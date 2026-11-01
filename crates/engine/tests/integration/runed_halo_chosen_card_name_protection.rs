@@ -1036,13 +1036,24 @@ fn remaining_damage_chain_nodes_keep_latched_trigger_source_across_pause() {
     scenario.at_phase(Phase::PreCombatMain);
     let halo = halo_on_battlefield(&mut scenario);
 
-    // Volatile Rig on battlefield under P1.
+    // 1. Volatile Rig on battlefield under P1.
     let rig = scenario
         .add_creature_from_oracle(P1, "Volatile Rig", 4, 4, VOLATILE_RIG_ORACLE)
         .as_artifact_creature()
         .id();
 
-    // Shielded creature on P1 with an optional prevention shield to force a ReplacementChoice.
+    // 2. Clone in P1's hand.
+    let clone = scenario
+        .add_spell_to_hand_from_oracle(P1, "Clone", false, CLONE_ORACLE)
+        .as_creature()
+        .with_subtypes(vec!["Shapeshifter"])
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 3,
+        })
+        .id();
+
+    // 3. Shielded creature on P1 with an optional prevention shield to force a ReplacementChoice.
     let prevention = ReplacementDefinition::new(ReplacementEvent::DamageDone)
         .valid_card(TargetFilter::SelfRef)
         .prevention_shield(PreventionAmount::Next(1))
@@ -1053,6 +1064,18 @@ fn remaining_damage_chain_nodes_keep_latched_trigger_source_across_pause() {
         .with_replacement_definition(prevention)
         .id();
 
+    // 4. Swords to Plowshares to exile the original Volatile Rig before Clone is destroyed.
+    const EXILE_ORACLE: &str = "Exile target creature.";
+    let swords = scenario
+        .add_spell_to_hand_from_oracle(P0, "Swords to Plowshares", false, EXILE_ORACLE)
+        .as_instant()
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 0,
+        })
+        .id();
+
+    // 5. Murder in P0's hand to destroy the Clone.
     let murder = scenario
         .add_spell_to_hand_from_oracle(P0, "Murder", false, MURDER_ORACLE)
         .as_instant()
@@ -1063,8 +1086,18 @@ fn remaining_damage_chain_nodes_keep_latched_trigger_source_across_pause() {
         .id();
 
     scenario.with_mana_pool(
+        P1,
+        vec![
+            ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        ],
+    );
+    scenario.with_mana_pool(
         P0,
         vec![
+            ManaUnit::new(ManaType::White, ObjectId(0), false, vec![]),
             ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]),
             ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]),
             ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
@@ -1072,13 +1105,58 @@ fn remaining_damage_chain_nodes_keep_latched_trigger_source_across_pause() {
     );
 
     let mut runner = scenario.build();
-    runner.state_mut().rng = GameRng::seed_from_u64(1); // Losing flip -> deals 4 damage.
+    // Seed the coin flip so the flip loses (deals 4 damage). Seed 1 produces false on first flip.
+    runner.state_mut().rng = GameRng::seed_from_u64(1);
     name_halo_choice(&mut runner, halo, "Volatile Rig");
 
-    // Destroy Volatile Rig.
-    runner.cast(murder).target_object(rig).commit();
-    runner.resolve_top();
-    assert_eq!(runner.state().objects[&rig].zone, Zone::Graveyard);
+    // 1. P1 casts Clone, choosing to copy Volatile Rig.
+    runner.state_mut().active_player = P1;
+    runner.state_mut().priority_player = P1;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+    runner
+        .cast(clone)
+        .replacement_choice(0)
+        .copy_target(rig)
+        .resolve();
+    assert_eq!(
+        runner.state().objects[&clone].name,
+        "Volatile Rig",
+        "Clone entered copying Volatile Rig"
+    );
+
+    // 2. P0 casts Swords to Plowshares exiling the original Volatile Rig.
+    runner.state_mut().active_player = P0;
+    runner.state_mut().priority_player = P0;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
+    runner.cast(swords).target_object(rig).commit();
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P0 pass Swords");
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P1 pass Swords");
+    assert_eq!(
+        runner.state().objects[&rig].zone,
+        Zone::Exile,
+        "original Rig exiled so its own dies trigger never fires"
+    );
+
+    // 3. P0 casts Murder targeting the Clone.
+    runner.state_mut().active_player = P0;
+    runner.state_mut().priority_player = P0;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
+    runner.cast(murder).target_object(clone).commit();
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P0 pass Murder");
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P1 pass Murder");
+    assert_eq!(runner.state().objects[&clone].zone, Zone::Graveyard);
+    // In the graveyard, Clone has reverted to its printed card name "Clone"
+    assert_eq!(runner.state().objects[&clone].name, "Clone");
+    // Volatile Rig's dies trigger is on the stack.
+    assert_eq!(runner.state().stack.len(), 1, "dies trigger on stack");
 
     // The dies trigger resolves until the shielded creature's damage pauses on ReplacementChoice.
     let mut paused = false;
@@ -1097,12 +1175,12 @@ fn remaining_damage_chain_nodes_keep_latched_trigger_source_across_pause() {
         "must pause on ReplacementChoice for shielded creature"
     );
 
-    // Answer the replacement choice.
+    // Answer the replacement choice (index 0 is the optional prevention shield).
     runner
-        .act(GameAction::ChooseReplacement { index: 1 })
+        .act(GameAction::ChooseReplacement { index: 0 })
         .expect("answering replacement choice");
 
-    // The remaining damage continuation resumes, reaching P0.
+    // The remaining damage continuation resumes, reaching P0 and P1.
     runner.advance_until_stack_empty();
     assert!(runner.state().stack.is_empty(), "stack is empty at end");
     assert!(
@@ -1110,8 +1188,15 @@ fn remaining_damage_chain_nodes_keep_latched_trigger_source_across_pause() {
         "priority returned"
     );
 
-    // P0 was protected by Runed Halo naming Volatile Rig across the pause and resume!
+    // With Halo naming Volatile Rig:
+    // - P0 (protected) stays at 20 (latched trigger source LKI retains name "Volatile Rig").
+    // - P1 (unprotected) takes 4 damage (20 -> 16), proving the continuation ran.
     assert_eq!(runner.state().players[0].life, 20, "P0 life must remain 20");
+    assert_eq!(
+        runner.state().players[1].life,
+        16,
+        "P1 life must be 16 proving continuation ran"
+    );
 }
 
 const BOLT_ORACLE: &str = "Lightning Bolt deals 3 damage to any target.";
