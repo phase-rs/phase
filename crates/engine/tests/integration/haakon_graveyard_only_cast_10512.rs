@@ -153,7 +153,23 @@ fn assert_cast_refused(r: &mut GameRunner, id: ObjectId) {
 fn cast_and_resolve(r: &mut GameRunner, id: ObjectId) {
     assert!(offered(r, id), "the cast must be offered");
     r.cast(id).resolve();
+    settle(r);
+}
+
+/// Resolve the stack and require the completion boundary: `advance_until_stack_empty`
+/// also stops on an unanswered prompt, a failed action or its iteration limit.
+fn settle(r: &mut GameRunner) {
     r.advance_until_stack_empty();
+    assert!(
+        r.state().stack.is_empty(),
+        "the stack must resolve; stack = {:?}",
+        r.state().stack
+    );
+    assert!(
+        matches!(r.state().waiting_for, WaitingFor::Priority { .. }),
+        "resolution must end at a priority window; waiting_for = {:?}",
+        r.state().waiting_for
+    );
 }
 
 fn object_named_in(r: &GameRunner, name: &str, zone: Zone) -> ObjectId {
@@ -386,7 +402,7 @@ fn refuse_offered_hit(r: &mut GameRunner, id: ObjectId, cast: GameAction, declin
     if matches!(r.state().waiting_for, WaitingFor::CastOffer { .. }) {
         r.act(decline).expect("decline the offer");
     }
-    r.advance_until_stack_empty();
+    settle(r);
 }
 
 fn cascade_board(hit_is_haakon: bool) -> (GameRunner, ObjectId) {
@@ -457,7 +473,7 @@ fn control_bloodbraid_elf_cascade_casts_bears() {
     })
     .expect("cast the cascade hit");
     assert_eq!(r.state().objects[&bears].zone, Zone::Stack);
-    r.advance_until_stack_empty();
+    settle(&mut r);
     assert_eq!(names_in(&r, BEARS, Zone::Battlefield), 1);
 }
 
@@ -540,7 +556,7 @@ fn control_geological_appraiser_discover_casts_bears() {
     })
     .expect("cast the discover hit");
     assert_eq!(r.state().objects[&bears].zone, Zone::Stack);
-    r.advance_until_stack_empty();
+    settle(&mut r);
     assert_eq!(names_in(&r, BEARS, Zone::Battlefield), 1);
 }
 
@@ -660,7 +676,7 @@ fn haakon_restriction_survives_death_and_bounce() {
 
     add_mana(&mut r, &[Red]);
     r.cast(bolt).target_object(on_battlefield).resolve();
-    r.advance_until_stack_empty();
+    settle(&mut r);
     let back = object_named_in(&r, HAAKON_NAME, Zone::Graveyard);
     assert_eq!(
         r.life(P0),
@@ -675,7 +691,7 @@ fn haakon_restriction_survives_death_and_bounce() {
 
     add_mana(&mut r, &[Blue]);
     r.cast(unsummon).target_object(on_battlefield).resolve();
-    r.advance_until_stack_empty();
+    settle(&mut r);
     let in_hand = object_named_in(&r, HAAKON_NAME, Zone::Hand);
     assert_haakon_parsed(&r, in_hand);
     add_mana(&mut r, HAAKON_MANA);
@@ -706,6 +722,14 @@ fn haakon_restriction_does_not_leak_to_other_knights() {
 }
 
 // --- Parser ----------------------------------------------------------------
+//
+// Every line passed to `parse_line` ("Probe") is a SYNTHETIC parser-structure or
+// strict-refusal diagnostic, not a supported card. The card-data sweep found no
+// printed card other than Haakon carrying the ", but not from anywhere else"
+// rider. The nearest printed card is Haakon, Stromgald Scourge: "You may cast
+// this card from your graveyard, but not from anywhere else." The positives pin
+// that the restriction's zones come from the permission's own zone tail; the
+// negatives pin that every other head fails closed.
 
 fn parse_line(line: &str) -> engine::parser::oracle::ParsedAbilities {
     engine::parser::oracle::parse_oracle_text(line, "Probe", &[], &["Creature".to_string()], &[])
@@ -745,8 +769,8 @@ fn haakon_line_one_parses_to_permission_and_restriction() {
     );
 }
 
-/// The zone list comes from the permission itself, so every own-permission zone
-/// tail is the same class.
+/// Synthetic diagnostic (see the section note): the zone list comes from the
+/// permission itself, so every own-permission zone tail is the same class.
 #[test]
 fn exclusive_own_permission_zone_tails() {
     for (line, zones) in [
@@ -778,8 +802,9 @@ fn exclusive_own_permission_zone_tails() {
     }
 }
 
-/// Fail closed: a rider on anything but the card's own unlimited, rider-free
-/// permission stays an honest gap, with neither half emitted.
+/// Synthetic strict-refusal diagnostics (see the section note): a rider on
+/// anything but the card's own unlimited, rider-free permission stays an honest
+/// gap, with neither half emitted.
 #[test]
 fn exclusive_rider_on_other_permissions_fails_closed() {
     for line in [
@@ -787,6 +812,9 @@ fn exclusive_rider_on_other_permissions_fails_closed() {
         "Once during each of your turns, you may cast this card from your graveyard, but not from anywhere else.",
         "You may cast this card from your graveyard, but not from anywhere else unless you control a Knight.",
         "You may play this card from your graveyard, but not from anywhere else.",
+        // CR 611.2a: the permission parser discards a leading duration, so a timed
+        // head must decline rather than become a permanent permission + restriction.
+        "Until end of turn, you may cast this card from your graveyard, but not from anywhere else.",
     ] {
         let parsed = parse_line(line);
         assert!(parsed.casting_restrictions.is_empty(), "{line}");

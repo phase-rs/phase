@@ -2564,10 +2564,10 @@ const EXCLUSIVE_CAST_PERMISSION_RIDER: &str = ", but not from anywhere else";
 /// [`CastingRestriction`]s rather than a static, which functions only where its
 /// source is.
 ///
-/// Fails closed: the head must lower to the card's OWN, unlimited, rider-free
-/// cast permission ([`own_unlimited_cast_permission_zones`]). Any other head
-/// returns `None`, and the line keeps the permission parser's refusal of the
-/// residual rider, an honest `static_structure` gap.
+/// Fails closed: the head must lower to the card's OWN, unlimited, rider-free,
+/// duration-free cast permission ([`own_unlimited_cast_permission_zones`]).
+/// Any other head returns `None`, and the line keeps the permission parser's
+/// refusal of the residual rider.
 pub(crate) fn try_parse_exclusive_own_cast_permission(
     text: &str,
     lower: &str,
@@ -2581,7 +2581,22 @@ pub(crate) fn try_parse_exclusive_own_cast_permission(
         return None;
     }
     let head = format!("{head}.");
-    let def = try_parse_graveyard_cast_permission(&head, &head.to_lowercase())?;
+    let head_lower = head.to_lowercase();
+    // CR 611.2a: `try_parse_graveyard_cast_permission` consumes and DISCARDS a
+    // leading duration ("Until end of turn, you may cast …"), because
+    // `StaticDefinition` has nowhere to store it. Here that would make a timed
+    // permission and its restriction permanent, so a duration-headed sentence
+    // declines before the lossy parser sees it.
+    let duration_head = {
+        use crate::parser::oracle_nom::duration::parse_duration;
+        terminated(parse_duration, tag::<_, _, OracleError<'_>>(", "))
+            .parse(head_lower.as_str())
+            .is_ok()
+    };
+    if duration_head {
+        return None;
+    }
+    let def = try_parse_graveyard_cast_permission(&head, &head_lower)?;
     let zones = own_unlimited_cast_permission_zones(&def)?;
     Some((
         def.description(text.to_string()),
