@@ -35145,8 +35145,17 @@ pub enum CastingRestriction {
     /// is prohibited, whatever permission would otherwise allow it (CR 101.2).
     /// CR 113.6f makes the restriction function in every zone, so it rides the
     /// object's own restrictions rather than a battlefield static.
+    ///
+    /// CR 109.5 + CR 400.1: `pool` keeps whose graveyard the permission names.
+    /// "Your graveyard" is the would-be controller's, so `OwnGraveyard` admits
+    /// a graveyard origin only when the caster owns that graveyard: an opponent
+    /// casting the card from its owner's graveyard (Tinybones, the Pickpocket)
+    /// is casting it from "anywhere else". Origins in shared zones (exile)
+    /// aren't scoped by it.
     OnlyFromZones {
         zones: Vec<Zone>,
+        #[serde(default)]
+        pool: super::statics::GraveyardPermissionPool,
     },
 }
 

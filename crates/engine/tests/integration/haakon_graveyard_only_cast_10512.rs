@@ -9,7 +9,7 @@
 //! Spelljack or Muse Vessel would otherwise allow you to.").
 //!
 //! The line lowers to the card's own graveyard permission plus
-//! `CastingRestriction::OnlyFromZones { [Graveyard] }`. Haakon is built from its
+//! `CastingRestriction::OnlyFromZones { [Graveyard], OwnGraveyard }`. Haakon is built from its
 //! verbatim Oracle text, real cost and types (it is not in the integration
 //! fixture); every other card is the printed fixture card. Costs are funded, so
 //! a refusal can only come from the restriction, and every refusal row is paired
@@ -23,7 +23,7 @@ use engine::types::game_state::{CastOfferKind, CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
-use engine::types::statics::StaticMode;
+use engine::types::statics::{GraveyardPermissionPool, StaticMode};
 use engine::types::zones::Zone;
 
 use ManaType::{Black, Blue, Colorless, Green, Red, White};
@@ -99,8 +99,9 @@ fn assert_haakon_parsed(r: &GameRunner, id: ObjectId) {
         obj.casting_restrictions,
         vec![CastingRestriction::OnlyFromZones {
             zones: vec![Zone::Graveyard],
+            pool: GraveyardPermissionPool::OwnGraveyard,
         }],
-        "reach: line 1 must lower to OnlyFromZones([Graveyard])",
+        "reach: line 1 must lower to OnlyFromZones([Graveyard], own graveyard)",
     );
     assert!(
         obj.static_definitions.as_slice().iter().any(|s| matches!(
@@ -801,7 +802,8 @@ fn isochron_cannot_cast_a_copy_restricted_to_the_graveyard() {
     assert_eq!(
         c.r.state().objects[&c.imprint].casting_restrictions,
         vec![CastingRestriction::OnlyFromZones {
-            zones: vec![Zone::Graveyard]
+            zones: vec![Zone::Graveyard],
+            pool: GraveyardPermissionPool::OwnGraveyard,
         }],
         "reach: the imprint carries the restriction"
     );
@@ -885,6 +887,134 @@ fn control_isochron_casts_an_untargeted_unrestricted_copy() {
         c.r.state().players[0].library.len(),
         1,
         "the copy drew a card"
+    );
+}
+
+// --- "Your graveyard" (CR 109.5): Tinybones, the Pickpocket ------------------
+//
+// "Whenever Tinybones deals combat damage to a player, you may cast target
+// nonland permanent card from that player's graveyard, and mana of any type can
+// be spent to cast that spell." P0's Tinybones hits P1, whose graveyard holds
+// P1's own card. P0 is the would-be controller, so Haakon's "your graveyard" is
+// P0's (CR 109.5); P1's graveyard is "anywhere else", and the cast is refused.
+// The control casts P1's Grizzly Bears through the same trigger on the same board.
+
+struct TinybonesBoard {
+    r: GameRunner,
+    stolen: ObjectId,
+    /// The paid-cast offer named the stolen card.
+    offered: bool,
+}
+
+/// P0's Tinybones attacks P1 unblocked; P1's graveyard holds `stolen` (and the
+/// other candidate, so both rows share one board). The trigger targets `stolen`,
+/// and P0 tries to cast it, paying with `mana`.
+fn tinybones_steals(steal_haakon: bool, mana: &[ManaType]) -> TinybonesBoard {
+    use engine::game::scenario::P1;
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let tinybones = s.add_real_card(P0, "Tinybones, the Pickpocket", Zone::Battlefield, db());
+    let mut haakon = s.add_creature_to_graveyard(P1, HAAKON_NAME, 3, 3);
+    haakon
+        .from_oracle_text(HAAKON)
+        .with_mana_cost(haakon_cost())
+        .with_subtypes(vec!["Zombie", "Knight"]);
+    let haakon = haakon.id();
+    let bears = s.add_real_card(P1, BEARS, Zone::Graveyard, db());
+    let stolen = if steal_haakon { haakon } else { bears };
+    let mut r = build(s);
+    assert_eq!(
+        r.state().objects[&stolen].owner,
+        P1,
+        "reach: P1 owns the card"
+    );
+    assert_eq!(r.state().objects[&stolen].zone, Zone::Graveyard);
+    // Tinybones entered last turn: no summoning sickness.
+    r.state_mut()
+        .objects
+        .get_mut(&tinybones)
+        .unwrap()
+        .summoning_sick = false;
+
+    r.advance_to_combat();
+    r.declare_attackers(&[(tinybones, engine::game::combat::AttackTarget::Player(P1))])
+        .expect("Tinybones attacks P1");
+    let mut offered = false;
+    let mut cast_tried = false;
+    for _ in 0..40 {
+        let result = match r.state().waiting_for.clone() {
+            WaitingFor::DeclareBlockers { .. } => r.declare_blockers(&[]),
+            WaitingFor::TriggerTargetSelection { .. } | WaitingFor::TargetSelection { .. } => r
+                .act(GameAction::ChooseTarget {
+                    target: Some(engine::types::ability::TargetRef::Object(stolen)),
+                }),
+            WaitingFor::OptionalEffectChoice { .. } => {
+                r.act(GameAction::DecideOptionalEffect { accept: true })
+            }
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::GraveyardPaidCast { hit_card, .. },
+                ..
+            } if !cast_tried => {
+                offered = hit_card == stolen;
+                cast_tried = true;
+                add_mana(&mut r, mana);
+                match r.act(GameAction::GraveyardPaidCastChoice {
+                    choice: CastChoice::Cast,
+                }) {
+                    Ok(result) => Ok(result),
+                    // A refusal surfaced as an error leaves the offer open.
+                    Err(_) => r.act(GameAction::GraveyardPaidCastChoice {
+                        choice: CastChoice::Decline,
+                    }),
+                }
+            }
+            WaitingFor::CastOffer {
+                kind: CastOfferKind::GraveyardPaidCast { .. },
+                ..
+            } => r.act(GameAction::GraveyardPaidCastChoice {
+                choice: CastChoice::Decline,
+            }),
+            // CR 601.2g-h: the paid cast stops at its payment; pay from the pool.
+            WaitingFor::ManaPayment { .. } => r.act(GameAction::PassPriority),
+            WaitingFor::Priority { .. }
+                if r.state().stack.is_empty() && r.state().phase == Phase::PostCombatMain =>
+            {
+                break
+            }
+            WaitingFor::Priority { .. } => r.act(GameAction::PassPriority),
+            other => panic!("unexpected prompt during Tinybones' attack: {other:?}"),
+        };
+        result.expect("drive Tinybones' attack");
+    }
+    assert!(cast_tried, "reach: Tinybones' paid-cast offer appeared");
+    TinybonesBoard { r, stolen, offered }
+}
+
+/// CR 109.5 + CR 601.3: P0 can't cast P1's Haakon from P1's graveyard.
+#[test]
+fn tinybones_cannot_cast_an_opponents_haakon_from_their_graveyard() {
+    let b = tinybones_steals(true, HAAKON_MANA);
+    assert!(b.offered, "reach: the offer named Haakon");
+    assert_haakon_parsed(&b.r, b.stolen);
+    assert_eq!(
+        b.r.state().objects[&b.stolen].zone,
+        Zone::Graveyard,
+        "Haakon stays in P1's graveyard"
+    );
+    assert_eq!(names_in(&b.r, HAAKON_NAME, Zone::Battlefield), 0);
+    assert_eq!(names_in(&b.r, HAAKON_NAME, Zone::Stack), 0);
+}
+
+/// Control: the same trigger casts P1's Grizzly Bears, which P0 then controls.
+#[test]
+fn control_tinybones_casts_an_opponents_bears_from_their_graveyard() {
+    let b = tinybones_steals(false, BEARS_MANA);
+    assert!(b.offered, "reach: the offer named the Bears");
+    let bears = object_named_in(&b.r, BEARS, Zone::Battlefield);
+    assert_eq!(
+        b.r.state().objects[&bears].controller,
+        P0,
+        "P0 cast the Bears"
     );
 }
 
@@ -981,6 +1111,7 @@ fn haakon_line_one_parses_to_permission_and_restriction() {
         parsed.casting_restrictions,
         vec![CastingRestriction::OnlyFromZones {
             zones: vec![Zone::Graveyard],
+            pool: GraveyardPermissionPool::OwnGraveyard,
         }],
     );
     assert!(
@@ -1020,7 +1151,8 @@ fn exclusive_own_permission_zone_tails() {
         assert_eq!(
             parsed.casting_restrictions,
             vec![CastingRestriction::OnlyFromZones {
-                zones: zones.clone()
+                zones: zones.clone(),
+                pool: GraveyardPermissionPool::OwnGraveyard,
             }],
             "{line}",
         );
@@ -1077,12 +1209,23 @@ fn exclusive_rider_on_other_permissions_fails_closed() {
 fn only_from_zones_serde_round_trip() {
     let restriction = CastingRestriction::OnlyFromZones {
         zones: vec![Zone::Graveyard],
+        pool: GraveyardPermissionPool::OwnGraveyard,
     };
     let json = serde_json::to_value(&restriction).expect("serializes");
     assert_eq!(
         json,
-        serde_json::json!({ "type": "OnlyFromZones", "data": { "zones": ["Graveyard"] } }),
+        serde_json::json!({
+            "type": "OnlyFromZones",
+            "data": { "zones": ["Graveyard"], "pool": "OwnGraveyard" }
+        }),
     );
     let back: CastingRestriction = serde_json::from_value(json).expect("deserializes");
     assert_eq!(back, restriction);
+    // A payload without `pool` reads as the own-graveyard scope.
+    let legacy: CastingRestriction = serde_json::from_value(serde_json::json!({
+        "type": "OnlyFromZones",
+        "data": { "zones": ["Graveyard"] }
+    }))
+    .expect("deserializes without pool");
+    assert_eq!(legacy, restriction);
 }

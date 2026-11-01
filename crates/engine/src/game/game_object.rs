@@ -674,6 +674,26 @@ pub fn token_art_derivation_count() -> usize {
     TOKEN_ART_DERIVATION_COUNT.with(std::cell::Cell::get)
 }
 
+/// CR 601.2a + CR 400.1: the zone a cast starts from, together with that
+/// zone's owner. Each player has their own library, hand and graveyard
+/// (CR 400.1), and an object there is in its owner's zone (CR 400.3), so an
+/// origin restriction scoped to "your graveyard" (CR 109.5) needs both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CastOrigin {
+    pub zone: Zone,
+    pub zone_owner: PlayerId,
+}
+
+impl CastOrigin {
+    /// The origin of a cast of `obj` from where it is now.
+    pub fn of(obj: &GameObject) -> Self {
+        Self {
+            zone: obj.zone,
+            zone_owner: obj.owner,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameObject {
     pub id: ObjectId,
@@ -1568,14 +1588,16 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cast_from_zone: Option<Zone>,
 
-    /// CR 707.12: the zone the object this copy was made from was in when the
-    /// copy was created. A copy of a card is created in that zone and, if cast,
+    /// CR 707.12 + CR 400.1: where the object this copy was made from was when
+    /// the copy was created: its zone and that zone's owner (the original's
+    /// owner, CR 400.3). A copy of a card is created in that zone and, if cast,
     /// is cast from there, so the copy's own origin restrictions
-    /// (`CastingRestriction::OnlyFromZones`) are checked against it. Written
-    /// once by the copy-creating effects (`CopySpell`, `CastCopyOfCard`);
-    /// `None` on every object that isn't such a copy.
+    /// (`CastingRestriction::OnlyFromZones`, including whose graveyard) are
+    /// checked against it. Written once by the copy-creating effects
+    /// (`CopySpell`, `CastCopyOfCard`); `None` on every object that isn't such
+    /// a copy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub copied_from_zone: Option<Zone>,
+    pub copied_from_zone: Option<CastOrigin>,
 
     /// CR 601.2i + CR 707.10: Exact turn-journal coordinate of this cast while
     /// it remains a spell on the stack. Cleared on every Stack exit.

@@ -2597,20 +2597,25 @@ pub(crate) fn try_parse_exclusive_own_cast_permission(
         return None;
     }
     let def = try_parse_graveyard_cast_permission(&head, &head_lower)?;
-    let zones = own_unlimited_cast_permission_zones(&def)?;
+    let (zones, pool) = own_unlimited_cast_permission_zones(&def)?;
     Some((
         def.description(text.to_string()),
-        crate::types::ability::CastingRestriction::OnlyFromZones { zones },
+        crate::types::ability::CastingRestriction::OnlyFromZones { zones, pool },
     ))
 }
 
 /// CR 601.3 + CR 113.6f: the zones of a card's OWN unlimited, rider-free cast
 /// permission ("You may cast this card from your graveyard [or from exile]"),
-/// or `None` for any other permission. The mode is destructured without `..`
+/// with the permission's graveyard pool (CR 109.5: "your graveyard" is the
+/// caster's), or `None` for any other permission. The pool travels with the
+/// zones so the restriction keeps "your", not only "graveyard". The mode is
+/// destructured without `..`
 /// so a new permission rider must be classified here before it compiles: a
 /// rider the exclusivity clause does not account for must refuse, not ride
 /// along unexamined.
-fn own_unlimited_cast_permission_zones(def: &StaticDefinition) -> Option<Vec<Zone>> {
+fn own_unlimited_cast_permission_zones(
+    def: &StaticDefinition,
+) -> Option<(Vec<Zone>, GraveyardPermissionPool)> {
     let StaticMode::GraveyardCastPermission {
         frequency,
         play_mode,
@@ -2641,7 +2646,7 @@ fn own_unlimited_cast_permission_zones(def: &StaticDefinition) -> Option<Vec<Zon
         && def.per_player_condition.is_none()
         && def.modifications.is_empty()
         && !def.active_zones.is_empty();
-    own_unlimited.then(|| def.active_zones.clone())
+    own_unlimited.then(|| (def.active_zones.clone(), *pool))
 }
 
 /// CR 601.2f: Outcome of matching the "by <cost> in addition to … other costs"

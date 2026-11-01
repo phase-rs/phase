@@ -2295,6 +2295,7 @@ fn cast_stack_spell_copy_during_resolution(
     // ceases to exist (CR 704.5e).
     if !crate::game::restrictions::restrictions_permit_cast_origin(
         &obj.casting_restrictions,
+        ability.controller,
         obj.copied_from_zone,
     ) {
         crate::game::effects::prepare::cleanup_failed_prepared_copy_cast(state, copy_id);
