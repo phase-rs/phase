@@ -16,6 +16,428 @@ use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::phase::{PhaseGroup, TurnSegment};
 use crate::types::triggers::AttackTargetFilter;
 
+// Printed Oracle text and metadata verified against MTGJSON AtomicCards.
+const DIAGNOSTIC_JULIUS: &str = "Dr. Julius Jumblemorph is every creature type (even if this card isn't on the battlefield).\nWhenever a host you control enters, you may search your library and/or graveyard for a card with augment and combine it with that host. If you search your library this way, shuffle.";
+const DIAGNOSTIC_JERMANE: &str = "{G}, {T}: Put two +1/+1 counters on target creature with four or more legs.\n{1}{G}{G}, {T}: Until end of turn, all creatures able to block target creature with four or more legs do so.";
+const DIAGNOSTIC_RANKLE: &str = "Flying, haste\nWhenever Rankle, Master of Pranksters deals combat damage to a player, choose one at random —\n• Each player creates a token that's a copy of Glen Elendra Pranksters.\n• Each player creates a token that's a copy of Pyretic Prankster.\n• Each player creates a token that's a copy of Spiteful Prankster.";
+const DIAGNOSTIC_EREBOS: &str = "Choose one —\n• Target creature gets -X/-X until end of turn. You gain X life.\n• Exile up to twice X target cards from graveyards.";
+
+fn diagnostic_fallback(context: &str, text: &str, line_index: usize) -> OracleDiagnostic {
+    OracleDiagnostic::TargetFallback {
+        context: context.into(),
+        text: text.into(),
+        line_index,
+    }
+}
+
+fn diagnostic_must_block(line_index: usize) -> OracleDiagnostic {
+    OracleDiagnostic::IgnoredRemainder {
+        text: "with four or more legs".into(),
+        parser: "must-block".into(),
+        line_index,
+    }
+}
+
+fn diagnostic_rankle_modes(line: usize) -> Vec<OracleDiagnostic> {
+    [
+        "Glen Elendra Pranksters",
+        "Pyretic Prankster",
+        "Spiteful Prankster",
+    ]
+    .into_iter()
+    .map(|text| diagnostic_fallback("parse_target could not classify", text, line))
+    .collect()
+}
+
+fn diagnostic_parse_time(parsed: &ParsedAbilities) -> Vec<OracleDiagnostic> {
+    parsed
+        .parse_warnings
+        .iter()
+        .filter(|warning| !matches!(warning, OracleDiagnostic::SwallowedClause { .. }))
+        .cloned()
+        .collect()
+}
+
+fn diagnostic_parse_rankle(text: &str) -> ParsedAbilities {
+    parse_oracle_text(
+        text,
+        "Rankle, Master of Pranksters",
+        &["Flying".into(), "Haste".into()],
+        &["Creature".into()],
+        &["Faerie".into(), "Rogue".into()],
+    )
+}
+
+#[test]
+fn diagnostic_provenance_printed_cards() {
+    let cases = [
+        (
+            "Dr. Julius Jumblemorph",
+            DIAGNOSTIC_JULIUS,
+            vec![],
+            vec!["Creature".into()],
+            vec![],
+            vec![diagnostic_fallback("search-filter-suffix unmatched", "combine it with that host", 1)],
+        ),
+        (
+            "Curse of Leeches",
+            "Enchant player\nAs this permanent transforms into Curse of Leeches, attach it to a player.\nAt the beginning of enchanted player's upkeep, they lose 1 life and you gain 1 life.\nDaybound (If a player casts no spells during their own turn, it becomes night next turn.)",
+            vec!["Daybound".into(), "Enchant".into(), "Lifelink".into(), "Nightbound".into(), "Transform".into()],
+            vec!["Enchantment".into()],
+            vec!["Aura".into(), "Curse".into()],
+            vec![diagnostic_fallback("parse_target could not classify", "a player", 1)],
+        ),
+        (
+            "Jermane, Pride of the Circus",
+            DIAGNOSTIC_JERMANE,
+            vec![],
+            vec!["Creature".into()],
+            vec!["Cat".into(), "Performer".into()],
+            vec![diagnostic_must_block(1)],
+        ),
+        (
+            "Jace, Architect of Thought",
+            "[+1]: Until your next turn, whenever a creature an opponent controls attacks, it gets -1/-0 until end of turn.\n[−2]: Reveal the top three cards of your library. An opponent separates those cards into two piles. Put one pile into your hand and the other on the bottom of your library in any order.\n[−8]: For each player, search that player's library for a nonland card and exile it, then that player shuffles. You may cast those cards without paying their mana costs.",
+            vec![],
+            vec!["Planeswalker".into()],
+            vec!["Jace".into()],
+            vec![diagnostic_fallback("parse_target could not classify", "pile into your hand and the other", 1)],
+        ),
+        (
+            "Rankle, Master of Pranksters",
+            DIAGNOSTIC_RANKLE,
+            vec!["Flying".into(), "Haste".into()],
+            vec!["Creature".into()],
+            vec!["Faerie".into(), "Rogue".into()],
+            diagnostic_rankle_modes(1),
+        ),
+        (
+            "Erebos's Intervention",
+            DIAGNOSTIC_EREBOS,
+            vec![],
+            vec!["Instant".into()],
+            vec![],
+            vec![diagnostic_fallback(
+                "parse_target could not classify",
+                "up to twice X target cards from graveyards",
+                0,
+            )],
+        ),
+    ];
+    for (name, text, keywords, types, subtypes, expected) in cases {
+        let parsed = parse_oracle_text(text, name, &keywords, &types, &subtypes);
+        let warnings = diagnostic_parse_time(&parsed);
+        assert!(
+            !warnings.is_empty(),
+            "{name}: warning route must be reached"
+        );
+        assert_eq!(
+            warnings, expected,
+            "{name}: ordered complete warning payloads"
+        );
+        if name == "Jermane, Pride of the Circus" {
+            assert_eq!(parsed.abilities.len(), 2);
+        } else if name == "Jace, Architect of Thought" {
+            assert!(parsed
+                .abilities
+                .iter()
+                .any(|ability| matches!(ability.cost, Some(AbilityCost::Loyalty { amount: -2 }))));
+        } else if name == "Rankle, Master of Pranksters" {
+            let trigger = parsed.triggers.first().expect("triggered modal retained");
+            assert_eq!(
+                trigger
+                    .execute
+                    .as_ref()
+                    .expect("modal body")
+                    .mode_abilities
+                    .len(),
+                3
+            );
+        } else if name == "Erebos's Intervention" {
+            // Contract: header-line attribution for modal spells (mode items and
+            // swallow findings carry the bullet line).
+            // Reach guard: the spell route must produce a two-mode modal.
+            let modal = parsed.modal.as_ref().expect("modal spell retained");
+            assert_eq!(modal.mode_count, 2);
+            assert_eq!(parsed.abilities.len(), 2, "one ability per mode");
+            // Existence before attribution: the parse-time warning list (SwallowedClause
+            // filtered out by diagnostic_parse_time) carries the bullet-2 fallback.
+            let fallback = warnings
+                .iter()
+                .find(|warning| {
+                    matches!(warning, OracleDiagnostic::TargetFallback { text, .. }
+                        if text == "up to twice X target cards from graveyards")
+                })
+                .expect("bullet-2 target fallback retained");
+            assert_eq!(
+                fallback.line_index(),
+                0,
+                "modal-spell warnings attribute to the header line"
+            );
+        }
+    }
+}
+
+#[test]
+fn diagnostic_provenance_inherited_prefix_structural_composites() {
+    // Structural composite: no printed card in AtomicCards has a parse-time warning on a line
+    // before a triggered modal (verified: no multi-line face in the export carries an inherited
+    // duplicate). Nearest printed cards: Jermane, Pride of the Circus (line-1 must-block warning)
+    // and Rankle, Master of Pranksters (triggered modal). Rankle's metadata is required for
+    // self-reference normalization of both modal headers.
+    // The duplicated warning is the pre-existing whole-vector extension in oracle_modal.rs
+    // (the trigger context clones the inherited prefix and the whole vector is appended back).
+    // It is pinned only because this change must not alter warning membership; a fix to that
+    // duplication updates this expectation deliberately.
+    let first = format!("{DIAGNOSTIC_JERMANE}\n{DIAGNOSTIC_RANKLE}");
+    let repeated = format!("{first}\n{DIAGNOSTIC_RANKLE}");
+    let mut expected = vec![diagnostic_must_block(1), diagnostic_must_block(1)];
+    expected.extend(diagnostic_rankle_modes(3));
+    for (text, expected) in [
+        (&first, expected.clone()),
+        (&repeated, {
+            let mut repeated_expected = expected.clone();
+            repeated_expected.extend(expected);
+            repeated_expected.extend(diagnostic_rankle_modes(8));
+            repeated_expected
+        }),
+    ] {
+        let parsed = diagnostic_parse_rankle(text);
+        let warnings = diagnostic_parse_time(&parsed);
+        assert!(
+            !warnings.is_empty(),
+            "prior warning and modal routes must be reached"
+        );
+        assert_eq!(
+            warnings, expected,
+            "inherited copies retain full ordered payloads"
+        );
+        assert_eq!(parsed.triggers.len(), if text == &first { 1 } else { 2 });
+    }
+}
+
+#[test]
+fn diagnostic_provenance_level_reparse_precedes_main_loop() {
+    // Structural composite: no printed leveler in AtomicCards produces a parse-time warning (all 27
+    // faces with a physical LEVEL header checked). Nearest printed card: Enclave Cryptologist
+    // (level layout); the warning-bearing lines are verbatim from Dr. Julius Jumblemorph and
+    // Jermane, Pride of the Circus.
+    let text = "Level up {1}{U} ({1}{U}: Put a level counter on this. Level up only as a sorcery.)\nWhenever a host you control enters, you may search your library and/or graveyard for a card with augment and combine it with that host. If you search your library this way, shuffle.\nLEVEL 1-2\n0/1\n{1}{G}{G}, {T}: Until end of turn, all creatures able to block target creature with four or more legs do so.\nLEVEL 3+\n0/1\n{T}: Draw a card.";
+    let parsed = parse_oracle_text(
+        text,
+        "Enclave Cryptologist",
+        &["Level Up".into()],
+        &["Creature".into()],
+        &["Merfolk".into(), "Wizard".into()],
+    );
+    let must_block = parsed.abilities.iter().find(|ability| {
+        ability.description.as_deref().is_some_and(|text| text == "{1}{G}{G}, {T}: Until end of turn, all creatures able to block target creature with four or more legs do so.")
+    }).expect("must-block level activation retained");
+    assert!(must_block
+        .activation_restrictions
+        .iter()
+        .any(|restriction| matches!(
+            restriction,
+            ActivationRestriction::LevelCounterRange {
+                minimum: 1,
+                maximum: Some(2)
+            }
+        )));
+    assert_eq!(
+        parsed.triggers.len(),
+        1,
+        "ordinary host-enter trigger retained"
+    );
+    let warnings = diagnostic_parse_time(&parsed);
+    assert!(
+        warnings.iter().any(|warning| matches!(
+            warning, OracleDiagnostic::IgnoredRemainder { parser, text, .. }
+            if parser == "must-block" && text == "with four or more legs"
+        )),
+        "level warning retained"
+    );
+    assert!(
+        warnings.iter().any(|warning| matches!(
+            warning, OracleDiagnostic::TargetFallback { context, text, .. }
+            if context == "search-filter-suffix unmatched" && text == "combine it with that host"
+        )),
+        "ordinary trigger warning retained"
+    );
+    assert_eq!(
+        warnings[0].line_index(),
+        4,
+        "level warning uses its physical reparse line"
+    );
+    assert_eq!(
+        warnings[1].line_index(),
+        1,
+        "main-loop trigger follows in processing order"
+    );
+    assert_eq!(
+        warnings,
+        vec![
+            diagnostic_must_block(4),
+            diagnostic_fallback(
+                "search-filter-suffix unmatched",
+                "combine it with that host",
+                1
+            ),
+        ],
+        "level reparse warning precedes the earlier physical main-loop line",
+    );
+}
+
+#[test]
+fn diagnostic_provenance_joined_spell_body_structural_composite() {
+    // Structural composite: no printed card in AtomicCards has a nonzero-line joined spell
+    // body with a parse-time warning from its continuation (checked the full export).
+    // Nearest printed card: Suffocation; its warning is in the first resolution paragraph.
+    // Reorder its verified paragraphs so the warning-bearing damage instruction continues
+    // the delayed draw, after the cast restriction at line 0.
+    let lines = [
+        "Cast this spell only if you were dealt damage this turn by a red instant or sorcery spell.",
+        "Draw a card at the beginning of the next turn's upkeep.",
+        "Suffocation deals 4 damage to the controller of the last red instant or sorcery spell that dealt damage to you this turn.",
+    ];
+    let text = lines.join("\n");
+    let parsed = parse_oracle_text(&text, "Suffocation", &[], &["Instant".into()], &[]);
+    let warnings = diagnostic_parse_time(&parsed);
+    let fallback = warnings
+        .iter()
+        .find(|warning| {
+            matches!(warning, OracleDiagnostic::TargetFallback { text, .. }
+                if text == "the controller of the last red instant or sorcery spell that dealt damage to you this turn")
+        })
+        .expect("continuation's damage-target fallback retained");
+    assert_eq!(
+        fallback.line_index(),
+        1,
+        "joined-body warnings use the first resolution line, not the continuation"
+    );
+    assert_eq!(
+        warnings,
+        vec![diagnostic_fallback(
+            "parse_target could not classify",
+            "the controller of the last red instant or sorcery spell that dealt damage to you this turn",
+            1,
+        )]
+    );
+    let body = normalize_card_name_refs(&lines[1..].join("\n"), "Suffocation");
+    assert!(
+        parsed
+            .abilities
+            .iter()
+            .any(|ability| ability.description.as_deref() == Some(body.as_str())),
+        "both resolution paragraphs must reach the joined spell-body route"
+    );
+    let prefix = parse_oracle_text(
+        &lines[..2].join("\n"),
+        "Suffocation",
+        &[],
+        &["Instant".into()],
+        &[],
+    );
+    assert!(
+        diagnostic_parse_time(&prefix).is_empty(),
+        "the dispatch paragraph alone does not produce the continuation's warning"
+    );
+}
+
+#[test]
+fn diagnostic_provenance_as_enters_anchor_structural_composite() {
+    // Structural composite: no printed card in AtomicCards has an as-enters anchor mode
+    // with a parse-time warning (checked the full export). Nearest printed card: Outpost
+    // Siege, whose Khans-or-Dragons header and Dragons mode are retained below.
+    // Add a preceding keyword line and replace the Khans body with Dr. Julius Jumblemorph's
+    // verified warning-bearing trigger so the header is line 1 and the warning's mode is line 2.
+    let text = "Indestructible\nAs this enchantment enters, choose Khans or Dragons.\n• Khans — Whenever a host you control enters, you may search your library and/or graveyard for a card with augment and combine it with that host. If you search your library this way, shuffle.\n• Dragons — Whenever a creature you control leaves the battlefield, this enchantment deals 1 damage to any target.";
+    let parsed = parse_oracle_text(
+        text,
+        "Outpost Siege",
+        &["Indestructible".into()],
+        &["Enchantment".into()],
+        &[],
+    );
+    let warnings = diagnostic_parse_time(&parsed);
+    let fallback = warnings
+        .iter()
+        .find(|warning| {
+            matches!(warning, OracleDiagnostic::TargetFallback { context, text, .. }
+                if context == "search-filter-suffix unmatched" && text == "combine it with that host")
+        })
+        .expect("anchor-mode trigger's search-filter fallback retained");
+    assert_eq!(
+        fallback.line_index(),
+        1,
+        "anchor-mode warnings use the dispatch header, not the mode's own line"
+    );
+    assert_eq!(
+        warnings,
+        vec![diagnostic_fallback(
+            "search-filter-suffix unmatched",
+            "combine it with that host",
+            1,
+        )]
+    );
+    assert!(
+        parsed.replacements.iter().any(|replacement| {
+            replacement.execute.as_ref().is_some_and(|execute| {
+                matches!(execute.effect.as_ref(), Effect::Choose {
+                    choice_type: ChoiceType::Labeled { options },
+                    persist: true,
+                    ..
+                } if options == &["Khans", "Dragons"])
+            })
+        }),
+        "as-enters labeled-choice replacement retained"
+    );
+    assert_eq!(parsed.triggers.len(), 2, "both anchor triggers retained");
+    for (trigger, expected_label) in parsed.triggers.iter().zip(["Khans", "Dragons"]) {
+        assert!(
+            matches!(trigger.condition.as_ref(),
+                Some(TriggerCondition::ChosenLabelIs { label }) if label == expected_label),
+            "anchor trigger must retain its chosen-label condition"
+        );
+    }
+}
+
+#[test]
+fn diagnostic_provenance_cross_line_dedup_building_block() {
+    // Structural building-block test: no printed card in AtomicCards emits an identical
+    // TargetFallback/IgnoredRemainder on two lines (searched the full export for repeated
+    // parse-time warnings across lines). Nearest printed card: Jermane, Pride of the Circus
+    // (both lines print "target creature with four or more legs"; only line 1 warns).
+    // Both deduplicating variants must remain unattributed until emitter sealing.
+    let lines = ["", "", "earlier unit", "", "later unit"];
+    for first in [
+        diagnostic_fallback("classifier", "first target", 0),
+        diagnostic_must_block(0),
+    ] {
+        let later = diagnostic_fallback("classifier", "distinct later target", 0);
+        let mut ctx = ParseContext::default();
+        let mut emitter = DocEmitter::new(&lines, None);
+        emitter.begin_diagnostic_unit(2, ctx.diagnostics.len());
+        ctx.push_diagnostic(first.clone());
+        emitter.begin_diagnostic_unit(4, ctx.diagnostics.len());
+        ctx.push_diagnostic(first.clone());
+        ctx.push_diagnostic(later.clone());
+        assert_eq!(ctx.diagnostics, vec![first.clone(), later.clone()]);
+        let doc = emitter.finish("", "Structural dedup fixture", ctx.diagnostics);
+        assert_eq!(
+            doc.diagnostics.len(),
+            2,
+            "earlier survivor and later unique warning retained"
+        );
+        assert_eq!(doc.diagnostics[0].line_index(), 2);
+        assert_eq!(doc.diagnostics[1].line_index(), 4);
+        let mut expected_first = first;
+        expected_first.stamp_line(2);
+        let mut expected_later = later;
+        expected_later.stamp_line(4);
+        assert_eq!(doc.diagnostics, vec![expected_first, expected_later]);
+    }
+}
+
 #[test]
 fn teferi_master_of_time_minus_ten_preserves_two_extra_turns() {
     let oracle = "You may activate loyalty abilities of Teferi on any player's turn any time you could cast an instant.\n\

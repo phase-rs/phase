@@ -2271,10 +2271,9 @@ export interface StackEntryDisplay {
 
 // ── Pending Cast (for target selection) ──────────────────────────────────
 
-export interface DeferredSacrificeSelection {
-  object_id: ObjectId;
-  filter: TargetFilter;
-}
+export type DeferredSpellSacrifice =
+  | { type: "Selected"; object_id: ObjectId; filter: TargetFilter }
+  | { type: "All"; filter: TargetFilter };
 
 export interface PendingCast {
   object_id: ObjectId;
@@ -2284,7 +2283,7 @@ export interface PendingCast {
   activation_cost?: SerializedAbilityCost;
   activation_ability_index?: number;
   target_constraints?: Array<{ type: string }>;
-  deferred_sacrificed_permanents?: DeferredSacrificeSelection[];
+  deferred_sacrificed_permanents?: DeferredSpellSacrifice[];
   // CR 118.3a: pip ids the caster pinned to direct payment. `#[serde(default,
   // skip_serializing_if = "Vec::is_empty")]` — absent when no pin is recorded.
   pinned_pool_units?: number[];
@@ -2957,6 +2956,7 @@ export type WaitingFor =
       enters_attacking?: boolean;
       owner_library?: boolean;
       track_exiled_by_source?: boolean;
+      library_position?: LibraryPosition;
     } }
   | { type: "DrawnThisTurnTopdeckChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; min_count: number; life_payment: number; source_id: ObjectId } }
   | { type: "RetargetChoice"; data: { player: PlayerId; stack_entry_index: number; scope: RetargetScope; current_targets: TargetRef[]; slots: RetargetSlotAddress[]; slot_pools: TargetRef[][]; legal_new_targets: TargetRef[]; keep_is_distinct?: boolean[] } }
