@@ -555,6 +555,26 @@ describe("draftProtocol", () => {
     });
 
     it.each([
+      undefined,
+      [{ section: "main_deck", name: "Plains", count: 1, printing: { set_code: "lea", collector_number: "001" } }],
+      { malformed: "not a native sidecar" },
+      Array(2049).fill(null),
+    ])("leaves extra printings uninterpreted on P2P submissions: %j", (printings) => {
+      // Native bounds do not apply here. The host projects only the four
+      // named submit arguments (p2p-draft-host.ts), not these raw extra keys.
+      const input = {
+        type: "draft_submit_deck", submissionId: "owner-1",
+        mainDeck: ["Plains", "Island"], commanders: ["Plains"],
+        ...(printings === undefined ? {} : { printings }),
+      };
+      expect(validateDraftMessage(input)).toEqual(input);
+      expect(() => validateDraftMessage({ ...input, submissionId: undefined }))
+        .toThrow("Invalid deck submission: submissionId");
+      expect(() => validateDraftMessage({ ...input, commanders: undefined }))
+        .toThrow("Invalid deck submission: commanders");
+    });
+
+    it.each([
       { commanders: undefined },
       { commanders: null },
       { commanders: {} },

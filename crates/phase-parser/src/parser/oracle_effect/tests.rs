@@ -32639,6 +32639,7 @@ fn parse_aether_gust_effect_chain() {
             Effect::PutOnTopOrBottom {
                 target: TargetFilter::ParentTarget,
                 chooser: TargetFilter::ParentTargetOwner,
+                ..
             }
         ),
         "Expected ParentTarget PutOnTopOrBottom continuation, got {:?}",
@@ -48220,6 +48221,46 @@ fn perpetual_grant_ability_multi_quote_partial_failure_stays_closed() {
     );
 }
 
+/// CR 401.7: Calim, Djinn Emperor's "conjure a card named X into your library
+/// seventh from the top" must keep its position (it used to parse to a plain
+/// library conjure that placed the card at a random/default slot).
+#[test]
+fn conjure_into_library_nth_from_top_keeps_position() {
+    let def = parse_effect_chain(
+        "conjure a card named Calim, Djinn Emperor into your library seventh from the top",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            def.effect.as_ref(),
+            Effect::Conjure {
+                destination: Zone::Library,
+                library_position: Some(LibraryPosition::NthFromTop { n: 7 }),
+                ..
+            }
+        ),
+        "got {:?}",
+        def.effect
+    );
+    // Reach-guard: the plain (unpositioned) library conjure is unchanged.
+    let plain = parse_effect_chain(
+        "conjure a card named Lightning Bolt into your library",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            plain.effect.as_ref(),
+            Effect::Conjure {
+                destination: Zone::Library,
+                library_position: None,
+                ..
+            }
+        ),
+        "got {:?}",
+        plain.effect
+    );
+}
+
 /// SHAPE (V1): Indris's "They perpetually gain storm" rider binds the
 /// chain-conjured Bolts (`LastCreated`) and installs Storm on each.
 #[test]
@@ -50277,9 +50318,64 @@ fn parse_owner_of_target_puts_second_from_top() {
             "The owner of target nonland permanent puts it into their library second from the top or on the bottom",
             AbilityKind::Spell,
         );
+    // CR 401.7: the "second from the top" position must survive parsing.
     assert!(
-        matches!(*def.effect, Effect::PutOnTopOrBottom { .. }),
-        "Expected PutOnTopOrBottom, got {:?}",
+        matches!(
+            *def.effect,
+            Effect::PutOnTopOrBottom {
+                chooser: TargetFilter::ParentTargetOwner,
+                top_position: LibraryPosition::NthFromTop { n: 2 },
+                ..
+            }
+        ),
+        "Expected owner-chosen PutOnTopOrBottom with NthFromTop(2), got {:?}",
+        def.effect
+    );
+}
+
+/// Ordinal-generality probe for the shared `parse_nth_from_top` combinator.
+/// NOT printed text: the printed subjects are "creature an opponent controls",
+/// "nonland permanent" and "creature or enchantment", and only "second" exists
+/// in the corpus (nearest printed cards: Deem Inferior, Trickster's Stratagem).
+/// Third/fourth rows exist solely to prove the ordinal is parsed, not matched.
+#[test]
+fn parse_owner_puts_nth_from_top_or_bottom_is_ordinal_generic() {
+    for (ordinal, n) in [("second", 2), ("third", 3), ("fourth", 4)] {
+        let def = parse_effect_chain(
+            &format!(
+                "The owner of target creature puts it into their library {ordinal} from the top or on the bottom"
+            ),
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                *def.effect,
+                Effect::PutOnTopOrBottom {
+                    top_position: LibraryPosition::NthFromTop { n: got },
+                    ..
+                } if got == n
+            ),
+            "{ordinal}: got {:?}",
+            def.effect
+        );
+    }
+}
+
+#[test]
+fn parse_plain_top_or_bottom_keeps_top_position() {
+    let def = parse_effect_chain(
+        "The owner of target nonland permanent puts it on their choice of the top or bottom of their library",
+        AbilityKind::Spell,
+    );
+    assert!(
+        matches!(
+            *def.effect,
+            Effect::PutOnTopOrBottom {
+                top_position: LibraryPosition::Top,
+                ..
+            }
+        ),
+        "got {:?}",
         def.effect
     );
 }

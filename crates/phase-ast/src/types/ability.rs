@@ -20408,6 +20408,13 @@ pub enum LibraryPosition {
     },
 }
 
+impl LibraryPosition {
+    /// Serde skip-helper: `Top` is the default and is omitted from JSON.
+    pub fn is_top(&self) -> bool {
+        matches!(self, Self::Top)
+    }
+}
+
 /// CR 701.24a + CR 701.24d: Whether a mass move into a library is the move
 /// component of one parser-emitted “shuffle this set into that library” action.
 /// Ordinary mass moves retain the zone pipeline's per-object library behavior;
@@ -25061,7 +25068,8 @@ pub enum Effect {
         #[serde(default = "default_target_filter_controller")]
         player: TargetFilter,
     },
-    /// Put a target on top or bottom of its owner's library.
+    /// Put a target on top or bottom of its owner's library, or (via
+    /// `top_position`) at an Nth-from-the-top slot or the bottom (CR 401.7).
     PutOnTopOrBottom {
         target: TargetFilter,
         /// CR 608.2d: the player directed by the Oracle text chooses top or bottom.
@@ -25073,6 +25081,12 @@ pub enum Effect {
             skip_serializing_if = "is_target_filter_parent_target_owner"
         )]
         chooser: TargetFilter,
+        /// CR 401.7 + CR 608.2d: where the object goes when the chooser picks the
+        /// "top" branch. `Top` (the default) is the plain "top or bottom" choice;
+        /// `NthFromTop { n: 2 }` is "second from the top or on the bottom" (Deem
+        /// Inferior, Trickster's Stratagem). The other branch is always the bottom.
+        #[serde(default, skip_serializing_if = "LibraryPosition::is_top")]
+        top_position: LibraryPosition,
     },
     /// Deliver a gift to an opponent: draw a card, create a token, etc.
     /// Resolves for the opponent of the ability's controller (2-player: the single opponent).
@@ -32804,6 +32818,9 @@ macro_rules! define_effect_quantity_walk {
                 f(count);
                 visit_library_position(position, f);
             }
+            Effect::PutOnTopOrBottom { top_position, .. } => {
+                visit_library_position(top_position, f);
+            }
             Effect::ChooseDrawnThisTurnPayOrTopdeck {
                 count,
                 life_payment,
@@ -33000,7 +33017,6 @@ macro_rules! define_effect_quantity_walk {
             | Effect::Ripple { .. }
             | Effect::MiracleCast { .. }
             | Effect::MadnessCast { .. }
-            | Effect::PutOnTopOrBottom { .. }
             | Effect::GiftDelivery { .. }
             | Effect::Goad { .. }
             | Effect::GoadAll { .. }

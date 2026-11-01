@@ -16,9 +16,7 @@ use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::primitives::parse_keyword_name;
 use super::super::oracle_nom::target::controller_phrase_among;
 use super::super::oracle_target::{parse_target, parse_target_with_ctx, parse_type_phrase_folding};
-use super::super::oracle_util::{
-    contains_possessive, parse_count_expr, parse_ordinal, parse_subtype, TextPair,
-};
+use super::super::oracle_util::{contains_possessive, parse_count_expr, parse_subtype, TextPair};
 use super::imperative::CHOOSER_DOMAIN_CONTROLLERS;
 use super::{apply_where_x_to_filter, release_iteration_destination, strip_trailing_where_x};
 use crate::parser::oracle_ir::ast::*;
@@ -276,19 +274,9 @@ fn parse_search_result_library_position_restatement(
     .parse(input)?;
     alt((
         value(LibraryPosition::Top, tag("on top")),
-        map_opt(
-            terminated(
-                take_until::<_, _, OracleError<'_>>(" from the top"),
-                tag(" from the top"),
-            ),
-            |ordinal_text| {
-                parse_ordinal(ordinal_text).and_then(|(n, rest)| {
-                    rest.trim()
-                        .is_empty()
-                        .then_some(LibraryPosition::NthFromTop { n })
-                })
-            },
-        ),
+        map(nom_primitives::parse_nth_from_top, |n| {
+            LibraryPosition::NthFromTop { n }
+        }),
     ))
     .parse(input)
 }

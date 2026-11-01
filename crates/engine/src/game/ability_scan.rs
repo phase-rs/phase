@@ -2003,7 +2003,14 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             acc = acc.or(scan_target_filter(player, target_ctx, mode));
             acc
         }
-        Effect::PutOnTopOrBottom { target, chooser } => {
+        Effect::PutOnTopOrBottom {
+            target,
+            chooser,
+            // Not scanned: the parser only emits `Top`/`NthFromTop`, but
+            // `LibraryPosition` can nest a `QuantityExpr`; naming it keeps this
+            // arm a compile-time tripwire if that changes.
+            top_position: _,
+        } => {
             let mut acc = Axes::NONE;
             acc = acc.or(scan_target_filter(target, target_ctx, mode));
             acc = acc.or(scan_target_filter(chooser, target_ctx, mode));
