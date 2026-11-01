@@ -1,9 +1,8 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { FocusEvent, KeyboardEvent, MouseEvent, PointerEvent, Ref } from "react";
 import { useTranslation } from "react-i18next";
 
 import type {
-  ContestKind,
   ContestResult,
   ContestState,
   GameEvent,
@@ -16,23 +15,14 @@ import { CONTEST_RESULT_BANNER_MS, useContestStore } from "../../stores/contestS
 import { useGameStore } from "../../stores/gameStore.ts";
 import type { GameMode } from "../../stores/gameStore.ts";
 import { getOpponentDisplayName } from "../../stores/multiplayerStore.ts";
+import { StaringStage } from "./StaringStage.tsx";
 
 /** Wall-clock cadence of the local countdown redraw. Cosmetic only. */
 const COUNTDOWN_REDRAW_MS = 100;
 
-function ContestGlyph({ kind }: { kind: ContestKind }) {
+function BreathGlyph() {
   // Decorative: the contest is always named in text as well.
-  return kind === "Staring" ? (
-    <svg viewBox="0 0 64 40" className="h-10 w-16" aria-hidden="true" focusable="false">
-      <path
-        d="M4 20C14 6 26 2 32 2s18 4 28 18C50 34 38 38 32 38S14 34 4 20Z"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="3"
-      />
-      <circle cx="32" cy="20" r="9" fill="currentColor" />
-    </svg>
-  ) : (
+  return (
     <svg viewBox="0 0 64 40" className="h-10 w-16" aria-hidden="true" focusable="false">
       <path
         d="M4 18C16 8 24 10 32 14c8-4 16-6 28 4-8 14-18 20-28 20S12 32 4 18Z"
@@ -172,6 +162,9 @@ function ContestPanel({ contest }: { contest: ContestState }) {
   const localSeats = localContestSeats(contest, gameMode, me, aiSeatIds);
   const isParticipant = localSeats.length > 0;
   const paused = contest.paused_since_ms != null;
+  // A staring contest plays out under the stage's eye, which replaces the glyph and
+  // backdrop; the panel moves clear of it.
+  const isStaring = contest.kind === "Staring";
   const isActive = contest.phase === "Active";
   const isPreparing = contest.phase === "Pending" || contest.phase === "Preparing";
 
@@ -284,15 +277,20 @@ function ContestPanel({ contest }: { contest: ContestState }) {
       ref={dialogRef}
       tabIndex={-1}
       onBlur={keepFocusInside}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 outline-none"
+      className={[
+        "fixed inset-0 z-50 flex justify-center p-4 outline-none",
+        isStaring
+          ? "items-end [@media(max-height:600px)]:items-center [@media(max-height:600px)]:justify-end"
+          : "items-center bg-black/75",
+      ].join(" ")}
       role="dialog"
       aria-modal="true"
       aria-labelledby="contest-title"
     >
       <div className="flex w-full max-w-md flex-col items-center gap-4 rounded-2xl border border-white/20 bg-slate-900 p-5 text-center text-white shadow-2xl">
-        <ContestGlyph kind={contest.kind} />
+        {!isStaring && <BreathGlyph />}
         <h2 id="contest-title" className="text-xl font-semibold">
-          {contest.kind === "Staring"
+          {isStaring
             ? t("physicalContest.title.staring")
             : t("physicalContest.title.breathHolding")}
         </h2>
@@ -489,7 +487,9 @@ export function ContestOverlay() {
   const announce = useContestStore((s) => s.announce);
   useLocalContestHost(waitingFor?.type === "PhysicalContest");
 
-  useEffect(() => {
+  // Before paint: the same commit that settles the contest unmounts its panel, and
+  // the stage's closing beat has to take over without a frame of empty board.
+  useLayoutEffect(() => {
     for (const event of events) {
       if (event.type === "PhysicalContestResolved") {
         announce(event.data.kind, event.data.participants, event.data.result);
@@ -497,11 +497,11 @@ export function ContestOverlay() {
     }
   }, [events, announce]);
 
+  const contest = waitingFor?.type === "PhysicalContest" ? waitingFor.data.contest : null;
   return (
     <>
-      {waitingFor?.type === "PhysicalContest" && (
-        <ContestPanel contest={waitingFor.data.contest} />
-      )}
+      <StaringStage contest={contest} />
+      {contest && <ContestPanel contest={contest} />}
       <ContestResultBanner />
     </>
   );
