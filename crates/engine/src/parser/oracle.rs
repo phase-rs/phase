@@ -7323,9 +7323,10 @@ fn parse_normalized_oracle_ir(
         // CR 601.3 + CR 113.6f: "You may cast this card from <zones>, but not from
         // anywhere else." (Haakon, Stromgald Scourge) — the card's own cast permission
         // plus a restriction confining every cast of it to those zones. Both halves
-        // come from one sentence, so both are emitted for this line. Must precede
-        // Priority 7: the permission parser refuses the residual rider, which leaves
-        // the line an honest `static_structure` gap whenever this split declines.
+        // come from one sentence, so both are emitted for this line. This arm must
+        // run ahead of the Priority 7 static parser, whose permission rule refuses
+        // the residual rider; whenever this split declines, the line stays an honest
+        // `static_structure` gap.
         if let Some((permission, restriction)) =
             try_parse_exclusive_own_cast_permission(&line, &lower)
         {
