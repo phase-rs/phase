@@ -113,9 +113,9 @@ claim = "the production half fails DOWNWARD, and the pinned tuple + adjudication
   count = 0
   [probe.expect]
   outcome = "fail"
-  anchor  = ["left: (26, 28)",
-             "right: (27, 28)",
-             "THE TEST HALF HAS BEEN ADJUDICATED EIGHT TIMES"]
+  anchor  = ["left: (26, 29)",
+             "right: (27, 29)",
+             "THE TEST HALF HAS BEEN ADJUDICATED NINE TIMES"]
 
 [[probe]]
 id    = "P2_test_site_removed"
@@ -131,7 +131,7 @@ claim = "the cfg(test) half is pinned INDEPENDENTLY of the production half"
   count = 1
   [probe.expect]
   outcome = "fail"
-  anchor  = ["left: (27, 27)", "right: (27, 28)"]
+  anchor  = ["left: (27, 28)", "right: (27, 29)"]
 
 [[probe]]
 id    = "P3_walk_reaches_phase_ai_and_skips_comments"
@@ -148,7 +148,7 @@ claim = "the phase-ai root is walked, zero-hit files are visited, and COMMENT li
   count = 4
   [probe.expect]
   outcome = "fail"
-  anchor  = ["left: (28, 28)", "right: (27, 28)"]
+  anchor  = ["left: (28, 29)", "right: (27, 29)"]
 
 [[probe]]
 id    = "P4_counting_is_per_line"
@@ -164,7 +164,7 @@ claim = "the count sums LINES, not files -- two planted lines in one file move i
   count = 2
   [probe.expect]
   outcome = "fail"
-  anchor  = ["left: (29, 28)", "right: (27, 28)"]
+  anchor  = ["left: (29, 29)", "right: (27, 29)"]
 
 [[probe]]
 id    = "P5_relocation_preserves_the_count"
@@ -232,16 +232,16 @@ claim = "every declare-time site routes through the shared authority"
   [[probe.mutation]]
   kind    = "replace"
   file    = "crates/engine/src/game/engine.rs"
-  find    = "    crate::analysis::decision_template::declaration_conforms(\n"
-  replace = ""
-  # RAW occurrences: 4 in the pristine file (one is a `///` line, one is cfg(test)-scoped), so 3
-  # after the drop. The census's PRODUCTION count for the same file goes 2 -> 1. Two different
+  find    = "    // about to publish and the declaration the aim walk measures against ARE the same one.\n    crate::analysis::decision_template::declaration_conforms(\n"
+  replace = "    // about to publish and the declaration the aim walk measures against ARE the same one.\n"
+  # RAW occurrences: 5 in the pristine file (one is a `///` line, one is cfg(test)-scoped), so 4
+  # after the drop. The census's PRODUCTION count for the same file goes 3 -> 2. Two different
   # instruments, two different numbers, both stated.
   [[probe.assert_count]]
   file  = "crates/engine/src/game/engine.rs"
   text  = "declaration_conforms("
-  count = 3
+  count = 4
   [probe.expect]
   outcome = "fail"
-  anchor  = ["expected 1 definition + 3 call sites",
-             "(\"engine/src/game/engine.rs\", 1)"]
+  anchor  = ["expected 1 definition + 4 call sites",
+             "(\"engine/src/game/engine.rs\", 2)"]

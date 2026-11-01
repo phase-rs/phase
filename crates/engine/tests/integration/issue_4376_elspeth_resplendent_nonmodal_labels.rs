@@ -79,6 +79,7 @@ fn elspeth_resplendent_minus_seven_keeps_description_without_mode_labels() {
         .act(GameAction::ActivateAbility {
             source_id: elspeth,
             ability_index: minus_seven_index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("Elspeth's −7 activation reaches the stack");
 

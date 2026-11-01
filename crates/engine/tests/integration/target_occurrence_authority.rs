@@ -19,8 +19,8 @@ use engine::game::ability_utils::validate_targets_in_chain;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, EffectScope, ResolvedAbility, TapStateChange,
-    TargetFilter, TargetRef, TypedFilter,
+    AbilityDefinition, AbilityKind, ChosenTargetSlots, Effect, EffectScope, ResolvedAbility,
+    TapStateChange, TargetFilter, TargetRef, TypedFilter,
 };
 use engine::types::actions::{GameAction, ResolveAllScope};
 use engine::types::game_state::{PersistedGameState, PersistedRestoreFinalization, WaitingFor};
@@ -757,4 +757,142 @@ fn ents_fury_with_its_own_creature_illegal_does_not_fight() {
     assert_eq!(after, before, "CR 701.14b: no fight");
     let (before, after, _) = implicit_ally_board(false, true);
     assert_ne!(after, before, "control: Ent's Fury fights");
+}
+
+const EPIC_CONFRONTATION: &str = "Target creature you control gets +1/+2 until end of turn. It fights target creature you don't control. (Each deals damage equal to its power to the other.)";
+
+/// Casts `oracle` (a sorcery) at A (P0's creature) then B (P1's), and gives
+/// shroud (CR 702.18a) to each of A and B flagged in `shrouded`. Returns the
+/// board, the spell and A and B.
+fn implicit_fight_board(
+    name: &str,
+    oracle: &str,
+    shrouded: [bool; 2],
+) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let a = s.add_creature(P0, "Ally A", 4, 12).id();
+    let b = s.add_creature(P1, "Opponent B", 3, 12).id();
+    let spell = s
+        .add_spell_to_hand_from_oracle(P0, name, false, oracle)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut r = s.build();
+    r.cast(spell).target_objects(&[a, b]).commit();
+    for (id, shroud) in [(a, shrouded[0]), (b, shrouded[1])] {
+        if shroud {
+            r.state_mut().add_transient_continuous_effect(
+                id,
+                P0,
+                engine::types::ability::Duration::UntilEndOfTurn,
+                TargetFilter::SpecificObject { id },
+                vec![engine::types::ability::ContinuousModification::AddKeyword {
+                    keyword: Keyword::Shroud,
+                }],
+                None,
+            );
+        }
+    }
+    engine::game::layers::evaluate_layers(r.state_mut());
+    (r, spell, a, b)
+}
+
+fn fight_node(chain: &ResolvedAbility) -> &ResolvedAbility {
+    std::iter::successors(Some(chain), |node| node.sub_ability.as_deref())
+        .find(|node| matches!(node.effect, Effect::Fight { .. }))
+        .expect("the chain has a fight node")
+}
+
+/// CR 601.2c + CR 608.2b + CR 701.14b: the chain validation returns for an
+/// implicit-ally fight declares each chosen fighter that is still legal, once,
+/// and the fight node's recorded slot names its own fighter wherever
+/// validation stores it, or nothing once it is illegal. With both fighters
+/// legal, Epic Confrontation's fight node stores its ancestor's referent ahead
+/// of its own fighter, unrecorded; Ent's Fury's fight node stores only its own
+/// fighter. Oracle text: Scryfall-verified.
+#[test]
+fn validated_implicit_fight_declares_each_chosen_fighter_once() {
+    for (name, oracle, ancestor_stored) in [
+        ("Epic Confrontation", EPIC_CONFRONTATION, true),
+        ("Ent's Fury", ENTS_FURY, false),
+    ] {
+        for shrouded in [[false, false], [true, false], [false, true], [true, true]] {
+            let (r, spell, a, b) = implicit_fight_board(name, oracle, shrouded);
+            let case = format!("{name}, shrouded {shrouded:?}");
+            let announced = ability(&r, spell);
+            assert_eq!(
+                fight_node(announced).targets,
+                vec![TargetRef::Object(b)],
+                "reach: {case}"
+            );
+            assert_eq!(
+                fight_node(announced).chosen_target_slots,
+                ChosenTargetSlots::Recorded(vec![0]),
+                "reach: {case}"
+            );
+            let validated = validate_targets_in_chain(r.state(), announced);
+            let stored = match shrouded {
+                [false, false] if ancestor_stored => {
+                    vec![TargetRef::Object(a), TargetRef::Object(b)]
+                }
+                [_, false] => vec![TargetRef::Object(b)],
+                [_, true] => Vec::new(),
+            };
+            let fight = fight_node(&validated);
+            assert_eq!(fight.targets, stored, "reach: {case}");
+            let legal: Vec<TargetRef> = [a, b]
+                .into_iter()
+                .zip(shrouded)
+                .filter(|(_, shroud)| !shroud)
+                .map(|(id, _)| TargetRef::Object(id))
+                .collect();
+            assert_eq!(
+                engine::game::ability_utils::declared_targets_in_chain(&validated),
+                legal,
+                "{case}"
+            );
+            let b_slot = stored.iter().position(|t| *t == TargetRef::Object(b));
+            assert_eq!(
+                fight.chosen_target_slots,
+                ChosenTargetSlots::Recorded(b_slot.into_iter().collect()),
+                "{case}"
+            );
+            if shrouded == [false, false] && ancestor_stored {
+                assert_eq!(
+                    fight.target_pin_at(0),
+                    announced.target_pin_at(0),
+                    "inserted ancestor keeps its pin: {case}"
+                );
+                assert_eq!(
+                    fight.target_pin_at(1),
+                    fight_node(announced).target_pin_at(0),
+                    "the fight's own target keeps its pin: {case}"
+                );
+            }
+        }
+    }
+}
+
+/// CR 608.2b: a chain without a record still has none after the implicit-ally
+/// fight stores its ancestor's referent.
+#[test]
+fn validated_implicit_fight_without_a_record_keeps_none() {
+    fn unrecord(node: &mut ResolvedAbility) {
+        node.chosen_target_slots = ChosenTargetSlots::Unrecorded;
+        if let Some(sub) = node.sub_ability.as_deref_mut() {
+            unrecord(sub);
+        }
+    }
+    let (r, spell, a, b) =
+        implicit_fight_board("Epic Confrontation", EPIC_CONFRONTATION, [false, false]);
+    let mut announced = ability(&r, spell).clone();
+    unrecord(&mut announced);
+    let validated = validate_targets_in_chain(r.state(), &announced);
+    let fight = fight_node(&validated);
+    assert_eq!(
+        fight.targets,
+        vec![TargetRef::Object(a), TargetRef::Object(b)],
+        "reach: the referent is stored ahead"
+    );
+    assert_eq!(fight.chosen_target_slots, ChosenTargetSlots::Unrecorded);
 }

@@ -864,6 +864,7 @@ fn cost_vs_benefit_has_exactly_one_authority() {
             action: GameAction::ActivateAbility {
                 source_id: baron,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
             metadata: engine::ai_support::ActionMetadata::for_actor(
                 Some(AI),

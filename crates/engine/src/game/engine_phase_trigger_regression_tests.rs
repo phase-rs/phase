@@ -6,10 +6,11 @@ use crate::game::combat::AttackTarget;
 use crate::game::zones::create_object;
 use crate::parser::oracle::parse_oracle_text;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, Comparator, ControllerRef,
-    Effect, EffectScope, FilterProp, ObjectScope, PlayerFilter, QuantityExpr, QuantityRef,
-    ReplacementDefinition, ReplacementMode, ResolvedAbility, TapStateChange, TargetFilter,
-    TargetRef, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ChooseOneOfKind, Comparator,
+    ControllerRef, Effect, EffectScope, FilterProp, ObjectScope, PlayerFilter, QuantityExpr,
+    QuantityRef, ReplacementDefinition, ReplacementMode, ResolvedAbility, TapStateChange,
+    TargetFilter, TargetRef, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
+    UnlessPayModifier,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -3142,6 +3143,7 @@ fn choose_one_of_enters_branch_choice_state() {
         Effect::ChooseOneOf {
             chooser: PlayerFilter::Controller,
             branches: vec![draw_ability(1), draw_ability(2)],
+            kind: ChooseOneOfKind::Ordinary,
         },
         vec![],
         source_id,
@@ -3191,6 +3193,7 @@ fn choose_one_of_branch_resolves_selected_branch_with_original_controller() {
         continuation: None,
         replacement_applied: Default::default(),
         remaining_players: vec![],
+        trigger_context: None,
     };
 
     apply_as_current(&mut state, GameAction::ChooseBranch { index: 0 }).unwrap();
@@ -3224,6 +3227,7 @@ fn choose_one_of_each_opponent_prompts_apnap_and_branch_targets_faced_player() {
         Effect::ChooseOneOf {
             chooser: PlayerFilter::Opponent,
             branches: vec![branch_target_player_loses_life.clone(), draw_ability(1)],
+            kind: ChooseOneOfKind::Ordinary,
         },
         vec![],
         source_id,
@@ -3317,6 +3321,7 @@ fn choose_one_of_scoped_player_sacrifice_prompts_faced_opponent() {
         Effect::ChooseOneOf {
             chooser: PlayerFilter::Opponent,
             branches: vec![sacrifice_branch, draw_ability(1)],
+            kind: ChooseOneOfKind::Ordinary,
         },
         vec![],
         source_id,
@@ -3372,6 +3377,7 @@ fn choose_one_of_controller_token_branch_ignores_faced_opponent() {
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
@@ -3381,6 +3387,7 @@ fn choose_one_of_controller_token_branch_ignores_faced_opponent() {
         Effect::ChooseOneOf {
             chooser: PlayerFilter::Opponent,
             branches: vec![sacrifice_branch, token_branch],
+            kind: ChooseOneOfKind::Ordinary,
         },
         vec![],
         source_id,
@@ -3499,6 +3506,7 @@ fn post_replacement_choose_sets_named_choice_waiting_for() {
     let effect_def = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Choose {
+            chooser: crate::types::ability::ControllerRef::You,
             choice_type: crate::types::ability::ChoiceType::BasicLandType,
             persist: false,
             selection: crate::types::ability::TargetSelectionMode::Chosen,
@@ -3623,7 +3631,8 @@ fn glacierwood_siege_resolution_prompts_for_anchor_word_choice() {
     apply_as_current(&mut state, GameAction::PassPriority).unwrap();
     let resolve = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
 
-    assert!(state.battlefield.contains(&siege_id));
+    // CR 614.12a: the anchor word is chosen before the Siege enters.
+    assert!(!state.battlefield.contains(&siege_id));
     match resolve.waiting_for {
         WaitingFor::NamedChoice {
             free_entry: None,
@@ -3636,7 +3645,7 @@ fn glacierwood_siege_resolution_prompts_for_anchor_word_choice() {
             assert_eq!(source.prompt.identity.reference.object_id, siege_id);
             assert_eq!(
                 source.binding,
-                crate::types::game_state::NamedChoiceSourceBinding::ExactObjectAndResolution
+                crate::types::game_state::NamedChoiceSourceBinding::PendingEntry
             );
             assert_eq!(options, &vec!["Temur".to_string(), "Sultai".to_string()]);
         }
@@ -3651,6 +3660,7 @@ fn glacierwood_siege_resolution_prompts_for_anchor_word_choice() {
     )
     .unwrap();
 
+    assert!(state.battlefield.contains(&siege_id));
     assert_eq!(state.objects[&siege_id].chosen_label(), Some("Temur"));
 }
 

@@ -15,6 +15,7 @@ use crate::game::engine::{
     apply_actionless_priority_pass_for_prospective, apply_interaction_for_prospective_simulation,
     apply_interaction_for_simulation, ProspectiveSimulationOutcome,
 };
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::turn_control::authorized_submitter_for_player;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, DelayedTriggerCondition, Effect,
@@ -981,10 +982,15 @@ pub fn certify_fetch_then_cast(
     best
 }
 
+/// Whether `candidate` is the activation of an exact fetchland ability by its
+/// owner: the conjunction of the submitter check, [`is_exact_fetchland_source`]
+/// on the activated object and [`is_exact_fetch_ability`] on the indexed
+/// ability.
 fn is_exact_fetchland_candidate(state: &GameState, candidate: &CandidateAction) -> bool {
     let GameAction::ActivateAbility {
         source_id,
         ability_index,
+        ..
     } = candidate.action
     else {
         return false;
@@ -1001,22 +1007,61 @@ fn is_exact_fetchland_candidate(state: &GameState, candidate: &CandidateAction) 
     let Some(source) = state.objects.get(&source_id) else {
         return false;
     };
-    if source.zone != Zone::Battlefield
-        || source.owner != owner
-        || source.controller != owner
-        || !source
-            .card_types
-            .core_types
-            .contains(&crate::types::card_type::CoreType::Land)
-    {
+    if !is_exact_fetchland_source(source, owner) {
         return false;
     }
     let Some(ability) = source.abilities.get(ability_index) else {
         return false;
     };
+    is_exact_fetch_ability(ability)
+}
+
+/// The object half of the exact-fetchland test: a land on the battlefield that
+/// `owner` both owns and controls. The zone is read from the object itself.
+fn is_exact_fetchland_source(
+    source: &crate::game::game_object::GameObject,
+    owner: PlayerId,
+) -> bool {
+    !(source.zone != Zone::Battlefield
+        || source.owner != owner
+        || source.controller != owner
+        || !source
+            .card_types
+            .core_types
+            .contains(&crate::types::card_type::CoreType::Land))
+}
+
+/// The ability half of the exact-fetchland test: an activated ability whose
+/// cost sacrifices exactly its own source and whose effect chain is the exact
+/// search-then-put-onto-the-battlefield fetch shape.
+fn is_exact_fetch_ability(ability: &crate::types::ability::AbilityDefinition) -> bool {
     ability.kind == AbilityKind::Activated
         && has_exact_self_sacrifice_cost(ability.cost.as_ref())
         && has_exact_fetch_effect_chain(ability)
+}
+
+/// Necessary-condition filter for "some candidate of `player` can pass
+/// [`is_exact_fetchland_candidate`]".
+///
+/// A `false` answer proves no fetch-then-cast route can be certified for
+/// `player` in `state`: every such route starts from a candidate whose source
+/// passes [`is_exact_fetchland_source`] for `player` and whose indexed ability
+/// passes [`is_exact_fetch_ability`], and no object in the game has both. A
+/// `true` answer proves nothing and the caller must still run the full
+/// certification.
+///
+/// Falls open (`true`) while a layer flush is pending, because the live
+/// `abilities` lists may then be out of step with what the reducer will bind.
+/// The scan is an order-independent `any`, so it cannot leak container
+/// iteration order into the answer.
+pub fn controls_exact_fetchland(state: &GameState, player: PlayerId) -> bool {
+    if state.layers_dirty.is_dirty() {
+        return true;
+    }
+    state.objects.values().any(|source| {
+        is_exact_fetchland_source(source, player)
+            && source.abilities.iter().any(is_exact_fetch_ability)
+    })
 }
 
 fn has_exact_self_sacrifice_cost(cost: Option<&AbilityCost>) -> bool {
@@ -1240,24 +1285,27 @@ fn draws_are_opaque(state: &GameState, events: &[GameEvent]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        advance_priority_for_route, CertifiedPactPlan, FrozenCandidate, PactPlanState, PactReceipt,
-        ProspectiveBudget, ProspectiveManaDecision, StateCapabilityBinding,
-        PROSPECTIVE_MAX_SEARCH_BRANCHES,
+        advance_priority_for_route, controls_exact_fetchland, is_exact_fetchland_candidate,
+        CertifiedPactPlan, FrozenCandidate, PactPlanState, PactReceipt, ProspectiveBudget,
+        ProspectiveManaDecision, StateCapabilityBinding, PROSPECTIVE_MAX_SEARCH_BRANCHES,
     };
-    use crate::ai_support::TacticalClass;
+    use crate::ai_support::{ActionMetadata, CandidateAction, TacticalClass};
     use crate::game::engine::apply_actionless_priority_pass_for_prospective;
     use crate::game::triggers::{PendingTrigger, PendingTriggerContext};
     use crate::game::zones;
-    use crate::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter};
+    use crate::types::ability::{
+        AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, QuantityExpr,
+        ResolvedAbility, SacrificeCost, SearchSelectionConstraint, TargetFilter, TypedFilter,
+    };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
-    use crate::types::game_state::{GameState, WaitingFor};
+    use crate::types::game_state::{GameState, LayersDirty, WaitingFor};
     use crate::types::identifiers::{
         CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken, ObjectId,
     };
     use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
-    use crate::types::zones::Zone;
+    use crate::types::zones::{EtbTapState, Zone};
 
     #[test]
     fn terminal_search_branches_share_the_precharged_route_allowance_but_not_each_other() {
@@ -1444,5 +1492,131 @@ mod tests {
 
         assert!(advance_priority_for_route(&mut state, owner, opponent).is_none());
         assert_eq!(state, before);
+    }
+
+    /// Build the exact fetch shape the certifier accepts: `{T}, Sacrifice
+    /// this` searching the library for one card and putting it onto the
+    /// battlefield.
+    fn exact_fetch_ability() -> AbilityDefinition {
+        let mut ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::SearchLibrary {
+                filter: TargetFilter::Typed(TypedFilter::land()),
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: None,
+                selection_constraint: SearchSelectionConstraint::None,
+                split: None,
+                source_zones: vec![Zone::Library],
+            },
+        );
+        ability.cost = Some(AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Tap,
+                AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
+            ],
+        });
+        ability.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Typed(TypedFilter::land()),
+                owner_library: false,
+                enter_transformed: false,
+                enters_under: Some(ControllerRef::You),
+                enter_tapped: EtbTapState::Untapped,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+                conditional_enter_with_counters: vec![],
+                face_down_profile: None,
+                enters_modified_if: None,
+            },
+        )));
+        ability
+    }
+
+    /// Put a land owned and controlled by `owner` into `zone` carrying
+    /// `abilities`, on a state whose layers are clean so the precondition does
+    /// not fall open on its own.
+    fn state_with_land(
+        owner: PlayerId,
+        zone: Zone,
+        abilities: Vec<AbilityDefinition>,
+    ) -> GameState {
+        let mut state = GameState::new_two_player(42);
+        let land = zones::create_object(&mut state, CardId(1), owner, "Fetch".to_string(), zone);
+        let object = state.objects.get_mut(&land).expect("new object exists");
+        object.card_types.core_types.push(CoreType::Land);
+        object.abilities = std::sync::Arc::new(abilities);
+        state.layers_dirty = LayersDirty::Clean;
+        state
+    }
+
+    /// Positive arm of the fetchland precondition, and the proof that the
+    /// split predicates still accept the shape the certifier accepts.
+    #[test]
+    fn controls_exact_fetchland_sees_an_exact_fetchland_on_the_battlefield() {
+        let player = PlayerId(0);
+        let state = state_with_land(player, Zone::Battlefield, vec![exact_fetch_ability()]);
+
+        assert!(controls_exact_fetchland(&state, player));
+        let (source_id, _) = state.objects.iter().next().expect("one object");
+        let candidate = CandidateAction {
+            action: GameAction::ActivateAbility {
+                source_id: *source_id,
+                ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+            },
+            metadata: ActionMetadata {
+                actor: Some(player),
+                semantic_owner: Some(player),
+                tactical_class: TacticalClass::Ability,
+            },
+        };
+        assert!(
+            is_exact_fetchland_candidate(&state, &candidate),
+            "the precondition and the per-candidate test agree on the positive fixture"
+        );
+    }
+
+    /// Negative arms: nothing to activate, the fetchland is not on the
+    /// battlefield, or it belongs to the other player.
+    #[test]
+    fn controls_exact_fetchland_rejects_states_without_a_usable_fetchland() {
+        let player = PlayerId(0);
+        let opponent = PlayerId(1);
+
+        let mut empty = GameState::new_two_player(42);
+        empty.layers_dirty = LayersDirty::Clean;
+        assert!(!controls_exact_fetchland(&empty, player));
+
+        let plain_land = state_with_land(player, Zone::Battlefield, Vec::new());
+        assert!(!controls_exact_fetchland(&plain_land, player));
+
+        let in_hand = state_with_land(player, Zone::Hand, vec![exact_fetch_ability()]);
+        assert!(!controls_exact_fetchland(&in_hand, player));
+
+        let opponents = state_with_land(opponent, Zone::Battlefield, vec![exact_fetch_ability()]);
+        assert!(!controls_exact_fetchland(&opponents, player));
+        assert!(
+            controls_exact_fetchland(&opponents, opponent),
+            "the same fixture is positive for the player who owns the fetchland"
+        );
+    }
+
+    /// A pending layer flush means the ability lists cannot be trusted, so the
+    /// precondition must answer "may" even on a state with no fetchland.
+    #[test]
+    fn controls_exact_fetchland_falls_open_while_layers_are_dirty() {
+        let player = PlayerId(0);
+        let mut state = GameState::new_two_player(42);
+        state.layers_dirty = LayersDirty::Clean;
+        assert!(!controls_exact_fetchland(&state, player));
+
+        state.layers_dirty.mark_full();
+
+        assert!(controls_exact_fetchland(&state, player));
     }
 }

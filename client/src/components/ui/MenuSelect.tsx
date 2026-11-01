@@ -1,4 +1,4 @@
-import type { CSSProperties } from "react";
+import type { CSSProperties, KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
@@ -344,6 +344,24 @@ export function MenuSelect({
     selectedOption?.scrollIntoView({ block: "nearest" });
   }, [open, selectedValue, updatePosition, useBottomSheet, filterable]);
 
+  const handleMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) return;
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    const options = menuRef.current?.querySelectorAll<HTMLButtonElement>(
+      '[role="option"]:not(:disabled)',
+    );
+    if (!options || options.length === 0) return;
+    event.preventDefault();
+    const current = Array.prototype.indexOf.call(options, document.activeElement);
+    const next =
+      current < 0
+        ? event.key === "ArrowDown"
+          ? 0
+          : options.length - 1
+        : (current + (event.key === "ArrowDown" ? 1 : -1) + options.length) % options.length;
+    options[next].focus();
+  };
+
   useEffect(() => {
     if (!open) return;
 
@@ -357,20 +375,7 @@ export function MenuSelect({
       if (event.key === "Escape") {
         closeMenu();
         triggerRef.current?.focus();
-        return;
       }
-      if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
-      const options = menuRef.current?.querySelectorAll<HTMLButtonElement>('[role="option"]:not(:disabled)');
-      if (!options || options.length === 0) return;
-      event.preventDefault();
-      const current = Array.prototype.indexOf.call(options, document.activeElement);
-      const next =
-        current < 0
-          ? event.key === "ArrowDown"
-            ? 0
-            : options.length - 1
-          : (current + (event.key === "ArrowDown" ? 1 : -1) + options.length) % options.length;
-      options[next].focus();
     };
     const handleScroll = (event: Event) => {
       const target = event.target as Node | null;
@@ -477,6 +482,7 @@ export function MenuSelect({
             )}
             <div
               ref={menuRef}
+              onKeyDown={handleMenuKeyDown}
               id={listboxId}
               role="listbox"
               aria-label={ariaLabel ?? label}

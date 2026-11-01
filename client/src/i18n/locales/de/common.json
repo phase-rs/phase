@@ -179,6 +179,7 @@
       "exportedTo": "Nach {{path}} exportiert.",
       "exportRequested": "Export angefordert: {{filename}}.",
       "exportFailed": "Spielzustand konnte nicht exportiert werden.",
+      "exportFailedDetail": "Spielzustand konnte nicht exportiert werden. {{detail}}",
       "replayExported": "Wiederholung gespeichert als {{filename}}.",
       "replayExportUnavailable": "Für diese Partie ist keine Wiederholungsaufzeichnung verfügbar.",
       "replayExportFailed": "Die Wiederholung konnte nicht exportiert werden."
@@ -285,7 +286,9 @@
     "loading": "Wird geladen..."
   },
   "turnBanner": {
-    "turn": "Zug {{number}}"
+    "turn": "Zug {{number}}",
+    "yourTurn": "Du bist dran",
+    "opponentTurn": "{{name}} ist dran"
   },
   "diceRoll": {
     "rollingForFirst": "Auswürfeln, wer beginnt",

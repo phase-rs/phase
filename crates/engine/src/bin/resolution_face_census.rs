@@ -2662,12 +2662,14 @@ mod tests {
             ),
             zones: vec![Zone::Hand],
             graveyard_replacement: None,
+            enters_with_modifications: Default::default(),
             member_pool: Vec::new(),
         };
         let paid_graveyard = |hit_card| CastOfferKind::GraveyardPaidCast {
             hit_card,
             mana_spend_permission: None,
             graveyard_replacement: None,
+            enters_with_modifications: Default::default(),
             cast_transformed: false,
             additional_cost: None,
             cleanup: ResolutionCastCleanup {
@@ -2683,6 +2685,7 @@ mod tests {
                 reject_action: engine::types::ability::ResolutionMvRejectAction::RemainExiled,
                 success_action: engine::types::ability::ResolutionCastSuccessAction::BottomMisses,
                 delayed_trigger_receipts: Vec::new(),
+                indicated_action: None,
             },
         };
         let positive = vec![

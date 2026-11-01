@@ -37,6 +37,7 @@ fn jace_transforms_after_interactive_fifth_graveyard_card() {
         .act(GameAction::ActivateAbility {
             source_id: jace,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("Jace's loot ability should be activatable");
     runner.advance_until_stack_empty();
@@ -95,6 +96,7 @@ fn jace_stays_front_face_after_interactive_fourth_graveyard_card() {
         .act(GameAction::ActivateAbility {
             source_id: jace,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("Jace's loot ability should be activatable");
     runner.advance_until_stack_empty();
@@ -148,6 +150,7 @@ fn stolen_jace_uses_controllers_graveyard_and_returns_to_owner() {
         .act(GameAction::ActivateAbility {
             source_id: jace,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("the current controller should be able to activate Jace");
     runner.advance_until_stack_empty();

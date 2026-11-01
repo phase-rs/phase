@@ -1,7 +1,8 @@
 use crate::game::ability_utils::build_resolved_from_def;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::GameObject;
-use crate::game::targeting::TriggeringSpell;
+use crate::game::game_object::ObjectIncarnationRefExt;
+use crate::game::targeting::{TriggeringActivation, TriggeringSpell};
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, CopyRetargetPermission,
     Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
@@ -128,6 +129,8 @@ pub fn resolve(
         // copy of a spell cast as a prepare spell is itself a prepare spell;
         // `FilterProp::PrepareSpell` relies on this inheritance.
         let mut copy_obj = source_obj.clone();
+        // CR 123.1 + CR 707.2: stickers and their changes aren't copiable values.
+        crate::game::stickers::remove_stickers_from_copy(&mut copy_obj);
         copy_obj.id = copy_id;
         copy_obj.controller = copy_controller;
         // allow-raw-zone: spell-copy birth directly on stack has no from-zone event (CR 707.10).
@@ -287,7 +290,14 @@ pub fn resolve(
         // observers must react when a spell copy is created mid-resolution.
         // Collect now; drain after the copy is fully formed (CR 707.10c retarget
         // choice completes, or immediately when no retarget pause is needed).
-        crate::game::triggers::collect_triggers_into_deferred(state, &[spell_copied]);
+        // CR 601.2h + CR 603.3: under a live announcement it waits in that
+        // announcement's carrier instead.
+        let copied_at = events.len() - 1;
+        let owned =
+            crate::game::announcement_triggers::take_inline_trigger_span(state, events, copied_at);
+        if !owned.is_empty() {
+            crate::game::triggers::collect_triggers_into_deferred(state, &[spell_copied]);
+        }
     }
 
     // CR 707.10c / CR 115.1: arm retarget selection only when the copy effect
@@ -565,7 +575,10 @@ struct CopySource {
     /// (`crate::types::game_state::DepartedStackSpell`) rather than a live
     /// stack object — `resolve` must read this object, not
     /// `state.objects.get(&entry.id)`, which could now name an unrelated
-    /// later object at the same storage id.
+    /// later object at the same storage id. A departed activated ability
+    /// (`targeting::TriggeringActivation::Departed`) has none: this engine
+    /// stores no `GameObject` for an ability entry, so `resolve`'s
+    /// `state.objects.get(&entry.id)` fallback finds nothing for it either.
     departed_object: Option<Box<GameObject>>,
 }
 
@@ -600,6 +613,25 @@ fn copy_source_from_triggering_spell(source: TriggeringSpell<'_>) -> CopySourceL
     }
 }
 
+/// CR 602.2a + CR 113.7a: Adapt `targeting::triggering_activation`'s answer to a
+/// [`CopySourceLookup`]. `Departed` is the countered activation's last-known
+/// entry; `Gone` means the named stack object has neither a live entry nor a
+/// departed record; it differs from no source.
+fn copy_source_from_triggering_activation(source: TriggeringActivation<'_>) -> CopySourceLookup {
+    match source {
+        TriggeringActivation::OnStack(entry) => {
+            CopySourceLookup::Source(Box::new(CopySource::on_stack(entry.clone())))
+        }
+        // CR 707.10 + CR 113.7a: a countered activation is copied as it last existed.
+        // An ability on the stack has no `GameObject` here, so there is no departed object.
+        TriggeringActivation::Departed(entry) => CopySourceLookup::Source(Box::new(CopySource {
+            entry: entry.clone(),
+            departed_object: None,
+        })),
+        TriggeringActivation::Gone => CopySourceLookup::Gone,
+    }
+}
+
 fn copy_source_entry(state: &GameState, ability: &ResolvedAbility) -> CopySourceLookup {
     if let Effect::CopySpell {
         target, retarget, ..
@@ -611,14 +643,17 @@ fn copy_source_entry(state: &GameState, ability: &ResolvedAbility) -> CopySource
                 CopyRetargetPermission::RetargetEachCopyToIterationMember
             )
         {
-            // CR 608.2h: with a spell-cast event in scope, its on-stack/departed/
-            // gone answer is authoritative — never fall through to
+            // CR 608.2h: with a spell-cast or stack-using activation event in
+            // scope, its answer is authoritative — never fall through to
             // `triggering_spell_stack_entry`'s legacy `source_id` lookup, which
             // could otherwise re-find an unrelated entry that merely shares the
             // departed spell's former `source_id` (e.g. a sibling trigger still
             // waiting on the stack).
             if let Some(source) = crate::game::targeting::triggering_spell(state) {
                 return copy_source_from_triggering_spell(source);
+            }
+            if let Some(source) = crate::game::targeting::triggering_activation(state) {
+                return copy_source_from_triggering_activation(source);
             }
             if let Some(entry) = triggering_spell_stack_entry(state) {
                 return CopySourceLookup::Source(Box::new(CopySource::on_stack(entry)));
@@ -746,8 +781,21 @@ fn copy_source_entry(state: &GameState, ability: &ResolvedAbility) -> CopySource
     if let Some(source) = crate::game::targeting::triggering_spell(state) {
         return copy_source_from_triggering_spell(source);
     }
+    if let Some(source) = crate::game::targeting::triggering_activation(state) {
+        return copy_source_from_triggering_activation(source);
+    }
     if let Some(entry) = triggering_spell_stack_entry(state) {
         return CopySourceLookup::Source(Box::new(CopySource::on_stack(entry)));
+    }
+    // CR 113.7a + CR 605.3b: an activation event that names no stack entry (one
+    // resolved through the mana-ability path — including an ability CR 605.1a
+    // classifies as non-mana — or a state predating `stack_entry`) has nothing on
+    // the stack that is "that ability" — the top of the stack is an unrelated object.
+    if matches!(
+        state.current_trigger_event,
+        Some(GameEvent::AbilityActivated { .. })
+    ) {
+        return CopySourceLookup::Gone;
     }
     state
         .stack
@@ -853,7 +901,9 @@ fn stack_entry_from_exiled_spell_object(
     }
     let card_id = obj.card_id;
     let ability_def = spell_ability_definition(&obj.abilities)?;
-    let resolved = build_resolved_from_def(&ability_def, object_id, controller);
+    let mut resolved = build_resolved_from_def(&ability_def, object_id, controller);
+    // CR 707.12: a copy of a card declares only the targets chosen for it.
+    resolved.start_target_record_recursive();
     Some(StackEntry {
         id: object_id,
         source_id: object_id,
@@ -881,32 +931,14 @@ fn spell_ability_definition(abilities: &[AbilityDefinition]) -> Option<AbilityDe
 /// points at the wrong entry — bind from the triggering event's spell instead.
 fn triggering_spell_stack_entry(state: &GameState) -> Option<StackEntry> {
     let event = state.current_trigger_event.as_ref()?;
-    // CR 605.3b: a mana ability never uses the stack, so there is no stack
-    // entry for "that ability" to copy; the same-source fallback below would
-    // otherwise bind an unrelated activation of the same permanent.
-    if matches!(
-        event,
-        GameEvent::AbilityActivated {
-            kind: crate::types::events::ActivatedAbilityKind::Mana,
-            ..
-        }
-    ) {
+    // CR 602.2a + CR 605.3b: an activation names its stack entry on the event,
+    // which `targeting::triggering_activation` resolves; a mana ability never uses the
+    // stack. A `source_id` match here would bind another activation of the same
+    // source or a triggered ability it caused.
+    if matches!(event, GameEvent::AbilityActivated { .. }) {
         return None;
     }
     let object_id = crate::game::targeting::extract_source_from_event(event)?;
-    if matches!(event, GameEvent::AbilityActivated { .. }) {
-        if let Some(entry) = state.stack.iter().rev().find(|entry| {
-            matches!(
-                entry.kind,
-                StackEntryKind::ActivatedAbility {
-                    source_id: activated_id,
-                    ..
-                } if activated_id == object_id
-            ) || entry.source_id == object_id
-        }) {
-            return Some(entry.clone());
-        }
-    }
     let mut fallback = None;
     for entry in state.stack.iter().rev() {
         if entry.id == object_id {
@@ -2238,6 +2270,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Ref {
                     qty: crate::types::ability::QuantityRef::AdditionalCostPaymentCount,
@@ -2591,6 +2625,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -2976,6 +3012,8 @@ mod tests {
             kind: crate::types::events::ActivatedAbilityKind::Normal,
             departed_source_lki: None,
             trigger_state: crate::types::events::ActivationTriggerState::Pending,
+            stack_entry: Some(ObjectId(100)),
+            activation_cost: crate::types::events::BoundActivationCost::Unknown,
         });
 
         let copy_effect = ResolvedAbility::new(
@@ -3130,6 +3168,8 @@ mod tests {
             kind: crate::types::events::ActivatedAbilityKind::Normal,
             departed_source_lki: None,
             trigger_state: crate::types::events::ActivationTriggerState::Pending,
+            stack_entry: Some(ObjectId(100)),
+            activation_cost: crate::types::events::BoundActivationCost::Unknown,
         });
 
         let copy_effect = ResolvedAbility::new(
@@ -3205,6 +3245,8 @@ mod tests {
             kind: crate::types::events::ActivatedAbilityKind::Normal,
             departed_source_lki: None,
             trigger_state: crate::types::events::ActivationTriggerState::Pending,
+            stack_entry: Some(ObjectId(100)),
+            activation_cost: crate::types::events::BoundActivationCost::Unknown,
         });
 
         let copy_effect = ResolvedAbility::new(
@@ -3229,6 +3271,124 @@ mod tests {
                 .iter()
                 .any(|event| matches!(event, GameEvent::StackPushed { .. })),
             "hydrated TriggeringSource must copy the activated ability on stack"
+        );
+    }
+
+    /// CR 602.2a + CR 707.10b: an activation trigger's referent is the entry
+    /// its event names — here neither the top entry nor the topmost entry of
+    /// the same source — its departed record once that entry has left the
+    /// stack without resolving, and `Gone` with no record.
+    #[test]
+    fn triggering_activation_names_the_activations_own_entry() {
+        let mut state = GameState::new_two_player(42);
+        let source = ObjectId(10);
+        let activated = |id| StackEntry {
+            id: ObjectId(id),
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::NoOp,
+                    vec![],
+                    source,
+                    PlayerId(0),
+                )),
+            },
+        };
+        state.stack.push_back(activated(100));
+        state.stack.push_back(StackEntry {
+            id: ObjectId(101),
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: source,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::NoOp,
+                    vec![],
+                    source,
+                    PlayerId(0),
+                )),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
+        state.stack.push_back(activated(102));
+        let activation = |stack_entry| GameEvent::AbilityActivated {
+            player_id: PlayerId(0),
+            source_id: source,
+            kind: crate::types::events::ActivatedAbilityKind::Normal,
+            departed_source_lki: None,
+            trigger_state: crate::types::events::ActivationTriggerState::Pending,
+            stack_entry,
+            activation_cost: crate::types::events::BoundActivationCost::Unknown,
+        };
+        let copy_that_ability = ResolvedAbility::new(
+            Effect::CopySpell {
+                target: TargetFilter::ParentTarget,
+                retarget: CopyRetargetPermission::KeepOriginalTargets,
+                copier: None,
+                additional_modifications: Vec::new(),
+                starting_loyalty_from_casualty_sacrifice: false,
+            },
+            vec![],
+            ObjectId(20),
+            PlayerId(0),
+        );
+
+        state.current_trigger_event = Some(activation(Some(ObjectId(100))));
+        assert!(
+            matches!(
+                copy_source_entry(&state, &copy_that_ability),
+                CopySourceLookup::Source(source) if source.entry.id == ObjectId(100)
+            ),
+            "the named entry, not the top or a later same-source entry"
+        );
+
+        state.current_trigger_event = Some(activation(Some(ObjectId(103))));
+        assert!(
+            matches!(
+                copy_source_entry(&state, &copy_that_ability),
+                CopySourceLookup::Gone
+            ),
+            "a named entry that left the stack with no record is gone, never a same-source sibling"
+        );
+
+        // CR 707.10 + CR 113.7a + CR 608.2h: a named entry recorded on its
+        // non-resolving departure is copied from that record, with no object.
+        state
+            .departed_activated_abilities
+            .insert(ObjectId(104), activated(104));
+        state.current_trigger_event = Some(activation(Some(ObjectId(104))));
+        assert!(
+            matches!(
+                copy_source_entry(&state, &copy_that_ability),
+                CopySourceLookup::Source(source)
+                    if source.entry.id == ObjectId(104) && source.departed_object.is_none()
+            ),
+            "a countered activation is copied from its departed record"
+        );
+
+        state.current_trigger_event = Some(activation(None));
+        assert!(
+            crate::game::targeting::triggering_activation(&state).is_none(),
+            "an activation that used no stack names no entry"
+        );
+
+        state.current_trigger_event = Some(GameEvent::SpellCast {
+            controller: PlayerId(0),
+            object_id: ObjectId(100),
+            card_id: CardId(1),
+            cast_mana_value: None,
+        });
+        assert!(
+            crate::game::targeting::triggering_activation(&state).is_none(),
+            "a spell-cast event is not an activation"
         );
     }
 
@@ -4341,7 +4501,9 @@ mod tests {
                 counters: Default::default(),
                 tapped: false,
                 is_suspected: false,
+                was_prepared: false,
                 attachments: Vec::new(),
+                intensity: 0,
             },
             incarnation: 0,
         });

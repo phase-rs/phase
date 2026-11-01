@@ -92,6 +92,7 @@ fn activate(runner: &mut GameRunner, source: ObjectId) {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("costless activation must succeed");
     runner.advance_until_stack_empty();

@@ -224,6 +224,18 @@ html.game-viewport-lock #root {
   overflow: hidden;
 }
 
+/* Hidden tab (attribute owned by animation/hiddenDocumentMotion.ts): no CSS
+   animation or transition may start. A hidden tab renders no frames, so
+   Chromium holds every CSSAnimation/CSSTransition created by a forced style
+   pass, and with it the element, until the tab is shown. Each unmounted
+   pulsing badge or transitioning card would otherwise stay as detached DOM. */
+html[data-document-hidden] *,
+html[data-document-hidden] *::before,
+html[data-document-hidden] *::after {
+  animation: none !important;
+  transition: none !important;
+}
+
 /* The locked game document cannot act as a fallback scroll container. Keep the
    in-game menu within the visible viewport and let it own vertical touch scroll. */
 .game-menu-scroll {
@@ -986,6 +998,55 @@ select.select-dark option {
   }
 }
 
+/* Priority attention is a display-only cue shared by the status pill and the
+   primary priority action. A separate shadow layer preserves the surface's
+   depth shadow and the button's focus-visible ring without adding borders. */
+.priority-attention-glow {
+  --priority-attention-ring-min: 1px;
+  --priority-attention-ring-max: 3px;
+  --priority-attention-glow-min: 12px;
+  --priority-attention-glow-max: 24px;
+  --priority-attention-duration: 2s;
+}
+
+.priority-attention-glow-escalated {
+  --priority-attention-ring-min: 3px;
+  --priority-attention-ring-max: 6px;
+  --priority-attention-glow-min: 20px;
+  --priority-attention-glow-max: 36px;
+  --priority-attention-duration: 1s;
+}
+
+.priority-attention-glow::after {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  border-radius: inherit;
+  pointer-events: none;
+  box-shadow: 0 0 0 var(--priority-attention-ring-max) rgba(52, 211, 153, 0.65),
+    0 0 var(--priority-attention-glow-max) rgba(16, 185, 129, 0.55);
+  animation: priority-attention-pulse var(--priority-attention-duration) ease-in-out infinite;
+}
+
+@keyframes priority-attention-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 var(--priority-attention-ring-min) rgba(52, 211, 153, 0.35),
+      0 0 var(--priority-attention-glow-min) rgba(16, 185, 129, 0.25);
+  }
+
+  50% {
+    box-shadow: 0 0 0 var(--priority-attention-ring-max) rgba(52, 211, 153, 0.65),
+      0 0 var(--priority-attention-glow-max) rgba(16, 185, 129, 0.55);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .priority-attention-glow::after {
+    animation: none;
+  }
+}
+
 /* Debug layout bounds — toggled via Ctrl+Shift+D */
 .debug-bounds [data-debug-label] {
   outline: 2px solid color-mix(in srgb, currentColor 60%, transparent);
@@ -1041,3 +1102,399 @@ select.select-dark option {
 .debug-bounds [data-debug-label="Opp Zones"]::after    { background: #fbbf24; }
 .debug-bounds [data-debug-label="Player Bottom"]       { outline-color: #818cf8; }
 .debug-bounds [data-debug-label="Player Bottom"]::after { background: #818cf8; }
+
+/* Eye to Eye / Mouth to Mouth: a lightweight pop on each registered click. Short and
+   non-blocking so rapid clicking is never slowed by the animation. Opted into with
+   Tailwind's `motion-safe:` variant, so reduced-motion users never see it. */
+@keyframes contest-click-pop {
+  from {
+    transform: scale(0.94);
+  }
+  to {
+    transform: scale(1);
+  }
+}
+
+.animate-pulse-once {
+  animation: contest-click-pop 90ms ease-out;
+}
+
+/* Eye to Eye: the eye of a staring contest. `StaringStage` sets `--stare-strain` (0-1,
+   rising for as long as the contest runs) and `data-pose`; everything the eye does is
+   a function of those two, so the amplitude of each movement simply scales with strain.
+   The lids close by sliding in from the rim: `--stare-upper` / `--stare-lower` are how
+   far each sits in from fully open, and the -shut values meet at the seam. */
+.stare-stage {
+  --stare-upper: calc(22px * (1 - var(--stare-strain)));
+  --stare-lower: calc(8px * (1 - var(--stare-strain)));
+  --stare-upper-shut: 92px;
+  --stare-lower-shut: 66px;
+  background: rgb(0 0 0 / 0.85);
+}
+
+.stare-stage[data-pose="Preparing"] {
+  --stare-upper: 42px;
+  --stare-lower: 14px;
+}
+
+/* Important: each pose's `animation` shorthand would otherwise reset this to running. */
+.stare-stage[data-paused] * {
+  animation-play-state: paused !important;
+}
+
+/* The eye sits above the panel, or beside it wherever stacking would cover the eye:
+   a landscape screen too short for both, from a laptop down to a sideways phone. */
+.stare-eye-slot {
+  position: absolute;
+  inset-inline: 0;
+  top: 0;
+  height: 44dvh;
+  padding: 0.5rem;
+}
+
+.stare-dialog {
+  align-items: flex-end;
+}
+
+@media (max-height: 860px) and (min-aspect-ratio: 1 / 1) {
+  .stare-eye-slot {
+    right: min(30rem, 60%);
+    display: flex;
+    align-items: center;
+    height: 100%;
+  }
+
+  .stare-dialog {
+    align-items: center;
+    justify-content: flex-end;
+  }
+
+  .stare-dialog > * {
+    max-width: min(28rem, calc(60vw - 2rem));
+  }
+}
+
+.stare-stage[data-pose="EyeBlinks"],
+.stare-stage[data-pose="ViewerBlinks"],
+.stare-stage[data-pose="BothBlink"] {
+  animation: stare-stage-out var(--stare-finale) ease-in both;
+}
+
+.stare-aura {
+  opacity: calc(var(--stare-strain) * 0.35);
+}
+
+.stare-rim {
+  fill: none;
+  stroke: #0f0c17;
+  stroke-width: 7;
+  stroke-linejoin: round;
+}
+
+/* Trembling is uniform in time and grows in reach: a relaxed eye holds perfectly still. */
+.stare-tremble {
+  animation: stare-tremble 170ms linear infinite;
+}
+
+.stare-iris {
+  animation: stare-quiver 230ms linear infinite;
+}
+
+.stare-pupil {
+  transform-box: fill-box;
+  transform-origin: center;
+  transform: scale(calc(1.15 - var(--stare-strain) * 0.5));
+  transition: transform 300ms ease-out;
+}
+
+/* `pathLength={1}` on each vein: the dash reveals it rim-first as strain builds. */
+.stare-veins path {
+  fill: none;
+  stroke: #b91c1c;
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  stroke-dasharray: 1;
+  stroke-dashoffset: max(0, calc(1 - var(--stare-strain) * 1.25));
+  opacity: calc(var(--stare-strain) * 3);
+}
+
+.stare-bloodshot {
+  opacity: calc(var(--stare-strain) * 0.6);
+}
+
+.stare-glaze {
+  fill: #e0f2fe;
+  opacity: calc(var(--stare-strain) * 0.22);
+}
+
+.stare-water {
+  transform: translateY(calc(12px + (1 - var(--stare-strain)) * 62px));
+  animation: stare-water-slosh 2.4s ease-in-out infinite;
+}
+
+.stare-lid-upper,
+.stare-lid-lower {
+  stroke: #0f0c17;
+  stroke-width: 5;
+  transition: transform 350ms ease-out;
+}
+
+.stare-lid-upper {
+  transform: translateY(var(--stare-upper));
+}
+
+.stare-lid-lower {
+  transform: translateY(calc(var(--stare-lower) * -1));
+}
+
+/* The one blink a contest allows: an idle one before GO. */
+.stare-stage[data-pose="Preparing"] .stare-lid-upper {
+  animation: stare-idle-blink-upper 3.1s ease-in-out infinite;
+}
+
+.stare-stage[data-pose="Preparing"] .stare-lid-lower {
+  animation: stare-idle-blink-lower 3.1s ease-in-out infinite;
+}
+
+/* Late in a contest the upper lid keeps sagging and being dragged back up. */
+.stare-stage[data-pose="Staring"] .stare-flutter {
+  animation: stare-flutter 2.7s linear infinite;
+}
+
+.stare-stage[data-pose="EyeBlinks"] .stare-lid-upper,
+.stare-stage[data-pose="BothBlink"] .stare-lid-upper {
+  animation: stare-blink-upper var(--stare-finale) ease-in-out both;
+}
+
+.stare-stage[data-pose="EyeBlinks"] .stare-lid-lower,
+.stare-stage[data-pose="BothBlink"] .stare-lid-lower {
+  animation: stare-blink-lower var(--stare-finale) ease-in-out both;
+}
+
+/* Having won, the eye finally lets itself relax. */
+.stare-stage[data-pose="ViewerBlinks"] .stare-lid-upper {
+  animation: stare-gloat-upper var(--stare-finale) ease-in-out both;
+}
+
+.stare-tear {
+  fill: #bae6fd;
+  fill-opacity: 0.9;
+  stroke: #e0f2fe;
+  stroke-width: 1;
+  animation: stare-tear-fall 2.8s ease-in infinite both;
+}
+
+.stare-tear-squeezed {
+  animation: stare-tear-fall 1.1s ease-in 1 both;
+}
+
+/* First person: the viewer's own eyelids meet in the middle of the screen. */
+.stare-viewer-lid {
+  position: absolute;
+  inset-inline: -10%;
+  height: 56%;
+  background: #030206;
+  animation: stare-viewer-blink var(--stare-finale) ease-in-out both;
+}
+
+.stare-viewer-lid-upper {
+  --stare-viewer-from: -100%;
+  top: 0;
+  border-radius: 0 0 50% 50% / 0 0 30% 30%;
+}
+
+.stare-viewer-lid-lower {
+  --stare-viewer-from: 100%;
+  bottom: 0;
+  border-radius: 50% 50% 0 0 / 30% 30% 0 0;
+}
+
+@keyframes stare-tremble {
+  0%,
+  100% {
+    transform: translate(0, 0);
+  }
+  25% {
+    transform: translate(calc(var(--stare-strain) * 2.4px), calc(var(--stare-strain) * -1.6px));
+  }
+  50% {
+    transform: translate(calc(var(--stare-strain) * -1.8px), calc(var(--stare-strain) * 2px));
+  }
+  75% {
+    transform: translate(calc(var(--stare-strain) * 1.2px), calc(var(--stare-strain) * 1.4px));
+  }
+}
+
+@keyframes stare-quiver {
+  0%,
+  100% {
+    transform: translate(0, 0);
+  }
+  33% {
+    transform: translate(calc(var(--stare-strain) * -2.6px), 0);
+  }
+  66% {
+    transform: translate(calc(var(--stare-strain) * 2.2px), calc(var(--stare-strain) * 1px));
+  }
+}
+
+@keyframes stare-water-slosh {
+  0%,
+  100% {
+    translate: -20px 0;
+  }
+  50% {
+    translate: 20px 2px;
+  }
+}
+
+@keyframes stare-idle-blink-upper {
+  0%,
+  34%,
+  48%,
+  100% {
+    transform: translateY(var(--stare-upper));
+  }
+  41% {
+    transform: translateY(var(--stare-upper-shut));
+  }
+}
+
+@keyframes stare-idle-blink-lower {
+  0%,
+  34%,
+  48%,
+  100% {
+    transform: translateY(calc(var(--stare-lower) * -1));
+  }
+  41% {
+    transform: translateY(calc(var(--stare-lower-shut) * -1));
+  }
+}
+
+@keyframes stare-flutter {
+  0%,
+  78%,
+  90%,
+  100% {
+    transform: translateY(0);
+  }
+  82% {
+    transform: translateY(calc(var(--stare-strain) * var(--stare-strain) * 24px));
+  }
+  86% {
+    transform: translateY(calc(var(--stare-strain) * var(--stare-strain) * 8px));
+  }
+}
+
+/* The blink lands at the very start of the beat, holds shut, then opens part way. */
+@keyframes stare-blink-upper {
+  0% {
+    transform: translateY(var(--stare-upper));
+  }
+  7%,
+  48% {
+    transform: translateY(var(--stare-upper-shut));
+  }
+  70%,
+  100% {
+    transform: translateY(44px);
+  }
+}
+
+@keyframes stare-blink-lower {
+  0% {
+    transform: translateY(calc(var(--stare-lower) * -1));
+  }
+  7%,
+  48% {
+    transform: translateY(calc(var(--stare-lower-shut) * -1));
+  }
+  70%,
+  100% {
+    transform: translateY(-18px);
+  }
+}
+
+@keyframes stare-gloat-upper {
+  0%,
+  45% {
+    transform: translateY(var(--stare-upper));
+  }
+  70%,
+  100% {
+    transform: translateY(40px);
+  }
+}
+
+@keyframes stare-tear-fall {
+  0% {
+    transform: translate(var(--stare-tear-x), 205px) scale(0.3);
+    opacity: 0;
+  }
+  18% {
+    transform: translate(var(--stare-tear-x), 214px) scale(1);
+    opacity: 1;
+  }
+  85% {
+    opacity: 1;
+  }
+  100% {
+    transform: translate(var(--stare-tear-x), 420px) scale(0.8, 1.3);
+    opacity: 0;
+  }
+}
+
+@keyframes stare-viewer-blink {
+  0% {
+    transform: translateY(var(--stare-viewer-from));
+  }
+  8%,
+  40% {
+    transform: translateY(0);
+  }
+  58%,
+  100% {
+    transform: translateY(var(--stare-viewer-from));
+  }
+}
+
+@keyframes stare-stage-out {
+  0%,
+  72% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+/* Reduced motion: strain, tears and the result still show, as states rather than
+   movement. Tears rest on the lid and a blink is a held pose. */
+@media (prefers-reduced-motion: reduce) {
+  .stare-eye,
+  .stare-eye * {
+    animation: none !important;
+    transition: none !important;
+  }
+
+  .stare-tear {
+    transform: translate(var(--stare-tear-x), 226px);
+  }
+
+  .stare-stage[data-pose="EyeBlinks"] .stare-lid-upper,
+  .stare-stage[data-pose="BothBlink"] .stare-lid-upper {
+    transform: translateY(var(--stare-upper-shut));
+  }
+
+  .stare-stage[data-pose="EyeBlinks"] .stare-lid-lower,
+  .stare-stage[data-pose="BothBlink"] .stare-lid-lower {
+    transform: translateY(calc(var(--stare-lower-shut) * -1));
+  }
+
+  .stare-viewer-lid {
+    animation: none;
+    opacity: 0.85;
+    transform: none;
+  }
+}

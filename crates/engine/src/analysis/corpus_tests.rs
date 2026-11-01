@@ -61,13 +61,13 @@ fn card_db() -> &'static CardDatabase {
 /// fails loudly: the row total, the card-gated rows, and their testable complement.
 #[test]
 fn corpus_table_shape_is_locked() {
-    assert_eq!(corpus::corpus_len(), 61, "corpus must hold all 61 rows");
+    assert_eq!(corpus::corpus_len(), 62, "corpus must hold all 62 rows");
     let gated = (0..corpus::corpus_len())
         .filter(|&i| corpus::row(i).gated_on.is_some())
         .count();
     assert_eq!(
-        gated, 4,
-        "exactly 4 rows are card-gated (Doc Aurlock / Professor Onyx / Animate Dead / Grindstone)"
+        gated, 5,
+        "exactly 5 rows are card-gated (Doc Aurlock / Professor Onyx / Animate Dead / Grindstone / Helm of Obedience)"
     );
     // Every row's expected axis must be derivable (total match over the enum).
     for i in 0..corpus::corpus_len() {
@@ -104,9 +104,9 @@ fn corpus_partition_is_locked() {
         .filter(|&i| corpus::row(i).deferral.is_some())
         .collect();
 
-    assert_eq!(driven.len(), 22, "22 driven rows");
-    assert_eq!(gated.len(), 4, "4 gated rows");
-    assert_eq!(deferred.len(), 35, "35 deferred rows");
+    assert_eq!(driven.len(), 24, "24 driven rows");
+    assert_eq!(gated.len(), 5, "5 gated rows");
+    assert_eq!(deferred.len(), 33, "33 deferred rows");
 
     assert!(driven.is_disjoint(&gated), "driven ∩ gated must be empty");
     assert!(
@@ -127,7 +127,7 @@ fn corpus_partition_is_locked() {
         n,
         "driven ∪ gated ∪ deferred must cover every one of the {n} rows"
     );
-    assert_eq!(n, 61);
+    assert_eq!(n, 62);
 
     // Exclusivity: a driven or gated row must not also declare a deferral bucket.
     for &i in driven.iter().chain(gated.iter()) {
@@ -221,7 +221,8 @@ fn confirmed_drivers_match_expected() {
 
 /// The shared CLI dispatch ([`corpus::drive_row`]) classifies each status class
 /// through the REAL pipeline. NOTE: these are ARRAY indices; the gated rows are
-/// 2 / 21 / 39 / 52 (Doc Aurlock / Professor Onyx / Animate Dead / Grindstone) —
+/// 2 / 21 / 39 / 52 / 53 (Doc Aurlock / Professor Onyx / Animate Dead / Grindstone /
+/// Helm of Obedience) —
 /// NOT the ComboRow doc-comment's FEASIBILITY numbering (array idx 50 is a
 /// CONFIRMED driver, Spike Feeder + Archangel, not a gated row).
 #[test]
@@ -362,7 +363,9 @@ fn classify_status_compares_against_spec_not_rubber_stamp() {
     // Wrong win_kind ⇒ Failed. Revert "classify any Some(cert) as Confirmed" flips this.
     let wrong_win = LoopCertificate {
         unbounded: vec![ResourceAxis::DamageDealt(P1)],
-        win_kind: WinKind::LethalDamage,
+        rising: vec![ResourceAxis::DamageDealt(P1)],
+        win_kind: Some(WinKind::LethalDamage),
+        win_kind_at: None,
         mandatory: false,
         residual_board_delta: BoardDelta::default(),
         per_cycle: None,
@@ -378,7 +381,9 @@ fn classify_status_compares_against_spec_not_rubber_stamp() {
     // Right win_kind but wrong family ⇒ Failed. Revert "drop the family check" flips this.
     let wrong_family = LoopCertificate {
         unbounded: vec![ResourceAxis::TokensCreated],
-        win_kind: WinKind::Advantage,
+        rising: vec![ResourceAxis::TokensCreated],
+        win_kind: Some(WinKind::Advantage),
+        win_kind_at: None,
         mandatory: false,
         residual_board_delta: BoardDelta::default(),
         per_cycle: None,
@@ -404,7 +409,9 @@ fn classify_status_compares_against_spec_not_rubber_stamp() {
     // the three Failed assertions above are discriminating, not always-Failed.
     let right = LoopCertificate {
         unbounded: vec![ResourceAxis::Mana(ManaType::Green)],
-        win_kind: WinKind::Advantage,
+        rising: vec![ResourceAxis::Mana(ManaType::Green)],
+        win_kind: Some(WinKind::Advantage),
+        win_kind_at: None,
         mandatory: false,
         residual_board_delta: BoardDelta::default(),
         per_cycle: None,
@@ -475,7 +482,7 @@ fn assert_combo(idx: usize, cert: &LoopCertificate) {
         cert.unbounded,
         row.family,
     );
-    assert_eq!(cert.win_kind, row.win_kind, "{}: win_kind", row.name);
+    assert_eq!(cert.win_kind, Some(row.win_kind), "{}: win_kind", row.name);
 }
 
 /// HELIOD, SUN-CROWNED + WALKING BALLISTA — the canonical driving combo.
@@ -485,7 +492,7 @@ fn drive_heliod_ballista_certificate() {
     let cert = corpus::drive_offline_heliod_ballista(card_db()).expect(
         "Heliod + Ballista must be confirmed: board identical modulo life/damage, +1 damage/cycle",
     );
-    assert_eq!(cert.win_kind, WinKind::LethalDamage);
+    assert_eq!(cert.win_kind, Some(WinKind::LethalDamage));
     assert!(
         cert.covers(&[ResourceAxis::DamageDealt(P1)]),
         "certificate must name unbounded damage to the opponent (got {:?})",
@@ -541,12 +548,103 @@ fn drive_combo_11_selvala_staff() {
     assert_combo(12, &cert);
 }
 
+/// BASALT MONOLITH + RINGS OF BRIGHTHEARTH — infinite colorless mana: Rings copies the untap
+/// (CR 707.10), so a steady cycle taps Monolith twice ({C}x6) for one {3} untap and one {2}
+/// copy, +{C} net.
+#[test]
+fn drive_combo_basalt_rings() {
+    let cert = corpus::drive_offline_basalt_rings(card_db())
+        .expect("Basalt Monolith + Rings must confirm infinite colorless mana");
+    assert_combo(3, &cert);
+    assert!(
+        cert.unbounded
+            .contains(&ResourceAxis::Mana(ManaType::Colorless)),
+        "the certificate must name colorless mana (got {:?})",
+        cert.unbounded
+    );
+    // The steady cycle's yield, measured the same way: +{C} per copied untap.
+    let (mut board, cycle) =
+        corpus::basalt_rings_board(card_db()).expect("reach: the Basalt + Rings board builds");
+    let mut probe = LoopProbe::new(&mut board.runner);
+    assert_eq!(
+        cycle.run(&mut probe, true),
+        Some(true),
+        "reach: first cycle"
+    );
+    let _ = probe.iteration_delta();
+    assert_eq!(
+        cycle.run(&mut probe, true),
+        Some(true),
+        "reach: steady cycle"
+    );
+    assert_eq!(
+        probe.iteration_delta().mana[5],
+        1,
+        "{{C}}x6 in for {{3}} + {{2}} out nets one colorless mana"
+    );
+}
+
+/// Control: declining Rings' {2} leaves one tap ({C}x3) per {3} untap, a net-zero cycle, so the
+/// copy is what makes the loop net-positive and no certificate stands without it. The declined
+/// path is driven first with reach guards, so a broken setup or action fails here rather than
+/// passing as "no loop".
+#[test]
+fn drive_combo_basalt_rings_requires_the_copy() {
+    let (mut board, cycle) =
+        corpus::basalt_rings_board(card_db()).expect("reach: the Basalt + Rings board builds");
+    let mut probe = LoopProbe::new(&mut board.runner);
+    // The first cycle taps Monolith from untapped; steady cycles start and end with it tapped.
+    assert_eq!(
+        cycle.run(&mut probe, false),
+        Some(true),
+        "reach: the first declined cycle completes after Rings' prompt"
+    );
+    let _ = probe.iteration_delta();
+    assert_eq!(
+        cycle.run(&mut probe, false),
+        Some(true),
+        "reach: a steady declined cycle reaches and declines Rings' prompt, then completes"
+    );
+    let delta = probe.iteration_delta();
+    let state = probe.runner().state();
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }) && state.stack.is_empty(),
+        "reach: the cycle ends at an empty-stack priority window"
+    );
+    assert!(
+        state.objects[&cycle.monolith].tapped,
+        "reach: Monolith ends the cycle tapped"
+    );
+    assert_eq!(
+        delta.mana[5], 0,
+        "one {{3}} untap for one {{C}}x3 tap nets no colorless mana"
+    );
+    assert!(
+        corpus::drive_basalt_rings(card_db(), false).is_none(),
+        "without the copied untap the cycle is net-zero, so no loop is certified"
+    );
+}
+
 /// D2 KILO, APOGEE MIND + FREED + RELIC OF LEGENDS — infinite proliferate triggers.
 #[test]
 fn drive_combo_d2_kilo_freed_relic() {
     let cert = corpus::drive_offline_kilo_freed_relic(card_db())
         .expect("Kilo + Freed + Relic must confirm infinite proliferate triggers");
     assert_combo(1, &cert);
+}
+
+/// DISPLACER KITTEN + BLAZING FIRESINGER — the prepared Seething Song copy nets {R}{R} a cycle
+/// while Kitten re-prepares Firesinger (CR 722.3c), offered through `apply()`.
+#[test]
+fn drive_combo_61_kitten_firesinger() {
+    let cert = corpus::drive_kitten_firesinger_offer(card_db())
+        .expect("Kitten + Firesinger must be offered as an unbounded red-mana loop");
+    assert_combo(61, &cert);
+    assert!(
+        cert.unbounded.contains(&ResourceAxis::Mana(ManaType::Red)),
+        "the certificate must name red mana (got {:?})",
+        cert.unbounded
+    );
 }
 
 /// PR-7 #8 (offline acceptance): a REAL Pentad Prism seeded with ≥1 charge counter,
@@ -569,7 +667,7 @@ fn drive_pentad_prism_charge_growth_certificate() {
     );
     assert_eq!(
         cert.win_kind,
-        WinKind::Advantage,
+        Some(WinKind::Advantage),
         "a charge-counter growth loop is a CR 104.4b optional advantage engine, not a win"
     );
     assert!(
@@ -628,7 +726,7 @@ fn drive_kilo_freed_relic_ballista_certificate() {
     );
     assert_eq!(
         cert.win_kind,
-        WinKind::LethalDamage,
+        Some(WinKind::LethalDamage),
         "a +1 damage/cycle ping on the opponent is an unbounded CR 704.5a lethal-damage loop"
     );
     assert!(
@@ -660,7 +758,7 @@ fn drive_kilo_freed_relic_ballista_x0_no_damage_axis() {
     );
     assert_eq!(
         cert.win_kind,
-        WinKind::Advantage,
+        Some(WinKind::Advantage),
         "with a dead Ballista the only unbounded axis is the proliferate trigger — an \
          advantage engine, not a lethal win"
     );
@@ -694,7 +792,7 @@ fn one_ring_burden_growth_certificate() {
     );
     assert_eq!(
         cert.win_kind,
-        WinKind::Advantage,
+        Some(WinKind::Advantage),
         "a burden-counter growth loop is a CR 104.4b optional advantage engine, not a win"
     );
     assert!(
@@ -843,6 +941,7 @@ fn drive_one_ping(probe: &mut LoopProbe, pinger: ObjectId) {
         .act(GameAction::ActivateAbility {
             source_id: pinger,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate pinger");
     assert!(
@@ -898,7 +997,7 @@ fn drive_damage_loop_certificate() {
     let cert = detect_loop(&cycle_start, &cycle_end, &delta, P0, true)
         .expect("board-identical +damage cycle must be confirmed as a net-progress loop");
 
-    assert_eq!(cert.win_kind, WinKind::LethalDamage);
+    assert_eq!(cert.win_kind, Some(WinKind::LethalDamage));
     assert!(
         cert.covers(&[ResourceAxis::DamageDealt(P1)]),
         "the certificate must name unbounded damage to the opponent (got {:?})",
@@ -1583,8 +1682,7 @@ fn pr6_gate_loop_detection_serde_defaults_off() {
 /// Bloodthirsty Conqueror), all three opponents at 1 life. One drain cycle takes all
 /// three to 0; the CR 704.5a state-based actions eliminate them in ONE simultaneous
 /// batch and CR 104.2a leaves P0 the sole survivor → `GameOver { winner: Some(P0) }`.
-/// This is the NATURAL win (real SBA deaths), not the 2-player §3 shortcut (gated off
-/// at >2 living) — the production path the commander audit validated as safe.
+/// This is the NATURAL win (real SBA deaths), not a loop shortcut.
 ///
 /// DISCRIMINATION (the audit's revert-probe, run inline): swapping to a TARGETED
 /// "target opponent loses life" drain (Sanguine Bond) drains only ONE chosen opponent
@@ -1640,8 +1738,7 @@ fn mp_each_opponent_drain_natural_win_continues_to_sole_survivor() {
 /// "whenever you gain life, target opponent loses that much life" drain (Sanguine Bond +
 /// Exquisite Blood) with THREE legal opponents. `auto_select_targets` refuses to choose
 /// among 2+ legal targets, so the trigger STOPS at a target-selection window — it never
-/// silently auto-resolves into a game-ending drain. This is why the targeted shape is
-/// safe in multiplayer: a human (or AI) must pick the victim each iteration.
+/// silently auto-resolves into a game-ending drain.
 ///
 /// DISCRIMINATION: the SAME cards with a SINGLE legal opponent (2-player) auto-resolve
 /// to the sole target with no selection window. So the stop is caused by 2+ legal
@@ -1705,8 +1802,8 @@ fn mp_targeted_drain_stops_for_opponent_choice() {
 /// cycle (one opponent's life fell) must NOT compare equal (→ the gate does not fire and
 /// the game continues — no wrongful draw of a still-advancing loop).
 ///
-/// Scope: this pins the 4-player correctness of the draw gate's equality predicate and
-/// the no-false-winner guarantee. A full live auto-resolve of a net-zero loop to
+/// Scope: this asserts the draw gate's equality predicate and `live_mandatory_loop_winner`'s
+/// `None` at four players. A full live auto-resolve of a net-zero loop to
 /// `GameOver{winner:None}` needs a specific net-zero mandatory combo, which the
 /// committed card fixture does not contain (every corpus loop is net-progress).
 ///
@@ -1813,6 +1910,7 @@ fn drive_finite_stack_keeps_ring_empty() {
             .act(GameAction::ActivateAbility {
                 source_id: artifact,
                 ability_index: gain_idx,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("activate costless gain-life");
     }
@@ -1927,6 +2025,7 @@ fn the_time_sieve_rows_carried_span_is_refused_wherever_it_is_named() {
                         .iter()
                         .position(|a| !crate::game::mana_abilities::is_mana_ability(a))
                         .expect("the Sieve's ability"),
+                    payment_mode: CastPaymentMode::Auto,
                 }
             }
             WaitingFor::PayCost { choices, count, .. } => GameAction::SelectCards {

@@ -9,17 +9,20 @@ use engine::game::engine::{
 use engine::game::triggers::{PendingTrigger, PendingTriggerContext};
 use engine::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter};
 use engine::types::actions::GameAction;
+use engine::types::card_type::CoreType;
+use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{
-    AutoPassMode, CastingVariant, GameState, PendingResolutionCompletion, PendingSpellResolution,
-    PersistedGameState, PersistedRestoreError, PersistedRestoreFinalization,
-    PostReplacementDrainStack, StackEntry, StackEntryKind, StackResolutionAutoPassOverlay,
-    StackResolutionBudget, StackResolutionEntryFence, StackResolutionPolicy,
-    StackResolutionSession, WaitingFor,
+    AutoPassMode, CastingVariant, GameState, OwedSpellFinalPart, PendingResolutionCompletion,
+    PendingSpellResolution, PersistedGameState, PersistedRestoreError,
+    PersistedRestoreFinalization, PostReplacementDrainStack, StackEntry, StackEntryKind,
+    StackResolutionAutoPassOverlay, StackResolutionBudget, StackResolutionEntryFence,
+    StackResolutionPolicy, StackResolutionSession, WaitingFor,
 };
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::zones::Zone;
 use std::collections::{BTreeMap, BTreeSet};
 
 const P0: PlayerId = PlayerId(0);
@@ -380,4 +383,134 @@ fn persisted_coherent_stack_session_defers_queued_triggers_to_session_resume() {
         "the restored authorization remains coherent for its explicit resumer"
     );
     assert_eq!(state.deferred_triggers.len(), 1);
+}
+
+/// The captured Devour rest shape, except that the resolution carrier is a
+/// real sorcery still in the stack zone whose CR 608.2n final part is owed.
+/// The marker is `pub(crate)`, so it is written through the serialized form,
+/// the route a persisted snapshot takes; returns that JSON and the spell.
+fn owing_devour_rest() -> (serde_json::Value, ObjectId) {
+    let mut state = GameState::new(FormatConfig::free_for_all(), 4, 0xB152_FCBF);
+    state.phase = Phase::Cleanup;
+    state.active_player = P3;
+    state.priority_player = P2;
+    state.waiting_for = WaitingFor::Priority { player: P2 };
+    state.priority_pass_count = 3;
+    state.priority_passes.extend([P0, P1, P3]);
+    let spell = engine::game::zones::create_object(
+        &mut state,
+        CardId(347),
+        P3,
+        "Owing Sorcery".to_string(),
+        Zone::Stack,
+    );
+    state
+        .objects
+        .get_mut(&spell)
+        .expect("the sorcery exists")
+        .card_types
+        .core_types
+        .push(CoreType::Sorcery);
+    state.resolving_stack_entry = Some(StackEntry {
+        id: spell,
+        source_id: spell,
+        controller: P3,
+        kind: StackEntryKind::Spell {
+            card_id: CardId(347),
+            ability: Some(Box::new(ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                spell,
+                P3,
+            ))),
+            casting_variant: CastingVariant::Normal,
+            actual_mana_spent: 4,
+        },
+    });
+    state
+        .resolution_stack
+        .push_post_replacement(PostReplacementDrainStack::default());
+    state.push_devour_change_zone_snapshot([ObjectId(27), ObjectId(31)].into_iter().collect());
+
+    let mut raw = serde_json::to_value(state).expect("raw state serializes");
+    raw["resolving_spell_final_part"] =
+        serde_json::to_value(OwedSpellFinalPart { spell }).expect("the marker serializes");
+    (raw, spell)
+}
+
+/// CR 608.2n: the Devour terminal-rest recovery retires residue whose
+/// resolution has nothing left to do. A carrier that still owes its spell's
+/// final part is not that residue, so a restore of such a snapshot fails closed
+/// rather than retiring the carrier and stranding the spell in the stack zone.
+#[test]
+fn a_persisted_devour_rest_owing_a_final_part_fails_closed() {
+    let (raw, _spell) = owing_devour_rest();
+    let persisted: PersistedGameState =
+        serde_json::from_value(raw).expect("the owing rest decodes as a raw snapshot");
+    assert!(
+        serde_json::to_value(&persisted)
+            .expect("the decoded snapshot reserializes")
+            .get("resolving_spell_final_part")
+            .is_some(),
+        "reach guard: the decoded snapshot carries the owed final part"
+    );
+
+    match persisted.prepare_for_restore(PersistedRestoreFinalization::DeferUntilRehydrated) {
+        Err(error) => assert_eq!(
+            error,
+            PersistedRestoreError::TerminalRestRecoveryExhausted,
+            "an owing carrier is not terminal residue the restore may retire"
+        ),
+        Ok(prepared) => panic!("an owing Devour rest must not be prepared: {prepared:?}"),
+    }
+}
+
+/// The same impossible shape reached through the transport decode: a stale
+/// pass from the captured priority window must not recover it. The guard
+/// leaves the owing carrier and its spell untouched (the shape stays pinned)
+/// instead of retiring the carrier with the spell stranded in the stack zone.
+#[test]
+fn a_stale_pass_does_not_recover_a_devour_rest_owing_a_final_part() {
+    let (raw, spell) = owing_devour_rest();
+    let mut state: GameState =
+        serde_json::from_value(raw).expect("the owing rest decodes as a game state");
+    assert_eq!(
+        state.owed_spell_final_part(),
+        Some(&OwedSpellFinalPart { spell }),
+        "reach guard: the decoded state carries the owed final part"
+    );
+
+    let result = apply(&mut state, P2, GameAction::PassPriority)
+        .expect("the captured priority holder may pass");
+
+    assert_eq!(
+        state.resolving_stack_entry.as_ref().map(|entry| entry.id),
+        Some(spell),
+        "the owing carrier is not retired as terminal residue"
+    );
+    assert_eq!(
+        state.objects[&spell].zone,
+        Zone::Stack,
+        "the spell is not stranded by a recovery"
+    );
+    assert_eq!(
+        state.phase,
+        Phase::Cleanup,
+        "the pass does not advance phase"
+    );
+    assert_eq!(
+        result
+            .events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                GameEvent::StackResolved { object_id } if *object_id == spell
+            ))
+            .count(),
+        0,
+        "nothing reports the spell resolved"
+    );
 }

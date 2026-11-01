@@ -2,7 +2,7 @@
 //!
 //! Parser AST verification — VERIFIED:
 //! - `Effect::Token { types: Vec<String>, count: QuantityExpr, .. }` at
-//!   `crates/engine/src/types/ability.rs:2131-2168`. CR 111.1: tokens created
+//!   `crates/phase-ast/src/types/ability.rs`. CR 111.1: tokens created
 //!   by spells/abilities. Creature tokens have `types.iter().any(|s| s == "Creature")`.
 //! - `QuantityExpr::Fixed { value }` at `ability.rs:1360`. Mass generators
 //!   have `value >= 2` or a non-Fixed count (dynamic quantity). CR 111.1.
@@ -424,6 +424,7 @@ mod tests {
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),
@@ -443,6 +444,7 @@ mod tests {
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),

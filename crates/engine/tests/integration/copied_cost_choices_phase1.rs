@@ -22,7 +22,11 @@ const LIGHTNING_BOLT: &str = "Lightning Bolt deals 3 damage to any target.";
 const VINELASHER: &str = "Offspring {2} (You may pay an additional {2} as you cast this spell. If you do, when this creature enters, create a 1/1 token copy of it.)\nLandfall — Whenever a land you control enters, this creature deals 1 damage to target opponent.";
 const DOUBLE_MAJOR: &str = "Copy target creature spell you control, except it isn't legendary if the spell is legendary. (A copy of a creature spell becomes a token.)";
 const SECURITRON: &str = "Squad {3} (As an additional cost to cast this spell, you may pay {3} any number of times. When this creature enters, create that many tokens that are copies of it.)\nVigilance\nWhenever a creature token you control enters, put a +1/+1 counter on it.";
-const INGENIOUS_MASTERY: &str = "You may pay {2}{U} rather than pay this spell's mana cost.\nIf the {2}{U} cost was paid, you draw three cards, then an opponent creates two Treasure tokens and they scry 2. If that cost wasn't paid, you draw X cards.";
+/// Synthetic (labelled): Ingenious Mastery without its paid branch's "then an
+/// opponent creates two Treasure tokens and they scry 2" rider, which the parser
+/// leaves as an honest gap. The tests below exercise the copied alternative-cost
+/// decision (CR 118.9 + CR 707.10), not that rider.
+const MASTERY_PAID_DRAW_ONLY: &str = "You may pay {2}{U} rather than pay this spell's mana cost.\nIf the {2}{U} cost was paid, you draw three cards. If that cost wasn't paid, you draw X cards.";
 const JOIN_THE_MAESTROS: &str = "Casualty 2 (As you cast this spell, you may sacrifice a creature with power 2 or greater. When you do, copy this spell.)\nCreate a 4/3 black Ogre Warrior creature token.";
 const DEGAVOLVER: &str = "Kicker {1}{B} and/or {R} (You may pay an additional {1}{B} and/or {R} as you cast this spell.)\nIf this creature was kicked with its {1}{B} kicker, it enters with two +1/+1 counters on it and with \"Pay 3 life: Regenerate this creature.\"\nIf this creature was kicked with its {R} kicker, it enters with a +1/+1 counter on it and with first strike.";
 
@@ -441,8 +445,12 @@ fn copied_mastery_cards_drawn(pay_alternative: bool) -> i64 {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_library_top(P0, &["A", "B", "C", "D", "E", "F", "G", "H"]);
-    let mut mastery_builder =
-        scenario.add_spell_to_hand_from_oracle(P0, "Ingenious Mastery", false, INGENIOUS_MASTERY);
+    let mut mastery_builder = scenario.add_spell_to_hand_from_oracle(
+        P0,
+        "Ingenious Mastery",
+        false,
+        MASTERY_PAID_DRAW_ONLY,
+    );
     mastery_builder.with_mana_cost(ManaCost::Cost {
         generic: 2,
         shards: vec![ManaCostShard::X, ManaCostShard::Blue],

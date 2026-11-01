@@ -20,6 +20,7 @@ from typing import Any, Iterator
 IMAGE_SIZES = ("small", "normal", "art_crop")
 PLACEHOLDER_URL = "https://errors.scryfall.com/soon.jpg"
 MAP_NAME = re.compile(r"^scryfall-images\.(?P<schema>[^.]+)\.(?P<locale>[^.]+)\.json$")
+SCRYFALL_LOCALE_ALIASES = {"zhs": "zh"}
 
 
 class JsonArrayError(ValueError):
@@ -233,6 +234,7 @@ def augment_maps(bulk: Path, output: Path, *, schema_version: str = "v2") -> dic
         if not isinstance(card_id, str) or identity is None:
             continue
         language = card.get("lang")
+        language = SCRYFALL_LOCALE_ALIASES.get(language, language)
         if language == "en":
             absent = {locale for locale, (_path, image_map) in maps.items() if card_id not in image_map}
             if absent:

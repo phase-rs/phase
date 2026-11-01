@@ -1,16 +1,17 @@
 use std::collections::HashSet;
 
+use crate::game::engine::EngineError;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter};
 use crate::types::events::{GameEvent, LifeTotalReading};
 use crate::types::game_state::{
-    GameState, PendingEffectResolutionEvent, PendingEffectResolved, PendingLifeTotalAssignment,
-    WaitingFor,
+    GameState, IngressLifeWindow, PendingEffectResolutionEvent, PendingEffectResolved,
+    PendingLifeTotalAssignment, UnrepresentablePolicy, WaitingFor,
 };
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
-use crate::types::resolved_commands::ResolvedPlayerEdit;
+use crate::types::resolved_commands::{ResolvedPlayerEdit, ResolvedPlayerEditReplayInvariantError};
 
 /// Why a replacement-routed life change could not complete synchronously.
 ///
@@ -35,13 +36,104 @@ pub enum ReplacementDeferred {
     SubstitutionContinuation { applied: u32 },
 }
 
+/// A player-resource change (life, a player counter, or energy) whose final
+/// result the engine cannot represent: the final amount does not fit an `i32`
+/// delta, or the life total, per-turn gained/lost counter, counter total or
+/// energy total would overflow. Nothing was mutated.
+///
+/// Representability is an engine limit, not a game rule: how the change is
+/// then treated is chosen by the caller's [`UnrepresentablePolicy`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LifeChangeUnrepresentable {
+    pub player: PlayerId,
+}
+
+impl LifeChangeUnrepresentable {
+    /// The single place the compatibility skip policy logs a discarded change.
+    fn log_discarded(self, site: &'static str) {
+        tracing::warn!(
+            player = self.player.0,
+            site,
+            "engine-unrepresentable player-resource change skipped by compatibility policy"
+        );
+    }
+}
+
+impl From<LifeChangeUnrepresentable> for EngineError {
+    /// The typed carrier survives to the action boundary, which recognizes the
+    /// failure and restores its snapshot. Clients see only the stable
+    /// `InvalidAction` rejection code, never the diagnostic payload.
+    fn from(unrepresentable: LifeChangeUnrepresentable) -> Self {
+        EngineError::LifeChangeUnrepresentable {
+            player: unrepresentable.player,
+        }
+    }
+}
+
+/// Why an action-ingress life change did not complete synchronously.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LifeChangeError {
+    /// The replacement/substitution pipeline paused for player input.
+    Deferred(ReplacementDeferred),
+    /// The final result is not representable; the ingress caller rejects.
+    Unrepresentable(LifeChangeUnrepresentable),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SubstitutionDrainOutcome {
     Completed,
     Deferred,
 }
 
-/// CR 119.1: Gain life — increase the player's life total.
+/// Final settle step of a life event: applies the (possibly replaced) event and
+/// reports the amount actually changed.
+type LifeSettleFn = fn(
+    &mut GameState,
+    ProposedEvent,
+    UnrepresentablePolicy,
+    &mut Vec<GameEvent>,
+) -> Result<u32, LifeChangeUnrepresentable>;
+
+/// Runs `body` with a fresh action-ingress window open and returns its result
+/// together with the window as it stood at close. Any player-resource
+/// settlement (life, player counter, or energy) inside `body` that proves unrepresentable is recorded in the window instead
+/// of being skipped, so the ingress caller can reject the action. Windows nest:
+/// the prior window is restored untouched on close, so an inner window reports
+/// only to its own caller.
+pub(crate) fn within_ingress_life_window<T>(
+    state: &mut GameState,
+    body: impl FnOnce(&mut GameState) -> T,
+) -> (T, IngressLifeWindow) {
+    let prior = state
+        .ingress_life_window
+        .replace(IngressLifeWindow::default());
+    let result = body(state);
+    let window = std::mem::replace(&mut state.ingress_life_window, prior).unwrap_or_default();
+    (result, window)
+}
+
+/// The action-ingress rule for any player-resource change (life, a player
+/// counter, or energy): runs `body` under `UnrepresentablePolicy::Reject`
+/// inside a fresh ingress window. The body's own unrepresentable error is
+/// reported first; otherwise a failure recorded in the window (a nested
+/// ordinary settlement) outranks the body's result, because the whole
+/// action is rejected and rolled back by the boundary. A park made inside
+/// the window is stamped `Reject`, so its resume is held to the same rule.
+/// An engine numeric limit, not a CR 101.3 impossibility.
+pub(crate) fn within_rejecting_ingress_window<T>(
+    state: &mut GameState,
+    body: impl FnOnce(&mut GameState, UnrepresentablePolicy) -> Result<T, LifeChangeUnrepresentable>,
+) -> Result<T, LifeChangeUnrepresentable> {
+    let (result, window) =
+        within_ingress_life_window(state, |state| body(state, UnrepresentablePolicy::Reject));
+    match (result, window.failed_player) {
+        (Err(own), _) => Err(own),
+        (Ok(_), Some(player)) => Err(LifeChangeUnrepresentable { player }),
+        (Ok(value), None) => Ok(value),
+    }
+}
+
+/// CR 119.3: Gain life — adjust the player's life total.
 pub fn resolve_gain(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -129,44 +221,137 @@ pub fn resolve_gain(
     Ok(())
 }
 
-/// Apply life gain, running through the replacement pipeline.
-/// Returns the actual amount of life gained (may differ due to replacements like Leyline of Hope).
-/// Returns `Err(ReplacementDeferred)` when multiple replacement effects compete and
-/// the player must choose which applies first (CR 616.1).
-pub fn apply_life_gain(
-    state: &mut GameState,
+/// The proposed `LifeGain` event for an entry, or `None` when the change is
+/// vacuous or suppressed before the replacement pipeline.
+fn proposed_life_gain(
+    state: &GameState,
     player_id: PlayerId,
     amount: u32,
-    events: &mut Vec<GameEvent>,
-) -> Result<u32, ReplacementDeferred> {
+) -> Option<ProposedEvent> {
     if amount == 0 {
-        return Ok(0);
+        return None;
     }
     // CR 119.7: Short-circuit BEFORE the replacement pipeline — "can't gain life"
     // suppresses the life gain event entirely (and any replacements that would
     // otherwise modify it).
     if crate::game::static_abilities::player_has_cant_gain_life(state, player_id) {
-        return Ok(0);
+        return None;
     }
-    let proposed = ProposedEvent::LifeGain {
+    Some(ProposedEvent::LifeGain {
         player_id,
         amount,
         applied: HashSet::new(),
-    };
+    })
+}
+
+/// The proposed `LifeLoss` event for an entry, or `None` when the change is
+/// vacuous or suppressed before the replacement pipeline.
+fn proposed_life_loss(
+    state: &GameState,
+    player_id: PlayerId,
+    amount: u32,
+) -> Option<ProposedEvent> {
+    if amount == 0 {
+        return None;
+    }
+    // CR 119.8: A player who can't lose life is unaffected. Short-circuit
+    // before the replacement pipeline.
+    if crate::game::static_abilities::player_has_cant_lose_life(state, player_id) {
+        return None;
+    }
+    Some(ProposedEvent::LifeLoss {
+        player_id,
+        amount,
+        applied: HashSet::new(),
+    })
+}
+
+/// Collapses an ordinary-policy core result to the ordinary entries' contract.
+/// `IgnoreImpossible` never returns `Unrepresentable` from settlement: with an
+/// ingress window it records failure for the public boundary, and without one
+/// it uses the logged compatibility skip. This remains a defensive arm.
+fn ordinary_life_outcome(result: Result<u32, LifeChangeError>) -> Result<u32, ReplacementDeferred> {
+    match result {
+        Ok(applied) => Ok(applied),
+        Err(LifeChangeError::Deferred(deferred)) => Err(deferred),
+        Err(LifeChangeError::Unrepresentable(unrepresentable)) => {
+            debug_assert!(
+                false,
+                "IgnoreImpossible settlement records ingress failure or skips without returning an error"
+            );
+            unrepresentable.log_discarded("ordinary life entry");
+            Ok(0)
+        }
+    }
+}
+
+/// Runs an ingress life change under an open ingress window. A failure
+/// recorded anywhere inside the window (a substitute's or continuation's
+/// ordinary entry) outranks a deferral, because the whole action is rejected
+/// and rolled back by the boundary. The window, policy and fold are the shared
+/// `within_rejecting_ingress_window`; a deferral rides through it as a success
+/// value.
+fn run_ingress_life_change(
+    state: &mut GameState,
+    proposed: ProposedEvent,
+    settle: LifeSettleFn,
+    events: &mut Vec<GameEvent>,
+) -> Result<u32, LifeChangeError> {
+    let outcome = within_rejecting_ingress_window(state, |state, policy| {
+        match apply_life_change_core(state, proposed, settle, policy, events) {
+            Ok(applied) => Ok(Ok(applied)),
+            Err(LifeChangeError::Deferred(deferred)) => Ok(Err(deferred)),
+            Err(LifeChangeError::Unrepresentable(unrepresentable)) => Err(unrepresentable),
+        }
+    });
+    match outcome {
+        Ok(Ok(applied)) => Ok(applied),
+        Ok(Err(deferred)) => Err(LifeChangeError::Deferred(deferred)),
+        Err(unrepresentable) => Err(LifeChangeError::Unrepresentable(unrepresentable)),
+    }
+}
+
+/// The shared life-change core behind both policies: route `proposed` through
+/// the replacement pipeline and settle the result. The policy is chosen by the
+/// entry that calls this, never decided here.
+///
+/// Under `Reject` an unrepresentable final edit returns `Err` BEFORE the
+/// stashed post-replacement continuation drains (nothing settles; the action
+/// boundary discards the stash with everything else). Under `IgnoreImpossible`
+/// the settle step skips only the change the engine's numeric capacity cannot
+/// represent and the continuation drains exactly as it does for an applied
+/// change. That skip is an engine limit and a compatibility fallback for
+/// ordinary resolution outside a public action boundary (and for legacy
+/// serialized `PendingReplacement` policy payloads), NOT a CR 101.3
+/// impossibility: public boundaries reject the action and restore their entry
+/// state instead.
+fn apply_life_change_core(
+    state: &mut GameState,
+    proposed: ProposedEvent,
+    settle: LifeSettleFn,
+    policy: UnrepresentablePolicy,
+    events: &mut Vec<GameEvent>,
+) -> Result<u32, LifeChangeError> {
     match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Execute(event) => {
-            let gained = apply_life_gain_after_replacement(state, event, events);
+            let applied =
+                settle(state, event, policy, events).map_err(LifeChangeError::Unrepresentable)?;
             // CR 614.6 + CR 704.3: Drain any mandatory-post-effect continuation
             // (cross-event substitutes such as Lich; same-event work beyond the
             // applier's amount substitution) inside this resolution step so
             // SBAs and priority never fall between the (possibly substituted)
-            // life gain and its substitute. Mirrors the drain pattern in
+            // life change and its substitute. Mirrors the drain pattern in
             // `effects/draw.rs::draw_through_replacement`. The `Prevented` arm
             // below already drains via `drain_substitution_continuation`.
             match drain_substitution_continuation(state, events) {
-                SubstitutionDrainOutcome::Completed => Ok(gained),
+                SubstitutionDrainOutcome::Completed => Ok(applied),
                 SubstitutionDrainOutcome::Deferred => {
-                    Err(ReplacementDeferred::SubstitutionContinuation { applied: gained })
+                    // The root change is FINAL at this point — `applied` is what
+                    // the player actually received or paid. Only the substitute
+                    // is unfinished.
+                    Err(LifeChangeError::Deferred(
+                        ReplacementDeferred::SubstitutionContinuation { applied },
+                    ))
                 }
             }
         }
@@ -176,19 +361,74 @@ pub fn apply_life_gain(
             match drain_substitution_continuation(state, events) {
                 SubstitutionDrainOutcome::Completed => Ok(0),
                 SubstitutionDrainOutcome::Deferred => {
-                    // Fully prevented: the root gained nothing, whatever the
+                    // Fully prevented: the root changed nothing, whatever the
                     // substitute goes on to do.
-                    Err(ReplacementDeferred::SubstitutionContinuation { applied: 0 })
+                    Err(LifeChangeError::Deferred(
+                        ReplacementDeferred::SubstitutionContinuation { applied: 0 },
+                    ))
                 }
             }
         }
         ReplacementResult::NeedsChoice(player) => {
             // CR 616.1: Multiple competing replacements — player must choose.
+            debug_assert!(
+                state.ingress_life_window.is_none() || state.pending_replacement.is_some(),
+                "an ingress life change that parks must leave its stamped record pending"
+            );
             state.waiting_for =
                 crate::game::replacement::replacement_choice_waiting_for(player, state);
-            Err(ReplacementDeferred::ReplacementChoice)
+            Err(LifeChangeError::Deferred(
+                ReplacementDeferred::ReplacementChoice,
+            ))
         }
     }
+}
+
+/// Apply life gain, running through the replacement pipeline.
+/// Returns the actual amount of life gained (may differ due to replacements like Leyline of Hope).
+/// Returns `Err(ReplacementDeferred)` when multiple replacement effects compete and
+/// the player must choose which applies first (CR 616.1).
+///
+/// An engine-unrepresentable result is not a CR 101.3 impossibility. With an
+/// open ingress window, the owning public action rejects and restores its entry
+/// state; outside one, ordinary resolution and legacy parked records retain the
+/// compatibility behavior of logging and skipping the change. Direct action-
+/// ingress callers use [`try_apply_life_gain`] to reject it explicitly.
+pub fn apply_life_gain(
+    state: &mut GameState,
+    player_id: PlayerId,
+    amount: u32,
+    events: &mut Vec<GameEvent>,
+) -> Result<u32, ReplacementDeferred> {
+    let Some(proposed) = proposed_life_gain(state, player_id, amount) else {
+        return Ok(0);
+    };
+    ordinary_life_outcome(apply_life_change_core(
+        state,
+        proposed,
+        settle_life_gain,
+        UnrepresentablePolicy::IgnoreImpossible,
+        events,
+    ))
+}
+
+/// Action-ingress life gain: like [`apply_life_gain`], except that a final
+/// result the engine cannot represent is reported as
+/// [`LifeChangeError::Unrepresentable`] so the caller rejects the action and
+/// the action boundary restores its snapshot. Opens the ingress window for the
+/// whole call, so a record parked here is stamped for rejection on resume and
+/// an unrepresentable settlement reached through a substitute or continuation
+/// is reported too.
+pub fn try_apply_life_gain(
+    state: &mut GameState,
+    player_id: PlayerId,
+    amount: u32,
+    events: &mut Vec<GameEvent>,
+) -> Result<u32, LifeChangeError> {
+    let Some(proposed) = proposed_life_gain(state, player_id, amount) else {
+        return Ok(0);
+    };
+    run_ingress_life_change(state, proposed, settle_life_gain, events)
 }
 
 /// CR 614.1a + CR 614.6 — Issue #317: Drain a `post_replacement_continuation`
@@ -233,16 +473,23 @@ fn drain_substitution_continuation(
     }
 }
 
-/// CR 119.1: Apply a post-replacement `ProposedEvent::LifeGain` to the game state.
+/// CR 119.3: Settle a post-replacement `ProposedEvent::LifeGain`: the one
+/// place the final gain edit is made and its representability is decided.
 ///
-/// Extracted from `apply_life_gain`'s Execute arm so the same mutation can be
-/// invoked by `handle_replacement_choice` when a player accepts a life-gain
-/// replacement choice. Caller is responsible for emitting `EffectResolved`.
-pub fn apply_life_gain_after_replacement(
+/// Order before anything observable: a recorded replacement-quantity overflow,
+/// then the amount must fit an `i32` delta, then the checked scalar edit (life
+/// total and gained-this-turn counter) must succeed. An unrepresentable result
+/// is handled per `policy`: `Reject` returns the typed error;
+/// `IgnoreImpossible` reports `Ok(0)` without a `LifeChanged`. An open ingress
+/// window records the failure for the owning public boundary to reject and
+/// restore; without one, ordinary resolution and legacy parked records use the
+/// logged compatibility skip.
+fn settle_life_gain(
     state: &mut GameState,
     event: ProposedEvent,
+    policy: UnrepresentablePolicy,
     events: &mut Vec<GameEvent>,
-) -> u32 {
+) -> Result<u32, LifeChangeUnrepresentable> {
     let ProposedEvent::LifeGain {
         player_id: pid,
         amount: gain_amount,
@@ -251,28 +498,32 @@ pub fn apply_life_gain_after_replacement(
     else {
         debug_assert!(
             false,
-            "apply_life_gain_after_replacement called with non-LifeGain ProposedEvent"
+            "settle_life_gain called with non-LifeGain ProposedEvent"
         );
-        return 0;
+        return Ok(0);
     };
+    if let Some(settled) = settle_quantity_overflow(state, pid, policy, "life gain") {
+        return settled;
+    }
+    if ingress_window_has_failed(state) {
+        return Ok(0);
+    }
     // CR 119.8: gaining 0 life doesn't count as gaining life — no state
     // mutation and no journal command; the event below still fires as before.
     if gain_amount != 0 {
-        state
-            .resolve_and_apply_player_edit(
-                pid,
-                ResolvedPlayerEdit::Life {
-                    delta: gain_amount as i32,
-                },
-            )
-            .expect("post-replacement life gain must target a live player");
+        let edit = i32::try_from(gain_amount)
+            .map_err(|_| LifeChangeUnrepresentable { player: pid })
+            .and_then(|delta| apply_final_life_edit(state, pid, delta));
+        if let Err(unrepresentable) = edit {
+            return settle_unrepresentable(state, unrepresentable, policy, "life gain");
+        }
     }
     // CR 611.3a + CR 119: gate escalation on a live life-reading static.
     crate::game::layers::mark_layers_full_if_life_reading_static_live(state);
     events.push(GameEvent::LifeChanged {
         player_id: pid,
         amount: gain_amount as i32,
-        // CR 119.1: read back after the edit, so a run of life changes carries
+        // CR 119.3: read back after the edit, so a run of life changes carries
         // each intermediate total rather than only the final snapshot's.
         new_total: LifeTotalReading(
             state
@@ -282,66 +533,213 @@ pub fn apply_life_gain_after_replacement(
                 .map(|player| player.life),
         ),
     });
-    gain_amount
+    Ok(gain_amount)
 }
 
-/// CR 119.3: An effect that causes a player to lose life subtracts that much
+/// Applies the final signed life delta through the checked scalar authority.
+fn apply_final_life_edit(
+    state: &mut GameState,
+    player: PlayerId,
+    delta: i32,
+) -> Result<(), LifeChangeUnrepresentable> {
+    apply_final_player_resource_edit(state, player, ResolvedPlayerEdit::Life { delta })
+}
+
+/// Applies a final player-resource gain or life change through the checked
+/// scalar authority (`GameState::resolve_and_apply_player_edit`): the one
+/// adapter that maps its overflow to `LifeChangeUnrepresentable`. Callers pass
+/// a nonzero life delta or a positive counter/energy delta, for which
+/// `ResourceOverflow` is the only failure a well-formed final event can
+/// produce; every other error is an invariant violation of the caller.
+pub(crate) fn apply_final_player_resource_edit(
+    state: &mut GameState,
+    player: PlayerId,
+    edit: ResolvedPlayerEdit,
+) -> Result<(), LifeChangeUnrepresentable> {
+    match state.resolve_and_apply_player_edit(player, edit) {
+        Ok(()) => Ok(()),
+        Err(ResolvedPlayerEditReplayInvariantError::ResourceOverflow) => {
+            Err(LifeChangeUnrepresentable { player })
+        }
+        Err(ResolvedPlayerEditReplayInvariantError::UnknownPlayer(_)) => {
+            unreachable!("post-replacement player-resource change must target a live player")
+        }
+        Err(
+            ResolvedPlayerEditReplayInvariantError::ZeroDelta
+            | ResolvedPlayerEditReplayInvariantError::ResourceUnderflow
+            | ResolvedPlayerEditReplayInvariantError::SpeedPreconditionMismatch { .. },
+        ) => unreachable!(
+            "a nonzero life delta or positive counter/energy delta reports only ResourceOverflow"
+        ),
+    }
+}
+
+/// Whether an open ingress window has already recorded an unrepresentable
+/// settlement: the action will be rejected, so no further player-resource edit
+/// (life, player counter, or energy) applies.
+pub(crate) fn ingress_window_has_failed(state: &GameState) -> bool {
+    state
+        .ingress_life_window
+        .is_some_and(|window| window.failed_player.is_some())
+}
+
+/// The failure branch of a settle step, per policy. `Reject` hands the typed
+/// error to the caller. `IgnoreImpossible` reports `Ok(0)` for an
+/// engine-unrepresentable player-resource change (life, player counter, or
+/// energy). An open ingress window records the failure so
+/// its public action boundary rejects and restores; with no window, ordinary
+/// resolution and legacy parked records log and skip it for compatibility. This
+/// fallback is an engine-capacity policy, not CR 101.3 impossibility.
+pub(crate) fn settle_unrepresentable(
+    state: &mut GameState,
+    unrepresentable: LifeChangeUnrepresentable,
+    policy: UnrepresentablePolicy,
+    site: &'static str,
+) -> Result<u32, LifeChangeUnrepresentable> {
+    match policy {
+        UnrepresentablePolicy::Reject => Err(unrepresentable),
+        UnrepresentablePolicy::IgnoreImpossible => {
+            match state.ingress_life_window.as_mut() {
+                Some(window) => {
+                    window.failed_player.get_or_insert(unrepresentable.player);
+                }
+                // The engine's numeric capacity, not a CR 101.3 impossibility:
+                // outside an open ingress window this is the compatibility
+                // fallback for ordinary resolution; the log records the skip.
+                None => unrepresentable.log_discarded(site),
+            }
+            Ok(0)
+        }
+    }
+}
+
+/// Consumes a replacement-quantity overflow recorded while this life, player
+/// counter or energy event was replaced. The overflowed result exceeds the
+/// engine's numeric range, so it takes the same failure branch as any other
+/// engine-unrepresentable player-resource change: `Reject` returns the typed error; `IgnoreImpossible` returns `Ok(0)`
+/// and either records failure for an open ingress window to reject and restore,
+/// or logs and skips under the outside-boundary compatibility policy. This is
+/// a capacity limit, not a CR 101.3 impossibility. Taken first so the record is
+/// always cleared, even when an ingress window has already failed. `None` when
+/// nothing was recorded.
+pub(crate) fn settle_quantity_overflow(
+    state: &mut GameState,
+    pid: PlayerId,
+    policy: UnrepresentablePolicy,
+    site: &'static str,
+) -> Option<Result<u32, LifeChangeUnrepresentable>> {
+    state.take_replacement_quantity_overflow().map(|_| {
+        settle_unrepresentable(
+            state,
+            LifeChangeUnrepresentable { player: pid },
+            policy,
+            site,
+        )
+    })
+}
+
+/// Applies a post-replacement `ProposedEvent::LifeGain` under the compatibility
+/// policy. An open ingress window records an engine-unrepresentable result for
+/// the public boundary to reject and restore; without one, ordinary resolution
+/// and legacy parked records log and skip it for compatibility.
+///
+/// Extracted from `apply_life_gain`'s Execute arm so the same mutation can be
+/// invoked by `resolve_gain`. Caller is responsible for emitting `EffectResolved`.
+pub fn apply_life_gain_after_replacement(
+    state: &mut GameState,
+    event: ProposedEvent,
+    events: &mut Vec<GameEvent>,
+) -> u32 {
+    ordinary_settled_amount(settle_life_gain(
+        state,
+        event,
+        UnrepresentablePolicy::IgnoreImpossible,
+        events,
+    ))
+}
+
+/// Resume-path settle for a parked life gain: applies the event the player's
+/// `ChooseReplacement` answer delivered under the policy the parked record was
+/// stamped with. `Reject` returns the typed error so the boundary restores the
+/// record and prompt. `IgnoreImpossible` reports `Ok(0)`; an open ingress
+/// window still makes its public action reject and restore, while a legacy
+/// payload resumed without one retains the logged compatibility skip.
+pub(crate) fn settle_life_gain_after_choice(
+    state: &mut GameState,
+    event: ProposedEvent,
+    policy: UnrepresentablePolicy,
+    events: &mut Vec<GameEvent>,
+) -> Result<u32, LifeChangeUnrepresentable> {
+    settle_life_gain(state, event, policy, events)
+}
+
+/// Compatibility-policy settle result as a plain amount. `IgnoreImpossible`
+/// records ingress failure for the public owner to reject and restore, or uses
+/// the logged skip outside a boundary; the `Err` arm is defensive.
+fn ordinary_settled_amount(result: Result<u32, LifeChangeUnrepresentable>) -> u32 {
+    ordinary_settlement(result, 0, "ordinary life settle")
+}
+
+/// Compatibility-policy settle result for any player-resource settle step.
+/// `IgnoreImpossible` records ingress failure for the public owner to reject
+/// and restore, or uses the logged skip outside a boundary; the `Err` arm is
+/// defensive, and yields `skipped`.
+pub(crate) fn ordinary_settlement<T>(
+    result: Result<T, LifeChangeUnrepresentable>,
+    skipped: T,
+    site: &'static str,
+) -> T {
+    result.unwrap_or_else(|unrepresentable| {
+        debug_assert!(
+            false,
+            "compatibility settlement records ingress failure or skips outside a boundary"
+        );
+        unrepresentable.log_discarded(site);
+        skipped
+    })
+}
+
+/// CR 119.3: An effect that causes a player to lose life adjusts the total by
+/// subtracting that much
 /// from the player's life total.
 /// Returns the actual amount of life lost (may differ due to replacements like doubling).
 /// Returns `Err(ReplacementDeferred)` whenever the replacement/substitution
 /// pipeline pauses for player input.
+///
+/// A final loss beyond the engine's numeric capacity is not a CR 101.3
+/// impossibility. An open ingress window makes the owning public action reject
+/// and restore; without one, ordinary resolution and legacy parked records use
+/// the logged compatibility skip. Direct action-ingress callers use
+/// [`try_apply_life_loss`] to reject explicitly.
 pub fn apply_life_loss(
     state: &mut GameState,
     player_id: PlayerId,
     amount: u32,
     events: &mut Vec<GameEvent>,
 ) -> Result<u32, ReplacementDeferred> {
-    if amount == 0 {
+    let Some(proposed) = proposed_life_loss(state, player_id, amount) else {
         return Ok(0);
-    }
-    // CR 119.8: A player who can't lose life is unaffected. Short-circuit
-    // before the replacement pipeline.
-    if crate::game::static_abilities::player_has_cant_lose_life(state, player_id) {
-        return Ok(0);
-    }
-    let proposed = ProposedEvent::LifeLoss {
-        player_id,
-        amount,
-        applied: HashSet::new(),
     };
-    match replacement::replace_event(state, proposed, events) {
-        ReplacementResult::Execute(event) => {
-            let lost = apply_life_loss_after_replacement(state, event, events);
-            // CR 614.6: A replacement that substitutes another effect must
-            // finish that effect before the original resolution may continue.
-            match drain_substitution_continuation(state, events) {
-                SubstitutionDrainOutcome::Completed => Ok(lost),
-                SubstitutionDrainOutcome::Deferred => {
-                    // The root loss is FINAL at this point — `lost` is what the
-                    // player actually paid. Only the substitute is unfinished.
-                    Err(ReplacementDeferred::SubstitutionContinuation { applied: lost })
-                }
-            }
-        }
-        ReplacementResult::Prevented => {
-            // CR 614.1a + CR 614.6 — Issue #317: Drain substitute effect
-            // stashed by cross-event-type replacement.
-            match drain_substitution_continuation(state, events) {
-                SubstitutionDrainOutcome::Completed => Ok(0),
-                SubstitutionDrainOutcome::Deferred => {
-                    // Fully prevented: no life left the player, so nothing
-                    // downstream may narrate a loss.
-                    Err(ReplacementDeferred::SubstitutionContinuation { applied: 0 })
-                }
-            }
-        }
-        ReplacementResult::NeedsChoice(player) => {
-            // CR 616.1: Multiple competing replacements — player must choose.
-            state.waiting_for =
-                crate::game::replacement::replacement_choice_waiting_for(player, state);
-            Err(ReplacementDeferred::ReplacementChoice)
-        }
-    }
+    ordinary_life_outcome(apply_life_change_core(
+        state,
+        proposed,
+        settle_life_loss,
+        UnrepresentablePolicy::IgnoreImpossible,
+        events,
+    ))
+}
+
+/// Action-ingress life loss: the loss twin of [`try_apply_life_gain`].
+pub fn try_apply_life_loss(
+    state: &mut GameState,
+    player_id: PlayerId,
+    amount: u32,
+    events: &mut Vec<GameEvent>,
+) -> Result<u32, LifeChangeError> {
+    let Some(proposed) = proposed_life_loss(state, player_id, amount) else {
+        return Ok(0);
+    };
+    run_ingress_life_change(state, proposed, settle_life_loss, events)
 }
 
 /// CR 120.3a: Damage dealt to a player normally causes that player to lose
@@ -356,16 +754,14 @@ pub fn apply_damage_life_loss(
     apply_life_loss(state, player_id, amount, events)
 }
 
-/// CR 119.3: Apply a post-replacement `ProposedEvent::LifeLoss` to the game state.
-///
-/// Extracted from `apply_life_loss`'s Execute arm so the same mutation can
-/// be invoked by `handle_replacement_choice` when a player accepts a life-loss
-/// replacement choice. Caller is responsible for emitting `EffectResolved`.
-pub fn apply_life_loss_after_replacement(
+/// CR 119.3: Settle a post-replacement `ProposedEvent::LifeLoss`: the loss twin
+/// of [`settle_life_gain`] (same order, same per-policy failure branch).
+fn settle_life_loss(
     state: &mut GameState,
     event: ProposedEvent,
+    policy: UnrepresentablePolicy,
     events: &mut Vec<GameEvent>,
-) -> u32 {
+) -> Result<u32, LifeChangeUnrepresentable> {
     let ProposedEvent::LifeLoss {
         player_id: pid,
         amount: loss_amount,
@@ -374,22 +770,28 @@ pub fn apply_life_loss_after_replacement(
     else {
         debug_assert!(
             false,
-            "apply_life_loss_after_replacement called with non-LifeLoss ProposedEvent"
+            "settle_life_loss called with non-LifeLoss ProposedEvent"
         );
-        return 0;
+        return Ok(0);
     };
+    if let Some(settled) = settle_quantity_overflow(state, pid, policy, "life loss") {
+        return settled;
+    }
+    if ingress_window_has_failed(state) {
+        return Ok(0);
+    }
     // CR 119.8: losing 0 life doesn't count as losing life — no state
     // mutation and no journal command; the event below still fires as before.
     if loss_amount != 0 {
         let before = crate::game::players::team_life_total(state, pid);
-        state
-            .resolve_and_apply_player_edit(
-                pid,
-                ResolvedPlayerEdit::Life {
-                    delta: -(loss_amount as i32),
-                },
-            )
-            .expect("post-replacement life loss must target a live player");
+        // A loss negates a value that already fit an `i32`, so the negation
+        // itself cannot overflow.
+        let edit = i32::try_from(loss_amount)
+            .map_err(|_| LifeChangeUnrepresentable { player: pid })
+            .and_then(|magnitude| apply_final_life_edit(state, pid, -magnitude));
+        if let Err(unrepresentable) = edit {
+            return settle_unrepresentable(state, unrepresentable, policy, "life loss");
+        }
         let after = crate::game::players::team_life_total(state, pid);
         // The clone-local preview observes the real edit before events or a
         // substitution continuation can introduce later, unrelated work.
@@ -417,7 +819,38 @@ pub fn apply_life_loss_after_replacement(
                 .map(|player| player.life),
         ),
     });
-    loss_amount
+    Ok(loss_amount)
+}
+
+/// CR 119.3: Apply a post-replacement `ProposedEvent::LifeLoss` under the
+/// compatibility policy. An open ingress window records an engine-unrepresentable
+/// result for the public boundary to reject and restore; without one, ordinary
+/// resolution and legacy parked records log and skip it for compatibility.
+///
+/// Extracted from `apply_life_loss`'s Execute arm. Caller is responsible for
+/// emitting `EffectResolved`.
+pub fn apply_life_loss_after_replacement(
+    state: &mut GameState,
+    event: ProposedEvent,
+    events: &mut Vec<GameEvent>,
+) -> u32 {
+    ordinary_settled_amount(settle_life_loss(
+        state,
+        event,
+        UnrepresentablePolicy::IgnoreImpossible,
+        events,
+    ))
+}
+
+/// Resume-path settle for a parked life loss: the loss twin of
+/// [`settle_life_gain_after_choice`].
+pub(crate) fn settle_life_loss_after_choice(
+    state: &mut GameState,
+    event: ProposedEvent,
+    policy: UnrepresentablePolicy,
+    events: &mut Vec<GameEvent>,
+) -> Result<u32, LifeChangeUnrepresentable> {
+    settle_life_loss(state, event, policy, events)
 }
 
 /// Outcome of applying a life-total permutation via `apply_life_totals_assignment`.
@@ -431,6 +864,42 @@ pub fn apply_life_loss_after_replacement(
 pub enum LifeAssignmentOutcome {
     Applied,
     Deferred,
+    /// A receiver's current-to-resulting difference does not fit an `i32`.
+    /// Nothing was mutated (every delta is computed before the first edit) and
+    /// the failure is recorded in the open ingress window, so the action
+    /// boundary rejects the whole action.
+    Unrepresentable,
+}
+
+/// The signed life change that takes `current` to `target`, or `None` when the
+/// difference is not representable as an `i32`.
+///
+/// `Some(0)` is a real no-op; `None` is a failure. The failure is recorded in
+/// the open ingress life window (so an action boundary rejects the whole
+/// action), or logged as a discarded change when no window is open. Callers
+/// must stop mutating on `None` rather than substituting zero: a partial
+/// assignment would be observable if no boundary rolled it back. Shared by
+/// every site that feeds the life authority a difference.
+pub(super) fn life_total_difference(
+    state: &mut GameState,
+    player: PlayerId,
+    target: i32,
+    current: i32,
+    site: &'static str,
+) -> Option<i32> {
+    match target.checked_sub(current) {
+        Some(diff) => Some(diff),
+        None => {
+            let unrepresentable = LifeChangeUnrepresentable { player };
+            let _ = settle_unrepresentable(
+                state,
+                unrepresentable,
+                UnrepresentablePolicy::IgnoreImpossible,
+                site,
+            );
+            None
+        }
+    }
 }
 
 /// CR 701.12c / CR 119.7 + CR 119.8: Apply a simultaneous life-total permutation.
@@ -456,24 +925,29 @@ pub fn apply_life_totals_assignment(
     events: &mut Vec<GameEvent>,
 ) -> Result<LifeAssignmentOutcome, EffectError> {
     // CR 701.12c: snapshot every receiver's current life BEFORE any mutation so
-    // each delta is measured against the pre-permutation total.
-    let deltas: Vec<(PlayerId, i32)> = assignment
-        .iter()
-        .map(|&(pid, new_life)| {
-            let old = state
-                .players
-                .iter()
-                .find(|p| p.id == pid)
-                .map(|p| p.life)
-                .ok_or(EffectError::PlayerNotFound)?;
-            Ok((pid, new_life - old))
-        })
-        .collect::<Result<Vec<_>, EffectError>>()?;
+    // each delta is measured against the pre-permutation total. A difference
+    // that does not fit an `i32` fails the whole assignment before the first
+    // edit, so no receiver's change is partially committed.
+    let mut deltas: Vec<(PlayerId, i32)> = Vec::with_capacity(assignment.len());
+    for &(pid, new_life) in assignment {
+        let old = state
+            .players
+            .iter()
+            .find(|p| p.id == pid)
+            .map(|p| p.life)
+            .ok_or(EffectError::PlayerNotFound)?;
+        let Some(diff) = life_total_difference(state, pid, new_life, old, "life-total assignment")
+        else {
+            return Ok(LifeAssignmentOutcome::Unrepresentable);
+        };
+        deltas.push((pid, diff));
+    }
 
     for (index, (pid, diff)) in deltas.iter().copied().enumerate() {
         let deferred = match diff.signum() {
             1 => apply_life_gain(state, pid, diff as u32, events).err(),
-            -1 => apply_life_loss(state, pid, (-diff) as u32, events).err(),
+            // `unsigned_abs`: a stored difference may be `i32::MIN`.
+            -1 => apply_life_loss(state, pid, diff.unsigned_abs(), events).err(),
             _ => None,
         };
         if deferred.is_some() {
@@ -513,7 +987,8 @@ pub(crate) fn drain_pending_life_total_assignment(
 
         let deferred = match diff.signum() {
             1 => apply_life_gain(state, pid, diff as u32, events).err(),
-            -1 => apply_life_loss(state, pid, (-diff) as u32, events).err(),
+            // `unsigned_abs`: a stored difference may be `i32::MIN`.
+            -1 => apply_life_loss(state, pid, diff.unsigned_abs(), events).err(),
             _ => None,
         };
         if deferred.is_some() || !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
@@ -696,11 +1171,22 @@ pub fn resolve_set_life_total(
             return Err(EffectError::PlayerNotFound);
         }
         let current_life = crate::game::players::team_life_total(state, target_player_id);
-        let diff = amount - current_life;
+        let Some(diff) = life_total_difference(
+            state,
+            target_player_id,
+            amount,
+            current_life,
+            "set life total",
+        ) else {
+            // The failure is recorded in the ingress window (or logged when no
+            // window is open). Stop before any later player's life is set.
+            return Ok(());
+        };
 
         let deferred = match diff.signum() {
             1 => apply_life_gain(state, target_player_id, diff as u32, events).err(),
-            -1 => apply_life_loss(state, target_player_id, (-diff) as u32, events).err(),
+            // `unsigned_abs`: the difference may be `i32::MIN`.
+            -1 => apply_life_loss(state, target_player_id, diff.unsigned_abs(), events).err(),
             _ => None,
         };
         if deferred.is_some() {
@@ -728,8 +1214,8 @@ mod tests {
     use crate::game::game_object::AttachTarget;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AggregateFunction, ControllerRef, QuantityExpr, QuantityRef, SharedQuality,
-        StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+        AggregateFunction, ChooseOneOfKind, ControllerRef, QuantityExpr, QuantityRef,
+        SharedQuality, StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
@@ -1051,7 +1537,7 @@ mod tests {
             .any(|e| matches!(e, GameEvent::LifeChanged { amount, .. } if *amount == -2)));
     }
 
-    /// CR 119.1 + CR 119.3: every `LifeChanged` reports the player's life total
+    /// CR 119.3: every `LifeChanged` reports the player's life total
     /// as it stands once that one change is applied — not the total after the
     /// whole action. A run of changes is therefore replayable one at a time,
     /// which is what lets a presentation layer show intermediate totals without
@@ -1754,6 +2240,7 @@ mod tests {
                 Effect::ChooseOneOf {
                     chooser: PlayerFilter::Controller,
                     branches: vec![branch],
+                    kind: ChooseOneOfKind::Ordinary,
                 },
             ))]
         .into();
@@ -1819,6 +2306,7 @@ mod tests {
                             player: TargetFilter::Controller,
                         },
                     )],
+                    kind: ChooseOneOfKind::Ordinary,
                 },
             ))]
         .into();
@@ -1927,5 +2415,691 @@ mod tests {
         resolve_gain(&mut state, &ability, &mut events).unwrap();
         assert_eq!(state.players[1].life, 24, "target player (p1) gains 4 life");
         assert_eq!(state.players[0].life, 20, "controller (p0) is unaffected");
+    }
+
+    /// Representability of the final life edit: one fallible core, an explicit
+    /// policy per entry (ordinary skip vs. action-ingress rejection).
+    mod representability {
+        use super::*;
+        use crate::game::scenario::{GameRunner, GameScenario, P0, P1};
+        use crate::game::scenario_db::GameScenarioDbExt;
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::IngressLifeWindow;
+        use crate::types::mana::{ManaType, ManaUnit};
+        use crate::types::phase::Phase;
+
+        fn scenario() -> GameScenario {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            scenario
+        }
+
+        fn add_card(scenario: &mut GameScenario, player: PlayerId, name: &str) -> ObjectId {
+            scenario.add_real_card(
+                player,
+                name,
+                Zone::Battlefield,
+                crate::test_support::shared_card_db(),
+            )
+        }
+
+        fn mana(color: ManaType) -> ManaUnit {
+            ManaUnit::new(color, ObjectId(9_999), false, Vec::new())
+        }
+
+        fn life_changed_count(events: &[GameEvent]) -> usize {
+            events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::LifeChanged { .. }))
+                .count()
+        }
+
+        fn gain_life_effect_resolved(events: &[GameEvent]) -> bool {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::GainLife,
+                        ..
+                    }
+                )
+            })
+        }
+
+        fn unrepresentable(player: PlayerId) -> LifeChangeError {
+            LifeChangeError::Unrepresentable(LifeChangeUnrepresentable { player })
+        }
+
+        /// Outside an ingress window, ordinary-policy helpers use the
+        /// compatibility skip (no mutation or `LifeChanged`); `try_*` entries
+        /// report an unrepresentable result. One below the limit both apply. A
+        /// nested window is restored untouched on close.
+        #[test]
+        fn ordinary_entries_skip_and_try_entries_reject_unrepresentable_results() {
+            let mut state = GameState::new_two_player(42);
+            let player = PlayerId(0);
+
+            // Gain: life i32::MAX - 1, gain 2.
+            state.players[0].life = i32::MAX - 1;
+            let mut events = Vec::new();
+            assert_eq!(apply_life_gain(&mut state, player, 2, &mut events), Ok(0));
+            assert_eq!(state.players[0].life, i32::MAX - 1);
+            assert_eq!(state.players[0].life_gained_this_turn, 0);
+            assert_eq!(life_changed_count(&events), 0);
+            assert_eq!(
+                try_apply_life_gain(&mut state, player, 2, &mut events),
+                Err(unrepresentable(player))
+            );
+            assert_eq!(state.players[0].life, i32::MAX - 1);
+            assert_eq!(life_changed_count(&events), 0);
+            assert_eq!(state.ingress_life_window, None, "the window closes");
+
+            // Loss: life i32::MIN + 1, lose 2.
+            state.players[0].life = i32::MIN + 1;
+            assert_eq!(apply_life_loss(&mut state, player, 2, &mut events), Ok(0));
+            assert_eq!(state.players[0].life, i32::MIN + 1);
+            assert_eq!(state.players[0].life_lost_this_turn, 0);
+            assert_eq!(
+                try_apply_life_loss(&mut state, player, 2, &mut events),
+                Err(unrepresentable(player))
+            );
+            assert_eq!(state.players[0].life, i32::MIN + 1);
+            assert_eq!(life_changed_count(&events), 0);
+
+            // An amount beyond the i32 delta is unrepresentable on its own.
+            state.players[0].life = 0;
+            assert_eq!(
+                apply_life_gain(&mut state, player, u32::MAX, &mut events),
+                Ok(0)
+            );
+            assert_eq!(
+                try_apply_life_gain(&mut state, player, u32::MAX, &mut events),
+                Err(unrepresentable(player))
+            );
+            assert_eq!(state.players[0].life, 0);
+
+            // One below the limit both apply.
+            state.players[0].life = i32::MAX - 2;
+            assert_eq!(apply_life_gain(&mut state, player, 2, &mut events), Ok(2));
+            assert_eq!(state.players[0].life, i32::MAX);
+            state.players[0].life = i32::MAX - 2;
+            assert_eq!(
+                try_apply_life_gain(&mut state, player, 2, &mut events),
+                Ok(2)
+            );
+            assert_eq!(state.players[0].life, i32::MAX);
+            assert_eq!(life_changed_count(&events), 2);
+        }
+
+        /// Windows nest: a `try_*` entry opened inside an outer window reports
+        /// only to its own caller and restores the outer window exactly.
+        #[test]
+        fn try_entry_restores_the_outer_ingress_window() {
+            let mut state = GameState::new_two_player(42);
+            let player = PlayerId(0);
+            let outer = Some(IngressLifeWindow {
+                failed_player: Some(PlayerId(1)),
+            });
+            let mut events = Vec::new();
+
+            state.ingress_life_window = outer;
+            state.players[0].life = i32::MAX - 1;
+            assert_eq!(
+                try_apply_life_gain(&mut state, player, 2, &mut events),
+                Err(unrepresentable(player))
+            );
+            assert_eq!(
+                state.ingress_life_window, outer,
+                "a failing inner window must leave the outer one untouched"
+            );
+
+            state.players[0].life = i32::MAX - 2;
+            assert_eq!(
+                try_apply_life_gain(&mut state, player, 2, &mut events),
+                Ok(2)
+            );
+            assert_eq!(
+                state.ingress_life_window, outer,
+                "a representable inner call must restore the outer window exactly"
+            );
+        }
+
+        /// Inside an open ingress window an ordinary entry records its failure
+        /// for the ingress caller instead of skipping silently, and once a failure
+        /// is recorded no later settlement in that window edits life.
+        #[test]
+        fn ordinary_entry_inside_an_ingress_window_records_the_failure() {
+            let mut state = GameState::new_two_player(42);
+            let player = PlayerId(0);
+            let mut events = Vec::new();
+            state.players[0].life = i32::MAX - 1;
+
+            let (results, window) = within_ingress_life_window(&mut state, |state| {
+                let failing = apply_life_gain(state, player, 2, &mut events);
+                // Representable on its own, but the window already failed.
+                let later = apply_life_gain(state, player, 1, &mut events);
+                (failing, later)
+            });
+
+            assert_eq!(results, (Ok(0), Ok(0)));
+            assert_eq!(
+                window,
+                IngressLifeWindow {
+                    failed_player: Some(player)
+                }
+            );
+            assert_eq!(state.players[0].life, i32::MAX - 1);
+            assert_eq!(life_changed_count(&events), 0);
+            assert_eq!(state.ingress_life_window, None, "the window closes");
+        }
+
+        /// Activates Lochmere Serpent's "{B}, Sacrifice a Swamp: You gain 1 life
+        /// and draw a card." with `doublers` in play, returning the runner, the
+        /// activation's events and P0's hand size before it.
+        fn activate_serpent_gain(
+            start_life: i32,
+            doublers: &[&str],
+        ) -> (GameRunner, Result<Vec<GameEvent>, EngineError>, usize) {
+            let mut scenario = scenario();
+            scenario.with_life(P0, start_life);
+            let serpent = add_card(&mut scenario, P0, "Lochmere Serpent");
+            for doubler in doublers {
+                add_card(&mut scenario, P0, doubler);
+            }
+            let sacrificed = add_card(&mut scenario, P0, "Swamp");
+            add_card(&mut scenario, P0, "Swamp");
+            scenario.with_mana_pool(P0, vec![mana(ManaType::Black)]);
+            scenario.with_library_top(P0, &["Filler One", "Filler Two"]);
+            let mut runner = scenario.build();
+            let hand_before = runner.state().players[0].hand.len();
+            let events = runner
+                .activate(serpent, 1)
+                .pay_with(&[sacrificed])
+                .try_resolve()
+                .map(|outcome| outcome.events().to_vec());
+            (runner, events, hand_before)
+        }
+
+        /// A public resolution whose gain exceeds engine capacity fails
+        /// explicitly: the action is rejected and restored, so neither the gain
+        /// nor the rest of the instruction ("draw a card") commits.
+        #[test]
+        fn public_resolution_rejects_the_unrepresentable_gain_and_rolls_back() {
+            // Control: one below the limit — 1 doubled to 2 reaches i32::MAX.
+            let (runner, events, hand_before) =
+                activate_serpent_gain(i32::MAX - 2, &["Rhox Faithmender"]);
+            let events = events.expect("the control activation must resolve");
+            assert!(
+                matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+                "reach guard: the control activation must settle, got {:?}",
+                runner.state().waiting_for
+            );
+            assert_eq!(runner.life(P0), i32::MAX);
+            assert_eq!(runner.state().players[0].life_gained_this_turn, 2);
+            assert_eq!(runner.state().players[0].hand.len(), hand_before + 1);
+            assert!(gain_life_effect_resolved(&events));
+
+            // Engine-unrepresentable: i32::MAX - 1 + 2 overflows; the public
+            // action is rejected, so neither the gain nor the draw commits.
+            let (runner, events, hand_before) =
+                activate_serpent_gain(i32::MAX - 1, &["Rhox Faithmender"]);
+            let error = events.expect_err("the unrepresentable gain must reject the action");
+            assert!(
+                matches!(
+                    error,
+                    EngineError::LifeChangeUnrepresentable { player } if player == P0
+                ),
+                "expected the typed unrepresentable-life rejection, got {error:?}"
+            );
+            assert_eq!(runner.life(P0), i32::MAX - 1);
+            assert_eq!(runner.state().players[0].life_gained_this_turn, 0);
+            assert_eq!(
+                runner.state().players[0].hand.len(),
+                hand_before,
+                "the rejected resolution must not run the draw"
+            );
+            assert_eq!(
+                runner.state().stack.len(),
+                1,
+                "the rejected resolution leaves the ability on the stack"
+            );
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::Priority { .. }
+            ));
+        }
+
+        /// A parked life event that resumes beyond engine capacity rejects the
+        /// answering public action and restores its prompt; it never commits the
+        /// gain or the rest of the instruction.
+        #[test]
+        fn parked_gain_rejects_unrepresentable_resume_and_keeps_the_prompt() {
+            let doublers = ["Rhox Faithmender", "Boon Reflection"];
+            for (start_life, applies) in [(i32::MAX - 4, true), (i32::MAX - 3, false)] {
+                let (mut runner, result, hand_before) =
+                    activate_serpent_gain(start_life, &doublers);
+                result.expect("the activation must stop at the ordering prompt");
+                assert!(
+                    matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::ReplacementChoice { .. }
+                    ),
+                    "reach guard: two doublers must park an ordering prompt, got {:?}",
+                    runner.state().waiting_for
+                );
+                assert_eq!(
+                    runner
+                        .state()
+                        .pending_replacement
+                        .as_ref()
+                        .map(|pending| pending.unrepresentable_life_change),
+                    Some(UnrepresentablePolicy::Reject),
+                    "a gain parked inside the activation's action window rejects on resume"
+                );
+                let mut events = Vec::new();
+                let mut rejected = None;
+                for _ in 0..4 {
+                    if !matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::ReplacementChoice { .. }
+                    ) {
+                        break;
+                    }
+                    match runner.act(GameAction::ChooseReplacement { index: 0 }) {
+                        Ok(result) => events.extend(result.events),
+                        Err(error) => {
+                            rejected = Some(error);
+                            break;
+                        }
+                    }
+                }
+                if applies {
+                    assert!(
+                        rejected.is_none(),
+                        "the representable resume must be accepted: {rejected:?}"
+                    );
+                    assert!(matches!(
+                        runner.state().waiting_for,
+                        WaitingFor::Priority { .. }
+                    ));
+                    assert_eq!(
+                        runner.state().players[0].hand.len(),
+                        hand_before + 1,
+                        "the draw after the gain must run (start life {start_life})"
+                    );
+                    assert_eq!(runner.life(P0), i32::MAX, "1 doubled twice is 4");
+                    assert_eq!(life_changed_count(&events), 1);
+                } else {
+                    let error =
+                        rejected.expect("the unrepresentable resume must reject its answer");
+                    assert!(
+                        matches!(
+                            error,
+                            EngineError::LifeChangeUnrepresentable { player } if player == P0
+                        ),
+                        "expected the typed unrepresentable-life rejection, got {error:?}"
+                    );
+                    assert!(
+                        matches!(
+                            runner.state().waiting_for,
+                            WaitingFor::ReplacementChoice { .. }
+                        ),
+                        "the rejected answer must restore its prompt, got {:?}",
+                        runner.state().waiting_for
+                    );
+                    assert_eq!(runner.life(P0), start_life);
+                    assert_eq!(runner.state().players[0].life_gained_this_turn, 0);
+                    assert_eq!(runner.state().players[0].hand.len(), hand_before);
+                    assert_eq!(life_changed_count(&events), 0);
+                }
+            }
+        }
+
+        /// Casts Dazzling Reflection ("You gain life equal to target creature's
+        /// power. The next time that creature would deal damage this turn,
+        /// prevent that damage.") on a P0 creature of `power` with `doublers` in
+        /// play; any ordering prompt is answered with index 0 and must be
+        /// accepted. Returns the runner, the cast's events and the spell.
+        fn cast_dazzling_reflection(
+            power: i32,
+            doublers: &[&str],
+        ) -> (GameRunner, Result<Vec<GameEvent>, EngineError>, ObjectId) {
+            cast_dazzling_reflection_answering(power, doublers, Some(0))
+        }
+
+        /// As [`cast_dazzling_reflection`], with the ordering answer chosen by the
+        /// caller: `None` halts the cast at the CR 616.1 prompt instead.
+        fn cast_dazzling_reflection_answering(
+            power: i32,
+            doublers: &[&str],
+            replacement_choice: Option<usize>,
+        ) -> (GameRunner, Result<Vec<GameEvent>, EngineError>, ObjectId) {
+            let mut scenario = scenario();
+            for doubler in doublers {
+                add_card(&mut scenario, P0, doubler);
+            }
+            let creature = scenario.add_creature(P0, "Test Behemoth", power, 1).id();
+            let spell = scenario.add_real_card(
+                P0,
+                "Dazzling Reflection",
+                Zone::Hand,
+                crate::test_support::shared_card_db(),
+            );
+            scenario.with_mana_pool(P0, vec![mana(ManaType::White), mana(ManaType::White)]);
+            let mut runner = scenario.build();
+            let cast = runner
+                .cast(spell)
+                // Both of the spell's target slots name the same creature; with
+                // Rhox Faithmender also on the battlefield the second slot has two
+                // legal creatures, so it must be declared explicitly.
+                .target_object(creature)
+                .target_object(creature);
+            let events = match replacement_choice {
+                Some(index) => cast.replacement_choice(index),
+                None => cast,
+            }
+            .try_resolve()
+            .map(|outcome| outcome.events().to_vec());
+            (runner, events, spell)
+        }
+
+        fn prevent_damage_resolved(events: &[GameEvent]) -> bool {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::PreventDamage,
+                        ..
+                    }
+                )
+            })
+        }
+
+        /// A replacement-quantity overflow (Boon Reflection doubling
+        /// 1,100,000,000 to 2,200,000,000, past `i32::MAX`) rejects the resolving
+        /// action: the whole spell rolls back, so the gain, the prevention, and
+        /// the graveyard move all wait for an explicit caller decision.
+        #[test]
+        fn ordinary_replacement_quantity_overflow_rejects_the_resolution() {
+            // Control A: no doubler — the whole power is gained.
+            let (runner, events, _) = cast_dazzling_reflection(1_100_000_000, &[]);
+            let events = events.expect("the representable cast must resolve");
+            assert_eq!(runner.life(P0), 1_100_000_020);
+            assert!(prevent_damage_resolved(&events));
+
+            // Control B: Boon Reflection is live and applies when representable.
+            let (runner, events, _) = cast_dazzling_reflection(500_000_000, &["Boon Reflection"]);
+            let events = events.expect("the representable cast must resolve");
+            assert_eq!(runner.life(P0), 1_000_000_020);
+            assert!(prevent_damage_resolved(&events));
+
+            // The overflow: the resolving action is rejected and restored whole.
+            let (runner, events, spell) =
+                cast_dazzling_reflection(1_100_000_000, &["Boon Reflection"]);
+            let error = events.expect_err("the overflow must reject the resolution");
+            assert!(
+                matches!(
+                    error,
+                    EngineError::LifeChangeUnrepresentable { player } if player == P0
+                ),
+                "expected the typed unrepresentable-life rejection, got {error:?}"
+            );
+            assert_eq!(runner.life(P0), 20);
+            assert_eq!(runner.state().players[0].life_gained_this_turn, 0);
+            assert!(
+                !runner.state().players[0].graveyard.contains(&spell),
+                "the rejected resolution leaves the spell on the stack"
+            );
+            assert_eq!(runner.state().stack.len(), 1);
+            assert_eq!(
+                runner.state().replacement_quantity_overflow,
+                None,
+                "the rejected action restores the pre-resolution record"
+            );
+        }
+
+        /// A choice-resumed ordinary delivery whose later answer overflows
+        /// rejects the answering action and restores its ordering prompt.
+        #[test]
+        fn choice_resumed_ordinary_quantity_overflow_rejects_the_answer() {
+            // Reach guard: the same setup, left unanswered, halts at the CR 616.1
+            // ordering prompt for the two doublers, so the answer below is a real
+            // prompt answer rather than a no-prompt degenerate path.
+            let (prompted, _, _) = cast_dazzling_reflection_answering(
+                600_000_000,
+                &["Rhox Faithmender", "Boon Reflection"],
+                None,
+            );
+            assert!(
+                matches!(
+                    prompted.state().waiting_for,
+                    WaitingFor::ReplacementChoice {
+                        candidate_count: 2,
+                        ..
+                    }
+                ),
+                "reach guard: two doublers must park an ordering prompt, got {:?}",
+                prompted.state().waiting_for
+            );
+
+            // 600,000,000 doubled is 1,200,000,000; doubled again overflows i32.
+            let (runner, events, spell) =
+                cast_dazzling_reflection(600_000_000, &["Rhox Faithmender", "Boon Reflection"]);
+            let error = events.expect_err("the overflow must reject the answer");
+            assert!(
+                matches!(
+                    error,
+                    EngineError::LifeChangeUnrepresentable { player } if player == P0
+                ),
+                "expected the typed unrepresentable-life rejection, got {error:?}"
+            );
+            assert_eq!(runner.life(P0), 20);
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ));
+            assert!(!runner.state().players[0].graveyard.contains(&spell));
+            assert_eq!(runner.state().replacement_quantity_overflow, None);
+        }
+
+        /// The settle steps take a recorded overflow under each policy.
+        #[test]
+        fn settle_takes_the_replacement_quantity_overflow_under_each_policy() {
+            let player = PlayerId(0);
+            let source = ObjectId(1);
+            let gain_event = || ProposedEvent::LifeGain {
+                player_id: player,
+                amount: 3,
+                applied: HashSet::new(),
+            };
+            let loss_event = || ProposedEvent::LifeLoss {
+                player_id: player,
+                amount: 3,
+                applied: HashSet::new(),
+            };
+            let mut events = Vec::new();
+
+            // Ordinary entries: the capacity-exceeding change is skipped by the
+            // compatibility fallback outside a public action boundary.
+            let mut state = GameState::new_two_player(42);
+            state.record_replacement_quantity_overflow(source);
+            assert_eq!(apply_life_gain(&mut state, player, 3, &mut events), Ok(0));
+            assert_eq!(state.replacement_quantity_overflow, None);
+            state.record_replacement_quantity_overflow(source);
+            assert_eq!(apply_life_loss(&mut state, player, 3, &mut events), Ok(0));
+            assert_eq!(state.replacement_quantity_overflow, None);
+            assert_eq!(state.players[0].life, 20);
+            assert_eq!(state.players[0].life_gained_this_turn, 0);
+            assert_eq!(state.players[0].life_lost_this_turn, 0);
+            assert_eq!(life_changed_count(&events), 0);
+
+            // Reject policy, through the ingress entries: the loop head stops at
+            // the pre-set record and the settle step reports the error.
+            state.record_replacement_quantity_overflow(source);
+            assert_eq!(
+                try_apply_life_gain(&mut state, player, 3, &mut events),
+                Err(unrepresentable(player))
+            );
+            assert_eq!(state.replacement_quantity_overflow, None);
+            state.record_replacement_quantity_overflow(source);
+            assert_eq!(
+                try_apply_life_loss(&mut state, player, 3, &mut events),
+                Err(unrepresentable(player))
+            );
+            assert_eq!(state.replacement_quantity_overflow, None);
+
+            // Reject policy, resume path.
+            state.record_replacement_quantity_overflow(source);
+            assert_eq!(
+                settle_life_gain_after_choice(
+                    &mut state,
+                    gain_event(),
+                    UnrepresentablePolicy::Reject,
+                    &mut events
+                ),
+                Err(LifeChangeUnrepresentable { player })
+            );
+            assert_eq!(state.replacement_quantity_overflow, None);
+            state.record_replacement_quantity_overflow(source);
+            assert_eq!(
+                settle_life_loss_after_choice(
+                    &mut state,
+                    loss_event(),
+                    UnrepresentablePolicy::Reject,
+                    &mut events
+                ),
+                Err(LifeChangeUnrepresentable { player })
+            );
+            assert_eq!(state.replacement_quantity_overflow, None);
+
+            // Inside an open window an ordinary entry records the failure.
+            state.record_replacement_quantity_overflow(source);
+            let (result, window) = within_ingress_life_window(&mut state, |state| {
+                apply_life_gain(state, player, 3, &mut events)
+            });
+            assert_eq!(result, Ok(0));
+            assert_eq!(window.failed_player, Some(player));
+            assert_eq!(state.replacement_quantity_overflow, None);
+            state.record_replacement_quantity_overflow(source);
+            let (result, window) = within_ingress_life_window(&mut state, |state| {
+                apply_life_loss(state, player, 3, &mut events)
+            });
+            assert_eq!(result, Ok(0));
+            assert_eq!(window.failed_player, Some(player));
+            assert_eq!(state.replacement_quantity_overflow, None);
+
+            // A window that already failed still has the record taken.
+            state.ingress_life_window = Some(IngressLifeWindow {
+                failed_player: Some(PlayerId(1)),
+            });
+            state.record_replacement_quantity_overflow(source);
+            assert_eq!(apply_life_gain(&mut state, player, 3, &mut events), Ok(0));
+            assert_eq!(state.replacement_quantity_overflow, None);
+            state.record_replacement_quantity_overflow(source);
+            assert_eq!(apply_life_loss(&mut state, player, 3, &mut events), Ok(0));
+            assert_eq!(state.replacement_quantity_overflow, None);
+            state.ingress_life_window = None;
+
+            // An amount of 0 never runs the pipeline: the record is untouched.
+            state.record_replacement_quantity_overflow(source);
+            assert_eq!(apply_life_gain(&mut state, player, 0, &mut events), Ok(0));
+            assert_eq!(
+                state.replacement_quantity_overflow,
+                Some(crate::types::game_state::ReplacementQuantityOverflow { source })
+            );
+            assert_eq!(life_changed_count(&events), 0);
+        }
+
+        /// CR 119.3: an ordinary change that is representable still applies in
+        /// full when it is lethal (effect and damage paths), so the shared edit's
+        /// fallibility never turns a legal lethal loss into a skip.
+        #[test]
+        fn lethal_life_loss_still_applies_through_effect_and_damage_paths() {
+            // Sign in Blood: "Target player draws two cards and loses 2 life."
+            let mut scenario = scenario();
+            scenario.with_life(P1, 2);
+            scenario.with_library_top(P1, &["Filler One", "Filler Two", "Filler Three"]);
+            let sign = scenario.add_real_card(
+                P0,
+                "Sign in Blood",
+                Zone::Hand,
+                crate::test_support::shared_card_db(),
+            );
+            scenario.with_mana_pool(P0, vec![mana(ManaType::Black), mana(ManaType::Black)]);
+            let mut runner = scenario.build();
+            let outcome = runner.cast(sign).target_player(P1).resolve();
+            // CR 800.4a: the lethal loss eliminates P1 at the boundary and their
+            // hand leaves the game with them, so the draw is read from its events
+            // (the final hand size is 0 either way). Draw precedes the loss.
+            let drawn = outcome
+                .events()
+                .iter()
+                .filter(|event| {
+                    matches!(event, GameEvent::CardDrawn { player_id, .. } if *player_id == P1)
+                })
+                .count();
+            assert_eq!(
+                drawn, 2,
+                "reach guard: the draw half must run before the loss"
+            );
+            outcome.assert_life_delta(P1, -2);
+            assert_eq!(runner.life(P1), 0);
+            assert!(
+                matches!(runner.state().waiting_for, WaitingFor::GameOver { .. }),
+                "P1 at 0 life must lose to state-based actions, got {:?}",
+                runner.state().waiting_for
+            );
+
+            // Lightning Bolt: "Lightning Bolt deals 3 damage to any target."
+            let mut scenario = self::scenario();
+            scenario.with_life(P1, 3);
+            let bolt = scenario.add_real_card(
+                P0,
+                "Lightning Bolt",
+                Zone::Hand,
+                crate::test_support::shared_card_db(),
+            );
+            scenario.with_mana_pool(P0, vec![mana(ManaType::Red)]);
+            let mut runner = scenario.build();
+            let outcome = runner.cast(bolt).target_player(P1).resolve();
+            outcome.assert_zone(&[bolt], Zone::Graveyard);
+            outcome.assert_life_delta(P1, -3);
+            assert_eq!(runner.life(P1), 0);
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::GameOver { .. }
+            ));
+        }
+
+        /// The sibling difference helper: an `i32` overflow is the receiver's
+        /// unrepresentable change and reports `None` (never a substitute zero), while
+        /// a representable difference — including `i32::MIN` — passes through.
+        #[test]
+        fn life_total_difference_reports_overflow_as_failure() {
+            let mut state = GameState::new_two_player(42);
+            assert_eq!(
+                life_total_difference(&mut state, P0, 7, 20, "test"),
+                Some(-13)
+            );
+            assert_eq!(
+                life_total_difference(&mut state, P0, 20, 7, "test"),
+                Some(13)
+            );
+            assert_eq!(
+                life_total_difference(&mut state, P0, i32::MAX, -1, "test"),
+                None
+            );
+            assert_eq!(
+                life_total_difference(&mut state, P0, i32::MIN, 1, "test"),
+                None
+            );
+            assert_eq!(
+                life_total_difference(&mut state, P0, i32::MIN, 0, "test")
+                    .expect("i32::MIN stays representable as a difference")
+                    .unsigned_abs(),
+                1 << 31,
+                "its magnitude needs unsigned_abs"
+            );
+        }
     }
 }

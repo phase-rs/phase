@@ -1,4 +1,4 @@
-use crate::types::ability::{EffectError, PtValue, ResolvedAbility};
+use crate::types::ability::{EffectError, PtValue, ResolvedAbility, TokenAttackDestination};
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::GameState;
 
@@ -28,6 +28,7 @@ pub fn resolve(
             owner: crate::types::ability::TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: TokenAttackDestination::ControllerChooses,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],

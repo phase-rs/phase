@@ -15,9 +15,8 @@ export function TurnBanner() {
   const showTurnBanner = useUiStore((s) => s.showTurnBanner);
   const turnBannerText = useUiStore((s) => s.turnBannerText);
   const turnBannerNumber = useUiStore((s) => s.turnBannerNumber);
+  const isYourTurn = useUiStore((s) => s.turnBannerIsYours);
   const shouldReduceMotion = useReducedMotion();
-
-  const isYourTurn = turnBannerText.toUpperCase().includes("YOUR");
 
   const colors = isYourTurn
     ? {

@@ -2,16 +2,16 @@
 //!
 //! Parser AST verification — VERIFIED against engine source:
 //! - `StaticCondition::DevotionGE { colors: Vec<ManaColor>, threshold: u32 }` at
-//!   `crates/engine/src/types/ability.rs:7070` — the Theros gods and
+//!   `crates/phase-ast/src/types/ability.rs` — the Theros gods and
 //!   devotion-gated statics ("as long as your devotion to black is less than
 //!   five, Erebos isn't a creature", parsed as `RemoveType{Creature}` gated on
 //!   `Not{DevotionGE}`).
 //! - `QuantityRef::Devotion { colors: DevotionColors }` at
-//!   `crates/engine/src/types/ability.rs:5574` — scaling payoffs (Gray
+//!   `crates/phase-ast/src/types/ability.rs` — scaling payoffs (Gray
 //!   Merchant's drain, Anax's power) and Nykthos-style mana ramp (`Effect::Mana`
 //!   whose `ManaProduction` count is devotion).
 //! - `DevotionColors::{Fixed(Vec<ManaColor>), ChosenColor}` at
-//!   `crates/engine/src/types/ability.rs:1818`.
+//!   `crates/phase-ast/src/types/ability.rs`.
 //! - Pip density reuses `ManaCost::count_colored_pips` (`types/mana.rs:1746`),
 //!   the single CR 700.5 counting authority (hybrid `{G/W}{G/W}` counts as 2).
 //!

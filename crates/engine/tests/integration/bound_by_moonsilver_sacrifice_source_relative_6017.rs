@@ -72,6 +72,7 @@ fn bound_by_moonsilver_sacrifice_another_is_source_relative() {
         .act(GameAction::ActivateAbility {
             source_id: aura,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating Bound by Moonsilver's sacrifice ability must succeed");
 

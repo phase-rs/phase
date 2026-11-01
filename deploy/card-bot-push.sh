@@ -52,6 +52,7 @@ cd "$(dirname "$0")/.."
 # The seam pins (formats, endpoints, server directory) guard what the image
 # ships; a failure aborts before anything is built (set -e).
 echo "Testing card-bot..."
+bun scripts/protocol-versions.mjs generate
 bun test scripts/card-bot
 
 echo "Building ${IMAGE}..."
@@ -59,7 +60,7 @@ echo "Building ${IMAGE}..."
 # --provenance=false keeps the image in the classic format the host's older
 # Docker (20.10.x) can `docker load`.
 docker buildx build --platform linux/amd64 --provenance=false --load \
-  -f deploy/card-bot.Dockerfile -t "$IMAGE" scripts/card-bot
+  -f deploy/card-bot.Dockerfile -t "$IMAGE" .
 
 echo "Uploading image to ${HOST}..."
 docker save "$IMAGE" | ssh "${HOST}" "${detect} \$D load"

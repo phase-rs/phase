@@ -37,7 +37,9 @@
     "approve": "Approve",
     "decline": "Decline",
     "cancel": "Cancel request",
-    "declinedToast": "Takeback request declined"
+    "declinedToast": "Takeback request declined",
+    "cancelledToast": "Takeback request cancelled",
+    "withdrawnToast": "Takeback request withdrawn: a player left the game"
   },
   "connectionDot": {
     "connected": "Connected",
@@ -285,7 +287,8 @@
     "botGameNotice": "Hosting Discord game {{code}}. Connection and privacy come from the Discord post.",
     "botSeedIgnored": "Some settings from the Discord post couldn't be used here — check the format and player count.",
     "botP2PNotice": "Your device runs the game. Keep the app open and stay connected.",
-    "botServerNotice": "A dedicated server runs the game. It may slow down or go offline."
+    "botServerNotice": "A dedicated server runs the game. It may slow down or go offline.",
+    "poolBracketConflict": "None of the {{selected}} selected decks are legal under the current filters, so Random seats draw from all {{total}} decks."
   },
   "page": {
     "deckRejected": "Deck was rejected by the host.",
@@ -351,5 +354,11 @@
   "deepLink": {
     "gameInProgressTitle": "Game in progress",
     "gameInProgressBody": "Finish or leave your current game, then open the link again."
+  },
+  "p2pStateWithheld": "The game state after this action is too large to send, so this board is out of date. A player can request a takeback of the last action from the game menu to continue (for a loop, take it with a smaller count).",
+  "terminalRecovery": {
+    "finalViewsUnpublished": "Concede reached a Full terminal state, but the native final views could not be published.",
+    "concedeUnreconciled": "Could not reconcile the Concede outcome; the seat remains fenced.",
+    "receiptUnsent": "The durable terminal receipt could not be sent; waiting for redelivery"
   }
 }

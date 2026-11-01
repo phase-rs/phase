@@ -12,8 +12,9 @@ use crate::types::replacements::ReplacementEvent;
 ///
 /// Mirrors `create_draw_replacement::resolve` for the planar-die planeswalk
 /// event class: it builds a `ReplacementDefinition` for
-/// `ReplacementEvent::Planeswalk` whose substitute is carried in
-/// `runtime_execute` (a `ResolvedAbility`, so the heterogeneous payload Effect
+/// `ReplacementEvent::Planeswalk` whose substitute is named by
+/// `runtime_execute` (a handle to a `ResolvedAbility` in
+/// `GameState::replacement_continuations`, so the heterogeneous payload Effect
 /// resolves through the post-replacement continuation drain in
 /// `effects::planeswalk::resolve`'s `Prevented` arm).
 ///
@@ -49,29 +50,28 @@ pub fn resolve(
     );
 
     let mut shield = ReplacementDefinition::new(ReplacementEvent::Planeswalk);
-    shield.runtime_execute = Some(Box::new(substitute)); // CR 614.6: substitute
     shield.consume_on_apply = false; // CR 614.5: continuous within the window
     shield.valid_player = Some(ReplacementPlayerScope::AnyPlayer); // "a player"
     shield.planeswalk_scope =
         Some(crate::types::ability::PlaneswalkReplacementScope::PlanarDieOnly);
     // Duration::UntilNextTurnOf { Controller } → RestrictionExpiry::UntilPlayerNextTurn.
-    match crate::game::effects::add_target_replacement::expiry_from_duration(
-        ability.duration.as_ref(),
-    ) {
-        crate::game::effects::add_target_replacement::ReplacementDurationExpiry::Explicit(
-            expiry,
-        ) => shield.expiry = Some(expiry),
+    match crate::types::ability::expiry_from_duration(ability.duration.as_ref()) {
+        crate::types::ability::ReplacementDurationExpiry::Explicit(expiry) => {
+            shield.expiry = Some(expiry)
+        }
         // CR 611.2a: the controller-scoped class, named here rather than
         // re-derived — this resolver's own comment above ("Duration::
         // UntilNextTurnOf { Controller }") is exactly this arm.
-        crate::game::effects::add_target_replacement::ReplacementDurationExpiry::ExplicitControllerNextTurn => {
-            shield.expiry = Some(crate::types::ability::RestrictionExpiry::UntilPlayerNextTurn {
-                player: ability.controller,
-            });
+        crate::types::ability::ReplacementDurationExpiry::ExplicitControllerNextTurn => {
+            shield.expiry = Some(
+                crate::types::ability::RestrictionExpiry::UntilPlayerNextTurn {
+                    player: ability.controller,
+                },
+            );
         }
-        crate::game::effects::add_target_replacement::ReplacementDurationExpiry::Unstated => {}
-        crate::game::effects::add_target_replacement::ReplacementDurationExpiry::GateControlled
-        | crate::game::effects::add_target_replacement::ReplacementDurationExpiry::Unsupported => {
+        crate::types::ability::ReplacementDurationExpiry::Unstated => {}
+        crate::types::ability::ReplacementDurationExpiry::GateControlled
+        | crate::types::ability::ReplacementDurationExpiry::Unsupported => {
             // CR 611.2a: do not install a planeswalk replacement with a stated
             // duration this lifecycle cannot enforce.
             return Ok(());
@@ -79,6 +79,9 @@ pub fn resolve(
     }
     shield.source_controller = Some(ability.controller);
 
+    // CR 614.6: the substitute is installed only on the hosting path, so the early
+    // return above leaves the arena unchanged.
+    shield.runtime_execute = Some(state.install_replacement_continuation(substitute));
     state.pending_damage_replacements.push(shield);
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::CreatePlaneswalkReplacement,
@@ -155,11 +158,10 @@ mod tests {
             "expiry comes from the ability's until-next-turn-of-controller duration"
         );
         assert_eq!(shield.source_controller, Some(controller));
-        // CR 614.6: the substitute (chaos ensues) rides in runtime_execute.
-        let runtime = shield
-            .runtime_execute
-            .as_ref()
-            .expect("substitute must ride in runtime_execute");
+        // CR 614.6: the substitute (chaos ensues) is named by runtime_execute.
+        let runtime = state
+            .replacement_rider(shield)
+            .expect("substitute must be named by runtime_execute");
         assert!(matches!(runtime.effect, Effect::ChaosEnsues));
     }
 }

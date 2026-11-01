@@ -231,6 +231,8 @@ interface UiStoreState {
   showTurnBanner: boolean;
   turnBannerText: string;
   turnBannerNumber: number | null;
+  /** Whether the banner announces the local viewer's own turn (drives styling). */
+  turnBannerIsYours: boolean;
   /** Active dice-roll / coin-flip overlay payload, or null when idle. Set by
    *  `flashDiceRoll`, auto-advanced through `diceRollQueue`, then cleared. */
   diceRoll: DiceRollPayload | null;
@@ -363,7 +365,7 @@ interface UiStoreActions {
   setCombatClickHandler: (handler: ((id: ObjectId) => void) | null) => void;
   setPreviewSticky: (sticky: boolean) => void;
   setDragging: (dragging: boolean) => void;
-  flashTurnBanner: (text: string, turnNumber: number) => void;
+  flashTurnBanner: (text: string, turnNumber: number, isYourTurn: boolean) => void;
   /** Show the dice-roll / coin-flip overlay for the engine's already-known
    *  result. No-ops when animation speed is "instant" (0). */
   flashDiceRoll: (payload: DiceRollPayload) => void;
@@ -446,6 +448,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   showTurnBanner: false,
   turnBannerText: "",
   turnBannerNumber: null,
+  turnBannerIsYours: false,
   diceRoll: null,
   diceRollQueue: [],
   scryOutcome: null,
@@ -753,7 +756,7 @@ export const useUiStore = create<UiStore>()((set, get) => ({
   setCombatClickHandler: (handler) => set({ combatClickHandler: handler }),
   setPreviewSticky: (sticky) => set({ previewSticky: sticky }),
   setDragging: (dragging) => set({ isDragging: dragging }),
-  flashTurnBanner: (text, turnNumber) => {
+  flashTurnBanner: (text, turnNumber, isYourTurn) => {
     // Banner duration scales with both the global Animation Speed slider
     // (animationSpeedMultiplier) and the per-category Banner Pacing slider
     // (pacingMultipliers.banners). When animationSpeedMultiplier is 0
@@ -763,7 +766,12 @@ export const useUiStore = create<UiStore>()((set, get) => ({
     if (speed <= 0) return;
     const banner = prefs.pacingMultipliers.banners;
     const duration = TURN_BANNER_DURATION_MS * speed * banner;
-    set({ showTurnBanner: true, turnBannerText: text, turnBannerNumber: turnNumber });
+    set({
+      showTurnBanner: true,
+      turnBannerText: text,
+      turnBannerNumber: turnNumber,
+      turnBannerIsYours: isYourTurn,
+    });
     setTimeout(() => set({ showTurnBanner: false }), duration);
   },
   flashDiceRoll: (payload) => {

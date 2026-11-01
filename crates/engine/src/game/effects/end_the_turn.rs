@@ -19,7 +19,7 @@ pub fn resolve(
 ) -> Result<(), EffectError> {
     super::end_phase::clear_preexisting_unstacked_triggers(state);
 
-    if !super::end_phase::exile_nonresolving_stack_objects(state, ability.source_id, events) {
+    if !super::end_phase::exile_every_stack_object(state, ability.source_id, events) {
         return Ok(());
     }
 
@@ -27,11 +27,8 @@ pub fn resolve(
     // triggered abilities are put on the stack as part of this step.
     crate::game::sba::check_state_based_actions(state, events);
 
-    // CR 724.1d: Remove all creatures and planeswalkers from combat. Clearing
-    // the combat state is the engine's idiom for ending combat (see the
-    // end-of-combat handling in `turns.rs`); attacking/blocking status is
-    // derived from `state.combat`.
-    state.combat = None;
+    // CR 724.1d: Remove all creatures and planeswalkers from combat.
+    crate::game::turns::remove_all_from_combat(state);
 
     // CR 724.1d: Skip straight to the cleanup step (skipping any intervening
     // phases/steps, including the end step — CR 724.1e).

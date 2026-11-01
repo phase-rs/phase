@@ -12,6 +12,7 @@ use engine::game::triggers::drain_order_triggers_with_identity;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost};
@@ -1522,6 +1523,7 @@ fn boa_color_survives_an_intervening_number_choice() {
         .act(GameAction::ActivateAbility {
             source_id: boa,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate");
     let mut answers = vec!["White", "3"].into_iter();
@@ -1778,6 +1780,7 @@ fn boa_color_survives_an_inline_mana_ability_paying_its_cost() {
             .act(GameAction::ActivateAbility {
                 source_id: boa,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("activate");
         for _ in 0..32 {

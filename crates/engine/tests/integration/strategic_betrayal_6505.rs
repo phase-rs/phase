@@ -20,7 +20,8 @@
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
-    AbilityDefinition, ControllerRef, Effect, TargetChoiceTiming, TargetFilter,
+    AbilityDefinition, ControllerRef, Effect, ResolvedAbility, TargetChoiceTiming, TargetFilter,
+    TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
@@ -29,6 +30,10 @@ use engine::types::keywords::{Keyword, WardCost};
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
+
+use super::controller_anaphor_binds_through_context::{
+    main_phase_scenario, mana_value_board, ManaValueBoard,
+};
 
 /// Strategic Betrayal — verbatim Oracle text (used to build every test card).
 const SB_ORACLE: &str = "Target opponent exiles a creature they control and their graveyard.";
@@ -774,6 +779,262 @@ fn origin_leak_compound_exile_primary_leg_stays_battlefield() {
         Some(Zone::Graveyard),
         "the trailing conjunct keeps its own Graveyard origin; got {origin:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// 14. SUBJECT ANTECEDENT — "they" / "that player" in the predicate is the
+//     subject's target player, read through the subject seed.
+// ---------------------------------------------------------------------------
+
+/// No printed card has this shape; it pairs a `Target opponent` subject with a
+/// stack-timed "target cards from their graveyard" leg, against its `Target
+/// player` twin (the Memory's Journey shape).
+#[test]
+fn target_opponent_graveyard_shuffle_matches_its_target_player_twin() {
+    for (name, text) in [
+        (
+            "Anaphor Probe Alpha",
+            "Target opponent shuffles up to two target cards from their graveyard into their library.",
+        ),
+        (
+            "Anaphor Probe Beta",
+            "Target player shuffles up to two target cards from their graveyard into their library.",
+        ),
+    ] {
+        let parsed = parse_oracle_text(text, name, &[], &[], &[]);
+        assert!(
+            !chain_has_unimplemented(&parsed.abilities[0]),
+            "{name} parses cleanly; got {:#?}",
+            parsed.abilities
+        );
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let g1 = scenario.add_creature_to_graveyard(P1, "P1 Grave A", 1, 1).id();
+        let g2 = scenario.add_creature_to_graveyard(P1, "P1 Grave B", 1, 1).id();
+        let g0 = scenario.add_creature_to_graveyard(P0, "P0 Grave", 1, 1).id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, name, true, text)
+            .id();
+        let mut runner = scenario.build();
+
+        let outcome = runner
+            .cast(spell)
+            .target_player(P1)
+            .target_objects(&[g1, g2])
+            .resolve();
+
+        assert_eq!(outcome.zone_of(g1), Zone::Library, "{name}");
+        assert_eq!(outcome.zone_of(g2), Zone::Library, "{name}");
+        assert_eq!(outcome.zone_of(g0), Zone::Graveyard, "{name}");
+    }
+}
+
+/// CR 608.2c + CR 115.10a: "a creature that player controls" is a creature the
+/// target player controls, chosen by that player as the spell resolves. "…a
+/// creature you control" keeps the caster's reading.
+#[test]
+fn target_player_exiles_a_creature_that_player_controls() {
+    const THAT_PLAYER: &str = "Target player exiles a creature that player controls.";
+    const YOU: &str = "Target player exiles a creature you control.";
+
+    let parsed = parse_oracle_text(YOU, "Anaphor Probe Gamma", &[], &[], &[]);
+    let root = &parsed.abilities[0];
+    assert!(!chain_has_unimplemented(root), "got {root:#?}");
+    match find_change_zone(root).map(|node| &*node.effect) {
+        Some(Effect::ChangeZone {
+            target: TargetFilter::Typed(tf),
+            ..
+        }) => assert_eq!(tf.controller, Some(ControllerRef::You)),
+        other => panic!("expected a Typed ChangeZone leg; got {other:?}"),
+    }
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let theirs_a = scenario.add_creature(P1, "P1 Beast A", 2, 2).id();
+    let theirs_b = scenario.add_creature(P1, "P1 Beast B", 3, 3).id();
+    let mine = scenario.add_creature(P0, "P0 Beast", 4, 4).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Anaphor Probe Delta", false, THAT_PLAYER)
+        .id();
+    let mut runner = scenario.build();
+
+    let outcome = runner.cast(spell).target_player(P1).resolve();
+    match outcome.final_waiting_for() {
+        WaitingFor::EffectZoneChoice { player, cards, .. } => {
+            assert_eq!(*player, P1, "the target player chooses");
+            let mut offered = cards.clone();
+            offered.sort();
+            let mut expected = vec![theirs_a, theirs_b];
+            expected.sort();
+            assert_eq!(offered, expected, "only P1's creatures are offered");
+        }
+        other => panic!("expected P1's EffectZoneChoice; got {other:?}"),
+    }
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![theirs_b],
+        })
+        .expect("P1 selects a creature to exile");
+    assert_eq!(runner.state().objects[&theirs_b].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&theirs_a].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&mine].zone, Zone::Battlefield);
+}
+
+const BLOT_OUT: &str = "Target opponent exiles a creature or planeswalker they control with the greatest mana value among creatures and planeswalkers they control.";
+
+/// Every target declared across a resolved ability chain.
+fn declared_chain_targets(ability: &ResolvedAbility) -> Vec<TargetRef> {
+    let mut targets = ability.targets.clone();
+    if let Some(sub) = &ability.sub_ability {
+        targets.extend(declared_chain_targets(sub));
+    }
+    targets
+}
+
+/// Cast Blot Out (or End of the Hunt, the same Oracle text) at P1 and return
+/// the resolution's pending prompt, asserting the cast declared only P1.
+fn cast_blot_out_at_p1(runner: &mut GameRunner, name: &str, spell: ObjectId) -> WaitingFor {
+    let commit = runner.cast(spell).target_player(P1).commit();
+    let top = commit
+        .state()
+        .stack
+        .last()
+        .and_then(|entry| entry.ability())
+        .expect("the spell is on the stack");
+    assert_eq!(
+        declared_chain_targets(top),
+        vec![TargetRef::Player(P1)],
+        "{name}: the cast targets only the opponent (CR 115.1)"
+    );
+    commit.resolve().final_waiting_for().clone()
+}
+
+fn assert_zones(runner: &GameRunner, expected: &[(ObjectId, Zone, &str)]) {
+    for (id, zone, label) in expected {
+        assert_eq!(runner.state().objects[id].zone, *zone, "{label}");
+    }
+}
+
+/// CR 608.2c + CR 115.10a + CR 202.3: Blot Out's opponent chooses, as the spell
+/// resolves, among the creatures and planeswalkers they control with the
+/// greatest mana value among their own creatures and planeswalkers. P2's higher
+/// Y and the caster's Z are neither offered nor counted.
+#[test]
+fn blot_out_family_opponent_chooses_among_their_own_greatest_mana_value() {
+    for (name, instant) in [("Blot Out", true), ("End of the Hunt", false)] {
+        // Tie: X2 and XP share P1's greatest mana value, 4.
+        let mut scenario = main_phase_scenario(3);
+        let board = mana_value_board(&mut scenario, 4);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, name, instant, BLOT_OUT)
+            .id();
+        let mut runner = scenario.build();
+        match cast_blot_out_at_p1(&mut runner, name, spell) {
+            WaitingFor::EffectZoneChoice { player, cards, .. } => {
+                assert_eq!(player, P1, "{name}: the target opponent chooses");
+                let mut offered = cards;
+                offered.sort();
+                let mut expected = vec![board.x2, board.xp];
+                expected.sort();
+                assert_eq!(offered, expected, "{name}: P1's tied greatest");
+            }
+            other => panic!("{name}: expected P1's EffectZoneChoice; got {other:?}"),
+        }
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![board.x2],
+            })
+            .expect("P1 exiles X2");
+        assert_mana_value_board(&runner, &board, board.x2, name);
+
+        // XP alone is P1's greatest (the ruling's "they must exile the
+        // planeswalker"): it is exiled with no choice.
+        let mut scenario = main_phase_scenario(3);
+        let board = mana_value_board(&mut scenario, 1);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, name, instant, BLOT_OUT)
+            .id();
+        let mut runner = scenario.build();
+        cast_blot_out_at_p1(&mut runner, name, spell);
+        assert_mana_value_board(&runner, &board, board.xp, name);
+    }
+}
+
+/// The exiled object is in exile; every other object on the board stays on the
+/// battlefield.
+fn assert_mana_value_board(
+    runner: &GameRunner,
+    board: &ManaValueBoard,
+    exiled: ObjectId,
+    name: &str,
+) {
+    let zone = |id: ObjectId| {
+        if id == exiled {
+            Zone::Exile
+        } else {
+            Zone::Battlefield
+        }
+    };
+    assert_zones(
+        runner,
+        &[
+            (board.x1, zone(board.x1), &format!("{name}: X1")),
+            (board.x2, zone(board.x2), &format!("{name}: X2")),
+            (board.xp, zone(board.xp), &format!("{name}: XP")),
+            (board.y, zone(board.y), &format!("{name}: P2's Y")),
+            (board.z, zone(board.z), &format!("{name}: P0's Z")),
+            (board.z2, zone(board.z2), &format!("{name}: P0's Z2")),
+            (board.zp, zone(board.zp), &format!("{name}: P0's ZP")),
+        ],
+    );
+}
+
+/// CR 115.10a: Blot Out's opponent chooses rather than targets, so a hexproof
+/// creature among their greatest is still offered.
+#[test]
+fn blot_out_offers_a_hexproof_greatest_creature() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let hexproof = scenario
+        .add_creature(P1, "P1 Hexproof", 3, 3)
+        .with_mana_cost(ManaCost::generic(4))
+        .hexproof()
+        .id();
+    let walker = scenario
+        .add_creature(P1, "P1 Walker", 0, 0)
+        .as_planeswalker_with_loyalty("Jace", 3)
+        .with_mana_cost(ManaCost::generic(4))
+        .id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Blot Out", true, BLOT_OUT)
+        .id();
+    let mut runner = scenario.build();
+    match cast_blot_out_at_p1(&mut runner, "Blot Out", spell) {
+        WaitingFor::EffectZoneChoice { cards, .. } => assert!(
+            cards.contains(&hexproof) && cards.contains(&walker),
+            "the hexproof creature is offered; got {cards:?}"
+        ),
+        other => panic!("expected P1's EffectZoneChoice; got {other:?}"),
+    }
+}
+
+/// A disjunctive "creature or planeswalker you control" leg takes the same
+/// resolution-pick shape as its single-type twin. Parse level only: no printed
+/// card has the shape at the pinned input.
+#[test]
+fn disjunctive_you_control_leg_is_resolution_chosen() {
+    const OR_YOU: &str = "Target opponent exiles a creature or planeswalker you control.";
+    let parsed = parse_oracle_text(OR_YOU, "Anaphor Probe Epsilon", &[], &[], &[]);
+    let root = &parsed.abilities[0];
+    assert!(!chain_has_unimplemented(root), "got {root:#?}");
+    let leg = root.sub_ability.as_deref().expect("the moved-object leg");
+    assert!(
+        matches!(&*leg.effect, Effect::ChangeZone { .. }),
+        "got {:?}",
+        leg.effect
+    );
+    assert_eq!(leg.target_choice_timing, TargetChoiceTiming::Resolution);
 }
 
 // ---------------------------------------------------------------------------

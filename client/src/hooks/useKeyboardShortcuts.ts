@@ -87,6 +87,10 @@ export function useKeyboardShortcuts(): void {
       } = useGameStore.getState();
       const uiState = useUiStore.getState();
 
+      // The contest overlay is modal and owns the activation keys (Space / Enter click
+      // for the contest): they never pass priority or toggle auto-pass behind it.
+      if (waitingFor?.type === "PhysicalContest" && (e.key === " " || e.key === "Enter")) return;
+
       // Flex Layout edit mode owns Escape while active so it can't fall through
       // to game-action cancellation.
       if (uiState.flexEditMode && e.key === "Escape") {

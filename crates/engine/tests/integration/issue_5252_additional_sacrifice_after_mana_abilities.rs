@@ -169,18 +169,21 @@ fn manual_payment_defers_selected_artifact_sacrifice_until_mana_payment_commit()
         .act(GameAction::ActivateAbility {
             source_id: lens,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("selected artifact should still be activatable for mana");
     runner
         .act(GameAction::ActivateAbility {
             source_id: island_a,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("first Island should be activatable for mana");
     runner
         .act(GameAction::ActivateAbility {
             source_id: island_b,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("second Island should be activatable for mana");
 
@@ -414,6 +417,7 @@ fn deferred_sacrifice_revalidates_cost_filter_at_commit() {
         .act(GameAction::ActivateAbility {
             source_id: lens,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("selected artifact can still activate its tap mana ability");
 
@@ -588,12 +592,14 @@ fn x_cost_spell_defers_artifact_sacrifice_through_x_choice_and_mana_payment() {
         .act(GameAction::ActivateAbility {
             source_id: lens,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("selected artifact should remain activatable for X mana");
     runner
         .act(GameAction::ActivateAbility {
             source_id: island,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Island should pay the blue shard");
     runner
@@ -728,6 +734,7 @@ fn deferred_sacrifice_artifact_cannot_be_consumed_by_mana_ability_cost() {
     let activation = runner.act(GameAction::ActivateAbility {
         source_id: treasure,
         ability_index: 0,
+        payment_mode: CastPaymentMode::Auto,
     });
     assert!(
         activation.is_err(),
@@ -811,6 +818,7 @@ fn composite_mana_ability_cost_cannot_partially_pay_with_deferred_sacrifice_arti
     let activation = runner.act(GameAction::ActivateAbility {
         source_id: artifact,
         ability_index: 0,
+        payment_mode: CastPaymentMode::Auto,
     });
     assert!(
         activation.is_err(),
@@ -970,6 +978,7 @@ fn deferred_sacrifice_permanent_is_not_exile_cost_choice_for_mana_ability() {
         .act(GameAction::ActivateAbility {
             source_id: altar,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate exile-for-mana ability");
 

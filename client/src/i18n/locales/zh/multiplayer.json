@@ -139,7 +139,8 @@
     "startingLife": "起始生命",
     "useCustomFormat": "使用",
     "waitingForPlayer": "等待牌手",
-    "youHost": "你（房主）"
+    "youHost": "你（房主）",
+    "poolBracketConflict": "所选 {{selected}} 套牌在当前过滤器下均不可用，因此随机对手将从全部 {{total}} 套牌中选择。"
   },
   "joinErrorDialog": {
     "dismiss": "关闭"
@@ -347,9 +348,17 @@
     "cancel": "取消请求",
     "decline": "拒绝",
     "declinedToast": "悔棋请求已被拒绝",
+    "cancelledToast": "悔棋请求已取消",
+    "withdrawnToast": "有牌手离开了游戏，悔棋请求已撤回",
     "ownMessage": "正在等待其他牌手同意回退到你最后一步行动之前。",
     "ownTitle": "已请求悔棋",
     "requestedMessage": "要将牌局回退到其最后一步行动之前吗？",
     "requestedTitle": "{{name}} 请求悔棋"
+  },
+  "p2pStateWithheld": "此操作后的游戏状态过大，无法发送，因此当前棋盘已过时。要继续游戏，牌手可以从游戏菜单请求悔棋，撤回上一步操作（如为循环，请用更少的次数执行）。",
+  "terminalRecovery": {
+    "finalViewsUnpublished": "认输已进入 Full 终局状态，但无法发布原生最终视图。",
+    "concedeUnreconciled": "无法核对认输结果；该席位仍处于锁定状态。",
+    "receiptUnsent": "无法发送持久的终局回执；正在等待重新投递"
   }
 }

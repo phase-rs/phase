@@ -222,6 +222,7 @@ fn resolved_grizzly_bears_restore_returns_to_the_precast_priority_boundary() {
         .act(GameAction::ActivateAbility {
             source_id: forest_a,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("tap Forest A and float green before the spell checkpoint");
     assert!(runner.state().objects[&forest_a].tapped);

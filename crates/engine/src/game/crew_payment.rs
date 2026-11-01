@@ -7,12 +7,25 @@
 //! never re-read live power, toughness, or statics after preparation.
 
 use crate::game::engine::{EngineError, PriorityAnnouncementFacadeAccess, PriorityPrincipal};
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::static_abilities::object_crew_power_contribution;
 use crate::types::card_type::CoreType;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::keywords::Keyword;
 use crate::types::statics::CrewAction;
+use serde::{Deserialize, Serialize};
+
+/// CR 702.122b + CR 702.122c + CR 400.7: one recorded crew payment — `crewer`
+/// was tapped to pay `vehicle`'s crew cost, so `crewer` crewed `vehicle` and
+/// `vehicle` was crewed by `crewer`. Each end is pinned to its exact
+/// incarnation, so an object that left and returned is not mistaken for the one
+/// that crewed or was crewed. Stored in `GameState::crew_history_this_turn`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct CrewHistoryPair {
+    pub vehicle: ObjectIncarnationRef,
+    pub crewer: ObjectIncarnationRef,
+}
 
 /// An engine-authored Crew announcement for the Priority preflight. The vehicle
 /// identity remains provider-owned until the Priority facade rebuilds the

@@ -37,7 +37,9 @@
     "approve": "Aprovar",
     "decline": "Recusar",
     "cancel": "Cancelar solicitação",
-    "declinedToast": "Solicitação de retrocesso recusada"
+    "declinedToast": "Solicitação de retrocesso recusada",
+    "cancelledToast": "Solicitação de retrocesso cancelada",
+    "withdrawnToast": "Solicitação de retrocesso retirada: um jogador saiu do jogo"
   },
   "connectionDot": {
     "connected": "Conectado",
@@ -285,7 +287,8 @@
     "botGameNotice": "Hospedando a partida do Discord {{code}}. A conexão e a privacidade vêm da publicação no Discord.",
     "botSeedIgnored": "Algumas configurações da publicação no Discord não puderam ser usadas aqui — verifique o formato e o número de jogadores.",
     "botP2PNotice": "Seu dispositivo executa a partida. Mantenha o app aberto e conectado.",
-    "botServerNotice": "Um servidor dedicado executa a partida. Ele pode ficar lento ou sair do ar."
+    "botServerNotice": "Um servidor dedicado executa a partida. Ele pode ficar lento ou sair do ar.",
+    "poolBracketConflict": "Nenhum dos {{selected}} decks selecionados é legal com os filtros atuais, então os oponentes aleatórios escolhem entre os {{total}} decks."
   },
   "page": {
     "deckRejected": "O deck foi rejeitado pelo anfitrião.",
@@ -351,5 +354,11 @@
   "deepLink": {
     "gameInProgressTitle": "Partida em andamento",
     "gameInProgressBody": "Termine ou saia da sua partida atual e abra o link novamente."
+  },
+  "p2pStateWithheld": "O estado do jogo após esta ação é grande demais para ser enviado, por isso este tabuleiro está desatualizado. Um jogador pode solicitar um retrocesso da última ação no menu do jogo para continuar (em um loop, execute-o com uma contagem menor).",
+  "terminalRecovery": {
+    "finalViewsUnpublished": "A concessão atingiu um estado final Full, mas não foi possível publicar as visualizações finais nativas.",
+    "concedeUnreconciled": "Não foi possível reconciliar o resultado da concessão; o assento permanece bloqueado.",
+    "receiptUnsent": "Não foi possível enviar o recibo durável do resultado final; aguardando nova entrega"
   }
 }

@@ -188,6 +188,11 @@ pub enum GameAction {
     ActivateAbility {
         source_id: ObjectId,
         ability_index: usize,
+        /// CR 602.2b + CR 601.2g-h: the activation's mana-payment preference,
+        /// the same opt-in as `CastSpell`'s. `Manual` stops in `ManaPayment`
+        /// after targets so the player activates mana abilities themself.
+        #[serde(default, skip_serializing_if = "CastPaymentMode::is_auto")]
+        payment_mode: CastPaymentMode,
     },
     DeclareAttackers {
         attacks: Vec<(ObjectId, AttackTarget)>,
@@ -789,6 +794,13 @@ pub enum GameAction {
     SetMayTriggerAutoChoice {
         op: MayTriggerAutoChoiceOp,
     },
+    /// Un-card actions (Unglued/Unhinged/Unstable/Unfinity silver-border cards):
+    /// opt in or out, perform a gesture from the Un-actions menu, or call
+    /// "Gotcha!". Legal in any `WaitingFor` state and actor-scoped, like the
+    /// preference actions — a gesture never changes game progression by itself.
+    UnAction {
+        action: super::un_actions::UnAction,
+    },
     /// CR 603.3b: Update the acting player's saved trigger-ordering templates.
     /// Legal in any WaitingFor state and routed to the acting player (who may only
     /// mutate their own templates), mirroring `SetMayTriggerAutoChoice`. Pure
@@ -1153,6 +1165,22 @@ fn default_true() -> bool {
 /// can still be multiplied by ordinary token replacement effects.
 pub const MAX_DEBUG_CREATE_COUNT: u32 = 100;
 
+/// Maximum amount for one sandbox `GainLife` / `LoseLife` debug action. A sanity
+/// bound on the request, not the representability authority: it leaves about 2^11
+/// headroom under `i32::MAX` for doubling replacements, but a stack of replacements
+/// can still carry the result past what the engine represents. That result is never
+/// clamped: the checked quantity resolver and the checked `Times` / `Plus` appliers
+/// report it as an unrepresentable life change and the action is rejected unchanged.
+pub const MAX_DEBUG_LIFE_AMOUNT: u32 = 1_000_000;
+
+/// Maximum count for one sandbox `GivePlayerCounters` / `GiveEnergy` debug
+/// action. A sanity bound on the request, not the representability
+/// authority: count replacements can still carry the result past what the
+/// engine represents. That result is never clamped: the checked
+/// `Times` / `Plus` appliers and the checked settle step report it as an
+/// unrepresentable player-resource change and the action is rejected unchanged.
+pub const MAX_DEBUG_COUNTER_AMOUNT: u32 = 1_000_000;
+
 /// Serde default for debug create counts: legacy payloads create one object.
 fn default_debug_create_count() -> u32 {
     1
@@ -1171,7 +1199,9 @@ pub enum DebugCardCreationKind {
 
 /// Direct game-state manipulation actions for debugging, testing, and remediation.
 /// Bypasses `WaitingFor` validation — fires from any game state without disrupting
-/// the current prompt. Gated on `GameState::debug_mode`.
+/// the current prompt, except the player-resource variants that
+/// [`DebugAction::requires_settled_priority`] gates to a Priority window.
+/// Gated on `GameState::debug_mode`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum DebugAction {
@@ -1179,8 +1209,14 @@ pub enum DebugAction {
     /// Move an existing object to a different zone.
     /// When `simulate` is true, runs the full pipeline (triggers placed on stack, SBAs);
     /// a `Battlefield` destination also consults ETB replacements (enters tapped,
-    /// enters with counters, "as enters" choices), like `CreateCard { run_etb: true }`.
-    /// When false, raw placement with no replacements, triggers, or SBAs.
+    /// enters with counters, "as enters" choices), like `CreateCard { run_etb: true }`;
+    /// an object already on the battlefield, or a token that has left it (CR 111.8),
+    /// is not put onto the battlefield, so no replacement is consulted and nothing
+    /// enters; triggers and state-based actions are still checked, as for every
+    /// simulated move.
+    /// When false, raw placement with no replacements, triggers, or SBAs; a
+    /// planeswalker or battle still arrives with its printed loyalty / defense
+    /// counters (CR 306.5b + CR 306.5c, CR 310.4b + CR 310.4c).
     MoveToZone {
         object_id: ObjectId,
         to_zone: Zone,
@@ -1209,7 +1245,9 @@ pub enum DebugAction {
         attach_to: Option<AttachTarget>,
         /// When `true`, route a `Battlefield` spawn through the real ETB pipeline
         /// (replacements → ETB triggers → SBAs). When `false`, place the card raw
-        /// with no entry effects — mirrors `MoveToZone { simulate: false }`. Only
+        /// with no entry effects — mirrors `MoveToZone { simulate: false }`; a
+        /// planeswalker or battle still arrives with its printed loyalty / defense
+        /// counters (CR 306.5b + CR 306.5c, CR 310.4b + CR 310.4c). Only
         /// consulted for `zone == Battlefield`; ignored for other destinations.
         #[serde(default = "default_true")]
         run_etb: bool,
@@ -1308,6 +1346,12 @@ pub enum DebugAction {
     // ── Player State Manipulation ─────────────────────────────────────────
     /// Set a player's life total directly.
     SetLife { player_id: PlayerId, life: i32 },
+    /// Gain life through the real CR 119.3 life-gain event (replacements, can't-gain statics, life-gain triggers apply).
+    /// Requires a Priority window, so an open prompt (e.g. a CR 616.1 replacement choice) keeps its owner.
+    GainLife { player_id: PlayerId, amount: u32 },
+    /// Lose life through the real CR 119.3 life-loss event.
+    /// Requires a Priority window, like `GainLife`.
+    LoseLife { player_id: PlayerId, amount: u32 },
     /// Modify a non-energy player counter. Positive delta adds, negative removes.
     ModifyPlayerCounters {
         player_id: PlayerId,
@@ -1316,6 +1360,18 @@ pub enum DebugAction {
     },
     /// Modify energy counters, which are stored separately from `PlayerCounterKind`.
     ModifyEnergy { player_id: PlayerId, delta: i32 },
+    /// CR 122.1: Give a non-energy player counter through the real counter-placement
+    /// event, so can't effects, count replacements (scoped by the requesting seat, the
+    /// player who puts them), CR 616.1 ordering, counter triggers and state-based
+    /// actions apply. Requires a Priority window, like `GainLife`.
+    GivePlayerCounters {
+        player_id: PlayerId,
+        counter_kind: PlayerCounterKind,
+        count: u32,
+    },
+    /// CR 107.14 + CR 122.1: Give energy counters through the real counter-placement
+    /// event. Requires a Priority window, like `GainLife`.
+    GiveEnergy { player_id: PlayerId, count: u32 },
     /// Add mana to a player's pool (mixed types in one action).
     AddMana {
         player_id: PlayerId,
@@ -1453,8 +1509,12 @@ impl DebugAction {
             | Self::ShuffleLibrary { .. }
             | Self::Proliferate { .. }
             | Self::SetLife { .. }
+            | Self::GainLife { .. }
+            | Self::LoseLife { .. }
             | Self::ModifyPlayerCounters { .. }
             | Self::ModifyEnergy { .. }
+            | Self::GivePlayerCounters { .. }
+            | Self::GiveEnergy { .. }
             | Self::AddMana { .. }
             | Self::SetInfiniteMana { .. }
             | Self::SetPhase { .. }
@@ -1490,6 +1550,101 @@ impl DebugAction {
             ));
         }
         Ok(())
+    }
+
+    /// Whether this debug action is a real player-resource event whose
+    /// replacements can park a CR 616.1 ordering choice, so it is admitted only
+    /// at a settled Priority boundary. `CreateCard`'s battlefield-ETB entry has
+    /// its own payload-dependent check in `preflight_debug_action`.
+    pub fn requires_settled_priority(&self) -> bool {
+        match self {
+            Self::GainLife { .. }
+            | Self::LoseLife { .. }
+            | Self::GivePlayerCounters { .. }
+            | Self::GiveEnergy { .. } => true,
+            Self::MoveToZone { .. }
+            | Self::CreateCard { .. }
+            | Self::RemoveObject { .. }
+            | Self::Sacrifice { .. }
+            | Self::DrawCards { .. }
+            | Self::Mill { .. }
+            | Self::Reveal { .. }
+            | Self::ShuffleLibrary { .. }
+            | Self::Proliferate { .. }
+            | Self::SetBasePowerToughness { .. }
+            | Self::ModifyCounters { .. }
+            | Self::SetTapped { .. }
+            | Self::SetPrepared { .. }
+            | Self::SetController { .. }
+            | Self::SetSummoningSickness { .. }
+            | Self::SetFaceState { .. }
+            | Self::Attach { .. }
+            | Self::Detach { .. }
+            | Self::GrantKeyword { .. }
+            | Self::RemoveKeyword { .. }
+            | Self::SetLife { .. }
+            | Self::ModifyPlayerCounters { .. }
+            | Self::ModifyEnergy { .. }
+            | Self::AddMana { .. }
+            | Self::SetInfiniteMana { .. }
+            | Self::SetPhase { .. }
+            | Self::RunStateBasedActions
+            | Self::CreateToken { .. }
+            | Self::CreateTokenCopy { .. } => false,
+        }
+    }
+
+    /// Rejects sandbox life-change amounts above `MAX_DEBUG_LIFE_AMOUNT` and
+    /// player-counter/energy gain counts above `MAX_DEBUG_COUNTER_AMOUNT` before
+    /// any state change (no silent wrap or clamp).
+    pub fn validate_player_resource_amount(&self) -> Result<(), String> {
+        match self {
+            Self::GainLife { amount, .. } | Self::LoseLife { amount, .. } => {
+                if *amount > MAX_DEBUG_LIFE_AMOUNT {
+                    return Err(format!(
+                        "Debug life change amount {amount} exceeds the maximum {MAX_DEBUG_LIFE_AMOUNT}"
+                    ));
+                }
+                Ok(())
+            }
+            Self::GivePlayerCounters { count, .. } | Self::GiveEnergy { count, .. } => {
+                if *count > MAX_DEBUG_COUNTER_AMOUNT {
+                    return Err(format!(
+                        "Debug counter gain count {count} exceeds the maximum {MAX_DEBUG_COUNTER_AMOUNT}"
+                    ));
+                }
+                Ok(())
+            }
+            Self::MoveToZone { .. }
+            | Self::CreateCard { .. }
+            | Self::RemoveObject { .. }
+            | Self::Sacrifice { .. }
+            | Self::DrawCards { .. }
+            | Self::Mill { .. }
+            | Self::Reveal { .. }
+            | Self::ShuffleLibrary { .. }
+            | Self::Proliferate { .. }
+            | Self::SetBasePowerToughness { .. }
+            | Self::ModifyCounters { .. }
+            | Self::SetTapped { .. }
+            | Self::SetPrepared { .. }
+            | Self::SetController { .. }
+            | Self::SetSummoningSickness { .. }
+            | Self::SetFaceState { .. }
+            | Self::Attach { .. }
+            | Self::Detach { .. }
+            | Self::GrantKeyword { .. }
+            | Self::RemoveKeyword { .. }
+            | Self::SetLife { .. }
+            | Self::ModifyPlayerCounters { .. }
+            | Self::ModifyEnergy { .. }
+            | Self::AddMana { .. }
+            | Self::SetInfiniteMana { .. }
+            | Self::SetPhase { .. }
+            | Self::RunStateBasedActions
+            | Self::CreateToken { .. }
+            | Self::CreateTokenCopy { .. } => Ok(()),
+        }
     }
 
     /// Human-readable description of this debug action, used by the sandbox
@@ -1680,6 +1835,27 @@ impl DebugAction {
             DebugAction::SetLife { player_id, life } => {
                 format!("SetLife ({} → {})", player_label(*player_id), life)
             }
+            DebugAction::GainLife { player_id, amount } => {
+                format!("GainLife ({} gains {})", player_label(*player_id), amount)
+            }
+            DebugAction::LoseLife { player_id, amount } => {
+                format!("LoseLife ({} loses {})", player_label(*player_id), amount)
+            }
+            DebugAction::GivePlayerCounters {
+                player_id,
+                counter_kind,
+                count,
+            } => format!(
+                "GivePlayerCounters ({} gets {} {} counters)",
+                player_label(*player_id),
+                count,
+                counter_kind
+            ),
+            DebugAction::GiveEnergy { player_id, count } => format!(
+                "GiveEnergy ({} gets {} energy)",
+                player_label(*player_id),
+                count
+            ),
             DebugAction::AddMana { player_id, mana } => {
                 format!("AddMana ({} gains {:?})", player_label(*player_id), mana)
             }
@@ -1884,6 +2060,9 @@ impl GameAction {
                 | GameAction::SetPriorityYield { .. }
                 | GameAction::SetMayTriggerAutoChoice { .. }
                 | GameAction::SetReplacementAutoChoice { .. }
+                | GameAction::UnAction {
+                    action: super::un_actions::UnAction::SetEnabled { .. },
+                }
                 | GameAction::SetTriggerOrderTemplate { .. }
                 | GameAction::ReorderHand { .. }
         )
@@ -1909,6 +2088,7 @@ impl GameAction {
                 GameAction::Debug(_)
                     | GameAction::GrantDebugPermission { .. }
                     | GameAction::RevokeDebugPermission { .. }
+                    | GameAction::UnAction { .. }
             )
     }
 
@@ -1942,11 +2122,12 @@ impl GameAction {
         )
     }
 
-    /// The cast payment preference carried by this action, if it is one of
-    /// the cast-family variants (CR 601.2g).
+    /// The payment preference carried by this action, if it is one of the
+    /// cast-family variants (CR 601.2g) or an activation (CR 602.2b).
     pub(crate) fn payment_mode_mut(&mut self) -> Option<&mut CastPaymentMode> {
         match self {
             GameAction::CastSpell { payment_mode, .. }
+            | GameAction::ActivateAbility { payment_mode, .. }
             | GameAction::CastSpellForFree { payment_mode, .. }
             | GameAction::CastSpellAsMiracle { payment_mode, .. }
             | GameAction::CastSpellAsMadness { payment_mode, .. }
@@ -2022,6 +2203,7 @@ impl GameAction {
             | Self::CancelAutoPass
             | Self::SetPhaseStops { .. }
             | Self::SetPriorityPassingMode { .. }
+            | Self::UnAction { .. }
             | Self::SetTriggerOrderTemplate { .. }
             | Self::ChooseCountersToRemove { .. }
             | Self::SubmitPayAmount { .. }
@@ -2383,6 +2565,7 @@ impl GameAction {
             | GameAction::SetPriorityYield { .. }
             | GameAction::SetMayTriggerAutoChoice { .. }
                 | GameAction::SetReplacementAutoChoice { .. }
+            | GameAction::UnAction { .. }
             | GameAction::SetTriggerOrderTemplate { .. }
             | GameAction::AssignCombatDamage { .. }
             | GameAction::AssignBlockerDamage { .. }
@@ -2425,6 +2608,39 @@ impl GameAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// U1: the wire shape of the sandbox give actions, pinned for the phase-3
+    /// TypeScript mirror.
+    #[test]
+    fn u1_give_actions_wire_shape() {
+        let give_counters = DebugAction::GivePlayerCounters {
+            player_id: PlayerId(1),
+            counter_kind: PlayerCounterKind::Rad,
+            count: 3,
+        };
+        assert_eq!(
+            serde_json::to_value(&give_counters).unwrap(),
+            serde_json::json!({
+                "type": "GivePlayerCounters",
+                "data": { "player_id": 1, "counter_kind": "Rad", "count": 3 }
+            })
+        );
+        let give_energy = DebugAction::GiveEnergy {
+            player_id: PlayerId(0),
+            count: 2,
+        };
+        assert_eq!(
+            serde_json::to_value(&give_energy).unwrap(),
+            serde_json::json!({
+                "type": "GiveEnergy",
+                "data": { "player_id": 0, "count": 2 }
+            })
+        );
+        for action in [give_counters, give_energy] {
+            let json = serde_json::to_string(&action).unwrap();
+            assert_eq!(serde_json::from_str::<DebugAction>(&json).unwrap(), action);
+        }
+    }
 
     #[test]
     fn pass_priority_serializes_as_tagged_union() {
@@ -2587,6 +2803,7 @@ mod tests {
                 GameAction::ActivateAbility {
                     source_id: oid,
                     ability_index: 0,
+                    payment_mode: CastPaymentMode::Auto,
                 },
                 Some(oid),
             ),

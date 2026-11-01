@@ -14,7 +14,7 @@ This skill is the gate for any work that would add a variant to an existing engi
 - Approving an audit verdict of "engine extension required"
 - Wiring a converter arm to a not-yet-existing variant
 
-If you find yourself about to type `pub enum Foo { ... NewVariant ... }` in `crates/engine/src/`, pause and run this skill.
+If you find yourself about to type `pub enum Foo { ... NewVariant ... }` in `crates/engine/src/` or `crates/phase-ast/src/`, pause and run this skill.
 
 ## The three filter stages — all must pass
 
@@ -28,16 +28,16 @@ Run **all five searches** before considering extension:
 
 ```bash
 # 1. Direct name search
-rg -n "<concept_keyword>" crates/engine/src/types/
+rg -n "<concept_keyword>" crates/engine/src/types/ crates/phase-ast/src/types/
 
 # 2. Inverse concept (engine often expresses "not X" as "X { negated: bool }" or "X { negated: true }")
-rg -n "<inverse_concept>" crates/engine/src/types/
+rg -n "<inverse_concept>" crates/engine/src/types/ crates/phase-ast/src/types/
 
 # 3. Inversion-parameter variants
-rg -n "negated: bool|invert|polar" crates/engine/src/types/ability.rs
+rg -n "negated: bool|invert|polar" crates/engine/src/types/ability.rs crates/phase-ast/src/types/ability.rs
 
 # 4. Native parser reverse dictionary — how does oracle_nom express this concept?
-rg -n "<concept_keyword>|<engine_concept>" crates/engine/src/parser/oracle_*.rs
+rg -n "<concept_keyword>|<engine_concept>" crates/phase-parser/src/parser/oracle_*.rs
 
 # 5. Synthesis layer
 rg -n "<concept_keyword>" crates/engine/src/database/synthesis.rs

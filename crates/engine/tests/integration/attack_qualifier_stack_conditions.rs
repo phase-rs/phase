@@ -34,6 +34,14 @@ const TROUBLE_IN_PAIRS: &str =
     "If an opponent would begin an extra turn, that player skips that turn instead.\n\
 Whenever an opponent attacks you with two or more creatures, draws their second card each turn, or casts their second spell each turn, you draw a card.";
 
+/// Review control (CR 508.1a + CR 603.4): a FILTERED head count ("… attacks you
+/// with two or more Dinosaurs") is the trigger event's own qualifier. Its
+/// producer wraps it in `EventTime`, the chain walker strips it, and a later
+/// type change to an attacker cannot block the trigger. The mutation below is
+/// exactly what a retained resolution recheck would fail on.
+const DINOSAUR_ATTACK_QUALIFIER: &str =
+    "Whenever an opponent attacks you with two or more Dinosaurs, you draw a card.";
+
 fn add_enchantment_from_oracle(
     scenario: &mut GameScenario,
     controller: PlayerId,
@@ -260,14 +268,18 @@ fn aurelia_style_triggering_player_attack_count_strips_and_survives_mutation() {
     );
     assert!(matches!(
         parsed.triggers[0].condition.as_ref(),
-        Some(TriggerCondition::AttackersDeclaredCount {
-            subject: AttackersDeclaredCountSubject::Controller {
-                scope: engine::types::ability::ControllerRef::TriggeringPlayer,
-                ..
-            },
-            comparator: Comparator::GE,
-            count: 3,
-        })
+        Some(TriggerCondition::EventTime { condition })
+            if matches!(
+                condition.as_ref(),
+                TriggerCondition::AttackersDeclaredCount {
+                    subject: AttackersDeclaredCountSubject::Controller {
+                        scope: engine::types::ability::ControllerRef::TriggeringPlayer,
+                        ..
+                    },
+                    comparator: Comparator::GE,
+                    count: 3,
+                }
+            )
     ));
 
     let mut scenario = GameScenario::new();
@@ -411,14 +423,18 @@ fn trouble_attack_target_filter_strips_attack_target_threshold_on_stack() {
     );
     assert!(matches!(
         parsed.triggers[0].condition.as_ref(),
-        Some(TriggerCondition::AttackersDeclaredCount {
-            subject: AttackersDeclaredCountSubject::AttackTarget {
-                attacked: AttackTargetFilter::Player,
-                ..
-            },
-            comparator: Comparator::GE,
-            count: 2,
-        })
+        Some(TriggerCondition::EventTime { condition })
+            if matches!(
+                condition.as_ref(),
+                TriggerCondition::AttackersDeclaredCount {
+                    subject: AttackersDeclaredCountSubject::AttackTarget {
+                        attacked: AttackTargetFilter::Player,
+                        ..
+                    },
+                    comparator: Comparator::GE,
+                    count: 2,
+                }
+            )
     ));
 
     let mut scenario = GameScenario::new();
@@ -443,4 +459,88 @@ fn trouble_attack_target_filter_strips_attack_target_threshold_on_stack() {
     runner.advance_until_stack_empty();
 
     assert_eq!(hand_size(&runner, P0), p0_hand_before + 1);
+}
+
+/// Review control (CR 508.1a + CR 603.4): the FILTERED head count ("… attacks
+/// you with two or more Dinosaurs") is the trigger event's own qualifier. With
+/// two Dinosaurs attacking, the qualifier is checked at declaration and
+/// stripped from the stack entry, so one attacker losing the Dinosaur type
+/// before resolution cannot block the draw — the mutation a retained
+/// resolution recheck would fail on.
+#[test]
+fn filtered_attack_qualifier_strips_and_survives_attacker_type_mutation() {
+    let parsed = parse_oracle_text(
+        DINOSAUR_ATTACK_QUALIFIER,
+        "Dinosaur Watcher",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    assert!(
+        matches!(
+            parsed.triggers[0].condition.as_ref(),
+            Some(TriggerCondition::EventTime { condition })
+                if matches!(
+                    condition.as_ref(),
+                    TriggerCondition::AttackersDeclaredCount {
+                        subject: AttackersDeclaredCountSubject::AttackTarget {
+                            filter: Some(_),
+                            ..
+                        },
+                        comparator: Comparator::GE,
+                        count: 2,
+                    }
+                )
+        ),
+        "the filtered head count must be EventTime-wrapped, got {:?}",
+        parsed.triggers[0].condition
+    );
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_card_to_library_top(P0, "Drawn Card");
+    let _watcher = scenario
+        .add_creature_from_oracle(P0, "Dinosaur Watcher", 1, 1, DINOSAUR_ATTACK_QUALIFIER)
+        .id();
+    let attackers = {
+        let mut first = scenario.add_creature(P1, "Dino A", 2, 2);
+        first.with_subtypes(vec!["Dinosaur"]);
+        let first = first.id();
+        let mut second = scenario.add_creature(P1, "Dino B", 2, 2);
+        second.with_subtypes(vec!["Dinosaur"]);
+        let second = second.id();
+        [first, second]
+    };
+    let mut runner = scenario.build();
+    let p0_hand_before = hand_size(&runner, P0);
+
+    hand_turn_to(&mut runner, P1);
+    runner
+        .declare_attackers(&attackers.map(|id| (id, AttackTarget::Player(P0))))
+        .expect("two Dinosaurs should be legal attackers");
+    order_triggers_if_needed(&mut runner);
+    assert_any_stack_condition_stripped(&runner);
+
+    // Mutate one attacker so a retained resolution recheck would count fewer
+    // than two Dinosaurs.
+    {
+        let obj = runner
+            .state_mut()
+            .objects
+            .get_mut(&attackers[1])
+            .expect("the second attacker exists");
+        obj.card_types
+            .subtypes
+            .retain(|subtype| subtype != "Dinosaur");
+        obj.base_card_types
+            .subtypes
+            .retain(|subtype| subtype != "Dinosaur");
+    }
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        hand_size(&runner, P0),
+        p0_hand_before + 1,
+        "the event-time qualifier must not be rechecked after the attacker-type mutation"
+    );
 }

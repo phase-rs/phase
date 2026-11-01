@@ -2019,6 +2019,7 @@ fn ripple_free_cast_keeps_reveal_through_mana_ability_color_choice() {
         .act(GameAction::ActivateAbility {
             source_id: altar,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate Phyrexian Altar during the free cast's payment");
     assert!(

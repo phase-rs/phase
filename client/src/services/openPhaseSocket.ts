@@ -62,6 +62,9 @@ export interface OpenOptions<T extends PhaseSocketTransport = WebSocket> {
    * the browser WebSocket. Explicit factories always take precedence.
    */
   socketFactory?: PhaseSocketFactory<T>;
+  /** Observe the raw transport, including failures before ServerHello. */
+  onSocketCreated?: (socket: PhaseSocketTransport) => void;
+  onFrameSent?: () => void;
   /**
    * Which protocol surface this socket will carry. Defaults to `"full"`, the
    * conservative choice: a caller that has not thought about it gets the
@@ -179,6 +182,7 @@ export function openPhaseSocket(
       );
       return;
     }
+    opts.onSocketCreated?.(ws);
 
     let settled = false;
     const settle = (fn: () => void) => {
@@ -271,6 +275,8 @@ export function openPhaseSocket(
         lobby_protocol_version?: number;
         public_url?: string;
         wire_formats?: WireFormat[];
+        heartbeat?: { ping_interval_ms?: unknown; silence_budget_ms?: unknown };
+        command_correlation?: unknown;
       };
       const info: ServerInfo = {
         version: data.server_version,
@@ -280,6 +286,8 @@ export function openPhaseSocket(
         lobbyProtocolVersion: data.lobby_protocol_version,
         publicUrl: data.public_url,
         wireFormats: data.wire_formats ?? [],
+        heartbeat: parseHeartbeat(data.heartbeat),
+        commandCorrelation: data.command_correlation === "CommandIdV1" ? "CommandIdV1" : undefined,
       };
 
       const rejection = serverProtocolRejection(info, surface);
@@ -326,18 +334,29 @@ export function openPhaseSocket(
           },
         }),
       );
+      opts.onFrameSent?.();
 
       settle(() => {
         const useGzipEnvelope = localWireFormats.includes("GzipEnvelopeV1")
           && info.wireFormats?.includes("GzipEnvelopeV1");
         resolve({
-          ws: useGzipEnvelope ? new GzipEnvelopeSocket(ws) : ws,
+          ws: useGzipEnvelope ? new GzipEnvelopeSocket(ws, opts.onFrameSent) : ws,
           serverInfo: info,
           close: () => ws.close(),
         });
       });
     };
   });
+}
+
+/** A malformed contract is treated as absent: no advertised budget, no silence close. */
+function parseHeartbeat(
+  raw: { ping_interval_ms?: unknown; silence_budget_ms?: unknown } | undefined,
+): ServerInfo["heartbeat"] {
+  const positive = (value: unknown): value is number =>
+    typeof value === "number" && Number.isFinite(value) && value > 0;
+  if (!raw || !positive(raw.ping_interval_ms) || !positive(raw.silence_budget_ms)) return undefined;
+  return { pingIntervalMs: raw.ping_interval_ms, silenceBudgetMs: raw.silence_budget_ms };
 }
 
 // ── withReconnect ───────────────────────────────────────────────────────

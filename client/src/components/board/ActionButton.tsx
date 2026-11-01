@@ -5,6 +5,7 @@ import type { AttackTarget, ObjectId, WaitingFor } from "../../adapter/types.ts"
 import { usePlayerId, useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { dispatchAction, dispatchResolveAll } from "../../game/dispatch.ts";
 import { usePhaseInfo } from "../../hooks/usePhaseInfo.ts";
+import { usePriorityAttentionClass } from "../../hooks/usePriorityAttention.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../stores/multiplayerStore.ts";
 import { blockerAssignmentPairs, useUiStore } from "../../stores/uiStore.ts";
@@ -90,6 +91,7 @@ export function ActionButton() {
   const { advanceLabel } = usePhaseInfo();
 
   const mode = getActionButtonMode(waitingFor, stackLength, canActForWaitingState);
+  const attentionClass = usePriorityAttentionClass(canActForWaitingState);
 
   // Skip-confirm state for No Attacks / No Blocks
   const [skipArmed, setSkipArmed] = useState<"attackers" | "blockers" | null>(null);
@@ -401,7 +403,7 @@ export function ActionButton() {
               disabled={actionBlocked}
               onClick={() => dispatchAction({ type: "PassPriority" })}
               aria-describedby={resolveTooltipId}
-              className={gameButtonClass({ tone: "blue", size: "md", disabled: actionBlocked, className: `${primaryButtonClass} group relative` })}
+              className={gameButtonClass({ tone: "blue", size: "md", disabled: actionBlocked, className: `${primaryButtonClass} group relative ${attentionClass}` })}
             >
               {t("actionButton.resolve")}
               <GameplayTooltip id={resolveTooltipId}>
@@ -473,7 +475,7 @@ export function ActionButton() {
                   tone: "emerald",
                   size: "md",
                   disabled: blocked,
-                  className: `${primaryButtonClass} group relative`,
+                  className: `${primaryButtonClass} group relative ${attentionClass}`,
                 })}
               >
                 {advanceLabel}

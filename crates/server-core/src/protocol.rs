@@ -19,7 +19,7 @@ use phase_ai::config::AiDifficulty;
 use serde::{Deserialize, Serialize};
 
 use crate::session::{AiDriverFault, FullSessionKey};
-use crate::takeback::{RewindOption, RewindTarget};
+use crate::takeback::{RewindOption, RewindTarget, TakebackResolution};
 
 /// Full game wire protocol version. Kept numerically aligned with the lobby
 /// broker while state/action messages share the same WebSocket protocol enum.
@@ -67,6 +67,37 @@ pub enum WireFormat {
     GzipEnvelopeV1,
     /// Future capability advertised by a newer peer. Unknown entries must not
     /// make an otherwise compatible additive handshake fail.
+    #[serde(other)]
+    Unknown,
+}
+
+/// Optional recipient-projected state encoding, independent of compression.
+/// Native Full servers confirm selection in a second plain-text ServerHello
+/// before application dispatch. Frames encode the complete socket envelope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StateCodec {
+    StateCodecV1,
+    #[serde(other)]
+    Unknown,
+}
+
+/// Optional timing hints for application JSON Ping/Pong diagnostics.
+/// These describe client JSON pings, not the native WebSocket Ping cadence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeartbeatContract {
+    pub ping_interval_ms: u64,
+    pub silence_budget_ms: u64,
+}
+
+/// Connection-scoped command ownership, never player authority or idempotency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CommandId(pub u64);
+
+/// Optional command-completion correlation supported by a native server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CommandCorrelation {
+    CommandIdV1,
     #[serde(other)]
     Unknown,
 }
@@ -255,6 +286,10 @@ pub struct CurrentTerminalDelivery {
     pub delivery_id: TerminalDeliveryId,
     pub credential: TerminalCredential,
     pub display: TerminalMatchDisplay,
+    /// Recipient-filtered final Full state with its server-derived projection.
+    /// Raw JSON preserves object-key order across durable delivery retries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_view: Option<Box<serde_json::value::RawValue>>,
 }
 
 /// Bootstrap proof held by a reconnecting player before the regular Full
@@ -291,7 +326,15 @@ pub enum ClientMessage {
         lobby_protocol_version: Option<u32>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         wire_formats: Vec<WireFormat>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        state_codecs: Vec<StateCodec>,
     },
+    /// Request a FULL of this socket's currently authorized view. No client
+    /// game, seat, hash or revision is accepted. Requires confirmed StateCodecV1
+    /// on a native Full server. At most one response is pending until encoding
+    /// completes; retries in that interval are no-ops charged to ingress quota.
+    /// Rejection, enqueue/encoding failure and teardown release admission.
+    ResyncState,
     CreateGame {
         deck: DeckData,
     },
@@ -438,6 +481,16 @@ pub enum ClientMessage {
     },
     Emote {
         emote: String,
+    },
+    /// One click in the running Eye to Eye / Mouth to Mouth contest. Carries the
+    /// engine-authored identity of the contest it is for (so a frame delayed from an
+    /// earlier contest is dropped, never counted as activity in a later one) and a
+    /// per-contest sequence number (duplicate / reorder protection): the sender is
+    /// the authenticated seat and the instant is the server's own clock, so a client
+    /// can claim neither a win nor a timestamp.
+    ContestClick {
+        contest: u64,
+        seq: u32,
     },
     SpectatorJoin {
         game_code: String,
@@ -651,6 +704,19 @@ fn default_true() -> bool {
     true
 }
 
+/// Which frame a [`ServerMessage::StateWithheld`] replaced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum WithheldFrame {
+    /// Carries the recipient's seat, the only seat assignment a board-less client receives.
+    GameStarted {
+        your_player: PlayerId,
+    },
+    StateUpdate,
+}
+
+/// On a codec-confirmed connection, top-level type values Full and Delta are
+/// state-codec frames. These tags are reserved and must not become ServerMessage tags.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ServerMessage {
@@ -658,6 +724,8 @@ pub enum ServerMessage {
     /// `protocol_version` against its own and refuses to proceed on mismatch.
     /// `build_commit` is the git short-hash of the server binary; it is used
     /// by the lobby to gate joins when host and guest are on different builds.
+    /// Native Full servers repeat this in plain text with selected_state_codec
+    /// before dispatching application commands for an opted-in peer.
     ServerHello {
         server_version: String,
         build_commit: String,
@@ -680,6 +748,18 @@ pub enum ServerMessage {
         /// Binary envelopes this server can negotiate after the text hello.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         wire_formats: Vec<WireFormat>,
+        /// Present when application Ping replies are independent of game CPU work.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        heartbeat: Option<HeartbeatContract>,
+        /// Completion ownership is optional transport-envelope metadata.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command_correlation: Option<CommandCorrelation>,
+        /// Supported codecs; empty on LobbyOnly and broker projections.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        state_codecs: Vec<StateCodec>,
+        /// Set only by the second plain-text negotiation confirmation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        selected_state_codec: Option<StateCodec>,
     },
     GameCreated {
         game_code: String,
@@ -833,6 +913,15 @@ pub enum ServerMessage {
     /// transition. The submitting adapter resolves its pending request without
     /// caching or publishing a replacement snapshot.
     ActionNoOp,
+    /// Sent in place of a `GameStarted` or `StateUpdate` over the frame bound.
+    /// The action it answers applied; only its state was not delivered.
+    StateWithheld {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        full_key: Option<FullSessionKey>,
+        state_revision: u64,
+        withheld: WithheldFrame,
+        reason: String,
+    },
     /// Acknowledges a host-authorized permanent game cleanup.
     GameAbandoned {
         game_code: String,
@@ -973,6 +1062,15 @@ pub enum ServerMessage {
         from_player: PlayerId,
         emote: String,
     },
+    /// Live click counters of the running contest, sent between full state
+    /// transitions (display only — the counts never decide the winner).
+    ContestProgress {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        full_key: Option<FullSessionKey>,
+        /// The contest these counters belong to; a client ignores any other.
+        contest: u64,
+        clicks: Vec<(PlayerId, u32)>,
+    },
     TimerUpdate {
         player: PlayerId,
         remaining_seconds: u32,
@@ -1042,13 +1140,14 @@ pub enum ServerMessage {
     TakebackRequested {
         requester: PlayerId,
         requester_name: String,
+        /// The seats asked to approve; the UI offers Approve/Decline only to them.
+        voters: Vec<PlayerId>,
     },
-    /// The pending takeback request has been resolved, either by unanimous
-    /// approval, a decline, or the requester cancelling it. When
-    /// `approved` is true, a `StateUpdate` carrying the rolled-back state
-    /// is sent to every seat immediately before this message.
+    /// The pending takeback vote ended, for `resolution`'s reason. On
+    /// `approved`, a `StateUpdate` carrying the rolled-back state is sent to
+    /// every seat immediately before this message.
     TakebackResolved {
-        approved: bool,
+        resolution: TakebackResolution,
         /// The player whose response concluded the request: the decliner,
         /// or the requester on self-cancel. `None` when every human seat
         /// approved without a final distinguished responder (e.g. the
@@ -1571,9 +1670,21 @@ mod tests {
                     reason: "Match conceded".to_string(),
                     ranked_result: None,
                 },
+                final_view: Some(
+                    serde_json::value::RawValue::from_string(
+                        r#"{"turn_number":7,"derived":{"unique_authorized_submitter":1}}"#
+                            .to_string(),
+                    )
+                    .unwrap(),
+                ),
             }),
         };
         let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains(r#""terminalRevision":9"#));
+        assert!(json.contains(r#""deliveryId":"delivery-0""#));
+        assert!(json.contains(
+            r#""finalView":{"turn_number":7,"derived":{"unique_authorized_submitter":1}}"#
+        ));
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
         match parsed {
             ServerMessage::TerminalBootstrapResult {
@@ -1582,6 +1693,10 @@ mod tests {
                 assert_eq!(delivery.key.generation, 4);
                 assert_eq!(delivery.terminal_revision, 9);
                 assert_eq!(delivery.delivery_id.0, "delivery-0");
+                assert_eq!(
+                    delivery.final_view.as_ref().unwrap().get(),
+                    r#"{"turn_number":7,"derived":{"unique_authorized_submitter":1}}"#
+                );
             }
             _ => panic!("wrong variant"),
         }
@@ -2118,6 +2233,43 @@ mod tests {
         }
     }
 
+    /// `ContestClick` carries only a contest identity and a sequence number: no seat,
+    /// timestamp or count for a client to forge. The exact wire shape is pinned because the TypeScript adapter
+    /// (`ws-adapter.ts` `submitContestClick`) writes it by hand.
+    #[test]
+    fn client_message_contest_click_roundtrips_with_only_a_sequence() {
+        let json =
+            serde_json::to_string(&ClientMessage::ContestClick { contest: 3, seq: 7 }).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"ContestClick","data":{"contest":3,"seq":7}}"#
+        );
+        assert!(matches!(
+            serde_json::from_str::<ClientMessage>(&json).unwrap(),
+            ClientMessage::ContestClick { contest: 3, seq: 7 }
+        ));
+    }
+
+    #[test]
+    fn server_message_contest_progress_roundtrips() {
+        let msg = ServerMessage::ContestProgress {
+            full_key: None,
+            contest: 3,
+            clicks: vec![(PlayerId(0), 12), (PlayerId(1), 9)],
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"ContestProgress","data":{"contest":3,"clicks":[[0,12],[1,9]]}}"#
+        );
+        match serde_json::from_str::<ServerMessage>(&json).unwrap() {
+            ServerMessage::ContestProgress { clicks, .. } => {
+                assert_eq!(clicks, vec![(PlayerId(0), 12), (PlayerId(1), 9)]);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
     #[test]
     fn server_message_timer_update_roundtrips() {
         let msg = ServerMessage::TimerUpdate {
@@ -2216,6 +2368,7 @@ mod tests {
         let msg = ClientMessage::SeatMutate {
             mutation: SeatMutation::SetKind {
                 seat_index: 1,
+                expected_kind: None,
                 kind: SeatKind::Ai {
                     difficulty: AiDifficulty::Medium,
                     deck: DeckChoice::DeckList(Box::new(DeckData {
@@ -2245,6 +2398,65 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn decoded_conditional_seat_mutation_preserves_joined_human() {
+        struct Resolver;
+        impl seat_reducer::types::DeckResolver for Resolver {
+            fn resolve(
+                &self,
+                _choice: &DeckChoice,
+            ) -> Result<engine::game::deck_loading::PlayerDeckList, String> {
+                Ok(Default::default())
+            }
+        }
+        let context = seat_reducer::types::ReducerCtx {
+            platform: phase_ai::config::Platform::Native,
+            deck_resolver: &Resolver,
+        };
+        let mut state = seat_reducer::types::SeatState {
+            seats: vec![SeatKind::HostHuman, SeatKind::JoinedHuman],
+            tokens: vec!["host".to_string(), "guest".to_string()],
+            format: engine::types::format::FormatConfig::standard(),
+            game_started: false,
+        };
+        let mut frame = serde_json::json!({
+            "type": "SeatMutate",
+            "data": { "mutation": {
+                "type": "SetKind",
+                "data": {
+                    "seatIndex": 1,
+                    "kind": { "type": "Ai", "data": {
+                        "difficulty": "Medium", "deck": { "type": "Random" }
+                    }},
+                    "expectedKind": { "type": "WaitingHuman" }
+                }
+            }}
+        });
+        let ClientMessage::SeatMutate { mutation } = serde_json::from_value(frame.clone()).unwrap()
+        else {
+            panic!("expected seat mutation");
+        };
+        crate::seat_mutation_wire_guard::guard_seat_mutation(&mutation).unwrap();
+        let delta = seat_reducer::apply(&mut state, mutation, &context).unwrap();
+        assert_eq!(state.seats[1], SeatKind::JoinedHuman);
+        assert_eq!(state.tokens[1], "guest");
+        assert!(delta.invalidated_tokens.is_empty());
+
+        frame["data"]["mutation"]["data"]
+            .as_object_mut()
+            .unwrap()
+            .remove("expectedKind");
+        let ClientMessage::SeatMutate { mutation } = serde_json::from_value(frame).unwrap() else {
+            panic!("expected seat mutation");
+        };
+        assert!(serde_json::to_value(&mutation).unwrap()["data"]
+            .get("expectedKind")
+            .is_none());
+        let delta = seat_reducer::apply(&mut state, mutation, &context).unwrap();
+        assert_eq!(delta.invalidated_tokens, vec!["guest"]);
+        assert!(matches!(state.seats[1], SeatKind::Ai { .. }));
     }
 
     #[test]
@@ -2303,6 +2515,7 @@ mod tests {
             protocol_version: PROTOCOL_VERSION,
             lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
             wire_formats: vec![WireFormat::GzipEnvelopeV1],
+            state_codecs: Vec::new(),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
@@ -2313,12 +2526,14 @@ mod tests {
                 protocol_version,
                 lobby_protocol_version,
                 wire_formats,
+                state_codecs,
             } => {
                 assert_eq!(client_version, "0.1.11");
                 assert_eq!(build_commit, "abc1234");
                 assert_eq!(protocol_version, PROTOCOL_VERSION);
                 assert_eq!(lobby_protocol_version, Some(LOBBY_PROTOCOL_VERSION));
                 assert_eq!(wire_formats, vec![WireFormat::GzipEnvelopeV1]);
+                assert!(state_codecs.is_empty());
             }
             _ => panic!("wrong variant"),
         }
@@ -2341,6 +2556,42 @@ mod tests {
     }
 
     #[test]
+    fn codec_hello_missing_and_unknown_capabilities_are_tolerated() {
+        for (advertisement, expected) in [
+            (None, Vec::new()),
+            (
+                Some(serde_json::json!(["FutureCodec"])),
+                vec![StateCodec::Unknown],
+            ),
+            (
+                Some(serde_json::json!(["FutureCodec", "StateCodecV1"])),
+                vec![StateCodec::Unknown, StateCodec::StateCodecV1],
+            ),
+        ] {
+            let mut wire = serde_json::json!({"type": "ClientHello", "data": {
+                "client_version": "peer", "build_commit": "build", "protocol_version": PROTOCOL_VERSION
+            }});
+            if let Some(advertisement) = advertisement {
+                wire["data"]["state_codecs"] = advertisement;
+            }
+            let ClientMessage::ClientHello { state_codecs, .. } =
+                serde_json::from_value(wire).unwrap()
+            else {
+                panic!("hello expected")
+            };
+            assert_eq!(state_codecs, expected);
+        }
+        let hello: ServerMessage = serde_json::from_value(serde_json::json!({
+            "type": "ServerHello", "data": {"server_version": "server", "build_commit": "build",
+                "protocol_version": PROTOCOL_VERSION, "mode": "Full"}
+        }))
+        .unwrap();
+        assert!(matches!(hello, ServerMessage::ServerHello {
+            state_codecs, selected_state_codec: None, ..
+        } if state_codecs.is_empty()));
+    }
+
+    #[test]
     fn server_hello_roundtrips() {
         let msg = ServerMessage::ServerHello {
             server_version: "0.1.11".to_string(),
@@ -2350,8 +2601,20 @@ mod tests {
             lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
             public_url: Some("https://x.ngrok-free.app".to_string()),
             wire_formats: vec![WireFormat::GzipEnvelopeV1],
+            heartbeat: Some(HeartbeatContract {
+                ping_interval_ms: 5_000,
+                silence_budget_ms: 45_000,
+            }),
+            command_correlation: None,
+            state_codecs: vec![StateCodec::StateCodecV1],
+            selected_state_codec: Some(StateCodec::StateCodecV1),
         };
         let json = serde_json::to_string(&msg).unwrap();
+        let wire: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            wire["data"]["heartbeat"],
+            serde_json::json!({"ping_interval_ms": 5000, "silence_budget_ms": 45000})
+        );
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
         match parsed {
             ServerMessage::ServerHello {
@@ -2362,6 +2625,10 @@ mod tests {
                 lobby_protocol_version,
                 public_url,
                 wire_formats,
+                heartbeat,
+                command_correlation: _,
+                state_codecs,
+                selected_state_codec,
             } => {
                 assert_eq!(server_version, "0.1.11");
                 assert_eq!(build_commit, "abc1234");
@@ -2370,6 +2637,15 @@ mod tests {
                 assert_eq!(lobby_protocol_version, Some(LOBBY_PROTOCOL_VERSION));
                 assert_eq!(public_url.as_deref(), Some("https://x.ngrok-free.app"));
                 assert_eq!(wire_formats, vec![WireFormat::GzipEnvelopeV1]);
+                assert_eq!(state_codecs, vec![StateCodec::StateCodecV1]);
+                assert_eq!(selected_state_codec, Some(StateCodec::StateCodecV1));
+                assert_eq!(
+                    heartbeat,
+                    Some(HeartbeatContract {
+                        ping_interval_ms: 5_000,
+                        silence_budget_ms: 45_000,
+                    })
+                );
             }
             _ => panic!("wrong variant"),
         }
@@ -2388,6 +2664,10 @@ mod tests {
             lobby_protocol_version: None,
             public_url: None,
             wire_formats: Vec::new(),
+            heartbeat: None,
+            command_correlation: None,
+            state_codecs: Vec::new(),
+            selected_state_codec: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(!json.contains("public_url"), "None must be omitted: {json}");
@@ -2401,6 +2681,29 @@ mod tests {
             !json.contains("wire_formats"),
             "empty list must be omitted: {json}"
         );
+    }
+
+    #[test]
+    fn legacy_hello_does_not_advertise_compute_independent_heartbeats() {
+        let legacy = serde_json::json!({
+            "type": "ServerHello",
+            "data": {
+                "server_version": "0.109.0",
+                "build_commit": "legacy",
+                "protocol_version": PROTOCOL_VERSION,
+                "mode": "Full"
+            }
+        });
+        let parsed: ServerMessage = serde_json::from_value(legacy).unwrap();
+        assert!(matches!(
+            parsed,
+            ServerMessage::ServerHello {
+                heartbeat: None,
+                ..
+            }
+        ));
+        let encoded = serde_json::to_value(parsed).unwrap();
+        assert!(encoded["data"].get("heartbeat").is_none());
     }
 
     #[test]
@@ -2983,6 +3286,8 @@ mod tests {
         let pool = vec![first_pull.clone(), second_pull.clone()];
         let pool_groups = DraftPoolGroups::from_pool(&pool, &DraftSource::single_set("TST"));
         let view = DraftPlayerView {
+            flow: draft_core::types::DraftFlow::LegacyBarrier,
+            fifo: None,
             status: DraftStatus::Deckbuilding,
             kind: DraftKind::Sealed,
             source: DraftSourceView::Set {
@@ -3037,6 +3342,9 @@ mod tests {
         };
         let msg = ServerMessage::DraftStateUpdate { view: view.clone() };
         let json = serde_json::to_string(&msg).unwrap();
+        let shape: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(shape["data"]["view"].get("flow").is_none());
+        assert!(shape["data"]["view"].get("fifo").is_none());
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
         match parsed {
             ServerMessage::DraftStateUpdate { view: v } => {
@@ -3300,6 +3608,8 @@ mod tests {
         use draft_core::view::{DraftSourceView, SetLayoutView, SpectatorDraftView};
 
         let view = SpectatorDraftView {
+            flow: DraftFlow::LegacyBarrier,
+            fifo: None,
             status: DraftStatus::Drafting,
             kind: DraftKind::Premier,
             source: DraftSourceView::Set {
@@ -3335,6 +3645,9 @@ mod tests {
         };
         let msg = ServerMessage::DraftSpectatorView { view };
         let json = serde_json::to_string(&msg).unwrap();
+        let shape: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(shape["data"]["view"].get("flow").is_none());
+        assert!(shape["data"]["view"].get("fifo").is_none());
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
         match parsed {
             ServerMessage::DraftSpectatorView { view: v } => {
@@ -3346,7 +3659,125 @@ mod tests {
         }
     }
 
-    /// The bump this number is at: `PlayerFilter` gains `AnyOf { filters }` and
+    /// v159: coin-flip effects are one `Effect::FlipCoins { flips: CoinFlipRun, .. }`
+    /// and the coin-flip resolution frame's kind becomes `Exactly`/`UntilLoss`.
+    /// A v158 or older peer silently reads a multi-flip or until-loss run as one flip, so
+    /// it must be refused before it receives v159 state.
+    /// v157: `ChooseFromZoneConstraint::TotalManaValue` in paused zone choices
+    /// and ability state requires a versioned full-game peer.
+    ///
+    /// v156: `StaticCondition`, `TriggerCondition` and `AbilityCondition` gain
+    /// `QuantityQuality { quantity, quality }` with the new `NumberQuality`
+    /// (CR 107.1, CR 603.4), carried in `GameState` ability definitions; a v155
+    /// peer cannot decode the new tag, so it must be refused before it receives
+    /// v156 state.
+    /// The same bump adds the optional per-seat `created_tokens` channel (each
+    /// seat's pinned creation result) to the private
+    /// player-scope tail sidecar that `PendingContinuation` carries under its
+    /// existing `player_scope_linked_exile` key (CR 608.2c + CR 608.2f: the
+    /// tokens every seat created, for a paused "each player creates … The
+    /// tokens …" tail); it is serde-defaulted, so a sidecar without it decodes
+    /// as the linked-exile-only sidecar.
+    ///
+    /// v155: `PendingChangeZoneIteration.remaining` carries each member's
+    /// pre-event entry modifications (`ChangeZoneMemberEntry`, CR 603.6a +
+    /// CR 614.12) and drops the raw gate fields, and the persisted resolution
+    /// state moves from version 6 to 7; a v154 peer cannot parse a parked
+    /// ChangeZone frame, so it must be refused before it receives v155 state.
+    ///
+    /// v154: `PendingCostMoveResume` gains `CounterCostRemovalPayment` (a
+    /// counter-removal cost paused on a CR 616.1 replacement choice, whose
+    /// settled count the activation reads, CR 118.11) and
+    /// `ManaAbilityCostCursor` gains `counter_removal`, both carried in
+    /// `GameState::pending_cost_move_resume`; a v153 peer cannot parse the new
+    /// tag, so it must be refused before it receives v154 state;
+    /// `PausedCounterCostRemoval` carries its `replacement_subtree` boundary.
+    ///
+    /// v153: `GrantAllActivatedAbilitiesOf` gains the optional `kind` selector
+    /// and the loyalty-grant sibling variant is removed. A v152 peer
+    /// drops the defaulted field silently and over-grants, so it must be
+    /// refused before it receives v153 state.
+    ///
+    /// v152: `ShortcutDecisionSchema` gains `suggested_declaration` and
+    /// `leading_aims`, and `ShortcutProposal` gains `leading_aims`; a v151 peer
+    /// drops them, so it must be refused before it receives v152 state.
+    /// v151: populated Bestow form payloads require a versioned full-game peer.
+    /// v150: the cast-this-way gains rider is reshaped —
+    /// `CastingPermission::ExileWithAltCost.enters_with_modifications` becomes a
+    /// `PendingEntersModifications` object and
+    /// `Effect::AddPendingEntersModifications` carries its `rider`; a v149 peer
+    /// cannot parse either new shape, so it must be refused before it receives
+    /// v150 state.
+    /// v149: `GameState::deferred_spell_delivery` is gone and
+    /// `GameState::resolving_spell_final_part` marks the CR 608.2n final part a
+    /// paused instant or sorcery still owes; a v148 peer drops the key and would
+    /// move the spell before its paused instructions finish, so it must be refused
+    /// before it receives v149 state.
+    /// v148: Timesifter's top-card exile contest — `Effect::ExileTopCardContest`
+    /// in serialized ability definitions and the parked
+    /// `BatchCompletion::TopCardContestRoundComplete`; a v147 peer cannot parse
+    /// either tag, so it must be refused before it receives v148 state.
+    /// v147: online physical contests (Eye to Eye, Mouth to Mouth) —
+    /// `WaitingFor::PhysicalContest`, `Effect::PhysicalContest`, the two
+    /// `PhysicalContest*` `GameEvent`s, `ClientMessage::ContestClick` and
+    /// `ServerMessage::ContestProgress`; a v146 peer cannot parse the new tags, so
+    /// it must be refused before it receives v147 state.
+    /// v146: `ConfirmedPeriod` gains `counted_by` (CR 732.2a counted loop offers) and `performance`,
+    /// and a loop offer's `win_kind` becomes optional; a v145 peer drops the field
+    /// or cannot parse the offer, so it must be refused before it receives v146 state.
+    /// v145: `ParentTargetMissingReason` gains `SearchLibrary` (CR 701.23b),
+    /// serialized on `ResolvedAbility.parent_target_missing_reason`; a v144
+    /// peer cannot parse the tag. P2P moves in lockstep (wire 127); lobby
+    /// messages unchanged.
+    ///
+    /// v144: one-time boons (#7495) add `Effect::CreateBoon`, `Effect::NoteNumber`,
+    /// the `HasBoon` conditions, and `WaitingFor::ChooseTokenHost` tags, and
+    /// retype the perpetual P/T edit's `power_delta`/`toughness_delta` to
+    /// required `QuantityExpr` `power`/`toughness`. A v143 peer cannot parse
+    /// the new shapes, so it must be refused before it receives v144 state.
+    ///
+    /// v143: `GameState::modal_modes_chosen_this_turn` / `_this_game` retype to
+    /// `(ObjectIncarnationRef, usize)` (CR 400.7 incarnation-keyed modal
+    /// history); a v142 peer cannot decode the object-shaped key, so it must be
+    /// refused before it receives v143 state.
+    ///
+    /// v142: `LinkedExileSnapshot` gains `incarnation` (CR 400.7), carried in
+    /// `GameState::linked_exile_lki` and the trigger and zone-change linked-exile
+    /// snapshots; a v141 peer re-encoding state drops it, so it must be refused
+    /// before it receives v142 state.
+    ///
+    /// v141: `ExileLinkKind` gains `CastCost` (CR 607.2q cast-cost exile links),
+    /// carried in `GameState::exile_links`; a v140 peer cannot parse the tag, so
+    /// it must be refused before it receives v141 state.
+    ///
+    /// v140: `AttackSubject` gains `EventAttackers` (the players a trigger's
+    /// attack event's attackers attacked), carried in a resolving or pending
+    /// ability's `player_scope` inside `GameState`; a v139 peer cannot parse the
+    /// tag, so it must be refused before it receives v140 state.
+    ///
+    /// v139: CR 702.122c per-turn crew relation —
+    /// `GameState::crew_history_this_turn` and `FilterProp::CrewedThisTurn`, both
+    /// inside `GameState`; a v138 peer cannot parse the new filter tag, so it
+    /// must be refused before it receives v139 state.
+    ///
+    /// v134: `GameEvent::AbilityActivated` gains
+    /// `stack_entry`, the stack object a stack-using activation created, carried
+    /// in `GameState`'s trigger events; an older peer drops it silently and
+    /// resolves an activation trigger's "copy that ability" differently, so it
+    /// must be refused before it receives v134 state.
+    ///
+    /// v133: CR 614.12a pre-entry as-enters choices —
+    /// `NamedChoiceSourceBinding::PendingEntry`, `ProposedEvent::ZoneChange`'s
+    /// `enter_with_choices` and `PendingReplacement::delivery_boundary`, all
+    /// inside `GameState`; a v132 peer cannot parse the new binding tag, so it
+    /// must be refused before it receives v133 state.
+    ///
+    /// v132: `GameObject::exile_from_stack_linked_source`
+    /// carries the stamping incarnation (`ObjectIncarnationRef`, CR 400.7); a
+    /// v131 peer cannot decode a set rider, so it must be refused before it
+    /// receives v132 state.
+    ///
+    /// v131: `PlayerFilter` gains `AnyOf { filters }` and
     /// `TargetPlayer`, carried in a resolving or pending ability's `player_scope`
     /// inside `GameState`; a v130 peer cannot parse either tag, so it must be
     /// refused before it receives v131 state.
@@ -3512,13 +3943,9 @@ mod tests {
     /// The preceding v88 bump gave `WaitingFor::DeclareBlockers` its
     /// `block_capacities` (CR 509.1a + CR 101.1).
     ///
-    /// The name embeds the numeral deliberately: `assert_eq!(PROTOCOL_VERSION,
-    /// <n>)` under a function named for `<n-1>` is green, so
-    /// `check-protocol-version.mjs` requires the current numeral in this name
-    /// and refuses the superseded one.
     #[test]
-    fn protocol_version_is_131_for_coordinated_player_set() {
-        assert_eq!(PROTOCOL_VERSION, 131);
+    fn protocol_version_is_owned_by_broker() {
+        assert_eq!(PROTOCOL_VERSION, lobby_broker::PROTOCOL_VERSION);
     }
 
     /// The bump alone is inert — a version number nobody enforces prevents no
@@ -3529,7 +3956,7 @@ mod tests {
     ///
     /// REVERT-PROBE: relax to `PROTOCOL_VERSION - 1` — the exact regression
     /// this guards — and this test reds while
-    /// `protocol_version_is_131_for_coordinated_player_set` stays
+    /// `protocol_version_is_owned_by_broker` stays
     /// green, which is why the two are separate assertions.
     #[test]
     fn full_game_floor_is_current_only_not_a_rollout_window() {
@@ -3754,10 +4181,71 @@ mod tests {
     }
 
     #[test]
+    fn server_message_state_withheld_wire_shape_roundtrips() {
+        let msg = ServerMessage::StateWithheld {
+            full_key: None,
+            state_revision: 6,
+            withheld: WithheldFrame::StateUpdate,
+            reason: "too large".to_string(),
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "StateWithheld",
+                "data": {
+                    "state_revision": 6,
+                    "withheld": { "type": "StateUpdate" },
+                    "reason": "too large",
+                },
+            })
+        );
+        assert!(matches!(
+            serde_json::from_value::<ServerMessage>(json).unwrap(),
+            ServerMessage::StateWithheld {
+                full_key: None,
+                state_revision: 6,
+                withheld: WithheldFrame::StateUpdate,
+                ..
+            }
+        ));
+        let started = serde_json::to_value(ServerMessage::StateWithheld {
+            full_key: None,
+            state_revision: 2,
+            withheld: WithheldFrame::GameStarted {
+                your_player: PlayerId(1),
+            },
+            reason: String::new(),
+        })
+        .unwrap();
+        assert_eq!(
+            started,
+            serde_json::json!({
+                "type": "StateWithheld",
+                "data": {
+                    "state_revision": 2,
+                    "withheld": { "type": "GameStarted", "data": { "your_player": 1 } },
+                    "reason": "",
+                },
+            })
+        );
+        assert!(matches!(
+            serde_json::from_value::<ServerMessage>(started).unwrap(),
+            ServerMessage::StateWithheld {
+                withheld: WithheldFrame::GameStarted {
+                    your_player: PlayerId(1)
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn server_message_takeback_requested_roundtrips() {
         let msg = ServerMessage::TakebackRequested {
             requester: PlayerId(1),
             requester_name: "Alice".to_string(),
+            voters: vec![PlayerId(0), PlayerId(2)],
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
@@ -3765,9 +4253,11 @@ mod tests {
             ServerMessage::TakebackRequested {
                 requester,
                 requester_name,
+                voters,
             } => {
                 assert_eq!(requester, PlayerId(1));
                 assert_eq!(requester_name, "Alice");
+                assert_eq!(voters, vec![PlayerId(0), PlayerId(2)]);
             }
             _ => panic!("wrong variant"),
         }
@@ -3775,34 +4265,90 @@ mod tests {
 
     #[test]
     fn server_message_takeback_resolved_roundtrips() {
-        let msg = ServerMessage::TakebackResolved {
-            approved: true,
-            resolved_by: Some(PlayerId(0)),
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
-        match parsed {
-            ServerMessage::TakebackResolved {
-                approved,
-                resolved_by,
-            } => {
-                assert!(approved);
-                assert_eq!(resolved_by, Some(PlayerId(0)));
+        for resolution in [
+            TakebackResolution::Approved,
+            TakebackResolution::Declined,
+            TakebackResolution::Cancelled,
+            TakebackResolution::Withdrawn,
+        ] {
+            let msg = ServerMessage::TakebackResolved {
+                resolution,
+                resolved_by: Some(PlayerId(0)),
+            };
+            let json = serde_json::to_string(&msg).unwrap();
+            let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+            match parsed {
+                ServerMessage::TakebackResolved {
+                    resolution: parsed_resolution,
+                    resolved_by,
+                } => {
+                    assert_eq!(parsed_resolution, resolution);
+                    assert_eq!(resolved_by, Some(PlayerId(0)));
+                }
+                _ => panic!("wrong variant"),
             }
-            _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn server_message_takeback_resolved_wire_bytes_name_the_resolution() {
+        let msg = ServerMessage::TakebackResolved {
+            resolution: TakebackResolution::Withdrawn,
+            resolved_by: Some(PlayerId(2)),
+        };
+        assert_eq!(
+            serde_json::to_value(&msg).unwrap(),
+            serde_json::json!({
+                "type": "TakebackResolved",
+                "data": { "resolution": "withdrawn", "resolved_by": 2 },
+            })
+        );
     }
 
     #[test]
     fn server_message_takeback_resolved_omits_resolved_by_when_none() {
         let msg = ServerMessage::TakebackResolved {
-            approved: false,
+            resolution: TakebackResolution::Declined,
             resolved_by: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(
             !json.contains("resolved_by"),
             "None must be omitted: {json}"
+        );
+    }
+
+    #[test]
+    fn optional_command_correlation_hello_preserves_old_server_fallback() {
+        let legacy = serde_json::json!({
+            "type": "ServerHello",
+            "data": {
+                "server_version": "test",
+                "build_commit": "test",
+                "protocol_version": PROTOCOL_VERSION,
+                "mode": "Full",
+            },
+        });
+        assert!(matches!(
+            serde_json::from_value::<ServerMessage>(legacy.clone()).unwrap(),
+            ServerMessage::ServerHello {
+                command_correlation: None,
+                ..
+            }
+        ));
+        let mut negotiated = legacy;
+        negotiated["data"]["command_correlation"] = serde_json::json!("CommandIdV1");
+        let hello: ServerMessage = serde_json::from_value(negotiated.clone()).unwrap();
+        assert!(matches!(
+            &hello,
+            ServerMessage::ServerHello {
+                command_correlation: Some(CommandCorrelation::CommandIdV1),
+                ..
+            }
+        ));
+        assert_eq!(
+            serde_json::to_value(hello).unwrap()["data"]["command_correlation"],
+            "CommandIdV1"
         );
     }
 }

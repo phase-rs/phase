@@ -28,7 +28,11 @@ fn champions_full_party_parsed_as_parent_target_pump() {
             t.mode == TriggerMode::YouAttack
                 && matches!(
                     t.condition,
-                    Some(TriggerCondition::AttackersDeclaredCount { count: 8, .. })
+                    Some(TriggerCondition::EventTime { ref condition })
+                        if matches!(
+                            condition.as_ref(),
+                            TriggerCondition::AttackersDeclaredCount { count: 8, .. }
+                        )
                 )
         })
         .expect("Full Party trigger");
