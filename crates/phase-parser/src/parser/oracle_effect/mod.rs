@@ -16520,7 +16520,12 @@ fn parse_reveal_until_active_filter_text(input: &str) -> OracleResult<'_, &str> 
 }
 
 fn parse_reveal_until_passive_filter_text(input: &str) -> OracleResult<'_, &str> {
-    all_consuming(alt((terminated(take_until(" card"), tag(" card")), rest))).parse(input)
+    all_consuming(alt((
+        terminated(take_until(" cards"), tag(" cards")),
+        terminated(take_until(" card"), tag(" card")),
+        rest,
+    )))
+    .parse(input)
 }
 
 /// Match a disjunction separator at the head of `input`: `", or "` / `", "` /
@@ -16811,36 +16816,51 @@ fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEf
 
     // CR 701.20a: Passive-voice form — "…until a/an <filter> [card] is revealed
     // [and exiles that card]" (Indomitable Creativity, Blessed Reincarnation,
-    // Tunnel Vision). Passive prefix stops before the article; extract article,
+    // Tunnel Vision) or "…until four land cards are revealed" (Mind Funeral).
+    // Passive prefix stops before the article or count; extract count,
     // filter phrase, and optional exile suffix here.
-    let (_, rest_orig) = nom_on_lower(tp.original, tp.lower, parse_reveal_until_passive_prefix)?;
-    let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
+    let (_, rest_orig) = nom_on_lower(
+        count_tp.original,
+        count_tp.lower,
+        parse_reveal_until_passive_prefix,
+    )?;
+    let rest_lower = &count_tp.lower[count_tp.lower.len() - rest_orig.len()..];
 
-    // Consume the article ("a" / "an").
-    let (_, after_article_orig) =
-        nom_on_lower(rest_orig, rest_lower, nom_primitives::parse_article)?;
-    let after_article_lower = &rest_lower[rest_lower.len() - after_article_orig.len()..];
+    // Consume the article ("a" / "an") or count ("four", "X", etc.).
+    let (after_count_lower, raw_count) = parse_reveal_until_count(rest_lower).ok()?;
 
-    // Capture everything up to " is revealed" — this is the filter phrase.
-    let (remainder, captured) = take_until::<_, _, OracleError<'_>>(" is revealed")
-        .parse(after_article_lower)
-        .ok()?;
+    // Capture everything up to " is revealed" or " are revealed" — this is the filter phrase.
+    let (remainder, (captured, _)) = alt((
+        pair(
+            take_until::<_, _, OracleError<'_>>(" is revealed"),
+            tag(" is revealed"),
+        ),
+        pair(
+            take_until::<_, _, OracleError<'_>>(" are revealed"),
+            tag(" are revealed"),
+        ),
+    ))
+    .parse(after_count_lower)
+    .ok()?;
 
-    // Strip trailing " card" if present ("artifact or creature card" → "artifact or creature").
-    // Tunnel Vision's captured = "card with that name" (no " card" suffix — handled by HasChosenName).
+    // Strip trailing " cards" or " card" if present ("artifact or creature card" → "artifact or creature",
+    // "land cards" → "land"). Tunnel Vision's captured = "card with that name" (no " card" suffix — handled by HasChosenName).
     let (_, filter_text) = parse_reveal_until_passive_filter_text(captured).ok()?;
 
     let filter = build_reveal_until_filter(filter_text);
+    // CR 107.3c: fail honestly instead of fabricating a raw-text placeholder.
+    let count = apply_where_x_quantity_expression(raw_count, where_x_expression.as_deref())?;
 
     // CR 406.2: Detect inline "and exiles that card" suffix. When present, the kept
-    // card goes directly to Exile. Consume " is revealed" via nom tag, then check
-    // the optional exile clause with a tag probe (.is_ok() since opt is infallible anyway).
-    let (after_is_revealed, _) = tag::<_, _, OracleError<'_>>(" is revealed")
-        .parse(remainder)
-        .ok()?;
-    let inline_exile = tag::<_, _, OracleError<'_>>(" and exiles that card")
-        .parse(after_is_revealed)
-        .is_ok();
+    // card goes directly to Exile.
+    let inline_exile = alt((
+        tag::<_, _, OracleError<'_>>(" and exiles that card"),
+        tag(" and exiles those cards"),
+        tag(" and exile that card"),
+        tag(" and exile those cards"),
+    ))
+    .parse(remainder)
+    .is_ok();
     let kept_destination = if inline_exile {
         Zone::Exile
     } else {
@@ -16850,7 +16870,7 @@ fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEf
     Some(parsed_clause(Effect::RevealUntil {
         player,
         filter,
-        count: QuantityExpr::Fixed { value: 1 },
+        count,
         matched_disposition: RevealUntilDisposition::KeepEach,
         kept_destination,
         rest_destination: Zone::Library,

@@ -45367,6 +45367,84 @@ fn reveal_until_puts_those_cards_to_graveyard() {
     );
 }
 
+/// CR 701.20a: Mind Funeral — "Target opponent reveals cards from the top of their
+/// library until four land cards are revealed. That player puts all cards revealed
+/// this way into their graveyard."
+///
+/// Passive-voice reveal-until with count > 1 ("until four land cards are revealed")
+/// and third-person continuation ("That player puts all cards revealed this way into their graveyard").
+#[test]
+fn reveal_until_passive_count_mind_funeral() {
+    let def = parse_effect_chain(
+        "Target opponent reveals cards from the top of their library until four land cards are revealed. That player puts all cards revealed this way into their graveyard.",
+        AbilityKind::Spell,
+    );
+    let Effect::RevealUntil {
+        player,
+        filter,
+        count,
+        kept_destination,
+        rest_destination,
+        ..
+    } = &*def.effect
+    else {
+        panic!("expected RevealUntil, got {:?}", def.effect);
+    };
+
+    assert!(
+        matches!(
+            player,
+            TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::Opponent),
+                ..
+            })
+        ),
+        "expected opponent player filter, got: {player:?}"
+    );
+    assert!(
+        matches!(
+            filter,
+            TargetFilter::Typed(TypedFilter { type_filters, .. })
+                if type_filters.contains(&TypeFilter::Land)
+        ),
+        "expected land filter, got: {filter:?}"
+    );
+    assert_eq!(*count, QuantityExpr::Fixed { value: 4 });
+    assert_eq!(*kept_destination, Zone::Graveyard);
+    assert_eq!(*rest_destination, Zone::Graveyard);
+}
+
+/// CR 701.20a: Plural passive-voice reveal-until with custom count and zone destination.
+#[test]
+fn reveal_until_passive_count_plural_are_revealed() {
+    let def = parse_effect_chain(
+        "Target player reveals cards from the top of their library until two creature cards are revealed, then puts those cards into their graveyard.",
+        AbilityKind::Spell,
+    );
+    let Effect::RevealUntil {
+        count,
+        filter,
+        kept_destination,
+        rest_destination,
+        ..
+    } = &*def.effect
+    else {
+        panic!("expected RevealUntil, got {:?}", def.effect);
+    };
+
+    assert_eq!(*count, QuantityExpr::Fixed { value: 2 });
+    assert!(
+        matches!(
+            filter,
+            TargetFilter::Typed(TypedFilter { type_filters, .. })
+                if type_filters.contains(&TypeFilter::Creature)
+        ),
+        "expected creature filter, got: {filter:?}"
+    );
+    assert_eq!(*kept_destination, Zone::Graveyard);
+    assert_eq!(*rest_destination, Zone::Graveyard);
+}
+
 /// CR 701.20a: Treasure Hunt — "then put all cards revealed this way into your hand."
 /// The entire revealed pile goes to hand (kept_destination=Hand, rest_destination=Hand).
 #[test]
