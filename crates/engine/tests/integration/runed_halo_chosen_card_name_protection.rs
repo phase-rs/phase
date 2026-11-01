@@ -273,6 +273,93 @@ fn runed_halo_prevents_noncombat_damage_from_named_card() {
     );
 }
 
+const PYROHEMIA_ORACLE: &str = "At the beginning of the end step, if no creatures are on the battlefield, sacrifice this enchantment.\n{R}: This enchantment deals 1 damage to each creature and each player.";
+
+/// P0 controls Runed Halo naming `chosen` and activates its own Pyrohemia
+/// (a non-targeting `DamageAll` ability) with a tapped Mountain. Returns
+/// `(runner, mountain, p1_creature)` after the ability has resolved.
+fn activate_pyrohemia_with_halo_naming(
+    chosen: &str,
+) -> (engine::game::scenario::GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let halo = scenario
+        .add_enchantment_from_oracle(P0, "Runed Halo", RUNED_HALO_ORACLE)
+        .id();
+    let pyro = scenario
+        .add_enchantment_from_oracle(P0, "Pyrohemia", PYROHEMIA_ORACLE)
+        .id();
+    let mountain = scenario
+        .add_land_from_oracle(P0, "Mountain", "{T}: Add {R}.")
+        .id();
+    let bear = scenario.add_creature(P1, "Bystander", 2, 2).id();
+    let mut runner = scenario.build();
+
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&halo)
+        .unwrap()
+        .chosen_attributes
+        .push(engine::types::ability::ChosenAttribute::CardName(
+            chosen.to_string(),
+        ));
+
+    let ability_index = runner.state().objects[&pyro]
+        .abilities
+        .iter()
+        .position(|a| matches!(a.effect.as_ref(), Effect::DamageAll { .. }))
+        .expect("Pyrohemia's {R} DamageAll ability");
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: pyro,
+            ability_index,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activating Pyrohemia must succeed");
+    assert!(
+        runner.state().objects[&mountain].tapped,
+        "the {{R}} activation cost must be paid by tapping the Mountain"
+    );
+    assert!(
+        !runner.state().stack.is_empty(),
+        "Pyrohemia's ability must be on the stack before resolution"
+    );
+    runner.advance_until_stack_empty();
+    (runner, mountain, bear)
+}
+
+#[test]
+fn runed_halo_prevents_nontargeted_damage_all_from_named_source() {
+    let (runner, _, bear) = activate_pyrohemia_with_halo_naming("Pyrohemia");
+
+    // Reach guard: the ability resolved (it damaged the other player and a creature).
+    assert_eq!(
+        runner.state().players[1].life,
+        19,
+        "Pyrohemia must have resolved, dealing 1 to the unprotected player"
+    );
+    assert_eq!(runner.state().objects[&bear].damage_marked, 1);
+    // CR 702.16e: damage from the chosen-name source to the Halo controller is prevented.
+    assert_eq!(
+        runner.state().players[0].life,
+        20,
+        "P0 has protection from Pyrohemia and must take no damage from its DamageAll"
+    );
+}
+
+#[test]
+fn runed_halo_does_not_prevent_nontargeted_damage_all_from_other_name() {
+    let (runner, _, _) = activate_pyrohemia_with_halo_naming("Grizzly Bears");
+
+    assert_eq!(runner.state().players[1].life, 19);
+    assert_eq!(
+        runner.state().players[0].life,
+        19,
+        "a non-matching chosen name must not protect P0 from Pyrohemia"
+    );
+}
+
 #[test]
 fn runed_halo_prevents_targeting_from_named_card() {
     let mut scenario = GameScenario::new();
