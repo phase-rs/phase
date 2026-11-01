@@ -1137,8 +1137,9 @@ select.select-dark option {
   --stare-lower: 14px;
 }
 
+/* Important: each pose's `animation` shorthand would otherwise reset this to running. */
 .stare-stage[data-paused] * {
-  animation-play-state: paused;
+  animation-play-state: paused !important;
 }
 
 /* The eye sits above the panel, or beside it wherever stacking would cover the eye:
@@ -1166,6 +1167,10 @@ select.select-dark option {
   .stare-dialog {
     align-items: center;
     justify-content: flex-end;
+  }
+
+  .stare-dialog > * {
+    max-width: min(28rem, calc(60vw - 2rem));
   }
 }
 

@@ -575,6 +575,19 @@ describe("ContestOverlay staring eye", () => {
     expect(submitContestClick).toHaveBeenCalledWith(2, 1);
   });
 
+  it("leaves a settled result behind with the game it belonged to", () => {
+    showContest(contestState("Active"), { submitContestClick: vi.fn(() => true) });
+    const view = render(<ContestOverlay />);
+    settle({ Outcome: { Decided: { winner: 0, loser: 1, reason: "Inactivity" } } });
+    expect(useContestStore.getState().announcement).not.toBeNull();
+
+    view.unmount();
+    render(<ContestOverlay />);
+
+    expect(useContestStore.getState().announcement).toBeNull();
+    expect(screen.queryByTestId("staring-stage")).not.toBeInTheDocument();
+  });
+
   it("does not take a hotseat seat for the viewer, whichever of them lost", () => {
     useGameStore.setState({ aiSeatIds: [] });
     showContest(contestState("Active"), { driveContest: vi.fn() });

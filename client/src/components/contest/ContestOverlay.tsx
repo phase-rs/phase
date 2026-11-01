@@ -487,6 +487,16 @@ export function ContestOverlay() {
     }
   }, [events, announce]);
 
+  // A result belongs to the game it was announced in; leaving that game must not
+  // leave it in the store to play over the next one.
+  useEffect(
+    () => () => {
+      const { announcement, dismissAnnouncement } = useContestStore.getState();
+      if (announcement) dismissAnnouncement(announcement.id);
+    },
+    [],
+  );
+
   const contest = waitingFor?.type === "PhysicalContest" ? waitingFor.data.contest : null;
   return (
     <>
