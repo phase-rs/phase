@@ -2573,6 +2573,21 @@ fn reconcile_terminal_sba(state: &mut GameState, result: &mut ActionResult) {
     settle_finished_game(state, result);
 }
 
+/// The named spans the recorded road may offer; a mandatory recurrence is never one.
+fn offerable_spans(named: Vec<super::play_trace::NamedSpan>) -> Vec<super::play_trace::NamedSpan> {
+    use super::play_trace::NamingCause;
+    named
+        .into_iter()
+        .filter(|span| match span.cause {
+            NamingCause::Repeat
+            | NamingCause::TriggerTop
+            | NamingCause::Restored
+            | NamingCause::LegalNow => true,
+            NamingCause::MandatoryRecurrence => false,
+        })
+        .collect()
+}
+
 /// CR 732.2a: the loop-shortcut half of [`reconcile_terminal_result`] — the ring road, then the
 /// recorded road. Evaluated once per priority frame: a boundary whose auto-pass loop did not
 /// advance re-runs only [`reconcile_terminal_sba`].
@@ -2696,20 +2711,7 @@ fn reconcile_loop_shortcut(state: &mut GameState, result: &mut ActionResult) {
     // the window before that the confirmer confirms. It runs after the ring road and only while
     // `waiting_for` is still `Priority`, so a ring mint above takes precedence, gated identically
     // (opt-in + top-level-only). INV-2: this OFFERS the interactive shortcut (never auto-resolves).
-    // A mandatory recurrence is not offered here; every other cause is.
-    let offerable: Vec<super::play_trace::NamedSpan> = named
-        .into_iter()
-        .filter(|span| {
-            use super::play_trace::NamingCause;
-            match span.cause {
-                NamingCause::Repeat
-                | NamingCause::TriggerTop
-                | NamingCause::Restored
-                | NamingCause::LegalNow => true,
-                NamingCause::MandatoryRecurrence => false,
-            }
-        })
-        .collect();
+    let offerable = offerable_spans(named);
     if !matches!(state.waiting_for, WaitingFor::GameOver { .. })
         && state.loop_detection.samples()
         && !in_simulation_probe()
@@ -26114,8 +26116,8 @@ mod kilo_interruptibility_tests {
     const RELIC_TAP_MANA: usize = 1;
     const FREED_UNTAP: usize = 1;
 
-    /// The trace-fed producer's offer at `state`'s priority window, asked every span the trace
-    /// names.
+    /// The trace-fed producer's offer at `state`'s priority window, asked every offerable span the
+    /// trace names.
     fn offer_at(
         state: &GameState,
     ) -> Option<(
@@ -26123,7 +26125,7 @@ mod kilo_interruptibility_tests {
         crate::analysis::decision_template::ShortcutDecisionSchema,
         crate::game::period_confirm::ConfirmedPeriod,
     )> {
-        let spans = crate::game::play_trace::current_named(state);
+        let spans = offerable_spans(crate::game::play_trace::current_named(state));
         try_offer_object_growth_shortcut(&mut state.clone(), &spans)
             .map(|(certificate, schema, period, _)| (certificate, schema, period))
     }

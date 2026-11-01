@@ -7,7 +7,9 @@ use engine::game::casting::can_cast_object_now;
 use engine::game::deck_loading::create_object_from_card_face;
 use engine::game::effects::attach::attach_to;
 use engine::game::mana_abilities::is_mana_ability;
-use engine::game::perf_counters::{play_trace_counters, PlayTraceCounters};
+use engine::game::perf_counters::{
+    play_trace_counters, snapshot as perf_snapshot, PlayTraceCounters,
+};
 use engine::game::period_confirm::{confirm_for_tests, OfferRefusal};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
@@ -17,11 +19,13 @@ use engine::game::{
     PlayTraceView, TraceEntry,
 };
 use engine::types::ability::{AbilityCost, AbilityKind, TargetRef};
-use engine::types::actions::{CastChoice, GameAction, ReplacementAutoChoice};
+use engine::types::actions::{
+    CastChoice, GameAction, ReplacementAutoChoice, ResolveAllConsentDecision, ResolveAllScope,
+};
 use engine::types::counter::CounterType;
 use engine::types::game_state::{
     AutoMayChoice, CastPaymentMode, GameState, LoopDetectionMode, ManaChoice,
-    MayTriggerAutoChoiceSelector, StackEntryKind, WaitingFor,
+    MayTriggerAutoChoiceScope, MayTriggerAutoChoiceSelector, StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::mana::ManaType;
@@ -1067,6 +1071,8 @@ fn optional_answer(entry: &TraceEntry) -> bool {
 #[derive(Default)]
 struct NivWindows {
     remembered: usize,
+    /// The most remembered answers a window held that name the trigger that asked them.
+    asked: usize,
     named: usize,
     mandatory: usize,
     /// A P0 window named a trigger-top span over P0's remembered answer and no optional answer.
@@ -1096,6 +1102,14 @@ fn drive_niv(choice: AutoMayChoice, db: &CardDatabase) -> NivWindows {
                     view.entries
                         .iter()
                         .filter(|entry| remembered_by(entry, P0))
+                        .count(),
+                );
+                seen.asked = seen.asked.max(
+                    view.entries
+                        .iter()
+                        .filter(|entry| {
+                            matches!(entry.kind, EntryKind::Remembered { asked_by: Some(_) })
+                        })
                         .count(),
                 );
                 seen.named = seen.named.max(view.named.len());
@@ -1160,6 +1174,10 @@ fn play_trace_names_a_stored_accept_period_trigger_top_not_mandatory() {
         seen.ordered,
         "each remembered answer follows the resolution that asked it"
     );
+    assert!(
+        seen.asked > 0,
+        "reach: a remembered answer names the trigger that asked it"
+    );
     // CR 732.2a: the remembered answer is P0's choice, so the period is P0's alone.
     assert_eq!(
         seen.foreign,
@@ -1185,7 +1203,99 @@ fn play_trace_records_a_stored_decline_and_names_nothing() {
     assert_eq!(seen.named, 0);
 }
 
-/// CR 616.1e: Battletide Alchemist's prevention ("If a source would deal damage to a player, you
+/// CR 603.5 + CR 608.2: two Soul's Attendants ("Whenever another creature enters, you may gain 1
+/// life.") see Raise the Alarm ("Create two 1/1 white Soldier creature tokens.") make two Soldiers.
+/// P0 declines the first trigger and remembers it for the card, so a granted Resolve All resolves
+/// the three declined triggers left in one pass, and each remembered decline follows the
+/// resolution that asked it.
+#[test]
+fn play_trace_places_each_remembered_answer_after_its_resolution_in_a_batch() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    for _ in 0..2 {
+        scenario.add_real_card(P0, "Plains", Zone::Battlefield, db);
+    }
+    let alarm = scenario.add_real_card(P0, "Raise the Alarm", Zone::Hand, db);
+    let mut runner = scenario.build();
+    let state = runner.state_mut();
+    state.loop_detection = LoopDetectionMode::Interactive;
+    let attendants = [
+        place(state, P0, "Soul's Attendant", db),
+        place(state, P0, "Soul's Attendant", db),
+    ];
+    let waiting = |state: &GameState| {
+        state
+            .stack
+            .iter()
+            .filter(|entry| attendants.contains(&entry.source_id))
+            .count()
+    };
+    cast(&mut runner, alarm, vec![], CastPaymentMode::Auto);
+    for _ in 0..BEAT_CAP {
+        match runner.state().waiting_for {
+            WaitingFor::OptionalEffectChoice { .. } => break,
+            WaitingFor::Priority { .. } => act(&mut runner, GameAction::PassPriority),
+            _ => answer(&mut runner, &|_| 0),
+        }
+    }
+    assert_eq!(waiting(runner.state()), 3, "reach: the first trigger asks");
+    act(
+        &mut runner,
+        GameAction::DecideOptionalEffectAndRemember {
+            choice: AutoMayChoice::Decline,
+            scope: MayTriggerAutoChoiceScope::SameCard,
+        },
+    );
+    assert_eq!(
+        waiting(runner.state()),
+        3,
+        "reach: three declined triggers wait"
+    );
+    act(
+        &mut runner,
+        GameAction::BeginResolveAll {
+            max_resolutions: 3,
+            scope: ResolveAllScope::Shared,
+        },
+    );
+    let WaitingFor::ResolveAllConsent { epoch, .. } = runner.state().waiting_for else {
+        panic!("P1 consents: {:?}", runner.state().waiting_for);
+    };
+    let before = perf_snapshot().stack_inert_noop_entries;
+    let start = trace_of(runner.state()).entries.len();
+    act(
+        &mut runner,
+        GameAction::RespondResolveAllConsent {
+            epoch,
+            decision: ResolveAllConsentDecision::Grant,
+        },
+    );
+    assert_eq!(
+        perf_snapshot().stack_inert_noop_entries - before,
+        3,
+        "reach: one pass resolved the three declined triggers"
+    );
+    let view = trace_of(runner.state());
+    let resolved = entry_steps(&view, start..view.entries.len());
+    let Some(&Step::Resolve(node)) = resolved.get(1) else {
+        panic!("a resolution follows the consent: {resolved:?}");
+    };
+    assert_eq!(
+        resolved,
+        vec![
+            Step::Answer(P1, "RespondResolveAllConsent"),
+            Step::Resolve(node),
+            Step::Remembered(P0),
+            Step::Resolve(node),
+            Step::Remembered(P0),
+            Step::Resolve(node),
+            Step::Remembered(P0),
+        ]
+    );
+}
+
+/// Battletide Alchemist's prevention ("If a source would deal damage to a player, you
 /// may prevent X of that damage, where X is the number of Clerics you control.") is P1's optional
 /// choice inside P0's Worldgorger loop, whose Gibbering Fiend ("When this creature enters, it
 /// deals 1 damage to each opponent.") re-enters each cycle; P1 answers it once and remembers it.
