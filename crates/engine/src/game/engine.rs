@@ -23061,7 +23061,13 @@ mod stage2_injector_tests {
     const TARGET_DRAIN: &str = "Whenever you gain life, target opponent loses that much life.";
     const FEEDBACK: &str = "Whenever an opponent loses life, you gain that much life.";
     /// Synthetic `FEEDBACK` variant that also gives energy, so a ring cycle
-    /// moves an energy total the edit authority still checks.
+    /// moves an energy total the edit authority still checks. No printed card
+    /// exhibits the shape: the test needs the ring's one feedback trigger to
+    /// move energy itself, so the ring keeps the same triggers. The nearest
+    /// printed card is Exquisite Blood ("Whenever an opponent loses life, you
+    /// gain that much life."), whose text `FEEDBACK` is; a printed energy source
+    /// such as Sphinx of the Revelation ("Whenever you gain life, you get that
+    /// many {E} (energy counters).") would add a trigger to every ring cycle.
     const FEEDBACK_ENERGY: &str =
         "Whenever an opponent loses life, you gain that much life and you get {E}.";
     const KICKOFF: &str = "You gain 1 life.";
@@ -31710,14 +31716,14 @@ mod period_growth_life_cap_tests {
         }
     }
 
-    /// CR 732.2c + CR 119.3 + CR 810.9 + CR 810.9a: a take whose driven cycle changes a player's
-    /// life other than by a gain stored whole on that player's own field is performed, whatever
-    /// its batched items: a loss spilled onto the teammate at `i32::MIN`, a loss on the member's
-    /// own field, and a loss that reaches `i32::MIN` exactly. A take whose cycle only gains, each
-    /// gain on its own player's field, is not routed by that. The frames and the cycle's
-    /// `LifeChanged` events are built by hand, as a Two-Headed Giant board that a can't-lose
-    /// effect keeps in the game (CR 810.8a) would leave them with team A's member P0 near
-    /// `i32::MIN`; no row passes a life limit, so the gate alone decides.
+    /// CR 732.2c + CR 119.3 + CR 810.9 + CR 810.9a: a take in whose driven cycle some player's net
+    /// life change is not a gain, or nothing, stored whole on that player's own field is
+    /// performed, whatever its batched items: a loss spilled onto the teammate at `i32::MIN`, a
+    /// loss on the member's own field, and a loss that reaches `i32::MIN` exactly. A take whose
+    /// cycle only gains, each gain on its own player's field, is not routed by that. The frames
+    /// and the cycle's `LifeChanged` events are built by hand, as a Two-Headed Giant board that a
+    /// can't-lose effect keeps in the game (CR 810.8a) would leave them with team A's member P0
+    /// near `i32::MIN`; no row passes a life limit, so the gate alone decides.
     #[test]
     fn a_period_whose_life_is_not_stored_as_gains_is_performed() {
         use crate::analysis::decision_template::IterationCount;

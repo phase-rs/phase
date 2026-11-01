@@ -3747,7 +3747,12 @@ mod tests {
         /// A P0 "Interactive Lich" whose replacement substitutes a choice for a
         /// life gain (CR 614.6): branch 0 is `first_branch`, branch 1 opens a
         /// nested one-branch draw choice, and a draw tail follows either branch.
-        /// `preset` adjusts the runner before the source is created.
+        /// `preset` adjusts the runner before the source is created. Synthetic:
+        /// no printed card's life-gain replacement offers a choice, and the
+        /// tests need one so the substitute pauses on its own prompt and a
+        /// branch answer can be rejected or resume a nested choice. The nearest
+        /// printed card is Nefarious Lich, whose "If you would gain life, draw
+        /// that many cards instead." substitutes a draw for the gain.
         fn interactive_lich(
             first_branch: Effect,
             preset: impl FnOnce(&mut GameRunner),
@@ -4575,6 +4580,11 @@ mod tests {
         /// rules name (as with the `LifeChanged` amount). Tainted Remedy first:
         /// the gain is replaced by a loss of 1,000,000, so the multiplier, a
         /// life-gain replacement, never applies. Either way P0 loses (CR 704.5a).
+        /// The x3,000 multiplier is synthetic: no printed card multiplies a life
+        /// gain by more than two, and the test needs one replacement that takes
+        /// the gain past `i32::MAX` on its own, so P0 orders exactly two
+        /// candidates. The nearest printed card is Boon Reflection ("If you
+        /// would gain life, you gain twice that much life instead.").
         #[test]
         fn a_gain_past_i32_substituted_by_tainted_remedy_reads_the_saturated_stamp() {
             // (answer the multiplier first, P0 life, P0 lost, stamp, LifeChanged amount)
@@ -6503,7 +6513,14 @@ mod tests {
             /// any-player count scaler (`Times { factor }`) in play, and asserts
             /// the parked CR 616.1 prompt: P1's, over exactly the three, stamped
             /// for rejection, with nothing placed yet. Returns the runner, the
-            /// scaler, P0's Vorinclex (doubler) and P1's Vorinclex (halver).
+            /// scaler, P0's Vorinclex (doubler) and P1's Vorinclex (halver). The
+            /// scaler is synthetic: no printed card multiplies placed counters
+            /// by more than two, and the tests need a factor that carries a
+            /// 1,000,000 give past `u32` among three replacements. The nearest
+            /// printed card is Vorinclex, Monstrous Raider, whose "If you would
+            /// put one or more counters on a permanent or player, put twice that
+            /// many of each of those kinds of counters on that permanent or
+            /// player instead." doubles them.
             fn scaled_pair_give(
                 resource: Resource,
                 factor: u32,

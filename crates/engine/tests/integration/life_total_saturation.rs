@@ -13,7 +13,7 @@
 //! only with an out (Lightning Bolt) is offered a draw without end, at the cap
 //! as below it (CR 732.5). A shortcut's batched life lands at the take, and a
 //! shortcut whose cycles' life a lump would not store as performing stores it
-//! (a change an `i32` limit holds back, a loss, a change stored on a teammate,
+//! (a change an `i32` limit holds back, a net loss, a change stored on a teammate,
 //! or life beside batched tokens or counters) is taken by performing its
 //! cycles, so its counters and total end as performing them leaves them, even
 //! after a later life change (CR 732.2c), and its record keeps the first and
@@ -1098,7 +1098,11 @@ fn two_headed_giant_pays_life_above_i32_max_as_minion_of_the_wastes_enters() {
 /// looks at the whole three-card library. A synthetic loss-halving
 /// replacement (no card claim) modifies the loss to 1,500,000,000, but the
 /// cost paid is still the declared amount (CR 118.11), so the count is the
-/// same.
+/// same. No printed card halves a life loss, and the row needs a replacement
+/// that lowers the loss below the declared payment: a printed doubler would
+/// take both past `i32::MAX`, where the clamped count cannot tell them apart.
+/// The nearest printed card is Bloodletter of Aclazotz ("If an opponent would
+/// lose life during your turn, they lose twice that much life instead.").
 #[test]
 fn pay_any_amount_of_life_above_i32_max_reads_the_amount_paid() {
     let Some(db) = crate::support::shared_card_db() else {
@@ -1255,18 +1259,43 @@ fn doubling_a_life_total_at_i32_min_reports_the_saturated_loss() {
 
 /// A self-feeding life-gain trigger (synthetic text, as in
 /// `loop_shortcut.rs`): with one copy every gain triggers another, so the loop
-/// is mandatory and never stops.
+/// is mandatory and never stops. No printed card has a mandatory self-feeding
+/// gain, and the tests need a loop of one mandatory trigger whose every cycle
+/// gains 1, so the draw (CR 104.4b) and the out-only offer (CR 732.5) turn on
+/// that gain alone. The nearest printed class is Worldgorger Dragon ("Flying,
+/// trample" / "When this creature enters, exile all other permanents you
+/// control." / "When this creature leaves the battlefield, return the exiled
+/// cards to the battlefield under their owners' control.") with Animate Dead
+/// ("Enchant creature card in a graveyard" / "When this Aura enters, if it's on
+/// the battlefield, it loses "enchant creature card in a graveyard" and gains
+/// "enchant creature put onto the battlefield with this Aura." Return enchanted
+/// creature card to the battlefield under your control and attach this Aura to
+/// it. When this Aura leaves the battlefield, that creature's controller
+/// sacrifices it." / "Enchanted creature gets -1/-0.") beside Soul Warden
+/// ("Whenever another creature enters, you gain 1 life."), which would make
+/// each row about its trigger order (CR 603.3b) rather than the cap.
 const SELF_LIFE_ENGINE: &str = "Whenever you gain life, you gain 1 life.";
 
-/// The synthetic kickoff gain that starts a life-gain loop.
-const KICKOFF: &str = "You gain 1 life.";
+/// Blessed Wine's verbatim Oracle text (not a member of the test fixture): its
+/// gain of 1 starts a life-gain loop. Its delayed draw comes only at the next
+/// turn's upkeep, which no test here reaches.
+const BLESSED_WINE: &str =
+    "You gain 1 life.\nDraw a card at the beginning of the next turn's upkeep.";
 
-/// A synthetic drain trigger: each gain makes every opponent lose 1 life.
-const DRAIN_ENGINE: &str = "Whenever you gain life, each opponent loses 1 life.";
+/// Marauding Blight-Priest's verbatim Oracle text: each gain makes every
+/// opponent lose 1 life.
+const MARAUDING_BLIGHT_PRIEST: &str = "Whenever you gain life, each opponent loses 1 life.";
 
 /// A synthetic free life-gain engine (as in `combo_infinite_pile.rs`): tap for
 /// {C}, gain `n` life, untap, repeat. The mana and the life are its unbounded
-/// axes.
+/// axes. No printed card is a free engine that changes life by a chosen amount
+/// each cycle, and the tests need that amount to place a total at, or past, an
+/// `i32` limit in a few cycles. The nearest printed board is Phyrexian Altar
+/// ("Sacrifice a creature: Add one mana of any color."), Gravecrawler ("This
+/// creature can't block." / "You may cast this card from your graveyard as long
+/// as you control a Zombie.") and Walking Corpse (a Zombie with no rules text)
+/// beside Soul Warden ("Whenever another creature enters, you gain 1 life."),
+/// which gains 1 per cycle.
 fn lifedynamo(n: u32) -> String {
     format!("{{T}}: Add {{C}}.\n{{0}}: You gain {n} life.\n{{0}}: Untap Lifedynamo.")
 }
@@ -1433,8 +1462,8 @@ fn pass_to_next_boundary(runner: &mut GameRunner) {
 }
 
 /// A mandatory life-gain loop in Interactive loop detection: P0 controls one
-/// `SELF_LIFE_ENGINE` creature and holds the `KICKOFF` spell, with the given
-/// stored life fields and P0's gained-this-turn counter preset to `gained`.
+/// `SELF_LIFE_ENGINE` creature and holds Blessed Wine, with the given stored
+/// life fields and P0's gained-this-turn counter preset to `gained`.
 fn mandatory_life_gain_loop(
     mut scenario: GameScenario,
     life_fields: &[(PlayerId, i32)],
@@ -1445,7 +1474,7 @@ fn mandatory_life_gain_loop(
     }
     scenario.add_creature_from_oracle(P0, "Test Life Engine", 2, 2, SELF_LIFE_ENGINE);
     let kickoff = scenario
-        .add_spell_to_hand_from_oracle(P0, "Test Lifegain Kickoff", false, KICKOFF)
+        .add_spell_to_hand_from_oracle(P0, "Blessed Wine", true, BLESSED_WINE)
         .id();
     let mut runner = scenario.build();
     runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
@@ -1455,7 +1484,11 @@ fn mandatory_life_gain_loop(
 
 /// A synthetic free engine of P0's (as in `combo_infinite_pile.rs`): tap for
 /// {C}, change life, untap, repeat. The mana, and any life it gains, are its
-/// unbounded axes.
+/// unbounded axes. No printed card is a free engine that changes life by a
+/// chosen amount each cycle, and the tests need chosen gains, losses and drains
+/// that place a total at, or past, an `i32` limit in a few cycles. The nearest
+/// printed board is the one named at [`lifedynamo`]: Phyrexian Altar,
+/// Gravecrawler and Walking Corpse beside Soul Warden.
 #[derive(Clone, Copy, Debug)]
 enum Dynamo {
     /// `lifedynamo(n)`: P0 gains `n` life each cycle.
@@ -1470,7 +1503,9 @@ enum Dynamo {
 
 impl Dynamo {
     /// The dynamo's synthetic text: the two orders of a gain and a loss share
-    /// one text and differ only in the order its abilities are activated.
+    /// one text and differ only in the order its abilities are activated. No
+    /// printed card has any of these texts; see [`Dynamo`] for why and for the
+    /// nearest printed board.
     fn text(self) -> String {
         match self {
             Dynamo::Gain(n) => lifedynamo(n),
@@ -2103,7 +2138,7 @@ fn an_optional_life_gain_loop_at_the_cap_is_never_drawn_or_offered() {
 }
 
 /// CR 104.4b + CR 732.4: a mandatory loop (one "Whenever you gain
-/// life, you gain 1 life." trigger after one kickoff gain) is a draw. At
+/// life, you gain 1 life." trigger after Blessed Wine's gain) is a draw. At
 /// `i32::MAX` the stored total cannot move, but every gain still carries its
 /// rules amount, so the loop is drawn exactly as it is at 20, including from
 /// one below the cap and for a Two-Headed Giant team whose shared total is at
@@ -2204,11 +2239,11 @@ fn a_mandatory_life_gain_loop_at_the_cap_is_drawn() {
 }
 
 /// CR 104.4b: P0's two mandatory triggers feed each other (Exquisite Blood,
-/// "Whenever an opponent loses life, you gain that much life.", and a
-/// synthetic "Whenever you gain life, each opponent loses 1 life."), P1 can't
-/// lose and P0 can't win (Platinum Angel), so the loop has no way to stop and
-/// is a draw. P1's life total is held at `i32::MIN`, which Path B's at-limit
-/// reading does not read.
+/// "Whenever an opponent loses life, you gain that much life.", and Marauding
+/// Blight-Priest, "Whenever you gain life, each opponent loses 1 life."), P1
+/// can't lose and P0 can't win (Platinum Angel), so the loop has no way to
+/// stop and is a draw. P1's life total is held at `i32::MIN`, which Path B's
+/// at-limit reading does not read.
 #[test]
 fn a_mandatory_drain_loop_against_a_seat_held_at_i32_min_is_drawn() {
     let Some(db) = crate::support::shared_card_db() else {
@@ -2219,9 +2254,9 @@ fn a_mandatory_drain_loop_against_a_seat_held_at_i32_min_is_drawn() {
     scenario.with_life(P1, i32::MIN);
     scenario.add_real_card(P1, "Platinum Angel", Zone::Battlefield, db);
     scenario.add_real_card(P0, "Exquisite Blood", Zone::Battlefield, db);
-    scenario.add_creature_from_oracle(P0, "Test Drain Engine", 2, 2, DRAIN_ENGINE);
+    scenario.add_creature_from_oracle(P0, "Marauding Blight-Priest", 3, 2, MARAUDING_BLIGHT_PRIEST);
     let kickoff = scenario
-        .add_spell_to_hand_from_oracle(P0, "Test Lifegain Kickoff", false, KICKOFF)
+        .add_spell_to_hand_from_oracle(P0, "Blessed Wine", true, BLESSED_WINE)
         .id();
     let mut runner = scenario.build();
     runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
@@ -2571,19 +2606,31 @@ fn a_life_shortcut_period_crossing_the_cap_gains_the_rules_amount() {
 }
 
 /// P0's `{0}` ability that loses 4 life, activated between a shortcut's accept
-/// and the step boundary.
+/// and the step boundary. Synthetic: the exact amount is the shape, chosen so a
+/// row's total lands where it tests a limit, and no printed card has a free
+/// ability that changes its controller's life by that amount. The nearest
+/// printed card is Soulmender ("{T}: You gain 1 life.").
 const LOSE_FOUR: &str = "{0}: You lose 4 life.";
 
 /// P0's `{0}` ability that gains 98 life, activated between a shortcut's accept
-/// and the step boundary.
+/// and the step boundary. Synthetic: the exact amount is the shape, chosen so a
+/// row's total lands where it tests a limit, and no printed card has a free
+/// ability that changes its controller's life by that amount. The nearest
+/// printed card is Soulmender ("{T}: You gain 1 life.").
 const GAIN_NINETY_EIGHT: &str = "{0}: You gain 98 life.";
 
 /// P0's `{0}` ability that gains 108 life, activated between a shortcut's
-/// accept and the step boundary.
+/// accept and the step boundary. Synthetic: the exact amount is the shape,
+/// chosen so a row's total lands where it tests a limit, and no printed card
+/// has a free ability that changes its controller's life by that amount. The
+/// nearest printed card is Soulmender ("{T}: You gain 1 life.").
 const GAIN_108: &str = "{0}: You gain 108 life.";
 
 /// P0's `{0}` ability that loses 25 life, activated between a shortcut's accept
-/// and the step boundary.
+/// and the step boundary. Synthetic: the exact amount is the shape, chosen so a
+/// row's total lands where it tests a limit, and no printed card has a free
+/// ability that changes its controller's life by that amount. The nearest
+/// printed card is Soulmender ("{T}: You gain 1 life.").
 const LOSE_TWENTY_FIVE: &str = "{0}: You lose 25 life.";
 
 /// CR 732.2c + CR 119.3: a taken shortcut leaves the game as if its cycles were
@@ -3222,12 +3269,20 @@ fn a_shortcut_losing_a_total_down_to_i32_min_is_performed_whatever_its_lost_coun
 }
 
 /// A synthetic free engine of P0's whose cycle gains 2 life and puts a charge
-/// counter on itself.
+/// counter on itself. No printed card is a free engine that gains life and
+/// grows a counter in each cycle, and the test needs both in one cycle so the
+/// take batches life beside a counter. The nearest printed board is the one
+/// named at [`lifedynamo`]: Phyrexian Altar, Gravecrawler and Walking Corpse
+/// beside Soul Warden.
 const LIFE_AND_CHARGE_DYNAMO: &str = "{T}: Add {C}.\n{0}: You gain 2 life.\n{0}: Put a charge \
                                       counter on Lifedynamo.\n{0}: Untap Lifedynamo.";
 
 /// A synthetic free engine of P0's whose cycle gains 2 life and creates a Servo
-/// token.
+/// token. No printed card is a free engine that gains life and creates a token
+/// in each cycle, and the test needs both in one cycle so the take batches life
+/// beside a token. The nearest printed board is the one named at
+/// [`lifedynamo`]: Phyrexian Altar, Gravecrawler and Walking Corpse beside Soul
+/// Warden.
 const LIFE_AND_SERVO_DYNAMO: &str = "{T}: Add {C}.\n{0}: You gain 2 life.\n{0}: Create a 1/1 \
                                      colorless Servo artifact creature token.\n{0}: Untap \
                                      Lifedynamo.";
@@ -3363,16 +3418,14 @@ fn a_life_shortcut_that_also_grows_tokens_or_counters_is_performed_at_the_take()
 /// CR 104.4b + CR 732.5 + CR 732.2c: a loop of P0's mandatory triggers that
 /// another player can stop only with an out is offered as a draw without end,
 /// at the cap as below it, and a counted take performs it. One "Whenever you
-/// gain life, you gain 1 life." trigger loops after one kickoff gain while P0's
-/// opponent (P2 in Two-Headed Giant) holds Lightning Bolt ("Lightning Bolt
-/// deals 3 damage to any target.") and a Mountain. The trigger text is
-/// synthetic: no printed card has a mandatory self-feeding gain, and the
-/// nearest printed class (Worldgorger Dragon with Animate Dead beside Soul
-/// Warden) would make the row about its trigger order (CR 603.3b) rather than
-/// the cap. In a duel at 20 and at `i32::MAX`, for a Two-Headed Giant team
-/// whose shared total is at the cap (CR 810.4), and with P0's own field at the
-/// cap so each gain is stored on P1's field (CR 810.9a), the first recurrence
-/// offers P0 a draw without end with no winner and no unbounded or rising axis.
+/// gain life, you gain 1 life." trigger loops after Blessed Wine's gain while
+/// P0's opponent (P2 in Two-Headed Giant) holds Lightning Bolt ("Lightning
+/// Bolt deals 3 damage to any target.") and a Mountain. The trigger text is the
+/// synthetic [`SELF_LIFE_ENGINE`], whose doc says why no printed card serves.
+/// In a duel at 20 and at `i32::MAX`, for a Two-Headed Giant team whose shared
+/// total is at the cap (CR 810.4), and with P0's own field at the cap so each
+/// gain is stored on P1's field (CR 810.9a), the first recurrence offers P0 a
+/// draw without end with no winner and no unbounded or rising axis.
 /// A `Fixed(3)` take performs three cycles, each gaining 1 (CR 119.3), and its
 /// record keeps the first and last (CR 732.1b); it marks nothing and leaves P0
 /// with priority. The rows pin that the loop is offered at the cap as below it;
@@ -3432,7 +3485,7 @@ fn an_out_only_life_gain_loop_is_offered_at_the_cap_as_below_it() {
         scenario.add_basic_land(out_holder, engine::types::mana::ManaColor::Red);
         scenario.add_bolt_to_hand(out_holder);
         let kickoff = scenario
-            .add_spell_to_hand_from_oracle(P0, "Test Lifegain Kickoff", false, KICKOFF)
+            .add_spell_to_hand_from_oracle(P0, "Blessed Wine", true, BLESSED_WINE)
             .id();
         let mut runner = scenario.build();
         runner.state_mut().loop_detection = LoopDetectionMode::Interactive;

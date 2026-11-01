@@ -11355,22 +11355,45 @@ fn bounded_fixed_count_commits_exactly_n_periods() {
     }
 }
 
+/// A card of P0's in [`bounded_drain_at_offer`]: its name and its Oracle text.
+type DrainCard = (&'static str, &'static str);
+
 /// Marauding Blight-Priest, verbatim (Scryfall).
-const MARAUDING_BLIGHT_PRIEST: &str = "Whenever you gain life, each opponent loses 1 life.";
+const MARAUDING_BLIGHT_PRIEST: DrainCard = (
+    "Marauding Blight-Priest",
+    "Whenever you gain life, each opponent loses 1 life.",
+);
 /// Exquisite Blood, verbatim (Scryfall).
-const EXQUISITE_BLOOD: &str = "Whenever an opponent loses life, you gain that much life.";
+const EXQUISITE_BLOOD: DrainCard = (
+    "Exquisite Blood",
+    "Whenever an opponent loses life, you gain that much life.",
+);
 /// Synthetic: a Blight-Priest that drains 2, so one repetition gains its controller 2 and a
-/// controller one life below `i32::MAX` crosses the cap inside a repetition.
-const DRAIN_TWO_PRIEST: &str = "Whenever you gain life, each opponent loses 2 life.";
+/// controller one life below `i32::MAX` crosses the cap inside a repetition. No printed card
+/// drains each opponent more than 1 whenever its controller gains life; the nearest printed card
+/// is Marauding Blight-Priest ("Whenever you gain life, each opponent loses 1 life.").
+const DRAIN_TWO_PRIEST: DrainCard = (
+    "Test Drain-Two Priest",
+    "Whenever you gain life, each opponent loses 2 life.",
+);
 /// Synthetic: an Exquisite Blood that gains a fixed 2^24, so its controller crosses `i32::MAX`
 /// mid-take while the offer board's summed life (the horizon `cascade_horizon` walks) stays
-/// small.
-const DRAIN_GAIN_BLOOD: &str = "Whenever an opponent loses life, you gain 16777216 life.";
+/// small. No printed card gains a fixed amount whenever an opponent loses life; the nearest
+/// printed card is Exquisite Blood ("Whenever an opponent loses life, you gain that much life.").
+const DRAIN_GAIN_BLOOD: DrainCard = (
+    "Test Fixed-Gain Blood",
+    "Whenever an opponent loses life, you gain 16777216 life.",
+);
+/// Blessed Wine, verbatim: the instant whose gain of 1 starts the drain. Its delayed draw comes
+/// only at the next turn's upkeep, which the bounded drain never reaches.
+const BLESSED_WINE: &str =
+    "You gain 1 life.\nDraw a card at the beginning of the next turn's upkeep.";
 
 /// The 3-player untargeted drain of `multiplayer_pure_life_drain_offers_at_three_and_four_players`
-/// (`priest` + `blood` under P0, opponents at staggered life), with P0 at `p0_life`:
-/// casts and resolves the kick-off, then drives until the engine writes the bounded offer.
-fn bounded_drain_at_offer(priest: &str, blood: &str, p0_life: i32) -> GameRunner {
+/// (`priest`, a 3/2 creature as Marauding Blight-Priest, and `blood`, an enchantment as Exquisite
+/// Blood, under P0, opponents at staggered life), with P0 at `p0_life`: casts and resolves
+/// Blessed Wine, then drives until the engine writes the bounded offer.
+fn bounded_drain_at_offer(priest: DrainCard, blood: DrainCard, p0_life: i32) -> GameRunner {
     let mut scenario = GameScenario::new_n_player(3, 7);
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_life(P0, p0_life);
@@ -11378,10 +11401,10 @@ fn bounded_drain_at_offer(priest: &str, blood: &str, p0_life: i32) -> GameRunner
         // Staggered: pairwise-UNEQUAL absolute life, equal per-cycle delta.
         scenario.with_life(seat, 1000 + 50 * i as i32);
     }
-    scenario.add_creature_from_oracle(P0, "Test Blight Priest", 2, 2, priest);
-    scenario.add_creature_from_oracle(P0, "Test Exquisite Blood", 2, 2, blood);
+    scenario.add_creature_from_oracle(P0, priest.0, 3, 2, priest.1);
+    scenario.add_enchantment_from_oracle(P0, blood.0, blood.1);
     let kickoff = scenario
-        .add_spell_to_hand_from_oracle(P0, "Test Lifegain Kickoff", false, KICKOFF)
+        .add_spell_to_hand_from_oracle(P0, "Blessed Wine", true, BLESSED_WINE)
         .id();
     let mut runner = scenario.build();
     runner.state_mut().loop_detection = LoopDetectionMode::Interactive;

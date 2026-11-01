@@ -802,7 +802,12 @@ fn trigger_driven_take_history_work_is_flat_per_cycle_b() {
 }
 
 /// Synthetic Soul's Attendant analog that gives energy instead of life, so a replayed cycle moves
-/// an energy total the edit authority still checks.
+/// an energy total the edit authority still checks. No printed card exhibits the shape: the test
+/// needs a "may" that every drive records, as Soul's Attendant's, whose taking moves energy
+/// itself, so the period keeps the same triggers. The nearest printed card is Soul's Attendant
+/// ("Whenever another creature enters, you may gain 1 life."); a printed energy source such as
+/// Sphinx of the Revelation ("Whenever you gain life, you get that many {E} (energy counters).")
+/// would add a trigger to every recorded cycle.
 const ENERGY_ATTENDANT: &str = "Whenever another creature enters, you may get {E}.";
 
 /// The attendant beside Board B.

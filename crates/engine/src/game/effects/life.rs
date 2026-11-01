@@ -1732,7 +1732,15 @@ mod tests {
 
     /// CR 701.12c + CR 616.1: a parked life-total assignment carries a
     /// difference past the `i32` range exactly through serialization, and the
-    /// resume lands every receiver on the other's previous total.
+    /// resume lands every receiver on the other's previous total. "Life
+    /// Shield" is synthetic: no printed card has an optional replacement of a
+    /// life total being reduced whose acceptance leaves the reduction as it is,
+    /// and the test needs one so the assignment parks on a choice and the
+    /// resume lands the exact difference. The nearest printed card is Enduring
+    /// Angel, whose "If your life total would be reduced to 0 or less, instead
+    /// transform this creature and your life total becomes 3. Then if this
+    /// creature didn't transform this way, you lose the game." replaces the
+    /// reduction itself.
     #[test]
     fn life_total_assignment_parks_and_resumes_a_difference_past_i32_exactly() {
         use crate::game::engine::apply_as_current;

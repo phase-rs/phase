@@ -471,6 +471,12 @@ mod tests {
     /// gain of the same amount (CR 614.6), and an energy total past `u32::MAX`
     /// is unrepresentable. Reach-guard control: with room for the energy, the
     /// substitute replaces the loss and the cost is still paid (CR 118.11).
+    /// "Energy Substitute" is synthetic: no printed card replaces a life loss
+    /// with an energy gain, and the test needs a substitute that moves a `u32`
+    /// total by the replaced amount, so the settlement can be unrepresentable
+    /// while the payment is affordable. The nearest printed card is Nefarious
+    /// Lich, whose "If you would gain life, draw that many cards instead."
+    /// substitutes another resource for a life change of the same amount.
     #[test]
     fn pay_life_reports_a_nested_unrepresentable_settlement_as_insufficient_life() {
         let board = |energy: u32| {
@@ -729,7 +735,14 @@ mod tests {
     /// CR 118.3 + CR 119.4: an unaffordable payment is refused on its
     /// unreplaced amount, before any life-loss replacement sees it — CR 118.11
     /// lets a replacement modify a cost's action, not make an unaffordable cost
-    /// payable. The replacements below are synthetic fixtures, not a card.
+    /// payable. The replacements below are synthetic fixtures, not a card: no
+    /// printed card adds to or halves a life loss. The only printed life-loss
+    /// modifiers double it, and two doublers give the same result in either
+    /// order, so the engine asks no ordering choice; (a) needs two modifiers
+    /// whose order matters, so a consulted replacement would show as a parked
+    /// choice, and (b) needs one that lowers the loss. The nearest printed card
+    /// is Bloodletter of Aclazotz ("If an opponent would lose life during your
+    /// turn, they lose twice that much life instead.").
     #[test]
     fn unaffordable_wide_life_payment_is_refused_before_any_replacement() {
         let board_with = |replacements: Vec<ReplacementDefinition>| {
@@ -799,10 +812,77 @@ mod tests {
         assert_eq!(state.players[0].life, 15);
     }
 
+    /// A printed card: its name, verbatim Oracle text, MTGJSON keywords, card
+    /// types and subtypes.
+    struct PrintedCard {
+        name: &'static str,
+        oracle_text: &'static str,
+        keywords: &'static [&'static str],
+        types: &'static [&'static str],
+        subtypes: &'static [&'static str],
+    }
+
+    /// Angel of Jubilation, verbatim.
+    const ANGEL_OF_JUBILATION: PrintedCard = PrintedCard {
+        name: "Angel of Jubilation",
+        oracle_text: "Flying\nOther nonblack creatures you control get +1/+1.\nPlayers can't pay \
+                      life or sacrifice creatures to cast spells or activate abilities.",
+        keywords: &["Flying"],
+        types: &["Creature"],
+        subtypes: &["Angel"],
+    };
+
+    /// Platinum Emperion, verbatim.
+    const PLATINUM_EMPERION: PrintedCard = PrintedCard {
+        name: "Platinum Emperion",
+        oracle_text: "Your life total can't change. (You can't gain or lose life. You can't pay \
+                      any amount of life except 0.)",
+        keywords: &[],
+        types: &["Artifact", "Creature"],
+        subtypes: &["Golem"],
+    };
+
+    /// Puts `card` under P0's control on the battlefield with the static
+    /// abilities parsed from its Oracle text, after the reach guard that one of
+    /// them is a static `has_mode` accepts.
+    fn add_printed_statics(
+        state: &mut GameState,
+        card: &PrintedCard,
+        has_mode: fn(&StaticMode) -> bool,
+    ) {
+        let strings =
+            |words: &[&str]| -> Vec<String> { words.iter().map(|word| word.to_string()).collect() };
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            card.oracle_text,
+            card.name,
+            &strings(card.keywords),
+            &strings(card.types),
+            &strings(card.subtypes),
+        );
+        assert!(
+            parsed
+                .statics
+                .iter()
+                .any(|definition| has_mode(&definition.mode)),
+            "reach guard: {}'s static parses",
+            card.name
+        );
+        let card_id = CardId(state.next_object_id);
+        let id = create_object(
+            state,
+            card_id,
+            PlayerId(0),
+            card.name.to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&id).unwrap().static_definitions = parsed.statics.into();
+    }
+
     /// CR 107.4f + CR 119.4a + CR 119.8: the general and cast/activation
     /// payable-life budgets, and the Phyrexian count derived from the latter,
     /// read the exact team total; each budget is the largest amount its
-    /// predicate accepts.
+    /// predicate accepts. The two locks are printed cards: Angel of Jubilation
+    /// and Platinum Emperion.
     #[test]
     fn payable_life_budgets_read_the_exact_team_sum() {
         let mut boards = Vec::new();
@@ -839,16 +919,29 @@ mod tests {
         boards.push(state);
 
         // CR 118.3 + CR 601.2h: a direct "can't pay life" static zeroes only
-        // the cast/activation budget (and the Phyrexian count read from it).
+        // the cast/activation budget (and the Phyrexian count read from it):
+        // Angel of Jubilation's "Players can't pay life or sacrifice creatures
+        // to cast spells or activate abilities."
         let mut state = two_headed_giant_with_team_a_life(i32::MAX, i32::MAX);
-        add_cant_pay_life_permanent(&mut state, PlayerId(0));
+        add_printed_statics(&mut state, &ANGEL_OF_JUBILATION, |mode| {
+            matches!(
+                mode,
+                StaticMode::CantPayCost {
+                    cost: CostPaymentProhibition::PayLife,
+                    ..
+                }
+            )
+        });
         assert_eq!(max_payable_life(&state, PlayerId(0)), 4_294_967_294);
         assert_eq!(max_payable_life_cast_or_activation(&state, PlayerId(0)), 0);
         assert_eq!(max_phyrexian_life_payments(&state, PlayerId(0)), 0);
         boards.push(state.clone());
 
-        // CR 119.8: can't lose life zeroes the general budget too.
-        add_cant_lose_life_permanent(&mut state, PlayerId(0));
+        // CR 119.8: can't lose life zeroes the general budget too: Platinum
+        // Emperion's "Your life total can't change."
+        add_printed_statics(&mut state, &PLATINUM_EMPERION, |mode| {
+            matches!(mode, StaticMode::CantLoseLife)
+        });
         assert_eq!(max_payable_life(&state, PlayerId(0)), 0);
         boards.push(state);
 
