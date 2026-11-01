@@ -733,6 +733,45 @@ describe("Discard cost modal", () => {
     });
   });
 
+  it("shows bottomdeck order for multi-card choices and dispatches in click order", () => {
+    setWaitingFor(
+      buildEffectZoneChoiceWaitingFor({
+        player: 0,
+        cards: [10, 11],
+        count: 2,
+        min_count: 0,
+        up_to: false,
+        source_id: 1,
+        effect_kind: "PutAtLibraryPosition",
+        zone: "Hand",
+        library_position: { type: "Bottom" },
+      }),
+      {
+        10: makeObject(10, "First Card"),
+        11: makeObject(11, "Second Card"),
+      },
+    );
+
+    render(<CardChoiceModal />);
+
+    // Click Card A (10) first, then Card B (11)
+    fireEvent.click(screen.getByRole("button", { name: /First Card/i }));
+    expect(screen.getByText("Bottom")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Second Card/i }));
+    // In engine submission order [10, 11], 10 is placed first and 11 is placed last,
+    // so 11 ends at the very bottom and 10 is 2nd from the bottom.
+    expect(screen.getByText("2nd")).toBeInTheDocument();
+    expect(screen.getByText("Bottom")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Put on bottom (2nd -> Bottom)" }));
+
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "SelectCards",
+      data: { cards: [10, 11] },
+    });
+  });
+
   it("renders reveal cost modal and dispatches selected card on confirm", () => {
     setWaitingFor(
       buildPayCostWaitingFor({

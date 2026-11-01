@@ -1384,7 +1384,7 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
   const selectedOrder = isLibraryOrder ? Array.from(selected) : [];
   const selectedOrderLabels = selectedOrder.map((_, index) =>
     isBottomdeck
-      ? formatBottomdeckOrderLabel(index, t)
+      ? formatBottomdeckOrderLabel(index, selectedOrder.length, t)
       : formatTopdeckOrderLabel(index, t),
   );
   const isReady = isUpTo
@@ -1436,7 +1436,7 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
           const badgeLabel =
             isLibraryOrder && selectedIndex >= 0
               ? isBottomdeck
-                ? formatBottomdeckOrderLabel(selectedIndex, t)
+                ? formatBottomdeckOrderLabel(selectedIndex, selectedOrder.length, t)
                 : formatTopdeckOrderLabel(selectedIndex, t)
               : t(EFFECT_ZONE_BADGE_KEYS[mode]);
           return (
@@ -1495,8 +1495,13 @@ function formatTopdeckOrderLabel(index: number, t: TFunction<"game">): string {
   }
 }
 
-function formatBottomdeckOrderLabel(index: number, t: TFunction<"game">): string {
-  switch (index) {
+function formatBottomdeckOrderLabel(
+  index: number,
+  total: number,
+  t: TFunction<"game">,
+): string {
+  const positionFromBottom = Math.max(0, total - 1 - index);
+  switch (positionFromBottom) {
     case 0:
       return t("cardChoice.effectZone.orderBottom");
     case 1:
@@ -1508,7 +1513,9 @@ function formatBottomdeckOrderLabel(index: number, t: TFunction<"game">): string
     case 4:
       return t("cardChoice.effectZone.orderFifth");
     default:
-      return t("cardChoice.effectZone.orderPosition", { position: index + 1 });
+      return t("cardChoice.effectZone.orderPosition", {
+        position: positionFromBottom + 1,
+      });
   }
 }
 
