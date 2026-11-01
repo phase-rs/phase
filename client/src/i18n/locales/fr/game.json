@@ -648,6 +648,9 @@
   },
   "zone": {
     "commandZone": "Zone de commandement",
+    "conspiracy": "Conspiration",
+    "conspiracyTitle": "Conspiration : {{name}}",
+    "turnFaceUp": "Retourner {{name}} face visible",
     "emblem": "Emblème",
     "emblemFallback": "Emblème",
     "commander": "Commandant",

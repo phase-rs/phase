@@ -2319,6 +2319,7 @@ mod tests {
             is_oathbreaker: _,     // format eligibility
             deck_copy_limit: _,    // deck construction
             rarities: _,           // printing metadata
+            chosen_names: _, // secretly chosen names (CR 702.106a / CR 702.106f), transferred to chosen_attributes on reveal
         } = CardFace::default();
     }
 

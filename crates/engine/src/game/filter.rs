@@ -7485,11 +7485,10 @@ fn filter_inner_for_object(
                 triggering_object,
                 granting_object,
             );
-            let chosen_name = source_ctx.chosen_attributes.iter().find_map(|a| match a {
-                ChosenAttribute::CardName(n) => Some(n.as_str()),
-                _ => None,
-            });
-            chosen_name.is_some_and(|name| card_names_match(&obj.name, name))
+            source_ctx.chosen_attributes.iter().any(|a| match a {
+                ChosenAttribute::CardName(n) => card_names_match(&obj.name, n),
+                _ => false,
+            })
         }
         // CR 609.7a: "the chosen source" — match the ObjectId selected by
         // the prior damage-source choice while its continuation resolves.
@@ -7834,11 +7833,10 @@ fn zone_change_filter_inner(
                 triggering_object,
                 ctx.granting_object,
             );
-            let chosen_name = source_ctx.chosen_attributes.iter().find_map(|a| match a {
-                    ChosenAttribute::CardName(n) => Some(n.as_str()),
-                    _ => None,
-            });
-            chosen_name.is_some_and(|name| card_names_match(&record.name, name))
+            source_ctx.chosen_attributes.iter().any(|a| match a {
+                ChosenAttribute::CardName(n) => card_names_match(&record.name, n),
+                _ => false,
+            })
         }
         // CR 607.2d + CR 603.10a + CR 400.7: the remembered object on the
         // leaves-the-battlefield look-back path. The candidate occurrence is the

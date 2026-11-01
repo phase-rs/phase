@@ -127,6 +127,15 @@ pub fn start_with_conspiracy(state: &mut GameState, id: ObjectId, hidden_agenda:
     crate::game::layers::mark_layers_full(state);
 }
 
+/// CR 702.106c / CR 116.2j / CR 905.4a: True if `obj` is an eligible face-down
+/// hidden-agenda conspiracy that `player` can turn face up from the command zone.
+pub fn is_face_down_conspiracy_candidate(obj: &GameObject, player: PlayerId) -> bool {
+    obj.zone == Zone::Command
+        && obj.face_down
+        && (obj.owner == player || obj.controller == player)
+        && is_conspiracy(obj)
+}
+
 /// CR 905.4a + CR 702.106: Turn a face-down hidden-agenda conspiracy face up.
 ///
 /// A player may do this any time they have priority. No-op (returns `false`)
@@ -138,16 +147,18 @@ pub fn turn_hidden_agenda_face_up(state: &mut GameState, id: ObjectId, player: P
     let Some(obj) = state.objects.get_mut(&id) else {
         return false;
     };
-    if !(obj.zone == Zone::Command
-        && obj.face_down
-        && (obj.owner == player || obj.controller == player)
-        && is_conspiracy(obj))
-    {
+    if !is_face_down_conspiracy_candidate(obj, player) {
         return false;
     }
     obj.face_down = false;
     if let Some(back_face) = obj.back_face.take() {
         crate::game::printed_cards::apply_back_face_to_object(obj, back_face);
+    }
+    for name in &obj.secret_chosen_names {
+        obj.chosen_attributes
+            .push(crate::types::ability::ChosenAttribute::CardName(
+                name.clone(),
+            ));
     }
     crate::game::layers::mark_layers_full(state);
     true

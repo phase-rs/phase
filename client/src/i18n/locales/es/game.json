@@ -648,6 +648,9 @@
   },
   "zone": {
     "commandZone": "Zona de mando",
+    "conspiracy": "Conspiración",
+    "conspiracyTitle": "Conspiración: {{name}}",
+    "turnFaceUp": "Poner {{name}} boca arriba",
     "emblem": "Emblema",
     "emblemFallback": "Emblema",
     "commander": "Comandante",

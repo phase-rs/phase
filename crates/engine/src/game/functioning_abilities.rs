@@ -95,7 +95,7 @@ use crate::types::zones::Zone;
 fn non_emblem_command_zone_static_functions(obj: &GameObject, def: &StaticDefinition) -> bool {
     if crate::game::conspiracy::is_conspiracy(obj) {
         return crate::game::conspiracy::functions_from_command_zone(obj)
-            && static_opts_in_to_command_zone(def);
+            && (def.active_zones.is_empty() || static_opts_in_to_command_zone(def));
     }
     static_opts_in_to_command_zone(def)
 }

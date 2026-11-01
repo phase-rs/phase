@@ -1407,6 +1407,14 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chosen_attributes: Vec<ChosenAttribute>,
 
+    /// CR 702.106a / CR 702.106f: Secretly chosen card names for face-down
+    /// hidden-agenda / double-agenda conspiracies in the command zone.
+    /// Kept secret from observers until the conspiracy is turned face up,
+    /// at which point they are revealed and transferred to `chosen_attributes`
+    /// as `ChosenAttribute::CardName` (CR 702.106c).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secret_chosen_names: Vec<String>,
+
     /// CR 701.15c: Which players have goaded this creature. A goaded creature must attack
     /// each combat if able and must attack a player other than the goading player(s) if able.
     /// Multiple players can goad the same creature, creating additional combat requirements.
@@ -1876,6 +1884,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         foretold: _,
         exiled_by: _,
         chosen_attributes: _,
+        secret_chosen_names: _,
         goaded_by: _,
         detained_by: _,
         is_suspected: _,
@@ -3182,6 +3191,7 @@ impl GameObject {
             foretold: false,
             exiled_by: None,
             chosen_attributes: Vec::new(),
+            secret_chosen_names: Vec::new(),
             goaded_by: std::collections::HashSet::new(),
             detained_by: std::collections::HashSet::new(),
             is_suspected: false,

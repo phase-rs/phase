@@ -2702,6 +2702,8 @@
     "companionActivate": "支付{3}：将{{name}}置于你手上",
     "companionTitle": "行侣：{{name}}",
     "companionTitleUsed": "行侣：{{name}}（已使用）",
+    "conspiracy": "谋略",
+    "conspiracyTitle": "谋略: {{name}}",
     "emblem": "徽记",
     "emblemFallback": "徽记",
     "exile": "放逐",
@@ -2725,6 +2727,7 @@
     "signatureSpellTitleTax": "招牌咒语：{{name}}（税：+{{tax}}）",
     "tax": "税：+{{tax}}",
     "topOfLibrary": "牌库顶",
+    "turnFaceUp": "将{{name}}翻回正面",
     "used": "已使用",
     "viewCount": "查看{{count}}",
     "zoneTitle": "{{zone}}（{{count}}）"

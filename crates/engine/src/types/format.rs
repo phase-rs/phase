@@ -3666,6 +3666,14 @@ impl FormatConfig {
         }
     }
 
+    /// CR 905: True when the format is a Limited format with an optional command
+    /// zone enabled (e.g. Conspiracy Draft CR 905). These cards are placed in the
+    /// command zone at game start, are not marked as commanders, and are not
+    /// netted against the main deck.
+    pub fn command_zone_holds_limited_conspiracies(&self) -> bool {
+        self.format == GameFormat::Limited && self.command_zone
+    }
+
     /// Return a copy of this config with the sandbox capability enabled.
     /// Pure data transform; the resulting config is otherwise identical and
     /// keeps the same `GameFormat`, deck/seat/life rules, etc. Idempotent.

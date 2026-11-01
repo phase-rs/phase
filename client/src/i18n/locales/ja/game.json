@@ -681,6 +681,9 @@
   },
   "zone": {
     "commandZone": "統率領域",
+    "conspiracy": "謀略",
+    "conspiracyTitle": "謀略: {{name}}",
+    "turnFaceUp": "{{name}}を表向きにする",
     "emblem": "紋章",
     "emblemFallback": "紋章",
     "commander": "統率者",

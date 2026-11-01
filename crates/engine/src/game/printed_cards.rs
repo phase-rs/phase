@@ -2539,6 +2539,7 @@ mod tests {
             metadata: Default::default(),
             rarities: Default::default(),
             attraction_lights: vec![],
+            chosen_names: vec![],
         }
     }
 

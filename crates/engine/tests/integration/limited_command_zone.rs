@@ -10,19 +10,30 @@
 //! - Regular conspiracies enter face up (CR 905.4)
 //! - Face-down conspiracies are redacted for observers and visible to controllers in viewer projection
 //! - Face-down conspiracies in the command zone can be turned face up as a special action
-//!   during priority (CR 702.106c / CR 116.2k)
+//!   during priority (CR 702.106c / CR 116.2j / CR 905.4a)
+//! - Secretly chosen names (single and double agenda) are transferred to chosen attributes
+//!   and power cost reductions when revealed
 
 use engine::ai_support::legal_actions;
-use engine::game::deck_loading::{load_deck_into_state, DeckEntry, DeckPayload, PlayerDeckPayload};
+use engine::game::deck_loading::{
+    create_command_zone_card_from_card_face, load_deck_into_state, DeckEntry, DeckPayload,
+    PlayerDeckPayload,
+};
+use engine::game::derived_views::ClientGameStateRef;
 use engine::game::scenario::{GameRunner, P0, P1};
 use engine::game::visibility::{filter_state_for_viewer, HIDDEN_CARD_NAME};
+use engine::types::ability::{
+    ChosenAttribute, ControllerRef, StaticDefinition, TargetFilter, TypedFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
 use engine::types::card_type::CoreType;
 use engine::types::format::{DeckSizeRule, FormatConfig, GameFormat};
 use engine::types::game_state::GameState;
 use engine::types::game_state::WaitingFor;
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
+use engine::types::statics::{CostModifyMode, CostReductionReach, StaticMode};
 
 fn plain_card_face(name: &str) -> CardFace {
     CardFace {
@@ -31,20 +42,59 @@ fn plain_card_face(name: &str) -> CardFace {
     }
 }
 
-fn conspiracy_card_face(name: &str, hidden_agenda: bool) -> CardFace {
+fn conspiracy_card_face(name: &str, hidden_agenda: bool, chosen_names: Vec<String>) -> CardFace {
     let mut face = CardFace {
         name: name.to_string(),
+        chosen_names,
         ..Default::default()
     };
     face.card_type.core_types.push(CoreType::Conspiracy);
     if hidden_agenda {
         face.oracle_text = Some(
-            "Hidden agenda (Start the game with this conspiracy face down in the command zone.)"
+            "Hidden agenda (Start the game with this conspiracy face down in the command zone and secretly choose a card name.)\nSpells with the chosen name you cast cost {1} less to cast."
                 .to_string(),
+        );
+        face.static_abilities.push(
+            StaticDefinition::new(StaticMode::ModifyCost {
+                mode: CostModifyMode::Reduce,
+                amount: ManaCost::generic(1),
+                spell_filter: Some(TargetFilter::HasChosenName),
+                dynamic_count: None,
+                reach: CostReductionReach::SpillsToGeneric,
+            })
+            .affected(TargetFilter::Typed(
+                TypedFilter::card().controller(ControllerRef::You),
+            )),
         );
     } else {
         face.oracle_text = Some("Conspiracy text".to_string());
     }
+    face
+}
+
+fn double_agenda_conspiracy_face(name: &str, chosen_names: Vec<String>) -> CardFace {
+    let mut face = CardFace {
+        name: name.to_string(),
+        chosen_names,
+        ..Default::default()
+    };
+    face.card_type.core_types.push(CoreType::Conspiracy);
+    face.oracle_text = Some(
+        "Double agenda (Start the game with this conspiracy face down in the command zone and secretly choose two card names.)\nSpells with the chosen names you cast cost {1} less to cast."
+            .to_string(),
+    );
+    face.static_abilities.push(
+        StaticDefinition::new(StaticMode::ModifyCost {
+            mode: CostModifyMode::Reduce,
+            amount: ManaCost::generic(1),
+            spell_filter: Some(TargetFilter::HasChosenName),
+            dynamic_count: None,
+            reach: CostReductionReach::SpillsToGeneric,
+        })
+        .affected(TargetFilter::Typed(
+            TypedFilter::card().controller(ControllerRef::You),
+        )),
+    );
     face
 }
 
@@ -92,8 +142,8 @@ fn limited_command_zone_cards_loaded_separately_from_main_deck() {
         })
         .collect();
 
-    let worldknit_face = conspiracy_card_face("Worldknit", false);
-    let brago_face = conspiracy_card_face("Brago's Favor", true);
+    let worldknit_face = conspiracy_card_face("Worldknit", false, vec![]);
+    let brago_face = conspiracy_card_face("Brago's Favor", true, vec!["Grizzly Bears".to_string()]);
 
     let commander_entries = vec![
         DeckEntry {
@@ -171,6 +221,11 @@ fn limited_command_zone_cards_loaded_separately_from_main_deck() {
         brago_obj.face_down,
         "CR 905.4a: hidden agenda starts face down"
     );
+    assert_eq!(
+        brago_obj.secret_chosen_names,
+        vec!["Grizzly Bears".to_string()],
+        "secret chosen names preserved on object"
+    );
 
     // Check visibility projection
     let p0_view = filter_state_for_viewer(&state, P0);
@@ -186,6 +241,29 @@ fn limited_command_zone_cards_loaded_separately_from_main_deck() {
         p1_brago.name, HIDDEN_CARD_NAME,
         "opponent cannot view face-down conspiracy identity"
     );
+    assert!(p1_brago.secret_chosen_names.is_empty());
+    assert!(p1_brago.chosen_attributes.is_empty());
+    assert!(p1_brago.abilities.is_empty());
+    assert!(p1_brago.static_definitions.is_empty());
+    assert!(p1_brago.trigger_definitions.is_empty());
+    assert!(p1_brago.replacement_definitions.is_empty());
+    assert!(p1_brago.card_types.core_types.is_empty());
+    assert_eq!(p1_brago.mana_cost, ManaCost::default());
+    assert!(p1_brago.keywords.is_empty());
+    assert!(p1_brago.color.is_empty());
+
+    // Blocker 1: Serialization regression through ClientGameStateRef / serde_json
+    // Opponent wire representation leaks NO card name, secret name, abilities, or card types
+    let p1_wire = serde_json::to_string(&ClientGameStateRef::wrap(&state, Some(P1)))
+        .expect("wire state serializes");
+    assert!(
+        !p1_wire.contains("Brago's Favor"),
+        "opponent wire representation must not contain secret conspiracy name"
+    );
+    assert!(
+        !p1_wire.contains("Grizzly Bears"),
+        "opponent wire representation must not contain secret chosen card name"
+    );
 }
 
 #[test]
@@ -198,7 +276,7 @@ fn limited_command_zone_turn_hidden_agenda_face_up_special_action() {
     state.phase = Phase::PreCombatMain;
     state.waiting_for = WaitingFor::Priority { player: P0 };
 
-    let brago_face = conspiracy_card_face("Brago's Favor", true);
+    let brago_face = conspiracy_card_face("Brago's Favor", true, vec!["Grizzly Bears".to_string()]);
     let payload = DeckPayload {
         player: PlayerDeckPayload {
             main_deck: (0..40)
@@ -229,8 +307,16 @@ fn limited_command_zone_turn_hidden_agenda_face_up_special_action() {
 
     let brago_id = state.command_zone[0];
     assert!(state.objects[&brago_id].face_down);
+    assert_eq!(
+        state.objects[&brago_id].secret_chosen_names,
+        vec!["Grizzly Bears".to_string()]
+    );
+    assert!(
+        state.objects[&brago_id].chosen_attributes.is_empty(),
+        "secret chosen name is not public before turn face up"
+    );
 
-    // CR 702.106c / CR 116.2k: candidate offer is available during priority
+    // CR 702.106c / CR 116.2j / CR 905.4a: candidate offer is available during priority
     let actions = legal_actions(&state);
     assert!(
         actions.iter().any(
@@ -250,6 +336,11 @@ fn limited_command_zone_turn_hidden_agenda_face_up_special_action() {
     let brago_after = &runner.state().objects[&brago_id];
     assert!(!brago_after.face_down, "conspiracy is now face up");
     assert_eq!(brago_after.name, "Brago's Favor");
+    assert_eq!(
+        brago_after.chosen_attributes,
+        vec![ChosenAttribute::CardName("Grizzly Bears".to_string())],
+        "secret name transferred to chosen_attributes upon turning face up"
+    );
 
     // Both players can see its identity now
     let p1_view = filter_state_for_viewer(runner.state(), P1);
@@ -263,11 +354,186 @@ fn limited_command_zone_turn_hidden_agenda_face_up_special_action() {
 }
 
 #[test]
+fn limited_command_zone_double_agenda_two_chosen_names() {
+    let mut state = GameState::new_two_player(7);
+    state.format_config = FormatConfig::limited_with_command_zone();
+    state.turn_number = 1;
+    state.active_player = P0;
+    state.priority_player = P0;
+    state.phase = Phase::PreCombatMain;
+    state.waiting_for = WaitingFor::Priority { player: P0 };
+
+    let double_agenda = double_agenda_conspiracy_face(
+        "Double Agenda Conspiracy",
+        vec!["Grizzly Bears".to_string(), "Runeclaw Bear".to_string()],
+    );
+
+    let payload = DeckPayload {
+        player: PlayerDeckPayload {
+            main_deck: (0..40)
+                .map(|i| DeckEntry {
+                    card: plain_card_face(&format!("Plains {i}")),
+                    count: 1,
+                })
+                .collect(),
+            commander: vec![DeckEntry {
+                card: double_agenda,
+                count: 1,
+            }],
+            ..Default::default()
+        },
+        opponent: PlayerDeckPayload {
+            main_deck: (0..40)
+                .map(|i| DeckEntry {
+                    card: plain_card_face(&format!("Plains {i}")),
+                    count: 1,
+                })
+                .collect(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    load_deck_into_state(&mut state, &payload);
+
+    let obj_id = state.command_zone[0];
+    assert!(state.objects[&obj_id].face_down);
+    assert_eq!(
+        state.objects[&obj_id].secret_chosen_names,
+        vec!["Grizzly Bears".to_string(), "Runeclaw Bear".to_string()]
+    );
+    assert!(state.objects[&obj_id].chosen_attributes.is_empty());
+
+    let mut runner = GameRunner::from_state(state);
+    let result = runner.act(GameAction::TurnFaceUp {
+        object_id: obj_id,
+        x: 0,
+    });
+    assert!(result.is_ok(), "turn face up succeeds");
+
+    let obj_after = &runner.state().objects[&obj_id];
+    assert!(!obj_after.face_down);
+    assert_eq!(
+        obj_after.chosen_attributes,
+        vec![
+            ChosenAttribute::CardName("Grizzly Bears".to_string()),
+            ChosenAttribute::CardName("Runeclaw Bear".to_string()),
+        ],
+        "both secretly chosen names are transferred to chosen_attributes"
+    );
+}
+
+#[test]
+fn limited_command_zone_cost_reduction_with_chosen_name() {
+    let mut state = GameState::new_two_player(7);
+    state.format_config = FormatConfig::limited_with_command_zone();
+    state.turn_number = 1;
+    state.active_player = P0;
+    state.priority_player = P0;
+    state.phase = Phase::PreCombatMain;
+    state.waiting_for = WaitingFor::Priority { player: P0 };
+
+    let brago_face = conspiracy_card_face("Brago's Favor", true, vec!["Grizzly Bears".to_string()]);
+    let brago_id = create_command_zone_card_from_card_face(&mut state, &brago_face, P0);
+
+    // Forest on battlefield
+    let card_id = engine::types::identifiers::CardId(state.next_object_id);
+    let forest_id = engine::game::zones::create_object(
+        &mut state,
+        card_id,
+        P0,
+        "Forest".to_string(),
+        engine::types::zones::Zone::Battlefield,
+    );
+    let forest_obj = state.objects.get_mut(&forest_id).unwrap();
+    forest_obj.card_types.core_types.push(CoreType::Land);
+    forest_obj
+        .card_types
+        .supertypes
+        .push(engine::types::card_type::Supertype::Basic);
+    forest_obj.card_types.subtypes.push("Forest".to_string());
+    forest_obj.base_card_types = forest_obj.card_types.clone();
+    forest_obj.entered_battlefield_turn = Some(0);
+    forest_obj.summoning_sick = false;
+    let mana_ability = engine::types::ability::AbilityDefinition::new(
+        engine::types::ability::AbilityKind::Activated,
+        engine::types::ability::Effect::Mana {
+            produced: engine::types::ability::ManaProduction::Fixed {
+                colors: vec![ManaColor::Green],
+                contribution: engine::types::ability::ManaContribution::Base,
+            },
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+            target: None,
+        },
+    )
+    .cost(engine::types::ability::AbilityCost::Tap);
+    std::sync::Arc::make_mut(&mut forest_obj.abilities).push(mana_ability.clone());
+    std::sync::Arc::make_mut(&mut forest_obj.base_abilities).push(mana_ability);
+
+    // Grizzly Bears in hand ({1}{G})
+    let bear_card_id = engine::types::identifiers::CardId(state.next_object_id);
+    let bear_id = engine::game::zones::create_object(
+        &mut state,
+        bear_card_id,
+        P0,
+        "Grizzly Bears".to_string(),
+        engine::types::zones::Zone::Hand,
+    );
+    let bear_obj = state.objects.get_mut(&bear_id).unwrap();
+    bear_obj.card_types.core_types.push(CoreType::Creature);
+    bear_obj.base_card_types = bear_obj.card_types.clone();
+    bear_obj.mana_cost = ManaCost::Cost {
+        shards: vec![ManaCostShard::Green],
+        generic: 1,
+    };
+    bear_obj.power = Some(2);
+    bear_obj.toughness = Some(2);
+
+    let mut runner = GameRunner::from_state(state);
+
+    // While face-down: Brago's Favor does not reduce cost. Grizzly Bears costs {1}{G} (2 mana).
+    // With only 1 Forest ({G}), Grizzly Bears cannot be cast.
+    let actions = legal_actions(runner.state());
+    assert!(
+        !actions
+            .iter()
+            .any(|a| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == bear_id)),
+        "cannot cast Grizzly Bears with only 1 Forest while conspiracy is face down"
+    );
+
+    // Turn Brago's Favor face-up
+    let turn_up = runner.act(GameAction::TurnFaceUp {
+        object_id: brago_id,
+        x: 0,
+    });
+    assert!(turn_up.is_ok(), "turn face up succeeds");
+
+    // Now Brago's Favor functions from command zone!
+    // Spells with chosen name "Grizzly Bears" cost {1} less -> now costs {G}.
+    // With 1 Forest, Grizzly Bears is now a legal cast!
+    let actions_after = legal_actions(runner.state());
+    assert!(
+        actions_after
+            .iter()
+            .any(|a| matches!(a, GameAction::CastSpell { object_id, .. } if *object_id == bear_id)),
+        "can cast Grizzly Bears for reduced cost after turning conspiracy face up"
+    );
+
+    let outcome = runner.cast(bear_id).resolve();
+    assert!(
+        outcome.is_tapped(forest_id),
+        "Forest was tapped to pay the reduced cost"
+    );
+}
+
+#[test]
 fn limited_without_command_zone_does_not_place_command_cards() {
     let mut state = GameState::new_two_player(7);
     state.format_config = FormatConfig::limited(); // command_zone: false
 
-    let brago_face = conspiracy_card_face("Brago's Favor", true);
+    let brago_face = conspiracy_card_face("Brago's Favor", true, vec!["Grizzly Bears".to_string()]);
     let payload = DeckPayload {
         player: PlayerDeckPayload {
             main_deck: (0..40)

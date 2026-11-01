@@ -24,9 +24,23 @@ export function commandZoneLeaders(gameState: GameState, playerId: PlayerId): Ga
     .filter(
       (obj): obj is GameObject =>
         obj != null &&
-        (obj.is_commander === true ||
-          obj.signature_spell != null ||
-          Boolean(obj.card_types?.core_types?.includes("Conspiracy"))) &&
+        (obj.is_commander === true || obj.signature_spell != null) &&
+        obj.owner === playerId &&
+        obj.zone === "Command",
+    );
+}
+
+/**
+ * Command-zone conspiracies this player owns that are currently in the command
+ * zone (CR 905). Conspiracies are not commanders and do not carry commander tax.
+ */
+export function commandZoneConspiracies(gameState: GameState, playerId: PlayerId): GameObject[] {
+  return (gameState.command_zone ?? [])
+    .map((id) => gameState.objects[id])
+    .filter(
+      (obj): obj is GameObject =>
+        obj != null &&
+        Boolean(obj.card_types?.core_types?.includes("Conspiracy")) &&
         obj.owner === playerId &&
         obj.zone === "Command",
     );

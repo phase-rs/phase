@@ -463,13 +463,16 @@ pub(crate) fn turn_face_up_prepare(
 
     // CR 702.106c / CR 116.2j / CR 905.4a: Face-down hidden agenda conspiracy in command zone.
     // Turning it face up is a special action with no cost (CR 116.2j).
-    if obj.zone == Zone::Command && obj.face_down && crate::game::conspiracy::is_conspiracy(obj) {
-        if obj.owner != player && obj.controller != player {
+    if obj.zone == Zone::Command && crate::game::conspiracy::is_conspiracy(obj) {
+        if !crate::game::conspiracy::is_face_down_conspiracy_candidate(obj, player) {
             return Err(EngineError::InvalidAction(
-                "You don't control this conspiracy".to_string(),
+                "You don't control this face-down conspiracy".to_string(),
             ));
         }
-        return Ok((TurnUpCostSource::HiddenAgenda, TurnFaceUpCost::Mana(ManaCost::NoCost)));
+        return Ok((
+            TurnUpCostSource::HiddenAgenda,
+            TurnFaceUpCost::Mana(ManaCost::NoCost),
+        ));
     }
 
     if obj.controller != player {
@@ -603,11 +606,10 @@ pub(crate) fn handle_turn_face_up(
 ) -> Result<WaitingFor, EngineError> {
     // CR 702.106c / CR 116.2j / CR 905.4a: Special action to turn face-down hidden agenda conspiracy in command zone face up.
     if let Some(obj) = state.objects.get(&object_id) {
-        if obj.zone == Zone::Command && obj.face_down && crate::game::conspiracy::is_conspiracy(obj)
-        {
-            if obj.owner != player && obj.controller != player {
+        if obj.zone == Zone::Command && crate::game::conspiracy::is_conspiracy(obj) {
+            if !crate::game::conspiracy::is_face_down_conspiracy_candidate(obj, player) {
                 return Err(EngineError::InvalidAction(
-                    "You don't control this conspiracy".to_string(),
+                    "You don't control this face-down conspiracy".to_string(),
                 ));
             }
             if announced_x != 0 {

@@ -648,6 +648,9 @@
   },
   "zone": {
     "commandZone": "Strefa dowodzenia",
+    "conspiracy": "Spisek",
+    "conspiracyTitle": "Spisek: {{name}}",
+    "turnFaceUp": "Obróć {{name}} odkrytą stroną do góry",
     "emblem": "Emblemat",
     "emblemFallback": "Emblemat",
     "commander": "Dowódca",

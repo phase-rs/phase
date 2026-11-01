@@ -5017,24 +5017,19 @@ pub(crate) fn priority_actions_with_probe(
         }
     }
 
-    // CR 702.106c / CR 116.2j: turning a face-down hidden agenda conspiracy in
+    // CR 702.106c / CR 116.2j / CR 905.4a: turning a face-down hidden agenda conspiracy in
     // the command zone face up is a special action available any time its
     // controller has priority.
     for &object_id in &state.command_zone {
-        let Some(object) = state.objects.get(&object_id) else {
-            continue;
-        };
-        if !object.face_down
-            || (object.controller != player && object.owner != player)
-            || !crate::game::conspiracy::is_conspiracy(object)
+        if let Some(crate::game::morph::TurnFaceUpOffer::Ready) =
+            crate::game::morph::turn_face_up_offer(state, player, object_id)
         {
-            continue;
+            actions.push(candidate(
+                GameAction::TurnFaceUp { object_id, x: 0 },
+                TacticalClass::Ability,
+                Some(player),
+            ));
         }
-        actions.push(candidate(
-            GameAction::TurnFaceUp { object_id, x: 0 },
-            TacticalClass::Ability,
-            Some(player),
-        ));
     }
 
     // CR 702.143a-b: Foretell is a priority-time special action from hand

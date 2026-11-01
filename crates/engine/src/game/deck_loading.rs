@@ -668,16 +668,22 @@ pub fn create_command_zone_card_from_card_face(
     card_face: &CardFace,
     owner: PlayerId,
 ) -> crate::types::identifiers::ObjectId {
+    let mut face = card_face.clone();
+    crate::database::synthesis::synthesize_conspiracy(&mut face);
+
     let card_id = CardId(state.next_object_id);
-    let obj_id = create_object(state, card_id, owner, card_face.name.clone(), Zone::Command);
+    let obj_id = create_object(state, card_id, owner, face.name.clone(), Zone::Command);
 
     let obj = state.objects.get_mut(&obj_id).expect("just created");
-    apply_card_face_to_object(obj, card_face);
+    apply_card_face_to_object(obj, &face);
     obj.is_commander = false;
     obj.controller = owner;
+    if !face.chosen_names.is_empty() {
+        obj.secret_chosen_names = face.chosen_names.clone();
+    }
 
     if crate::game::conspiracy::is_conspiracy(obj) {
-        let hidden_agenda = crate::game::conspiracy::card_has_hidden_agenda(card_face);
+        let hidden_agenda = crate::game::conspiracy::card_has_hidden_agenda(&face);
         if hidden_agenda {
             obj.back_face = Some(crate::game::printed_cards::snapshot_object_face(obj));
         }
@@ -1119,8 +1125,9 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     }
     let placement = if place_commanders {
         Some(CommandZonePlacement::Commander)
-    } else if state.format_config.format == crate::types::format::GameFormat::Limited
-        && state.format_config.command_zone
+    } else if state
+        .format_config
+        .command_zone_holds_limited_conspiracies()
     {
         Some(CommandZonePlacement::NonCommanderLimited)
     } else {
@@ -1551,6 +1558,7 @@ mod tests {
             metadata: Default::default(),
             rarities: Default::default(),
             attraction_lights: vec![],
+            chosen_names: vec![],
         }
     }
 
@@ -1604,6 +1612,7 @@ mod tests {
             metadata: Default::default(),
             rarities: Default::default(),
             attraction_lights: vec![],
+            chosen_names: vec![],
         }
     }
 

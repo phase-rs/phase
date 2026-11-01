@@ -3174,6 +3174,41 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
             pool.registered_planar_deck = Arc::new(Vec::new());
             pool.registered_scheme_deck = Arc::new(Vec::new());
             pool.current_scheme_deck = Arc::new(Vec::new());
+            // CR 905.4a + CR 702.106a: Non-commander formats (such as Limited with
+            // command zone for conspiracies) must not leak commander-slot entries
+            // to opponents or observers. Any hidden-agenda conspiracies in the
+            // commander slot must likewise be redacted.
+            if !state.format_config.uses_commander {
+                pool.registered_commander = Arc::new(Vec::new());
+                pool.current_commander = Arc::new(Vec::new());
+            } else {
+                if pool
+                    .registered_commander
+                    .iter()
+                    .any(|e| crate::game::conspiracy::card_has_hidden_agenda(&e.card))
+                {
+                    pool.registered_commander = Arc::new(
+                        pool.registered_commander
+                            .iter()
+                            .filter(|e| !crate::game::conspiracy::card_has_hidden_agenda(&e.card))
+                            .cloned()
+                            .collect(),
+                    );
+                }
+                if pool
+                    .current_commander
+                    .iter()
+                    .any(|e| crate::game::conspiracy::card_has_hidden_agenda(&e.card))
+                {
+                    pool.current_commander = Arc::new(
+                        pool.current_commander
+                            .iter()
+                            .filter(|e| !crate::game::conspiracy::card_has_hidden_agenda(&e.card))
+                            .cloned()
+                            .collect(),
+                    );
+                }
+            }
         }
     }
 
@@ -4810,6 +4845,7 @@ fn hide_card(state: &mut GameState, obj_id: ObjectId) {
         obj.static_definitions.clear();
         obj.printed_ref = None;
         obj.foretold = false;
+        obj.secret_chosen_names.clear();
     }
 }
 
@@ -4844,13 +4880,21 @@ fn redact_face_down_identity_from_observer(obj: &mut crate::game::game_object::G
     // face's warnings), so it must be redacted here for the same reason
     // `back_face` is — it is evidence about the hidden printed text.
     obj.parse_warnings.clear();
-    // CR 708.5 + CR 905.4a: also clear runtime ability definitions so that
-    // face-down command-zone conspiracies don't leak their static/triggered
-    // abilities to observers. The controller sees the real object via
-    // `reveal_face_down_identity_to_controller`.
-    obj.abilities = Arc::new(Vec::new());
+    // CR 708.5 + CR 905.4a: clear runtime ability definitions, chosen attributes,
+    // and secret names so that face-down command-zone conspiracies don't leak
+    // their static/triggered/replacement abilities or secret choices to observers.
+    Arc::make_mut(&mut obj.abilities).clear();
     obj.trigger_definitions = Default::default();
     obj.static_definitions = Default::default();
+    obj.replacement_definitions = Default::default();
+    obj.chosen_attributes.clear();
+    obj.secret_chosen_names.clear();
+    if obj.zone == Zone::Command {
+        obj.card_types = Default::default();
+        obj.mana_cost = Default::default();
+        obj.keywords.clear();
+        obj.color.clear();
+    }
 }
 
 /// CR 603.3b + CR 400.2: A pending trigger awaiting its
