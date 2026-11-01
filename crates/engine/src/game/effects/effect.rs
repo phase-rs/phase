@@ -1275,6 +1275,47 @@ fn snapshot_transient_modifications(
                     value: resolve_quantity_with_targets(state, value, ability),
                 }
             }
+            // CR 113.10 + CR 608.2c + CR 608.2h: "<object> loses this ability"
+            // names the ability that actually RESOLVED, and only the resolution
+            // knows which that is. The parser could stamp no more than a printed
+            // slot (`ability_index`), and a printed slot is the wrong identity
+            // for a GAINED ability: Agatha's Soul Cauldron exiles a Licid and
+            // donates its activated ability to another creature, where it
+            // occupies a live slot whose number names the RECIPIENT's own first
+            // printed ability (`layers.rs`'s `GrantAllActivatedAbilitiesOf`
+            // expansion re-sources the donated def to the recipient). Reading
+            // the index there would delete an unrelated printed ability
+            // permanently and leave the gained one activatable; on Necrotic
+            // Ooze, whose printed list is empty, it would do nothing at all.
+            //
+            // So concretize the live resolving ability here, where
+            // `ResolvedAbility::ability_index` — the same authority
+            // `AbilityCondition::AbilityUseCountThisTurn` reads for "this
+            // ability" — still identifies it against the source's CURRENT
+            // `abilities`. CR 608.2h + CR 611.2d: information a resolving effect
+            // requires is determined once, now. The layer arm then compares
+            // structurally and needs no index at all (CR 113.10b).
+            //
+            // Gated on `ability_index.is_some()`: `None` is the parser's
+            // "this clause names no printed activated-ability slot" verdict (a
+            // triggered ability's body, CR 603.1), and that stays a no-op rather
+            // than silently acquiring a resolution identity it never earned.
+            ContinuousModification::RemoveSourceAbility {
+                ability_index,
+                ability: _,
+            } => ContinuousModification::RemoveSourceAbility {
+                ability_index: *ability_index,
+                ability: ability_index
+                    .and(ability.ability_index)
+                    .and_then(|live_index| {
+                        state
+                            .objects
+                            .get(&ability.source_id)
+                            .and_then(|source| source.abilities.get(live_index))
+                    })
+                    .cloned()
+                    .map(Box::new),
+            },
             // CR 613.1f + CR 608.2c: the reanimator-Aura's granted Enchant restriction
             // ("enchant creature put onto the battlefield with this Aura") is a layer-6
             // ability grant (CR 613.1f) whose anaphoric ParentTarget must bind to the

@@ -286,6 +286,7 @@ mod loki_becomes_target_ability;
 mod loop_only_dependency_fallback;
 mod lose_control_this_turn_delayed_trigger;
 mod lose_hexproof_family;
+mod loses_this_ability_removal;
 mod lost_mine_fungi_cavern_duration_runtime;
 mod lost_mine_storeroom_targeting_runtime;
 mod louisoix_sacrifice_counter;

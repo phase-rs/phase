@@ -1991,6 +1991,13 @@ pub(crate) fn modification_polarity(m: &ContinuousModification) -> EffectPolarit
         | ContinuousModification::RemoveAllAbilities
         | ContinuousModification::RemoveType { .. }
         | ContinuousModification::RemoveSubtype { .. } => EffectPolarity::Harmful,
+        // CR 113.10: a "<object> loses this ability" removal is always
+        // SELF-inflicted by the resolving ability (Great Fang Chroniclers, the
+        // Licids trade the ability for the animation), so it is not a reason to
+        // aim an effect at anything — enumerated at the SAME value the wildcard
+        // below already yields, so AI behaviour is unchanged and no `cargo
+        // ai-gate` paired-seed run is needed.
+        ContinuousModification::RemoveSourceAbility { .. } => EffectPolarity::Contextual,
         // SetPower/SetToughness, SetColor, etc. are contextual — could go either way.
         _ => EffectPolarity::Contextual,
     }

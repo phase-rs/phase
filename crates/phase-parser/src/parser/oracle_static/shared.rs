@@ -1015,6 +1015,9 @@ fn continuous_modification_dynamic_quantity_mut(
         | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
         | ContinuousModification::GrantTrigger { .. }
         | ContinuousModification::RemoveAllAbilities
+        // CR 613.1f: a printed-slot index leaf — no nested definition,
+        // quantity or anaphor to descend into.
+        | ContinuousModification::RemoveSourceAbility { .. }
         | ContinuousModification::AddType { .. }
         | ContinuousModification::RemoveType { .. }
         | ContinuousModification::AddSubtype { .. }

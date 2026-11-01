@@ -2478,6 +2478,8 @@ pub(crate) fn continuous_modification_dynamic_quantity(
         // magnitude — its `execute` (ChangeZone→Exile) has no dynamic value.
         | ContinuousModification::GrantReplacement { .. }
         | ContinuousModification::RemoveAllAbilities
+        // CR 613.1f: carries a printed-slot index, not a `QuantityExpr`.
+        | ContinuousModification::RemoveSourceAbility { .. }
         | ContinuousModification::AddType { .. }
         | ContinuousModification::RemoveType { .. }
         | ContinuousModification::AddSubtype { .. }

@@ -438,6 +438,9 @@ impl<'a> CopyExceptionOperation<'a> {
             | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
             | ContinuousModification::GrantReplacement { .. }
             | ContinuousModification::RemoveAllAbilities
+            // CR 613.1f: a layer-6 ability removal, not a copiable value — it
+            // is layered like `RemoveAllAbilities`, never folded into the copy.
+            | ContinuousModification::RemoveSourceAbility { .. }
             | ContinuousModification::RemoveType { .. }
             | ContinuousModification::RemoveSubtype { .. }
             | ContinuousModification::SetDynamicPower { .. }

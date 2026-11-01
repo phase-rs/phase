@@ -3652,6 +3652,29 @@ pub(super) fn rebind_attach_attachment_to_forwarded_source_if_anaphor_names_move
     false
 }
 
+/// CR 113.10 + CR 602.1: True when a static's `SelfRef` is an EXPLICIT
+/// self-reference to the clause's own source rather than the bare-"it" anaphor
+/// [`sub_targets_moved_card`] looks for.
+///
+/// "<object> loses this ability" (CR 113.10 — "an effect that removes an ability
+/// will state that the object 'loses' that ability") names an ability printed on
+/// that object (CR 602.1). The card the parent instruction just moved has no such
+/// ability, so the clause does not anchor on it and its enclosing chain must not
+/// be stamped `forward_result`: that stamp rewrites a bare `SelfRef` to the moved
+/// object (`effects/mod.rs::bind_forwarded_generic_self_ref`) and re-sources the
+/// child there, which would silently apply the removal to the wrong permanent
+/// (Great Fang Chroniclers: "Conjure a card named Muraganda Petroglyphs onto the
+/// battlefield, then this creature loses this ability").
+///
+/// Asked PER STATIC, not per child: a sibling static in the same `GenericEffect`
+/// that genuinely does carry the bare-"it" anaphor still stamps the flag.
+fn static_names_its_own_printed_ability(static_def: &StaticDefinition) -> bool {
+    static_def
+        .modifications
+        .iter()
+        .any(|m| matches!(m, ContinuousModification::RemoveSourceAbility { .. }))
+}
+
 /// CR 608.2c: True when a sub-ability anchors on the just-moved card via
 /// the bare-"it" anaphor. Two encodings are recognized:
 ///
@@ -3673,6 +3696,9 @@ pub(super) fn rebind_attach_attachment_to_forwarded_source_if_anaphor_names_move
 /// Walks the sub's leaf target slot, `GenericEffect`'s grant list
 /// (each `StaticDefinition.affected`), `CreateDelayedTrigger`'s inner
 /// `AbilityDefinition`, and nested `sub_ability` / `else_ability`.
+///
+/// One `SelfRef` shape is EXCLUDED, per static — see
+/// [`static_names_its_own_printed_ability`].
 fn sub_targets_moved_card(sub: &AbilityDefinition) -> bool {
     if matches!(
         sub.effect.target_filter(),
@@ -3697,10 +3723,11 @@ fn sub_targets_moved_card(sub: &AbilityDefinition) -> bool {
     } = &*sub.effect
     {
         if static_abilities.iter().any(|s| {
-            matches!(
-                s.affected.as_ref(),
-                Some(TargetFilter::SelfRef | TargetFilter::ParentTarget)
-            )
+            !static_names_its_own_printed_ability(s)
+                && matches!(
+                    s.affected.as_ref(),
+                    Some(TargetFilter::SelfRef | TargetFilter::ParentTarget)
+                )
         }) {
             return true;
         }
@@ -13111,6 +13138,9 @@ fn apply_where_x_continuous_modification(
         | ContinuousModification::GrantAllActivatedAbilitiesOf { .. }
         | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
         | ContinuousModification::RemoveAllAbilities
+        // CR 613.1f: a printed-slot index leaf — no nested definition,
+        // quantity or anaphor to descend into.
+        | ContinuousModification::RemoveSourceAbility { .. }
         | ContinuousModification::AddType { .. }
         | ContinuousModification::RemoveType { .. }
         | ContinuousModification::AddSubtype { .. }
@@ -13215,6 +13245,9 @@ fn rebind_target_anaphor_continuous_modification(modification: &mut ContinuousMo
         | ContinuousModification::GrantAllTriggeredAbilitiesOf { .. }
         | ContinuousModification::GrantTrigger { .. }
         | ContinuousModification::RemoveAllAbilities
+        // CR 613.1f: a printed-slot index leaf — no nested definition,
+        // quantity or anaphor to descend into.
+        | ContinuousModification::RemoveSourceAbility { .. }
         | ContinuousModification::AddType { .. }
         | ContinuousModification::RemoveType { .. }
         | ContinuousModification::AddSubtype { .. }
