@@ -57090,15 +57090,31 @@ fn resolution_face_legality_admits_the_land_face_only_under_a_play_policy() {
     );
 }
 
-/// CR 712.8a + CR 712.12: a Play policy's filter is read against the card in
-/// exile — its front face — on BOTH land legs. A spell//land card whose front
-/// the filter excludes offers no land back; one whose front the filter admits
-/// may still play its differently typed land back. The structural land leg
-/// (`resolution_land_card_admission`) reads the same filter.
+/// CR 712.12: a Play policy's filter judges the land face being played, on the
+/// projection that elects it — not the card's front. Bala Ged Recovery //
+/// Bala Ged Sanctuary in exile: a Land filter admits Sanctuary even though the
+/// card's front is a sorcery, and a Sorcery filter rejects the land face even
+/// though the front is a sorcery. Ownership is still the card's own: a Land
+/// filter limited to an opponent's cards rejects P0's Sanctuary. The
+/// structural land leg (`resolution_land_card_admission`) and the face
+/// legality the window and election read agree.
 #[test]
-fn resolution_land_back_face_admission_reads_the_policy_filter_on_the_card() {
-    let mut state = setup_game_at_main_phase();
-    let spell = resolution_test_spell_land(&mut state);
+fn resolution_land_back_face_admission_reads_the_policy_filter_on_the_played_face() {
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::game::scenario_db::GameScenarioDbExt;
+
+    let db = crate::test_support::shared_card_db();
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let card = scenario.add_real_card(P0, "Bala Ged Recovery", Zone::Exile, db);
+    let state = scenario.state.clone();
+    assert!(
+        state.objects[&card]
+            .card_types
+            .core_types
+            .contains(&CoreType::Sorcery),
+        "reach-guard: in exile the card has its sorcery front's characteristics"
+    );
     let policy = |filter: TargetFilter| {
         crate::types::ability::ResolutionCastFacePolicy::new(
             filter,
@@ -57108,31 +57124,43 @@ fn resolution_land_back_face_admission_reads_the_policy_filter_on_the_card() {
         )
         .with_play_mode(CardPlayMode::Play)
     };
+    let back_legality = |policy: &crate::types::ability::ResolutionCastFacePolicy| {
+        let mut request = resolution_test_play_request(CardPlayMode::Play, None);
+        request.face_policy = policy.clone();
+        request.cleanup.face_policy = policy.clone();
+        resolution_test_face_legality(&state, card, &request).back
+    };
 
-    let front_type = policy(TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)));
+    let land = policy(TargetFilter::Typed(TypedFilter::new(TypeFilter::Land)));
     assert!(
-        resolution_land_face_admission(&state, PlayerId(0), spell, &front_type),
-        "a card the filter admits by its front may play its land back"
+        resolution_land_face_admission(&state, P0, card, &land),
+        "a Land filter admits the Sanctuary face"
     );
-    assert!(resolution_land_card_admission(&state, spell, &front_type));
+    assert!(resolution_land_card_admission(&state, card, &land));
+    assert_eq!(back_legality(&land), Some(ResolutionFaceAction::PlayLand));
 
-    let excluded = policy(TargetFilter::Typed(TypedFilter::creature()));
+    let sorcery = policy(TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)));
     assert!(
-        !resolution_land_face_admission(&state, PlayerId(0), spell, &excluded),
-        "a card the filter excludes offers no land back"
+        !resolution_land_face_admission(&state, P0, card, &sorcery),
+        "a Sorcery filter rejects the land face"
     );
-    assert!(!resolution_land_card_admission(&state, spell, &excluded));
-    assert_eq!(
-        resolution_test_face_legality(&state, spell, &{
-            let mut request = resolution_test_play_request(CardPlayMode::Play, None);
-            request.face_policy = excluded.clone();
-            request.cleanup.face_policy = excluded;
-            request
-        },)
-        .back,
-        None,
-        "the face legality the window and election read agrees"
+    assert!(!resolution_land_card_admission(&state, card, &sorcery));
+    assert_eq!(back_legality(&sorcery), None);
+
+    let opponents_land = policy(TargetFilter::Typed(
+        TypedFilter::new(TypeFilter::Land).properties(vec![FilterProp::Owned {
+            controller: crate::types::ability::ControllerRef::Opponent,
+        }]),
+    ));
+    assert!(
+        !resolution_land_face_admission(&state, P0, card, &opponents_land),
+        "ownership is read on the card"
     );
+    assert!(!resolution_land_card_admission(
+        &state,
+        card,
+        &opponents_land
+    ));
 }
 
 /// CR 712.12 + CR 305.2a: when the land face is a Play election's only legal

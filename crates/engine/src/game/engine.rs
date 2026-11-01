@@ -19051,18 +19051,26 @@ pub(crate) fn resolution_back_land_face_play_is_legal(
     player: PlayerId,
     object_id: ObjectId,
 ) -> bool {
-    let Some(obj) = state.objects.get(&object_id) else {
-        return false;
-    };
-    if !modal_land_face_election_available(obj) {
-        return false;
+    project_modal_land_back_face(state, object_id)
+        .is_some_and(|projected| resolution_land_play_is_legal(&projected, player, object_id))
+}
+
+/// CR 712.12: a clone of `state` in which `object_id` presents its elected land
+/// back face — the face that would be played — or `None` when the card has no
+/// modal land back face. Only the face characteristics change; the card's
+/// owner, zone and exile links are untouched, so a filter read on the
+/// projection judges the played face's characteristics and the card's
+/// membership together. The real object is not mutated.
+pub(crate) fn project_modal_land_back_face(
+    state: &GameState,
+    object_id: ObjectId,
+) -> Option<GameState> {
+    if !modal_land_face_election_available(state.objects.get(&object_id)?) {
+        return None;
     }
     let mut projected = state.clone();
-    let Some(projected_obj) = projected.objects.get_mut(&object_id) else {
-        return false;
-    };
-    elect_modal_land_back_face(projected_obj);
-    resolution_land_play_is_legal(&projected, player, object_id)
+    elect_modal_land_back_face(projected.objects.get_mut(&object_id)?);
+    Some(projected)
 }
 
 /// CR 701.18b + CR 712.12 + CR 305.2a + CR 116.2a: play the land back face of
