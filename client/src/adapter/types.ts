@@ -2047,6 +2047,12 @@ export interface CardFacePartial {
 export interface CompanionInfo {
   card: { card: CardFacePartial; count: number };
   used: boolean;
+  /**
+   * CR 702.139a + CR 203.1 + CR 206.1: the owner's printing of the revealed
+   * companion, captured at the reveal from the source it was revealed from
+   * (display-only). Absent when the engine recorded none.
+   */
+  printing?: CardPrinting | null;
 }
 
 export type CompanionChoiceSource =

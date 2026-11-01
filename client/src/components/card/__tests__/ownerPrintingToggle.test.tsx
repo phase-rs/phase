@@ -11,7 +11,7 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
 
-import type { CardPrinting, GameObject, GameState } from "../../../adapter/types.ts";
+import type { CardPrinting, CompanionInfo, GameObject, GameState } from "../../../adapter/types.ts";
 import type * as Platform from "../../../services/platform.ts";
 import type { PrintingEntry } from "../../../services/scryfall.ts";
 import type { ResolutionKey, ResolutionResponse, ResolvedAsset } from "../../../services/visualPacks/types.ts";
@@ -26,6 +26,7 @@ import type { CardVfxLayerHandle } from "../../animation/cardVfx/CardVfxLayer.ts
 import type { CardFlightSpec } from "../../animation/cardVfx/cardFlightSpecs.ts";
 import { gameObjectFactory } from "../../../test/factories/gameObjectFactory.ts";
 import { gameStateFactory, buildStackEntry } from "../../../test/factories/gameStateFactory.ts";
+import { ZONE_THEME } from "../../../viewmodel/zoneAffordance.ts";
 
 // Only unrelated engine-content and dispatch boundaries are doubled. Image
 // selection, repositories, preference selection, and Settings remain real.
@@ -594,6 +595,28 @@ describe("owner printing carrier surfaces (group 1)", () => {
       await expectImage(surface.container, URL_V);
     },
   );
+
+  it("V16 resolves a declared companion's owner printing before it enters hand", async () => {
+    const env = await setup();
+    const { CompanionFanCard } = await import("../../hand/CompanionFanCard.tsx");
+    const companion: CompanionInfo = { card: { card: { name: "Alpha", scryfall_oracle_id: ORACLE }, count: 1 },
+      used: false, printing: printingA };
+    const props = { canActivate: false, theme: ZONE_THEME.companion, rotation: 0, arcOffset: 0,
+      restingY: 0, hoverY: 0, marginLeft: 0, zIndex: 1 };
+    const surface = render(<CompanionFanCard companion={companion} {...props} />);
+    await toggleCycle(env, surface.container);
+    // Owner admission needs the printing AND the face's Oracle id; the hook never
+    // takes a name-only carrier, so the fan keeps the viewer's art for these.
+    const refused: CompanionInfo[] = [
+      { ...companion, printing: undefined },
+      { ...companion, printing: null },
+      { ...companion, card: { ...companion.card, card: { name: "Alpha" } } },
+    ];
+    for (const current of refused) {
+      surface.rerender(<CompanionFanCard companion={current} {...props} />);
+      await expectImage(surface.container, URL_V);
+    }
+  });
 });
 
 describe("owner printing remaining carrier surfaces (group 2)", () => {
@@ -1073,9 +1096,10 @@ describe("owner printing remaining carrier surfaces (group 2)", () => {
       "components/zone/CommandZone.tsx": 1, "components/zone/CommanderCardZone.tsx": 1,
       "components/zone/GraveyardPile.tsx": 1, "components/zone/LibraryPile.tsx": 1,
       "components/animation/ResolvedAnimationImage.tsx": 1, "components/animation/RevealOverlay.tsx": 1,
+      "components/hand/CompanionFanCard.tsx": 1,
     };
     const excludedHooks: Record<string, number> = {
-      "components/card/CardReportDialog.tsx": 1, "components/hand/CompanionFanCard.tsx": 1,
+      "components/card/CardReportDialog.tsx": 1,
       "components/controls/CardCoverageDashboard.tsx": 1, "components/deck-builder/CardGrid.tsx": 1,
       "components/deck-builder/DeckStack.tsx": 1, "components/deck-builder/PrintingPickerModal.tsx": 1,
       "components/draft/DraftCardFace.tsx": 1, "components/draft/LimitedDeckBuilder.tsx": 1,
@@ -1214,7 +1238,7 @@ describe("owner printing remaining carrier surfaces (group 2)", () => {
     expect(failures, failures.join("\n")).toEqual([]);
     expect(hooks).toEqual({ ...objectHooks, ...excludedHooks });
     expect(Object.values(hooks).reduce((sum, count) => sum + count, 0)).toBe(28);
-    expect(Object.values(objectHooks).reduce((sum, count) => sum + count, 0)).toBe(15);
+    expect(Object.values(objectHooks).reduce((sum, count) => sum + count, 0)).toBe(16);
     expect(images).toEqual(expectedImages);
     expect(Object.values(images).reduce((sum, count) => sum + count, 0)).toBe(47);
     expect(helpers).toEqual(expectedHelpers);
