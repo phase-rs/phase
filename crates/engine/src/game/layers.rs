@@ -55,7 +55,7 @@ use crate::types::game_state::{
     TransientContinuousEffectBindings,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
-use crate::types::keywords::Keyword;
+use crate::types::keywords::{Keyword, ProtectionTarget};
 use crate::types::layers::{ActiveContinuousEffect, Layer};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
@@ -5885,9 +5885,8 @@ fn effect_population_reads(e: &ActiveContinuousEffect) -> (bool, bool) {
 /// The live read union, split by whether a contribution is attributable to one
 /// continuous effect.
 struct LiveCharacteristicReads {
-    /// Read kinds that belong to no single effect, so no writer is ever exempt
-    /// from them: dynamic magnitudes and Continuous statics' enabling
-    /// conditions.
+    /// Reads outside retained affected-set groups, so no writer is exempt:
+    /// dynamic magnitudes, live contributor populations, and enabling conditions.
     global: CharacteristicKinds,
     /// `global` plus every live affected filter's kinds — the full ReadKinds
     /// union that drives the entrant-independent global exit.
@@ -5901,13 +5900,14 @@ struct LiveCharacteristicReads {
 ///
 /// ```text
 /// global    := ⋃ dynamic-magnitude kinds     // every live modification's magnitude
+///            ∪ ⋃ contributor kinds           // live provider and protection-color populations
 ///            ∪ ⋃ live condition kinds        // every live effect's retained condition
 ///            ∪ ⋃ Continuous condition kinds  // every live Continuous static's condition
 ///            ∪ ⋃ transient gate kinds        // every INSTALLED transient's duration + condition
 /// ReadKinds := global ∪ ⋃ affected-filter kinds  // every live modification's affected filter
 /// ```
 ///
-/// All five channels are unioned UNCONDITIONALLY. An earlier design gated the
+/// All channels are unioned UNCONDITIONALLY. An earlier design gated the
 /// affected-filter channel on the write set already intersecting, which is
 /// unsound: a board whose only name-sensitive read lives in another static's
 /// affected filter has an empty base union, so the gate would never notice a
@@ -5916,7 +5916,7 @@ struct LiveCharacteristicReads {
 /// The affected-filter channel is reported separately because it is the only
 /// one attributable to a single effect, and CR 613.6 puts an effect's own
 /// affected filter out of reach of its own writes — see
-/// [`AffectedFilterReadTally`]. The other four channels are board-level and
+/// [`AffectedFilterReadTally`]. The remaining channels are board-level and
 /// admit no such exclusion.
 ///
 /// WHAT CONVERGES WHERE. The `e.condition` channel below is NOT a single
@@ -5992,6 +5992,17 @@ fn live_characteristic_reads(
             ContinuousModification::GrantAllActivatedAbilitiesOf { source, .. }
             | ContinuousModification::GrantAllTriggeredAbilitiesOf { source } => {
                 global = global.union(target_filter_characteristic_reads(source));
+            }
+            // CR 611.3a + CR 109.5: the contributor population reads both
+            // current color and current control independently of the recipient.
+            ContinuousModification::AddKeyword {
+                keyword:
+                    Keyword::Protection(ProtectionTarget::EachColor(
+                        crate::types::keywords::ProtectionColorSet::AmongPermanentsYouControl,
+                    )),
+            } => {
+                global =
+                    global.union(CharacteristicKinds::COLOR.union(CharacteristicKinds::CONTROLLER));
             }
             _ => {}
         }
@@ -6466,6 +6477,24 @@ fn active_effects_force_incremental_escalation(
     active_effects: &[ActiveContinuousEffect],
 ) -> bool {
     active_effects.iter().any(|e| {
+        // CR 611.3a + CR 109.5: a newly controlled colored permanent can
+        // change this grant on a pre-existing recipient, including an Aura host.
+        if let ContinuousModification::AddKeyword {
+            keyword:
+                Keyword::Protection(ProtectionTarget::EachColor(
+                    crate::types::keywords::ProtectionColorSet::AmongPermanentsYouControl,
+                )),
+        } = &e.modification
+        {
+            let you = active_effect_condition_controller(state, e);
+            if entered_ids.iter().any(|id| {
+                state.objects.get(id).is_some_and(|obj| {
+                    obj.is_phased_in_permanent() && obj.controller == you && !obj.color.is_empty()
+                })
+            }) {
+                return true;
+            }
+        }
         // CR 611.3a: The provider population can change for a pre-existing
         // recipient on entry, even when that recipient's affected set cannot.
         // Test each live controller because "you" is bound at the recipient.
@@ -13460,6 +13489,84 @@ mod tests {
 
     fn setup() -> GameState {
         GameState::new_two_player(42)
+    }
+
+    // Focused partial-revert guard for R5, independent of cast settlement's
+    // broader invalidation. The integration regression casts the actual cards.
+    #[test]
+    fn kannushi_pledge_population_probe_reads_entrant_color_and_controller() {
+        use crate::game::scenario::{GameScenario, P0, P1};
+
+        for with_hour in [false, true] {
+            let mut scenario = GameScenario::new();
+            let host = scenario
+                .add_creature(P1, "Colorless host fixture", 4, 6)
+                .id();
+            let pledge = scenario.add_enchantment_from_oracle(
+                P0, "Pledge of Loyalty",
+                "Enchant creature\nEnchanted creature has protection from each color among permanents you control. This effect doesn't remove this Aura.",
+            ).with_color(vec![ManaColor::White]).id();
+            if with_hour {
+                scenario
+                    .add_enchantment_from_oracle(P1, "Darkest Hour", "All creatures are black.")
+                    .with_color(vec![ManaColor::Black]);
+            }
+            let thopter = scenario
+                .add_creature_from_oracle(P0, "Ornithopter", 0, 2, "Flying")
+                .as_artifact()
+                .id();
+            let mut runner = scenario.build();
+            let state = runner.state_mut();
+            state.objects.get_mut(&pledge).unwrap().attached_to = Some(host.into());
+            state
+                .objects
+                .get_mut(&host)
+                .unwrap()
+                .attachments
+                .push(pledge);
+            let active = collect_shared_active_continuous_effects(state);
+            assert!(
+                active.iter().any(|effect| matches!(
+                    &effect.modification,
+                    ContinuousModification::AddKeyword {
+                        keyword: Keyword::Protection(ProtectionTarget::EachColor(
+                            crate::types::keywords::ProtectionColorSet::AmongPermanentsYouControl
+                        )),
+                    }
+                )),
+                "positive live-grant reach guard"
+            );
+            let entered = BTreeSet::from([thopter]);
+            assert!(state.objects[&thopter].color.is_empty());
+            assert!(
+                !active_effects_force_incremental_escalation(state, &entered, &active),
+                "the base-colorless entrant must reach the characteristic probe"
+            );
+            let reads = live_characteristic_reads(state, &active);
+            assert!(reads.global.intersects(CharacteristicKinds::COLOR));
+            assert!(reads.global.intersects(CharacteristicKinds::CONTROLLER));
+            assert_eq!(
+                population_probe_blinded_by_entrant_characteristic_change(state, &entered, &active,),
+                with_hour,
+                "only Darkest Hour can color this entrant before layer 6"
+            );
+
+            state
+                .objects
+                .get_mut(&thopter)
+                .unwrap()
+                .color
+                .push(ManaColor::Red);
+            assert!(
+                active_effects_force_incremental_escalation(state, &entered, &active),
+                "a colored controlled entrant independently changes the population"
+            );
+            state.objects.get_mut(&thopter).unwrap().controller = P1;
+            assert!(
+                !active_effects_force_incremental_escalation(state, &entered, &active),
+                "opponent entrants don't contribute to the granting source's you"
+            );
+        }
     }
 
     /// CR 113.1b + CR 109.5: a player-held ability's whose-turn leaves read the

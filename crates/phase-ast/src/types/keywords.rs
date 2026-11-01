@@ -742,6 +742,9 @@ pub enum ProtectionColorSet {
     /// color identity of the granting effect's controller's commander(s); undefined
     /// (no colors) when that player has no commander.
     OutsideCommanderColorIdentity,
+    /// CR 702.16i + CR 611.3a + CR 109.5: current colors of permanents
+    /// controlled by the granting static ability's current controller.
+    AmongPermanentsYouControl,
 }
 
 /// CR 702.21a: Ward cost — what the targeting player must pay.
@@ -3479,25 +3482,31 @@ pub fn parse_protection_target(s: &str) -> ProtectionTarget {
     }
 }
 
-/// CR 702.16i + CR 903.4: Parse "each color that's not in your commander's color
-/// identity" (and its "that is not in" / "not in" spellings) into a
-/// `ProtectionColorSet`. One trailing period is tolerated because the keyword
-/// quality splitter can preserve sentence punctuation.
+/// CR 702.16i: Parse a qualified live color set. One trailing period is
+/// tolerated because the keyword quality splitter can preserve punctuation.
 fn parse_protection_color_set(s: &str) -> Option<ProtectionColorSet> {
     type E<'a> = nom::error::Error<&'a str>;
 
     all_consuming(terminated(
-        value(
-            ProtectionColorSet::OutsideCommanderColorIdentity,
-            (
-                tag::<_, _, E<'_>>("each color "),
-                alt((
-                    tag("that's not in "),
-                    tag("that is not in "),
-                    tag("not in "),
-                )),
-                super::text_grammar::parse_your_commanders_color_identity,
-            ),
+        preceded(
+            tag::<_, _, E<'_>>("each color "),
+            alt((
+                value(
+                    ProtectionColorSet::OutsideCommanderColorIdentity,
+                    (
+                        alt((
+                            tag("that's not in "),
+                            tag("that is not in "),
+                            tag("not in "),
+                        )),
+                        super::text_grammar::parse_your_commanders_color_identity,
+                    ),
+                ),
+                value(
+                    ProtectionColorSet::AmongPermanentsYouControl,
+                    (tag("among "), tag("permanents "), tag("you control")),
+                ),
+            )),
         ),
         opt(tag(".")),
     ))
@@ -5217,6 +5226,51 @@ mod tests {
             .unwrap(),
             serde_json::json!({"EachColor": "OutsideCommanderColorIdentity"})
         );
+    }
+
+    #[test]
+    fn parse_protection_target_among_controlled_permanents_and_serde() {
+        let expected = ProtectionTarget::EachColor(ProtectionColorSet::AmongPermanentsYouControl);
+        for phrase in [
+            "each color among permanents you control",
+            "Each color among permanents you control.",
+        ] {
+            assert_eq!(parse_protection_target(phrase), expected);
+        }
+        assert_eq!(
+            Keyword::from_str("Protection:each color among permanents you control").unwrap(),
+            Keyword::Protection(expected.clone())
+        );
+        for (quality, wire) in [
+            (
+                expected,
+                serde_json::json!({"EachColor": "AmongPermanentsYouControl"}),
+            ),
+            (
+                ProtectionTarget::EachColor(ProtectionColorSet::OutsideCommanderColorIdentity),
+                serde_json::json!({"EachColor": "OutsideCommanderColorIdentity"}),
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(&quality).unwrap(), wire);
+            assert_eq!(
+                serde_json::from_value::<ProtectionTarget>(wire).unwrap(),
+                quality
+            );
+        }
+        assert!(serde_json::from_value::<ProtectionTarget>(
+            serde_json::json!({"EachColor": "UnknownSet"})
+        )
+        .is_err());
+        for phrase in [
+            "each color among permanents you control while attacking",
+            "each color among creatures you control",
+            "each color among permanents your opponents control",
+        ] {
+            assert_eq!(
+                parse_protection_target(phrase),
+                ProtectionTarget::CardType(phrase.into())
+            );
+        }
     }
 
     /// Hostile siblings of the color-set phrase stay untyped card-type strings.

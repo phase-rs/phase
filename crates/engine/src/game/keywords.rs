@@ -748,6 +748,19 @@ pub fn protection_color_set_members(
                 })
                 .unwrap_or_default()
         }
+        // CR 110.1 + CR 702.26b: only existing, phased-in permanents count.
+        // CR 109.5 + CR 611.3a: "you" and colors are live, not owner/base values.
+        // CR 613.1e + CR 613.1f: layer 5 colors feed the layer 6 grant.
+        ProtectionColorSet::AmongPermanentsYouControl => {
+            crate::game::effects::mana::distinct_colors(
+                state
+                    .battlefield
+                    .iter()
+                    .filter_map(|id| state.objects.get(id))
+                    .filter(|obj| obj.is_phased_in_permanent() && obj.controller == you)
+                    .flat_map(|obj| obj.color.iter()),
+            )
+        }
     }
 }
 
