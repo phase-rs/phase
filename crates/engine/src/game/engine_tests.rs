@@ -9307,7 +9307,8 @@ fn test_mana_ability_during_mana_payment_stays_in_mana_payment() {
         cost_reduction_election: None,
         activation_cost_snapshot: None,
         activation_cost: None,
-        deferred_random_discard_cost: None,
+        deferred_hand_discard_cost: None,
+        prepaid_finalization: None,
         activation_ability_index: None,
         pending_loyalty_activation_player: None,
         target_constraints: vec![],
@@ -9756,7 +9757,8 @@ fn taps_for_mana_multiplier_fires_once_on_color_choice_mana_payment_resume() {
         cost_reduction_election: None,
         activation_cost_snapshot: None,
         activation_cost: None,
-        deferred_random_discard_cost: None,
+        deferred_hand_discard_cost: None,
+        prepaid_finalization: None,
         activation_ability_index: None,
         pending_loyalty_activation_player: None,
         target_constraints: vec![],
@@ -13241,6 +13243,61 @@ fn modal_land_face_election_requires_a_modal_land_back_face() {
     assert!(!modal_land_face_election_available(&transform_land));
     assert!(!modal_land_face_election_available(&spell_spell));
     assert!(!modal_land_face_election_available(&single_land));
+}
+
+/// CR 732.1b + CR 704.5a + CR 800.4a: a take's record keeps its first and last repetition and every
+/// seat that lost and left in between, modelled on Phyrexian Altar recurring Gravecrawler beside
+/// Zulaport Cutthroat, where P1 and P2 leave in repetition 5 of six.
+#[test]
+fn elide_middle_repetitions_keeps_the_ends_and_each_departure_between() {
+    let marker = |repetition| GameEvent::ShortcutRepetition {
+        controller: P0,
+        repetition,
+    };
+    let step = |count| GameEvent::CardsDrawn {
+        player_id: P0,
+        count,
+    };
+    let lost = |seat| GameEvent::PlayerLost {
+        player_id: PlayerId(seat),
+    };
+    let left = |seat| GameEvent::PlayerEliminated {
+        player_id: PlayerId(seat),
+    };
+    for unchanged in [
+        vec![step(0), lost(1)],
+        vec![step(0), marker(1), step(1)],
+        vec![step(0), marker(1), step(1), lost(1), marker(2), step(2)],
+    ] {
+        let mut events = unchanged.clone();
+        elide_middle_repetitions(&mut events);
+        assert_eq!(events, unchanged);
+    }
+
+    let mut events = vec![step(0)];
+    for repetition in 1..=6 {
+        events.extend([marker(repetition), step(repetition)]);
+        if repetition == 5 {
+            events.extend([lost(1), lost(2), step(50), left(1), left(2)]);
+        }
+    }
+    events.push(step(7));
+    elide_middle_repetitions(&mut events);
+    assert_eq!(
+        events,
+        [
+            step(0),
+            marker(1),
+            step(1),
+            lost(1),
+            lost(2),
+            left(1),
+            left(2),
+            marker(6),
+            step(6),
+            step(7),
+        ]
+    );
 }
 
 /// The resolution land-play board with a spell (sorcery) // land card in exile

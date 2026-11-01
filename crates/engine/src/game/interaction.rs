@@ -936,6 +936,10 @@ pub(crate) fn action_preserves_interaction(action: &GameAction) -> bool {
             | GameAction::SetPriorityYield { .. }
             | GameAction::SetMayTriggerAutoChoice { .. }
             | GameAction::SetReplacementAutoChoice { .. }
+            | GameAction::UnAction {
+                action: crate::types::un_actions::UnAction::SetEnabled { .. }
+                    | crate::types::un_actions::UnAction::PerformTell { .. },
+            }
             | GameAction::SetTriggerOrderTemplate { .. }
             | GameAction::CancelAutoPass
             | GameAction::GrantDebugPermission { .. }
@@ -1314,9 +1318,9 @@ struct ShortcutReplyProjection {
 /// second copy of them.
 ///
 /// `segments` is positionally aligned with `projection.points`: the two come out of ONE `unzip`
-/// of one accumulator at a single site, so they are built in lockstep. That is
-/// correct-by-construction, not a type-level guarantee — this struct can be built with a
-/// mismatched pair, which is why `declared_sequence_preview` length-checks the entry it reads.
+/// of one accumulator at a single site, so they are built in lockstep. The type does not
+/// enforce it — this struct can be built with a mismatched pair, which is why
+/// `declared_sequence_preview` length-checks the entry it reads.
 /// The entry for a point that declares no partition is EMPTY; otherwise it is aligned with that
 /// point's own candidates and sums to the declared count, because a piecewise schedule's starts
 /// are that partition's own prefix sums. WHICH entry an element is minted from is decided by
@@ -2115,10 +2119,9 @@ fn shortcut_reply_projection(waiting_for: &WaitingFor) -> Option<ShortcutReplyPr
     };
     // CR 732.2b: the proposal states which places it admits; this publishes that range's two
     // ends verbatim, never a second derivation of them. The engine stays the authority inside
-    // that range: a place it cannot drive is refused at the responder's seam even though the
-    // published range admits it, so published and honored part company above the budget --
-    // `the_published_range_and_the_reducer_agree_below_the_budget_and_part_above_it` pins both
-    // sides. An empty range therefore arrives with its floor above its ceiling, which the
+    // that range: a place above the budget it drives is refused at the responder's seam though
+    // the published range admits it; `the_published_range_and_the_reducer_agree_below_the_budget_and_part_above_it`
+    // pins both sides. An empty range therefore arrives with its floor above its ceiling, which the
     // submission guard reads as admitting no place at all.
     let places = proposal.shortening_places();
     Some(ShortcutReplyProjection {
@@ -2893,7 +2896,9 @@ fn shortcut_preview_entries(
 /// number to multiply a period by, so it yields no sample and the caller publishes nothing.
 fn shortcut_preview_counts(count: &InteractionShortcutCountSpec) -> Vec<u32> {
     match count {
-        InteractionShortcutCountSpec::UntilLethal => Vec::new(),
+        InteractionShortcutCountSpec::UntilLethal | InteractionShortcutCountSpec::WithoutEnd => {
+            Vec::new()
+        }
         InteractionShortcutCountSpec::Fixed {
             min,
             max,
@@ -3384,10 +3389,10 @@ fn completed_shortcut_declaration(
         ) => iterations,
         (InteractionShortcutDecision::Decline, _)
         | (
-            InteractionShortcutDecision::AcceptSuggested,
-            InteractionShortcutCountSpec::UntilLethal,
-        )
-        | (InteractionShortcutDecision::Fixed { .. }, InteractionShortcutCountSpec::UntilLethal) => {
+            InteractionShortcutDecision::AcceptSuggested
+            | InteractionShortcutDecision::Fixed { .. },
+            InteractionShortcutCountSpec::UntilLethal | InteractionShortcutCountSpec::WithoutEnd,
+        ) => {
             return None;
         }
     };
@@ -3472,12 +3477,10 @@ fn declared_shortcut_preview(
         ) => iterations,
         (InteractionShortcutDecision::Decline, _)
         | (
-            InteractionShortcutDecision::AcceptSuggested,
-            InteractionShortcutCountSpec::UntilLethal,
-        )
-        | (InteractionShortcutDecision::Fixed { .. }, InteractionShortcutCountSpec::UntilLethal) => {
-            return None
-        }
+            InteractionShortcutDecision::AcceptSuggested
+            | InteractionShortcutDecision::Fixed { .. },
+            InteractionShortcutCountSpec::UntilLethal | InteractionShortcutCountSpec::WithoutEnd,
+        ) => return None,
     };
     let basis = shortcut_preview_basis(interaction_id, &projection)?;
     let group = basis.group?;
@@ -3663,12 +3666,13 @@ fn declared_shortcut_projection(waiting_for: &WaitingFor) -> Option<DeclaredSequ
             suggested: iterations,
         },
         IterationCount::UntilLethal => InteractionShortcutCountSpec::UntilLethal,
+        IterationCount::WithoutEnd => InteractionShortcutCountSpec::WithoutEnd,
     };
     let declared_count = match proposal.count {
         IterationCount::Fixed(iterations) => Some(iterations),
-        // CR 732.1b: an until-lethal proposal names no count to partition, so every arm below
-        // declares an ORDER and no segment.
-        IterationCount::UntilLethal => None,
+        // CR 732.1b: an until-lethal or endless proposal names no count to partition, so every
+        // arm below declares an ORDER and no segment.
+        IterationCount::UntilLethal | IterationCount::WithoutEnd => None,
     };
 
     let mut candidates: Vec<LoopShortcutCandidateValue> = Vec::new();
@@ -3839,8 +3843,7 @@ fn declared_sequence_preview(
     // and a per-period loss no negation can state. Only the THIRD is about this call site's
     // narrower domain — `basis.seats` here is the declaration's announced subjects, a subset of
     // the offer's candidate domain. On the other three the offer's own element refuses in
-    // exactly the same way, so both sides fold the period's seat keys and stating the
-    // magnitudes is correct.
+    // exactly the same way, so both sides fold the period's seat keys.
     //
     // So re-ask the SAME landed rule over the life map's OWN KEYS. That domain satisfies the
     // third conjunct by construction (the seat it tests is drawn from that very map), leaving the
@@ -3851,7 +3854,7 @@ fn declared_sequence_preview(
     //
     // The `basis.seats` wrapper covers the remaining case: a declaration whose announced subjects
     // are OBJECTS has no seat domain at all, so nothing narrowed and the offer's own fold over
-    // the period's seat keys is right for it too.
+    // the period's seat keys applies to it unchanged.
     //
     // The `per_cycle` conjunct re-reads a value `shortcut_preview_basis` already required, so it
     // is `Some` on every basis that resolved; were it not, the zip would drop the magnitudes,
@@ -3941,25 +3944,8 @@ fn loop_shortcut_projection(
             // offer. With the lower clamp replaced by `.min(MAX_SHORTCUT_CYCLES)` below,
             // a `0` authority yields `max == 0`, and `suggested.clamp(1, max)` is then
             // `Ord::clamp(1, 0)`, whose `assert!(min <= max)` is a PLAIN assert that
-            // survives release (measured: an `-O` build of `5u32.clamp(1, 0)` panics with
-            // `min > max. min = 1, max = 0`). Removing this guard turns a malformed
-            // restored dump into an engine panic.
-            //
-            // LATENT, NOT LIVE (measured at this head): no in-tree producer can reach this
-            // arm with `0`. `build_shortcut_schema` (`game/engine.rs`) has four call sites and
-            // derives every capacity itself: `interactive_loop_bridge` and the unbounded
-            // recorded offer measure no threshold, so theirs is
-            // `MAX_SHORTCUT_CYCLES`, while `bounded_offer_tail` hands it a measured
-            // threshold that cannot be `0` — that producer refuses outright unless the reduction
-            // measured one of at least 1 — and `counted_offer` the repetitions the counting
-            // replay performed, at least one. The per-viewer projection in
-            // `game/visibility.rs` only re-projects an existing schema's pair; and
-            // `ShortcutDecisionSchema::default()` seeds the capacity at `MAX_SHORTCUT_CYCLES`
-            // (`analysis/decision_template.rs`), which is also its `#[serde(default)]` for a save
-            // carrying no capacity key. The only way `0`
-            // arrives is a LOADED/PERSISTED authority that explicitly serializes it. This
-            // guard is therefore the fail-closed twin of item E: a latent hole shut before
-            // it opens.
+            // survives release. Removing this guard turns a malformed restored dump into an
+            // engine panic.
             if schema.deliverable_capacity == 0 {
                 return Err(InteractionReasonCode::InvalidAuthorityState);
             }
@@ -3972,6 +3958,9 @@ fn loop_shortcut_projection(
         }
         crate::analysis::decision_template::IterationCount::UntilLethal => {
             InteractionShortcutCountSpec::UntilLethal
+        }
+        crate::analysis::decision_template::IterationCount::WithoutEnd => {
+            InteractionShortcutCountSpec::WithoutEnd
         }
     };
     // CR 732.2a: carry the measured per-period signature forward so the picker's numbers can
@@ -6396,6 +6385,7 @@ fn project_action_payload(
         | GameAction::SetPriorityYield { .. }
         | GameAction::SetMayTriggerAutoChoice { .. }
         | GameAction::SetReplacementAutoChoice { .. }
+        | GameAction::UnAction { .. }
         | GameAction::SetTriggerOrderTemplate { .. } => {}
         GameAction::AssignCombatDamage {
             assignments,
@@ -6875,6 +6865,7 @@ fn action_code(action: &GameAction) -> InteractionActionCode {
         GameAction::SetMayTriggerAutoChoice { .. } => {
             InteractionActionCode::SetMayTriggerAutoChoice
         }
+        GameAction::UnAction { .. } => InteractionActionCode::UnAction,
         GameAction::SetTriggerOrderTemplate { .. } => {
             InteractionActionCode::SetTriggerOrderTemplate
         }
@@ -10827,6 +10818,10 @@ fn materialize_loop_shortcut_response(
         ) => IterationCount::UntilLethal,
         (
             InteractionShortcutDecision::AcceptSuggested,
+            InteractionShortcutCountSpec::WithoutEnd,
+        ) => IterationCount::WithoutEnd,
+        (
+            InteractionShortcutDecision::AcceptSuggested,
             InteractionShortcutCountSpec::Fixed { suggested, .. },
         ) => IterationCount::Fixed(suggested),
         (
@@ -12239,6 +12234,7 @@ mod tests {
                 },
                 declaration: None,
                 road: OfferRoad::Ring,
+                counted_take: Default::default(),
                 period: Default::default(),
             };
             bind_interaction_authority(&mut state, InteractionSessionId("picker-ceiling".into()))

@@ -5,8 +5,9 @@
 //! this file's hand-installed trigger remains a valid focused runtime unit).
 //!
 //! These drive the REAL cleanup / priority / delayed-trigger-dispatch pipeline
-//! (`GameRunner::advance_to_phase` → `auto_advance` → `execute_cleanup`, and the
-//! shared `check_delayed_triggers`). The delayed trigger is hand-installed
+//! (`GameRunner::advance_to_phase` → `auto_advance` → `execute_cleanup`, whose
+//! reversion collects the delayed trigger into `deferred_triggers` and settles
+//! it at the CR 514.3a tail drain). The delayed trigger is hand-installed
 //! because no supported card currently *creates* one via a cast (that is the
 //! deferred parser work); every ASSERTION below flips if a B1 change is reverted:
 //!
