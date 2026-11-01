@@ -139,9 +139,9 @@ use super::oracle_static::{
     is_speed_unlock_sentence, lower_static_ir, parse_alternative_keyword_cost,
     parse_cast_spells_alternative_cost_multi, parse_collect_evidence_alt_cost,
     parse_flashback_trailing_self_spell_cost_reduction, parse_spells_alternative_cost,
-    parse_static_line, parse_static_line_multi, try_parse_graveyard_keyword_grant_clause,
-    try_parse_graveyard_keyword_grant_static, try_parse_top_of_library_cast_permission,
-    GrantedCastKeywordKind,
+    parse_static_line, parse_static_line_multi, try_parse_exclusive_own_cast_permission,
+    try_parse_graveyard_keyword_grant_clause, try_parse_graveyard_keyword_grant_static,
+    try_parse_top_of_library_cast_permission, GrantedCastKeywordKind,
 };
 use super::oracle_trigger::{
     lower_trigger_ir, lower_trigger_node_ir, parse_trigger_lines_at_index,
@@ -7230,6 +7230,21 @@ fn parse_normalized_oracle_ir(
                     continue;
                 }
             }
+        }
+
+        // CR 601.3 + CR 113.6f: "You may cast this card from <zones>, but not from
+        // anywhere else." (Haakon, Stromgald Scourge) — the card's own cast permission
+        // plus a restriction confining every cast of it to those zones. Both halves
+        // come from one sentence, so both are emitted for this line. Must precede
+        // Priority 7: the permission parser refuses the residual rider, which leaves
+        // the line an honest `static_structure` gap whenever this split declines.
+        if let Some((permission, restriction)) =
+            try_parse_exclusive_own_cast_permission(&line, &lower)
+        {
+            emitter.static_ir_at(item_line, StaticIr::from_definition(&line, permission));
+            emitter.casting_restriction_at(item_line, restriction);
+            i += 1;
+            continue;
         }
 
         // Priority 7: Static/continuous patterns

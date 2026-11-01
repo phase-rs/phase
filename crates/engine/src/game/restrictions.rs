@@ -1265,6 +1265,58 @@ fn casting_restriction_applies(
         // CR 601.2b / CR 601.2h: "Spend only ... on X" restricts how the cost is paid,
         // never when. Always satisfied here; enforced in the mana-payment path.
         CastingRestriction::SpendOnlyOnX { .. } => true,
+        // CR 601.3 + CR 113.6f: the cast's ORIGIN zone must be one the object
+        // may be cast from. Consulted at announcement, where the object still
+        // occupies its origin — unless an in-flight pending cast (CR 601.2a has
+        // already moved it to the stack) records it. The persisted post-finalize
+        // origin is deliberately NOT consulted: at a NEW announcement it can only
+        // describe a PREVIOUS cast of this object, and a stale graveyard stamp
+        // must not admit a later hand cast.
+        CastingRestriction::OnlyFromZones { .. } => {
+            super::casting::pending_cast_origin_zone_for(state, source_id)
+                .or_else(|| state.objects.get(&source_id).map(|obj| obj.zone))
+                .is_some_and(|origin| restriction_permits_cast_origin(restriction, origin))
+        }
+    }
+}
+
+/// CR 601.3 + CR 113.6f: whether an object's own casting restrictions permit
+/// casting it from `origin`. The single answer to the cast-origin question,
+/// shared by the announcement check ([`check_casting_restrictions`]) and the
+/// CR 707.12 cast-a-copy route, which creates the copy in the original's zone
+/// and casts it from there without announcing through the cast pipeline.
+pub(crate) fn restrictions_permit_cast_origin(
+    restrictions: &[CastingRestriction],
+    origin: Zone,
+) -> bool {
+    restrictions
+        .iter()
+        .all(|restriction| restriction_permits_cast_origin(restriction, origin))
+}
+
+fn restriction_permits_cast_origin(restriction: &CastingRestriction, origin: Zone) -> bool {
+    match restriction {
+        CastingRestriction::OnlyFromZones { zones } => zones.contains(&origin),
+        // Timing, condition and payment restrictions say nothing about origin.
+        CastingRestriction::AsSorcery
+        | CastingRestriction::DuringCombat
+        | CastingRestriction::DuringOpponentsTurn
+        | CastingRestriction::DuringYourTurn
+        | CastingRestriction::DuringYourUpkeep
+        | CastingRestriction::DuringOpponentsUpkeep
+        | CastingRestriction::DuringAnyUpkeep
+        | CastingRestriction::DuringYourEndStep
+        | CastingRestriction::DuringOpponentsEndStep
+        | CastingRestriction::DeclareAttackersStep
+        | CastingRestriction::DeclareBlockersStep
+        | CastingRestriction::BeforeAttackersDeclared
+        | CastingRestriction::BeforeBlockersDeclared
+        | CastingRestriction::AfterBlockersDeclared
+        | CastingRestriction::BeforeCombatDamage
+        | CastingRestriction::AfterCombat
+        | CastingRestriction::RequiresCondition { .. }
+        | CastingRestriction::CantSpendMana
+        | CastingRestriction::SpendOnlyOnX { .. } => true,
     }
 }
 

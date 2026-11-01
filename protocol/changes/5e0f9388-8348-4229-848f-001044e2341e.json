@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "CastingRestriction gains OnlyFromZones (an object's own restriction on the zones it may be cast from, CR 113.6f; Haakon, Stromgald Scourge). Older peers cannot deserialize the new variant in card data or game-object state."
+}

@@ -64,6 +64,7 @@ pub fn resolve(
             .unwrap_or_default()
             .into_iter()
             .filter(|id| matches_target_filter(state, *id, &effective_filter, &ctx))
+            .filter(|id| copy_castable_from_original_zone(state, *id))
             .collect();
 
         if !source_ids.is_empty() {
@@ -113,6 +114,9 @@ pub fn resolve(
     }
 
     for (index, source_id) in source_ids.iter().copied().enumerate() {
+        if !copy_castable_from_original_zone(state, source_id) {
+            continue;
+        }
         let copy_id =
             cast_one_copy(state, source_id, ability, events).map_err(EffectError::InvalidParam)?;
 
@@ -163,6 +167,20 @@ pub fn resolve(
         subject: None,
     });
     Ok(())
+}
+
+/// CR 707.12 + CR 601.3 + CR 113.6f: the copy is created in the original's
+/// zone and cast from there, and it copies the original's own restriction on
+/// where it may be cast from (Haakon, Stromgald Scourge). A copy that can't be
+/// cast from that zone is neither offered nor created. A missing source is left
+/// to `cast_one_copy`, which reports it.
+fn copy_castable_from_original_zone(state: &GameState, source_id: ObjectId) -> bool {
+    state.objects.get(&source_id).is_none_or(|source| {
+        crate::game::restrictions::restrictions_permit_cast_origin(
+            &source.casting_restrictions,
+            source.zone,
+        )
+    })
 }
 
 fn references_tracked_set(filter: &TargetFilter) -> bool {

@@ -107,6 +107,7 @@ use dispatch::{parse_static_line_inner, InvertedAsLongAs};
 use prelude::StaticIr;
 pub(crate) use restriction::is_control_players_during_own_library_search;
 pub(crate) use restriction::is_graveyard_cast_permission_lead;
+pub(crate) use restriction::try_parse_exclusive_own_cast_permission;
 
 mod support {
     pub(super) use super::anthem::{
