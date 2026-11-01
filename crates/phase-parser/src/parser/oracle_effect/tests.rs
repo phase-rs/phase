@@ -48310,7 +48310,7 @@ fn perpetual_they_subject_binds_last_created_after_conjure() {
 }
 
 /// SHAPE (V1/A2 mechanism pin): a choose-then-grant SUBJECT shape binds
-/// `ParentTarget` (the tracked chosen set) via `pending_tracked_set_origin`.
+/// `ParentTarget` (the tracked chosen set) via `pending_tracked_set`.
 /// The singular head + plural anaphor is deliberately non-card-text: it pins
 /// the A2 gate mechanism (Racketeer Boss's own "choose up to two ... and/or
 /// ..." head does not parse to `ChooseFromZone`, so its production rider
