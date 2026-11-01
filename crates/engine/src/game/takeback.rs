@@ -585,6 +585,15 @@ impl TakebackLedger {
         self.pending.is_some()
     }
 
+    /// The seats that have approved the open vote, requester included, in seat order.
+    pub fn approvals(&self) -> Option<Vec<PlayerId>> {
+        self.pending.as_ref().map(|pending| {
+            let mut approvals: Vec<_> = pending.approvals.iter().copied().collect();
+            approvals.sort();
+            approvals
+        })
+    }
+
     /// The open vote, with the voter set `respond` enforces.
     pub fn pending_vote(&self, state: &GameState, ai_seats: &[PlayerId]) -> Option<TakebackVote> {
         self.pending.as_ref().map(|pending| TakebackVote {

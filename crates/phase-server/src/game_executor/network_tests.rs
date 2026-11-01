@@ -794,8 +794,38 @@ fn codec_player_resync_preserves_elimination_and_rewinds() {
                 .game_executor
                 .with_session(session, |session| {
                     // Match the existing SingleUser takeback fixture: stamp the
-                    // deployment policy, then capture a real action's boundary.
+                    // deployment policy before any action.
                     session.set_hosting(server_core::session::HostingMode::SingleUser);
+                })
+                .await;
+            drop(lease);
+
+            let viewer = PlayerId(0);
+            let eliminated = PlayerId(2);
+            let mut peer = codec_seat(&table, viewer, false).await;
+            let mut conceding = codec_seat(&table, eliminated, false).await;
+            peer.fence(true).await;
+            conceding.fence(true).await;
+            conceding.send(&ClientMessage::Concede).await;
+            let publication = peer.state().await;
+            assert_eq!(
+                publication.value["data"]["eliminated_players"],
+                serde_json::json!([eliminated]),
+                "the real concession must publish before recovery"
+            );
+            peer.fence(false).await;
+            conceding.fence(true).await;
+
+            // A real concession retires takeback history, so capture the
+            // turn boundary after it.
+            let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
+                .await
+                .unwrap();
+            let (lease, ()) = table
+                .app
+                .context
+                .game_executor
+                .with_session(session, |session| {
                     let starting_turn = session.state.turn_number;
                     for _ in 0..400 {
                         if session.state.turn_number > starting_turn {
@@ -822,22 +852,6 @@ fn codec_player_resync_preserves_elimination_and_rewinds() {
                 })
                 .await;
             drop(lease);
-
-            let viewer = PlayerId(0);
-            let eliminated = PlayerId(2);
-            let mut peer = codec_seat(&table, viewer, false).await;
-            let mut conceding = codec_seat(&table, eliminated, false).await;
-            peer.fence(true).await;
-            conceding.fence(true).await;
-            conceding.send(&ClientMessage::Concede).await;
-            let publication = peer.state().await;
-            assert_eq!(
-                publication.value["data"]["eliminated_players"],
-                serde_json::json!([eliminated]),
-                "the real concession must publish before recovery"
-            );
-            peer.fence(false).await;
-            conceding.fence(true).await;
 
             let (reference, state_before, revision) = resync_reference(&table, Some(viewer)).await;
             assert!(
@@ -3912,6 +3926,9 @@ fn codec_lifecycle_approved_takeback_is_automatic() {
                 .unwrap();
             assert_eq!(vote.requester, requester);
             assert_eq!(vote.voters, approvals);
+            let approved = session.takeback.approvals().unwrap();
+            assert_eq!(approved.len(), 1);
+            assert!(approved.contains(&requester));
             drop(session);
             for (index, voter) in approvals.iter().enumerate() {
                 peers[usize::from(voter.0)]
@@ -3922,7 +3939,7 @@ fn codec_lifecycle_approved_takeback_is_automatic() {
                     let session = crate::lock_session(&table.app.sessions, &table.key.game_code)
                         .await
                         .unwrap();
-                    assert!(session.takeback.is_pending());
+                    assert_eq!(session.takeback.approvals().unwrap().len(), index + 2);
                 }
             }
             let mut approved_frames = Vec::new();
