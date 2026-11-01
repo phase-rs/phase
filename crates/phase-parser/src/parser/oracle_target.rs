@@ -3130,7 +3130,7 @@ fn match_and_or_connector(lower: &str) -> Option<usize> {
     .map(|(tail, _)| lower.len() - tail.len())
 }
 
-/// CR 508.1a / CR 509.1h: consume a run of status adjectives at `pos`. An "X or
+/// CR 508.1k / CR 509.1g / CR 509.1h: consume a run of status adjectives at `pos`. An "X or
 /// Y" pair ("attacking or blocking creature") is one property disjunction: an
 /// attacking creature OR a blocking creature, not both.
 fn consume_status_prefix_run(
@@ -3169,10 +3169,24 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
 /// the target's fellow objects, so its "other" excludes that target, not the
 /// ability's source (Craterous Stomp, Mark for Death, Flames of the Raze-Boar).
 pub(crate) fn exclude_parent_target_from_its_controllers_others(filter: &mut TargetFilter) {
+    rewrite_other_as_parent_target_exclusion(filter, &|typed| {
+        typed.controller == Some(ControllerRef::ParentTargetController)
+    });
+}
+
+/// CR 608.2c: rewrite every typed leg's "other" (`Another`) to "other than the
+/// parent target" — for a population whose "other" names the chain's target
+/// rather than the ability's source.
+pub(crate) fn exclude_parent_target_from_others(filter: &mut TargetFilter) {
+    rewrite_other_as_parent_target_exclusion(filter, &|_| true);
+}
+
+fn rewrite_other_as_parent_target_exclusion(
+    filter: &mut TargetFilter,
+    applies: &dyn Fn(&TypedFilter) -> bool,
+) {
     match filter {
-        TargetFilter::Typed(typed)
-            if typed.controller == Some(ControllerRef::ParentTargetController) =>
-        {
+        TargetFilter::Typed(typed) if applies(typed) => {
             for prop in &mut typed.properties {
                 if matches!(prop, FilterProp::Another) {
                     *prop = FilterProp::DistinctFrom {
@@ -3183,7 +3197,7 @@ pub(crate) fn exclude_parent_target_from_its_controllers_others(filter: &mut Tar
         }
         TargetFilter::Or { filters } | TargetFilter::And { filters } => filters
             .iter_mut()
-            .for_each(exclude_parent_target_from_its_controllers_others),
+            .for_each(|leg| rewrite_other_as_parent_target_exclusion(leg, applies)),
         _ => {}
     }
 }
@@ -3299,7 +3313,7 @@ fn parse_type_phrase_folding_unbound<'a>(
         }
     }
 
-    // CR 508.1a / CR 509.1h: Consume combat status prefixes (unblocked,
+    // CR 508.1k / CR 509.1g / CR 509.1h: Consume combat status prefixes (unblocked,
     // attacking, blocking). A status run after a `non-` or other adjective
     // prefix is consumed again once those are (see below).
     consume_status_prefix_run(
@@ -3562,7 +3576,7 @@ fn parse_type_phrase_folding_unbound<'a>(
         }
     }
 
-    // CR 508.1a / CR 509.1h: A combat-status run can also follow a `non-`
+    // CR 508.1k / CR 509.1g / CR 509.1h: A combat-status run can also follow a `non-`
     // negation or adjective prefix ("nonartifact attacking creature" — Broken
     // Visage; "nontoken attacking creature" — Sophina, Spearsage Deserter; "a
     // goaded attacking or blocking creature" — Baeloth Barrityl). The run above

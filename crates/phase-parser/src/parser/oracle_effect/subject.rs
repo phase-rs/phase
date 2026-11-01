@@ -3415,7 +3415,14 @@ fn parse_subject_application_for(
         {
             return None;
         }
-        let filter = merge_partial_type_phrase_filter(filter, rest);
+        let mut filter = merge_partial_type_phrase_filter(filter, rest);
+        // CR 608.2c: an instant or sorcery is never a member of a population of
+        // permanents, so its "each other <X>" excludes the object the chain
+        // already targeted, not the spell ("Target creature you control gets
+        // +2/+1 …. Each other creature you control gets +1/+1 …").
+        if ctx.source_is_instant_or_sorcery() && ctx.chain_declared_object_target.is_some() {
+            crate::parser::oracle_target::exclude_parent_target_from_others(&mut filter);
+        }
         return subject_filter_application(filter, false);
     }
     if alt((

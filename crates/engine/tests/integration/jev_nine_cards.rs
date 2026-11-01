@@ -546,3 +546,72 @@ fn locket_of_yesterdays_counts_graveyard_cards_named_like_the_spell_being_cast()
         "no card shares Other Spell's name, so it costs the full {{3}}"
     );
 }
+
+const PHALANX_TACTICS: &str = "Target creature you control gets +2/+1 until end of turn. Each other creature you control gets +1/+1 until end of turn.";
+const MARK_FOR_DEATH: &str = "Target creature an opponent controls blocks this turn if able. Untap that creature. Other creatures that player controls can't block this turn.";
+
+/// CR 608.2c: on an instant, "each other creature you control" excludes the
+/// targeted creature, which gets only its own +2/+1.
+#[test]
+fn phalanx_tactics_other_creatures_exclude_the_target() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let tactics = scenario
+        .add_spell_to_hand_from_oracle(P0, "Phalanx Tactics", true, PHALANX_TACTICS)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    let target = scenario.add_creature(P0, "Target", 2, 2).id();
+    let other = scenario.add_creature(P0, "Other", 2, 2).id();
+    let mut runner = scenario.build();
+
+    let outcome = runner.cast(tactics).target_objects(&[target]).resolve();
+    outcome.assert_power_toughness(target, 4, 3);
+    outcome.assert_power_toughness(other, 3, 3);
+}
+
+/// CR 509.1b + CR 509.1c + CR 608.2c: the marked creature must block; the other
+/// creatures its controller controls can't block.
+#[test]
+fn mark_for_death_bars_only_the_other_creatures_from_blocking() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mark = scenario
+        .add_spell_to_hand_from_oracle(P0, "Mark for Death", false, MARK_FOR_DEATH)
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    let attacker = scenario.add_creature(P0, "Attacker", 3, 3).id();
+    let marked = scenario.add_creature(P1, "Marked", 2, 2).id();
+    let other = scenario.add_creature(P1, "Other", 2, 2).id();
+    let mut runner = scenario.build();
+
+    runner.cast(mark).target_objects(&[marked]).resolve();
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(attacker, AttackTarget::Player(P1))])
+        .expect("attack declares");
+    for _ in 0..10 {
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareBlockers { .. }
+        ) {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("priority pass is accepted");
+    }
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::DeclareBlockers { .. }
+        ),
+        "combat reaches declare blockers"
+    );
+    assert!(
+        runner.declare_blockers(&[(other, attacker)]).is_err(),
+        "another creature that player controls can't block"
+    );
+    runner
+        .declare_blockers(&[(marked, attacker)])
+        .expect("the marked creature can and must block");
+}

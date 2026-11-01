@@ -42200,7 +42200,7 @@ fn repaired_grammar_neighbours_parse_to_their_meaning_or_an_explicit_gap() {
         mark.contains(r#""controller":"ParentTargetController","properties":[{"type":"DistinctFrom","reference":{"type":"ParentTarget"}}]"#),
         "{mark}"
     );
-    // CR 508.1a / CR 509.1h: "goaded attacking or blocking" keeps both legs goaded.
+    // CR 508.1k / CR 509.1g / CR 509.1h: "goaded attacking or blocking" keeps both legs goaded.
     let baeloth = parsed_json(
         "Baeloth Barrityl, Entertainer",
         "Whenever a goaded attacking or blocking creature dies, you create a Treasure token.",

@@ -3010,8 +3010,7 @@ fn detect_linked_choice_persisted_parity(
                     .and_then(|def| def.valid_card.as_ref())
                     .is_some_and(reads_named_parity)
                 || item_trigger(item)
-                    .and_then(|def| def.valid_card.clone())
-                    .is_some_and(|filter| reads_named_parity(&filter))
+                    .is_some_and(|def| def.valid_card.as_ref().is_some_and(reads_named_parity))
         })
         .map(|item| item.id)
         .collect();

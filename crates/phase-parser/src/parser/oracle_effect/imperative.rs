@@ -1594,7 +1594,15 @@ pub(super) fn parse_all_sacrifice<'a>(
 /// composites are walked so a disjunctive class ("creature or planeswalker")
 /// excludes the source on every leg its type could match. Other shapes are left
 /// untouched — the callers' filters are typal by construction.
+///
+/// CR 608.2c: over the parent target's controller's objects, "other" excludes
+/// that target instead — the same reading the type-phrase grammar applies.
 pub(super) fn add_another_to_filter_recursive(filter: &mut TargetFilter) {
+    add_another_to_legs(filter);
+    crate::parser::oracle_target::exclude_parent_target_from_its_controllers_others(filter);
+}
+
+fn add_another_to_legs(filter: &mut TargetFilter) {
     match filter {
         TargetFilter::Typed(typed) if !typed.properties.contains(&FilterProp::Another) => {
             typed.properties.push(FilterProp::Another);
@@ -1602,14 +1610,11 @@ pub(super) fn add_another_to_filter_recursive(filter: &mut TargetFilter) {
         TargetFilter::Typed(_) => {}
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
             for leg in filters {
-                add_another_to_filter_recursive(leg);
+                add_another_to_legs(leg);
             }
         }
         _ => {}
     }
-    // CR 608.2c: "other" over the parent target's controller's objects excludes
-    // that target — the same reading the type-phrase grammar applies.
-    crate::parser::oracle_target::exclude_parent_target_from_its_controllers_others(filter);
 }
 
 /// NOTE: Shares verb prefixes with `try_parse_verb_and_target` in `mod.rs`.
