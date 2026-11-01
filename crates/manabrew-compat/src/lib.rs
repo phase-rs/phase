@@ -8768,13 +8768,13 @@ mod tests {
     #[test]
     fn unsupported_capability_registry_is_well_formed() {
         let capabilities = unsupported_protocol_capabilities();
-        assert_eq!(capabilities.len(), 94);
+        assert_eq!(capabilities.len(), 95);
 
         let codes: HashSet<_> = capabilities
             .iter()
             .map(|capability| capability.code)
             .collect();
-        assert_eq!(codes.len(), 94, "capability codes must be unique");
+        assert_eq!(codes.len(), 95, "capability codes must be unique");
 
         for capability in capabilities {
             assert!(

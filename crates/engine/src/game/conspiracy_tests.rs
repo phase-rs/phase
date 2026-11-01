@@ -407,8 +407,14 @@ fn face_down_conspiracy_has_no_characteristics_until_turned_up() {
     let mut state = GameState::new_two_player(7);
     let cda = StaticDefinition::new(StaticMode::from_str("Continuous").unwrap());
     let mut face = synthesized_conspiracy_face(vec![cda], vec![]);
+    face.name = "Brago's Favor".to_string();
     face.mana_cost = crate::types::mana::ManaCost::generic(1);
     let id = create_conspiracy_object(&mut state, "Brago's Favor", &face, P0);
+    // The production face application, which the reveal snapshot reads back.
+    crate::game::printed_cards::apply_card_face_to_object(
+        state.objects.get_mut(&id).unwrap(),
+        &face,
+    );
     start_with_conspiracy(&mut state, id, true);
 
     let named = TargetFilter::Named {
