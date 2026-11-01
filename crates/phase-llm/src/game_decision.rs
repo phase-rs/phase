@@ -112,7 +112,7 @@ pub fn decision_fingerprint(state: &GameState, contract: &AiDecisionContract) ->
 /// - Battlefield permanents: id, card, controller, tapped, attacking, blocking, damage, P/T, counters, attachments
 /// - Stack entries: id, source, controller
 /// - Combat state: attacking/blocking assignments
-/// - Graveyard and exile counts
+/// - Graveyard and exile objects (counts and visible card identities)
 /// - The legal candidate options available to the viewer
 ///
 /// Deliberately excludes transient priority-pass artifacts:
@@ -147,11 +147,12 @@ pub fn information_fingerprint(state: &GameState, contract: &AiDecisionContract)
 
     for obj_id in &visible.battlefield {
         if let Some(obj) = visible.objects.get(obj_id) {
-            let counters_summary: Vec<String> = obj
+            let mut counters_summary: Vec<String> = obj
                 .counters
                 .iter()
                 .map(|(k, v)| format!("{k:?}={v}"))
                 .collect();
+            counters_summary.sort();
             parts.push(format!(
                 "obj:{}:card={}:ctrl={}:tap={}:dmg={}:pt={:?}/{:?}:counters={:?}:att_to={:?}",
                 obj.id.0,
@@ -182,20 +183,29 @@ pub fn information_fingerprint(state: &GameState, contract: &AiDecisionContract)
                 attacker.object_id.0, attacker.defending_player.0, attacker.attack_target
             ));
         }
-        for (attacker, blockers) in &combat.blocker_assignments {
+        let mut assignments: Vec<_> = combat.blocker_assignments.iter().collect();
+        assignments.sort_by_key(|(attacker, _)| attacker.0);
+        for (attacker, blockers) in assignments {
             let blocker_ids: Vec<u64> = blockers.iter().map(|b| b.0).collect();
             parts.push(format!("blockers_of:{}:{blocker_ids:?}", attacker.0));
         }
     }
 
     for p in &visible.players {
-        parts.push(format!(
-            "gy:{}:{}",
-            p.id.0,
-            visible.graveyard_of(p.id).len()
-        ));
+        let graveyard = visible.graveyard_of(p.id);
+        parts.push(format!("gy:{}:{}", p.id.0, graveyard.len()));
+        for object_id in graveyard.iter() {
+            if let Some(obj) = visible.objects.get(object_id) {
+                parts.push(format!("gy_card:{}:{}:{}", p.id.0, obj.id.0, obj.card_id.0));
+            }
+        }
     }
     parts.push(format!("exile:{}", visible.exile.len()));
+    for object_id in &visible.exile {
+        if let Some(obj) = visible.objects.get(object_id) {
+            parts.push(format!("exile_card:{}:{}", obj.id.0, obj.card_id.0));
+        }
+    }
 
     let options = option_lines(state, contract);
     for opt in &options {
@@ -1546,6 +1556,110 @@ mod tests {
                 },
             });
         assert_ne!(base_fp, information_fingerprint(&stack_changed, &c));
+
+        // Graveyard change:
+        let mut gy_changed = state.clone();
+        gy_changed.players[0].graveyard.push_back(ObjectId(200));
+        gy_changed.objects.insert(
+            ObjectId(200),
+            engine::game::game_object::GameObject::new(
+                ObjectId(200),
+                CardId(201),
+                PlayerId(0),
+                "Creature Card".into(),
+                engine::types::zones::Zone::Graveyard,
+            ),
+        );
+        assert_ne!(base_fp, information_fingerprint(&gy_changed, &c));
+
+        // Same graveyard count but different card ID:
+        let mut gy_swap = gy_changed.clone();
+        gy_swap.objects.get_mut(&ObjectId(200)).unwrap().card_id = CardId(202);
+        assert_ne!(
+            information_fingerprint(&gy_changed, &c),
+            information_fingerprint(&gy_swap, &c)
+        );
+
+        // Exile change:
+        let mut exile_changed = state.clone();
+        exile_changed.exile.push_back(ObjectId(300));
+        exile_changed.objects.insert(
+            ObjectId(300),
+            engine::game::game_object::GameObject::new(
+                ObjectId(300),
+                CardId(301),
+                PlayerId(0),
+                "Exiled Card".into(),
+                engine::types::zones::Zone::Exile,
+            ),
+        );
+        assert_ne!(base_fp, information_fingerprint(&exile_changed, &c));
+
+        // Same exile count but different card ID:
+        let mut exile_swap = exile_changed.clone();
+        exile_swap.objects.get_mut(&ObjectId(300)).unwrap().card_id = CardId(302);
+        assert_ne!(
+            information_fingerprint(&exile_changed, &c),
+            information_fingerprint(&exile_swap, &c)
+        );
+    }
+
+    #[test]
+    fn information_fingerprint_is_order_independent_for_hash_maps() {
+        let mut state1 = GameState::new(FormatConfig::modern(), 2, 1);
+        let mut state2 = GameState::new(FormatConfig::modern(), 2, 1);
+        let c = two_option_contract();
+
+        // Object on battlefield with counters inserted in different orders:
+        let obj_id = ObjectId(50);
+        let mut obj1 = engine::game::game_object::GameObject::new(
+            obj_id,
+            CardId(10),
+            PlayerId(0),
+            "Test Permanent".into(),
+            engine::types::zones::Zone::Battlefield,
+        );
+        let mut obj2 = obj1.clone();
+
+        use engine::types::counter::CounterType;
+        obj1.counters.insert(CounterType::Plus1Plus1, 2);
+        obj1.counters.insert(CounterType::Loyalty, 1);
+        obj1.counters.insert(CounterType::Stun, 1);
+
+        obj2.counters.insert(CounterType::Stun, 1);
+        obj2.counters.insert(CounterType::Plus1Plus1, 2);
+        obj2.counters.insert(CounterType::Loyalty, 1);
+
+        state1.battlefield.push_back(obj_id);
+        state1.objects.insert(obj_id, obj1);
+        state2.battlefield.push_back(obj_id);
+        state2.objects.insert(obj_id, obj2);
+
+        // Combat state with blocker assignments inserted in different orders:
+        let mut combat1 = engine::game::combat::CombatState::default();
+        let mut combat2 = engine::game::combat::CombatState::default();
+
+        combat1
+            .blocker_assignments
+            .insert(ObjectId(10), vec![ObjectId(20), ObjectId(21)]);
+        combat1
+            .blocker_assignments
+            .insert(ObjectId(5), vec![ObjectId(30)]);
+
+        combat2
+            .blocker_assignments
+            .insert(ObjectId(5), vec![ObjectId(30)]);
+        combat2
+            .blocker_assignments
+            .insert(ObjectId(10), vec![ObjectId(20), ObjectId(21)]);
+
+        state1.combat = Some(combat1);
+        state2.combat = Some(combat2);
+
+        assert_eq!(
+            information_fingerprint(&state1, &c),
+            information_fingerprint(&state2, &c)
+        );
     }
 
     #[test]
