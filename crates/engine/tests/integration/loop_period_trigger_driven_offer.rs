@@ -1184,10 +1184,10 @@ fn public_recorded_period_replay_saturates_a_later_life_counter() {
     ));
 }
 
-/// CR 732.2a/c: the recorded-period Replay with the energy attendant. The control commits all
-/// three energy gains; with the energy total one short of its limit, the first replayed cycle
-/// fits and the next one rejects the final Accept action and restores that action's entire
-/// entry state.
+/// CR 732.2a/c: the recorded-period Replay with the energy attendant. The control commits every
+/// recorded attendant energy gain once in each cycle; with the energy total one cycle's gains
+/// short of its limit, the first replayed cycle fits exactly and the next one rejects the final
+/// Accept action and restores that action's entire entry state.
 #[test]
 fn public_recorded_period_replay_rejects_later_energy_overflow_atomically() {
     use engine::game::perf_counters::take_cost_snapshot;
@@ -1209,6 +1209,12 @@ fn public_recorded_period_replay_rejects_later_energy_overflow_atomically() {
         "reach guard: the offer is a nonempty recorded period owned by P0"
     );
     let recorded = recorded_declaration(&control_offer, |_| false);
+    // Energy Attendant: each "may" the period recorded as taken gets {E} once per repetition.
+    let takes = attendant_answers(&control_offer)
+        .iter()
+        .filter(|(_, take)| *take == MayChoiceOption::Take)
+        .count() as u32;
+    assert!(takes > 0, "reach guard: the period takes an attendant gain");
     let control_energy = control.state().players[0].energy;
     let before_control = take_cost_snapshot();
     control.take_declared(IterationCount::Fixed(COUNT), Some(recorded));
@@ -1219,13 +1225,13 @@ fn public_recorded_period_replay_rejects_later_energy_overflow_atomically() {
     );
     assert_eq!(
         control.state().players[0].energy - control_energy,
-        COUNT,
-        "the representable Replay committed the attendant's energy once in each cycle"
+        takes * COUNT,
+        "the representable Replay committed each recorded attendant energy gain once in each cycle"
     );
 
     let (mut hostile, _) = offered(Board::BEnergyAttendant)
         .expect("the real Board B fixture must produce its recorded-period offer");
-    hostile.runner.state_mut().players[0].energy = u32::MAX - 1;
+    hostile.runner.state_mut().players[0].energy = u32::MAX - takes;
     let hostile_recorded = recorded_declaration(hostile.state(), |_| false);
     let before_hostile = take_cost_snapshot();
     hostile
@@ -1401,13 +1407,18 @@ fn a_recorded_offers_may_is_fixed_at_the_interaction_ingress() {
     assert_recorded_mays_are_fixed_at_the_interaction_ingress(drive);
 }
 
-/// Whether `slot` names a choice of Soul's Attendant.
+/// Whether `slot` names a choice of the attendant beside Board B: Soul's Attendant or the
+/// synthetic Energy Attendant ([`ENERGY_ATTENDANT`]).
 fn asked_of_attendant(state: &GameState, slot: &DecisionSlot) -> bool {
     match &slot.source {
-        YieldTarget::ThisObject { source_id, .. } => state
-            .objects
-            .get(source_id)
-            .is_some_and(|object| object.name == "Soul's Attendant"),
+        YieldTarget::ThisObject { source_id, .. } => {
+            state.objects.get(source_id).is_some_and(|object| {
+                matches!(
+                    object.name.as_str(),
+                    "Soul's Attendant" | "Energy Attendant"
+                )
+            })
+        }
         YieldTarget::AllCopies { .. } => false,
     }
 }
@@ -1522,7 +1533,8 @@ const ATTENDANT_ANSWERS: [[MayChoiceOption; 2]; 2] = [
     [MayChoiceOption::Take, MayChoiceOption::Take],
 ];
 
-/// The answer the standing offer's period recorded at each occurrence of Soul's Attendant's "may".
+/// The answer the standing offer's period recorded at each occurrence of the attendant's "may"
+/// ([`asked_of_attendant`]).
 fn attendant_answers(offer: &GameState) -> Vec<(u8, MayChoiceOption)> {
     let WaitingFor::LoopShortcut { period, .. } = &offer.waiting_for else {
         panic!("an offer stands");

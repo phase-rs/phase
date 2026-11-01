@@ -2516,9 +2516,13 @@ impl ResourceVector {
     /// `self`'s, so a cycle with no life total at `i32::MAX` reads exactly as
     /// `self`.
     ///
-    /// Read only by Path B (`game::engine::interactive_loop_bridge`'s CR 732.4
-    /// draw walk): an optional loop is never drawn (CR 104.4b), and a taken
-    /// shortcut's collapse reads the cap through [`grown_life_deltas`].
+    /// Read only by Path B's ring walk (`game::engine::interactive_loop_bridge`),
+    /// which draws a forced period (CR 104.4b + CR 732.4) and offers a draw
+    /// without end for a period whose only non-mandatory members are outs
+    /// (CR 732.5); the reading classifies the cycle, and the period's decision
+    /// profile decides which. A period holding an optional action is neither
+    /// (CR 104.4b). A taken shortcut's collapse reads the cap through
+    /// [`grown_life_deltas`].
     pub(crate) fn with_at_limit_life_reading(
         &self,
         prior: &GameState,
@@ -2608,10 +2612,10 @@ impl ResourceVector {
     /// so the total's change, the sum of its members' stored changes, is the only change any
     /// member's life total makes across the period. Attribution (CR 810.9: they happen "to each
     /// player individually") decides which member carries that change, never its sign or its
-    /// size, so a bounded entry has its total's sign or is 0. In a two-member team (CR 810.1; the
-    /// engine's only shared life total is Two-Headed Giant's) whose counters sum to `t`, the
-    /// members' entries still sum to `t`; where a limit held the total back, each member carries
-    /// at most `t`.
+    /// size, so a bounded entry has its total's sign or is 0. In a two-member team (CR 810.1)
+    /// whose counters sum to `t`, the members' entries still sum to `t`; where a limit held the
+    /// total back, or in the Archenemy Commander heroes' three-member total (CR 904.13b), each
+    /// member carries at most `t`.
     ///
     /// Where no entry of `self` is negative, no entry of the result is, and a total that grows
     /// keeps a positive entry, except a total that fails closed, which keeps none: where its
@@ -6483,8 +6487,9 @@ struct LifeTotalChanges {
 }
 
 /// The [`LifeTotalChanges`] of every life total in `current`: players grouped by the total their
-/// life changes adjust (`game::topology::shared_life_dedup_key`: a Two-Headed Giant team's
-/// shared total, CR 810.4, and otherwise the player's own). Its two readers are the take's gate
+/// life changes adjust (`game::topology::shared_life_dedup_key`: a shared life total (a
+/// Two-Headed Giant team's, CR 810.4, or the Archenemy Commander heroes', CR 904.13b), and
+/// otherwise the player's own). Its two readers are the take's gate
 /// ([`life_not_stored_as_gains`]) and the offer's attribution
 /// ([`ResourceVector::with_life_attributed`]).
 fn life_total_changes(prior: &GameState, current: &GameState) -> Vec<LifeTotalChanges> {
@@ -16647,6 +16652,12 @@ mod tests {
                 true,
                 [((max, max), pinned, (0, 0)), ((-100, -98), (0, 0), (0, 0))],
                 &[0, 1],
+            ),
+            (
+                "team, a member's gained counter pinned, no field moved",
+                true,
+                [((20, 20), pinned, (0, 0)), ((15, 15), (0, 0), (0, 0))],
+                &[],
             ),
             (
                 "duel, held at the cap with the gained counter pinned",

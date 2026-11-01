@@ -36019,12 +36019,15 @@ impl GameState {
     ///     nothing, so neither may take the elision. Identity again holds by performance.
     /// (f) LIFE LANDS AT THE TAKE → a Mark take applies its `Life` items at the accepted count
     ///     (`game::engine`'s `materialize_object_growth_shortcut`), so no life waits for the
-    ///     boundary and no later change can reorder against it. Identity holds because the take
-    ///     batches life only where the driven cycle's life changes are gains, each stored whole
-    ///     on its player's own field, and no cycle of the accepted count would carry a total its
-    ///     life changes touch, or a gaining player's own field, past an `i32` limit. Then no
-    ///     change is held back and nothing spills, so every cycle repeats the driven cycle from
-    ///     where the one before it ended, and the lump lands where performing the cycles would.
+    ///     boundary and no later change can reorder against it. Identity holds for every total
+    ///     and field because the take batches life only where each player's net life change in
+    ///     the driven cycle is a gain, or nothing, stored whole on its own field, and no cycle of
+    ///     the accepted count would carry a total its life changes touch, or a gaining player's
+    ///     own field, past an `i32` limit. Then no change is held back and nothing spills, so
+    ///     every cycle repeats the driven cycle from where the one before it ended, and the lump
+    ///     lands every total and field where performing the cycles would. A period that also
+    ///     loses life is batched at its net, so the lump moves the gained counter by the net and
+    ///     the lost counter by nothing (route (a)'s net batching, unchanged by this route).
     ///     A take that would batch life beside a `Tokens` or `Counters` item, which the boundary
     ///     applies at the count its controller names there, is performed instead (route (b)).
     ///

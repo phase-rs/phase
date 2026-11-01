@@ -2905,11 +2905,13 @@ fn interactive_loop_bridge_paths(
     // axis, over a period that left every unmeasured axis unchanged. Only reached when Path A
     // found no determinate winner. A seat whose life total sits at `i32::MAX` at both ends of
     // the compared cycle has its life axis read from the cycle's rules amount
-    // (`ResourceVector::with_at_limit_life_reading`), so a mandatory loop that only gains life at
-    // the cap is drawn as it is below the cap, unless a per-turn counter fell or ends the cycle
-    // at `u32::MAX` (no reading; the stored 0 stands). `i32::MIN` is not read: a seat alive
-    // there has an effect keeping it from losing (CR 704.5a), and a loss axis there would veto
-    // the CR 104.4b draw of a loop that drains it.
+    // (`ResourceVector::with_at_limit_life_reading`), so a loop that only gains life at the cap
+    // reads as it does below the cap: drawn when its period is forced, offered without end when
+    // its only non-mandatory members are outs (CR 732.5). Where a per-turn counter fell or ends
+    // the cycle at `u32::MAX` there is no reading and the stored 0 stands; a period that then
+    // recurs with no other change is read on the zero-progress leg. `i32::MIN` is not read: a
+    // seat alive there has an effect keeping it from losing (CR 704.5a), and a loss axis there
+    // would veto the CR 104.4b draw of a loop that drains it.
     {
         let _timed = crate::analysis::resource::CostTimer::start(if mandatory {
             |cost| {
@@ -3082,14 +3084,7 @@ fn interactive_loop_bridge_paths(
                 {
                     return None;
                 }
-                // CR 810.9 + CR 810.9a: a shared total's change is credited to the member it
-                // happened to, not to the field the spread stored it in, and a total whose
-                // change cannot be attributed is credited to nobody.
-                if delta
-                    .with_life_attributed(prior, frames.current())
-                    .unbounded_axes_for(controller)
-                    .is_empty()
-                {
+                if delta.unbounded_axes_for(controller).is_empty() {
                     return None; // no unbounded axis for the driver ⇒ not this player's loop
                 }
                 let profile = resolve(
@@ -6975,11 +6970,12 @@ enum TakeRoute {
 /// the mark would refill restricted mana without its restriction (CR 106.6), it batches none of
 /// the damage a period marks (CR 120.3e), its mint makes bare tapped copies under the proposer,
 /// without a keyword, delayed trigger, other controller or certified departure the cover admitted
-/// as growth, its batched collapse must not miss what the board observes, its cycle's life must
-/// be gains stored whole on their players' own fields (CR 810.9), none of its cycles may carry a
-/// total its life changes touch or a gaining player's own field past an `i32` limit, and it may
-/// batch life only alone, since the life lands at the take (CR 732.2c), and a signed proposal's
-/// departures are seen only as its repetitions cross them (CR 704.3).
+/// as growth, its batched collapse must not miss what the board observes, each player's net life
+/// change in its cycle must be a gain, or nothing, stored whole on its own field (CR 810.9), none
+/// of its cycles may carry a total its life changes touch or a gaining player's own field past an
+/// `i32` limit, and it may batch life only alone, since the life lands at the take
+/// (CR 732.2c), and a signed proposal's departures are seen only as its repetitions cross them
+/// (CR 704.3).
 fn take_route(
     state: &GameState,
     proposal: &crate::analysis::loop_check::ShortcutProposal,
