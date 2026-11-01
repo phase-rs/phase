@@ -1769,6 +1769,7 @@ export interface GameObject {
   goaded_by?: PlayerId[];
   casting_permissions?: CastingPermission[];
   is_emblem?: boolean;
+  is_conspiracy?: boolean;
   /**
    * CR 114: Display-only provenance of the source that created this emblem
    * (e.g. the planeswalker whose ultimate made it). The frontend renders the
@@ -2957,6 +2958,7 @@ export type WaitingFor =
   | { type: "RepeatDecision"; data: { player: PlayerId; ability: unknown } }
   | { type: "TopOrBottomChoice"; data: { player: PlayerId; object_id: ObjectId; top_position?: LibraryPosition } }
   | { type: "PopulateChoice"; data: { player: PlayerId; source_id: ObjectId; valid_tokens: ObjectId[] } }
+  | { type: "SecretAgendaChoice"; data: { player: PlayerId; object_id: ObjectId; name_count: number } }
   | { type: "CompanionReveal"; data: { player: PlayerId; eligible_companions: CompanionRevealChoice[] } }
   | { type: "ChooseLegend"; data: { player: PlayerId; legend_name: string; candidates: ObjectId[] } }
   | { type: "CommanderZoneChoice"; data: { player: PlayerId; commander_id: ObjectId; current_zone: string } }
@@ -3503,6 +3505,7 @@ export type GameAction =
   | { type: "ChooseExert"; data: { exert: boolean } }
   | { type: "ChooseEnlist"; data: { target: ObjectId | null } }
   | { type: "HarmonizeTap"; data: { creature_id: ObjectId | null } }
+  | { type: "ChooseSecretAgendaNames"; data: { names: string[] } }
   | { type: "DeclareCompanion"; data: { choice: CompanionDeclaration } }
   | { type: "CompanionToHand" }
   // CR 116.2c: special action — pay a continuous effect's printed termination

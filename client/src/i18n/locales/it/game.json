@@ -648,6 +648,9 @@
   },
   "zone": {
     "commandZone": "Zona di comando",
+    "conspiracy": "Cospirazione",
+    "conspiracyTitle": "Cospirazione: {{name}}",
+    "turnFaceUp": "Gira {{name}} a faccia in su",
     "emblem": "Emblema",
     "emblemFallback": "Emblema",
     "commander": "Comandante",
@@ -2307,6 +2310,8 @@
       "fallback": "Fai una scelta"
     },
     "searchSubtitle": "Digita per cercare tra tutte le carte",
+    "secretAgendaTitle": "Nomina segretamente una carta ({{current}} di {{total}})",
+    "secretAgendaSubtitle": "Nascosto finché non giri a faccia in su questa cospirazione",
     "searchPlaceholder": "Cerca per nome...",
     "noCardsFound": "Nessuna carta trovata",
     "buttonSubtitle": "Seleziona un'opzione",

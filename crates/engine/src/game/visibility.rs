@@ -16,7 +16,7 @@ use crate::types::zones::{ExileCostSourceZone, Zone};
 use super::players;
 use super::turn_control;
 
-const HIDDEN_CARD_NAME: &str = "Hidden Card";
+pub const HIDDEN_CARD_NAME: &str = "Hidden Card";
 
 /// Resolution-only look-result provenance is never part of a viewer snapshot.
 /// The engine retains it for the active loop, while clients need only the
@@ -233,6 +233,7 @@ fn redact_paid_cast_cleanup_authority(waiting_for: &mut WaitingFor) {
         | WaitingFor::SeparatePilesChooseOpponent { .. }
         | WaitingFor::SeparatePilesPartition { .. }
         | WaitingFor::SeparatePilesChoice { .. }
+        | WaitingFor::SecretAgendaChoice { .. }
         | WaitingFor::CompanionReveal { .. }
         | WaitingFor::ChooseLegend { .. }
         | WaitingFor::CommanderZoneChoice { .. }
@@ -1061,6 +1062,7 @@ pub(crate) fn identity_projection_for_viewer(
         .battlefield
         .iter()
         .copied()
+        .chain(state.command_zone.iter().copied())
         .chain(
             state
                 .battlefield
@@ -1158,6 +1160,7 @@ pub(crate) fn identity_projection_for_unseated_viewer(
     for object_id in state
         .battlefield
         .iter()
+        .chain(state.command_zone.iter())
         .chain(state.stack.iter().map(|entry| &entry.id))
     {
         if state
@@ -3177,6 +3180,41 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
             // CR 400.2 + CR 100.4: the record names this seat's library and sideboard
             // cards, so it leaves with the lists it annotates.
             pool.printings = DisplayOnly::new(None);
+            // CR 905.4a + CR 702.106a: Non-commander formats (such as Limited with
+            // command zone for conspiracies) must not leak commander-slot entries
+            // to opponents or observers. Any hidden-agenda conspiracies in the
+            // commander slot must likewise be redacted.
+            if !state.format_config.uses_commander {
+                pool.registered_commander = Arc::new(Vec::new());
+                pool.current_commander = Arc::new(Vec::new());
+            } else {
+                if pool
+                    .registered_commander
+                    .iter()
+                    .any(|e| crate::game::conspiracy::card_has_hidden_agenda(&e.card))
+                {
+                    pool.registered_commander = Arc::new(
+                        pool.registered_commander
+                            .iter()
+                            .filter(|e| !crate::game::conspiracy::card_has_hidden_agenda(&e.card))
+                            .cloned()
+                            .collect(),
+                    );
+                }
+                if pool
+                    .current_commander
+                    .iter()
+                    .any(|e| crate::game::conspiracy::card_has_hidden_agenda(&e.card))
+                {
+                    pool.current_commander = Arc::new(
+                        pool.current_commander
+                            .iter()
+                            .filter(|e| !crate::game::conspiracy::card_has_hidden_agenda(&e.card))
+                            .cloned()
+                            .collect(),
+                    );
+                }
+            }
         }
     }
 
@@ -3192,6 +3230,16 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
             } = &mut filtered.waiting_for
             {
                 eligible_companions.clear();
+            }
+        }
+    }
+
+    // CR 702.106f: You don't reveal that more than one name was secretly chosen,
+    // so every other viewer sees the same one-name prompt for either agenda.
+    if let WaitingFor::SecretAgendaChoice { player, .. } = &state.waiting_for {
+        if !can_view_private_for_player(*player) {
+            if let WaitingFor::SecretAgendaChoice { name_count, .. } = &mut filtered.waiting_for {
+                *name_count = 1;
             }
         }
     }
@@ -4817,6 +4865,8 @@ fn hide_card(state: &mut GameState, obj_id: ObjectId) {
         obj.static_definitions.clear();
         obj.printed_ref = None;
         obj.foretold = false;
+        obj.secret_chosen_names.clear();
+        obj.agenda_name_count = 0;
     }
 }
 
@@ -4836,6 +4886,12 @@ fn reveal_face_down_identity_to_controller(obj: &mut crate::game::game_object::G
         obj.base_name = back_face.name.clone();
         obj.printed_ref = back_face.printed_ref.clone();
         obj.base_printed_ref = back_face.printed_ref.clone();
+        if obj.zone == Zone::Command && obj.is_conspiracy {
+            obj.card_types = back_face.card_types.clone();
+            obj.base_card_types = back_face.card_types.clone();
+            obj.mana_cost = back_face.mana_cost.clone();
+            obj.keywords = back_face.keywords.clone();
+        }
     }
 }
 
@@ -4845,11 +4901,31 @@ fn redact_face_down_identity_from_observer(obj: &mut crate::game::game_object::G
     obj.printed_ref = None;
     // CR 708.5 + CR 708.2: a face-down permanent has no name and no abilities,
     // and no player but its controller may look at the card underneath.
+    // This applies equally to face-down conspiracies in the command zone (CR 905.4a / CR 702.106a).
     // `parse_warnings` survives the face-down transformation on the
     // authoritative object (measured: a manifested card keeps the printed
     // face's warnings), so it must be redacted here for the same reason
     // `back_face` is — it is evidence about the hidden printed text.
     obj.parse_warnings.clear();
+    // CR 315.5b + CR 702.106f: clear runtime ability definitions, chosen attributes,
+    // secret names, and the agenda's name count for face-down command-zone
+    // conspiracies so they don't leak their abilities or secret choices to observers.
+    // `is_conspiracy` stays: it is the public display classification, not a
+    // characteristic. Battlefield face-down permanents must keep their granted
+    // runtime abilities/replacements.
+    if obj.zone == Zone::Command {
+        Arc::make_mut(&mut obj.abilities).clear();
+        obj.trigger_definitions = Default::default();
+        obj.static_definitions = Default::default();
+        obj.replacement_definitions = Default::default();
+        obj.chosen_attributes.clear();
+        obj.secret_chosen_names.clear();
+        obj.agenda_name_count = 0;
+        obj.card_types = Default::default();
+        obj.mana_cost = crate::types::mana::ManaCost::NoCost;
+        obj.keywords.clear();
+        obj.color.clear();
+    }
 }
 
 /// CR 603.3b + CR 400.2: A pending trigger awaiting its

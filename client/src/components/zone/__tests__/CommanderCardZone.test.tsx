@@ -7,6 +7,7 @@ import { useGameStore } from "../../../stores/gameStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
 import {
   buildCommanderGameObject,
+  buildGameObject,
   buildObjectMap,
   gameObjectFactory,
 } from "../../../test/factories/gameObjectFactory.ts";
@@ -16,7 +17,7 @@ import {
   buildPriorityWaitingFor,
 } from "../../../test/factories/gameStateFactory.ts";
 import { CommandDock } from "../CommandDock.tsx";
-import { CommanderCardZone } from "../CommanderCardZone.tsx";
+import { CommanderCardZone, ConspiracyCardZone } from "../CommanderCardZone.tsx";
 
 vi.mock("../../../game/dispatch.ts", () => ({
   dispatchAction: vi.fn(),
@@ -394,5 +395,91 @@ describe("CommanderCardZone art resolution", () => {
     render(<CommanderCardZone playerId={0} />);
 
     expect(screen.getByAltText("Kefka, Court Mage")).toHaveAttribute("src", ART_URL);
+  });
+});
+
+const CONSPIRACY_ID = 201;
+
+function conspiracyObject(overrides: Partial<GameObject> = {}): GameObject {
+  return buildGameObject({
+    id: CONSPIRACY_ID,
+    name: "Brago's Favor",
+    owner: 0,
+    controller: 0,
+    is_commander: false,
+    is_conspiracy: true,
+    card_types: { core_types: ["Conspiracy"], supertypes: [], subtypes: [] },
+    zone: "Command",
+    face_down: true,
+    ...overrides,
+  });
+}
+
+function turnFaceUpAction(objectId = CONSPIRACY_ID): GameAction {
+  return {
+    type: "TurnFaceUp",
+    data: { object_id: objectId },
+  };
+}
+
+describe("ConspiracyCardZone", () => {
+  beforeEach(() => {
+    localizedNames.clear();
+    vi.mocked(dispatchAction).mockClear();
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("renders conspiracy badge and dispatches TurnFaceUp when clicked", () => {
+    const conspiracy = conspiracyObject();
+    const action = turnFaceUpAction();
+    const gameState = makeState(conspiracy);
+    useGameStore.setState({
+      gameMode: "local",
+      gameState,
+      waitingFor: gameState.waiting_for,
+      legalActions: [action],
+      legalActionsByObject: { [String(CONSPIRACY_ID)]: [action] },
+      spellCosts: {},
+    });
+    useUiStore.setState({
+      inspectedObjectId: null,
+      pendingAbilityChoice: null,
+      debugInteractionMode: false,
+    });
+
+    render(<ConspiracyCardZone playerId={0} />);
+
+    expect(screen.getByText("Conspiracy")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button"));
+
+    expect(dispatchAction).toHaveBeenCalledTimes(1);
+    expect(dispatchAction).toHaveBeenCalledWith(action);
+  });
+
+  // CR 315.5b: an opponent's face-down conspiracy reaches the client with no
+  // card types, so the engine's display classification alone keeps it visible.
+  it("shows an opponent's redacted face-down conspiracy in the command dock", () => {
+    const conspiracy = conspiracyObject({
+      owner: 1,
+      controller: 1,
+      name: "Hidden Card",
+      card_types: { core_types: [], supertypes: [], subtypes: [] },
+    });
+    const gameState = makeState(conspiracy);
+    useGameStore.setState({
+      gameMode: "local",
+      gameState,
+      waitingFor: gameState.waiting_for,
+      legalActions: [],
+      legalActionsByObject: {},
+      spellCosts: {},
+    });
+
+    render(<CommandDock playerId={1} isMirrored />);
+
+    expect(screen.getByRole("img", { name: "Hidden Card" })).toBeInTheDocument();
   });
 });

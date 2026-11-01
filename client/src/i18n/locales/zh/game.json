@@ -2003,6 +2003,8 @@
     "numberSubtitle": "输入{{min}}或更大的整数",
     "searchPlaceholder": "按名称搜寻…",
     "searchSubtitle": "输入以搜寻所有牌",
+    "secretAgendaTitle": "秘密指定一个牌名（{{current}}/{{total}}）",
+    "secretAgendaSubtitle": "在你将此阴谋翻为正面之前保持隐藏",
     "title": {
       "basicLandType": "选择基本地类别",
       "cardName": "说出一个牌名",
@@ -2703,6 +2705,8 @@
     "companionActivate": "支付{3}：将{{name}}置于你手上",
     "companionTitle": "行侣：{{name}}",
     "companionTitleUsed": "行侣：{{name}}（已使用）",
+    "conspiracy": "谋略",
+    "conspiracyTitle": "谋略: {{name}}",
     "emblem": "徽记",
     "emblemFallback": "徽记",
     "exile": "放逐",
@@ -2726,6 +2730,7 @@
     "signatureSpellTitleTax": "招牌咒语：{{name}}（税：+{{tax}}）",
     "tax": "税：+{{tax}}",
     "topOfLibrary": "牌库顶",
+    "turnFaceUp": "将{{name}}翻回正面",
     "used": "已使用",
     "viewCount": "查看{{count}}",
     "zoneTitle": "{{zone}}（{{count}}）"

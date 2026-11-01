@@ -35438,14 +35438,12 @@ fn cant_cast_filter_matches_for(
         // CR 201.2: "spells with the chosen name" — the shared spell-filter path
         // has no top-level chosen-name variant, so match the spell name against
         // the source's chosen name here.
-        TargetFilter::HasChosenName => {
-            let chosen_name = source_obj.chosen_attributes.iter().find_map(|a| match a {
-                ChosenAttribute::CardName(n) => Some(n.as_str()),
-                _ => None,
-            });
-            chosen_name
-                .is_some_and(|name| crate::game::filter::card_names_match(name, &spell_obj.name))
-        }
+        TargetFilter::HasChosenName => source_obj.chosen_attributes.iter().any(|a| match a {
+            ChosenAttribute::CardName(n) => {
+                crate::game::filter::card_names_match(n, &spell_obj.name)
+            }
+            _ => false,
+        }),
         // Everything else — including IsChosenColor / IsChosenCardType properties —
         // flows through the shared source-aware typed-filter conjunction.
         _ => super::filter::spell_object_matches_filter_from_state_for(

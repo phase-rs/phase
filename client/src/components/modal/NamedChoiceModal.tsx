@@ -51,6 +51,39 @@ function getChoiceTypeKey(choiceType: string | Record<string, unknown>): string 
 
 const MAX_RESULTS = 10;
 
+type SecretAgendaChoice = Extract<WaitingFor, { type: "SecretAgendaChoice" }>;
+
+/** CR 702.106a / CR 702.106f: collects every name the engine asks for and sends
+ *  them as one answer, so a double agenda looks like any other agenda to the
+ *  table. The engine validates the answer; a rejected one simply starts over. */
+export function SecretAgendaModal({ data }: { data: SecretAgendaChoice["data"] }) {
+  const { t } = useTranslation("game");
+  const dispatch = useGameDispatch();
+  const [names, setNames] = useState<string[]>([]);
+
+  const handleName = (name: string) => {
+    const next = [...names, name];
+    if (next.length < data.name_count) {
+      setNames(next);
+      return;
+    }
+    setNames([]);
+    dispatch({ type: "ChooseSecretAgendaNames", data: { names: next } });
+  };
+
+  return (
+    <CardNameSearch
+      key={names.length}
+      title={t("namedChoice.secretAgendaTitle", {
+        current: names.length + 1,
+        total: data.name_count,
+      })}
+      subtitle={t("namedChoice.secretAgendaSubtitle")}
+      onConfirm={handleName}
+    />
+  );
+}
+
 export function NamedChoiceModal({ data }: { data: OptionChoice["data"] }) {
   const typeKey = getChoiceTypeKey(data.choice_type);
   if (typeKey === "CardName") {
@@ -125,7 +158,13 @@ function NumberEntry({ contract }: { contract: FreeEntry }) {
   );
 }
 
-function CardNameSearch() {
+interface CardNameSearchProps {
+  title?: string;
+  subtitle?: string;
+  onConfirm?: (name: string) => void;
+}
+
+function CardNameSearch({ title, subtitle, onConfirm }: CardNameSearchProps) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
   const [query, setQuery] = useState("");
@@ -165,10 +204,13 @@ function CardNameSearch() {
   }, [matches]);
 
   const handleConfirm = useCallback(() => {
-    if (selected) {
+    if (!selected) return;
+    if (onConfirm) {
+      onConfirm(selected);
+    } else {
       dispatch({ type: "ChooseOption", data: { choice: selected } });
     }
-  }, [dispatch, selected]);
+  }, [dispatch, onConfirm, selected]);
 
   const handleSelect = useCallback((name: string) => {
     setSelected(name);
@@ -195,7 +237,7 @@ function CardNameSearch() {
   const showResults = matches.length > 0 && !selected;
 
   return (
-    <ChoiceOverlay title={t("namedChoice.title.cardName")} subtitle={t("namedChoice.searchSubtitle")} footer={<ConfirmButton onClick={handleConfirm} disabled={!selected} />}>
+    <ChoiceOverlay title={title ?? t("namedChoice.title.cardName")} subtitle={subtitle ?? t("namedChoice.searchSubtitle")} footer={<ConfirmButton onClick={handleConfirm} disabled={!selected} />}>
       <div className="flex w-full max-w-md flex-col items-center gap-3">
         <div className="relative w-full">
           <input

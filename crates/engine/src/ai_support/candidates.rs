@@ -3154,6 +3154,27 @@ pub fn candidate_actions_broad_with_probe(
                 )
             })
             .collect(),
+        // CR 702.106a / CR 702.106f: Secret agenda names are one atomic answer.
+        WaitingFor::SecretAgendaChoice {
+            player, name_count, ..
+        } => {
+            let mut seen = HashSet::new();
+            let names: Vec<String> = card_name_choice_candidates(state, *player, None)
+                .into_iter()
+                .chain(state.all_card_names.iter().cloned())
+                .filter(|name| seen.insert(name.to_lowercase()))
+                .take(usize::from(*name_count))
+                .collect();
+            if names.len() == usize::from(*name_count) {
+                vec![candidate(
+                    GameAction::ChooseSecretAgendaNames { names },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )]
+            } else {
+                Vec::new()
+            }
+        }
         // CR 702.139a: Companion reveal candidates
         WaitingFor::CompanionReveal {
             player,
@@ -5014,6 +5035,21 @@ pub(crate) fn priority_actions_with_probe(
             // Vindicator stay unofferable until the client can announce an X for
             // a special action.
             Some(crate::game::morph::TurnFaceUpOffer::RequiresChosenX) | None => {}
+        }
+    }
+
+    // CR 702.106c / CR 116.2j / CR 905.4a: turning a face-down hidden agenda conspiracy in
+    // the command zone face up is a special action available any time its
+    // controller has priority.
+    for &object_id in &state.command_zone {
+        if let Some(crate::game::morph::TurnFaceUpOffer::Ready) =
+            crate::game::morph::turn_face_up_offer(state, player, object_id)
+        {
+            actions.push(candidate(
+                GameAction::TurnFaceUp { object_id, x: 0 },
+                TacticalClass::Ability,
+                Some(player),
+            ));
         }
     }
 

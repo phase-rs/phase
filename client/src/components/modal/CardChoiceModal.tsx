@@ -39,7 +39,7 @@ import { menuButtonClass } from "../menu/buttonStyles.ts";
 import { formatCounterType } from "../../viewmodel/cardProps.ts";
 import { getBoardChoiceView } from "../../viewmodel/gameStateView.ts";
 import { BoosterPackModal, boosterPackEntries } from "./BoosterPackModal.tsx";
-import { NamedChoiceModal } from "./NamedChoiceModal.tsx";
+import { NamedChoiceModal, SecretAgendaModal } from "./NamedChoiceModal.tsx";
 import { VoteChoiceModal } from "./VoteChoiceModal.tsx";
 import { SpecializeColorModal } from "./SpecializeColorModal.tsx";
 import { RoomDoorChoiceModal } from "./RoomDoorChoiceModal.tsx";
@@ -306,6 +306,9 @@ export function CardChoiceModal() {
     case "NamedChoice":
       if (!canActForWaitingState) return null;
       return <NamedChoiceModal data={waitingFor.data} />;
+    case "SecretAgendaChoice":
+      if (!canActForWaitingState) return null;
+      return <SecretAgendaModal key={waitingFor.data.object_id} data={waitingFor.data} />;
     case "OpponentGuess":
       // CR 608.2d: the guesser picks one of the offered options. Display-only —
       // reuses the generic option picker; the engine computes correctness.

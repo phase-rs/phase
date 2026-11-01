@@ -681,6 +681,9 @@
   },
   "zone": {
     "commandZone": "Command Zone",
+    "conspiracy": "Conspiracy",
+    "conspiracyTitle": "Conspiracy: {{name}}",
+    "turnFaceUp": "Turn {{name}} face up",
     "emblem": "Emblem",
     "emblemFallback": "Emblem",
     "commander": "Commander",
@@ -2345,6 +2348,8 @@
       "fallback": "Make a Choice"
     },
     "searchSubtitle": "Type to search all cards",
+    "secretAgendaTitle": "Secretly Name a Card ({{current}} of {{total}})",
+    "secretAgendaSubtitle": "Hidden until you turn this conspiracy face up",
     "searchPlaceholder": "Search by name...",
     "noCardsFound": "No cards found",
     "buttonSubtitle": "Select one option",

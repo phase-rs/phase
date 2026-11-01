@@ -1093,7 +1093,7 @@ describe("owner printing remaining carrier surfaces (group 2)", () => {
       "components/card/CardPreview.tsx": 2, "components/hand/MobileHandDrawer.tsx": 1,
       "components/hand/OpponentHand.tsx": 1, "components/modal/CardTextboxPreview.tsx": 1,
       "components/stack/StackEntry.tsx": 1, "components/zone/CommandDock.tsx": 1,
-      "components/zone/CommandZone.tsx": 1, "components/zone/CommanderCardZone.tsx": 1,
+      "components/zone/CommandZone.tsx": 1, "components/zone/CommanderCardZone.tsx": 2,
       "components/zone/GraveyardPile.tsx": 1, "components/zone/LibraryPile.tsx": 1,
       "components/animation/ResolvedAnimationImage.tsx": 1, "components/animation/RevealOverlay.tsx": 1,
       "components/hand/CompanionFanCard.tsx": 1,
@@ -1120,7 +1120,7 @@ describe("owner printing remaining carrier surfaces (group 2)", () => {
     };
     const expectedHelpers: Record<string, number> = {
       "components/animation/ResolvedAnimationImage.tsx": 1, "components/stack/StackEntry.tsx": 1,
-      "components/zone/CommandDock.tsx": 1, "components/zone/CommanderCardZone.tsx": 1,
+      "components/zone/CommandDock.tsx": 1, "components/zone/CommanderCardZone.tsx": 2,
       "components/zone/GraveyardPile.tsx": 1, "components/zone/LibraryPile.tsx": 1,
       "components/zone/ZoneViewer.tsx": 1, "components/modal/CardChoiceModal.tsx": 20,
       "components/modal/cardChoice/libraryModals.tsx": 6,
@@ -1237,12 +1237,12 @@ describe("owner printing remaining carrier surfaces (group 2)", () => {
     scan(src);
     expect(failures, failures.join("\n")).toEqual([]);
     expect(hooks).toEqual({ ...objectHooks, ...excludedHooks });
-    expect(Object.values(hooks).reduce((sum, count) => sum + count, 0)).toBe(28);
-    expect(Object.values(objectHooks).reduce((sum, count) => sum + count, 0)).toBe(16);
+    expect(Object.values(hooks).reduce((sum, count) => sum + count, 0)).toBe(29);
+    expect(Object.values(objectHooks).reduce((sum, count) => sum + count, 0)).toBe(17);
     expect(images).toEqual(expectedImages);
     expect(Object.values(images).reduce((sum, count) => sum + count, 0)).toBe(47);
     expect(helpers).toEqual(expectedHelpers);
-    expect(Object.values(helpers).reduce((sum, count) => sum + count, 0)).toBe(35);
+    expect(Object.values(helpers).reduce((sum, count) => sum + count, 0)).toBe(36);
     expect(Object.keys(helpers)).toHaveLength(11);
     expect(exclusions).toEqual({ "components/modal/BoosterPackModal.tsx": 1, "pages/GamePage.tsx": 1 });
     expect(intermediates).toEqual({ HandCard: 1, ZoneFanCard: 2, DrawerCard: 1, CardTextboxPreview: 3 });

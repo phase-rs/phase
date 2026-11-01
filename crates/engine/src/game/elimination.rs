@@ -832,6 +832,11 @@ fn prune_mulligan_pending(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 events,
             );
         }
+        // CR 800.4a: a player who leaves answers no agenda prompt; the pregame
+        // procedure carries on for the players who remain.
+        WaitingFor::SecretAgendaChoice { player, .. } if !players::is_alive(state, player) => {
+            state.waiting_for = super::conspiracy::next_pregame_decision(state, events);
+        }
         WaitingFor::OpeningHandBottomCards { pending, reason } => {
             let alive: Vec<_> = pending
                 .into_iter()

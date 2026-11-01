@@ -681,6 +681,9 @@
   },
   "zone": {
     "commandZone": "統率領域",
+    "conspiracy": "謀略",
+    "conspiracyTitle": "謀略: {{name}}",
+    "turnFaceUp": "{{name}}を表向きにする",
     "emblem": "紋章",
     "emblemFallback": "紋章",
     "commander": "統率者",
@@ -2345,6 +2348,8 @@
       "fallback": "選択する"
     },
     "searchSubtitle": "入力してすべてのカードを検索",
+    "secretAgendaTitle": "カード名を秘密裏に選ぶ（{{current}}/{{total}}）",
+    "secretAgendaSubtitle": "この策略を表向きにするまで非公開です",
     "searchPlaceholder": "名前で検索…",
     "noCardsFound": "カードが見つかりません",
     "buttonSubtitle": "選択肢を1つ選択",

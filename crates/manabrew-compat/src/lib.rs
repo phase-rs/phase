@@ -691,7 +691,7 @@ pub fn unsupported_protocol_capabilities() -> &'static [UnsupportedCapability] {
 /// `upstream.` = the protocol has no primitive for something the engine can do.
 /// `local.` = the protocol has the primitive but this engine cannot source it,
 /// or a documented adapter-local extension is intentionally in use.
-static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 94] = [
+static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 95] = [
     UnsupportedCapability {
         code: "upstream.object-selection-missing",
         area: "prompts",
@@ -1160,6 +1160,12 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 94] = [
         area: "actions",
         reason: "CR 702.139: Phase models both halves (GameAction::DeclareCompanion at the start of the game, GameAction::CompanionToHand for the {3} special action). CompanionToHand is a priority-window special action and hits the same hole as the planar die: no special-action kind exists in AvailableActionKind's three variants. DeclareCompanion is a pre-game declaration and has no prompt family either.",
         suggested_protocol_extension: "Covered by the special-action kind proposed on local.planar-die-unsupported; the pre-game declaration additionally needs a prompt point before the first turn.",
+    },
+    UnsupportedCapability {
+        code: "local.secret-agenda-unsupported",
+        area: "actions",
+        reason: "CR 702.106a: GameAction::ChooseSecretAgendaNames answers a pre-game secret prompt for conspiracy cards, and the protocol has no pre-game prompt family or conspiracy support.",
+        suggested_protocol_extension: "A prompt point before the first turn, as proposed on local.companion-unsupported, carrying a card-name entry whose answer is private to the chooser.",
     },
     UnsupportedCapability {
         code: "local.end-continuous-effect-unsupported",
@@ -1823,6 +1829,9 @@ fn build_prompt_input(
         }
         WaitingFor::CombatTaxPayment { .. } => {
             unsupported_prompt(waiting_for, "local.pay-combat-cost-unsupported")
+        }
+        WaitingFor::SecretAgendaChoice { .. } => {
+            unsupported_prompt(waiting_for, "local.secret-agenda-unsupported")
         }
         _ => interaction_prompt(prepared, card_lookup),
     }
@@ -2968,6 +2977,10 @@ pub fn convert_available_action(
         }
         GameAction::DeclareCompanion { .. } | GameAction::CompanionToHand => {
             AvailableActionConversion::Unsupported("local.companion-unsupported")
+        }
+        // CR 702.106a: conspiracies have no Manabrew counterpart.
+        GameAction::ChooseSecretAgendaNames { .. } => {
+            AvailableActionConversion::Unsupported("local.secret-agenda-unsupported")
         }
         // CR 116.2c: the pay-to-end special action has no Manabrew counterpart.
         GameAction::EndContinuousEffect { .. } => {
@@ -6301,6 +6314,26 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn secret_agenda_prompt_is_explicitly_unsupported() {
+        let result = build_prompt(
+            &prepared_for(WaitingFor::SecretAgendaChoice {
+                player: PlayerId(0),
+                object_id: ObjectId(1),
+                name_count: 1,
+            }),
+            &lookup,
+        );
+
+        assert!(matches!(
+            result,
+            Err(AdapterError::UnsupportedPrompt {
+                code: "local.secret-agenda-unsupported",
+                ..
+            })
+        ));
+    }
+
     /// The generic path: a waiting state with no bespoke arm is now prompted
     /// from the engine's own projection instead of being refused.
     ///
@@ -8793,13 +8826,13 @@ mod tests {
     #[test]
     fn unsupported_capability_registry_is_well_formed() {
         let capabilities = unsupported_protocol_capabilities();
-        assert_eq!(capabilities.len(), 94);
+        assert_eq!(capabilities.len(), 95);
 
         let codes: HashSet<_> = capabilities
             .iter()
             .map(|capability| capability.code)
             .collect();
-        assert_eq!(codes.len(), 94, "capability codes must be unique");
+        assert_eq!(codes.len(), 95, "capability codes must be unique");
 
         for capability in capabilities {
             assert!(

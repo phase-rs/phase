@@ -323,6 +323,9 @@ pub fn check_companion_reveal(state: &GameState, player: PlayerId) -> Option<Wai
 /// Returns the first CompanionReveal WaitingFor found, or None.
 pub fn check_all_companion_reveals(state: &GameState) -> Option<WaitingFor> {
     for &player_id in &state.seat_order {
+        if !super::players::is_alive(state, player_id) {
+            continue;
+        }
         if let Some(wf) = check_companion_reveal(state, player_id) {
             return Some(wf);
         }
@@ -456,6 +459,16 @@ pub fn handle_declare_companion(
     Ok(advance_companion_reveal(state, player, events))
 }
 
+/// CR 702.139a + CR 103.5: The pregame step after start-of-game conspiracies are
+/// set: companion reveals if any player has an eligible companion, else mulligans.
+pub(super) fn companion_reveals_or_mulligan(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> WaitingFor {
+    check_all_companion_reveals(state)
+        .unwrap_or_else(|| super::mulligan::start_mulligan(state, events))
+}
+
 /// Move to the next player's companion reveal, or start mulligans if all done.
 fn advance_companion_reveal(
     state: &mut GameState,
@@ -470,6 +483,9 @@ fn advance_companion_reveal(
 
     // Check remaining players for eligible companions
     for &player_id in seat_order.iter().skip(current_idx + 1) {
+        if !super::players::is_alive(state, player_id) {
+            continue;
+        }
         if let Some(wf) = check_companion_reveal(state, player_id) {
             return wf;
         }

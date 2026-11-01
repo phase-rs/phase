@@ -137,7 +137,7 @@ pub(in crate::game) fn priority_turn_face_up_candidates(
     principal: &PriorityPrincipal,
 ) -> Vec<PriorityTurnFaceUpCandidate> {
     let player = principal.semantic_holder();
-    state
+    let mut candidates: Vec<PriorityTurnFaceUpCandidate> = state
         .battlefield
         .iter()
         .copied()
@@ -149,7 +149,25 @@ pub(in crate::game) fn priority_turn_face_up_candidates(
                 ),
             })
         })
-        .collect()
+        .collect();
+
+    // CR 702.106c / CR 116.2j / CR 905.4a: As a special action, a player may turn a
+    // face-down hidden agenda conspiracy card they control in the command zone face up.
+    // This is now handled by turn_face_up_offer which covers both battlefield and
+    // command-zone face-down objects. The command-zone branch in turn_face_up_offer
+    // returns Ready for eligible conspiracies (no cost, no X).
+    for &object_id in &state.command_zone {
+        if let Some(offer) = turn_face_up_offer(state, player, object_id) {
+            candidates.push(match offer {
+                TurnFaceUpOffer::RequiresChosenX => PriorityTurnFaceUpCandidate::RequiresChosenX,
+                TurnFaceUpOffer::Ready => PriorityTurnFaceUpCandidate::Ready(
+                    PriorityTurnFaceUpAnnouncement::new(object_id),
+                ),
+            });
+        }
+    }
+
+    candidates
 }
 
 /// An engine-authored face-down play announcement for Priority preflight. The
@@ -447,6 +465,20 @@ pub(crate) fn turn_face_up_prepare(
         .get(&object_id)
         .ok_or_else(|| EngineError::InvalidAction("Object not found".to_string()))?;
 
+    // CR 702.106c / CR 116.2j / CR 905.4a: Face-down hidden agenda conspiracy in command zone.
+    // Turning it face up is a special action with no cost (CR 116.2j).
+    if obj.zone == Zone::Command && crate::game::conspiracy::is_conspiracy(obj) {
+        if !crate::game::conspiracy::is_face_down_conspiracy_candidate(obj, player) {
+            return Err(EngineError::InvalidAction(
+                "You don't control this face-down conspiracy".to_string(),
+            ));
+        }
+        return Ok((
+            TurnUpCostSource::HiddenAgenda,
+            TurnFaceUpCost::Mana(ManaCost::NoCost),
+        ));
+    }
+
     if obj.controller != player {
         return Err(EngineError::InvalidAction(
             "You don't control this permanent".to_string(),
@@ -576,6 +608,31 @@ pub(crate) fn handle_turn_face_up(
     announced_x: u32,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
+    // CR 702.106c / CR 116.2j / CR 905.4a: Special action to turn face-down hidden agenda conspiracy in command zone face up.
+    if let Some(obj) = state.objects.get(&object_id) {
+        if obj.zone == Zone::Command && crate::game::conspiracy::is_conspiracy(obj) {
+            if !crate::game::conspiracy::is_face_down_conspiracy_candidate(obj, player) {
+                return Err(EngineError::InvalidAction(
+                    "You don't control this face-down conspiracy".to_string(),
+                ));
+            }
+            if announced_x != 0 {
+                return Err(EngineError::InvalidAction(
+                    "Turning a conspiracy face up has no X cost".to_string(),
+                ));
+            }
+            if !crate::game::conspiracy::turn_hidden_agenda_face_up(
+                state, object_id, player, events,
+            ) {
+                return Err(EngineError::InvalidAction(
+                    "Failed to turn conspiracy face up".to_string(),
+                ));
+            }
+            events.push(GameEvent::TurnedFaceUp { object_id });
+            return Ok(WaitingFor::Priority { player });
+        }
+    }
+
     // CR 116.2b: `turn_face_up_prepare` is the single legality and cost
     // authority, shared with the Priority offer enumeration.
     let (cost_source, cost) = turn_face_up_prepare(state, object_id, player)?;

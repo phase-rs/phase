@@ -582,6 +582,7 @@ pub enum InteractionActionCode {
     ChooseRoomDoor,
     TapForConvoke,
     HarmonizeTap,
+    ChooseSecretAgendaNames,
     DeclareCompanion,
     CompanionToHand,
     DiscoverChoice,

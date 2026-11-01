@@ -2732,6 +2732,11 @@ pub fn fallback_action(
         .into_iter()
         .next(),
 
+        // CR 702.106a: the agenda names are a required answer, offered as one action.
+        WaitingFor::SecretAgendaChoice { .. } => engine::ai_support::legal_actions(state)
+            .into_iter()
+            .next(),
+
         // Companion reveal: decline.
         WaitingFor::CompanionReveal { .. } => Some(GameAction::DeclareCompanion {
             choice: CompanionDeclaration::Decline,

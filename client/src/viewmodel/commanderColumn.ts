@@ -30,6 +30,22 @@ export function commandZoneLeaders(gameState: GameState, playerId: PlayerId): Ga
     );
 }
 
+/**
+ * Command-zone conspiracies this player owns that are currently in the command
+ * zone (CR 905). Conspiracies are not commanders and do not carry commander tax.
+ */
+export function commandZoneConspiracies(gameState: GameState, playerId: PlayerId): GameObject[] {
+  return (gameState.command_zone ?? [])
+    .map((id) => gameState.objects[id])
+    .filter(
+      (obj): obj is GameObject =>
+        obj != null &&
+        obj.is_conspiracy === true &&
+        obj.owner === playerId &&
+        obj.zone === "Command",
+    );
+}
+
 /** One attacker's commander-damage badges inflicted on a given victim. */
 export interface CommanderDamageEntry {
   /** Attacking commander's controller (PlayerId as string key). */

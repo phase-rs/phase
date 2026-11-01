@@ -16908,6 +16908,20 @@ fn apply_non_priority_pass_action(
             let waiting_for = state.waiting_for.clone();
             engine_stack::handle_multi_target_selection(state, waiting_for, &selected, &mut events)?
         }
+        // CR 702.106a / CR 702.106f: Secret pregame agenda names.
+        (
+            WaitingFor::SecretAgendaChoice {
+                player, object_id, ..
+            },
+            GameAction::ChooseSecretAgendaNames { names },
+        ) => super::conspiracy::handle_secret_agenda_names(
+            state,
+            *player,
+            *object_id,
+            names,
+            &mut events,
+        )
+        .map_err(EngineError::InvalidAction)?,
         // CR 702.139a: Pre-game companion reveal
         (WaitingFor::CompanionReveal { player, .. }, GameAction::DeclareCompanion { choice }) => {
             super::companion::handle_declare_companion(state, *player, choice, &mut events)
@@ -20913,12 +20927,9 @@ pub fn start_game_with_starting_player(
     // If players have cards in their libraries, start mulligan flow
     let has_libraries = state.players.iter().any(|p| !p.library.is_empty());
     let waiting_for = if has_libraries {
-        // CR 702.139a: Check for eligible companions before mulligans.
-        if let Some(companion_wf) = super::companion::check_all_companion_reveals(state) {
-            companion_wf
-        } else {
-            mulligan::start_mulligan(state, &mut events)
-        }
+        // CR 702.106a: Agenda names are chosen as conspiracies enter the command
+        // zone, ahead of companion reveals and mulligans (CR 702.139a).
+        super::conspiracy::next_pregame_decision(state, &mut events)
     } else {
         // No cards to mulligan with, skip straight to game
         crate::game::planechase::reveal_starting_plane(state);

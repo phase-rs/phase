@@ -697,6 +697,12 @@ pub enum GameAction {
     HarmonizeTap {
         creature_id: Option<ObjectId>,
     },
+    /// CR 702.106a / CR 702.106f: Answer a secret pregame agenda prompt with all
+    /// of the conspiracy's names at once, so nothing observable distinguishes a
+    /// double agenda from a hidden agenda.
+    ChooseSecretAgendaNames {
+        names: Vec<String>,
+    },
     /// CR 702.139a: Declare a companion during pre-game reveal (or decline).
     DeclareCompanion {
         /// An explicit reveal choice or an explicit decline. This cannot be
@@ -2190,6 +2196,7 @@ impl GameAction {
             | Self::ChooseDungeon { .. }
             | Self::ChooseDungeonRoom { .. }
             | Self::RollPlanarDie
+            | Self::ChooseSecretAgendaNames { .. }
             | Self::DeclareCompanion { .. }
             | Self::CompanionToHand
             | Self::DiscoverChoice { .. }
@@ -2540,6 +2547,7 @@ impl GameAction {
             | GameAction::RollPlanarDie
             | GameAction::ChooseSpecializeColor { .. }
             | GameAction::HarmonizeTap { .. }
+            | GameAction::ChooseSecretAgendaNames { .. }
             | GameAction::DeclareCompanion { .. }
             | GameAction::CompanionToHand
             | GameAction::DiscoverChoice { .. }

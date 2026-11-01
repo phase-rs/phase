@@ -1352,6 +1352,22 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "is_false")]
     pub is_emblem: bool,
 
+    /// CR 905: True when this game object represents a conspiracy card in the
+    /// command zone. Stamped at creation so the object's identity as a conspiracy
+    /// is preserved even while face down (CR 905.4a), when all rules characteristics
+    /// (name, card types, abilities) are blanked (CR 315.5b). Not a characteristic:
+    /// it is the public display classification, since a face-down card in the
+    /// command zone is visibly a conspiracy without revealing which one.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_conspiracy: bool,
+
+    /// CR 702.106a / CR 702.106f: How many card names this conspiracy's agenda
+    /// secretly chooses (1 for hidden agenda, 2 for double agenda, 0 otherwise).
+    /// Stamped at creation because a face-down conspiracy has no text to read.
+    /// Private until revealed: CR 702.106f hides that more than one name exists.
+    #[serde(default, skip_serializing_if = "is_zero_u8_field")]
+    pub agenda_name_count: u8,
+
     /// CR 114: Display-only provenance of the source that created this emblem
     /// (planeswalker, spell, etc.). Populated at creation in `create_emblem`;
     /// `None` for every non-emblem object. See [`EmblemSource`].
@@ -1429,6 +1445,14 @@ pub struct GameObject {
     /// Persists for the object's lifetime on the battlefield.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chosen_attributes: Vec<ChosenAttribute>,
+
+    /// CR 702.106a / CR 702.106f: Secretly chosen card names for face-down
+    /// hidden-agenda / double-agenda conspiracies in the command zone.
+    /// Kept secret from observers until the conspiracy is turned face up,
+    /// at which point they are revealed and transferred to `chosen_attributes`
+    /// as `ChosenAttribute::CardName` (CR 702.106c).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secret_chosen_names: Vec<String>,
 
     /// CR 701.15c: Which players have goaded this creature. A goaded creature must attack
     /// each combat if able and must attack a player other than the goading player(s) if able.
@@ -1889,6 +1913,8 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         commander_tax: _,
         is_renowned: _,
         is_emblem: _,
+        is_conspiracy: _,
+        agenda_name_count: _,
         emblem_source: _,
         // omitted-safe-by-write-site: written once at emblem creation, immutable after.
         linked_ability_source: _,
@@ -1904,6 +1930,7 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         foretold: _,
         exiled_by: _,
         chosen_attributes: _,
+        secret_chosen_names: _,
         goaded_by: _,
         detained_by: _,
         is_suspected: _,
@@ -3199,6 +3226,8 @@ impl GameObject {
             commander_tax: None,
             is_renowned: false,
             is_emblem: false,
+            is_conspiracy: false,
+            agenda_name_count: 0,
             emblem_source: None,
             linked_ability_source: None,
             is_token: false,
@@ -3213,6 +3242,7 @@ impl GameObject {
             foretold: false,
             exiled_by: None,
             chosen_attributes: Vec::new(),
+            secret_chosen_names: Vec::new(),
             goaded_by: std::collections::HashSet::new(),
             detained_by: std::collections::HashSet::new(),
             is_suspected: false,
@@ -4358,6 +4388,10 @@ impl GameObject {
 }
 
 /// Serde helper: skip serialization when a `u32` field is zero.
+fn is_zero_u8_field(n: &u8) -> bool {
+    *n == 0
+}
+
 fn is_zero_u32_field(n: &u32) -> bool {
     *n == 0
 }
