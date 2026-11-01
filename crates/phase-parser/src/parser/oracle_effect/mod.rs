@@ -41883,7 +41883,7 @@ pub(crate) struct PrintedColorCarrier {
 /// more than once is REFUSED rather than collapsed (see the ARITY CONTRACT
 /// below), so the census records only which arm today's pool takes.
 /// RE-MEASURED **2026-08-29** against the MTGJSON pool whose tracked vintage
-/// sidecar `crates/engine/data/mtgjson-vintage` reads **2026-08-28**.
+/// sidecar `crates/phase-ast/data/mtgjson-vintage` reads **2026-08-28**.
 /// Re-measure rather than trusting the constant:
 ///
 /// ```text

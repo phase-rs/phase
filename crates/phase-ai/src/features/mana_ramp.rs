@@ -1,7 +1,7 @@
 //! Mana ramp feature — structural detection over a deck's typed AST.
 //!
 //! Parser AST verification — VERIFIED:
-//! - Activated mana ability: `AbilityKind::Activated` at `crates/engine/src/types/ability.rs:3747`;
+//! - Activated mana ability: `AbilityKind::Activated` at `crates/phase-ast/src/types/ability.rs`;
 //!   `AbilityCost::Tap` at `ability.rs:1883`; `Effect::Mana { produced: ManaProduction, .. }`
 //!   at `ability.rs:2520`; `ManaProduction` at `ability.rs:476`.
 //! - Cost lookup via `AbilityDefinition::cost_categories()` at `ability.rs:4031` yielding
@@ -14,7 +14,7 @@
 //!   followed by `Effect::ChangeZone { destination: Zone::Battlefield | Zone::Hand, .. }`
 //!   at `ability.rs:2271`. Walk chain via `phase_ai::ability_chain::collect_chain_effects`.
 //! - Additional land drops: `StaticMode::AdditionalLandDrop { count }` at
-//!   `crates/engine/src/types/statics.rs:268`, `StaticMode::MayPlayAdditionalLand`
+//!   `crates/phase-ast/src/types/statics.rs`, `StaticMode::MayPlayAdditionalLand`
 //!   at `statics.rs:280`.
 //! - Controller scoping: `TypedFilter.controller: Option<ControllerRef>` at
 //!   `ability.rs:815-818`.

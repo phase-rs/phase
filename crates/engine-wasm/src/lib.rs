@@ -3862,7 +3862,7 @@ pub fn get_stack_pressure() -> JsValue {
 // See `engine::game::derived_views`.
 
 /// Returns the engine-typed catalog of debug-spawnable token presets,
-/// loaded from `crates/engine/data/known-tokens.toml`. Read by the debug UI
+/// loaded from `crates/phase-ast/data/known-tokens.toml`. Read by the debug UI
 /// to populate the Create Token dropdown — frontend never derives this list.
 #[wasm_bindgen]
 pub fn list_token_presets_js() -> JsValue {

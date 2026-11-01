@@ -69712,7 +69712,7 @@ fn nested_chosen_color_is_seen_at_every_depth_of_the_filter_closure() {
 /// `GainControlAll`, `PutCounterAll`, `CounterAll` and `GoadAll` all carry an
 /// object filter built by that same parser and all sit in the `false` list
 /// below. They answer `false` because on the 2026-08-28 pool (the vintage in
-/// `crates/engine/data/mtgjson-vintage`) no card reaches them with the printed
+/// `crates/phase-ast/data/mtgjson-vintage`) no card reaches them with the printed
 /// qualifier — the same dated-census idiom used for the 4-face card list on
 /// `inject_printed_color_choice_filter` — NOT because the compiler proved they
 /// cannot. Re-measure rather than trusting it.

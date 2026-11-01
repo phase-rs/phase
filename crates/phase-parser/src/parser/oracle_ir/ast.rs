@@ -3107,7 +3107,7 @@ fn copy_recipient_is_attachment_host_anaphor(
 /// prefixes. This is the COMPLETE set. DERIVE IT FROM THE COMMAND, NOT BY EYE:
 ///
 /// ```text
-/// awk '/^pub enum Effect \{/,/^\}/' crates/engine/src/types/ability.rs \
+/// awk '/^pub enum Effect \{/,/^\}/' crates/phase-ast/src/types/ability.rs \
 ///   | rg -n 'duration: (Option<)?Duration'
 /// ```
 ///

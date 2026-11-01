@@ -158,14 +158,14 @@ The `NamedChoice` system is a well-contained interactive pattern with low blast 
 
 | # | File | What to change |
 |---|------|---------------|
-| 1 | `crates/engine/src/types/ability.rs` — `ChoiceType` enum | Add variant with typed fields |
+| 1 | `crates/phase-ast/src/types/ability.rs` — `ChoiceType` enum | Add variant with typed fields |
 | 2 | `crates/engine/src/game/effects/choose.rs` — `compute_options()` | Add match arm to generate options for the new variant |
 | 3 | `crates/engine/src/game/engine_resolution_choices.rs` — `ChooseOption` handler | May need custom validation (e.g., NumberRange validates parsed u8 in range) |
 | 4 | `client/src/adapter/types.ts` | Already generic (`choice_type: string`, `options: string[]`) — **no change needed** |
 | 5 | `client/src/components/modal/NamedChoiceModal.tsx` | Add rendering branch only if the existing button grid / card-name search is insufficient |
 | 6 | `client/src/components/modal/NamedChoiceModal.tsx` — `CHOICE_TYPE_TITLE_KEYS` | Map the new ChoiceType key → an i18n leaf (e.g. `Keyword: "keyword"`). The title renders via `t(\`namedChoice.title.${leaf}\`)`, so also add `namedChoice.title.<leaf>` to `client/src/i18n/locales/en/game.json`. Never hardcode the label. |
 | 7 | `crates/engine/src/ai_support/candidates.rs` — `NamedChoice` arm | Already generates one action per option — works for any choice type with populated options |
-| 8 | `crates/engine/src/parser/oracle_effect/` | Add parser patterns for the new choice text |
+| 8 | `crates/phase-parser/src/parser/oracle_effect/` | Add parser patterns for the new choice text |
 | 9 | `crates/engine/src/game/effects/choose.rs` — tests | Add test for `compute_options()` with new variant |
 
 ### Key design decisions

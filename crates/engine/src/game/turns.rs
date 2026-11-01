@@ -1957,6 +1957,9 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.creatures_blocked_this_turn.clear();
     state.creature_blocked_attackers_this_turn.clear();
     state.players_who_created_token_this_turn.clear();
+    // CR 705.3: a new turn reopens each player's "first time you flip … each
+    // turn" window.
+    state.players_who_flipped_coins_this_turn.clear();
     state.created_tokens_this_turn.clear();
     // CR 122.6 + CR 514.2: The `counter_added_this_turn` ledger backs the
     // turn-scoped `CountersPutOnThisTurn` filter predicate (CR 122.6 look-back),

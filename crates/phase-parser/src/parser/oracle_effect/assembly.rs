@@ -4364,7 +4364,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // could not be modelled.
     //
     // CENSUS, re-measured 2026-08-29 against the pool whose tracked vintage
-    // sidecar `crates/engine/data/mtgjson-vintage` reads 2026-08-28: the printed
+    // sidecar `crates/phase-ast/data/mtgjson-vintage` reads 2026-08-28: the printed
     // form appears on 4 card faces (Avacyn, Guardian Angel / Prismatic Strands /
     // Root Greevil / Wash Out) and NO ability line prints it twice — Avacyn's
     // two occurrences sit in two SEPARATE activated abilities, i.e. two chains

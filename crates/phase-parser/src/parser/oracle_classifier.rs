@@ -640,6 +640,10 @@ pub(crate) fn is_static_pattern(lower: &str) -> bool {
         return true;
     }
 
+    if super::oracle_static::is_win_first_coin_flip_set_each_turn_static(lower) {
+        return true;
+    }
+
     // CR 509.1c: A printed permanent forced-block ("lure") static, "All creatures
     // able to block <self/enchanted creature> do so" (Ochran Assassin, Breaker of
     // Armies, Lure), routes to the static parser — NOT the one-shot spell form
