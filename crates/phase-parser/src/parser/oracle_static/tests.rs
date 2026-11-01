@@ -12847,6 +12847,80 @@ fn static_same_turn_loyalty_abilities_activate_as_instant() {
     assert_eq!(def.condition, Some(StaticCondition::SourceEnteredThisTurn));
 }
 
+/// CR 606.3 + CR 304.5: Teferi, Master of Time's timing permission (Scryfall-
+/// verified verbatim Oracle line 1; the production pipeline normalizes "Teferi"
+/// to `~` before the static line parses, so the unit shape uses `~` directly).
+/// Unlike the Wandering Emperor's conditional possessive form, this is
+/// unconditional with an "of \<subject\>" axis plus the "on any player's turn"
+/// infix — which CR 304.5 subsumes into instant timing (priority only), so it
+/// lowers to the same shared `ActivateAsInstant { PaysLoyalty, None }` mode,
+/// self-scoped. Reverting the `dispatch.rs` call site yields `None` here.
+#[test]
+fn static_teferi_master_of_time_loyalty_timing_permission() {
+    let def = parse_static_line(
+        "You may activate loyalty abilities of ~ on any player's turn any time you could cast an instant.",
+    )
+    .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::ActivateAsInstant {
+            cost_category: CostCategory::PaysLoyalty,
+            keyword: None,
+        }
+    );
+    assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+    assert_eq!(def.condition, None);
+}
+
+/// CR 606.3 + CR 304.5: the subject axis composes — Teferi's Talent's emblem
+/// carries the same timing permission scoped to "planeswalkers you control"
+/// (verbatim emblem text, already quoted in the granted-loyalty corpus below).
+/// Same shared mode; only `affected` differs.
+#[test]
+fn static_loyalty_timing_permission_subject_axis_composes() {
+    let def = parse_static_line(
+        "You may activate loyalty abilities of planeswalkers you control on any player's turn any time you could cast an instant.",
+    )
+    .unwrap();
+    assert_eq!(
+        def.mode,
+        StaticMode::ActivateAsInstant {
+            cost_category: CostCategory::PaysLoyalty,
+            keyword: None,
+        }
+    );
+    assert_eq!(
+        def.affected,
+        Some(TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Planeswalker).controller(ControllerRef::You),
+        ))
+    );
+    assert_eq!(def.condition, None);
+}
+
+/// CR 304.5: the "on any player's turn" infix is optional — instant timing
+/// already spans any player's turn, so the bare tail parses to the same
+/// permission rather than failing closed. Combinator pin: no printed card
+/// carries the bare form yet. Both apostrophe forms parse.
+#[test]
+fn static_loyalty_timing_permission_turn_infix_optional() {
+    for line in [
+        "You may activate loyalty abilities of ~ any time you could cast an instant.",
+        "You may activate loyalty abilities of ~ on any player\u{2019}s turn any time you could cast an instant.",
+    ] {
+        let def = parse_static_line(line).unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::ActivateAsInstant {
+                cost_category: CostCategory::PaysLoyalty,
+                keyword: None,
+            },
+            "{line}"
+        );
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef), "{line}");
+    }
+}
+
 #[test]
 fn static_equip_abilities_activate_as_instant() {
     let def =
