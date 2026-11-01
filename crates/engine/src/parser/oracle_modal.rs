@@ -6,6 +6,7 @@ use nom::combinator::{map, map_opt, not, opt, peek, rest, success, value};
 use nom::multi::{fold_many1, many_till};
 use nom::sequence::{delimited, pair, preceded, terminated};
 use nom::Parser;
+use std::ops::Range;
 
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, AdditionalCostOrigin,
@@ -1152,15 +1153,20 @@ fn split_reflexive_optional_cost(trigger_line: &str) -> Option<(String, String)>
     Some((trigger_orig.to_string(), cost_cased))
 }
 
-/// Native document payload for a Priority-1 modal block.  The document router
-/// owns all source spans; this type deliberately carries only nested parser IR.
+/// Native document payload for a Priority-1 modal block. The document router
+/// owns source spans; this carries nested IR and transient diagnostic-transfer metadata.
 pub(crate) enum OracleBlockIr {
     Activated(AbilityIr),
     Modal {
         choice: ModalChoice,
         modes: Vec<ModalModeIr>,
     },
-    Triggered(Vec<TriggerIr>),
+    Triggered {
+        triggers: Vec<TriggerIr>,
+        /// Destination containing copies of the caller's prefix
+        /// `0..inherited_diagnostics.len()`, excluding newly produced diagnostics.
+        inherited_diagnostics: Range<usize>,
+    },
     AsEnters {
         replacement: ReplacementIr,
         children: Vec<(usize, Vec<AnchorModeIr>)>,
@@ -1239,6 +1245,7 @@ pub(crate) fn lower_oracle_block_ir(
             modes,
             reflexive_parent,
         } => {
+            let inherited_len = ctx.diagnostics.len();
             let mut trigger_ctx = ctx.clone_for_independent_body();
             // CR 603.1: `parse_trigger_lines_at_index_ir` parses a NEW printed
             // trigger line, which establishes its own event authority. Any outer
@@ -1251,7 +1258,14 @@ pub(crate) fn lower_oracle_block_ir(
                 Some(PrintedTriggerIndex::placeholder()),
                 &mut trigger_ctx,
             );
+            let destination_start = ctx.diagnostics.len();
+            debug_assert_eq!(
+                trigger_ctx.diagnostics.get(..inherited_len),
+                ctx.diagnostics.get(..inherited_len),
+                "independent trigger parsing must retain the inherited diagnostic prefix",
+            );
             ctx.diagnostics.extend(trigger_ctx.diagnostics);
+            let inherited_diagnostics = destination_start..destination_start + inherited_len;
             for trigger in &mut triggers {
                 // CR 603.4: a trailing "if <guard>" left on the trigger line that
                 // did not hoist would be silently dropped when the modal payload
@@ -1389,7 +1403,10 @@ pub(crate) fn lower_oracle_block_ir(
                     trigger.modifiers.optional = true;
                 }
             }
-            OracleBlockIr::Triggered(triggers)
+            OracleBlockIr::Triggered {
+                triggers,
+                inherited_diagnostics,
+            }
         }
         OracleBlockAst::AsEntersAnchorWordModal {
             header_text,
