@@ -48493,6 +48493,7 @@ fn parse_effect_chain_ir_body(
             } else {
                 strip_any_number_quantifier(text_no_temporal)
             };
+        ctx.choice_quantifier_stripped = multi_target.is_some();
         let retained_type_clause = {
             let lower = text_no_qty.to_lowercase();
             parse_retained_type_clause(TextPair::new(&text_no_qty, &lower))

@@ -610,13 +610,16 @@ pub struct ParseContext {
     ///
     /// The legacy bare-choose producer declares `Resolution` only after the
     /// target parser consumes the entire object phrase, with chosen selection
-    /// and no printed target, context reference, or player target. A partial
-    /// phrase leaves this unset; `TargetOnly` then defaults to `Stack`,
-    /// without a filter-shape inference.
+    /// and no stripped quantifier, printed target, context reference, or player
+    /// target. A partial or quantified phrase leaves this unset; `TargetOnly`
+    /// then defaults to `Stack`, without a filter-shape inference.
     ///
     /// Set and consumed within a single chunk parse; never serialized. A
     /// speculative sub-parse that discards its cloned context discards this too.
     pub declared_target_choice_timing: Option<TargetChoiceTiming>,
+    /// CR 608.2d: stripped choice cardinality cannot use the single-object
+    /// resolution chooser. Defaults to false in each rebuilt chunk context.
+    pub(crate) choice_quantifier_stripped: bool,
     /// CR 603.4: Transient relative-clause filter parsed from a
     /// trigger subject ("an opponent **who controls F** draws a card"). Set by
     /// `parse_single_subject` when it consumes a "who controls <filter>"

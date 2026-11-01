@@ -78417,6 +78417,54 @@ fn bare_choose_partial_object_phrase_keeps_stack_timing() {
     assert_eq!(def.target_choice_timing, TargetChoiceTiming::Stack);
 }
 
+/// SHAPE: Log Flume's printed Visit choice cannot enter the single-object chooser.
+#[test]
+fn bare_choose_stripped_quantifier_keeps_stack_timing() {
+    let target = TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
+    let log_flume = "Choose up to four creatures you control.";
+    let final_showdown = "Choose a creature you control.";
+    for (text, declared, timing) in [
+        (log_flume, None, TargetChoiceTiming::Stack),
+        (
+            final_showdown,
+            Some(TargetChoiceTiming::Resolution),
+            TargetChoiceTiming::Resolution,
+        ),
+    ] {
+        let ir = parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default());
+        let head = &ir.clauses[0];
+        assert_eq!(
+            head.parsed.effect,
+            Effect::TargetOnly {
+                target: target.clone(),
+            },
+            "{text}"
+        );
+        assert_eq!(head.declared_target_choice_timing, declared, "{text}");
+
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert_eq!(
+            def.effect.as_ref(),
+            &Effect::TargetOnly {
+                target: target.clone(),
+            },
+            "{text}"
+        );
+        assert_eq!(def.target_choice_timing, timing, "{text}");
+    }
+
+    // A quantified chunk must not suppress a later single-creature choice.
+    let chain = format!("{log_flume} {final_showdown}");
+    let ir = parse_effect_chain_ir(&chain, AbilityKind::Spell, &mut ParseContext::default());
+    assert_eq!(ir.clauses.len(), 2);
+    assert_eq!(ir.clauses[0].declared_target_choice_timing, None);
+    assert_eq!(ir.clauses[1].parsed.effect, Effect::TargetOnly { target });
+    assert_eq!(
+        ir.clauses[1].declared_target_choice_timing,
+        Some(TargetChoiceTiming::Resolution)
+    );
+}
+
 /// SHAPE: a random object selection must not enter the controller-choice path.
 #[test]
 fn bare_choose_random_object_keeps_stack_timing() {

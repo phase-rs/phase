@@ -5090,6 +5090,7 @@ pub(super) fn parse_choose_ast(
             // choice establishes that the object is chosen during resolution.
             // Random selections must not become controller-choice prompts.
             if remainder.trim().is_empty()
+                && !ctx.choice_quantifier_stripped
                 && ctx.target_selection_mode == TargetSelectionMode::Chosen
                 && !nom_primitives::scan_contains(rest_lower, "target ")
                 && !target.is_context_ref()
