@@ -247,7 +247,8 @@ mod tests {
             ),
             (
                 "tests/integration/no_top_level_test_binaries.rs",
-                "SECOND WAVE, disclosed not routed: collects `mod` registrations from main.rs.",
+                "SECOND WAVE, disclosed not routed: collects `mod` registrations from the shard \
+                 roots.",
             ),
             (
                 "tests/integration/waiting_for_actor_authority_census.rs",

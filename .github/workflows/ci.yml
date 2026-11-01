@@ -70,7 +70,7 @@ jobs:
       # hosted runner's memory); the second is the full command and reuses them.
       - name: Clippy
         run: |
-          cargo clippy --locked --workspace --exclude phase-tauri --test integration --features engine/proptest -- -D warnings
+          cargo clippy --locked --workspace --exclude phase-tauri --test 'integration*' --features engine/proptest -- -D warnings
           cargo clippy --locked --workspace --exclude phase-tauri --all-targets --features engine/proptest -- -D warnings
 
       - name: Interaction bindings are current
@@ -493,7 +493,7 @@ jobs:
         run: |
           test -s data/card-data.json
           test_name='gemstone_caverns_begin_game::gemstone_caverns_full_export_retains_luck_counter_mana_contract'
-          cargo test -p phase-engine --test integration "$test_name" -- --exact 2>&1 | tee /tmp/gemstone-export-guard.log
+          cargo test -p phase-engine --test integration_3 "$test_name" -- --exact 2>&1 | tee /tmp/gemstone-export-guard.log
           grep -F 'test result: ok. 1 passed' /tmp/gemstone-export-guard.log
 
       - name: Card export must not mutate the tracked parser vocabulary
