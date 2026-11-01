@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "GraveyardCastPermission gains cast_limit, mana_spend_permission and enters_modifications (also on GraveyardPermissionLatch): an old peer ignores a Single grant's limit and its riders, so it would let a one-cast grant cast again"
+}

@@ -32,10 +32,17 @@ fn validate_deck_choice(field: &str, deck: &DeckChoice) -> Result<(), String> {
 /// Validate seat mutation payloads before reducer apply/deck resolution.
 pub fn guard_seat_mutation(mutation: &SeatMutation) -> Result<(), String> {
     match mutation {
-        SeatMutation::SetKind { seat_index, kind } => {
+        SeatMutation::SetKind {
+            seat_index,
+            kind,
+            expected_kind,
+        } => {
             bound_seat_index(*seat_index)?;
             if let SeatKind::Ai { deck, .. } = kind {
                 validate_deck_choice("mutation.kind.ai.deck", deck)?;
+            }
+            if let Some(SeatKind::Ai { deck, .. }) = expected_kind {
+                validate_deck_choice("mutation.expectedKind.ai.deck", deck)?;
             }
         }
         SeatMutation::Remove { seat_index } => {
@@ -57,6 +64,7 @@ mod tests {
     fn seat_mutation_guard_accepts_valid_ai_named_deck() {
         let mutation = SeatMutation::SetKind {
             seat_index: 1,
+            expected_kind: None,
             kind: SeatKind::Ai {
                 difficulty: AiDifficulty::Medium,
                 deck: DeckChoice::Named("Mono Green".to_string()),
@@ -69,6 +77,7 @@ mod tests {
     fn seat_mutation_guard_rejects_oversized_named_deck() {
         let mutation = SeatMutation::SetKind {
             seat_index: 1,
+            expected_kind: None,
             kind: SeatKind::Ai {
                 difficulty: AiDifficulty::Medium,
                 deck: DeckChoice::Named("x".repeat(MAX_AI_DECK_NAME_LEN + 1)),
@@ -76,6 +85,52 @@ mod tests {
         };
         let err = guard_seat_mutation(&mutation).unwrap_err();
         assert!(err.contains("name"));
+    }
+
+    #[test]
+    fn seat_mutation_guard_bounds_expected_ai_decks() {
+        use engine::starter_decks::DeckData;
+        use lobby_broker::inbound_guard::MAX_MAIN_DECK_ENTRIES;
+
+        for deck in [
+            DeckChoice::Named("x".repeat(MAX_AI_DECK_NAME_LEN)),
+            DeckChoice::DeckList(Box::new(DeckData {
+                main_deck: vec!["Forest".to_string(); MAX_MAIN_DECK_ENTRIES],
+                ..Default::default()
+            })),
+        ] {
+            let mutation = SeatMutation::SetKind {
+                seat_index: 1,
+                kind: SeatKind::WaitingHuman,
+                expected_kind: Some(SeatKind::Ai {
+                    difficulty: AiDifficulty::Medium,
+                    deck,
+                }),
+            };
+            assert!(guard_seat_mutation(&mutation).is_ok());
+        }
+        for deck in [
+            DeckChoice::Named("x".repeat(MAX_AI_DECK_NAME_LEN + 1)),
+            DeckChoice::DeckList(Box::new(DeckData {
+                main_deck: vec!["Forest".to_string(); MAX_MAIN_DECK_ENTRIES + 1],
+                ..Default::default()
+            })),
+        ] {
+            let mutation = SeatMutation::SetKind {
+                seat_index: 1,
+                kind: SeatKind::Ai {
+                    difficulty: AiDifficulty::Easy,
+                    deck: DeckChoice::Named("Mono Green".to_string()),
+                },
+                expected_kind: Some(SeatKind::Ai {
+                    difficulty: AiDifficulty::Medium,
+                    deck,
+                }),
+            };
+            assert!(guard_seat_mutation(&mutation)
+                .unwrap_err()
+                .contains("mutation.expectedKind.ai.deck"));
+        }
     }
 
     #[test]

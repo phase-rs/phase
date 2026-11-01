@@ -161,7 +161,7 @@ pub(crate) fn handle_priority_pass_with_limit(
                     turns::AdvancePhaseOnce::Deferred => {
                         return deferred_transition_outcome(state);
                     }
-                    turns::AdvancePhaseOnce::Entry(_) | turns::AdvancePhaseOnce::Skipped => {}
+                    turns::AdvancePhaseOnce::Entry(_) => {}
                 }
                 let (waiting_for, transition_deferred) =
                     turns::auto_advance_reporting_deferral(state, events);

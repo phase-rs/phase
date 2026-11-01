@@ -118,7 +118,7 @@ export const TARGET_NOUN_SLUG: Record<TargetObjectCategory, TargetNounSlug> = {
 };
 
 export function TargetingOverlay() {
-  const { t } = useTranslation("game");
+  const { t } = useTranslation(["game", "common"]);
   const canActForWaitingState = useCanActForWaitingState();
   const localPlayerId = usePlayerId();
   const waitingFor = useGameStore((s) => s.waitingFor);

@@ -860,6 +860,11 @@ async function ensureDraftWasm(): Promise<typeof DraftWasm> {
 export class DraftEngineOperationLease {
   constructor(private readonly wasm: typeof DraftWasm) {}
 
+  /** Opt the draft bots in or out of the built-in draft-guide pick enhancements. */
+  setPickEnhancements(enabled: boolean): void {
+    this.wasm.set_draft_pick_enhancements(enabled);
+  }
+
   initialize(setPoolJson: string, difficulty: number, seed: number): DraftPlayerView {
     return this.wasm.start_quick_draft(setPoolJson, difficulty, seed) as DraftPlayerView;
   }
