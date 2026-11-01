@@ -347,6 +347,7 @@ mod mimeoplasm_interactive_exile;
 mod minimus_containment_treasure_grant;
 mod mirror_march_copy_token_exile;
 mod mirror_strike_redirect;
+mod mistcaller_enter_wasnt_cast_exile;
 mod mizzixs_mastery;
 mod modal_enters_becomes_choice;
 mod modal_mode_labels;
