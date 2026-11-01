@@ -18,11 +18,17 @@ use crate::game::game_object::GameObject;
 pub(crate) const PROTECTION_REPLACEMENT_SOURCE_BASE: u64 = u64::MAX - 16;
 pub(crate) const PROTECTION_REPLACEMENT_SOURCE_COUNT: u64 = 9;
 
-impl ObjectId {
+/// The protection virtual-candidate decoding of an [`ObjectId`], defined here
+/// beside the engine-owned source range it reads.
+pub(crate) trait ProtectionReplacementSourceExt {
     /// CR 616.1 (Matt R10-F1): the quality-variant discriminant when `self`
-    /// is a protection virtual-candidate source, else `None`. Checked
-    /// arithmetic throughout — never wraps, never truncates.
-    pub(crate) fn protection_source_discriminant(self) -> Option<u8> {
+    /// is a protection virtual-candidate source, else `None`.
+    fn protection_source_discriminant(self) -> Option<u8>;
+}
+
+impl ProtectionReplacementSourceExt for ObjectId {
+    /// Checked arithmetic throughout — never wraps, never truncates.
+    fn protection_source_discriminant(self) -> Option<u8> {
         let offset = self.0.checked_sub(PROTECTION_REPLACEMENT_SOURCE_BASE)?;
         if offset >= PROTECTION_REPLACEMENT_SOURCE_COUNT {
             return None;

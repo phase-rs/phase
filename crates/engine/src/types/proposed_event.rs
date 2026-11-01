@@ -1,18 +1,17 @@
 use std::collections::HashSet;
-use std::sync::Arc;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::game::game_object::{AttachTarget, DisplayIdentity};
 
 use super::counter::CounterType;
-use super::definitions::{Definitions, ReplacementIdentity};
+use super::definitions::ReplacementIdentity;
 
 use super::ability::{
     ContinuousModification, CopiableValues, DieRollIgnoreRule, Duration, FaceDownProfile, TargetRef,
 };
 use super::events::EventObjectSnapshot;
-use super::identifiers::{ObjectId, ObjectIncarnationRef};
+use super::identifiers::{ObjectId, ObjectIncarnationRef, ProtectionReplacementSourceExt};
 use super::keywords::{Keyword, MatchedProtectionQuality};
 use super::mana::{ManaType, UnitDecision};
 use super::phase::Phase;
@@ -48,31 +47,6 @@ impl ReplacementId {
 impl ReplacementIdentity for ReplacementId {
     fn registry_index(self) -> Option<usize> {
         self.index_as_usize()
-    }
-}
-
-// Replacement-candidate-identity accessors for `Definitions<T>`. They live
-// here — beside `ReplacementId` in this state module — rather than on
-// `Definitions` in `types/definitions.rs`, and take `impl ReplacementIdentity`
-// rather than `ReplacementId`: `Definitions` is AST-reachable, and a signature
-// there naming this state anchor's item would pull it into the AST closure
-// (layer_boundary_census 5b).
-impl<T: Clone> Definitions<T> {
-    /// Mutable access by replacement-candidate identity. Same contained
-    /// conversion as [`Definitions::get_by_rid`].
-    pub(crate) fn get_mut_by_rid(&mut self, rid: impl ReplacementIdentity) -> Option<&mut T> {
-        rid.registry_index()
-            .and_then(|i| Arc::make_mut(&mut self.0).get_mut(i))
-    }
-}
-
-impl<T> Definitions<T> {
-    /// Read access by replacement-candidate identity. The rid index is `u64`
-    /// on every target (it doubles as the virtual-candidate payload carrier),
-    /// so the conversion is contained: real ordinals resolve, anything wider
-    /// answers `None` exactly as an out-of-range `.get()` does on 64-bit.
-    pub fn get_by_rid(&self, rid: impl ReplacementIdentity) -> Option<&T> {
-        rid.registry_index().and_then(|i| self.0.get(i))
     }
 }
 

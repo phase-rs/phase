@@ -33,7 +33,7 @@ use crate::types::game_state::{
     ReplacementCandidateSummary, ReplacementChoiceKind, ReplacementIndexEntry, ResidentDrainPolicy,
     WaitingFor,
 };
-use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef, ProtectionReplacementSourceExt};
 use crate::types::keywords::{
     MatchedProtectionQuality, ProtectionColorlessness, ProtectionPlayerScope,
 };
