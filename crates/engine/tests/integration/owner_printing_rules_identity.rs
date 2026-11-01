@@ -95,8 +95,11 @@ use std::io::Read;
 const BOGWATER_ORACLE: &str =
     "Whenever this creature or another creature you control enters, you gain 1 life.";
 
-/// Synthetic spell: no printed card is claimed, it only produces the five token entries.
-const TOKEN_FLOOD_ORACLE: &str = "Create five 1/1 green Insect creature tokens.";
+/// Printed card text of Increasing Devotion (MTGJSON, checked 2026-11-01), {3}{W}{W} Sorcery: a
+/// printed instant or sorcery that creates exactly five 1/1 tokens from one resolution when cast
+/// from hand (the graveyard branch creates ten instead, and this test casts it from hand with a
+/// zeroed mana cost).
+const INCREASING_DEVOTION_ORACLE: &str = "Create five 1/1 white Human creature tokens. If this spell was cast from a graveyard, create ten of those tokens instead.\nFlashback {7}{W}{W} (You may cast this card from your graveyard for its flashback cost. Then exile it.)";
 
 const TOKEN_COUNT: usize = 5;
 
@@ -144,7 +147,7 @@ fn bogwater_life_gain_batch_claims_every_gain_at_its_consumer_occurrence() {
     scenario.with_life(P0, 20);
     scenario.add_creature_from_oracle(P0, "Bogwater Lumaret", 2, 2, BOGWATER_ORACLE);
     let spell = scenario
-        .add_spell_to_hand_from_oracle(P0, "Token Flood", true, TOKEN_FLOOD_ORACLE)
+        .add_spell_to_hand_from_oracle(P0, "Increasing Devotion", false, INCREASING_DEVOTION_ORACLE)
         .with_mana_cost(ManaCost::Cost {
             shards: vec![],
             generic: 0,
@@ -159,7 +162,7 @@ fn bogwater_life_gain_batch_claims_every_gain_at_its_consumer_occurrence() {
             targets: vec![],
             payment_mode: CastPaymentMode::Auto,
         })
-        .expect("cast token flood");
+        .expect("cast Increasing Devotion");
     runner
         .act(GameAction::SetAutoPass {
             mode: AutoPassRequest::UntilStackEmpty,
@@ -388,9 +391,15 @@ fn legacy_of(state: &GameState) -> GameState {
 }
 
 /// A morph card in P0's hand and an opposing synthetic source of an unconditional "cast a
-/// spell: pay 2 life" tax (no printed card is claimed), so one action both pays a cost and
-/// conceals the printing. Returns the runner paused at mana payment after the face-down
-/// choice, the morph card and P0's lands.
+/// spell: pay 2 life" additional cost, so one action both pays a cost and conceals the printing.
+/// No printed permanent imposes a life additional cost on every spell: the nearest, Liesa,
+/// Shroud of Dusk (MTGJSON, checked 2026-11-01: "Rather than pay {2} for each previous time
+/// you've cast this spell from the command zone this game, pay 2 life that many times.\nFlying,
+/// lifelink\nWhenever a player casts a spell, they lose 2 life."), only changes how her own
+/// commander recast is paid and otherwise loses 2 life on a triggered ability — a trigger is
+/// paid after the spell is cast and is not refunded or cancelled with it, so it cannot exhibit
+/// the cost-and-cancel interplay this fixture needs. Returns the runner paused at mana payment
+/// after the face-down choice, the morph card and P0's lands.
 fn face_down_under_tax(players: u8, code: &str) -> (GameRunner, ObjectId, Vec<ObjectId>) {
     let mut scenario = if players == 2 {
         GameScenario::new()
@@ -1011,20 +1020,21 @@ fn whole_game_state_projection_omits_every_printing_on_a_real_board() {
 /// Printed card text of Murder (Scryfall, checked 2026-10-24): the board's removal spell.
 const MURDER_ORACLE: &str = "Destroy target creature.";
 
-/// Synthetic observer (no printed card is claimed): it only yields a real battlefield-to-
-/// graveyard record and a dies trigger that waits on the stack carrying that record.
-const DIES_DRAW: &str = "When this creature dies, you draw a card.";
+/// Printed card text of Palace Familiar (MTGJSON, checked 2026-11-01), {1}{U} Bird 1/1: the
+/// observer that yields a real battlefield-to-graveyard record and a dies trigger that waits
+/// on the stack carrying that record (CR 603.10a: it looks back in time to the battlefield).
+const PALACE_FAMILIAR_ORACLE: &str = "Flying\nWhen this creature dies, draw a card.";
 
 type Fields = serde_json::Map<String, Value>;
 
-/// Board B (stamped) or B0 (`None`): P0's "Doomed Bear" dies to Murder through the production
-/// reducer, and the game is left at priority with the bear's dies trigger as the only stack
-/// entry, the trigger carrying the bear's ledger record as its `trigger_event`.
+/// Board B (stamped) or B0 (`None`): P0's "Palace Familiar" dies to Murder through the production
+/// reducer, and the game is left at priority with the familiar's dies trigger as the only stack
+/// entry, the trigger carrying the familiar's ledger record as its `trigger_event`.
 fn dies_trigger_board(stamp_code: Option<&str>) -> (GameState, ObjectId) {
     dies_trigger_board_with_identity(stamp_code, None)
 }
 
-/// `dies_trigger_board`, with the bear also carrying a printed card identity (`printed_ref` and
+/// `dies_trigger_board`, with the familiar also carrying a printed card identity (`printed_ref` and
 /// `base_printed_ref`, the pair a stamped card holds) when `identity` is given. Both are set so a
 /// layer re-derivation before the death cannot clear the identity.
 fn dies_trigger_board_with_identity(
@@ -1035,8 +1045,8 @@ fn dies_trigger_board_with_identity(
     scenario.at_phase(Phase::PreCombatMain);
     scenario.with_library_top(P0, &["Forest"]);
     let bear = scenario
-        .add_creature(P0, "Doomed Bear", 2, 2)
-        .from_oracle_text(DIES_DRAW)
+        .add_creature(P0, "Palace Familiar", 1, 1)
+        .from_oracle_text(PALACE_FAMILIAR_ORACLE)
         .id();
     let murder = scenario
         .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER_ORACLE)
@@ -1051,7 +1061,7 @@ fn dies_trigger_board_with_identity(
             .state_mut()
             .objects
             .get_mut(&bear)
-            .expect("the bear exists");
+            .expect("the familiar exists");
         object.printed_ref = Some(identity.clone());
         object.base_printed_ref = Some(identity);
     }
@@ -1067,7 +1077,7 @@ fn dies_trigger_board_with_identity(
     }
     assert_eq!(
         runner.stack_names(),
-        ["Doomed Bear"],
+        ["Palace Familiar"],
         "reach: only the dies trigger waits"
     );
     assert!(matches!(
@@ -1079,7 +1089,7 @@ fn dies_trigger_board_with_identity(
     let record = trigger_record(&state);
     assert_eq!(
         record.object_id, bear,
-        "reach: the trigger carries the bear"
+        "reach: the trigger carries the familiar"
     );
     assert_eq!(
         context_set_code(record).as_deref(),
@@ -1097,8 +1107,8 @@ fn dies_trigger_board_with_identity(
 #[test]
 fn departed_dies_trigger_row_keeps_its_latched_owner_art() {
     let identity = PrintedCardRef {
-        oracle_id: "oracle-doomed-bear".to_string(),
-        face_name: "Doomed Bear".to_string(),
+        oracle_id: "oracle-palace-familiar".to_string(),
+        face_name: "Palace Familiar".to_string(),
     };
     let (state, bear) = dies_trigger_board_with_identity(Some("SPAA"), Some(identity.clone()));
 
@@ -1120,7 +1130,7 @@ fn departed_dies_trigger_row_keeps_its_latched_owner_art() {
         matches!(context.source_read(&state), TriggerSourceRead::Latched(_)),
         "reach: the departed source is read from its latched context"
     );
-    assert_eq!(context.lki.name, "Doomed Bear");
+    assert_eq!(context.lki.name, "Palace Familiar");
     assert_eq!(
         context.printing.get().as_ref().map(|p| p.set_code.as_str()),
         Some("SPAA")
@@ -1137,7 +1147,7 @@ fn departed_dies_trigger_row_keeps_its_latched_owner_art() {
     for viewer in [Some(P0), Some(P1), None] {
         let envelope = client_envelope(&state, viewer);
         let row = &envelope["derived"]["stack_entry_details"][entry.id.0.to_string()];
-        assert_eq!(row["source_name"], "Doomed Bear", "{viewer:?}: {row}");
+        assert_eq!(row["source_name"], "Palace Familiar", "{viewer:?}: {row}");
         assert_eq!(row["printing"]["set_code"], "SPAA", "{viewer:?}: {row}");
         assert_eq!(
             row["printed_ref"],
@@ -1156,7 +1166,7 @@ fn departed_dies_trigger_row_keeps_its_latched_owner_art() {
     for viewer in [Some(P0), Some(P1), None] {
         let envelope = client_envelope(&state, viewer);
         let row = &envelope["derived"]["stack_entry_details"][entry.id.0.to_string()];
-        assert_eq!(row["source_name"], "Doomed Bear", "{viewer:?}: {row}");
+        assert_eq!(row["source_name"], "Palace Familiar", "{viewer:?}: {row}");
         assert!(row.get("printing").is_none(), "{viewer:?}: {row}");
         assert!(row.get("printed_ref").is_none(), "{viewer:?}: {row}");
     }
@@ -1310,10 +1320,10 @@ fn live_record_paths(payload: &Value, object: Option<ObjectId>) -> Vec<Vec<Strin
     found
 }
 
-/// The bear's one live record (the helper asserts the count).
+/// The familiar's one live record (the helper asserts the count).
 fn bear_live_record_path(payload: &Value, bear: ObjectId) -> Vec<String> {
     let mut paths = live_record_paths(payload, Some(bear));
-    assert_eq!(paths.len(), 1, "reach: the bear has one live record");
+    assert_eq!(paths.len(), 1, "reach: the familiar has one live record");
     paths.remove(0)
 }
 
@@ -1328,7 +1338,7 @@ fn bear_row_index(payload: &Value, bear: ObjectId) -> usize {
         .expect("the ledger is an array")
         .iter()
         .position(|row| row["object_id"].as_u64() == Some(bear.0))
-        .expect("the ledger holds the bear's row")
+        .expect("the ledger holds the familiar's row")
 }
 
 fn row_path(row: usize) -> Vec<String> {
@@ -1375,7 +1385,7 @@ fn append_ledger_twin(payload: &mut Value, row: usize, edit: impl FnOnce(&mut Fi
     ledger.len() - 1
 }
 
-/// Copy the bear's one live event into `deferred_entry_events` (a second live carrier) and
+/// Copy the familiar's one live event into `deferred_entry_events` (a second live carrier) and
 /// return the paths of the original record and of the copy's record.
 fn duplicate_live_record_into_deferred_entry_events(
     payload: &mut Value,
@@ -1400,7 +1410,7 @@ fn duplicate_live_record_into_deferred_entry_events(
     (original, copy)
 }
 
-/// A board and its two persisted forms, with the bear's ledger row.
+/// A board and its two persisted forms, with the familiar's ledger row.
 fn bear_board(
     stamp_code: Option<&str>,
 ) -> (GameState, ObjectId, usize, [(&'static str, Value); 2]) {
@@ -1422,7 +1432,7 @@ fn assert_bound(reloaded: &GameState, turn: u32, row: usize, context: &str) {
     assert_eq!(
         stamps(trigger_record(reloaded)),
         (turn, row),
-        "{context}: the trigger's record names the bear's ledger occurrence"
+        "{context}: the trigger's record names the familiar's ledger occurrence"
     );
 }
 
@@ -1595,7 +1605,7 @@ fn a_printing_never_chooses_between_rules_identical_occurrences() {
             "{label} (ii): the twin is present with its printing"
         );
 
-        // (iii) Two carriers of the bear's record, each stamped to a different row of the
+        // (iii) Two carriers of the familiar's record, each stamped to a different row of the
         // printing-only pair, keep their own stamps.
         let both = reload_edited(&form, |payload| {
             with_printing_twin(payload);

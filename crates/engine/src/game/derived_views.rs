@@ -3240,6 +3240,14 @@ mod tests {
         })
     }
 
+    /// A synthetic emblem row fixture. No printed emblem carries an activated ability or empty
+    /// ability lists; the nearest printed emblem shape is Daretti, Scrap Savant's [−10] emblem
+    /// (MTGJSON, checked 2026-11-01: "You get an emblem with \"Whenever an artifact is put into
+    /// your graveyard from the battlefield, return that card to the battlefield at the beginning
+    /// of the next end step.\""), whose emblem is triggered. These tests exercise only a stack
+    /// row's source authority — the display-only printing captured from the creator — so the
+    /// fixture grants an empty emblem and names its source "Creator" rather than impersonating a
+    /// printed card.
     fn emblem_row_fixture() -> (GameState, ObjectId) {
         let mut state = GameState::new_two_player(42);
         let id = crate::game::effects::create_emblem::grant_emblem(

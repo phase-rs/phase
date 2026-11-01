@@ -169,7 +169,14 @@ fn emblem_stack_owner_printing_activated_and_name_only_provenance() {
             .get_mut(&emblem)
             .unwrap()
             .emblem_source = Some(engine::game::game_object::EmblemSource {
-            // Name-only provenance models format-created Momir, not a deck card.
+            // Name-only provenance models format-created Momir, not a deck card: the name
+            // mirrors production `MOMIR_EMBLEM_SOURCE_NAME`. The printed command-zone
+            // activated ability is Momir Vig, Simic Visionary Avatar's (Vanguard, MTGJSON
+            // checked 2026-11-01): "{X}, Discard a card: Create a token that's a copy of a
+            // creature card with mana value X chosen at random. Activate only as a sorcery
+            // and only once each turn." Its {X} + discard cost and random choice are
+            // unrelated to what this test exercises (the activation's stack row and captured
+            // printing), so the harness grants a costless stand-in under the same name.
             name: "Momir Vig, Simic Visionary".into(),
             printed_ref: None,
             printing: DisplayOnly::new(pair.clone()),
@@ -450,42 +457,60 @@ fn emblem_stack_owner_printing_engine_group_ignores_captured_pair() {
     }
 }
 
+/// Printed card text of Daretti, Scrap Savant (MTGJSON, checked 2026-11-01), {3}{R}
+/// Legendary Planeswalker — Daretti. Its [−10] emblem is the printed delayed-return emblem
+/// this test drives through the production activation and emblem-resolution path.
+const DARETTI: &str = "[+2]: Discard up to two cards, then draw that many cards.\n[−2]: Sacrifice an artifact. If you do, return target artifact card from your graveyard to the battlefield.\n[−10]: You get an emblem with \"Whenever an artifact is put into your graveyard from the battlefield, return that card to the battlefield at the beginning of the next end step.\"\nDaretti, Scrap Savant can be your commander.";
+
+/// Printed card text of Shatter (MTGJSON, checked 2026-11-01), {1}{R} Instant: the removal
+/// that puts an owned artifact into its owner's graveyard.
+const SHATTER: &str = "Destroy target artifact.";
+
 #[test]
 fn emblem_stack_owner_printing_delayed_trigger_uses_emblem_source() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PostCombatMain);
+    let daretti = scenario
+        .add_planeswalker_from_oracle(P0, "Daretti, Scrap Savant", "Daretti", 10, DARETTI)
+        .id();
+    let relic = scenario
+        .add_artifact_from_oracle(P0, "Relic Alpha", "")
+        .id();
+    let shatter = scenario
+        .add_spell_to_hand_from_oracle(P0, "Shatter", true, SHATTER)
+        .id();
     let mut runner = scenario.build();
-    let emblem = engine::game::effects::create_emblem::grant_emblem(
-        runner.state_mut(),
-        P0,
-        vec![],
-        vec![],
-        vec![command_activation(Effect::CreateDelayedTrigger {
-            condition: engine::types::ability::DelayedTriggerCondition::AtNextPhase {
-                phase: Phase::End,
-            },
-            effect: Box::new(AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::GainLife {
-                    amount: QuantityExpr::Fixed { value: 2 },
-                    player: TargetFilter::Controller,
-                },
-            )),
-            uses_tracked_set: false,
-        })],
+    {
+        let source = runner.state_mut().objects.get_mut(&daretti).unwrap();
+        source.printing = DisplayOnly::new(Some(printing()));
+        source.base_printing = DisplayOnly::new(Some(printing()));
+    }
+    let index = runner.state().objects[&daretti]
+        .abilities
+        .iter()
+        .position(|ability| matches!(*ability.effect, Effect::CreateEmblem { .. }))
+        .expect("Daretti has an emblem-creating loyalty ability");
+    runner.activate(daretti, index).resolve();
+    let emblem = *runner
+        .state()
+        .command_zone
+        .last()
+        .expect("the -10 ability created an emblem");
+    assert_eq!(
+        runner.state().objects[&emblem]
+            .emblem_source
+            .as_ref()
+            .expect("the emblem captured its creator")
+            .printing
+            .get(),
+        &Some(printing())
     );
-    runner
-        .state_mut()
-        .objects
-        .get_mut(&emblem)
-        .unwrap()
-        .emblem_source = Some(engine::game::game_object::EmblemSource {
-        name: "Creator".into(),
-        printed_ref: None,
-        printing: DisplayOnly::new(Some(printing())),
-    });
-    runner.activate(emblem, 0).resolve();
-    assert_eq!(runner.state().delayed_triggers.len(), 1);
+
+    // Kill P0's own artifact; the emblem's triggered ability then resolves into the
+    // delayed return at the next end step.
+    let outcome = runner.cast(shatter).target_object(relic).commit().resolve();
+    assert_eq!(outcome.state().objects[&relic].zone, Zone::Graveyard);
+    assert_eq!(outcome.state().delayed_triggers.len(), 1);
     runner.advance_to_end_step();
     let entry = runner
         .state()
@@ -499,6 +524,6 @@ fn emblem_stack_owner_printing_delayed_trigger_uses_emblem_source() {
     ));
     assert_projected_printing(runner.state(), emblem, entry.id, Some(printing()));
     runner.resolve_top();
-    assert_eq!(runner.life(P0), 22);
+    assert_eq!(runner.state().objects[&relic].zone, Zone::Battlefield);
     assert!(runner.state().stack.is_empty());
 }

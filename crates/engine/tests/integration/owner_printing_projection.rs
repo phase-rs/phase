@@ -61,7 +61,7 @@ use engine::types::game_state::{
 };
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::keywords::Keyword;
-use engine::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::statics::{AdditionalCostTaxAction, StaticMode};
@@ -402,6 +402,17 @@ fn projected_object(state_form: &Value, id: ObjectId) -> &Value {
 /// The capture routes that copy the live object's printing are the trigger-source context, the
 /// emblem source and the library search view; last-known information carries no printing. The
 /// same routes give nothing for the card once it is face down.
+///
+/// "Source Walker" is a planeswalker body built by hand, NOT a printed card: the test needs a
+/// planeswalker that creates a genuinely empty emblem (`statics: vec![], triggers: vec![]`) so
+/// the emblem source's printing is the only thing observed. The nearest printed emblem creators
+/// both carry real emblem text that would add behavior: **Narset of the Ancient Way** ({1}{U}{R}
+/// {W}, Legendary Planeswalker — Narset, [−6]: You get an emblem with "Whenever you cast a
+/// noncreature spell, this emblem deals 2 damage to any target.") and **Daretti, Scrap Savant**
+/// ({3}{R}, Legendary Planeswalker — Daretti, [−10]: You get an emblem with "Whenever an
+/// artifact is put into your graveyard from the battlefield, return that card to the battlefield
+/// at the beginning of the next end step."); each also needs a loyalty payment through its own
+/// ability. So the empty emblem is created directly from this hand-built source.
 #[test]
 fn captures_take_the_live_printing() {
     let mut s = scenario();
@@ -881,22 +892,48 @@ fn lki_and_side_tables_follow_the_name() {
 // the stack row derives its printing from the filtered state
 // ---------------------------------------------------------------------------
 
-/// A creature card with morph {4} and mana value 5 in `player`'s hand (the face-down cast
-/// costs {3}).
-fn add_morph(s: &mut GameScenario, player: PlayerId, name: &str) -> ObjectId {
-    s.add_creature_to_hand(player, name, 4, 5)
-        .with_keyword(Keyword::Morph(ManaCost::generic(4).into()))
-        .with_mana_cost(ManaCost::generic(5))
+/// The printed morph card every morph fixture in this file is: **Glacial Stalker**
+/// ({5}{U}, Creature — Elemental, 4/5) — "Morph {4}{U} (You may cast this card face down as a
+/// 2/2 creature for {3}. Turn it face up any time for its morph cost.)", verbatim from
+/// AtomicCards.json. The face-down cast always costs {3}; the printed cost is {5}{U} and the
+/// morph cost is {4}{U}, so a turn-up needs one blue mana in the pool. Copies of this card are
+/// told apart by object id, as two copies in a deck are.
+const MORPH_NAME: &str = "Glacial Stalker";
+
+fn morph_cost() -> ManaCost {
+    ManaCost::Cost {
+        shards: vec![ManaCostShard::Blue],
+        generic: 5,
+    }
+}
+
+fn morph_turn_up_cost() -> ManaCost {
+    ManaCost::Cost {
+        shards: vec![ManaCostShard::Blue],
+        generic: 4,
+    }
+}
+
+/// Glacial Stalker in `player`'s hand (the face-down cast costs {3}).
+fn add_morph(s: &mut GameScenario, player: PlayerId) -> ObjectId {
+    s.add_creature_to_hand(player, MORPH_NAME, 4, 5)
+        .with_subtypes(vec!["Elemental"])
+        .with_keyword(Keyword::Morph(morph_turn_up_cost().into()))
+        .with_mana_cost(morph_cost())
         .id()
+}
+
+fn fund_unit(board: &mut Board, player: PlayerId, mana: ManaType) {
+    let unit = ManaUnit::new(mana, ObjectId(0), false, vec![]);
+    board
+        .state_mut()
+        .add_mana_to_pool(player, unit)
+        .expect("the player has a mana pool");
 }
 
 fn fund(board: &mut Board, player: PlayerId, amount: usize) {
     for _ in 0..amount {
-        let unit = ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]);
-        board
-            .state_mut()
-            .add_mana_to_pool(player, unit)
-            .expect("the player has a mana pool");
+        fund_unit(board, player, ManaType::Colorless);
     }
 }
 
@@ -979,7 +1016,7 @@ fn stack_row_of_a_public_spell_carries_its_printing() {
 #[test]
 fn stack_row_of_a_face_down_cast_has_no_printing_and_ignores_cached_lki() {
     let mut s = scenario();
-    let trap = add_morph(&mut s, P0, "Trap Beast");
+    let trap = add_morph(&mut s, P0);
     let mut board = Board::new(s);
     board.stamp(trap, "TRAP");
     // A face-up incarnation on the battlefield first, so its last-known information is cached
@@ -988,13 +1025,16 @@ fn stack_row_of_a_face_down_cast_has_no_printing_and_ignores_cached_lki() {
     board.move_to(trap, Zone::Hand);
     assert_eq!(
         board.state().lki_cache[&trap].name,
-        "Trap Beast",
+        MORPH_NAME,
         "reach: the earlier incarnation's last-known information is cached"
     );
     assert!(json(&board.state().lki_cache[&trap])
         .get("printing")
         .is_none());
     fund(&mut board, P0, 6);
+    // The printed {5}{U} stays affordable, so the face-down {3} is offered as a choice rather
+    // than auto-selected (CR 601.2b + CR 702.37c).
+    fund_unit(&mut board, P0, ManaType::Blue);
     cast_face_down(&mut board, trap);
     let object = &board.state().objects[&trap];
     assert_eq!(
@@ -1006,7 +1046,7 @@ fn stack_row_of_a_face_down_cast_has_no_printing_and_ignores_cached_lki() {
 
     let p0 = stack_row(&board, Viewer::Seat(P0), trap);
     assert_eq!(
-        p0["source_name"], "Trap Beast",
+        p0["source_name"], MORPH_NAME,
         "the controller sees the real name"
     );
     assert_eq!(row_set_code(&p0), None);
@@ -1023,7 +1063,7 @@ fn stack_row_of_a_face_down_cast_has_no_printing_and_ignores_cached_lki() {
     // carries no printing.
     let p1 = filter_state_for_viewer(board.state(), P1);
     assert!(json(&p1.lki_cache[&trap]).get("printing").is_none());
-    assert_eq!(p1.lki_cache[&trap].name, "Trap Beast");
+    assert_eq!(p1.lki_cache[&trap].name, MORPH_NAME);
     board.assert_exposure_rule("face-down cast row");
 }
 
@@ -1031,6 +1071,14 @@ fn stack_row_of_a_face_down_cast_has_no_printing_and_ignores_cached_lki() {
 /// carries the context's printing; a context-free (delayed) entry reads the live, filtered
 /// source object, so the opponent loses the printing once that object is hidden.
 /// (Hand-built stack entries: the context and the context-free shapes are pushed directly.)
+///
+/// "Trigger Source" and "Delayed Source" are NOT printed cards: each is a textless 1/1 body
+/// that only has to carry a source context, and the pushed abilities are `Effect::NoOp` rows
+/// that never resolve any card's text. The nearest printed triggered sources would be **Soul
+/// Warden** ({W}, Creature — Human Cleric, 1/1 — "Whenever another creature enters, you gain 1
+/// life.") and **Palace Familiar** ({1}{U}, Creature — Bird, 1/1 — "Flying\nWhen this creature
+/// dies, draw a card."); either would add trigger matching and a real effect to a test that is
+/// about which printing a latched row discloses, so the inert rows stand.
 #[test]
 fn triggered_stack_rows_follow_their_latched_authority() {
     let mut s = scenario();
@@ -1129,6 +1177,15 @@ fn triggered_stack_rows_follow_their_latched_authority() {
 /// (the ability stores the source's context as it is now), the source is optionally merged
 /// under a mutating card, and the delayed ability then fires through the production check.
 /// Returns the board and the fired stack entry.
+///
+/// "Delayed Host" is a textless 2/2 body, NOT a printed card: the delayed trigger is built by
+/// hand, so no card's text is exercised. The nearest printed card of this shape is **Kiki-Jiki,
+/// Mirror Breaker** ({2}{R}{R}{R}, Legendary Creature — Goblin Shaman, 2/2 — "Haste\n{T}:
+/// Create a token that's a copy of target nonlegendary creature you control, except it has haste.
+/// Sacrifice it at the beginning of the next end step."); it does not fit because its delayed
+/// trigger needs a tapped activated ability, creates and later sacrifices a token copy, and never
+/// merges its own source under another card — the merge-then-fire sequence is what this test
+/// drives.
 fn fire_delayed_ability_of_host(merge_first: bool) -> (Board, ObjectId) {
     let mut s = scenario();
     let host = s.add_creature(P0, "Delayed Host", 2, 2).id();
@@ -1226,6 +1283,9 @@ fn delayed_row_pairs_its_name_and_printing_from_one_authority() {
 #[test]
 fn stack_row_of_an_activated_ability_carries_the_live_printing() {
     let mut s = scenario();
+    // Synthetic source with a costless activated ability: the test is about the printing on the
+    // stack row, not the ability. The nearest printed creature, Merfolk Looter ("{T}: Draw a
+    // card, then discard a card."), would add a {T} cost and a discard choice to the flow.
     let source = s
         .add_creature(P0, "Ability Source", 1, 1)
         .with_ability_definition(AbilityDefinition::new(
@@ -1308,6 +1368,9 @@ fn stack_row_of_a_ceased_spell_copy_token_discloses_no_printing() {
     let mut s = scenario();
     let copier = s.add_creature(P0, "Copier", 1, 1).id();
     let spell = s
+        // Synthetic spell with a costless activated ability (the nearest printed creature,
+        // Merfolk Looter, adds a {T} cost and a discard choice): the test follows the spell's
+        // printing into its copy, not the ability.
         .add_creature_to_hand(P0, "Copied Beast", 2, 2)
         .with_mana_cost(ManaCost::generic(1))
         .with_ability_definition(AbilityDefinition::new(
@@ -1413,6 +1476,14 @@ fn stack_row_of_a_ceased_spell_copy_token_discloses_no_printing() {
 /// activate). No concealment clears a Room's printing, correctly: its artwork is public. Public
 /// nameless sources (Rooms, copies of a face-down permanent) pair an empty rules name with a
 /// public printing, and the derived row's empty-name guard is what keeps them apart.
+///
+/// "Test Room" is a textless 0/0 body carrying only the Room subtype, NOT a printed card: every
+/// printed Room is an `Enchantment — Room` with door text, and the fixture must contribute no
+/// rules text because a locked door has none (CR 709.5). The nearest, **Bottomless Pool //
+/// Locker Room** ({U} / {4}{U}, Enchantment — Room — front: "When you unlock this door, return up
+/// to one target creature to its owner's hand.\n(You may cast either half. That door unlocks on
+/// the battlefield. As a sorcery, you may pay the mana cost of a locked door to unlock it.)"),
+/// would need a two-door shared type line and an unlock cost that the test never uses.
 #[test]
 fn stack_row_of_a_nameless_public_room_has_no_printing() {
     let mut s = scenario();
@@ -1544,8 +1615,8 @@ fn raw_event_channel_forwards_printing_only_beside_its_name() {
     let drawn = s.add_card_to_library_top(P0, "Drawn Card");
     let foretold = s.add_card_to_hand(P0, "Foretold Card");
     let face_up_attacker = s.add_creature(P0, "Face Up Attacker", 2, 2).id();
-    let morph_attacker = add_morph(&mut s, P0, "Face Down Attacker");
-    let entering = add_morph(&mut s, P0, "Entering Secret");
+    let morph_attacker = add_morph(&mut s, P0);
+    let entering = add_morph(&mut s, P0);
     let walker = s.add_creature(P0, "Searcher", 1, 1).id();
     let mut board = Board::new(s);
     for (id, tag) in [
@@ -1647,7 +1718,7 @@ fn raw_event_channel_forwards_printing_only_beside_its_name() {
         .iter()
         .find(|record| record.object_id == entering)
         .expect("the entry was journaled");
-    assert_eq!(record.name, "Entering Secret");
+    assert_eq!(record.name, MORPH_NAME);
     let context = record
         .trigger_source_context
         .as_ref()
@@ -1737,8 +1808,8 @@ fn whole_projection_sentinel_census() {
     let public = s.add_creature(P0, "Public Card", 2, 2).id();
     let hand = s.add_card_to_hand(P0, "Hand Card");
     let library = s.add_card_to_library_top(P0, "Library Card");
-    let down_permanent = add_morph(&mut s, P0, "Face Down Permanent");
-    let down_spell = add_morph(&mut s, P0, "Face Down Spell");
+    let down_permanent = add_morph(&mut s, P0);
+    let down_spell = add_morph(&mut s, P0);
     let bounced = s.add_creature(P0, "Bounced Card", 1, 1).id();
     let twin_a = s.add_creature(P0, "Twin", 1, 1).id();
     let twin_b = s.add_creature(P1, "Twin", 1, 1).id();
@@ -1758,6 +1829,8 @@ fn whole_projection_sentinel_census() {
         board.stamp(id, tag);
     }
     fund(&mut board, P0, 6);
+    // Glacial Stalker's printed {5}{U} stays affordable, so the face-down {3} is a choice.
+    fund_unit(&mut board, P0, ManaType::Blue);
     board.play_face_down(P0, down_permanent);
     cast_face_down(&mut board, down_spell);
     board.move_to(bounced, Zone::Hand);
@@ -1866,7 +1939,7 @@ fn assert_face_down_and_stamped_before(board: &Board, id: ObjectId, tag: &str) {
 #[test]
 fn play_face_down_conceals_the_printing() {
     let mut s = scenario();
-    let hand = add_morph(&mut s, P0, "Hand Secret");
+    let hand = add_morph(&mut s, P0);
     let public = s.add_creature(P0, "Public Bear", 2, 2).id();
     let mut board = Board::new(s);
     board.stamp(hand, "HSEC");
@@ -1879,7 +1952,7 @@ fn play_face_down_conceals_the_printing() {
             .back_face
             .as_ref()
             .map(|face| face.name.as_str()),
-        Some("Hand Secret"),
+        Some(MORPH_NAME),
         "reach: the real face is stashed"
     );
     board.assert_nowhere("HSEC", "after play_face_down");
@@ -1895,12 +1968,14 @@ fn play_face_down_conceals_the_printing() {
 #[test]
 fn face_down_cast_conceals_the_printing_through_turn_up_and_departure() {
     let mut s = scenario();
-    let morph = add_morph(&mut s, P0, "Secret Beast");
+    let morph = add_morph(&mut s, P0);
     let public = s.add_creature(P0, "Public Bear", 2, 2).id();
     let mut board = Board::new(s);
     board.stamp(morph, "BEAST");
     board.stamp(public, "PUBB");
     fund(&mut board, P0, 9);
+    // Glacial Stalker's morph cost is {4}{U}: the turn-up below needs one blue mana.
+    fund_unit(&mut board, P0, ManaType::Blue);
     assert_face_down_and_stamped_before(&board, morph, "BEAST");
     cast_face_down(&mut board, morph);
     assert_eq!(board.state().objects[&morph].zone, Zone::Stack);
@@ -1923,7 +1998,7 @@ fn face_down_cast_conceals_the_printing_through_turn_up_and_departure() {
     });
     let object = &board.state().objects[&morph];
     assert!(!object.face_down, "reach: turned face up");
-    assert_eq!(object.name, "Secret Beast", "turned up with its real name");
+    assert_eq!(object.name, MORPH_NAME, "turned up with its real name");
     assert!(live_set_code(board.state(), morph).is_none());
     board.assert_nowhere("BEAST", "after the turn-up");
     board.move_to(morph, Zone::Graveyard);
@@ -1939,10 +2014,12 @@ fn face_down_cast_conceals_the_printing_through_turn_up_and_departure() {
 #[test]
 fn cancelled_face_down_cast_returns_the_card_to_hand_without_resurrecting_a_printing() {
     let mut s = scenario();
-    let morph = add_morph(&mut s, P0, "Secret Beast");
+    let morph = add_morph(&mut s, P0);
     let mut board = Board::new(s);
     board.stamp(morph, "CNCL");
     fund(&mut board, P0, 5);
+    // Glacial Stalker's printed {5}{U} stays affordable, so the face-down {3} is a choice.
+    fund_unit(&mut board, P0, ManaType::Blue);
     assert_face_down_and_stamped_before(&board, morph, "CNCL");
     cast(&mut board, morph, CastPaymentMode::Manual);
     board.act(GameAction::ChooseAlternativeCast {
@@ -1961,10 +2038,7 @@ fn cancelled_face_down_cast_returns_the_card_to_hand_without_resurrecting_a_prin
     let object = &board.state().objects[&morph];
     assert_eq!(object.zone, Zone::Hand, "reach: back in hand");
     assert!(!object.face_down, "reach: face up again");
-    assert_eq!(
-        object.name, "Secret Beast",
-        "reach: the real name is restored"
-    );
+    assert_eq!(object.name, MORPH_NAME, "reach: the real name is restored");
     // Recorded outcome: the cancel restored name and face, and the printing stays gone (the
     // reversal records no printing edit, and the concealment happened inside the cast).
     assert_eq!(
@@ -1999,11 +2073,20 @@ fn assert_printing_in_owner_forms_only(board: &Board, tag: &str, step: &str) {
     }
 }
 
-/// A morph card in P0's hand and an opposing source of an unconditional "cast a spell: pay 2
+/// Glacial Stalker in P0's hand and an opposing source of an unconditional "cast a spell: pay 2
 /// life" tax, whose payment is made by the very action that turns the card face down.
+///
+/// The tax source is NO PRINTED CARD: no printed permanent imposes a life additional cost on
+/// every spell. The nearest, **Liesa, Shroud of Dusk** ({2}{W}{W}{B}, Legendary Creature —
+/// Angel, 5/5 — AtomicCards.json: "Rather than pay {2} for each previous time you've cast this
+/// spell from the command zone this game, pay 2 life that many times.\nFlying, lifelink\nWhenever
+/// a player casts a spell, they lose 2 life."), does not fit: her life payment only substitutes
+/// for her own commander tax, and her every-spell clause is a trigger that takes the life after
+/// the cast — neither is a cast-time additional cost that the paying action charges and that a
+/// cancelled cast returns. So the static is installed by hand on a plain 1/1 body.
 fn face_down_cast_under_a_life_tax(tag: &str, life: i32) -> (Board, ObjectId) {
     let mut s = scenario();
-    let morph = add_morph(&mut s, P0, "Secret Beast");
+    let morph = add_morph(&mut s, P0);
     let tax = s.add_creature(P1, "Tax Source", 1, 1).id();
     let mut board = Board::new(s);
     board.stamp(morph, tag);
@@ -2025,6 +2108,8 @@ fn face_down_cast_under_a_life_tax(tag: &str, life: i32) -> (Board, ObjectId) {
     }
     engine::game::layers::flush_layers(board.state_mut());
     fund(&mut board, P0, 5);
+    // Glacial Stalker's printed {5}{U} stays affordable, so the face-down {3} is a choice.
+    fund_unit(&mut board, P0, ManaType::Blue);
     board.state_mut().players[0].life = life;
     cast(&mut board, morph, CastPaymentMode::Manual);
     assert!(
@@ -2095,7 +2180,7 @@ fn cancelled_face_down_cast_that_paid_a_cost_with_the_turn_down_restores_the_rec
     let object = &board.state().objects[&morph];
     assert_eq!(object.zone, Zone::Hand, "reach: back in hand");
     assert!(!object.face_down, "reach: face up again");
-    assert_eq!(object.name, "Secret Beast");
+    assert_eq!(object.name, MORPH_NAME);
     assert_eq!(
         board.state().players[0].life,
         20,
@@ -2143,7 +2228,7 @@ fn rejected_face_down_choice_after_the_writer_ran_restores_the_card_as_it_was() 
     let object = &board.state().objects[&morph];
     assert_eq!(object.zone, Zone::Hand);
     assert!(!object.face_down);
-    assert_eq!(object.name, "Secret Beast");
+    assert_eq!(object.name, MORPH_NAME);
     assert_eq!(
         live_set_code(board.state(), morph).as_deref(),
         Some("SLATE"),
@@ -2164,7 +2249,7 @@ fn rejected_face_down_choice_after_the_writer_ran_restores_the_card_as_it_was() 
 #[test]
 fn rejected_face_down_cast_leaves_the_card_as_it_was() {
     let mut s = scenario();
-    let morph = add_morph(&mut s, P0, "Secret Beast");
+    let morph = add_morph(&mut s, P0);
     let mut board = Board::new(s);
     board.stamp(morph, "RJCT");
     fund(&mut board, P0, 2);
@@ -2182,7 +2267,7 @@ fn rejected_face_down_cast_leaves_the_card_as_it_was() {
     let object = &board.state().objects[&morph];
     assert_eq!(object.zone, Zone::Hand);
     assert!(!object.face_down);
-    assert_eq!(object.name, "Secret Beast");
+    assert_eq!(object.name, MORPH_NAME);
     assert_eq!(
         live_set_code(board.state(), morph).as_deref(),
         Some("SRJCT"),
@@ -2196,13 +2281,19 @@ fn rejected_face_down_cast_leaves_the_card_as_it_was() {
     board.assert_follows_name("after the rejected cast");
 }
 
-/// A face-down entry the zone-change pipeline refuses (CR 101.2: the "can't" effect wins; Grafdigger's Cage class)
+/// A face-down entry the zone-change pipeline refuses (CR 101.2: the "can't" effect wins)
 /// rolls back the flag only; the card stays in its zone and has already forgotten its printing.
+///
+/// The refusing static is **Grafdigger's Cage** ({1}, Artifact — AtomicCards.json: "Creature
+/// cards in graveyards and libraries can't enter the battlefield.\nPlayers can't cast spells
+/// from graveyards or libraries."). The fixture is that card's first line only, installed as a
+/// static definition by hand rather than parsed from the Oracle text; the body is a plain
+/// permanent that carries it (nothing here needs the printed artifact type).
 #[test]
 fn prevented_face_down_entry_leaves_the_card_without_a_printing() {
     let mut s = scenario();
     let source = s.add_creature(P0, "Manifest Source", 1, 1).id();
-    let cage = s.add_creature(P0, "Cage", 0, 0).id();
+    let cage = s.add_creature(P0, "Grafdigger's Cage", 0, 0).id();
     let caged = s.add_card_to_library_top(P0, "Caged Creature");
     let mut board = Board::new(s);
     board.stamp(caged, "CAGD");
@@ -2303,7 +2394,7 @@ fn turn_face_down_effect_conceals_the_printing() {
 #[test]
 fn face_down_permanent_owned_and_controlled_by_different_players() {
     let mut s = scenario();
-    let stolen = add_morph(&mut s, P0, "Stolen Secret");
+    let stolen = add_morph(&mut s, P0);
     let mut board = Board::new(s);
     board.stamp(stolen, "STLN");
     board.play_face_down(P0, stolen);
@@ -2317,7 +2408,7 @@ fn face_down_permanent_owned_and_controlled_by_different_players() {
     let p1 = board.forms(Viewer::Seat(P1));
     assert_eq!(
         projected_object(&p1[0].1, stolen)["name"],
-        "Stolen Secret",
+        MORPH_NAME,
         "the controller sees the real name (CR 708.5)"
     );
     let p0 = board.forms(Viewer::Seat(P0));
@@ -2426,7 +2517,7 @@ fn assert_absent_from_state_forms(board: &Board, tag: &str, step: &str) {
 #[test]
 fn mutate_over_a_face_down_creature_conceals_every_component() {
     let mut s = scenario();
-    let buried = add_morph(&mut s, P0, "Buried Secret");
+    let buried = add_morph(&mut s, P0);
     let gem = add_mutator(&mut s, "Test Mutator");
     // A public non-creature card: a positive control that cannot be a mutate target.
     let forest = s.add_basic_land(P0, ManaColor::Green);
@@ -2595,9 +2686,9 @@ struct HiddenBoard {
 
 fn hidden_board() -> HiddenBoard {
     let mut s = scenario();
-    let buried = add_morph(&mut s, P0, "Buried Secret");
+    let buried = add_morph(&mut s, P0);
     let top = s.add_creature_to_hand(P0, "Mutant", 4, 4).id();
-    let lone = add_morph(&mut s, P0, "Lone Secret");
+    let lone = add_morph(&mut s, P0);
     let public = s.add_creature(P0, "Public Bear", 2, 2).id();
     let mut board = Board::new(s);
     board.stamp(buried, "BRID");
@@ -2670,6 +2761,14 @@ impl HiddenBoard {
 /// permanent (a pre-existing rules defect, recorded elsewhere); the stored face it applies
 /// carries no printing. A never-hidden double-faced card transformed the same way keeps its
 /// own printing, beside its back face's name.
+///
+/// "Day Face" / "Night Face" are a textless body pair, NOT a printed card: neither face has
+/// Oracle text or an ability (the textless-vanilla exemption). No printed transform card is
+/// textless; the nearest, **Delver of Secrets // Insectile Aberration** ({U}, Creature — Human
+/// Wizard, 1/1 front: "At the beginning of your upkeep, look at the top card of your library. You
+/// may reveal that card. If an instant or sorcery card is revealed this way, transform this
+/// creature."; back 3/2 "Flying"), would add an upkeep trigger that performs exactly the
+/// transform under test, so the pair stays hand-built.
 #[test]
 fn transform_cannot_write_a_concealed_printing_back() {
     let mut h = hidden_board();
@@ -2724,6 +2823,14 @@ fn transform_cannot_write_a_concealed_printing_back() {
 
 /// The survivor becomes a copy of a flip card and then flips into its stashed face; the
 /// never-hidden flip card flips and keeps its own printing.
+///
+/// "Flip Card" / "Flipped Face" are a textless body pair, NOT a printed card, for the same
+/// reason as the transform pair above. The nearest printed flip card is **Nezumi Graverobber //
+/// Nighteyes the Desecrator** ({1}{B}, Creature — Rat Rogue, 2/1 front: "{1}{B}: Exile target
+/// card from an opponent's graveyard. If no cards are in that graveyard, flip this creature.";
+/// back, Legendary Creature — Rat Wizard, 4/2: "{4}{B}: Put target creature card from a graveyard
+/// onto the battlefield under your control."), which carries an activated ability on each face
+/// that nothing here activates.
 #[test]
 fn become_copy_then_flip_cannot_write_a_concealed_printing_back() {
     let mut h = hidden_board();
