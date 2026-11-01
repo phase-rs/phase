@@ -235,6 +235,7 @@ mod commander_team_formats;
 mod commanders_plate_protection;
 mod companion_special_action;
 mod composite_cost_shared_resources;
+mod compound_ward_cost_pays_every_part;
 mod condition_gates_fail_closed;
 mod conditional_cost_reduction_3223;
 mod conditional_entry_gate_projection;
