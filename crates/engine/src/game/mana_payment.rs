@@ -5102,7 +5102,11 @@ mod tests {
         assert!(state.players[0].mana_pool.is_empty());
 
         // Flag P0 → seeded to the cap for each of the six types; P1 untouched.
-        state.mark_unbounded_loop(state.players[0].id, &INFINITE_MANA_AXES);
+        state.mark_unbounded_loop(
+            state.players[0].id,
+            &INFINITE_MANA_AXES,
+            &INFINITE_MANA_AXES,
+        );
         refill_infinite_mana(&mut state);
         for color in INFINITE_MANA_TYPES {
             let n = state.players[0]
@@ -5211,9 +5215,13 @@ mod tests {
         let p1 = state.players[1].id;
 
         // P0 marked with the six Mana axes → all six colors seeded to the cap.
-        state.mark_unbounded_loop(p0, &INFINITE_MANA_AXES);
+        state.mark_unbounded_loop(p0, &INFINITE_MANA_AXES, &INFINITE_MANA_AXES);
         // P1 marked with ONLY a non-mana axis → must never receive mana.
-        state.mark_unbounded_loop(p1, &[ResourceAxis::TokensCreated]);
+        state.mark_unbounded_loop(
+            p1,
+            &[ResourceAxis::TokensCreated],
+            &[ResourceAxis::TokensCreated],
+        );
 
         refill_infinite_mana(&mut state);
 
@@ -5246,7 +5254,11 @@ mod tests {
         let p0 = state.players[0].id;
 
         // Record ONLY the colorless mana axis (the combo detector's real certificate).
-        state.mark_unbounded_loop(p0, &[ResourceAxis::Mana(ManaType::Colorless)]);
+        state.mark_unbounded_loop(
+            p0,
+            &[ResourceAxis::Mana(ManaType::Colorless)],
+            &[ResourceAxis::Mana(ManaType::Colorless)],
+        );
         refill_infinite_mana(&mut state);
 
         let count_of = |color: ManaType| {
@@ -5288,7 +5300,7 @@ mod tests {
         let mut state = GameState::new_two_player(0);
         let p0 = state.players[0].id;
 
-        state.mark_unbounded_loop(p0, &INFINITE_MANA_AXES);
+        state.mark_unbounded_loop(p0, &INFINITE_MANA_AXES, &INFINITE_MANA_AXES);
         refill_infinite_mana(&mut state);
 
         for color in INFINITE_MANA_TYPES {

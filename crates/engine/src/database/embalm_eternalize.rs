@@ -71,7 +71,7 @@ pub fn synthesize_embalm_eternalize(face: &mut CardFace) {
 /// runtime** (e.g. Cursecloth Wrappings' "target creature card in your graveyard
 /// gains embalm until end of turn. The embalm cost is equal to its mana cost.").
 /// Mirrors `database::synthesis::graveyard_activated_ability_for_keyword` for the
-/// Encore / Scavenge family: the `AddKeyword` continuous-effect seam installs
+/// Unearth / Encore / Scavenge family: the `AddKeyword` continuous-effect seam installs
 /// only the keyword, so the activatable ability must be synthesized on demand.
 /// Returns `None` for any non-Embalm/Eternalize keyword.
 ///

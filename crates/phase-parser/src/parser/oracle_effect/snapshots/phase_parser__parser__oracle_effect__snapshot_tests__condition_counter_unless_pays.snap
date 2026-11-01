@@ -1,0 +1,36 @@
+---
+source: crates/phase-parser/src/parser/oracle_effect/mod.rs
+assertion_line: 29415
+expression: def
+---
+{
+  "kind": "Spell",
+  "effect": {
+    "type": "Counter",
+    "target": {
+      "type": "StackSpell"
+    }
+  },
+  "cost": null,
+  "sub_ability": null,
+  "duration": null,
+  "description": null,
+  "target_prompt": null,
+  "condition": null,
+  "optional_targeting": false,
+  "optional": false,
+  "unless_pay": {
+    "cost": {
+      "type": "Mana",
+      "cost": {
+        "type": "Cost",
+        "shards": [],
+        "generic": 2
+      }
+    },
+    "payer": {
+      "type": "ParentTargetController"
+    }
+  },
+  "forward_result": false
+}

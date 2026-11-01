@@ -1,8 +1,8 @@
 use crate::types::ability::{AggregateFunction, ControllerRef, PlayerRelation, SeatDirection};
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::GameState;
-use crate::types::game_state::LinkedExileSnapshot;
 use crate::types::game_state::StackEntry;
+use crate::types::game_state::{LinkedExileSnapshot, TriggerSourceContext};
 use crate::types::identifiers::ObjectId;
 use crate::types::phase::TurnDirection;
 use crate::types::player::PlayerId;
@@ -396,7 +396,8 @@ pub fn apnap_order_from(
 /// because `TrackedBySource` links are pruned immediately on battlefield exit per
 /// CR 400.7. Outside that look-back path, fall back to the exile-link store's
 /// links of the incarnation this read is made for. The final linked-exile LKI
-/// fallback is incarnation-bounded the same way (CR 400.7).
+/// fallback is incarnation-bounded the same way (CR 400.7). A record with a
+/// trigger source context reads `linked_exile_pile`.
 pub fn linked_exile_cards_for_source(
     state: &GameState,
     source_id: ObjectId,
@@ -408,8 +409,14 @@ pub fn linked_exile_cards_for_source(
         ..
     }) = state.current_trigger_event.as_ref()
     {
-        if *object_id == source_id && !record.linked_exile_snapshot.is_empty() {
-            return record.linked_exile_snapshot.clone();
+        if *object_id == source_id {
+            let linked = match record.trigger_source_context() {
+                Some(source) => linked_exile_pile(state, source),
+                None => record.linked_exile_snapshot.clone(),
+            };
+            if !linked.is_empty() {
+                return linked;
+            }
         }
     }
 
@@ -433,6 +440,35 @@ pub fn linked_exile_cards_for_source(
     crate::game::exile_links::lki_snapshots_for_reader(state, source_id, reader)
         .cloned()
         .collect()
+}
+
+/// CR 607.2a + CR 400.7: The cards linked to a trigger bound to `source`: its
+/// latched snapshot plus the linked-exile LKI recorded for that incarnation
+/// (its departure pile and what it exiled after departing).
+pub fn linked_exile_pile(
+    state: &GameState,
+    source: &TriggerSourceContext,
+) -> Vec<LinkedExileSnapshot> {
+    let bound = source.identity.reference;
+    let mut pile = source.linked_exile_snapshot.clone();
+    // `departed`, not `admits`: an entry whose successor is this incarnation
+    // belongs to an earlier departure, a different object.
+    let later = state
+        .linked_exile_lki
+        .get(&bound.object_id)
+        .into_iter()
+        .flatten()
+        .filter(|lki| lki.departed == bound.incarnation)
+        .flat_map(|lki| &lki.snapshot);
+    for snap in later {
+        if !pile
+            .iter()
+            .any(|p| p.exiled_id == snap.exiled_id && p.incarnation == snap.incarnation)
+        {
+            pile.push(snap.clone());
+        }
+    }
+    pile
 }
 
 /// CR 406.6 + CR 607.1: Returns true if `player` owns at least one card currently
@@ -473,7 +509,7 @@ where
 {
     let mut seen = std::collections::BTreeSet::new();
     let team_totals = players.into_iter().filter_map(|pid| {
-        let key = super::topology::shared_resource_dedup_key(state, pid);
+        let key = super::topology::shared_life_dedup_key(state, pid);
         seen.insert(key).then(|| team_life_total(state, pid))
     });
     match aggregate {
@@ -494,7 +530,7 @@ where
 /// source of truth (CR 810.9: life loss/gain still happens to "each player
 /// individually") — this is a pure derived sum, not a separate stored pool.
 pub fn team_life_total(state: &GameState, player: PlayerId) -> i32 {
-    super::topology::shared_resource_members(state, player)
+    super::topology::shared_life_members(state, player)
         .into_iter()
         .filter_map(|member| state.players.iter().find(|p| p.id == member))
         .map(|p| p.life)
@@ -504,9 +540,10 @@ pub fn team_life_total(state: &GameState, player: PlayerId) -> i32 {
 /// CR 810.10 + CR 810.10a: A player's team's shared poison-counter total.
 /// Mirrors `team_life_total` — a pure derived sum over `Player::poison_counters`
 /// for the player and their (living) teammates. Non-team formats degenerate
-/// to the player's own count.
+/// to the player's own count, as does Archenemy Commander for every seat:
+/// CR 904.13c keeps poison individual even though life is shared.
 pub fn team_poison_total(state: &GameState, player: PlayerId) -> u32 {
-    super::topology::shared_resource_members(state, player)
+    super::topology::shared_poison_members(state, player)
         .into_iter()
         .filter_map(|member| state.players.iter().find(|p| p.id == member))
         .map(|p| p.poison_counters)
@@ -1202,6 +1239,62 @@ mod tests {
         );
     }
 
+    /// CR 904.13b + CR 810.9d: in Archenemy Commander the archenemy's
+    /// dedup key must stay distinct from the heroes' shared key even when
+    /// the archenemy sits in seat 1 — a bare `TeamId(player.0)` key
+    /// collides with the heroes' shared `TeamId(1)` and drops one side
+    /// from the fold (a Repay-in-Kind Min over archenemy-at-10 plus
+    /// heroes-sharing-60 would read 60 instead of 10).
+    #[test]
+    fn aggregate_over_teams_archenemy_commander_seat_one_keeps_sides_distinct() {
+        let mut config = FormatConfig::archenemy_commander();
+        config.archenemy_player = Some(PlayerId(1));
+        let mut state = GameState::new(config, 4, 0);
+        state.players[1].life = 10;
+        state.players[0].life = 20;
+        state.players[2].life = 20;
+        state.players[3].life = 20;
+        let all = vec![PlayerId(0), PlayerId(1), PlayerId(2), PlayerId(3)];
+        assert_eq!(
+            aggregate_over_teams(&state, all.clone(), AggregateFunction::Min),
+            10,
+            "seat-1 archenemy's 10 must survive the fold, not collapse into the heroes' 60"
+        );
+        assert_eq!(
+            aggregate_over_teams(&state, all.clone(), AggregateFunction::Max),
+            60
+        );
+        assert_eq!(
+            aggregate_over_teams(&state, all, AggregateFunction::Sum),
+            70,
+            "both sides' totals must be counted exactly once"
+        );
+    }
+
+    /// Default Archenemy keeps per-seat keys: every seat reads its own
+    /// life, so a seat-1 archenemy at 40 beside 20-life heroes folds as
+    /// four distinct totals. Pins the non-Commander side of the seat-1
+    /// key fix.
+    #[test]
+    fn aggregate_over_teams_default_archenemy_seat_one_stays_per_seat() {
+        let mut config = FormatConfig::archenemy();
+        config.archenemy_player = Some(PlayerId(1));
+        let mut state = GameState::new(config, 4, 0);
+        state.players[1].life = 40;
+        state.players[0].life = 20;
+        state.players[2].life = 20;
+        state.players[3].life = 20;
+        let all = vec![PlayerId(0), PlayerId(1), PlayerId(2), PlayerId(3)];
+        assert_eq!(
+            aggregate_over_teams(&state, all.clone(), AggregateFunction::Min),
+            20
+        );
+        assert_eq!(
+            aggregate_over_teams(&state, all, AggregateFunction::Sum),
+            100
+        );
+    }
+
     // --- linked-exile LKI incarnation bounds (CR 400.7 + CR 113.7a) ---
 
     /// The incarnation the source had when it left the battlefield.
@@ -1283,6 +1376,105 @@ mod tests {
             .iter()
             .map(|snapshot| snapshot.exiled_id)
             .collect()
+    }
+
+    /// CR 607.2a + CR 400.7: the pile is the snapshot plus the bound
+    /// incarnation's later exiles, deduplicated, never an earlier departure's.
+    #[test]
+    fn linked_exile_pile_reads_only_the_bound_incarnation() {
+        let (mut state, source, card) = departed_pile(Some(DEPARTED + 1));
+        let other = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(1),
+            "Other".into(),
+            Zone::Exile,
+        );
+        let later = create_object(
+            &mut state,
+            CardId(6),
+            PlayerId(1),
+            "Later".into(),
+            Zone::Exile,
+        );
+        let snap = |id| LinkedExileSnapshot {
+            exiled_id: id,
+            owner: PlayerId(1),
+            mana_value: 0,
+            incarnation: 0,
+        };
+        let entries = state.linked_exile_lki.get_mut(&source).unwrap();
+        entries.push(LinkedExileLki {
+            departed: DEPARTED,
+            successor: DEPARTED,
+            snapshot: vec![snap(later)],
+        });
+        entries.push(LinkedExileLki {
+            departed: DEPARTED - 1,
+            successor: DEPARTED,
+            snapshot: vec![snap(other)],
+        });
+        let mut context = state.objects[&source]
+            .snapshot_for_zone_change(source, Some(Zone::Battlefield), Zone::Graveyard)
+            .trigger_source_context
+            .expect("context");
+        context.identity.reference.incarnation = DEPARTED;
+        context.linked_exile_snapshot = vec![snap(card)];
+        let ids: Vec<ObjectId> = linked_exile_pile(&state, &context)
+            .iter()
+            .map(|s| s.exiled_id)
+            .collect();
+        assert_eq!(ids, vec![card, later]);
+    }
+
+    /// CR 603.10a + CR 607.2a: a leaves record carrying a trigger source context
+    /// also reads what the bound incarnation exiled after departing.
+    #[test]
+    fn record_branch_reads_the_bound_incarnations_later_exiles() {
+        let (mut state, source, card) = departed_pile(Some(DEPARTED + 1));
+        let later = create_object(
+            &mut state,
+            CardId(6),
+            PlayerId(1),
+            "Later".into(),
+            Zone::Exile,
+        );
+        let snap = |id| LinkedExileSnapshot {
+            exiled_id: id,
+            owner: PlayerId(1),
+            mana_value: 0,
+            incarnation: 0,
+        };
+        state
+            .linked_exile_lki
+            .get_mut(&source)
+            .unwrap()
+            .push(LinkedExileLki {
+                departed: DEPARTED,
+                successor: DEPARTED,
+                snapshot: vec![snap(later)],
+            });
+        let mut record = state.objects[&source].snapshot_for_zone_change(
+            source,
+            Some(Zone::Battlefield),
+            Zone::Graveyard,
+        );
+        record.linked_exile_snapshot = vec![snap(card)];
+        record.sync_trigger_source_context();
+        record
+            .trigger_source_context
+            .as_mut()
+            .unwrap()
+            .identity
+            .reference
+            .incarnation = DEPARTED;
+        state.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: source,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(record),
+        });
+        assert_eq!(linked_ids(&state, source), vec![card, later]);
     }
 
     /// CR 113.7a + CR 400.7: a departure entry admits exactly the object that

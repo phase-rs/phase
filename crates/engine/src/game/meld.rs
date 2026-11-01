@@ -607,6 +607,7 @@ fn refresh_meld_entry_records(
         realized.played_from_zone = old.played_from_zone;
         realized.attachments = old.attachments;
         realized.linked_exile_snapshot = old.linked_exile_snapshot;
+        realized.block_pairs = old.block_pairs;
         realized.co_departed = old.co_departed;
         realized.entered_incarnation = old.entered_incarnation;
         realized.attached_to = old.attached_to;

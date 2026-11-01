@@ -414,6 +414,29 @@ pub(crate) fn resolve_keyword_mana_cost(
     }
 }
 
+/// CR 118.6 + CR 202.1b: "An ability can also have an unpayable cost if its cost
+/// is based on the mana cost of an object with no mana cost." True when `cost` is
+/// a placeholder bound to the recipient's MANA COST (`SelfManaCost`,
+/// `SelfManaCostReduced`) and the recipient has none, so the concretized
+/// `ManaCost::NoCost` would otherwise read as "pay nothing" on the activated-
+/// ability payment path. `SelfManaValue` is excluded: a no-mana-cost object's
+/// mana value is 0 (CR 202.3a), which is a payable {0}.
+pub(crate) fn self_mana_cost_is_unpayable(
+    state: &GameState,
+    object_id: ObjectId,
+    cost: &ManaCost,
+) -> bool {
+    match cost {
+        ManaCost::SelfManaCost | ManaCost::SelfManaCostReduced { .. } => matches!(
+            resolve_keyword_mana_cost(state, object_id, cost),
+            ManaCost::NoCost
+        ),
+        // A concrete cost is payable as written; `SelfManaValue` concretizes to
+        // the recipient's mana value, which is 0 for a no-mana-cost object.
+        ManaCost::NoCost | ManaCost::Cost { .. } | ManaCost::SelfManaValue => false,
+    }
+}
+
 /// CR 601.2f + CR 602.1a: Resolve `SelfManaCost` / `SelfManaValue` placeholders
 /// anywhere in an `AbilityCost` tree before affordability or payment. The mana
 /// payment path treats those placeholders as free, so every payable cost must
@@ -485,21 +508,24 @@ pub(crate) fn concretize_encore_mana_value_in_ability_cost(
     }
 }
 
-/// CR 702.97a / CR 702.128a / CR 702.129a / CR 702.141a + CR 602.1a: Resolve a
-/// `ManaCost::SelfManaCost` or `ManaCost::SelfManaValue` payload carried by a
-/// granted graveyard activated keyword to the recipient card's concrete mana
-/// sub-cost. Encore / Scavenge / Embalm / Eternalize are graveyard *activated*
-/// abilities whose mana sub-cost is paid through `AbilityCost::Mana`, and that
-/// payment path treats self-referential placeholders as free — so they must be
-/// concretized before the activated ability is synthesized. Non-self-referential
-/// keywords (printed Embalm `{3}{W}`, Encore `{5}`, or any other keyword) pass
-/// through unchanged.
+/// CR 702.84a / CR 702.97a / CR 702.128a / CR 702.129a / CR 702.141a + CR 602.1a:
+/// Resolve a `ManaCost::SelfManaCost` or `ManaCost::SelfManaValue` payload
+/// carried by a granted graveyard activated keyword to the recipient card's
+/// concrete mana sub-cost. Unearth / Encore / Scavenge / Embalm / Eternalize are
+/// graveyard *activated* abilities whose mana sub-cost is paid through
+/// `AbilityCost::Mana`, and that payment path treats self-referential
+/// placeholders as free — so they must be concretized before the activated
+/// ability is synthesized. Non-self-referential keywords (printed Embalm
+/// `{3}{W}`, Encore `{5}`, or any other keyword) pass through unchanged.
 pub fn resolve_self_cost_graveyard_activated_keyword(
     state: &GameState,
     object_id: ObjectId,
     keyword: &Keyword,
 ) -> Keyword {
     match keyword {
+        Keyword::Unearth(cost) => {
+            Keyword::Unearth(resolve_keyword_mana_cost(state, object_id, cost))
+        }
         Keyword::Encore(cost) => Keyword::Encore(resolve_keyword_mana_cost(state, object_id, cost)),
         Keyword::Scavenge(cost) => {
             Keyword::Scavenge(resolve_keyword_mana_cost(state, object_id, cost))
@@ -629,10 +655,36 @@ pub fn has_indestructible(obj: &GameObject) -> bool {
 
 /// CR 702.16b: Returns true if target's protection prevents interaction from source.
 pub fn protection_prevents_from(target: &GameObject, source: &GameObject) -> bool {
+    protection_prevents_from_with_source_name(target, Some(source), None)
+}
+
+/// CR 702.16b + CR 702.16e + CR 608.2h: Returns true if target's protection prevents
+/// interaction from source. When checking `ProtectionTarget::ChosenCardName`,
+/// `source_name` (e.g. from an LKI projection) takes precedence over `source.name`,
+/// allowing departed sources (such as dead Clones or ceased tokens) to be matched by
+/// their last-known name.
+pub fn protection_prevents_from_with_source_name(
+    target: &GameObject,
+    source: Option<&GameObject>,
+    source_name: Option<&str>,
+) -> bool {
     for kw in &target.keywords {
         if let Keyword::Protection(ref pt) = kw {
-            if source_matches_protection_target(pt, target, source) {
-                return true;
+            match pt {
+                ProtectionTarget::ChosenCardName => {
+                    if target.chosen_card_name().is_some_and(|chosen| {
+                        crate::game::filter::source_has_chosen_name(source, source_name, chosen)
+                    }) {
+                        return true;
+                    }
+                }
+                _ => {
+                    if let Some(source_obj) = source {
+                        if source_matches_protection_target(pt, target, source_obj) {
+                            return true;
+                        }
+                    }
+                }
             }
         }
     }
@@ -665,6 +717,11 @@ pub fn source_matches_protection_target(
             .chosen_card_type()
             .and_then(|ct| ct.protection_quality_str())
             .is_some_and(|quality| source_matches_card_type(source, quality)),
+        // CR 702.16a + CR 201.2: "Protection from the chosen card
+        // name" — resolved from the protected permanent's own chosen card name.
+        ProtectionTarget::ChosenCardName => protected.chosen_card_name().is_some_and(|name| {
+            crate::game::filter::source_has_chosen_name(Some(source), None, name)
+        }),
         // CR 702.16k: Resolve "the chosen player" from the protected
         // permanent's persisted choice. Protection covers objects that player
         // controls and objects they own that no other player controls; CR
@@ -764,13 +821,15 @@ pub fn resolve_granted_protection(
             .into_iter()
             .map(ProtectionTarget::Color)
             .collect(),
-        // "The chosen player" stays unresolved: it is read off the protected
-        // permanent's own persisted choice, not the granting source.
+        // "The chosen player" and "the chosen card name" stay unresolved: they
+        // are read off the protected permanent's own persisted choice, not the
+        // granting source.
         ProtectionTarget::Color(_)
         | ProtectionTarget::CardType(_)
         | ProtectionTarget::Quality(_)
         | ProtectionTarget::Multicolored
         | ProtectionTarget::ChosenPlayer
+        | ProtectionTarget::ChosenCardName
         | ProtectionTarget::Everything
         | ProtectionTarget::Filter(_)
         | ProtectionTarget::FromPlayer(_) => vec![quality.clone()],
@@ -1961,6 +2020,51 @@ mod tests {
             &ProtectionTarget::ChosenCardType,
             &no_choice,
             &creature_source,
+        ));
+    }
+
+    /// CR 702.16a + CR 201.2: `source_matches_protection_target`'s
+    /// `ChosenCardName` arm resolves against the *protected* object's own
+    /// chosen card name. A source with matching name matches; a source with a
+    /// different name does not. An object with no chosen card name is matched by
+    /// nothing through this arm.
+    #[test]
+    fn source_matches_protection_target_chosen_card_name() {
+        use crate::types::ability::ChosenAttribute;
+
+        let mut protected = make_obj();
+        protected
+            .chosen_attributes
+            .push(ChosenAttribute::CardName("Grizzly Bears".to_string()));
+
+        let mut bear_source = make_obj();
+        bear_source.name = "Grizzly Bears".to_string();
+        let mut giant_source = make_obj();
+        giant_source.name = "Hill Giant".to_string();
+
+        assert!(
+            source_matches_protection_target(
+                &ProtectionTarget::ChosenCardName,
+                &protected,
+                &bear_source,
+            ),
+            "named source must match protection from chosen card name Grizzly Bears"
+        );
+        assert!(
+            !source_matches_protection_target(
+                &ProtectionTarget::ChosenCardName,
+                &protected,
+                &giant_source,
+            ),
+            "different named source must NOT match protection from chosen card name Grizzly Bears"
+        );
+
+        // No chosen card name -> the arm protects from nothing.
+        let no_choice = make_obj();
+        assert!(!source_matches_protection_target(
+            &ProtectionTarget::ChosenCardName,
+            &no_choice,
+            &bear_source,
         ));
     }
 

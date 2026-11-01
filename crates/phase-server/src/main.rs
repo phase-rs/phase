@@ -1,3 +1,6 @@
+// The auto-trait proof for im-backed game state held across the nested
+// Full-socket handler futures exceeds the default limit of 128.
+#![recursion_limit = "256"]
 mod admin;
 mod data_bootstrap;
 mod draft_pools;
@@ -96,21 +99,21 @@ use server_core::lobby::RegisterGameRequest;
 use server_core::lobby_subscriber_wire_guard::guard_lobby_subscriber_capacity;
 use server_core::protocol::{
     build_commit, resolve_draft_source_intent, ClientMessage, RankedPlayerResult, ServerErrorCode,
-    ServerMessage, ServerMode, WireFormat, LOBBY_MIN_SUPPORTED_PROTOCOL, LOBBY_PROTOCOL_VERSION,
-    MIN_SUPPORTED_LOBBY_PROTOCOL, MIN_SUPPORTED_PROTOCOL, PROTOCOL_VERSION,
+    ServerMessage, ServerMode, StateCodec, WireFormat, LOBBY_MIN_SUPPORTED_PROTOCOL,
+    LOBBY_PROTOCOL_VERSION, MIN_SUPPORTED_LOBBY_PROTOCOL, MIN_SUPPORTED_PROTOCOL, PROTOCOL_VERSION,
 };
 use server_core::resolve_deck;
 use server_core::seat_mutation_wire_guard::guard_seat_mutation;
 use server_core::session::ActionResult;
 use server_core::session::{
     AiRunOutcome, AiTransition, CreateGameError, DecisionSnapshot, FullRuntime, GameSession,
-    HostingMode, PreviewRefusal, SessionActionError, SessionManager,
+    HandledAction, HostingMode, PreviewRefusal, SessionActionError, SessionManager,
 };
 use server_core::spectator_wire_guard::{
     guard_draft_spectator_capacity, guard_game_spectator_capacity, guard_spectate_draft,
     guard_spectator_join,
 };
-use server_core::takeback::RewindOption;
+use server_core::takeback::{RewindOption, TakebackOutcome, TakebackResolution};
 use std::borrow::Cow;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
@@ -1008,6 +1011,8 @@ const DEFAULT_MAX_GAMES: usize = 100;
 struct Limits {
     max_connections: u32,
     max_games: usize,
+    /// Largest application frame a socket's encoder writes.
+    max_frame_bytes: usize,
 }
 
 impl Default for Limits {
@@ -1015,6 +1020,7 @@ impl Default for Limits {
         Self {
             max_connections: DEFAULT_MAX_CONNECTIONS,
             max_games: DEFAULT_MAX_GAMES,
+            max_frame_bytes: server_core::game_state_snapshot_wire_guard::MAX_SERVER_FRAME_BYTES,
         }
     }
 }
@@ -1345,9 +1351,11 @@ struct ClientHelloInfo {
     client_version: String,
     build_commit: String,
     wire_format: Option<WireFormat>,
+    state_codec: Option<StateCodec>,
 }
 
 const MAX_ADVERTISED_WIRE_FORMATS: usize = 8;
+const MAX_ADVERTISED_STATE_CODECS: usize = 8;
 
 /// Outcome of evaluating the handshake gate against an incoming message.
 /// Extracted into a pure function so the gate's invariants can be unit-tested
@@ -1437,6 +1445,7 @@ fn classify_hello_gate(
                 protocol_version,
                 lobby_protocol_version,
                 wire_formats,
+                state_codecs,
             },
         ) => {
             // The `server` field on RejectProtocol surfaces the version this
@@ -1450,6 +1459,10 @@ fn classify_hello_gate(
                 HelloGateOutcome::RejectInvalidHello(
                     "ClientHello advertises too many wire formats".to_string(),
                 )
+            } else if state_codecs.len() > MAX_ADVERTISED_STATE_CODECS {
+                HelloGateOutcome::RejectInvalidHello(
+                    "ClientHello advertises too many state codecs".to_string(),
+                )
             } else if let Err(reason) = guard_client_hello(client_version, build_commit) {
                 HelloGateOutcome::RejectInvalidHello(reason)
             } else {
@@ -1459,6 +1472,9 @@ fn classify_hello_gate(
                     wire_format: wire_formats
                         .contains(&WireFormat::GzipEnvelopeV1)
                         .then_some(WireFormat::GzipEnvelopeV1),
+                    state_codec: (matches!(acceptance, HelloAcceptance::FullGame(_))
+                        && state_codecs.contains(&StateCodec::StateCodecV1))
+                    .then_some(StateCodec::StateCodecV1),
                 })
             }
         }
@@ -1509,6 +1525,7 @@ fn reject_if_disabled(msg: &ClientMessage, mode: ServerMode) -> Option<&'static 
         | ClientMessage::PreviewInteraction { .. }
         | ClientMessage::PreviewManaPayment { .. }
         | ClientMessage::ExportAuthoritativeState
+        | ClientMessage::ResyncState
         | ClientMessage::Reconnect { .. }
         | ClientMessage::AbandonGame
         | ClientMessage::SeatMutate { .. }
@@ -1744,6 +1761,9 @@ enum FullSocketAuthority {
 
 fn full_socket_authority(message: &ClientMessage) -> FullSocketAuthority {
     match message {
+        // Resync authorizes seats and spectators under its retained session
+        // lease and final route fence, not the CurrentSeat preflight.
+        ClientMessage::ResyncState => FullSocketAuthority::Independent,
         ClientMessage::ClientHello { .. }
         | ClientMessage::SubscribeLobby
         | ClientMessage::UnsubscribeLobby
@@ -2081,6 +2101,24 @@ async fn abort_unpublished_full_admission(
     notify_full_seat_disconnect(session, player, grace, disconnected_at, &peers);
 }
 
+fn full_seat_matches_session(session: &GameSession, identity: &SocketIdentity) -> bool {
+    identity.full_seat().is_some_and(|(code, player, token)| {
+        session.game_code == code && session.player_for_token(token) == Some(player)
+    })
+}
+
+fn full_sender_matches(
+    routes: &HashMap<String, HashMap<PlayerId, socket_mailbox::Sender>>,
+    game_code: &str,
+    player: PlayerId,
+    tx: &socket_mailbox::Sender,
+) -> bool {
+    routes
+        .get(game_code)
+        .and_then(|players| players.get(&player))
+        .is_some_and(|sender| sender.same_channel(tx))
+}
+
 /// Verifies a Full seat while the caller already owns this game's session lock.
 ///
 /// This is the authority linearization point for every state mutation: the
@@ -2106,18 +2144,14 @@ async fn full_socket_is_current_while_state_locked(
     identity: &SocketIdentity,
     tx: &crate::socket_mailbox::Sender,
 ) -> bool {
-    let Some((game_code, player_id, player_token)) = identity.full_seat() else {
+    let Some((game_code, player_id, _)) = identity.full_seat() else {
         return false;
     };
-    if session.game_code != game_code || session.player_for_token(player_token) != Some(player_id) {
+    if !full_seat_matches_session(session, identity) {
         return false;
     }
-
     let conns = connections.lock().await;
-    conns
-        .get(game_code)
-        .and_then(|players| players.get(&player_id))
-        .is_some_and(|sender| sender.same_channel(tx))
+    full_sender_matches(&conns, game_code, player_id, tx)
 }
 
 /// A pre-dispatch rejection fast path. It improves stale-socket feedback, but
@@ -2996,6 +3030,7 @@ async fn serve() {
         limits: Limits {
             max_connections: cli.max_connections,
             max_games: cli.max_games,
+            ..Limits::default()
         },
         replica_ordinal: cli.replica_ordinal,
         metrics: Arc::new(metrics::ServerMetrics::default()),
@@ -3857,10 +3892,11 @@ mod lifecycle_tests {
             generation: 1,
         };
         let readout_for = |player| match {
-            let source = crate::game_executor::StateUpdateSource::from_result(&result, 1);
-            source
-                .guard()
-                .map(|()| build_state_update_message(&source, &full_key, player, Vec::new(), &[]))
+            crate::game_executor::StateUpdateSource::from_result(&result, 1)
+                .guarded("GAME01")
+                .map(|source| {
+                    build_state_update_message(&source, &full_key, player, Vec::new(), &[])
+                })
         }
         .expect("the snapshot guard admits this small board")
         {
@@ -5011,6 +5047,35 @@ impl Drop for ConnectionSlot {
     }
 }
 
+/// One metadata authority for the initial advertisement and text confirmation.
+fn native_server_hello(
+    mode: ServerMode,
+    public_url: Option<String>,
+    selected: Option<StateCodec>,
+) -> ServerMessage {
+    let state_codecs = match mode {
+        ServerMode::Full => vec![StateCodec::StateCodecV1],
+        ServerMode::LobbyOnly => Vec::new(),
+    };
+    ServerMessage::ServerHello {
+        server_version: env!("CARGO_PKG_VERSION").to_string(),
+        build_commit: build_commit().to_string(),
+        protocol_version: PROTOCOL_VERSION,
+        mode,
+        lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+        public_url,
+        wire_formats: vec![WireFormat::GzipEnvelopeV1],
+        heartbeat: Some(server_core::protocol::HeartbeatContract {
+            ping_interval_ms: 5_000,
+            silence_budget_ms: 45_000,
+        }),
+        command_correlation: Some(server_core::protocol::CommandCorrelation::CommandIdV1),
+        state_codecs,
+        selected_state_codec: selected
+            .filter(|codec| mode == ServerMode::Full && *codec == StateCodec::StateCodecV1),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_socket(
     socket: WebSocket,
@@ -5039,6 +5104,7 @@ async fn handle_socket(
             replies: tx.clone(),
             metrics: context.metrics.clone(),
             executor: context.game_executor.clone(),
+            max_frame_bytes: context.limits.max_frame_bytes,
             #[cfg(test)]
             hooks: context.socket_hooks.clone(),
         },
@@ -5077,20 +5143,7 @@ async fn handle_socket(
     // before sending any game-affecting frame). The advertised `mode` lets
     // the client route host/join flows through WS (Full) or P2P+broker
     // (LobbyOnly) without probing.
-    let hello = ServerMessage::ServerHello {
-        server_version: env!("CARGO_PKG_VERSION").to_string(),
-        build_commit: build_commit().to_string(),
-        protocol_version: PROTOCOL_VERSION,
-        mode,
-        lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
-        public_url,
-        wire_formats: vec![WireFormat::GzipEnvelopeV1],
-        heartbeat: Some(server_core::protocol::HeartbeatContract {
-            ping_interval_ms: 5_000,
-            silence_budget_ms: 45_000,
-        }),
-        command_correlation: Some(server_core::protocol::CommandCorrelation::CommandIdV1),
-    };
+    let hello = native_server_hello(mode, public_url.clone(), None);
     if socket.enqueue_reply(hello).is_err() {
         transport.shutdown().await;
         let count = player_count.fetch_sub(1, Ordering::Relaxed) - 1;
@@ -5109,6 +5162,7 @@ async fn handle_socket(
         lobby.clone(),
         host_registration,
         mode,
+        public_url,
         hello_tx,
         application,
     )));
@@ -5136,7 +5190,12 @@ async fn handle_socket(
                 },
             };
             socket.set_command_id(client_msg.command_id());
+            let resync = client_msg.resync;
             let client_msg = client_msg.message;
+            #[cfg(test)]
+            if matches!(&client_msg, ClientMessage::ResyncState) {
+                context.socket_hooks.before_resync_dispatch().await;
+            }
             let span = identity
                 .session_span
                 .clone()
@@ -5146,6 +5205,7 @@ async fn handle_socket(
             // death timestamp survives until ordered session cleanup can run.
             handle_client_message(
                 client_msg,
+                resync,
                 &mut socket,
                 &state,
                 &draft_state,
@@ -5456,6 +5516,8 @@ fn to_server_message(m: lobby_broker::LobbyServerMessage) -> ServerMessage {
             wire_formats: Vec::new(),
             heartbeat: None,
             command_correlation: None,
+            state_codecs: Vec::new(),
+            selected_state_codec: None,
         },
         L::GameCreated {
             game_code,
@@ -5590,6 +5652,7 @@ fn to_lobby_client_message(msg: &ClientMessage) -> Option<lobby_broker::LobbyCli
             protocol_version,
             lobby_protocol_version,
             wire_formats: _,
+            state_codecs: _,
         } => L::ClientHello {
             client_version: client_version.clone(),
             build_commit: build_commit.clone(),
@@ -5774,6 +5837,7 @@ fn to_lobby_client_message(msg: &ClientMessage) -> Option<lobby_broker::LobbyCli
             token: token.clone(),
             rotation_nonce: rotation_nonce.clone(),
         },
+        ClientMessage::ResyncState => return None,
         _ => return None,
     })
 }
@@ -8279,7 +8343,7 @@ async fn handle_contest_click(
 
 /// Broadcasts the result of an approved takeback (GH #1507): a `StateUpdate`
 /// carrying the rolled-back state to every seat, filtered per-player exactly
-/// like a normal action result, followed by `TakebackResolved { approved: true, .. }`.
+/// like a normal action result, followed by `TakebackResolved { resolution: approved, .. }`.
 /// `resolved_by` is the player whose response concluded the request, or
 /// `None` when it resolved naturally (e.g. the requester was the sole human).
 // Same shape as the sibling transport fan-outs at `:2010`/`:3767`/`:4071`:
@@ -8322,14 +8386,41 @@ async fn broadcast_takeback_approved(
                 }),
             };
             publisher.publish(&source);
-            publisher.notify_players(ServerMessage::TakebackResolved {
-                approved: true,
+            publisher.notify_players(takeback_resolved_message(
+                TakebackResolution::Approved,
                 resolved_by,
-            });
+            ));
             publisher
         })
         .await;
     publisher.finish(executor).await;
+}
+
+/// The wire notice for a resolved takeback vote.
+fn takeback_resolved_message(
+    resolution: TakebackResolution,
+    resolved_by: Option<PlayerId>,
+) -> ServerMessage {
+    ServerMessage::TakebackResolved {
+        resolution,
+        resolved_by,
+    }
+}
+
+/// A concession's takeback notice as `(before, after)` its state delivery: an
+/// approval follows the restored state it installed, as
+/// [`broadcast_takeback_approved`] orders it; any other resolution precedes
+/// the concession's state.
+fn concession_takeback_notices(
+    takeback: Option<TakebackResolution>,
+    conceding: PlayerId,
+) -> (Option<ServerMessage>, Option<ServerMessage>) {
+    let notice = takeback.map(|resolution| takeback_resolved_message(resolution, Some(conceding)));
+    if takeback == Some(TakebackResolution::Approved) {
+        (None, notice)
+    } else {
+        (notice, None)
+    }
 }
 
 /// What a Full-mode game socket submitted: a client-materialized `GameAction`,
@@ -8348,6 +8439,8 @@ enum GameSubmission {
 struct AppliedHumanSubmission {
     revision: u64,
     unpublished: Option<ActionResult>,
+    /// The takeback approval notice still owed after the unpublished result.
+    takeback_after: Option<ServerMessage>,
     publisher: game_executor::StateUpdatePublisher,
     ai: std::ops::ControlFlow<AiRunOutcome, server_core::session::AiRunCursor>,
 }
@@ -8391,6 +8484,7 @@ fn operation_failed_message(
             })
         }
         ClientMessage::ClientHello { .. }
+        | ClientMessage::ResyncState
         | ClientMessage::CreateGame { .. }
         | ClientMessage::JoinGame { .. }
         | ClientMessage::Reconnect { .. }
@@ -8597,6 +8691,7 @@ async fn handle_full_concession(
     context: &ServerContext,
     state: &SharedState,
     connections: &SharedConnections,
+    game_spectators: &SharedGameSpectators,
     draft_state: &SharedDraftState,
     game_db: &SharedGameDb,
     identity: &SocketIdentity,
@@ -8616,6 +8711,7 @@ async fn handle_full_concession(
         let _ = tx.send(message);
         return;
     };
+    let lock_start = Instant::now();
     let session = lock_session(state, &game_code).await.ok();
     let current = match session.as_deref() {
         Some(session) => {
@@ -8631,14 +8727,14 @@ async fn handle_full_concession(
         let (session, result) = context
             .game_executor
             .with_session(session, move |session| {
-                let (revision, result) = match scope {
+                let (revision, HandledAction { result, takeback }) = match scope {
                     ConcessionScope::Game => {
-                        let result = session.handle_action_with_card_db_outcome(
+                        let handled = session.handle_action_with_card_db_outcome(
                             &player_token,
                             GameAction::Concede { player_id: player },
                             None,
                         )?;
-                        (session.advance_state_revision(), result)
+                        (session.advance_state_revision(), handled)
                     }
                     ConcessionScope::Match => {
                         session.handle_match_concede_outcome(&player_token)?
@@ -8686,14 +8782,17 @@ async fn handle_full_concession(
                     .expect("authenticated concession retains its runtime")
                     .key
                     .clone();
+                let ai = (!ended).then(|| session.begin_ai_run());
                 Ok::<_, SessionActionError>((
                     revision,
                     result,
+                    takeback,
                     winner,
                     terminal,
                     session.rewind_options(),
                     full_key,
                     session.player_count,
+                    ai,
                 ))
             })
             .await;
@@ -8703,20 +8802,64 @@ async fn handle_full_concession(
             FULL_SOCKET_AUTHORITY_REJECTION.to_string(),
         ))
     };
-    let (lease, (revision, result, winner, terminal, rewinds, full_key, player_count)) =
-        match result {
-            Ok(result) => result,
-            Err(error) => {
-                let message = match (scope, error) {
-                    (ConcessionScope::Game, SessionActionError::Operational(message)) => {
-                        ServerMessage::ActionFailed { message }
-                    }
-                    (_, error) => session_action_error_message(error),
-                };
-                let _ = tx.send(message);
-                return;
+    let (
+        lease,
+        (revision, result, takeback, winner, terminal, rewinds, full_key, player_count, ai),
+    ) = match result {
+        Ok(result) => result,
+        Err(error) => {
+            let message = match (scope, error) {
+                (ConcessionScope::Game, SessionActionError::Operational(message)) => {
+                    ServerMessage::ActionFailed { message }
+                }
+                (_, error) => session_action_error_message(error),
+            };
+            let _ = tx.send(message);
+            return;
+        }
+    };
+    let ai_fault = match ai {
+        Some(ControlFlow::Continue(cursor)) => {
+            let publisher = game_executor::StateUpdatePublisher::capture(
+                connections,
+                Some(game_spectators),
+                full_key,
+                player_count,
+                Vec::new(),
+                Vec::new(),
+            )
+            .await;
+            let (takeback_before, takeback_after) = concession_takeback_notices(takeback, player);
+            if let Some(notice) = takeback_before {
+                publisher.notify_players(notice);
             }
-        };
+            let after_human = takeback_after
+                .into_iter()
+                .chain([ServerMessage::Conceded { player }])
+                .collect();
+            finish_full_ai_continuation(
+                lease,
+                ControlFlow::Continue(cursor),
+                result,
+                revision,
+                publisher,
+                after_human,
+                &tx.for_completion(None),
+                &context.game_executor,
+                state,
+                draft_state,
+                connections,
+                game_db,
+                game_code,
+                "concede",
+                lock_start,
+            )
+            .await;
+            return;
+        }
+        Some(ControlFlow::Break(outcome)) => outcome.fault,
+        None => None,
+    };
     // Terminal persistence is leaf I/O. Retain this game's publication lease
     // through retirement and fan-out, but release it before draft reporting.
     #[cfg(test)]
@@ -8738,19 +8881,35 @@ async fn handle_full_concession(
     let retire = !deliveries.is_empty() || matches!(scope, ConcessionScope::Match);
     let mut publisher = game_executor::StateUpdatePublisher::capture(
         connections,
-        None,
+        Some(game_spectators),
         full_key,
         player_count,
         result.0.eliminated_players.clone(),
         rewinds,
     )
     .await;
+    let code = game_code.clone();
+    let (takeback_before, takeback_after) = concession_takeback_notices(takeback, player);
     publisher = context
         .game_executor
         .run(move || {
+            if let Some(notice) = takeback_before {
+                publisher.notify_players(notice);
+            }
             let source = game_executor::StateUpdateSource::from_result(&result, revision);
-            if source.guard().is_ok() {
-                publisher.publish(&source);
+            match source.guarded(&code) {
+                Ok(source) => publisher.publish(&source),
+                Err(reason) => {
+                    warn!(
+                        game = %code,
+                        revision,
+                        %reason,
+                        "concession snapshot exceeds broadcast bounds; not published"
+                    );
+                }
+            }
+            if let Some(notice) = takeback_after {
+                publisher.notify_players(notice);
             }
             if matches!(scope, ConcessionScope::Game) {
                 publisher.notify_players(ServerMessage::Conceded { player });
@@ -8760,6 +8919,7 @@ async fn handle_full_concession(
         })
         .await;
     publisher.finish(&context.game_executor).await;
+    broadcast_ai_failure(connections, &game_code, ai_fault).await;
     drop(lease);
     if retire {
         report_draft_game_over(draft_state, connections, &game_code, winner).await;
@@ -8852,19 +9012,26 @@ async fn handle_full_game_submission(
     let card_db = db.clone();
     let persistence = game_db.clone();
     let persistence_executor = executor.clone();
+    let code = game_code.clone();
+    let seat = identity
+        .player_id
+        .expect("the authority gate proved this seat");
     // The owned game guard spans admission waits, AI continuations and all
     // publication. Other games can use the CPU between these work units.
     let (session, applied) = executor
         .with_session(session, move |session| {
-            let result = match submission {
+            let HandledAction { result, takeback } = match submission {
                 GameSubmission::Action(action) => session.handle_action_with_card_db_outcome(
                     &player_token,
                     action,
                     Some(card_db.as_ref()),
                 ),
-                GameSubmission::Interaction(submission) => {
-                    session.handle_interaction_with_rejection(&player_token, submission)
-                }
+                GameSubmission::Interaction(submission) => session
+                    .handle_interaction_with_rejection(&player_token, submission)
+                    .map(|result| HandledAction {
+                        result,
+                        takeback: None,
+                    }),
             }?;
             if is_zero_count_debug_create {
                 return Ok(None);
@@ -8872,28 +9039,45 @@ async fn handle_full_game_submission(
             let revision = session.advance_state_revision();
             let ai = session.begin_ai_run();
             let mut publisher = publisher.expect("a non-noop submission captures its routes");
+            let (takeback_before, takeback_after) = concession_takeback_notices(takeback, seat);
+            if let Some(notice) = takeback_before {
+                publisher.notify_players(notice);
+            }
             let terminal = matches!(
                 &session.state.waiting_for,
                 engine::types::game_state::WaitingFor::GameOver { .. }
             );
-            let unpublished = if ai.is_break() && !terminal {
+            let (unpublished, takeback_after) = if ai.is_break() && !terminal {
                 // A short human-only transition and its projection share one CPU
                 // unit; an unrelated AI sequence cannot queue between them.
                 persist_full_session_async(&persistence_executor, &persistence, session);
-                let source = game_executor::StateUpdateSource::from_result(&result, revision);
-                source.guard().map_err(SessionActionError::Operational)?;
+                let source = game_executor::StateUpdateSource::from_result(&result, revision)
+                    .guarded(&code)
+                    .map_err(|reason| {
+                        warn!(
+                            game = %code,
+                            revision,
+                            %reason,
+                            "action snapshot exceeds broadcast bounds"
+                        );
+                        SessionActionError::Operational(reason)
+                    })?;
                 publisher.set_batch_metadata(
                     session.state.eliminated_players.clone(),
                     session.rewind_options(),
                 );
                 publisher.publish(&source);
-                None
+                if let Some(notice) = takeback_after {
+                    publisher.notify_players(notice);
+                }
+                (None, None)
             } else {
-                Some(result)
+                (Some(result), takeback_after)
             };
             Ok::<_, SessionActionError>(Some(AppliedHumanSubmission {
                 revision,
                 unpublished,
+                takeback_after,
                 publisher,
                 ai,
             }))
@@ -8918,7 +9102,8 @@ async fn handle_full_game_submission(
     let AppliedHumanSubmission {
         revision,
         unpublished,
-        mut publisher,
+        takeback_after,
+        publisher,
         ai,
     } = applied;
     let Some(human_result) = unpublished else {
@@ -8931,11 +9116,53 @@ async fn handle_full_game_submission(
         drop(session);
         return;
     };
+    finish_full_ai_continuation(
+        session,
+        ai,
+        human_result,
+        revision,
+        publisher,
+        takeback_after.into_iter().collect(),
+        &reply,
+        executor,
+        state,
+        draft_state,
+        connections,
+        game_db,
+        game_code,
+        kind,
+        lock_start,
+    )
+    .await;
+}
+
+/// Runs the AI continuation of a human transition whose publication waited on
+/// it, then publishes the human result, `after_human`, the AI transitions and
+/// any terminal delivery under the same game lease.
+#[allow(clippy::too_many_arguments)]
+async fn finish_full_ai_continuation(
+    session: OwnedMutexGuard<GameSession>,
+    ai: ControlFlow<AiRunOutcome, server_core::session::AiRunCursor>,
+    human_result: ActionResult,
+    revision: u64,
+    mut publisher: game_executor::StateUpdatePublisher,
+    after_human: Vec<ServerMessage>,
+    reply: &crate::socket_mailbox::Completion<'_>,
+    executor: &game_executor::GameExecutor,
+    state: &SharedState,
+    draft_state: &SharedDraftState,
+    connections: &SharedConnections,
+    game_db: &SharedGameDb,
+    game_code: String,
+    kind: &'static str,
+    lock_start: Instant,
+) {
     let (session, ai) = match ai {
         std::ops::ControlFlow::Break(outcome) => (session, outcome),
         std::ops::ControlFlow::Continue(cursor) => executor.continue_ai(session, cursor).await,
     };
     let ai_actions = ai.transitions.len();
+    let has_followup = !ai.transitions.is_empty();
     let persistence = game_db.clone();
     let persistence_executor = executor.clone();
     let code = game_code.clone();
@@ -8958,8 +9185,13 @@ async fn handle_full_game_submission(
                 session.state.eliminated_players.clone(),
                 session.rewind_options(),
             );
-            let guarded =
-                game_executor::StateUpdateSource::from_result(&human_result, revision).guard();
+            let source = game_executor::StateUpdateSource::from_result(&human_result, revision);
+            let guarded = if has_followup {
+                source.without_decision()
+            } else {
+                source
+            }
+            .admissible();
             Ok::<_, String>((publisher, human_result, winner, terminal, guarded))
         })
         .await;
@@ -8986,9 +9218,9 @@ async fn handle_full_game_submission(
         None => Vec::new(),
     };
     let terminal_prepared = !deliveries.is_empty();
-    let has_followup = !ai.transitions.is_empty();
     #[cfg(test)]
     executor.before_historical_publication().await;
+    let code = game_code.clone();
     publisher = executor
         .run(move || {
             let source = game_executor::StateUpdateSource::from_result(&human_result, revision);
@@ -8997,7 +9229,20 @@ async fn handle_full_game_submission(
             } else {
                 source
             };
-            publisher.publish(&source);
+            match source.guarded(&code) {
+                Ok(source) => publisher.publish(&source),
+                Err(reason) => {
+                    warn!(
+                        game = %code,
+                        revision,
+                        %reason,
+                        "action snapshot exceeds broadcast bounds; not published"
+                    );
+                }
+            }
+            for notice in after_human {
+                publisher.notify_players(notice);
+            }
             publisher
         })
         .await;
@@ -9640,9 +9885,168 @@ async fn seat_guest_and_start(
     }
 }
 
+/// Build only the current projected view; never replay publication events or
+/// mutate revision, presence, persistence, AI, or other recipients.
+fn build_resync_state_message(
+    session: &GameSession,
+    player: Option<PlayerId>,
+) -> Result<ServerMessage, String> {
+    let key = &session
+        .full_runtime
+        .as_ref()
+        .ok_or_else(|| "Game has no Full runtime".to_string())?
+        .key;
+    match player {
+        Some(player) => {
+            let decision = session
+                .game_started
+                .then(|| DecisionSnapshot::from_state(&session.state));
+            let source = game_executor::StateUpdateSource {
+                revision: session.state_revision,
+                state: &session.state,
+                events: &[],
+                log_entries: &[],
+                decision: decision.as_ref().map(Into::into),
+            };
+            source.admissible()?;
+            Ok(build_state_update_message(
+                &source,
+                key,
+                player,
+                session.rewind_options(),
+                &session.state.eliminated_players,
+            ))
+        }
+        None => build_spectator_state_update_message(
+            key,
+            &session.state,
+            &[],
+            &[],
+            session.state_revision,
+        ),
+    }
+}
+
+/// Retain the publication lease through registry- and route-fenced enqueue.
+/// A rejected seat releases every guard before spectator authorization.
+async fn handle_resync_state(
+    state: &SharedState,
+    connections: &SharedConnections,
+    spectators: &SharedGameSpectators,
+    identity: &SocketIdentity,
+    tx: &socket_mailbox::Sender,
+    permit: socket_mailbox::ResyncPermit,
+    context: &ServerContext,
+) {
+    let mut permit = Some(permit);
+    let seat = identity
+        .full_seat()
+        .map(|(code, player, _)| (code, Some(player)));
+    let spectator = identity
+        .spectator_game_code
+        .as_deref()
+        .map(|code| (code, None));
+    for (code, player) in seat.into_iter().chain(spectator) {
+        let Ok(session) = lock_session(state, code).await else {
+            continue;
+        };
+        if player.is_some() && !full_seat_matches_session(&session, identity) {
+            drop(session);
+            continue;
+        }
+        let Some(runtime) = session.full_runtime.as_ref() else {
+            drop(session);
+            continue;
+        };
+        let key = runtime.key.clone();
+        let (session, message) = context
+            .game_executor
+            .with_session(session, move |session| {
+                build_resync_state_message(session, player)
+            })
+            .await;
+        let message = match message {
+            Ok(message) => message,
+            Err(error) => {
+                drop(session);
+                let _ = tx.send(ServerMessage::error(error));
+                return;
+            }
+        };
+        #[cfg(test)]
+        context
+            .socket_hooks
+            .after_resync_build(&key, session.state_revision)
+            .await;
+        let mut message = Some(message);
+        let mut discarded = None;
+        let registry = state.lock().await;
+        let registered = registry
+            .session(code)
+            .is_some_and(|handle| Arc::ptr_eq(&handle, OwnedMutexGuard::mutex(&session)));
+        let binding_current = registered
+            && session
+                .full_runtime
+                .as_ref()
+                .is_some_and(|runtime| runtime.key == key)
+            && !tx.is_closed();
+        let sent = match player {
+            Some(player) => {
+                let routes = connections.lock().await;
+                if binding_current
+                    && full_seat_matches_session(&session, identity)
+                    && full_sender_matches(&routes, code, player, tx)
+                {
+                    // Session, registry, and route guards all span send.
+                    Some(tx.send_resync(
+                        message.take().expect("owned projection"),
+                        permit.take().expect("owned admission"),
+                        |message| discarded = Some(message),
+                    ))
+                } else {
+                    None
+                }
+            }
+            None => {
+                let routes = spectators.lock().await;
+                let current = routes
+                    .get(code)
+                    .is_some_and(|senders| senders.iter().any(|sender| sender.same_channel(tx)));
+                if binding_current && current {
+                    Some(tx.send_resync(
+                        message.take().expect("owned projection"),
+                        permit.take().expect("owned admission"),
+                        |message| discarded = Some(message),
+                    ))
+                } else {
+                    None
+                }
+            }
+        };
+        drop(registry);
+        // Registry and route guards are gone; the exact session lease remains.
+        if matches!(sent, Some(Ok(()))) {
+            #[cfg(test)]
+            context
+                .socket_hooks
+                .after_resync_enqueue(&key, session.state_revision)
+                .await;
+        }
+        drop(session);
+        if let Some(message) = discarded.or(message) {
+            context.game_executor.run(move || drop(message)).await;
+        }
+        if sent.is_some() {
+            return;
+        }
+    }
+    let _ = tx.send(ServerMessage::error(FULL_SOCKET_AUTHORITY_REJECTION));
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_client_message(
     client_msg: ClientMessage,
+    resync: Option<socket_mailbox::ResyncPermit>,
     socket: &mut NegotiatedSocket,
     state: &SharedState,
     draft_state: &SharedDraftState,
@@ -9685,6 +10089,10 @@ async fn handle_client_message(
     }
 
     if matches!(mode, ServerMode::Full) {
+        #[cfg(test)]
+        if matches!(&client_msg, ClientMessage::Action { .. }) {
+            context.socket_hooks.before_action_preflight().await;
+        }
         if let Some(reason) =
             full_socket_authority_rejection(&client_msg, state, connections, identity, tx).await
         {
@@ -9706,6 +10114,23 @@ async fn handle_client_message(
     match client_msg {
         ClientMessage::ClientHello { .. } | ClientMessage::Ping { .. } => {
             unreachable!("the independent decoder consumes handshake and heartbeat frames");
+        }
+        ClientMessage::ResyncState => {
+            let (Some(StateCodec::StateCodecV1), Some(permit)) = (socket.state_codec(), resync)
+            else {
+                let _ = socket.enqueue_reply(ServerMessage::error("State codec is not negotiated"));
+                return;
+            };
+            handle_resync_state(
+                state,
+                connections,
+                game_spectators,
+                identity,
+                tx,
+                permit,
+                context,
+            )
+            .await;
         }
         // These terminal-only messages deliberately do not touch identity,
         // SessionManager, connection registration, or reconnect leases. A
@@ -10008,7 +10433,7 @@ async fn handle_client_message(
                     // An absent game keeps this arm's own message, so
                     // `lock_session`'s refusal is discarded.
                     match lock_session(state, game_code).await.ok() {
-                        Some(session) if session.hosting == HostingMode::SingleUser => {
+                        Some(session) if session.hosting() == HostingMode::SingleUser => {
                             context
                                 .game_executor
                                 .with_session(session, |session| {
@@ -10397,16 +10822,24 @@ async fn handle_client_message(
                                     &result,
                                     state_revision,
                                 );
-                                if source.guard().is_ok() {
-                                    for (pid, sender) in ai_recipients {
-                                        let _ = sender.send(build_state_update_message(
-                                            &source,
-                                            &key,
-                                            pid,
-                                            rewind_targets.clone(),
-                                            &result.0.eliminated_players,
-                                        ));
+                                match source.guarded(&key.game_code) {
+                                    Ok(source) => {
+                                        for (pid, sender) in ai_recipients {
+                                            let _ = sender.send(build_state_update_message(
+                                                &source,
+                                                &key,
+                                                pid,
+                                                rewind_targets.clone(),
+                                                &result.0.eliminated_players,
+                                            ));
+                                        }
                                     }
+                                    Err(reason) => warn!(
+                                        game = %key.game_code,
+                                        revision = state_revision,
+                                        %reason,
+                                        "reconnect AI snapshot exceeds broadcast bounds; not published"
+                                    ),
                                 }
                             })
                             .await;
@@ -10616,9 +11049,7 @@ async fn handle_client_message(
                         ServerMessage::error(error)
                     })?;
                     if let Some(ref format) = format_config {
-                        if format.format == engine::types::format::GameFormat::Planechase
-                            && !ai_seats.is_empty()
-                        {
+                        if format.format.is_planechase_family() && !ai_seats.is_empty() {
                             return Err(Box::new(ServerMessage::error(
                                 "Planechase does not support AI seats yet".to_string(),
                             )));
@@ -11383,6 +11814,7 @@ async fn handle_client_message(
                 context,
                 state,
                 connections,
+                game_spectators,
                 draft_state,
                 game_db,
                 identity,
@@ -11397,6 +11829,7 @@ async fn handle_client_message(
                 context,
                 state,
                 connections,
+                game_spectators,
                 draft_state,
                 game_db,
                 identity,
@@ -11444,13 +11877,16 @@ async fn handle_client_message(
                 .with_session(guard, move |session| {
                     let outcome = session.request_takeback(player_id, target.unwrap_or_default());
                     let requested = session.pending_takeback_message();
-                    let snapshot = matches!(outcome, Ok(server_core::TakebackOutcome::Approved))
-                        .then(|| {
-                            (
-                                session.advance_state_revision(),
-                                session.current_broadcast_snapshot(),
-                            )
-                        });
+                    let snapshot = matches!(
+                        outcome,
+                        Ok(TakebackOutcome::Resolved(TakebackResolution::Approved))
+                    )
+                    .then(|| {
+                        (
+                            session.advance_state_revision(),
+                            session.current_broadcast_snapshot(),
+                        )
+                    });
                     (outcome, requested, session.player_count, snapshot)
                 })
                 .await;
@@ -11501,7 +11937,7 @@ async fn handle_client_message(
                     let msg = ServerMessage::RequestRejected { reason };
                     let _ = socket.enqueue_reply(msg);
                 }
-                Ok(server_core::TakebackOutcome::Pending) => {
+                Ok(TakebackOutcome::Pending) => {
                     info!(game = %game_code, player = ?player_id, "takeback requested");
                     if let Some(msg) = requested_msg {
                         let conns = connections.lock().await;
@@ -11512,8 +11948,8 @@ async fn handle_client_message(
                         }
                     }
                 }
-                Ok(server_core::TakebackOutcome::Approved) => {
-                    info!(game = %game_code, player = ?player_id, "takeback auto-approved (sole human seat)");
+                Ok(TakebackOutcome::Resolved(TakebackResolution::Approved)) => {
+                    info!(game = %game_code, player = ?player_id, "takeback auto-approved (no voter to ask)");
                     let (state_revision, snapshot) =
                         approved_snapshot.expect("Approved outcome always computes a snapshot");
                     broadcast_takeback_approved(
@@ -11541,8 +11977,14 @@ async fn handle_client_message(
                     .await;
                     broadcast_ai_failure(connections, &game_code, ai_failure).await;
                 }
-                Ok(server_core::TakebackOutcome::Rejected) => {
-                    // request_takeback never returns Rejected — only respond_takeback does.
+                Ok(TakebackOutcome::Resolved(other)) => {
+                    let conns = connections.lock().await;
+                    if let Some(players) = conns.get(&game_code) {
+                        let msg = takeback_resolved_message(other, Some(player_id));
+                        for sender in players.values() {
+                            let _ = sender.send(msg.clone());
+                        }
+                    }
                 }
             }
             drop(guard);
@@ -11581,13 +12023,16 @@ async fn handle_client_message(
                 .game_executor
                 .with_session(guard, move |session| {
                     let outcome = session.respond_takeback(player_id, approve);
-                    let snapshot = matches!(outcome, Ok(server_core::TakebackOutcome::Approved))
-                        .then(|| {
-                            (
-                                session.advance_state_revision(),
-                                session.current_broadcast_snapshot(),
-                            )
-                        });
+                    let snapshot = matches!(
+                        outcome,
+                        Ok(TakebackOutcome::Resolved(TakebackResolution::Approved))
+                    )
+                    .then(|| {
+                        (
+                            session.advance_state_revision(),
+                            session.current_broadcast_snapshot(),
+                        )
+                    });
                     (outcome, session.player_count, snapshot)
                 })
                 .await;
@@ -11628,10 +12073,10 @@ async fn handle_client_message(
                     let msg = ServerMessage::RequestRejected { reason };
                     let _ = socket.enqueue_reply(msg);
                 }
-                Ok(server_core::TakebackOutcome::Pending) => {
+                Ok(TakebackOutcome::Pending) => {
                     info!(game = %game_code, player = ?player_id, approve, "takeback approval recorded");
                 }
-                Ok(server_core::TakebackOutcome::Approved) => {
+                Ok(TakebackOutcome::Resolved(TakebackResolution::Approved)) => {
                     info!(game = %game_code, player = ?player_id, "takeback unanimously approved");
                     let (state_revision, snapshot) =
                         approved_snapshot.expect("Approved outcome always computes a snapshot");
@@ -11660,14 +12105,11 @@ async fn handle_client_message(
                     .await;
                     broadcast_ai_failure(connections, &game_code, ai_failure).await;
                 }
-                Ok(server_core::TakebackOutcome::Rejected) => {
-                    info!(game = %game_code, player = ?player_id, "takeback declined");
+                Ok(TakebackOutcome::Resolved(other)) => {
+                    info!(game = %game_code, player = ?player_id, ?other, "takeback declined");
                     let conns = connections.lock().await;
                     if let Some(players) = conns.get(&game_code) {
-                        let msg = ServerMessage::TakebackResolved {
-                            approved: false,
-                            resolved_by: Some(player_id),
-                        };
+                        let msg = takeback_resolved_message(other, Some(player_id));
                         for sender in players.values() {
                             let _ = sender.send(msg.clone());
                         }
@@ -11726,10 +12168,10 @@ async fn handle_client_message(
                     info!(game = %game_code, player = ?player_id, "takeback request cancelled");
                     let conns = connections.lock().await;
                     if let Some(players) = conns.get(&game_code) {
-                        let msg = ServerMessage::TakebackResolved {
-                            approved: false,
-                            resolved_by: Some(player_id),
-                        };
+                        let msg = takeback_resolved_message(
+                            TakebackResolution::Cancelled,
+                            Some(player_id),
+                        );
                         for sender in players.values() {
                             let _ = sender.send(msg.clone());
                         }
@@ -12801,10 +13243,11 @@ mod state_transport_derived_tests {
             generation: 1,
         };
         match {
-            let source = game_executor::StateUpdateSource::from_result(result, 1);
-            source
-                .guard()
-                .map(|()| build_state_update_message(&source, &full_key, viewer, Vec::new(), &[]))
+            game_executor::StateUpdateSource::from_result(result, 1)
+                .guarded("ABC123")
+                .map(|source| {
+                    build_state_update_message(&source, &full_key, viewer, Vec::new(), &[])
+                })
         }
         .expect("fixture state update")
         {
@@ -12879,10 +13322,11 @@ mod state_transport_derived_tests {
             generation: 1,
         };
         match {
-            let source = game_executor::StateUpdateSource::from_result(result, 1);
-            source
-                .guard()
-                .map(|()| build_state_update_message(&source, &full_key, viewer, Vec::new(), &[]))
+            game_executor::StateUpdateSource::from_result(result, 1)
+                .guarded("ABC123")
+                .map(|source| {
+                    build_state_update_message(&source, &full_key, viewer, Vec::new(), &[])
+                })
         }
         .expect("fixture state update")
         {
@@ -13825,6 +14269,96 @@ mod full_socket_authority_tests {
     }
 
     #[tokio::test]
+    async fn resync_rejects_incomplete_identity_after_valid_attachment() {
+        let (state, connections, code, token) = test_session();
+        let key = server_core::FullSessionKey {
+            game_code: code.clone(),
+            generation: 1,
+        };
+        {
+            let mut session = lock_session(&state, &code).await.unwrap();
+            session.full_runtime = Some(FullRuntime {
+                key: key.clone(),
+                activation_epoch: None,
+            });
+        }
+        let spectators = Arc::new(Mutex::new(HashMap::new()));
+        let (tx, mut rx) = socket_mailbox::channel();
+        let mut identity = empty_identity();
+        attach_full_seat(
+            &state,
+            &connections,
+            &mut identity,
+            code.clone(),
+            token.clone(),
+            &tx,
+        )
+        .await
+        .unwrap();
+        let context = ServerContext::default();
+        handle_resync_state(
+            &state,
+            &connections,
+            &spectators,
+            &identity,
+            &tx,
+            tx.try_admit_resync().unwrap(),
+            &context,
+        )
+        .await;
+        match rx.recv().await.unwrap() {
+            ServerMessage::StateUpdate {
+                full_key,
+                state,
+                legal_actions,
+                ..
+            } => {
+                assert_eq!(full_key, Some(key));
+                assert_eq!(state.viewer_projection, Some(PlayerId(0)));
+                assert!(
+                    legal_actions.is_empty(),
+                    "pregame does not invent a decision"
+                );
+            }
+            other => panic!("positive attachment must reach projection: {other:?}"),
+        }
+        identity.player_token = None;
+        handle_resync_state(
+            &state,
+            &connections,
+            &spectators,
+            &identity,
+            &tx,
+            tx.try_admit_resync().unwrap(),
+            &context,
+        )
+        .await;
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            ServerMessage::Error { .. }
+        ));
+        assert!(
+            tx.try_admit_resync().is_ok(),
+            "denial releases the pending owner"
+        );
+        identity.player_token = Some(token);
+        handle_resync_state(
+            &state,
+            &connections,
+            &spectators,
+            &identity,
+            &tx,
+            tx.try_admit_resync().unwrap(),
+            &context,
+        )
+        .await;
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            ServerMessage::StateUpdate { .. }
+        ));
+    }
+
+    #[tokio::test]
     async fn a_timely_contest_reconnect_retains_receipt_time_through_admission() {
         use engine::types::contest::{ContestConfig, ContestKind, ContestState};
         use engine::types::game_state::WaitingFor;
@@ -14555,13 +15089,10 @@ mod draft_socket_authority_tests {
             app.draft_sessions.lock().await.restore_persisted_session(persisted).unwrap();
             let (mut socket, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
             assert!(matches!(recv_server_message(&mut socket).await, ServerMessage::ServerHello { .. }));
-            let hello = ClientMessage::ClientHello {
-                client_version: env!("CARGO_PKG_VERSION").into(),
-                build_commit: build_commit().into(),
-                protocol_version: PROTOCOL_VERSION,
-                lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
-                wire_formats: Vec::new(),
-            };
+            let hello = ClientMessage::ClientHello { client_version: env!("CARGO_PKG_VERSION").into(),
+            build_commit: build_commit().into(),
+            protocol_version: PROTOCOL_VERSION,
+            lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION), wire_formats: Vec::new(), state_codecs: Vec::new() };
             socket.send(WsMessage::Text(serde_json::to_string(&hello).unwrap().into())).await.unwrap();
             socket.send(WsMessage::Text(serde_json::to_string(&ClientMessage::ReconnectDraft {
                 draft_code: code.clone(),
@@ -14737,6 +15268,7 @@ mod draft_socket_authority_tests {
                     protocol_version: PROTOCOL_VERSION,
                     lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
                     wire_formats: Vec::new(),
+                    state_codecs: Vec::new(),
                 },
                 ClientMessage::ReconnectDraft {
                     draft_code: code.clone(),
@@ -14863,6 +15395,7 @@ mod draft_socket_authority_tests {
                         protocol_version: PROTOCOL_VERSION,
                         lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
                         wire_formats: Vec::new(),
+                        state_codecs: Vec::new(),
                     })
                     .expect("hello json")
                     .into(),
@@ -15000,6 +15533,7 @@ mod draft_socket_authority_tests {
                     protocol_version: PROTOCOL_VERSION,
                     lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
                     wire_formats: Vec::new(),
+                    state_codecs: Vec::new(),
                 },
                 ClientMessage::ReconnectDraft {
                     draft_code: draft_code.clone(),
@@ -16035,6 +16569,7 @@ mod issue_4548_full_create_tests {
             protocol_version: PROTOCOL_VERSION,
             lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
             wire_formats,
+            state_codecs: Vec::new(),
         }
     }
 
@@ -16073,6 +16608,7 @@ mod issue_4548_full_create_tests {
                 protocol_version: PROTOCOL_VERSION,
                 lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
                 wire_formats: Vec::new(),
+                state_codecs: Vec::new(),
             };
             socket
                 .send(WsMessage::Text(
@@ -16308,6 +16844,7 @@ mod issue_4548_full_create_tests {
                 protocol_version: PROTOCOL_VERSION,
                 lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
                 wire_formats: Vec::new(),
+                state_codecs: Vec::new(),
             };
             socket
                 .send(WsMessage::Text(
@@ -16358,6 +16895,108 @@ mod issue_4548_full_create_tests {
         );
     }
 
+    fn hello_frame() -> ClientMessage {
+        ClientMessage::ClientHello {
+            client_version: env!("CARGO_PKG_VERSION").to_string(),
+            build_commit: build_commit().to_string(),
+            protocol_version: PROTOCOL_VERSION,
+            lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+            wire_formats: Vec::new(),
+            state_codecs: Vec::new(),
+        }
+    }
+
+    /// A settings-create frame carrying one AI seat (seat 1) under the
+    /// given format, over the empty host deck this harness uses (it runs
+    /// on an empty `CardDatabase`).
+    fn ai_create_frame(format_config: engine::types::format::FormatConfig) -> ClientMessage {
+        ClientMessage::CreateGameWithSettings {
+            deck: empty_deck(),
+            display_name: "Alice".to_string(),
+            public: true,
+            password: None,
+            timer_seconds: None,
+            player_count: 2,
+            match_config: Default::default(),
+            ai_seats: vec![ai_seat()],
+            format_config: Some(format_config),
+            room_name: None,
+            host_peer_id: None,
+            draft_metadata: None,
+            start_when_full: true,
+            ranked: false,
+            requested_code: None,
+            booster_pack_pool: None,
+        }
+    }
+
+    /// Connects to a fresh full-mode server, hellos, sends one AI-seat
+    /// settings-create frame under `format`, and returns the first reply.
+    async fn ai_create_first_reply(format: engine::types::format::FormatConfig) -> ServerMessage {
+        let (url, server, _temp_dir, _game_db) = spawn_full_mode_server().await;
+        let result = tokio::time::timeout(Duration::from_secs(2), async {
+            let (mut socket, _) = tokio_tungstenite::connect_async(url)
+                .await
+                .expect("connect");
+            assert!(matches!(
+                recv_server_message(&mut socket).await,
+                ServerMessage::ServerHello { .. }
+            ));
+            send_test_message(&mut socket, &hello_frame(), false).await;
+            send_test_message(&mut socket, &ai_create_frame(format), false).await;
+            recv_server_message(&mut socket).await
+        })
+        .await;
+        server.abort();
+        result.expect("create reply must arrive before the timeout")
+    }
+
+    /// `Planechase` with AI seats is refused before deck validation runs.
+    #[tokio::test]
+    async fn full_create_refuses_ai_seats_for_planechase() {
+        let reply = ai_create_first_reply(engine::types::format::FormatConfig::planechase()).await;
+        let ServerMessage::Error { message, .. } = reply else {
+            panic!("planechase + AI seats must be refused, got {reply:?}");
+        };
+        assert!(
+            message.contains("does not support AI seats"),
+            "unexpected refusal: {message}"
+        );
+    }
+
+    /// `PlanechaseCommander` with AI seats is refused the same way: the
+    /// guard reads `GameFormat::is_planechase_family()`, so the composed
+    /// variant cannot slip AI seats through to `ai_seat_setups`.
+    #[tokio::test]
+    async fn full_create_refuses_ai_seats_for_planechase_commander() {
+        let reply =
+            ai_create_first_reply(engine::types::format::FormatConfig::planechase_commander())
+                .await;
+        let ServerMessage::Error { message, .. } = reply else {
+            panic!("planechase commander + AI seats must be refused, got {reply:?}");
+        };
+        assert!(
+            message.contains("does not support AI seats"),
+            "unexpected refusal: {message}"
+        );
+    }
+
+    /// Positive control: ordinary `Commander` with AI seats passes the AI
+    /// guard. The empty host deck then fails format deck validation, which
+    /// proves creation reached validation instead of the AI refusal.
+    #[tokio::test]
+    async fn full_create_commander_ai_seats_reach_deck_validation() {
+        let reply = ai_create_first_reply(engine::types::format::FormatConfig::commander()).await;
+        let ServerMessage::Error { message, code } = reply else {
+            panic!("empty commander deck must fail validation, got {reply:?}");
+        };
+        assert_eq!(code, Some(ServerErrorCode::DeckRejected));
+        assert!(
+            !message.contains("does not support AI seats"),
+            "commander must pass the AI guard: {message}"
+        );
+    }
+
     #[tokio::test]
     async fn full_mode_create_accepts_an_empty_host_deck_for_dandan() {
         let (url, server, _temp_dir, _game_db) = spawn_full_mode_server().await;
@@ -16375,6 +17014,7 @@ mod issue_4548_full_create_tests {
                 protocol_version: PROTOCOL_VERSION,
                 lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
                 wire_formats: Vec::new(),
+                state_codecs: Vec::new(),
             };
             socket
                 .send(WsMessage::Text(
@@ -16437,6 +17077,7 @@ mod issue_4548_full_create_tests {
                 protocol_version: PROTOCOL_VERSION,
                 lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
                 wire_formats: Vec::new(),
+                state_codecs: Vec::new(),
             };
             socket
                 .send(WsMessage::Text(
@@ -16670,6 +17311,7 @@ mod issue_4548_full_create_tests {
             protocol_version: PROTOCOL_VERSION,
             lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
             wire_formats: Vec::new(),
+            state_codecs: Vec::new(),
         };
         send_test_message(&mut socket, &hello, false).await;
         socket
@@ -18986,7 +19628,15 @@ mod game_submission_tests {
     pub(super) async fn connect_and_hello(
         url: String,
     ) -> WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>> {
-        let (mut socket, _) = tokio_tungstenite::connect_async(url)
+        connect_and_hello_with(url, None).await
+    }
+
+    /// [`connect_and_hello`] with the client socket's own limits.
+    pub(super) async fn connect_and_hello_with(
+        url: String,
+        config: Option<tokio_tungstenite::tungstenite::protocol::WebSocketConfig>,
+    ) -> WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>> {
+        let (mut socket, _) = tokio_tungstenite::connect_async_with_config(url, config, false)
             .await
             .expect("connect");
 
@@ -19001,6 +19651,7 @@ mod game_submission_tests {
             protocol_version: PROTOCOL_VERSION,
             lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
             wire_formats: Vec::new(),
+            state_codecs: Vec::new(),
         };
         socket
             .send(WsMessage::Text(
@@ -20167,6 +20818,7 @@ mod game_submission_tests {
                 protocol_version: PROTOCOL_VERSION,
                 lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
                 wire_formats: Vec::new(),
+                state_codecs: Vec::new(),
             };
             socket
                 .send(WsMessage::Text(
@@ -20229,6 +20881,7 @@ mod refused_auto_start_join_tests {
                 protocol_version: PROTOCOL_VERSION,
                 lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
                 wire_formats: Vec::new(),
+                state_codecs: Vec::new(),
             },
         )
         .await;
@@ -20537,6 +21190,7 @@ mod mode_gate_tests {
                 protocol_version: PROTOCOL_VERSION,
                 lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
                 wire_formats: Vec::new(),
+                state_codecs: Vec::new(),
             },
             ClientMessage::SubscribeLobby,
             ClientMessage::UnsubscribeLobby,
@@ -21057,6 +21711,7 @@ mod handshake_tests {
                 // gate must fall back to the `protocol_version` window.
                 lobby_protocol_version: None,
                 wire_formats: Vec::new(),
+                state_codecs: Vec::new(),
             },
             hello_acceptance(ServerMode::Full),
         );
@@ -21066,6 +21721,7 @@ mod handshake_tests {
                 client_version: "0.1.11".into(),
                 build_commit: "abc1234".into(),
                 wire_format: None,
+                state_codec: None,
             })
         );
     }
@@ -21083,6 +21739,7 @@ mod handshake_tests {
                     protocol_version,
                     lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
                     wire_formats: Vec::new(),
+                    state_codecs: Vec::new(),
                 },
                 hello_acceptance(ServerMode::Full),
             )
@@ -21156,6 +21813,7 @@ mod handshake_tests {
                 client_version: "zone-choice-peer".into(),
                 build_commit: "zone-choice-build".into(),
                 wire_format: None,
+                state_codec: None,
             })
         );
     }
@@ -21170,6 +21828,7 @@ mod handshake_tests {
                 protocol_version: PROTOCOL_VERSION,
                 lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
                 wire_formats: vec![WireFormat::GzipEnvelopeV1],
+                state_codecs: Vec::new(),
             },
             hello_acceptance(ServerMode::Full),
         );
@@ -21179,6 +21838,7 @@ mod handshake_tests {
                 client_version: "0.1.11".into(),
                 build_commit: "abc1234".into(),
                 wire_format: Some(WireFormat::GzipEnvelopeV1),
+                state_codec: None,
             })
         );
     }
@@ -21200,6 +21860,7 @@ mod handshake_tests {
                 // gate must fall back to the `protocol_version` window.
                 lobby_protocol_version: None,
                 wire_formats: Vec::new(),
+                state_codecs: Vec::new(),
             },
             hello_acceptance(ServerMode::Full),
         );
@@ -21225,6 +21886,7 @@ mod handshake_tests {
                 // gate must fall back to the `protocol_version` window.
                 lobby_protocol_version: None,
                 wire_formats: Vec::new(),
+                state_codecs: Vec::new(),
             },
             hello_acceptance(ServerMode::LobbyOnly),
         );
@@ -21246,6 +21908,7 @@ mod handshake_tests {
                 protocol_version: PROTOCOL_VERSION.saturating_sub(9),
                 lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
                 wire_formats: Vec::new(),
+                state_codecs: Vec::new(),
             },
             hello_acceptance(ServerMode::LobbyOnly),
         );
@@ -21267,6 +21930,7 @@ mod handshake_tests {
                 protocol_version: PROTOCOL_VERSION,
                 lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION + 5),
                 wire_formats: Vec::new(),
+                state_codecs: Vec::new(),
             },
             hello_acceptance(ServerMode::LobbyOnly),
         );
@@ -21289,6 +21953,7 @@ mod handshake_tests {
                 protocol_version: PROTOCOL_VERSION,
                 lobby_protocol_version: Some(below),
                 wire_formats: Vec::new(),
+                state_codecs: Vec::new(),
             },
             hello_acceptance(ServerMode::LobbyOnly),
         );
@@ -21315,6 +21980,7 @@ mod handshake_tests {
                 protocol_version: previous,
                 lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
                 wire_formats: Vec::new(),
+                state_codecs: Vec::new(),
             },
             hello_acceptance(ServerMode::Full),
         );
@@ -21340,6 +22006,7 @@ mod handshake_tests {
                 // gate must fall back to the `protocol_version` window.
                 lobby_protocol_version: None,
                 wire_formats: Vec::new(),
+                state_codecs: Vec::new(),
             },
             hello_acceptance(ServerMode::Full),
         );
@@ -21364,6 +22031,7 @@ mod handshake_tests {
                 // gate must fall back to the `protocol_version` window.
                 lobby_protocol_version: None,
                 wire_formats: Vec::new(),
+                state_codecs: Vec::new(),
             },
             hello_acceptance(ServerMode::Full),
         );
@@ -21388,6 +22056,7 @@ mod handshake_tests {
                 // gate must fall back to the `protocol_version` window.
                 lobby_protocol_version: None,
                 wire_formats: Vec::new(),
+                state_codecs: Vec::new(),
             },
             hello_acceptance(ServerMode::Full),
         );
@@ -21406,6 +22075,7 @@ mod handshake_tests {
                 // gate must fall back to the `protocol_version` window.
                 lobby_protocol_version: None,
                 wire_formats: Vec::new(),
+                state_codecs: Vec::new(),
             },
             hello_acceptance(ServerMode::Full),
         );
@@ -21457,6 +22127,7 @@ mod handshake_tests {
                 // gate must fall back to the `protocol_version` window.
                 lobby_protocol_version: None,
                 wire_formats: Vec::new(),
+                state_codecs: Vec::new(),
             },
             hello_acceptance(ServerMode::Full),
         );
@@ -25305,6 +25976,7 @@ mod metrics_tests {
             protocol_version: PROTOCOL_VERSION,
             lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
             wire_formats: Vec::new(),
+            state_codecs: Vec::new(),
         };
         socket
             .send(WsMessage::Text(
@@ -25655,5 +26327,105 @@ mod metrics_tests {
         counter.store(1, std::sync::atomic::Ordering::Relaxed);
         ConnectionSlot::new(counter.clone()).disarm();
         assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), 1);
+    }
+}
+
+#[cfg(test)]
+mod state_codec_handshake_tests {
+    use super::*;
+
+    fn hello(codecs: Vec<StateCodec>) -> ClientMessage {
+        ClientMessage::ClientHello {
+            client_version: "codec-peer".into(),
+            build_commit: "codec-build".into(),
+            protocol_version: PROTOCOL_VERSION,
+            lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
+            wire_formats: vec![WireFormat::GzipEnvelopeV1],
+            state_codecs: codecs,
+        }
+    }
+
+    #[test]
+    fn codec_selection_is_full_only_bounded_and_first_hello_only() {
+        for codecs in [
+            vec![StateCodec::StateCodecV1],
+            vec![StateCodec::Unknown, StateCodec::StateCodecV1],
+            vec![StateCodec::StateCodecV1; MAX_ADVERTISED_STATE_CODECS],
+        ] {
+            let message = hello(codecs);
+            assert!(matches!(
+                classify_hello_gate(false, &message, hello_acceptance(ServerMode::Full)),
+                HelloGateOutcome::Accept(ClientHelloInfo {
+                    state_codec: Some(StateCodec::StateCodecV1),
+                    wire_format: Some(WireFormat::GzipEnvelopeV1),
+                    ..
+                })
+            ));
+            assert!(matches!(
+                classify_hello_gate(false, &message, hello_acceptance(ServerMode::LobbyOnly)),
+                HelloGateOutcome::Accept(ClientHelloInfo {
+                    state_codec: None,
+                    ..
+                })
+            ));
+            assert_eq!(
+                classify_hello_gate(true, &message, hello_acceptance(ServerMode::Full)),
+                HelloGateOutcome::IgnoreRedundantHello
+            );
+        }
+        for codecs in [
+            Vec::new(),
+            vec![StateCodec::Unknown; MAX_ADVERTISED_STATE_CODECS],
+        ] {
+            assert!(matches!(
+                classify_hello_gate(false, &hello(codecs), hello_acceptance(ServerMode::Full)),
+                HelloGateOutcome::Accept(ClientHelloInfo {
+                    state_codec: None,
+                    ..
+                })
+            ));
+        }
+        for codecs in [
+            vec![StateCodec::StateCodecV1; MAX_ADVERTISED_STATE_CODECS + 1],
+            vec![StateCodec::Unknown; MAX_ADVERTISED_STATE_CODECS + 1],
+        ] {
+            assert!(matches!(
+                classify_hello_gate(false, &hello(codecs), hello_acceptance(ServerMode::Full)),
+                HelloGateOutcome::RejectInvalidHello(_)
+            ));
+        }
+        let mut wrong_version = hello(vec![StateCodec::StateCodecV1]);
+        if let ClientMessage::ClientHello {
+            protocol_version, ..
+        } = &mut wrong_version
+        {
+            *protocol_version = PROTOCOL_VERSION + 1;
+        }
+        assert!(matches!(
+            classify_hello_gate(false, &wrong_version, hello_acceptance(ServerMode::Full)),
+            HelloGateOutcome::RejectProtocol { .. }
+        ));
+    }
+
+    #[test]
+    fn resync_is_full_operational_and_never_broker_projected() {
+        let request = ClientMessage::ResyncState;
+        assert!(reject_if_disabled(&request, ServerMode::Full).is_none());
+        assert!(reject_if_disabled(&request, ServerMode::LobbyOnly).is_some());
+        assert_eq!(
+            full_socket_authority(&request),
+            FullSocketAuthority::Independent
+        );
+        assert!(to_lobby_client_message(&request).is_none());
+        assert!(operation_failed_message(&request, "denied").is_none());
+        assert!(guard_client_message_before_dispatch(&request, ServerMode::Full).is_ok());
+        assert!(
+            server_core::client_message_wire_guard::guard_broker_projection_inbound(&request)
+                .is_ok()
+        );
+        assert!(matches!(
+            wire_rejection_message(&request, "denied".into()),
+            ServerMessage::Error { .. }
+        ));
     }
 }

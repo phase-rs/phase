@@ -44,7 +44,7 @@ export function DeckBuilderToolbar({
   format,
   onFormatChange,
 }: DeckBuilderToolbarProps) {
-  const { t } = useTranslation("deck-builder");
+  const { t } = useTranslation(["deck-builder", "common"]);
   const formatLabel =
     DECK_CONSTRUCTION_FORMATS.find((entry) => entry.format === format)?.label ?? format;
   const formatMenuItems = DECK_CONSTRUCTION_FORMATS.map(({ format: value, label }) => ({

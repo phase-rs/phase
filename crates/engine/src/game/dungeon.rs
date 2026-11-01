@@ -1515,6 +1515,7 @@ fn patch_ansur_drain(mut root: ResolvedAbility) -> ResolvedAbility {
                 CardTypeSetSource::TrackedSet {
                     set: TrackedAnaphorSource::ChainSet,
                     caused_by: None,
+                    filter: None,
                 },
             )
             .expect("Sum over ManaValue of the chain set is statically valid");

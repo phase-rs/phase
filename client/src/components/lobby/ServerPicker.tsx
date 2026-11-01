@@ -27,7 +27,7 @@ interface ServerPickerProps {
 type ConnTestState = "idle" | "testing" | "ok" | "fail";
 
 export function ServerPicker({ onClose }: ServerPickerProps) {
-  const { t } = useTranslation("multiplayer");
+  const { t } = useTranslation(["multiplayer", "common"]);
   const hostingServer = useMultiplayerStore((s) => s.hostingServer);
   const userLobbySources = useMultiplayerStore((s) => s.userLobbySources);
   const sourceStatus = useMultiplayerStore((s) => s.sourceStatus);

@@ -17,7 +17,11 @@ import type {
   PlayerId,
   PersistedGameState,
   RestoredGameStateResult,
+  StateWithheldNotice,
   SubmitResult,
+  TakebackEvent,
+  TakebackNotice,
+  TakebackReply,
   ViewerSnapshot,
   WaitingFor,
 } from "./types";
@@ -26,7 +30,7 @@ import type {
   InteractionPreviewRequest,
   InteractionSubmission,
 } from "./generated/interaction";
-import type { BracketDeckRequest, BracketEstimate, CommanderBracketTier } from "../types/bracketEstimate";
+import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 
 import {
   AdapterError,
@@ -53,8 +57,15 @@ import { ContestClickBuffer, isContestSequence } from "../network/contestClickBu
 import { createPeerSession, type PeerSession } from "../network/peer";
 import type { TransportConnection, TransportPeer } from "../network/transport";
 import type { P2PMessage } from "../network/protocol";
-import { WIRE_PROTOCOL_VERSION, legalActionsFromWire, legalActionsToWire } from "../network/protocol";
+import {
+  WIRE_PROTOCOL_VERSION,
+  legalActionsFromWire,
+  legalActionsToWire,
+  takebackEventFromWire,
+  takebackEventToWire,
+} from "../network/protocol";
 import type {
+  DeckListData,
   PlayerSlot,
   SeatKind,
   SeatMutation,
@@ -141,6 +152,8 @@ export type P2PAdapterEvent =
       events: GameEvent[];
       logEntries?: GameLogEntry[];
     }
+  /** The latest state was applied but withheld (`null`: a delivered state ended that). */
+  | { type: "stateDelivery"; withheld: StateWithheldNotice | null }
   // 3-4p multiplayer additions:
   | {
       type: "opponentDisconnectedWithChoice";
@@ -157,7 +170,10 @@ export type P2PAdapterEvent =
   | { type: "roomFull" }
   | { type: "deckRejected"; reason: string; format?: string }
   | { type: "reconnecting"; attempt: number }
-  | { type: "reconnectFailed"; reason: string };
+  | { type: "reconnectFailed"; reason: string }
+  /** The authority sent this seat a fresh bootstrap; it replays a still-open takeback vote after this event. */
+  | { type: "bootstrapDelivered" }
+  | TakebackEvent;
 
 type P2PAdapterEventListener = (event: P2PAdapterEvent) => void;
 
@@ -183,16 +199,7 @@ function reconnectRejectionReason(
   }
 }
 
-interface DeckSeatPayload {
-  main_deck: string[];
-  sideboard: string[];
-  commander: string[];
-  companion?: string[];
-  signature_spell?: string[];
-  planar_deck?: string[];
-  scheme_deck?: string[];
-  bracket_tier?: CommanderBracketTier;
-}
+type DeckSeatPayload = DeckListData;
 
 interface DeckListPayload {
   player: DeckSeatPayload;
@@ -234,6 +241,15 @@ type NativeViewerUpdate = {
   revision: number;
 };
 
+/** One seat's server outcome for a revision: its view, or the notice that replaced an oversized one. */
+type NativeSeatReport =
+  | { kind: "view"; update: NativeViewerUpdate }
+  | { kind: "withheld"; notice: StateWithheldNotice };
+
+function seatReportRevision(report: NativeSeatReport): number {
+  return report.kind === "view" ? report.update.revision : report.notice.revision;
+}
+
 /** The view a reattached seat is sent, with the engine revision it belongs to. */
 type NativeResumedView = { revision: number; snapshot: EngineSnapshot };
 
@@ -259,7 +275,9 @@ class NativeP2PBridge {
   private readonly playerTokens = new Map<PlayerId, string>();
   private readonly latestViews = new Map<PlayerId, NativeViewerUpdate>();
   private readonly terminalDeliveries = new Map<PlayerId, FullTerminalDelivery>();
-  private readonly pendingViews = new Map<number, Map<PlayerId, NativeViewerUpdate>>();
+  private readonly pendingViews = new Map<number, Map<PlayerId, NativeSeatReport>>();
+  /** Each seat's latest withheld notice; `latestViews` cannot reach its revision. */
+  private readonly withheldNotices = new Map<PlayerId, StateWithheldNotice>();
   private readonly startWaiters: Array<(update: NativeViewerUpdate) => void> = [];
   /** Suspended seats being reattached, each waiting for its first view of the game. */
   private readonly resumeWaiters = new Map<
@@ -272,6 +290,16 @@ class NativeP2PBridge {
   private deliveredRevision = -1;
   private deliveredFaultIds = new Set<number>();
   private readonly pendingFaults = new Map<number, { id: number; revision: number; message: string }>();
+  /** Terminal revision of the host's Full delivery, released after that revision's fan-out. */
+  private pendingHostTerminalRevision: number | null = null;
+  /** Each seat's takeback notices in arrival order, each held until the revision
+   * that seat had been sent when it arrived has been fanned out. */
+  private pendingSeatNotices: Array<{
+    playerId: PlayerId;
+    session: object | undefined;
+    revision: number;
+    event: TakebackEvent;
+  }> = [];
   private gameCode: string | null = null;
   private fullKey: FullSessionKey | null = null;
   /** Clients still in their pregame handshake; `dispose()` releases them. */
@@ -285,8 +313,12 @@ class NativeP2PBridge {
     private readonly formatConfig: FormatConfig | undefined,
     private readonly matchConfig: MatchConfig | undefined,
     private readonly options: NativeP2PHostOptions,
-    private readonly onRevision: (revision: number, views: Map<PlayerId, NativeViewerUpdate>) => Promise<void>,
+    private readonly onRevision: (revision: number, reports: Map<PlayerId, NativeSeatReport>) => Promise<void>,
     private readonly onFault: (fault: { id: number; revision: number; message: string }) => Promise<void>,
+    private readonly onHostTerminalDelivery: (revision: number) => Promise<void>,
+    private readonly onSeatNotice: (playerId: PlayerId, event: TakebackEvent) => Promise<void>,
+    /** The guest session a seat's notice is addressed to; `undefined` for the host seat. */
+    private readonly seatSession: (playerId: PlayerId) => object | undefined,
     private readonly resumeSession?: NativeP2PServerSession,
   ) {}
 
@@ -565,8 +597,13 @@ class NativeP2PBridge {
    */
   retainSuspendedTerminalViews(finalViews: ReadonlyMap<PlayerId, GameState>, revision: number): void {
     for (const [playerId, finalView] of finalViews) {
-      if (playerId !== 0 && !this.clients.has(playerId)) this.seedTerminalView(playerId, finalView, revision);
+      if (this.finalViewIsSeatAuthority(playerId, revision)) this.seedTerminalView(playerId, finalView, revision);
     }
+  }
+
+  /** No loopback view of `revision` exists to cross-check for a suspended guest or a seat withheld at it. */
+  private finalViewIsSeatAuthority(playerId: PlayerId, revision: number): boolean {
+    return (playerId !== 0 && !this.clients.has(playerId)) || this.withheldNotices.get(playerId)?.revision === revision;
   }
 
   /**
@@ -614,6 +651,7 @@ class NativeP2PBridge {
     this.clients.delete(playerId);
     this.playerTokens.delete(playerId);
     this.latestViews.delete(playerId);
+    this.withheldNotices.delete(playerId);
   }
 
   dispose(): void {
@@ -623,8 +661,10 @@ class NativeP2PBridge {
     this.clients.clear();
     this.playerTokens.clear();
     this.latestViews.clear();
+    this.withheldNotices.clear();
     this.pendingViews.clear();
     this.resumeWaiters.clear();
+    this.pendingSeatNotices = [];
   }
 
   private async attachClient(client: WebSocketAdapter): Promise<NativeSessionAttachment> {
@@ -652,6 +692,10 @@ class NativeP2PBridge {
           && event.delivery.key.generation === this.fullKey.generation
         ) {
           this.terminalDeliveries.set(playerId, event.delivery);
+          if (playerId === 0) {
+            this.pendingHostTerminalRevision = event.delivery.terminalRevision;
+            this.enqueueHostTerminalBarrier();
+          }
         }
         return;
       }
@@ -659,6 +703,30 @@ class NativeP2PBridge {
         if (this.deliveredFaultIds.has(event.id)) return;
         this.pendingFaults.set(event.id, { id: event.id, revision: event.revision, message: event.message });
         this.enqueueFaultBarrier();
+        return;
+      }
+      if (
+        event.type === "takebackRequested"
+        || event.type === "takebackResolved"
+        || event.type === "requestRejected"
+      ) {
+        const playerId = client.playerId;
+        if (this.disposed || playerId === null) return;
+        this.pendingSeatNotices.push({
+          playerId,
+          session: this.seatSession(playerId),
+          revision: this.seatRevision(playerId),
+          event,
+        });
+        this.enqueueSeatNoticeBarrier();
+        return;
+      }
+      if (event.type === "stateDelivery") {
+        // The clear arrives as the seat's next delivered view, which already crosses the barrier.
+        const playerId = client.playerId;
+        if (!event.withheld || playerId === null || event.withheld.revision <= this.deliveredRevision) return;
+        this.withheldNotices.set(playerId, event.withheld);
+        this.recordSeatReport(playerId, event.withheld.revision, { kind: "withheld", notice: event.withheld });
         return;
       }
       if (event.type !== "stateChanged" || event.serverRevision === undefined) return;
@@ -672,6 +740,7 @@ class NativeP2PBridge {
         revision,
       };
       this.latestViews.set(playerId, update);
+      this.withheldNotices.delete(playerId);
       const resume = this.resumeWaiters.get(playerId);
       if (resume) {
         this.resumeWaiters.delete(playerId);
@@ -680,10 +749,7 @@ class NativeP2PBridge {
         // seats are about to report: it must not wait for them.
         if (revision <= this.deliveredRevision) return;
       }
-      const views = this.pendingViews.get(revision) ?? new Map<PlayerId, NativeViewerUpdate>();
-      views.set(playerId, update);
-      this.pendingViews.set(revision, views);
-      this.flushCompletedRevisions();
+      this.recordSeatReport(playerId, revision, { kind: "view", update });
     });
     this.pending.add(client);
     const attachment = await client.initializePregame().finally(() => this.pending.delete(client));
@@ -695,26 +761,35 @@ class NativeP2PBridge {
     return attachment;
   }
 
+  private recordSeatReport(playerId: PlayerId, revision: number, report: NativeSeatReport): void {
+    const reports = this.pendingViews.get(revision) ?? new Map<PlayerId, NativeSeatReport>();
+    reports.set(playerId, report);
+    this.pendingViews.set(revision, reports);
+    this.flushCompletedRevisions();
+  }
+
   /** Hand every revision that each currently attached seat has now reported to the
    * fan-out, oldest first. A seat that detached no longer holds a revision back. */
   private flushCompletedRevisions(): void {
     const complete = [...this.pendingViews.entries()]
-      .filter(([, views]) => [...this.clients.keys()].every((seat) => views.has(seat)))
+      .filter(([, reports]) => [...this.clients.keys()].every((seat) => reports.has(seat)))
       .sort(([a], [b]) => a - b);
-    for (const [revision, views] of complete) {
+    for (const [revision, reports] of complete) {
       this.pendingViews.delete(revision);
       this.revisionQueue = this.revisionQueue
         .then(async () => {
-          await this.onRevision(revision, views);
+          await this.onRevision(revision, reports);
           this.deliveredRevision = Math.max(this.deliveredRevision, revision);
           await this.releaseFaultsThroughDeliveredRevision();
+          await this.releaseSeatNoticesThroughDeliveredRevision();
+          await this.releaseHostTerminalThroughDeliveredRevision();
         })
         .catch((error) => {
           console.error("[NativeP2PBridge] revision fan-out failed:", error);
         });
-      const hostUpdate = views.get(0);
-      if (hostUpdate) {
-        for (const resolve of this.startWaiters.splice(0)) resolve(hostUpdate);
+      const hostReport = reports.get(0);
+      if (hostReport?.kind === "view") {
+        for (const resolve of this.startWaiters.splice(0)) resolve(hostReport.update);
       }
     }
   }
@@ -734,6 +809,53 @@ class NativeP2PBridge {
     }
   }
 
+  /** The latest revision the server has sent this seat, as a view or a withheld notice. */
+  private seatRevision(playerId: PlayerId): number {
+    return Math.max(
+      this.latestViews.get(playerId)?.revision ?? -1,
+      this.withheldNotices.get(playerId)?.revision ?? -1,
+    );
+  }
+
+  private enqueueSeatNoticeBarrier(): void {
+    this.revisionQueue = this.revisionQueue
+      .then(() => this.releaseSeatNoticesThroughDeliveredRevision())
+      .catch((error) => console.error("[NativeP2PBridge] takeback notice fan-out failed:", error));
+  }
+
+  /** A seat's notice follows the state it was sent before it, as on that seat's socket.
+   * A notice dies with its guest session. */
+  private async releaseSeatNoticesThroughDeliveredRevision(): Promise<void> {
+    const released = this.pendingSeatNotices.filter((notice) => notice.revision <= this.deliveredRevision);
+    if (released.length === 0) return;
+    this.pendingSeatNotices = this.pendingSeatNotices.filter((notice) => notice.revision > this.deliveredRevision);
+    for (const notice of released) {
+      if (this.seatSession(notice.playerId) !== notice.session) continue;
+      await this.onSeatNotice(notice.playerId, notice.event);
+    }
+  }
+
+  private enqueueHostTerminalBarrier(): void {
+    this.revisionQueue = this.revisionQueue
+      .then(() => this.releaseHostTerminalThroughDeliveredRevision())
+      .catch((error) => console.error("[NativeP2PBridge] host terminal release failed:", error));
+  }
+
+  /** The host's terminal signal follows its revision's fan-out, whichever arrives first. */
+  private async releaseHostTerminalThroughDeliveredRevision(): Promise<void> {
+    const revision = this.pendingHostTerminalRevision;
+    if (revision === null || this.deliveredRevision < revision) return;
+    this.pendingHostTerminalRevision = null;
+    // A host withheld at its terminal is handed its Full final view here, whatever the later commit's outcome.
+    const finalView = this.terminalDeliveries.get(0)?.finalView;
+    if (finalView && this.withheldNotices.get(0)?.revision === revision) this.seedTerminalView(0, finalView, revision);
+    await this.onHostTerminalDelivery(revision);
+  }
+
+  hostTerminalDelivery(): FullTerminalDelivery | null {
+    return this.terminalDeliveries.get(0) ?? null;
+  }
+
   persistence(): NativeP2PServerSession | null {
     if (!this.gameCode || !this.fullKey) return null;
     return {
@@ -743,8 +865,16 @@ class NativeP2PBridge {
     };
   }
 
-  viewerUpdates(): Map<PlayerId, NativeViewerUpdate> {
-    return new Map(this.latestViews);
+  /** Each seat's latest outcome: its notice when that is newer than its last view, else the view. */
+  seatReports(): Map<PlayerId, NativeSeatReport> {
+    const reports = new Map<PlayerId, NativeSeatReport>();
+    for (const [playerId, update] of this.latestViews) reports.set(playerId, { kind: "view", update });
+    for (const [playerId, notice] of this.withheldNotices) {
+      if (notice.revision > (this.latestViews.get(playerId)?.revision ?? -1)) {
+        reports.set(playerId, { kind: "withheld", notice });
+      }
+    }
+    return reports;
   }
 
   playerIds(): PlayerId[] {
@@ -829,17 +959,15 @@ class NativeP2PBridge {
     if (!deliveries) throw new AdapterError("P2P_ERROR", "Full terminal authority is unavailable", true);
     const states = new Map<PlayerId, GameState>();
     for (const [playerId, delivery] of deliveries) {
-      // A guest seat suspended while the game was live (`suspendGuest`) has no
-      // loopback client to report the terminal revision, so its cached view is
-      // older by construction and cannot be cross-checked. Its recipient-bound
+      // A guest seat suspended while the game was live (`suspendGuest`), or any
+      // seat whose state frame at this revision was withheld, has no loopback
+      // view of the terminal revision to cross-check. Its recipient-bound
       // Full final view is the only authority for it: `readTerminalDeliveries`
-      // already bound it to this terminal revision, display and Full key. The
-      // view is retained (`retainSuspendedTerminalViews`) only once the caller's
-      // commit succeeds. The host seat and every attached seat keep the strict
-      // check below.
+      // already bound it to this terminal revision, display and Full key. A
+      // guest's view is retained (`retainSuspendedTerminalViews`) only once the
+      // caller's commit succeeds. Every other seat keeps the strict check below.
       if (
-        playerId !== 0
-        && !this.clients.has(playerId)
+        this.finalViewIsSeatAuthority(playerId, revision)
         && delivery.terminalRevision === revision
         && delivery.finalView?.waiting_for.type === "GameOver"
       ) {
@@ -1017,6 +1145,19 @@ class NativeP2PBridge {
   /** One contest click for `playerId`, sent on that seat's own authenticated socket. */
   submitContestClick(playerId: PlayerId, contest: number, seq: number): void {
     this.clients.get(playerId)?.submitContestClick(contest, seq);
+  }
+
+  /** No target: the server rolls back the last action. */
+  requestTakeback(playerId: PlayerId): void {
+    this.clients.get(playerId)?.sendRequestTakeback();
+  }
+
+  respondTakeback(playerId: PlayerId, approve: boolean): void {
+    this.clients.get(playerId)?.sendRespondTakeback(approve);
+  }
+
+  cancelTakeback(playerId: PlayerId): void {
+    this.clients.get(playerId)?.sendCancelTakeback();
   }
 
   private clientFor(playerId: PlayerId): WebSocketAdapter {
@@ -1295,6 +1436,10 @@ function traceAdapter(side: "Host" | "Guest", event: string, data?: Record<strin
   console.debug(`[P2P ${side} Adapter]`, performance.now().toFixed(1), event, data ?? {});
 }
 
+function resolvedTakebackEvent(notice: TakebackNotice): TakebackEvent {
+  return { type: "takebackResolved", resolution: notice.resolution, resolvedBy: notice.resolvedBy };
+}
+
 function isZeroCountDebugCreate(action: GameAction): boolean {
   if (action.type !== "Debug") return false;
   switch (action.data.type) {
@@ -1442,6 +1587,8 @@ export class P2PHostAdapter implements EngineAdapter {
   /** Native snapshots become reconnectable only after their matching server
    * revision has completed the PeerJS fan-out. */
   private nativeDeliveredViews = new Map<PlayerId, { revision: number; snapshot: EngineSnapshot }>();
+  /** The notice a seat was handed instead of its latest native revision; cleared by its next delivered view. */
+  private nativeWithheldSeats = new Map<PlayerId, StateWithheldNotice>();
   /** Serializes every state-bearing delivery with reconnect promotion. A
    * reconnect cannot acknowledge an older view while a state fan-out is in
    * flight and would otherwise miss that update after becoming active. */
@@ -1531,6 +1678,7 @@ export class P2PHostAdapter implements EngineAdapter {
    * fault itself: rehydration sets the latter before the bridge replays it. */
   private deliveredNativeAiDriverFault: NativeAiDriverFault | null = null;
   readonly supportsMatchConcede: true | undefined;
+  readonly supportsTakeback = true;
   private matchConcedeSent = false;
 
   private gameStarted = false;
@@ -1687,10 +1835,14 @@ export class P2PHostAdapter implements EngineAdapter {
         formatConfig,
         matchConfig,
         native,
-        (revision, views) => this.enqueueDelivery(
-          () => this.handleNativeRevision(revision, views),
+        (revision, reports) => this.enqueueDelivery(
+          () => this.handleNativeRevision(revision, reports),
         ),
         (fault) => this.enqueueDelivery(() => this.handleNativeAiDriverFault(fault)),
+        (revision) => this.enqueueDelivery(() => this.commitWithheldHostTerminal(revision)),
+        (pid, event) => this.enqueueDelivery(() => this.handleNativeSeatNotice(pid, event)),
+        // A returning guest's replay arrives over its new loopback before its session is promoted.
+        (pid) => this.guestSessions.get(pid) ?? this.pendingReconnectSessions.get(pid),
         nativeResume,
       );
     }
@@ -2062,7 +2214,14 @@ export class P2PHostAdapter implements EngineAdapter {
     operation: () => Promise<SubmitResult>,
   ): Promise<BrowserTransition> {
     const browserMutation = this.nativeBridge === null;
-    return this.stampBrowserMutation(await operation(), browserMutation);
+    const transition = this.stampBrowserMutation(await operation(), browserMutation);
+    // A concession that ended the vote unapproved is heard before its state;
+    // an approval follows its state (`broadcastStateUpdateInner`).
+    const takeback = transition.result.takeback;
+    if (takeback && takeback.resolution !== "approved") {
+      await this.enqueueDelivery(async () => this.announceTakeback(resolvedTakebackEvent(takeback)));
+    }
+    return transition;
   }
 
   /** Stamp a successful browser-WASM gameplay mutation after the engine accepts it. */
@@ -2395,9 +2554,10 @@ export class P2PHostAdapter implements EngineAdapter {
           if (this.isResume && this.gameStarted) {
             const snapshot = await this.nativeBridge.getSnapshot();
             this.reconcileEliminatedSeats(snapshot);
-            for (const [playerId, update] of this.nativeBridge.viewerUpdates()) {
-              this.nativeDeliveredViews.set(playerId, { revision: update.revision, snapshot: update.snapshot });
-              this.authoritativeRevision = Math.max(this.authoritativeRevision, update.revision);
+            for (const [playerId, report] of this.nativeBridge.seatReports()) {
+              const revision = seatReportRevision(report);
+              this.recordNativeSeatOutcome(playerId, revision, report);
+              this.authoritativeRevision = Math.max(this.authoritativeRevision, revision);
             }
             this.resumeGameState = null;
           } else {
@@ -3108,9 +3268,7 @@ export class P2PHostAdapter implements EngineAdapter {
     if (!this.ownsAuthority() || this.nativeBridge || !contestRunnable) {
       return idle;
     }
-    const aiPlayers = this.pregameSeatState.seats.flatMap((seat, index) =>
-      seat.type === "Ai" ? [index] : [],
-    );
+    const aiPlayers = this.aiSeats();
     // A settled contest whose resolution never reached the host screen is delivered
     // (and its AI follow-up run) before the engine is driven any further: the
     // engine reports NotInContest from here on and cannot recreate its events.
@@ -3254,19 +3412,26 @@ export class P2PHostAdapter implements EngineAdapter {
    * correlation rather than inventing another clock. */
   private async handleNativeRevision(
     revision: number,
-    views: Map<PlayerId, NativeViewerUpdate>,
+    reports: Map<PlayerId, NativeSeatReport>,
     terminalReason?: string,
   ): Promise<void> {
     if (!this.ownsAuthority()) return;
-    const hostUpdate = views.get(0);
-    if (!hostUpdate) return;
+    const hostReport = reports.get(0);
+    if (!hostReport) return;
     if (revision < this.authoritativeRevision) return;
     this.authoritativeRevision = revision;
     const allNames = this.playerNamesForSeats();
     const sends: Array<Promise<boolean>> = [];
     for (const [pid, session] of this.guestSessions) {
-      const update = views.get(pid);
-      if (!update || this.disconnectedSeats.has(pid)) continue;
+      const report = reports.get(pid);
+      if (!report || this.disconnectedSeats.has(pid)) continue;
+      if (report.kind === "withheld") {
+        // A seat client without a snapshot fails a withheld GameStarted instead of reporting it.
+        if (this.nativeInitialSetupPending) continue;
+        sends.push(this.send(session, { type: "state_withheld", revision }));
+        continue;
+      }
+      const { update } = report;
       if (this.nativeInitialSetupPending) {
         const token = this.playerTokens.get(pid);
         if (!token) continue;
@@ -3297,9 +3462,20 @@ export class P2PHostAdapter implements EngineAdapter {
     }
     await Promise.all(sends);
     this.nativeInitialSetupPending = false;
-    for (const [playerId, update] of views) {
-      this.nativeDeliveredViews.set(playerId, { revision, snapshot: update.snapshot });
+    const hostWasWithheld = this.nativeWithheldSeats.has(0);
+    for (const [playerId, report] of reports) {
+      this.recordNativeSeatOutcome(playerId, revision, report);
     }
+    if (hostReport.kind === "withheld") {
+      // `commitWithheldHostTerminal` commits a terminal from the host's Full delivery.
+      this.emit({
+        type: "stateDelivery",
+        withheld: { revision: hostReport.notice.revision, reason: i18n.t("multiplayer:p2pStateWithheld") },
+      });
+      return;
+    }
+    const hostUpdate = hostReport.update;
+    if (hostWasWithheld) this.emit({ type: "stateDelivery", withheld: null });
     this.emit({
       type: "stateChanged",
       snapshot: hostUpdate.snapshot,
@@ -3307,6 +3483,37 @@ export class P2PHostAdapter implements EngineAdapter {
       logEntries: hostUpdate.logEntries,
     });
     await this.commitTerminalIfComplete(hostUpdate.snapshot, revision, terminalReason);
+  }
+
+  /** The single writer of what each native seat was last handed: a view, or a withheld notice. */
+  private recordNativeSeatOutcome(playerId: PlayerId, revision: number, report: NativeSeatReport): void {
+    if (report.kind === "view") {
+      this.nativeDeliveredViews.set(playerId, { revision, snapshot: report.update.snapshot });
+      this.nativeWithheldSeats.delete(playerId);
+    } else {
+      // The last real view stays the seat's reconnect handoff.
+      this.nativeWithheldSeats.set(playerId, report.notice);
+    }
+  }
+
+  /** The host's state was withheld at `revision`, so its recipient-bound Full delivery supplies the view the terminal commits from. */
+  private async commitWithheldHostTerminal(revision: number): Promise<void> {
+    if (!this.ownsAuthority() || this.nativeWithheldSeats.get(0)?.revision !== revision) return;
+    const delivery = this.nativeBridge?.hostTerminalDelivery();
+    if (!delivery || delivery.terminalRevision !== revision) return;
+    if (!delivery.finalView) {
+      this.emit({ type: "terminalUnavailable", message: "Full terminal authority is invalid for seat 0" });
+      return;
+    }
+    const snapshot: EngineSnapshot = {
+      state: delivery.finalView,
+      legalResult: EMPTY_LEGAL_ACTIONS,
+      seq: nextSnapshotSeq(),
+    };
+    this.recordNativeSeatOutcome(0, revision, { kind: "view", update: { snapshot, events: [], revision } });
+    this.emit({ type: "stateDelivery", withheld: null });
+    this.emit({ type: "stateChanged", snapshot, events: [] });
+    await this.commitTerminalIfComplete(snapshot, revision);
   }
 
   /** The native server publishes the fault after its final state snapshot.
@@ -3449,6 +3656,19 @@ export class P2PHostAdapter implements EngineAdapter {
           ? finalViews?.get(playerId)
           : (await this.wasm.getViewerSnapshot(playerId)).state;
         if (!terminalState) throw new Error(`Full terminal view is missing for seat ${playerId}`);
+        if (this.nativeWithheldSeats.get(playerId)?.revision === revision) {
+          // The seat was handed a notice at this revision: its final view must precede the statement.
+          const snapshot: EngineSnapshot = { state: terminalState, legalResult: EMPTY_LEGAL_ACTIONS, seq: nextSnapshotSeq() };
+          this.recordNativeSeatOutcome(playerId, revision, { kind: "view", update: { snapshot, events: [], revision } });
+          const delivered = await this.send(session, {
+            type: "state_update",
+            revision,
+            state: terminalState,
+            events: [],
+            ...legalActionsToWire(EMPTY_LEGAL_ACTIONS),
+          });
+          if (!delivered) return;
+        }
         const recipientResult = await this.terminalResultForRecipient(playerId, terminalState, revision);
         await this.sendTerminalResult(playerId, session, recipientResult);
       } catch (err) {
@@ -3678,6 +3898,7 @@ export class P2PHostAdapter implements EngineAdapter {
       }
     }
     await Promise.all(sends);
+    const takeback = transition.result.takeback;
     // This read decides whether the game closes AT ALL, and the guest-path
     // `try` around this call would swallow a rejection: `terminalResult` would
     // stay null with nothing to retry it, because a finished game produces no
@@ -3692,7 +3913,13 @@ export class P2PHostAdapter implements EngineAdapter {
         type: "terminalUnavailable",
         message: "Failed to read the authoritative state; a game that just ended stays open until something drives another close",
       });
+      // Only the seat restore needs the snapshot; the announce does not.
+      if (takeback?.resolution === "approved") this.announceTakeback(resolvedTakebackEvent(takeback));
       return;
+    }
+    if (takeback?.resolution === "approved") {
+      this.restoreRewoundSeats(closingSnapshot);
+      this.announceTakeback(resolvedTakebackEvent(takeback));
     }
     await this.commitTerminalIfComplete(closingSnapshot, revision, terminalReason);
   }
@@ -3932,6 +4159,12 @@ export class P2PHostAdapter implements EngineAdapter {
     if (!session || this.disconnectedSeats.has(pid)) return;
     if (!this.shouldRedeliver(pid)) return;
     try {
+      const withheld = this.nativeWithheldSeats.get(pid);
+      if (withheld) {
+        // A lost notice heals into the notice, never into the seat's older board.
+        await this.send(session, { type: "state_withheld", revision: withheld.revision });
+        return;
+      }
       const handoff = await this.reconnectHandoff(pid);
       const accepted = await this.send(session, {
         type: "state_update",
@@ -4217,6 +4450,130 @@ export class P2PHostAdapter implements EngineAdapter {
     this.requestBoundMatchConcede(0);
   }
 
+  sendRequestTakeback(): void {
+    if (!this.ownsAuthority()) return;
+    void this.requestTakeback(0);
+  }
+
+  sendRespondTakeback(approve: boolean): void {
+    if (!this.ownsAuthority()) return;
+    void this.respondTakeback(0, approve);
+  }
+
+  sendCancelTakeback(): void {
+    if (!this.ownsAuthority()) return;
+    void this.cancelTakeback(0);
+  }
+
+  private aiSeats(): PlayerId[] {
+    return this.pregameSeatState.seats.flatMap((seat, index) => (seat.type === "Ai" ? [index] : []));
+  }
+
+  private async requestTakeback(pid: PlayerId): Promise<void> {
+    if (this.nativeBridge) {
+      this.nativeBridge.requestTakeback(pid);
+      return;
+    }
+    await this.answerTakeback(pid, () => this.wasm.requestTakeback(pid, this.aiSeats()));
+  }
+
+  private async respondTakeback(pid: PlayerId, approve: boolean): Promise<void> {
+    if (this.nativeBridge) {
+      this.nativeBridge.respondTakeback(pid, approve);
+      return;
+    }
+    await this.answerTakeback(pid, () => this.wasm.respondTakeback(pid, approve, this.aiSeats()));
+  }
+
+  private async cancelTakeback(pid: PlayerId): Promise<void> {
+    if (this.nativeBridge) {
+      this.nativeBridge.cancelTakeback(pid);
+      return;
+    }
+    await this.answerTakeback(pid, () => this.wasm.cancelTakeback(pid));
+  }
+
+  /** Run one browser takeback call for `pid` and publish what the engine replied. */
+  private async answerTakeback(pid: PlayerId, call: () => Promise<TakebackReply>): Promise<void> {
+    let reply: TakebackReply;
+    try {
+      reply = await call();
+    } catch (err) {
+      console.error(`[P2PHost] takeback call for seat ${pid} failed:`, err);
+      const reason = err instanceof Error ? err.message : String(err);
+      await this.enqueueDelivery(async () => this.deliverTakebackEvent(pid, { type: "requestRejected", reason }));
+      return;
+    }
+    try {
+      await this.publishTakebackReply(pid, reply);
+    } catch (err) {
+      console.error("[P2PHost] delivery after a takeback reply failed:", err);
+    }
+  }
+
+  /** The server transport's arms for the same replies, one for one. */
+  private async publishTakebackReply(pid: PlayerId, reply: TakebackReply): Promise<void> {
+    switch (reply.status) {
+      case "requested": {
+        const event: TakebackEvent = {
+          type: "takebackRequested",
+          requester: reply.requester,
+          requesterName: this.playerNamesForSeats()[reply.requester] ?? "",
+          voters: reply.voters,
+        };
+        await this.enqueueDelivery(async () => this.announceTakeback(event));
+        return;
+      }
+      case "recorded":
+        return;
+      case "rejected": {
+        const event: TakebackEvent = { type: "requestRejected", reason: reply.reason };
+        await this.enqueueDelivery(async () => this.deliverTakebackEvent(pid, event));
+        return;
+      }
+      case "resolved": {
+        const notice: TakebackNotice = { resolution: reply.resolution, resolvedBy: reply.resolvedBy };
+        if (notice.resolution === "approved") {
+          const transition = this.stampBrowserMutation({ events: [], log_entries: [], takeback: notice }, true);
+          await this.publishHostSnapshot(transition.result);
+          await this.broadcastStateUpdate(transition);
+          void this.persistAuthoritativeState();
+        } else {
+          await this.enqueueDelivery(async () => this.announceTakeback(resolvedTakebackEvent(notice)));
+        }
+        // The AI loop stops while a vote is open; every resolution restarts it.
+        await this.runAiLoop();
+        return;
+      }
+    }
+  }
+
+  /** Called only inside `enqueueDelivery`, so a notice cannot land between a reconnect's replay and its promotion. */
+  private deliverTakebackEvent(pid: PlayerId, event: TakebackEvent): void {
+    if (pid === 0) {
+      this.emit(event);
+      return;
+    }
+    const session = this.guestSessions.get(pid);
+    if (!session || this.disconnectedSeats.has(pid)) return;
+    void this.send(session, takebackEventToWire(event));
+  }
+
+  private announceTakeback(event: TakebackEvent): void {
+    this.deliverTakebackEvent(0, event);
+    for (const pid of this.guestSessions.keys()) this.deliverTakebackEvent(pid, event);
+  }
+
+  /** A native seat's takeback notice, relayed to that seat as the server sent it. */
+  private async handleNativeSeatNotice(pid: PlayerId, event: TakebackEvent): Promise<void> {
+    if (!this.ownsAuthority() || !this.nativeBridge) return;
+    // Seat 0 is the table's single trigger: the server sends every vote notice to every seat.
+    if (pid === 0 && event.type === "takebackResolved" && event.resolution === "approved") {
+      this.restoreRewoundSeats(await this.nativeBridge.getSnapshot());
+    }
+    this.deliverTakebackEvent(pid, event);
+  }
+
   /**
    * The sole match-concession sink. Both the local host control and a guest's
    * protected wire request pass through this authority-bound route.
@@ -4262,6 +4619,7 @@ export class P2PHostAdapter implements EngineAdapter {
     this.guestDecks.clear();
     this.aiDecks.clear();
     this.nativeDeliveredViews.clear();
+    this.nativeWithheldSeats.clear();
     this.guestAckedRevisions.clear();
     this.pendingRedeliveries.clear();
     this.issuedTerminalResults.clear();
@@ -4672,6 +5030,20 @@ export class P2PHostAdapter implements EngineAdapter {
         this.requestBoundMatchConcede(pid);
         break;
       }
+      // No elimination or run-state gate: the takeback authority decides.
+      case "request_takeback": {
+        await this.requestTakeback(pid);
+        break;
+      }
+      case "respond_takeback": {
+        if (typeof msg.approve !== "boolean") return;
+        await this.respondTakeback(pid, msg.approve);
+        break;
+      }
+      case "cancel_takeback": {
+        await this.cancelTakeback(pid);
+        break;
+      }
       default:
         break;
     }
@@ -4736,7 +5108,11 @@ export class P2PHostAdapter implements EngineAdapter {
     // ordinary inactivity timeout instead of pausing for the reconnect grace.
     // A concession already in flight owns the seat's socket until it settles.
     if (!this.concedingSeats.has(pid)) this.nativeBridge?.suspendGuest(pid);
+    this.announceSeatAway(pid);
+  }
 
+  /** Tell every other seat and the host that `pid` is away mid-game, offering the host its choice. */
+  private announceSeatAway(pid: PlayerId): void {
     // Notify remaining guests.
     for (const [otherPid, session] of this.guestSessions) {
       if (otherPid === pid) continue;
@@ -4750,6 +5126,29 @@ export class P2PHostAdapter implements EngineAdapter {
       gracePeriodMs: this.gracePeriodMs,
     });
     this.emit({ type: "gamePaused", reason: "Player disconnected" });
+  }
+
+  private restoreRewoundSeats(snapshot: EngineSnapshot): void {
+    // The resume reconcile assumes a cold start; an approval rewinds a live table, so only seats the restored state brings back change.
+    const authoritative = new Set(snapshot.state.eliminated_players ?? []);
+    let restored = false;
+    for (const pid of [...this.eliminatedSeats]) {
+      if (authoritative.has(pid)) continue;
+      this.eliminatedSeats.delete(pid);
+      restored = true;
+      if (
+        pid === 0
+        || !this.playerTokens.has(pid)
+        || this.guestSessions.has(pid)
+        || this.disconnectedSeats.has(pid)
+      ) continue;
+      this.armResumeGrace(pid);
+      if (this.gameRunState === "running") this.gameRunState = "paused-disconnect";
+      this.nativeBridge?.suspendGuest(pid);
+      this.announceSeatAway(pid);
+    }
+    // A resumed host loads the persisted cache as-is.
+    if (restored) this.saveSession();
   }
 
   private async handleReconnect(
@@ -4911,6 +5310,22 @@ export class P2PHostAdapter implements EngineAdapter {
           return;
         }
       }
+      if (!this.nativeBridge) {
+        // The open vote lives in the engine; the native server replays its own.
+        const vote = await this.wasm.pendingTakeback();
+        if (vote !== null) {
+          const replayed = await this.send(session, takebackEventToWire({
+            type: "takebackRequested",
+            requester: vote.requester,
+            requesterName: this.playerNamesForSeats()[vote.requester] ?? "",
+            voters: vote.voters,
+          }));
+          if (!replayed) {
+            this.failPendingReconnect(pid, session, "Reconnect takeback request could not be delivered");
+            return;
+          }
+        }
+      }
       if (this.pendingReconnectSessions.get(pid) !== session || !this.ownsAuthority()) return;
 
       const grace = this.disconnectedSeats.get(pid);
@@ -4949,7 +5364,8 @@ export class P2PHostAdapter implements EngineAdapter {
       // handoff is the recipient-bound terminal view the bridge holds or, when
       // the reattachment is refused for a retired session, restores.
       if (!this.nativeBridge.isGuestAttached(pid)) {
-        this.nativeDeliveredViews.set(pid, await this.nativeBridge.returningSeatView(pid));
+        const view = await this.nativeBridge.returningSeatView(pid);
+        this.recordNativeSeatOutcome(pid, view.revision, { kind: "view", update: { ...view, events: [] } });
       }
       const delivered = this.nativeDeliveredViews.get(pid);
       if (!delivered) throw new AdapterError("P2P_ERROR", `No delivered native snapshot for seat ${pid}`, true);
@@ -5066,19 +5482,22 @@ export class P2PHostAdapter implements EngineAdapter {
         };
         return {
           authoritative,
-          views: new Map<PlayerId, NativeViewerUpdate>([[0, authoritative]]),
+          views: new Map<PlayerId, NativeSeatReport>([[0, { kind: "view", update: authoritative }]]),
           fanoutAlreadyCompleted: false,
         };
       }
       const authoritative = await bridge.reconcileConcede(pid);
       if (this.disposed || !this.ownsAuthority()) throw new Error("Host authority was superseded");
-      const views = bridge.viewerUpdates();
-      const fanoutAlreadyCompleted = views.size > 0 && [...views].every(([playerId, update]) =>
-        this.nativeDeliveredViews.get(playerId)?.revision === update.revision,
+      const views = bridge.seatReports();
+      const fanoutAlreadyCompleted = views.size > 0 && [...views].every(([playerId, report]) =>
+        (report.kind === "view"
+          ? this.nativeDeliveredViews.get(playerId)?.revision
+          : this.nativeWithheldSeats.get(playerId)?.revision) === seatReportRevision(report),
       );
-      for (const [playerId, update] of views) {
-        this.nativeDeliveredViews.set(playerId, { revision: update.revision, snapshot: update.snapshot });
-        this.authoritativeRevision = Math.max(this.authoritativeRevision, update.revision);
+      for (const [playerId, report] of views) {
+        const revision = seatReportRevision(report);
+        this.recordNativeSeatOutcome(playerId, revision, report);
+        this.authoritativeRevision = Math.max(this.authoritativeRevision, revision);
       }
       return { authoritative, views, fanoutAlreadyCompleted };
     };
@@ -5116,15 +5535,17 @@ export class P2PHostAdapter implements EngineAdapter {
         await this.runAiLoop();
       } else if (terminal) {
         try {
-          const hostUpdate = views.get(0);
-          if (!hostUpdate) throw new Error("Full terminal host view is unavailable");
-          if (fanoutAlreadyCompleted) {
-            await this.commitTerminalIfComplete(hostUpdate.snapshot, authoritative.revision, reason);
-          } else {
+          const hostReport = views.get(0);
+          if (!hostReport) throw new Error("Full terminal host view is unavailable");
+          if (!fanoutAlreadyCompleted) {
             // A2 restored the complete recipient views outside the ordinary
             // revision barrier. Run them through the same state fan-out so
             // each P2P seat receives final state before its terminal statement.
             await this.handleNativeRevision(authoritative.revision, views, reason);
+          } else if (hostReport.kind === "view") {
+            await this.commitTerminalIfComplete(hostReport.update.snapshot, authoritative.revision, reason);
+          } else {
+            await this.commitWithheldHostTerminal(authoritative.revision);
           }
         } catch {
           this.emit({
@@ -5396,10 +5817,12 @@ export class P2PGuestAdapter implements EngineAdapter {
   /** Current host lease accepted from game_setup/reconnect_ack. */
   private authority: P2PAuthorityStamp | null = null;
   readonly supportsMatchConcede: true | undefined;
+  readonly supportsTakeback = true;
   private matchConcedeSent = false;
   /** Revision of the cached state frame. A terminal result is bound to this
    * exact final state, not merely to the room code. */
   private cachedRevision: number | null = null;
+  private withheldState: StateWithheldNotice | null = null;
   private readonly acceptedAiDriverFaultIds = new Set<number>();
   /**
    * Once true, the adapter is in a terminal state (kicked, reconnect rejected,
@@ -5691,6 +6114,13 @@ export class P2PGuestAdapter implements EngineAdapter {
     this.send({ type: "state_ack", revision: this.cachedRevision });
   }
 
+  /** A delivered state ends the withheld condition. */
+  private settleWithheld(): void {
+    if (!this.withheldState) return;
+    this.withheldState = null;
+    this.emit({ type: "stateDelivery", withheld: null });
+  }
+
   private async acceptTerminalResult(
     session: PeerSession,
     message: Extract<P2PMessage, { type: "terminal_result" }>,
@@ -5755,6 +6185,21 @@ export class P2PGuestAdapter implements EngineAdapter {
   sendConcede(): void {
     if (!this.currentAuthenticatedSession()) return;
     this.send({ type: "concede" });
+  }
+
+  sendRequestTakeback(): void {
+    if (!this.currentAuthenticatedSession()) return;
+    this.send({ type: "request_takeback" });
+  }
+
+  sendRespondTakeback(approve: boolean): void {
+    if (!this.currentAuthenticatedSession()) return;
+    this.send({ type: "respond_takeback", approve });
+  }
+
+  sendCancelTakeback(): void {
+    if (!this.currentAuthenticatedSession()) return;
+    this.send({ type: "cancel_takeback" });
   }
 
   /** Requests settlement from the authenticated host-side match authority. */
@@ -5869,6 +6314,7 @@ export class P2PGuestAdapter implements EngineAdapter {
         }
         this.cachedRevision = msg.revision ?? null;
         this.cacheSnapshot(msg.state, legalActionsFromWire(msg));
+        this.settleWithheld();
         this.emit({ type: "playerIdentity", playerId: msg.assignedPlayerId, playerNames: msg.playerNames });
         this.settleGameSetup({ events: msg.events });
         this.sendStateAck();
@@ -5887,6 +6333,8 @@ export class P2PGuestAdapter implements EngineAdapter {
         }
         this.cachedRevision = msg.revision ?? null;
         const reconnectSnapshot = this.cacheSnapshot(msg.state, legalActionsFromWire(msg));
+        this.settleWithheld();
+        this.emit({ type: "bootstrapDelivered" });
         this.emit({ type: "playerIdentity", playerId: msg.assignedPlayerId, playerNames: msg.playerNames });
         this.emit({
           type: "stateChanged",
@@ -5932,6 +6380,12 @@ export class P2PGuestAdapter implements EngineAdapter {
         void this.acceptTerminalResult(session, msg);
         break;
       }
+      case "takeback_requested":
+      case "takeback_resolved":
+      case "request_rejected": {
+        this.emit(takebackEventFromWire(msg));
+        break;
+      }
       case "ai_driver_fault": {
         if (this.acceptedAiDriverFaultIds.has(msg.id)) break;
         if (this.cachedRevision === null || this.cachedRevision < msg.revision) {
@@ -5973,6 +6427,7 @@ export class P2PGuestAdapter implements EngineAdapter {
         this.cachedRevision = msg.revision ?? null;
         const updateSnapshot = this.cacheSnapshot(msg.state, legalActionsFromWire(msg));
         this.sendStateAck();
+        this.settleWithheld();
         const settled = this.settlePendingSubmission({
           kind: "resolve",
           result: { events: msg.events, log_entries: msg.logEntries },
@@ -5985,6 +6440,20 @@ export class P2PGuestAdapter implements EngineAdapter {
             logEntries: msg.logEntries,
           });
         }
+        break;
+      }
+      case "state_withheld": {
+        // A stale notice cannot be attributed to the parked submission: answer it like a stale `state_update`.
+        if (this.cachedRevision !== null && msg.revision < this.cachedRevision) {
+          this.sendStateAck();
+          return;
+        }
+        this.cachedRevision = msg.revision;
+        this.sendStateAck();
+        this.withheldState = { revision: msg.revision, reason: i18n.t("multiplayer:p2pStateWithheld") };
+        this.emit({ type: "stateDelivery", withheld: this.withheldState });
+        // Withheld means applied: the parked action committed.
+        this.settlePendingSubmission({ kind: "resolve", result: { events: [], log_entries: [] } });
         break;
       }
       case "action_rejected": {

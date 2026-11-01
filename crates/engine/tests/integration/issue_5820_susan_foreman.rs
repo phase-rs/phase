@@ -351,7 +351,7 @@ fn susan_foreman_replaces_phenomenon_sba_planeswalk() {
     let mut events = Vec::new();
     let mut any = false;
     assert_eq!(
-        check_phenomenon_planeswalk_sba(&mut state, &mut events, &mut any),
+        check_phenomenon_planeswalk_sba(&mut state, &mut events, &mut any, &[]),
         Some(PlaneswalkResolution::Deferred),
         "Susan arrange must pause the SBA planeswalk"
     );

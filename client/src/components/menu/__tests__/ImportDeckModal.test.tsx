@@ -9,6 +9,7 @@ import {
   isCardCommanderEligibleForFormat,
   signatureSpellSelectionPolicy,
 } from "../../../services/engineRuntime";
+import { IMPORT_ERROR_KEYS } from "../../../services/deckUrlImport";
 import { setSavedDeckTxnLockWaitForTests, withSavedDeckLibrary } from "../../../services/savedDeckTransaction";
 import { useAppNotificationStore } from "../../../stores/appToastStore";
 import { useConnectivityStore } from "../../../stores/connectivityStore";
@@ -32,8 +33,10 @@ vi.mock("../../../services/engineRuntime", () => ({
   signatureSpellSelectionPolicy: vi.fn(),
 }));
 
-vi.mock("../../../services/deckUrlImport", () => ({
+vi.mock("../../../services/deckUrlImport", async (importOriginal) => ({
   fetchDeckFromUrl: mocks.fetchDeckFromUrl,
+  IMPORT_ERROR_KEYS: (await importOriginal<typeof import("../../../services/deckUrlImport")>())
+    .IMPORT_ERROR_KEYS,
 }));
 
 vi.mock("../../../adapter/wasm-adapter", () => ({
@@ -93,6 +96,29 @@ describe("ImportDeckModal", () => {
     await waitFor(() => expect(onImported).toHaveBeenCalledWith("URL Deck", ["URL Deck"], "open"));
     expect(mocks.fetchDeckFromUrl).toHaveBeenCalledWith("https://moxfield.com/decks/abc");
     expect(localStorage.getItem(STORAGE_KEY_PREFIX + "URL Deck")).not.toBeNull();
+  });
+
+  it.each([
+    [
+      "translates a frontend-authored error key",
+      IMPORT_ERROR_KEYS.offline,
+      "URL imports are unavailable offline. Use Paste Text or From File instead.",
+    ],
+    [
+      "shows a server-authored error verbatim",
+      "Deck is private on Moxfield",
+      "Deck is private on Moxfield",
+    ],
+  ])("%s when the URL import rejects", async (_name, message, shown) => {
+    const user = userEvent.setup();
+    mocks.fetchDeckFromUrl.mockRejectedValue(new Error(message));
+    render(<ImportDeckModal open onClose={vi.fn()} onImported={vi.fn()} />);
+
+    await user.click(screen.getByRole("button", { name: "From URL" }));
+    await user.type(screen.getByPlaceholderText(/moxfield\.com\/decks/i), "https://moxfield.com/decks/abc");
+    await user.click(screen.getByRole("button", { name: "Import" }));
+
+    expect(await screen.findByText(shown)).toBeInTheDocument();
   });
 
   it("saves imported card names in the engine's canonical spelling", async () => {

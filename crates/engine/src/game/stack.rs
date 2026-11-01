@@ -1749,16 +1749,11 @@ fn resolving_saga_chapter(entry: &StackEntry) -> Option<ResolvingSagaChapter> {
     let StackEntryKind::TriggeredAbility { ability, .. } = &entry.kind else {
         return None;
     };
-    let occurrence = &ability.trigger_definition_ref.as_ref()?.occurrence;
     let saga = ability.trigger_source.as_ref()?;
 
     // CR 714.2: chapter numbers come from the chapter-symbol provenance on the
     // source incarnation's own trigger entries, never from a live lore count.
-    let chapter = saga
-        .trigger_entries
-        .iter()
-        .find(|entry| &entry.occurrence == occurrence)
-        .and_then(|entry| entry.definition.saga_chapter)?;
+    let chapter = ability.triggered_definition()?.saga_chapter?;
     // CR 714.2d: greatest chapter number among that same incarnation's chapter
     // abilities.
     let final_chapter = saga
@@ -3262,7 +3257,9 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
                             // mark the battlefield object transformed without
                             // swapping faces again. Casting-variant-specific, so
                             // it stays caller-side (the pipeline tail only knows
-                            // the generic `enter_transformed` face-swap).
+                            // the generic `enter_transformed` face-swap). This
+                            // entry is not a CR 701.27a transform, so it emits
+                            // no `GameEvent::Transformed`.
                             if matches!(
                                 casting_variant,
                                 CastingVariant::MoreThanMeetsTheEye | CastingVariant::Disturb
@@ -3277,7 +3274,6 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
                                 }
                                 if marked {
                                     crate::game::layers::mark_layers_full(state);
-                                    events.push(GameEvent::Transformed { object_id });
                                 }
                             }
                         }
@@ -4866,6 +4862,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         modal,
         mode_abilities,
         parent_target_missing_reason,
+        control_change_instruction,
     } = ability;
 
     let self_counter = matches!(
@@ -4963,6 +4960,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         && modal.is_none()
         && mode_abilities.is_empty()
         && parent_target_missing_reason.is_none()
+        && control_change_instruction.is_none()
 }
 
 /// CR 117.3b + CR 117.3d + CR 117.5 + CR 608.2 + CR 704.3 + CR 119.3: Fixed
@@ -5120,6 +5118,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         modal,
         mode_abilities,
         parent_target_missing_reason,
+        control_change_instruction,
     } = ability;
 
     let fixed_controller_gain_life = matches!(
@@ -5194,6 +5193,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         && modal.is_none()
         && mode_abilities.is_empty()
         && parent_target_missing_reason.is_none()
+        && control_change_instruction.is_none()
 }
 
 /// CR 117.3b + CR 117.3d + CR 117.5 + CR 608.2 + CR 704.3: Fixed opponent-
@@ -5353,6 +5353,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         modal,
         mode_abilities,
         parent_target_missing_reason,
+        control_change_instruction,
     } = ability;
 
     let fixed_opponent_effect = matches!(
@@ -5431,6 +5432,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         && modal.is_none()
         && mode_abilities.is_empty()
         && parent_target_missing_reason.is_none()
+        && control_change_instruction.is_none()
 }
 
 fn optional_ability_is_inert_under_auto_choice(
@@ -5708,6 +5710,10 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         illegal_target_slots: a_illegal_target_slots,
         unjudged_target_slots: a_unjudged_target_slots,
         illegal_local_target_slots: a_illegal_local_target_slots,
+        // CR 608.2e: a player-scope driver's transient capture, never on a
+        // stack entry; guaranteed `None` ONE HOP upstream by the
+        // batch-candidate checks, like the modal ordinal.
+        control_change_instruction: _,
     } = a;
     let ResolvedAbility {
         effect: b_effect,
@@ -5797,6 +5803,10 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         illegal_target_slots: b_illegal_target_slots,
         unjudged_target_slots: b_unjudged_target_slots,
         illegal_local_target_slots: b_illegal_local_target_slots,
+        // CR 608.2e: a player-scope driver's transient capture, never on a
+        // stack entry; guaranteed `None` ONE HOP upstream by the
+        // batch-candidate checks, like the modal ordinal.
+        control_change_instruction: _,
     } = b;
 
     a_effect == b_effect

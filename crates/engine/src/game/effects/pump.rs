@@ -1,11 +1,10 @@
 use crate::game::filter;
 use crate::game::quantity::{
-    quantity_expr_uses_recipient, resolve_quantity_with_targets,
-    resolve_quantity_with_targets_and_recipient,
+    resolve_quantity_with_targets, resolve_quantity_with_targets_and_recipient,
 };
 use crate::types::ability::{
-    ContinuousModification, DoublePTMode, Duration, Effect, EffectError, EffectKind, PtValue,
-    QuantityExpr, ResolvedAbility, TargetFilter,
+    quantity_expr_uses_recipient, ContinuousModification, DoublePTMode, Duration, Effect,
+    EffectError, EffectKind, PtValue, QuantityExpr, ResolvedAbility, TargetFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;

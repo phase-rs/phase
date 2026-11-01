@@ -23,6 +23,10 @@ mod suggest;
 thread_local! {
     static PACK_GEN: Cell<Option<PackGenerator>> = const { Cell::new(None) };
     static DIFFICULTY: Cell<AiDifficulty> = const { Cell::new(AiDifficulty::Medium) };
+    /// Whether bots (and auto-pick) apply the built-in draft guides. Opt-in and
+    /// set by the caller via [`set_draft_pick_enhancements`]; defaults off.
+    static PICK_ENHANCEMENT: Cell<bot_ai::PickEnhancement> =
+        const { Cell::new(bot_ai::PickEnhancement::Off) };
     static RNG: Cell<Option<ChaCha20Rng>> = const { Cell::new(None) };
     /// Per RESEARCH Pitfall 2: draft-wasm has its own CardDatabase, separate
     /// from engine-wasm's thread-local. The frontend loads card-data.json into
@@ -85,6 +89,19 @@ fn deck_submission_message(error: DraftError) -> String {
             .join("; "),
         error => error.to_string(),
     }
+}
+
+/// Opt bots and auto-pick in or out of the built-in draft-guide pick
+/// enhancements. Independent of difficulty; the frontend sets it from the
+/// player's setting before starting or resuming a draft.
+#[wasm_bindgen]
+pub fn set_draft_pick_enhancements(enabled: bool) {
+    let enhancement = if enabled {
+        bot_ai::PickEnhancement::DraftGuides
+    } else {
+        bot_ai::PickEnhancement::Off
+    };
+    PICK_ENHANCEMENT.with(|cell| cell.set(enhancement));
 }
 
 /// Map a u8 difficulty value to AiDifficulty.
@@ -688,6 +705,7 @@ fn apply_human_pick_and_resolve_bots_with_overrides(
                     difficulty,
                     &draft_session.pools[seat as usize],
                     card_db,
+                    PICK_ENHANCEMENT.with(|cell| cell.get()),
                     &mut rng,
                 );
                 // Map indices to ids BEFORE applying — the apply mutates the pack
@@ -780,6 +798,7 @@ pub fn auto_pick() -> Result<JsValue, JsValue> {
                 difficulty,
                 &draft_session.pools[0],
                 db_borrow.as_ref(),
+                PICK_ENHANCEMENT.with(|cell| cell.get()),
                 &mut rng,
             );
             pack.0[pick_idx].instance_id.clone()
@@ -4204,6 +4223,125 @@ mod create_multiplayer_draft_tests {
             .expect("sealed pack boundaries")
             .iter()
             .all(|pack| pack.len() == 3));
+
+        clear_state();
+    }
+
+    #[test]
+    fn unglued_set_pool_loads_ten_cards_per_pack_for_draft_and_sealed() {
+        let set_pool_json = r#"{
+            "code": "UGL",
+            "name": "Unglued",
+            "release_date": null,
+            "pack_variants": [
+                {
+                    "contents": [
+                        { "slot": "basic", "count": 1, "choices": [{ "sheet": "basic", "weight": 1 }] },
+                        { "slot": "common", "count": 6, "choices": [{ "sheet": "common", "weight": 1 }] },
+                        { "slot": "rare", "count": 1, "choices": [{ "sheet": "rare", "weight": 1 }] },
+                        { "slot": "uncommon", "count": 2, "choices": [{ "sheet": "uncommon", "weight": 1 }] }
+                    ],
+                    "weight": 3
+                },
+                {
+                    "contents": [
+                        { "slot": "basic", "count": 1, "choices": [{ "sheet": "basic", "weight": 1 }] },
+                        { "slot": "common", "count": 6, "choices": [{ "sheet": "common", "weight": 1 }] },
+                        { "slot": "rare", "count": 1, "choices": [{ "sheet": "rare", "weight": 1 }] },
+                        { "slot": "uncommon", "count": 1, "choices": [{ "sheet": "uncommon", "weight": 1 }] }
+                    ],
+                    "weight": 2
+                }
+            ],
+            "pack_variants_total_weight": 5,
+            "sheets": {
+                "basic": {
+                    "cards": [
+                        { "name": "Forest", "set_code": "UGL", "collector_number": "1", "rarity": "common", "weight": 1 }
+                    ],
+                    "total_weight": 1,
+                    "foil": false,
+                    "balance_colors": false
+                },
+                "common": {
+                    "cards": [
+                        { "name": "C1", "set_code": "UGL", "collector_number": "2", "rarity": "common", "weight": 1 },
+                        { "name": "C2", "set_code": "UGL", "collector_number": "3", "rarity": "common", "weight": 1 },
+                        { "name": "C3", "set_code": "UGL", "collector_number": "4", "rarity": "common", "weight": 1 },
+                        { "name": "C4", "set_code": "UGL", "collector_number": "5", "rarity": "common", "weight": 1 },
+                        { "name": "C5", "set_code": "UGL", "collector_number": "6", "rarity": "common", "weight": 1 },
+                        { "name": "C6", "set_code": "UGL", "collector_number": "7", "rarity": "common", "weight": 1 }
+                    ],
+                    "total_weight": 6,
+                    "foil": false,
+                    "balance_colors": false
+                },
+                "uncommon": {
+                    "cards": [
+                        { "name": "U1", "set_code": "UGL", "collector_number": "8", "rarity": "uncommon", "weight": 1 },
+                        { "name": "U2", "set_code": "UGL", "collector_number": "9", "rarity": "uncommon", "weight": 1 }
+                    ],
+                    "total_weight": 2,
+                    "foil": false,
+                    "balance_colors": false
+                },
+                "rare": {
+                    "cards": [
+                        { "name": "R1", "set_code": "UGL", "collector_number": "10", "rarity": "rare", "weight": 1 }
+                    ],
+                    "total_weight": 1,
+                    "foil": false,
+                    "balance_colors": false
+                }
+            },
+            "prints": [],
+            "basic_lands": ["Forest"]
+        }"#;
+
+        let pool_input_json = serde_json::json!({
+            "type": "Set",
+            "data": { "set_pool_json": set_pool_json }
+        })
+        .to_string();
+        let seats_json = r#"[
+            { "type": "Human", "player_id": 0, "display_name": "Host" },
+            { "type": "Human", "player_id": 1, "display_name": "Guest" }
+        ]"#;
+
+        clear_state();
+        let draft_view = create_multiplayer_draft_inner(
+            &pool_input_json,
+            seats_json,
+            1,
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+            2,
+        )
+        .expect("Unglued draft should start");
+        assert_eq!(draft_view.cards_per_pack, 10);
+        assert_eq!(draft_view.current_pack.expect("current pack").len(), 10);
+
+        clear_state();
+        let sealed_view = create_multiplayer_draft_inner(
+            &pool_input_json,
+            seats_json,
+            3,
+            42,
+            "test-room",
+            "Swiss",
+            "Competitive",
+            2,
+        )
+        .expect("Unglued sealed should start");
+        assert_eq!(sealed_view.cards_per_pack, 10);
+        assert_eq!(sealed_view.pool.len(), 60);
+        assert!(sealed_view
+            .sealed_packs
+            .expect("sealed pack boundaries")
+            .iter()
+            .all(|pack| pack.len() == 10));
 
         clear_state();
     }

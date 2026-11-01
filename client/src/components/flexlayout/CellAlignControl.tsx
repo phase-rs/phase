@@ -1,3 +1,4 @@
+import type { ParseKeys } from "i18next";
 import { useTranslation } from "react-i18next";
 
 import {
@@ -9,7 +10,7 @@ import {
 
 /** The three alignment choices, with a glyph that reads as left / center / right
  *  and the settings i18n key for its accessible label. */
-const ALIGNMENTS: ReadonlyArray<{ value: CellAlign; glyph: string; labelKey: string }> = [
+const ALIGNMENTS: ReadonlyArray<{ value: CellAlign; glyph: string; labelKey: ParseKeys<"settings"> }> = [
   { value: "start", glyph: "⇤", labelKey: "flexLayout.align.left" },
   { value: "center", glyph: "↔", labelKey: "flexLayout.align.center" },
   { value: "end", glyph: "⇥", labelKey: "flexLayout.align.right" },

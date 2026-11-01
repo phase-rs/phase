@@ -26,6 +26,7 @@ use engine::game::engine::EngineError;
 use engine::game::planeswalker::can_activate_loyalty_ability;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zones;
+use engine::game::{create_debug_cards, debug_card_entry_source, DebugCardCreateRequest};
 use engine::parser::oracle::parse_oracle_text;
 use engine::parser::oracle_effect::parse_effect_chain;
 use engine::types::ability::{
@@ -33,7 +34,7 @@ use engine::types::ability::{
     ObjectScope, QuantityExpr, QuantityRef, TargetChoiceTiming, TargetFilter, TargetRef,
 };
 use engine::types::ability_visit::visit_ability_def;
-use engine::types::actions::GameAction;
+use engine::types::actions::{DebugCardCreationKind, GameAction};
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{ActionResult, GameRng, RandomDraw, StackEntryKind, WaitingFor};
@@ -44,6 +45,8 @@ use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 use rand::Rng;
+
+use crate::support::shared_card_db;
 
 /// Verbatim Oracle text (MTGJSON `text`). The row separators are U+2014 and the
 /// signs of `[−1]` and `[−2]` are U+2212.
@@ -1347,6 +1350,98 @@ fn casting_comet_puts_him_on_the_battlefield_with_one_ability_and_no_prompt() {
     outcome.assert_zone(&[spell], Zone::Battlefield);
     assert_eq!(runner.state().objects[&spell].abilities.len(), 1);
     assert_eq!(loyalty(&runner, spell), 5);
+}
+
+// ---------------------------------------------------------------------------
+// Sandbox entry: the debug Create Card tool
+// ---------------------------------------------------------------------------
+
+/// Comet for P0, put onto the battlefield by the sandbox Create Card tool from the
+/// committed fixture's verbatim face, beside an opposing creature.
+fn debug_table(run_etb: bool, creation_kind: DebugCardCreationKind) -> Table {
+    let mut scenario = scenario();
+    scenario.add_creature(P1, "Opposing Ogre", 3, 9);
+    let mut runner = scenario.build();
+    runner.state_mut().debug_mode = true;
+    let db = shared_card_db().expect("the committed integration fixture loads");
+    let face = db
+        .get_face_by_name("Comet, Stellar Pup")
+        .expect("Comet is in the committed fixture");
+    create_debug_cards(
+        runner.state_mut(),
+        DebugCardCreateRequest {
+            actor: P0,
+            source: debug_card_entry_source(db, face),
+            owner: P0,
+            zone: Zone::Battlefield,
+            count: 1,
+            attach_to: None,
+            run_etb,
+            nonlegendary: false,
+            creation_kind,
+        },
+    )
+    .unwrap_or_else(|error| panic!("the debug creation is accepted: {error:?}"));
+    let comet = runner
+        .state()
+        .battlefield
+        .iter()
+        .copied()
+        .find(|id| runner.state().objects[id].name == "Comet, Stellar Pup")
+        .expect("Comet is on the battlefield");
+    assert!(is_priority(&runner), "reach-guard: the creation settled");
+    Table { runner, comet }
+}
+
+/// CR 306.5b + CR 306.5c: Comet put onto the battlefield by the sandbox Create Card
+/// tool enters with his five loyalty counters, so his rows read and change them as
+/// for a cast Comet: face 4 deals 5 to the clicked recipient, then `[−2]` leaves 3;
+/// face 1's `[+2]` leaves 7, with two Squirrels. Rows: the real entry (`run_etb`),
+/// the raw placement, and the token kind.
+///
+/// Red at base: the created Comet had a loyalty field of 5 but no loyalty counter,
+/// so face 4 dealt 0 damage and left him at 5, and face 1 left him at 2.
+#[test]
+fn debug_created_comet_rolls_read_and_change_its_loyalty_counters() {
+    for (run_etb, kind) in [
+        (true, DebugCardCreationKind::Card),
+        (false, DebugCardCreationKind::Card),
+        (true, DebugCardCreationKind::Token),
+    ] {
+        let row = format!("run_etb={run_etb}, {kind:?}");
+
+        // Face 4: one board click on P1 answers the recipient prompt.
+        let Table { mut runner, comet } = debug_table(run_etb, kind);
+        roll(&mut runner, comet, 4);
+        let (chooser, eligible) = recipient_prompt(&runner);
+        assert_eq!(chooser, P0, "{row}: the controller chooses");
+        assert!(eligible.contains(&TargetRef::Player(P1)), "{row}");
+        click_recipient(&mut runner, Some(TargetRef::Player(P1)))
+            .unwrap_or_else(|error| panic!("{row}: the click must be accepted: {error:?}"));
+        assert_eq!(
+            life(&runner, P1),
+            15,
+            "{row}: damage equal to his five loyalty counters"
+        );
+        assert_eq!(loyalty(&runner, comet), 3, "{row}: then [−2]");
+        assert_eq!(
+            runner.state().objects[&comet].loyalty,
+            Some(3),
+            "{row}: CR 306.5c"
+        );
+        assert!(is_priority(&runner), "{row}");
+        assert!(
+            runner.state().stack.is_empty(),
+            "{row}: the ability finished"
+        );
+
+        // Face 1: [+2], then two Squirrels.
+        let Table { mut runner, comet } = debug_table(run_etb, kind);
+        roll(&mut runner, comet, 1);
+        assert!(is_priority(&runner), "{row}: no prompt");
+        assert_eq!(loyalty(&runner, comet), 7, "{row}: [+2]");
+        assert_eq!(squirrels(&runner).len(), 2, "{row}");
+    }
 }
 
 // ---------------------------------------------------------------------------

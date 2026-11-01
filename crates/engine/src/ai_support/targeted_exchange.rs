@@ -360,8 +360,9 @@ pub fn root_may_yield_adverse_exchange(state: &GameState, action: &GameAction) -
     //
     // This rail is load-bearing by CONSTRUCTION, not by payload: it holds no matter
     // what those four families come to synthesize. Today none of them carries an
-    // adverse shape (cycling draws, embalm/eternalize/encore copy, plot exiles, equip
-    // attaches), so deleting this rail keeps every current fixture green — which is
+    // adverse shape (cycling draws, embalm/eternalize/encore copy, unearth returns,
+    // scavenge counters, plot exiles, equip attaches), so deleting this rail keeps
+    // every current fixture green — which is
     // exactly why `activation_beyond_printed_abilities_falls_open` pins the index
     // boundary directly rather than pinning a card.
     if let RootBinding::Activation { ability_index, .. } = root {
@@ -430,7 +431,7 @@ pub fn root_may_yield_adverse_exchange(state: &GameState, action: &GameAction) -
 /// the ability's first object target rather than to its source, which is the
 /// wording class `is_target_sourced_self_damage` gates. `DamageAll` shares that
 /// one axis with `DealDamage` (see
-/// `ability_utils::one_sided_fight_source_supplies_quantity_creature`), so it is
+/// `types::ability::one_sided_fight_source_supplies_quantity_creature`), so it is
 /// admitted here to keep the guard no tighter than the class.
 fn effect_may_yield_adverse_exchange(effect: &Effect) -> bool {
     matches!(
