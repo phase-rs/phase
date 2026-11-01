@@ -3821,6 +3821,84 @@ fn parse_syr_konrad_trigger_lines_stays_single_disjunctive_trigger() {
     );
 }
 
+/// Public-parser acceptance boundary, not a runtime claim for unsupported heads.
+/// Synthetic inputs combine Disa's exclusion with Voracious Brood's batching,
+/// "Name Sticker" Goblin's exclusion list, and Oglor's inclusion union.
+/// CR 400.3 + CR 603.2: do not admit heads whose owner, source admission, or
+/// batch count cannot be preserved. Printed Disa and Syr Konrad remain controls.
+#[test]
+fn trigger_graveyard_narrowing_preserves_base_acceptance() {
+    for oracle in [
+        "Whenever one or more creature cards are put into your graveyard from anywhere other than the battlefield, put that many +1/+1 counters on this creature.",
+        "Whenever a creature card is put into your graveyard from anywhere other than the battlefield or your library, you gain 2 life.",
+        "Whenever one or more creature cards are put into your graveyard from anywhere other than the battlefield or your library, you gain 2 life.",
+        "Whenever a creature card is put into an opponent's graveyard from anywhere other than your library, you gain 2 life.",
+        "Whenever one or more creature cards are put into an opponent's graveyard from anywhere other than your library, you gain 2 life.",
+    ] {
+        let parsed = parse_oracle_text(oracle, "Synthetic unsupported graveyard head", &[], &[], &[]);
+        assert_eq!(parsed.triggers.len(), 1, "{oracle}: {parsed:?}");
+        assert!(
+            matches!(parsed.triggers[0].mode, TriggerMode::Unknown(_)),
+            "base-rejected shape must stay unsupported: {oracle}: {parsed:?}"
+        );
+    }
+
+    // Synthetic Narcomoeba/Oglor self-arrival plus an independent death event:
+    // base declines the clause-only builder and retains two scalar definitions.
+    let split = parse_oracle_text(
+        "Whenever this card is put into your graveyard from your library and/or hand or a creature dies, you gain 2 life.",
+        "Synthetic self union and death observer", &[], &[], &[],
+    );
+    assert_eq!(split.triggers.len(), 2, "{split:?}");
+    let arrival = &split.triggers[0];
+    assert_eq!(arrival.mode, TriggerMode::ChangesZone);
+    assert!(arrival.zone_change_clauses.is_empty(), "{arrival:?}");
+    assert_eq!(arrival.valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(arrival.destination, Some(Zone::Graveyard));
+    assert_eq!(arrival.origin_zones, vec![Zone::Library, Zone::Hand]);
+    assert!(
+        arrival.trigger_zones.contains(&Zone::Graveyard),
+        "{arrival:?}"
+    );
+    let death = &split.triggers[1];
+    assert_eq!(death.mode, TriggerMode::ChangesZone);
+    assert_eq!(death.origin, Some(Zone::Battlefield));
+    assert_eq!(death.destination, Some(Zone::Graveyard));
+
+    // Positive reach guards for the singular exclusion, consistent opponent
+    // inclusion union, and legacy disjunctive exclusion grammar respectively.
+    let disa = parse_oracle_text(
+        "Whenever a Lhurgoyf permanent card is put into your graveyard from anywhere other than the battlefield, put it onto the battlefield.\nWhenever one or more creatures you control deal combat damage to a player, create a Tarmogoyf token.",
+        "Disa the Restless", &[], &[], &[],
+    );
+    assert_eq!(disa.triggers[0].mode, TriggerMode::ChangesZone);
+    assert_eq!(disa.triggers[0].zone_change_clauses.len(), 1);
+    assert_eq!(
+        disa.triggers[0].zone_change_clauses[0].origin,
+        OriginConstraint::NotEquals(Zone::Battlefield),
+    );
+    let union = parse_oracle_text(
+        "Whenever a creature card is put into an opponent's graveyard from their library or hand, that player loses 1 life.",
+        "Synthetic Oglor and Patron of the Nezumi union control", &[], &[], &[],
+    );
+    assert_eq!(union.triggers[0].mode, TriggerMode::ChangesZone);
+    assert_eq!(
+        union.triggers[0].origin_zones,
+        vec![Zone::Library, Zone::Hand]
+    );
+    let konrad = parse_oracle_text(
+        "Whenever another creature dies, or a creature card is put into a graveyard from anywhere other than the battlefield, or a creature card leaves your graveyard, Syr Konrad deals 1 damage to each opponent.\n{1}{B}: Each player mills a card. (They each put the top card of their library into their graveyard.)",
+        "Syr Konrad, the Grim", &[], &[], &[],
+    );
+    assert_eq!(konrad.triggers.len(), 1);
+    assert_eq!(konrad.triggers[0].mode, TriggerMode::ChangesZone);
+    assert_eq!(konrad.triggers[0].zone_change_clauses.len(), 3);
+    assert_eq!(
+        konrad.triggers[0].zone_change_clauses[1].origin,
+        OriginConstraint::NotEquals(Zone::Battlefield),
+    );
+}
+
 // SHAPE TEST — issue #411: Syr Konrad's three-way disjunctive zone-change
 // trigger. Asserts the parsed `TriggerDefinition` SHAPE; it does not drive
 // the runtime apply pipeline (see `triggers.rs` for the runtime test).

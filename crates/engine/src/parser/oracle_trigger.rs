@@ -1570,7 +1570,10 @@ fn is_damage_done_trigger_pattern(cond_lower: &str) -> bool {
 /// proves the same origin as construction. "Your graveyard" names the controller,
 /// not an antecedent of "that player"; an unqualified graveyard names no player.
 fn condition_names_destination_graveyard_owner(cond_lower: &str) -> bool {
-    scan_preceded(cond_lower, put_into_graveyard_head).is_some_and(|(_, (possessive, _), _)| {
+    scan_preceded(cond_lower, |input| {
+        put_into_graveyard_head(input, GraveyardHeadOrigins::SingleBattlefieldExclusion)
+    })
+    .is_some_and(|(_, (possessive, _), _)| {
         matches!(
             possessive,
             Some(PlayerRelation::Opponent | PlayerRelation::All)
@@ -22877,16 +22880,24 @@ fn parse_zone_change_clause(subject: &TargetFilter, rest: &str) -> Option<ZoneCh
     // CR 603.6c: "is/are put into [a] graveyard [from <zone>]" — the general
     // put-into-graveyard form. Source-zone constraint comes from the optional
     // "from" tail.
-    if let Ok((_, (possessive, origin))) = put_into_graveyard_head(rest) {
-        let origin = destination_graveyard_origin(subject, origin);
-        let owner = if filter_requires_self(subject)
-            && origin != OriginConstraint::Equals(Zone::Battlefield)
-        {
-            None
-        } else {
-            graveyard_owner_scope(possessive)
-        };
-        let valid_card = Some(scope_to_destination_owner(subject.clone(), owner));
+    if let Ok((after_verb, ())) = alt((
+        value((), tag::<_, _, OracleError<'_>>("is put into ")),
+        value((), tag("are put into ")),
+    ))
+    .parse(rest)
+    {
+        let (after_gy, possessive) = parse_graveyard_possessive.parse(after_verb).ok()?;
+        let (tail, origin) = parse_put_into_graveyard_origin(after_gy).ok()?;
+        if !tail.trim().is_empty() {
+            return None;
+        }
+        let origin =
+            destination_graveyard_origin(subject, (!after_gy.trim().is_empty()).then_some(origin));
+        // CR 400.3 + CR 109.5: the graveyard possessive scopes the card's owner.
+        let valid_card = Some(scope_to_destination_owner(
+            subject.clone(),
+            graveyard_owner_scope(possessive),
+        ));
         return Some(ZoneChangeClause {
             origin,
             destination: Some(Zone::Graveyard),
@@ -22983,9 +22994,9 @@ fn parse_disjunctive_zone_change_condition(condition: &str) -> Option<Vec<ZoneCh
 /// graveyard. `valid_target` carries the same possessive for the parse-details
 /// display only; `match_changes_zone` does not read it.
 ///
-/// Explicit single-zone exclusions retain the complete qualified subject on a
-/// `ZoneChangeClause`; inclusion unions and multi-zone exclusion complements use
-/// `origin_zones`. The batched builder uses the same carriers and head grammar.
+/// Single unqualified battlefield exclusions retain the complete qualified
+/// subject on a `ZoneChangeClause`. Inclusion unions use `origin_zones`.
+/// Batched heads accept inclusions only.
 fn try_parse_put_into_graveyard(
     subject: &TargetFilter,
     rest: &str,
@@ -22997,18 +23008,11 @@ fn try_parse_put_into_graveyard(
     ))
     .parse(rest)
     .ok()?;
-    let Ok((_, (possessive, origin))) = put_into_graveyard_head(rest) else {
+    let Ok((_, (possessive, origin))) =
+        put_into_graveyard_head(rest, GraveyardHeadOrigins::SingleBattlefieldExclusion)
+    else {
         return Some(unknown_trigger_definition(rest));
     };
-    // CR 603.2 + CR 603.6c: mixed self/other exclusions have no complete source
-    // admission, even when a multi-zone complement lowers to scalar OneOf.
-    // Keep inclusion unions and unrestricted origins on their existing paths.
-    if matches!(&origin, GraveyardOrigin::Excluded(_))
-        && filter_references_self(subject)
-        && !filter_requires_self(subject)
-    {
-        return Some(unknown_trigger_definition(rest));
-    }
     let origin = destination_graveyard_origin(subject, origin);
     // CR 603.2 + CR 603.6c: destination triggers must observe the matching event;
     // "from anywhere" is not a leaves-the-battlefield trigger. A single-zone
@@ -23099,12 +23103,12 @@ fn scope_to_destination_owner(subject: TargetFilter, owner: Option<ControllerRef
     }
 }
 
-/// Parser-private provenance: an exclusion complement and an inclusion union
-/// both lower to OneOf; retain their distinct handling of mixed-self subjects.
-enum GraveyardOrigin {
-    Unspecified,
-    Included(OriginConstraint),
-    Excluded(OriginConstraint),
+/// Parser-private acceptance boundary: batched heads support inclusions only;
+/// singular heads additionally support Disa's unqualified battlefield exclusion.
+#[derive(Clone, Copy)]
+enum GraveyardHeadOrigins {
+    InclusionOnly,
+    SingleBattlefieldExclusion,
 }
 
 /// CR 603.6c + CR 400.3 + CR 608.2c: shared, fully consumed graveyard head.
@@ -23112,12 +23116,13 @@ enum GraveyardOrigin {
 /// the same qualifier gate for construction and destination-owner anaphor proof.
 fn put_into_graveyard_head(
     input: &str,
-) -> OracleResult<'_, (Option<PlayerRelation>, GraveyardOrigin)> {
+    origins: GraveyardHeadOrigins,
+) -> OracleResult<'_, (Option<PlayerRelation>, Option<OriginConstraint>)> {
     let (input, _) = alt((tag("is put into "), tag("are put into "))).parse(input)?;
     let (input, possessive) = parse_graveyard_possessive(input)?;
     let input = input.trim_start();
     if input.is_empty() {
-        return Ok((input, (possessive, GraveyardOrigin::Unspecified)));
+        return Ok((input, (possessive, None)));
     }
     let (_, after_from) = preceded(tag("from "), rest).parse(input)?;
     if let Some((origin, zones, qualifier)) = parse_graveyard_origin_union(after_from) {
@@ -23132,31 +23137,30 @@ fn put_into_graveyard_head(
             }
             OriginConstraint::OneOf(zones)
         };
-        return Ok(("", (possessive, GraveyardOrigin::Included(origin))));
+        return Ok(("", (possessive, Some(origin))));
     }
-    let (tail, origin) = parse_put_into_graveyard_origin(input)?;
-    let (tail, _) = eof.parse(tail.trim())?;
-    // Inclusion unions were consumed above. Only exclusion lists produce
-    // NotEquals or OneOf on this fallback path.
-    let origin = match origin {
-        OriginConstraint::NotEquals(_) | OriginConstraint::OneOf(_) => {
-            GraveyardOrigin::Excluded(origin)
+    match origins {
+        GraveyardHeadOrigins::InclusionOnly => Err(oracle_err(input)),
+        GraveyardHeadOrigins::SingleBattlefieldExclusion => {
+            // CR 603.2 + CR 603.6c: Disa observes non-battlefield arrivals.
+            // Do not admit qualified exclusions or exclusion lists: their
+            // ownership and source-admission semantics are not supported here.
+            let (tail, origin) = all_consuming(value(
+                OriginConstraint::NotEquals(Zone::Battlefield),
+                tag("from anywhere other than the battlefield"),
+            ))
+            .parse(input)?;
+            Ok((tail, (possessive, Some(origin))))
         }
-        OriginConstraint::Any | OriginConstraint::Equals(_) => GraveyardOrigin::Included(origin),
-    };
-    Ok((tail, (possessive, origin)))
+    }
 }
 
 /// CR 110.1 + CR 109.2: a permanent (but not a permanent card) starts on
 /// the battlefield unless the printed head explicitly supplies an origin.
 fn destination_graveyard_origin(
     subject: &TargetFilter,
-    origin: GraveyardOrigin,
+    origin: Option<OriginConstraint>,
 ) -> OriginConstraint {
-    let origin = match origin {
-        GraveyardOrigin::Unspecified => None,
-        GraveyardOrigin::Included(origin) | GraveyardOrigin::Excluded(origin) => Some(origin),
-    };
     origin.unwrap_or_else(|| {
         if matches!(subject, TargetFilter::Typed(typed)
             if typed.type_filters.contains(&TypeFilter::Permanent)
@@ -23597,8 +23601,7 @@ fn try_parse_put_into_exile_from(
 
 /// Parse "whenever one or more [type] cards are put into [your] graveyard from [your library]".
 /// CR 603.2c: "One or more" triggers fire once per batch of simultaneous events.
-/// The shared head's exclusion clauses retain Card, subtype, and destination
-/// ownership predicates, just as the singular builder does.
+/// Inclusion-only heads retain the scalar subject used by the batch counter.
 fn try_parse_one_or_more_put_into_graveyard(
     lower: &str,
 ) -> Option<(TriggerMode, TriggerDefinition)> {
@@ -23622,7 +23625,9 @@ fn try_parse_one_or_more_put_into_graveyard(
         ))
         .parse(head)
         .ok()?;
-        let Ok((_, (possessive, origin))) = put_into_graveyard_head(head) else {
+        let Ok((_, (possessive, origin))) =
+            put_into_graveyard_head(head, GraveyardHeadOrigins::InclusionOnly)
+        else {
             return Some(unknown_trigger_definition(lower));
         };
         let destination_owner = graveyard_owner_scope(possessive);
@@ -23660,14 +23665,7 @@ fn try_parse_one_or_more_put_into_graveyard(
             OriginConstraint::Any => {}
             OriginConstraint::Equals(zone) => def.origin = Some(zone),
             OriginConstraint::OneOf(zones) => def.origin_zones = zones,
-            origin @ OriginConstraint::NotEquals(_) => {
-                def.zone_change_clauses.push(ZoneChangeClause {
-                    origin,
-                    destination: Some(Zone::Graveyard),
-                    destination_constraint: DestinationConstraint::Any,
-                    valid_card: def.valid_card.take(),
-                });
-            }
+            OriginConstraint::NotEquals(_) => return Some(unknown_trigger_definition(lower)),
         }
         def.valid_target = valid_target;
         def.batched = true;
