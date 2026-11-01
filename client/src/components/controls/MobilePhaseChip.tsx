@@ -7,8 +7,8 @@ import { useSeatColor } from "../../hooks/useSeatColor.ts";
 import { useGameStore } from "../../stores/gameStore";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 import { DialogShell } from "../modal/DialogShell.tsx";
+import { PhaseIconFor } from "./phaseIcons.tsx";
 import {
-  PHASE_ICONS,
   PHASE_KEY,
   SCOPE_DOT_CLASS,
   usePhaseStopCycle,
@@ -93,7 +93,7 @@ export function MobilePhaseChip({ className }: { className?: string } = {}) {
           style={{ backgroundColor: turnSeatColor }}
         />
         <span aria-hidden className="text-cyan-300 [&>svg]:h-3 [&>svg]:w-3">
-          {PHASE_ICONS[phase]}
+          <PhaseIconFor phase={phase} />
         </span>
         <span className="truncate">{phaseLabel}</span>
         {currentStop && (
@@ -159,7 +159,7 @@ function PhaseStopRow({ phase }: { phase: Phase }) {
               : "border-white/10 bg-white/5 text-slate-400"
           } [&>svg]:h-3.5 [&>svg]:w-3.5`}
         >
-          {PHASE_ICONS[phase]}
+          <PhaseIconFor phase={phase} />
         </span>
         <span className="min-w-0 flex-1">
           <span className="block truncate text-sm font-medium text-slate-100">
