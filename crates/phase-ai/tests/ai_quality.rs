@@ -1551,7 +1551,7 @@ fn casts_artifact_with_activated_exile_without_valid_targets() {
         .add_artifact_to_hand_from_oracle(
             P0,
             "Voyager Staff",
-            "{2}, Sacrifice Voyager Staff: Exile target creature. Return the exiled card to the battlefield under its owner's control at the beginning of the next end step.",
+            "{2}, Sacrifice this artifact: Exile target creature. Return the exiled card to the battlefield under its owner's control at the beginning of the next end step.",
         )
         .with_mana_cost(ManaCost::Cost {
             shards: vec![],
@@ -1581,7 +1581,7 @@ fn casts_artifact_with_activated_exile_without_valid_targets() {
 }
 
 #[test]
-fn casts_creature_with_graveyard_activated_ability_and_duplicate_in_hand() {
+fn casts_sewerdreg_with_battlefield_activated_ability_and_duplicate_in_hand() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     for _ in 0..6 {
@@ -1593,8 +1593,8 @@ fn casts_creature_with_graveyard_activated_ability_and_duplicate_in_hand() {
             P0,
             "Sewerdreg",
             3,
-            5,
-            "Swampwalk\n{2}, Exile Sewerdreg from your graveyard: Exile target card from a graveyard.",
+            3,
+            "Swampwalk\nSacrifice this creature: Exile target card from a graveyard.",
         )
         .with_mana_cost(ManaCost::Cost {
             shards: vec![
@@ -1610,8 +1610,8 @@ fn casts_creature_with_graveyard_activated_ability_and_duplicate_in_hand() {
             P0,
             "Sewerdreg",
             3,
-            5,
-            "Swampwalk\n{2}, Exile Sewerdreg from your graveyard: Exile target card from a graveyard.",
+            3,
+            "Swampwalk\nSacrifice this creature: Exile target card from a graveyard.",
         )
         .with_mana_cost(ManaCost::Cost {
             shards: vec![
