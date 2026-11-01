@@ -36680,7 +36680,7 @@ pub(super) fn damage_dealer_effect_mut(def: &mut AbilityDefinition) -> &mut Effe
 }
 
 /// Membership mirror for `AntecedentRole::DigLook` — the `Dig` anchor that both
-/// private-look riders bind back to (`ExileLookedAtCard`, `ExileOneOfThemFaceDown`).
+/// private-look riders bind back to (`ExileLookedAtCard`, `ExileLookedAtCardsFaceDown`).
 /// ONE predicate because the two scans it replaces were byte-identical.
 ///
 /// The effect variant alone, NOT `reveal: false`. The private-look condition
@@ -38412,7 +38412,7 @@ fn continuation_is_exile_producer(continuation: Option<&ContinuationAst>) -> boo
     matches!(
         continuation,
         Some(
-            ContinuationAst::ExileOneOfThemFaceDown { .. }
+            ContinuationAst::ExileLookedAtCardsFaceDown { .. }
                 | ContinuationAst::ExileLookedAtCard { .. }
         )
     )
@@ -38425,7 +38425,7 @@ fn continuation_is_exile_producer(continuation: Option<&ContinuationAst>) -> boo
 /// face down" chunk parses to its own standalone exile-shaped raw effect
 /// (`ChangeZone { destination: Exile, target: ParentTarget }`) — CR 406.6's
 /// exile genuinely happened in that clause's text — but it is ALSO dispositioned
-/// `Continue`, because a `ContinuationAst::ExileOneOfThemFaceDown` marker on this
+/// `Continue`, because a `ContinuationAst::ExileLookedAtCardsFaceDown` marker on this
 /// SAME clause later rewrites the PRECEDING `Dig` into the exile-producing form
 /// and discards this raw `ChangeZone` during the LATER lowering pass.
 /// `chain_has_prior_exile_producer` is seeded during the earlier per-chunk PARSE
@@ -41837,7 +41837,7 @@ pub(crate) struct PrintedColorCarrier {
 /// more than once is REFUSED rather than collapsed (see the ARITY CONTRACT
 /// below), so the census records only which arm today's pool takes.
 /// RE-MEASURED **2026-08-29** against the MTGJSON pool whose tracked vintage
-/// sidecar `crates/engine/data/mtgjson-vintage` reads **2026-08-28**.
+/// sidecar `crates/phase-ast/data/mtgjson-vintage` reads **2026-08-28**.
 /// Re-measure rather than trusting the constant:
 ///
 /// ```text

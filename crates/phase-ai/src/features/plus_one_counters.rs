@@ -2,7 +2,7 @@
 //!
 //! Parser AST verification — VERIFIED:
 //! - `Effect::PutCounter { counter_type: CounterType, count: QuantityExpr, target }` at
-//!   `crates/engine/src/types/ability.rs:2201-2207`. CR 122.1a: +1/+1 counters add
+//!   `crates/phase-ast/src/types/ability.rs`. CR 122.1a: +1/+1 counters add
 //!   to power and toughness.
 //! - `Effect::PutCounter { counter_type, count, target }` at `ability.rs:2425-2431`.
 //!   Alternate counter-placement shape. CR 122.1a.
@@ -11,7 +11,7 @@
 //! - `Effect::Proliferate` (unit variant) at `ability.rs:2379`. CR 701.34: proliferate
 //!   adds one counter of each kind already on chosen permanents/players.
 //! - `Keyword::EtbCounter { counter_type: CounterType, count: u32 }` at
-//!   `crates/engine/src/types/keywords.rs:358-361`. CR 122.6a: ETB-with-counters keyword.
+//!   `crates/phase-ast/src/types/keywords.rs`. CR 122.6a: ETB-with-counters keyword.
 //! - `Effect::Token { enter_with_counters: Vec<(CounterType, QuantityExpr)>, .. }` at
 //!   `ability.rs:2167`. CR 122.6a: tokens that enter with counters.
 //! - Created-token placement: `Effect::PutCounter { target: TargetFilter::LastCreated, .. }`

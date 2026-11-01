@@ -53,6 +53,7 @@ mod roughshod_mentor_green_trample_grant;
 mod run_for_your_life_escape;
 mod runadi_behemoth_caller_etb_counters;
 mod runaway_steam_kin_fewer_than_counters;
+mod runed_halo_chosen_card_name_protection;
 mod runo_stromkirk_reveal_transform_gate;
 mod s01_current_phase_condition;
 mod s01_excess_damage_followup;

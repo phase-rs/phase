@@ -15,7 +15,7 @@
 //! `GameAction::SelectCards` — and asserts only OBSERVABLE outcomes: which
 //! player is prompted, which cards are offered, and where every object ends up.
 //! No AST shapes are asserted; the parser-level guards for this change live in
-//! `crates/engine/src/parser/oracle_effect/imperative.rs`'s unit tests.
+//! `crates/phase-parser/src/parser/oracle_effect/imperative.rs`'s unit tests.
 //!
 //! Two rules ride on these assertions:
 //!   * CR 400.7j + CR 601.2h + CR 602.2b — the activation cost moved two cards
