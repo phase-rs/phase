@@ -19,7 +19,7 @@ use crate::types::ability::{
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{DamageRecord, GameState};
+use crate::types::game_state::{DamageRecord, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::KeywordKind;
 use crate::types::player::{PlayerCounterKind, PlayerId};
@@ -632,9 +632,20 @@ pub(crate) fn apply_damage_to_target(
                 // can resolve against the prevented event's damage source. Clear
                 // after the call to prevent leakage into unrelated later
                 // replacements.
-                let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
-                    state, None, None, None, events,
-                );
+                //
+                // CR 616.1g: the continuation — a prevention rider, or a damage
+                // substitution's substitute (Soul-Scar Mage's counters) — can
+                // raise a prompt of its own (two counter replacements to order).
+                // This event is settled; the prompt is surfaced, and a caller
+                // with more recipients pauses behind it
+                // (`pause_behind_continuation_prompt`).
+                if let Some(waiting_for) =
+                    crate::game::engine_replacement::apply_pending_post_replacement_effect(
+                        state, None, None, None, events,
+                    )
+                {
+                    state.waiting_for = waiting_for;
+                }
             }
             Ok(DamageResult::Applied(0))
         }
@@ -1203,6 +1214,29 @@ fn stash_remaining_post_replacement_damage(
     append_to_pending_continuation(state, Some(Box::new(head)));
 }
 
+/// CR 616.1g + CR 608.2c: after one recipient's damage settled, its replacement
+/// continuation (a prevention rider, or a damage substitution's substitute) may
+/// have left a prompt open — Soul-Scar Mage's counters meeting two counter
+/// replacements to order. When the effect still has recipients to damage, it
+/// must stop behind that prompt exactly as it does for a `NeedsChoice` pause:
+/// going on would raise the next recipient's prompt over the open one.
+fn pause_behind_continuation_prompt(state: &GameState, has_remaining: bool) -> bool {
+    has_remaining && !matches!(state.waiting_for, WaitingFor::Priority { .. })
+}
+
+/// The ability whose remaining recipients a pause stashes. On a `NeedsChoice`
+/// pause the stash also carries the parent's `sub_ability` tail. On a
+/// [`pause_behind_continuation_prompt`] pause the effect returns with a prompt
+/// open, and `resolve_ability_chain` parks that tail itself — stashing it here
+/// too would run it twice.
+fn pause_stash_owner(ability: &ResolvedAbility, result: &DamageResult) -> ResolvedAbility {
+    let mut owner = ability.clone();
+    if matches!(result, DamageResult::Applied(_)) {
+        owner.sub_ability = None;
+    }
+    owner
+}
+
 /// CR 120.3 + CR 616.1e: Build a linked sub_ability chain from a sequence of
 /// (target, amount) pairs and stash it as `pending_continuation`. If the parent
 /// ability has an existing `sub_ability` chain, it is appended to the tail so
@@ -1450,13 +1484,15 @@ pub fn resolve(
     if let Some(distribution) = &ability.distribution {
         for (i, (target, amount)) in distribution.iter().enumerate() {
             match apply_damage_to_target(state, &ctx, target.clone(), *amount, false, events)? {
-                DamageResult::Applied(_) => {}
-                DamageResult::NeedsChoice => {
+                DamageResult::Applied(_)
+                    if !pause_behind_continuation_prompt(state, i + 1 < distribution.len()) => {}
+                result => {
                     // CR 120.3 + CR 616.1e: Remaining distributed targets must resume
                     // after the replacement choice resolves. Stash each as a chained
                     // DealDamage continuation keyed to the same damage-source id.
                     let remaining = distribution[i + 1..].iter().map(|(t, a)| (t.clone(), *a));
-                    stash_remaining_damage_chain(state, ability, ctx.source_id, remaining);
+                    let owner = pause_stash_owner(ability, &result);
+                    stash_remaining_damage_chain(state, &owner, ctx.source_id, remaining);
                     return Ok(());
                 }
             }
@@ -1464,14 +1500,19 @@ pub fn resolve(
     } else {
         for (i, target) in effective_targets.iter().enumerate() {
             match apply_damage_to_target(state, &ctx, target.clone(), num_dmg, false, events)? {
-                DamageResult::Applied(_) => {}
-                DamageResult::NeedsChoice => {
+                DamageResult::Applied(_)
+                    if !pause_behind_continuation_prompt(
+                        state,
+                        i + 1 < effective_targets.len(),
+                    ) => {}
+                result => {
                     // CR 120.3 + CR 616.1e: Remaining targets must resume after the
                     // replacement choice resolves.
                     let remaining = effective_targets[i + 1..]
                         .iter()
                         .map(|t| (t.clone(), num_dmg));
-                    stash_remaining_damage_chain(state, ability, ctx.source_id, remaining);
+                    let owner = pause_stash_owner(ability, &result);
+                    stash_remaining_damage_chain(state, &owner, ctx.source_id, remaining);
                     return Ok(());
                 }
             }
@@ -1876,9 +1917,30 @@ fn resolve_each_target_power_damage(
                 // CR 615.5: A prevention rider (e.g. "for each 1 damage prevented
                 // this way") resolves immediately afterward for non-combat damage.
                 if state.has_post_replacement_drain() {
-                    let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
-                        state, None, None, None, events,
-                    );
+                    if let Some(waiting_for) =
+                        crate::game::engine_replacement::apply_pending_post_replacement_effect(
+                            state, None, None, None, events,
+                        )
+                    {
+                        state.waiting_for = waiting_for;
+                        // CR 616.1g: the rider or a damage substitution's
+                        // substitute (Soul-Scar Mage's counters) raised its own
+                        // prompt. This source's event is settled; with sources
+                        // left, pause exactly as the `NeedsChoice` arm below
+                        // does, with the sources AFTER this one stashed.
+                        if pause_behind_continuation_prompt(state, idx + 1 < batch.len()) {
+                            apply_batch_survivors_before_replacement_pause(
+                                state, &survivors, events,
+                            );
+                            let remaining = batch
+                                .iter()
+                                .skip(idx + 1)
+                                .map(|(src, _, amt)| (*src, recipient.clone(), *amt));
+                            let owner = pause_stash_owner(ability, &DamageResult::Applied(0));
+                            stash_remaining_each_source_damage(state, &owner, remaining);
+                            return Ok(());
+                        }
+                    }
                 }
             }
             ReplacementResult::NeedsChoice(player) => {
@@ -2141,13 +2203,15 @@ pub fn resolve_all(
 
     for (i, (target, num_dmg)) in recipient_amounts.iter().enumerate() {
         match apply_damage_to_target(state, &ctx, target.clone(), *num_dmg, false, events)? {
-            DamageResult::Applied(_) => {}
-            DamageResult::NeedsChoice => {
+            DamageResult::Applied(_)
+                if !pause_behind_continuation_prompt(state, i + 1 < recipient_amounts.len()) => {}
+            result => {
                 // CR 120.3 + CR 616.1e: Remaining batch recipients must resume after
                 // the replacement choice resolves — chain them as DealDamage
                 // continuations keyed to the same damage-source id.
                 let remaining = recipient_amounts[i + 1..].iter().cloned();
-                stash_remaining_damage_chain(state, ability, ctx.source_id, remaining);
+                let owner = pause_stash_owner(ability, &result);
+                stash_remaining_damage_chain(state, &owner, ctx.source_id, remaining);
                 // Tag the stashed chain with the parent `EffectKind::DamageAll` so the
                 // drain re-emits the parent event the non-pause tail fires.
                 mark_pending_continuation_parent(state, EffectKind::DamageAll);
@@ -2756,8 +2820,9 @@ pub fn resolve_each_player(
         if dmg > 0 {
             match apply_damage_to_target(state, &ctx, TargetRef::Player(*pid), dmg, false, events)?
             {
-                DamageResult::Applied(_) => {}
-                DamageResult::NeedsChoice => {
+                DamageResult::Applied(_)
+                    if !pause_behind_continuation_prompt(state, i + 1 < player_ids.len()) => {}
+                result => {
                     // CR 120.3 + CR 616.1e: Remaining players must resume after the
                     // replacement choice resolves. Pre-resolve per-player amounts now
                     // so each continuation node carries a Fixed quantity.
@@ -2780,7 +2845,8 @@ pub fn resolve_each_player(
                             (next_dmg > 0).then_some((TargetRef::Player(next_pid), next_dmg))
                         })
                         .collect();
-                    stash_remaining_damage_chain(state, ability, ctx.source_id, remaining);
+                    let owner = pause_stash_owner(ability, &result);
+                    stash_remaining_damage_chain(state, &owner, ctx.source_id, remaining);
                     // Tag the stashed chain with the parent `EffectKind::DamageEachPlayer`
                     // so the drain re-emits the parent event the non-pause tail fires.
                     mark_pending_continuation_parent(state, EffectKind::DamageEachPlayer);
@@ -2867,19 +2933,16 @@ pub fn resolve_each_deals_equal_to_power(
             false,
             events,
         )? {
-            DamageResult::Applied(_) => {}
-            DamageResult::NeedsChoice => {
+            DamageResult::Applied(_)
+                if !pause_behind_continuation_prompt(state, i + 1 < source_ids.len()) => {}
+            result => {
                 // CR 120.3 + CR 616.1e: This source's damage paused for a
                 // replacement choice. Each remaining source deals its own power
                 // from its own object, so stash one continuation node per
                 // remaining source (each carrying its own `source_id`), then the
                 // parent sub_ability tail.
-                stash_remaining_each_deals_chain(
-                    state,
-                    ability,
-                    &source_ids[i + 1..],
-                    recipient_id,
-                );
+                let owner = pause_stash_owner(ability, &result);
+                stash_remaining_each_deals_chain(state, &owner, &source_ids[i + 1..], recipient_id);
                 mark_pending_continuation_parent(state, EffectKind::EachDealsDamageEqualToPower);
                 return Ok(());
             }
@@ -3062,8 +3125,7 @@ pub fn resolve_each_source_deals_damage(
     // continuations and the remaining raw entries are stashed as `DealDamage`
     // continuations (they still need the full replacement pipeline).
     let mut replaced: Vec<(DamageContext, ProposedEvent)> = Vec::new();
-    let mut phase_b_paused_at: Option<usize> = None;
-    let mut phase_b_waiting_for_player: Option<crate::types::player::PlayerId> = None;
+    let mut phase_b_pause: Option<(usize, WaitingFor, ResolvedAbility)> = None;
     for (i, (_src, ctx, target, dmg)) in entries.iter().enumerate() {
         let Some(proposed) = pre_replacement_damage_gate(state, ctx, target, *dmg, false, events)
         else {
@@ -3079,9 +3141,22 @@ pub fn resolve_each_source_deals_damage(
                 // "-1/-1 counter for each 1 damage prevented") inline so it
                 // resolves "immediately afterward" as the rule requires.
                 if state.has_post_replacement_drain() {
-                    let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
-                        state, None, None, None, events,
-                    );
+                    if let Some(waiting_for) =
+                        crate::game::engine_replacement::apply_pending_post_replacement_effect(
+                            state, None, None, None, events,
+                        )
+                    {
+                        state.waiting_for = waiting_for.clone();
+                        // CR 616.1g: the rider or a damage substitution's
+                        // substitute raised its own prompt. Source `i` is
+                        // settled; with sources left, pause Phase B behind it
+                        // exactly as for a `NeedsChoice`.
+                        if pause_behind_continuation_prompt(state, i + 1 < entries.len()) {
+                            let owner = pause_stash_owner(ability, &DamageResult::Applied(0));
+                            phase_b_pause = Some((i, waiting_for, owner));
+                            break;
+                        }
+                    }
                 }
             }
             ReplacementResult::NeedsChoice(player) => {
@@ -3090,18 +3165,22 @@ pub fn resolve_each_source_deals_damage(
                 // (they still need replacement). The `replace_event` call already
                 // registered the pending replacement in state; we just set
                 // `waiting_for` and return.
-                phase_b_paused_at = Some(i);
-                phase_b_waiting_for_player = Some(player);
+                phase_b_pause = Some((
+                    i,
+                    replacement::replacement_choice_waiting_for(player, state),
+                    ability.clone(),
+                ));
                 break;
             }
         }
     }
 
-    if let (Some(pause_at), Some(player)) = (phase_b_paused_at, phase_b_waiting_for_player) {
-        state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
-        // Source `pause_at` is mid-Phase-B (replacement choice in flight via
-        // `waiting_for`); `handle_replacement_choice` will call
-        // `apply_damage_after_replacement` for it directly after resolution.
+    if let Some((pause_at, waiting_for, owner)) = phase_b_pause {
+        state.waiting_for = waiting_for;
+        // Source `pause_at` is either mid-Phase-B (replacement choice in flight
+        // via `waiting_for`; `handle_replacement_choice` will call
+        // `apply_damage_after_replacement` for it directly after resolution) or
+        // already settled with its continuation's prompt open (CR 616.1g).
         // Stash `replaced` (Phase-B-complete) as `ApplyPostReplacementDamage`
         // and `entries[pause_at+1..]` (Phase-B-incomplete) as `DealDamage` in
         // a single combined chain — one `sub_ability` tail so downstream fires
@@ -3109,7 +3188,7 @@ pub fn resolve_each_source_deals_damage(
         let raw_remaining = entries[pause_at + 1..]
             .iter()
             .map(|(src, _ctx, t, a)| (*src, t.clone(), *a));
-        stash_each_source_combined_continuation(state, ability, &replaced, raw_remaining);
+        stash_each_source_combined_continuation(state, &owner, &replaced, raw_remaining);
         mark_pending_continuation_parent(state, EffectKind::EachSourceDealsDamage);
         return Ok(());
     }
