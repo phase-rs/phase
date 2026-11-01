@@ -2071,6 +2071,7 @@ pub(crate) fn materialize_token_spec_body(
             if !object.base_keywords.contains(&keyword) {
                 object.base_keywords.push(keyword.clone());
             }
+            // allow-raw-authority: materialization write — exact-payload dedup while installing the intrinsic Enchant into the entrant's own characteristics before any layer pass, not a presence query (has_keyword is discriminant-only and would drop a distinct Enchant filter)
             if !object.keywords.contains(&keyword) {
                 object.keywords.push(keyword);
             }

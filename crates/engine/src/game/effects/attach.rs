@@ -1952,10 +1952,7 @@ fn enchant_restriction_admits_player(
     let Some(attachment) = attachment else {
         return true;
     };
-    let Some(enchant_filter) = attachment.keywords.iter().find_map(|k| match k {
-        crate::types::keywords::Keyword::Enchant(f) => Some(f),
-        _ => None,
-    }) else {
+    let Some(enchant_filter) = crate::game::keywords::enchant_restriction(attachment) else {
         return false;
     };
     crate::game::filter::player_matches_target_filter_in_state(
@@ -2025,10 +2022,7 @@ pub(crate) fn attach_to_with_authority_and_events(
             }
         }
         AttachmentAuthority::Projected(projection) => {
-            if let Some(enchant_filter) = projection.keywords.iter().find_map(|k| match k {
-                crate::types::keywords::Keyword::Enchant(f) => Some(f),
-                _ => None,
-            }) {
+            if let Some(enchant_filter) = crate::game::keywords::enchant_restriction(projection) {
                 let ctx = FilterContext::from_source_with_controller(
                     attachment_id,
                     projection.controller,

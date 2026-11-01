@@ -77,6 +77,24 @@ pub fn has_keyword_kind(obj: &GameObject, kind: KeywordKind) -> bool {
     obj.keywords.iter().any(|keyword| keyword.kind() == kind)
 }
 
+/// CR 702.5a: the object's own enchant restriction — the filter of its
+/// `Enchant [object or player]` keyword — or `None` when it has none.
+///
+/// Object-scoped, with the same battlefield caveat as [`has_keyword`]: it reads
+/// the keywords of the object the caller holds. Attachment legality holds either
+/// a battlefield permanent or a CR 614.12 entry projection whose characteristics
+/// (including a token's intrinsic Enchant, CR 111.3) are already materialized;
+/// both answer from their own keyword list.
+pub(crate) fn enchant_restriction(
+    obj: &GameObject,
+) -> Option<&crate::types::ability::TargetFilter> {
+    // allow-raw-authority: this IS the object-scoped Enchant-payload authority
+    obj.keywords.iter().find_map(|keyword| match keyword {
+        Keyword::Enchant(filter) => Some(filter),
+        _ => None,
+    })
+}
+
 /// Whether generic keyword removal strips this candidate.
 /// CR 702.11d + CR 702.11e: losing hexproof removes all qualified hexproof
 /// abilities. Other removal operands keep their existing same-variant scope.
