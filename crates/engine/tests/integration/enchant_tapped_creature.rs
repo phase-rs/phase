@@ -11,6 +11,7 @@ use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
+use engine::types::zones::Zone;
 
 const ENTANGLING_VINES: &str =
     "Enchant tapped creature\nEnchanted creature doesn't untap during its controller's untap step.";
@@ -84,5 +85,65 @@ fn entangling_vines_offers_only_tapped_creatures() {
     assert!(
         !legal.contains(&untapped),
         "untapped creature is illegal: {legal:?}"
+    );
+}
+
+/// CR 702.5a + CR 704.5m: An Aura attached to an illegal permanent (such as Entangling Vines
+/// attached to a creature that has become untapped) is put into its owner's graveyard by
+/// state-based actions.
+#[test]
+fn entangling_vines_falls_off_when_host_untaps() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let tapped_bear = scenario.add_creature(P1, "Tapped Bear", 2, 2).id();
+    let vines = scenario
+        .add_spell_to_hand(P0, "Entangling Vines", false)
+        .from_oracle_text_with_keywords(&["Enchant"], ENTANGLING_VINES)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(ManaCost::generic(0))
+        .id();
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&tapped_bear)
+        .unwrap()
+        .tapped = true;
+
+    // Resolve Entangling Vines onto the tapped creature.
+    runner.cast(vines).target_object(tapped_bear).resolve();
+    runner.advance_until_stack_empty();
+
+    // Verify it is attached on the battlefield.
+    assert_eq!(
+        runner.state().objects[&vines].zone,
+        Zone::Battlefield,
+        "Entangling Vines must be on the battlefield after resolution"
+    );
+    assert_eq!(
+        runner.state().objects[&vines].attached_to,
+        Some(engine::game::game_object::AttachTarget::Object(tapped_bear)),
+        "Entangling Vines must be attached to the tapped bear"
+    );
+
+    // Host becomes untapped.
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&tapped_bear)
+        .unwrap()
+        .tapped = false;
+
+    // Run state-based actions.
+    let mut events = Vec::new();
+    engine::game::sba::check_state_based_actions(runner.state_mut(), &mut events);
+
+    // CR 704.5m: The host is now untapped, so the Aura's "Enchant tapped creature"
+    // restriction is violated and the Aura moves to its owner's graveyard.
+    assert_eq!(
+        runner.state().objects[&vines].zone,
+        Zone::Graveyard,
+        "Entangling Vines must be put into its owner's graveyard when host is untapped"
     );
 }
