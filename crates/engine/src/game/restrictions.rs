@@ -1273,9 +1273,9 @@ fn casting_restriction_applies(
         // describe a PREVIOUS cast of this object, and a stale graveyard stamp
         // must not admit a later hand cast.
         CastingRestriction::OnlyFromZones { .. } => {
-            super::casting::pending_cast_origin_zone_for(state, source_id)
-                .or_else(|| state.objects.get(&source_id).map(|obj| obj.zone))
-                .is_some_and(|origin| restriction_permits_cast_origin(restriction, origin))
+            let origin = super::casting::pending_cast_origin_zone_for(state, source_id)
+                .or_else(|| state.objects.get(&source_id).map(|obj| obj.zone));
+            restriction_permits_cast_origin(restriction, origin)
         }
     }
 }
@@ -1283,20 +1283,26 @@ fn casting_restriction_applies(
 /// CR 601.3 + CR 113.6f: whether an object's own casting restrictions permit
 /// casting it from `origin`. The single answer to the cast-origin question,
 /// shared by the announcement check ([`check_casting_restrictions`]) and the
-/// CR 707.12 cast-a-copy route, which creates the copy in the original's zone
-/// and casts it from there without announcing through the cast pipeline.
+/// CR 707.12 cast-a-copy routes, which create the copy in the original's zone
+/// and cast it from there without announcing through the cast pipeline.
+///
+/// `origin: None` means the caller can't establish the origin. A restriction on
+/// the origin then refuses (fail closed); every other restriction is
+/// origin-independent and permits.
 pub(crate) fn restrictions_permit_cast_origin(
     restrictions: &[CastingRestriction],
-    origin: Zone,
+    origin: Option<Zone>,
 ) -> bool {
     restrictions
         .iter()
         .all(|restriction| restriction_permits_cast_origin(restriction, origin))
 }
 
-fn restriction_permits_cast_origin(restriction: &CastingRestriction, origin: Zone) -> bool {
+fn restriction_permits_cast_origin(restriction: &CastingRestriction, origin: Option<Zone>) -> bool {
     match restriction {
-        CastingRestriction::OnlyFromZones { zones } => zones.contains(&origin),
+        CastingRestriction::OnlyFromZones { zones } => {
+            origin.is_some_and(|origin| zones.contains(&origin))
+        }
         // Timing, condition and payment restrictions say nothing about origin.
         CastingRestriction::AsSorcery
         | CastingRestriction::DuringCombat

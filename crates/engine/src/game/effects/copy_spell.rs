@@ -146,6 +146,9 @@ pub fn resolve(
         // cast from a graveyard" riders (Sevinne's Reclamation, issue #3283)
         // re-fire when a flashback copy resolves.
         copy_obj.cast_from_zone = None;
+        // CR 707.12: if this copy is later cast ("you may cast the copy"), it is
+        // cast from the zone the copied object is in.
+        copy_obj.copied_from_zone = Some(source_obj.zone);
         copy_obj.cast_controller = None;
         // CR 707.10: no mana was spent to cast a spell copy — reset the
         // cast-payment stamps so spend-color riders ("if {W}{W} was spent to

@@ -178,7 +178,7 @@ fn copy_castable_from_original_zone(state: &GameState, source_id: ObjectId) -> b
     state.objects.get(&source_id).is_none_or(|source| {
         crate::game::restrictions::restrictions_permit_cast_origin(
             &source.casting_restrictions,
-            source.zone,
+            Some(source.zone),
         )
     })
 }
@@ -250,6 +250,7 @@ fn cast_one_copy(
     copy.prepared_copy_source = None;
     // CR 707.12: The copy is created in the same zone as the source object before casting.
     copy.cast_from_zone = Some(origin_zone);
+    copy.copied_from_zone = Some(origin_zone);
     copy.cost_x_paid = None;
     copy.kickers_paid.clear();
     copy.additional_cost_payment_count = 0;

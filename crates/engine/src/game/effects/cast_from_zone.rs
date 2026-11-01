@@ -2287,6 +2287,24 @@ fn cast_stack_spell_copy_during_resolution(
             "ParentTarget {copy_id:?} is not a stack spell copy"
         )));
     }
+    // CR 707.12 + CR 601.3 + CR 113.6f: casting a copy of an object casts it
+    // from the zone the copied object was in (`copied_from_zone`, stamped when
+    // the copy was made), and the copy keeps the original's own restriction on
+    // where it may be cast from. A copy that can't be cast from there is refused
+    // before it is announced or recorded as cast, and, never having been cast,
+    // ceases to exist (CR 704.5e).
+    if !crate::game::restrictions::restrictions_permit_cast_origin(
+        &obj.casting_restrictions,
+        obj.copied_from_zone,
+    ) {
+        crate::game::effects::prepare::cleanup_failed_prepared_copy_cast(state, copy_id);
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::CastFromZone,
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(());
+    }
     crate::game::ledger::validate_spell_cast_recording(state, ability.controller)
         .map_err(stack_spell_copy_cast_ledger_error)?;
     crate::game::casting_costs::validate_cast_occurrence_stack_spell_carrier(state, copy_id)

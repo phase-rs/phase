@@ -1568,6 +1568,15 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cast_from_zone: Option<Zone>,
 
+    /// CR 707.12: the zone the object this copy was made from was in when the
+    /// copy was created. A copy of a card is created in that zone and, if cast,
+    /// is cast from there, so the copy's own origin restrictions
+    /// (`CastingRestriction::OnlyFromZones`) are checked against it. Written
+    /// once by the copy-creating effects (`CopySpell`, `CastCopyOfCard`);
+    /// `None` on every object that isn't such a copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copied_from_zone: Option<Zone>,
+
     /// CR 601.2i + CR 707.10: Exact turn-journal coordinate of this cast while
     /// it remains a spell on the stack. Cleared on every Stack exit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1898,6 +1907,8 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         base_name_origin: _,
         class_level: _,
         cast_from_zone: _,
+        // omitted-safe-by-write-site: written once when a copy is created.
+        copied_from_zone: _,
         // COMPARED: finalized-cast provenance can affect resolution semantics while
         // this object remains a spell on the stack (types/game_state.rs).
         cast_occurrence: _,
@@ -3204,6 +3215,7 @@ impl GameObject {
             base_name_origin: None,
             class_level: None,
             cast_from_zone: None,
+            copied_from_zone: None,
             cast_occurrence: None,
             spell_announcement: None,
             cast_controller: None,

@@ -655,6 +655,239 @@ fn control_shiko_casts_a_copy_of_bears() {
     );
 }
 
+// --- Cast a copy of a card through the legacy CopySpell -> CastFromZone chain ---
+//
+// CR 707.12: Isochron Scepter copies its imprinted card in exile and casts the
+// copy. Haakon (a creature card) can't be a source on this route, so these rows
+// use SYNTHETIC instants carrying the same rider. No printed instant or sorcery
+// has it; the nearest printed card is Haakon, Stromgald Scourge: "You may cast
+// this card from your graveyard, but not from anywhere else." The rows pin the
+// restriction's consumer on this route; the real Shock and an unrestricted
+// synthetic instant are the controls.
+
+const GRAVEYARD_ONLY_SHOCK: &str = "You may cast this card from your graveyard, but not from anywhere else.\nGraveyard Shock deals 2 damage to any target.";
+const EXILE_ONLY_SHOCK: &str = "You may cast this card from exile, but not from anywhere else.\nExile Shock deals 2 damage to any target.";
+const GRAVEYARD_ONLY_INSIGHT: &str =
+    "You may cast this card from your graveyard, but not from anywhere else.\nDraw a card.";
+const PLAIN_INSIGHT: &str = "Draw a card.";
+
+/// The imprinted card: a printed fixture card, or a synthetic instant ({R}).
+enum Imprint {
+    Real(&'static str),
+    Synthetic(&'static str, &'static str),
+}
+
+/// Imprint `card` on a real Isochron Scepter through its real Imprint trigger,
+/// activate the Scepter, and drive the copy. Returns the runner, the imprinted
+/// card and every event the activation produced.
+fn isochron_copy(card: Imprint) -> IsochronCopy {
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let scepter = s.add_real_card(P0, "Isochron Scepter", Zone::Battlefield, db());
+    // A library to draw from, so the untargeted rows can't deck P0.
+    s.add_real_card(P0, "Swamp", Zone::Library, db());
+    s.add_real_card(P0, "Swamp", Zone::Library, db());
+    let imprint = match card {
+        Imprint::Real(name) => s.add_real_card(P0, name, Zone::Hand, db()),
+        Imprint::Synthetic(name, oracle) => s
+            .add_spell_to_hand_from_oracle(P0, name, true, oracle)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 0,
+            })
+            .id(),
+    };
+    let mut r = build(s);
+    let trigger = &r.state().objects[&scepter].trigger_definitions[0];
+    let execute = trigger
+        .definition
+        .execute
+        .as_ref()
+        .expect("Isochron Scepter's Imprint trigger has an execute ability");
+    let mut imprint_ability =
+        engine::game::ability_utils::build_resolved_from_def(execute, scepter, P0);
+    imprint_ability.targets = vec![engine::types::ability::TargetRef::Object(imprint)];
+    let mut imprint_events = Vec::new();
+    engine::game::effects::change_zone::resolve(
+        r.state_mut(),
+        &imprint_ability,
+        &mut imprint_events,
+    )
+    .expect("Imprint exile resolves");
+    assert_eq!(
+        r.state().objects[&imprint].zone,
+        Zone::Exile,
+        "reach: imprinted"
+    );
+
+    add_mana(&mut r, &[Colorless, Colorless]);
+    let mut events = Vec::new();
+    let mut announced = false;
+    let result = r
+        .act(GameAction::ActivateAbility {
+            source_id: scepter,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activate Isochron Scepter");
+    events.extend(result.events);
+    for _ in 0..60 {
+        let result = match &r.state().waiting_for {
+            WaitingFor::OptionalEffectChoice { .. } => {
+                r.act(GameAction::DecideOptionalEffect { accept: true })
+            }
+            WaitingFor::CopyRetarget { .. } => {
+                announced = true;
+                r.act(GameAction::ChooseTarget {
+                    target: Some(engine::types::ability::TargetRef::Player(
+                        engine::game::scenario::P1,
+                    )),
+                })
+            }
+            WaitingFor::Priority { .. } if r.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => r.act(GameAction::PassPriority),
+            other => panic!("unexpected prompt during the Isochron copy: {other:?}"),
+        }
+        .expect("drive the Isochron copy");
+        events.extend(result.events);
+    }
+    settle(&mut r);
+    IsochronCopy {
+        r,
+        imprint,
+        events,
+        announced,
+    }
+}
+
+struct IsochronCopy {
+    r: GameRunner,
+    imprint: ObjectId,
+    events: Vec<engine::types::events::GameEvent>,
+    /// The copy's announcement walk (`CopyRetarget`) opened.
+    announced: bool,
+}
+
+fn copied(events: &[engine::types::events::GameEvent], original: ObjectId) -> bool {
+    events.iter().any(|e| {
+        matches!(e, engine::types::events::GameEvent::SpellCopied { original_id, .. }
+            if *original_id == original)
+    })
+}
+
+fn copy_cast(r: &GameRunner) -> bool {
+    r.state()
+        .spells_cast_this_turn_by_player
+        .get(&P0)
+        .is_some_and(|casts| !casts.is_empty())
+}
+
+/// Every object named `name` other than the exiled original: a refused copy
+/// must not survive anywhere.
+fn copies_left(r: &GameRunner, name: &str, original: ObjectId) -> usize {
+    r.state()
+        .objects
+        .values()
+        .filter(|o| o.name == name && o.id != original)
+        .count()
+}
+
+/// Targeted copy: an admitted copy completes through its announcement walk
+/// (`CopyRetarget`, CopyWalk::Announce). The graveyard-only copy, created in
+/// exile, is refused before that walk opens.
+#[test]
+fn isochron_cannot_cast_a_copy_restricted_to_the_graveyard() {
+    let c = isochron_copy(Imprint::Synthetic("Graveyard Shock", GRAVEYARD_ONLY_SHOCK));
+    assert_eq!(
+        c.r.state().objects[&c.imprint].casting_restrictions,
+        vec![CastingRestriction::OnlyFromZones {
+            zones: vec![Zone::Graveyard]
+        }],
+        "reach: the imprint carries the restriction"
+    );
+    assert!(
+        copied(&c.events, c.imprint),
+        "reach: Isochron copied the card"
+    );
+    assert!(!c.announced, "the refused copy must not be announced");
+    assert!(!copy_cast(&c.r), "the copy must not be cast");
+    assert_eq!(c.r.state().players[1].life, 20, "no damage was dealt");
+    assert_eq!(
+        copies_left(&c.r, "Graveyard Shock", c.imprint),
+        0,
+        "no copy survives"
+    );
+}
+
+/// Untargeted copy (immediate completion, no announcement walk): refused the
+/// same way.
+#[test]
+fn isochron_cannot_cast_an_untargeted_copy_restricted_to_the_graveyard() {
+    let c = isochron_copy(Imprint::Synthetic(
+        "Graveyard Insight",
+        GRAVEYARD_ONLY_INSIGHT,
+    ));
+    assert!(
+        copied(&c.events, c.imprint),
+        "reach: Isochron copied the card"
+    );
+    assert!(!copy_cast(&c.r), "the copy must not be cast");
+    assert_eq!(c.r.state().players[0].library.len(), 2, "no card was drawn");
+    assert_eq!(
+        copies_left(&c.r, "Graveyard Insight", c.imprint),
+        0,
+        "no copy survives"
+    );
+}
+
+/// Provenance: a copy restricted to exile, created in exile, is cast through
+/// its announcement walk.
+#[test]
+fn isochron_casts_a_copy_restricted_to_exile() {
+    let c = isochron_copy(Imprint::Synthetic("Exile Shock", EXILE_ONLY_SHOCK));
+    assert!(
+        copied(&c.events, c.imprint),
+        "reach: Isochron copied the card"
+    );
+    assert!(
+        c.announced,
+        "the copy completed through its announcement walk"
+    );
+    assert!(copy_cast(&c.r), "the exile-origin copy is cast");
+    assert_eq!(c.r.state().players[1].life, 18, "the copy dealt 2 damage");
+}
+
+#[test]
+fn control_isochron_casts_a_copy_of_shock() {
+    let c = isochron_copy(Imprint::Real("Shock"));
+    assert!(copied(&c.events, c.imprint), "reach: Isochron copied Shock");
+    assert!(
+        c.announced,
+        "Shock's copy completed through its announcement walk"
+    );
+    assert!(copy_cast(&c.r));
+    assert_eq!(c.r.state().players[1].life, 18);
+}
+
+#[test]
+fn control_isochron_casts_an_untargeted_unrestricted_copy() {
+    let c = isochron_copy(Imprint::Synthetic("Plain Insight", PLAIN_INSIGHT));
+    assert!(
+        copied(&c.events, c.imprint),
+        "reach: Isochron copied the card"
+    );
+    assert!(
+        !c.announced,
+        "reach: the untargeted copy completes immediately"
+    );
+    assert!(copy_cast(&c.r));
+    assert_eq!(
+        c.r.state().players[0].library.len(),
+        1,
+        "the copy drew a card"
+    );
+}
+
 // --- Incarnations (CR 400.7) ----------------------------------------------
 
 /// Hostile: the restriction follows the card through new objects. Cast from the

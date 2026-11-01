@@ -3,5 +3,5 @@
     "full",
     "wire"
   ],
-  "reason": "CastingRestriction gains OnlyFromZones (an object's own restriction on the zones it may be cast from, CR 113.6f; Haakon, Stromgald Scourge). Older peers cannot deserialize the new variant in card data or game-object state."
+  "reason": "CastingRestriction gains OnlyFromZones (an object's own restriction on the zones it may be cast from, CR 113.6f; Haakon, Stromgald Scourge), and GameObject gains copied_from_zone (CR 707.12: the zone a copy of a card was made from, checked when the copy is cast). Older peers cannot deserialize the new variant in card data or game-object state, and would drop the copy provenance."
 }
