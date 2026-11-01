@@ -321,6 +321,9 @@ pub fn check_companion_reveal(state: &GameState, player: PlayerId) -> Option<Wai
 /// Returns the first CompanionReveal WaitingFor found, or None.
 pub fn check_all_companion_reveals(state: &GameState) -> Option<WaitingFor> {
     for &player_id in &state.seat_order {
+        if !super::players::is_alive(state, player_id) {
+            continue;
+        }
         if let Some(wf) = check_companion_reveal(state, player_id) {
             return Some(wf);
         }
@@ -463,6 +466,9 @@ fn advance_companion_reveal(
 
     // Check remaining players for eligible companions
     for &player_id in seat_order.iter().skip(current_idx + 1) {
+        if !super::players::is_alive(state, player_id) {
+            continue;
+        }
         if let Some(wf) = check_companion_reveal(state, player_id) {
             return wf;
         }

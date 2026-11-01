@@ -115,6 +115,7 @@ fn normal_mulligan_decision(state: &GameState) -> WaitingFor {
     let pending = state
         .seat_order
         .iter()
+        .filter(|&&player| super::players::is_alive(state, player))
         .map(|&player| MulliganDecisionEntry {
             free_reveals_taken: 0,
             player,

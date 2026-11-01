@@ -282,7 +282,7 @@ fn limited_command_zone_cards_loaded_separately_from_main_deck() {
     assert!(p1_brago.trigger_definitions.is_empty());
     assert!(p1_brago.replacement_definitions.is_empty());
     assert!(p1_brago.card_types.core_types.is_empty());
-    assert_eq!(p1_brago.mana_cost, ManaCost::default());
+    assert_eq!(p1_brago.mana_cost, ManaCost::NoCost);
     assert!(p1_brago.keywords.is_empty());
     assert!(p1_brago.color.is_empty());
 
@@ -732,9 +732,13 @@ fn pregame_agenda_prompt_survives_a_conceding_chooser() {
         state.waiting_for
     );
     apply(&mut state, PlayerId(2), names(&["Grizzly Bears"])).expect("P2 answers");
-    assert!(
-        matches!(state.waiting_for, WaitingFor::MulliganDecision { .. }),
-        "pregame reaches mulligans for the survivors: {:?}",
-        state.waiting_for
+    let WaitingFor::MulliganDecision { pending, .. } = &state.waiting_for else {
+        panic!("expected MulliganDecision, got {:?}", state.waiting_for);
+    };
+    let pending_players: Vec<PlayerId> = pending.iter().map(|e| e.player).collect();
+    assert_eq!(
+        pending_players,
+        vec![PlayerId(1), PlayerId(2)],
+        "eliminated P0 is excluded from the new mulligan round"
     );
 }
