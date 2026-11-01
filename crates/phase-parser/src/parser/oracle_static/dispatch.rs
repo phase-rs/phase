@@ -5,8 +5,8 @@ use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
 use super::{
-    anthem::*, cda::*, cost_mod::*, evasion::*, keyword_grant::*, loyalty::*, mana_transform::*,
-    restriction::*, same_is_true::*, type_change::*,
+    anthem::*, cda::*, coin_flip::*, cost_mod::*, evasion::*, keyword_grant::*, loyalty::*,
+    mana_transform::*, restriction::*, same_is_true::*, type_change::*,
 };
 use crate::parser::oracle_nom::target::{controller_phrase_among, ControllerPhrase};
 use crate::types::statics::ProhibitionScope;
@@ -1294,6 +1294,12 @@ pub(crate) fn parse_static_line_inner(
     }
 
     if let Some(result) = try_parse_unspent_mana_loss_causes_life_loss_static(&text, &lower) {
+        return Some(result);
+    }
+
+    // CR 705.3: Edgar's "the first time you flip one or more coins each turn,
+    // those coins come up heads and you win those flips."
+    if let Some(result) = try_parse_win_first_coin_flip_set_each_turn_static(&text, &lower) {
         return Some(result);
     }
 

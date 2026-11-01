@@ -28,7 +28,7 @@ Triggered abilities fire in response to game events and go on the stack (MTG Rul
 
 ## Key Types
 
-### `TriggerDefinition` — `crates/engine/src/types/ability.rs`
+### `TriggerDefinition` — `crates/phase-ast/src/types/ability.rs`
 
 ```rust
 pub struct TriggerDefinition {
@@ -50,7 +50,7 @@ pub struct TriggerDefinition {
 }
 ```
 
-### `TriggerMode` — `crates/engine/src/types/triggers.rs`
+### `TriggerMode` — `crates/phase-ast/src/types/triggers.rs`
 
 The event discriminant. ~160 variants organized by category:
 
@@ -68,14 +68,14 @@ The event discriminant. ~160 variants organized by category:
 | Other | `Explored`, `Fight`, `Transformed`, `DayTimeChanges` | Various |
 | Fallback | `Unknown(String)` | Never matches (parsed but unimplemented) |
 
-### `TriggerConstraint` — `crates/engine/src/types/ability.rs`
+### `TriggerConstraint` — `crates/phase-ast/src/types/ability.rs`
 
 Rate-limiting:
 - `OncePerTurn` — tracked in `state.triggers_fired_this_turn`
 - `OncePerGame` — tracked in `state.triggers_fired_this_game`
 - `OnlyDuringYourTurn` — checked at fire-time via `state.active_player`
 
-### `TriggerCondition` — `crates/engine/src/types/ability.rs`
+### `TriggerCondition` — `crates/phase-ast/src/types/ability.rs`
 
 Intervening-if (checked at fire AND resolution):
 - `LifeGainedThisTurn { minimum: u32 }` — "if you've gained N or more life this turn"
@@ -173,13 +173,13 @@ discriminates an LKI path from a bare live match is the **ceased-to-exist token*
 
 ### Phase 1 — Type Definition
 
-- [ ] **`crates/engine/src/types/triggers.rs` — `TriggerMode` enum**
+- [ ] **`crates/phase-ast/src/types/triggers.rs` — `TriggerMode` enum**
   Add a variant for your event type. Skip if an existing mode fits. Convention: use PascalCase verb form matching the event (`SpellCast`, `DamageDone`, `Attacks`).
 
-- [ ] **`crates/engine/src/types/ability.rs` — `TriggerCondition` enum** (if new intervening-if)
+- [ ] **`crates/phase-ast/src/types/ability.rs` — `TriggerCondition` enum** (if new intervening-if)
   Add a variant if the trigger has a condition not covered by existing conditions.
 
-- [ ] **`crates/engine/src/types/ability.rs` — `TriggerConstraint` enum** (if new constraint)
+- [ ] **`crates/phase-ast/src/types/ability.rs` — `TriggerConstraint` enum** (if new constraint)
   Add a variant if the trigger has a rate-limit not covered by existing constraints.
 
 ### Phase 2 — Event Emission
@@ -214,14 +214,14 @@ The trigger pipeline responds to `GameEvent` variants. If no existing event cove
 
 ### Phase 4 — Target Extraction (if trigger effect targets)
 
-- [ ] **`crates/engine/src/types/ability.rs` — `extract_target_filter_from_effect()`**
+- [ ] **`crates/phase-ast/src/types/ability.rs` — `extract_target_filter_from_effect()`**
   If the trigger's `execute` effect has a target that requires player selection (not `SelfRef`/`Controller`/`None`), add a match arm returning `Some(&target_filter)`.
 
   **If you skip this, the trigger will go on the stack without requesting targets. The effect will fail at resolution with no valid targets.**
 
 ### Phase 5 — Parser
 
-- [ ] **`crates/engine/src/parser/oracle_trigger.rs` — `parse_trigger_line()`**
+- [ ] **`crates/phase-parser/src/parser/oracle_trigger.rs` — `parse_trigger_line()`**
   The trigger parser handles three main patterns:
 
   - **"When/Whenever X, do Y"** — One-shot or recurring event trigger
@@ -234,7 +234,7 @@ The trigger pipeline responds to `GameEvent` variants. If no existing event cove
   - Intervening-if extraction: "if you've gained life this turn"
   - Constraint parsing: "triggers only once each turn"
 
-- [ ] **`crates/engine/src/parser/oracle_trigger.rs` — parser tests**
+- [ ] **`crates/phase-parser/src/parser/oracle_trigger.rs` — parser tests**
   Every new pattern needs a test:
   ```rust
   #[test]
@@ -330,17 +330,17 @@ After completing work using this skill:
 ```bash
 rg -q "fn process_triggers" crates/engine/src/game/triggers.rs && \
 rg -q "fn collect_matching_triggers" crates/engine/src/game/triggers.rs && \
-rg -q "fn extract_target_filter_from_effect" crates/engine/src/types/ability.rs && \
+rg -q "fn extract_target_filter_from_effect" crates/phase-ast/src/types/ability.rs && \
 rg -q "fn build_trigger_registry" crates/engine/src/game/trigger_matchers.rs && \
 rg -q "fn subject_filter_matches_with_lki" crates/engine/src/game/trigger_matchers.rs && \
 rg -q "fn source_controller_or_lki" crates/engine/src/game/filter.rs && \
 rg -q "fn apply_zone_exit_cleanup" crates/engine/src/game/zones.rs && \
 rg -q "struct LKISnapshot" crates/engine/src/types/game_state.rs && \
-rg -q "struct TriggerDefinition" crates/engine/src/types/ability.rs && \
-rg -q "enum TriggerMode" crates/engine/src/types/triggers.rs && \
-rg -q "enum TriggerConstraint" crates/engine/src/types/ability.rs && \
-rg -q "enum TriggerCondition" crates/engine/src/types/ability.rs && \
-rg -q "fn parse_trigger_line" crates/engine/src/parser/oracle_trigger.rs && \
+rg -q "struct TriggerDefinition" crates/phase-ast/src/types/ability.rs && \
+rg -q "enum TriggerMode" crates/phase-ast/src/types/triggers.rs && \
+rg -q "enum TriggerConstraint" crates/phase-ast/src/types/ability.rs && \
+rg -q "enum TriggerCondition" crates/phase-ast/src/types/ability.rs && \
+rg -q "fn parse_trigger_line" crates/phase-parser/src/parser/oracle_trigger.rs && \
 rg -q "pending_trigger" crates/engine/src/types/game_state.rs && \
 rg -q "TriggerTargetSelection" crates/engine/src/types/game_state.rs && \
 rg -q "fn resolve_top" crates/engine/src/game/stack.rs && \

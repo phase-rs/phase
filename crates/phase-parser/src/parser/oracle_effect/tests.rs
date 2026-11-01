@@ -63584,9 +63584,60 @@ fn discover_the_impossible_cast_target_stays_parent_target_after_exiled_by_sourc
     let target = parsed.abilities.iter().find_map(find_cast_from_zone_target);
     assert!(
         matches!(target, Some(TargetFilter::ParentTarget)),
-        "Discover the Impossible's same-chain exile (via the ExileOneOfThemFaceDown \
+        "Discover the Impossible's same-chain exile (via the ExileLookedAtCardsFaceDown \
          continuation) must keep CastFromZone{{ParentTarget}}, got {target:?}"
     );
+}
+
+/// Black Cat, Cunning Thief: the whole look/exile/rest chain is one `Dig` that keeps TWO
+/// cards (exile, face down via the chained conceal) and sends the remainder to the library
+/// bottom in a random order — with no sibling `ChangeZone`/`PutAtLibraryPosition` left over
+/// (the pre-fix `count: 1` "rest" placement). CR 401.4 + CR 701.20e.
+#[test]
+fn black_cat_exile_two_face_down_fuses_into_one_dig_with_random_rest() {
+    let parsed = parse_oracle_text(
+        "When Black Cat enters, look at the top nine cards of target opponent's library, exile two of them face down, then put the rest on the bottom of their library in a random order. You may play the exiled cards for as long as they remain exiled. Mana of any type can be spent to cast spells this way.",
+        "Black Cat, Cunning Thief",
+        &[],
+        &["Creature".to_string()],
+        &["Insect".to_string()],
+    );
+    let execute = parsed.triggers[0]
+        .execute
+        .as_deref()
+        .expect("Black Cat has an ETB trigger body");
+    let Effect::Dig {
+        count,
+        keep_count,
+        up_to,
+        destination,
+        rest_destination,
+        rest_order,
+        ..
+    } = &*execute.effect
+    else {
+        panic!("expected Dig head, got {:?}", execute.effect);
+    };
+    assert_eq!(*count, QuantityExpr::Fixed { value: 9 });
+    assert_eq!(*keep_count, Some(2));
+    assert!(!*up_to);
+    assert_eq!(*destination, Some(Zone::Exile));
+    assert_eq!(*rest_destination, Some(Zone::Library));
+    assert_eq!(*rest_order, DigRestOrder::Random);
+    let conceal = execute.sub_ability.as_deref().expect("conceal sub-ability");
+    assert!(matches!(&*conceal.effect, Effect::HideawayConceal { .. }));
+    let mut cursor = execute;
+    while let Some(next) = cursor.sub_ability.as_deref() {
+        assert!(
+            !matches!(
+                &*next.effect,
+                Effect::ChangeZone { .. } | Effect::PutAtLibraryPosition { .. }
+            ),
+            "no sibling exile/placement may remain after the fusion, got {:?}",
+            next.effect
+        );
+        cursor = next;
+    }
 }
 
 /// Structural cascade traversal: assert `effect` is the named `Effect::Token`,
@@ -69711,7 +69762,7 @@ fn nested_chosen_color_is_seen_at_every_depth_of_the_filter_closure() {
 /// `GainControlAll`, `PutCounterAll`, `CounterAll` and `GoadAll` all carry an
 /// object filter built by that same parser and all sit in the `false` list
 /// below. They answer `false` because on the 2026-08-28 pool (the vintage in
-/// `crates/engine/data/mtgjson-vintage`) no card reaches them with the printed
+/// `crates/phase-ast/data/mtgjson-vintage`) no card reaches them with the printed
 /// qualifier — the same dated-census idiom used for the 4-face card list on
 /// `inject_printed_color_choice_filter` — NOT because the compiler proved they
 /// cannot. Re-measure rather than trusting it.

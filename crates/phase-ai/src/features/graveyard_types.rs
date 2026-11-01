@@ -2,9 +2,9 @@
 //!
 //! Parser AST verification — VERIFIED against engine source:
 //! - `QuantityRef::DistinctCardTypes { source: CardTypeSetSource }` at
-//!   `crates/engine/src/types/ability.rs:5565` (CR 205.2a card types).
+//!   `crates/phase-ast/src/types/ability.rs` (CR 205.2a card types).
 //! - `CardTypeSetSource::Zone { zone: ZoneRef, scope: CountScope }` at
-//!   `crates/engine/src/types/ability.rs:5272` (CR 109.2a + CR 400.1) — the
+//!   `crates/phase-ast/src/types/ability.rs` (CR 109.2a + CR 400.1) — the
 //!   graveyard scoping used by every card in this class.
 //! - Threshold payoffs carry `StaticCondition::QuantityComparison { lhs, comparator,
 //!   rhs }` whose `lhs` is that quantity (Backwoods Survivalists, Autumnal Gloom).

@@ -9664,6 +9664,7 @@ fn protection_target_reads_filter_population(
         | ProtectionTarget::ChosenColor
         | ProtectionTarget::ChosenCardType
         | ProtectionTarget::ChosenPlayer
+        | ProtectionTarget::ChosenCardName
         | ProtectionTarget::Everything
         | ProtectionTarget::FromPlayer(_)
         // A color set (CR 702.16i) names colors, never an object population.
@@ -10369,6 +10370,7 @@ fn static_mode_reads_filter_population(
         | StaticMode::PayLifeAsColoredMana { .. }
         | StaticMode::StepEndUnspentMana { .. }
         | StaticMode::UnspentManaLossCausesLifeLoss
+        | StaticMode::WinFirstCoinFlipSetEachTurn
         | StaticMode::CanAttackWithDefender
         | StaticMode::IgnoreLandwalkForBlocking { .. }
         | StaticMode::CanActivateAbilitiesAsThoughHaste
