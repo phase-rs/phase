@@ -31,6 +31,7 @@ mod bishop_of_binding_where_x_exiled_card_power;
 mod blitz_em_dash_graveyard_cast;
 mod blizzard_brawl_snow_indestructible;
 mod bring_to_light_free_cast_2880;
+mod call_for_aid_phase2;
 mod cartographers_hawk_relative_damage_recipient;
 mod case_solve_condition;
 mod cast_this_way_gate_8721;
