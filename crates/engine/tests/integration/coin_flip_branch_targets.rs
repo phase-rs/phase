@@ -608,7 +608,7 @@ fn crooked_scales_printed_text_announces_both_targets_and_a_won_flip_destroys_on
 /// Real card: Crooked Scales with its printed Oracle text, losing the flip. CR 705.2 + CR 608.2c:
 /// the lose outcome uses the target announced for it. CR 118.12a: "destroy target creature you
 /// control unless you pay {3}" asks the activating player (CR 109.5) for the payment; declining
-/// destroys only the announced own creature and ends the ability, and paying destroys nothing.
+/// destroys only the announced own creature and ends the ability, and paying spends the {3}.
 /// Paying {3} should also repeat the process (CR 118.12a); the engine parses "repeat this
 /// process" as an `Unimplemented` root sub-ability, so the repeat is not implemented and this row
 /// does not assert what follows a payment (tracked follow-up).
@@ -673,34 +673,37 @@ fn crooked_scales_printed_text_lost_flip_asks_for_the_payment_and_destroys_the_a
                 runner.state().waiting_for
             );
         };
-        assert_eq!(*player, P0, "the activating player is asked (CR 109.5)");
+        assert_eq!(
+            *player, P0,
+            "the activating player, here also the active player, is asked (CR 109.5)"
+        );
         events.extend(
             runner
                 .act(GameAction::PayUnlessCost { pay })
                 .expect("answer the unless-cost")
                 .events,
         );
-        finish(&mut runner, &mut events);
-        if !pay {
-            assert_eq!(
-                flips(&events),
-                vec![false],
-                "declining ends the ability: no repeat (CR 118.12a)"
-            );
-        }
         assert_eq!(
             pool(&runner),
             0,
-            "the activation and, when paid, the unless-cost spent all the mana"
+            "the activation's {{4}} and, when paid, the unless-cost's {{3}} were spent"
+        );
+        if pay {
+            // CR 118.12a: paying should repeat the process; "repeat this process" parses as an
+            // Unimplemented root sub-ability, so the repeat is not implemented and nothing after
+            // the payment is asserted here (tracked follow-up).
+            continue;
+        }
+        finish(&mut runner, &mut events);
+        assert_eq!(
+            flips(&events),
+            vec![false],
+            "declining ends the ability: no repeat (CR 118.12a)"
         );
         assert_eq!(
             runner.state().objects[&own].zone,
-            if pay {
-                Zone::Battlefield
-            } else {
-                Zone::Graveyard
-            },
-            "declining destroys the announced own creature; paying destroys nothing"
+            Zone::Graveyard,
+            "declining destroys the announced own creature"
         );
         for untouched in [own_distractor, opposing, opposing_distractor, source] {
             assert_eq!(runner.state().objects[&untouched].zone, Zone::Battlefield);
@@ -3377,8 +3380,9 @@ fn illegal_coin_children_do_not_substitute_distractors_or_suppress_a_legal_tail(
                 if removed & 2 != 0 { vec![0] } else { vec![] }
             );
             let payers = finish_declining_payment(&mut runner, &mut events);
-            // CR 118.12a + CR 608.2b: a lost flip whose own target stayed legal offers the {3};
-            // with both targets gone nothing is offered.
+            // CR 118.12a + CR 608.2b: a lost flip offers the {3} whenever the ability resolves, even
+            // when its own target is gone (paying and repeating do not act on that target); with
+            // both targets gone the ability does not resolve and nothing is offered.
             assert_eq!(
                 payers,
                 if won || removed == 3 {
