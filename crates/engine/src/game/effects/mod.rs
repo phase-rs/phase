@@ -1456,6 +1456,11 @@ pub(crate) fn settle_empty_forwarded_zone_result(state: &mut GameState, producer
     }
 }
 
+/// Resumes ready continuations and restores the caller's trigger context.
+///
+/// Die completions in the resumed event span retain their result, including a
+/// prevented roll's cleared result. If the buffer shrinks below the span's start,
+/// the span is empty and does not claim ownership of the die result.
 pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 601.2h + CR 605.3b + CR 608.2c: a parked counter-cost root whose
     // replacement subtree has retired resumes before any further resolution
@@ -1706,7 +1711,9 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
         // CR 706.4 + CR 608.2c: a die instruction that settled inside this drain owns
         // `die_result_this_resolution` (the survivors' aggregate, or the CR 614.6 clear
         // for a prevented roll); the caller's pre-push snapshot must not overwrite it.
-        let published_die = events[die_mark..]
+        let published_die = events
+            .get(die_mark..)
+            .unwrap_or_default()
             .iter()
             .any(|event| {
                 matches!(
@@ -28845,6 +28852,37 @@ mod tests {
 
         assert_eq!(state.players[0].life, before + 7);
         assert_eq!(state.die_result_this_resolution, Some(11));
+        assert_eq!(state.current_trigger_event, Some(ambient.clone()));
+        assert_eq!(state.current_trigger_events, vec![ambient]);
+        assert_eq!(state.current_trigger_match_count, Some(17));
+        assert!(state.resolution_stack.is_empty());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    }
+
+    /// Composed fail-safe fixture: no printed card rolls a zero-sided die.
+    #[test]
+    fn continuation_drain_preserves_a_prevented_die_results_clear() {
+        let (mut state, source, ambient) = continuation_die_context_fixture(Effect::RollDie {
+            count: QuantityExpr::Fixed { value: 1 },
+            sides: 0,
+            modifier: None,
+            results: vec![],
+        });
+        let mut events = vec![];
+        drain_pending_continuation(&mut state, &mut events);
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: EffectKind::RollDie,
+                source_id,
+                ..
+            } if *source_id == source
+        )));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, GameEvent::DieRolled { .. })));
+        assert_eq!(state.die_result_this_resolution, None);
         assert_eq!(state.current_trigger_event, Some(ambient.clone()));
         assert_eq!(state.current_trigger_events, vec![ambient]);
         assert_eq!(state.current_trigger_match_count, Some(17));
