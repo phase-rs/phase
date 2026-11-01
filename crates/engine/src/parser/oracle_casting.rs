@@ -73,6 +73,7 @@ pub(crate) fn split_additional_cost_trailing_spell_reduction<'a>(
 /// - "you may blight N" → `Optional(Blight { count: N })`
 /// - "blight N or pay {M}" → `Choice(Blight { count: N }, Mana { cost: M })`
 /// - General "X or Y" → `Choice(X, Y)` using `parse_single_cost` for each fragment
+/// - "X and Y" → `Required(Composite[X, Y])`
 /// - Anything no arm can read → an honest `Unimplemented` cost (`Optional` for a
 ///   "you may" body, otherwise `Required`), NOT `None`. CR 601.2f + CR 601.2h:
 ///   the cost is part of the total cost and cannot be silently dropped. Only a
@@ -161,6 +162,10 @@ pub fn parse_additional_cost_line(lower: &str, raw: &str) -> Option<AdditionalCo
         {
             return Some(AdditionalCost::Choice(cost_a, cost_b));
         }
+    }
+
+    if let Some(cost) = super::oracle_cost::parse_binary_cost_conjunction_nom(body_lower) {
+        return Some(AdditionalCost::Required(cost));
     }
 
     // Mandatory single cost: "sacrifice a creature", "discard a card", "pay 3 life", etc.
@@ -1024,8 +1029,9 @@ mod tests {
     use super::*;
     use crate::types::ability::{
         AdditionalCostRepeatability, AggregateFunction, BeholdCostAction, CardSelectionMode,
-        Comparator, ControllerRef, CountScope, Effect, FilterProp, ParsedCondition, PlayerScope,
-        QuantityExpr, QuantityRef, TargetFilter, TypeFilter,
+        ChoiceType, Comparator, ControllerRef, CountScope, DiscardSelfScope, Effect, FilterProp,
+        ParsedCondition, PlayerScope, QuantityExpr, QuantityRef, SacrificeCost,
+        SacrificeRequirement, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::keywords::Keyword;
     use crate::types::mana::{ManaColor, ManaCost};
@@ -1710,6 +1716,59 @@ Trample";
             )) => {}
             other => panic!("Expected Choice(Discard, PayLife), got {:?}", other),
         }
+    }
+
+    /// CR 601.2f + CR 601.2h: Ruthless Disposal's two " and "-joined costs are
+    /// both required, so neither leg may be dropped.
+    #[test]
+    fn parse_additional_cost_and_joined_costs_are_both_required() {
+        let raw =
+            "As an additional cost to cast this spell, discard a card and sacrifice a creature.";
+        let lower = raw.to_lowercase();
+        assert_eq!(
+            parse_additional_cost_line(&lower, raw),
+            Some(AdditionalCost::Required(AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Discard {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        filter: None,
+                        selection: CardSelectionMode::Chosen,
+                        self_scope: DiscardSelfScope::FromHand,
+                    },
+                    AbilityCost::Sacrifice(SacrificeCost::count(
+                        TargetFilter::Typed(TypedFilter::creature()),
+                        1,
+                    )),
+                ],
+            }))
+        );
+    }
+
+    /// The conjunction arm must not capture a line whose " and " is inside a
+    /// single cost (Liquid Fire's number range).
+    #[test]
+    fn parse_additional_cost_and_inside_one_cost_keeps_its_parse() {
+        let raw = "As an additional cost to cast this spell, choose a number between 0 and 5.";
+        let lower = raw.to_lowercase();
+        let Some(AdditionalCost::Required(AbilityCost::EffectCost { effect })) =
+            parse_additional_cost_line(&lower, raw)
+        else {
+            panic!("Liquid Fire must stay a Required EffectCost");
+        };
+        assert!(
+            matches!(
+                *effect,
+                Effect::Choose {
+                    choice_type: ChoiceType::NumberRange {
+                        min: 0,
+                        max: Some(5),
+                        ..
+                    },
+                    ..
+                }
+            ),
+            "{effect:?}"
+        );
     }
 
     #[test]
@@ -3171,6 +3230,37 @@ Trample";
             CastingRestriction::SpendOnlyOnX {
                 colors: vec![ManaColor::Black, ManaColor::Red]
             }
+        );
+    }
+
+    /// CR 601.2f + CR 601.2h: Kaervek's Spite's "sacrifice all" and "discard
+    /// your hand" are both required.
+    #[test]
+    fn parse_additional_cost_sacrifice_all_and_discard_hand() {
+        let raw = "As an additional cost to cast this spell, sacrifice all permanents you control and discard your hand.";
+        let lower = raw.to_lowercase();
+        assert_eq!(
+            parse_additional_cost_line(&lower, raw),
+            Some(AdditionalCost::Required(AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Sacrifice(SacrificeCost::new(
+                        TargetFilter::Typed(
+                            TypedFilter::permanent().controller(ControllerRef::You)
+                        ),
+                        SacrificeRequirement::All,
+                    )),
+                    AbilityCost::Discard {
+                        count: QuantityExpr::Ref {
+                            qty: QuantityRef::HandSize {
+                                player: PlayerScope::Controller,
+                            },
+                        },
+                        filter: None,
+                        selection: CardSelectionMode::Chosen,
+                        self_scope: DiscardSelfScope::FromHand,
+                    },
+                ],
+            }))
         );
     }
 }

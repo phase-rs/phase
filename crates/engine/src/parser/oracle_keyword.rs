@@ -2867,6 +2867,7 @@ fn format_cumulative_upkeep_cost(cost: &AbilityCost) -> String {
                 SacrificeRequirement::Aggregate { value, .. } => {
                     format!("Sacrifice {subject} with total power {value} or greater")
                 }
+                SacrificeRequirement::All => format!("Sacrifice all {subject}s"),
             }
         }
         AbilityCost::OneOf { costs } => costs
