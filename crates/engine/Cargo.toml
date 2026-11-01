@@ -12,12 +12,12 @@ documentation = "https://github.com/phase-rs/phase"
 name = "engine"
 
 [features]
-cli = ["tracing-subscriber"]
+cli = ["tracing-subscriber", "phase-parser/cli"]
 audit = []
 forge = []
 proptest = ["dep:proptest"]
 # Exposes raw zone placement for test crates; never enabled by production consumers.
-test-support = ["phase-ast/test-support"]
+test-support = ["phase-ast/test-support", "phase-parser/test-support"]
 # Generates only the self-contained interaction DTO contract. Production
 # consumers do not enable this feature and continue to use the existing action
 # transport until the explicit adapter cutover.
@@ -29,6 +29,7 @@ combo-verify = ["test-support"]
 
 [dependencies]
 phase-ast = { path = "../phase-ast" }
+phase-parser = { path = "../phase-parser" }
 serde = { workspace = true }
 serde_ignored = "0.1"
 tracing = { workspace = true }

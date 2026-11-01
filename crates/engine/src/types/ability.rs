@@ -1253,7 +1253,7 @@ pub enum CostPaidObjectRecord {
 /// Why the settlement traversal is SCOPED to the ids its seam moved rather than
 /// settling every record: one ability can settle twice with DIFFERENT outcomes.
 /// `finalize_mana_payment_with_resume` settles a deferred spell sacrifice as
-/// `Relocation`, then eleven lines later `pay_deferred_random_discard_cost`
+/// `Relocation`, then eleven lines later `pay_deferred_hand_discard_cost`
 /// settles the same ability's random discard leg as `Discard`
 /// (`finalize_mana_payment_with_phyrexian_choices` carries the same pair). An
 /// unscoped second pass would apply CR 701.9c to the sacrifice record — a rule

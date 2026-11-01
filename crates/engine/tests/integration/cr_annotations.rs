@@ -85,7 +85,7 @@ fn cr_annotation_for_station_tap_cost_is_701_26a() {
 
 #[test]
 fn cr_annotation_for_oracle_keyword_saddle_parser_is_702_171a() {
-    let src = include_str!("../../src/parser/oracle_keyword.rs");
+    let src = include_str!("../../../phase-parser/src/parser/oracle_keyword.rs");
     assert!(
         !src.contains("CR 702.173: Saddle"),
         "parser/oracle_keyword.rs must not annotate Saddle with CR 702.173 (Freerunning)"

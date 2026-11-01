@@ -238,10 +238,6 @@ mod tests {
                 "SECOND WAVE, disclosed not routed: region slices of a source string.",
             ),
             (
-                "src/parser/oracle_condition.rs",
-                "SECOND WAVE, disclosed not routed: whole-file `body.contains(..)` family probe.",
-            ),
-            (
                 "tests/integration/interaction_contract.rs",
                 "SECOND WAVE, disclosed not routed: whole-file signature/arithmetic probes.",
             ),
