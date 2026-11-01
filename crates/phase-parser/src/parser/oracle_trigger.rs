@@ -22702,6 +22702,10 @@ fn try_parse_counter_removed(lower: &str) -> Option<(TriggerMode, TriggerDefinit
         }
         if let Some(counter_type) = counter_type {
             def.description = Some(format!("{} counter", counter_type.as_str()));
+            def.counter_filter = Some(CounterTriggerFilter {
+                counter_type,
+                threshold: None,
+            });
         }
         return Some((TriggerMode::CounterRemoved, def));
     }

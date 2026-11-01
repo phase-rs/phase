@@ -42134,6 +42134,19 @@ fn cost_modifier_counts_keep_coordinated_population_qualifiers() {
             },
         }
     );
+    // CR 400.1: legs in one zone can share an object, which a single union count
+    // would count once instead of once per leg, so that union declines.
+    // Synthetic; Machinist's Dismissal is the nearest printed card.
+    assert!(!matches!(
+        parse_static_line("This spell costs {1} less to cast for each artifact you control and each creature you control.")
+            .map(|def| def.mode),
+        Some(StaticMode::ModifyCost {
+            dynamic_count: Some(QuantityRef::ObjectCount {
+                filter: TargetFilter::Or { .. }
+            }),
+            ..
+        })
+    ));
     assert_eq!(
         dynamic_count_of("Spells you cast cost {1} less to cast for each card with the same name as that spell in your graveyard."),
         QuantityRef::ObjectCount {

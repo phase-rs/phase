@@ -5615,6 +5615,22 @@ pub(crate) fn parse_for_each_population_union(input: &str) -> OracleResult<'_, Q
         .map(population_count_filter)
         .collect::<Option<Vec<TargetFilter>>>()
         .ok_or_else(|| oracle_err(input))?;
+    // CR 400.1: an object is in one zone at a time, so legs over disjoint zones
+    // never share an object and one union count equals the per-leg sum. Legs
+    // that share a zone ("each artifact you control and each creature you
+    // control") would count a shared object once instead of once per leg, so
+    // they decline. A leg with no zone constraint ranges over the battlefield.
+    let mut seen_zones: Vec<Zone> = Vec::new();
+    for filter in &filters {
+        let mut zones = filter.population_zones();
+        if zones.is_empty() {
+            zones.push(Zone::Battlefield);
+        }
+        if zones.iter().any(|zone| seen_zones.contains(zone)) {
+            return Err(oracle_err(input));
+        }
+        seen_zones.extend(zones);
+    }
     Ok((
         rest,
         QuantityRef::ObjectCount {
