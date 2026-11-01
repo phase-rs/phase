@@ -687,6 +687,10 @@ fn apply_human_pick_and_resolve_bots_with_overrides(
             // rather than by coincidence.
             let cards_per_pick =
                 usize::from(draft_session.config.kind.procedure().cards_per_pick).min(pack.0.len());
+            let pack_shape = bot_ai::PackShape {
+                pack_number: draft_session.current_pack_number,
+                cards_in_pack: draft_session.cards_in_pack(draft_session.current_pack_number),
+            };
             let chosen = overrides
                 .get(&seat)
                 .filter(|ids| {
@@ -706,6 +710,7 @@ fn apply_human_pick_and_resolve_bots_with_overrides(
                     &draft_session.pools[seat as usize],
                     card_db,
                     PICK_ENHANCEMENT.with(|cell| cell.get()),
+                    pack_shape,
                     &mut rng,
                 );
                 // Map indices to ids BEFORE applying — the apply mutates the pack
@@ -791,6 +796,10 @@ pub fn auto_pick() -> Result<JsValue, JsValue> {
         let mut rng = RNG
             .with(|cell| cell.take())
             .ok_or_else(|| JsValue::from_str("RNG not initialized"))?;
+        let pack_shape = bot_ai::PackShape {
+            pack_number: draft_session.current_pack_number,
+            cards_in_pack: draft_session.cards_in_pack(draft_session.current_pack_number),
+        };
         let card_id = CARD_DB.with(|cell| {
             let db_borrow = cell.borrow();
             let pick_idx = bot_ai::bot_pick(
@@ -799,6 +808,7 @@ pub fn auto_pick() -> Result<JsValue, JsValue> {
                 &draft_session.pools[0],
                 db_borrow.as_ref(),
                 PICK_ENHANCEMENT.with(|cell| cell.get()),
+                pack_shape,
                 &mut rng,
             );
             pack.0[pick_idx].instance_id.clone()

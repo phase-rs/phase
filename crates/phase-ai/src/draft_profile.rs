@@ -44,8 +44,18 @@ use engine::types::keywords::Keyword;
 use crate::cast_facts::EffectProfile;
 use crate::draft_eval::{dominant_colors, produced_color_count};
 
-/// Cards per booster pack, used to turn a pool size into a pack/pick position.
-pub const PACK_SIZE: usize = 15;
+/// Where in the draft a pick happens: which booster, and which pick within it.
+///
+/// Supplied by the draft session (which records each booster's real size) rather
+/// than inferred from pool size, so packs of any configured size select the
+/// right adaptive stage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PackPosition {
+    /// Zero-based booster index.
+    pub pack_number: usize,
+    /// One-based pick within the current booster.
+    pub pick_in_pack: usize,
+}
 
 /// Minimum `card_bonus` for a card to count as a "high-quality" theme signal.
 const SIGNAL_QUALITY_THRESHOLD: f64 = 1.0;
@@ -301,13 +311,13 @@ impl DraftProfile {
             .unwrap_or(0.0)
     }
 
-    /// Policy weights for the pick after `pool_size` prior picks.
-    pub fn stage_weights(&self, pool_size: usize) -> StageWeights {
+    /// Policy weights for the pick at `position`.
+    pub fn stage_weights(&self, position: PackPosition) -> StageWeights {
         let policy = &self.adaptive_draft_policy;
         let stages = &policy.draft_stages;
         let commit = &policy.color_commitment;
-        let pick_in_pack = pool_size % PACK_SIZE + 1;
-        let later_pack = pool_size >= PACK_SIZE;
+        let pick_in_pack = position.pick_in_pack;
+        let later_pack = position.pack_number > 0;
 
         let in_range = |s: &DraftStage| (s.pick_range[0]..=s.pick_range[1]).contains(&pick_in_pack);
         let (stage, mut color) = if in_range(&stages.early) {
@@ -333,7 +343,7 @@ impl DraftProfile {
         }
     }
 
-    /// Score `card` for the pick that follows `pool`, or `None` when the card's
+    /// Score `card` for the pick at `position` that follows `pool`, or `None` when the card's
     /// set is not covered by this profile (the caller keeps its generic scoring).
     ///
     /// `base` is the caller's context-free card rating and `curve` its mana-curve
@@ -342,11 +352,12 @@ impl DraftProfile {
         &self,
         card: &ProfileCard<'_>,
         pool: &[ProfileCard<'_>],
+        position: PackPosition,
         base: f64,
         curve: f64,
     ) -> Option<ProfileScore> {
         let set = self.set_profile(card.set_code)?;
-        let weights = self.stage_weights(pool.len());
+        let weights = self.stage_weights(position);
         let policy = &self.adaptive_draft_policy;
 
         let classes = card.face.map(classify).unwrap_or_default();
@@ -703,6 +714,24 @@ mod tests {
         )
     }
 
+    /// Position of the pick after `prior_picks` picks in 15-card packs.
+    fn at(prior_picks: usize) -> PackPosition {
+        PackPosition {
+            pack_number: prior_picks / 15,
+            pick_in_pack: prior_picks % 15 + 1,
+        }
+    }
+
+    fn score15(
+        p: &DraftProfile,
+        c: &ProfileCard<'_>,
+        pool: &[ProfileCard<'_>],
+        base: f64,
+        curve: f64,
+    ) -> Option<ProfileScore> {
+        p.score_pick(c, pool, at(pool.len()), base, curve)
+    }
+
     fn card<'a>(
         name: &'a str,
         set: &'a str,
@@ -738,28 +767,28 @@ mod tests {
     #[test]
     fn stage_weights_follow_pick_number_and_skip_early_after_pack_one() {
         let p = DraftProfile::mirrodin_block();
-        let early = p.stage_weights(0);
+        let early = p.stage_weights(at(0));
         assert_eq!(
             (early.raw_power, early.deck_fit, early.color_commitment),
             (1.0, 0.25, 0.0)
         );
-        assert_eq!(p.stage_weights(4), early);
-        let middle = p.stage_weights(5);
+        assert_eq!(p.stage_weights(at(4)), early);
+        let middle = p.stage_weights(at(5));
         assert_eq!(
             (middle.raw_power, middle.deck_fit, middle.color_commitment),
             (0.8, 0.7, 0.5)
         );
-        assert_eq!(p.stage_weights(8), middle);
-        let late = p.stage_weights(9);
+        assert_eq!(p.stage_weights(at(8)), middle);
+        let late = p.stage_weights(at(9));
         assert_eq!(
             (late.raw_power, late.deck_fit, late.color_commitment),
             (0.6, 1.0, 1.0)
         );
-        assert_eq!(p.stage_weights(14), late);
+        assert_eq!(p.stage_weights(at(14)), late);
         // Pick 1 of pack 2 behaves like the middle stage, not the early one.
-        assert_eq!(p.stage_weights(15), middle);
-        assert_eq!(p.stage_weights(30), middle);
-        assert_eq!(p.stage_weights(24), late);
+        assert_eq!(p.stage_weights(at(15)), middle);
+        assert_eq!(p.stage_weights(at(30)), middle);
+        assert_eq!(p.stage_weights(at(24)), late);
     }
 
     #[test]
@@ -799,14 +828,14 @@ mod tests {
         let mut land = face(vec![CoreType::Artifact, CoreType::Land], &[]);
         land.abilities = vec![tap_for(vec![ManaColor::Red])];
         let c = card("Great Furnace", "MRD", &[], &land);
-        let s = p.score_pick(&c, &[], 2.0, 0.0).unwrap();
+        let s = score15(p, &c, &[], 2.0, 0.0).unwrap();
         assert_eq!(s.card_bonus, 6.0);
         assert_eq!(s.class_bonus, 1.5);
         // Pick 1: raw weight 1.0, fit weight 0.25 (only the artifact-density term here).
         let expected = 2.0 + 6.0 + 1.5 + 0.25 * s.artifact_density;
         assert!((s.total - expected).abs() < 1e-9);
         // A different base moves the total one-for-one.
-        let s2 = p.score_pick(&c, &[], 3.0, 0.0).unwrap();
+        let s2 = score15(p, &c, &[], 3.0, 0.0).unwrap();
         assert!((s2.total - s.total - 1.0).abs() < 1e-9);
     }
 
@@ -817,7 +846,7 @@ mod tests {
         myr.abilities = vec![tap_for(vec![ManaColor::Red])];
         myr.keywords = vec![Keyword::Modular(1)];
         let c = card("Test Myr", "DST", &[], &myr);
-        let s = p.score_pick(&c, &[], 0.0, 0.0).unwrap();
+        let s = score15(p, &c, &[], 0.0, 0.0).unwrap();
         assert_eq!(s.class_bonus, 1.0); // mana_creature 1.0 beats modular 0.75, not 1.75
     }
 
@@ -825,34 +854,34 @@ mod tests {
     fn unknown_set_is_not_scored() {
         let p = DraftProfile::mirrodin_block();
         let f = face(vec![CoreType::Instant], &[]);
-        assert!(p
-            .score_pick(&card("Bolt", "LEA", &[], &f), &[], 1.0, 0.0)
-            .is_none());
+        assert!(score15(p, &card("Bolt", "LEA", &[], &f), &[], 1.0, 0.0).is_none());
     }
 
     #[test]
     fn artifact_density_bonus_shrinks_as_the_pool_fills_with_artifacts() {
         let p = DraftProfile::mirrodin_block();
         let sword = face(vec![CoreType::Artifact], &["Equipment"]);
-        let empty_pool_bonus = p
-            .score_pick(&card("Bonesplitter", "MRD", &[], &sword), &[], 0.0, 0.0)
+        let empty_pool_bonus = score15(p, &card("Bonesplitter", "MRD", &[], &sword), &[], 0.0, 0.0)
             .unwrap()
             .artifact_density;
         let pool: Vec<ProfileCard<'_>> = (0..6)
             .map(|_| card("Bonesplitter", "MRD", &[], &sword))
             .collect();
-        let full_pool_bonus = p
-            .score_pick(&card("Bonesplitter", "MRD", &[], &sword), &pool, 0.0, 0.0)
-            .unwrap()
-            .artifact_density;
+        let full_pool_bonus = score15(
+            p,
+            &card("Bonesplitter", "MRD", &[], &sword),
+            &pool,
+            0.0,
+            0.0,
+        )
+        .unwrap()
+        .artifact_density;
         assert!(empty_pool_bonus > 0.0);
         assert_eq!(full_pool_bonus, 0.0);
 
         // Non-artifacts never earn it.
         let bear = face(vec![CoreType::Creature], &[]);
-        let s = p
-            .score_pick(&card("Bear", "MRD", &[], &bear), &[], 0.0, 0.0)
-            .unwrap();
+        let s = score15(p, &card("Bear", "MRD", &[], &bear), &[], 0.0, 0.0).unwrap();
         assert_eq!(s.artifact_density, 0.0);
     }
 
@@ -869,12 +898,10 @@ mod tests {
             filler_pool.push(card("Bear", "MRD", &[], &bear));
         }
         let probe = card("Bonesplitter", "MRD", &[], &sword);
-        let with_roles = p
-            .score_pick(&probe, &role_pool, 0.0, 0.0)
+        let with_roles = score15(p, &probe, &role_pool, 0.0, 0.0)
             .unwrap()
             .artifact_density;
-        let with_filler = p
-            .score_pick(&probe, &filler_pool, 0.0, 0.0)
+        let with_filler = score15(p, &probe, &filler_pool, 0.0, 0.0)
             .unwrap()
             .artifact_density;
         assert!(with_filler > with_roles);
@@ -891,24 +918,16 @@ mod tests {
         bear.power = Some(PtValue::Fixed(2));
         bear.toughness = Some(PtValue::Fixed(2));
 
-        let in_5dn = p
-            .score_pick(&card("Flyer", "5DN", &[], &flyer), &[], 0.0, 0.0)
-            .unwrap();
+        let in_5dn = score15(p, &card("Flyer", "5DN", &[], &flyer), &[], 0.0, 0.0).unwrap();
         assert_eq!(in_5dn.threat_need, 1.5);
-        let in_mrd = p
-            .score_pick(&card("Flyer", "MRD", &[], &flyer), &[], 0.0, 0.0)
-            .unwrap();
+        let in_mrd = score15(p, &card("Flyer", "MRD", &[], &flyer), &[], 0.0, 0.0).unwrap();
         assert_eq!(in_mrd.threat_need, 0.0);
-        let plain = p
-            .score_pick(&card("Bear", "5DN", &[], &bear), &[], 0.0, 0.0)
-            .unwrap();
+        let plain = score15(p, &card("Bear", "5DN", &[], &bear), &[], 0.0, 0.0).unwrap();
         assert_eq!(plain.threat_need, 0.0);
 
         // Four threats already drafted: the need is met.
         let pool = vec![card("Flyer", "5DN", &[], &flyer); 4];
-        let met = p
-            .score_pick(&card("Flyer", "5DN", &[], &flyer), &pool, 0.0, 0.0)
-            .unwrap();
+        let met = score15(p, &card("Flyer", "5DN", &[], &flyer), &pool, 0.0, 0.0).unwrap();
         assert_eq!(met.threat_need, 0.0);
     }
 
@@ -926,7 +945,7 @@ mod tests {
         let probe = card("Terror", "MRD", &[], &kill);
         let need = |n: usize| {
             let pool = vec![card("Terror", "MRD", &[], &kill); n];
-            p.score_pick(&probe, &pool, 0.0, 0.0).unwrap().deck_need
+            score15(p, &probe, &pool, 0.0, 0.0).unwrap().deck_need
         };
         assert_eq!(need(0), 2.0);
         assert!(need(2) < need(0));
@@ -945,7 +964,7 @@ mod tests {
         let repeated = vec![card("Bonesplitter", "MRD", &[], &sword); 5];
         let probe = card("Talisman of Impulse", "MRD", &[], &talisman);
         assert_eq!(
-            p.score_pick(&probe, &repeated, 0.0, 0.0)
+            score15(p, &probe, &repeated, 0.0, 0.0)
                 .unwrap()
                 .archetype_synergy,
             0.0
@@ -959,12 +978,12 @@ mod tests {
         ];
         let pool: Vec<ProfileCard<'_>> =
             names.iter().map(|n| card(n, "MRD", &[], &sword)).collect();
-        let s = p.score_pick(&probe, &pool, 0.0, 0.0).unwrap();
+        let s = score15(p, &probe, &pool, 0.0, 0.0).unwrap();
         assert!(s.archetype_synergy > 0.0 && s.archetype_synergy <= 2.5);
 
         // The equipment theme is demonstrated too, but equipment already earns its class bonus.
         let sword_probe = card("Sword", "MRD", &[], &sword);
-        let sw = p.score_pick(&sword_probe, &pool, 0.0, 0.0).unwrap();
+        let sw = score15(p, &sword_probe, &pool, 0.0, 0.0).unwrap();
         // Only the (unlinked) artifact-affinity theme may contribute for equipment.
         assert!(sw.archetype_synergy <= s.archetype_synergy + 1e-9);
         assert_eq!(p.theme_signals(&pool)[&Theme::EquipmentCombat], 4);
@@ -985,35 +1004,31 @@ mod tests {
         let probe = card("Blue", "MRD", &blue, &blue_face);
         // Early (pool of 4): commitment 0 → no penalty.
         assert_eq!(
-            p.score_pick(&probe, &pool, 0.0, 0.0)
+            score15(p, &probe, &pool, 0.0, 0.0)
                 .unwrap()
                 .off_color_penalty,
             0.0
         );
         // Middle (pool of 5..8).
         pool.push(card("Red", "MRD", &red, &red_face));
-        let mid = p
-            .score_pick(&probe, &pool, 0.0, 0.0)
+        let mid = score15(p, &probe, &pool, 0.0, 0.0)
             .unwrap()
             .off_color_penalty;
         // Late (pool of 9..14).
         pool.extend((0..4).map(|_| card("Red", "MRD", &red, &red_face)));
-        let late = p
-            .score_pick(&probe, &pool, 0.0, 0.0)
+        let late = score15(p, &probe, &pool, 0.0, 0.0)
             .unwrap()
             .off_color_penalty;
         assert!(mid > 0.0 && late > mid);
         // On-color and colorless cards are never penalised.
         let on = card("Red2", "MRD", &red, &red_face);
         assert_eq!(
-            p.score_pick(&on, &pool, 0.0, 0.0)
-                .unwrap()
-                .off_color_penalty,
+            score15(p, &on, &pool, 0.0, 0.0).unwrap().off_color_penalty,
             0.0
         );
         let none = card("Rock", "MRD", &[], &red_face);
         assert_eq!(
-            p.score_pick(&none, &pool, 0.0, 0.0)
+            score15(p, &none, &pool, 0.0, 0.0)
                 .unwrap()
                 .off_color_penalty,
             0.0
@@ -1032,15 +1047,15 @@ mod tests {
             },
         )];
         let c = card("Terror", "MRD", &[], &kill);
-        let early = p.score_pick(&c, &[], 4.0, 1.0).unwrap();
+        let early = score15(p, &c, &[], 4.0, 1.0).unwrap();
         let filler = face(vec![CoreType::Creature], &[]);
         let pool = vec![card("Filler", "MRD", &[], &filler); 9];
-        let late = p.score_pick(&c, &pool, 4.0, 1.0).unwrap();
+        let late = score15(p, &c, &pool, 4.0, 1.0).unwrap();
         // Same card, same base: power-weighted early total exceeds the late one's raw share.
         assert!(early.total > 0.0 && late.total > 0.0);
         assert!(early.deck_need == late.deck_need || late.deck_need > 0.0);
-        let w_early = p.stage_weights(0);
-        let w_late = p.stage_weights(9);
+        let w_early = p.stage_weights(at(0));
+        let w_late = p.stage_weights(at(9));
         assert!(w_early.raw_power > w_late.raw_power);
         assert!(w_late.deck_fit > w_early.deck_fit);
     }
