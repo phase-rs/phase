@@ -27194,6 +27194,7 @@ mod tests {
             copy: None,
             enter_tapped: EtbTapState::Unspecified,
             count: 1,
+            appended: Vec::new(),
             applied: HashSet::new(),
         };
         let mut events = Vec::new();
@@ -27291,6 +27292,7 @@ mod tests {
                     copy: None,
                     enter_tapped: EtbTapState::Unspecified,
                     count,
+                    appended: Vec::new(),
                     applied: HashSet::new(),
                 }),
                 accounted,
