@@ -6,6 +6,37 @@ use super::game_state::{LKISnapshot, ZoneChangeRecord};
 use super::zones::Zone;
 use crate::game::game_object::GameObject;
 
+/// CR 616.1 (Matt R10-F1): source-id range for protection virtual-candidate
+/// rids. One sentinel per matched-protection-quality variant, in explicit
+/// discriminant order (`BASE + 0` = Color through `BASE + 8` = FromPlayer,
+/// matching `MatchedProtectionQuality::replacement_rid_parts` — never `as`
+/// casts): the rid index (`u64` on every target, never `usize`) carries the
+/// quality's minor word whole, so the mapping is lossless, save-stable, and
+/// identical on native and wasm32. Never a real object's id (the
+/// allocator starts at 1), and disjoint from `ObjectId(0)` (registry-hosted
+/// replacements) so dispatch can discriminate by source alone.
+pub(crate) const PROTECTION_REPLACEMENT_SOURCE_BASE: u64 = u64::MAX - 16;
+pub(crate) const PROTECTION_REPLACEMENT_SOURCE_COUNT: u64 = 9;
+
+/// The protection virtual-candidate decoding of an [`ObjectId`], defined here
+/// beside the engine-owned source range it reads.
+pub(crate) trait ProtectionReplacementSourceExt {
+    /// CR 616.1 (Matt R10-F1): the quality-variant discriminant when `self`
+    /// is a protection virtual-candidate source, else `None`.
+    fn protection_source_discriminant(self) -> Option<u8>;
+}
+
+impl ProtectionReplacementSourceExt for ObjectId {
+    /// Checked arithmetic throughout — never wraps, never truncates.
+    fn protection_source_discriminant(self) -> Option<u8> {
+        let offset = self.0.checked_sub(PROTECTION_REPLACEMENT_SOURCE_BASE)?;
+        if offset >= PROTECTION_REPLACEMENT_SOURCE_COUNT {
+            return None;
+        }
+        u8::try_from(offset).ok()
+    }
+}
+
 /// Monotonic identity for one logical simultaneous zone-change action.
 ///
 /// This remains distinct from an [`ObjectId`]: a logical group can contain

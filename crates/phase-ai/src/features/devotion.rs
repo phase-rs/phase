@@ -441,6 +441,8 @@ fn continuous_modification_quantity(
         | CM::AssignDamageAsThoughUnblocked
         | CM::AssignNoCombatDamage
         | CM::ChangeController
+        // Designation-anchored control (Fealty): no devotion characteristic.
+        | CM::ChangeControllerToDesignation { .. }
         | CM::SetBasicLandType { .. }
         | CM::SetChosenBasicLandType
         | CM::SetChosenName

@@ -294,6 +294,13 @@ pub fn resolve(
     // because compile-time AST has no access to runtime player ids; `binding`
     // says which live player to rewrite it to. Mirrors the
     // `bind_contextual_filter_to_condition` pattern above.
+    //
+    // CR 603.7a + CR 608.2c: `chosen_player_stamp` carries the resolved
+    // `ChosenPlayer` id past this block so it can be stamped onto the built
+    // `delayed_ability.targets` below (`delayed_ability` is built fresh via
+    // `build_resolved_from_def`, so `chosen_players` does NOT survive
+    // creation→fire but `targets` does).
+    let mut chosen_player_stamp: Option<crate::types::player::PlayerId> = None;
     if let DelayedTriggerCondition::AtNextPhaseForPlayer {
         player,
         gate,
@@ -327,6 +334,32 @@ pub fn resolve(
                         .map(|obj| obj.owner)
                 })
                 .unwrap_or(ability.controller),
+            // CR 603.7a + CR 608.2c: resolve "that player" from the Nth
+            // `Effect::Choose { Opponent }` answer recorded in the resolving
+            // ability's `chosen_players` (Faramir's "choose an opponent …
+            // at the beginning of that player's next end step"). FAIL-CLOSED:
+            // a missing index (malformed chain, no choice made) errors —
+            // never a controller fallback, which would fire the delayed
+            // body on the wrong player's turn.
+            crate::types::ability::DelayedTriggerPlayerBinding::ChosenPlayer { index } => {
+                match ability.chosen_players.get(*index as usize) {
+                    Some(chosen) => {
+                        chosen_player_stamp = Some(*chosen);
+                        *chosen
+                    }
+                    // A missing index is a malformed chain (binding references a
+                    // choice that was never made): surface it as an error in
+                    // every build rather than silently dropping the trigger
+                    // in release while passing debug tests.
+                    None => {
+                        return Err(crate::types::ability::EffectError::InvalidParam(
+                            format!(
+                                "ChosenPlayer binding index {index} has no chosen player; cannot create delayed trigger"
+                            ),
+                        ));
+                    }
+                }
+            }
         };
         // CR 513.2 + CR 603.7a: the "on your next turn" floor only becomes
         // concrete at creation. Stamp the symbolic parse-time gate to the actual
@@ -683,6 +716,18 @@ pub fn resolve(
     };
     delayed_ability.set_target_incarnations_recursive(target_pins);
     delayed_ability.set_unpinned_targets(snapshot_targets);
+    // CR 603.7a + CR 608.2c: carry the `ChosenPlayer`-resolved id into the
+    // fired body as its first player target, so `PlayerScope::Target` (and
+    // `AbilityCondition::PlayerAttackedPlayer { attacker: Target, .. }`)
+    // reads the chosen player at fire time. Scoped to the `ChosenPlayer`
+    // binding only — `Controller`/`ParentTargetOwner` bodies keep their
+    // existing target shapes untouched. Placed AFTER the unpinned reseed
+    // above, which would otherwise clobber the stamp (the reseed covers
+    // event/parent/last-created referents; the chosen-player carrier is
+    // disjoint from all three).
+    if let Some(chosen) = chosen_player_stamp {
+        delayed_ability.push_target(TargetRef::Player(chosen));
+    }
     // CR 608.2k: Give each clause that names an event-subject anaphor its own
     // referent, so a chain naming both the event's subject and its object slot
     // does not hand one clause the other's object.

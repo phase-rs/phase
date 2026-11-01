@@ -1207,7 +1207,7 @@ fn install_replacement_on_steward(
     obj.replacement_definitions.push(replacement);
     ReplacementId {
         source: holder,
-        index,
+        index: index as u64,
     }
 }
 

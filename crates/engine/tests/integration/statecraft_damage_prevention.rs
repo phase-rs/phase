@@ -26,7 +26,9 @@ use engine::types::ability::{
     ResolvedAbility, ShieldKind, TargetFilter, TargetRef, TypedFilter,
 };
 use engine::types::actions::GameAction;
-use engine::types::game_state::WaitingFor;
+use engine::types::counter::CounterType;
+use engine::types::events::GameEvent;
+use engine::types::game_state::{PersistedGameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost};
 use engine::types::phase::Phase;
@@ -108,6 +110,25 @@ fn add_enchantment_spell_to_hand(
         .as_enchantment()
         .from_oracle_text(oracle_text)
         .with_mana_cost(free_cost())
+        .id()
+}
+
+/// Add a CASTABLE Aura spell to `player`'s hand: the Aura subtype plus the
+/// `enchant` keyword seed the "Enchant creature" target slot and the
+/// attach-on-resolution behavior (mirrors the Heart of Light real-cast
+/// staging — without them the cast resolves unattached).
+fn add_aura_spell_to_hand(
+    scenario: &mut GameScenario,
+    player: PlayerId,
+    name: &str,
+    oracle_text: &str,
+) -> ObjectId {
+    scenario
+        .add_spell_to_hand(player, name, false)
+        .as_enchantment()
+        .with_subtypes(vec!["Aura"])
+        .with_mana_cost(free_cost())
+        .from_oracle_text_with_keywords(&["enchant"], oracle_text)
         .id()
 }
 
@@ -1269,4 +1290,289 @@ fn heart_of_light_real_cast_prevents_combat_and_noncombat_damage() {
              fully prevented (combat_scope: None) — got {other:?}"
         ),
     }
+}
+
+/// SYNTHETIC minimal each-source batch spell in the Case of the Gateway
+/// Express shape ("Each creature you control deals 1 damage to that
+/// creature"). Grammar-real halves — the `EachSourceDealsDamage` universal
+/// subject plus a targeted-creature recipient — composed because the Case
+/// itself (a solve-triggered ability) is not stagable as a single cast.
+const PACK_ONSLAUGHT_TEXT: &str = "Each creature you control deals 1 damage to target creature.";
+
+fn prevented_pairs(events: &[GameEvent]) -> Vec<(TargetRef, u32)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::DamagePrevented { target, amount, .. } => Some((target.clone(), *amount)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn shield_counters_on(runner: &GameRunner, object: ObjectId) -> u32 {
+    runner
+        .state()
+        .objects
+        .get(&object)
+        .and_then(|obj| obj.counters.get(&CounterType::Shield))
+        .copied()
+        .unwrap_or(0)
+}
+
+/// CR 122.1c + CR 615.13 + CR 616.1e (Matt C3): the parked batch scope must
+/// hydrate before the shield-counter applier runs, through the shared
+/// accumulation/write-through authority.
+///
+/// P0 controls two Bears, the second enchanted with a real-cast Defang;
+/// P1's Ogre carries two shield counters. Pack Onslaught's first source
+/// parks a shield-prevented prefix; the final source pauses between shield
+/// prevention and Defang. Selecting shield prevention must join the SAME
+/// aggregate application — exactly one counter consumed, one event naming 2.
+/// Pre-fix the resumed entry burned a counter immediately plus a second at
+/// drain (two counters, two fragmented events).
+#[test]
+fn gateway_express_pause_consumes_exactly_one_shield_counter() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let bear_a = scenario.add_creature(P0, "Bear A", 2, 2).id();
+    let bear_b = scenario.add_creature(P0, "Bear B", 2, 2).id();
+    let ogre = scenario.add_creature(P1, "Ogre", 3, 3).id();
+    scenario.with_counter(ogre, CounterType::Shield, 2);
+    let defang = add_aura_spell_to_hand(&mut scenario, P0, "Defang", DEFANG_TEXT);
+    let onslaught = scenario
+        .add_spell_to_hand_from_oracle(P0, "Pack Onslaught", true, PACK_ONSLAUGHT_TEXT)
+        .with_mana_cost(free_cost())
+        .id();
+    let mut runner = scenario.build();
+
+    runner.cast(defang).target_object(bear_b).resolve();
+    assert_eq!(
+        runner.state().objects[&defang].attached_to,
+        Some(engine::game::game_object::AttachTarget::Object(bear_b)),
+        "reach guard: Defang must attach to the second Bear"
+    );
+    let p0_creatures: Vec<ObjectId> = runner
+        .state()
+        .battlefield
+        .iter()
+        .filter(|id| {
+            let obj = &runner.state().objects[id];
+            obj.controller == P0 && obj.power.is_some()
+        })
+        .copied()
+        .collect();
+    assert_eq!(
+        p0_creatures,
+        vec![bear_a, bear_b],
+        "reach guard: the batch must iterate Bear A first, Bear B last"
+    );
+    assert_eq!(
+        shield_counters_on(&runner, ogre),
+        2,
+        "reach guard: the Ogre must start with two shield counters"
+    );
+
+    let mut log: Vec<GameEvent> = Vec::new();
+    let outcome = runner.cast(onslaught).target_object(ogre).resolve();
+    log.extend(outcome.events().iter().cloned());
+    let WaitingFor::ReplacementChoice { candidates, .. } = outcome.final_waiting_for() else {
+        panic!(
+            "the Bear B event must pause for a CR 616.1 ordering choice, got {:?}",
+            outcome.final_waiting_for()
+        );
+    };
+    assert_eq!(
+        candidates.len(),
+        2,
+        "the Bear B event must offer shield prevention and Defang"
+    );
+    assert!(
+        candidates.iter().any(|c| c.source_name.contains("Defang")),
+        "one candidate must be Defang, got {:?}",
+        candidates
+            .iter()
+            .map(|c| &c.source_name)
+            .collect::<Vec<_>>()
+    );
+    let shield_index = candidates
+        .iter()
+        .position(|c| !c.source_name.contains("Defang"))
+        .expect("the other candidate must be the shield-counter prevention");
+    assert_eq!(
+        runner.state().pending_each_source_batches.len(),
+        1,
+        "the pause must park exactly one batch record"
+    );
+    assert_eq!(
+        runner.state().pending_each_source_batches[0]
+            .tally
+            .iter()
+            .map(|entry| entry.amount)
+            .sum::<i32>(),
+        1,
+        "the parked prefix must hold Bear A's shield-prevented 1"
+    );
+
+    let result = runner
+        .act(GameAction::ChooseReplacement {
+            index: shield_index,
+        })
+        .expect("the ordering choice must be answerable");
+    log.extend(result.events);
+    runner.advance_until_stack_empty();
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "resolution must complete to a clean priority window, got {:?}",
+        runner.state().waiting_for
+    );
+
+    assert_eq!(
+        shield_counters_on(&runner, ogre),
+        1,
+        "one simultaneous application must consume exactly one shield counter"
+    );
+    assert_eq!(
+        prevented_pairs(&log),
+        vec![(TargetRef::Object(ogre), 2)],
+        "prefix + resumed entry must publish as ONE aggregate application"
+    );
+    assert_eq!(
+        runner.state().objects[&ogre].damage_marked,
+        0,
+        "both damage must be prevented (none dealt through)"
+    );
+    assert!(
+        runner.state().pending_each_source_batches.is_empty(),
+        "the pause record must be consumed by the completion cascade"
+    );
+}
+
+/// CR 122.1c + CR 615.13 + CR 616.1e persistence (Matt C3): the
+/// shield-counter control above, save/loaded THROUGH the ordering prompt —
+/// the parked prefix and the prompt survive the authoritative round trip, and
+/// selecting shield prevention after restore still consumes exactly one
+/// counter for one aggregate application.
+#[test]
+fn gateway_express_pause_survives_save_load() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let bear_a = scenario.add_creature(P0, "Bear A", 2, 2).id();
+    let bear_b = scenario.add_creature(P0, "Bear B", 2, 2).id();
+    let ogre = scenario.add_creature(P1, "Ogre", 3, 3).id();
+    scenario.with_counter(ogre, CounterType::Shield, 2);
+    let defang = add_aura_spell_to_hand(&mut scenario, P0, "Defang", DEFANG_TEXT);
+    let onslaught = scenario
+        .add_spell_to_hand_from_oracle(P0, "Pack Onslaught", true, PACK_ONSLAUGHT_TEXT)
+        .with_mana_cost(free_cost())
+        .id();
+    let mut runner = scenario.build();
+
+    runner.cast(defang).target_object(bear_b).resolve();
+    let p0_creatures: Vec<ObjectId> = runner
+        .state()
+        .battlefield
+        .iter()
+        .filter(|id| {
+            let obj = &runner.state().objects[id];
+            obj.controller == P0 && obj.power.is_some()
+        })
+        .copied()
+        .collect();
+    assert_eq!(
+        p0_creatures,
+        vec![bear_a, bear_b],
+        "reach guard: the batch must iterate Bear A first, Bear B last"
+    );
+
+    let mut log: Vec<GameEvent> = Vec::new();
+    let outcome = runner.cast(onslaught).target_object(ogre).resolve();
+    log.extend(outcome.events().iter().cloned());
+    let WaitingFor::ReplacementChoice { candidates, .. } = outcome.final_waiting_for() else {
+        panic!(
+            "the Bear B event must pause for a CR 616.1 ordering choice, got {:?}",
+            outcome.final_waiting_for()
+        );
+    };
+    let shield_index = candidates
+        .iter()
+        .position(|c| !c.source_name.contains("Defang"))
+        .expect("the other candidate must be the shield-counter prevention");
+
+    // Save/load THROUGH the pause: the shield-prevented prefix must survive.
+    assert_eq!(
+        runner.state().pending_each_source_batches.len(),
+        1,
+        "reach guard: the pause must park exactly one batch record"
+    );
+    let saved = serde_json::to_string(&PersistedGameState::capture(runner.state().clone()))
+        .expect("the authoritative paused state serializes");
+    let restored: PersistedGameState =
+        serde_json::from_str(&saved).expect("the authoritative paused state deserializes");
+    let mut runner = GameRunner::from_state(
+        restored
+            .into_game_state()
+            .expect("persisted test snapshot satisfies the checked restore contract"),
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "the ordering prompt must survive restore, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        runner.state().pending_each_source_batches.len(),
+        1,
+        "the parked batch record must survive authoritative restore"
+    );
+    assert_eq!(
+        runner.state().pending_each_source_batches[0]
+            .tally
+            .iter()
+            .map(|entry| entry.amount)
+            .sum::<i32>(),
+        1,
+        "the parked prefix (Bear A's 1 prevented) must survive restore"
+    );
+    assert_eq!(
+        shield_counters_on(&runner, ogre),
+        2,
+        "no counter may be consumed before the ordering answer"
+    );
+
+    let result = runner
+        .act(GameAction::ChooseReplacement {
+            index: shield_index,
+        })
+        .expect("the ordering choice must be answerable after restore");
+    log.extend(result.events);
+    runner.advance_until_stack_empty();
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "resolution must complete to a clean priority window, got {:?}",
+        runner.state().waiting_for
+    );
+
+    assert_eq!(
+        shield_counters_on(&runner, ogre),
+        1,
+        "one simultaneous application must consume exactly one shield counter"
+    );
+    assert_eq!(
+        prevented_pairs(&log),
+        vec![(TargetRef::Object(ogre), 2)],
+        "prefix + resumed entry must publish as ONE aggregate application"
+    );
+    assert_eq!(
+        runner.state().objects[&ogre].damage_marked,
+        0,
+        "both damage must be prevented (none dealt through)"
+    );
+    assert!(
+        runner.state().pending_each_source_batches.is_empty(),
+        "the pause record must be consumed by the completion cascade"
+    );
 }

@@ -1875,6 +1875,7 @@ fn lower_as_enters_anchor_word_modal(
             protection_does_not_remove: None,
             room_door: None,
             granting_object: None,
+            bound_actor: None,
         };
         result.statics.push(placeholder);
     }

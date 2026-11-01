@@ -269,7 +269,10 @@ pub fn resolve(
     // routes through. Only the positional-library conjure reorders; other
     // destinations append and never disturb an existing top card.
     if destination == Zone::Library && library_position.is_some() {
-        crate::game::layers::mark_layers_full_if_top_of_library_static_live(state);
+        crate::game::layers::mark_layers_full_if_dimension_read_live(
+            state,
+            crate::game::layers::LayerInvalidationDimension::TopOfLibrary,
+        );
     }
 
     // ASSIGNS `state.last_created_token_ids` (never appended), matching every
@@ -948,7 +951,7 @@ mod tests {
     /// Issue #5614 (re-review blocker): repositioning a just-conjured card to the
     /// top of a library (RandomWithinTop with n=1 forces index 0) must route through
     /// the shared top-of-library invalidation seam
-    /// (`mark_layers_full_if_top_of_library_static_live`) so a live
+    /// (`mark_layers_full_if_dimension_read_live` with `TopOfLibrary`) so a live
     /// `TopOfLibraryMatches` static (Vampire Nocturnus class) re-evaluates against
     /// the new top card. Without the seam a cached layer derivation retains the stale
     /// former top. PRODUCTION PATH: runs the real conjure resolver with NO manual

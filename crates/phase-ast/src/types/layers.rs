@@ -201,6 +201,9 @@ impl ContinuousModification {
             ),
             // CR 613.2: Control-changing effects are applied in Layer 2.
             ContinuousModification::ChangeController => Layer::Control,
+            // CR 613.1b + CR 725.5: designation-anchored control is a
+            // control-changing effect — same layer, holder re-derived live.
+            ContinuousModification::ChangeControllerToDesignation { .. } => Layer::Control,
             // CR 707.9a: A copy effect that grants "this ability" makes that
             // ability part of the copiable values. Applied at Layer 1 alongside
             // CopyValues / SetName so downstream copy effects observe the
@@ -254,6 +257,12 @@ pub struct ActiveContinuousEffect {
     pub characteristic_defining: bool,
     /// CR 201.5a: the granter stamped on the static this effect comes from.
     pub granter: Option<ObjectIncarnationRef>,
+    /// CR 109.5 + CR 701.21a: installer-resolved actor binding carried from
+    /// `TransientContinuousEffect::bound_actor` for transient-derived effects
+    /// (`None` for static-derived effects, which are always object-wide).
+    /// The layer-6 graft arm stamps it onto grafted prohibition defs as their
+    /// `source_controller` anchor so actor-bound grafts stay exact.
+    pub bound_actor: Option<PlayerId>,
 }
 
 #[cfg(test)]

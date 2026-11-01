@@ -106,6 +106,8 @@ mod self_copy_last_known_values;
 mod self_destruct_target_power;
 mod self_exile_at_resolution_8721;
 mod self_name_of_short_name_rules_words;
+mod selfless_squire_damage_prevented_trigger;
+mod selfless_squire_furnace_protection_ordering;
 mod sensei_golden_tail_5950;
 mod sentinel_sliver_vigilance_grant;
 mod sephiroth_super_nova_transform_emblem_4359;

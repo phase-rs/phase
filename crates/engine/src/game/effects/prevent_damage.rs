@@ -1655,20 +1655,35 @@ mod tests {
             is_combat: true,
             applied: std::collections::HashSet::new(),
         };
-        let (survivors, tally) = crate::game::replacement::replace_combat_damage_batch(
-            &mut state,
-            &mut events,
-            vec![proposed],
-        );
+        let crate::game::replacement::CombatDamageReplacementOutcome::Complete { survivors, tally } =
+            crate::game::replacement::replace_combat_damage_batch(
+                &mut state,
+                &mut events,
+                vec![proposed],
+            )
+        else {
+            panic!("a single Prevention::All shield is one candidate: no CR 616.1 pause is possible here");
+        };
         assert_eq!(survivors, vec![None], "all 3 combat damage prevented");
         // CR 615.7: the shield aggregated 3 prevented damage.
         let total: i32 = tally.values().sum();
         assert_eq!(total, 3);
 
+        // CR 615.13: the aggregate is keyed by (shield, recipient), and this
+        // batch has exactly one of each, so it is a single entry. Pin that
+        // structurally: the tally is a `HashMap`, so were a regression ever to
+        // split this across several entries, the `.next()` below would silently
+        // pick a nondeterministic one instead of failing.
+        assert_eq!(tally.len(), 1, "one shield, one recipient, one entry");
         // CR 615.5: fire the rider once against the aggregate prevented amount.
-        let (rid, &prevented) = tally.iter().next().unwrap();
+        let ((rid, recipient), &prevented) = tally.iter().next().unwrap();
+        // CR 120.3: the aggregate names the recipient it was prevented for.
+        assert_eq!(*recipient, TargetRef::Player(PlayerId(0)));
         let runtime = state
-            .replacement_rider(&state.pending_damage_replacements[rid.index()])
+            .replacement_rider(
+                &state.pending_damage_replacements
+                    [usize::try_from(rid.index()).expect("test shield index fits usize")],
+            )
             .cloned()
             .map(Box::new)
             .unwrap();

@@ -463,6 +463,7 @@ mod padeem_consul_of_innovation;
 mod painters_servant_multi_zone_additive_color;
 mod palace_jailer;
 mod palantir_of_orthanc;
+mod palisade_giant_combat_pause_ownership;
 mod panther_habit_equipped_prevention_scope;
 mod park_heights_pegasus_draw_condition_runtime;
 mod parker_luck;

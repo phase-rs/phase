@@ -982,7 +982,7 @@ fn two_entry_controller_replacements_are_ordered_before_the_counter_replacement(
             runner
                 .state()
                 .entering_or_live_object(ral)
-                .and_then(|o| o.replacement_definitions.get(rid.index))
+                .and_then(|o| o.replacement_definitions.get_by_rid(*rid))
                 .and_then(|def| def.enters_under.clone())
         };
     assert_eq!(offered.len(), 2);

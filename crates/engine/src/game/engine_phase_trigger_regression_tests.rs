@@ -6399,3 +6399,465 @@ fn jotun_owl_keeper_one_of_x_n_pays_combined_mana() {
         "combined {{W}}{{U}} cost drains both colored mana units from the pool"
     );
 }
+
+// Phase 3 (call-aid-34a46f), commit 1 — base firing characterization of the
+// "at the beginning of combat on <opponent-possessive> turn" family. CR 507.2
+// + CR 603.2: with `constraint: None` at base, every family trigger fires on
+// EVERY BeginCombat, including its controller's — but CR 603.1 + CR 500.1
+// license only opponents' turns (branch-(b) over-fire). Reach-guard rule:
+// each test drives BOTH the controller-turn and the opponent-turn leg.
+
+/// Drive a fresh two-player table at PreCombatMain with `active` as the active
+/// player through to BeginCombat (both players pass) and report whether a
+/// trigger fired (stack or pending_trigger). `setup` puts the card under test
+/// (controlled by P0) plus any support permanents onto the battlefield.
+fn fired_at_begin_combat(active: PlayerId, setup: impl Fn(&mut GameState)) -> bool {
+    let mut state = new_game(42);
+    state.turn_number = 2;
+    state.phase = Phase::PreCombatMain;
+    state.active_player = active;
+    state.priority_player = active;
+    state.waiting_for = WaitingFor::Priority { player: active };
+    setup(&mut state);
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+    assert_eq!(
+        state.phase,
+        Phase::BeginCombat,
+        "both players passing from PreCombatMain must reach the CR 507.2 window (active {active:?})"
+    );
+    !state.stack.is_empty() || state.pending_trigger.is_some()
+}
+
+fn put_sentinel(state: &mut GameState) -> ObjectId {
+    let id = create_object(
+        state,
+        CardId(7001),
+        PlayerId(0),
+        "Sentinel of the Eternal Watch".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.card_types.subtypes.push("Giant".to_string());
+        obj.card_types.subtypes.push("Soldier".to_string());
+        obj.power = Some(4);
+        obj.toughness = Some(6);
+        obj.base_card_types = obj.card_types.clone();
+    }
+    apply_oracle_to_object(
+        state,
+        id,
+        "Sentinel of the Eternal Watch",
+        "Vigilance (Attacking doesn't cause this creature to tap.)\nAt the beginning of combat on each opponent's turn, tap target creature that player controls.",
+    );
+    id
+}
+
+fn put_citadel_dragons_line(state: &mut GameState) -> ObjectId {
+    let id = create_object(
+        state,
+        CardId(7011),
+        PlayerId(0),
+        "Citadel Siege".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.base_card_types = obj.card_types.clone();
+    }
+    // Trigger line only: no ETB anchor, so no ChosenLabelIs gate. Full-Oracle
+    // + NamedChoice coverage lives in citadel_siege_khans_fires_dragons_silent_on_controller_turn.
+    apply_oracle_to_object(
+        state,
+        id,
+        "Citadel Siege",
+        "At the beginning of combat on each opponent's turn, tap target creature that player controls.",
+    );
+    id
+}
+
+fn put_citadel_khans_line(state: &mut GameState) -> ObjectId {
+    let id = create_object(
+        state,
+        CardId(7012),
+        PlayerId(0),
+        "Citadel Siege".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.base_card_types = obj.card_types.clone();
+    }
+    apply_oracle_to_object(
+        state,
+        id,
+        "Citadel Siege",
+        "At the beginning of combat on your turn, put two +1/+1 counters on target creature you control.",
+    );
+    id
+}
+
+fn put_fight_or_flight(state: &mut GameState) -> ObjectId {
+    let id = create_object(
+        state,
+        CardId(7021),
+        PlayerId(0),
+        "Fight or Flight".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.base_card_types = obj.card_types.clone();
+    }
+    apply_oracle_to_object(
+        state,
+        id,
+        "Fight or Flight",
+        "At the beginning of combat on each opponent's turn, separate all creatures that player controls into two piles. Only creatures in the pile of their choice can attack this turn.",
+    );
+    id
+}
+
+fn put_web_of_inertia(state: &mut GameState) -> ObjectId {
+    let id = create_object(
+        state,
+        CardId(7031),
+        PlayerId(0),
+        "Web of Inertia".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.base_card_types = obj.card_types.clone();
+    }
+    apply_oracle_to_object(
+        state,
+        id,
+        "Web of Inertia",
+        "At the beginning of combat on each opponent's turn, that player may exile a card from their graveyard. If the player doesn't, creatures they control can't attack you this turn.",
+    );
+    id
+}
+
+fn put_champions(state: &mut GameState) -> ObjectId {
+    let id = create_object(
+        state,
+        CardId(7041),
+        PlayerId(0),
+        "Champions of Minas Tirith".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.card_types.subtypes.push("Human".to_string());
+        obj.card_types.subtypes.push("Soldier".to_string());
+        obj.power = Some(3);
+        obj.toughness = Some(3);
+        obj.base_card_types = obj.card_types.clone();
+    }
+    apply_oracle_to_object(
+        state,
+        id,
+        "Champions of Minas Tirith",
+        "When this creature enters, you become the monarch.\nAt the beginning of combat on each opponent's turn, if you're the monarch, that opponent may pay {X}, where X is the number of cards in their hand. If they don't, they can't attack you this combat.",
+    );
+    id
+}
+
+fn put_overencumbered(state: &mut GameState) -> ObjectId {
+    let id = create_object(
+        state,
+        CardId(7051),
+        PlayerId(0),
+        "Overencumbered".to_string(),
+        Zone::Battlefield,
+    );
+    {
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Enchantment);
+        obj.card_types.subtypes.push("Aura".to_string());
+        obj.base_card_types = obj.card_types.clone();
+        obj.attached_to = Some(crate::game::game_object::AttachTarget::Player(PlayerId(1)));
+    }
+    apply_oracle_to_object(
+        state,
+        id,
+        "Overencumbered",
+        "Enchant opponent\nWhen this Aura enters, enchanted opponent creates a Clue token, a Food token, and a Junk token.\nAt the beginning of combat on enchanted opponent's turn, that player may pay {1} for each artifact they control. If they don't, creatures can't attack this combat.",
+    );
+    id
+}
+
+/// CR 507.2 + CR 603.2: Sentinel of the Eternal Watch fires only on
+/// opponents' turns — its Oracle licenses only opponents' turns
+/// (CR 603.1 + CR 500.1), and the routed constraint silences the
+/// controller-turn leg while the opponent-turn leg stays.
+#[test]
+fn sentinel_fires_only_on_opponent_turns() {
+    let setup = |state: &mut GameState| {
+        put_sentinel(state);
+        put_pt_creature(state, 7002, PlayerId(0), "P0 Bear", 2, 2);
+        put_pt_creature(state, 7003, PlayerId(1), "P1 Bear", 2, 2);
+    };
+    assert!(
+        !fired_at_begin_combat(PlayerId(0), setup),
+        "Sentinel stays silent on its controller's turn"
+    );
+    assert!(
+        fired_at_begin_combat(PlayerId(1), setup),
+        "Sentinel fires on the opponent's turn (licensed turn)"
+    );
+}
+
+/// CR 507.2 + CR 603.2: Citadel Siege's Dragons mode fires only on
+/// opponents' turns. Trigger line only (no ChosenLabelIs gate); the routed
+/// constraint silences the controller-turn leg.
+#[test]
+fn citadel_dragons_fires_only_on_opponent_turns() {
+    let setup = |state: &mut GameState| {
+        put_citadel_dragons_line(state);
+        put_pt_creature(state, 7013, PlayerId(0), "P0 Bear", 2, 2);
+        put_pt_creature(state, 7014, PlayerId(1), "P1 Bear", 2, 2);
+    };
+    assert!(
+        !fired_at_begin_combat(PlayerId(0), setup),
+        "Citadel Dragons stays silent on its controller's turn"
+    );
+    assert!(
+        fired_at_begin_combat(PlayerId(1), setup),
+        "Citadel Dragons fires on the opponent's turn (licensed turn)"
+    );
+}
+
+/// CR 507.2 + CR 603.2 (mirror, UNCHANGED in commit 2): Citadel Siege's Khans
+/// mode already fires only on its controller's turn — the canary's correct
+/// half.
+#[test]
+fn citadel_khans_fires_only_controller_turn() {
+    let setup = |state: &mut GameState| {
+        put_citadel_khans_line(state);
+        put_pt_creature(state, 7015, PlayerId(0), "P0 Bear", 2, 2);
+    };
+    assert!(
+        fired_at_begin_combat(PlayerId(0), setup),
+        "Citadel Khans fires on its controller's turn"
+    );
+    assert!(
+        !fired_at_begin_combat(PlayerId(1), setup),
+        "Citadel Khans stays silent on the opponent's turn"
+    );
+}
+
+/// CR 507.2 + CR 603.2 (canary): full-Oracle Citadel Siege resolved via
+/// stack flow with the ETB anchor NamedChoice answered per mode. On the
+/// controller's turn Khans fires and Dragons stays silent.
+#[test]
+fn citadel_siege_khans_fires_dragons_silent_on_controller_turn() {
+    for choice in ["Dragons", "Khans"] {
+        let mut state = setup_game_at_main_phase();
+        let siege_id = create_object(
+            &mut state,
+            CardId(6210),
+            PlayerId(0),
+            "Citadel Siege".to_string(),
+            Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&siege_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.base_card_types = obj.card_types.clone();
+        }
+        apply_oracle_to_object(
+            &mut state,
+            siege_id,
+            "Citadel Siege",
+            "As this enchantment enters, choose Khans or Dragons.\n• Khans — At the beginning of combat on your turn, put two +1/+1 counters on target creature you control.\n• Dragons — At the beginning of combat on each opponent's turn, tap target creature that player controls.",
+        );
+        put_pt_creature(&mut state, 6211, PlayerId(0), "P0 Bear", 2, 2);
+
+        state.stack.push_back(StackEntry {
+            id: siege_id,
+            source_id: siege_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(6210),
+                ability: None,
+                casting_variant: crate::types::game_state::CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        let resolve = apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+
+        // NOTE (rebase onto upstream/main): spell resolution now pauses for
+        // the as-enters choice BEFORE zone-arrival — the entry has left
+        // `state.stack` but the object lands on the battlefield only after
+        // the choice resolves. Assert arrival after `ChooseOption` below.
+        match resolve.waiting_for {
+            WaitingFor::NamedChoice {
+                player,
+                choice_type: crate::types::ability::ChoiceType::Labeled { ref options },
+                ..
+            } => {
+                assert_eq!(player, PlayerId(0));
+                assert_eq!(options, &vec!["Khans".to_string(), "Dragons".to_string()]);
+            }
+            other => panic!("expected Citadel Siege anchor choice, got {other:?}"),
+        }
+
+        apply_as_current(
+            &mut state,
+            GameAction::ChooseOption {
+                choice: choice.to_string(),
+            },
+        )
+        .unwrap();
+        assert_eq!(state.objects[&siege_id].chosen_label(), Some(choice));
+        assert!(
+            state.battlefield.contains(&siege_id),
+            "{choice} mode: the siege must be on the battlefield once its as-enters choice resolves"
+        );
+
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        assert_eq!(state.phase, Phase::BeginCombat);
+        let fired = !state.stack.is_empty() || state.pending_trigger.is_some();
+        assert_eq!(
+            fired,
+            choice == "Khans",
+            "{choice} mode on the controller's turn: Khans fires, Dragons stays silent"
+        );
+    }
+}
+
+/// CR 507.2 + CR 603.2: Fight or Flight fires only on opponents' turns —
+/// its Oracle licenses only opponents' turns (CR 603.1 + CR 500.1). The
+/// Unimplemented effect does not block firing observation.
+#[test]
+fn fight_or_flight_fires_only_on_opponent_turns() {
+    let setup = |state: &mut GameState| {
+        put_fight_or_flight(state);
+    };
+    assert!(
+        !fired_at_begin_combat(PlayerId(0), setup),
+        "Fight or Flight stays silent on its controller's turn"
+    );
+    assert!(
+        fired_at_begin_combat(PlayerId(1), setup),
+        "Fight or Flight fires on the opponent's turn (licensed turn)"
+    );
+}
+
+/// CR 507.2 + CR 603.2: Web of Inertia fires only on opponents' turns —
+/// its Oracle licenses only opponents' turns (CR 603.1 + CR 500.1).
+#[test]
+fn web_of_inertia_fires_only_on_opponent_turns() {
+    let setup = |state: &mut GameState| {
+        put_web_of_inertia(state);
+    };
+    assert!(
+        !fired_at_begin_combat(PlayerId(0), setup),
+        "Web of Inertia stays silent on its controller's turn"
+    );
+    assert!(
+        fired_at_begin_combat(PlayerId(1), setup),
+        "Web of Inertia fires on the opponent's turn (licensed turn)"
+    );
+}
+
+/// CR 507.2 + CR 603.2: Champions of Minas Tirith fires only on opponents'
+/// turns — its Oracle licenses only opponents' turns (CR 603.1 + CR 500.1),
+/// once the already-parsed IsMonarch gate is satisfied via the existing
+/// monarch field.
+#[test]
+fn champions_fires_only_on_opponent_turns() {
+    let setup = |state: &mut GameState| {
+        put_champions(state);
+        state.monarch = Some(PlayerId(0));
+    };
+    assert!(
+        !fired_at_begin_combat(PlayerId(0), setup),
+        "Champions stays silent on its controller's turn"
+    );
+    assert!(
+        fired_at_begin_combat(PlayerId(1), setup),
+        "Champions fires on the opponent's turn (licensed turn)"
+    );
+}
+
+/// CR 507.2 + CR 603.2 (multiplayer): Sentinel fires at exactly the two
+/// opponents' BeginCombats in a 3-player game (once per opponent turn), and
+/// stays silent at its controller's.
+#[test]
+fn sentinel_fires_opponents_begin_combats_3player() {
+    for active in [PlayerId(0), PlayerId(1), PlayerId(2)] {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = active;
+        state.priority_player = active;
+        state.waiting_for = WaitingFor::Priority { player: active };
+        put_sentinel(&mut state);
+        put_pt_creature(&mut state, 7002, PlayerId(0), "P0 Bear", 2, 2);
+        put_pt_creature(&mut state, 7003, PlayerId(1), "P1 Bear", 2, 2);
+        put_pt_creature(&mut state, 7004, PlayerId(2), "P2 Bear", 2, 2);
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+        assert_eq!(
+            state.phase,
+            Phase::BeginCombat,
+            "all three players passing must reach BeginCombat (active {active:?})"
+        );
+        let fired = !state.stack.is_empty() || state.pending_trigger.is_some();
+        assert_eq!(
+            fired,
+            active != PlayerId(0),
+            "Sentinel at {active:?}'s BeginCombat in a 3-player game: fires on opponents' turns, silent on its controller's"
+        );
+    }
+}
+
+/// CR 507.2 + CR 603.2 (guard, UNCHANGED in commit 2): Kitt Kanto fires every
+/// turn — its "each player's turn" trigger is correctly unconstrained.
+#[test]
+fn kitt_kanto_fires_every_turn() {
+    let setup = |state: &mut GameState| {
+        put_kitt_kanto(state);
+        put_pt_creature(state, 3263, PlayerId(0), "P0 Bear A", 2, 2);
+        put_pt_creature(state, 3264, PlayerId(0), "P0 Bear B", 2, 2);
+    };
+    assert!(
+        fired_at_begin_combat(PlayerId(0), setup),
+        "Kitt Kanto fires on its controller's turn"
+    );
+    assert!(
+        fired_at_begin_combat(PlayerId(1), setup),
+        "Kitt Kanto fires on the opponent's turn"
+    );
+}
+
+/// CR 507.2 + CR 603.2 (Matt R2-F3): Overencumbered fires on the enchanted
+/// opponent's turn — its Oracle licenses only that turn, and the trigger
+/// event must match. The controller-turn leg is deliberately NOT pinned
+/// here: whether it fires there today is an inherited timing gap outside
+/// this finding's scope, and a positive pin would reject a future timing
+/// correction.
+#[test]
+fn overencumbered_fires_on_enchanted_opponents_turn() {
+    let setup = |state: &mut GameState| {
+        put_overencumbered(state);
+    };
+    assert!(
+        fired_at_begin_combat(PlayerId(1), setup),
+        "Overencumbered fires on the enchanted opponent's turn"
+    );
+}

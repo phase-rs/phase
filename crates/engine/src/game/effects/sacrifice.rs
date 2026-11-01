@@ -179,12 +179,10 @@ pub(crate) fn can_sacrifice_for_ability(
     object_id: ObjectId,
     player: PlayerId,
 ) -> bool {
+    // CR 109.5 + CR 701.21a: actor-aware object bar — the same authority as
+    // selection, cost guards and execution (`object_cant_be_sacrificed_by`).
     !sacrifice_cause_muzzled(state, ability, object_id, player)
-        && !crate::game::static_abilities::object_has_static_other(
-            state,
-            object_id,
-            "CantBeSacrificed",
-        )
+        && !crate::game::static_abilities::object_cant_be_sacrificed_by(state, player, object_id)
 }
 
 /// CR 701.21a: To sacrifice a permanent, its controller moves it to its owner's graveyard.
@@ -505,7 +503,15 @@ pub fn resolve(
                         obj.controller == chooser
                             && !obj.is_emblem
                             && crate::game::filter::matches_target_filter(state, *id, filter, &ctx)
-                            && !sacrifice_cause_muzzled(state, ability, *id, chooser)
+                            // CR 608.2d: a resolving player can't choose an
+                            // illegal option — a permanent its chooser is
+                            // barred from sacrificing (Call for Aid's
+                            // installer bar, an object-wide grant) or that
+                            // this ability is barred from making them
+                            // sacrifice is not a legal candidate. Offering it
+                            // lets the chooser name it and evade a mandatory
+                            // sacrifice while keeping a legal victim.
+                            && can_sacrifice_for_ability(state, ability, *id, chooser)
                     })
             })
             .collect();
