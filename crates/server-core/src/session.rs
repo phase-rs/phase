@@ -1919,7 +1919,7 @@ impl GameSession {
         // `player == authorized_submitter(state)`, so a spoofed action at the
         // wire is rejected inside the engine as well as here.
         let action_type = action.variant_name();
-        let result = match &action {
+        let mut result = match &action {
             GameAction::Debug(DebugAction::CreateCard {
                 owner,
                 zone,
@@ -1974,6 +1974,9 @@ impl GameSession {
         );
         if takeback == Some(TakebackResolution::Approved) {
             self.after_takeback_approved();
+            // The batches describe the discarded branch, not the restored state.
+            result.events.clear();
+            result.log_entries.clear();
         }
 
         // Computed after the takeback bookkeeping: an approved rollback
@@ -5534,35 +5537,44 @@ mod tests {
             .any(|action| matches!(action, GameAction::PlayLand { .. }))
     }
 
+    /// Bolt-AI after the Bolt killed P2, with a takeback requested by P0 pending.
+    fn bolt_vote_pending() -> (SessionManager, String, [String; 3]) {
+        let (mgr, code, [token0, token1, token2]) = bolt_ai_session();
+        bolt_kills_p2(&mgr, &code, &token0, &token2);
+        assert_eq!(
+            mgr.try_session(&code)
+                .unwrap()
+                .request_takeback(P0, RewindTarget::LastAction),
+            Ok(TakebackOutcome::Pending)
+        );
+        (mgr, code, [token0, token1, token2])
+    }
+
+    fn bolt_kills_p2(mgr: &SessionManager, code: &str, token0: &str, token2: &str) {
+        mgr.try_session(code)
+            .unwrap()
+            .handle_action(token0, GameAction::PassPriority)
+            .expect("P0 passes");
+        let ai = mgr.try_session(code).unwrap().run_ai();
+        assert!(ai.failure.is_none(), "{:?}", ai.failure);
+        mgr.try_session(code)
+            .unwrap()
+            .handle_action(token2, GameAction::PassPriority)
+            .expect("P2's pass resolves the Bolt");
+        let session = mgr.try_session(code).unwrap();
+        assert_eq!(session.state.eliminated_players, vec![PlayerId(2)]);
+        assert!(session.state.stack.is_empty());
+        assert!(holds_play_land(
+            &engine_legal_actions_full(&session.state).0
+        ));
+    }
+
     /// S3. A target-branch voter's no-op concession approves the vote through
     /// the action handler, which returns the restored state with the
-    /// requester's decision inputs.
+    /// requester's decision inputs and no batch from the discarded branch.
     #[test]
     fn a_voters_noop_concession_returns_the_restored_state_and_its_decision() {
-        let (mgr, code, [token0, _token1, token2]) = bolt_ai_session();
-        mgr.try_session(&code)
-            .unwrap()
-            .handle_action(&token0, GameAction::PassPriority)
-            .expect("P0 passes");
-        let ai = mgr.try_session(&code).unwrap().run_ai();
-        assert!(ai.failure.is_none(), "{:?}", ai.failure);
-        mgr.try_session(&code)
-            .unwrap()
-            .handle_action(&token2, GameAction::PassPriority)
-            .expect("P2's pass resolves the Bolt");
-        {
-            let mut session = mgr.try_session(&code).unwrap();
-            assert_eq!(session.state.eliminated_players, vec![PlayerId(2)]);
-            assert!(session.state.stack.is_empty());
-            assert!(holds_play_land(
-                &engine_legal_actions_full(&session.state).0
-            ));
-            assert_eq!(
-                session.request_takeback(P0, RewindTarget::LastAction),
-                Ok(TakebackOutcome::Pending)
-            );
-        }
-
+        let (mgr, code, [_token0, _token1, token2]) = bolt_vote_pending();
         let handled = mgr
             .try_session(&code)
             .unwrap()
@@ -5575,14 +5587,69 @@ mod tests {
             )
             .expect("a concession is admitted during a vote");
         assert_eq!(handled.takeback, Some(TakebackResolution::Approved));
-        let (state, _, legal_actions, ..) = handled.result;
+        let (state, events, legal_actions, log_entries, ..) = handled.result;
         assert_eq!(state.waiting_for, WaitingFor::Priority { player: P0 });
         assert_eq!(state.stack.len(), 1, "the Bolt is back on the stack");
         assert!(state.eliminated_players.is_empty());
         assert_eq!(state.players[2].life, 3);
+        assert!(events.is_empty(), "{events:?}");
+        assert!(log_entries.is_empty(), "{log_entries:?}");
         let session = mgr.try_session(&code).unwrap();
         assert_eq!(legal_actions, engine_legal_actions_full(&session.state).0);
         assert!(!holds_play_land(&legal_actions));
+    }
+
+    /// S3b. An auto-pass armed for P0 runs on P2's no-op concession. Without a
+    /// vote its passes reach the result and the game log; when the concession
+    /// approves the vote, the handler returns and logs none of them.
+    #[test]
+    fn an_approving_concession_drops_the_batches_of_the_branch_it_discards() {
+        let concede_with_armed_auto_pass = |mgr: &SessionManager, code: &str, token2: &str| {
+            let dir = tempfile::tempdir().unwrap();
+            {
+                let mut session = mgr.try_session(code).unwrap();
+                session.game_log = Arc::new(GameFileCache::new(dir.path().to_path_buf()));
+                session.state.auto_pass.insert(
+                    P0,
+                    AutoPassMode::UntilTurnBoundary {
+                        until: engine::types::game_state::TurnBoundary::EndOfCurrentTurn,
+                    },
+                );
+            }
+            let handled = mgr
+                .try_session(code)
+                .unwrap()
+                .handle_action_with_card_db_outcome(
+                    token2,
+                    GameAction::Concede {
+                        player_id: PlayerId(2),
+                    },
+                    None,
+                )
+                .expect("P2's concession is admitted");
+            let logged = std::fs::read_to_string(dir.path().join(format!("{code}.events.jsonl")))
+                .unwrap_or_default();
+            (handled, logged)
+        };
+
+        let (mgr, code, [token0, _token1, token2]) = bolt_ai_session();
+        bolt_kills_p2(&mgr, &code, &token0, &token2);
+        let (handled, logged) = concede_with_armed_auto_pass(&mgr, &code, &token2);
+        assert_eq!(handled.takeback, None);
+        let (state, events, _, log_entries, ..) = handled.result;
+        assert_ne!(state.waiting_for, WaitingFor::Priority { player: P0 });
+        assert!(!events.is_empty());
+        assert!(!log_entries.is_empty());
+        assert!(!logged.is_empty());
+
+        let (mgr, code, [_token0, _token1, token2]) = bolt_vote_pending();
+        let (handled, logged) = concede_with_armed_auto_pass(&mgr, &code, &token2);
+        assert_eq!(handled.takeback, Some(TakebackResolution::Approved));
+        let (state, events, _, log_entries, ..) = handled.result;
+        assert_eq!(state.stack.len(), 1, "the Bolt is back on the stack");
+        assert!(events.is_empty(), "{events:?}");
+        assert!(log_entries.is_empty(), "{log_entries:?}");
+        assert!(logged.is_empty(), "{logged}");
     }
 
     // ── Turn-boundary rewind tests ───────────────────────────────────────
