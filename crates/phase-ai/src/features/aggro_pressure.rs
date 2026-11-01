@@ -2,8 +2,8 @@
 //!
 //! Parser AST verification — VERIFIED:
 //! - `CardFace.card_type.core_types: Vec<CoreType>`; `CoreType::Creature` at
-//!   `crates/engine/src/types/card_type.rs:74-77` (CR 302).
-//! - `CardFace.mana_cost: ManaCost` at `crates/engine/src/types/card.rs:51`;
+//!   `crates/phase-ast/src/types/card_type.rs` (CR 302).
+//! - `CardFace.mana_cost: ManaCost` at `crates/phase-ast/src/types/card.rs`;
 //!   `ManaCost::mana_value()` at `mana.rs:468` (CR 202.3).
 //! - `CardFace.keywords: Vec<Keyword>` at `card.rs:60` (CR 702.1: keywords
 //!   are named ability shorthands; reminder text summarizes their rules).

@@ -6,27 +6,28 @@ use crate::game::effects::{append_to_pending_continuation, mark_pending_continua
 use crate::game::filter;
 use crate::game::keywords;
 use crate::game::quantity::{
-    quantity_expr_uses_recipient, resolve_quantity_with_targets,
-    resolve_quantity_with_targets_and_recipient, resolve_quantity_with_targets_slice,
+    resolve_quantity_with_targets, resolve_quantity_with_targets_and_recipient,
+    resolve_quantity_with_targets_slice,
 };
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    names_resolution_chosen_recipient, DamageContextSnapshot, DamageSource, EachDamageRecipient,
-    Effect, EffectError, EffectKind, ExcessRecipient, PlayerFilter, QuantityExpr, ResolvedAbility,
-    TargetChoiceTiming, TargetDamageSourceBinding, TargetFilter, TargetRef,
+    names_resolution_chosen_recipient, quantity_expr_uses_recipient, DamageContextSnapshot,
+    DamageSource, EachDamageRecipient, Effect, EffectError, EffectKind, ExcessRecipient,
+    PlayerFilter, QuantityExpr, ResolvedAbility, TargetChoiceTiming, TargetDamageSourceBinding,
+    TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{DamageRecord, GameState};
+use crate::types::game_state::{DamageRecord, GameState, TriggerSourceRead};
 use crate::types::identifiers::ObjectId;
-use crate::types::keywords::KeywordKind;
+use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::player::{PlayerCounterKind, PlayerId};
 use crate::types::proposed_event::ProposedEvent;
 
 /// Source attributes needed for damage application (CR 120.3).
 /// Read from the source object before the mutable damage phase to avoid borrow conflicts.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct DamageContext {
     pub(crate) source_id: ObjectId,
     /// CR 400.7: The source incarnation observed before the damage event is
@@ -52,6 +53,10 @@ pub(crate) struct DamageContext {
     /// replacement pause+resume (the bonus is threaded through the snapshot and
     /// `PendingReplacement`). `0` on every ordinary damage leg.
     pub(crate) lifelink_bonus: u32,
+    /// CR 702.16 + CR 608.2h: Source name projection, used for
+    /// `ProtectionTarget::ChosenCardName`. Set from captured LKI name when
+    /// the source has departed its observed zone (e.g. Clone in graveyard or ceased token).
+    pub(crate) source_name: Option<String>,
 }
 
 /// A player-recipient filter's outcome; `NoReferent` must not fall through to the
@@ -416,6 +421,7 @@ impl DamageContext {
             // CR 702.15b: set only on a redirect leg; from_source rebuilds the base
             // context, so the resume restores the bonus from the parked record.
             lifelink_bonus: 0,
+            source_name: Some(obj.name.clone()),
         })
     }
 
@@ -436,6 +442,7 @@ impl DamageContext {
             // CR 120.4a: no excess redirect on the source-gone fallback path.
             excess_recipient: None,
             lifelink_bonus: 0,
+            source_name: None,
         }
     }
 }
@@ -457,6 +464,7 @@ impl From<DamageContextSnapshot> for DamageContext {
             // CR 702.15b: restore the deferred lifelink bonus so a redirect leg
             // resumed from a snapshot still gains the combined total.
             lifelink_bonus: snapshot.lifelink_bonus,
+            source_name: None,
         }
     }
 }
@@ -547,14 +555,17 @@ pub(crate) fn pre_replacement_damage_gate(
         }
     }
 
-    // CR 702.16b + CR 702.16e: Protection prevents damage from sources with the matching quality.
-    // Emits DamagePrevented so "when damage is prevented" triggers can fire.
+    // CR 702.16b + CR 702.16e + CR 608.2h: Protection prevents damage from sources
+    // with the matching quality. Emits DamagePrevented so "when damage is prevented"
+    // triggers can fire.
     if let TargetRef::Object(target_obj_id) = target {
-        if let (Some(target_obj), Some(source_obj)) = (
-            state.objects.get(target_obj_id),
-            state.objects.get(&ctx.source_id),
-        ) {
-            if keywords::protection_prevents_from(target_obj, source_obj) {
+        if let Some(target_obj) = state.objects.get(target_obj_id) {
+            let source_obj = state.objects.get(&ctx.source_id);
+            if keywords::protection_prevents_from_with_source_name(
+                target_obj,
+                source_obj,
+                ctx.source_name.as_deref(),
+            ) {
                 events.push(GameEvent::DamagePrevented {
                     source_id: ctx.source_id,
                     target: target.clone(),
@@ -565,15 +576,16 @@ pub(crate) fn pre_replacement_damage_gate(
         }
     }
 
-    // CR 702.16e + CR 615.1: "All damage that would be dealt to [a player with
+    // CR 702.16e + CR 615.1 + CR 608.2h: "All damage that would be dealt to [a player with
     // protection from the damage source] is prevented." Mirror the object-
     // protection gate above for player targets. Emits DamagePrevented so
     // prevention-triggered abilities still observe the event.
     if let TargetRef::Player(player_id) = target {
-        if crate::game::static_abilities::player_protection_from(
+        if crate::game::static_abilities::player_protection_from_with_source_name(
             state,
             *player_id,
             Some(ctx.source_id),
+            ctx.source_name.as_deref(),
         ) {
             events.push(GameEvent::DamagePrevented {
                 source_id: ctx.source_id,
@@ -1052,7 +1064,7 @@ pub(crate) fn apply_damage_after_replacement(
                 let redirect_ctx = DamageContext {
                     excess_recipient: None,
                     lifelink_bonus: primary_amount,
-                    ..*ctx
+                    ..ctx.clone()
                 };
                 redirected = true;
                 // Route through the same non-combat single-target pipeline the
@@ -1213,9 +1225,7 @@ fn stash_remaining_damage_chain(
     damage_source_id: ObjectId,
     remaining: impl IntoIterator<Item = (TargetRef, u32)>,
 ) {
-    let controller = ability.controller;
-    let mut iter = remaining.into_iter();
-    let Some((first_target, first_amount)) = iter.next() else {
+    let Some(mut head) = remaining_damage_chain(ability, damage_source_id, remaining) else {
         // No remaining batch work — still forward the parent's sub_ability so the
         // downstream chain resumes after the pending replacement choice resolves.
         if let Some(sub) = ability.sub_ability.as_ref() {
@@ -1226,17 +1236,33 @@ fn stash_remaining_damage_chain(
         }
         return;
     };
-
-    let mut head =
-        build_remaining_damage_node(damage_source_id, controller, first_target, first_amount);
-    for (target, amount) in iter {
-        let node = build_remaining_damage_node(damage_source_id, controller, target, amount);
-        append_to_sub_chain(&mut head, node);
-    }
     if let Some(sub) = ability.sub_ability.as_ref() {
         append_to_sub_chain(&mut head, cast_tail_with_parent_targets(sub, ability));
     }
     append_to_pending_continuation(state, Some(Box::new(head)));
+}
+
+/// CR 113.7a + CR 608.2h: Link the remaining (target, amount) recipients into a
+/// `sub_ability` chain. Every node keeps the parent's latched trigger source so a
+/// departed source is still evaluated by its last known information.
+fn remaining_damage_chain(
+    ability: &ResolvedAbility,
+    damage_source_id: ObjectId,
+    remaining: impl IntoIterator<Item = (TargetRef, u32)>,
+) -> Option<ResolvedAbility> {
+    let node = |target, amount| {
+        let mut node =
+            build_remaining_damage_node(damage_source_id, ability.controller, target, amount);
+        node.trigger_source = ability.trigger_source.clone();
+        node
+    };
+    let mut iter = remaining.into_iter();
+    let (first_target, first_amount) = iter.next()?;
+    let mut head = node(first_target, first_amount);
+    for (target, amount) in iter {
+        append_to_sub_chain(&mut head, node(target, amount));
+    }
+    Some(head)
 }
 
 /// CR 608.2c + CR 616.1e: Clone a damage effect's `sub_ability` tail for a
@@ -1531,6 +1557,74 @@ pub fn resolve_post_replacement(
     Ok(())
 }
 
+/// CR 608.2h + CR 702.16 + CR 113.7a: Single authority for resolving the
+/// `DamageContext` of an ability's damage source.
+///
+/// Builds the damage source projection from `ability.trigger_source`:
+/// - When `TriggerSourceRead::ExactLive`, uses the current live object;
+/// - Otherwise (`TriggerSourceRead::Latched`), uses the captured LKI name and characteristics,
+///   so a non-token Clone in the graveyard or a token that ceased to exist retains its
+///   battlefield last-known name.
+///
+/// When absent (e.g. non-triggered abilities), falls back to `DamageContext::from_source` /
+/// `DamageContext::fallback`.
+fn damage_context_from_ability(state: &GameState, ability: &ResolvedAbility) -> DamageContext {
+    let source_read = ability
+        .trigger_source
+        .as_ref()
+        .map(|source| source.source_read(state));
+
+    match source_read {
+        Some(TriggerSourceRead::ExactLive(obj)) => {
+            let mut ctx = DamageContext::from_source(state, obj.id)
+                .unwrap_or_else(|| DamageContext::fallback(obj.id, obj.controller));
+            ctx.source_name = Some(obj.name.clone());
+            ctx
+        }
+        Some(TriggerSourceRead::Latched(latched)) => {
+            // CR 608.2h + CR 400.7: the captured observation, not the object now
+            // occupying the id, supplies the source's characteristics. Prefer
+            // the exact-incarnation exit snapshot over the trigger-time snapshot.
+            let lki = crate::game::filter::exit_lki_for_incarnation(
+                state,
+                latched.identity.reference.object_id,
+                latched.identity.reference.incarnation,
+            )
+            .unwrap_or(&latched.lki);
+            // allow-raw-authority: reading characteristic snapshot from departed-source LKI
+            let has_keyword = |kind: KeywordKind| lki.keywords.iter().any(|k| k.kind() == kind);
+            let mut ctx = DamageContext::fallback(ability.source_id, lki.controller);
+            ctx.source_incarnation = Some(latched.identity.reference.incarnation);
+            ctx.source_name = Some(lki.name.clone());
+            ctx.source_is_creature = lki.card_types.contains(&CoreType::Creature);
+            ctx.has_deathtouch = has_keyword(KeywordKind::Deathtouch);
+            ctx.has_lifelink = has_keyword(KeywordKind::Lifelink);
+            ctx.has_wither = has_keyword(KeywordKind::Wither);
+            ctx.has_infect = has_keyword(KeywordKind::Infect);
+            ctx.combat_damage_poison = lki
+                .keywords
+                .iter()
+                .map(|k| match k {
+                    Keyword::Toxic(n) => *n,
+                    _ => 0,
+                })
+                .sum();
+            ctx
+        }
+        None => {
+            let mut ctx = DamageContext::from_source(state, ability.source_id)
+                .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller));
+            if ctx.source_name.is_none() {
+                ctx.source_name = state
+                    .objects
+                    .get(&ability.source_id)
+                    .map(|o| o.name.clone());
+            }
+            ctx
+        }
+    }
+}
+
 /// CR 120.2b: the object that deals a single-source `DealDamage` node's damage,
 /// or `None` where no object deals it.
 fn single_damage_source(
@@ -1555,10 +1649,7 @@ fn single_damage_source(
                 .and_then(|id| DamageContext::from_source(state, id))
                 .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller)),
         ),
-        None => Some(
-            DamageContext::from_source(state, ability.source_id)
-                .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller)),
-        ),
+        None => Some(damage_context_from_ability(state, ability)),
         // CR 120.1: multi-source per-power damage is dispatched to
         // `resolve_each_target_power_damage` (each source has its own
         // `DamageContext`) before a single source is asked for.
@@ -2057,7 +2148,7 @@ pub fn resolve_all(
         None
     };
     let mut ctx = filter::FilterContext::from_ability(ability);
-    if let Some(source_ctx) = target_source_ctx {
+    if let Some(ref source_ctx) = target_source_ctx {
         ctx.source_id = source_ctx.source_id;
     }
     let matching_objects: Vec<_> = state
@@ -2102,8 +2193,7 @@ pub fn resolve_all(
             .and_then(crate::game::targeting::extract_source_from_event)
             .and_then(|id| DamageContext::from_source(state, id))
             .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller)),
-        None => DamageContext::from_source(state, ability.source_id)
-            .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller)),
+        None => damage_context_from_ability(state, ability),
         // CR 120.1: `EachTarget` (multi-source per-power) is only produced by the
         // parser for the single-recipient `DealDamage` shape; the batch
         // `DamageAll` form is never constructed with it.
@@ -2186,8 +2276,16 @@ fn collect_matching_players(
                     // The generic predicate authority is used here; ability-target
                     // anchors are resolved by the player_scope driver, not by this
                     // damage-population helper.
-                    PlayerFilter::AllExcept { ref exclude } => {
-                        !crate::game::effects::matches_player_scope(
+                    PlayerFilter::AllExcept {
+                        ref exclude,
+                        relation,
+                    } => {
+                        crate::game::players::matches_relation(
+                            state,
+                            p.id,
+                            source_controller,
+                            relation,
+                        ) && !crate::game::effects::matches_player_scope(
                             state,
                             p.id,
                             exclude,
@@ -2455,8 +2553,20 @@ pub fn resolve_each_player(
         }
     };
 
-    let ctx = DamageContext::from_source(state, ability.source_id)
-        .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller));
+    let ctx = damage_context_from_ability(state, ability);
+
+    // CR 115.1 + CR 608.2c + CR 109.4 (R3): resolve an `AllExcept`
+    // exclusion through the shared `players_for_filter` authority once,
+    // ahead of recipient selection, and reuse the result per player —
+    // recursive unions, declared-target fallback, and parent-object
+    // anchors included. No ability-blind fallback and no duplicate
+    // TargetPlayer/AllExcept reading beside the authority.
+    let excluded: Vec<PlayerId> = match &player_filter {
+        PlayerFilter::AllExcept { exclude, .. } => {
+            crate::game::effects::speed_effects::players_for_filter(state, exclude, ability)
+        }
+        _ => Vec::new(),
+    };
 
     // Collect matching player IDs first to avoid borrow issues.
     let player_ids: Vec<PlayerId> = state
@@ -2467,15 +2577,16 @@ pub fn resolve_each_player(
                 && match &player_filter {
                     PlayerFilter::Controller => p.id == ability.controller,
                     PlayerFilter::All => true,
-                    // CR 608.2c + CR 109.4: all players except the anchor's set.
-                    PlayerFilter::AllExcept { exclude } => {
-                        !crate::game::effects::matches_player_scope(
+                    // CR 608.2c + CR 109.4: players matching the base
+                    // `relation` except the anchor's set, resolved once
+                    // through the shared authority above.
+                    PlayerFilter::AllExcept { relation, .. } => {
+                        crate::game::players::matches_relation(
                             state,
                             p.id,
-                            exclude,
                             ability.controller,
-                            ability.source_id,
-                        )
+                            *relation,
+                        ) && !excluded.contains(&p.id)
                     }
                     // CR 102.1 + CR 608.2c: the union of the members, answered
                     // member by member by the generic predicate authority.
@@ -2998,7 +3109,7 @@ pub fn resolve_each_source_deals_damage(
         match recipient {
             EachDamageRecipient::Shared(_) => {
                 for recip in &shared_recipients {
-                    entries.push((source_id, ctx, recip.clone(), amt));
+                    entries.push((source_id, ctx.clone(), recip.clone(), amt));
                 }
             }
             // CR 109.4 + CR 120.3a: each source deals to the player that
@@ -3049,7 +3160,7 @@ pub fn resolve_each_source_deals_damage(
         };
         match replacement::replace_event(state, proposed, events) {
             ReplacementResult::Execute(event) => {
-                replaced.push((*ctx, event));
+                replaced.push((ctx.clone(), event));
             }
             ReplacementResult::Prevented => {
                 // CR 615.5: fire any prevention rider (e.g. Phyrexian Hydra
@@ -8466,5 +8577,57 @@ mod attacked_referent_recipient_tests {
             resolve_effect_recipients(&state, &ability, &referent, false),
             vec![TargetRef::Player(PlayerId(1))]
         );
+    }
+
+    /// CR 113.7a + CR 608.2h: continuation nodes built for the recipients left after a
+    /// replacement pause keep the latched trigger source, so a departed source (a
+    /// ceased token) is still read by its last known name on resume.
+    #[test]
+    fn remaining_damage_chain_nodes_keep_latched_trigger_source() {
+        let mut state = GameState::new_two_player(42);
+        let token = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Goblin".to_string(),
+            Zone::Battlefield,
+        );
+        let latched =
+            crate::game::triggers::trigger_source_context_for_latch(&state, &state.objects[&token]);
+        state.objects.remove(&token);
+
+        let mut ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+            vec![],
+            token,
+            PlayerId(1),
+        );
+        ability.trigger_source = Some(latched);
+
+        let head = remaining_damage_chain(
+            &ability,
+            token,
+            [
+                (TargetRef::Player(PlayerId(0)), 1),
+                (TargetRef::Player(PlayerId(1)), 2),
+                (TargetRef::Player(PlayerId(0)), 3),
+            ],
+        )
+        .expect("three remaining recipients");
+
+        let mut count = 0;
+        let mut node = Some(&head);
+        while let Some(n) = node {
+            count += 1;
+            let ctx = damage_context_from_ability(&state, n);
+            assert_eq!(ctx.source_name.as_deref(), Some("Goblin"));
+            node = n.sub_ability.as_deref();
+        }
+        assert_eq!(count, 3, "positive guard: every recipient node was visited");
     }
 }

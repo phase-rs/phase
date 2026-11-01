@@ -1,5 +1,10 @@
 {
-  "playerLatency": {"host":"Anfitrião","waiting":"Aguardando","value":"{{ms}} ms","description":"Latência de ida e volta até o anfitrião. A falta de resposta não desconecta a partida."},
+  "playerLatency": {
+    "host": "Anfitrião",
+    "waiting": "Aguardando",
+    "value": "{{ms}} ms",
+    "description": "Latência de ida e volta até o anfitrião. A falta de resposta não desconecta a partida."
+  },
   "abilityBlock": {
     "badge": "Bloqueada",
     "cantBeActivated": "Esta habilidade não pode ser ativada",
@@ -27,6 +32,7 @@
     "shorten": "Shorten it",
     "decline": "Decline the shortcut",
     "untilLethal": "Repeat until the game ends.",
+    "withoutEnd": "Repeat without end. If every player accepts, the game is a draw.",
     "fixedCount_one": "Repeat at most once.",
     "fixedCount_other": "Repeat at most {{count}} times.",
     "convokeInfo_one": "Auto-taps up to 1 creature for convoke each iteration.",
@@ -840,7 +846,7 @@
     "targetingLabel": "Mirando {{label}}",
     "titleTargets": "Alvos: {{targets}}",
     "titlePaid": "Pago: {{paid}}",
-    "titleContext": "Contexto: {{context}}",
+    "titleContext": "Contexto: {{items}}",
     "revealedCards": "Revelada: {{cards}}",
     "paidXValue": "X={{value}}",
     "paidManaSpent": "{{amount}} de mana",
@@ -1552,6 +1558,7 @@
     "effectZone": {
       "titleSacrifice": "Sacrificar",
       "titleTopdeck": "Colocar no Grimório",
+      "titleBottomdeck": "Colocar no Grimório",
       "titleBattlefield": "Colocar no Campo de Batalha",
       "titleHand": "Devolver",
       "titleExile": "Exilar",
@@ -1571,6 +1578,12 @@
       "subtitleTopdeckUpTo_other": "Escolha até {{count}} cartas para colocar no topo de seu grimório",
       "subtitleTopdeckRange_one": "Escolha {{min}}-{{count}} carta para colocar no topo de seu grimório",
       "subtitleTopdeckRange_other": "Escolha {{min}}-{{count}} cartas para colocar no topo de seu grimório",
+      "subtitleBottomdeckExact_one": "Escolha {{count}} carta para colocar no fundo de seu grimório",
+      "subtitleBottomdeckExact_other": "Escolha {{count}} cartas para colocar no fundo de seu grimório",
+      "subtitleBottomdeckUpTo_one": "Escolha até {{count}} carta para colocar no fundo de seu grimório",
+      "subtitleBottomdeckUpTo_other": "Escolha até {{count}} cartas para colocar no fundo de seu grimório",
+      "subtitleBottomdeckRange_one": "Escolha {{min}}-{{count}} carta para colocar no fundo de seu grimório",
+      "subtitleBottomdeckRange_other": "Escolha {{min}}-{{count}} cartas para colocar no fundo de seu grimório",
       "subtitleBattlefieldExact_one": "Escolha {{count}} carta para colocar no campo de batalha",
       "subtitleBattlefieldExact_other": "Escolha {{count}} cartas para colocar no campo de batalha",
       "subtitleBattlefieldUpTo_one": "Escolha até {{count}} carta para colocar no campo de batalha",
@@ -1616,14 +1629,17 @@
       "labelSkip": "Pular",
       "labelDecline": "Recusar",
       "labelPutOnTop": "Colocar no topo ({{order}})",
+      "labelPutOnBottom": "Colocar no fundo ({{order}})",
       "labelConfirm": "Confirmar ({{selected}}/{{count}})",
       "labelTop": "Topo ({{selected}}/{{count}})",
+      "labelBottom": "Fundo ({{selected}}/{{count}})",
       "labelPut": "Colocar ({{selected}}/{{count}})",
       "labelReturn": "Devolver ({{selected}}/{{count}})",
       "labelExile": "Exilar ({{selected}}/{{count}})",
       "labelAttach": "Attach ({{selected}}/{{count}})",
       "labelCast": "Conjurar ({{selected}}/{{count}})",
       "orderTop": "Topo",
+      "orderBottom": "Fundo",
       "orderSecond": "2.º",
       "orderThird": "3.º",
       "orderFourth": "4.º",
@@ -2389,6 +2405,7 @@
     "cardFallback": "Card",
     "title": "Put {{name}} on top or bottom of library",
     "top": "Top of library",
+    "nthFromTop": "Position {{n}} from the top of library",
     "bottom": "Bottom of library"
   },
   "mutateMerge": {
@@ -2501,6 +2518,7 @@
     "triggerFallback": "Gatilho {{number}}"
   },
   "costReductionOrder": {
+    "announcedHybrids": "Pagamentos híbridos anunciados",
     "eyebrow": "Ordem das Reduções de Custo",
     "title": "Ordene Suas Reduções de Custo",
     "subtitle": "Estas reduções fixam um custo total diferente conforme a ordem em que você as aplica (CR 601.2f). O topo desta lista é aplicado primeiro.",
@@ -2901,6 +2919,36 @@
       "winner": "{{name}} venceu a competição.",
       "tie": "Empate: nada acontece.",
       "cancelled": "A competição foi cancelada: nada acontece."
+    }
+  },
+  "unActions": {
+    "menu": {
+      "title": "Un-Actions",
+      "open": "Open Un-actions menu",
+      "close": "Close Un-actions menu",
+      "TouchFace": "Touch your face",
+      "TouchTable": "Slap the table",
+      "Laugh": "Laugh out loud",
+      "FlickCards": "Flick your cards",
+      "saysWord": "Say a word…",
+      "saysNumber": "Say a number…",
+      "wordPlaceholder": "A word",
+      "numberPlaceholder": "A number",
+      "say": "Say it!"
+    },
+    "gotcha": {
+      "button": "Gotcha!"
+    },
+    "sayPhrase": {
+      "title": "Say it to stop the effect",
+      "say": "Say “{{phrase}}”",
+      "stayQuiet": "Stay quiet"
+    },
+    "fx": {
+      "touchFace": "*smack*",
+      "touchTable": "SLAP!",
+      "laugh": "HA HA HA!",
+      "flickCards": "thwip thwip!"
     }
   }
 }

@@ -1,5 +1,10 @@
 {
-  "playerLatency": {"host":"Anfitrión","waiting":"Esperando","value":"{{ms}} ms","description":"Latencia de ida y vuelta al anfitrión. La falta de respuesta no desconecta la partida."},
+  "playerLatency": {
+    "host": "Anfitrión",
+    "waiting": "Esperando",
+    "value": "{{ms}} ms",
+    "description": "Latencia de ida y vuelta al anfitrión. La falta de respuesta no desconecta la partida."
+  },
   "abilityBlock": {
     "badge": "Bloqueada",
     "cantBeActivated": "Esta habilidad no puede activarse",
@@ -27,6 +32,7 @@
     "shorten": "Shorten it",
     "decline": "Decline the shortcut",
     "untilLethal": "Repeat until the game ends.",
+    "withoutEnd": "Repeat without end. If every player accepts, the game is a draw.",
     "fixedCount_one": "Repeat at most once.",
     "fixedCount_other": "Repeat at most {{count}} times.",
     "convokeInfo_one": "Auto-taps up to 1 creature for convoke each iteration.",
@@ -840,7 +846,7 @@
     "targetingLabel": "Apuntando a {{label}}",
     "titleTargets": "Objetivos: {{targets}}",
     "titlePaid": "Pagado: {{paid}}",
-    "titleContext": "Contexto: {{context}}",
+    "titleContext": "Contexto: {{items}}",
     "revealedCards": "Revelada: {{cards}}",
     "paidXValue": "X={{value}}",
     "paidManaSpent": "{{amount}} de maná",
@@ -1552,6 +1558,7 @@
     "effectZone": {
       "titleSacrifice": "Sacrificar",
       "titleTopdeck": "Poner en la biblioteca",
+      "titleBottomdeck": "Poner en la biblioteca",
       "titleBattlefield": "Poner en el campo de batalla",
       "titleHand": "Devolver",
       "titleExile": "Exiliar",
@@ -1571,6 +1578,12 @@
       "subtitleTopdeckUpTo_other": "Elige hasta {{count}} cartas para poner en la parte superior de tu biblioteca",
       "subtitleTopdeckRange_one": "Elige {{min}}-{{count}} carta para poner en la parte superior de tu biblioteca",
       "subtitleTopdeckRange_other": "Elige {{min}}-{{count}} cartas para poner en la parte superior de tu biblioteca",
+      "subtitleBottomdeckExact_one": "Elige {{count}} carta para poner en la parte inferior de tu biblioteca",
+      "subtitleBottomdeckExact_other": "Elige {{count}} cartas para poner en la parte inferior de tu biblioteca",
+      "subtitleBottomdeckUpTo_one": "Elige hasta {{count}} carta para poner en la parte inferior de tu biblioteca",
+      "subtitleBottomdeckUpTo_other": "Elige hasta {{count}} cartas para poner en la parte inferior de tu biblioteca",
+      "subtitleBottomdeckRange_one": "Elige {{min}}-{{count}} carta para poner en la parte inferior de tu biblioteca",
+      "subtitleBottomdeckRange_other": "Elige {{min}}-{{count}} cartas para poner en la parte inferior de tu biblioteca",
       "subtitleBattlefieldExact_one": "Elige {{count}} carta para poner en el campo de batalla",
       "subtitleBattlefieldExact_other": "Elige {{count}} cartas para poner en el campo de batalla",
       "subtitleBattlefieldUpTo_one": "Elige hasta {{count}} carta para poner en el campo de batalla",
@@ -1616,14 +1629,17 @@
       "labelSkip": "Omitir",
       "labelDecline": "Rechazar",
       "labelPutOnTop": "Poner encima ({{order}})",
+      "labelPutOnBottom": "Poner en el fondo ({{order}})",
       "labelConfirm": "Confirmar ({{selected}}/{{count}})",
       "labelTop": "Superior ({{selected}}/{{count}})",
+      "labelBottom": "Fondo ({{selected}}/{{count}})",
       "labelPut": "Poner ({{selected}}/{{count}})",
       "labelReturn": "Devolver ({{selected}}/{{count}})",
       "labelExile": "Exiliar ({{selected}}/{{count}})",
       "labelAttach": "Attach ({{selected}}/{{count}})",
       "labelCast": "Lanzar ({{selected}}/{{count}})",
       "orderTop": "Superior",
+      "orderBottom": "Fondo",
       "orderSecond": "2.º",
       "orderThird": "3.º",
       "orderFourth": "4.º",
@@ -2389,6 +2405,7 @@
     "cardFallback": "Card",
     "title": "Pon {{name}} en la parte superior o inferior de la biblioteca",
     "top": "Superior de la biblioteca",
+    "nthFromTop": "Position {{n}} from the top of library",
     "bottom": "Inferior de la biblioteca"
   },
   "mutateMerge": {
@@ -2501,6 +2518,7 @@
     "triggerFallback": "Disparo {{number}}"
   },
   "costReductionOrder": {
+    "announcedHybrids": "Pagos híbridos anunciados",
     "eyebrow": "Orden de reducción de costes",
     "title": "Ordena tus reducciones de coste",
     "subtitle": "Estas reducciones fijan un coste total distinto según el orden en que las apliques (CR 601.2f). La parte superior de esta lista se aplica primero.",
@@ -2901,6 +2919,36 @@
       "winner": "{{name}} ha ganado el concurso.",
       "tie": "Empate: no pasa nada.",
       "cancelled": "El concurso se canceló: no pasa nada."
+    }
+  },
+  "unActions": {
+    "menu": {
+      "title": "Un-Actions",
+      "open": "Open Un-actions menu",
+      "close": "Close Un-actions menu",
+      "TouchFace": "Touch your face",
+      "TouchTable": "Slap the table",
+      "Laugh": "Laugh out loud",
+      "FlickCards": "Flick your cards",
+      "saysWord": "Say a word…",
+      "saysNumber": "Say a number…",
+      "wordPlaceholder": "A word",
+      "numberPlaceholder": "A number",
+      "say": "Say it!"
+    },
+    "gotcha": {
+      "button": "Gotcha!"
+    },
+    "sayPhrase": {
+      "title": "Say it to stop the effect",
+      "say": "Say “{{phrase}}”",
+      "stayQuiet": "Stay quiet"
+    },
+    "fx": {
+      "touchFace": "*smack*",
+      "touchTable": "SLAP!",
+      "laugh": "HA HA HA!",
+      "flickCards": "thwip thwip!"
     }
   }
 }

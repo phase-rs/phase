@@ -9,7 +9,7 @@
 
 #[test]
 fn cr_annotation_for_saddle_keyword_is_702_171a() {
-    let src = include_str!("../../src/types/keywords.rs");
+    let src = include_str!("../../../phase-ast/src/types/keywords.rs");
     assert!(
         !src.contains("CR 702.173: Saddle"),
         "types/keywords.rs must not annotate Saddle with CR 702.173 (Freerunning)"
@@ -34,7 +34,7 @@ fn cr_annotation_for_saddle_keyword_is_702_171a() {
 
 #[test]
 fn cr_annotation_for_saddled_trigger_mode_is_702_171b() {
-    let src = include_str!("../../src/types/triggers.rs");
+    let src = include_str!("../../../phase-ast/src/types/triggers.rs");
     assert!(
         !src.contains("CR 702.174: Triggers when a creature becomes saddled"),
         "types/triggers.rs Saddled must use CR 702.171b, not CR 702.174 (Gift)"
@@ -85,7 +85,7 @@ fn cr_annotation_for_station_tap_cost_is_701_26a() {
 
 #[test]
 fn cr_annotation_for_oracle_keyword_saddle_parser_is_702_171a() {
-    let src = include_str!("../../src/parser/oracle_keyword.rs");
+    let src = include_str!("../../../phase-parser/src/parser/oracle_keyword.rs");
     assert!(
         !src.contains("CR 702.173: Saddle"),
         "parser/oracle_keyword.rs must not annotate Saddle with CR 702.173 (Freerunning)"

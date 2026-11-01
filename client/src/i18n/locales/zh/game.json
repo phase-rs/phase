@@ -615,15 +615,18 @@
     },
     "effectZone": {
       "labelAttach": "贴附（{{selected}}/{{count}}）",
+      "labelBottom": "牌库底（{{selected}}/{{count}}）",
       "labelCast": "施放（{{selected}}/{{count}}）",
       "labelConfirm": "确认（{{selected}}/{{count}}）",
       "labelDecline": "拒绝",
       "labelExile": "放逐（{{selected}}/{{count}}）",
       "labelPut": "放置（{{selected}}/{{count}}）",
+      "labelPutOnBottom": "置于牌库底（{{order}}）",
       "labelPutOnTop": "置于牌库顶（{{order}}）",
       "labelReturn": "移回（{{selected}}/{{count}}）",
       "labelSkip": "跳过",
       "labelTop": "牌库顶（{{selected}}/{{count}}）",
+      "orderBottom": "底部",
       "orderFifth": "第5张",
       "orderFourth": "第4张",
       "orderPosition": "第{{position}}位",
@@ -634,6 +637,12 @@
       "subtitleAttachExact_other": "选择{{count}}件要贴附的武具",
       "subtitleAttachRange_one": "选择{{min}}-{{count}}件要贴附的武具",
       "subtitleAttachRange_other": "选择{{min}}-{{count}}件要贴附的武具",
+      "subtitleBottomdeckExact_one": "选择{{count}}张要置于你牌库底的牌",
+      "subtitleBottomdeckExact_other": "选择{{count}}张要置于你牌库底的牌",
+      "subtitleBottomdeckRange_one": "选择{{min}}-{{count}}张要置于你牌库底的牌",
+      "subtitleBottomdeckRange_other": "选择{{min}}-{{count}}张要置于你牌库底的牌",
+      "subtitleBottomdeckUpTo_one": "至多选择{{count}}张要置于你牌库底的牌",
+      "subtitleBottomdeckUpTo_other": "至多选择{{count}}张要置于你牌库底的牌",
       "subtitleCastExact_one": "选择{{count}}张要施放的牌",
       "subtitleCastExact_other": "选择{{count}}张要施放的牌",
       "subtitleCastUpTo_one": "至多选择{{count}}张要施放的牌",
@@ -685,8 +694,9 @@
       "subtitleUntapUpTo_one": "至多选择{{count}}个要竖置的永久物",
       "subtitleUntapUpTo_other": "至多选择{{count}}个要竖置的永久物",
       "titleAttach": "贴附",
-      "titleCast": "施放",
       "titleBattlefield": "放进战场",
+      "titleBottomdeck": "置于牌库底",
+      "titleCast": "施放",
       "titleExile": "放逐",
       "titleHand": "移回",
       "titleSacrifice": "牺牲",
@@ -1152,6 +1162,7 @@
     "respondTitle": "有人提议循环捷径",
     "shorten": "缩短循环",
     "untilLethal": "重复直到游戏结束。",
+    "withoutEnd": "无限重复。若所有玩家都接受，本局游戏为平局。",
     "winKind": {
       "Advantage": "此循环能产生无限的优势。",
       "Decking": "此循环让一名对手抓空牌库。",
@@ -1162,6 +1173,7 @@
     }
   },
   "costReductionOrder": {
+    "announcedHybrids": "已宣告的混血法术力支付",
     "appliedFirst": "最先应用",
     "appliedLast": "最后应用",
     "cancel": "取消",
@@ -2508,7 +2520,7 @@
     "selectedModes": "已选模式",
     "targetingLabel": "正在指定目标：{{label}}",
     "title": "堆叠",
-    "titleContext": "上下文：{{context}}",
+    "titleContext": "上下文：{{items}}",
     "titlePaid": "已支付：{{paid}}",
     "titleTargets": "目标：{{targets}}",
     "triggered": "触发式",
@@ -2629,6 +2641,7 @@
   "topOrBottom": {
     "bottom": "牌库底",
     "cardFallback": "牌",
+    "nthFromTop": "Position {{n}} from the top of library",
     "title": "将{{name}}置于牌库顶或牌库底",
     "top": "牌库顶"
   },
@@ -2906,6 +2919,36 @@
       "winner": "{{name}} 赢得了比赛。",
       "tie": "平局：什么也不会发生。",
       "cancelled": "比赛已取消：什么也不会发生。"
+    }
+  },
+  "unActions": {
+    "menu": {
+      "title": "Un-Actions",
+      "open": "Open Un-actions menu",
+      "close": "Close Un-actions menu",
+      "TouchFace": "Touch your face",
+      "TouchTable": "Slap the table",
+      "Laugh": "Laugh out loud",
+      "FlickCards": "Flick your cards",
+      "saysWord": "Say a word…",
+      "saysNumber": "Say a number…",
+      "wordPlaceholder": "A word",
+      "numberPlaceholder": "A number",
+      "say": "Say it!"
+    },
+    "gotcha": {
+      "button": "Gotcha!"
+    },
+    "sayPhrase": {
+      "title": "Say it to stop the effect",
+      "say": "Say “{{phrase}}”",
+      "stayQuiet": "Stay quiet"
+    },
+    "fx": {
+      "touchFace": "*smack*",
+      "touchTable": "SLAP!",
+      "laugh": "HA HA HA!",
+      "flickCards": "thwip thwip!"
     }
   }
 }

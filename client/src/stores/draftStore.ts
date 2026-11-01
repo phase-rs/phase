@@ -73,6 +73,7 @@ import {
   type DraftRunFormat,
   type DraftRunState,
 } from "../services/quickDraftPersistence";
+import { usePreferencesStore } from "./preferencesStore";
 import { useGameStore } from "./gameStore";
 import { getSharedAdapter } from "../adapter/wasm-adapter";
 import type { GameFormat, MatchType } from "../adapter/types";
@@ -588,6 +589,7 @@ async function startLocalDraft(input: {
     const view = await withDraftEngineOperation((lease) => {
       if (lifecycle !== lifecycleGeneration) throw new Error("Stale draft start");
       lease.loadCardDatabase(database);
+      lease.setPickEnhancements(usePreferencesStore.getState().draftPickEnhancements);
       if (lifecycle !== lifecycleGeneration) throw new Error("Stale draft start");
       return input.initialize(lease);
     });
@@ -1372,6 +1374,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()((set,
       const restored = await withDraftEngineOperation((lease) => {
         if (lifecycle !== lifecycleGeneration) throw new Error("Stale draft resume");
         lease.loadCardDatabase(database);
+        lease.setPickEnhancements(usePreferencesStore.getState().draftPickEnhancements);
         if (lifecycle !== lifecycleGeneration) throw new Error("Stale draft resume");
         return {
           view: lease.importSession(saved.sessionJson, meta.difficulty),

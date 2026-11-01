@@ -412,11 +412,12 @@ mod tests {
             parent_target_missing_reason: None,
             activation_cost_reduction: None,
             activation_record: None,
+            control_change_instruction: None,
         }
     }
 
     /// Zimone, Paradox Sculptor's real activated line, committed verbatim at
-    /// `crates/engine/src/parser/swallow_check.rs`.
+    /// `crates/phase-parser/src/parser/swallow_check.rs`.
     const ZIMONE_ACTIVATED_LINE: &str = "{G}{U}, {T}: Double the number of each kind of counter \
         on up to two target creatures and/or artifacts you control.";
 

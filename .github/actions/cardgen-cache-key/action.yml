@@ -1,0 +1,72 @@
+name: Card-data cache key
+description: >
+  Derive the content hash that keys the generated card-data caches
+  (`cardgen-` and `cardgen-gates-v1-`) from the MTGJSON input and the engine
+  sources, without `hashFiles()`. Run after AtomicCards.json is in place.
+
+outputs:
+  hash:
+    description: Hex content hash of every input that can change oracle-gen output.
+    value: ${{ steps.hash.outputs.hash }}
+
+runs:
+  using: composite
+  steps:
+    - name: Hash card-data inputs
+      id: hash
+      shell: bash
+      # Replaces `hashFiles(...)` in the cardgen cache keys. The runner's
+      # hashFiles intermittently hangs until its 120 s evaluation limit and
+      # fails the step ("couldn't finish within 120 seconds") on the same
+      # inputs it hashes in ~1 s elsewhere in the same job. actions/cache also
+      # re-evaluates its `key` input in the post (save) step, so the hang could
+      # fail a job after every gate had passed. A step output is evaluated once
+      # and is a plain string to every later use.
+      #
+      # ci.yml (card-data-gate) and .github/actions/ai-card-data-cache SHARE the
+      # `cardgen-` cache entries, so both must take the key from this action.
+      # Change the input set only here.
+      #
+      # Inputs, matching what oracle-gen's output depends on:
+      #   - data/mtgjson/AtomicCards.json (gitignored, so hashed by content)
+      #   - engine, phase-ast and phase-parser sources, plus crates/phase-ast/data/** and build.rs, which the
+      #     phase-ast lib compiles in (include_str! / OUT_DIR embed)
+      #   - crates/engine/Cargo.toml, crates/phase-ast/Cargo.toml, crates/phase-parser/Cargo.toml and Cargo.lock (dep bumps such as nom)
+      #   - data/bracket_lists.json, which oracle-gen reads from its data dir and
+      #     stamps into each card's bracket signals
+      # Tracked inputs use `git ls-files -s`: the index blob SHAs of the
+      # checked-out tree, a content hash with no file reads. Reading the index
+      # rather than the work tree also keeps the key fixed when oracle-gen's
+      # write-if-changed later rewrites oracle-subtypes.json.
+      run: |
+        set -euo pipefail
+        mtgjson=data/mtgjson/AtomicCards.json
+        if [ ! -s "$mtgjson" ]; then
+          echo "::error::$mtgjson is missing or empty — download MTGJSON before deriving the card-data cache key"
+          exit 1
+        fi
+        paths=(
+          ':(glob)crates/engine/src/**/*.rs'
+          ':(glob)crates/phase-ast/src/**/*.rs'
+          ':(glob)crates/phase-parser/src/**/*.rs'
+          crates/phase-ast/data
+          crates/phase-ast/build.rs
+          crates/engine/Cargo.toml
+          crates/phase-ast/Cargo.toml
+          crates/phase-parser/Cargo.toml
+          Cargo.lock
+          data/bracket_lists.json
+        )
+        # Validate each path independently, so a rename that drops one input
+        # from the key fails loudly instead of silently freezing the key on it.
+        for p in "${paths[@]}"; do
+          if [ -z "$(git ls-files -s -- "$p")" ]; then
+            echo "::error::card-data cache input '$p' matched no tracked files — update .github/actions/cardgen-cache-key"
+            exit 1
+          fi
+        done
+        hash="$({
+          git ls-files -s -- "${paths[@]}"
+          sha256sum "$mtgjson"
+        } | sha256sum | cut -d' ' -f1)"
+        echo "hash=$hash" >> "$GITHUB_OUTPUT"
