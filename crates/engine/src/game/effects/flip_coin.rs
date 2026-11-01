@@ -36,10 +36,15 @@ enum CoinFlipOutcome {
 
 /// CR 705.3: where a run stands in the set of coins one instruction flips at
 /// once. An `Exactly` run ("flip five coins") is one set; an `UntilLoss` run
-/// flips one coin at a time, so each of its flips is its own set. Run-local and
-/// never persisted: a set with an indicated result never suspends (see
-/// `flip_through_replacement`), and a run resumed from a Krark's Thumb keep
-/// choice continues a set that had none.
+/// flips one coin at a time, so each of its flips is its own set.
+///
+/// Run-local and never persisted: under the currently supported coin-flip
+/// replacements, a set with an indicated result never parks a `PendingCoinFlip`
+/// frame (it settles inline in `flip_through_replacement`, and `FlipRun::park`
+/// asserts it), so a run resumed from a Krark's Thumb keep choice continues a
+/// set that had none. Branch or reward choices can still suspend and abandon a
+/// run under the pre-existing behavior of `settle_flip` and `complete_run`:
+/// they return `Suspended` without parking a frame, so nothing resumes the run.
 #[derive(Debug, Clone, Copy)]
 enum FlipSet {
     /// No coin of the current set has been flipped.

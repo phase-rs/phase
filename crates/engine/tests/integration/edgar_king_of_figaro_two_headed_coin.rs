@@ -530,6 +530,130 @@ fn edgar_in_the_graveyard_fixes_nothing() {
         .contains(&P0));
 }
 
+// --- Per-player isolation ---------------------------------------------------
+
+const SORCERERS_STRONGBOX: &str =
+    "{2}, {T}: Flip a coin. If you win the flip, sacrifice this artifact and draw three cards.";
+
+fn add_strongbox(scenario: &mut GameScenario, player: PlayerId) -> ObjectId {
+    scenario
+        .add_artifact_from_oracle(player, "Sorcerer's Strongbox", SORCERERS_STRONGBOX)
+        .id()
+}
+
+fn add_colorless(runner: &mut GameRunner, player: PlayerId, count: usize) {
+    for _ in 0..count {
+        let unit = ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]);
+        runner.state_mut().players[player.0 as usize]
+            .mana_pool
+            .add(unit);
+    }
+}
+
+/// `player` activates `strongbox` with the coin pinned to `outcome`, and the
+/// activation resolves. P0 (the active player) passes on an empty stack first
+/// when it is P1's turn to act.
+fn activate_strongbox_pinned(
+    runner: &mut GameRunner,
+    player: PlayerId,
+    strongbox: ObjectId,
+    outcome: bool,
+) -> Drive {
+    for _ in 0..4 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { player: holder } if holder == player => break,
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("pass on an empty stack");
+            }
+            other => panic!("expected priority, got {other:?}"),
+        }
+    }
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: strongbox,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Sorcerer's Strongbox is activatable");
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "reach: the ability is on the stack"
+    );
+    pin(runner.state_mut(), &[outcome]);
+    drive_to_rest(runner)
+}
+
+/// Probe P3. CR 705.3 + CR 109.5: the window is per player. On P0's turn, with
+/// Edgar controlled by P1, P0's earlier flip neither is fixed nor spends P1's
+/// window: P1's first flip is won (that Strongbox is sacrificed and P1 draws
+/// three), P1's second is not. Control: the same board without Edgar keeps
+/// P1's pinned loss a loss.
+#[test]
+fn each_players_window_is_their_own() {
+    for with_edgar in [true, false] {
+        let mut scenario = table();
+        let edgar = with_edgar.then(|| {
+            scenario
+                .add_creature_from_oracle(P0, EDGAR_NAME, 4, 5, EDGAR)
+                .controlled_by(P1)
+                .id()
+        });
+        let p0_box = add_strongbox(&mut scenario, P0);
+        let p1_first = add_strongbox(&mut scenario, P1);
+        let p1_second = add_strongbox(&mut scenario, P1);
+        let mut runner = scenario.build();
+        add_colorless(&mut runner, P0, 2);
+        add_colorless(&mut runner, P1, 4);
+        if let Some(edgar) = edgar {
+            assert_edgar_static_parsed(&runner, edgar);
+            assert!(player_wins_first_coin_flip_set_each_turn(
+                runner.state(),
+                P1
+            ));
+            assert!(!player_wins_first_coin_flip_set_each_turn(
+                runner.state(),
+                P0
+            ));
+        }
+        assert_eq!(runner.state().active_player, P0, "reach: it is P0's turn");
+
+        let p0 = activate_strongbox_pinned(&mut runner, P0, p0_box, L);
+        assert_eq!(flips(&p0.events), vec![(P0, L)], "edgar={with_edgar}");
+        assert_eq!(runner.state().objects[&p0_box].zone, Zone::Battlefield);
+
+        let p1_hand = hand_size(&runner, P1);
+        let first = activate_strongbox_pinned(&mut runner, P1, p1_first, L);
+        // Only the won flip's draw is asserted: Strongbox's "draw three cards"
+        // currently lowers outside the win branch (pre-existing), so a lost
+        // flip also draws and must not be pinned here.
+        let drawn_by_first = hand_size(&runner, P1) - p1_hand;
+        let second = activate_strongbox_pinned(&mut runner, P1, p1_second, L);
+        if with_edgar {
+            assert_eq!(
+                flips(&first.events),
+                vec![(P1, W)],
+                "P1's window was still open"
+            );
+            assert_eq!(runner.state().objects[&p1_first].zone, Zone::Graveyard);
+            assert_eq!(drawn_by_first, 3, "P1 drew three");
+        } else {
+            assert_eq!(
+                flips(&first.events),
+                vec![(P1, L)],
+                "control: no static, no fix"
+            );
+            assert_eq!(runner.state().objects[&p1_first].zone, Zone::Battlefield);
+        }
+        assert_eq!(flips(&second.events), vec![(P1, L)], "edgar={with_edgar}");
+        assert_eq!(runner.state().objects[&p1_second].zone, Zone::Battlefield);
+        let ledger = &runner.state().players_who_flipped_coins_this_turn;
+        assert!(ledger.contains(&P0) && ledger.contains(&P1), "both flipped");
+    }
+}
+
 // --- Sets: multi-coin, Krark's Thumb, until-loss ------------------------------
 
 fn ral_board(with_krark: bool) -> (GameRunner, ObjectId, ObjectId) {
