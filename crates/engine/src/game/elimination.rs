@@ -184,16 +184,19 @@ pub fn concede(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEve
 /// CR 603.2 + CR 603.6c: who collects the triggered abilities a departure's own
 /// events trigger.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum DepartureTriggers {
+pub(crate) enum DepartureTriggers {
     /// The caller's post-action pipeline scans its event buffer: a loss by
     /// state-based action (CR 704.5a) or by an effect (CR 104.3e).
     ScannedByCaller,
+    /// A post-action pass in progress scans the events and places the waiting queue at its
+    /// own settle (CR 117.5).
+    PlacedByPass,
     /// Nothing scans the departure's events after it returns (a concession,
     /// CR 104.3a), so the departure queues their triggers itself.
     CollectedByDeparture,
 }
 
-fn eliminate_players(
+pub(crate) fn eliminate_players(
     state: &mut GameState,
     players_to_eliminate: &[PlayerId],
     departure_triggers: DepartureTriggers,
@@ -215,7 +218,10 @@ fn eliminate_players(
             continue;
         }
         leaving_set.insert(player);
-        if super::topology::has_two_headed_giant_shared_resources(state) {
+        // Team loss rides with shared life: CR 810.8a in 2HG, and
+        // CR 810.8a-via-904.13b for Archenemy Commander heroes (the
+        // archenemy has no teammates, so the fold is a no-op there).
+        if super::topology::has_shared_life(state, player) {
             for teammate in players::teammates(state, player) {
                 if players::is_alive(state, teammate) {
                     leaving_set.insert(teammate);
@@ -327,7 +333,8 @@ fn eliminate_players(
         leave_nodes.push((player, do_eliminate(state, player, &leaving_set, events)));
         eliminated_any = true;
 
-        if super::topology::has_two_headed_giant_shared_resources(state) {
+        // Twin of the leaving-set cascade above: teammates depart together.
+        if super::topology::has_shared_life(state, player) {
             for teammate in players::teammates(state, player) {
                 if players::is_alive(state, teammate) {
                     leave_nodes.push((
@@ -588,7 +595,7 @@ fn eliminate_players(
         // CR 603.3b: If prune collapsed an ordering pass into
         // `deferred_triggers` while `waiting_for` is Priority, dispatch now so
         // combat auto-advance does not skip them (issue #1350).
-        drain_or_clear_deferred_triggers_after_elimination(state, events);
+        drain_or_clear_deferred_triggers_after_elimination(state, departure_triggers, events);
 
         // CR 800.4a: If the active `WaitingFor` was waiting on any
         // newly-eliminated player, advance to `Priority` for the next living
@@ -677,6 +684,16 @@ fn eliminate_players(
             if let Err(error) = super::engine::abandon_copy_walk(state, &walk, events) {
                 tracing::error!(%error, "an unannounceable copy was not abandoned");
             }
+        }
+
+        // CR 800.4f + CR 805.6 + CR 118.12: an in-progress collective
+        // tap-creatures payment is reconciled with the surviving heroes
+        // (pruned session, next contributor, or explicit settlement) before
+        // the generic dead-actor repoint below, which would otherwise
+        // discard the session and strand the resolving chain.
+        if let Err(error) = super::costs::reconcile_team_tap_payment_after_departure(state, events)
+        {
+            debug_assert!(false, "team tap payment elimination resume failed: {error}");
         }
 
         if let Some(waiting_pid) = state.waiting_for.acting_player() {
@@ -920,9 +937,13 @@ fn prune_deferred_triggers_for_eliminated_players(state: &mut GameState) {
 /// not skip them (issue #1350).
 fn drain_or_clear_deferred_triggers_after_elimination(
     state: &mut GameState,
+    departure_triggers: DepartureTriggers,
     events: &mut Vec<GameEvent>,
 ) {
-    if state.deferred_triggers.is_empty()
+    // CR 117.5 + CR 603.3b: a post-action pass in progress places its queue whole at its
+    // settle to priority.
+    if departure_triggers == DepartureTriggers::PlacedByPass
+        || state.deferred_triggers.is_empty()
         || state.pending_trigger.is_some()
         || state.pending_trigger_order.is_some()
     {
@@ -1615,6 +1636,7 @@ fn do_eliminate(
         state.pending_replacement = None;
         state.replacement_may_cost_paused = false;
         super::replacement::abandon_post_replacement_continuation(state);
+        super::turns::abandon_phase_begin_choice(state);
     }
 
     // A leaving player gains no life: they are no longer a player in the game, so

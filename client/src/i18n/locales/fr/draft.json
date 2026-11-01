@@ -119,6 +119,10 @@
   },
   "setSelector": {
     "botDifficulty": "Difficulté des bots",
+    "pickEnhancements": {
+      "label": "Utiliser l'IA intégrée avec améliorations des choix de draft",
+      "hint": "Les bots suivent un guide écrit d'ordre de choix pour les formats qui en ont un (actuellement Mirrodin, Darksteel et Fifth Dawn). S'applique à partir de la difficulté moyenne."
+    },
     "difficultyLevels": {
       "VeryEasy": "Très facile",
       "Easy": "Facile",
@@ -162,6 +166,7 @@
     "startSealed": "Lancer le scellé"
   },
   "pack": {
+    "label": "Booster de draft",
     "confirmPick": "Confirmer le choix",
     "selected": "Sélection",
     "draftEffects": "Effets de draft :",

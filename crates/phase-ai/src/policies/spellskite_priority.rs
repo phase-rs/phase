@@ -16,9 +16,8 @@ use engine::types::identifiers::ObjectId;
 use engine::types::player::PlayerId;
 
 use super::context::PolicyContext;
-use super::effect_classify::{effect_polarity, EffectPolarity};
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
-use super::stack_awareness::can_be_destroyed;
+use super::stack_awareness::{can_be_destroyed, is_harmful, judged_reaches};
 use crate::features::DeckFeatures;
 
 fn reject(kind: &'static str) -> PolicyVerdict {
@@ -60,18 +59,17 @@ fn stack_has_redirectable_threat(
         let Some(ability) = entry.ability() else {
             return false;
         };
-        let harms_ai = engine::game::effects::stack_reach::stack_entry_node_reach(state, entry)
+        let harms_ai = judged_reaches(state, entry, is_harmful)
             .iter()
             .any(|reach| {
-                matches!(effect_polarity(&reach.node.effect), EffectPolarity::Harmful)
-                    && reach.acted_on.iter().any(|t| match t {
-                        TargetRef::Player(pid) => *pid == ai_player,
-                        TargetRef::Object(obj_id) => state.objects.get(obj_id).is_some_and(|o| {
-                            o.controller == ai_player
-                                && (!matches!(reach.node.effect, Effect::Destroy { .. })
-                                    || can_be_destroyed(o))
-                        }),
-                    })
+                reach.acted_on.iter().any(|t| match t {
+                    TargetRef::Player(pid) => *pid == ai_player,
+                    TargetRef::Object(obj_id) => state.objects.get(obj_id).is_some_and(|o| {
+                        o.controller == ai_player
+                            && (!matches!(reach.node.effect, Effect::Destroy { .. })
+                                || can_be_destroyed(o))
+                    }),
+                })
             });
         if !harms_ai {
             return false;
@@ -309,6 +307,48 @@ mod tests {
         let bear = ai_creature(&mut state);
         push_opp_destroy_spell(&mut state, bear);
         assert_score(policy_verdict(&state, sk), "spellskite_redirect_available");
+    }
+
+    #[test]
+    fn a_redirectable_threat_is_found_among_landfall_triggers_without_reading_their_reach() {
+        use crate::test_support::{reading_with_reach_count, with_landfall_triggers};
+        let mut state = GameState::new_two_player(42);
+        let sk = spellskite(&mut state);
+        let bear = ai_creature(&mut state);
+        push_opp_destroy_spell(&mut state, bear);
+        // The opponent's landfall triggers below and above the destroy spell.
+        let landfall = with_landfall_triggers(&state, OPP);
+        let (found, builds) =
+            reading_with_reach_count(|| stack_has_redirectable_threat(&state, AI, sk));
+        assert!(
+            found,
+            "reach guard: the destroy spell is a redirectable threat"
+        );
+        assert!(builds > 0, "reach guard: its reach is read");
+        assert_eq!(
+            reading_with_reach_count(|| stack_has_redirectable_threat(&landfall, AI, sk)),
+            (true, builds),
+            "the same answer, without reading the triggers' reach"
+        );
+        assert_score(
+            policy_verdict(&landfall, sk),
+            "spellskite_redirect_available",
+        );
+
+        // A harmful spell that cannot be redirected to Spellskite.
+        let mut state = GameState::new_two_player(42);
+        let sk = spellskite(&mut state);
+        push_opp_player_life_loss(&mut state);
+        let landfall = with_landfall_triggers(&state, OPP);
+        let (found, builds) =
+            reading_with_reach_count(|| stack_has_redirectable_threat(&state, AI, sk));
+        assert!(!found);
+        assert!(builds > 0, "reach guard: the life loss's reach is read");
+        assert_eq!(
+            reading_with_reach_count(|| stack_has_redirectable_threat(&landfall, AI, sk)),
+            (false, builds),
+            "the same answer, without reading the triggers' reach"
+        );
     }
 
     #[test]

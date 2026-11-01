@@ -47,6 +47,7 @@ const {
     setLatency: vi.fn(),
     setOpponentDisplayName: vi.fn(),
     setSpectators: vi.fn(),
+    setStateWithheld: vi.fn(),
     showToast: vi.fn(),
     takeActiveP2PHost: vi.fn(() => null),
     openBroker: vi.fn(),

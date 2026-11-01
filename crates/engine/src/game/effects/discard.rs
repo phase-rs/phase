@@ -502,12 +502,12 @@ pub fn resolve(
                     });
                     return Ok(());
                 }
-                // CR 701.9a + CR 609.3: a muzzled player is treated as unable to
-                // discard: a mandatory discard is a failed no-op (mirrors the
-                // empty-hand mandatory-discard path below), an "up to" discard
-                // simply discards zero.
+                // CR 701.9a + CR 609.3 + CR 118.12: a muzzled player is treated as
+                // unable to discard: a mandatory discard that requires cards fails (as
+                // below), a discard requiring zero cards is paid in full, and an "up to"
+                // discard simply discards zero.
                 PlayerHandDiscardPool::Muzzled => {
-                    if !up_to {
+                    if !up_to && num_cards > 0 {
                         state.cost_payment_failed_flag = true;
                     }
                     events.push(GameEvent::EffectResolved {
@@ -527,8 +527,14 @@ pub fn resolve(
             (num_cards as usize).min(hand_cards.len())
         };
         if count == 0 && !up_to {
-            // CR 608.2c: Effect resolved as no-op (empty hand) — veto downstream IfYouDo.
-            state.cost_payment_failed_flag = true;
+            // CR 118.12 + CR 118.3: "If you do" checks whether the player chose to pay an
+            // optional cost or started to pay a mandatory one. A discard that requires
+            // cards when none can be discarded never started, so veto downstream
+            // IfYouDo / WhenYouDo. A discard requiring zero cards — "discard your hand"
+            // with an empty hand (Moonveil Regent ruling) — is paid in full.
+            if num_cards > 0 {
+                state.cost_payment_failed_flag = true;
+            }
         } else if random {
             // CR 701.9a: this is a resolving effect, so Library-of-Leng-class
             // replacements DO apply — `DiscardCause::Effect`.
@@ -813,8 +819,9 @@ fn player_hand_discard_pool(
 /// a cost the player can only choose to pay in full; with fewer eligible cards
 /// than N it is an impossible option, so neither its "If you do" rider nor a
 /// reflexive "When you do" (Ill-Timed Explosion, CR 603.12) can follow from it.
-/// "Up to N" and "discard your hand" (zero cards is a legal hand — Balin,
-/// Loremaster ruling) are never impossible. Shapes this can't decide here
+/// "Up to N" is never impossible, and neither is "discard your hand" (it requires
+/// exactly the cards in that hand, so zero cards pays it in full) unless the player
+/// is muzzled against it while holding cards. Shapes this can't decide here
 /// (per-player fan-outs, repeats, specific-card discards, an unresolvable
 /// discarding player) answer `false`, so the prompt is offered.
 pub(crate) fn optional_discard_is_infeasible(state: &GameState, ability: &ResolvedAbility) -> bool {
@@ -2867,6 +2874,339 @@ mod tests {
         assert!(
             state.cost_payment_failed_flag,
             "cost_payment_failed_flag should be set when discard count is 0 (empty hand)"
+        );
+    }
+
+    /// CR 118.12 + CR 118.3: "discard your hand" requires exactly the cards in
+    /// that hand, so with an empty hand it requires zero cards and is paid in
+    /// full — its "If you do" stays on (Moonveil Regent ruling). The control is
+    /// the same empty hand under "discard a card", which requires a card it
+    /// cannot discard and still vetoes.
+    #[test]
+    fn whole_hand_discard_of_empty_hand_completes_without_veto() {
+        use crate::types::ability::{PlayerScope, QuantityRef};
+
+        let discard = |count: QuantityExpr| {
+            ResolvedAbility::new(
+                Effect::Discard {
+                    count,
+                    target: TargetFilter::Controller,
+                    selection: CardSelectionMode::Chosen,
+                    unless_filter: None,
+                    filter: None,
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            )
+        };
+
+        let mut state = GameState::new_two_player(42);
+        assert!(state.players[0].hand.is_empty(), "P0 starts empty-handed");
+        let mut events = Vec::new();
+        resolve(
+            &mut state,
+            &discard(QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::Controller,
+                },
+            }),
+            &mut events,
+        )
+        .unwrap();
+        assert!(
+            !state.cost_payment_failed_flag,
+            "discarding an empty hand is paid in full and must not veto its rider"
+        );
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::DiscardChoice { .. }),
+            "an empty hand offers no discard choice"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Discard,
+                    ..
+                }
+            )),
+            "the whole-hand discard publishes its completion marker"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, GameEvent::Discarded { .. })),
+            "an empty hand discards no card"
+        );
+
+        // Control: the same empty hand under "discard a card" still vetoes.
+        let mut control = GameState::new_two_player(42);
+        let mut control_events = Vec::new();
+        resolve(
+            &mut control,
+            &discard(QuantityExpr::Fixed { value: 1 }),
+            &mut control_events,
+        )
+        .unwrap();
+        assert!(
+            control.cost_payment_failed_flag,
+            "a discard requiring a card it cannot discard must still veto"
+        );
+    }
+
+    /// CR 701.9a + CR 609.3 + CR 118.12: a player muzzled against an opponent's
+    /// discards (Tamiyo, Collector of Tales class) who holds no cards faces a
+    /// whole-hand discard requiring zero cards, which is paid in full and must
+    /// not veto its rider. The control on the same muzzled board requires a card
+    /// the muzzled player can't discard, so it still fails.
+    #[test]
+    fn muzzled_whole_hand_discard_of_empty_hand_completes_without_veto() {
+        use crate::types::ability::{
+            CostCategory, PlayerScope, QuantityRef, StaticDefinition, TargetRef,
+        };
+        use crate::types::statics::{ProhibitionScope, StaticMode};
+
+        // "Target player discards ...", controlled by the protected player's
+        // opponent: the muzzle protects only against opponents' effects.
+        let opponents_discard = |count: QuantityExpr| {
+            ResolvedAbility::new(
+                Effect::Discard {
+                    count,
+                    target: TargetFilter::Player,
+                    selection: CardSelectionMode::Chosen,
+                    unless_filter: None,
+                    filter: None,
+                },
+                vec![TargetRef::Player(PlayerId(0))],
+                ObjectId(100),
+                PlayerId(1),
+            )
+        };
+        let muzzled_board = || {
+            let mut state = GameState::new_two_player(42);
+            let ward = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Ward Host".into(),
+                Zone::Battlefield,
+            );
+            let protection = StaticDefinition::new(StaticMode::CantCauseForcedAction {
+                cause: ProhibitionScope::Opponents,
+                actions: vec![CostCategory::Discards, CostCategory::SacrificesPermanent],
+            });
+            let obj = state.objects.get_mut(&ward).unwrap();
+            obj.static_definitions.push(protection.clone());
+            std::sync::Arc::make_mut(&mut obj.base_static_definitions).push(protection);
+            // CR 604.1: the muzzle's presence gate reads the post-layers index.
+            crate::game::layers::evaluate_layers(&mut state);
+            // Reach guard: both fixtures take the `Muzzled` arm, not the
+            // eligible-pool path below it.
+            assert!(
+                crate::game::static_abilities::forced_action_muzzled(
+                    &state,
+                    PlayerId(1),
+                    PlayerId(0),
+                    CostCategory::Discards,
+                ),
+                "the fixture's player must be muzzled against the opponent's discard"
+            );
+            state
+        };
+
+        let mut state = muzzled_board();
+        assert!(state.players[0].hand.is_empty(), "P0 starts empty-handed");
+        let mut events = Vec::new();
+        resolve(
+            &mut state,
+            &opponents_discard(QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::Target,
+                },
+            }),
+            &mut events,
+        )
+        .unwrap();
+        assert!(
+            !state.cost_payment_failed_flag,
+            "a muzzled discard requiring zero cards is paid in full and must not veto"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Discard,
+                    ..
+                }
+            )),
+            "the muzzled discard publishes its completion marker"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, GameEvent::Discarded { .. })),
+            "an empty hand discards no card"
+        );
+
+        // Control: the same muzzled board, requiring a card P0 holds but can't
+        // discard. Only the muzzle explains the veto and the untouched hand.
+        let mut control = muzzled_board();
+        let held = create_object(
+            &mut control,
+            CardId(2),
+            PlayerId(0),
+            "Held".into(),
+            Zone::Hand,
+        );
+        let mut control_events = Vec::new();
+        resolve(
+            &mut control,
+            &opponents_discard(QuantityExpr::Fixed { value: 1 }),
+            &mut control_events,
+        )
+        .unwrap();
+        assert!(
+            control.cost_payment_failed_flag,
+            "a muzzled discard that requires a card must still fail"
+        );
+        assert!(
+            control.players[0].hand.contains(&held),
+            "the muzzled player keeps the card"
+        );
+        assert!(
+            !matches!(control.waiting_for, WaitingFor::DiscardChoice { .. }),
+            "a muzzled player is offered no discard choice"
+        );
+    }
+
+    /// CR 118.12 + CR 701.9a + CR 609.3: the rider-visible half of the muzzled
+    /// zero-card discard, through real combat → trigger → prompt → resolve. The
+    /// victim may "discard" an empty hand while muzzled, since that discards no
+    /// card, so the "If they do" follows. With a card in hand the option can't be
+    /// taken (Tamiyo, Collector of Tales ruling 2019-05-03), so neither the
+    /// prompt nor the rider happens. The protection line is Tamiyo's verbatim.
+    /// The trigger is a synthetic twin of Miss Highwater's "they may discard
+    /// their hand. If they do, they draw seven cards ...", whose printed text
+    /// doesn't fully parse yet.
+    #[test]
+    fn muzzled_may_discard_hand_rider_follows_only_for_an_empty_hand() {
+        use crate::game::combat::AttackTarget;
+        use crate::game::scenario::{GameRunner, GameScenario, P0, P1};
+        use crate::types::phase::Phase;
+
+        const TAMIYO_STATIC: &str = "Spells and abilities your opponents control can't cause you to discard cards or sacrifice permanents.";
+        const TRIGGER_TWIN: &str = "Whenever this creature deals combat damage to a player, they may discard their hand. If they do, they draw two cards.";
+        const LIBRARY: [&str; 2] = ["Top", "Second"];
+
+        let hit_muzzled_player = |held: bool| -> GameRunner {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            scenario.add_creature_from_oracle(P0, "Ward Host", 2, 2, TAMIYO_STATIC);
+            if held {
+                scenario.add_card_to_hand(P0, "Held");
+            }
+            scenario.with_library_top(P0, &LIBRARY);
+            // The attacker's own hand keeps a count that read the wrong player
+            // from coinciding with the victim's empty hand.
+            scenario.add_card_to_hand(P1, "Attacker's Card");
+            let attacker = scenario
+                .add_creature_from_oracle(P1, "Synthetic Twin", 3, 3, TRIGGER_TWIN)
+                .id();
+            let mut runner = scenario.build();
+            runner.state_mut().active_player = P1;
+            runner.state_mut().priority_player = P1;
+            runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+            runner.advance_to_combat();
+            runner
+                .declare_attackers(&[(attacker, AttackTarget::Player(P0))])
+                .expect("declare the attack");
+            // The drive stops at the block prompt, then runs on to the trigger.
+            runner.combat_damage();
+            runner.declare_blockers(&[]).expect("declare no blocks");
+            runner.combat_damage();
+            runner
+        };
+
+        let mut empty = hit_muzzled_player(false);
+        assert!(
+            matches!(
+                empty.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { player, .. } if player == P0
+            ),
+            "an empty hand can be discarded, so the victim is offered the option, got {:?}",
+            empty.state().waiting_for
+        );
+        empty
+            .act(GameAction::DecideOptionalEffect { accept: true })
+            .expect("accept discarding the empty hand");
+        empty.advance_until_stack_empty();
+        assert_eq!(
+            empty.state().players[0].hand.len(),
+            LIBRARY.len(),
+            "the zero-card discard is paid in full, so the rider draws two cards"
+        );
+
+        let held = hit_muzzled_player(true);
+        assert!(
+            !matches!(
+                held.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { .. }
+            ),
+            "a muzzled player with a card in hand can't take the option"
+        );
+        assert_eq!(
+            held.state().players[0].hand.len(),
+            1,
+            "the card stays in hand"
+        );
+        assert!(held.state().players[0].graveyard.is_empty());
+        assert_eq!(held.state().players[0].library.len(), LIBRARY.len());
+    }
+
+    /// CR 118.12: a discard whose count resolves to zero requires
+    /// no card, so it is paid in full without touching the hand.
+    #[test]
+    fn zero_count_discard_is_paid_in_full() {
+        let mut state = GameState::new_two_player(42);
+        let held = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Held".into(),
+            Zone::Hand,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 0 },
+                target: TargetFilter::Controller,
+                selection: CardSelectionMode::Chosen,
+                unless_filter: None,
+                filter: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(
+            !state.cost_payment_failed_flag,
+            "a zero-card discard is paid in full"
+        );
+        assert!(
+            state.players[0].hand.contains(&held),
+            "a zero-card discard leaves the hand alone"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Discard,
+                    ..
+                }
+            )),
+            "the zero-card discard publishes its completion marker"
         );
     }
 

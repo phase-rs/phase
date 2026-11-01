@@ -4133,6 +4133,9 @@ fn classify_attach_host_authority(filter: &TargetFilter) -> AttachHostAuthority 
         | TargetFilter::EventTargetController
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
+        // CR 108.3 + CR 508.1d: per-member owner anchor — names no single
+        // host, left unattached like the neighboring player anchors.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
         | TargetFilter::PostReplacementSourceController

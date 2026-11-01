@@ -2996,6 +2996,7 @@ pub fn convert_available_action(
         | GameAction::SetPriorityYield { .. }
         | GameAction::SetMayTriggerAutoChoice { .. }
         | GameAction::SetReplacementAutoChoice { .. }
+        | GameAction::UnAction { .. }
         | GameAction::SetTriggerOrderTemplate { .. } => {
             AvailableActionConversion::Unsupported("local.autopass-settings-unsupported")
         }

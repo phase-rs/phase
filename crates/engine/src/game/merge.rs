@@ -50,13 +50,13 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::game::game_object::DisplayIdentity;
+use crate::game::game_object::{DisplayIdentity, GameObject, ObjectIncarnationRefExt};
 use crate::game::printed_cards::intrinsic_copiable_values;
 use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest};
 use crate::types::ability::{ContinuousModification, CopiableValues, Duration, TargetFilter};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::proposed_event::AppliedReplacementKey;
 use crate::types::zones::Zone;
 
@@ -397,6 +397,7 @@ pub fn split_merged_permanent_on_leave(
         return;
     }
     let components = survivor.merged_components.clone();
+    let survivor_successor = leave_successor(survivor);
 
     // CR 730.3e (second clause): a TOKEN merged permanent leaving under a
     // card-scoped (`NonToken`) `Moved` redirect routes its CARD components to
@@ -443,7 +444,7 @@ pub fn split_merged_permanent_on_leave(
         // flicker/blink return) brings this component back too, not just the
         // survivor. See `expand_returned_merge_components`.
         if let Some(obj) = state.objects.get_mut(&component_id) {
-            obj.split_from_merge_survivor = Some(merged_id);
+            obj.split_from_merge_survivor = Some(survivor_successor);
         }
     }
 
@@ -484,6 +485,7 @@ pub(crate) fn move_merged_permanent_on_leave(
         return BatchMoveResult::Done;
     }
     let components = survivor.merged_components.clone();
+    let survivor_successor = leave_successor(survivor);
 
     // CR 730.3 + CR 400.7: restore each physical card's own characteristics
     // before proposing its destination. Clearing this list also prevents the
@@ -507,7 +509,7 @@ pub(crate) fn move_merged_permanent_on_leave(
                     .objects
                     .get_mut(&component_id)
                     .expect("merged component exists")
-                    .split_from_merge_survivor = Some(merged_id);
+                    .split_from_merge_survivor = Some(survivor_successor);
             }
             ZoneMoveRequest::merged_component(component_id, dest)
                 .with_replacement_applied(applied.clone())
@@ -540,10 +542,11 @@ pub(crate) fn restore_pre_merge_tokenness_for_leave(state: &mut GameState, merge
 ///
 /// Given the objects a *continuity* reference resolved to, append each survivor's
 /// co-departed sibling components that are still co-located in the same zone, in
-/// deterministic id order. The caller (the `ChangeZone` return loop) then applies
-/// its move to the whole pile; the components return as separate, non-merged
-/// objects (CR 730.3 — merging is not re-established) and their back-links clear
-/// on battlefield entry.
+/// deterministic id order. The caller (the `ChangeZone` return loop, or
+/// `ChangeZoneAll`'s linked-exile return) then applies its move to the whole
+/// pile; the components return as separate, non-merged objects (CR 730.3 —
+/// merging is not re-established) and their back-links clear on battlefield
+/// entry.
 ///
 /// This is a no-op unless `target_filter` is a continuity reference AND a
 /// resolved object is a former merged survivor with co-located components. In
@@ -573,17 +576,22 @@ pub(crate) fn expand_returned_merge_components(
 /// Empty unless `survivor_id` is a former merged survivor with components still
 /// in its zone. Shared by both return paths that "find the object the merged
 /// permanent became": the `ChangeZone` continuity-reference return
-/// ([`expand_returned_merge_components`], flicker/blink) and the
-/// `UntilSourceLeaves` implicit return in `engine::check_exile_returns`
-/// (exile-until-this-leaves / "O-Ring" effects).
+/// ([`expand_returned_merge_components`], flicker/blink and the linked-exile
+/// return) and the `UntilSourceLeaves` implicit return in
+/// `engine::check_exile_returns` (exile-until-this-leaves effects).
+///
+/// A component whose pinned survivor incarnation is no longer current is not
+/// returned (CR 400.7): the survivor changed zones since the split.
 pub(crate) fn co_split_components(
     state: &GameState,
     survivor_id: ObjectId,
     exclude: &[ObjectId],
 ) -> Vec<ObjectId> {
-    let Some(zone) = state.objects.get(&survivor_id).map(|o| o.zone) else {
+    let Some(survivor) = state.objects.get(&survivor_id) else {
         return Vec::new();
     };
+    let zone = survivor.zone;
+    let survivor_ref = ObjectIncarnationRef::from_object(survivor);
     // Split-out components are never independent members of the battlefield
     // (CR 730.2) — only an off-battlefield survivor can have co-located ones.
     if zone == Zone::Battlefield {
@@ -593,7 +601,7 @@ pub(crate) fn co_split_components(
         .objects
         .iter()
         .filter(|(id, obj)| {
-            obj.split_from_merge_survivor == Some(survivor_id)
+            obj.split_from_merge_survivor == Some(survivor_ref)
                 && obj.zone == zone
                 && !exclude.contains(*id)
         })
@@ -601,6 +609,12 @@ pub(crate) fn co_split_components(
         .collect();
     components.sort_by_key(|id| id.0);
     components
+}
+
+/// CR 400.7: the incarnation the survivor holds once its leave move lands; that
+/// move bumps it exactly once, so a later zone change no longer matches.
+fn leave_successor(survivor: &GameObject) -> ObjectIncarnationRef {
+    ObjectIncarnationRef::of(survivor.id, survivor.incarnation + 1)
 }
 
 /// CR 730.3c: Target references that denote "the object that just left the
@@ -615,6 +629,7 @@ fn references_object_that_left(target_filter: &TargetFilter) -> bool {
             | TargetFilter::TrackedSet { .. }
             | TargetFilter::TrackedSetFiltered { .. }
             | TargetFilter::TriggeringSource
+            | TargetFilter::ExiledBySource
     )
 }
 

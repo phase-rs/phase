@@ -20,8 +20,10 @@ import type {
   PersistedGameState,
   RewindOption,
   RewindTarget,
+  StateWithheldNotice,
   SubmitResult,
   FormatConfig,
+  WithheldFrame,
 } from "./types";
 import type {
   InteractionPreview,
@@ -1003,6 +1005,27 @@ export const LOBBY_MIN_SUPPORTED_SERVER_PROTOCOL = PROTOCOL_VERSION - 1;
  * PROTOCOL_VERSION moved twice for GameState-only changes and the derived lobby
  * window went disjoint from the deployed broker's.
  *
+ * 19 — Prospective: no lobby variant or field changes shape in this bump.
+ *      Moved ahead of the `PlanechaseCommander` GameFormat variant — see
+ *      LOBBY_PROTOCOL_VERSION's own `/// 19` entry in
+ *      crates/lobby-broker/src/protocol.rs. MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL
+ *      stays at 2. A pre-19 Rust broker rejects a lobby frame naming
+ *      PlanechaseCommander; MIN_LOBBY_PROTOCOL_FOR_PLANECHASE_COMMANDER
+ *      below is this client's floor for it.
+ * 18 — Prospective: no lobby variant or field changes shape in this bump.
+ *      Moved ahead of the `ArchenemyCommander` GameFormat variant — see
+ *      LOBBY_PROTOCOL_VERSION's own `/// 18` entry in
+ *      crates/lobby-broker/src/protocol.rs. MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL
+ *      stays at 2. A pre-18 Rust broker rejects a lobby frame naming
+ *      ArchenemyCommander; MIN_LOBBY_PROTOCOL_FOR_ARCHENEMY_COMMANDER
+ *      below is this client's floor for it.
+ * 17 — Prospective: no lobby variant or field changes shape in this bump.
+ *      Moved ahead of the `TwoHeadedGiantCommander` GameFormat variant — see
+ *      LOBBY_PROTOCOL_VERSION's own `/// 17` entry in
+ *      crates/lobby-broker/src/protocol.rs. MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL
+ *      stays at 2. A pre-17 Rust broker rejects a lobby frame naming
+ *      TwoHeadedGiantCommander; MIN_LOBBY_PROTOCOL_FOR_TWO_HEADED_GIANT_COMMANDER
+ *      below is this client's floor for it.
  * 16 — GameFormat gains `Dandan` (see PROTOCOL_VERSION 110). A Rust broker below
  *      16 rejects a lobby frame naming it; MIN_LOBBY_PROTOCOL_FOR_DANDAN below
  *      is this client's frozen floor for that pairing.
@@ -1284,6 +1307,42 @@ export const MIN_LOBBY_PROTOCOL_FOR_FREEFORM_FORMATS = 11;
 export const MIN_LOBBY_PROTOCOL_FOR_DANDAN = 16;
 
 /**
+ * Lowest broker `LOBBY_PROTOCOL_VERSION` whose `GameFormat` deserializer knows
+ * `TwoHeadedGiantCommander`; below it a lobby frame naming it is rejected as
+ * malformed.
+ *
+ * Frozen at 17 and written as a bare literal, never derived from
+ * LOBBY_PROTOCOL_VERSION, so a later bump cannot drag it forward and start
+ * refusing v17 brokers. `scripts/check-protocol-version.mjs` refuses a derived
+ * right-hand side for it.
+ */
+export const MIN_LOBBY_PROTOCOL_FOR_TWO_HEADED_GIANT_COMMANDER = 17;
+
+/**
+ * Lowest broker `LOBBY_PROTOCOL_VERSION` whose `GameFormat` deserializer knows
+ * `ArchenemyCommander`; below it a lobby frame naming it is rejected as
+ * malformed.
+ *
+ * Frozen at 18 and written as a bare literal, never derived from
+ * LOBBY_PROTOCOL_VERSION, so a later bump cannot drag it forward and start
+ * refusing v18 brokers. `scripts/check-protocol-version.mjs` refuses a derived
+ * right-hand side for it.
+ */
+export const MIN_LOBBY_PROTOCOL_FOR_ARCHENEMY_COMMANDER = 18;
+
+/**
+ * Lowest broker `LOBBY_PROTOCOL_VERSION` whose `GameFormat` deserializer knows
+ * `PlanechaseCommander`; below it a lobby frame naming it is rejected as
+ * malformed.
+ *
+ * Pinned to a bare literal, deliberately NOT derived from
+ * LOBBY_PROTOCOL_VERSION, so a later bump cannot drag it forward and start
+ * refusing v19 brokers. `scripts/check-protocol-version.mjs` refuses a derived
+ * right-hand side for it.
+ */
+export const MIN_LOBBY_PROTOCOL_FOR_PLANECHASE_COMMANDER = 19;
+
+/**
  * The lowest broker `LOBBY_PROTOCOL_VERSION` that parses `format` in a lobby
  * frame, or `null` when every broker this client connects to parses it (see
  * MIN_SUPPORTED_SERVER_LOBBY_PROTOCOL). Consult it before sending any lobby
@@ -1299,6 +1358,12 @@ export function lobbyProtocolRequiredForFormat(format: GameFormat): number | nul
       return MIN_LOBBY_PROTOCOL_FOR_FREEFORM_FORMATS;
     case "Dandan":
       return MIN_LOBBY_PROTOCOL_FOR_DANDAN;
+    case "TwoHeadedGiantCommander":
+      return MIN_LOBBY_PROTOCOL_FOR_TWO_HEADED_GIANT_COMMANDER;
+    case "ArchenemyCommander":
+      return MIN_LOBBY_PROTOCOL_FOR_ARCHENEMY_COMMANDER;
+    case "PlanechaseCommander":
+      return MIN_LOBBY_PROTOCOL_FOR_PLANECHASE_COMMANDER;
     case "Standard":
     case "Commander":
     case "Pioneer":
@@ -1451,6 +1516,8 @@ export type WsAdapterEvent =
       /** Server-published turn boundaries. Always an array on this transport —
        *  `[]` means "the server published none", never "unknown". */
       rewindTargets?: RewindOption[] }
+  /** The server applied a state it could not send; `null` once a state arrives again. */
+  | { type: "stateDelivery"; withheld: StateWithheldNotice | null }
   | { type: "sessionAttached"; attachment: NativeSessionAttachment }
   | { type: "emoteReceived"; fromPlayer: PlayerId; emote: string }
   | { type: "contestProgress"; contest: number; clicks: [PlayerId, number][] }
@@ -1522,6 +1589,9 @@ export class WebSocketAdapter implements EngineAdapter {
    */
   private snapshot: EngineSnapshot | null = null;
   private cachedStateRevision: number | null = null;
+  private withheldState: StateWithheldNotice | null = null;
+  /** A withheld bootstrap failed this adapter's reconnect while its socket stayed attached. */
+  private withheldBootstrapFailed = false;
   private _playerId: PlayerId | null = null;
   private playerToken: string | null = null;
   private _gameCode: string | null = null;
@@ -2298,6 +2368,8 @@ export class WebSocketAdapter implements EngineAdapter {
       this.ws = null;
     }
     this.snapshot = null;
+    this.withheldState = null;
+    this.withheldBootstrapFailed = false;
     this._playerId = null;
     this.playerToken = null;
     this._gameCode = null;
@@ -2416,11 +2488,24 @@ export class WebSocketAdapter implements EngineAdapter {
   private completeReconnect(inGame: boolean): void {
     this.finishSocketDiagnostics("resumed");
     this.reconnectInFlight = false;
+    this.withheldBootstrapFailed = false;
     this.reconnectAttempt = 0;
     this.reconnectStartedAt = null;
     if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
     this.emit({ type: "reconnected", inGame });
+  }
+
+  /** A delivered state ends both withheld conditions. */
+  private settleWithheld(): void {
+    if (this.withheldState) {
+      this.withheldState = null;
+      this.emit({ type: "stateDelivery", withheld: null });
+    }
+    if (this.withheldBootstrapFailed) {
+      this.withheldBootstrapFailed = false;
+      this.emit({ type: "reconnected", inGame: true });
+    }
   }
 
   private recordSocketLoss(id: string): SocketReconnectOutcome {
@@ -2824,6 +2909,7 @@ export class WebSocketAdapter implements EngineAdapter {
           },
         );
         this.cachedStateRevision = data.state_revision ?? null;
+        this.settleWithheld();
         this._playerId = data.your_player;
         if (nativeReconnect) {
           const attachment: NativeSessionAttachment = {
@@ -2936,6 +3022,7 @@ export class WebSocketAdapter implements EngineAdapter {
           },
         );
         this.cachedStateRevision = data.state_revision ?? this.cachedStateRevision;
+        this.settleWithheld();
         const pending = this.submission.take(msg.command_id);
         const resolvedAction = pending !== null;
         if (pending) {
@@ -2983,11 +3070,49 @@ export class WebSocketAdapter implements EngineAdapter {
         const data = msg.data as { message: string };
         const pending = this.submission.take(msg.command_id);
         if (pending) {
-          pending.reject(new AdapterError("WS_ERROR", data.message, false));
+          pending.reject(new AdapterError(AdapterErrorCode.REQUEST_FAILED, data.message, true));
           this.emit({ type: "actionPendingChanged", pending: false });
         } else if (this.submission.unmatched(msg.command_id).surfaces) {
           this.emit({ type: "operationFailed", message: data.message });
         }
+        break;
+      }
+
+      case "StateWithheld": {
+        const data = msg.data as {
+          full_key?: FullSessionKey;
+          state_revision: number;
+          withheld: WithheldFrame;
+          reason: string;
+        };
+        // Without a delivered board the seat cannot reach the menu: fail the join recoverably.
+        if (data.withheld.type === "GameStarted" && this.snapshot === null) {
+          // The notice is this client's only seat assignment; GamePage resets the reconnect state on it, so it precedes the failure.
+          const seat = data.withheld.data.your_player;
+          this._playerId = seat;
+          this.emit({ type: "playerIdentity", playerId: seat, opponentName: null });
+          this.rejectInitialization(new AdapterError(AdapterErrorCode.REQUEST_FAILED, data.reason, true));
+          if (this.reconnectInFlight) {
+            this.failReconnect("failed");
+            this.withheldBootstrapFailed = true;
+          }
+          this.emit({ type: "operationFailed", message: data.reason });
+          break;
+        }
+        if (!this.acceptFollowUpFullSessionKey(data.full_key)) break;
+        if (data.withheld.type === "GameStarted") {
+          if (this.reconnectInFlight) this.completeReconnect(true);
+        } else {
+          const pending = this.submission.take(msg.command_id);
+          if (pending) {
+            pending.resolve({ events: [], log_entries: [] });
+            this.emit({ type: "actionPendingChanged", pending: false });
+          }
+        }
+        // A stale notice still answers its command but must not report a newer board as withheld.
+        if (this.cachedStateRevision !== null && data.state_revision < this.cachedStateRevision) break;
+        this.withheldState = { revision: data.state_revision, reason: data.reason };
+        this.emit({ type: "stateDelivery", withheld: this.withheldState });
         break;
       }
 
@@ -3032,7 +3157,7 @@ export class WebSocketAdapter implements EngineAdapter {
         const pending = this.pendingManaPaymentPreviews.get(data.request_id);
         if (pending) {
           this.pendingManaPaymentPreviews.delete(data.request_id);
-          pending.reject(new AdapterError("WS_ERROR", data.message, false));
+          pending.reject(new AdapterError(AdapterErrorCode.REQUEST_FAILED, data.message, true));
         }
         break;
       }
@@ -3077,14 +3202,14 @@ export class WebSocketAdapter implements EngineAdapter {
         const pending = this.pendingAuthoritativeStateExport;
         this.pendingAuthoritativeStateExport = null;
         pending?.reject(new AdapterError(
-          "WS_ERROR",
+          AdapterErrorCode.REQUEST_FAILED,
           typeof data === "object"
             && data !== null
             && "message" in data
             && typeof data.message === "string"
             ? data.message
             : "Authoritative-state export failed.",
-          false,
+          true,
         ));
         break;
       }
@@ -3094,7 +3219,7 @@ export class WebSocketAdapter implements EngineAdapter {
         const pending = this.pendingInteractionPreviews.get(data.request_id);
         if (pending) {
           this.pendingInteractionPreviews.delete(data.request_id);
-          pending.reject(new AdapterError("WS_ERROR", data.message, false));
+          pending.reject(new AdapterError(AdapterErrorCode.REQUEST_FAILED, data.message, true));
         }
         break;
       }

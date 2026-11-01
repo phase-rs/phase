@@ -12,10 +12,12 @@ set -euo pipefail
 . "$(dirname "$0")/lib/added-lines.sh"
 
 BASE="${1:-$(git merge-base origin/main HEAD 2>/dev/null || echo HEAD~1)}"
-SCOPE=(crates/engine/src/parser)
+SCOPE=(crates/engine/src/parser crates/phase-parser/src/parser)
 SCOPE_EXCLUDES=(
     ':(exclude)crates/engine/src/parser/oracle_quantity.rs'
     ':(exclude)crates/engine/src/parser/oracle_nom/quantity.rs'
+    ':(exclude)crates/phase-parser/src/parser/oracle_quantity.rs'
+    ':(exclude)crates/phase-parser/src/parser/oracle_nom/quantity.rs'
 )
 
 python3 - <<'PY'
@@ -28,21 +30,21 @@ legacy_call = re.compile(
 )
 
 seams = {
-    "crates/engine/src/parser/oracle_effect/imperative.rs": [
+    "crates/phase-parser/src/parser/oracle_effect/imperative.rs": [
         "try_parse_roll_die_with_modifier",
     ],
-    "crates/engine/src/parser/oracle_effect/lower.rs": [
+    "crates/phase-parser/src/parser/oracle_effect/lower.rs": [
         "parse_dynamic_counter_suffix_body",
     ],
-    "crates/engine/src/parser/oracle_effect/mod.rs": [
+    "crates/phase-parser/src/parser/oracle_effect/mod.rs": [
         "try_parse_gain_energy",
         "parse_dynamic_energy_unless_cost",
         "parse_where_x_is",
     ],
-    "crates/engine/src/parser/oracle_effect/search.rs": [
+    "crates/phase-parser/src/parser/oracle_effect/search.rs": [
         "parse_highest_mana_value_library_suffix",
     ],
-    "crates/engine/src/parser/oracle_replacement.rs": [
+    "crates/phase-parser/src/parser/oracle_replacement.rs": [
         "parse_enters_with_where_x_suffix",
     ],
 }

@@ -64,6 +64,12 @@ interface SetSelectorProps {
    * the normal path by naming one set, which then fills every booster.
    */
   singleSet?: boolean;
+  /**
+   * Offer the draft-guide pick enhancements checkbox beside the bot difficulty.
+   * Only surfaces whose bots run in this tab's draft engine honour the setting,
+   * so it is opt-in: pods, whose host does not read it, leave it off.
+   */
+  showPickEnhancements?: boolean;
 }
 
 /**
@@ -106,6 +112,7 @@ export function SetSelector({
   candidatePool = false,
   startLabel,
   singleSet = false,
+  showPickEnhancements = false,
 }: SetSelectorProps) {
   const { t } = useTranslation("draft");
 
@@ -239,7 +246,7 @@ export function SetSelector({
 
   return (
     <div className="flex flex-col gap-6">
-      <BotDifficultySelector />
+      <BotDifficultySelector showPickEnhancements={showPickEnhancements} />
 
       {!singleSet && (
         <PackList

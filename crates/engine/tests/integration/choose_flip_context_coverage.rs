@@ -227,7 +227,7 @@ impl Game {
         assert_eq!(self.runner.state().objects[&self.unpicked].controller, P1);
         assert_eq!(self.runner.state().objects[&self.spell].controller, P1);
         assert!(self.events.iter().any(|event| matches!(event,
-            GameEvent::ControllerChanged { object_id, old_controller, new_controller }
+            GameEvent::ControllerChanged { object_id, old_controller, new_controller, .. }
                 if *object_id == self.picked && *old_controller == P1 && *new_controller == recipient)),
             "reach: the selected creature was actually handed off");
         assert!(self.runner.state().stack.is_empty());

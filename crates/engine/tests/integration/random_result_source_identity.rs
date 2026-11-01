@@ -759,11 +759,11 @@ fn ral_flip(won: bool, accept: bool, blink: bool, targeted: bool) {
         matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. })
             || (state.stack.is_empty() && matches!(state.waiting_for, WaitingFor::Priority { .. }))
     });
-    // Deliberately exercise the existing prompt-policy limitation: a winning
-    // flip offers the optional instruction even after the source left and
-    // returned. CR 608.2d forbids impossible choices; it does not require this
-    // stale-source offer or establish that its cost can be paid.
-    if won {
+    // CR 400.7 + CR 608.2d: once Ral left and returned, "exile Ral" names an
+    // object that no longer exists, so a winning flip offers no optional
+    // instruction; the trigger resolves without a prompt. A losing flip has no
+    // optional instruction to offer.
+    if won && !blink {
         assert!(
             matches!(
                 run.runner.state().waiting_for,
@@ -773,6 +773,13 @@ fn ral_flip(won: bool, accept: bool, blink: bool, targeted: bool) {
             run.runner.state().waiting_for
         );
         run.act(GameAction::DecideOptionalEffect { accept });
+    } else {
+        assert!(
+            run.runner.state().stack.is_empty()
+                && matches!(run.runner.state().waiting_for, WaitingFor::Priority { .. }),
+            "no optional choice is offered (won={won}, blink={blink}), got {:?}",
+            run.runner.state().waiting_for
+        );
     }
     run.finish();
     run.assert_flips(&[(P0, won)]);
@@ -788,8 +795,8 @@ fn ral_flip(won: bool, accept: bool, blink: bool, targeted: bool) {
     assert_eq!(object.controller, P0);
     // CR 712.14a + CR 400.7j: the accepted exile's own return finds the moved
     // card and puts its printed planeswalker face onto the battlefield. A stale
-    // source's completed exile moved nothing, so its dependent return has no
-    // referent and the returned permanent keeps its front face.
+    // source's exile is never offered, so its dependent "If you do" return does
+    // not happen and the returned permanent keeps its front face.
     assert_eq!(object.transformed, transformed);
     assert_eq!(
         object.name,
@@ -1243,7 +1250,10 @@ fn synthetic_optional_self_move_preserves_gated_declared_slot_and_anaphor() {
 /// `SelfRef` move; the stashed dependent is the `ParentTarget` return followed
 /// by a separately printed tail. The dependent node therefore inherits the
 /// witness as a stale referent — the accepted move's own result must supersede
-/// it. No printed-card claim is made for the synthetic witness.
+/// it. When the source was blinked first, the move is impossible and is not
+/// offered (CR 400.7 + CR 608.2d); the dependent return does not run, but the
+/// separately printed tail still resolves. No printed-card claim is made for
+/// the synthetic witness.
 fn parked_optional_move(tail: ParkedMoveTail, live: bool) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
@@ -1387,17 +1397,34 @@ fn parked_optional_move(tail: ParkedMoveTail, live: bool) {
     if !live {
         run.blink(response, source);
     }
-    // The accepted move must not move the returned permanent; its baseline is
-    // the incarnation after any test-setup blink.
+    // The returned permanent must not be moved; its baseline is the incarnation
+    // after any test-setup blink.
     let baseline_incarnation = run.runner.state().objects[&source].incarnation;
     let start = run.events.len();
     pin(&mut run.runner, coin_seed(&[true]));
-    run.until(|state| matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. }));
-    assert!(matches!(
-        run.runner.state().waiting_for,
-        WaitingFor::OptionalEffectChoice { player: P0, source_id, .. } if source_id == source
-    ));
-    run.act(GameAction::DecideOptionalEffect { accept: true });
+    // The driver only passes priority, so it stops at an offered optional or,
+    // when none is offered, once the trigger has fully resolved.
+    run.until(|state| {
+        matches!(state.waiting_for, WaitingFor::OptionalEffectChoice { .. })
+            || (state.stack.is_empty() && matches!(state.waiting_for, WaitingFor::Priority { .. }))
+    });
+    if live {
+        assert!(matches!(
+            run.runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { player: P0, source_id, .. } if source_id == source
+        ));
+        run.act(GameAction::DecideOptionalEffect { accept: true });
+    } else {
+        // CR 400.7 + CR 608.2d: the blinked source is a new object, so the
+        // optional `SelfRef` move is impossible and never offered; it is
+        // declined, and the `OptionalEffectPerformed` dependent return with it.
+        assert!(
+            run.runner.state().stack.is_empty()
+                && matches!(run.runner.state().waiting_for, WaitingFor::Priority { .. }),
+            "an impossible move of a blinked source is not offered, got {:?}",
+            run.runner.state().waiting_for
+        );
+    }
     run.finish();
     run.assert_flips(&[(P0, true)]);
 
@@ -1441,7 +1468,7 @@ fn synthetic_accepted_move_tail_resolves_for_live_source() {
 }
 
 #[test]
-fn synthetic_accepted_empty_move_keeps_independent_tail() {
+fn synthetic_impossible_move_is_not_offered_and_keeps_independent_tail() {
     parked_optional_move(ParkedMoveTail::GainTwoLife, false);
 }
 
@@ -1451,7 +1478,7 @@ fn synthetic_declared_slot_tail_survives_live_move_result() {
 }
 
 #[test]
-fn synthetic_declared_slot_tail_survives_empty_move_result() {
+fn synthetic_declared_slot_tail_survives_impossible_move_not_offered() {
     parked_optional_move(ParkedMoveTail::SlotPumpAndDamage, false);
 }
 

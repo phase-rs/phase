@@ -2,7 +2,6 @@ import type { CSSProperties } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { PlayerId } from "../../adapter/types.ts";
-import { seatStatusKey } from "../../game/waitingForRegistry.ts";
 import { useSeatColor } from "../../hooks/useSeatColor.ts";
 import { useTurnStatus } from "../../hooks/useTurnStatus.ts";
 import type { PlayerBattlefieldView } from "../../viewmodel/gameStateView.ts";
@@ -45,7 +44,7 @@ export function OpponentSeatPane({
   const isActiveTurn = activePlayerId === playerId;
   const isWaitingOnThisPlayer = waitingSeatId === playerId;
   const waitingReasonText = isWaitingOnThisPlayer
-    ? t(seatStatusKey(reason), reason?.params)
+    ? t(`status.seat.${reason?.id ?? "thinking"}`, reason?.params)
     : null;
   const seatStyle = {
     "--card-size-scale": "0.62",

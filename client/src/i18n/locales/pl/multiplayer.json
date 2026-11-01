@@ -353,6 +353,7 @@
     "gameInProgressTitle": "Gra w toku",
     "gameInProgressBody": "Zakończ lub opuść bieżącą grę, a potem otwórz link ponownie."
   },
+  "p2pStateWithheld": "Stan gry po tej akcji jest zbyt duży, aby go wysłać, więc ta plansza jest nieaktualna. Gry peer-to-peer nie umożliwiają wycofania ruchu; plansza zaktualizuje się, gdy późniejszy stan będzie wystarczająco mały, aby go wysłać.",
   "terminalRecovery": {
     "finalViewsUnpublished": "Poddanie osiągnęło stan końcowy Full, ale nie udało się opublikować natywnych widoków końcowych.",
     "concedeUnreconciled": "Nie udało się uzgodnić wyniku poddania; miejsce pozostaje zablokowane.",

@@ -1,5 +1,10 @@
 {
-  "playerLatency": {"host":"Host","waiting":"Warten","value":"{{ms}} ms","description":"Hin- und Rücklaufzeit zum Host. Eine fehlende Antwort trennt das Spiel nicht."},
+  "playerLatency": {
+    "host": "Host",
+    "waiting": "Warten",
+    "value": "{{ms}} ms",
+    "description": "Hin- und Rücklaufzeit zum Host. Eine fehlende Antwort trennt das Spiel nicht."
+  },
   "abilityBlock": {
     "badge": "Blockiert",
     "cantBeActivated": "Diese Fähigkeit kann nicht aktiviert werden",
@@ -27,6 +32,7 @@
     "shorten": "Shorten it",
     "decline": "Decline the shortcut",
     "untilLethal": "Repeat until the game ends.",
+    "withoutEnd": "Repeat without end. If every player accepts, the game is a draw.",
     "fixedCount_one": "Repeat at most once.",
     "fixedCount_other": "Repeat at most {{count}} times.",
     "convokeInfo_one": "Auto-taps up to 1 creature for convoke each iteration.",
@@ -840,7 +846,7 @@
     "targetingLabel": "Visiert {{label}} an",
     "titleTargets": "Ziele: {{targets}}",
     "titlePaid": "Bezahlt: {{paid}}",
-    "titleContext": "Kontext: {{context}}",
+    "titleContext": "Kontext: {{items}}",
     "revealedCards": "Aufgedeckt: {{cards}}",
     "paidXValue": "X={{value}}",
     "paidManaSpent": "{{amount}} Mana",
@@ -1552,6 +1558,7 @@
     "effectZone": {
       "titleSacrifice": "Opfern",
       "titleTopdeck": "Auf die Bibliothek legen",
+      "titleBottomdeck": "Auf die Bibliothek legen",
       "titleBattlefield": "Auf das Schlachtfeld legen",
       "titleHand": "Zurückgeben",
       "titleExile": "Ins Exil schicken",
@@ -1571,6 +1578,12 @@
       "subtitleTopdeckUpTo_other": "Wähle bis zu {{count}} Karten, um sie oben auf deine Bibliothek zu legen",
       "subtitleTopdeckRange_one": "Wähle {{min}}-{{count}} Karte, um sie oben auf deine Bibliothek zu legen",
       "subtitleTopdeckRange_other": "Wähle {{min}}-{{count}} Karten, um sie oben auf deine Bibliothek zu legen",
+      "subtitleBottomdeckExact_one": "Wähle {{count}} Karte, um sie unter deine Bibliothek zu legen",
+      "subtitleBottomdeckExact_other": "Wähle {{count}} Karten, um sie unter deine Bibliothek zu legen",
+      "subtitleBottomdeckUpTo_one": "Wähle bis zu {{count}} Karte, um sie unter deine Bibliothek zu legen",
+      "subtitleBottomdeckUpTo_other": "Wähle bis zu {{count}} Karten, um sie unter deine Bibliothek zu legen",
+      "subtitleBottomdeckRange_one": "Wähle {{min}}-{{count}} Karte, um sie unter deine Bibliothek zu legen",
+      "subtitleBottomdeckRange_other": "Wähle {{min}}-{{count}} Karten, um sie unter deine Bibliothek zu legen",
       "subtitleBattlefieldExact_one": "Wähle {{count}} Karte, um sie auf das Schlachtfeld zu legen",
       "subtitleBattlefieldExact_other": "Wähle {{count}} Karten, um sie auf das Schlachtfeld zu legen",
       "subtitleBattlefieldUpTo_one": "Wähle bis zu {{count}} Karte, um sie auf das Schlachtfeld zu legen",
@@ -1616,14 +1629,17 @@
       "labelSkip": "Überspringen",
       "labelDecline": "Ablehnen",
       "labelPutOnTop": "Oben drauflegen ({{order}})",
+      "labelPutOnBottom": "Nach unten legen ({{order}})",
       "labelConfirm": "Bestätigen ({{selected}}/{{count}})",
       "labelTop": "Oben ({{selected}}/{{count}})",
+      "labelBottom": "Unten ({{selected}}/{{count}})",
       "labelPut": "Legen ({{selected}}/{{count}})",
       "labelReturn": "Zurückgeben ({{selected}}/{{count}})",
       "labelExile": "Ins Exil ({{selected}}/{{count}})",
       "labelAttach": "Attach ({{selected}}/{{count}})",
       "labelCast": "Wirken ({{selected}}/{{count}})",
       "orderTop": "Oben",
+      "orderBottom": "Unten",
       "orderSecond": "2.",
       "orderThird": "3.",
       "orderFourth": "4.",
@@ -2501,6 +2517,7 @@
     "triggerFallback": "Trigger {{number}}"
   },
   "costReductionOrder": {
+    "announcedHybrids": "Angekündigte Hybrid-Zahlungen",
     "eyebrow": "Reihenfolge der Kostenreduzierungen",
     "title": "Ordne deine Kostenreduzierungen",
     "subtitle": "Je nach Reihenfolge, in der du diese Reduzierungen anwendest, werden andere Gesamtkosten festgelegt (CR 601.2f). Das oberste dieser Liste wird zuerst angewendet.",
@@ -2901,6 +2918,36 @@
       "winner": "{{name}} hat den Wettbewerb gewonnen.",
       "tie": "Unentschieden – nichts passiert.",
       "cancelled": "Der Wettbewerb wurde abgebrochen – nichts passiert."
+    }
+  },
+  "unActions": {
+    "menu": {
+      "title": "Un-Actions",
+      "open": "Open Un-actions menu",
+      "close": "Close Un-actions menu",
+      "TouchFace": "Touch your face",
+      "TouchTable": "Slap the table",
+      "Laugh": "Laugh out loud",
+      "FlickCards": "Flick your cards",
+      "saysWord": "Say a word…",
+      "saysNumber": "Say a number…",
+      "wordPlaceholder": "A word",
+      "numberPlaceholder": "A number",
+      "say": "Say it!"
+    },
+    "gotcha": {
+      "button": "Gotcha!"
+    },
+    "sayPhrase": {
+      "title": "Say it to stop the effect",
+      "say": "Say “{{phrase}}”",
+      "stayQuiet": "Stay quiet"
+    },
+    "fx": {
+      "touchFace": "*smack*",
+      "touchTable": "SLAP!",
+      "laugh": "HA HA HA!",
+      "flickCards": "thwip thwip!"
     }
   }
 }

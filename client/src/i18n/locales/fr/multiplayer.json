@@ -353,6 +353,7 @@
     "gameInProgressTitle": "Partie en cours",
     "gameInProgressBody": "Terminez ou quittez votre partie en cours, puis rouvrez le lien."
   },
+  "p2pStateWithheld": "L'état de la partie après cette action est trop volumineux pour être envoyé, ce plateau n'est donc pas à jour. Les parties pair-à-pair n'ont pas de reprise ; le plateau se mettra à jour lorsqu'un état ultérieur sera assez petit pour être envoyé.",
   "terminalRecovery": {
     "finalViewsUnpublished": "La concession a atteint un état final Full, mais les vues finales natives n’ont pas pu être publiées.",
     "concedeUnreconciled": "Impossible de rapprocher le résultat de la concession ; le siège reste verrouillé.",

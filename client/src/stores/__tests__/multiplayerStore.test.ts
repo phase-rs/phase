@@ -26,6 +26,9 @@ const localStorageItems = vi.hoisted(() => {
 });
 
 import type { PlayerSlot } from "../../multiplayer/seatTypes";
+import { P2PHostAdapter } from "../../adapter/p2p-adapter";
+import { DECK_LIST_FIELDS, type DeckListField } from "../../multiplayer/deckListData";
+import { expandParsedDeck } from "../../services/deckParser";
 import { formatMetadata } from "../../data/formatRegistry";
 import {
   FORMAT_DEFAULTS,
@@ -1298,6 +1301,95 @@ describe("multiplayerStore", () => {
     expect(frame.data.deck).not.toHaveProperty("bracket_tier");
   });
 
+  describe("host deck hand-off carries every DeckData list", () => {
+    const BASE_DECK = { main_deck: ["Forest"], sideboard: [], commander: [] };
+    const SAMPLES: Record<DeckListField, string[]> = {
+      main_deck: ["Forest", "Island"],
+      sideboard: ["Negate"],
+      commander: ["Goreclaw, Terror of Qal Sisma"],
+      companion: ["Lurrus of the Dream-Den"],
+      attraction_deck: ["Balloon Stand"],
+      planar_deck: ["Academy at Tolaria West"],
+      scheme_deck: ["A Display of My Dark Power"],
+      contraption_deck: ["Accessories to Murder"],
+      sticker_sheets: ["Vampire Champion Fury", "Wild Ogre Bupkis"],
+      signature_spell: ["Chain Lightning"],
+    };
+
+    /** The `{ player, opponent, ai_decks }` the store handed the P2P host adapter. */
+    function p2pHandOff(): { player: Record<string, unknown>; opponent: unknown } {
+      const { calls } = vi.mocked(P2PHostAdapter).mock;
+      const handOff: unknown = calls[calls.length - 1][0];
+      if (typeof handOff !== "object" || handOff === null || !("player" in handOff) || !("opponent" in handOff)) {
+        throw new Error("the P2P host adapter was not handed a deck list");
+      }
+      const { player, opponent } = handOff;
+      if (typeof player !== "object" || player === null) {
+        throw new Error("the P2P host adapter was not handed a host deck");
+      }
+      return { player: { ...player }, opponent };
+    }
+
+    it.each(DECK_LIST_FIELDS)("server host carries %s", async (field) => {
+      useMultiplayerStore
+        .getState()
+        .startHosting(hostingSettings(), { ...BASE_DECK, [field]: SAMPLES[field] }, HOST_URL);
+
+      await waitFor(() => expect(socketMocks.send).toHaveBeenCalled());
+      const frame = JSON.parse(socketMocks.send.mock.calls[0][0] as string) as {
+        type: string;
+        data: { deck: Record<string, unknown> };
+      };
+      expect(frame.type).toBe("CreateGameWithSettings");
+      expect(frame.data.deck[field]).toEqual(SAMPLES[field]);
+    });
+
+    it.each(DECK_LIST_FIELDS)("P2P host carries %s", async (field) => {
+      const ok = await useMultiplayerStore
+        .getState()
+        .startP2PHostingSession(
+          hostingSettings(),
+          { ...BASE_DECK, [field]: SAMPLES[field] },
+          { brokerUrl: null },
+        );
+
+      expect(ok).toBe(true);
+      const payload = p2pHandOff();
+      expect(payload.player[field]).toEqual(SAMPLES[field]);
+      expect(payload.opponent).toEqual({
+        main_deck: [],
+        sideboard: [],
+        commander: [],
+        planar_deck: [],
+        scheme_deck: [],
+      });
+    });
+
+    it("sends a deck without the optional lists byte-for-byte as before", async () => {
+      // The input spelled as `MultiplayerPage` spells it: `ExpandedDeck`
+      // always carries empty companion, signature-spell and sticker lists.
+      const deck = {
+        ...expandParsedDeck({ main: [{ count: 1, name: "Forest" }], sideboard: [] }),
+        bracket_tier: "core" as const,
+      };
+      expect(deck).toHaveProperty("companion", []);
+      expect(deck).toHaveProperty("signature_spell", []);
+      expect(deck).toHaveProperty("sticker_sheets", []);
+      const legacyBytes =
+        '{"main_deck":["Forest"],"sideboard":[],"commander":[],"planar_deck":[],"scheme_deck":[],"bracket_tier":"core"}';
+
+      useMultiplayerStore.getState().startHosting(hostingSettings(), deck, HOST_URL);
+      await waitFor(() => expect(socketMocks.send).toHaveBeenCalled());
+      expect(socketMocks.send.mock.calls[0][0] as string).toContain(`"deck":${legacyBytes},`);
+
+      const ok = await useMultiplayerStore
+        .getState()
+        .startP2PHostingSession(hostingSettings(), deck, { brokerUrl: null });
+      expect(ok).toBe(true);
+      expect(JSON.stringify(p2pHandOff().player)).toBe(legacyBytes);
+    });
+  });
+
   it("saves server-host metadata with the reconnect token while waiting for players", async () => {
     useMultiplayerStore.getState().startHosting(
       hostingSettings(),
@@ -2146,6 +2238,7 @@ describe("multiplayerStore", () => {
       type: "SetKind",
       data: {
         seatIndex: 1,
+        expectedKind: { type: "WaitingHuman" },
         kind: {
           type: "Ai",
           data: { difficulty: "Hard", deck: { type: "Random" } },
@@ -2156,6 +2249,7 @@ describe("multiplayerStore", () => {
       type: "SetKind",
       data: {
         seatIndex: 3,
+        expectedKind: { type: "WaitingHuman" },
         kind: {
           type: "Ai",
           data: { difficulty: "Easy", deck: { type: "Named", data: "My Deck" } },

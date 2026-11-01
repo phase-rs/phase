@@ -23,6 +23,10 @@ mod suggest;
 thread_local! {
     static PACK_GEN: Cell<Option<PackGenerator>> = const { Cell::new(None) };
     static DIFFICULTY: Cell<AiDifficulty> = const { Cell::new(AiDifficulty::Medium) };
+    /// Whether bots (and auto-pick) apply the built-in draft guides. Opt-in and
+    /// set by the caller via [`set_draft_pick_enhancements`]; defaults off.
+    static PICK_ENHANCEMENT: Cell<bot_ai::PickEnhancement> =
+        const { Cell::new(bot_ai::PickEnhancement::Off) };
     static RNG: Cell<Option<ChaCha20Rng>> = const { Cell::new(None) };
     /// Per RESEARCH Pitfall 2: draft-wasm has its own CardDatabase, separate
     /// from engine-wasm's thread-local. The frontend loads card-data.json into
@@ -85,6 +89,19 @@ fn deck_submission_message(error: DraftError) -> String {
             .join("; "),
         error => error.to_string(),
     }
+}
+
+/// Opt bots and auto-pick in or out of the built-in draft-guide pick
+/// enhancements. Independent of difficulty; the frontend sets it from the
+/// player's setting before starting or resuming a draft.
+#[wasm_bindgen]
+pub fn set_draft_pick_enhancements(enabled: bool) {
+    let enhancement = if enabled {
+        bot_ai::PickEnhancement::DraftGuides
+    } else {
+        bot_ai::PickEnhancement::Off
+    };
+    PICK_ENHANCEMENT.with(|cell| cell.set(enhancement));
 }
 
 /// Map a u8 difficulty value to AiDifficulty.
@@ -688,6 +705,7 @@ fn apply_human_pick_and_resolve_bots_with_overrides(
                     difficulty,
                     &draft_session.pools[seat as usize],
                     card_db,
+                    PICK_ENHANCEMENT.with(|cell| cell.get()),
                     &mut rng,
                 );
                 // Map indices to ids BEFORE applying — the apply mutates the pack
@@ -780,6 +798,7 @@ pub fn auto_pick() -> Result<JsValue, JsValue> {
                 difficulty,
                 &draft_session.pools[0],
                 db_borrow.as_ref(),
+                PICK_ENHANCEMENT.with(|cell| cell.get()),
                 &mut rng,
             );
             pack.0[pick_idx].instance_id.clone()

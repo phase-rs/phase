@@ -197,6 +197,13 @@ export function pool_filter_options(pool_json: string): any;
 export function resolve_shared_stack_bot_turns(): any;
 
 /**
+ * Opt bots and auto-pick in or out of the built-in draft-guide pick
+ * enhancements. Independent of difficulty; the frontend sets it from the
+ * player's setting before starting or resuming a draft.
+ */
+export function set_draft_pick_enhancements(enabled: boolean): void;
+
+/**
  * Mark a human seat as connected or disconnected. The host adapter calls
  * this on guest disconnect/reconnect so `DraftPlayerView.seats[*].connected`
  * reflects the runtime state. Rejects bot seats with `SeatIsBot`.
@@ -371,6 +378,7 @@ export interface InitOutput {
     readonly load_card_database: (a: number, b: number) => [number, number, number];
     readonly pool_filter_options: (a: number, b: number) => [number, number, number];
     readonly resolve_shared_stack_bot_turns: () => [number, number, number];
+    readonly set_draft_pick_enhancements: (a: number) => void;
     readonly set_seat_connected: (a: number, b: number) => [number, number, number];
     readonly shared_stack_forced_decision: (a: number) => [number, number, number];
     readonly start_quick_cube_draft: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];

@@ -1,0 +1,257 @@
+---
+source: crates/phase-parser/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&lowered"
+---
+{
+  "abilities": [
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Dig",
+        "player": {
+          "type": "Player"
+        },
+        "count": {
+          "type": "Fixed",
+          "value": 1
+        },
+        "destination": null,
+        "keep_count": 0,
+        "up_to": false,
+        "filter": {
+          "type": "Any"
+        },
+        "rest_destination": null,
+        "reveal": false,
+        "enter_tapped": false,
+        "enters_attacking": false
+      },
+      "declares_chosen_group": 2147483648,
+      "cost": {
+        "type": "Loyalty",
+        "amount": 2
+      },
+      "sub_ability": {
+        "kind": "Spell",
+        "effect": {
+          "type": "PutAtLibraryPosition",
+          "target": {
+            "type": "ParentTarget"
+          },
+          "count": {
+            "type": "Fixed",
+            "value": 1
+          },
+          "position": {
+            "type": "Bottom"
+          }
+        },
+        "cost": null,
+        "sub_ability": null,
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": true,
+        "forward_result": false,
+        "sub_link": "SequentialSibling"
+      },
+      "duration": null,
+      "description": "[+2]: Look at the top card of target player's library. You may put that card on the bottom of that player's library.",
+      "target_prompt": null,
+      "activation_restrictions": [
+        {
+          "type": "AsSorcery"
+        }
+      ],
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Draw",
+        "count": {
+          "type": "Fixed",
+          "value": 3
+        },
+        "target": {
+          "type": "Controller"
+        }
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": 0
+      },
+      "sub_ability": {
+        "kind": "Spell",
+        "effect": {
+          "type": "PutAtLibraryPosition",
+          "target": {
+            "type": "Typed",
+            "type_filters": [
+              "Card"
+            ],
+            "controller": "You",
+            "properties": [
+              {
+                "type": "InZone",
+                "zone": "Hand"
+              }
+            ]
+          },
+          "count": {
+            "type": "Fixed",
+            "value": 2
+          },
+          "position": {
+            "type": "Top"
+          }
+        },
+        "cost": null,
+        "sub_ability": null,
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false
+      },
+      "duration": null,
+      "description": "[0]: Draw three cards, then put two cards from your hand on top of your library in any order.",
+      "target_prompt": null,
+      "activation_restrictions": [
+        {
+          "type": "AsSorcery"
+        }
+      ],
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "Bounce",
+        "target": {
+          "type": "Typed",
+          "type_filters": [
+            "Creature"
+          ],
+          "controller": null,
+          "properties": []
+        },
+        "destination": null
+      },
+      "cost": {
+        "type": "Loyalty",
+        "amount": -1
+      },
+      "sub_ability": null,
+      "duration": null,
+      "description": "[−1]: Return target creature to its owner's hand.",
+      "target_prompt": null,
+      "activation_restrictions": [
+        {
+          "type": "AsSorcery"
+        }
+      ],
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZoneAll",
+        "origin": "Library",
+        "destination": "Exile",
+        "target": {
+          "type": "Typed",
+          "type_filters": [
+            "Card"
+          ],
+          "controller": null,
+          "properties": [
+            {
+              "type": "Owned",
+              "controller": "TargetPlayer"
+            },
+            {
+              "type": "InZone",
+              "zone": "Library"
+            }
+          ]
+        }
+      },
+      "declares_chosen_group": 2147483649,
+      "cost": {
+        "type": "Loyalty",
+        "amount": -12
+      },
+      "sub_ability": {
+        "kind": "Spell",
+        "effect": {
+          "type": "ChangeZoneAll",
+          "origin": "Hand",
+          "destination": "Library",
+          "target": {
+            "type": "DeclaredPlayer",
+            "group": 2147483649
+          },
+          "library_shuffle": {
+            "type": "TerminalShuffle"
+          }
+        },
+        "cost": null,
+        "sub_ability": {
+          "kind": "Spell",
+          "effect": {
+            "type": "Shuffle",
+            "target": {
+              "type": "ParentTargetController"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "duration": null,
+          "description": null,
+          "target_prompt": null,
+          "condition": null,
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        },
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false
+      },
+      "duration": null,
+      "description": "[−12]: Exile all cards from target player's library, then that player shuffles their hand into their library.",
+      "target_prompt": null,
+      "activation_restrictions": [
+        {
+          "type": "AsSorcery"
+        }
+      ],
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "extractedKeywords": []
+}

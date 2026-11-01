@@ -306,12 +306,11 @@ export interface DraftMatchDeckPayload {
 export interface CommanderSeatDecks {
   hostDeck: DraftDeckPayload;
   /**
-   * Every LIVE human seat's own deck, including `localSeat`.
+   * Seats provisionally live at preparation, including `localSeat`.
    *
    * `localSeat`'s entry is the SAME OBJECT as `hostDeck`, never a second
-   * synthesis of it. That is what lets the sender address every recipient from
-   * this one list without re-reading the draft session — the exactly-once
-   * export invariant would otherwise force a second `exportDraftSession()`.
+   * synthesis. `P2PDraftHost.sendCommanderLaunches` uses both arrays to finalize
+   * recipients and engine seats without exporting or synthesizing decks again.
    */
   liveSeatDecks: Array<{ seat: number; deck: DraftDeckPayload }>;
   engineSeatDecks: Array<{ seat: number; deck: DraftDeckPayload }>;
