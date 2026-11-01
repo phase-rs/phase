@@ -21,7 +21,7 @@ import {
   PROTOCOL_VERSION,
   WebSocketAdapter,
 } from "../ws-adapter";
-import { AdapterError, AdapterErrorCode, supportsMatchConcede, supportsServerRewind } from "../types";
+import { AdapterError, AdapterErrorCode, supportsMatchConcede, supportsTakeback, supportsTurnRewind } from "../types";
 import type { FormatConfig, GameAction, GameState, SubmitResult } from "../types";
 import type {
   InteractionChoiceId,
@@ -726,7 +726,8 @@ describe("WebSocketAdapter", () => {
 */
   describe("server rewind capability (F2)", () => {
     it("declares the capability through the standalone type guard", () => {
-      expect(supportsServerRewind(adapter)).toBe(true);
+      expect(supportsTurnRewind(adapter)).toBe(true);
+      expect(supportsTakeback(adapter)).toBe(true);
     });
 
     // The reverse-skew guard. The last-action frame must carry NO `data` key —
@@ -2724,7 +2725,7 @@ describe("WebSocketAdapter", () => {
         },
       }));
       socket.dispatchSynthetic("message", JSON.stringify({
-        type: "TakebackResolved", data: { approved: true, resolved_by: 0 },
+        type: "TakebackResolved", data: { resolution: "approved", resolved_by: 0 },
       }));
       await expect(outcome()).resolves.toEqual({ resolvedWith: { events: [], log_entries: [] } });
       const sequence = events.mock.calls
@@ -2737,8 +2738,20 @@ describe("WebSocketAdapter", () => {
         "withheld:6", "withheld:7", "takebackRequested", "withheld:none", "state:8", "takebackResolved",
       ]);
 
+      expect(events).toHaveBeenCalledWith({ type: "takebackResolved", resolution: "approved", resolvedBy: 0 });
+
       deliverWithheld(9);
       expect(latestDelivery(events)).toEqual({ revision: 9, reason: WITHHELD_REASON });
+    });
+
+    it("emits the resolution a TakebackResolved frame names", () => {
+      deliverOwnershipStateUpdate(socket, "cached", 5);
+      const events = vi.fn();
+      subject.onEvent(events);
+      socket.dispatchSynthetic("message", JSON.stringify({
+        type: "TakebackResolved", data: { resolution: "withdrawn", resolved_by: 1 },
+      }));
+      expect(events).toHaveBeenCalledWith({ type: "takebackResolved", resolution: "withdrawn", resolvedBy: 1 });
     });
 
     it("keeps all four simultaneous mulligan submissions owned when a peer advances", async () => {

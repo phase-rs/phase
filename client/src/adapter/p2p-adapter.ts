@@ -19,6 +19,9 @@ import type {
   RestoredGameStateResult,
   StateWithheldNotice,
   SubmitResult,
+  TakebackEvent,
+  TakebackNotice,
+  TakebackReply,
   ViewerSnapshot,
   WaitingFor,
 } from "./types";
@@ -54,7 +57,13 @@ import { ContestClickBuffer, isContestSequence } from "../network/contestClickBu
 import { createPeerSession, type PeerSession } from "../network/peer";
 import type { TransportConnection, TransportPeer } from "../network/transport";
 import type { P2PMessage } from "../network/protocol";
-import { WIRE_PROTOCOL_VERSION, legalActionsFromWire, legalActionsToWire } from "../network/protocol";
+import {
+  WIRE_PROTOCOL_VERSION,
+  legalActionsFromWire,
+  legalActionsToWire,
+  takebackEventFromWire,
+  takebackEventToWire,
+} from "../network/protocol";
 import type {
   DeckListData,
   PlayerSlot,
@@ -161,7 +170,8 @@ export type P2PAdapterEvent =
   | { type: "roomFull" }
   | { type: "deckRejected"; reason: string; format?: string }
   | { type: "reconnecting"; attempt: number }
-  | { type: "reconnectFailed"; reason: string };
+  | { type: "reconnectFailed"; reason: string }
+  | TakebackEvent;
 
 type P2PAdapterEventListener = (event: P2PAdapterEvent) => void;
 
@@ -280,6 +290,9 @@ class NativeP2PBridge {
   private readonly pendingFaults = new Map<number, { id: number; revision: number; message: string }>();
   /** Terminal revision of the host's Full delivery, released after that revision's fan-out. */
   private pendingHostTerminalRevision: number | null = null;
+  /** Each seat's takeback notices in arrival order, each held until the revision
+   * that seat had been sent when it arrived has been fanned out. */
+  private pendingSeatNotices: Array<{ playerId: PlayerId; revision: number; event: TakebackEvent }> = [];
   private gameCode: string | null = null;
   private fullKey: FullSessionKey | null = null;
   /** Clients still in their pregame handshake; `dispose()` releases them. */
@@ -296,6 +309,7 @@ class NativeP2PBridge {
     private readonly onRevision: (revision: number, reports: Map<PlayerId, NativeSeatReport>) => Promise<void>,
     private readonly onFault: (fault: { id: number; revision: number; message: string }) => Promise<void>,
     private readonly onHostTerminalDelivery: (revision: number) => Promise<void>,
+    private readonly onSeatNotice: (playerId: PlayerId, event: TakebackEvent) => Promise<void>,
     private readonly resumeSession?: NativeP2PServerSession,
   ) {}
 
@@ -641,6 +655,7 @@ class NativeP2PBridge {
     this.withheldNotices.clear();
     this.pendingViews.clear();
     this.resumeWaiters.clear();
+    this.pendingSeatNotices = [];
   }
 
   private async attachClient(client: WebSocketAdapter): Promise<NativeSessionAttachment> {
@@ -679,6 +694,17 @@ class NativeP2PBridge {
         if (this.deliveredFaultIds.has(event.id)) return;
         this.pendingFaults.set(event.id, { id: event.id, revision: event.revision, message: event.message });
         this.enqueueFaultBarrier();
+        return;
+      }
+      if (
+        event.type === "takebackRequested"
+        || event.type === "takebackResolved"
+        || event.type === "requestRejected"
+      ) {
+        const playerId = client.playerId;
+        if (this.disposed || playerId === null) return;
+        this.pendingSeatNotices.push({ playerId, revision: this.seatRevision(playerId), event });
+        this.enqueueSeatNoticeBarrier();
         return;
       }
       if (event.type === "stateDelivery") {
@@ -741,6 +767,7 @@ class NativeP2PBridge {
           await this.onRevision(revision, reports);
           this.deliveredRevision = Math.max(this.deliveredRevision, revision);
           await this.releaseFaultsThroughDeliveredRevision();
+          await this.releaseSeatNoticesThroughDeliveredRevision();
           await this.releaseHostTerminalThroughDeliveredRevision();
         })
         .catch((error) => {
@@ -766,6 +793,28 @@ class NativeP2PBridge {
       this.deliveredFaultIds.add(fault.id);
       await this.onFault(fault);
     }
+  }
+
+  /** The latest revision the server has sent this seat, as a view or a withheld notice. */
+  private seatRevision(playerId: PlayerId): number {
+    return Math.max(
+      this.latestViews.get(playerId)?.revision ?? -1,
+      this.withheldNotices.get(playerId)?.revision ?? -1,
+    );
+  }
+
+  private enqueueSeatNoticeBarrier(): void {
+    this.revisionQueue = this.revisionQueue
+      .then(() => this.releaseSeatNoticesThroughDeliveredRevision())
+      .catch((error) => console.error("[NativeP2PBridge] takeback notice fan-out failed:", error));
+  }
+
+  /** A seat's notice follows the state it was sent before it, as on that seat's socket. */
+  private async releaseSeatNoticesThroughDeliveredRevision(): Promise<void> {
+    const released = this.pendingSeatNotices.filter((notice) => notice.revision <= this.deliveredRevision);
+    if (released.length === 0) return;
+    this.pendingSeatNotices = this.pendingSeatNotices.filter((notice) => notice.revision > this.deliveredRevision);
+    for (const notice of released) await this.onSeatNotice(notice.playerId, notice.event);
   }
 
   private enqueueHostTerminalBarrier(): void {
@@ -1080,6 +1129,19 @@ class NativeP2PBridge {
     this.clients.get(playerId)?.submitContestClick(contest, seq);
   }
 
+  /** No target: the server rolls back the last action. */
+  requestTakeback(playerId: PlayerId): void {
+    this.clients.get(playerId)?.sendRequestTakeback();
+  }
+
+  respondTakeback(playerId: PlayerId, approve: boolean): void {
+    this.clients.get(playerId)?.sendRespondTakeback(approve);
+  }
+
+  cancelTakeback(playerId: PlayerId): void {
+    this.clients.get(playerId)?.sendCancelTakeback();
+  }
+
   private clientFor(playerId: PlayerId): WebSocketAdapter {
     const client = this.clients.get(playerId);
     if (!client) {
@@ -1356,6 +1418,10 @@ function traceAdapter(side: "Host" | "Guest", event: string, data?: Record<strin
   console.debug(`[P2P ${side} Adapter]`, performance.now().toFixed(1), event, data ?? {});
 }
 
+function resolvedTakebackEvent(notice: TakebackNotice): TakebackEvent {
+  return { type: "takebackResolved", resolution: notice.resolution, resolvedBy: notice.resolvedBy };
+}
+
 function isZeroCountDebugCreate(action: GameAction): boolean {
   if (action.type !== "Debug") return false;
   switch (action.data.type) {
@@ -1594,6 +1660,7 @@ export class P2PHostAdapter implements EngineAdapter {
    * fault itself: rehydration sets the latter before the bridge replays it. */
   private deliveredNativeAiDriverFault: NativeAiDriverFault | null = null;
   readonly supportsMatchConcede: true | undefined;
+  readonly supportsTakeback = true;
   private matchConcedeSent = false;
 
   private gameStarted = false;
@@ -1755,6 +1822,7 @@ export class P2PHostAdapter implements EngineAdapter {
         ),
         (fault) => this.enqueueDelivery(() => this.handleNativeAiDriverFault(fault)),
         (revision) => this.enqueueDelivery(() => this.commitWithheldHostTerminal(revision)),
+        (pid, event) => this.enqueueDelivery(() => this.handleNativeSeatNotice(pid, event)),
         nativeResume,
       );
     }
@@ -2126,7 +2194,14 @@ export class P2PHostAdapter implements EngineAdapter {
     operation: () => Promise<SubmitResult>,
   ): Promise<BrowserTransition> {
     const browserMutation = this.nativeBridge === null;
-    return this.stampBrowserMutation(await operation(), browserMutation);
+    const transition = this.stampBrowserMutation(await operation(), browserMutation);
+    // A concession that ended the vote unapproved is heard before its state;
+    // an approval follows its state (`broadcastStateUpdateInner`).
+    const takeback = transition.result.takeback;
+    if (takeback && takeback.resolution !== "approved") {
+      await this.enqueueDelivery(async () => this.announceTakeback(resolvedTakebackEvent(takeback)));
+    }
+    return transition;
   }
 
   /** Stamp a successful browser-WASM gameplay mutation after the engine accepts it. */
@@ -3173,9 +3248,7 @@ export class P2PHostAdapter implements EngineAdapter {
     if (!this.ownsAuthority() || this.nativeBridge || !contestRunnable) {
       return idle;
     }
-    const aiPlayers = this.pregameSeatState.seats.flatMap((seat, index) =>
-      seat.type === "Ai" ? [index] : [],
-    );
+    const aiPlayers = this.aiSeats();
     // A settled contest whose resolution never reached the host screen is delivered
     // (and its AI follow-up run) before the engine is driven any further: the
     // engine reports NotInContest from here on and cannot recreate its events.
@@ -3821,6 +3894,11 @@ export class P2PHostAdapter implements EngineAdapter {
       });
       return;
     }
+    const takeback = transition.result.takeback;
+    if (takeback?.resolution === "approved") {
+      this.restoreRewoundSeats(closingSnapshot);
+      this.announceTakeback(resolvedTakebackEvent(takeback));
+    }
     await this.commitTerminalIfComplete(closingSnapshot, revision, terminalReason);
   }
 
@@ -4350,6 +4428,129 @@ export class P2PHostAdapter implements EngineAdapter {
     this.requestBoundMatchConcede(0);
   }
 
+  sendRequestTakeback(): void {
+    if (!this.ownsAuthority()) return;
+    void this.requestTakeback(0);
+  }
+
+  sendRespondTakeback(approve: boolean): void {
+    if (!this.ownsAuthority()) return;
+    void this.respondTakeback(0, approve);
+  }
+
+  sendCancelTakeback(): void {
+    if (!this.ownsAuthority()) return;
+    void this.cancelTakeback(0);
+  }
+
+  private aiSeats(): PlayerId[] {
+    return this.pregameSeatState.seats.flatMap((seat, index) => (seat.type === "Ai" ? [index] : []));
+  }
+
+  private async requestTakeback(pid: PlayerId): Promise<void> {
+    if (this.nativeBridge) {
+      this.nativeBridge.requestTakeback(pid);
+      return;
+    }
+    await this.answerTakeback(pid, () => this.wasm.requestTakeback(pid, this.aiSeats()));
+  }
+
+  private async respondTakeback(pid: PlayerId, approve: boolean): Promise<void> {
+    if (this.nativeBridge) {
+      this.nativeBridge.respondTakeback(pid, approve);
+      return;
+    }
+    await this.answerTakeback(pid, () => this.wasm.respondTakeback(pid, approve, this.aiSeats()));
+  }
+
+  private async cancelTakeback(pid: PlayerId): Promise<void> {
+    if (this.nativeBridge) {
+      this.nativeBridge.cancelTakeback(pid);
+      return;
+    }
+    await this.answerTakeback(pid, () => this.wasm.cancelTakeback(pid));
+  }
+
+  /** Run one browser takeback call for `pid` and publish what the engine replied. */
+  private async answerTakeback(pid: PlayerId, call: () => Promise<TakebackReply>): Promise<void> {
+    let reply: TakebackReply;
+    try {
+      reply = await call();
+    } catch (err) {
+      console.error(`[P2PHost] takeback call for seat ${pid} failed:`, err);
+      const reason = err instanceof Error ? err.message : String(err);
+      await this.enqueueDelivery(async () => this.deliverTakebackEvent(pid, { type: "requestRejected", reason }));
+      return;
+    }
+    try {
+      await this.publishTakebackReply(pid, reply);
+    } catch (err) {
+      console.error("[P2PHost] delivery after a takeback reply failed:", err);
+    }
+  }
+
+  /** The server transport's arms for the same replies, one for one. */
+  private async publishTakebackReply(pid: PlayerId, reply: TakebackReply): Promise<void> {
+    switch (reply.status) {
+      case "requested": {
+        const event: TakebackEvent = {
+          type: "takebackRequested",
+          requester: reply.requester,
+          requesterName: this.playerNamesForSeats()[reply.requester] ?? "",
+        };
+        await this.enqueueDelivery(async () => this.announceTakeback(event));
+        return;
+      }
+      case "recorded":
+        return;
+      case "rejected": {
+        const event: TakebackEvent = { type: "requestRejected", reason: reply.reason };
+        await this.enqueueDelivery(async () => this.deliverTakebackEvent(pid, event));
+        return;
+      }
+      case "resolved": {
+        const notice: TakebackNotice = { resolution: reply.resolution, resolvedBy: reply.resolvedBy };
+        if (notice.resolution === "approved") {
+          const transition = this.stampBrowserMutation({ events: [], log_entries: [], takeback: notice }, true);
+          await this.publishHostSnapshot(transition.result);
+          await this.broadcastStateUpdate(transition);
+          void this.persistAuthoritativeState();
+        } else {
+          await this.enqueueDelivery(async () => this.announceTakeback(resolvedTakebackEvent(notice)));
+        }
+        // The AI loop stops while a vote is open; every resolution restarts it.
+        await this.runAiLoop();
+        return;
+      }
+    }
+  }
+
+  /** Called only inside `enqueueDelivery`, so a notice cannot land between a reconnect's replay and its promotion. */
+  private deliverTakebackEvent(pid: PlayerId, event: TakebackEvent): void {
+    if (pid === 0) {
+      this.emit(event);
+      return;
+    }
+    const session = this.guestSessions.get(pid);
+    if (!session || this.disconnectedSeats.has(pid)) return;
+    void this.send(session, takebackEventToWire(event));
+  }
+
+  private announceTakeback(event: TakebackEvent): void {
+    this.deliverTakebackEvent(0, event);
+    for (const pid of this.guestSessions.keys()) this.deliverTakebackEvent(pid, event);
+  }
+
+  /** A native seat's takeback notice, relayed to that seat as the server sent it. */
+  private async handleNativeSeatNotice(pid: PlayerId, event: TakebackEvent): Promise<void> {
+    if (!this.ownsAuthority() || !this.nativeBridge) return;
+    // Seat 0 is the table's single trigger: the server sends every vote notice to every seat.
+    if (pid === 0 && event.type === "takebackResolved" && event.resolution === "approved") {
+      this.restoreRewoundSeats(await this.nativeBridge.getSnapshot());
+    }
+    this.deliverTakebackEvent(pid, event);
+  }
+
   /**
    * The sole match-concession sink. Both the local host control and a guest's
    * protected wire request pass through this authority-bound route.
@@ -4806,6 +5007,20 @@ export class P2PHostAdapter implements EngineAdapter {
         this.requestBoundMatchConcede(pid);
         break;
       }
+      // No elimination or run-state gate: the takeback authority decides.
+      case "request_takeback": {
+        await this.requestTakeback(pid);
+        break;
+      }
+      case "respond_takeback": {
+        if (typeof msg.approve !== "boolean") return;
+        await this.respondTakeback(pid, msg.approve);
+        break;
+      }
+      case "cancel_takeback": {
+        await this.cancelTakeback(pid);
+        break;
+      }
       default:
         break;
     }
@@ -4870,7 +5085,11 @@ export class P2PHostAdapter implements EngineAdapter {
     // ordinary inactivity timeout instead of pausing for the reconnect grace.
     // A concession already in flight owns the seat's socket until it settles.
     if (!this.concedingSeats.has(pid)) this.nativeBridge?.suspendGuest(pid);
+    this.announceSeatAway(pid);
+  }
 
+  /** Tell every other seat and the host that `pid` is away mid-game, offering the host its choice. */
+  private announceSeatAway(pid: PlayerId): void {
     // Notify remaining guests.
     for (const [otherPid, session] of this.guestSessions) {
       if (otherPid === pid) continue;
@@ -4884,6 +5103,29 @@ export class P2PHostAdapter implements EngineAdapter {
       gracePeriodMs: this.gracePeriodMs,
     });
     this.emit({ type: "gamePaused", reason: "Player disconnected" });
+  }
+
+  private restoreRewoundSeats(snapshot: EngineSnapshot): void {
+    // The resume reconcile assumes a cold start; an approval rewinds a live table, so only seats the restored state brings back change.
+    const authoritative = new Set(snapshot.state.eliminated_players ?? []);
+    let restored = false;
+    for (const pid of [...this.eliminatedSeats]) {
+      if (authoritative.has(pid)) continue;
+      this.eliminatedSeats.delete(pid);
+      restored = true;
+      if (
+        pid === 0
+        || !this.playerTokens.has(pid)
+        || this.guestSessions.has(pid)
+        || this.disconnectedSeats.has(pid)
+      ) continue;
+      this.armResumeGrace(pid);
+      if (this.gameRunState === "running") this.gameRunState = "paused-disconnect";
+      this.nativeBridge?.suspendGuest(pid);
+      this.announceSeatAway(pid);
+    }
+    // A resumed host loads the persisted cache as-is.
+    if (restored) this.saveSession();
   }
 
   private async handleReconnect(
@@ -5043,6 +5285,21 @@ export class P2PHostAdapter implements EngineAdapter {
         if (!faultDelivered) {
           this.failPendingReconnect(pid, session, "Reconnect fault could not be delivered");
           return;
+        }
+      }
+      if (!this.nativeBridge) {
+        // The open vote lives in the engine; the native server replays its own.
+        const requester = await this.wasm.pendingTakebackRequester();
+        if (requester !== null) {
+          const replayed = await this.send(session, takebackEventToWire({
+            type: "takebackRequested",
+            requester,
+            requesterName: this.playerNamesForSeats()[requester] ?? "",
+          }));
+          if (!replayed) {
+            this.failPendingReconnect(pid, session, "Reconnect takeback request could not be delivered");
+            return;
+          }
         }
       }
       if (this.pendingReconnectSessions.get(pid) !== session || !this.ownsAuthority()) return;
@@ -5536,6 +5793,7 @@ export class P2PGuestAdapter implements EngineAdapter {
   /** Current host lease accepted from game_setup/reconnect_ack. */
   private authority: P2PAuthorityStamp | null = null;
   readonly supportsMatchConcede: true | undefined;
+  readonly supportsTakeback = true;
   private matchConcedeSent = false;
   /** Revision of the cached state frame. A terminal result is bound to this
    * exact final state, not merely to the room code. */
@@ -5905,6 +6163,21 @@ export class P2PGuestAdapter implements EngineAdapter {
     this.send({ type: "concede" });
   }
 
+  sendRequestTakeback(): void {
+    if (!this.currentAuthenticatedSession()) return;
+    this.send({ type: "request_takeback" });
+  }
+
+  sendRespondTakeback(approve: boolean): void {
+    if (!this.currentAuthenticatedSession()) return;
+    this.send({ type: "respond_takeback", approve });
+  }
+
+  sendCancelTakeback(): void {
+    if (!this.currentAuthenticatedSession()) return;
+    this.send({ type: "cancel_takeback" });
+  }
+
   /** Requests settlement from the authenticated host-side match authority. */
   sendMatchConcede(): void {
     if (!this.currentAuthenticatedSession()) return;
@@ -6080,6 +6353,12 @@ export class P2PGuestAdapter implements EngineAdapter {
       }
       case "terminal_result": {
         void this.acceptTerminalResult(session, msg);
+        break;
+      }
+      case "takeback_requested":
+      case "takeback_resolved":
+      case "request_rejected": {
+        this.emit(takebackEventFromWire(msg));
         break;
       }
       case "ai_driver_fault": {

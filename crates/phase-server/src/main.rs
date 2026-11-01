@@ -8288,7 +8288,7 @@ async fn handle_contest_click(
 
 /// Broadcasts the result of an approved takeback (GH #1507): a `StateUpdate`
 /// carrying the rolled-back state to every seat, filtered per-player exactly
-/// like a normal action result, followed by `TakebackResolved { approved: true, .. }`.
+/// like a normal action result, followed by `TakebackResolved { resolution: approved, .. }`.
 /// `resolved_by` is the player whose response concluded the request, or
 /// `None` when it resolved naturally (e.g. the requester was the sole human).
 // Same shape as the sibling transport fan-outs at `:2010`/`:3767`/`:4071`:
@@ -8346,14 +8346,8 @@ fn takeback_resolved_message(
     resolution: TakebackResolution,
     resolved_by: Option<PlayerId>,
 ) -> ServerMessage {
-    let approved = match resolution {
-        TakebackResolution::Approved => true,
-        TakebackResolution::Declined
-        | TakebackResolution::Cancelled
-        | TakebackResolution::Withdrawn => false,
-    };
     ServerMessage::TakebackResolved {
-        approved,
+        resolution,
         resolved_by,
     }
 }

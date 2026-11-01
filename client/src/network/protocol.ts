@@ -11,6 +11,8 @@ import type {
   ObjectId,
   ObjectAction,
   ActionRejection,
+  TakebackEvent,
+  TakebackResolution,
 } from "../adapter/types";
 import type {
   InteractionPreview,
@@ -813,6 +815,16 @@ export type P2PMessage = P2PAuthorityWire & (
   | { type: "concede" }
   /** Protected by a draft-installed match capability on the host. */
   | { type: "match_concede" }
+  /** Guest → host takeback controls. No seat field: the host reads the seat
+   *  from the authenticated connection, and no target: the authority rolls
+   *  back the last action. */
+  | { type: "request_takeback" }
+  | { type: "respond_takeback"; approve: boolean }
+  | { type: "cancel_takeback" }
+  /** Host → guest takeback notices, mapped only by `takebackEventToWire`. */
+  | { type: "takeback_requested"; requester: number; requesterName: string }
+  | { type: "takeback_resolved"; resolution: TakebackResolution; resolvedBy: number | null }
+  | { type: "request_rejected"; reason: string }
   // Reconnect: guest presents prior token; host accepts (with fresh state) or rejects.
   | {
       type: "reconnect";
@@ -898,6 +910,12 @@ const VALID_TYPES = new Set([
   "emote",
   "concede",
   "match_concede",
+  "request_takeback",
+  "respond_takeback",
+  "cancel_takeback",
+  "takeback_requested",
+  "takeback_resolved",
+  "request_rejected",
   "reconnect",
   "reconnect_ack",
   "reconnect_rejected",
@@ -916,6 +934,51 @@ const VALID_TYPES = new Set([
   "seat_mutate",
   "seat_snapshot",
 ]);
+
+export type TakebackWireMessage = Extract<
+  P2PMessage,
+  { type: "takeback_requested" | "takeback_resolved" | "request_rejected" }
+>;
+
+/** Host-side: project a takeback event onto its guest frame. */
+export function takebackEventToWire(event: TakebackEvent): TakebackWireMessage {
+  switch (event.type) {
+    case "takebackRequested":
+      return {
+        type: "takeback_requested",
+        requester: event.requester,
+        requesterName: event.requesterName,
+      };
+    case "takebackResolved":
+      return {
+        type: "takeback_resolved",
+        resolution: event.resolution,
+        resolvedBy: event.resolvedBy,
+      };
+    case "requestRejected":
+      return { type: "request_rejected", reason: event.reason };
+  }
+}
+
+/** Guest-side: hydrate a takeback frame into the event every takeback-capable adapter emits. */
+export function takebackEventFromWire(msg: TakebackWireMessage): TakebackEvent {
+  switch (msg.type) {
+    case "takeback_requested":
+      return {
+        type: "takebackRequested",
+        requester: msg.requester,
+        requesterName: msg.requesterName,
+      };
+    case "takeback_resolved":
+      return {
+        type: "takebackResolved",
+        resolution: msg.resolution,
+        resolvedBy: msg.resolvedBy,
+      };
+    case "request_rejected":
+      return { type: "requestRejected", reason: msg.reason };
+  }
+}
 
 /** Validate an already-parsed object as a P2PMessage. Throws on malformed data. */
 export function validateMessage(raw: unknown): P2PMessage {

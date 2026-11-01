@@ -12,6 +12,7 @@ import type {
   EndContinuousEffectOffer,
   GameAction,
   PendingCast,
+  TakebackEvent,
 } from "../../adapter/types";
 import { buildGameState } from "../../test/factories/gameStateFactory";
 import {
@@ -20,6 +21,8 @@ import {
   encodeWireMessage,
   legalActionsFromWire,
   legalActionsToWire,
+  takebackEventFromWire,
+  takebackEventToWire,
   validateMessage,
 } from "../protocol";
 import type { P2PMessage } from "../protocol";
@@ -729,5 +732,42 @@ describe("validateMessage", () => {
 
   it("rejects raw unbound match concessions", () => {
     expect(() => validateMessage({ type: "concede_match" })).toThrow(/Invalid message type/);
+  });
+});
+
+describe("takeback frames", () => {
+  const frames: P2PMessage[] = [
+    { type: "request_takeback" },
+    { type: "respond_takeback", approve: false },
+    { type: "cancel_takeback" },
+    { type: "takeback_requested", requester: 1, requesterName: "Guest" },
+    { type: "takeback_resolved", resolution: "withdrawn", resolvedBy: 2 },
+    { type: "request_rejected", reason: "No takeback request is pending" },
+  ];
+
+  it.each(frames)("validateMessage admits $type", (frame) => {
+    expect(validateMessage(frame)).toEqual(frame);
+  });
+
+  it.each(["request_takebacks", "takeback_resolve"])("validateMessage rejects the neighbour %s", (type) => {
+    expect(() => validateMessage({ type })).toThrow(/Invalid message type/);
+  });
+
+  const events: TakebackEvent[] = [
+    { type: "takebackRequested", requester: 0, requesterName: "Host" },
+    { type: "takebackResolved", resolution: "approved", resolvedBy: null },
+    { type: "requestRejected", reason: "Only the players asked to approve this takeback may respond" },
+  ];
+
+  it.each(events)("$type survives the wire mapping", (event) => {
+    expect(takebackEventFromWire(takebackEventToWire(event))).toEqual(event);
+  });
+
+  it("maps each event to its frame", () => {
+    expect(events.map(takebackEventToWire)).toEqual([
+      { type: "takeback_requested", requester: 0, requesterName: "Host" },
+      { type: "takeback_resolved", resolution: "approved", resolvedBy: null },
+      { type: "request_rejected", reason: "Only the players asked to approve this takeback may respond" },
+    ]);
   });
 });

@@ -26,6 +26,8 @@ import type {
   RestoredGameStateResult,
   RestoredStackAutomationPresentation,
   SubmitResult,
+  TakebackNotice,
+  TakebackReply,
   ViewerSnapshot,
   ViewerTransitionSnapshot,
 } from "./types";
@@ -38,6 +40,7 @@ import {
   actionRejectionError,
   AdapterError,
   AdapterErrorCode,
+  appliedSubmitResult,
   isActionOutcome,
   isStateLostMessage,
   nextSnapshotSeq,
@@ -79,6 +82,12 @@ function isDebugCreateCardDbMissing(error: unknown): boolean {
 }
 
 function unwrapActionOutcome<T>(value: unknown): T {
+  return unwrapAppliedOutcome(value).result as T;
+}
+
+function unwrapAppliedOutcome(
+  value: unknown,
+): { status: "applied"; result: unknown; takeback?: TakebackNotice } {
   if (typeof value === "string") throw new Error(value);
   if (!isActionOutcome(value)) {
     throw new AdapterError(
@@ -90,7 +99,7 @@ function unwrapActionOutcome<T>(value: unknown): T {
   if (value.status === "rejected") {
     throw actionRejectionError(value.rejection);
   }
-  return value.result as T;
+  return value;
 }
 
 class AiPoolScoreTimeoutError extends Error {
@@ -504,6 +513,62 @@ export class WasmAdapter
         : await this.fallback!.driveContest(nowMs, aiPlayers, awayPlayers, clicks);
       this.invalidateAiDecisionDiagnostics();
       return result;
+    } catch (err) {
+      throw await classifyEngineErrorAsync(err, this.takePanic);
+    }
+  }
+
+  /** Open a takeback vote for `actor` on the hosted ledger (`request_takeback_js`). */
+  async requestTakeback(actor: PlayerId, aiPlayers: PlayerId[]): Promise<TakebackReply> {
+    this.assertInitialized("requestTakeback");
+    try {
+      const reply = this.engine
+        ? await this.engine.requestTakeback(actor, aiPlayers)
+        : await this.fallback!.requestTakeback(actor, aiPlayers);
+      this.invalidateAiDecisionDiagnostics();
+      return reply;
+    } catch (err) {
+      throw await classifyEngineErrorAsync(err, this.takePanic);
+    }
+  }
+
+  /** Record `actor`'s vote on the open takeback (`respond_takeback_js`). */
+  async respondTakeback(
+    actor: PlayerId,
+    approve: boolean,
+    aiPlayers: PlayerId[],
+  ): Promise<TakebackReply> {
+    this.assertInitialized("respondTakeback");
+    try {
+      const reply = this.engine
+        ? await this.engine.respondTakeback(actor, approve, aiPlayers)
+        : await this.fallback!.respondTakeback(actor, approve, aiPlayers);
+      this.invalidateAiDecisionDiagnostics();
+      return reply;
+    } catch (err) {
+      throw await classifyEngineErrorAsync(err, this.takePanic);
+    }
+  }
+
+  /** Withdraw `actor`'s own open takeback request (`cancel_takeback_js`). */
+  async cancelTakeback(actor: PlayerId): Promise<TakebackReply> {
+    this.assertInitialized("cancelTakeback");
+    try {
+      return this.engine
+        ? await this.engine.cancelTakeback(actor)
+        : await this.fallback!.cancelTakeback(actor);
+    } catch (err) {
+      throw await classifyEngineErrorAsync(err, this.takePanic);
+    }
+  }
+
+  /** The seat whose takeback vote is open, if any (`pending_takeback_requester_js`). */
+  async pendingTakebackRequester(): Promise<PlayerId | null> {
+    this.assertInitialized("pendingTakebackRequester");
+    try {
+      return this.engine
+        ? await this.engine.pendingTakebackRequester()
+        : await this.fallback!.pendingTakebackRequester();
     } catch (err) {
       throw await classifyEngineErrorAsync(err, this.takePanic);
     }
@@ -1493,6 +1558,10 @@ interface MainThreadFallback {
     awayPlayers: PlayerId[],
     clicks: ContestClickInput[],
   ): Promise<ContestDriveResult>;
+  requestTakeback(actor: PlayerId, aiPlayers: PlayerId[]): Promise<TakebackReply>;
+  respondTakeback(actor: PlayerId, approve: boolean, aiPlayers: PlayerId[]): Promise<TakebackReply>;
+  cancelTakeback(actor: PlayerId): Promise<TakebackReply>;
+  pendingTakebackRequester(): Promise<PlayerId | null>;
   submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult>;
   submitInteraction(submission: InteractionSubmission, actor: PlayerId): Promise<SubmitResult>;
   previewManaPayment(action: GameAction, actor: PlayerId): Promise<ObjectId[]>;
@@ -1637,13 +1706,22 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
         return outcome as ContestDriveResult;
       }),
 
+    requestTakeback: (actor: PlayerId, aiPlayers: PlayerId[]) =>
+      enqueue(() => wasm.request_takeback_js(actor, Uint8Array.from(aiPlayers)) as TakebackReply),
+
+    respondTakeback: (actor: PlayerId, approve: boolean, aiPlayers: PlayerId[]) =>
+      enqueue(() => (
+        wasm.respond_takeback_js(actor, approve, Uint8Array.from(aiPlayers)) as TakebackReply
+      )),
+
+    cancelTakeback: (actor: PlayerId) =>
+      enqueue(() => wasm.cancel_takeback_js(actor) as TakebackReply),
+
+    pendingTakebackRequester: () =>
+      enqueue(() => wasm.pending_takeback_requester_js() ?? null),
+
     submitAction: (action: GameAction, actor: PlayerId) =>
-      enqueue(() => {
-        const r = unwrapActionOutcome<{ events?: SubmitResult["events"]; log_entries?: SubmitResult["log_entries"] }>(
-          wasm.submit_action(actor, action),
-        );
-        return { events: r.events ?? [], log_entries: r.log_entries ?? [] };
-      }),
+      enqueue(() => appliedSubmitResult(unwrapAppliedOutcome(wasm.submit_action(actor, action)))),
 
     submitInteraction: (submission: InteractionSubmission, actor: PlayerId) =>
       enqueue(() => {

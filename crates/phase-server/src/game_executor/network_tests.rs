@@ -3598,7 +3598,7 @@ mod oversized_publication {
                     let resolved = until_type(socket, "TakebackResolved").await;
                     assert_eq!(
                         resolved["data"],
-                        serde_json::json!({ "approved": true, "resolved_by": 0 })
+                        serde_json::json!({ "resolution": "approved", "resolved_by": 0 })
                     );
                 }
                 assert_eq!(server_smaug_damage(&table).await, pre);
@@ -3738,7 +3738,7 @@ mod oversized_publication {
                     Some("TakebackResolved") => {
                         assert_eq!(
                             frame["data"],
-                            serde_json::json!({ "approved": false, "resolved_by": conceding.0 })
+                            serde_json::json!({ "resolution": "withdrawn", "resolved_by": conceding.0 })
                         );
                         break;
                     }
@@ -3841,7 +3841,7 @@ mod oversized_publication {
                                 Some("TakebackResolved") => {
                                     assert_eq!(
                                         frame["data"],
-                                        serde_json::json!({ "approved": false, "resolved_by": 1 })
+                                        serde_json::json!({ "resolution": "withdrawn", "resolved_by": 1 })
                                     );
                                     break;
                                 }
@@ -3926,7 +3926,7 @@ mod oversized_publication {
                         let resolved = until_type(socket, "TakebackResolved").await;
                         assert_eq!(
                             resolved["data"],
-                            serde_json::json!({ "approved": true, "resolved_by": 2 })
+                            serde_json::json!({ "resolution": "approved", "resolved_by": 2 })
                         );
                     }
                 })

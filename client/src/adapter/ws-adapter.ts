@@ -23,6 +23,8 @@ import type {
   StateWithheldNotice,
   SubmitResult,
   FormatConfig,
+  TakebackEvent,
+  TakebackResolution,
   WithheldFrame,
 } from "./types";
 import type {
@@ -1523,12 +1525,7 @@ export type WsAdapterEvent =
   | { type: "contestProgress"; contest: number; clicks: [PlayerId, number][] }
   | { type: "conceded"; player: PlayerId }
   | { type: "timerUpdate"; player: PlayerId; remainingSeconds: number }
-  | { type: "takebackRequested"; requester: PlayerId; requesterName: string }
-  | { type: "takebackResolved"; approved: boolean; resolvedBy: PlayerId | null }
-  /** The server refused a fire-and-forget request (e.g. `RequestTakeback`).
-   *  Distinct from `error`, which the native session treats as terminal:
-   *  this one is survivable and carries a server-authored reason to show. */
-  | { type: "requestRejected"; reason: string };
+  | TakebackEvent;
 
 type WsAdapterEventListener = (event: WsAdapterEvent) => void;
 
@@ -1579,7 +1576,8 @@ const NATIVE_AI_RECONNECT_POLICY: ReconnectPolicy = {
  */
 export class WebSocketAdapter implements EngineAdapter {
   readonly supportsMatchConcede = true;
-  readonly supportsServerRewind = true;
+  readonly supportsTakeback = true;
+  readonly supportsTurnRewind = true;
   private ws: PhaseSocketTransport | null = null;
   /**
    * The single cached engine pair, rebuilt (and re-stamped) once per inbound
@@ -3356,10 +3354,10 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "TakebackResolved": {
-        const data = msg.data as { approved: boolean; resolved_by?: PlayerId | null };
+        const data = msg.data as { resolution: TakebackResolution; resolved_by?: PlayerId | null };
         this.emit({
           type: "takebackResolved",
-          approved: data.approved,
+          resolution: data.resolution,
           resolvedBy: data.resolved_by ?? null,
         });
         break;

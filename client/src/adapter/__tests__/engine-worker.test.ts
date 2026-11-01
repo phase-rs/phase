@@ -15,6 +15,11 @@ const wasm = vi.hoisted(() => ({
   load_card_database: vi.fn(),
   classify_deck_js: vi.fn(),
   deckSupplyForFormat: vi.fn(),
+  submit_action: vi.fn(),
+  request_takeback_js: vi.fn(),
+  respond_takeback_js: vi.fn(),
+  cancel_takeback_js: vi.fn(),
+  pending_takeback_requester_js: vi.fn(),
 }));
 vi.mock("@wasm/engine", () => ({ default: vi.fn(), ...wasm }));
 
@@ -80,6 +85,69 @@ describe("engine worker — requests", () => {
       expect(wasm.get_legal_actions_for_viewer_js).toHaveBeenCalledWith(3);
       expect(wasm.get_legal_actions_js).not.toHaveBeenCalled();
       expect(pick(resultOf(id)!.data)).toEqual({ viewer: 3 });
+    });
+  });
+
+  describe("browser-hosted takeback", () => {
+    const send = async (data: Record<string, unknown>) =>
+      (fakeSelf.onmessage as (e: unknown) => unknown)({ data });
+    const responseTo = (id: number) =>
+      fakeSelf.postMessage.mock.calls.map(([m]) => m).find((m) => m.id === id);
+
+    afterEach(() => {
+      Object.values(wasm).forEach((fn) => fn.mockReset());
+    });
+
+    it("answers an applied action that ended a vote with its notice", async () => {
+      wasm.submit_action.mockReturnValue({
+        status: "applied",
+        result: { events: [], log_entries: [] },
+        takeback: { resolution: "withdrawn", resolvedBy: 1 },
+      });
+
+      await send({ type: "submitAction", id: 951, actor: 1, action: { type: "Concede", data: { player_id: 1 } } });
+
+      expect(responseTo(951)).toEqual({
+        type: "result",
+        id: 951,
+        data: { events: [], log_entries: [], takeback: { resolution: "withdrawn", resolvedBy: 1 } },
+      });
+    });
+
+    it("refuses an applied outcome whose notice names no resolution", async () => {
+      wasm.submit_action.mockReturnValue({
+        status: "applied",
+        result: { events: [], log_entries: [] },
+        takeback: { resolution: "maybe", resolvedBy: 1 },
+      });
+
+      await send({ type: "submitAction", id: 952, actor: 1, action: { type: "PassPriority" } });
+
+      expect(responseTo(952)).toMatchObject({ type: "error", id: 952, message: "The engine rejected that action." });
+    });
+
+    it("routes each takeback request to its export", async () => {
+      wasm.request_takeback_js.mockReturnValue({ status: "requested", requester: 1 });
+      wasm.respond_takeback_js.mockReturnValue({ status: "recorded" });
+      wasm.cancel_takeback_js.mockReturnValue({ status: "resolved", resolution: "cancelled", resolvedBy: 1 });
+      wasm.pending_takeback_requester_js.mockReturnValue(undefined);
+
+      await send({ type: "requestTakeback", id: 961, actor: 1, aiPlayers: [3] });
+      await send({ type: "respondTakeback", id: 962, actor: 2, approve: true, aiPlayers: [3] });
+      await send({ type: "cancelTakeback", id: 963, actor: 1 });
+      await send({ type: "pendingTakebackRequester", id: 964 });
+
+      expect(wasm.request_takeback_js).toHaveBeenCalledWith(1, Uint8Array.from([3]));
+      expect(wasm.respond_takeback_js).toHaveBeenCalledWith(2, true, Uint8Array.from([3]));
+      expect(wasm.cancel_takeback_js).toHaveBeenCalledWith(1);
+      expect(responseTo(961)).toEqual({ type: "result", id: 961, data: { status: "requested", requester: 1 } });
+      expect(responseTo(962)).toEqual({ type: "result", id: 962, data: { status: "recorded" } });
+      expect(responseTo(963)).toEqual({
+        type: "result",
+        id: 963,
+        data: { status: "resolved", resolution: "cancelled", resolvedBy: 1 },
+      });
+      expect(responseTo(964)).toEqual({ type: "result", id: 964, data: null });
     });
   });
 

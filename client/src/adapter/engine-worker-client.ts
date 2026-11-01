@@ -20,6 +20,7 @@ import type {
   ReplayHeader,
   RestoredStackAutomationPresentation,
   SubmitResult,
+  TakebackReply,
   ViewerSnapshot,
   ViewerTransitionSnapshot,
 } from "./types";
@@ -342,6 +343,38 @@ export class EngineWorkerClient {
   ): Promise<ContestDriveResult> {
     return this.request<ContestDriveResult>(
       { type: "driveContest", nowMs, aiPlayers, awayPlayers, clicks },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
+  async requestTakeback(actor: number, aiPlayers: number[]): Promise<TakebackReply> {
+    return this.request<TakebackReply>(
+      { type: "requestTakeback", actor, aiPlayers },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
+  async respondTakeback(
+    actor: number,
+    approve: boolean,
+    aiPlayers: number[],
+  ): Promise<TakebackReply> {
+    return this.request<TakebackReply>(
+      { type: "respondTakeback", actor, approve, aiPlayers },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
+  async cancelTakeback(actor: number): Promise<TakebackReply> {
+    return this.request<TakebackReply>(
+      { type: "cancelTakeback", actor },
+      ENGINE_REQUEST_TIMEOUT_MS,
+    );
+  }
+
+  async pendingTakebackRequester(): Promise<number | null> {
+    return this.request<number | null>(
+      { type: "pendingTakebackRequester" },
       ENGINE_REQUEST_TIMEOUT_MS,
     );
   }

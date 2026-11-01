@@ -500,7 +500,7 @@ export function GamePage() {
         break;
       case "takebackResolved":
         setPendingTakeback(null);
-        if (!event.approved) {
+        if (event.resolution !== "approved") {
           useMultiplayerStore.getState().showToast(t("multiplayer:takebackDialog.declinedToast"));
         }
         break;
