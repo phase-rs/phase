@@ -4913,7 +4913,7 @@ fn redact_face_down_identity_from_observer(obj: &mut crate::game::game_object::G
         obj.secret_chosen_names.clear();
         obj.agenda_name_count = 0;
         obj.card_types = Default::default();
-        obj.mana_cost = Default::default();
+        obj.mana_cost = crate::types::mana::ManaCost::NoCost;
         obj.keywords.clear();
         obj.color.clear();
     }

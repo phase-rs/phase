@@ -451,21 +451,57 @@ fn face_down_conspiracy_has_no_characteristics_until_turned_up() {
 #[test]
 fn face_down_conspiracy_visibility_redacted_for_opponent_revealed_for_controller() {
     let mut state = GameState::new_two_player(7);
-    let face = synthesized_conspiracy_face(vec![], vec![]);
+    let cda = StaticDefinition::new(StaticMode::from_str("Continuous").unwrap());
+    let mut face = synthesized_conspiracy_face(vec![cda], vec![]);
+    face.name = "Brago's Favor".to_string();
+    face.mana_cost = crate::types::mana::ManaCost::generic(1);
     let id = create_conspiracy_object(&mut state, "Brago's Favor", &face, P0);
-    let obj = state.objects.get_mut(&id).unwrap();
-    obj.back_face = Some(crate::game::printed_cards::snapshot_object_face(obj));
+    crate::game::printed_cards::apply_card_face_to_object(
+        state.objects.get_mut(&id).unwrap(),
+        &face,
+    );
     start_with_conspiracy(&mut state, id, true);
 
     // Controller projection sees the face-down conspiracy revealed
     let p0_view = crate::game::visibility::filter_state_for_viewer(&state, P0);
     let p0_card = p0_view.objects.get(&id).unwrap();
     assert_eq!(p0_card.name, "Brago's Favor");
+    assert!(p0_card.is_conspiracy);
+    assert!(p0_card
+        .card_types
+        .core_types
+        .contains(&CoreType::Conspiracy));
 
-    // Opponent projection has identity redacted
+    // Opponent projection has identity and rules payload redacted
     let p1_view = crate::game::visibility::filter_state_for_viewer(&state, P1);
     let p1_card = p1_view.objects.get(&id).unwrap();
     assert_eq!(p1_card.name, crate::game::visibility::HIDDEN_CARD_NAME);
+    assert!(
+        p1_card.is_conspiracy,
+        "preserves public display classification"
+    );
+    assert!(
+        p1_card.card_types.core_types.is_empty(),
+        "characteristics redacted"
+    );
+    assert!(p1_card.static_definitions.is_empty(), "statics redacted");
+    assert!(p1_card.trigger_definitions.is_empty(), "triggers redacted");
+    assert!(
+        p1_card.replacement_definitions.is_empty(),
+        "replacements redacted"
+    );
+    assert!(p1_card.abilities.is_empty(), "abilities redacted");
+    assert_eq!(p1_card.mana_cost, crate::types::mana::ManaCost::NoCost);
+
+    // Serialization for opponent and unseated observer does not leak name or statics
+    for viewer in [Some(P1), None] {
+        let wire = serde_json::to_string(&crate::game::derived_views::ClientGameStateRef::wrap(
+            &state, viewer,
+        ))
+        .expect("wire state serializes");
+        assert!(!wire.contains("Brago's Favor"), "viewer {viewer:?}");
+        assert!(!wire.contains("Continuous"), "viewer {viewer:?}");
+    }
 
     // Turn face up
     assert!(turn_hidden_agenda_face_up(
@@ -479,4 +515,9 @@ fn face_down_conspiracy_visibility_redacted_for_opponent_revealed_for_controller
     let p1_view_after = crate::game::visibility::filter_state_for_viewer(&state, P1);
     let p1_card_after = p1_view_after.objects.get(&id).unwrap();
     assert_eq!(p1_card_after.name, "Brago's Favor");
+    assert_eq!(p1_card_after.static_definitions.len(), 1);
+    assert!(p1_card_after
+        .card_types
+        .core_types
+        .contains(&CoreType::Conspiracy));
 }
