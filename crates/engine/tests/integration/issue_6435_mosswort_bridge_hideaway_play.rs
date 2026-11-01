@@ -558,6 +558,10 @@ fn resolve_until(runner: &mut GameRunner, done: impl Fn(&GameState) -> bool) {
             WaitingFor::OptionalEffectChoice { .. } => {
                 GameAction::DecideOptionalEffect { accept: true }
             }
+            // The hidden Shock, cast during the resolution, chooses its target.
+            WaitingFor::TargetSelection { .. } => GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(P1)),
+            },
             other => panic!("unexpected prompt {other:?}"),
         };
         runner.act(action).expect("prompt answer accepted");
@@ -645,16 +649,9 @@ fn blink_bridge_under_its_activation(rehide: bool) -> Option<BlinkedBridge> {
     })
 }
 
-fn has_free_play(state: &GameState, card: ObjectId) -> bool {
-    state.objects[&card]
-        .casting_permissions
-        .iter()
-        .any(|permission| {
-            matches!(
-                permission,
-                CastingPermission::ExileWithAltCost { cost, .. } if cost.is_without_paying_mana()
-            )
-        })
+/// A hidden instant played during the resolution has resolved into the graveyard.
+fn was_played(state: &GameState, card: ObjectId) -> bool {
+    state.objects[&card].zone == Zone::Graveyard
 }
 
 /// CR 113.7a + CR 607.2a + CR 400.7: Bridge's activation waits while Bridge is
@@ -691,11 +688,11 @@ fn old_bridge_activation_plays_its_own_card_not_the_new_one() {
     resolve_until(&mut blink.runner, priority_with_stack(0));
     let state = blink.runner.state();
     assert!(
-        has_free_play(state, blink.hidden),
+        was_played(state, blink.hidden),
         "the activation plays the card the activating Bridge hid"
     );
     assert!(
-        !has_free_play(state, rehidden),
+        !was_played(state, rehidden),
         "the returned Bridge's card is not the activating Bridge's exiled card"
     );
 }
@@ -725,7 +722,7 @@ fn old_bridge_activation_after_an_empty_rehide_still_plays_its_card() {
 
     resolve_until(&mut blink.runner, priority_with_stack(0));
     assert!(
-        has_free_play(blink.runner.state(), blink.hidden),
+        was_played(blink.runner.state(), blink.hidden),
         "the activation plays the card the activating Bridge hid"
     );
 }

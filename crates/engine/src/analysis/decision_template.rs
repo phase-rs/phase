@@ -2,8 +2,7 @@
 //! be legally taken based on the current game state and the predictable results."
 //! A [`DecisionTemplate`] captures that sequence so it can be replayed verbatim when a
 //! simultaneous-trigger group recurs (CR 603.3b ordering) or driven across loop
-//! iterations as a predictable shortcut (CR 732.2a). PURELY ADDITIVE / offline —
-//! never called from the reducer in this phase.
+//! iterations as a predictable shortcut (CR 732.2a).
 
 use crate::types::game_state::{GameState, WaitingFor, YieldTarget};
 use crate::types::identifiers::ObjectId;
@@ -39,12 +38,7 @@ pub type IterationIndex = u32;
 /// `LoopChoice` entry in `GameState::decision_templates` survives the CR 603.3b batch
 /// boundary — `GameState::clear_ephemeral_trigger_order_templates`' retain predicate is
 /// scoped to `TriggerOrdering` — so it is the vehicle a later episode's declaration can
-/// ride, and it is still POPULATED BY PHASE 4 AND BY NOTHING TODAY. PINNED BY A SHIPPED
-/// ROW: `fantastic_four_bounded_loop::r3b_driven_a_loop_choice_carrier_survives_a_whole_
-/// accepted_f4_drive` plants the `(kind × ephemerality)` cells on the real 4-player board
-/// and drives a whole accepted CR 732.2a shortcut through `apply()` — the `LoopChoice`
-/// cell survives (`3 → 2`) while the `TriggerOrdering` ephemeral cell beside it does not.
-/// `loop_shortcut_ranking::r3b_*` is the seam-level statement of the same predicate.
+/// ride, and nothing populates one today.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum DecisionKind {
     TriggerOrdering,
@@ -390,7 +384,7 @@ pub struct ShortcutDecisionSchema {
     /// taken" quantifies existentially over declarations, so the maximum is the reduction that
     /// answers it. `None` means the producer measured none: no axis of the period consumes any
     /// living seat, so the board licenses no threshold rather than one that happens to be
-    /// large. This is what the rules say about the loop; it wears no implementation ceiling.
+    /// large. It wears no implementation ceiling.
     ///
     /// Read by [`ShortcutDecisionSchema::is_bounded`] — the one question it answers — and by
     /// nothing that publishes or enforces a count, which
@@ -408,11 +402,9 @@ pub struct ShortcutDecisionSchema {
     /// runs to a million), so this budget is ours, not the game's — the same labelling ground
     /// the declare handler's budget arm states.
     ///
-    /// The single authority for how HIGH a count may go, and only for that: a proposal
-    /// exceeding it contains a conditional action (an in-proposal CR 704.5a / CR 704.5c /
-    /// CR 104.3c / CR 121.4 elimination would decide what happens next), which CR 732.2a
-    /// forbids — so the declared-count check in `game::engine` rejects a `Fixed(n)` above it,
-    /// and `game::interaction` publishes it as the count picker's ceiling. Whether a given
+    /// The single authority for how HIGH a count may go, and only for that: the declared-count
+    /// check in `game::engine` rejects a `Fixed(n)` above it, and `game::interaction` publishes
+    /// it as the count picker's ceiling. Whether a given
     /// declaration may legally specify a count at or below it is [`declaration_conforms`]'
     /// question, not this field's. `IterationCount` above is the *suggestion*; this is the
     /// *ceiling*, and they are deliberately separate fields.
@@ -596,7 +588,8 @@ impl std::fmt::Display for RankingError {
 /// entry because a game event removed the head would be the conditional action CR 732.2a bars.
 /// CR 732.2c therefore makes a longer ranking a proposal certifying a choice nobody takes, and
 /// `validate_pins` refuses one at DECLARE time. The type still admits one — a save written
-/// before that rule can carry it — so the defensive walks over the whole list stay correct.
+/// before that rule can carry it — so the redaction walk and the wire length bound read the
+/// whole list.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(try_from = "Vec<AnnouncementSubject>")]
 pub struct Ranking(Vec<AnnouncementSubject>);
@@ -702,14 +695,8 @@ pub enum ReplayMode {
     Scheduled { count: IterationCount },
 }
 
-/// CR 732.2a "a loop that repeats a specified number of times". **Phase 1 ships ONLY
-/// `Fixed`** (reviewer G7): nothing in Phase 1 reads the count — [`resolve`] takes an
-/// explicit `iteration` index, and the count-driven loop that consumes it is Phase 3 /
-/// Part A. The count-terminated variants (`UntilLethal` → CR 704.5a "a player with 0 or
-/// less life loses"; `UntilResource(ResourceAxis, i64)`) are deferred to the phase that
-/// adds their driver, so the shipped surface stays minimal and fully tested. The enum is
-/// kept (rather than a bare `u32` field on `Scheduled`) so Phase 3 adds those variants
-/// without a field-type change at any `Scheduled` construction site.
+/// CR 732.2a "a loop that repeats a specified number of times": the repetitions a shortcut
+/// proposal names — a count, until a player is at 0 or less life, or without end.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum IterationCount {
     Fixed(u32),
@@ -718,6 +705,9 @@ pub enum IterationCount {
     /// The terminating condition is the SBA, not a caller-supplied count. (`UntilResource`
     /// stays deferred to Phase 4/B5.)
     UntilLethal,
+    /// CR 104.4b + CR 732.4: repeat a loop whose in-loop actions are all mandatory with no
+    /// ending point; once every player accepts, the game is a draw.
+    WithoutEnd,
 }
 
 /// CR 732.2a "predictable results / no conditional actions": deterministic,
@@ -1172,16 +1162,14 @@ fn evaluate_schedule(
             .ok_or_else(|| ReplayFailure::ScheduleExhausted { slot: slot.clone() })?,
     };
     match ranking.head() {
-        // CR 608.2b: a pinned TARGET object must still be a live battlefield object — this
-        // is exactly the pre-parameterization `Constant` behaviour, unchanged.
+        // CR 608.2b: a pinned TARGET object must still be a live battlefield object.
         AnnouncementSubject::Object(src) => resolve_source(src, state).map(ConcreteTarget::Object),
         // CR 601.2c + CR 115.1: a ranked seat is a TARGET, so it is judged by
         // `targeting::player_is_legal_target` (existence + CR 702.11c hexproof /
         // CR 702.18a shroud / CR 702.16b protection) rather than by existence alone. Its two
         // trailing arguments describe THE ABILITY INSTANCE that would name the seat, not a
         // target object — hence `resolve_ability_instance` (which admits the command zone —
-        // CR 114.4 / CR 113.6p) and NOT `resolve_source` (battlefield-only, and correctly so
-        // for a pin).
+        // CR 114.4 / CR 113.6p) and NOT `resolve_source` (battlefield-only).
         //
         // A `None` ANYWHERE in this chain falls through to the `ok_or_else` below: with no
         // live ability instance the engine cannot certify that the object it would ask the
@@ -1191,8 +1179,7 @@ fn evaluate_schedule(
         // just means the table plays the loop out manually. (CR 732.2b is the RESPONDER rule
         // — each OTHER player accepting or shortening a proposal that already exists — so it
         // cannot govern a proposer that publishes nothing.) Announcing a target we cannot
-        // certify is not
-        // free. This is the fail-closed branch, not an oversight.
+        // certify is not free.
         AnnouncementSubject::Seat(p) => resolve_ability_instance(&slot.source, state)
             .and_then(|src_id| state.objects.get(&src_id).map(|o| (src_id, o.controller)))
             .filter(|(src_id, ctrl)| {
@@ -1243,8 +1230,7 @@ fn schedule_announces_every_declared_subject(schedule: &TargetSchedule) -> bool 
 /// CR 732.2a firewall: a `Scheduled` template may auto-drive a shortcut only if every
 /// free choice in the cycle is pinned (TOTAL COVERAGE).
 ///
-/// THIS IS WHERE THE NO-CONDITIONAL-ACTIONS CLAUSE IS SATISFIED, AND IT IS SATISFIED BY
-/// CONSTRUCTION. CR 732.2a requires a proposal describe "the predictable results of the sequence of
+/// CR 732.2a requires a proposal describe "the predictable results of the sequence of
 /// choices" and says it "can't include conditional actions, where the outcome of a game event
 /// determines the next action a player takes". Pins fix every free choice BEFORE the offer is made,
 /// so the sequence the table accepts is the sequence that runs. The two companion gates are

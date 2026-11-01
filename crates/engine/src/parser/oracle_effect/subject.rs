@@ -48,8 +48,9 @@ use super::super::oracle_static::{
     parse_targeting_bypass_tail, peel_compound_all_quantified_conjuncts,
 };
 use super::super::oracle_target::{
-    parse_target, parse_target_with_ctx, parse_target_with_syntax, parse_type_phrase_folding,
-    parse_type_phrase_folding_with_ctx, TargetSyntax,
+    bare_pronoun_names_ability_source, parse_block_filter_phrase, parse_target,
+    parse_target_with_ctx, parse_target_with_syntax, parse_type_phrase_folding,
+    parse_type_phrase_folding_with_ctx, BlockFilterPhrase, TargetSyntax,
 };
 use super::super::oracle_util::{
     merge_or_filters, parse_number, TextPair, SELF_REF_PARSE_ONLY_PHRASES, SELF_REF_TYPE_PHRASES,
@@ -3393,9 +3394,28 @@ fn parse_subject_application_for(
         }
         let consumed = lower.len() - rest_lower.len();
         let phrase = &subject[consumed..];
-        let (filter, rest) = ctx
-            .with_player_antecedents(|scoped| parse_type_phrase_folding_with_ctx(phrase, scoped));
-        let filter = merge_partial_type_phrase_filter(filter, rest.trim());
+        // CR 509.1g + CR 608.2k: the sub-parse drops object anaphors, so carry
+        // the one binding it can express. A postnominal "blocking it" names the
+        // source only when a nearer pinned antecedent does not outrank it
+        // (Plague Wight, but not "... target creature. Each creature blocking
+        // it ...").
+        let source_subject =
+            bare_pronoun_names_ability_source(ctx).then_some(TargetFilter::SelfRef);
+        let (filter, rest) = ctx.with_player_antecedents(|scoped| {
+            scoped.subject = source_subject;
+            parse_type_phrase_folding_with_ctx(phrase, scoped)
+        });
+        let rest = rest.trim();
+        // CR 608.2c: blockers of an antecedent `BlockingSource` cannot express
+        // (Bob the Claymore's equipped creature) are not every creature. Leave
+        // the subject unbound rather than dropping the clause.
+        if tag::<_, _, OracleError<'_>>("blocking ")
+            .parse(rest)
+            .is_ok()
+        {
+            return None;
+        }
+        let filter = merge_partial_type_phrase_filter(filter, rest);
         return subject_filter_application(filter, false);
     }
     if alt((
@@ -6199,7 +6219,7 @@ fn build_become_clause(
         return Some(clause);
     }
 
-    // CR 730.1: "it becomes night" / "it becomes day" — set game day/night designation.
+    // CR 731.1: "it becomes night" / "it becomes day" — set game day/night designation.
     // Must intercept before parse_animation_spec which produces AddSubtype("Night"/"Day").
     if let Some(clause) = try_parse_set_day_night(become_text) {
         return Some(clause);
@@ -6869,7 +6889,7 @@ fn try_parse_set_life_total(
     })
 }
 
-/// CR 730.1: Parse "night" / "day" after "becomes" into SetDayNight effect.
+/// CR 731.1: Parse "night" / "day" after "becomes" into SetDayNight effect.
 /// Accepts a trailing "as ~ enters" timing qualifier and ignores it.
 fn try_parse_set_day_night(become_text: &str) -> Option<ParsedEffectClause> {
     let lower = become_text.to_lowercase();
@@ -7900,8 +7920,11 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
     )
         .parse(lower)
     {
+        // Fail closed on a dropped disjunct (see `classify_block_exception`):
+        // `None` here declines the whole predicate rather than publishing a
+        // whitelist narrower than the printed one.
         return Some(vec![StaticMode::CantBeBlockedExceptBy {
-            kind: classify_block_exception(except_text),
+            kind: classify_block_exception(except_text)?,
         }]);
     }
     // CR 509.1b: "can't be blocked by <filter>" — blocker restriction
@@ -7919,12 +7942,27 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
         // leave the filter as a bare-creature match, making the restriction
         // accept ALL creatures rather than only those of the chosen color.
         let filter_tp = TextPair::new(filter_text, filter_text);
-        let filter = parse_chosen_qualifier_subject(&filter_tp).unwrap_or_else(|| {
-            let (f, _) = parse_type_phrase_folding(filter_text);
-            f
-        });
-        if !matches!(filter, TargetFilter::Any) {
-            return Some(vec![StaticMode::CantBeBlockedBy { filter }]);
+        // CR 509.1b + CR 608.2c (issue #10364): the whole tail after "by " is the
+        // blocker filter, so read it with the union-folding reader - "creatures
+        // with power 2 or less and/or Walls" (Doorman) closes its first leg on
+        // the power suffix, which the leg grammar's own early union loop runs
+        // before and therefore never folds.
+        let phrase = match parse_chosen_qualifier_subject(&filter_tp) {
+            Some(chosen) => BlockFilterPhrase::from_whole_phrase_filter(chosen),
+            None => parse_block_filter_phrase(filter_text),
+        };
+        match phrase {
+            BlockFilterPhrase::Filter { filter, .. } => {
+                return Some(vec![StaticMode::CantBeBlockedBy { filter }]);
+            }
+            // Coverage honesty: a printed disjunct no leg grammar could read.
+            // Declining the whole predicate routes the clause to the
+            // Unimplemented/gap fallback instead of publishing a restriction
+            // narrower than the printed one.
+            BlockFilterPhrase::DroppedDisjunct => return None,
+            // Pre-existing fall-through: the tail after "by " named no filter at
+            // all, so the later arms get their try at this predicate.
+            BlockFilterPhrase::Unconstrained => {}
         }
     }
     // CR 702.18a: "can't be the target of spells or abilities" is blanket Shroud,
@@ -9028,8 +9066,8 @@ mod tests {
     use super::*;
     use crate::types::ability::AttackerBlockStatus;
     use crate::types::ability::{
-        AbilityKind, BasicLandType, ChoiceType, ContinuousModification, ControllerRef, Effect,
-        QuantityRef, TypeFilter,
+        AbilityKind, BasicLandType, ChoiceType, Comparator, ContinuousModification, ControllerRef,
+        Effect, PtStat, PtValueScope, QuantityRef, TypeFilter,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::identifiers::TrackedSetId;
@@ -12085,6 +12123,66 @@ mod tests {
         );
     }
 
+    /// CR 509.1b + CR 608.2c (issue #10364): the blocker filter is a union of
+    /// legs even when the separator follows a leg's own trailing suffix
+    /// (Doorman). The power suffix must stay bound to the leg it follows — a
+    /// `Wall` disjunct carries NO power constraint.
+    #[test]
+    fn parse_restriction_modes_cant_be_blocked_by_suffix_then_union() {
+        let creature_power_2_or_less = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: None,
+            properties: vec![FilterProp::PtComparison {
+                stat: PtStat::Power,
+                scope: PtValueScope::Current,
+                comparator: Comparator::LE,
+                value: QuantityExpr::Fixed { value: 2 },
+            }],
+        });
+        let walls = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Subtype("Wall".to_string())],
+            controller: None,
+            properties: vec![],
+        });
+        for predicate in [
+            "can't be blocked by creatures with power 2 or less and/or walls",
+            "can't be blocked by creatures with power 2 or less or walls",
+            "can't be blocked by creatures with power 2 or less and walls",
+        ] {
+            assert_eq!(
+                parse_restriction_modes(predicate),
+                Some(vec![StaticMode::CantBeBlockedBy {
+                    filter: TargetFilter::Or {
+                        filters: vec![creature_power_2_or_less.clone(), walls.clone()],
+                    },
+                }]),
+                "{predicate}"
+            );
+        }
+    }
+
+    /// Coverage honesty (issue #10364): an "and/or" disjunct the filter grammar
+    /// cannot read must DECLINE rather than publish a restriction narrower than
+    /// the printed one. The positive case above is the reach-guard proving this
+    /// `None` is a remainder rejection and not a dead arm: the same predicate
+    /// with a READABLE second disjunct returns the two-leg union.
+    #[test]
+    fn parse_restriction_modes_cant_be_blocked_by_declines_unreadable_disjunct() {
+        assert_eq!(
+            parse_restriction_modes(
+                "can't be blocked by creatures with power 2 or less and/or your commander"
+            ),
+            None
+        );
+        assert!(
+            parse_restriction_modes(
+                "can't be blocked by creatures with power 2 or less and/or walls"
+            )
+            .is_some(),
+            "reach guard: the arm is live — a readable disjunct still parses"
+        );
+    }
+
     #[test]
     fn parse_restriction_modes_cant_crew_variants() {
         assert_eq!(
@@ -12467,7 +12565,8 @@ mod tests {
     /// must be stripped so the full union parses, not just its first disjunct.
     #[test]
     fn classify_block_exception_strips_redundant_by() {
-        let kind = classify_block_exception("vehicles or by creatures with haste");
+        let kind = classify_block_exception("vehicles or by creatures with haste")
+            .expect("a readable exception union must classify");
         let BlockExceptionKind::Quality(TargetFilter::Or { filters }) = kind else {
             panic!("expected a quality Or filter, got {kind:?}");
         };
@@ -13091,6 +13190,48 @@ mod tests {
             Some(CLAUSE),
             "the gap must quote the WHOLE printed clause, subject included"
         );
+    }
+
+    /// CR 608.2k: a postnominal "blocking it" binds the source only when no
+    /// nearer pinned antecedent outranks it, whichever rung supplies `SelfRef`.
+    #[test]
+    fn each_creature_blocking_it_binds_source_through_pronoun_precedence() {
+        let blocking_source = TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::BlockingSource]),
+        );
+        for mut ctx in [
+            ParseContext {
+                subject: Some(TargetFilter::SelfRef),
+                ..Default::default()
+            },
+            ParseContext {
+                object_pronoun_ref: Some(TargetFilter::SelfRef),
+                ..Default::default()
+            },
+        ] {
+            let application = parse_subject_application("each creature blocking it", &mut ctx)
+                .expect("the source's blockers are expressible");
+            assert_eq!(application.affected, blocking_source);
+        }
+    }
+
+    /// CR 608.2c + CR 608.2k: "blocking it" with any other antecedent has no
+    /// `BlockingSource` reading, so the subject stays unbound instead of
+    /// dropping the clause and widening to every creature.
+    #[test]
+    fn each_creature_blocking_nearer_antecedent_stays_unbound() {
+        let mut pinned = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            object_pronoun_ref: Some(TargetFilter::ParentTarget),
+            ..Default::default()
+        };
+        assert!(parse_subject_application("each creature blocking it", &mut pinned).is_none());
+
+        let mut blank = ParseContext::default();
+        assert!(parse_subject_application("each creature blocking it", &mut blank).is_none());
+
+        // Reach-guard: the same type phrase binds without the relative clause.
+        assert!(parse_subject_application("each creature", &mut blank).is_some());
     }
 
     /// CR 608.2c: a non-targeted MASS player subject ("each opponent") stated

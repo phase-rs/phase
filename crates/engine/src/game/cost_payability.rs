@@ -482,6 +482,33 @@ pub(crate) enum ObjectLegPayment {
     Unguided,
 }
 
+/// What the `source` of a priced cost is, threaded explicitly by each gate
+/// entry point. It decides whether `source` can itself be chosen to pay the
+/// cost from its own zone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CostSourceRole {
+    /// `source` is the spell whose cast is being priced. CR 601.2a: the card
+    /// is moved to the stack before its costs are paid, so it can't pay them
+    /// from the zone it is cast from, though it is still there while its cast
+    /// is priced (before announcement, `casting::is_spell_being_cast` can't
+    /// see it yet).
+    SpellBeingCast,
+    /// `source` is the object an activated ability belongs to, or an object
+    /// offering a cost outside casting. CR 602.2a: only the ability is put on
+    /// the stack; the object stays where it is.
+    AbilitySource,
+}
+
+impl CostSourceRole {
+    /// The spell whose cast is being priced, when `source` is one.
+    pub(crate) fn spell_being_cast(self, source: ObjectId) -> Option<ObjectId> {
+        match self {
+            Self::SpellBeingCast => Some(source),
+            Self::AbilitySource => None,
+        }
+    }
+}
+
 /// How many objects one object-using leg needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ObjectLegDemand {
@@ -615,6 +642,7 @@ fn object_cost_node(cost: &AbilityCost) -> ObjectCostNode<'_> {
         }
         AbilityCost::Mana { .. }
         | AbilityCost::ManaDynamic { .. }
+        | AbilityCost::SayPhrase { .. }
         | AbilityCost::Tap
         | AbilityCost::Untap
         | AbilityCost::Loyalty { .. }
@@ -660,6 +688,7 @@ fn object_leg_demand_and_candidates(
     source: ObjectId,
     granting_object: Option<ObjectIncarnationRef>,
     kind: &ObjectLegKind<'_>,
+    role: CostSourceRole,
 ) -> (ObjectLegDemand, Vec<ObjectId>) {
     let source_in = |zone: Zone| -> Vec<ObjectId> {
         state
@@ -777,13 +806,11 @@ fn object_leg_demand_and_candidates(
         // their graveyard.
         ObjectLegKind::CollectEvidence => (
             ObjectLegDemand::Unmodeled,
-            state
-                .graveyard_of(player)
-                .iter()
-                .copied()
-                // CR 601.2a: a spell being cast is on the stack.
-                .filter(|&id| !super::casting::is_spell_being_cast(state, id))
-                .collect(),
+            super::effects::collect_evidence::evidence_candidates(
+                state,
+                player,
+                role.spell_being_cast(source),
+            ),
         ),
         // CR 702.49a: ninjutsu returns an unblocked attacker the player controls.
         ObjectLegKind::Ninjutsu { variant } => (
@@ -803,12 +830,13 @@ fn collect_object_cost_legs<'a>(
     source: ObjectId,
     granting_object: Option<ObjectIncarnationRef>,
     cost: &'a AbilityCost,
+    role: CostSourceRole,
     legs: &mut Vec<ObjectCostLeg<'a>>,
 ) {
     match object_cost_node(cost) {
         ObjectCostNode::AllOf(costs) => {
             for leg in costs {
-                collect_object_cost_legs(state, player, source, granting_object, leg, legs);
+                collect_object_cost_legs(state, player, source, granting_object, leg, role, legs);
             }
         }
         ObjectCostNode::OneOf(costs) => {
@@ -820,6 +848,7 @@ fn collect_object_cost_legs<'a>(
                     source,
                     granting_object,
                     branch,
+                    role,
                     &mut branch_legs,
                 );
             }
@@ -840,8 +869,14 @@ fn collect_object_cost_legs<'a>(
             });
         }
         ObjectCostNode::ObjectLeg(kind) => {
-            let (demand, candidates) =
-                object_leg_demand_and_candidates(state, player, source, granting_object, &kind);
+            let (demand, candidates) = object_leg_demand_and_candidates(
+                state,
+                player,
+                source,
+                granting_object,
+                &kind,
+                role,
+            );
             legs.push(ObjectCostLeg {
                 leaf: cost,
                 demand,
@@ -969,6 +1004,7 @@ pub(crate) fn object_cost_legs_jointly_payable(
     granting_object: Option<ObjectIncarnationRef>,
     costs: &[AbilityCost],
     payment: ObjectLegPayment,
+    role: CostSourceRole,
 ) -> bool {
     if costs.iter().map(object_cost_leg_count).sum::<usize>() < 2 {
         return true;
@@ -976,7 +1012,15 @@ pub(crate) fn object_cost_legs_jointly_payable(
     let mut legs = Vec::new();
     for cost in costs {
         let first = legs.len();
-        collect_object_cost_legs(state, player, source, granting_object, cost, &mut legs);
+        collect_object_cost_legs(
+            state,
+            player,
+            source,
+            granting_object,
+            cost,
+            role,
+            &mut legs,
+        );
         if printed_order_discard_count(cost).is_some() {
             for leg in &mut legs[first..] {
                 leg.coverage = ObjectLegCoverage::PrintedOrderDiscardSequence;
@@ -1011,6 +1055,7 @@ pub(crate) fn activation_residual_jointly_payable(
         granting_object,
         children,
         ObjectLegPayment::GuidedActivation,
+        CostSourceRole::AbilitySource,
     )
 }
 
@@ -1069,6 +1114,7 @@ pub(crate) fn restrict_activation_prompt_to_joint_payment(
         spell.object_id,
         spell.ability.context.granting_object,
         residual,
+        CostSourceRole::AbilitySource,
         &mut legs,
     );
     let Some(current) = legs.iter().position(|leg| is_current_leg(leg.leaf)) else {
@@ -1096,7 +1142,7 @@ pub(crate) fn restrict_activation_prompt_to_joint_payment(
 /// they are defined here beside the payment authority.
 pub trait AbilityCostPayability {
     /// CR 605.3a + CR 602.2b + CR 601.2g-h: Payability gate for ACTIVATED
-    /// MANA ABILITIES specifically. Unlike [`Self::is_payable`] (which defers mana
+    /// MANA ABILITIES specifically. Unlike [`Self::is_payable_for_spell`] (which defers mana
     /// affordability to the normal spell/ability payment step), a mana ability
     /// resolves immediately after its activation cost is paid. If that cost
     /// includes mana, CR 117.1d and CR 118.2 still allow activating other mana
@@ -1121,15 +1167,32 @@ pub trait AbilityCostPayability {
     /// Mana affordability is NOT checked here; CR 601.2g handles the mana step
     /// separately through the mana-payment flow.
     ///
-    /// Ability-agnostic entry point for costs paid outside the activated-ability
-    /// pipeline (spell costs): delegates to `AbilityCostLegPayability::is_payable_in` with no
-    /// activation index and [`ObjectLegPayment::Unguided`] object legs.
-    /// Callers that KNOW the ability whose cost this is (the activation
-    /// pipeline) must use [`Self::is_payable_for_activation`] instead so CR 106.6
-    /// tag-scoped mana is judged the same way the real payment step judges it.
-    fn is_payable(&self, state: &GameState, player: PlayerId, source: ObjectId) -> bool;
+    /// Entry point for spell costs: `source` is the spell whose cast is being
+    /// priced ([`CostSourceRole::SpellBeingCast`]), which CR 601.2a moves to
+    /// the stack before its costs are paid. Delegates to
+    /// `AbilityCostLegPayability::is_payable_in` with no activation index and
+    /// [`ObjectLegPayment::Unguided`] object legs.
+    ///
+    /// There is deliberately no role-less entry point: every caller names what
+    /// `source` is. An activated ability's cost uses
+    /// [`Self::is_payable_for_activation`] (CR 106.6 tag-scoped mana is then
+    /// judged the way the real payment step judges it) or
+    /// [`Self::is_payable_for_mana_ability`]; a replacement's "you may pay"
+    /// uses [`Self::is_payable_for_replacement`].
+    fn is_payable_for_spell(&self, state: &GameState, player: PlayerId, source: ObjectId) -> bool;
 
-    /// CR 118.3 + CR 601.2h + CR 106.6: [`Self::is_payable`] for the
+    /// CR 614.1c + CR 118.3: [`Self::is_payable_for_spell`] for a cost a
+    /// replacement effect offers ("As this enters, you may pay ..."). Its
+    /// `source` isn't being cast, so it stays where it is and can be used to
+    /// pay ([`CostSourceRole::AbilitySource`]).
+    fn is_payable_for_replacement(
+        &self,
+        state: &GameState,
+        player: PlayerId,
+        source: ObjectId,
+    ) -> bool;
+
+    /// CR 118.3 + CR 601.2h + CR 106.6: [`Self::is_payable_for_spell`] for the
     /// activated-ability pipeline, with the activated ability's exact index in
     /// hand. That pipeline pays object-using legs through its guided dispatcher
     /// ([`ObjectLegPayment::GuidedActivation`]).
@@ -1152,12 +1215,13 @@ pub trait AbilityCostPayability {
 /// The shared body of the [`AbilityCostPayability`] gates. A separate trait
 /// because its signature names the crate-private [`ObjectLegPayment`].
 pub(crate) trait AbilityCostLegPayability {
-    /// The single body behind [`AbilityCostPayability::is_payable`],
+    /// The single body behind [`AbilityCostPayability::is_payable_for_spell`],
     /// [`AbilityCostPayability::is_payable_for_activation`] and the mana-ability gates, so the
     /// composite/disjunctive traversal is not duplicated. `ability_index` is the
     /// ability's identity (granting object, CR 106.6 tagged mana); `payment` is
-    /// how the caller's payment pipeline surfaces object-using legs. The two are
-    /// independent.
+    /// how the caller's payment pipeline surfaces object-using legs; `role` is
+    /// what `source` is (a spell being cast or an ability's source). The three
+    /// are independent.
     fn is_payable_in(
         &self,
         state: &GameState,
@@ -1165,6 +1229,7 @@ pub(crate) trait AbilityCostLegPayability {
         source: ObjectId,
         ability_index: Option<usize>,
         payment: ObjectLegPayment,
+        role: CostSourceRole,
     ) -> bool;
 }
 
@@ -1202,6 +1267,7 @@ impl AbilityCostPayability for AbilityCost {
                         source,
                         Some(ability_index),
                         ObjectLegPayment::Unguided,
+                        CostSourceRole::AbilitySource,
                     );
                 }
                 let (pending_spell, reserved_count) = reserved.expect("checked reservation");
@@ -1246,7 +1312,7 @@ impl AbilityCostPayability for AbilityCost {
                     &excluded_sources,
                 )
             }
-            // Same {T}+TapCreatures source-exclusion logic as `is_payable`'s
+            // Same {T}+TapCreatures source-exclusion logic as `is_payable_in`'s
             // Composite arm, but Mana sub-costs use the mana-specific check.
             // CR 118.3 + CR 601.2h: the mana-ability payment path prompts its
             // object-using legs without look-ahead, so they are checked
@@ -1301,6 +1367,7 @@ impl AbilityCostPayability for AbilityCost {
                     granter,
                     costs,
                     ObjectLegPayment::Unguided,
+                    CostSourceRole::AbilitySource,
                 )
             }
             // Every other kind has no mana-pool component — defer to the
@@ -1311,12 +1378,36 @@ impl AbilityCostPayability for AbilityCost {
                 source,
                 Some(ability_index),
                 ObjectLegPayment::Unguided,
+                CostSourceRole::AbilitySource,
             ),
         }
     }
 
-    fn is_payable(&self, state: &GameState, player: PlayerId, source: ObjectId) -> bool {
-        self.is_payable_in(state, player, source, None, ObjectLegPayment::Unguided)
+    fn is_payable_for_spell(&self, state: &GameState, player: PlayerId, source: ObjectId) -> bool {
+        self.is_payable_in(
+            state,
+            player,
+            source,
+            None,
+            ObjectLegPayment::Unguided,
+            CostSourceRole::SpellBeingCast,
+        )
+    }
+
+    fn is_payable_for_replacement(
+        &self,
+        state: &GameState,
+        player: PlayerId,
+        source: ObjectId,
+    ) -> bool {
+        self.is_payable_in(
+            state,
+            player,
+            source,
+            None,
+            ObjectLegPayment::Unguided,
+            CostSourceRole::AbilitySource,
+        )
     }
 
     fn is_payable_for_activation(
@@ -1332,6 +1423,7 @@ impl AbilityCostPayability for AbilityCost {
             source,
             ability_index,
             ObjectLegPayment::GuidedActivation,
+            CostSourceRole::AbilitySource,
         )
     }
 }
@@ -1344,6 +1436,7 @@ impl AbilityCostLegPayability for AbilityCost {
         source: ObjectId,
         ability_index: Option<usize>,
         payment: ObjectLegPayment,
+        role: CostSourceRole,
     ) -> bool {
         let granting_object =
             super::casting::activated_ability_granting_object(state, source, ability_index);
@@ -1351,6 +1444,8 @@ impl AbilityCostLegPayability for AbilityCost {
             // CR 601.2g: Mana affordability is checked by the mana payment step,
             // not the 601.2b choice-of-object gate.
             AbilityCost::Mana { .. } => true,
+            // Un-card: saying a phrase requires that the player has opted in.
+            AbilityCost::SayPhrase { .. } => state.un_actions.is_enabled(player),
             // CR 118.3: Tap/Untap availability is enforced at payment time
             // (the object must be in the correct state). This gate only concerns
             // choice-of-object eligibility.
@@ -1512,10 +1607,17 @@ impl AbilityCostLegPayability for AbilityCost {
                 eligible_craft_materials(state, player, source, materials).len()
                     >= count.min_count()
             }
-            // CR 701.59b: Can't collect evidence if graveyard total mana value
-            // is less than N.
+            // CR 701.59b: Can't collect evidence if the total mana value of the
+            // graveyard cards that can be exiled as evidence is less than N.
+            // CR 601.2a vs CR 602.2a: a spell being priced is one of them only
+            // until announced, an ability's source stays one.
             AbilityCost::CollectEvidence { amount } => {
-                super::effects::collect_evidence::can_collect_evidence(state, player, *amount)
+                super::effects::collect_evidence::can_collect_evidence(
+                    state,
+                    player,
+                    role.spell_being_cast(source),
+                    *amount,
+                )
             }
             // CR 118.3 + CR 601.2b: An "exile any number of [filter] with
             // [aggregate] [cmp] N" cost is payable iff the aggregate over EVERY
@@ -1764,7 +1866,9 @@ impl AbilityCostLegPayability for AbilityCost {
                         filter,
                         true,
                     ),
-                    other => other.is_payable_in(state, player, source, ability_index, payment),
+                    other => {
+                        other.is_payable_in(state, player, source, ability_index, payment, role)
+                    }
                 }) && object_cost_legs_jointly_payable(
                     state,
                     player,
@@ -1772,6 +1876,7 @@ impl AbilityCostLegPayability for AbilityCost {
                     granting_object,
                     costs,
                     payment,
+                    role,
                 )
             }
             // CR 118.12a: Disjunctive — payable if **any** sub-cost is
@@ -1780,7 +1885,7 @@ impl AbilityCostLegPayability for AbilityCost {
             // gate only needs at least one branch to be reachable.
             AbilityCost::OneOf { costs } => costs
                 .iter()
-                .any(|c| c.is_payable_in(state, player, source, ability_index, payment)),
+                .any(|c| c.is_payable_in(state, player, source, ability_index, payment, role)),
             // CR 601.2b + CR 701.67a: Waterbend composes a mana cost with a
             // tap-creature-or-artifact-to-help option (the whole point of the
             // keyword). The plain auto-tap pre-check (`can_pay_cost_after_auto_tap`)
@@ -2528,14 +2633,14 @@ mod tests {
         let cost = AbilityCost::Mana {
             cost: ManaCost::NoCost,
         };
-        assert!(cost.is_payable(&state, P0, ObjectId(0)));
+        assert!(cost.is_payable_for_spell(&state, P0, ObjectId(0)));
     }
 
     #[test]
     fn tap_untap_always_payable() {
         let state = new_state();
-        assert!(AbilityCost::Tap.is_payable(&state, P0, ObjectId(0)));
-        assert!(AbilityCost::Untap.is_payable(&state, P0, ObjectId(0)));
+        assert!(AbilityCost::Tap.is_payable_for_spell(&state, P0, ObjectId(0)));
+        assert!(AbilityCost::Untap.is_payable_for_spell(&state, P0, ObjectId(0)));
     }
 
     #[test]
@@ -2545,11 +2650,11 @@ mod tests {
         assert!(AbilityCost::PayLife {
             amount: QuantityExpr::Fixed { value: 5 }
         }
-        .is_payable(&state, P0, ObjectId(0)));
+        .is_payable_for_spell(&state, P0, ObjectId(0)));
         assert!(!AbilityCost::PayLife {
             amount: QuantityExpr::Fixed { value: 6 }
         }
-        .is_payable(&state, P0, ObjectId(0)));
+        .is_payable_for_spell(&state, P0, ObjectId(0)));
     }
 
     #[test]
@@ -2559,11 +2664,11 @@ mod tests {
         assert!(AbilityCost::PayEnergy {
             amount: QuantityExpr::Fixed { value: 3 }
         }
-        .is_payable(&state, P0, ObjectId(0)));
+        .is_payable_for_spell(&state, P0, ObjectId(0)));
         assert!(!AbilityCost::PayEnergy {
             amount: QuantityExpr::Fixed { value: 4 }
         }
-        .is_payable(&state, P0, ObjectId(0)));
+        .is_payable_for_spell(&state, P0, ObjectId(0)));
     }
 
     /// CR 118.3 + CR 602.1a: a self-exile cost with no explicit zone ("Exile
@@ -2581,7 +2686,7 @@ mod tests {
             filter: Some(TargetFilter::SelfRef),
         };
         assert!(
-            self_exile.is_payable(&scenario.state, P0, src),
+            self_exile.is_payable_for_spell(&scenario.state, P0, src),
             "self-exile cost with no zone must be payable from the battlefield"
         );
         // Within the Ominous Cemetery composite ({5}, {T}, Exile this land) the
@@ -2589,7 +2694,7 @@ mod tests {
         assert!(AbilityCost::Composite {
             costs: vec![AbilityCost::Tap, self_exile],
         }
-        .is_payable(&scenario.state, P0, src));
+        .is_payable_for_spell(&scenario.state, P0, src));
         // An EXPLICIT zone still gates: a battlefield source cannot pay a
         // "from your graveyard" self-exile cost (Scavenge class).
         assert!(!AbilityCost::Exile {
@@ -2597,7 +2702,7 @@ mod tests {
             zone: Some(Zone::Graveyard),
             filter: Some(TargetFilter::SelfRef),
         }
-        .is_payable(&scenario.state, P0, src));
+        .is_payable_for_spell(&scenario.state, P0, src));
     }
 
     /// CR 601.2b: Standalone TapCreatures (no {T}) includes the source itself
@@ -2619,7 +2724,7 @@ mod tests {
         mark_elf(&mut scenario.state, elf_b);
         // 3 Elves total including source → payable.
         assert!(
-            cost.is_payable(&scenario.state, P0, src),
+            cost.is_payable_for_spell(&scenario.state, P0, src),
             "source counts among the 3 Elves"
         );
         // With 2 OTHER Elves + source, must still be payable (source is the 3rd).
@@ -2627,7 +2732,7 @@ mod tests {
         scenario.state.battlefield.retain(|id| *id != elf_b);
         scenario.state.objects.remove(&elf_b);
         assert!(
-            !cost.is_payable(&scenario.state, P0, src),
+            !cost.is_payable_for_spell(&scenario.state, P0, src),
             "only 2 Elves (source + elf_a) < 3"
         );
     }
@@ -2654,14 +2759,14 @@ mod tests {
         mark_elf(&mut scenario.state, elf_b);
         // Source committed to {T} — 2 OTHER Elves available → payable.
         assert!(
-            cost.is_payable(&scenario.state, P0, src),
+            cost.is_payable_for_spell(&scenario.state, P0, src),
             "2 other Elves satisfy TapCreatures(2)"
         );
         // Remove elf_b — only 1 other Elf → unpayable.
         scenario.state.battlefield.retain(|id| *id != elf_b);
         scenario.state.objects.remove(&elf_b);
         assert!(
-            !cost.is_payable(&scenario.state, P0, src),
+            !cost.is_payable_for_spell(&scenario.state, P0, src),
             "only 1 other Elf < 2"
         );
     }
@@ -2670,14 +2775,30 @@ mod tests {
     fn blight_requires_creatures() {
         let mut scenario = GameScenario::new();
         // No creatures on battlefield yet.
-        assert!(!AbilityCost::Blight { count: 1 }.is_payable(&scenario.state, P0, ObjectId(0)));
+        assert!(!AbilityCost::Blight { count: 1 }.is_payable_for_spell(
+            &scenario.state,
+            P0,
+            ObjectId(0)
+        ));
 
         let _id = scenario.add_creature(P0, "Bear", 2, 2).id();
-        assert!(AbilityCost::Blight { count: 1 }.is_payable(&scenario.state, P0, ObjectId(0)));
+        assert!(AbilityCost::Blight { count: 1 }.is_payable_for_spell(
+            &scenario.state,
+            P0,
+            ObjectId(0)
+        ));
         // CR 701.68b: N > 1 no longer requires N creatures — all N counters go on
         // the single chosen creature, so one controlled creature suffices.
-        assert!(AbilityCost::Blight { count: 2 }.is_payable(&scenario.state, P0, ObjectId(0)));
-        assert!(AbilityCost::Blight { count: 3 }.is_payable(&scenario.state, P0, ObjectId(0)));
+        assert!(AbilityCost::Blight { count: 2 }.is_payable_for_spell(
+            &scenario.state,
+            P0,
+            ObjectId(0)
+        ));
+        assert!(AbilityCost::Blight { count: 3 }.is_payable_for_spell(
+            &scenario.state,
+            P0,
+            ObjectId(0)
+        ));
     }
 
     fn chosen_hand_discard(filter: Option<TargetFilter>) -> AbilityCost {
@@ -2817,7 +2938,7 @@ mod tests {
         assert!(one_leg.is_payable_for_mana_ability(&state, P0, source, 0));
         assert!(!two_legs.is_payable_for_mana_ability(&state, P0, source, 0));
         // The ordinary gate is unaffected by the mana-ability exclusion.
-        assert!(two_legs.is_payable(&state, P0, source));
+        assert!(two_legs.is_payable_for_spell(&state, P0, source));
     }
 
     fn object_leg<'a>(
@@ -3016,10 +3137,10 @@ mod tests {
             costs: vec![subtype("Swamp"), subtype("Forest")],
         };
         // Reach guard: each leg alone is payable by the dual.
-        assert!(subtype("Swamp").is_payable(&scenario.state, P0, source));
-        assert!(subtype("Forest").is_payable(&scenario.state, P0, source));
+        assert!(subtype("Swamp").is_payable_for_spell(&scenario.state, P0, source));
+        assert!(subtype("Forest").is_payable_for_spell(&scenario.state, P0, source));
         assert!(!cost.is_payable_for_activation(&scenario.state, P0, source, Some(0)));
-        assert!(!cost.is_payable(&scenario.state, P0, source));
+        assert!(!cost.is_payable_for_spell(&scenario.state, P0, source));
 
         let swamp = scenario.add_creature(P0, "Swamp Creature", 1, 1).id();
         scenario
@@ -3039,12 +3160,13 @@ mod tests {
             P0,
             source,
             Some(0),
-            ObjectLegPayment::Unguided
+            ObjectLegPayment::Unguided,
+            CostSourceRole::AbilitySource,
         ));
         // Unguided (spell) payment would let the Swamp leg strand the Forest
         // leg, so the overlapping shape fails closed there, and on the
         // mana-ability path, which prompts its legs the same way.
-        assert!(!cost.is_payable(&scenario.state, P0, source));
+        assert!(!cost.is_payable_for_spell(&scenario.state, P0, source));
         assert!(!cost.is_payable_for_mana_ability(&scenario.state, P0, source, 0));
         // Reach guard: the mana-ability arm still offers a lone leg.
         let lone = AbilityCost::Composite {
@@ -3063,7 +3185,7 @@ mod tests {
             selection: crate::types::ability::CardSelectionMode::Chosen,
             self_scope: crate::types::ability::DiscardSelfScope::FromHand,
         }
-        .is_payable(&state, P0, ObjectId(0)));
+        .is_payable_for_spell(&state, P0, ObjectId(0)));
     }
 
     #[test]
@@ -3071,10 +3193,10 @@ mod tests {
         let mut scenario = GameScenario::new();
         let src = scenario.add_creature(P0, "Bear", 2, 2).id();
         let cost = AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1));
-        assert!(cost.is_payable(&scenario.state, P0, src));
+        assert!(cost.is_payable_for_spell(&scenario.state, P0, src));
         // Move source off battlefield.
         scenario.state.objects.get_mut(&src).unwrap().zone = Zone::Graveyard;
-        assert!(!cost.is_payable(&scenario.state, P0, src));
+        assert!(!cost.is_payable_for_spell(&scenario.state, P0, src));
     }
 
     #[test]
@@ -3085,17 +3207,17 @@ mod tests {
             TargetFilter::Typed(TypedFilter::creature()),
             1,
         ));
-        assert!(cost.is_payable(&scenario.state, P0, src));
+        assert!(cost.is_payable_for_spell(&scenario.state, P0, src));
 
         let another_cost = AbilityCost::Sacrifice(SacrificeCost::count(
             TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Another])),
             1,
         ));
-        assert!(!another_cost.is_payable(&scenario.state, P0, src));
+        assert!(!another_cost.is_payable_for_spell(&scenario.state, P0, src));
 
         scenario.add_creature(P0, "Bear", 2, 2);
-        assert!(cost.is_payable(&scenario.state, P0, src));
-        assert!(another_cost.is_payable(&scenario.state, P0, src));
+        assert!(cost.is_payable_for_spell(&scenario.state, P0, src));
+        assert!(another_cost.is_payable_for_spell(&scenario.state, P0, src));
     }
 
     #[test]
@@ -3108,7 +3230,7 @@ mod tests {
         ));
 
         assert!(
-            cost.is_payable(&scenario.state, P0, src),
+            cost.is_payable_for_spell(&scenario.state, P0, src),
             "X sacrifice costs should be payable at X=0 even with no eligible permanents"
         );
 
@@ -3116,7 +3238,7 @@ mod tests {
             .add_creature(P0, "Squirrel Token", 1, 1)
             .with_subtypes(vec!["Squirrel"]);
         assert!(
-            cost.is_payable(&scenario.state, P0, src),
+            cost.is_payable_for_spell(&scenario.state, P0, src),
             "X sacrifice costs should stay payable once eligible permanents exist"
         );
     }
@@ -3132,13 +3254,13 @@ mod tests {
         };
 
         assert!(
-            cost.is_payable(&scenario.state, P0, source),
+            cost.is_payable_for_spell(&scenario.state, P0, source),
             "X exile costs are payable at X=0 before any eligible card is selected"
         );
 
         scenario.add_spell_to_graveyard(P0, "Lightning Bolt", true);
         assert!(
-            cost.is_payable(&scenario.state, P0, source),
+            cost.is_payable_for_spell(&scenario.state, P0, source),
             "X exile costs stay payable when eligible cards can set X above zero"
         );
     }
@@ -3146,8 +3268,8 @@ mod tests {
     #[test]
     fn loyalty_positive_is_always_payable() {
         let state = new_state();
-        assert!(AbilityCost::Loyalty { amount: 1 }.is_payable(&state, P0, ObjectId(0)));
-        assert!(AbilityCost::Loyalty { amount: 0 }.is_payable(&state, P0, ObjectId(0)));
+        assert!(AbilityCost::Loyalty { amount: 1 }.is_payable_for_spell(&state, P0, ObjectId(0)));
+        assert!(AbilityCost::Loyalty { amount: 0 }.is_payable_for_spell(&state, P0, ObjectId(0)));
     }
 
     #[test]
@@ -3155,8 +3277,12 @@ mod tests {
         let mut scenario = GameScenario::new();
         let src = scenario.add_creature(P0, "PW", 0, 0).id();
         scenario.state.objects.get_mut(&src).unwrap().loyalty = Some(3);
-        assert!(AbilityCost::Loyalty { amount: -3 }.is_payable(&scenario.state, P0, src));
-        assert!(!AbilityCost::Loyalty { amount: -4 }.is_payable(&scenario.state, P0, src));
+        assert!(AbilityCost::Loyalty { amount: -3 }.is_payable_for_spell(&scenario.state, P0, src));
+        assert!(!AbilityCost::Loyalty { amount: -4 }.is_payable_for_spell(
+            &scenario.state,
+            P0,
+            src
+        ));
     }
 
     #[test]
@@ -3171,7 +3297,7 @@ mod tests {
                 },
             ],
         };
-        assert!(payable.is_payable(&state, P0, ObjectId(0)));
+        assert!(payable.is_payable_for_spell(&state, P0, ObjectId(0)));
         let unpayable = AbilityCost::Composite {
             costs: vec![
                 AbilityCost::Tap,
@@ -3180,7 +3306,7 @@ mod tests {
                 },
             ],
         };
-        assert!(!unpayable.is_payable(&state, P0, ObjectId(0)));
+        assert!(!unpayable.is_payable_for_spell(&state, P0, ObjectId(0)));
     }
 
     /// CR 701.17b: a Mill cost is payable iff the library holds at least
@@ -3200,21 +3326,21 @@ mod tests {
 
         for count in 0..=4 {
             assert!(
-                AbilityCost::Mill { count }.is_payable(state, P0, ObjectId(0)),
+                AbilityCost::Mill { count }.is_payable_for_spell(state, P0, ObjectId(0)),
                 "mill {count} must be payable from a 4-card library"
             );
         }
         for count in 5..=8 {
             assert!(
-                !AbilityCost::Mill { count }.is_payable(state, P0, ObjectId(0)),
+                !AbilityCost::Mill { count }.is_payable_for_spell(state, P0, ObjectId(0)),
                 "mill {count} exceeds a 4-card library and must be unpayable"
             );
         }
 
         // Empty library: only the degenerate zero-card mill remains payable.
         let empty = new_state();
-        assert!(AbilityCost::Mill { count: 0 }.is_payable(&empty, P0, ObjectId(0)));
-        assert!(!AbilityCost::Mill { count: 1 }.is_payable(&empty, P0, ObjectId(0)));
+        assert!(AbilityCost::Mill { count: 0 }.is_payable_for_spell(&empty, P0, ObjectId(0)));
+        assert!(!AbilityCost::Mill { count: 1 }.is_payable_for_spell(&empty, P0, ObjectId(0)));
     }
 
     /// CR 701.43b: exert is payable regardless of the source's tapped state,
@@ -3222,7 +3348,63 @@ mod tests {
     #[test]
     fn exert_always_payable() {
         let state = new_state();
-        assert!(AbilityCost::Exert.is_payable(&state, P0, ObjectId(0)));
+        assert!(AbilityCost::Exert.is_payable_for_spell(&state, P0, ObjectId(0)));
+    }
+
+    /// CR 601.2a + CR 701.59b: collect evidence, alone or inside a composite
+    /// (Detective's Phoenix's "{R}, Collect evidence 6"), never counts a spell
+    /// whose cast it prices: that spell is on the stack by the time the cost is
+    /// paid. CR 602.2a: an activated ability's source stays where it is, so a
+    /// graveyard source counts toward its own ability's collect evidence, as
+    /// does a source that isn't in the graveyard.
+    #[test]
+    fn collect_evidence_payable_excludes_only_a_spell_being_cast() {
+        use crate::types::mana::ManaCost;
+        let mut scenario = GameScenario::new();
+        let source = scenario
+            .add_creature_to_graveyard(P0, "Graveyard Card", 2, 2)
+            .with_mana_cost(ManaCost::generic(3))
+            .id();
+        scenario
+            .add_creature_to_graveyard(P0, "Evidence", 2, 2)
+            .with_mana_cost(ManaCost::generic(3));
+        let elsewhere = scenario.add_creature(P0, "Battlefield Source", 2, 2).id();
+        let state = &scenario.state;
+
+        let alone = AbilityCost::CollectEvidence { amount: 6 };
+        let composite = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::generic(1),
+                },
+                alone.clone(),
+            ],
+        };
+        for cost in [&alone, &composite] {
+            assert!(
+                cost.is_payable_for_spell(state, P0, elsewhere),
+                "reach: both graveyard cards total mana value 6: {cost:?}"
+            );
+            assert!(
+                !cost.is_payable_for_spell(state, P0, source),
+                "a spell being cast isn't its own evidence: {cost:?}"
+            );
+            assert!(
+                cost.is_payable_for_activation(state, P0, source, Some(0)),
+                "an activation's graveyard source is evidence: {cost:?}"
+            );
+        }
+        // The mana-ability gate prices mana legs for real, so only the bare
+        // collect-evidence cost is probed there.
+        assert!(
+            alone.is_payable_for_mana_ability(state, P0, source, 0),
+            "a mana ability's graveyard source is evidence"
+        );
+        assert!(
+            alone.is_payable_for_replacement(state, P0, source),
+            "a replacement's graveyard source is evidence"
+        );
+        assert!(AbilityCost::CollectEvidence { amount: 3 }.is_payable_for_spell(state, P0, source));
     }
 
     /// CR 118.3: #542 Loch Mare — `RemoveCounter` with `CounterMatch::Any`
@@ -3249,7 +3431,7 @@ mod tests {
             selection: CounterCostSelection::SingleObject,
         };
         assert!(
-            cost.is_payable(&scenario.state, P0, src),
+            cost.is_payable_for_spell(&scenario.state, P0, src),
             "untyped 'remove a counter' must be payable when the object has -1/-1 counters",
         );
 
@@ -3262,7 +3444,7 @@ mod tests {
             .counters
             .clear();
         assert!(
-            !cost.is_payable(&scenario.state, P0, src),
+            !cost.is_payable_for_spell(&scenario.state, P0, src),
             "untyped 'remove a counter' must be unpayable when no counters of any kind are present",
         );
     }
@@ -3289,7 +3471,7 @@ mod tests {
         };
 
         assert!(
-            !cost.is_payable(&scenario.state, P0, src),
+            !cost.is_payable_for_spell(&scenario.state, P0, src),
             "single-object untyped counter costs must align with payment, which removes one concrete counter type"
         );
     }
@@ -3313,7 +3495,7 @@ mod tests {
         };
         // Payable even with zero counters.
         assert!(
-            cost.is_payable(&scenario.state, P0, src),
+            cost.is_payable_for_spell(&scenario.state, P0, src),
             "'remove any number of' must be payable even with zero counters",
         );
         // Still payable with some counters.
@@ -3325,7 +3507,7 @@ mod tests {
             .counters
             .insert(CounterType::Generic("storage".to_string()), 3);
         assert!(
-            cost.is_payable(&scenario.state, P0, src),
+            cost.is_payable_for_spell(&scenario.state, P0, src),
             "'remove any number of' must be payable with counters present",
         );
     }
@@ -3378,7 +3560,7 @@ mod tests {
 
         let cost = parse_oracle_cost("exile a green card with mana value X from your hand");
         assert!(
-            cost.is_payable(&state, caster, shoal),
+            cost.is_payable_for_spell(&state, caster, shoal),
             "Shoal pitch cost must be payable when any green card can set X"
         );
 
@@ -3435,13 +3617,13 @@ mod tests {
             scenario.add_creature_to_graveyard(P0, &format!("Filler {idx}"), 1, 1);
         }
         assert!(
-            !cost.is_payable(&scenario.state, P0, uro),
+            !cost.is_payable_for_spell(&scenario.state, P0, uro),
             "four other graveyard cards is not enough to escape"
         );
 
         scenario.add_creature_to_graveyard(P0, "Filler 4", 1, 1);
         assert!(
-            cost.is_payable(&scenario.state, P0, uro),
+            cost.is_payable_for_spell(&scenario.state, P0, uro),
             "five other graveyard cards must satisfy Uro's escape exile cost"
         );
 
@@ -3538,7 +3720,7 @@ mod tests {
             "an untagged activation must not spend power-up-restricted mana"
         );
         assert!(
-            !cost.is_payable(&scenario.state, P0, source),
+            !cost.is_payable_for_spell(&scenario.state, P0, source),
             "the tag-agnostic entry point stays conservative"
         );
     }

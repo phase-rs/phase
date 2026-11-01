@@ -857,6 +857,18 @@ impl RwProfile {
         self.reads_player_fused = self.reads_player_fused.union(o.reads_player_fused);
     }
 
+    /// CR 405: whether the resolution reads the stack's shape, or anything it cannot classify.
+    pub(crate) fn reads_stack(&self) -> bool {
+        [
+            self.reads_src,
+            self.reads_board,
+            self.reads_player,
+            self.reads_frozen,
+        ]
+        .iter()
+        .any(|kinds| kinds.stack_shape || kinds.other)
+    }
+
     /// CR 603.3b T1 (§1.2): the resolution function never consults the source
     /// binding — no source read, no self write, no source-referential frozen
     /// read. Fail-closed (the walk routes source predicates into `reads_src` /

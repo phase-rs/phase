@@ -71,6 +71,16 @@ pub enum WireFormat {
     Unknown,
 }
 
+/// Optional recipient-projected state encoding, independent of compression.
+/// Native Full servers confirm selection in a second plain-text ServerHello
+/// before application dispatch. Frames encode the complete socket envelope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StateCodec {
+    StateCodecV1,
+    #[serde(other)]
+    Unknown,
+}
+
 /// Optional timing hints for application JSON Ping/Pong diagnostics.
 /// These describe client JSON pings, not the native WebSocket Ping cadence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -316,7 +326,15 @@ pub enum ClientMessage {
         lobby_protocol_version: Option<u32>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         wire_formats: Vec<WireFormat>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        state_codecs: Vec<StateCodec>,
     },
+    /// Request a FULL of this socket's currently authorized view. No client
+    /// game, seat, hash or revision is accepted. Requires confirmed StateCodecV1
+    /// on a native Full server. At most one response is pending until encoding
+    /// completes; retries in that interval are no-ops charged to ingress quota.
+    /// Rejection, enqueue/encoding failure and teardown release admission.
+    ResyncState,
     CreateGame {
         deck: DeckData,
     },
@@ -697,6 +715,8 @@ pub enum WithheldFrame {
     StateUpdate,
 }
 
+/// On a codec-confirmed connection, top-level type values Full and Delta are
+/// state-codec frames. These tags are reserved and must not become ServerMessage tags.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ServerMessage {
@@ -704,6 +724,8 @@ pub enum ServerMessage {
     /// `protocol_version` against its own and refuses to proceed on mismatch.
     /// `build_commit` is the git short-hash of the server binary; it is used
     /// by the lobby to gate joins when host and guest are on different builds.
+    /// Native Full servers repeat this in plain text with selected_state_codec
+    /// before dispatching application commands for an opted-in peer.
     ServerHello {
         server_version: String,
         build_commit: String,
@@ -732,6 +754,12 @@ pub enum ServerMessage {
         /// Completion ownership is optional transport-envelope metadata.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         command_correlation: Option<CommandCorrelation>,
+        /// Supported codecs; empty on LobbyOnly and broker projections.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        state_codecs: Vec<StateCodec>,
+        /// Set only by the second plain-text negotiation confirmation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        selected_state_codec: Option<StateCodec>,
     },
     GameCreated {
         game_code: String,
@@ -2485,6 +2513,7 @@ mod tests {
             protocol_version: PROTOCOL_VERSION,
             lobby_protocol_version: Some(LOBBY_PROTOCOL_VERSION),
             wire_formats: vec![WireFormat::GzipEnvelopeV1],
+            state_codecs: Vec::new(),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
@@ -2495,12 +2524,14 @@ mod tests {
                 protocol_version,
                 lobby_protocol_version,
                 wire_formats,
+                state_codecs,
             } => {
                 assert_eq!(client_version, "0.1.11");
                 assert_eq!(build_commit, "abc1234");
                 assert_eq!(protocol_version, PROTOCOL_VERSION);
                 assert_eq!(lobby_protocol_version, Some(LOBBY_PROTOCOL_VERSION));
                 assert_eq!(wire_formats, vec![WireFormat::GzipEnvelopeV1]);
+                assert!(state_codecs.is_empty());
             }
             _ => panic!("wrong variant"),
         }
@@ -2523,6 +2554,42 @@ mod tests {
     }
 
     #[test]
+    fn codec_hello_missing_and_unknown_capabilities_are_tolerated() {
+        for (advertisement, expected) in [
+            (None, Vec::new()),
+            (
+                Some(serde_json::json!(["FutureCodec"])),
+                vec![StateCodec::Unknown],
+            ),
+            (
+                Some(serde_json::json!(["FutureCodec", "StateCodecV1"])),
+                vec![StateCodec::Unknown, StateCodec::StateCodecV1],
+            ),
+        ] {
+            let mut wire = serde_json::json!({"type": "ClientHello", "data": {
+                "client_version": "peer", "build_commit": "build", "protocol_version": PROTOCOL_VERSION
+            }});
+            if let Some(advertisement) = advertisement {
+                wire["data"]["state_codecs"] = advertisement;
+            }
+            let ClientMessage::ClientHello { state_codecs, .. } =
+                serde_json::from_value(wire).unwrap()
+            else {
+                panic!("hello expected")
+            };
+            assert_eq!(state_codecs, expected);
+        }
+        let hello: ServerMessage = serde_json::from_value(serde_json::json!({
+            "type": "ServerHello", "data": {"server_version": "server", "build_commit": "build",
+                "protocol_version": PROTOCOL_VERSION, "mode": "Full"}
+        }))
+        .unwrap();
+        assert!(matches!(hello, ServerMessage::ServerHello {
+            state_codecs, selected_state_codec: None, ..
+        } if state_codecs.is_empty()));
+    }
+
+    #[test]
     fn server_hello_roundtrips() {
         let msg = ServerMessage::ServerHello {
             server_version: "0.1.11".to_string(),
@@ -2537,6 +2604,8 @@ mod tests {
                 silence_budget_ms: 45_000,
             }),
             command_correlation: None,
+            state_codecs: vec![StateCodec::StateCodecV1],
+            selected_state_codec: Some(StateCodec::StateCodecV1),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let wire: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -2556,6 +2625,8 @@ mod tests {
                 wire_formats,
                 heartbeat,
                 command_correlation: _,
+                state_codecs,
+                selected_state_codec,
             } => {
                 assert_eq!(server_version, "0.1.11");
                 assert_eq!(build_commit, "abc1234");
@@ -2564,6 +2635,8 @@ mod tests {
                 assert_eq!(lobby_protocol_version, Some(LOBBY_PROTOCOL_VERSION));
                 assert_eq!(public_url.as_deref(), Some("https://x.ngrok-free.app"));
                 assert_eq!(wire_formats, vec![WireFormat::GzipEnvelopeV1]);
+                assert_eq!(state_codecs, vec![StateCodec::StateCodecV1]);
+                assert_eq!(selected_state_codec, Some(StateCodec::StateCodecV1));
                 assert_eq!(
                     heartbeat,
                     Some(HeartbeatContract {
@@ -2591,6 +2664,8 @@ mod tests {
             wire_formats: Vec::new(),
             heartbeat: None,
             command_correlation: None,
+            state_codecs: Vec::new(),
+            selected_state_codec: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(!json.contains("public_url"), "None must be omitted: {json}");

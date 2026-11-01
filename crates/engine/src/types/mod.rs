@@ -21,6 +21,7 @@ pub mod proposed_event;
 pub mod replay;
 pub mod resolution;
 pub mod resolved_commands;
+pub mod un_actions;
 
 pub use phase_ast::types::*;
 

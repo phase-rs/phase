@@ -487,7 +487,7 @@ pub(crate) fn additional_cost_declaration_is_offerable(
     let exile_this_way_cost = is_exile_any_number_effect_cost(&cost);
     let split = split_declared_mana_addition_and_residual(Some(state), Some(pending), cost)?;
     if let Some(residual) = split.residual.as_ref() {
-        if !residual.is_payable(state, player, pending.object_id) {
+        if !residual.is_payable_for_spell(state, player, pending.object_id) {
             return Ok(false);
         }
     }
@@ -1259,9 +1259,10 @@ fn spell_alternative_cost_is_payable(
                 None,
                 costs,
                 super::cost_payability::ObjectLegPayment::Unguided,
+                super::cost_payability::CostSourceRole::SpellBeingCast,
             )
         }
-        other => other.is_payable(state, player, object_id),
+        other => other.is_payable_for_spell(state, player, object_id),
     }
 }
 
@@ -1720,7 +1721,7 @@ pub(crate) fn finish_pending_cost_or_cast(
 
     if pending.additional_cost_flow.is_none() {
         if let Some(req_cost) = pending.deferred_required_additional_cost.take() {
-            if !req_cost.is_payable(state, player, pending.object_id) {
+            if !req_cost.is_payable_for_spell(state, player, pending.object_id) {
                 return Err(EngineError::SpellCastReversed {
                     player,
                     pending: Box::new(pending),
@@ -1836,7 +1837,7 @@ pub(crate) fn finish_pending_cost_or_cast(
     // CR 601.2b: If a Required additional cost was deferred while an optional cost
     // (e.g., Casualty) was offered first (Village Rites + Casualty), pay it now.
     if let Some(AdditionalCost::Required(req_cost)) = pending.additional_cost_flow.take() {
-        if !req_cost.is_payable(state, player, pending.object_id) {
+        if !req_cost.is_payable_for_spell(state, player, pending.object_id) {
             return Err(EngineError::ActionNotAllowed(
                 "Cannot pay required additional cost".to_string(),
             ));
@@ -7505,6 +7506,7 @@ fn validate_x_mana_sacrifice_residual(
             AbilityCost::Sacrifice(_)
             | AbilityCost::Mana { .. }
             | AbilityCost::ManaDynamic { .. }
+            | AbilityCost::SayPhrase { .. }
             | AbilityCost::Tap
             | AbilityCost::Untap
             | AbilityCost::Loyalty { .. }
@@ -9007,7 +9009,7 @@ fn check_additional_cost_or_pay_with_kept_cost(
     let (additional, deferred_required, additional_cost_source) =
         if let Some(AdditionalCost::Required(ref req)) = legacy_obj_additional {
             if !additional_cost_queue.is_empty() {
-                if !req.is_payable(state, player, object_id) {
+                if !req.is_payable_for_spell(state, player, object_id) {
                     let mut pending = pending_cast_keeping(
                         object_id,
                         card_id,
@@ -9740,7 +9742,7 @@ fn flash_timing_non_mana_additional_cost(
             if matches!(cost, AbilityCost::Mana { .. }) {
                 return None;
             }
-            cost.is_payable(state, player, object_id)
+            cost.is_payable_for_spell(state, player, object_id)
                 .then_some(AdditionalCost::Required(cost))
         })
 }
@@ -18600,7 +18602,8 @@ pub fn ability_cost_has_x(cost: &crate::types::ability::AbilityCost) -> bool {
         | AbilityCost::Blight { .. }
         | AbilityCost::Reveal { .. }
         | AbilityCost::Behold { .. }
-        | AbilityCost::GetPlayerCounters { .. } => false,
+        | AbilityCost::GetPlayerCounters { .. }
+        | AbilityCost::SayPhrase { .. } => false,
     }
 }
 
@@ -29015,7 +29018,11 @@ its replicate cost was paid.)\nDraw a card.";
         let bear = scenario.add_creature(PlayerId(0), "Lone Bear", 2, 2).id();
 
         assert!(
-            AbilityCost::Blight { count: 3 }.is_payable(&scenario.state, PlayerId(0), bear),
+            AbilityCost::Blight { count: 3 }.is_payable_for_spell(
+                &scenario.state,
+                PlayerId(0),
+                bear
+            ),
             "CR 701.68b: Blight 3 is payable with a single controlled creature"
         );
     }

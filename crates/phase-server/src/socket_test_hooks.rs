@@ -1,4 +1,5 @@
-//! Test-only barriers observe real socket delivery without delaying game work.
+//! Instance-scoped barriers observe bootstrap, resync ownership and publication
+//! lease boundaries in the real socket path; unarmed hooks never delay work.
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -20,6 +21,7 @@ pub(crate) struct Hooks {
     quota_flush: Arc<Mutex<Option<Arc<BootstrapGate>>>>,
     parser_work: Arc<Mutex<Option<Arc<ParserWork>>>>,
     hello_accept: Arc<Mutex<Option<Arc<BootstrapGate>>>>,
+    resync: Arc<Mutex<ResyncGates>>,
 }
 
 /// One connection's real parser calls, with a frozen quota window so wire tests
@@ -143,13 +145,94 @@ impl ParserWork {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum ResyncPoint {
+    Dispatch,
+    Built,
+    Enqueued,
+    ActionPreflight,
+    Encoding,
+}
+
+#[derive(Default)]
+struct ResyncGates {
+    dispatch: Option<Arc<BootstrapGate>>,
+    built: Option<Arc<BootstrapGate>>,
+    enqueued: Option<Arc<BootstrapGate>>,
+    action_preflight: Option<Arc<BootstrapGate>>,
+    encoding: Option<Arc<BootstrapGate>>,
+}
+
+impl ResyncGates {
+    fn slot(&mut self, point: ResyncPoint) -> &mut Option<Arc<BootstrapGate>> {
+        match point {
+            ResyncPoint::Dispatch => &mut self.dispatch,
+            ResyncPoint::Built => &mut self.built,
+            ResyncPoint::Enqueued => &mut self.enqueued,
+            ResyncPoint::ActionPreflight => &mut self.action_preflight,
+            ResyncPoint::Encoding => &mut self.encoding,
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct BootstrapGate {
     pub(crate) entered: Notify,
     pub(crate) release: Notify,
+    pub(crate) snapshot: Mutex<Option<(server_core::FullSessionKey, u64)>>,
 }
 
 impl Hooks {
+    pub(crate) fn arm_resync(&self, point: ResyncPoint) -> Arc<BootstrapGate> {
+        let gate = Arc::new(BootstrapGate::default());
+        *self.resync.lock().slot(point) = Some(gate.clone());
+        gate
+    }
+
+    async fn resync_boundary(
+        &self,
+        point: ResyncPoint,
+        snapshot: Option<(server_core::FullSessionKey, u64)>,
+    ) {
+        let gate = self.resync.lock().slot(point).take();
+        if let Some(gate) = gate {
+            *gate.snapshot.lock() = snapshot;
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
+    }
+
+    pub(crate) async fn before_resync_dispatch(&self) {
+        self.resync_boundary(ResyncPoint::Dispatch, None).await;
+    }
+
+    pub(crate) async fn after_resync_build(
+        &self,
+        key: &server_core::FullSessionKey,
+        revision: u64,
+    ) {
+        self.resync_boundary(ResyncPoint::Built, Some((key.clone(), revision)))
+            .await;
+    }
+
+    pub(crate) async fn after_resync_enqueue(
+        &self,
+        key: &server_core::FullSessionKey,
+        revision: u64,
+    ) {
+        self.resync_boundary(ResyncPoint::Enqueued, Some((key.clone(), revision)))
+            .await;
+    }
+
+    pub(crate) async fn before_action_preflight(&self) {
+        self.resync_boundary(ResyncPoint::ActionPreflight, None)
+            .await;
+    }
+
+    pub(crate) async fn before_resync_encode(&self) {
+        self.resync_boundary(ResyncPoint::Encoding, None).await;
+    }
+
     pub(crate) fn arm_hello_accept(&self) -> Arc<BootstrapGate> {
         let gate = Arc::new(BootstrapGate::default());
         *self.hello_accept.lock() = Some(gate.clone());
