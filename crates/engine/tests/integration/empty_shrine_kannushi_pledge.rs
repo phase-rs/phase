@@ -803,3 +803,238 @@ fn kannushi_pledge_raw_oracle_and_nonbattlefield_colors() {
     complete(&runner);
     assert_eq!(colors(&runner, kannushi), vec![ManaColor::White]);
 }
+
+// CR 702.160a, 718.3b, 105.2, 611.3a: a genuinely prototyped entrant
+// contributes its alternative color to an already-settled live protection set.
+// No test-side layer flush, dirty marking, keyword seeding, or form assignment.
+#[test]
+fn kannushi_pledge_prototype_entry_updates_existing_recipient() {
+    use engine::types::card_type::CoreType;
+    use engine::types::game_state::CastingVariant;
+    use engine::types::mana::{ManaCost, ManaCostShard};
+
+    const FLESHGORGER: &str = "Prototype {1}{B}{B} — 3/3 (You may cast this spell with different mana cost, color, and size. It keeps its abilities and types.)\nMenace, lifelink\nWard—Pay life equal to this creature's power.";
+    let database = db();
+    assert_grant(database, "Empty-Shrine Kannushi", KANNUSHI, false);
+    assert_grant(database, "Pledge of Loyalty", PLEDGE, true);
+    let face = database
+        .get_face_by_name("Phyrexian Fleshgorger")
+        .expect("real exported Phyrexian Fleshgorger must exist");
+    assert_eq!(face.oracle_text.as_deref(), Some(FLESHGORGER));
+    assert!(face.static_abilities.is_empty());
+    assert!(face.triggers.is_empty());
+    assert!(face.replacements.is_empty());
+    assert!(
+        card_face_gaps(face).is_empty(),
+        "{:?}",
+        card_face_gaps(face)
+    );
+
+    let normal_cost = ManaCost::Cost {
+        generic: 7,
+        shards: vec![],
+    };
+    let prototype_cost = ManaCost::Cost {
+        generic: 1,
+        shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+    };
+    assert!(face.keywords.iter().any(|keyword| matches!(
+        keyword,
+        Keyword::Prototype { cost, power: Some(3), toughness: Some(3) }
+            if cost == &prototype_cost
+    )));
+
+    // Run both ordinary-colorless controls before the colored-prototype cases.
+    for prototype in [false, true] {
+        for aura in [false, true] {
+            let mut s = scenario();
+            let host = s.add_real_card(P1, "Ornithopter", Zone::Battlefield, database);
+            let grant = s.add_real_card(
+                P0,
+                if aura {
+                    "Pledge of Loyalty"
+                } else {
+                    "Empty-Shrine Kannushi"
+                },
+                Zone::Hand,
+                database,
+            );
+            let entrant = s.add_real_card(P0, "Phyrexian Fleshgorger", Zone::Hand, database);
+            let mut runner = s.build();
+            let protected = if aura {
+                cast_on(&mut runner, P0, grant, host);
+                attached(&runner, grant, host);
+                host
+            } else {
+                cast(&mut runner, P0, grant);
+                grant
+            };
+            complete(&runner);
+            assert!(!runner.state().layers_dirty.is_dirty());
+            assert_eq!(runner.state().objects[&grant].zone, Zone::Battlefield);
+            assert_eq!(runner.state().objects[&grant].controller, P0);
+            assert_eq!(runner.state().objects[&grant].color, vec![ManaColor::White]);
+            assert_eq!(runner.state().objects[&protected].zone, Zone::Battlefield);
+            assert_eq!(
+                runner.state().objects[&protected].controller,
+                if aura { P1 } else { P0 }
+            );
+            assert_eq!(colors(&runner, protected), vec![ManaColor::White]);
+            assert_eq!(
+                engine::game::keywords::protection_color_set_members(
+                    runner.state(),
+                    &ProtectionColorSet::AmongPermanentsYouControl,
+                    P0,
+                ),
+                vec![ManaColor::White],
+                "before entry there is exactly one contributing color",
+            );
+            assert!(!runner.state().objects.values().any(|object| {
+                object.is_phased_in_permanent()
+                    && object.controller == P0
+                    && object.color.contains(&ManaColor::Black)
+            }));
+            {
+                let object = &runner.state().objects[&entrant];
+                assert_eq!(object.name, "Phyrexian Fleshgorger");
+                assert_eq!(object.zone, Zone::Hand);
+                assert_eq!(object.controller, P0);
+                assert!(object.base_color.is_empty());
+                assert!(object.color.is_empty());
+                assert_eq!(object.mana_cost, normal_cost);
+                assert_eq!((object.power, object.toughness), (Some(7), Some(5)));
+                assert!(object.prototype_form.is_none());
+                assert!(object.card_types.core_types.contains(&CoreType::Artifact));
+                assert!(object.card_types.core_types.contains(&CoreType::Creature));
+                assert_eq!(
+                    object.card_types.subtypes,
+                    vec!["Phyrexian".to_string(), "Wurm".to_string()]
+                );
+                assert!(object.base_keywords.contains(&Keyword::Menace));
+                assert!(object.base_keywords.contains(&Keyword::Lifelink));
+                assert!(object.static_definitions.iter_all().next().is_none());
+            }
+
+            prepare(&mut runner, P0);
+            let variant = if prototype {
+                CastingVariant::Prototype
+            } else {
+                CastingVariant::Normal
+            };
+            let committed = runner.cast(entrant).casting_variant(variant).commit();
+            assert_eq!(
+                committed
+                    .selected_casting_variant()
+                    .map(|option| option.variant),
+                Some(variant),
+                "both forms are affordable; the engine must honor the elected form",
+            );
+            {
+                let object = &committed.state().objects[&entrant];
+                assert_eq!(object.zone, Zone::Stack);
+                assert_eq!(object.controller, P0);
+                assert_eq!(object.cast_from_zone, Some(Zone::Hand));
+                assert!(object.cast_occurrence.is_some());
+                assert_eq!(object.prototype_form.is_some(), prototype);
+                assert_eq!(
+                    object.color,
+                    if prototype {
+                        vec![ManaColor::Black]
+                    } else {
+                        vec![]
+                    }
+                );
+                assert_eq!(
+                    (object.power, object.toughness),
+                    if prototype {
+                        (Some(3), Some(3))
+                    } else {
+                        (Some(7), Some(5))
+                    }
+                );
+                assert_eq!(
+                    object.mana_cost,
+                    if prototype {
+                        prototype_cost.clone()
+                    } else {
+                        normal_cost.clone()
+                    }
+                );
+            }
+            let outcome = committed.resolve();
+            assert!(matches!(
+                outcome.final_waiting_for(),
+                WaitingFor::Priority { .. }
+            ));
+            complete(&runner);
+            assert!(!runner.state().layers_dirty.is_dirty());
+            {
+                let object = &runner.state().objects[&entrant];
+                assert!(runner.state().battlefield.contains(&entrant));
+                assert_eq!(object.zone, Zone::Battlefield);
+                assert!(object.is_phased_in_permanent());
+                assert_eq!(object.controller, P0);
+                assert!(object.base_color.is_empty());
+                assert_eq!(object.prototype_form.is_some(), prototype);
+                assert_eq!(
+                    object.color,
+                    if prototype {
+                        vec![ManaColor::Black]
+                    } else {
+                        vec![]
+                    }
+                );
+                assert_eq!(
+                    (object.power, object.toughness),
+                    if prototype {
+                        (Some(3), Some(3))
+                    } else {
+                        (Some(7), Some(5))
+                    }
+                );
+                assert_eq!(
+                    object.mana_cost,
+                    if prototype {
+                        prototype_cost.clone()
+                    } else {
+                        normal_cost.clone()
+                    }
+                );
+                if let Some(form) = &object.prototype_form {
+                    assert_eq!(form.colors, vec![ManaColor::Black]);
+                    assert_eq!((form.power, form.toughness), (3, 3));
+                    assert_eq!(form.mana_cost, prototype_cost);
+                }
+                assert!(object.card_types.core_types.contains(&CoreType::Artifact));
+                assert!(object.card_types.core_types.contains(&CoreType::Creature));
+                assert_eq!(
+                    object.card_types.subtypes,
+                    vec!["Phyrexian".to_string(), "Wurm".to_string()]
+                );
+                // The existing entry blocker inspects statics, counters,
+                // attachments and controller overrides, not Ward keywords.
+                assert!(object.static_definitions.iter_all().next().is_none());
+                assert!(object.counters.is_empty());
+                assert!(object.attached_to.is_none());
+                assert!(object.attachments.is_empty());
+                assert!(object
+                    .base_controller
+                    .is_none_or(|controller| controller == P0));
+            }
+            assert_eq!(runner.state().objects[&grant].controller, P0);
+            assert_eq!(runner.state().objects[&protected].zone, Zone::Battlefield);
+            assert_eq!(
+                runner.state().objects[&protected].controller,
+                if aura { P1 } else { P0 }
+            );
+            if aura {
+                attached(&runner, grant, host);
+            }
+            assert_eq!(
+                colors(&runner, protected),
+                if prototype { vec![ManaColor::White, ManaColor::Black] } else { vec![ManaColor::White] },
+                "prototype entry must update the existing live protection set (aura={aura}, prototype={prototype})",
+            );
+        }
+    }
+}
