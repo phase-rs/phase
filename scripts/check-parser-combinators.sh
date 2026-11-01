@@ -77,7 +77,7 @@ BASE_SHA="$(git rev-parse "$BASE")"
 HEAD_SHA="$(git rev-parse HEAD)"
 # When parser code moves to a new location, append that path here and keep the
 # old one listed: the old path's deletions are what exempt the moved lines.
-SCOPE=(crates/engine/src/parser crates/engine/src/types/text_grammar.rs)
+SCOPE=(crates/engine/src/parser crates/engine/src/types/text_grammar.rs crates/phase-ast/src/types/text_grammar.rs)
 
 # When invoked as a pre-commit hook (GIT_INDEX_FILE is set, or no explicit base
 # was provided and BASE == HEAD), only check staged changes to avoid flagging

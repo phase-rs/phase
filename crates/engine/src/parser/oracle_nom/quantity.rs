@@ -24,7 +24,9 @@ use super::target::{
     parse_controller_phrase, parse_type_filter_word, ControllerForm, ControllerSubject,
     ControllerTense, PlayerAnaphor,
 };
-use crate::parser::oracle_ir::context::{bind_controller_phrase, PlayerAntecedents};
+use crate::parser::oracle_ir::context::{
+    bind_controller_phrase, BareCardAggregateBinding, PlayerAntecedents,
+};
 use crate::parser::oracle_target::{
     parse_counter_suffix, parse_shared_quality, parse_shared_quality_clause,
     parse_target_with_syntax, parse_type_phrase_folding, TargetSyntax,
@@ -1114,10 +1116,63 @@ fn parse_noted_number_ref(input: &str) -> OracleResult<'_, QuantityRef> {
 /// order.
 /// `PayAmountChoice` records this value in `last_effect_count` before it resumes
 /// the chained effect, which is the runtime carrier for `EventContextAmount`.
-fn parse_paid_energy_this_way_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+///
+/// `pub(crate)` (not private) because the exile/destroy-verb fail-closed guard
+/// (`target_span_dropped_this_way_anaphor` in `oracle_effect`) runs this
+/// combinator over a dispatcher's target span: a "this way" this combinator
+/// consumes is quantity-bound (a payment threshold), never a dropped
+/// target-identity anaphor, so it must not trip the refusal.
+pub(crate) fn parse_paid_energy_this_way_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     value(
         QuantityRef::EventContextAmount,
         preceded(opt(tag("the ")), tag("amount of {e} paid this way")),
+    )
+    .parse(input)
+}
+
+/// CR 608.2c + CR 122.1: the shared terminal for "… counter(s) removed this
+/// way" quantity references — an optional single-token counter kind (`+1/+1`,
+/// `charge`, `eyeball`, …) plus the bare plural/singular head. Both the
+/// quantity binder (`try_parse_counters_removed_this_way`) and the fail-closed
+/// excisor (`strip_bound_quantity_anaphors`) enter here, so the phrase shape
+/// cannot drift between binding and excision.
+pub(crate) fn parse_counters_removed_this_way_suffix(input: &str) -> OracleResult<'_, ()> {
+    alt((
+        // Kind-qualified first ("+1/+1 counters", "charge counters") so the
+        // match covers the kind token; `alt` backtracks to the bare arm when
+        // the kind arm's terminal fails.
+        value(
+            (),
+            preceded(
+                terminated(parse_counter_type_typed, tag(" ")),
+                parse_counter_removed_terminal,
+            ),
+        ),
+        parse_counter_removed_terminal,
+    ))
+    .parse(input)
+}
+
+fn parse_counter_removed_terminal(input: &str) -> OracleResult<'_, ()> {
+    let (rest, _) = alt((value((), tag("counters")), value((), tag("counter")))).parse(input)?;
+    value((), tag(" removed this way")).parse(rest)
+}
+
+/// CR 608.2c + CR 122.1: "the number of [kind] counter(s) removed this way"
+/// as a bound previous-effect amount (Sarulf, Realm Eater; Simic Manipulator;
+/// Molten Hydra…). Returns the same [`QuantityRef::PreviousEffectAmount`]
+/// the quantity authority binds, so the fail-closed excisor consumes the
+/// phrase through this authority rather than redefining it.
+pub(crate) fn parse_counters_removed_this_way_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    value(
+        QuantityRef::PreviousEffectAmount {
+            channel: DamageChannel::Total,
+            aggregate: AggregateFunction::Sum,
+        },
+        preceded(
+            tag("the number of "),
+            parse_counters_removed_this_way_suffix,
+        ),
     )
     .parse(input)
 }
@@ -1853,25 +1908,47 @@ fn parse_this_way_participle(input: &str) -> OracleResult<'_, ()> {
     .parse(input)
 }
 
-/// CR 608.2c: The EXPLICIT chain-set anaphor — `[the ]<noun> <participle> this
-/// way`. The trailing "this way" is what makes it unambiguous: it names the set
-/// published by an effect in THIS resolution, so it cannot be confused with the
-/// linked-exile pool ("the exiled card" = exiled with the source, persistently)
-/// or the cost-paid referent ("the sacrificed permanent" = a cost). That is why
-/// this — and not the bare pre-nominal form — is the shape allowed to stand
-/// alone as a referent after "the <property> of ".
-fn parse_this_way_anaphor(input: &str) -> OracleResult<'_, ()> {
-    value(
-        (),
-        (
-            opt(tag("the ")),
-            parse_tracked_set_noun,
-            tag(" "),
-            parse_this_way_participle,
-            tag(" this way"),
-        ),
-    )
+/// CR 608.2c + CR 701.21a: the AGENT an anaphor may interpose between the
+/// noun and the participle — "the creature *you* sacrificed this way" (Danse
+/// Macabre). One axis, one `alt()`; the value is the existing `ControllerRef`
+/// leaf, never a bool and never a new enum. `you` is the ability controller;
+/// `they` is the scoped player (Grand Ossuary — the same leaf Oversimplify
+/// already exports for the same semantics). No leaf is added without a
+/// measured corpus fragment at an aggregate head.
+fn parse_this_way_agent(input: &str) -> OracleResult<'_, ControllerRef> {
+    alt((
+        value(ControllerRef::You, tag("you ")),
+        value(ControllerRef::ScopedPlayer, tag("they ")),
+    ))
     .parse(input)
+}
+
+/// CR 608.2c: The EXPLICIT chain-set anaphor — `[the ]<noun> [agent
+/// ]<participle> this way`. The trailing "this way" is what makes it
+/// unambiguous: it names the set published by an effect in THIS resolution, so
+/// it cannot be confused with the linked-exile pool ("the exiled card" = exiled
+/// with the source, persistently) or the cost-paid referent ("the sacrificed
+/// permanent" = a cost). That is why this — and not the bare pre-nominal
+/// form — is the shape allowed to stand alone as a referent after "the
+/// <property> of ".
+///
+/// Yields the member restriction the agent names, or `None` when no agent is
+/// interposed. The noun deliberately contributes nothing: the population's
+/// type content is already carried by the publisher and by `caused_by`.
+fn parse_this_way_anaphor(input: &str) -> OracleResult<'_, Option<TargetFilter>> {
+    let (rest, (_, _, _, agent, _, _)) = (
+        opt(tag("the ")),
+        parse_tracked_set_noun,
+        tag(" "),
+        opt(parse_this_way_agent),
+        parse_this_way_participle,
+        tag(" this way"),
+    )
+        .parse(input)?;
+    Ok((
+        rest,
+        agent.map(|controller| TargetFilter::Typed(TypedFilter::card().controller(controller))),
+    ))
 }
 
 /// CR 608.2c: The anaphor that names the chain tracked set published by the
@@ -1892,11 +1969,12 @@ fn parse_this_way_anaphor(input: &str) -> OracleResult<'_, ()> {
 /// linked-exile pool (`parse_linked_exile_mana_value_ref` — "the mana value of
 /// the exiled card") and the craft-material pool ("… the exiled card used to
 /// craft it"). See [`parse_this_way_anaphor`] for the bare-referent form.
-fn parse_tracked_set_anaphor(input: &str) -> OracleResult<'_, ()> {
+fn parse_tracked_set_anaphor(input: &str) -> OracleResult<'_, Option<TargetFilter>> {
     alt((
-        // Pre-nominal: "those exiled cards" / "the exiled cards". Unchanged.
+        // Pre-nominal: "those exiled cards" / "the exiled cards". Unchanged;
+        // no agent position exists in this shape, so it yields no restriction.
         value(
-            (),
+            None,
             (
                 alt((tag("those "), tag("the "))),
                 tag("exiled "),
@@ -2015,22 +2093,27 @@ fn parse_spell_history_property_aggregate_ref(input: &str) -> OracleResult<'_, Q
 /// entry points.
 pub(crate) fn parse_contextual_bare_card_aggregate_ref(
     input: &str,
-    source: crate::types::ability::TrackedAnaphorSource,
+    binding: crate::parser::oracle_ir::context::BareCardAggregateBinding,
 ) -> OracleResult<'_, QuantityRef> {
     let (rest, (function, property)) = parse_object_property_aggregate_head(input)?;
     let (rest, _) = parse_bare_card_set_anaphor(rest)?;
+    // CR 608.2c + CR 115.1: a target-set binding emits the new population
+    // axis — the ability's chosen targets — never a chain-set TrackedSet.
+    let source = match binding {
+        BareCardAggregateBinding::ChainSet(set) => CardTypeSetSource::TrackedSet {
+            set,
+            caused_by: None,
+            filter: None,
+        },
+        BareCardAggregateBinding::AbilityTargets => {
+            CardTypeSetSource::TargetedObjects { slot: None }
+        }
+    };
     Ok((
         rest,
         QuantityRef::PropertyAggregate(
-            PropertyAggregate::new(
-                function,
-                property,
-                CardTypeSetSource::TrackedSet {
-                    set: source,
-                    caused_by: None,
-                },
-            )
-            .expect("tracked populations support every aggregate property"),
+            PropertyAggregate::new(function, property, source)
+                .expect("tracked and targeted populations support every aggregate property"),
         ),
     ))
 }
@@ -2063,7 +2146,7 @@ fn parse_object_property_aggregate_ref(input: &str) -> OracleResult<'_, Quantity
         // Only the EXPLICIT "this way" anaphor may stand alone here — the bare
         // pre-nominal "the exiled card" belongs to the linked-exile and
         // craft-material referents (see `parse_this_way_anaphor`).
-        if let Ok((anaphor_rest, _)) = parse_this_way_anaphor(rest) {
+        if let Ok((anaphor_rest, filter)) = parse_this_way_anaphor(rest) {
             return Ok((
                 anaphor_rest,
                 QuantityRef::PropertyAggregate(
@@ -2073,6 +2156,7 @@ fn parse_object_property_aggregate_ref(input: &str) -> OracleResult<'_, Quantity
                         CardTypeSetSource::TrackedSet {
                             set: TrackedAnaphorSource::ChainSet,
                             caused_by: None,
+                            filter,
                         },
                     )
                     .expect("tracked populations support every aggregate property"),
@@ -2096,7 +2180,7 @@ fn parse_object_property_aggregate_ref(input: &str) -> OracleResult<'_, Quantity
             ),
         ));
     }
-    if let Ok((anaphor_rest, _)) = parse_tracked_set_anaphor(rest) {
+    if let Ok((anaphor_rest, filter)) = parse_tracked_set_anaphor(rest) {
         return Ok((
             anaphor_rest,
             QuantityRef::PropertyAggregate(
@@ -2106,6 +2190,7 @@ fn parse_object_property_aggregate_ref(input: &str) -> OracleResult<'_, Quantity
                     CardTypeSetSource::TrackedSet {
                         set: TrackedAnaphorSource::ChainSet,
                         caused_by: None,
+                        filter,
                     },
                 )
                 .expect("tracked populations support every aggregate property"),
@@ -3071,6 +3156,9 @@ fn filter_is_population_anchored(filter: &TargetFilter) -> bool {
         | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
+        // CR 108.3 + CR 508.1d: per-member owner anchor — not a population
+        // domain this classifier looks for.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
         | TargetFilter::OriginalSource
@@ -3209,6 +3297,9 @@ pub(crate) fn objects_filter_zone_is_unambiguous(filter: &TargetFilter) -> bool 
         | TargetFilter::DeclaredPlayer { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
+        // CR 108.3 + CR 508.1d: per-member owner anchor — contributes no zone
+        // claim, so the domain stays unambiguous like the neighboring anchors.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
         | TargetFilter::OriginalSource
@@ -3318,6 +3409,7 @@ fn parse_tracked_set_this_way_source(input: &str) -> OracleResult<'_, CardTypeSe
         CardTypeSetSource::TrackedSet {
             set: TrackedAnaphorSource::ChainSet,
             caused_by: Some(cause),
+            filter: None,
         },
     ))
 }
@@ -8741,7 +8833,8 @@ mod tests {
                         ObjectProperty::Power,
                         crate::types::ability::CardTypeSetSource::TrackedSet {
                             set: TrackedAnaphorSource::ChainSet,
-                            caused_by: None
+                            caused_by: None,
+                            filter: None
                         }
                     )
                     .expect("statically valid property aggregate")
@@ -8749,6 +8842,90 @@ mod tests {
                 "phrase {phrase:?}"
             );
         }
+    }
+
+    /// CR 608.2c + CR 701.21a: the agent an interposed pronoun names between
+    /// the noun and the participle — "the creature YOU sacrificed this way"
+    /// (Danse Macabre) — is threaded into the tracked-set aggregate as a
+    /// member filter, so the resolver counts only that agent's members. The
+    /// unnamed shape keeps `filter: None`.
+    #[test]
+    fn agent_interposed_anaphor_threads_member_filter() {
+        use crate::types::ability::{
+            CardTypeSetSource, ControllerRef, TargetFilter, TrackedAnaphorSource, TypedFilter,
+        };
+
+        for (phrase, expected) in [
+            (
+                "the total power of the creature you sacrificed this way",
+                ControllerRef::You,
+            ),
+            (
+                "the total power of the creatures they exiled this way",
+                ControllerRef::ScopedPlayer,
+            ),
+        ] {
+            let (rest, q) = parse_quantity_ref(phrase)
+                .unwrap_or_else(|e| panic!("agent phrase {phrase:?} should parse: {e:?}"));
+            assert_eq!(rest, "", "agent phrase {phrase:?} must fully consume");
+            match q {
+                QuantityRef::PropertyAggregate(aggregate) => {
+                    assert_eq!(aggregate.function(), AggregateFunction::Sum);
+                    assert_eq!(aggregate.property(), ObjectProperty::Power);
+                    assert_eq!(
+                        aggregate.source(),
+                        &CardTypeSetSource::TrackedSet {
+                            set: TrackedAnaphorSource::ChainSet,
+                            caused_by: None,
+                            filter: Some(TargetFilter::Typed(
+                                TypedFilter::card().controller(expected)
+                            )),
+                        },
+                        "phrase {phrase:?}"
+                    );
+                }
+                other => panic!("expected filtered TrackedSet aggregate, got {other:?}"),
+            }
+        }
+
+        // Negative: the same anaphor with NO interposed agent keeps
+        // `filter: None` — the restriction appears only when named.
+        let (rest, q) = parse_quantity_ref("the total power of the cards sacrificed this way")
+            .expect("agentless anaphor parses");
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::PropertyAggregate(aggregate) => {
+                assert!(matches!(
+                    aggregate.source(),
+                    CardTypeSetSource::TrackedSet {
+                        set: TrackedAnaphorSource::ChainSet,
+                        caused_by: None,
+                        filter: None
+                    }
+                ));
+            }
+            other => panic!("expected unfiltered TrackedSet aggregate, got {other:?}"),
+        }
+
+        // Rejections: "the cards sacrificed" names no "this way" set, so it
+        // is refused by both the quantity head and the event-context path;
+        // the pre-nominal "the total power of the sacrificed cards" has no
+        // agent position and binds no tracked set through this head either.
+        assert!(parse_quantity_ref("the cards sacrificed").is_err());
+        assert!(
+            crate::parser::oracle_quantity::parse_event_context_quantity("the cards sacrificed")
+                .is_none()
+        );
+        assert!(parse_quantity_ref("the total power of the sacrificed cards").is_err());
+
+        // Hostile: "an opponent" is not a leaf in the agent grammar — only
+        // the closed you/they set composes — so the interposed agent
+        // position must refuse rather than minting an honorary leaf.
+        assert!(
+            parse_quantity_ref("the total power of the creature an opponent sacrificed this way")
+                .is_err(),
+            "an opponent in the agent position must refuse (NON-CLAIM, M3)"
+        );
     }
 
     /// CR 702.167c + CR 105.1: "the number of colors among the exiled cards used
@@ -11899,6 +12076,7 @@ mod tests {
                 source: CardTypeSetSource::TrackedSet {
                     set: TrackedAnaphorSource::ChainSet,
                     caused_by: Some(ThisWayCause::Discarded),
+                    filter: None,
                 },
             }
         );
@@ -11917,6 +12095,7 @@ mod tests {
                 source: CardTypeSetSource::TrackedSet {
                     set: TrackedAnaphorSource::ChainSet,
                     caused_by: Some(ThisWayCause::Exiled),
+                    filter: None,
                 },
             }
         );
@@ -11934,6 +12113,7 @@ mod tests {
                 source: CardTypeSetSource::TrackedSet {
                     set: TrackedAnaphorSource::ChainSet,
                     caused_by: Some(ThisWayCause::Discarded),
+                    filter: None,
                 },
             }
         );
@@ -14816,6 +14996,8 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{phrase:?} must bind: {e:?}"));
             assert_eq!(rest, "", "{phrase:?} must fully consume");
             match q {
+                // Test asserts the ChainSet binding; the phrases carry no
+                // agent, so no restriction is expected or asserted.
                 QuantityRef::PropertyAggregate(aggregate)
                     if matches!(
                         aggregate.source(),
@@ -14859,6 +15041,8 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{phrase:?} must bind: {e:?}"));
             assert_eq!(rest, "", "{phrase:?} must fully consume");
             match q {
+                // As above: ChainSet binding assertion over agentless
+                // phrases; no restriction expected.
                 QuantityRef::PropertyAggregate(aggregate)
                     if aggregate.function() == AggregateFunction::Sum
                         && matches!(

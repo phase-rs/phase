@@ -700,6 +700,11 @@ fn parse_power_threshold_block_restriction(text: &str) -> Option<StaticDefinitio
     }
     // Reuse the shared filter grammar so the power comparison + dynamic threshold
     // ("less than the number of Islands you control") lower through one authority.
+    //
+    // Deliberately NOT routed through `parse_block_filter_phrase`'s union fold
+    // (issue #10364): the all-consuming `remainder` guard immediately below
+    // already FAILS CLOSED on any unread tail, union leg included, so a dropped
+    // disjunct here declines to an honest gap rather than a narrower filter.
     let (filter, remainder) = parse_target(filter_text.trim());
     if !remainder.trim().is_empty()
         || matches!(filter, TargetFilter::Any)
@@ -1578,17 +1583,17 @@ pub(crate) fn parse_static_line_inner(
         }
     }
 
-    // CR 508.1b + CR 303.4b: "[All ]creatures attacking <scope> <predicate>" — a
-    // continuous modification (keyword grant, +N/+M pump, ...) applied to
-    // attackers by the identity of their defending player. The defender scope is
-    // the only axis that varies — controller ("you"; Boarded Window), any
-    // opponent ("your opponents [and/or planeswalkers they control]";
-    // Blast-Furnace Hellkite, Neyali), or the enchanted player ("enchanted
-    // player"; Curse of Hospitality) — so it is parsed as one `alt` in
-    // `parse_attacking_defender_scope` rather than a dispatch arm per scope. Must
-    // precede the generic "all creatures " branch below, which would otherwise
-    // consume the "all creatures " prefix and leave a subject continuation that
-    // `parse_continuous_gets_has` (which expects a verb) can't parse.
+    // CR 508.1b + CR 303.4b: preserve the defending-player subject used by
+    // Boarded Window: "Creatures attacking you get -1/-0."
+    // Blast-Furnace Hellkite:
+    // "Creatures attacking your opponents have double strike."
+    // Curse of Hospitality:
+    // "Creatures attacking enchanted player have trample."
+    // Watchdog: "As long as this creature is untapped, all creatures attacking
+    // you get -1/-0." — the "all creatures attacking" form that must reach this
+    // typed defending-player scope before the generic all-creatures arm below.
+    // Oracle lines verified in MTGJSON. This dedicated subject parser precedes
+    // the generic all-creatures subject dispatch below.
     if let Some((rest, defender)) = parse_attacking_defender_scope(&tp) {
         let filter =
             TargetFilter::Typed(
@@ -1615,7 +1620,7 @@ pub(crate) fn parse_static_line_inner(
         }
     }
 
-    // --- "All creatures get/have ..." ---
+    // --- "All creatures [<qualifier>] get/have ..." ---
     if let Some(rest) = nom_tag_tp(&tp, "all creatures ") {
         // CR 105.2 + CR 613.1f: "All creatures are [color] and <keyword|pump>"
         // (Onakke Catacomb: "... are black and have deathtouch") is a color-
@@ -1627,12 +1632,36 @@ pub(crate) fn parse_static_line_inner(
         if let Some(def) = parse_all_subject_are_color(&tp, &text) {
             return Some(def);
         }
-        if let Some(def) = parse_continuous_gets_has(
-            rest.original,
-            TargetFilter::Typed(TypedFilter::creature()),
-            &text,
-        ) {
-            return Some(def);
+        // Engineered Plague (MTGJSON):
+        // "All creatures of the chosen type get -1/-1."
+        // CR 611.3a + CR 205.3m + CR 607.2d: preserve the creature-type restriction
+        // linked to this source's choice by parsing the complete subject.
+        // If the subject authority returns None, do not substitute a bare creature
+        // filter. This does not strengthen that authority's trailing-text validation.
+        // Humility (MTGJSON):
+        // "All creatures lose all abilities and have base power and toughness 1/1."
+        // Its leading predicate retains the bare subject (CR 611.3a).
+        match nom_primitives::scan_split_at_phrase(rest.lower, parse_continuous_predicate_verb) {
+            Some((qualifier, _)) if !qualifier.is_empty() => {
+                let subject_len = tp.lower.len() - rest.lower.len() + qualifier.len();
+                let (subject, predicate) = tp.split_at(subject_len);
+                if let Some(affected) = parse_continuous_subject_filter(subject.original) {
+                    if let Some(def) =
+                        parse_continuous_gets_has(predicate.original, affected, &text)
+                    {
+                        return Some(def);
+                    }
+                }
+            }
+            Some(_) | None => {
+                if let Some(def) = parse_continuous_gets_has(
+                    rest.original,
+                    TargetFilter::Typed(TypedFilter::creature()),
+                    &text,
+                ) {
+                    return Some(def);
+                }
+            }
         }
     }
 
@@ -2385,13 +2414,26 @@ pub(crate) fn parse_static_line_inner(
                 // `FilterProp::IsChosenColor`. Falls back to `parse_type_phrase_folding`
                 // for non-anaphor filter shapes.
                 let by_rest_tp = TextPair::new(by_rest, by_rest);
-                let (filter, remainder) =
-                    if let Some(chosen) = parse_chosen_qualifier_subject(&by_rest_tp) {
-                        (chosen, "")
-                    } else {
-                        parse_type_phrase_folding(by_rest)
-                    };
-                if !matches!(filter, TargetFilter::Any) {
+                // CR 509.1b + CR 608.2c (issue #10364): fold the filter's union
+                // legs - a leg's own trailing suffix ("creatures with power 2 or
+                // less and/or Walls") closes the leg before the leg grammar's
+                // early union loop can see the separator.
+                let phrase = match parse_chosen_qualifier_subject(&by_rest_tp) {
+                    Some(chosen) => BlockFilterPhrase::from_whole_phrase_filter(chosen),
+                    None => parse_block_filter_phrase(by_rest),
+                };
+                // Coverage honesty, and it MUST be a `return`, not a skipped arm:
+                // this block ends in a blanket `CantBeBlocked` fallback below, so
+                // falling through on a half-read filter would publish total
+                // unblockability - wider than print, not narrower.
+                if matches!(phrase, BlockFilterPhrase::DroppedDisjunct) {
+                    return None;
+                }
+                if let BlockFilterPhrase::Filter {
+                    filter,
+                    tail: remainder,
+                } = phrase
+                {
                     let mut def = StaticDefinition::new(StaticMode::CantBeBlockedBy { filter })
                         .affected(TargetFilter::SelfRef)
                         .description(text.to_string());

@@ -1,5 +1,10 @@
 {
-  "playerLatency": {"host":"Hôte","waiting":"En attente","value":"{{ms}} ms","description":"Latence aller-retour vers l’hôte. Une réponse manquante ne déconnecte pas la partie."},
+  "playerLatency": {
+    "host": "Hôte",
+    "waiting": "En attente",
+    "value": "{{ms}} ms",
+    "description": "Latence aller-retour vers l’hôte. Une réponse manquante ne déconnecte pas la partie."
+  },
   "abilityBlock": {
     "badge": "Bloquée",
     "cantBeActivated": "Cette capacité ne peut pas être activée",
@@ -27,6 +32,7 @@
     "shorten": "Shorten it",
     "decline": "Decline the shortcut",
     "untilLethal": "Repeat until the game ends.",
+    "withoutEnd": "Repeat without end. If every player accepts, the game is a draw.",
     "fixedCount_one": "Repeat at most once.",
     "fixedCount_other": "Repeat at most {{count}} times.",
     "convokeInfo_one": "Auto-taps up to 1 creature for convoke each iteration.",
@@ -840,7 +846,7 @@
     "targetingLabel": "Cible {{label}}",
     "titleTargets": "Cibles : {{targets}}",
     "titlePaid": "Payé : {{paid}}",
-    "titleContext": "Contexte : {{context}}",
+    "titleContext": "Contexte : {{items}}",
     "revealedCards": "Révélée : {{cards}}",
     "paidXValue": "X={{value}}",
     "paidManaSpent": "{{amount}} mana",
@@ -2501,6 +2507,7 @@
     "triggerFallback": "Déclencheur {{number}}"
   },
   "costReductionOrder": {
+    "announcedHybrids": "Paiements hybrides annoncés",
     "eyebrow": "Ordre des réductions de coût",
     "title": "Ordonnez vos réductions de coût",
     "subtitle": "Ces réductions fixent un coût total différent selon l'ordre dans lequel vous les appliquez (CR 601.2f). Le haut de cette liste est appliqué en premier.",
@@ -2901,6 +2908,36 @@
       "winner": "{{name}} a gagné le concours.",
       "tie": "Égalité : il ne se passe rien.",
       "cancelled": "Le concours a été annulé : il ne se passe rien."
+    }
+  },
+  "unActions": {
+    "menu": {
+      "title": "Un-Actions",
+      "open": "Open Un-actions menu",
+      "close": "Close Un-actions menu",
+      "TouchFace": "Touch your face",
+      "TouchTable": "Slap the table",
+      "Laugh": "Laugh out loud",
+      "FlickCards": "Flick your cards",
+      "saysWord": "Say a word…",
+      "saysNumber": "Say a number…",
+      "wordPlaceholder": "A word",
+      "numberPlaceholder": "A number",
+      "say": "Say it!"
+    },
+    "gotcha": {
+      "button": "Gotcha!"
+    },
+    "sayPhrase": {
+      "title": "Say it to stop the effect",
+      "say": "Say “{{phrase}}”",
+      "stayQuiet": "Stay quiet"
+    },
+    "fx": {
+      "touchFace": "*smack*",
+      "touchTable": "SLAP!",
+      "laugh": "HA HA HA!",
+      "flickCards": "thwip thwip!"
     }
   }
 }

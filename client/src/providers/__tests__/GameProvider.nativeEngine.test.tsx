@@ -10,6 +10,8 @@ type NativeAdapterEvent =
   | { type: "error"; message: string }
   | { type: "operationFailed"; message: string }
   | { type: "reconnected"; inGame: boolean }
+  | { type: "stateDelivery"; withheld: { revision: number; reason: string } | null }
+  | { type: "stateChanged"; snapshot: unknown; events: unknown[] }
   | { type: "aiDriverFault"; id: number; revision: number; message: string }
   // Non-terminal: the server refused a fire-and-forget request. Listed here
   // alongside the two terminal events precisely because `handleNativeEvent`
@@ -173,6 +175,7 @@ const {
     setIsSpectator: vi.fn(),
     setLatency: vi.fn(),
     setSpectators: vi.fn(),
+    setStateWithheld: vi.fn(),
     showToast: vi.fn(),
   };
   const multiplayerGetState = vi.fn(() => multiplayerState);
@@ -359,6 +362,7 @@ import { AdapterError, AdapterErrorCode } from "../../adapter/types";
 import { clearPromptOverlayState } from "../../game/sessionCleanup";
 import { createGameLoopController } from "../../game/controllers/gameLoopController";
 import { loadGame } from "../../stores/gameStore";
+import { processRemoteUpdate } from "../../game/dispatch";
 
 const UNAVAILABLE = "This draft run is unavailable. End Run to draft again.";
 
@@ -1938,6 +1942,36 @@ describe("GameProvider native AI routing", () => {
     expect(setContext).not.toHaveBeenCalledWith("battlefield");
     act(() => nativeAdapters[0]!.emit({ type: "reconnected", inGame: true }));
     expect(setContext).toHaveBeenCalledWith("battlefield");
+  });
+
+  it.each(["ai", "online"] as const)("copies the adapter's withheld status into the store for %s", async (mode) => {
+    vi.mocked(processRemoteUpdate).mockResolvedValue(undefined);
+    multiplayerState.setStateWithheld.mockClear();
+    const view = render(
+      <GameProvider gameId="state-withheld" mode={mode} joinCode={mode === "online" ? "GAME01" : undefined}>
+        <div />
+      </GameProvider>,
+    );
+    await waitFor(() => {
+      expect(nativeAdapters).toHaveLength(1);
+      expect(gameStoreState.adapter).toBe(nativeAdapters[0]);
+    });
+    const nativeAdapter = nativeAdapters[0]!;
+    const notice = { revision: 6, reason: "too large to send" };
+    act(() => nativeAdapter.emit({ type: "stateDelivery", withheld: notice }));
+    expect(multiplayerState.setStateWithheld).toHaveBeenLastCalledWith(notice);
+    act(() => nativeAdapter.emit({
+      type: "stateChanged", snapshot: { state: { waiting_for: { type: "Priority" } } }, events: [],
+    }));
+    expect(processRemoteUpdate).toHaveBeenCalled();
+    expect(multiplayerState.setStateWithheld).toHaveBeenCalledTimes(1);
+    act(() => nativeAdapter.emit({ type: "stateDelivery", withheld: null }));
+    expect(multiplayerState.setStateWithheld).toHaveBeenLastCalledWith(null);
+
+    act(() => nativeAdapter.emit({ type: "stateDelivery", withheld: notice }));
+    view.unmount();
+    expect(multiplayerState.setStateWithheld).toHaveBeenLastCalledWith(null);
+    vi.mocked(processRemoteUpdate).mockReset();
   });
 
   async function expectNativeTerminalEvent(event: NativeAdapterEvent) {

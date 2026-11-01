@@ -32,7 +32,7 @@ interface MobileHandDrawerProps {
 }
 
 export function MobileHandDrawer({ interactionDisabled = false }: MobileHandDrawerProps) {
-  const { t } = useTranslation("game");
+  const { t } = useTranslation(["game", "common"]);
   const isOpen = useUiStore((s) => s.mobileHandOpen);
   const setOpen = useUiStore((s) => s.setMobileHandOpen);
   const playerId = usePerspectivePlayerId();

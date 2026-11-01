@@ -1991,7 +1991,7 @@ pub fn resolve_add(
         // CR 608.2c: A quantity bound to the resolved recipient (such as
         // Sovereign Okinec Ahau's "the difference") is evaluated separately
         // for each object. Source-relative quantities remain one shared value.
-        let count_uses_recipient = crate::game::quantity::quantity_expr_uses_recipient(&count);
+        let count_uses_recipient = crate::types::ability::quantity_expr_uses_recipient(&count);
         let counter_num_shared = (!count_uses_recipient).then(|| {
             // CR 107.1b: Ability-context resolve preserves the announced X for
             // source-relative counter quantities.
@@ -2294,7 +2294,7 @@ pub fn resolve_add_all(
     // re-evaluated against each object; a uniform count (the source's power —
     // Ouroboroid) is resolved once and shared. Detected via the recipient-
     // binding scope the parser stamps on per-recipient counts.
-    let count_uses_recipient = crate::game::quantity::quantity_expr_uses_recipient(&count);
+    let count_uses_recipient = crate::types::ability::quantity_expr_uses_recipient(&count);
 
     let additions: Vec<PendingCounterAddition> = matching_ids
         .into_iter()

@@ -89,6 +89,7 @@ const { mockMultiplayerState, mockUseMultiplayerStore } = vi.hoisted(() => {
     hostingStatus: "idle",
     playerSlots: [] as unknown[],
     displayName: "",
+    stateWithheld: null as { revision: number; reason: string } | null,
     setConnectionStatus: vi.fn(),
     setActionPending: vi.fn(),
     setLatency: vi.fn(),
@@ -539,6 +540,12 @@ describe("GamePage — cEDH bracket-violation blocking modal", () => {
     renderGamePage("/game/test-game-123?format=Planechase&players=4");
 
     expect(capturedFormatConfig?.format).toBe("Planechase");
+  });
+
+  it("passes Planechase Commander to GameProvider for a direct local URL", () => {
+    renderGamePage("/game/test-game-123?format=PlanechaseCommander&players=4");
+
+    expect(capturedFormatConfig?.format).toBe("PlanechaseCommander");
   });
 
   // The setup screen hands its edited config over on the navigation rather than
@@ -1447,6 +1454,26 @@ describe("GamePage — takeback is a transport capability", () => {
     renderGamePage("/game/test-game-123?mode=host");
 
     expect(capturedGameMenuProps?.onRequestTakeback).toBeTypeOf("function");
+    expect(screen.queryByTestId("state-withheld-banner")).toBeNull();
+  });
+
+  it("shows a withheld state's reason without taking the takeback control away", () => {
+    const reason = "The game state after this action is too large to send.";
+    storeOverrides.adapter = new FakeWebSocketAdapter();
+    mockMultiplayerState.stateWithheld = { revision: 6, reason };
+    try {
+      renderGamePage("/game/test-game-123?mode=host");
+
+      const banner = screen.getByTestId("state-withheld-banner");
+      expect(banner).toHaveTextContent(reason);
+      expect(banner).toHaveClass("pointer-events-none");
+      expect(capturedGameMenuProps?.onRequestTakeback).toBeTypeOf("function");
+      act(() => capturedOnWsEvent?.({ type: "takebackRequested", requester: 1, requesterName: "guest-one" }));
+      expect(screen.getByText("guest-one requests a takeback")).toBeInTheDocument();
+      expect(screen.getByTestId("state-withheld-banner")).toBeInTheDocument();
+    } finally {
+      mockMultiplayerState.stateWithheld = null;
+    }
   });
 
   // F5 (M11 half). The label axis must come from the AUTHORITATIVE store mode,

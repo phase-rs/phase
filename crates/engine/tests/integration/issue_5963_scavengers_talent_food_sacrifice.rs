@@ -12,8 +12,8 @@ use engine::game::scenario::{GameScenario, P0};
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, Effect,
     FilterProp, ManaContribution, ManaProduction, QuantityExpr, SacrificeCost, StaticDefinition,
-    TapCreaturesRequirement, TargetFilter, TriggerConstraint, TriggerDefinition, TypeFilter,
-    TypedFilter,
+    TapCreaturesRequirement, TargetFilter, TriggerConstraint, TriggerDefinition, TriggerLimitSpend,
+    TypeFilter, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, ManaChoice, ManaChoicePrompt, WaitingFor};
@@ -36,7 +36,9 @@ fn talent_triggers() -> (TriggerDefinition, TriggerDefinition) {
             TypedFilter::new(TypeFilter::Creature).controller(ControllerRef::You),
         ))
         .trigger_zones(vec![Zone::Battlefield])
-        .constraint(TriggerConstraint::OncePerTurn)
+        .constraint(TriggerConstraint::OncePerTurn {
+            spent_by: TriggerLimitSpend::Triggering,
+        })
         .execute(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::GainLife {

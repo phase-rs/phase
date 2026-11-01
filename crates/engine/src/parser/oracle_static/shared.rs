@@ -1519,6 +1519,7 @@ fn filter_zone_truth(filter: &TargetFilter, zone: Zone) -> SourceZoneTruth {
         | TargetFilter::ChosenDamageSource { .. }
         | TargetFilter::Named { .. }
         | TargetFilter::Owner
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::AllPlayers => SourceZoneTruth::Undetermined,
     }
 }
@@ -2457,7 +2458,8 @@ fn parse_cant_attack_you_or_block_predicate(
 /// production in [`parse_subject_combat_rule_static`], so the object lowers
 /// through one grammar in both.
 ///
-/// Delegates to the full `parse_type_phrase_folding` grammar, so the class covers any
+/// Delegates to the full `parse_filter_phrase_union` grammar (the union fold
+/// over `parse_type_phrase_folding` legs), so the class covers any
 /// object that grammar can express — a subtype ("Warriors"), a controller
 /// scope ("creatures you control"), a card type ("artifact creatures"), a
 /// color ("black creatures"), a static or dynamic power comparison — rather
@@ -2470,7 +2472,16 @@ fn parse_cant_attack_you_or_block_predicate(
 /// callers that must additionally reject a self-referential object apply that
 /// rule themselves, so no caller inherits a restriction it did not ask for.
 pub(crate) fn parse_block_object_filter(input: &str) -> OracleResult<'_, TargetFilter> {
-    let (filter, rest) = parse_type_phrase_folding(input);
+    // CR 509.1b + CR 608.2c (issue #10364): the blocker-side sibling of
+    // "can't be blocked by <filter>". `parse_type_phrase_folding` closes a leg
+    // on its own trailing suffix, so a union separator that FOLLOWS one
+    // ("creatures with power 2 or less and/or Walls") is never folded; the fold
+    // reads the whole union and still hands back the non-object tail
+    // (" unless ...", " as long as ...") for the CALLER's own gate grammar. This
+    // function declines only when the fold consumed NOTHING; a non-empty tail is
+    // returned, which is how Hipparion's " unless you pay {1}" reaches
+    // `evasion::parse_unless_static_condition`.
+    let (filter, rest) = parse_filter_phrase_union(input);
     if rest.len() >= input.len() || matches!(filter, TargetFilter::Any) {
         return Err(super::oracle_nom::error::oracle_err(input));
     }
@@ -4878,6 +4889,27 @@ pub(crate) fn parse_quantity_comparison(lower: &str) -> Option<StaticCondition> 
     })
 }
 
+/// Recognizes a continuous-predicate verb at the head of `input` — the same
+/// vocabulary `find_continuous_predicate_start` scans for (gets/get, gains/gain,
+/// has/have, loses/lose), in nom form so callers can split a subject from its
+/// predicate with `nom_primitives::scan_split_at_phrase`.
+pub(crate) fn parse_continuous_predicate_verb(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag("gets "),
+            tag("get "),
+            tag("gains "),
+            tag("gain "),
+            tag("has "),
+            tag("have "),
+            tag("loses "),
+            tag("lose "),
+        )),
+    )
+    .parse(input)
+}
+
 pub(crate) fn find_continuous_predicate_start(lower: &str) -> Option<usize> {
     [
         " gets ", " get ", " gains ", " gain ", " has ", " have ", " loses ", " lose ",
@@ -6524,12 +6556,45 @@ pub(crate) fn parse_rule_static_subject_filter(subject: &str) -> Option<TargetFi
         ));
     }
 
+    // Both `parse_type_phrase_folding` reads in this function (here and the
+    // "all "/"each " quantifier arm above) are deliberately NOT routed through
+    // the union fold (issue #10364): each is gated on an EMPTY remainder, so a
+    // union leg the leg grammar cannot read declines the subject to an honest
+    // gap instead of narrowing it.
     let (filter, rest) = parse_type_phrase_folding(subject);
     if rest.trim().is_empty() {
         return Some(match attachment_prop {
             Some(prop) => merge_filter_prop(filter, prop),
             None => filter,
         });
+    }
+
+    // CR 607.2d: "<type> the chosen player controls" (scheme statics: Bow to
+    // My Command, Imprison This Insolent Wretch). The folding grammar
+    // deliberately leaves this suffix unconsumed — remainder-coupled callers
+    // such as the quantity "the number of" path own the trailing controller
+    // scope (`parse_quantity_controller_suffix` carries its own chosen-player
+    // arm and fails closed on an empty remainder) — so the static subject
+    // composes it here: the head noun folds as usual, and the persisted-choice
+    // controller attaches only when the folded filter is controller-free and
+    // the remainder is EXACTLY the suffix (nom `tag` terminal anchor, matched
+    // on the lowered remainder so a capitalized head noun never breaks it).
+    // Anything else falls through to the honest `None` below.
+    let rest_lower = rest.to_lowercase();
+    if let Ok((tail, _)) =
+        tag::<_, _, OracleError<'_>>(" the chosen player controls").parse(rest_lower.as_str())
+    {
+        if tail.trim().is_empty() {
+            if let TargetFilter::Typed(mut tf) = filter {
+                if tf.controller.is_none() {
+                    tf.controller = Some(ControllerRef::SourceChosenPlayer);
+                    return Some(match attachment_prop {
+                        Some(prop) => merge_filter_prop(TargetFilter::Typed(tf), prop),
+                        None => TargetFilter::Typed(tf),
+                    });
+                }
+            }
+        }
     }
 
     None

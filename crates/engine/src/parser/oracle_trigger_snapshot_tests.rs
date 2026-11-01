@@ -1107,7 +1107,12 @@ fn twilight_diviner_second_trigger_has_graveyard_origin_condition() {
         );
     assert_eq!(def.mode, TriggerMode::ChangesZone);
     assert!(def.batched, "should be batched");
-    assert_eq!(def.constraint, Some(TriggerConstraint::OncePerTurn));
+    assert_eq!(
+        def.constraint,
+        Some(TriggerConstraint::OncePerTurn {
+            spent_by: TriggerLimitSpend::Triggering
+        })
+    );
     match &def.condition {
         Some(TriggerCondition::Or { conditions }) => {
             assert_eq!(conditions.len(), 2);

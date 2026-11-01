@@ -7890,6 +7890,7 @@ fn choose_then_flip(case: &ChooseThenFlip, thumb: bool, won: bool) {
         AbilityKind::Spell,
         Effect::Choose {
             choice_type: case.choice_type.clone(),
+            chooser: engine::types::ability::ControllerRef::You,
             persist: case.persist,
             selection: TargetSelectionMode::Chosen,
         },

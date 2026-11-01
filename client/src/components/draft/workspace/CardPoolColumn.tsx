@@ -1,3 +1,4 @@
+import type { TFunction } from "i18next";
 import { type KeyboardEvent, type RefCallback } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -71,7 +72,7 @@ type IntlWithListFormat = typeof Intl & {
 
 function descriptorLabel(
   descriptor: WorkspaceHeaderDescriptor,
-  t: ReturnType<typeof useTranslation>["t"],
+  t: TFunction<"draft">,
 ): string {
   if (descriptor.kind === "empty-ordinal") {
     return t(descriptor.labelKey, { column: descriptor.ordinal });

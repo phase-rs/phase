@@ -5,10 +5,11 @@ use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_until, take_while1};
 use nom::character::complete::{anychar, one_of, satisfy, space0, space1, u8 as parse_u8};
 use nom::combinator::{
-    all_consuming, eof, map, map_res, not, opt, peek, recognize, rest, value, verify,
+    all_consuming, eof, map, map_opt, map_res, not, opt, peek, recognize, rest, success, value,
+    verify,
 };
 use nom::error::ParseError;
-use nom::multi::{many1, many_till, separated_list0};
+use nom::multi::{many0, many1, many_till, separated_list0};
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
@@ -61,9 +62,9 @@ use crate::types::ability::{
     ObjectSelectionEligibility, OutsideGameSourcePool, PerPlayerScope, PlayerFilter,
     PlayerRelation, PlayerScope, PossessionAxis, PreventionAmount, PreventionScope, PtStat,
     PtValue, QuantityExpr, QuantityRef, ReassembleControlMode, ReturnResultReadSpec,
-    SearchSelectionConstraint, StaticDefinition, StickerTicketCostPayment, TapStateChange,
-    TargetChoiceTiming, TargetFilter, TargetSelectionMode, ThisWayCause, TokenAttackDestination,
-    TypeFilter, TypedFilter, ZoneChoiceCandidateSource, ZoneOwner, ZoneRef,
+    SearchSelectionConstraint, StaticDefinition, StickerTicketCostPayment, TapCreaturesRequirement,
+    TapStateChange, TargetChoiceTiming, TargetFilter, TargetSelectionMode, ThisWayCause,
+    TokenAttackDestination, TypeFilter, TypedFilter, ZoneChoiceCandidateSource, ZoneOwner, ZoneRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::phase::{Phase, PhaseGroup, TurnSegment};
@@ -981,6 +982,21 @@ pub(super) fn is_life_noun(noun: &str) -> bool {
 fn parse_numeric_imperative_ast_with_context(
     text: &str,
     lower: &str,
+    // Upstream evolution (true-upstream rebase): `ctx` is threaded mutably
+    // (declared-slot registry); this reader only copies the `Copy`
+    // `bare_card_aggregate_source` leaf, so the wider parameter is free.
+    ctx: &mut ParseContext,
+) -> Option<NumericImperativeAst> {
+    parse_numeric_imperative_ast_with_bare_card_source(text, lower, ctx)
+}
+
+fn parse_numeric_imperative_ast_with_bare_card_source(
+    text: &str,
+    lower: &str,
+    // Upstream evolution (true-upstream rebase): numeric count positions —
+    // including the bare-card aggregate fallback — now run through the shared
+    // ctx-threaded count grammar (`parse_verb_count_slot`), so this layer
+    // carries no separate binding parameter.
     ctx: &mut ParseContext,
 ) -> Option<NumericImperativeAst> {
     if let Some((_, rest)) = nom_on_lower(text, lower, |input| value((), tag("draw ")).parse(input))
@@ -1746,6 +1762,33 @@ pub(super) fn aggregate_return_choice_cardinality(
     .then_some(cardinality)
 }
 
+/// CR 118.12 + CR 601.2f: parse a trailing "with total power N or greater"
+/// tap-cost restriction (Bow to My Command's end-step leg; Crew CR 702.122a
+/// grammar in resolution position). All-consuming over the lowered target
+/// remainder — a longer or differently worded restriction is not this floor.
+fn parse_tap_total_power_floor(rem_lower: &str) -> Option<i32> {
+    all_consuming(terminated(
+        preceded(
+            (space0, tag("with total power ")),
+            nom_primitives::parse_number,
+        ),
+        (space0, tag("or greater"), opt(tag(".")), space0),
+    ))
+    .parse(rem_lower)
+    .ok()
+    .and_then(|(_, floor)| i32::try_from(floor).ok())
+}
+
+/// CR 118.12: does a tap/untap target remainder carry a total-power
+/// restriction in ANY wording? The fail-closed companion of
+/// `parse_tap_total_power_floor`: a remainder it cannot parse must decline
+/// the Tap lowering rather than silently drop the restriction.
+fn tap_remainder_mentions_total_power(rem_lower: &str) -> bool {
+    take_until::<_, _, OracleError<'_>>("total power")
+        .parse(rem_lower)
+        .is_ok()
+}
+
 pub(super) fn parse_targeted_action_ast(
     text: &str,
     lower: &str,
@@ -1963,9 +2006,29 @@ pub(super) fn parse_targeted_action_ast(
         let target = if ctx.subject.is_some() && is_bare_object_pronoun(target_text.trim()) {
             resolve_it_pronoun(ctx)
         } else {
-            let (target, _rem) = parse_target_with_ctx(target_text, ctx);
+            let (target, rem) = parse_target_with_ctx(target_text, ctx);
+            // CR 118.12 + CR 601.2f: "tap any number of <target> with total
+            // power N or greater" is an aggregate tap COST paid at resolution
+            // (Bow to My Command's end-step leg), not a tap action — route it
+            // to the cost authority so the aggregate is enforced. A
+            // total-power remainder in any other wording fails closed rather
+            // than dropping the restriction into a bare Tap.
+            let rem_lower = lower
+                .len()
+                .checked_sub(rem.len())
+                .and_then(|start| lower.get(start..))
+                .unwrap_or("");
+            if let Some(power) = parse_tap_total_power_floor(rem_lower) {
+                if !matches!(state, TapStateChange::Tap) {
+                    return None;
+                }
+                return Some(TargetedImperativeAst::TapAggregate { target, power });
+            }
+            if tap_remainder_mentions_total_power(rem_lower) {
+                return None;
+            }
             #[cfg(debug_assertions)]
-            assert_no_compound_remainder(_rem, text);
+            assert_no_compound_remainder(rem, text);
             target
         };
         return Some(match state {
@@ -2454,6 +2517,14 @@ pub(super) fn parse_targeted_action_ast(
         } else {
             target
         };
+        // CR 608.2c: Fail closed on a dropped "this way" back-reference
+        // (Danse Macabre's "a creature card put into a graveyard this way"):
+        // the single authority in `mod.rs` (`target_span_dropped_this_way_anaphor`)
+        // owns the bound-anaphor exemptions (payment amounts, reveal choices),
+        // so this call site never duplicates the predicate.
+        if super::target_span_dropped_this_way_anaphor(target_text, &target) {
+            return None;
+        }
 
         // CR 400.7: Single-object battlefield destinations use ChangeZone;
         // mass destinations use ChangeZoneAll. Only pure mass-bounce
@@ -2786,6 +2857,20 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             target,
             scope: EffectScope::All,
             state: TapStateChange::Untap,
+        },
+        // CR 118.12 + CR 601.2f: the aggregate tap cost lowers to a
+        // resolution-time `PayCost(TapCreatures)` — the same cost authority
+        // Crew/Saddle pay through — so the total-power floor is enforced on
+        // the selected subset. The parsed target carries the payer-relative
+        // filter (`controller: You` resolves to the payer via the
+        // payer-adjusted ability); subject injection rebinds `payer` below.
+        TargetedImperativeAst::TapAggregate { target, power } => Effect::PayCost {
+            cost: AbilityCost::TapCreatures {
+                requirement: TapCreaturesRequirement::total_power_at_least(power),
+                filter: target,
+            },
+            scale: None,
+            payer: TargetFilter::Controller,
         },
         TargetedImperativeAst::Goad { target } => Effect::Goad { target },
         TargetedImperativeAst::GoadAll { target } => Effect::GoadAll { target },
@@ -5964,6 +6049,7 @@ pub(super) fn parse_for_each_player_exile_controlled(
         chooser: Chooser::Controller.into(),
         candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
         reciprocal_role: None,
+        gather_role: None,
         up_to,
         selection: CardSelectionMode::Chosen,
         constraint: None,
@@ -6096,6 +6182,7 @@ pub(super) fn parse_exile_one_card_from_each_graveyard(
         chooser: Chooser::Controller.into(),
         candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Direct,
         reciprocal_role: None,
+        gather_role: None,
         up_to: false,
         selection: if random.is_some() {
             CardSelectionMode::Random
@@ -6127,6 +6214,149 @@ pub(super) fn parse_exile_one_card_from_each_graveyard(
         exile_all,
     )));
     Some(clause)
+}
+
+/// CR 701.13a + CR 401.1: the count and library owner of one library object of
+/// a third-person "<player> exile[s] …" instruction, composed from the shared
+/// grammars rather than re-parsed here — one `alt` over the three forms:
+///   * "the top half of <owner> library, rounded up|down" — the fraction
+///     combinator `parse_half_rounded` reads the count (CR 107.1a); the
+///     "<owner> library" it counts names the library, read ahead by `peek`
+///     because the fraction grammar consumes it as its counted quantity;
+///   * "the top N|X card(s) of <owner> library" — the shared count head
+///     [`parse_exile_top_count`] plus the "card[s] of <owner> library" suffix
+///     [`parse_library_player_suffix`];
+///   * "that many cards from the top of <owner> library" and the other
+///     dynamic-count forms — [`parse_dynamic_exile_from_top`].
+///
+/// Every owner comes from `parse_library_owner_phrase`, the single authority
+/// for whose library a possessive names; the caller maps it against the
+/// subject. FAIL-CLOSED: an owner that table does not name fails the parse.
+/// The remainder is the post-library tail.
+fn parse_subject_exile_library_source<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> OracleResult<'a, (QuantityExpr, TargetFilter)> {
+    let owner_library =
+        |i: &'a str| parse_library_owner_phrase(i, ctx).ok_or_else(|| oracle_err(i));
+    let cards_of_owner_library =
+        |i: &'a str| parse_library_player_suffix(i, ctx).ok_or_else(|| oracle_err(i));
+    let dynamic_count = |i: &'a str| {
+        parse_dynamic_exile_from_top(i, ctx)
+            .map(|(rest, owner, count)| (rest, (count, owner)))
+            .ok_or_else(|| oracle_err(i))
+    };
+    alt((
+        preceded(
+            tag::<_, _, OracleError<'_>>("the top "),
+            alt((
+                map(
+                    (
+                        // The owner the fraction then consumes as its counted quantity.
+                        peek(preceded(
+                            (nom_quantity::parse_fraction_divisor, opt(tag("of "))),
+                            owner_library,
+                        )),
+                        nom_quantity::parse_half_rounded,
+                    ),
+                    |(owner, count)| (count, owner),
+                ),
+                (parse_exile_top_count, cards_of_owner_library),
+            )),
+        ),
+        dynamic_count,
+    ))
+    .parse(input)
+}
+
+/// CR 701.13a: To exile an object, move it to the exile zone.
+///
+/// The library object of a "<player> exile[s] …" instruction (see
+/// [`parse_subject_exile_library_source`]), optionally "face down" (CR 406.3,
+/// via the shared `strip_exile_top_face_down` suffix).
+fn parse_subject_exile_library_top<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> OracleResult<'a, SubjectExileLibraryTopAst> {
+    let (after_lib, (count, owner)) = parse_subject_exile_library_source(input, ctx)?;
+    let (rest, face_down) = strip_exile_top_face_down(after_lib);
+    Ok((
+        rest,
+        SubjectExileLibraryTopAst {
+            count,
+            face_down,
+            owner,
+        },
+    ))
+}
+
+/// CR 701.13a: "a card at random from their graveyard|hand" — one object of a
+/// "<player> exile[s] …" instruction, read from the zone of the player "their"
+/// names (the subject). The zone is read by `parse_choose_zone_list`, the zone
+/// axis of the choose-from-zone connector; a union of zones is not an object
+/// this list models. No CR rule governs random selection; the selection
+/// follows the printed instruction (CR 608.2c).
+fn parse_subject_exile_random_zone_object(input: &str) -> OracleResult<'_, Zone> {
+    map_opt(
+        preceded(
+            (
+                alt((tag::<_, _, OracleError<'_>>("a "), tag("one "))),
+                tag("card at random from their "),
+            ),
+            parse_choose_zone_list,
+        ),
+        |zones| match zones.as_slice() {
+            [zone @ (Zone::Graveyard | Zone::Hand)] => Some(*zone),
+            _ => None,
+        },
+    )
+    .parse(input)
+}
+
+/// CR 701.13a: one object of a "<player> exile[s] …" instruction — the top
+/// cards of a library, or a card at random from the subject's graveyard or
+/// hand.
+fn parse_subject_exile_object<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> OracleResult<'a, SubjectExileObjectAst> {
+    alt((
+        map(
+            |i| parse_subject_exile_library_top(i, ctx),
+            SubjectExileObjectAst::LibraryTop,
+        ),
+        map(
+            parse_subject_exile_random_zone_object,
+            SubjectExileObjectAst::AtRandomFrom,
+        ),
+    ))
+    .parse(input)
+}
+
+/// CR 701.13a + CR 608.2f: the objects of a third-person "<player> exile[s]
+/// A[, B][, and C]" instruction, in printed order and in any order of kinds.
+/// An action taken on multiple objects is processed simultaneously (CR
+/// 608.2f), so the caller lowers two or more objects as one exile action. The
+/// remainder is returned unconsumed; the caller decides whether it is
+/// terminal.
+pub(super) fn parse_subject_exile_object_list<'a>(
+    input: &'a str,
+    ctx: &ParseContext,
+) -> OracleResult<'a, SubjectExileObjectsAst> {
+    map(
+        preceded(
+            alt((tag::<_, _, OracleError<'_>>("exiles "), tag("exile "))),
+            (
+                |i| parse_subject_exile_object(i, ctx),
+                many0(preceded(
+                    alt((tag(", and "), tag(", "), tag(" and "))),
+                    |i| parse_subject_exile_object(i, ctx),
+                )),
+            ),
+        ),
+        |(first, rest)| SubjectExileObjectsAst { first, rest },
+    )
+    .parse(input)
 }
 
 /// CR 102.2 + CR 102.3 + CR 608.2c + CR 608.2d: "For each opponent, choose [up
@@ -6175,6 +6405,7 @@ pub(super) fn parse_for_each_opponent_choose_controlled(
         chooser: Chooser::Controller.into(),
         candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
         reciprocal_role: None,
+        gather_role: None,
         up_to,
         selection: CardSelectionMode::Chosen,
         constraint: None,
@@ -6731,6 +6962,7 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
             choice_type,
             selection,
         } => Effect::Choose {
+            chooser: crate::types::ability::ControllerRef::You,
             selection,
             // CR 201.3 / CR 113.6 / CR 205.2a / CR 614.12c: A chosen attribute
             // must persist on the source whenever a later clause refers back to
@@ -6797,6 +7029,7 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
             chooser: chooser.into(),
             candidate_source,
             reciprocal_role: None,
+            gather_role: None,
             up_to: false,
             selection,
             constraint: None,
@@ -6825,6 +7058,7 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
                 chooser: chooser.into(),
                 candidate_source,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to,
                 selection,
                 constraint: None,
@@ -10793,8 +11027,17 @@ pub(super) fn parse_destroy_ast(
         // CR 608.2k: thread `ctx` so bare "it"/"them" anaphors bind to the
         // triggering subject ("Whenever a creature dies, destroy it" class).
         let (target, rem) = parse_target_with_ctx(rest, ctx);
+        // Upstream evolution (true-upstream rebase): an attachment qualifier
+        // now binds into the target rather than refusing the arm. Our
+        // fail-closed guard runs AFTER the bind, on the bound target, so a
+        // genuinely dropped "this way" still refuses.
         let phrase = &rest[..rest.len() - rem.len()];
         let (target, _rem) = bind_attachment_qualifier(target, phrase, rem, ctx)?;
+        // CR 608.2c: mirror of the Entry-35 return-verb guard — a "this
+        // way" the filter doesn't bind must refuse, not sweep.
+        if super::target_span_dropped_this_way_anaphor(rest, &target) {
+            return None;
+        }
         #[cfg(debug_assertions)]
         assert_no_compound_remainder(_rem, text);
         return Some(ZoneCounterImperativeAst::Destroy { target, all: true });
@@ -10814,6 +11057,11 @@ pub(super) fn parse_destroy_ast(
         if crate::types::ability::filter_reads_declared_slot(&target)
             && nom_primitives::scan_contains(&phrase.to_lowercase(), "target ")
         {
+            return None;
+        }
+        // CR 608.2c: mirror of the Entry-35 return-verb guard — a "this
+        // way" the filter doesn't bind must refuse, not sweep.
+        if super::target_span_dropped_this_way_anaphor(rest, &target) {
             return None;
         }
         #[cfg(debug_assertions)]
@@ -11232,6 +11480,21 @@ fn parse_dynamic_exile_from_top<'a>(
     None
 }
 
+/// CR 107.3 + CR 701.13a: the count head of "the top N|X card(s) of …" — a
+/// number or an X placeholder, read by the shared
+/// `nom_quantity::parse_quantity_expr_number` (`Fixed` / `Variable("X")`, bound
+/// by the spell's chosen X or a where-X definition), or no count at all ("the
+/// top card") for one card. The single count grammar of the positional
+/// top-of-library exile, shared by the imperative form (`parse_exile_ast`) and
+/// the third-person subject form (`parse_subject_exile_library_top`). Never fails.
+fn parse_exile_top_count(input: &str) -> OracleResult<'_, QuantityExpr> {
+    alt((
+        terminated(nom_quantity::parse_quantity_expr_number, space0),
+        success(QuantityExpr::Fixed { value: 1 }),
+    ))
+    .parse(input)
+}
+
 /// Parse the two library edges that a positional exile instruction currently
 /// supports. Keeping the edge separate from its surrounding sentence lets a
 /// caller preserve `LibraryPosition` rather than degrading a bottom instruction
@@ -11431,21 +11694,7 @@ pub(super) fn parse_exile_ast(
     }
 
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("exile the top ").parse(lower) {
-        let (initial_count, remainder) =
-            if let Ok((rem, n)) = nom_primitives::parse_number.parse(rest) {
-                (QuantityExpr::Fixed { value: n as i32 }, rem.trim_start())
-            } else if let Ok((rem, _)) = tag::<_, _, OracleError<'_>>("x").parse(rest) {
-                (
-                    QuantityExpr::Ref {
-                        qty: QuantityRef::Variable {
-                            name: "X".to_string(),
-                        },
-                    },
-                    rem.trim_start(),
-                )
-            } else {
-                (QuantityExpr::Fixed { value: 1 }, rest)
-            };
+        let (remainder, initial_count) = parse_exile_top_count(rest).ok()?;
         // CR 608.2 + CR 400.12 + CR 115.1: Match the "[card|cards] of [a player]'s
         // library" suffix and resolve the library owner via the shared
         // `parse_library_player_suffix` helper (also used by the manifest
@@ -11588,6 +11837,11 @@ pub(super) fn parse_exile_ast(
         } else {
             parsed_target
         };
+        // CR 608.2c: mirror of the Entry-35 return-verb guard — a "this
+        // way" the filter doesn't bind must refuse, not sweep.
+        if super::target_span_dropped_this_way_anaphor(rest, &target) {
+            return None;
+        }
         let origin = super::infer_origin_zone(rest_lower);
         let (origin, target) = super::compose_exile_graveyard_origin_and_target(
             origin,
@@ -11681,6 +11935,11 @@ pub(super) fn parse_exile_ast(
     if mass_zone {
         let (target, _rem) =
             ctx.with_player_antecedents(|scoped| parse_target_with_ctx(rest_text, scoped));
+        // CR 608.2c: mirror of the Entry-35 return-verb guard — a "this
+        // way" the filter doesn't bind must refuse, not sweep.
+        if super::target_span_dropped_this_way_anaphor(rest_text, &target) {
+            return None;
+        }
         #[cfg(debug_assertions)]
         assert_no_compound_remainder(_rem, text);
         let origin = super::infer_origin_zone(rest_lower);
@@ -11727,6 +11986,11 @@ pub(super) fn parse_exile_ast(
         let tail_is_consumed = tail_clean.is_empty() || !enter_with_counters.is_empty();
         if rem.trim().is_empty() && !matches!(target, TargetFilter::Any) && tail_is_consumed {
             attach_controller_if_absent(&mut target, ControllerRef::You);
+            // CR 608.2c: mirror of the Entry-35 return-verb guard — a "this
+            // way" the filter doesn't bind must refuse, not sweep.
+            if super::target_span_dropped_this_way_anaphor(rest_lower, &target) {
+                return None;
+            }
             if let TargetFilter::Typed(typed) = &mut target {
                 typed
                     .properties
@@ -11791,6 +12055,11 @@ pub(super) fn parse_exile_ast(
             && target.extract_in_zone() == Some(Zone::Graveyard)
             && terminal_punctuation_only(remainder)
         {
+            // CR 608.2c: mirror of the Entry-35 return-verb guard — a "this
+            // way" the filter doesn't bind must refuse, not sweep.
+            if super::target_span_dropped_this_way_anaphor(target_text, &target) {
+                return None;
+            }
             return Some(ZoneCounterImperativeAst::Exile {
                 origin: Some(Zone::Graveyard),
                 target,
@@ -11884,6 +12153,11 @@ pub(super) fn parse_exile_ast(
     } else {
         parsed_target
     };
+    // CR 608.2c: mirror of the Entry-35 return-verb guard — a "this
+    // way" the filter doesn't bind must refuse, not sweep.
+    if super::target_span_dropped_this_way_anaphor(target_input, &target) {
+        return None;
+    }
     // CR 400.7 (issue #6505): infer the origin zone excluding ONLY a trailing
     // compound conjunct ("and their graveyard", Strategic Betrayal) so its
     // sibling graveyard leg cannot leak Zone::Graveyard onto the battlefield
@@ -12293,6 +12567,20 @@ fn parse_mana_and_life_payment(rest_orig: &str) -> Option<AbilityCost> {
     })
 }
 
+/// Un-card: the body of a spoken payment after `say ` — a quoted phrase with an
+/// optional delivery qualifier (`in a robot voice`) and optional final period.
+pub(crate) fn parse_say_phrase_payment(input: &str) -> OracleResult<'_, String> {
+    let (rest, phrase) = super::parse_quoted_phrase(input)?;
+    let (rest, _) = opt(preceded(
+        tag(" in a "),
+        terminated(take_until(" voice"), tag(" voice")),
+    ))
+    .parse(rest)?;
+    let (rest, _) = opt(tag(".")).parse(rest)?;
+    let (rest, _) = eof.parse(rest)?;
+    Ok((rest, phrase.trim().to_string()))
+}
+
 /// CR 118.1 + CR 119.4 + CR 107.1c: parse the residue after a `pay ` prefix
 /// into an `AbilityCost` — mana+life combos, `pay <amount> life`, any-amount
 /// energy/life/mana payments, `{E}` counts, and bare mana symbols. Single
@@ -12438,6 +12726,18 @@ pub(super) fn parse_cost_resource_ast(
         let rest = &lower[lower.len() - rest_orig.len()..];
         if let Some(cost) = parse_pay_residue_cost(rest, rest_orig) {
             return Some(CostResourceImperativeAst::Pay { cost });
+        }
+    }
+    // Un-card (no CR entry): `say "<phrase>" [in a <adjective> voice]` — a spoken
+    // payment ("you may say \"INCARCERATE!\" in a robot voice. If you do, …").
+    // The optional-payment framing around it is the ordinary CR 118.12 shape.
+    if let Some((_, rest_orig)) =
+        nom_on_lower(text, lower, |input| value((), tag("say ")).parse(input))
+    {
+        if let Ok((_, phrase)) = parse_say_phrase_payment(rest_orig) {
+            return Some(CostResourceImperativeAst::Pay {
+                cost: AbilityCost::SayPhrase { phrase },
+            });
         }
     }
     // CR 106.4 + CR 505.1: Dispatch to the mana detector for a bare "add …"
@@ -13491,6 +13791,7 @@ fn is_player_axis_filter(filter: &TargetFilter) -> bool {
         // rather than admitting it through the object default.
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::Owner
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::AllPlayers => true,
         TargetFilter::Not { filter } => is_player_axis_filter(filter),
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
@@ -14917,7 +15218,8 @@ pub(super) fn parse_imperative_family_ast(
                 // None for count == 1 so "roll a d6" / "roll one d6" falls through.
                 Some(ast)
             } else {
-                try_parse_roll_die_with_modifier(lower).map(|(sides, modifier)| {
+                try_parse_roll_die_with_modifier(lower, ctx.bare_card_aggregate_source).map(
+                    |(sides, modifier)| {
                     ImperativeFamilyAst::RollDie {
                         count: QuantityExpr::Fixed { value: 1 },
                         sides,
@@ -14970,6 +15272,27 @@ pub(super) fn parse_imperative_family_ast(
         .parse(lower.trim())
         .ok()
         .map(|_| ImperativeFamilyAst::Planeswalk),
+        // CR 701.33a-b: "abandon this scheme" — an ability abandons the
+        // face-up ongoing scheme that sourced it (ongoing-scheme abandon
+        // clauses). Literal "this scheme", NOT `~`: normalizing "this scheme"
+        // to `~` would break the SetInMotion trigger matcher, which matches
+        // the literal phrase. The "you may " prefix and the `optional` flag
+        // are already stripped upstream, so the family parser sees only the
+        // bare verb body. The anchored all-consuming guard prevents matching
+        // a longer clause (e.g. the "unless ..." cost variant, which stays
+        // honestly Unimplemented until unless-alternative-costs are modeled).
+        "abandon" | "abandons" => all_consuming(terminated(
+            // Longer alternative first so "abandons" matches the full token
+            // before the "abandon" prefix can short-circuit the `alt`.
+            alt((
+                tag::<_, _, OracleError<'_>>("abandons this scheme"),
+                tag("abandon this scheme"),
+            )),
+            opt(tag(".")),
+        ))
+        .parse(lower.trim())
+        .ok()
+        .map(|_| ImperativeFamilyAst::AbandonScheme),
         // CR 500.7: "take an extra turn after this one"
         // CR 726.1: "take the initiative"
         "take" | "takes" => {
@@ -16070,11 +16393,17 @@ fn parse_reassemble_contraption_imperative(
 /// an optional trailing `" and (add|subtract) {quantity}"` modifier that the
 /// resolver applies to the natural roll before result-table lookup.
 ///
+/// This is the single authority for the die-roll header grammar, reached from
+/// both the chain dispatch and the line-initial die-table dispatch: a
+/// non-empty tail that is not a recognized add/subtract modifier refuses the
+/// whole header (CR 706.2).
+///
 /// Returns `(sides, modifier)` on success. The modifier is `None` when the
 /// remainder is empty or only contains trailing punctuation; otherwise the
 /// remainder must shape as a recognized add/subtract clause.
-fn try_parse_roll_die_with_modifier(
+pub(crate) fn try_parse_roll_die_with_modifier(
     lower: &str,
+    bare_card: Option<crate::parser::oracle_ir::context::BareCardAggregateBinding>,
 ) -> Option<(u8, Option<crate::types::ability::DieRollModifier>)> {
     let (sides, rest) = try_parse_roll_die_sides_with_rest(lower)?;
     let rest = rest.trim_end_matches(['.', ',', ';']).trim();
@@ -16091,7 +16420,21 @@ fn try_parse_roll_die_with_modifier(
     ))
     .parse(after_and)
     .ok()?;
-    let (_, value) = nom_quantity::parse_quantity_ref_complete(modifier_text).ok()?;
+    // CR 608.2c + CR 115.1: the generic quantity grammar cannot see a bare
+    // "those cards" aggregate (intentionally unavailable context-free), so when
+    // the chain established a bare-card binding, try it before refusing. The
+    // contextual parse must consume fully — a prefix-only match refuses the
+    // whole header honestly rather than silently narrowing the modifier.
+    let value = nom_quantity::parse_quantity_ref_complete(modifier_text)
+        .ok()
+        .map(|(_, qty)| qty)
+        .or_else(|| {
+            let binding = bare_card?;
+            let (rest, qty) =
+                nom_quantity::parse_contextual_bare_card_aggregate_ref(modifier_text, binding)
+                    .ok()?;
+            rest.trim().is_empty().then_some(qty)
+        })?;
     let modifier = if sign {
         crate::types::ability::DieRollModifier::Add {
             value: crate::types::ability::QuantityExpr::Ref { qty: value },
@@ -16143,6 +16486,18 @@ const DIE_RESULT_EM_DASH: &str = "\u{2014}";
 /// The printed endpoint is a separate question from the resolvable bound: a
 /// printed `"0 or less"` row is nonsense and is still refused, by that arm's own
 /// `verify` on the printed maximum.
+///
+/// ASYMMETRY WITH `"N+"`, deliberate and bounded. The open-ended UPPER form maps
+/// to `u8::MAX` so a modifier-boosted roll above the printed bound still lands in
+/// the branch (CR 706.2). The `"N or less"` form does NOT get the mirrored
+/// treatment of a `0` floor, because CR 706.1a makes 1 the smallest NATURAL
+/// result and this lower bound is exact for an unmodified roll. A negative
+/// modifier can drive a result below 1 (CR 706.2 allows the final number to be
+/// any integer), and such a result would fall through this branch rather than
+/// into it. No printed card combines a downward modifier with an "or less" row,
+/// so the gap is unreachable today; it is recorded here rather than papered over
+/// by widening the floor to 0, which would silently swallow `"0 or less"` — the
+/// exact refusal the guard below exists to make.
 ///
 /// This is also the DETECTOR the spell-resolution continuation loop uses to
 /// recognize a results-table row (`oracle.rs`), so the loop and the row
@@ -16762,6 +17117,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             clause.sub_ability = Some(Box::new(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::Choose {
+                    chooser: ControllerRef::You,
                     choice_type: player,
                     persist: false,
                     selection: TargetSelectionMode::Chosen,
@@ -17131,6 +17487,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 chooser: Chooser::Controller.into(),
                 candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: false,
                 selection: crate::types::ability::CardSelectionMode::Chosen,
                 constraint: None,
@@ -17170,6 +17527,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 chooser: Chooser::Controller.into(),
                 candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: false,
                 selection: crate::types::ability::CardSelectionMode::Chosen,
                 constraint: None,
@@ -17254,6 +17612,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 chooser: Chooser::Controller.into(),
                 candidate_source: ZoneChoiceCandidateSource::Direct,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: true,
                 selection: CardSelectionMode::Chosen,
                 constraint,
@@ -17578,6 +17937,8 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         ImperativeFamilyAst::TakeTheInitiative => Effect::TakeTheInitiative,
         // CR 701.31c: An ability instructs a player to planeswalk.
         ImperativeFamilyAst::Planeswalk => Effect::Planeswalk,
+        // CR 701.33a-b: An ability abandons its source scheme.
+        ImperativeFamilyAst::AbandonScheme => Effect::AbandonScheme,
         ImperativeFamilyAst::OpenAttractions { count } => Effect::OpenAttractions { count },
         ImperativeFamilyAst::RollToVisitAttractions => Effect::RollToVisitAttractions,
         ImperativeFamilyAst::AssembleContraptions { count } => {
@@ -18480,6 +18841,15 @@ pub(super) fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAs
                     ),
                     tag("that player"),
                 ),
+                // CR 108.3 + CR 508.1d: "its owner" names the owner of each
+                // affected object, resolved per member at install — "Each of
+                // them attacks its owner" (My Crushing Masterstroke), "Each
+                // of those creatures attacks its owner" (The Dead Shall
+                // Serve). Distinct from `ParentTargetOwner` (owner of the
+                // parent ability's single target): every member can have a
+                // different owner, so only `force_attack::resolve`'s
+                // per-member graft consumes this anchor.
+                value(TargetFilter::AffectedObjectOwner, tag("its owner")),
                 value(TargetFilter::SelfRef, tag("~")),
             )),
         ),
@@ -18494,12 +18864,19 @@ pub(super) fn try_parse_attack_if_able(lower: &str) -> Option<ImperativeFamilyAs
                 value(Some(Duration::UntilEndOfTurn), tag("this turn if able")),
                 value(
                     Some(Duration::UntilEndOfCombat),
-                    alt((
-                        tag("this combat if able"),
-                        tag("that combat if able"),
-                        tag("each combat if able"),
-                    )),
+                    alt((tag("this combat if able"), tag("that combat if able"))),
                 ),
+                // CR 508.1d + CR 611.2a: unbounded "each combat" is not "this
+                // combat" — a resolution-installed requirement with no end
+                // ("Each of those creatures attacks its owner each combat if
+                // able", The Dead Shall Serve) persists every future combat,
+                // like an intrinsic token grant. The only prior consumer of
+                // this arm (Silver Surfer's "attacks that player each combat",
+                // whose enclosing "until the end of your next turn" wins over
+                // the field at resolve via `ability.duration` precedence) is
+                // behaviorally unchanged — pinned by
+                // `silver_surfer_effective_duration_uses_enclosing_span`.
+                value(Some(Duration::Permanent), tag("each combat if able")),
                 value(None, tag("if able")),
             )),
         ),
@@ -26543,6 +26920,52 @@ mod tests {
     }
 
     #[test]
+    fn parse_attack_its_owner_this_turn_if_able() {
+        // CR 108.3 + CR 508.1d: "its owner" names the owner of each affected
+        // object, resolved per member at install — "Each of them attacks its
+        // owner this turn if able" (My Crushing Masterstroke).
+        let result = try_parse_attack_if_able("attack its owner this turn if able")
+            .expect("should parse 'attack its owner this turn if able'");
+        match result {
+            ImperativeFamilyAst::ForceAttack {
+                duration,
+                required_defender,
+            } => {
+                assert_eq!(duration, Some(Duration::UntilEndOfTurn));
+                assert_eq!(
+                    required_defender,
+                    TargetFilter::AffectedObjectOwner,
+                    "its owner must bind the per-member owner anchor, got {required_defender:?}"
+                );
+            }
+            other => panic!("Expected ForceAttack, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_attack_its_owner_each_combat_if_able() {
+        // CR 108.3 + CR 508.1d + CR 611.2a: unbounded "each combat" persists
+        // every future combat ("Each of those creatures attacks its owner
+        // each combat if able", The Dead Shall Serve) — not UntilEndOfCombat.
+        let result = try_parse_attack_if_able("attack its owner each combat if able")
+            .expect("should parse 'attack its owner each combat if able'");
+        match result {
+            ImperativeFamilyAst::ForceAttack {
+                duration,
+                required_defender,
+            } => {
+                assert_eq!(duration, Some(Duration::Permanent));
+                assert_eq!(
+                    required_defender,
+                    TargetFilter::AffectedObjectOwner,
+                    "its owner must bind the per-member owner anchor, got {required_defender:?}"
+                );
+            }
+            other => panic!("Expected ForceAttack, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn ruhan_choose_opponent_then_force_attack_composes() {
         use crate::types::ability::{ChoiceType, Effect};
 
@@ -29244,6 +29667,102 @@ mod tests {
         assert!(
             !def.optional,
             "expected optional: false for 'then planeswalk'"
+        );
+    }
+
+    /// CR 701.33a-b: the bare "abandon this scheme" verb body dispatches to
+    /// the `AbandonScheme` imperative-family leaf. Both "abandon" and
+    /// "abandons" verb tokens map to the same leaf.
+    #[test]
+    fn abandon_this_scheme_verb_dispatches_to_abandon_leaf() {
+        for input in ["abandon this scheme", "abandons this scheme"] {
+            let ast = parse_imperative_family_ast(input, input, &mut ParseContext::default())
+                .unwrap_or_else(|| panic!("'{input}' should parse to an AbandonScheme leaf"));
+            assert!(
+                matches!(ast, ImperativeFamilyAst::AbandonScheme),
+                "expected AbandonScheme leaf for '{input}', got {ast:?}"
+            );
+        }
+    }
+
+    /// CR 701.33a-b: "abandon this scheme." → mandatory
+    /// `Effect::AbandonScheme` (I Bask in Your Silent Awe abandon clause).
+    #[test]
+    fn effect_abandon_this_scheme_is_mandatory_abandon() {
+        let def = crate::parser::oracle_effect::parse_effect_chain(
+            "abandon this scheme.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(*def.effect, Effect::AbandonScheme),
+            "expected Effect::AbandonScheme, got {:?}",
+            def.effect
+        );
+        assert!(
+            !def.optional,
+            "expected optional: false for 'abandon this scheme'"
+        );
+    }
+
+    /// CR 701.33a-b: "you may abandon this scheme" → optional
+    /// `Effect::AbandonScheme` (My Laughter Echoes rider). The optional shell
+    /// is produced by the upstream optional-prefix strip.
+    #[test]
+    fn effect_you_may_abandon_this_scheme_is_optional_abandon() {
+        let def = crate::parser::oracle_effect::parse_effect_chain(
+            "You may abandon this scheme.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(*def.effect, Effect::AbandonScheme),
+            "expected Effect::AbandonScheme, got {:?}",
+            def.effect
+        );
+        assert!(
+            def.optional,
+            "expected optional: true for 'you may abandon this scheme'"
+        );
+    }
+
+    /// CR 701.33a-b + CR 118.12a: "abandon this scheme unless you discard a
+    /// card or pay 3 life" (Fear My Authority) → `Effect::AbandonScheme`
+    /// with a disjunctive controller unless-cost. Previously pinned the
+    /// honest `Unsupported unless clause` gap; the you-disjunction grammar
+    /// now binds both branches. The bare-leaf arm stays rejected: the
+    /// all-consuming guard must not swallow the unless rider.
+    #[test]
+    fn abandon_unless_cost_disjunction_is_supported() {
+        let def = crate::parser::oracle_effect::parse_effect_chain(
+            "abandon this scheme unless you discard a card or pay 3 life",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(*def.effect, Effect::AbandonScheme),
+            "expected Effect::AbandonScheme, got {:?}",
+            def.effect
+        );
+        let Some(unless) = &def.unless_pay else {
+            panic!("expected unless_pay on abandon, got none");
+        };
+        assert_eq!(
+            unless.payer,
+            crate::types::ability::TargetFilter::Controller,
+            "you-rider payer must be the controller, got {:?}",
+            unless.payer
+        );
+        let crate::types::ability::AbilityCost::OneOf { costs } = &unless.cost else {
+            panic!("expected OneOf unless cost, got {:?}", unless.cost);
+        };
+        assert_eq!(costs.len(), 2, "expected two branches, got {costs:?}");
+        assert!(
+            matches!(costs[0], crate::types::ability::AbilityCost::Discard { .. }),
+            "first branch must be Discard, got {:?}",
+            costs[0]
+        );
+        assert!(
+            matches!(costs[1], crate::types::ability::AbilityCost::PayLife { .. }),
+            "second branch must be PayLife, got {:?}",
+            costs[1]
         );
     }
 

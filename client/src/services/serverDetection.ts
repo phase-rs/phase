@@ -1,3 +1,4 @@
+import type { ParseKeys } from "i18next";
 import { canUseLanBridge } from "./lan";
 import { useMultiplayerStore } from "../stores/multiplayerStore";
 import {
@@ -18,7 +19,7 @@ const DEFAULT_PORT = 9374;
 export type FlagCode = "us";
 
 export interface ServerPreset {
-  labelKey: string;
+  labelKey: ParseKeys<"multiplayer">;
   url: string;
   flag?: FlagCode;
 }
@@ -32,7 +33,7 @@ export interface ServerPreset {
 export const SERVER_PRESETS: ServerPreset[] = [
   ...(DEFAULT_MULTIPLAYER_SERVER_URL === OFFICIAL_MULTIPLAYER_SERVER_URL
     ? []
-    : [{ labelKey: "serverPicker.selfHosted", url: DEFAULT_MULTIPLAYER_SERVER_URL }]),
+    : [{ labelKey: "serverPicker.selfHosted", url: DEFAULT_MULTIPLAYER_SERVER_URL } satisfies ServerPreset]),
   {
     labelKey: "serverPicker.official",
     url: OFFICIAL_MULTIPLAYER_SERVER_URL,

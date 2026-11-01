@@ -116,6 +116,32 @@ describe("NativeEngineSocket", () => {
     expect(messages).toEqual(["first", "second"]);
   });
 
+  it("dispatches one message per text reassembled from shell fragments", async () => {
+    const connection = deferred<number>();
+    invokeMock.mockImplementation((command: string) => {
+      return command === "connect_native_engine" ? connection.promise : Promise.resolve(undefined);
+    });
+    const socket = new NativeEngineSocket();
+    const messages: string[] = [];
+    socket.onmessage = (event) => messages.push(event.data);
+    await vi.waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("connect_native_engine", {
+        onEvent: expect.any(ChannelMock),
+        textDelivery: "fragments",
+      });
+    });
+
+    emitChannelEvent({ type: "fragment", text: "a" });
+    await resolveConnection(connection);
+    emitChannelEvent({ type: "message", text: "b" });
+    expect(messages).toEqual(["ab"]);
+
+    emitChannelEvent({ type: "fragment", text: "ab" });
+    emitChannelEvent({ type: "fragment", text: "c" });
+    emitChannelEvent({ type: "message", text: "d" });
+    expect(messages).toEqual(["ab", "abcd"]);
+  });
+
   it("finishes closing after a connection that was closed while connecting settles", async () => {
     const connection = deferred<number>();
     invokeMock.mockImplementation((command: string) => {
@@ -298,7 +324,7 @@ it("routes LAN lifecycle and a close-before-connect race to the independent brid
   const socket = new NativeEngineSocket({ type: "lan", url: "ws://192.168.1.2:9374/ws", origin: "https://phase-rs.dev" });
   socket.close();
   await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("connect_lan_server", {
-    url: "ws://192.168.1.2:9374/ws", origin: "https://phase-rs.dev", onEvent: expect.any(ChannelMock),
+    url: "ws://192.168.1.2:9374/ws", origin: "https://phase-rs.dev", onEvent: expect.any(ChannelMock), textDelivery: "fragments",
   }));
   connection.resolve(42);
   await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("lan_bridge_close", { id: 42 }));
@@ -322,7 +348,7 @@ it("restores a stored LAN URL's default port in the native payload", async () =>
   invokeMock.mockResolvedValue(42);
   const socket = new NativeEngineSocket({ type: "lan", url: "ws://192.168.1.2/ws", origin: "https://phase-rs.dev" });
   await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("connect_lan_server", {
-    url: "ws://192.168.1.2:80/ws", origin: "https://phase-rs.dev", onEvent: expect.any(ChannelMock),
+    url: "ws://192.168.1.2:80/ws", origin: "https://phase-rs.dev", onEvent: expect.any(ChannelMock), textDelivery: "fragments",
   }));
   socket.close();
 });

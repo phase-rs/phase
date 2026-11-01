@@ -73,6 +73,9 @@ const frozenFloors = {
   MIN_LOBBY_PROTOCOL_FOR_RECOVERABLE_ROTATION: 9,
   MIN_LOBBY_PROTOCOL_FOR_FREEFORM_FORMATS: 11,
   MIN_LOBBY_PROTOCOL_FOR_DANDAN: 16,
+  MIN_LOBBY_PROTOCOL_FOR_TWO_HEADED_GIANT_COMMANDER: 17,
+  MIN_LOBBY_PROTOCOL_FOR_ARCHENEMY_COMMANDER: 18,
+  MIN_LOBBY_PROTOCOL_FOR_PLANECHASE_COMMANDER: 19,
 };
 for (const [name, expected] of Object.entries(frozenFloors)) {
   const actual = extractVersion(clientSource, new RegExp(`export\\s+const\\s+${name}\\s*=\\s*(\\d+)\\s*;`), name);

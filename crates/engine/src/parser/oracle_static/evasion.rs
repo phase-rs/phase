@@ -21,13 +21,41 @@ pub(crate) fn parse_min_blockers_phrase(input: &str) -> OracleResult<'_, u32> {
 /// typed `BlockExceptionKind`. A leading count phrase ("N or more creatures")
 /// is a minimum-blocker constraint; everything else is a per-blocker quality
 /// filter. The parser IS the count-vs-quality detector — combat never re-parses.
-pub(crate) fn classify_block_exception(filter_text: &str) -> BlockExceptionKind {
+pub(crate) fn classify_block_exception(filter_text: &str) -> Option<BlockExceptionKind> {
     let trimmed = filter_text.trim_end_matches('.').trim();
     if let Ok((_, min)) = parse_min_blockers_phrase(trimmed) {
-        BlockExceptionKind::MinBlockers { min }
-    } else {
-        let normalized = strip_redundant_block_exception_by(trimmed);
-        BlockExceptionKind::Quality(parse_target(&normalized).0)
+        return Some(BlockExceptionKind::MinBlockers { min });
+    }
+    let normalized = strip_redundant_block_exception_by(trimmed);
+    // CR 509.1b + CR 608.2c (issue #10364): the whole phrase after "except by "
+    // is the exception filter, so fold its union legs. `parse_target` alone
+    // closes a leg on its own trailing suffix and never sees a separator that
+    // follows one ("creatures with power 2 or less and/or Walls").
+    //
+    // A dropped disjunct here makes the whitelist NARROWER than printed - the
+    // attacker becomes harder to block than its text says - so this returns
+    // `None` and every caller fails closed, matching the `by` direction.
+    //
+    // Only `DroppedDisjunct` declines; an `Unconstrained` filter still lowers to
+    // `Quality` exactly as before. That scoping is measured, not assumed: a
+    // census of `CantBeBlockedExceptBy { Quality(Any) }` finds ZERO rows at both
+    // this change's base and its head (measured with one MTGJSON vintage on both
+    // sides; a cross-vintage measurement previously showed a spurious single
+    // B.F.M. (Big Furry Monster) row, because that card has two same-named faces
+    // and only one of them reaches the export, so the two vintages disagreed
+    // about which face carries the "can't be blocked except by three or"
+    // clause). So tightening `Unconstrained` to a decline would change no
+    // printed card today, and leaving it alone changes none either; it is left
+    // alone because the `by` direction leaves it alone, and the two directions
+    // should tighten together. NOTE for whoever revisits this: a non-separator tail is NOT
+    // `Unconstrained` - Agility Bobblehead's ", where X is the number of
+    // Bobbleheads ..." reaches the `Filter` arm as
+    // `Quality(Typed{Creature, WithKeyword(Haste)})` with that tail dropped,
+    // which is the `Unconstrained`-vs-`Filter` distinction, not this one.
+    match parse_block_exception_phrase(&normalized) {
+        BlockFilterPhrase::Filter { filter, .. } => Some(BlockExceptionKind::Quality(filter)),
+        BlockFilterPhrase::Unconstrained => Some(BlockExceptionKind::Quality(TargetFilter::Any)),
+        BlockFilterPhrase::DroppedDisjunct => None,
     }
 }
 
@@ -820,6 +848,9 @@ pub(crate) fn parse_forced_block_blocker_slot(input: &str) -> Option<(&str, Opti
     let (rest, type_text) = take_until::<_, _, OracleError<'_>>(" able to block ")
         .parse(input)
         .ok()?;
+    // Deliberately NOT routed through the union fold (issue #10364): the
+    // all-consuming remainder guard below already FAILS CLOSED on any unread
+    // tail, union leg included.
     let (filter, filter_remainder) = parse_type_phrase_folding(type_text);
     if !filter_remainder.trim().is_empty() {
         return None; // mis-scoped Some — reject rather than accept a partial filter.
@@ -1798,9 +1829,10 @@ pub(crate) fn cant_be_blocked_mode(clause: &str) -> Option<(StaticMode, Option<S
     let rest = rest.trim_end_matches('.').trim_end();
     // "except by <filter>" → CantBeBlockedExceptBy (quality or min-blockers).
     if let Some(filter) = nom_tag_lower(rest, rest, " except by ") {
+        // Fail closed on a dropped disjunct (see `classify_block_exception`).
         return Some((
             StaticMode::CantBeBlockedExceptBy {
-                kind: classify_block_exception(filter),
+                kind: classify_block_exception(filter)?,
             },
             None,
         ));
@@ -1823,12 +1855,23 @@ pub(crate) fn cant_be_blocked_mode(clause: &str) -> Option<(StaticMode, Option<S
     // "by <filter>" → CantBeBlockedBy.
     if let Some(filter_text) = nom_tag_lower(rest, rest, " by ") {
         let filter_tp = TextPair::new(filter_text, filter_text);
-        let (filter, remainder) = if let Some(filter) = parse_chosen_qualifier_subject(&filter_tp) {
-            (filter, "")
-        } else {
-            parse_type_phrase_folding(filter_text)
+        // CR 509.1b + CR 608.2c (issue #10364): fold the filter's union legs -
+        // a leg's own trailing suffix ("creatures with power 2 or less and/or
+        // Walls") closes the leg before the leg grammar's early union loop can
+        // see the separator. Whatever survives the fold is still offered to
+        // `parse_compound_cant_be_blocked_condition` as a trailing gate.
+        //
+        // Coverage honesty: `DroppedDisjunct` and `Unconstrained` both decline
+        // here, which this arm already did for an unreadable filter.
+        let phrase = match parse_chosen_qualifier_subject(&filter_tp) {
+            Some(chosen) => BlockFilterPhrase::from_whole_phrase_filter(chosen),
+            None => parse_block_filter_phrase(filter_text),
         };
-        if !matches!(filter, TargetFilter::Any) {
+        if let BlockFilterPhrase::Filter {
+            filter,
+            tail: remainder,
+        } = phrase
+        {
             let condition = parse_compound_cant_be_blocked_condition(remainder);
             return Some((StaticMode::CantBeBlockedBy { filter }, condition));
         }
@@ -2424,8 +2467,9 @@ pub(crate) fn parse_subject_rule_static(text: &str) -> Option<StaticDefinition> 
             )
         })
     {
+        // Fail closed on a dropped disjunct (see `classify_block_exception`).
         let def = StaticDefinition::new(StaticMode::CantBeBlockedExceptBy {
-            kind: classify_block_exception(rest),
+            kind: classify_block_exception(rest)?,
         })
         .affected(affected.clone())
         .description(text.to_string());

@@ -50,11 +50,7 @@
 //!    `until_lethal_fallback`, which restores exactly the board a decline would have left.
 //!    Loss-or-no-op — never a gain.
 //! 2. `predicted_winner == None` + `UntilLethal` ⇒ REJECT.
-//!    Only the object-growth offer carries `None`. The crown gate requires
-//!    `Some(winner) == proposal.predicted_winner`, false for every winner when the latch is `None`
-//!    ⇒ `until_lethal_fallback` full-rolls-back the board, clears `loop_detect_ring` +
-//!    `last_recast_context`, and hands priority back. Zero progress, the CR 732.2b APNAP window
-//!    burned, the re-offer signal destroyed — weakly dominated by declining.
+//!    CR 732.2a: the engine refuses an `UntilLethal` declaration on an offer naming no winner.
 //! 3. `predicted_winner == Some(proposer)` + `UntilLethal` ⇒ positive (critical band).
 //!    The crown IS the win (CR 104.2a); the only other outcome is `until_lethal_fallback`, which
 //!    lands where declining lands. Dominant in outcome. (It is not costless: declaring opens the
@@ -119,6 +115,8 @@ use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, Tacti
 
 pub struct LoopShortcutPolicy;
 
+const DRAW_PROPOSAL_PREFERENCE: f64 = 1.0;
+
 impl TacticalPolicy for LoopShortcutPolicy {
     fn id(&self) -> PolicyId {
         PolicyId::LoopShortcut
@@ -164,6 +162,7 @@ impl TacticalPolicy for LoopShortcutPolicy {
             certificate,
             declaration,
             road: _,
+            counted_take: _,
             period,
         } = &ctx.state.waiting_for
         else {
@@ -197,22 +196,30 @@ impl TacticalPolicy for LoopShortcutPolicy {
                     .with_fact("winner", i64::from(winner.0)),
             ),
 
-            // CR 732.2a: only the object-growth offer latches `None`. The crown gate can never
-            // match it, so `UntilLethal` always ends in `until_lethal_fallback`: full board
-            // rollback, `loop_detect_ring` + `last_recast_context` cleared, priority handed back.
-            // Zero progress AND the CR 732.2b response window spent — weakly dominated by
-            // declining.
+            // CR 732.2a: the engine refuses an `UntilLethal` declaration on an offer naming no winner.
             (None, IterationCount::UntilLethal) => {
                 PolicyVerdict::reject(PolicyReason::new("loop_shortcut_untillethal_cannot_crown"))
             }
+
+            // CR 732.2b: an offer naming no winner is proposed as a draw, which every
+            // other player may still shorten.
+            (None, IterationCount::WithoutEnd) => PolicyVerdict::preference(
+                DRAW_PROPOSAL_PREFERENCE,
+                PolicyReason::new("loop_shortcut_declare_draw_without_end"),
+            ),
+
+            // A proposal without end names no winner, so an offer naming one is not a draw offer.
+            (Some(_), IterationCount::WithoutEnd) => PolicyVerdict::reject(PolicyReason::new(
+                "loop_shortcut_without_end_names_a_winner",
+            )),
 
             // CR 732.2a: a ZERO-repetition declaration is representable, and the engine treats
             // it as legal — `a_zero_count_declaration_validates_over_an_empty_range_but_still_
             // checks_cardinality` in `crates/engine/tests/integration/loop_shortcut.rs` pins
             // exactly that — but it commits NO cycles while still spending the CR 732.2b
             // response window. That is the same weak-domination shape the over-bound arm below
-            // and the `(None, UntilLethal)` arm above reject: the outcome set is {no-op, minus a
-            // response window}, so declining weakly dominates it.
+            // rejects: the outcome set is {no-op, minus a response window}, so declining weakly
+            // dominates it.
             //
             // ⚠ ORDER IS LOAD-BEARING: this arm MUST precede the `!schema.is_bounded() => na()`
             // arm below. `Fixed(0)` matches that guard too, so with the arms the other way round
@@ -280,8 +287,7 @@ impl TacticalPolicy for LoopShortcutPolicy {
             // crosses a CR 704.5a / CR 704.5c / CR 104.3c threshold inside the proposal, which
             // is a conditional action, so the engine hands it back fail-closed with ZERO
             // committed cycles while the CR 732.2b response window is spent. Weakly dominated
-            // by declining: the outcome set is {no-op minus a response window}. Same
-            // domination shape the `(None, UntilLethal)` arm above encodes.
+            // by declining: the outcome set is {no-op minus a response window}.
             (_, IterationCount::Fixed(n)) if *n > schema.deliverable_capacity => {
                 PolicyVerdict::reject(
                     PolicyReason::new("loop_shortcut_bounded_declare_over_bound")
@@ -548,7 +554,7 @@ mod tests {
     use super::*;
     use crate::config::{create_config, AiConfig, AiDifficulty, Platform};
     use crate::policies::context::SearchDepth;
-    use crate::policies::registry::STRONG_MAX;
+    use crate::policies::registry::{NUDGE_MAX, PREFERENCE_MAX, STRONG_MAX};
     use crate::search::{choose_action, score_candidates_with_session};
     use crate::session::AiSession;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
@@ -578,6 +584,7 @@ mod tests {
     fn cert() -> LoopCertificate {
         LoopCertificate {
             unbounded: vec![],
+            rising: vec![],
             win_kind: Some(WinKind::LethalDamage),
             win_kind_at: None,
             mandatory: false,
@@ -587,14 +594,22 @@ mod tests {
     }
 
     fn offer_state(predicted_winner: Option<PlayerId>) -> GameState {
+        offer_state_with(predicted_winner, ShortcutDecisionSchema::default())
+    }
+
+    fn offer_state_with(
+        predicted_winner: Option<PlayerId>,
+        schema: ShortcutDecisionSchema,
+    ) -> GameState {
         let mut state = GameState::new_two_player(0);
         state.waiting_for = WaitingFor::LoopShortcut {
             proposer: P0,
             predicted_winner,
             certificate: cert(),
-            schema: ShortcutDecisionSchema::default(),
+            schema,
             declaration: None,
             road: engine::analysis::loop_check::OfferRoad::Ring,
+            counted_take: Default::default(),
             period: Default::default(),
         };
         state
@@ -736,8 +751,7 @@ mod tests {
         assert_eq!(kind_of(&v), "loop_shortcut_declare_wins");
     }
 
-    /// Row 4 — an `UntilLethal` declare on a `None`-winner (object-growth) offer can never satisfy
-    /// the crown gate, so it always full-rolls-back: zero progress, CR 732.2b window burned.
+    /// Row 4 — an `UntilLethal` declare on an offer naming no winner is vetoed.
     #[test]
     fn declare_until_lethal_with_no_predicted_winner_is_rejected() {
         let state = offer_state(None);
@@ -747,6 +761,36 @@ mod tests {
             "an UntilLethal declare that cannot crown must be vetoed, got {v:?}"
         );
         assert_eq!(kind_of(&v), "loop_shortcut_untillethal_cannot_crown");
+    }
+
+    fn without_end_offer(predicted_winner: Option<PlayerId>) -> GameState {
+        offer_state_with(
+            predicted_winner,
+            ShortcutDecisionSchema {
+                iteration_count: IterationCount::WithoutEnd,
+                ..Default::default()
+            },
+        )
+    }
+
+    /// CR 732.2a: an offer naming no winner is worth proposing as a draw; declining it is neutral.
+    #[test]
+    fn a_without_end_offer_naming_no_winner_prefers_the_draw() {
+        let state = without_end_offer(None);
+        let v = verdict_for(&state, &declare(IterationCount::WithoutEnd));
+        let delta = delta_of(&v);
+        assert!(delta > NUDGE_MAX && delta <= PREFERENCE_MAX, "{v:?}");
+        assert_eq!(kind_of(&v), "loop_shortcut_declare_draw_without_end");
+        assert_eq!(delta_of(&verdict_for(&state, &decline())), 0.0);
+    }
+
+    /// A without-end declaration on an offer naming a winner is not proposed as a draw.
+    #[test]
+    fn a_without_end_declare_against_a_named_winner_is_rejected() {
+        let state = without_end_offer(Some(P1));
+        let v = verdict_for(&state, &declare(IterationCount::WithoutEnd));
+        assert!(matches!(v, PolicyVerdict::Reject { .. }), "{v:?}");
+        assert_eq!(kind_of(&v), "loop_shortcut_without_end_names_a_winner");
     }
 
     /// Rows 3 + 5 + 7 — THE CLASS GUARD: `materialize_fixed_shortcut` COMMITS every cycle it
@@ -792,6 +836,7 @@ mod tests {
             },
             declaration: None,
             road: engine::analysis::loop_check::OfferRoad::Ring,
+            counted_take: Default::default(),
             period: Default::default(),
         };
         state
@@ -835,6 +880,7 @@ mod tests {
             },
             declaration,
             road: engine::analysis::loop_check::OfferRoad::Ring,
+            counted_take: Default::default(),
             period: Default::default(),
         };
         state
@@ -1668,6 +1714,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_draw_offer_is_declared_as_one() {
+        let config = create_config(AiDifficulty::VeryEasy, Platform::Native);
+        let state = without_end_offer(None);
+        assert_both_candidates_reach_the_scorer(&state, &config);
+
+        let session = AiSession::arc_from_game(&state);
+        let scored = score_candidates_with_session(&state, P0, &config, &session);
+        let score_of = |wanted: &GameAction| {
+            scored
+                .iter()
+                .find(|(a, _)| a == wanted)
+                .map(|(_, s)| *s)
+                .unwrap_or_else(|| panic!("{wanted:?} is not scored: {scored:?}"))
+        };
+        let declare_score = score_of(&GameAction::DeclareShortcut {
+            count: IterationCount::WithoutEnd,
+            template: None,
+        });
+        let decline_score = score_of(&GameAction::DeclineShortcut);
+        assert!(
+            declare_score - decline_score > NUDGE_MAX,
+            "declare = {declare_score}, decline = {decline_score}"
+        );
+    }
+
     /// An offer whose period's plays were not read keeps its mana: a count adding red mana for 3
     /// of the proposer's life scores while the proposer survives it, as does the same period
     /// draining P1, and the count that kills the proposer is refused as an elimination.
@@ -2057,6 +2129,80 @@ mod tests {
             for action in non_searching_choices(&state) {
                 assert_eq!(action, Some(GameAction::DeclineShortcut), "{mode:?}");
             }
+        }
+    }
+
+    /// CR 732.5 + CR 104.4b: Worldgorger Dragon under Animate Dead loops with P1's Lightning Bolt
+    /// outside it. Driven to the engine's offer of a draw without end, two AI seats play it out:
+    /// whichever way the seats answer it, the game is a draw.
+    #[test]
+    fn ai_seats_play_an_out_only_loop_offer_to_a_draw() {
+        use crate::auto_play::{run_ai_actions_bounded, AiActionsStop};
+        use engine::game::scenario::GameScenario;
+        use engine::game::scenario_db::GameScenarioDbExt;
+        use engine::types::game_state::LoopDetectionMode;
+        use engine::types::mana::{ManaType, ManaUnit};
+        use engine::types::phase::Phase;
+        use std::collections::{HashMap, HashSet};
+
+        let db = integration_card_db();
+        for seed in [0, 1] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let dragon = scenario.add_real_card(P0, "Worldgorger Dragon", Zone::Graveyard, &db);
+            let animate = scenario.add_real_card(P0, "Animate Dead", Zone::Hand, &db);
+            scenario.with_mana_pool(
+                P0,
+                (0..2)
+                    .map(|_| ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]))
+                    .collect(),
+            );
+            scenario.add_real_card(P1, "Mountain", Zone::Battlefield, &db);
+            scenario.add_real_card(P1, "Lightning Bolt", Zone::Hand, &db);
+            for seat in [P0, P1] {
+                for _ in 0..10 {
+                    scenario.add_real_card(seat, "Swamp", Zone::Library, &db);
+                }
+            }
+            let mut runner = scenario.build();
+            runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+            drop(runner.cast(animate).target_object(dragon).commit());
+            for _ in 0..60 {
+                let action = match &runner.state().waiting_for {
+                    WaitingFor::Priority { .. } => GameAction::PassPriority,
+                    WaitingFor::OrderTriggers { triggers, .. } => GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    },
+                    _ => break,
+                };
+                runner.act(action).expect("a legal drive action");
+            }
+            assert_eq!(
+                runner.state().waiting_for.variant_name(),
+                "LoopShortcut",
+                "seed {seed}: reach"
+            );
+
+            let mut state = runner.state().clone();
+            let session = AiSession::arc_from_game(&state);
+            let run = run_ai_actions_bounded(
+                &mut state,
+                &HashSet::from([P0, P1]),
+                &HashMap::from([(P0, AiConfig::default()), (P1, AiConfig::default())]),
+                &mut SmallRng::seed_from_u64(seed),
+                &session,
+                300,
+            );
+            assert_eq!(
+                state.waiting_for,
+                WaitingFor::GameOver { winner: None },
+                "seed {seed}"
+            );
+            assert!(
+                matches!(run.stop, AiActionsStop::NoEligibleAiActor),
+                "seed {seed}: {:?}",
+                run.stop
+            );
         }
     }
 }

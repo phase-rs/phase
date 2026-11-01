@@ -26796,13 +26796,11 @@ fn defiler_single_line_cost_reduction_parses_as_dedicated_static() {
     );
 }
 
-/// CR 607.1 + CR 610.3 + #1320: Journey to Nowhere / Oblivion Ring class —
-/// two-trigger exile-return synthesis. The ETB exile ("exile target creature")
-/// has no "until" language, but it's paired with an LTB return trigger. The
-/// synthesis pass must set `Duration::UntilHostLeavesPlay` on the ETB exile
-/// so the engine's ExileLink mechanism returns the card when the source leaves.
+/// CR 607.2a + CR 607.3 + #1320: Journey to Nowhere / Oblivion Ring class —
+/// the ETB exile keeps no duration and the paired LTB returns the cards exiled
+/// by this source.
 #[test]
-fn journey_to_nowhere_etb_exile_gets_until_host_leaves_duration() {
+fn journey_to_nowhere_ltb_returns_exiled_by_source() {
     let oracle = "When this enchantment enters, exile target creature.\n\
                       When this enchantment leaves the battlefield, return the exiled card \
                       to the battlefield under its owner's control.";
@@ -26813,13 +26811,7 @@ fn journey_to_nowhere_etb_exile_gets_until_host_leaves_duration() {
         .iter()
         .find(|t| t.mode == TriggerMode::ChangesZone && t.destination == Some(Zone::Battlefield))
         .expect("must have ETB trigger");
-
     let execute = etb.execute.as_deref().expect("ETB must have execute");
-    assert_eq!(
-        execute.duration,
-        Some(crate::types::ability::Duration::UntilHostLeavesPlay),
-        "ETB exile must carry UntilHostLeavesPlay so the engine returns the card"
-    );
     assert!(
         matches!(
             execute.effect.as_ref(),
@@ -26830,19 +26822,48 @@ fn journey_to_nowhere_etb_exile_gets_until_host_leaves_duration() {
         ),
         "ETB execute must be ChangeZone→Exile"
     );
+    assert_eq!(
+        execute.duration, None,
+        "ETB exile must not carry a duration"
+    );
+
+    assert_ltb_returns_exiled_by_source(&result, "Journey to Nowhere");
 }
 
-/// CR 607.1 + CR 607.2a + CR 406.6 + CR 610.3: the mass-exile arm of the
-/// two-trigger exile-return class. Worldgorger Dragon ("exile all other
-/// permanents you control") parses its ETB to `Effect::ChangeZoneAll`→Exile,
-/// not the single-target `ChangeZone`. The widened
-/// `trigger_is_etb_exile_pending_duration` predicate must stamp
-/// `Duration::UntilHostLeavesPlay` on the mass-exile ETB exactly as it does for
-/// the single-target Journey to Nowhere / Oblivion Ring class, so the engine's
-/// `ExileLink::UntilSourceLeaves` mechanism returns the exiled cards when the
-/// source leaves. Oracle text verbatim from `data/card-data.json` (2026-07).
+fn assert_ltb_returns_exiled_by_source(result: &ParsedAbilities, name: &str) {
+    let ltb = result
+        .triggers
+        .iter()
+        .find(|t| t.mode == TriggerMode::LeavesBattlefield)
+        .unwrap_or_else(|| panic!("{name} must have an LTB trigger"));
+    let execute = ltb
+        .execute
+        .as_deref()
+        .unwrap_or_else(|| panic!("{name} LTB must have execute"));
+    assert!(
+        matches!(
+            execute.effect.as_ref(),
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Exile),
+                destination: Zone::Battlefield,
+                target: TargetFilter::ExiledBySource,
+                enters_under: None,
+                ..
+            }
+        ),
+        "{name}: LTB must return the cards exiled by this source, got {:?}",
+        execute.effect
+    );
+}
+
+/// CR 607.1 + CR 607.2a + CR 406.6: the mass-exile arm of the two-trigger
+/// exile-return class. Worldgorger Dragon ("exile all other permanents you
+/// control") parses its ETB to `Effect::ChangeZoneAll`→Exile, not the
+/// single-target `ChangeZone`; its LTB returns the cards exiled by this source
+/// exactly as for Journey to Nowhere. Oracle text verbatim from
+/// `data/card-data.json` (2026-07).
 #[test]
-fn mass_exile_ltb_return_etb_gets_until_host_leaves_duration() {
+fn mass_exile_ltb_returns_exiled_by_source() {
     let oracle = "Flying, trample\n\
              When this creature enters, exile all other permanents you control.\n\
              When this creature leaves the battlefield, return the exiled cards to the \
@@ -26855,16 +26876,10 @@ fn mass_exile_ltb_return_etb_gets_until_host_leaves_duration() {
         .iter()
         .find(|t| t.mode == TriggerMode::ChangesZone && t.destination == Some(Zone::Battlefield))
         .unwrap_or_else(|| panic!("{name} must have an ETB trigger"));
-
     let execute = etb
         .execute
         .as_deref()
         .unwrap_or_else(|| panic!("{name} ETB must have execute"));
-    assert_eq!(
-        execute.duration,
-        Some(crate::types::ability::Duration::UntilHostLeavesPlay),
-        "{name}: mass-exile ETB must carry UntilHostLeavesPlay so the engine returns the cards"
-    );
     assert!(
         matches!(
             execute.effect.as_ref(),
@@ -26875,6 +26890,12 @@ fn mass_exile_ltb_return_etb_gets_until_host_leaves_duration() {
         ),
         "{name}: ETB execute must be ChangeZoneAll→Exile"
     );
+    assert_eq!(
+        execute.duration, None,
+        "{name}: ETB exile must not carry a duration"
+    );
+
+    assert_ltb_returns_exiled_by_source(&result, name);
 }
 
 #[test]
@@ -34580,5 +34601,125 @@ fn nested_exiled_card_returns_keep_the_enclosing_chain_binding() {
             "{form} return must retain the enclosing TrackedSet binding; parsed: {:#?}",
             result.triggers
         );
+    }
+}
+
+/// CR 611.2a + CR 601.2i + CR 400.7j: the "exile this card from your hand: a
+/// land gains a mana ability until this card is cast from exile; you may cast
+/// it for as long as it remains exiled" class (verbatim Oracle text, the
+/// colorless {C}{C} grant and the five three-color grants). Each hand-activated
+/// ability is a continuous grant whose duration is this card's own cast from
+/// exile, followed by a cast permission on the exiled card itself — never a
+/// `CastFromZone`, which would move the targeted land.
+#[test]
+fn self_exile_land_grant_class_parses_until_self_cast_and_self_permission() {
+    use crate::types::ability::{CastingPermission, OriginConstraint};
+
+    const CLASS: [(&str, &str, &[&str]); 6] = [
+        (
+            "Emrakul, the Exigent Doom",
+            "When you cast this spell, untap all lands you control.\nFlying, trample\nWard—Sacrifice three permanents.\n{3}, Exile this card from your hand: Target land gains \"{T}: Add {C}{C}\" until this card is cast from exile. You may cast this card for as long as it remains exiled.",
+            &["Eldrazi"],
+        ),
+        (
+            "Glamorous Outlaw",
+            "When this creature enters, it deals 2 damage to each opponent and you scry 2.\n{2}, Exile this card from your hand: Target land gains \"{T}: Add {U}, {B}, or {R}\" until this card is cast from exile. You may cast this card for as long as it remains exiled.",
+            &["Vampire", "Rogue"],
+        ),
+        (
+            "Masked Bandits",
+            "Vigilance\nMenace (This creature can't be blocked except by two or more creatures.)\n{2}, Exile this card from your hand: Target land gains \"{T}: Add {B}, {R}, or {G}\" until this card is cast from exile. You may cast this card for as long as it remains exiled.",
+            &["Raccoon", "Rogue"],
+        ),
+        (
+            "Rakish Revelers",
+            "When this creature enters, create a 1/1 green and white Citizen creature token.\n{2}, Exile this card from your hand: Target land gains \"{T}: Add {R}, {G}, or {W}\" until this card is cast from exile. You may cast this card for as long as it remains exiled.",
+            &["Elf", "Druid", "Rogue"],
+        ),
+        (
+            "Shattered Seraph",
+            "Flying\nWhen this creature enters, you gain 3 life.\n{2}, Exile this card from your hand: Target land gains \"{T}: Add {W}, {U}, or {B}\" until this card is cast from exile. You may cast this card for as long as it remains exiled.",
+            &["Angel", "Rogue"],
+        ),
+        (
+            "Spara's Adjudicators",
+            "When this creature enters, target creature an opponent controls can't attack or block until your next turn.\n{2}, Exile this card from your hand: Target land gains \"{T}: Add {G}, {W}, or {U}\" until this card is cast from exile. You may cast this card for as long as it remains exiled.",
+            &["Cat", "Citizen"],
+        ),
+    ];
+
+    let deadline = Duration::UntilEvent {
+        event: Box::new(
+            TriggerDefinition::new(TriggerMode::SpellCast)
+                .valid_card(TargetFilter::SelfRef)
+                .spell_cast_origin(OriginConstraint::Equals(Zone::Exile)),
+        ),
+    };
+
+    for (name, oracle, subtypes) in CLASS {
+        let parsed = parse(oracle, name, &[], &["Creature"], subtypes);
+        let ability = parsed
+            .abilities
+            .iter()
+            .find(|ability| ability.activation_zone == Some(Zone::Hand))
+            .unwrap_or_else(|| panic!("{name}: no hand-activated ability"));
+
+        // Reach: the cost is the mana plus exiling this card from hand.
+        let Some(AbilityCost::Composite { costs }) = ability.cost.as_ref() else {
+            panic!("{name}: expected a composite cost, got {:?}", ability.cost);
+        };
+        assert!(
+            costs.iter().any(|c| matches!(c, AbilityCost::Mana { .. })),
+            "{name}: {costs:?}"
+        );
+        assert!(
+            costs.iter().any(|c| matches!(
+                c,
+                AbilityCost::Exile {
+                    zone: Some(Zone::Hand),
+                    ..
+                }
+            )),
+            "{name}: {costs:?}"
+        );
+
+        let Effect::GenericEffect { duration, .. } = ability.effect.as_ref() else {
+            panic!(
+                "{name}: expected a continuous grant, got {:?}",
+                ability.effect
+            );
+        };
+        assert_eq!(duration.as_ref(), Some(&deadline), "{name}");
+
+        let permission = ability
+            .sub_ability
+            .as_ref()
+            .unwrap_or_else(|| panic!("{name}: no cast permission"));
+        assert!(
+            matches!(
+                permission.effect.as_ref(),
+                Effect::GrantCastingPermission {
+                    permission: CastingPermission::PlayFromExile {
+                        mode: CardPlayMode::Cast,
+                        duration: Duration::Permanent,
+                        ..
+                    },
+                    target: TargetFilter::SelfRef,
+                    ..
+                }
+            ),
+            "{name}: {:?}",
+            permission.effect
+        );
+
+        let mut link = Some(ability);
+        while let Some(def) = link {
+            assert!(
+                !matches!(def.effect.as_ref(), Effect::CastFromZone { .. }),
+                "{name}: {:?}",
+                def.effect
+            );
+            link = def.sub_ability.as_deref();
+        }
     }
 }

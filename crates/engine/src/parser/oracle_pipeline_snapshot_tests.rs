@@ -606,7 +606,7 @@ fn iron_fist_living_weapon_grant_lowers_to_the_granter_residual() {
 /// the exiled permanent (`ParentTarget`). Zero `Effect::Unimplemented`.
 #[test]
 fn fractured_identity_each_player_other_than_controller_copies_exiled_permanent() {
-    use crate::types::ability::{Effect, PlayerFilter, TargetFilter};
+    use crate::types::ability::{Effect, PlayerFilter, PlayerRelation, TargetFilter};
 
     let p = parse_oracle_text(
         "Exile target nonland permanent. Each player other than its controller \
@@ -647,6 +647,7 @@ fn fractured_identity_each_player_other_than_controller_copies_exiled_permanent(
         sub.player_scope,
         Some(PlayerFilter::AllExcept {
             exclude: Box::new(PlayerFilter::ParentObjectTargetController),
+            relation: PlayerRelation::All,
         }),
         "tail player_scope must exclude the exiled permanent's controller",
     );

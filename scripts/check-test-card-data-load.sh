@@ -49,7 +49,7 @@ BASE="${1:-$(git merge-base origin/main HEAD 2>/dev/null || echo HEAD~1)}"
 
 # Test code lives both inline (`#[cfg(test)]` in crates/engine/src) and in
 # crates/engine/tests.
-SCOPE=(crates/engine)
+SCOPE=(crates/engine crates/phase-ast/src)
 # The canonical loader (support.rs) names the path on purpose; the CLI bins load
 # the real export by design. These files are outside the gate's view, so a line
 # moved out of one into a checked file is checked.

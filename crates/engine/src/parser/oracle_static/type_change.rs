@@ -1136,6 +1136,19 @@ pub(crate) fn parse_enchanted_is_type(
 
     let is_rest_lower = is_rest_lower.trim_end_matches('.');
 
+    // CR 205.1a + CR 205.1b: a retention clause ("It's still a land." —
+    // Corrupted Zendikon, "…creature that's still a land") names a card type
+    // the replacement set must keep. Split it off the descriptor and re-add the
+    // retained type to the granted set below.
+    let (is_rest_lower, retained_core_type) =
+        match super::grammar::split_type_retention_clause(is_rest_lower) {
+            Some((descriptor, retained)) => (
+                descriptor.trim().trim_end_matches('.').trim_end(),
+                Some(retained),
+            ),
+            None => (is_rest_lower, None),
+        };
+
     // Check for "in addition to its other types" suffix.
     // CR 205.1b: "in addition to its other types" retains all prior card types
     // (additive). Its absence means CR 205.1a applies: the new card type(s)
@@ -1289,6 +1302,12 @@ pub(crate) fn parse_enchanted_is_type(
             }
         }
 
+        if let Some(retained) = retained_core_type {
+            if !granted_core_types.contains(&retained) {
+                granted_core_types.push(retained);
+            }
+        }
+
         // CR 305.7: If a non-additive type-changing Aura sets exactly one
         // basic land subtype, keep the card-type replacement ("is a ... land")
         // and use SetBasicLandType instead of AddSubtype so the land-subtype
@@ -1379,7 +1398,11 @@ pub(crate) fn parse_enchanted_is_type(
         //       [type]" replaces existing card types (Frogify, Lignify, etc.).
         // These are documented separately and combined into a single bool to avoid
         // emitting two SetCardTypes pushes.
-        let needs_set_card_types = loss_replaces_card_types || !is_additive;
+        // CR 205.1b: a "still a [type]" retention clause keeps ALL prior card
+        // types (an artifact land stays an artifact), so it forces additive
+        // AddType unless the clause explicitly says "loses all other card types".
+        let needs_set_card_types =
+            loss_replaces_card_types || (!is_additive && retained_core_type.is_none());
 
         // --- Assemble modifications in written (mod_index) order ---
         // 1. Core types: replacement (SetCardTypes) when CR 205.1a applies (no
@@ -1429,7 +1452,10 @@ pub(crate) fn parse_enchanted_is_type(
         // Auto-inject RemoveAllSubtypes{Creature} unless the trailing clause
         // already provides it (Darksteel Mutation explicitly says "loses all
         // other creature types" and its clause_mods contains the wipe).
+        // CR 205.1b: a "still a [type]" retention clause keeps all prior
+        // subtypes too, so no implicit creature-subtype wipe is emitted.
         if !is_additive
+            && retained_core_type.is_none()
             && (granted_core_types.contains(&CoreType::Creature) || subtype_only_creature_change)
             && !granted_subtypes.is_empty()
             && !modifications

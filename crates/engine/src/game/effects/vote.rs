@@ -915,6 +915,7 @@ mod tests {
 
             activation_cost_reduction: None,
             activation_record: None,
+            control_change_instruction: None,
         };
 
         let mut events = Vec::new();
@@ -1048,6 +1049,7 @@ mod tests {
             parent_target_missing_reason: None,
             activation_cost_reduction: None,
             activation_record: None,
+            control_change_instruction: None,
         }
     }
 
@@ -1259,6 +1261,7 @@ mod tests {
                     chooser: Chooser::Controller.into(),
                     candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
                     reciprocal_role: None,
+                    gather_role: None,
                     up_to: false,
                     constraint: None,
                     selection: CardSelectionMode::Chosen,
@@ -1539,6 +1542,7 @@ mod tests {
 
             activation_cost_reduction: None,
             activation_record: None,
+            control_change_instruction: None,
         };
 
         // Resolution parks on VoteChoice with controller as first subject.
@@ -1730,6 +1734,7 @@ mod tests {
 
             activation_cost_reduction: None,
             activation_record: None,
+            control_change_instruction: None,
         };
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).expect("vote initiates");

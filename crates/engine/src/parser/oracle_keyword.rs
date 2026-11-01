@@ -7264,7 +7264,7 @@ mod router_registry_tests {
         let kw = routed.keyword.expect("must produce keyword");
         match kw {
             Keyword::Morph(crate::types::keywords::MorphCost::NonMana(
-                crate::types::ability::AbilityCost::Reveal { count, filter },
+                crate::types::ability::AbilityCost::Reveal { count, filter, .. },
             )) => {
                 assert_eq!(
                     count,
