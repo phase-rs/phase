@@ -1482,7 +1482,7 @@ mod tests {
     fn created_token_placements_never_pair_across_abilities() {
         let split = cast_ctx_effects(vec![
             AbilityDefinition::new(AbilityKind::Spell, token_effect(0, 0, vec![])),
-            AbilityDefinition::new(AbilityKind::Activated, p1p1_placement()),
+            AbilityDefinition::new(AbilityKind::Spell, p1p1_placement()),
         ]);
         assert_eq!(split, (2, 2, 2), "B's placement must survive the filter");
 
@@ -1492,7 +1492,7 @@ mod tests {
                 SubAbilityLink::ContinuationStep,
                 vec![token_effect(0, 0, vec![]), p1p1_placement()],
             ),
-            AbilityDefinition::new(AbilityKind::Activated, p1p1_placement()),
+            AbilityDefinition::new(AbilityKind::Spell, p1p1_placement()),
         ]);
         assert_eq!(paired, (2, 3, 2), "only A's own placement is filtered");
     }
