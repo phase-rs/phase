@@ -4,6 +4,8 @@
 //! Native Full and LobbyOnly sockets answer Pong here without game admission.
 //! Shared/WASM broker callers retain `LobbyClientMessage::Ping` parity; hosted
 //! listing refreshes still use the broker's registration-aware liveness kernel.
+//! Codec confirmation is FIFO-before application dispatch. Resync ownership is
+//! acquired after ordinary quota/guards and survives delayed application work.
 
 use axum::extract::ws::Message;
 use lobby_broker::LobbyRegistration;
@@ -43,12 +45,14 @@ enum RateCharge {
 const MAX_RECOVERY_CLICK_BYTES: usize = 1024;
 pub(crate) const MAX_QUOTA_DISCARDS_PER_WINDOW: u32 = 64;
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run(
     mut frames: mpsc::Receiver<Received<Message>>,
     mut socket: NegotiatedSocket,
     lobby: SharedLobby,
     host: watch::Receiver<Option<LobbyRegistration>>,
     mode: ServerMode,
+    public_url: Option<String>,
     hello: oneshot::Sender<ClientHelloInfo>,
     application: mpsc::Sender<Received<crate::socket_mailbox::ClientEnvelope>>,
 ) {
@@ -216,7 +220,8 @@ pub(crate) async fn run(
         if let Some(work) = &parser_work {
             work.deserialization();
         }
-        let envelope: crate::socket_mailbox::ClientEnvelope = match serde_json::from_str(&text) {
+        let mut envelope: crate::socket_mailbox::ClientEnvelope = match serde_json::from_str(&text)
+        {
             Ok(message) => message,
             Err(error) => {
                 if matches!(charge, RateCharge::RefusalInspection(_)) {
@@ -256,6 +261,19 @@ pub(crate) async fn run(
                 socket.bootstrap_hooks().before_hello_accept().await;
                 info!(version = %info.client_version, commit = %info.build_commit, "ClientHello accepted");
                 socket.set_wire_format(info.wire_format);
+                if info.state_codec == Some(server_core::protocol::StateCodec::StateCodecV1) {
+                    if socket
+                        .enqueue_reply(crate::native_server_hello(
+                            mode,
+                            public_url.clone(),
+                            info.state_codec,
+                        ))
+                        .is_err()
+                    {
+                        break;
+                    }
+                    socket.set_state_codec(info.state_codec);
+                }
                 if hello
                     .take()
                     .expect("first accepted hello owns the handoff")
@@ -335,6 +353,22 @@ pub(crate) async fn run(
                     .notify();
             }
         } else {
+            if matches!(message, ClientMessage::ResyncState) {
+                if socket.state_codec() != Some(server_core::protocol::StateCodec::StateCodecV1) {
+                    if socket
+                        .enqueue_reply(ServerMessage::error("State codec is not negotiated"))
+                        .is_err()
+                    {
+                        break;
+                    }
+                    continue;
+                }
+                match socket.try_admit_resync() {
+                    Ok(permit) => envelope.resync = Some(permit),
+                    Err(crate::socket_mailbox::RefusalError::Full) => continue,
+                    Err(crate::socket_mailbox::RefusalError::Closed) => break,
+                }
+            }
             match application.try_send(Received {
                 message: envelope,
                 received_at,
