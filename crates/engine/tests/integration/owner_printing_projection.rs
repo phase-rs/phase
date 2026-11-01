@@ -1132,7 +1132,7 @@ fn triggered_stack_rows_follow_their_latched_authority() {
 fn fire_delayed_ability_of_host(merge_first: bool) -> (Board, ObjectId) {
     let mut s = scenario();
     let host = s.add_creature(P0, "Delayed Host", 2, 2).id();
-    let gem = add_mutator(&mut s, "Gemrazer");
+    let gem = add_mutator(&mut s, "Test Mutator");
     let mut board = Board::new(s);
     board.stamp(host, "HOST");
     board.stamp(gem, "GEMZ");
@@ -1179,7 +1179,7 @@ fn fire_delayed_ability_of_host(merge_first: bool) -> (Board, ObjectId) {
         mutate_onto(&mut board, gem, MergeSide::Top);
         assert_eq!(
             board.state().objects[&host].name,
-            "Gemrazer",
+            "Test Mutator",
             "reach: the merged source now carries the top card's name"
         );
     }
@@ -1216,7 +1216,7 @@ fn delayed_row_pairs_its_name_and_printing_from_one_authority() {
     let (board, entry) = fire_delayed_ability_of_host(true);
     for viewer in VIEWERS {
         let row = stack_row(&board, viewer, entry);
-        assert_eq!(row["source_name"], "Gemrazer", "{viewer:?}");
+        assert_eq!(row["source_name"], "Test Mutator", "{viewer:?}");
         assert_eq!(row_set_code(&row), None, "{viewer:?}: {row}");
     }
 }
@@ -2333,8 +2333,14 @@ fn face_down_permanent_owned_and_controlled_by_different_players() {
 // the mutate merge conceals every component
 // ---------------------------------------------------------------------------
 
-/// A mutating creature card in hand: mutate {2}, printed cost {4}, one costless activated
-/// ability, so the merged permanent has an ability to activate.
+/// A synthetic mutating creature card in hand: mutate {2}, printed cost {4}, one costless
+/// activated ability, so the merged permanent has an ability to activate. The tests below
+/// are about printing concealment, not any card's text, and no printed mutate creature fits
+/// the shape: the nearest, Parcelbeast ("{1}, {T}: Look at the top card of your library...")
+/// and Porcuparrot ("{T}: This creature deals X damage to any target..."), both need {T},
+/// which CR 302.6 forbids for a permanent that came under its controller's control this
+/// turn, and the face-down root of the first scenario is played this turn. The name is
+/// deliberately not a printed card's.
 fn add_mutator(s: &mut GameScenario, name: &str) -> ObjectId {
     s.add_creature_to_hand(P0, name, 4, 4)
         .with_keyword(Keyword::Mutate(ManaCost::generic(2)))
@@ -2421,7 +2427,7 @@ fn assert_absent_from_state_forms(board: &Board, tag: &str, step: &str) {
 fn mutate_over_a_face_down_creature_conceals_every_component() {
     let mut s = scenario();
     let buried = add_morph(&mut s, P0, "Buried Secret");
-    let gem = add_mutator(&mut s, "Gemrazer");
+    let gem = add_mutator(&mut s, "Test Mutator");
     // A public non-creature card: a positive control that cannot be a mutate target.
     let forest = s.add_basic_land(P0, ManaColor::Green);
     let mut board = Board::new(s);
@@ -2523,7 +2529,7 @@ fn mutate_over_a_face_down_creature_conceals_every_component() {
 fn mutate_over_a_face_up_root_conceals_every_component_across_merges() {
     let mut s = scenario();
     let root = s.add_creature(P0, "Root Mutant", 2, 2).id();
-    let gem = add_mutator(&mut s, "Gemrazer");
+    let gem = add_mutator(&mut s, "Test Mutator");
     let third = add_mutator(&mut s, "Third Mutant");
     let mut board = Board::new(s);
     board.stamp(root, "ROOT");
