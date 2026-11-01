@@ -193,6 +193,49 @@ fn calix_declining_one_combat_trigger_leaves_the_second_instance_to_prompt() {
     );
 }
 
+/// CR 608.2d + CR 603.2h: with no nonlegendary enchantment to copy, Calix's "you
+/// may create a token that's a copy of a nonlegendary enchantment you control"
+/// offers nothing and spends nothing. The fixture Calix is a plain creature (not
+/// an enchantment), so P0 controls no nonlegendary enchantment; do not add
+/// `as_enchantment()` to it without also making it legendary.
+///
+/// Passes today because the copy is modeled as a stack-time target, so the
+/// trigger is removed for lack of a legal target (CR 603.3d). It must keep
+/// passing after the copied enchantment is re-modeled as chosen on resolution,
+/// at which point a CR 608.2d feasibility arm becomes required.
+#[test]
+fn calix_with_no_nonlegendary_enchantment_offers_nothing_and_spends_nothing() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let calix = scenario
+        .add_creature_from_oracle(P0, "Calix, Guided by Fate", 2, 2, CALIX_GUIDED_BY_FATE)
+        .id();
+
+    let mut runner = scenario.build();
+    let life_before = runner.life(P1);
+    run_combat(&mut runner, vec![calix], vec![]);
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        runner.life(P1),
+        life_before - 2,
+        "reach: Calix dealt combat damage to P1"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "nothing to copy is never offered: {:?}",
+        runner.state().waiting_for
+    );
+    assert!(runner.state().stack.is_empty());
+    assert!(
+        runner
+            .state()
+            .trigger_indicated_actions_this_turn
+            .is_empty(),
+        "an impossible copy takes no indicated action"
+    );
+}
+
 /// Primary regression — two same-controller creatures with combat-damage
 /// triggers attack unblocked, both deal combat damage to P1, and the resulting
 /// two simultaneous same-controller triggers MUST surface a CR 603.3b

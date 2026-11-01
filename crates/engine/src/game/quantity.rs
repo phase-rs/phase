@@ -231,11 +231,9 @@ fn linked_exile_for_context(
             // as the objects the trigger latched; a card that left exile after the
             // trigger latched its pile (a CR 610.3 return, for one) is not "the exiled
             // card", including when another effect exiled it again.
-            source
-                .linked_exile_snapshot
-                .iter()
+            crate::game::players::linked_exile_pile(state, source)
+                .into_iter()
                 .filter(|linked| linked.is_still_exiled(state))
-                .cloned()
                 .collect()
         })
         .unwrap_or_else(|| crate::game::players::linked_exile_cards_for_source(state, ctx.source))
@@ -1671,6 +1669,7 @@ pub fn trigger_definition_is_cast_stable_for_pre_cast(definition: &TriggerDefini
         unless_pay: None,
         batched: _,
         die_sides: _,
+        gotcha_condition: _,
         expend_threshold: _,
         attack_target_filter: _,
         player_actions: _,
@@ -2389,6 +2388,8 @@ fn quantity_ref_uses_unspent_mana(qty: &QuantityRef) -> bool {
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::CardsDrawnLastTurn { .. }
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
         | QuantityRef::BattlefieldEntriesThisTurn { .. }
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
@@ -2731,6 +2732,8 @@ fn quantity_ref_uses_object_count(qty: &QuantityRef) -> bool {
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::CardsDrawnLastTurn { .. }
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::ZoneChangeCountThisTurn { .. }
@@ -3052,6 +3055,8 @@ fn quantity_ref_characteristic_reads(qty: &QuantityRef, depth: u32) -> Character
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::CardsDrawnLastTurn { .. }
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         // CR 400.7 + CR 700.4: zone-change records store last-known information.
@@ -3331,6 +3336,8 @@ fn entered_object_perturbs_quantity_ref(
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::CardsDrawnLastTurn { .. }
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
         | QuantityRef::LandsPlayedThisTurn { .. }
         | QuantityRef::TurnsTaken
         | QuantityRef::ZoneChangeCountThisTurn { .. }
@@ -4919,14 +4926,18 @@ fn resolve_ref(
         // double-count, and Archenemy's 40/20 baseline follows that controller.
         QuantityRef::LifeAboveStarting => player.map_or(0, |p| {
             crate::game::players::team_life_total(state, p.id)
-                - state.format_config.starting_life_total_for_player(p.id)
+                - state
+                    .format_config
+                    .starting_life_total_for_player(p.id, state.players.len())
         }),
         // CR 103.4 + CR 904.5: the rules starting total for the referenced
         // player or players selected by `scope`, including the archenemy's
         // 40-life baseline.
         QuantityRef::StartingLifeTotal { player: scope } => {
             resolve_per_player_scalar(state, scope, controller, ctx, targets, ability, |p| {
-                state.format_config.starting_life_total_for_player(p.id)
+                state
+                    .format_config
+                    .starting_life_total_for_player(p.id, state.players.len())
             })
         }
         // CR 701.57a: the mana-value limit of the discover that fired the current
@@ -6311,6 +6322,32 @@ fn resolve_ref(
             ability,
             |p| u32_to_i32_saturating(p.cards_drawn_this_turn),
         ),
+        // CR 121.1 + CR 603.4: Cards drawn during the previous turn, scoped
+        // via PlayerScope. Reads the turn-start snapshot, mirroring the
+        // this-turn arm above.
+        QuantityRef::CardsDrawnLastTurn { player } => resolve_per_player_history_scalar(
+            state,
+            player,
+            controller,
+            ctx,
+            targets,
+            ability,
+            |p| u32_to_i32_saturating(p.cards_drawn_last_turn),
+        ),
+        // CR 601.2i + CR 603.4: Spells cast by opponents since the previous
+        // turn ended, scoped via PlayerScope. Reads the per-player window
+        // counter bumped on every finalized cast.
+        QuantityRef::OpponentSpellsCastSinceLastTurn { player } => {
+            resolve_per_player_history_scalar(
+                state,
+                player,
+                controller,
+                ctx,
+                targets,
+                ability,
+                |p| u32_to_i32_saturating(p.opponent_spells_cast_since_own_last_turn),
+            )
+        }
         // CR 403.3 + CR 608.2h + CR 608.2i: Battlefield entries this turn for the
         // scoped player. CR 608.2i is the look-back exception that makes a
         // departed permanent still count.
@@ -9518,7 +9555,7 @@ fn resolve_per_team_life(
     match scope {
         // CR 102.2 + CR 104.3 + CR 104.5 + CR 800.4: aggregate over all
         // opponents' teams still in the game. An eliminated player's
-        // `team_life_total` reads 0 (`shared_resource_members` returns empty
+        // `team_life_total` reads 0 (`shared_life_members` returns empty
         // for a departed player off-2HG), so leaving them in this fold lets
         // 0 win a `Min` read below every live player's actual life.
         PlayerScope::Opponent { aggregate } => crate::game::players::aggregate_over_teams(
@@ -9968,10 +10005,11 @@ pub(crate) fn player_count_matching_ids(
                     // set (count context). Uses the generic predicate
                     // authority; ability-target anchors are resolved by the
                     // player_scope driver, not by this count helper.
-                    PlayerFilter::AllExcept { exclude } => {
-                        !crate::game::effects::matches_player_scope(
-                            state, p.id, exclude, controller, source_id,
-                        )
+                    PlayerFilter::AllExcept { exclude, relation } => {
+                        crate::game::players::matches_relation(state, p.id, controller, *relation)
+                            && !crate::game::effects::matches_player_scope(
+                                state, p.id, exclude, controller, source_id,
+                            )
                     }
                     // CR 102.1 + CR 608.2c: the union of the members (count
                     // context). Delegates to the single-authority predicate in
@@ -10004,8 +10042,7 @@ pub(crate) fn player_count_matching_ids(
                                 )
                             },
                             |source| {
-                                source
-                                    .linked_exile_snapshot
+                                crate::game::players::linked_exile_pile(state, source)
                                     .iter()
                                     .any(|linked| linked.owner == p.id)
                             },
@@ -13586,7 +13623,7 @@ mod tests {
     /// `crates/engine/tests/integration/superlative_player_subject_control.rs`).
     /// WITHOUT that filter this read returns 0 rather than the lowest live
     /// life total, and this test fails.
-    /// Because `topology::shared_resource_members` returns EMPTY for a departed
+    /// Because `topology::shared_life_members` returns EMPTY for a departed
     /// (non-2HG) player, `team_life_total` for an eliminated player reads 0 —
     /// which becomes the new Min whenever it undercuts every live player's
     /// actual life. `Max` is unaffected (0 never wins a Max fold unless every
@@ -13953,7 +13990,9 @@ mod tests {
         }
         for (id, baseline) in [(PlayerId(0), 40), (PlayerId(1), 20)] {
             assert_eq!(
-                state.format_config.starting_life_total_for_player(id),
+                state
+                    .format_config
+                    .starting_life_total_for_player(id, state.players.len()),
                 baseline
             );
             assert_eq!(
@@ -21538,11 +21577,267 @@ mod tests {
         );
     }
 
+    /// CR 608.2c + CR 400.7: a superseded tracked-set origin normalizes to what a read through it
+    /// selected while its set was resolved, whether the newer set re-stamps its member after a
+    /// move, in place, or not at all, and renormalizing changes nothing.
+    #[test]
+    fn loop_normalization_reads_superseded_origins_as_while_resolved() {
+        use crate::game::combat::BlockHistoryPair;
+        use crate::types::game_state::{loop_states_equal, TrackedMemberOrigin};
+        use crate::types::identifiers::{CardId, ObjectIncarnationRef};
+
+        #[derive(Clone, Copy, PartialEq)]
+        enum Record {
+            Nothing,
+            SameStep,
+            AcrossStep,
+        }
+        fn stamp(
+            state: &mut GameState,
+            set: u64,
+            member: ObjectId,
+            incarnation: u64,
+            zone: Zone,
+            record: Record,
+        ) {
+            let set = TrackedSetId(set);
+            state.tracked_object_sets.insert(set, vec![member]);
+            state
+                .tracked_set_member_origins
+                .entry(set)
+                .or_default()
+                .insert(
+                    member,
+                    TrackedMemberOrigin {
+                        departed_from: zone,
+                        departure_incarnation: incarnation,
+                    },
+                );
+            if record != Record::Nothing {
+                let mut departed = state.objects[&member].clone();
+                departed.power = Some(5);
+                state
+                    .lki_by_incarnation
+                    .entry(member)
+                    .or_default()
+                    .insert(incarnation, departed.snapshot_public_characteristics());
+            }
+        }
+        // Prior frame: set 2 = {M@`stale`} departing `zone` is the latest set; `live` is M's
+        // incarnation (None: M no longer exists) and `carrier` a block-history incarnation of M.
+        // Current frame: the prior plus set 4, re-stamping M's departure from its prior live
+        // incarnation and leaving M at `after`, or naming N instead (`after` None).
+        let frames = |stale: u64,
+                      live: Option<u64>,
+                      carrier: Option<u64>,
+                      after: Option<u64>,
+                      zone: Zone,
+                      record: Record| {
+            let mut prior = GameState::new_two_player(42);
+            let mut create = |name: &str| {
+                crate::game::zones::create_object(
+                    &mut prior,
+                    CardId(1),
+                    PlayerId(0),
+                    name.to_string(),
+                    Zone::Graveyard,
+                )
+            };
+            let (m, n) = (create("M"), create("N"));
+            prior.objects.get_mut(&n).unwrap().incarnation = 6;
+            match live {
+                Some(incarnation) => prior.objects.get_mut(&m).unwrap().incarnation = incarnation,
+                None => {
+                    prior.objects.remove(&m);
+                }
+            }
+            if let Some(incarnation) = carrier {
+                prior
+                    .creature_blocked_attackers_this_turn
+                    .insert(BlockHistoryPair {
+                        blocker: ObjectIncarnationRef::of(m, incarnation),
+                        attacker: ObjectIncarnationRef::of(ObjectId(99), 0),
+                    });
+            }
+            stamp(&mut prior, 2, m, stale, zone, record);
+            let mut current = prior.clone();
+            if let Some(after) = after {
+                if record == Record::AcrossStep {
+                    current.lki_by_incarnation.clear();
+                }
+                stamp(&mut current, 4, m, live.unwrap_or(3), zone, record);
+                if let Some(object) = current.objects.get_mut(&m) {
+                    object.incarnation = after;
+                }
+            } else {
+                stamp(&mut current, 4, n, 5, Zone::Hand, Record::Nothing);
+            }
+            let origin = move |state: &GameState| {
+                state.tracked_set_member_origins[&TrackedSetId(2)][&m].departure_incarnation
+            };
+            (prior, current, origin, m, n)
+        };
+        let power_sum = QuantityExpr::Ref {
+            qty: QuantityRef::PropertyAggregate(
+                crate::types::ability::PropertyAggregate::new(
+                    AggregateFunction::Sum,
+                    ObjectProperty::Power,
+                    CardTypeSetSource::TrackedSet {
+                        set: TrackedAnaphorSource::ChainSet,
+                        caused_by: None,
+                        filter: None,
+                    },
+                )
+                .unwrap(),
+            ),
+        };
+
+        let mut failures = Vec::new();
+        for (case, live, carrier, after, zone, record) in [
+            (
+                "live, re-stamped",
+                Some(3),
+                None,
+                Some(4),
+                Zone::Hand,
+                Record::Nothing,
+            ),
+            (
+                "live, re-stamped in place",
+                Some(3),
+                None,
+                Some(3),
+                Zone::Hand,
+                Record::Nothing,
+            ),
+            (
+                "live, not re-stamped",
+                Some(3),
+                None,
+                None,
+                Zone::Hand,
+                Record::Nothing,
+            ),
+            (
+                "not live, re-stamped",
+                None,
+                None,
+                Some(4),
+                Zone::Hand,
+                Record::Nothing,
+            ),
+            (
+                "not live, not re-stamped",
+                None,
+                None,
+                None,
+                Zone::Hand,
+                Record::Nothing,
+            ),
+            (
+                "live, newer carrier",
+                Some(4),
+                Some(3),
+                None,
+                Zone::Hand,
+                Record::Nothing,
+            ),
+            (
+                "live, newer carrier, re-stamped",
+                Some(4),
+                Some(3),
+                Some(5),
+                Zone::Hand,
+                Record::Nothing,
+            ),
+            (
+                "live, carrier at the stamp, re-stamped",
+                Some(3),
+                Some(2),
+                Some(4),
+                Zone::Hand,
+                Record::Nothing,
+            ),
+            (
+                "snapshot, re-stamped in the same step",
+                Some(3),
+                None,
+                Some(4),
+                Zone::Battlefield,
+                Record::SameStep,
+            ),
+            (
+                "snapshot, re-stamped across a step",
+                Some(3),
+                None,
+                Some(4),
+                Zone::Battlefield,
+                Record::AcrossStep,
+            ),
+        ] {
+            let (prior, current, origin, m, n) = frames(2, live, carrier, after, zone, record);
+            let normalized = [prior.normalize_for_loop(), current.normalize_for_loop()];
+            if origin(&normalized[0]) != origin(&normalized[1]) {
+                failures.push(format!("{case}: prior and current origins differ"));
+            }
+            for (frame, once) in ["prior", "current"].into_iter().zip(&normalized) {
+                let twice = once.normalize_for_loop();
+                if twice.tracked_set_member_origins != once.tracked_set_member_origins
+                    || twice.lki_by_incarnation != once.lki_by_incarnation
+                {
+                    failures.push(format!("{case} / {frame}: renormalizing changed it"));
+                }
+                let names_snapshot = once
+                    .lki_by_incarnation
+                    .get(&m)
+                    .is_some_and(|history| history.contains_key(&origin(once)));
+                match record {
+                    Record::Nothing if origin(once) != 0 => {
+                        failures.push(format!("{case} / {frame}: origin is not unanchored"));
+                    }
+                    Record::SameStep | Record::AcrossStep if !names_snapshot => {
+                        failures.push(format!("{case} / {frame}: origin names no snapshot"));
+                    }
+                    Record::Nothing | Record::SameStep | Record::AcrossStep => {}
+                }
+            }
+            if record != Record::Nothing
+                && resolve_quantity(&normalized[0], &power_sum, PlayerId(0), n) != 5
+            {
+                failures.push(format!(
+                    "{case}: the normalized prior's read lost the snapshot"
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+
+        // CR 400.7: a later exile departure records under the live incarnation, so an in-place
+        // exile origin stays distinct from a stale one; a hand origin records nothing either way.
+        let stale_vs_live = |zone: Zone| {
+            let (_, stale, origin, ..) = frames(2, Some(3), None, None, zone, Record::Nothing);
+            let (_, live, ..) = frames(3, Some(3), None, None, zone, Record::Nothing);
+            let (stale, live) = (stale.normalize_for_loop(), live.normalize_for_loop());
+            (
+                origin(&stale) == origin(&live),
+                loop_states_equal(&stale, &live),
+            )
+        };
+        assert_eq!(
+            stale_vs_live(Zone::Exile),
+            (false, false),
+            "an exile origin naming the live incarnation must stay distinct from a stale one"
+        );
+        assert_eq!(
+            stale_vs_live(Zone::Hand),
+            (true, true),
+            "a hand origin naming the live incarnation must read like a stale one"
+        );
+    }
+
     /// B2 — STALE-ORIGIN totality: an origin naming an incarnation with no
     /// snapshot anywhere (legacy save, pruned history) must not panic
-    /// canonicalization — origin references join the identity pool, so the
-    /// stamp takes its own exact rank — and reads fall back to legacy
-    /// behavior (live 2 here), since no snapshot sits at that rank.
+    /// canonicalization, and reads fall back to legacy behavior (live 2
+    /// here), since no snapshot sits at that rank.
     #[test]
     fn loop_normalization_tolerates_stale_departure_origins() {
         use crate::types::game_state::{loop_states_equal, TrackedMemberOrigin};
@@ -21553,8 +21848,7 @@ mod tests {
             let set = TrackedSetId(state.next_tracked_set_id - 1);
             let oak = state.tracked_object_sets.get(&set).expect("staged set")[0];
             // A decoy snapshot under incarnation 7 plus an origin naming the
-            // record-less incarnation 99: without origin pooling, the exact
-            // rank lookup panics on the unpooled 99.
+            // record-less incarnation 99.
             state.lki_by_incarnation.clear();
             let pumped = state.lki_cache.get(&oak).expect("staged pump").clone();
             state
@@ -21605,6 +21899,75 @@ mod tests {
         );
     }
 
+    fn stage_carrier_kept_snapshot_with_origin(origin_incarnation: u64) -> (GameState, ObjectId) {
+        use crate::types::game_state::TrackedMemberOrigin;
+
+        let mut state = GameState::new_two_player(42);
+        let (source, _) = stage_pumped_bounced_discarded_member(&mut state);
+        let set = TrackedSetId(state.next_tracked_set_id - 1);
+        let oak = state.tracked_object_sets.get(&set).expect("staged set")[0];
+        state.lki_by_incarnation.clear();
+        let pumped = state.lki_cache.get(&oak).expect("staged pump").clone();
+        assert_eq!(pumped.power, Some(5), "staged pump shape");
+        state
+            .lki_by_incarnation
+            .entry(oak)
+            .or_default()
+            .insert(7, pumped);
+        // A ZoneChanged carrier still names incarnation 7, so the
+        // snapshot survives pruning in BOTH states even when no origin
+        // names it — the retained record the missing origin must not
+        // alias. Fixed ids keep the two states symmetric.
+        let mut record = crate::types::game_state::ZoneChangeRecord::test_minimal(
+            oak,
+            Some(Zone::Exile),
+            Zone::Battlefield,
+        );
+        record.entered_incarnation = Some(7);
+        let ability = crate::types::ability::ResolvedAbility::new(
+            crate::types::ability::Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(5),
+            PlayerId(0),
+        );
+        state.stack.push_back(crate::types::game_state::StackEntry {
+            id: ObjectId(20),
+            source_id: ObjectId(5),
+            controller: PlayerId(0),
+            kind: crate::types::game_state::StackEntryKind::TriggeredAbility {
+                source_id: ObjectId(5),
+                ability: Box::new(ability),
+                condition: None,
+                trigger_event: Some(crate::types::events::GameEvent::ZoneChanged {
+                    object_id: oak,
+                    from: Some(Zone::Exile),
+                    to: Zone::Battlefield,
+                    record: Box::new(record),
+                }),
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
+        state
+            .tracked_set_member_origins
+            .entry(set)
+            .or_default()
+            .insert(
+                oak,
+                TrackedMemberOrigin {
+                    departed_from: Zone::Battlefield,
+                    departure_incarnation: origin_incarnation,
+                },
+            );
+        (state, source)
+    }
+
     /// B2 — MISSING-BEFORE-RETAINED aliasing: two otherwise identical states
     /// each hold a retained power-5 snapshot at incarnation 7 — kept through
     /// pruning by a `ZoneChanged` carrier on the stack that still names 7 —
@@ -21616,74 +21979,7 @@ mod tests {
     /// 1, so A reads 5 and the normalized states coincide.
     #[test]
     fn loop_normalization_keeps_missing_before_retained_distinct() {
-        use crate::types::game_state::{loop_states_equal, TrackedMemberOrigin};
-
-        fn staged_with_origin(origin_incarnation: u64) -> (GameState, ObjectId) {
-            let mut state = GameState::new_two_player(42);
-            let (source, _) = stage_pumped_bounced_discarded_member(&mut state);
-            let set = TrackedSetId(state.next_tracked_set_id - 1);
-            let oak = state.tracked_object_sets.get(&set).expect("staged set")[0];
-            state.lki_by_incarnation.clear();
-            let pumped = state.lki_cache.get(&oak).expect("staged pump").clone();
-            assert_eq!(pumped.power, Some(5), "staged pump shape");
-            state
-                .lki_by_incarnation
-                .entry(oak)
-                .or_default()
-                .insert(7, pumped);
-            // A ZoneChanged carrier still names incarnation 7, so the
-            // snapshot survives pruning in BOTH states even when no origin
-            // names it — the retained record the missing origin must not
-            // alias. Fixed ids keep the two states symmetric.
-            let mut record = crate::types::game_state::ZoneChangeRecord::test_minimal(
-                oak,
-                Some(Zone::Exile),
-                Zone::Battlefield,
-            );
-            record.entered_incarnation = Some(7);
-            let ability = crate::types::ability::ResolvedAbility::new(
-                crate::types::ability::Effect::Draw {
-                    count: QuantityExpr::Fixed { value: 1 },
-                    target: TargetFilter::Controller,
-                },
-                vec![],
-                ObjectId(5),
-                PlayerId(0),
-            );
-            state.stack.push_back(crate::types::game_state::StackEntry {
-                id: ObjectId(20),
-                source_id: ObjectId(5),
-                controller: PlayerId(0),
-                kind: crate::types::game_state::StackEntryKind::TriggeredAbility {
-                    source_id: ObjectId(5),
-                    ability: Box::new(ability),
-                    condition: None,
-                    trigger_event: Some(crate::types::events::GameEvent::ZoneChanged {
-                        object_id: oak,
-                        from: Some(Zone::Exile),
-                        to: Zone::Battlefield,
-                        record: Box::new(record),
-                    }),
-                    description: None,
-                    source_name: String::new(),
-                    subject_match_count: None,
-                    die_result: None,
-                    provenance: None,
-                },
-            });
-            state
-                .tracked_set_member_origins
-                .entry(set)
-                .or_default()
-                .insert(
-                    oak,
-                    TrackedMemberOrigin {
-                        departed_from: Zone::Battlefield,
-                        departure_incarnation: origin_incarnation,
-                    },
-                );
-            (state, source)
-        }
+        use crate::types::game_state::loop_states_equal;
 
         let power_sum = || QuantityExpr::Ref {
             qty: QuantityRef::PropertyAggregate(
@@ -21699,8 +21995,8 @@ mod tests {
                 .unwrap(),
             ),
         };
-        let (a, source_a) = staged_with_origin(1);
-        let (b, source_b) = staged_with_origin(7);
+        let (a, source_a) = stage_carrier_kept_snapshot_with_origin(1);
+        let (b, source_b) = stage_carrier_kept_snapshot_with_origin(7);
         assert_eq!(
             resolve_quantity(&a, &power_sum(), PlayerId(0), source_a),
             2,
@@ -21726,6 +22022,46 @@ mod tests {
         assert!(
             !loop_states_equal(&na, &nb),
             "states whose tracked reads differ (2 vs 5) must not compare loop-equal"
+        );
+    }
+
+    /// CR 608.2c + CR 400.7: a superseded origin naming a missing incarnation between a
+    /// carrier-kept snapshot and the live object takes a rank no snapshot holds, so it stays
+    /// distinct from an origin naming the snapshot.
+    #[test]
+    fn loop_normalization_keeps_missing_above_retained_distinct() {
+        use crate::types::game_state::loop_states_equal;
+
+        let normalized = |origin: u64| {
+            let (mut state, source) = stage_carrier_kept_snapshot_with_origin(origin);
+            let set = TrackedSetId(state.next_tracked_set_id - 1);
+            let oak = state.tracked_object_sets.get(&set).expect("staged set")[0];
+            state.objects.get_mut(&oak).unwrap().incarnation = 9;
+            let newer = TrackedSetId(state.next_tracked_set_id);
+            state.next_tracked_set_id += 1;
+            state.tracked_object_sets.insert(newer, vec![source]);
+            let state = state.normalize_for_loop();
+            let rank = state.tracked_set_member_origins[&set][&oak].departure_incarnation;
+            let names_snapshot = state.lki_by_incarnation[&oak].contains_key(&rank);
+            (state, names_snapshot)
+        };
+        let (missing, missing_names_snapshot) = normalized(8);
+        let (retained, retained_names_snapshot) = normalized(7);
+        assert!(
+            retained_names_snapshot,
+            "reach-guard: the origin naming the snapshot keeps naming it"
+        );
+        assert!(
+            !missing_names_snapshot,
+            "the missing origin must not take the snapshot's rank"
+        );
+        assert!(
+            loop_states_equal(&missing, &normalized(8).0),
+            "reach-guard: identical states stay loop-equal"
+        );
+        assert!(
+            !loop_states_equal(&missing, &retained),
+            "a missing origin must stay distinct from one naming a retained snapshot"
         );
     }
 
@@ -23498,6 +23834,62 @@ mod tests {
 
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 5);
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(1), source), 4);
+    }
+
+    /// CR 607.2a + CR 113.7a: the owner scope of a trigger bound to a departed
+    /// incarnation counts owners of cards that incarnation exiled after departing.
+    #[test]
+    fn player_count_owners_of_cards_exiled_by_source_reads_bound_incarnation_lki() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(30),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Graveyard,
+        );
+        let exiled = create_object(
+            &mut state,
+            CardId(31),
+            PlayerId(1),
+            "Exiled 31".to_string(),
+            Zone::Exile,
+        );
+        let trigger_source = crate::game::triggers::trigger_source_context_for_latch(
+            &state,
+            &state.objects[&source],
+        );
+        assert!(trigger_source.linked_exile_snapshot.is_empty());
+        let departed = trigger_source.identity.reference.incarnation;
+        state.linked_exile_lki.insert(
+            source,
+            vec![crate::types::game_state::LinkedExileLki {
+                departed,
+                successor: departed,
+                snapshot: vec![crate::types::game_state::LinkedExileSnapshot {
+                    exiled_id: exiled,
+                    owner: PlayerId(1),
+                    mana_value: 0,
+                    incarnation: state.objects[&exiled].incarnation,
+                }],
+            }],
+        );
+        let mut ability = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            Vec::new(),
+            source,
+            PlayerId(0),
+        );
+        ability.set_trigger_source_recursive(trigger_source);
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::PlayerCount {
+                filter: PlayerFilter::OwnersOfCardsExiledBySource,
+            },
+        };
+
+        assert_eq!(resolve_quantity_with_targets(&state, &expr, &ability), 1);
     }
 
     #[test]

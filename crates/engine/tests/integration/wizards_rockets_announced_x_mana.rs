@@ -661,7 +661,7 @@ fn rockets_reserved_for_a_spell_sacrifice_is_neither_listed_nor_announced() {
         state.pending_cast.as_ref().is_some_and(|pending| pending
             .deferred_sacrificed_permanents
             .iter()
-            .any(|selection| selection.object_id == reserved)),
+            .any(|selection| selection.selected_object() == Some(reserved))),
         "Rockets is reserved as the spell's deferred sacrifice"
     );
     assert_eq!(zone(state, reserved), Zone::Battlefield);

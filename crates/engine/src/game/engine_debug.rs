@@ -573,7 +573,11 @@ pub fn apply_debug_action(
             validate_player(state, player_id)?;
             if enabled {
                 // Delegate to the single write authority; record the six Mana axes.
-                state.mark_unbounded_loop(player_id, &super::mana_payment::INFINITE_MANA_AXES);
+                state.mark_unbounded_loop(
+                    player_id,
+                    &super::mana_payment::INFINITE_MANA_AXES,
+                    &super::mana_payment::INFINITE_MANA_AXES,
+                );
                 // CR 500.5 debug exemption marker: tag this player's Mana axes as the debug
                 // toggle so the end-of-step keep-gate suppresses the empty for them only (a
                 // loop-backed Mana axis, absent from this set, drains and de-realizes instead).

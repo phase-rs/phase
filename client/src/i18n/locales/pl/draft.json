@@ -119,6 +119,10 @@
   },
   "setSelector": {
     "botDifficulty": "Poziom trudności botów",
+    "pickEnhancements": {
+      "label": "Użyj wbudowanej SI z ulepszeniami wyborów w draftcie",
+      "hint": "Boty stosują pisemny przewodnik kolejności wyborów w formatach, które go mają (obecnie Mirrodin, Darksteel i Fifth Dawn). Działa od średniego poziomu trudności."
+    },
     "difficultyLevels": {
       "VeryEasy": "Bardzo łatwy",
       "Easy": "Łatwy",
@@ -162,6 +166,7 @@
     "startSealed": "Rozpocznij sealed"
   },
   "pack": {
+    "label": "Booster draftu",
     "confirmPick": "Potwierdź wybór",
     "selected": "Wybrano",
     "draftEffects": "Efekty draftu:",

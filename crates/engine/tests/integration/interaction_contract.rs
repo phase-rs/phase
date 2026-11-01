@@ -3421,6 +3421,7 @@ fn loop_shortcut_zero_deliverable_capacity_is_rejected_not_clamped() {
             predicted_winner: Some(P0),
             certificate: engine::analysis::loop_check::LoopCertificate {
                 unbounded: Vec::new(),
+                rising: Vec::new(),
                 win_kind: Some(engine::analysis::loop_check::WinKind::LethalDamage),
                 win_kind_at: None,
                 mandatory: false,
@@ -3434,6 +3435,7 @@ fn loop_shortcut_zero_deliverable_capacity_is_rejected_not_clamped() {
             },
             declaration: None,
             road: engine::analysis::loop_check::OfferRoad::Ring,
+            counted_take: Default::default(),
             period: Default::default(),
         };
         bind(&mut state, "loop-zero-bound");
@@ -3485,6 +3487,7 @@ fn loop_shortcut_narrowed_capacity_bounds_the_picker() {
         predicted_winner: Some(P0),
         certificate: engine::analysis::loop_check::LoopCertificate {
             unbounded: Vec::new(),
+            rising: Vec::new(),
             win_kind: Some(engine::analysis::loop_check::WinKind::LethalDamage),
             win_kind_at: None,
             mandatory: false,
@@ -3501,6 +3504,7 @@ fn loop_shortcut_narrowed_capacity_bounds_the_picker() {
         },
         declaration: None,
         road: engine::analysis::loop_check::OfferRoad::Ring,
+        counted_take: Default::default(),
         period: Default::default(),
     };
     bind(&mut state, "loop-narrowed-bound");
@@ -3540,6 +3544,7 @@ fn loop_shortcut_number_schema_accepts_a_fixed_count_above_one() {
         predicted_winner: Some(P0),
         certificate: engine::analysis::loop_check::LoopCertificate {
             unbounded: Vec::new(),
+            rising: Vec::new(),
             win_kind: Some(engine::analysis::loop_check::WinKind::LethalDamage),
             win_kind_at: None,
             mandatory: false,
@@ -3553,6 +3558,7 @@ fn loop_shortcut_number_schema_accepts_a_fixed_count_above_one() {
         },
         declaration: None,
         road: engine::analysis::loop_check::OfferRoad::Ring,
+        counted_take: Default::default(),
         period: Default::default(),
     };
     bind(&mut state, "loop-count");
@@ -3629,6 +3635,7 @@ fn preview_offer_with_points(
         predicted_winner: Some(P0),
         certificate: engine::analysis::loop_check::LoopCertificate {
             unbounded: Vec::new(),
+            rising: Vec::new(),
             win_kind: Some(engine::analysis::loop_check::WinKind::Advantage),
             win_kind_at: None,
             mandatory: false,
@@ -3658,6 +3665,7 @@ fn preview_offer_with_points(
         },
         declaration: None,
         road: engine::analysis::loop_check::OfferRoad::Ring,
+        counted_take: Default::default(),
         period: Default::default(),
     };
     bind(&mut state, "loop-preview");
@@ -4351,6 +4359,7 @@ fn respond_window_on(
             predicted_winner: Some(P0),
             count: count.clone(),
             unbounded: Vec::new(),
+            rising: Vec::new(),
             win_kind: Some(engine::analysis::loop_check::WinKind::Advantage),
             win_kind_at: None,
             template: Some(DecisionTemplate {
@@ -4367,6 +4376,7 @@ fn respond_window_on(
             published_declaration: None,
             leading_aims: Vec::new(),
             road: engine::analysis::loop_check::OfferRoad::Ring,
+            counted_take: Default::default(),
             period: Default::default(),
         },
     };
@@ -5302,7 +5312,7 @@ fn a_multi_subject_schedule_states_the_head_its_drive_announces() {
         // A one-step schedule partitions the whole declared count, and nothing at all when the
         // proposal names no count.
         let partition = match &count {
-            IterationCount::UntilLethal => None,
+            IterationCount::UntilLethal | IterationCount::WithoutEnd => None,
             IterationCount::Fixed(n) => Some(vec![*n]),
         };
         for ((shape, tailed), (_, single)) in shapes(&TAILED).into_iter().zip(shapes(&HEAD)) {
@@ -6946,6 +6956,7 @@ fn loop_shortcut_schema_and_materializer_cover_every_decision_point_kind() {
         predicted_winner: Some(P0),
         certificate: engine::analysis::loop_check::LoopCertificate {
             unbounded: Vec::new(),
+            rising: Vec::new(),
             win_kind: Some(engine::analysis::loop_check::WinKind::Advantage),
             win_kind_at: None,
             mandatory: false,
@@ -7004,6 +7015,7 @@ fn loop_shortcut_schema_and_materializer_cover_every_decision_point_kind() {
         },
         declaration: None,
         road: engine::analysis::loop_check::OfferRoad::Ring,
+        counted_take: Default::default(),
         period: Default::default(),
     };
     bind(runner.state_mut(), "loop-point-kinds");
@@ -7183,6 +7195,7 @@ fn loop_shortcut_human_ingress_emits_the_target_class_spelling_for_a_submitted_s
         predicted_winner: Some(P0),
         certificate: engine::analysis::loop_check::LoopCertificate {
             unbounded: Vec::new(),
+            rising: Vec::new(),
             win_kind: Some(engine::analysis::loop_check::WinKind::Advantage),
             win_kind_at: None,
             mandatory: false,
@@ -7209,6 +7222,7 @@ fn loop_shortcut_human_ingress_emits_the_target_class_spelling_for_a_submitted_s
         },
         declaration: None,
         road: engine::analysis::loop_check::OfferRoad::Ring,
+        counted_take: Default::default(),
         period: Default::default(),
     };
     bind(runner.state_mut(), "r2f-human-seat-pin");
@@ -8516,6 +8530,7 @@ fn stage_sequenced_offer(
         predicted_winner: Some(P0),
         certificate: engine::analysis::loop_check::LoopCertificate {
             unbounded: Vec::new(),
+            rising: Vec::new(),
             win_kind: Some(engine::analysis::loop_check::WinKind::Advantage),
             win_kind_at: None,
             mandatory: false,
@@ -8543,6 +8558,7 @@ fn stage_sequenced_offer(
         },
         declaration: None,
         road: engine::analysis::loop_check::OfferRoad::Ring,
+        counted_take: Default::default(),
         period: Default::default(),
     };
     bind(runner.state_mut(), label);
@@ -11185,6 +11201,7 @@ fn p10_row_7_a_restored_multi_entry_ranking_still_loads_and_still_drives_head_on
             predicted_winner: Some(P0),
             count: IterationCount::Fixed(3),
             unbounded: Vec::new(),
+            rising: Vec::new(),
             win_kind: Some(engine::analysis::loop_check::WinKind::Advantage),
             win_kind_at: None,
             template: Some(declared),
@@ -11193,6 +11210,7 @@ fn p10_row_7_a_restored_multi_entry_ranking_still_loads_and_still_drives_head_on
             published_declaration: None,
             leading_aims: Vec::new(),
             road: engine::analysis::loop_check::OfferRoad::Ring,
+            counted_take: Default::default(),
             period: Default::default(),
         },
     };

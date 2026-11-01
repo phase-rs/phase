@@ -15,6 +15,7 @@ lobby-broker = { path = "../lobby-broker" }
 engine = { path = "../engine", package = "phase-engine" }
 phase-ai = { path = "../phase-ai" }
 seat-reducer = { path = "../seat-reducer" }
+state-codec = { path = "../state-codec" }
 draft-core = { path = "../draft-core" }
 rand = "0.9"
 axum = { version = "0.8", features = ["ws"] }

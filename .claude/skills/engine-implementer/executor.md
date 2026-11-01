@@ -135,7 +135,7 @@ Every behavioral change MUST ship at least one test that drives the real pipelin
 Choose the matching production entry point and completion assertions from [card-test](../card-test/SKILL.md): casting, activation, event-generated triggers, or public choice actions. A returned outcome or empty stack alone does not prove a paused resolution completed. Two of its rules bear repeating here:
 
 - **No vacuous negatives.** A negative assertion must be paired with a positive reach-guard in the same test proving the input got past any upstream short-circuit (e.g. `check_swallowed_clauses` early-returns on `Effect::Unimplemented`, making bare `!has_swallowed_clause(...)` assertions vacuous).
-- **Verbatim Oracle text.** Build test cards from the real card's exact Oracle text, never a paraphrase — paraphrases can take a different parser branch and go green while the real card stays broken.
+- **Verbatim Oracle text.** Build test cards from the real card's exact Oracle text, never a paraphrase — paraphrases can take a different parser branch and go green while the real card stays broken. [Real cards](SKILL.md#real-cards) governs synthetic cards and every justification in your report.
 
 Confirm discrimination concretely before returning:
 

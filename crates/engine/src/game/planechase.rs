@@ -33,7 +33,6 @@ use crate::game::game_object::GameObject;
 use crate::game::turn_control;
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
-use crate::types::format::GameFormat;
 use crate::types::game_state::{GameState, ManaAbilityResume, StackEntryKind, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaCost;
@@ -329,7 +328,7 @@ pub fn planeswalk(state: &mut GameState, player_id: PlayerId, events: &mut Vec<G
 /// Planeswalked/Chaos/DieRolled events are emitted and no triggers are
 /// collected for this starting reveal.
 pub fn reveal_starting_plane(state: &mut GameState) {
-    if state.format_config.format != GameFormat::Planechase
+    if !state.format_config.format.is_planechase_family()
         || active_plane(state).is_some()
         || state.planar_deck.is_empty()
     {
@@ -377,7 +376,7 @@ pub fn planar_die_roll_cost(state: &GameState, player: PlayerId) -> ManaCost {
 /// CR 901.9 / CR 116.2i: Active player may roll during a main phase while they
 /// have priority and the stack is empty, if they can pay the escalating cost.
 pub fn can_roll_planar_die(state: &GameState, player: PlayerId) -> bool {
-    if state.format_config.format != GameFormat::Planechase
+    if !state.format_config.format.is_planechase_family()
         || state.active_player != player
         || !matches!(state.waiting_for, WaitingFor::Priority { .. })
         || turn_control::priority_seat(state) != player
@@ -541,19 +540,16 @@ pub fn check_phenomenon_planeswalk_sba(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     any_performed: &mut bool,
+    waiting: &[crate::game::triggers::PendingTriggerContext],
 ) -> Option<PlaneswalkResolution> {
     let controller = state.planar_controller?;
     if !active_is_phenomenon(state) {
         return None;
     }
     let phenomenon_id = active_plane(state)?;
-    // CR 704.6f: do not planeswalk while the phenomenon's own triggered ability
-    // is still on the stack.
-    let has_ability_on_stack = state
-        .stack
-        .iter()
-        .any(|entry| entry.source_id == phenomenon_id);
-    if has_ability_on_stack {
+    // CR 704.6f: do not planeswalk while a triggered ability of the phenomenon
+    // has triggered but not yet left the stack.
+    if crate::game::sba::is_source_of_ability_not_yet_left_stack(state, waiting, phenomenon_id) {
         return None;
     }
     let resolution = resolve_planeswalk_via_replacements(
@@ -711,7 +707,7 @@ pub fn prepare_player_left_game_handoff(
     leaving: PlayerId,
     leaving_set: &HashSet<PlayerId>,
 ) -> Option<PlanarHandoff> {
-    if state.format_config.format != GameFormat::Planechase
+    if !state.format_config.format.is_planechase_family()
         || state.planar_controller != Some(leaving)
     {
         return None;
