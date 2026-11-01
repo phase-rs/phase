@@ -10593,10 +10593,12 @@ impl ManaAbilityResume {
             | ManaAbilityResume::ManaSourceSelection { .. }
             | ManaAbilityResume::PhyrexianCastPayment { .. }
             | ManaAbilityResume::FinalizePendingManaPayment { .. } => true,
-            // CR 605.3a: re-enters the outer mana ability, not the cast;
-            // `PendingManaAbility::resumes_pending_cast` follows that chain.
-            ManaAbilityResume::ManaAbilityManaPayment { .. }
-            | ManaAbilityResume::Priority
+            // CR 605.3a: re-enters the outer mana ability, whose own chain
+            // decides whether the cast's payment lies beneath it.
+            ManaAbilityResume::ManaAbilityManaPayment {
+                pending_mana_ability,
+            } => pending_mana_ability.resumes_pending_cast(),
+            ManaAbilityResume::Priority
             | ManaAbilityResume::CompanionToHand { .. }
             | ManaAbilityResume::PlanarDieRoll { .. }
             | ManaAbilityResume::TurnFaceUp { .. }
@@ -11036,14 +11038,13 @@ impl PendingManaAbility {
     /// CR 601.2g-h + CR 605.3a: whether finishing this activation, or any
     /// activation suspended beneath it at a payment window, returns to a cast's
     /// or activation's cost payment (so `GameState::pending_cast` is live).
+    /// `ManaAbilityResume::resumes_pending_cast` walks the suspended chain.
     pub(crate) fn resumes_pending_cast(&self) -> bool {
-        self.suspended_chain().any(|pending| {
-            pending.resume.resumes_pending_cast()
-                || pending
-                    .cost_move_resume
-                    .as_ref()
-                    .is_some_and(ManaAbilityResume::resumes_pending_cast)
-        })
+        self.resume.resumes_pending_cast()
+            || self
+                .cost_move_resume
+                .as_ref()
+                .is_some_and(ManaAbilityResume::resumes_pending_cast)
     }
 
     /// How many activations are suspended beneath this one. With its source this identifies the
@@ -29350,28 +29351,113 @@ impl GameState {
     }
 
     /// CR 601.2: The cast or activation announcement currently in flight, if
-    /// any, resolved through every typed carrier: the prompt's inline
-    /// `PendingCast`, the external `GameState::pending_cast` behind the
-    /// `ManaPayment` family and `DistributeAmong` (CR 601.2d), and the external
-    /// `pending_cast` behind a nested mana ability's continuation prompts
-    /// (CR 605.3b + CR 601.2g) when its `resume` returns to the cast's payment.
-    /// A bare `pending_cast` outside those carriers is not an active
-    /// announcement.
+    /// any, read from whichever typed [`PendingCastOwner`] holds it, provided
+    /// that owner is eligible at the current prompt (see
+    /// [`Self::pending_cast_owner_active_at_prompt`]). A bare
+    /// `GameState::pending_cast` left outside every carrier prompt, or a
+    /// lingering permission, is not an active announcement.
     pub fn active_cast_announcement(&self) -> Option<&PendingCast> {
-        if let Some(inline) = self.waiting_for.pending_cast_ref() {
-            return Some(inline);
+        PendingCastOwner::ALL
+            .into_iter()
+            .filter(|owner| self.pending_cast_owner_active_at_prompt(*owner))
+            .find_map(|owner| self.pending_cast_at(owner))
+    }
+
+    /// Whether `owner`'s `PendingCast` belongs to the announcement the current
+    /// prompt is continuing.
+    fn pending_cast_owner_active_at_prompt(&self, owner: PendingCastOwner) -> bool {
+        match owner {
+            // The prompt embeds the announcement itself.
+            PendingCastOwner::Prompt => true,
+            PendingCastOwner::External => self.prompt_continues_external_pending_cast(),
+            // CR 616.1 + CR 601.2h: a typed cost root holds the announcement
+            // only while its paused cost waits behind the child prompt it
+            // opened (the replacement choice); it never survives to priority.
+            PendingCastOwner::DeferredLifeCost
+            | PendingCastOwner::CostMove
+            | PendingCastOwner::DiscardForCost => self.cost_root_child_prompt_open(),
         }
-        let external = self.waiting_for.has_pending_cast()
-            || matches!(self.waiting_for, WaitingFor::DistributeAmong { .. })
+    }
+
+    /// Whether the current prompt continues the announcement carried in the
+    /// external `GameState::pending_cast`: the `ManaPayment` family, Assist
+    /// (CR 702.132a), `DistributeAmong` (CR 601.2d), a nested mana ability's
+    /// continuation prompt whose activation returns to the cast's payment
+    /// (CR 601.2g + CR 605.3b), or a mana ability's paused cost parked in a
+    /// typed root whose activation chain returns to that payment.
+    fn prompt_continues_external_pending_cast(&self) -> bool {
+        self.waiting_for.has_pending_cast()
+            || matches!(
+                self.waiting_for,
+                WaitingFor::DistributeAmong { .. }
+                    | WaitingFor::AssistChoosePlayer { .. }
+                    | WaitingFor::AssistPayment { .. }
+            )
             || self
                 .waiting_for
                 .pending_mana_ability_ref()
-                .is_some_and(PendingManaAbility::resumes_pending_cast);
-        if external {
-            self.pending_cast.as_deref()
-        } else {
-            None
-        }
+                .is_some_and(PendingManaAbility::resumes_pending_cast)
+            || (self.cost_root_child_prompt_open() && self.parked_mana_cost_resumes_pending_cast())
+    }
+
+    /// A typed cost root parks behind the prompt its paused cost opened; once
+    /// the game is back at priority (or over) no such child prompt is open.
+    fn cost_root_child_prompt_open(&self) -> bool {
+        !matches!(
+            self.waiting_for,
+            WaitingFor::Priority { .. } | WaitingFor::GameOver { .. }
+        )
+    }
+
+    /// CR 601.2g + CR 605.3b + CR 616.1: whether a mana ability whose own cost
+    /// paused (a replacement-aware sacrifice, collect evidence, or life
+    /// payment) returns, through its retained activation chain and its
+    /// cost-cursor parents, to a cast's or activation's cost payment, so the
+    /// external `pending_cast` is still that announcement.
+    fn parked_mana_cost_resumes_pending_cast(&self) -> bool {
+        let cost_move = self
+            .pending_cost_move_resume
+            .as_ref()
+            .is_some_and(|resume| match resume {
+                PendingCostMoveResume::ManaAbilityPayment { pending, cursor } => {
+                    pending.resumes_pending_cast()
+                        || std::iter::successors(cursor.parent.as_deref(), |parent| {
+                            parent.cursor.parent.as_deref()
+                        })
+                        .any(|parent| parent.pending.resumes_pending_cast())
+                }
+                PendingCostMoveResume::CollectEvidencePayment { resume, .. } => {
+                    match resume.as_ref() {
+                        CollectEvidenceResume::ManaAbility {
+                            pending_mana_ability,
+                        } => pending_mana_ability.resumes_pending_cast(),
+                        CollectEvidenceResume::Casting { .. }
+                        | CollectEvidenceResume::Effect { .. } => false,
+                    }
+                }
+                PendingCostMoveResume::Cast { .. }
+                | PendingCostMoveResume::SacrificeForCost { .. }
+                | PendingCostMoveResume::CounterCostRemovalPayment { .. }
+                | PendingCostMoveResume::ActivationMillPayment { .. }
+                | PendingCostMoveResume::WardSacrificePayment { .. }
+                | PendingCostMoveResume::ReplacementMayCost { .. }
+                | PendingCostMoveResume::Foretell { .. }
+                | PendingCostMoveResume::UnlessBouncePayment { .. }
+                | PendingCostMoveResume::LoyaltyActivation { .. }
+                | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
+                | PendingCostMoveResume::RandomDiscardUnlessPayment(..)
+                | PendingCostMoveResume::TurnFaceUpCostMove { .. } => false,
+            });
+        let deferred_life = self
+            .pending_deferred_life_cost_resume
+            .as_ref()
+            .is_some_and(|resume| match resume {
+                DeferredLifeCostResume::ManaRoot { resume, .. } => resume.resumes_pending_cast(),
+                DeferredLifeCostResume::Cast { .. }
+                | DeferredLifeCostResume::PayAmount { .. }
+                | DeferredLifeCostResume::TurnFaceUp { .. } => false,
+            });
+        cost_move || deferred_life
     }
 
     /// Returns the active continuation only when its typed frame is the stack

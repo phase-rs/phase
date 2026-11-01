@@ -23,7 +23,7 @@ use engine::types::ability::{
 use engine::types::actions::{CastChoice, GameAction};
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
-    CastOfferKind, CastPaymentMode, GameState, StackEntryKind, WaitingFor,
+    CastOfferKind, CastPaymentMode, GameState, PendingCostMoveResume, StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -1943,10 +1943,14 @@ fn assert_ripple_pile_revealed(
 /// A Surging Flame cast under Thalia's noncreature-spell tax, a Ripple 4 pile
 /// whose top card is the same-named hit, and a Phyrexian Altar (a sacrifice-for-
 /// any-color mana source auto-payment cannot spend on its own) as the only
-/// mana left for the free cast's `{1}` tax. Returns `(runner, bears, altar,
-/// misses)` positioned at the free cast's `ManaPayment` prompt.
+/// mana left for the free cast's `{1}` tax. `fodder` is the creature the
+/// Altar can sacrifice; `extra_permanents` are added to P0's battlefield.
+/// Returns `(runner, fodder, altar, misses)` positioned at the free cast's
+/// `ManaPayment` prompt.
 fn ripple_free_cast_at_tax_payment(
     db: &'static engine::database::CardDatabase,
+    fodder: &str,
+    extra_permanents: &[&str],
 ) -> (
     engine::game::scenario::GameRunner,
     ObjectId,
@@ -1961,8 +1965,11 @@ fn ripple_free_cast_at_tax_payment(
         &[ManaType::Red, ManaType::Red, ManaType::Red],
     );
     scenario.add_real_card(P0, "Thalia, Guardian of Thraben", Zone::Battlefield, db);
-    let bears = scenario.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, db);
+    let fodder = scenario.add_real_card(P0, fodder, Zone::Battlefield, db);
     let altar = scenario.add_real_card(P0, "Phyrexian Altar", Zone::Battlefield, db);
+    for name in extra_permanents {
+        scenario.add_real_card(P0, name, Zone::Battlefield, db);
+    }
     let spell = scenario.add_real_card(P0, "Surging Flame", Zone::Hand, db);
     scenario.add_real_card(P0, "Surging Flame", Zone::Library, db);
     let misses: Vec<ObjectId> = ["Mountain", "Forest", "Island"]
@@ -1999,7 +2006,7 @@ fn ripple_free_cast_at_tax_payment(
         "the free cast's Thalia tax must open a manual payment, got {:?}",
         runner.state().waiting_for
     );
-    (runner, bears, altar, misses)
+    (runner, fodder, altar, misses)
 }
 
 /// CR 702.60a + CR 701.20a + CR 601.2g + CR 605.3b: the free Ripple cast's
@@ -2012,7 +2019,8 @@ fn ripple_free_cast_keeps_reveal_through_mana_ability_color_choice() {
     let Some(db) = shared_card_db() else {
         return;
     };
-    let (mut runner, bears, altar, misses) = ripple_free_cast_at_tax_payment(db);
+    let (mut runner, bears, altar, misses) =
+        ripple_free_cast_at_tax_payment(db, "Grizzly Bears", &[]);
     assert_ripple_pile_revealed(&runner, &misses, "at ManaPayment");
 
     runner
@@ -2088,7 +2096,8 @@ fn ripple_free_cast_canceled_at_payment_does_not_retain_reveal() {
     let Some(db) = shared_card_db() else {
         return;
     };
-    let (mut runner, _bears, _altar, misses) = ripple_free_cast_at_tax_payment(db);
+    let (mut runner, _bears, _altar, misses) =
+        ripple_free_cast_at_tax_payment(db, "Grizzly Bears", &[]);
     assert_ripple_pile_revealed(&runner, &misses, "at ManaPayment");
 
     runner
@@ -2196,4 +2205,232 @@ fn ripple_free_cast_keeps_reveal_through_distribution() {
         );
     };
     assert_ripple_pile_revealed(&runner, &cards, "at RippleBottomOrder");
+}
+
+/// Index of the `source`-owned candidate at the current `ReplacementChoice`.
+fn replacement_candidate_index(
+    runner: &engine::game::scenario::GameRunner,
+    source: ObjectId,
+) -> usize {
+    match &runner.state().waiting_for {
+        WaitingFor::ReplacementChoice { candidates, .. } => candidates
+            .iter()
+            .position(|candidate| candidate.source_id == source)
+            .expect("replacement candidate is selectable"),
+        other => panic!("expected ReplacementChoice, got {other:?}"),
+    }
+}
+
+/// CR 702.60a + CR 701.20a + CR 601.2g + CR 605.3b + CR 616.1: the free Ripple
+/// cast's Thalia tax is paid with Phyrexian Altar, whose own sacrifice cost
+/// (Darksteel Colossus under Rest in Peace) pauses at a replacement choice.
+/// The cast's announcement lives in the external `pending_cast` behind the
+/// mana ability's typed cost root, so it is still in flight: the remaining
+/// pile stays revealed to every viewer across `ChooseReplacement`, through the
+/// rest of the payment, and at the bottom-order step.
+#[test]
+fn ripple_free_cast_keeps_reveal_through_mana_ability_cost_replacement_choice() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let (mut runner, colossus, altar, misses) =
+        ripple_free_cast_at_tax_payment(db, "Darksteel Colossus", &["Rest in Peace"]);
+    let rest_in_peace = runner
+        .state()
+        .objects
+        .values()
+        .find(|obj| obj.name == "Rest in Peace")
+        .map(|obj| obj.id)
+        .expect("Rest in Peace on the battlefield");
+    assert_ripple_pile_revealed(&runner, &misses, "at ManaPayment");
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: altar,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activate Phyrexian Altar during the free cast's payment");
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![colossus],
+        })
+        .expect("sacrifice Darksteel Colossus to the Altar");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "Rest in Peace and Darksteel Colossus compete for the sacrifice, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        matches!(
+            runner.state().pending_cost_move_resume,
+            Some(PendingCostMoveResume::ManaAbilityPayment { .. })
+        ),
+        "the Altar's paused sacrifice must be parked in its mana-ability root"
+    );
+    assert!(
+        runner.state().pending_cast.is_some(),
+        "the free cast's announcement stays in the external carrier"
+    );
+    assert_ripple_pile_revealed(&runner, &misses, "at the Altar's ReplacementChoice");
+
+    let index = replacement_candidate_index(&runner, rest_in_peace);
+    runner
+        .act(GameAction::ChooseReplacement { index })
+        .expect("Rest in Peace exiles the sacrificed Colossus");
+    assert_eq!(
+        runner.state().objects[&colossus].zone,
+        Zone::Exile,
+        "choosing Rest in Peace avoids the Colossus shuffle"
+    );
+    assert_ripple_pile_revealed(&runner, &misses, "after ChooseReplacement");
+
+    if matches!(
+        runner.state().waiting_for,
+        WaitingFor::ChooseManaColor { .. }
+    ) {
+        runner
+            .act(GameAction::ChooseManaColor {
+                choice: engine::types::game_state::ManaChoice::SingleColor(ManaType::Red),
+                count: 1,
+            })
+            .expect("choose the Altar's color");
+    }
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+        "the Altar's mana returns to the free cast's payment, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_ripple_pile_revealed(&runner, &misses, "back at ManaPayment");
+
+    runner
+        .act(GameAction::PassPriority)
+        .expect("commit the free cast's payment");
+    let WaitingFor::RippleBottomOrder { cards, .. } = runner.state().waiting_for.clone() else {
+        panic!(
+            "expected RippleBottomOrder after the free cast, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_ripple_pile_revealed(&runner, &cards, "at RippleBottomOrder");
+    runner
+        .act(GameAction::SelectCards { cards })
+        .expect("order the bottom pile");
+    runner
+        .act(GameAction::PassPriority)
+        .expect("ordinary action after Ripple finished");
+    assert!(
+        runner.state().revealed_cards.is_empty(),
+        "a finished Ripple must not keep its reveal"
+    );
+}
+
+/// CR 702.60a + CR 701.20a + CR 601.2h + CR 616.1: a Thrumming Stone-granted
+/// Ripple free cast of Fling pays its own additional sacrifice cost; Darksteel
+/// Colossus under Rest in Peace pauses that cost at a replacement choice. The
+/// announcement is embedded in the cast's typed cost-move root (no external
+/// carrier), and the remaining pile stays revealed across `ChooseReplacement`
+/// and at the bottom-order step.
+#[test]
+fn ripple_free_cast_keeps_reveal_through_additional_cost_replacement_choice() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    typed_pool(&mut scenario, &[ManaType::Red, ManaType::Red]);
+    scenario.add_real_card(P0, "Thrumming Stone", Zone::Battlefield, db);
+    let rest_in_peace = scenario.add_real_card(P0, "Rest in Peace", Zone::Battlefield, db);
+    let bears = scenario.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, db);
+    let colossus = scenario.add_real_card(P0, "Darksteel Colossus", Zone::Battlefield, db);
+    let spell = scenario.add_real_card(P0, "Fling", Zone::Hand, db);
+    scenario.add_real_card(P0, "Fling", Zone::Library, db);
+    let misses: Vec<ObjectId> = ["Mountain", "Forest", "Island"]
+        .iter()
+        .map(|name| scenario.add_real_card(P0, name, Zone::Library, db))
+        .collect();
+    for _ in 0..5 {
+        scenario.add_real_card(P1, "Swamp", Zone::Library, db);
+    }
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast Fling");
+    choose_player_target_if_pending(&mut runner, P1);
+    runner
+        .act(GameAction::SelectCards { cards: vec![bears] })
+        .expect("sacrifice Grizzly Bears to the original Fling");
+    runner.act(GameAction::PassPriority).expect("p0 pass");
+    runner.act(GameAction::PassPriority).expect("p1 pass");
+    accept_ripple_reveal(&mut runner);
+    runner
+        .act(GameAction::RippleChoice {
+            choice: CastChoice::Cast,
+        })
+        .expect("cast the revealed Fling");
+    choose_player_target_if_pending(&mut runner, P1);
+    assert_ripple_pile_revealed(&runner, &misses, "at the free Fling's sacrifice choice");
+
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![colossus],
+        })
+        .expect("sacrifice Darksteel Colossus to the free Fling");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "Rest in Peace and Darksteel Colossus compete for the sacrifice, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        matches!(
+            runner.state().pending_cost_move_resume,
+            Some(PendingCostMoveResume::SacrificeForCost {
+                pending: Some(_),
+                ..
+            })
+        ),
+        "the free cast's announcement is embedded in its sacrifice cost root"
+    );
+    assert!(
+        runner.state().pending_cast.is_none(),
+        "no external carrier holds the free cast's announcement"
+    );
+    assert_ripple_pile_revealed(&runner, &misses, "at the Fling ReplacementChoice");
+
+    let index = replacement_candidate_index(&runner, rest_in_peace);
+    runner
+        .act(GameAction::ChooseReplacement { index })
+        .expect("Rest in Peace exiles the sacrificed Colossus");
+    assert_eq!(runner.state().objects[&colossus].zone, Zone::Exile);
+    let WaitingFor::RippleBottomOrder { cards, .. } = runner.state().waiting_for.clone() else {
+        panic!(
+            "expected RippleBottomOrder after the free Fling, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_ripple_pile_revealed(&runner, &cards, "at RippleBottomOrder");
+    runner
+        .act(GameAction::SelectCards { cards })
+        .expect("order the bottom pile");
+    runner
+        .act(GameAction::PassPriority)
+        .expect("ordinary action after Ripple finished");
+    assert!(
+        runner.state().revealed_cards.is_empty(),
+        "a finished Ripple must not keep its reveal"
+    );
 }
