@@ -9466,6 +9466,48 @@ pub(crate) fn park_observer_triggers_if_paused(
     }
 }
 
+/// CR 603.2 + CR 603.6a + CR 616.1f: Preserve observers of completed battlefield
+/// entries when a replacement answer pauses on the next choice.
+/// The replacement handler's inner discard collectors already own `Discarded`
+/// events; queued-context witnesses deduplicate only zone changes. Restricting
+/// this outer pass to entries prevents collecting those discard observers twice.
+pub(crate) fn park_entry_observer_triggers_if_paused(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    slice_start: usize,
+) {
+    if triggered_mana_sidecar_owns_local_collection(state) {
+        return;
+    }
+    if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+        return;
+    }
+    // CR 601.2h + CR 602.2b + CR 603.3: under a live announcement these events
+    // wait in its carrier; only the span it does not own is parked here.
+    let owned = super::announcement_triggers::take_inline_trigger_span(state, events, slice_start);
+    // CR 603.2c: honor consumed events and queued zone-change witnesses before
+    // restricting the unclaimed candidates to this entry-only collector.
+    let mut candidates = filter_already_collected_trigger_events_from(
+        state,
+        &events[..owned.end],
+        slice_start,
+        &state.consumed_before_priority_trigger_events,
+    );
+    candidates.retain(|event| {
+        matches!(
+            event,
+            GameEvent::ZoneChanged {
+                to: Zone::Battlefield,
+                ..
+            }
+        )
+    });
+    let trigger_events = paused_observer_trigger_events(state, candidates);
+    if !trigger_events.is_empty() {
+        collect_triggers_into_deferred(state, &trigger_events);
+    }
+}
+
 /// CR 603.2 + CR 603.7: Park delayed observer triggers if the action paused
 /// before reaching priority.
 pub(crate) fn park_delayed_observer_triggers_if_paused(

@@ -971,6 +971,7 @@ fn spark_double_counter_completion_replays_copied_targeted_trigger() {
 
 mod feldon_tokens {
     use super::*;
+    use engine::game::scenario_db::GameScenarioDbExt;
     use engine::types::events::GameEvent;
     use engine::types::keywords::Keyword;
     use engine::types::mana::{ManaType, ManaUnit};
@@ -1351,6 +1352,51 @@ mod feldon_tokens {
     #[test]
     fn p1_both_counter_pauses_survive_persisted_restore() {
         ordered_loyalty_batch(true);
+    }
+
+    #[test]
+    fn altar_collects_each_token_entry_across_counter_ordering_pauses() {
+        let db = crate::support::shared_card_db().expect("integration card database");
+        let (mut scenario, feldon) = setup();
+        let card = graveyard_copier(&mut scenario, false);
+        let scales = scenario
+            .add_enchantment_from_oracle(P0, "Hardened Scales", SCALES)
+            .id();
+        let season = scenario
+            .add_enchantment_from_oracle(P0, "Doubling Season", SEASON)
+            .id();
+        scenario.add_real_card(P0, "Altar of the Brood", Zone::Battlefield, db);
+        let mut runner = scenario.build();
+        let before = runner.state().players[1].library.len();
+        assert!(before >= 4);
+        let mut events = runner
+            .activate(feldon, 0)
+            .target_object(card)
+            .resolve()
+            .events()
+            .to_vec();
+        let (first, copy_events) = choose_copy(&mut runner, feldon);
+        events.extend(copy_events);
+        events.extend(choose_token_counter_order(&mut runner, first, scales));
+        let (second, copy_events) = choose_copy(&mut runner, feldon);
+        events.extend(copy_events);
+        assert_ne!(first, second, "Season creates two distinct entrants");
+        events.extend(choose_token_counter_order(&mut runner, second, season));
+        assert_entry_publication(&runner, first, &events);
+        assert_entry_publication(&runner, second, &events);
+        runner.advance_until_stack_empty();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert!(runner.state().stack.is_empty());
+        // CR 603.2 + CR 603.3b: each entrant contributes one Altar trigger,
+        // even when identical triggers share a batched stack entry.
+        assert_eq!(
+            runner.state().players[1].library.len(),
+            before - 2,
+            "Altar mills exactly once for each entrant"
+        );
     }
 
     #[test]
