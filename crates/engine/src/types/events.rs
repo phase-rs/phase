@@ -691,6 +691,7 @@ impl EventObjectSnapshot {
             | TargetFilter::TrackedSet { .. }
             | TargetFilter::ExiledCardByIndex { .. }
             | TargetFilter::TriggeringSource
+            | TargetFilter::CastingSpell
             | TargetFilter::EventTarget
             // CR 506.3: needs live combat state (the attacker's current attack target)
             // and may be a planeswalker permanent; unlike `DefendingPlayer` it is not

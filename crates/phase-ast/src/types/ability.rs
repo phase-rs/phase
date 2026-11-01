@@ -2062,6 +2062,11 @@ pub enum ParitySource {
     /// CR 608.2c: Reads the most recent odd/even named choice made earlier in
     /// the same resolving instruction sequence.
     LastNamedChoice,
+    /// CR 607.2d: Reads the odd/even quality the source object chose as it
+    /// entered and keeps in its chosen attributes ("As this enchantment enters,
+    /// choose odd or even" read by "… of the chosen quality" — Ashling's
+    /// Prerogative). A source with no such choice matches no parity.
+    SourceChosen,
 }
 
 /// A branch in a d20/d6/d4 result table (CR 706.2).
@@ -8206,6 +8211,12 @@ pub enum TargetFilter {
     /// Matches spells on the stack (not activated/triggered abilities).
     /// CR 115.1a: Used by "becomes the target of a spell" triggers to filter source type.
     StackSpell,
+    /// CR 601.2f: The spell whose total cost is being determined — the "that
+    /// spell" of a cost modifier ("Spells you cast cost {1} less to cast for
+    /// each card with the same name as that spell in your graveyard", Locket of
+    /// Yesterdays). Only a cast-time cost-modifier evaluation carries this
+    /// referent; everywhere else it names no object.
+    CastingSpell,
     /// Matches a specific permanent by ObjectId.
     /// Used for duration-based statics that target a specific object
     /// (e.g., "that permanent loses all abilities for as long as ~").
@@ -8722,6 +8733,7 @@ pub fn filter_contains(filter: &TargetFilter, leaf: &dyn Fn(&TargetFilter) -> bo
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
@@ -9021,6 +9033,7 @@ pub fn filter_grammar_any(
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
@@ -9446,6 +9459,37 @@ pub fn retarget_chosen_card_type_to_creature_type(filter: &mut TargetFilter) -> 
     complete
 }
 
+/// CR 607.2d: Rebinds every `ManaValueParity { LastNamedChoice }` leaf beneath
+/// `filter` to the source's persisted choice. Returns whether any leaf was
+/// rebound; an incomplete bounded walk leaves `filter` untouched and reports
+/// `false`, as [`retarget_chosen_card_type_to_creature_type`] does.
+pub fn rebind_chosen_parity_to_source(filter: &mut TargetFilter) -> bool {
+    let mut rewritten = filter.clone();
+    let mut complete = true;
+    let mut rebound = false;
+    rewrite_filter_props::<()>(
+        &mut rewritten,
+        &mut |_, _, _| {},
+        &mut |prop| {
+            if let FilterProp::ManaValueParity {
+                parity: parity @ ParitySource::LastNamedChoice,
+            } = prop
+            {
+                *parity = ParitySource::SourceChosen;
+                rebound = true;
+            }
+        },
+        &mut |_| {},
+        &mut complete,
+        false,
+        None,
+    );
+    if complete && rebound {
+        *filter = rewritten;
+    }
+    complete && rebound
+}
+
 /// Rewrite every node and property reachable through `filter`, recording any incomplete
 /// bounded population walk in `complete` for the transactional caller.
 pub fn rewrite_filter_props<C>(
@@ -9547,6 +9591,7 @@ pub fn rewrite_filter_props<C>(
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
@@ -10434,6 +10479,7 @@ pub(crate) fn filter_binds_player(
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
@@ -11866,6 +11912,7 @@ fn target_filter_has_unsupported_selected_ref(filter: &TargetFilter, nested: boo
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::SourceChosenPlayer
@@ -23159,10 +23206,26 @@ pub enum Effect {
     /// counter resolvers and reuses the whole `ChooseOneOfBranch` interactive
     /// surface. This is the choose-ONE-kind sibling of the
     /// `repeat_for: DistinctCounterKindsAmong` for-EACH-kind loop.
+    ///
+    /// A printed kind (`counter_type: Some`) fixes the kind instead of choosing
+    /// among those present: "put a charge counter on it or remove one from it"
+    /// (Immard, the Stormcleaver) may always add one, and may remove one only
+    /// while the object has one of that kind (CR 608.2d).
     ChooseCounterAdjustment {
         adjustment: CounterAdjustment,
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
+        /// CR 122.1: the printed counter kind; `None` chooses among the kinds
+        /// present on the object.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        counter_type: Option<CounterType>,
+        /// The object whose counters change: the inherited parent target
+        /// (Clockspinning) or the ability's own source ("it" — Immard).
+        #[serde(
+            default = "default_target_filter_parent",
+            skip_serializing_if = "is_target_filter_parent_target"
+        )]
+        target: TargetFilter,
     },
     /// CR 701.10a + CR 613.4c: Multiply power/toughness of target creature by
     /// `factor` via a layer-7c continuous modification. `factor: 2` is "double"
@@ -27648,6 +27711,7 @@ pub fn filter_recipient_read(filter: &TargetFilter) -> RecipientRead {
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
@@ -28238,6 +28302,10 @@ fn default_target_filter_parent_target_owner() -> TargetFilter {
     TargetFilter::ParentTargetOwner
 }
 
+fn is_target_filter_parent_target(filter: &TargetFilter) -> bool {
+    matches!(filter, TargetFilter::ParentTarget)
+}
+
 fn is_target_filter_parent_target_owner(filter: &TargetFilter) -> bool {
     matches!(filter, TargetFilter::ParentTargetOwner)
 }
@@ -28604,6 +28672,7 @@ impl TargetFilter {
             | TargetFilter::TriggeringSpellOwner
             | TargetFilter::TriggeringPlayer
             | TargetFilter::TriggeringSource
+            | TargetFilter::CastingSpell
             | TargetFilter::AttackedPlayerOrPlaneswalker
             | TargetFilter::EventTarget
             | TargetFilter::TriggeringSourceController
@@ -28684,6 +28753,7 @@ impl TargetFilter {
             | TargetFilter::TriggeringSpellOwner
             | TargetFilter::TriggeringPlayer
             | TargetFilter::TriggeringSource
+            | TargetFilter::CastingSpell
             | TargetFilter::AttackedPlayerOrPlaneswalker
             | TargetFilter::EventTarget
             | TargetFilter::TriggeringSourceController
@@ -29100,6 +29170,7 @@ impl TargetFilter {
             | TargetFilter::TriggeringSpellOwner
             | TargetFilter::TriggeringPlayer
             | TargetFilter::TriggeringSource
+            | TargetFilter::CastingSpell
             | TargetFilter::EventTarget
             | TargetFilter::TriggeringSourceController
             | TargetFilter::EventTargetController

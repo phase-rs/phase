@@ -16,9 +16,9 @@
 
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ChooseOneOfKind, Effect, EffectError, EffectKind, PlayerFilter,
-    ResolvedAbility, TargetFilter, TargetRef,
+    QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
 };
-use crate::types::counter::positive_counter_types;
+use crate::types::counter::{positive_counter_types, CounterType};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 
@@ -36,8 +36,13 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (adjustment, count) = match &ability.effect {
-        Effect::ChooseCounterAdjustment { adjustment, count } => (*adjustment, count.clone()),
+    let (adjustment, count, fixed_kind, subject) = match &ability.effect {
+        Effect::ChooseCounterAdjustment {
+            adjustment,
+            count,
+            counter_type,
+            target,
+        } => (*adjustment, count.clone(), counter_type.clone(), target),
         _ => {
             return Err(EffectError::MissingParam(
                 "ChooseCounterAdjustment".to_string(),
@@ -56,11 +61,17 @@ pub fn resolve(
         });
     };
 
-    // The single target object, supplied via the parent-target chain.
-    let Some(target_id) = ability.targets.iter().find_map(|t| match t {
-        TargetRef::Object(id) => Some(*id),
-        TargetRef::Player(_) => None,
-    }) else {
+    // The object whose counters change: the ability's own source ("it" on a
+    // permanent's triggered ability), or the single target supplied via the
+    // parent-target chain.
+    let subject_id = match subject {
+        TargetFilter::SelfRef => Some(ability.source_id),
+        _ => ability.targets.iter().find_map(|t| match t {
+            TargetRef::Object(id) => Some(*id),
+            TargetRef::Player(_) => None,
+        }),
+    };
+    let Some(target_id) = subject_id else {
         no_op(state, events);
         return Ok(());
     };
@@ -77,44 +88,37 @@ pub fn resolve(
     // `DistinctCounterKindsAmong` ordering).
     let mut kinds = positive_counter_types(&obj.counters);
     kinds.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
-    if kinds.is_empty() {
+
+    let mut branches: Vec<AbilityDefinition> = Vec::new();
+    match fixed_kind {
+        // CR 122.1 + CR 608.2d: a printed kind is the only kind. Adding one is
+        // always an option; removing one is an option only while the object
+        // has one of that kind.
+        Some(kind) => {
+            if adjustment.allows_add() {
+                branches.push(put_counter_branch(kind.clone(), &count));
+            }
+            if adjustment.allows_remove() && kinds.contains(&kind) {
+                branches.push(remove_counter_branch(kind, &count));
+            }
+        }
+        // Build the flat per-kind branch set. For an `AddOrRemove` clause each
+        // kind contributes a remove branch then an add branch (matching the
+        // printed Oracle order "remove ... or put ...").
+        None => {
+            for kind in kinds {
+                if adjustment.allows_remove() {
+                    branches.push(remove_counter_branch(kind.clone(), &count));
+                }
+                if adjustment.allows_add() {
+                    branches.push(put_counter_branch(kind, &count));
+                }
+            }
+        }
+    }
+    if branches.is_empty() {
         no_op(state, events);
         return Ok(());
-    }
-
-    // Build the flat per-kind branch set. For an `AddOrRemove` clause each kind
-    // contributes a remove branch then an add branch (matching the printed Oracle
-    // order "remove ... or put ...").
-    let mut branches: Vec<AbilityDefinition> = Vec::new();
-    for kind in kinds {
-        if adjustment.allows_remove() {
-            branches.push(AbilityDefinition {
-                description: Some(format!("remove a {} counter", kind.display_phrase())),
-                ..AbilityDefinition::new(
-                    AbilityKind::Spell,
-                    Effect::RemoveCounter {
-                        counter_type: Some(kind.clone()),
-                        // CR 122.1: remove ONE of the chosen kind — `Fixed { 1 }`,
-                        // NOT the `-1` "remove all" sentinel.
-                        count: count.clone(),
-                        target: TargetFilter::ParentTarget,
-                    },
-                )
-            });
-        }
-        if adjustment.allows_add() {
-            branches.push(AbilityDefinition {
-                description: Some(format!("put a {} counter", kind.display_phrase())),
-                ..AbilityDefinition::new(
-                    AbilityKind::Spell,
-                    Effect::PutCounter {
-                        counter_type: kind,
-                        count: count.clone(),
-                        target: TargetFilter::ParentTarget,
-                    },
-                )
-            });
-        }
     }
 
     // CR 608.2d: emit the `ChooseCounterAdjustment` resolution marker on the
@@ -145,10 +149,41 @@ pub fn resolve(
     super::choose_one_of::resolve(state, &sub, events)
 }
 
+/// CR 122.1: "remove a <kind> counter" on the adjusted object — ONE of the
+/// kind (`count`), never the `-1` "remove all" sentinel.
+fn remove_counter_branch(kind: CounterType, count: &QuantityExpr) -> AbilityDefinition {
+    AbilityDefinition {
+        description: Some(format!("remove a {} counter", kind.display_phrase())),
+        ..AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::RemoveCounter {
+                counter_type: Some(kind),
+                count: count.clone(),
+                target: TargetFilter::ParentTarget,
+            },
+        )
+    }
+}
+
+/// CR 122.1: "put a <kind> counter" on the adjusted object.
+fn put_counter_branch(kind: CounterType, count: &QuantityExpr) -> AbilityDefinition {
+    AbilityDefinition {
+        description: Some(format!("put a {} counter", kind.display_phrase())),
+        ..AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: kind,
+                count: count.clone(),
+                target: TargetFilter::ParentTarget,
+            },
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{CounterAdjustment, QuantityExpr};
+    use crate::types::ability::CounterAdjustment;
 
     use crate::game::engine::apply;
     use crate::game::zones::create_object;
@@ -168,6 +203,8 @@ mod tests {
             Effect::ChooseCounterAdjustment {
                 adjustment: CounterAdjustment::AddOrRemove,
                 count: QuantityExpr::Fixed { value: 1 },
+                counter_type: None,
+                target: TargetFilter::ParentTarget,
             },
             vec![TargetRef::Object(target)],
             source,
@@ -300,6 +337,8 @@ mod tests {
             Effect::ChooseCounterAdjustment {
                 adjustment: CounterAdjustment::AddOrRemove,
                 count: QuantityExpr::Fixed { value: 1 },
+                counter_type: None,
+                target: TargetFilter::ParentTarget,
             },
             Vec::new(),
             source,

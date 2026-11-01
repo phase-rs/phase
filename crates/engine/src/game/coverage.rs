@@ -802,7 +802,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::TriggeringSpellOwner => "triggering spell's owner".into(),
         TargetFilter::TriggeringSourceController => "triggering source's controller".into(),
         TargetFilter::TriggeringPlayer => "triggering player".into(),
-        TargetFilter::TriggeringSource => "triggering source".into(),
+        TargetFilter::TriggeringSource | TargetFilter::CastingSpell => "triggering source".into(),
         TargetFilter::EventTarget => "object targeted by the triggering event".into(),
         TargetFilter::EventTargetController => {
             "controller of the object targeted by the triggering event".into()
@@ -993,7 +993,8 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                     crate::types::ability::ParitySource::Fixed(parity) => {
                         format!("{parity:?} mana value").to_lowercase()
                     }
-                    crate::types::ability::ParitySource::LastNamedChoice => {
+                    crate::types::ability::ParitySource::LastNamedChoice
+                    | crate::types::ability::ParitySource::SourceChosen => {
                         "chosen odd/even mana value".to_string()
                     }
                 };

@@ -42067,3 +42067,114 @@ fn enchanted_land_creature_retention_clause_keeps_land_type() {
         }));
     }
 }
+
+fn dynamic_count_of(line: &str) -> QuantityRef {
+    match parse_static_line(line).map(|def| def.mode) {
+        Some(StaticMode::ModifyCost {
+            dynamic_count: Some(count),
+            ..
+        }) => count,
+        other => panic!("{line}: expected a counted cost modifier, got {other:?}"),
+    }
+}
+
+/// CR 601.2f + CR 108.3 + CR 400.1: cost-modifier counts keep every qualifier
+/// of a coordinated population — owned cards across listed zones restricted by
+/// a card-description list, an "and each" union of populations, and a
+/// spell-relative name reference.
+#[test]
+fn cost_modifier_counts_keep_coordinated_population_qualifiers() {
+    let owned = || FilterProp::Owned {
+        controller: ControllerRef::You,
+    };
+    assert_eq!(
+        dynamic_count_of("This spell costs {1} less to cast for each card you own in exile and in your graveyard that's an instant card, a sorcery card, or a card that has an Adventure."),
+        QuantityRef::ObjectCount {
+            filter: TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::card().properties(vec![
+                        owned(),
+                        FilterProp::InAnyZone {
+                            zones: vec![Zone::Exile, Zone::Graveyard],
+                        },
+                    ])),
+                    TargetFilter::Or {
+                        filters: vec![
+                            TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                            TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
+                            TargetFilter::Typed(
+                                TypedFilter::card().properties(vec![FilterProp::HasAdventure]),
+                            ),
+                        ],
+                    },
+                ],
+            },
+        }
+    );
+    assert_eq!(
+        dynamic_count_of("This spell costs {1} less to cast for each artifact you control and each artifact card in your hand."),
+        QuantityRef::ObjectCount {
+            filter: TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::You),
+                    ),
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).properties(vec![
+                        FilterProp::InZone { zone: Zone::Hand },
+                        owned(),
+                    ])),
+                ],
+            },
+        }
+    );
+    assert_eq!(
+        dynamic_count_of("Spells you cast cost {1} less to cast for each card with the same name as that spell in your graveyard."),
+        QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(TypedFilter::card().properties(vec![
+                FilterProp::InZone {
+                    zone: Zone::Graveyard
+                },
+                owned(),
+                FilterProp::SharesQuality {
+                    quality: SharedQuality::Name,
+                    reference: Some(Box::new(TargetFilter::CastingSpell)),
+                    relation: SharedQualityRelation::Shares,
+                },
+            ])),
+        }
+    );
+}
+
+/// CR 509.1h + CR 105.2: a combat-status word after a `non-`
+/// prefix, and "that each share a color with one or more <objects>", both
+/// stay in the parsed filter.
+#[test]
+fn type_phrase_keeps_post_negation_status_and_plural_shared_color_reference() {
+    let (filter, rest) =
+        crate::parser::oracle_target::parse_target("target nonartifact attacking creature");
+    assert_eq!(rest, "");
+    assert_eq!(
+        filter,
+        TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Creature)
+                .with_type(TypeFilter::Non(Box::new(TypeFilter::Artifact)))
+                .properties(vec![FilterProp::Attacking { defender: None }])
+        )
+    );
+    let (filter, rest) = crate::parser::oracle_target::parse_target(
+        "target card that each share a color with one or more permanents you control",
+    );
+    assert_eq!(rest, "");
+    assert_eq!(
+        filter,
+        TargetFilter::Typed(
+            TypedFilter::card().properties(vec![FilterProp::SharesQuality {
+                quality: SharedQuality::Color,
+                reference: Some(Box::new(TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Permanent).controller(ControllerRef::You)
+                ))),
+                relation: SharedQualityRelation::Shares,
+            }])
+        )
+    );
+}

@@ -9099,11 +9099,15 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
             })
         }
         // "put the rest on the bottom" / "put those cards into your graveyard"
-        // after Dig — sets rest_destination on the preceding Dig effect.
+        // after Dig — sets rest_destination on the preceding Dig effect. A move
+        // of the revealed cards onto the battlefield is not a rest pile (its
+        // destination has no rest-pile reading), so it parses as its own
+        // instruction (Game Preserve: "put those cards onto the battlefield").
         Effect::Dig { .. }
-            if nom_primitives::scan_contains(&lower, "put them back")
+            if (nom_primitives::scan_contains(&lower, "put them back")
                 || nom_primitives::scan_contains(&lower, "put the rest")
-                || nom_primitives::scan_contains(&lower, "put those cards") =>
+                || nom_primitives::scan_contains(&lower, "put those cards"))
+                && !nom_primitives::scan_contains(&lower, "onto the battlefield") =>
         {
             let destination = if nom_primitives::scan_contains(&lower, "into your graveyard")
                 || nom_primitives::scan_contains(&lower, "into their graveyard")
@@ -9835,7 +9839,7 @@ pub(super) fn source_token_toughness_value() -> PtValue {
     })
 }
 
-pub(super) fn parse_token_source_power_toughness_followup(
+pub(crate) fn parse_token_source_power_toughness_followup(
     text: &str,
 ) -> Option<(PtValue, PtValue)> {
     let lower = text.trim().to_ascii_lowercase();

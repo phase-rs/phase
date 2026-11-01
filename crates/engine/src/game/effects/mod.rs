@@ -8350,6 +8350,7 @@ fn referent_exists_without_gated_action(
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
@@ -13725,7 +13726,13 @@ fn node_or_branch_references_tracked_set(
         || ability
             .player_scope
             .as_ref()
-            .is_some_and(player_filter_references_tracked_set);
+            .is_some_and(player_filter_references_tracked_set)
+        // CR 608.2c: a gate that measures the set ("If all cards revealed this
+        // way are creature cards, …") reads it as surely as the effect does.
+        || ability
+            .condition
+            .as_ref()
+            .is_some_and(condition_references_tracked_set);
 
     // CR 700.2 + CR 608.2c: both descents stop at a mode boundary. Guarding only
     // the entry hop in `next_sub_needs_tracked_set` is INSUFFICIENT whenever a
@@ -13950,6 +13957,21 @@ fn card_type_set_source_references_tracked_set(source: &CardTypeSetSource) -> bo
             found |= matches!(leaf, CardTypeSetSource::TrackedSet { .. });
         });
     found || !complete
+}
+
+/// CR 608.2c: whether a gating condition measures the chain's tracked set.
+fn condition_references_tracked_set(condition: &AbilityCondition) -> bool {
+    match condition {
+        AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
+            quantity_expr_references_tracked_set(lhs) || quantity_expr_references_tracked_set(rhs)
+        }
+        AbilityCondition::Not { condition } => condition_references_tracked_set(condition),
+        AbilityCondition::ConditionInstead { inner } => condition_references_tracked_set(inner),
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            conditions.iter().any(condition_references_tracked_set)
+        }
+        _ => false,
+    }
 }
 
 fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {

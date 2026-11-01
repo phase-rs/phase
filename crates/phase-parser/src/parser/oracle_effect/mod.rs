@@ -11279,6 +11279,7 @@ fn rebind_controller_scope(filter: &mut TargetFilter, from: ControllerRef, to: C
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
@@ -13666,6 +13667,24 @@ fn parse_perpetual_self_subject<'a>(
     lower: &'a str,
     ctx: &ParseContext,
 ) -> Option<(&'a str, TargetFilter)> {
+    // CR 608.2c: plural back-reference "those cards perpetually gain ..." — the
+    // cards the preceding instruction just moved, published as the chain's
+    // tracked set (Circadian Struggle: "Seek X cards …. … those cards
+    // perpetually gain …").
+    if let Ok((rest, _)) = (
+        tag::<_, _, OracleError<'_>>("those cards perpetually "),
+        alt((tag("gains "), tag("gain "))),
+    )
+        .parse(lower)
+    {
+        return Some((
+            rest,
+            TargetFilter::TrackedSet {
+                id: crate::types::identifiers::TrackedSetId(0),
+            },
+        ));
+    }
+
     // Anaphoric back-reference: "that <type> perpetually gains ...".
     if let Ok((after_that, _)) = tag::<_, _, OracleError<'_>>("that ").parse(lower) {
         let (rest, _) = take_until::<_, _, OracleError<'_>>("perpetually ")
@@ -26734,6 +26753,26 @@ fn anaphor_rewrite_would_drop_this_way_binding(text_lower: &str, effect: &Effect
 
 /// Replace the target filter on an effect with ParentTarget.
 /// Used for anaphoric "it"/"that creature" references in compound sub-effects.
+/// CR 608.2c: whether a gate counts members of the chain's tracked set.
+fn condition_measures_tracked_set(condition: &AbilityCondition) -> bool {
+    let measures = |expr: &QuantityExpr| {
+        matches!(
+            expr,
+            QuantityExpr::Ref {
+                qty: QuantityRef::TrackedSetSize | QuantityRef::FilteredTrackedSetSize { .. }
+            }
+        )
+    };
+    match condition {
+        AbilityCondition::QuantityCheck { lhs, rhs, .. } => measures(lhs) || measures(rhs),
+        AbilityCondition::Not { condition } => condition_measures_tracked_set(condition),
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            conditions.iter().any(condition_measures_tracked_set)
+        }
+        _ => false,
+    }
+}
+
 fn replace_target_with_parent(effect: &mut Effect) {
     // CR 115.10a: a target carrying the `Another` property excludes the
     // referenced object by definition, so it is never the parent target — an
@@ -28151,6 +28190,21 @@ fn chain_prior_targeted_player(clauses: &[ClauseIr]) -> bool {
 /// because its condition node has its own local target.
 fn chain_declared_object_target(clauses: &[ClauseIr]) -> Option<&TargetFilter> {
     chain_declared_object_target_clause(clauses).map(|(_, filter)| filter)
+}
+
+/// CR 608.2c + CR 109.4: an earlier object target described by its controller
+/// as an indefinite player ("target creature an opponent controls") introduces
+/// that player, so a later "that player" / "they" names the target's controller
+/// (Craterous Stomp: "… target creature an opponent controls. Each other
+/// creature that player controls …").
+fn declared_object_target_controller_antecedent(clauses: &[ClauseIr]) -> Option<ControllerRef> {
+    match chain_declared_object_target(clauses)? {
+        TargetFilter::Typed(TypedFilter {
+            controller: Some(ControllerRef::Opponent),
+            ..
+        }) => Some(ControllerRef::ParentTargetController),
+        _ => None,
+    }
 }
 
 /// CR 601.2c + CR 115.1: the single target filter a chain node announces as
@@ -47882,6 +47936,7 @@ fn parse_effect_chain_ir_body(
                 // controller, not the damaged player from the trigger
                 // condition's TriggeringPlayer scope).
                 .or_else(|| chain_parent_target_controller_scope.clone())
+                .or_else(|| declared_object_target_controller_antecedent(builder.clauses()))
                 .or_else(|| ctx.relative_player_scope.clone())
                 .or_else(|| {
                     player_scope
@@ -48764,6 +48819,17 @@ fn parse_effect_chain_ir_body(
         // immediately-following consumer.
         chain_pending_tracked_set_origin = match &clause.effect {
             Effect::ChooseFromZone { zone, .. } => Some(*zone),
+            // CR 701.20b: revealed cards stay in the library they were revealed
+            // from, so "put those cards …" reads them out of the library. A bare
+            // reveal is still a reveal `Dig` with no kept-card destination here;
+            // assembly demotes it to `RevealTop` later.
+            Effect::RevealTop { .. }
+            | Effect::Dig {
+                reveal: true,
+                destination: None,
+                keep_count: None,
+                ..
+            } => Some(Zone::Library),
             _ => None,
         };
         // CR 608.2d + CR 115.7d: The chunk loop intentionally keeps the full
@@ -48989,6 +49055,13 @@ fn parse_effect_chain_ir_body(
         // which is scoped to exactly the reported bug class.
         if condition.is_some()
             && !is_distributed_chunk
+            // CR 608.2c: a gate that measures the chain's tracked set ("If all
+            // cards revealed this way are creature cards, put those cards …")
+            // names the same set its clause's "those cards" does; that set is
+            // the antecedent, not the parent target.
+            && !condition
+                .as_ref()
+                .is_some_and(condition_measures_tracked_set)
             // CR 608.2k: only a GENUINE source-counter gate (no prior chosen
             // target — see `binds_source_counter_pronoun`) keeps the SelfRef
             // binding; a mis-scoped bare "it" over a prior typed target

@@ -13823,6 +13823,7 @@ fn is_player_axis_filter(filter: &TargetFilter) -> bool {
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
@@ -18152,6 +18153,22 @@ fn rebind_costpaid_scope_to_recipient(expr: QuantityExpr) -> QuantityExpr {
 /// permanent" / "that card" / "it") is a don't-care: the established target is
 /// reused via the parent `TargetOnly` chain. Returns `None` for every other
 /// remove/add clause, leaving existing paths unchanged.
+/// CR 122.1 + CR 608.2d: the " or remove one from it" tail of a single-counter
+/// placement — the removal leg reuses the placement's kind ("one") and object
+/// ("it").
+fn is_remove_one_from_same_object(remainder: &str) -> bool {
+    let remainder = remainder.to_ascii_lowercase();
+    let parsed = (
+        tag::<_, _, OracleError<'_>>(" or remove one from "),
+        alt((tag("~"), nom_primitives::parse_object_recipient_pronoun)),
+        opt(tag(".")),
+        eof,
+    )
+        .parse(remainder.as_str())
+        .is_ok();
+    parsed
+}
+
 fn try_parse_choose_counter_adjustment(lower: &str) -> Option<CounterAdjustment> {
     type E<'a> = OracleError<'a>;
 
@@ -18345,6 +18362,19 @@ pub(super) fn parse_zone_counter_ast<'a>(
                 remainder,
                 multi_target,
             )) => {
+                // CR 122.1 + CR 608.2d: "put a <kind> counter on it or remove one
+                // from it" — the controller adds or removes one of the printed
+                // kind on the same object (Immard, the Stormcleaver).
+                if matches!(count, QuantityExpr::Fixed { value: 1 })
+                    && multi_target.is_none()
+                    && is_remove_one_from_same_object(remainder)
+                {
+                    return Some(Ok(ZoneCounterImperativeAst::ChooseCounterAdjustment {
+                        adjustment: CounterAdjustment::AddOrRemove,
+                        counter_type: Some(counter_type),
+                        target,
+                    }));
+                }
                 // CR 608.2c: quantity/target owners must consume every counter suffix.
                 if !terminal_punctuation_only(remainder) {
                     return Some(Err(text));
@@ -18397,6 +18427,8 @@ pub(super) fn parse_zone_counter_ast<'a>(
     if let Some(adjustment) = try_parse_choose_counter_adjustment(lower) {
         return Some(Ok(ZoneCounterImperativeAst::ChooseCounterAdjustment {
             adjustment,
+            counter_type: None,
+            target: TargetFilter::ParentTarget,
         }));
     }
     if let Ok((after_remove, _)) = tag::<_, _, OracleError<'_>>("remove ").parse(lower) {
@@ -18616,12 +18648,16 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
         // CR 122.1 + CR 608.2d: the kind/op choice happens at resolution; the
         // target arrives via the parent `TargetOnly` chain, so this effect carries
         // no target slot. `count` is one per the printed "another"/"that counter".
-        ZoneCounterImperativeAst::ChooseCounterAdjustment { adjustment } => {
-            Effect::ChooseCounterAdjustment {
-                adjustment,
-                count: QuantityExpr::Fixed { value: 1 },
-            }
-        }
+        ZoneCounterImperativeAst::ChooseCounterAdjustment {
+            adjustment,
+            counter_type,
+            target,
+        } => Effect::ChooseCounterAdjustment {
+            adjustment,
+            count: QuantityExpr::Fixed { value: 1 },
+            counter_type,
+            target,
+        },
         ZoneCounterImperativeAst::MoveCounters {
             source,
             counter_type,
