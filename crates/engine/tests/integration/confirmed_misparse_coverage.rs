@@ -28,13 +28,22 @@ fn fixture() -> &'static Map<String, Value> {
     &RAW
 }
 
+fn one_registry(rows: &[(&str, MisparseClass)]) -> ConfirmedMisparses {
+    let entries: Vec<String> = rows
+        .iter()
+        .map(|(key, class)| {
+            format!(
+                "{{ key = {}, class = {}, clauses = [\"census-cited clause\"] }}",
+                serde_json::to_string(key).unwrap(),
+                serde_json::to_string(class).unwrap(),
+            )
+        })
+        .collect();
+    ConfirmedMisparses::parse(&format!("face = [{}]", entries.join(", "))).unwrap()
+}
+
 fn one_row(key: &str, class: MisparseClass) -> ConfirmedMisparses {
-    ConfirmedMisparses::parse(&format!(
-        "face = [{{ key = {}, class = {}, clauses = [\"census-cited clause\"] }}]",
-        serde_json::to_string(key).unwrap(),
-        serde_json::to_string(&class).unwrap(),
-    ))
-    .unwrap()
+    one_registry(&[(key, class)])
 }
 
 /// Preserve the original export envelope and every unmodified value. Only the
@@ -162,25 +171,54 @@ fn confirmed_misparse_round_trip_and_clear_preserve_unlisted_export() {
 
 #[test]
 fn confirmed_misparse_each_class_changes_both_coverage_authorities() {
-    let raw: Map<String, Value> = [(
-        "lightning bolt".to_string(),
-        fixture()["lightning bolt"].clone(),
-    )]
-    .into_iter()
-    .collect();
-    let baseline = database(&stamped_export(&raw, &ConfirmedMisparses::empty()));
-    assert!(!baseline
-        .get_face_by_name("Lightning Bolt")
-        .unwrap()
-        .abilities
-        .is_empty());
-    assert!(card_face_gaps(baseline.get_face_by_name("Lightning Bolt").unwrap()).is_empty());
+    // All classes share one database: `analyze_coverage` has a large fixed cost per call.
+    const POOL: usize = 60;
+    let mut candidates: Vec<&String> = fixture().keys().collect();
+    candidates.sort();
+    candidates.truncate(POOL);
+    let pool: Map<String, Value> = candidates
+        .iter()
+        .map(|key| (key.to_string(), fixture()[key.as_str()].clone()))
+        .collect();
+    let baseline = database(&stamped_export(&pool, &ConfirmedMisparses::empty()));
     let before = report(&baseline);
-    assert!(before["lightning bolt"].supported);
-    assert!(before["lightning bolt"].gap_details.is_empty());
-    for class in MisparseClass::iter() {
-        let marked = database(&stamped_export(&raw, &one_row("lightning bolt", class)));
-        let after = report(&marked);
+    let classes: Vec<MisparseClass> = MisparseClass::iter().collect();
+    // Reach guards folded into selection: no hidden-key faces, and every chosen
+    // card is baseline-supported, gap-free, and has abilities to parse.
+    let chosen: Vec<&String> = candidates
+        .iter()
+        .copied()
+        .filter(|key| !key.contains('['))
+        .filter(|key| {
+            let row = &before[key.as_str()];
+            row.supported
+                && row.gap_details.is_empty()
+                && !baseline
+                    .get_face_by_name(key.as_str())
+                    .expect("pool face")
+                    .abilities
+                    .is_empty()
+        })
+        .take(classes.len())
+        .collect();
+    assert_eq!(
+        chosen.len(),
+        classes.len(),
+        "first {POOL} fixture keys must supply one distinct gap-free card per MisparseClass"
+    );
+    let raw: Map<String, Value> = chosen
+        .iter()
+        .map(|key| (key.to_string(), fixture()[key.as_str()].clone()))
+        .collect();
+    let rows: Vec<(&str, MisparseClass)> = chosen
+        .iter()
+        .zip(&classes)
+        .map(|(key, class)| (key.as_str(), *class))
+        .collect();
+    let marked = database(&stamped_export(&raw, &one_registry(&rows)));
+    let after = report(&marked);
+    for (key, class) in rows {
+        let marked_row = &after[key];
         assert_eq!(
             class.handler(),
             format!(
@@ -188,15 +226,17 @@ fn confirmed_misparse_each_class_changes_both_coverage_authorities() {
                 serde_json::to_value(class).unwrap().as_str().unwrap()
             )
         );
-        assert!(!after["lightning bolt"].supported, "{class:?}");
-        assert_eq!(handlers(&after["lightning bolt"]), [class.handler()]);
+        assert!(!marked_row.supported, "{key}: {class:?}");
+        assert_eq!(handlers(marked_row), [class.handler()], "{key}: {class:?}");
         assert_eq!(
-            card_face_gaps(marked.get_face_by_name("Lightning Bolt").unwrap()),
-            [class.handler()]
+            card_face_gaps(marked.get_face_by_name(key).unwrap()),
+            [class.handler()],
+            "{key}: {class:?}"
         );
         assert_eq!(
-            serde_json::to_value(&after["lightning bolt"].parse_details).unwrap(),
-            serde_json::to_value(&before["lightning bolt"].parse_details).unwrap()
+            serde_json::to_value(&marked_row.parse_details).unwrap(),
+            serde_json::to_value(&before[key].parse_details).unwrap(),
+            "{key}: {class:?}"
         );
     }
 }
