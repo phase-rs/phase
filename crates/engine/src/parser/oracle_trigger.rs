@@ -23001,6 +23001,13 @@ fn try_parse_put_into_graveyard(
         return Some(unknown_trigger_definition(rest));
     };
     let origin = destination_graveyard_origin(subject, origin);
+    // CR 603.2 + CR 603.6c: destination triggers must observe the matching event;
+    // "from anywhere" is not a leaves-the-battlefield trigger. The exclusion
+    // clause drops scalar SelfRef source-zone inference, so fail closed for
+    // required-self subjects until that source admission is supported.
+    if filter_requires_self(subject) && matches!(origin, OriginConstraint::NotEquals(_)) {
+        return Some(unknown_trigger_definition(rest));
+    }
     let destination_owner = graveyard_owner_scope(possessive);
     let owner =
         if filter_requires_self(subject) && origin != OriginConstraint::Equals(Zone::Battlefield) {
@@ -23641,8 +23648,7 @@ fn try_parse_one_or_more_put_into_graveyard(
     None
 }
 
-/// Parse "whenever one or more cards are put into [a|a player's|your|an opponent's] library
-/// [from <zone>]" — batched zone-change triggers with library destination.
+/// Parse 'whenever one or more cards are put into [a|a player's] library [from <zone>]'. Owner-qualified ('your' / 'an opponent's') library heads fail closed: no printed card uses them (CR 400.3 owner scoping is not implemented here).
 /// CR 603.2c + CR 603.10a: "One or more" triggers fire once per batch of
 /// simultaneous zone-change events. Example: Wan Shi Tong, All-Knowing —
 /// "Whenever one or more cards are put into a library from anywhere, create..."

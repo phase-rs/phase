@@ -2796,6 +2796,30 @@ fn v12_disa_singular_exclusion_preserves_complete_subject() {
     );
 }
 
+/// Synthetic strict failure; nearest printed texts are Syr Konrad's Squire
+/// (disjunctive self exclusion) and Narcomoeba (self library-to-graveyard).
+/// CR 603.2 + CR 603.6c: matching destination events must trigger; "from anywhere"
+/// is not a leaves-the-battlefield trigger. Do not advertise a dead self head.
+#[test]
+fn v12_synthetic_self_exclusion_fails_closed_without_rejecting_disa() {
+    let control = parse_oracle_text(DISA, "Disa the Restless", &[], &[], &[]);
+    assert_eq!(control.triggers.len(), 2);
+    assert_exclusion_subject(&control.triggers[0], TriggerMode::ChangesZone);
+
+    let parsed = parse_oracle_text(
+        "When this card is put into your graveyard from anywhere other than the battlefield, you gain 2 life.",
+        "Synthetic self exclusion observer",
+        &[],
+        &[],
+        &[],
+    );
+    assert_eq!(parsed.triggers.len(), 1, "{parsed:?}");
+    assert!(
+        matches!(parsed.triggers[0].mode, TriggerMode::Unknown(_)),
+        "unsupported self source admission must fail closed: {parsed:?}"
+    );
+}
+
 /// V12: full-Oracle Disa returns only the owned Lhurgoyf card that was milled.
 /// CR 400.7e + CR 110.2a: find that arrival object and put it under P0's control.
 #[test]
