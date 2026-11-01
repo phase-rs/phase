@@ -147,7 +147,7 @@ pub struct TakebackLedger {
     game_number: u8,
     /// Counts observed transitions.
     clock: u64,
-    /// Each seat's latest no-op concession, at the clock it was observed.
+    /// Each seat's earliest no-op concession, at the clock it was observed.
     noop_concessions: BTreeMap<PlayerId, u64>,
 }
 
@@ -214,7 +214,7 @@ impl TakebackLedger {
                 resolution = self.pending.take().map(|_| TakebackResolution::Withdrawn);
                 self.retire();
             } else {
-                self.noop_concessions.insert(actor, self.clock);
+                self.noop_concessions.entry(actor).or_insert(self.clock);
                 match &self.pending {
                     Some(pending) if pending.requested_by == actor => {
                         self.pending = None;
@@ -1203,6 +1203,24 @@ mod tests {
         let mut table = quake_5_from_the_bolt();
         assert_eq!(table.concede(P1), None);
         assert_eq!(table.concede(P0), None);
+        assert_eq!(table.request(P0), Ok(APPROVED));
+
+        assert_eq!(table.request(P2), Ok(TakebackOutcome::Pending));
+        assert_eq!(
+            table.respond(P1, true),
+            Err("Only the players asked to approve this takeback may respond".to_string())
+        );
+        assert_eq!(table.respond(P0, true), Ok(APPROVED));
+    }
+
+    /// E2 sibling: P1's second concession, after the target, is undone by the
+    /// approval, and its first one still excludes P1.
+    #[test]
+    fn an_approval_keeps_a_concession_before_its_target_despite_a_later_one() {
+        let mut table = quake_5_from_the_bolt();
+        assert_eq!(table.concede(P1), None);
+        assert_eq!(table.concede(P0), None);
+        assert_eq!(table.concede(P1), None);
         assert_eq!(table.request(P0), Ok(APPROVED));
 
         assert_eq!(table.request(P2), Ok(TakebackOutcome::Pending));
