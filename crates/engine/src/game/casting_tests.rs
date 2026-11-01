@@ -57110,8 +57110,14 @@ fn resolution_play_election_plays_the_only_legal_land_face_and_leaves_no_permiss
     )
     .expect("the Play election initiates");
     assert!(
-        matches!(initiation, ResolutionElectionInitiation::PlayLandFace(_)),
-        "the only legal face is the land face"
+        matches!(
+            initiation,
+            ResolutionElectionInitiation::PlayLandFace {
+                back_face: true,
+                ..
+            }
+        ),
+        "the only legal face is the land (back) face"
     );
     assert!(play_state.objects[&spell].casting_permissions.is_empty());
 

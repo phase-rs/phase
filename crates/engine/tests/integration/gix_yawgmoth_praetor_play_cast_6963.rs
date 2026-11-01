@@ -141,7 +141,7 @@ fn magus_of_the_mind_lowers_a_play_grant_until_end_of_turn() {
     assert!(!grant.optional);
 }
 
-/// CR 701.18b + CR 400.3: Elder Brain's permission lowers to `PlayFromExile` in
+/// CR 701.18b + CR 400.1: Elder Brain's permission lowers to `PlayFromExile` in
 /// `Play` mode with its any-color rider, and no optional prompt. Its exile
 /// clause ("exile all cards from that player's hand") binds no player, so it
 /// stays an honest gap rather than exiling every hand; the draw half is kept.
@@ -191,7 +191,7 @@ fn elder_brain_play_permission_lowers_and_unbound_exile_stays_a_gap() {
     );
 }
 
-/// CR 400.3: Thought Distortion's "… from that player's hand and graveyard" is
+/// CR 400.1: Thought Distortion's "… from that player's hand and graveyard" is
 /// owner-bound by the multi-zone path, so the unbound-possessive guard leaves it
 /// untouched.
 #[test]
@@ -815,4 +815,353 @@ fn gix_with_nothing_playable_opens_no_window() {
         "reach-guard: the land was exiled"
     );
     assert_parent_finished(&board.runner, board.gix);
+}
+
+// ---------------------------------------------------------------------------
+// Land//land modal cards (CR 712.12) and the remaining entry-pause producers
+// ---------------------------------------------------------------------------
+
+/// Gix exiles Branchloft Pathway // Boulderloft Pathway and Divination, opens
+/// the Play window, and the Pathway is chosen. Returns the board at the
+/// resolution-owned `ModalFaceChoice`, with the AI's face actions checked.
+fn gix_at_pathway_face_choice(
+    db: &'static engine::database::card_db::CardDatabase,
+) -> (GixBoard, ObjectId, ObjectId) {
+    let (mut board, staged) = gix_board(1, |s| {
+        vec![
+            s.add_real_card(P1, "Branchloft Pathway", Zone::Library, db),
+            s.add_real_card(P1, "Divination", Zone::Library, db),
+        ]
+    });
+    let [pathway, divination] = staged[..] else {
+        unreachable!()
+    };
+    assert!(
+        board.runner.state().objects[&pathway].back_face.is_some(),
+        "reach-guard: the Pathway carries its modal land back face"
+    );
+    activate_gix(&mut board, 2);
+    assert_eq!(
+        window(board.runner.state()),
+        (sorted(vec![pathway, divination]), CardPlayMode::Play)
+    );
+    choose(&mut board.runner, Some(pathway));
+    assert!(
+        matches!(
+            board.runner.state().waiting_for,
+            WaitingFor::ModalFaceChoice { player: P0, object_id, .. } if object_id == pathway
+        ),
+        "CR 712.12: both land faces are electable, got {:?}",
+        board.runner.state().waiting_for
+    );
+    let offered = legal_actions(board.runner.state());
+    for back_face in [false, true] {
+        assert!(
+            offered.contains(&GameAction::ChooseModalFace { back_face }),
+            "AI legal actions offer face back_face={back_face}"
+        );
+    }
+    assert!(offered.contains(&GameAction::CancelCast));
+    (board, pathway, divination)
+}
+
+/// CR 712.12 + CR 305.2a: electing the Pathway's front face plays Branchloft
+/// Pathway as a land; the window re-opens with Divination, which is cast.
+#[test]
+fn gix_window_plays_a_pathways_front_face() {
+    let Some(db) = load_db() else { return };
+    let (mut board, pathway, divination) = gix_at_pathway_face_choice(db);
+    board
+        .runner
+        .act(GameAction::ChooseModalFace { back_face: false })
+        .expect("electing the front face");
+    let state = board.runner.state();
+    assert_eq!(state.objects[&pathway].zone, Zone::Battlefield);
+    assert_eq!(state.objects[&pathway].name, "Branchloft Pathway");
+    assert_eq!(state.objects[&pathway].controller, P0);
+    assert_eq!(lands_played(state, P0), 1);
+    assert_eq!(window(state), (vec![divination], CardPlayMode::Play));
+    choose(&mut board.runner, Some(divination));
+    assert_eq!(board.runner.state().objects[&divination].zone, Zone::Stack);
+    assert_parent_finished(&board.runner, board.gix);
+}
+
+/// CR 712.12 + CR 305.2a: electing the Pathway's back face plays Boulderloft
+/// Pathway as a land; the window re-opens with Divination.
+#[test]
+fn gix_window_plays_a_pathways_back_face() {
+    let Some(db) = load_db() else { return };
+    let (mut board, pathway, divination) = gix_at_pathway_face_choice(db);
+    board
+        .runner
+        .act(GameAction::ChooseModalFace { back_face: true })
+        .expect("electing the back face");
+    let state = board.runner.state();
+    assert_eq!(state.objects[&pathway].zone, Zone::Battlefield);
+    assert_eq!(state.objects[&pathway].name, "Boulderloft Pathway");
+    assert_eq!(lands_played(state, P0), 1);
+    assert_eq!(window(state), (vec![divination], CardPlayMode::Play));
+}
+
+/// Cancelling the Pathway's face election re-offers the whole window (nothing
+/// was played or counted); declining the window then leaves both cards exiled.
+#[test]
+fn cancelling_a_pathway_election_reoffers_the_window() {
+    let Some(db) = load_db() else { return };
+    let (mut board, pathway, divination) = gix_at_pathway_face_choice(db);
+    board
+        .runner
+        .act(GameAction::CancelCast)
+        .expect("cancelling the election");
+    let state = board.runner.state();
+    assert_eq!(state.objects[&pathway].zone, Zone::Exile);
+    assert_eq!(lands_played(state, P0), 0);
+    assert_eq!(
+        window(state),
+        (sorted(vec![pathway, divination]), CardPlayMode::Play)
+    );
+    choose(&mut board.runner, None);
+    let state = board.runner.state();
+    assert_eq!(state.objects[&pathway].zone, Zone::Exile);
+    assert_eq!(state.objects[&divination].zone, Zone::Exile);
+    assert_parent_finished(&board.runner, board.gix);
+}
+
+/// CR 614.12a (as-enters instruction, the post-replacement producer): Valgavoth's
+/// Lair enters tapped and pauses on its color choice for P0. A save/reload at
+/// the prompt keeps the window parked; after green is chosen the land is
+/// tapped under P0, one land drop is spent, only Divination is re-offered, and
+/// casting it finishes the ability with no parked work left.
+#[test]
+fn gix_window_reopens_after_an_as_enters_color_choice_across_a_reload() {
+    let Some(db) = load_db() else { return };
+    let (mut board, staged) = gix_board(1, |s| {
+        vec![
+            s.add_real_card(P1, "Valgavoth's Lair", Zone::Library, db),
+            s.add_real_card(P1, "Divination", Zone::Library, db),
+        ]
+    });
+    let [lair, divination] = staged[..] else {
+        unreachable!()
+    };
+    activate_gix(&mut board, 2);
+    assert_eq!(
+        window(board.runner.state()),
+        (sorted(vec![lair, divination]), CardPlayMode::Play)
+    );
+    choose(&mut board.runner, Some(lair));
+    let WaitingFor::NamedChoice {
+        player, options, ..
+    } = board.runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "reach-guard: the Lair's entry paused on its color choice, got {:?}",
+            board.runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, P0, "the color is chosen by the land's controller");
+    let green = options
+        .iter()
+        .find(|option| option.eq_ignore_ascii_case("green"))
+        .expect("green is offered")
+        .clone();
+
+    let saved = serde_json::to_string(board.runner.state()).expect("serializes");
+    let restored: GameState = serde_json::from_str(&saved).expect("deserializes");
+    let mut runner = GameRunner::from_state(restored);
+    runner
+        .act(GameAction::ChooseOption { choice: green })
+        .expect("choosing green after reload");
+    let state = runner.state();
+    assert_eq!(state.objects[&lair].zone, Zone::Battlefield);
+    assert_eq!(state.objects[&lair].controller, P0);
+    assert!(state.objects[&lair].tapped, "This land enters tapped.");
+    assert_eq!(lands_played(state, P0), 1);
+    assert_eq!(window(state), (vec![divination], CardPlayMode::Play));
+    choose(&mut runner, Some(divination));
+    assert_eq!(runner.state().objects[&divination].zone, Zone::Stack);
+    assert_parent_finished(&runner, board.gix);
+    assert!(
+        runner.state().active_ability_continuation().is_none(),
+        "no parked window or parent work remains"
+    );
+}
+
+/// CR 614.12a + CR 616.1 (delivery-tail producer): with two non-commuting
+/// counter modifiers and an "enters with an additional +1/+1 counter" static,
+/// the played land's entry pauses on the counter-order choice in the delivery
+/// tail; once answered the land is on the battlefield with its counter and the
+/// window re-opens with Divination.
+#[test]
+fn gix_window_reopens_after_a_delivery_tail_counter_order_choice() {
+    use engine::types::ability::{
+        QuantityModification, ReplacementDefinition, StaticDefinition, TypedFilter,
+    };
+    use engine::types::counter::CounterType;
+    use engine::types::replacements::ReplacementEvent;
+    use engine::types::statics::StaticMode;
+
+    let Some(db) = load_db() else { return };
+    let (mut board, staged) = gix_board(1, |s| {
+        s.add_creature(P0, "Doubling Season", 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(
+                ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                    .quantity_modification(QuantityModification::Times { factor: 2 }),
+            );
+        s.add_creature(P0, "Hardened Scales", 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(
+                ReplacementDefinition::new(ReplacementEvent::AddCounter)
+                    .quantity_modification(QuantityModification::Plus { value: 1 }),
+            );
+        s.add_creature(P0, "Land Counter Lord", 0, 0)
+            .as_enchantment()
+            .with_static_definition(
+                StaticDefinition::new(StaticMode::EntersWithAdditionalCounters {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: 1,
+                })
+                .affected(TargetFilter::Typed(
+                    TypedFilter::land().controller(ControllerRef::You),
+                )),
+            );
+        vec![
+            s.add_real_card(P1, "Forest", Zone::Library, db),
+            s.add_real_card(P1, "Divination", Zone::Library, db),
+        ]
+    });
+    let [forest, divination] = staged[..] else {
+        unreachable!()
+    };
+    activate_gix(&mut board, 2);
+    choose(&mut board.runner, Some(forest));
+    assert!(
+        matches!(
+            board.runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "reach-guard: the entry paused on the counter-order choice, got {:?}",
+        board.runner.state().waiting_for
+    );
+    board
+        .runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("ordering the counter modifiers");
+    let state = board.runner.state();
+    assert_eq!(state.objects[&forest].zone, Zone::Battlefield);
+    assert!(
+        state.objects[&forest]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied()
+            .unwrap_or(0)
+            > 0,
+        "reach-guard: the delivery tail placed the counter"
+    );
+    assert_eq!(window(state), (vec![divination], CardPlayMode::Play));
+    choose(&mut board.runner, Some(divination));
+    assert_parent_finished(&board.runner, board.gix);
+}
+
+/// CR 712.12 (the election's land-face-only branch): Gix has shroud, so Hagra
+/// Mauling's spell face has no legal target and its land face is the only
+/// legal face. Choosing it plays Hagra Broodpit with no face prompt, and the
+/// window re-opens with Divination.
+#[test]
+fn gix_window_plays_a_modal_cards_only_legal_land_face_without_a_prompt() {
+    use engine::types::keywords::Keyword;
+
+    let Some(db) = load_db() else { return };
+    let (mut board, staged) = gix_board(1, |s| {
+        vec![
+            s.add_real_card(P1, "Hagra Mauling", Zone::Library, db),
+            s.add_real_card(P1, "Divination", Zone::Library, db),
+        ]
+    });
+    let [mdfc, divination] = staged[..] else {
+        unreachable!()
+    };
+    {
+        let gix = board
+            .runner
+            .state_mut()
+            .objects
+            .get_mut(&board.gix)
+            .expect("Gix");
+        gix.keywords.push(Keyword::Shroud);
+        gix.base_keywords.push(Keyword::Shroud);
+    }
+    board.runner.state_mut().layers_dirty.mark_full();
+    activate_gix(&mut board, 2);
+    assert_eq!(
+        window(board.runner.state()).0,
+        sorted(vec![mdfc, divination]),
+        "reach-guard: the land face alone keeps the modal card a candidate"
+    );
+    choose(&mut board.runner, Some(mdfc));
+    let state = board.runner.state();
+    assert!(
+        !matches!(state.waiting_for, WaitingFor::ModalFaceChoice { .. }),
+        "one legal face is no player decision"
+    );
+    assert_eq!(state.objects[&mdfc].zone, Zone::Battlefield);
+    assert_eq!(lands_played(state, P0), 1);
+    assert_eq!(window(state), (vec![divination], CardPlayMode::Play));
+}
+
+/// CR 607.2a + CR 614.12a: an older, declined Gix batch (Opt) stays out of a
+/// later window. The later window's shock land pauses, survives a reload, and
+/// re-opens with only its own Divination, which is cast to finish the ability.
+#[test]
+fn a_parked_second_window_offers_only_its_own_batch_after_reload() {
+    let Some(db) = load_db() else { return };
+    let (mut board, staged) = gix_board(2, |s| {
+        vec![
+            s.add_real_card(P1, "Opt", Zone::Library, db),
+            s.add_real_card(P1, "Stomping Ground", Zone::Library, db),
+            s.add_real_card(P1, "Divination", Zone::Library, db),
+        ]
+    });
+    let [opt, shock, divination] = staged[..] else {
+        unreachable!()
+    };
+    activate_gix(&mut board, 1);
+    assert_eq!(
+        window(board.runner.state()),
+        (vec![opt], CardPlayMode::Play)
+    );
+    choose(&mut board.runner, None);
+    assert_eq!(board.runner.state().objects[&opt].zone, Zone::Exile);
+
+    activate_gix(&mut board, 2);
+    assert_eq!(
+        window(board.runner.state()),
+        (sorted(vec![shock, divination]), CardPlayMode::Play),
+        "the older batch's Opt is not offered"
+    );
+    choose(&mut board.runner, Some(shock));
+    assert!(
+        matches!(
+            board.runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "reach-guard: the shock land paused"
+    );
+    let saved = serde_json::to_string(board.runner.state()).expect("serializes");
+    let restored: GameState = serde_json::from_str(&saved).expect("deserializes");
+    let mut runner = GameRunner::from_state(restored);
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("answering the entry choice after reload");
+    assert_eq!(runner.state().objects[&shock].zone, Zone::Battlefield);
+    assert_eq!(
+        window(runner.state()),
+        (vec![divination], CardPlayMode::Play),
+        "only this batch's spell is re-offered"
+    );
+    choose(&mut runner, Some(divination));
+    assert_eq!(runner.state().objects[&divination].zone, Zone::Stack);
+    assert_eq!(runner.state().objects[&opt].zone, Zone::Exile);
+    assert_parent_finished(&runner, board.gix);
 }

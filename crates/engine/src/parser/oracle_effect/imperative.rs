@@ -3306,7 +3306,7 @@ type MultiZonePlayerExileParse<'a> = (&'a str, (Vec<TypeFilter>, ControllerRef, 
 type DefenderBoundAttackParse<'a> =
     Result<(&'a str, (TargetFilter, Option<Duration>)), nom::Err<OracleError<'a>>>;
 
-/// CR 400.3 + CR 608.2c: true when a mass-exile operand names an anaphoric
+/// CR 400.1 + CR 608.2c: true when a mass-exile operand names an anaphoric
 /// player's zone as its source ("… from that player's hand", "… from that
 /// opponent's graveyard") but the parsed `target` binds no player on any leg —
 /// so the lowered instruction would reach every player's zone. Structural on the
@@ -11893,7 +11893,7 @@ pub(super) fn parse_exile_ast(
             ctx,
             EffectScope::All,
         );
-        // CR 400.3 + CR 608.2c: "… from that player's hand" names ONE player's
+        // CR 400.1 + CR 608.2c: "… from that player's hand" names ONE player's
         // zone. A filter that bound no owner/controller would sweep every
         // player's zone (Elder Brain: "exile all cards from that player's hand"),
         // so refuse rather than lower the wider instruction.

@@ -1502,11 +1502,12 @@ pub(crate) enum ResolutionPlayRoute {
     /// CR 712.12: a land//land modal DFC (front face and back face both lands),
     /// whose land face the player may choose, bound in any zone the lingering
     /// grant serves (exiled Hideaway card in place; library-revealed Djinn-class
-    /// card delivered to exile by `grant_lingering_permissions`). No
-    /// resolution-owned prompt can elect a land face yet, so it keeps the
-    /// pre-existing lingering grant, whose PlayLand authority admits it (its front
-    /// face is a Land) and opens `ModalFaceChoice` (follow-up: resolution-owned
-    /// land//land election). A spell//land MDFC is not this route: it takes
+    /// card delivered to exile by `grant_lingering_permissions`). The single-card
+    /// route keeps the pre-existing lingering grant, whose PlayLand authority
+    /// admits it (its front face is a Land) and opens `ModalFaceChoice`. The
+    /// resolution-owned election (`casting::initiate_resolution_election`) can
+    /// now elect either land face — the free-cast window uses it — so moving
+    /// this route onto it is a follow-up. A spell//land MDFC is not this route: it takes
     /// [`ResolutionPlayRoute::ElectFace`]. Never returned for the Graveyard: base
     /// takes the immediate graveyard route there (`immediate_graveyard_free_cast`)
     /// and never lingers.
@@ -2561,12 +2562,13 @@ fn cast_resolution_request_during_resolution(
         }
         // CR 712.12 + CR 305.2a: the land face is the only legal face of a
         // Play election, so it is played as the instruction resolves.
-        crate::game::casting::ResolutionElectionInitiation::PlayLandFace(cleanup) => {
+        crate::game::casting::ResolutionElectionInitiation::PlayLandFace { cleanup, back_face } => {
             let commit = crate::game::engine_resolution_choices::play_resolution_land_face(
                 state,
                 ability.controller,
                 card,
                 *cleanup,
+                back_face,
                 events,
             )
             .map_err(|e| EffectError::InvalidParam(e.to_string()))?;

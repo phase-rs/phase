@@ -3415,13 +3415,18 @@ pub(super) fn handle_resolution_choice(
                 enters_with_modifications,
                 member_pool,
             };
-            // CR 701.18b + CR 305.1: under a Play policy a land card is played as
-            // a land as this ability resolves (CR 305.2a; refused under CR 305.2b
-            // / CR 305.3), never cast; the window then re-opens.
+            // CR 701.18b + CR 305.1: under a Play policy a land card that has no
+            // face to elect is played as a land as this ability resolves
+            // (CR 305.2a; refused under CR 305.2b / CR 305.3), never cast; the
+            // window then re-opens. A modal card (spell//land or land//land,
+            // CR 712.12) goes through the face election below.
             if window.face_policy.play_mode.is_play()
                 && state.objects.get(&chosen).is_some_and(|object| {
-                    effects::cast_from_zone::resolution_play_route(object)
-                        == effects::cast_from_zone::ResolutionPlayRoute::PlayLand
+                    object
+                        .card_types
+                        .core_types
+                        .contains(&crate::types::card_type::CoreType::Land)
+                        && !super::engine::modal_land_face_election_available(object)
                 })
             {
                 let commit =
@@ -3431,17 +3436,18 @@ pub(super) fn handle_resolution_choice(
                 ));
             }
             let request = window.resolution_request();
-            // CR 701.18b + CR 712.12: a Play policy may elect a spell//land modal
-            // card's land face, which `initiate_cast_during_resolution` refuses
-            // as a mis-built Cast request; route Play windows through the shared
-            // election so a land-face-only card is played as a land.
+            // CR 701.18b + CR 712.12: a Play policy may elect a modal card's
+            // land face, which `initiate_cast_during_resolution` refuses as a
+            // mis-built Cast request; route Play windows through the shared
+            // election so a land face is played as a land.
             let initiation = if window.face_policy.play_mode.is_play() {
                 match casting::initiate_resolution_election(state, player, chosen, request, events)?
                 {
                     casting::ResolutionElectionInitiation::Cast(initiation) => initiation,
-                    casting::ResolutionElectionInitiation::PlayLandFace(cleanup) => {
-                        let commit =
-                            play_resolution_land_face(state, player, chosen, *cleanup, events)?;
+                    casting::ResolutionElectionInitiation::PlayLandFace { cleanup, back_face } => {
+                        let commit = play_resolution_land_face(
+                            state, player, chosen, *cleanup, back_face, events,
+                        )?;
                         return Ok(ResolutionChoiceOutcome::WaitingFor(
                             resume_free_cast_window_after_land_play(state, window, commit, events),
                         ));
@@ -9744,36 +9750,43 @@ pub(crate) fn abort_resolution_cast(
 /// free Play route carries no receipts. Like the plain resolution land play
 /// (`cast_from_zone::play_land_during_resolution_instruction`), the land
 /// route gives `exiled_misses` no disposition: a single-card Play instruction
-/// never has misses. `Ok(None)` is CR 305.2b / CR 305.3's "ignore": nothing
-/// was played or counted.
+/// never has misses. `back_face` names the land face elected (CR 712.12): the
+/// back face of a modal card, or the front face — a land card's, or a
+/// land//land card's front. `Ok(None)` is CR 305.2b / CR 305.3's "ignore":
+/// nothing was played or counted.
 pub(crate) fn play_resolution_land_face(
     state: &mut GameState,
     player: crate::types::player::PlayerId,
     object_id: ObjectId,
     cleanup: crate::types::ability::ResolutionCastCleanup,
+    back_face: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<Option<super::engine::LandPlayCommit>, EngineError> {
     validate_resolution_cast_cleanup_authority(player, &cleanup)?;
     withdraw_resolution_cast_delayed_triggers(state, &cleanup)?;
-    Ok(super::engine::play_land_face_during_resolution(
-        state, player, object_id, events,
-    ))
+    Ok(if back_face {
+        super::engine::play_land_face_during_resolution(state, player, object_id, events)
+    } else {
+        super::engine::play_land_during_resolution(state, player, object_id, events)
+    })
 }
 
-/// CR 712.12 + CR 701.18b: finish a `ModalFaceChoice` whose player elected the
-/// land face under a Play election. The land face's admission is re-checked
-/// against the exact indexed permission's policy before anything changes, so a
-/// forged or stale choice is an error with no mutation. The temporary
-/// permission is then consumed, and the land is played during resolution.
-/// CR 614.12a: an entry choice pauses as the next prompt and its resume path
-/// finishes the parked parent; otherwise the parent resolution continues at
-/// once (CR 608.2c).
+/// CR 712.12 + CR 701.18b: finish a `ModalFaceChoice` whose player elected a
+/// land face under a Play election — `back_face` names which. The land face's
+/// admission is re-checked against the exact indexed permission's policy
+/// before anything changes, so a forged or stale choice is an error with no
+/// mutation. The temporary permission is then consumed, and the land is
+/// played during resolution. CR 614.12a: an entry choice pauses as the next
+/// prompt and its resume path finishes the parked parent; otherwise the parent
+/// resolution continues at once (CR 608.2c). An election offered from a
+/// free-cast window resumes that window instead.
 pub(crate) fn complete_resolution_land_face_choice(
     state: &mut GameState,
     player: crate::types::player::PlayerId,
     object_id: ObjectId,
     card_id: crate::types::identifiers::CardId,
     permission_index: crate::types::game_state::CastingPermissionIndex,
+    back_face: bool,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     let admitted = state
@@ -9786,11 +9799,12 @@ pub(crate) fn complete_resolution_land_face_choice(
                 granted_to: Some(grantee),
                 resolution_cleanup: Some(cleanup),
                 ..
-            } if *grantee == player => casting::resolution_land_face_admission(
+            } if *grantee == player => casting::resolution_land_face_choice_admission(
                 state,
                 player,
                 object_id,
                 &cleanup.face_policy,
+                back_face,
             ),
             _ => false,
         });
@@ -9829,9 +9843,10 @@ pub(crate) fn complete_resolution_land_face_choice(
             enters_with_modifications: enters_with_modifications.clone(),
             member_pool: member_pool.clone(),
         }),
-        _ => None,
+        crate::types::ability::ResolutionCastSuccessAction::BottomMisses
+        | crate::types::ability::ResolutionCastSuccessAction::RippleOfferRemaining { .. } => None,
     };
-    let commit = play_resolution_land_face(state, player, object_id, cleanup, events)?;
+    let commit = play_resolution_land_face(state, player, object_id, cleanup, back_face, events)?;
     if let Some(window) = window {
         return Ok(resume_free_cast_window_after_land_play(
             state, window, commit, events,

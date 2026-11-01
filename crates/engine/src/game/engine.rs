@@ -13261,22 +13261,22 @@ fn apply_non_priority_pass_action(
                     Some((permission_index, cleanup))
                 }
             };
-            // CR 701.18b + CR 712.12: under a Play instruction the back face
-            // of a spell//land modal card is a land face. Electing it plays
-            // the land during resolution instead of casting, so no face
-            // mutation happens here; the land-face completion elects the face
-            // itself. A back face whose land play is not admissible falls
-            // through to the cast path below, which rejects it and restores
-            // the object exactly as today.
-            let land_face = back_face
-                && resolution_cleanup.as_ref().is_some_and(|(_, cleanup)| {
-                    casting::resolution_land_face_admission(
-                        state,
-                        *player,
-                        *object_id,
-                        &cleanup.face_policy,
-                    )
-                });
+            // CR 701.18b + CR 712.12: under a Play instruction a land face of a
+            // modal card — the back face of a spell//land card, or either face
+            // of a land//land card — is played during resolution instead of
+            // cast, so no face mutation happens here; the land-face completion
+            // elects the face itself. A face whose land play is not admissible
+            // falls through to the cast path below, which rejects it and
+            // restores the object exactly as today.
+            let land_face = resolution_cleanup.as_ref().is_some_and(|(_, cleanup)| {
+                casting::resolution_land_face_choice_admission(
+                    state,
+                    *player,
+                    *object_id,
+                    &cleanup.face_policy,
+                    back_face,
+                )
+            });
             match resolution_cleanup {
                 Some((permission_index, _)) if land_face => {
                     crate::game::engine_resolution_choices::complete_resolution_land_face_choice(
@@ -13285,6 +13285,7 @@ fn apply_non_priority_pass_action(
                         *object_id,
                         *card_id,
                         permission_index,
+                        back_face,
                         &mut events,
                     )?
                 }
@@ -19038,10 +19039,10 @@ fn elect_modal_land_back_face(obj: &mut crate::game::game_object::GameObject) {
 }
 
 /// CR 712.12 + CR 305.2a + CR 305.2b + CR 305.3 + CR 101.2: whether `player` may play the
-/// land back face of the spell//land modal double-faced card `object_id` while
-/// an instructing ability resolves. The object's front face is not a land
-/// (CR 712.8a: outside the battlefield and stack it has only its front face's
-/// characteristics) and its back face is a modal land face. Legality is the
+/// land back face of the modal double-faced card `object_id` — a spell//land
+/// card or a land//land card — while an instructing ability resolves. Its back
+/// face is a modal land face (CR 712.8a: outside the battlefield and stack the
+/// object has only its front face's characteristics). Legality is the
 /// resolution-time land-play authority ([`resolution_land_play_is_legal`]:
 /// turn, prohibitions, allowance) evaluated against the elected land face, on
 /// a projected clone so the real object is not mutated.
@@ -19053,12 +19054,7 @@ pub(crate) fn resolution_back_land_face_play_is_legal(
     let Some(obj) = state.objects.get(&object_id) else {
         return false;
     };
-    if obj
-        .card_types
-        .core_types
-        .contains(&crate::types::card_type::CoreType::Land)
-        || !modal_land_face_election_available(obj)
-    {
+    if !modal_land_face_election_available(obj) {
         return false;
     }
     let mut projected = state.clone();
@@ -19106,16 +19102,18 @@ pub(crate) fn play_land_face_during_resolution(
 /// CR 305.3 "ignore any part of an effect that instructs a player to do so":
 /// nothing happens and nothing is counted.
 ///
-/// No CR 712.12 face prompt is opened here: a land//land modal card bound
-/// outside the graveyard never reaches here from a Play instruction —
-/// `cast_from_zone::resolution_play_route` keeps it on the lingering grant,
-/// whose PlayLand authority (its front face is a Land) opens `ModalFaceChoice`.
-/// A spell//land MDFC never reaches here either: it takes the resolution-owned
-/// face election (`ResolutionPlayRoute::ElectFace`), whose land face is played
-/// by [`play_land_face_during_resolution`]. The `CastFromZone` graveyard route
-/// is excluded from the land//land fallback because base takes the immediate
-/// graveyard route there and never lingers; a graveyard land//land plays its
-/// front face (no printed carrier; its CR 712.12 election is a follow-up).
+/// No CR 712.12 face prompt is opened here: the face, when there is one to
+/// elect, was elected before this is called. A land//land modal card reaches
+/// here by its FRONT face only after the resolution-owned election
+/// (`casting::initiate_resolution_election` / `ModalFaceChoice`) chose it; its
+/// back face, and a spell//land card's land face, are played by
+/// [`play_land_face_during_resolution`]. On the single-card Play route
+/// `cast_from_zone::resolution_play_route` keeps a land//land card outside the
+/// graveyard on the lingering grant, whose PlayLand authority opens
+/// `ModalFaceChoice`; the `CastFromZone` graveyard route is excluded from that
+/// fallback because base takes the immediate graveyard route there and never
+/// lingers, so a graveyard land//land plays its front face (no printed carrier;
+/// moving that route onto the election is a follow-up).
 pub(crate) fn play_land_during_resolution(
     state: &mut GameState,
     player: PlayerId,

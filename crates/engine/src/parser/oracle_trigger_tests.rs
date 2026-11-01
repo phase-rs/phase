@@ -35968,7 +35968,7 @@ fn elder_brain_they_draw_binds_to_defending_player() {
     let execute = def.execute.as_ref().expect("should have execute");
     assert!(
         matches!(&*execute.effect, Effect::Unimplemented { .. }),
-        "CR 400.3: the exile names ONE player's hand, but the possessive binds no \
+        "CR 400.1: the exile names ONE player's hand, but the possessive binds no \
          player, so it stays an honest gap rather than an every-hand ChangeZoneAll; \
          got {:?}",
         execute.effect
