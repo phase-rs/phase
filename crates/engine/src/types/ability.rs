@@ -37039,6 +37039,9 @@ pub enum TurnUpCostSource {
     Disguise,
     /// CR 701.40b: a manifested creature card's own mana cost.
     ManifestManaCost,
+    /// CR 702.106c / CR 116.2j / CR 905.4a: face-down hidden agenda conspiracy
+    /// in command zone — special action, no cost (CR 116.2j).
+    HiddenAgenda,
 }
 
 /// Condition that gates whether a replacement effect applies.

@@ -1112,32 +1112,21 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     // `commander` slot must neither place a command-zone object nor net the
     // slot out of the library, or a populated-but-inert `commander` slot would
     // add a 61st card to a constructed game.
-    if place_commanders {
-        let commander_decks: Vec<(PlayerId, &[DeckEntry])> =
-            std::iter::once((PlayerId(0), payload.player.commander.as_slice()))
-                .chain(std::iter::once((
-                    PlayerId(1),
-                    payload.opponent.commander.as_slice(),
-                )))
-                .chain(
-                    payload
-                        .ai_decks
-                        .iter()
-                        .enumerate()
-                        .map(|(i, d)| (PlayerId((2 + i) as u8), d.commander.as_slice())),
-                )
-                .collect();
-        for (owner, entries) in commander_decks {
-            for entry in entries {
-                for _ in 0..entry.count {
-                    create_commander_from_card_face(state, &entry.card, owner);
-                }
-            }
-        }
-    } else if state.format_config.command_zone {
-        // Optional command zone for limited / non-commander formats (e.g. Conspiracy Draft CR 905).
-        // Command zone cards exist separately from the normal deck (not netted against main deck,
-        // and not marked as commanders).
+    #[derive(Copy, Clone)]
+    enum CommandZonePlacement {
+        Commander,
+        NonCommanderLimited,
+    }
+    let placement = if place_commanders {
+        Some(CommandZonePlacement::Commander)
+    } else if state.format_config.format == crate::types::format::GameFormat::Limited
+        && state.format_config.command_zone
+    {
+        Some(CommandZonePlacement::NonCommanderLimited)
+    } else {
+        None
+    };
+    if let Some(placement) = placement {
         let command_decks: Vec<(PlayerId, &[DeckEntry])> =
             std::iter::once((PlayerId(0), payload.player.commander.as_slice()))
                 .chain(std::iter::once((
@@ -1155,7 +1144,14 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
         for (owner, entries) in command_decks {
             for entry in entries {
                 for _ in 0..entry.count {
-                    create_command_zone_card_from_card_face(state, &entry.card, owner);
+                    match placement {
+                        CommandZonePlacement::Commander => {
+                            create_commander_from_card_face(state, &entry.card, owner);
+                        }
+                        CommandZonePlacement::NonCommanderLimited => {
+                            create_command_zone_card_from_card_face(state, &entry.card, owner);
+                        }
+                    }
                 }
             }
         }

@@ -4786,11 +4786,19 @@ fn redact_face_down_identity_from_observer(obj: &mut crate::game::game_object::G
     obj.printed_ref = None;
     // CR 708.5 + CR 708.2: a face-down permanent has no name and no abilities,
     // and no player but its controller may look at the card underneath.
+    // This applies equally to face-down conspiracies in the command zone (CR 905.4a / CR 702.106a).
     // `parse_warnings` survives the face-down transformation on the
     // authoritative object (measured: a manifested card keeps the printed
     // face's warnings), so it must be redacted here for the same reason
     // `back_face` is — it is evidence about the hidden printed text.
     obj.parse_warnings.clear();
+    // CR 708.5 + CR 905.4a: also clear runtime ability definitions so that
+    // face-down command-zone conspiracies don't leak their static/triggered
+    // abilities to observers. The controller sees the real object via
+    // `reveal_face_down_identity_to_controller`.
+    obj.abilities = Arc::new(Vec::new());
+    obj.trigger_definitions = Default::default();
+    obj.static_definitions = Default::default();
 }
 
 /// CR 603.3b + CR 400.2: A pending trigger awaiting its

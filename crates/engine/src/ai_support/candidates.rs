@@ -4886,7 +4886,7 @@ pub(crate) fn priority_actions_with_probe(
         }
     }
 
-    // CR 702.106c / CR 116.2k: turning a face-down hidden agenda conspiracy in
+    // CR 702.106c / CR 116.2j: turning a face-down hidden agenda conspiracy in
     // the command zone face up is a special action available any time its
     // controller has priority.
     for &object_id in &state.command_zone {
