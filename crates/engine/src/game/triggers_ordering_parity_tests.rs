@@ -4,7 +4,7 @@
 //!   * The §5.2 **allowlist-parity sweep** — the corpus-wide proof that the new
 //!     `ability_rw` conflict gate reproduces the DELETED 12-string serde
 //!     allowlist's decision on every printed no-ordering-input trigger, modulo
-//!     the seven proven-order-dependent category-(1) rows (the CR 603.3b fix).
+//!     the proven-order-dependent category-(1) rows (the CR 603.3b fix).
 //!     A FROZEN in-test copy of the deleted walk is the reference oracle.
 //!   * The **discriminators** N-A/N-B/N-B2/N-C/N-D/N-F — hand-built groups run
 //!     through the production ordering-soundness authority
@@ -97,9 +97,8 @@ fn ast_bears_unimplemented(value: &serde_json::Value) -> bool {
 
 /// The canonical category-(1) rows (§5.2): provably order-dependent printed
 /// groups whose same-event auto→prompt flip IS the CR 603.3b fix. Each carries
-/// its in-plan order-dependence proof (see PR-6.75-C0FULL-C1-PLAN.md §5.2). A
-/// same-event diff on any OTHER card is an implementation finding, never a new
-/// row (STRICT PROOF-GATE).
+/// its one-line order-dependence proof. A same-event diff on any OTHER card is an
+/// implementation finding until such a proof lists it (STRICT PROOF-GATE).
 const CATEGORY_1_ROWS: &[&str] = &[
     // Ouroboroid: each copy's Power{Source} read is fed by the other's
     // PutCounterAll — token/counter totals differ by order.
@@ -115,6 +114,9 @@ const CATEGORY_1_ROWS: &[&str] = &[
     // Spawn of Mayhem: damage order across the 10-life threshold decides which
     // copy gets the counter.
     "spawn of mayhem",
+    // Marauding Raptor: the first copy's damage can destroy a small entering Dinosaur
+    // (CR 704.5g) before the second resolves — which copy gets +2/+0 depends on order.
+    "marauding raptor",
     // Your Inescapable Doom: PutCounter{Any} write × sibling CountersOn{Source}
     // read — same-kind counter feed (CR 904.3 two-copy scheme deck).
     "your inescapable doom",
@@ -137,6 +139,12 @@ const DOCUMENTED_OVER_PROMPT: &[&str] = &[
     // same-event sibling triggers, so they commute. The conservative prompt
     // remains fail-closed until that per-source proof is structural.
     "adaptive training post",
+    // Woodwork Prodigy: its source-local prepared intervening-if
+    // ("if this creature isn't prepared") and the corresponding BecomePrepared
+    // write targeting SelfRef are disjoint for same-event sibling triggers,
+    // so they commute. The conservative prompt remains fail-closed until that
+    // per-source proof is structural.
+    "woodwork prodigy",
     // ---- L8-held: a self-scoped write can flip a sibling's re-checked
     // intervening-if (CR 603.4), but the flip is monotone/self-limiting, so
     // identical siblings still commute semantically. The L8 idempotence recognizer
@@ -197,6 +205,10 @@ const DOCUMENTED_OVER_PROMPT: &[&str] = &[
     // commutes ONLY because the phoenix's own power (2 < 4) — runtime P/T, invisible
     // to a context-free recognizer.
     "flamewake phoenix",
+    // Choose{CreatureType, persist} → ChangeZoneAll{gy → library}: the chosen type is
+    // bound earlier in the same resolution, but the AST has no scope distinguishing it
+    // from persistent per-source storage.
+    "elvish soultiller",
     // ---- parse-blocked commutes (underneath the mis-parse, the structure
     // commutes) ----
     // RemoveCounter{TriggeringSource} mis-parse (should be SelfRef): each removes
@@ -327,12 +339,29 @@ const BATCH_GENUINE_ROWS: &[&str] = &[
     // #5719 — the Draw was Unimplemented until the quantity channel bound Intensity,
     // and the sweep skips Unimplemented-bearing triggers.
     "great desert hellion",
+    // Dies (self_ref): DestroyAll{creatures with CombatRelation{BlockingOrBlockedBy,
+    // subject: Source}} (AST measured). Each co-departing Abu Ja'far answers from
+    // ITS OWN departure row's block pairings (CR 608.2h), so the members destroy
+    // different creatures, and a leaves trigger one resolution sets off resolves
+    // before the next (Reveillark returning the creature the other Abu Ja'far
+    // destroyed, CR 603.6c): the outcome differs by order (CR 603.3b intended
+    // prompt). `MemberBinding::SourceCombatPairing` refuses the batch. Runtime pin:
+    // two_abu_jafars_dying_together_let_their_controller_order_the_triggers
+    "abu ja'far",
+    // Dies during combat (self_ref): DamageAll{6, creatures with CombatRelation{
+    // BlockedBySubject{ThisCombat}, subject: Source}} (AST measured). Each
+    // co-departing Membrane damages the attacker IT blocked, the attacker dies to
+    // state-based actions between the two resolutions, and a leaves trigger it
+    // sets off resolves before the next (CR 603.6c): same shape as Abu Ja'far.
+    // Runtime pin:
+    // two_cathedral_membranes_dying_together_let_their_controller_order_the_triggers
+    "cathedral membrane",
 ];
 
 /// R3 HIGH-1 (PR #5072 review): SAME-EVENT GENUINE member-bound order-dependence —
 /// the REAL under-prompts the maintainer review caught. The base engine auto-ordered
 /// ALL same-event groups unconditionally (CR 603.3b DEFERRED); the same-event member-
-/// bound discriminator (`profiles_conflict`: `if s.same_event && p.reads_member_bound`)
+/// bound discriminator (`profiles_conflict`: `if s.same_event && p.reads_member_bound()`)
 /// now correctly PROMPTS them. Kept SEPARATE from the conservative class-count below
 /// (rider-3 §7 honesty), analogous to `BATCH_GENUINE_ROWS`. Every member reads
 /// per-source bound storage AND routes a SHARED object into it, so the identical-
@@ -709,7 +738,7 @@ fn ordering_parity_sweep() {
                     } else if profile.reads_member_bound() {
                         // R3 HIGH-1: the same-event member-bound over-prompt CLASS.
                         // Predicate-keyed (mirrors the discriminator's own gate
-                        // `s.same_event && p.reads_member_bound` exactly — one
+                        // `s.same_event && p.reads_member_bound()` exactly — one
                         // predicate, two consumers), membership DERIVED not enumerated
                         // (rider-1: corpus-churn-robust — a 48-name allowlist would
                         // break on every regen). CONSERVATIVE by construction: an
@@ -982,7 +1011,7 @@ fn ordering_parity_sweep() {
         // ~15% churn tolerance (`>=`, corpus-churn-robust per rider-1 — the class is
         // predicate-keyed so its membership churns with the corpus). NON-vacuity /
         // mutation tripwire: deleting the discriminator row (`s.same_event &&
-        // p.reads_member_bound`) makes every member auto-order ⇒ this count collapses
+        // p.reads_member_bound()`) makes every member auto-order ⇒ this count collapses
         // to 0 ⇒ floor trips. Guards the HIGH-1 fix itself against silent regression.
         assert!(
             se_member_bound_class.len() >= 35,
@@ -1024,13 +1053,14 @@ fn ordering_parity_sweep() {
                 .intersection(&se_event_object_class)
                 .collect::<Vec<_>>()
         );
-        // cat-1 exact-hit: the 6 measured same-event flips. Your Inescapable Doom is
+        // cat-1 exact-hit: the measured same-event flips. Your Inescapable Doom is
         // expected-UNHIT (its counter feed parses to Any so the sweep never forms its
         // group); if that parser gap is ever fixed it starts hitting and this assert
         // forces the bookkeeping update.
         let expected_cat1: BTreeSet<String> = [
             "complex automaton",
             "docent of perfection",
+            "marauding raptor",
             "ouroboroid",
             "promise of tomorrow",
             "sidequest: hunt the mark",
@@ -1115,6 +1145,7 @@ fn token_power_src() -> Effect {
         owner: TargetFilter::Controller,
         attach_to: None,
         enters_attacking: false,
+        attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
@@ -1402,6 +1433,7 @@ fn n_d2_commander_intervening_if_is_fed_by_a_sibling_membership_write() {
         owner: TargetFilter::Controller,
         source_filter: None,
         enters_attacking: false,
+        attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
         tapped: false,
         count: qfix(1),
         extra_keywords: vec![],
@@ -2107,6 +2139,7 @@ fn choose_opponent_then_draw() -> ResolvedAbility {
         target: TargetFilter::Controller,
     });
     ra(Effect::Choose {
+        chooser: crate::types::ability::ControllerRef::You,
         choice_type: ChoiceType::opponent(),
         persist: false,
         selection: TargetSelectionMode::default(),
@@ -2214,7 +2247,7 @@ fn b2_dotd_member_bound_pin() {
 /// Revert-fail (both edits independently load-bearing): (1) restoring the bare
 /// `p.source_independent()` disjunct at `profiles_conflict`'s same-event fast path
 /// takes the member-bound group down the fast path ⇒ AUTO (RED); (2) deleting the
-/// `if s.same_event && p.reads_member_bound { return true }` discriminator lets it
+/// `if s.same_event && p.reads_member_bound() { return true }` discriminator lets it
 /// fall through to the feed rows, which check read/write KIND overlap not per-source
 /// storage (the TrackedSet return writes membership with no matching read) ⇒ AUTO
 /// (RED). Before this PR's same-event predicate the base engine auto-ordered ALL

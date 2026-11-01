@@ -9,6 +9,7 @@
 
 use crate::game::effects;
 use crate::game::engine::{self, EngineError};
+use crate::game::{engine_priority, triggers};
 use crate::types::ability::{EffectError, ResolvedAbility};
 use crate::types::actions::GameAction;
 use crate::types::events::GameEvent;
@@ -178,6 +179,13 @@ fn replay(
         return Ok(ReplayOutcome::Failed);
     }
 
+    if !transaction.transcript.is_empty() {
+        collect_initial_payment_events(&mut shadow, &buffered_events);
+        // CR 603.2c: these coordinates name only the initial buffer. Recorded
+        // actions own distinct inner buffers, so the closed claims end here.
+        shadow.consumed_before_priority_trigger_events.clear();
+    }
+
     for entry in &transaction.transcript {
         restore_trigger_context(&mut shadow, transaction.resolving_trigger_context.as_ref());
         let result = engine::apply_admitted_recorded_action(
@@ -206,6 +214,67 @@ fn replay(
     } else {
         Ok(ReplayOutcome::Paused { shadow })
     }
+}
+
+/// CR 603.2c + CR 603.3b: initial direct emissions have no ActionResult scan.
+/// Collect them once while their claims and typed retention owners are live.
+fn collect_initial_payment_events(state: &mut GameState, events: &[GameEvent]) {
+    let mut retained = engine_priority::retained_logical_zone_events(state);
+    retained.extend(state.deferred_entry_events.iter().cloned());
+    retained.extend(engine_priority::retained_cost_events(state));
+    let claims = &state.consumed_before_priority_trigger_events;
+    let ordinary = triggers::filter_already_collected_trigger_events_from(state, events, 0, claims);
+    let delayed = triggers::filter_consumed_trigger_events_from(
+        events,
+        0,
+        triggers::TriggerCollectionRequester::Delayed,
+        claims,
+    );
+    let ordinary: Vec<_> = ordinary
+        .into_iter()
+        .filter(|event| !retained.contains(event))
+        .collect();
+    let delayed: Vec<_> = delayed
+        .into_iter()
+        .filter(|event| !retained.contains(event))
+        .collect();
+    triggers::collect_triggers_into_deferred(state, &ordinary);
+    triggers::collect_delayed_trigger_contexts_into_deferred(state, &delayed);
+}
+
+/// CR 608.2c + CR 117.3b + CR 603.3b: the canonical tail and all outer
+/// frames complete before this caller hands the whole due batch to settlement.
+fn settle_canonical_tail(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+    event_start: usize,
+    carrier: Option<crate::types::identifiers::ObjectId>,
+) -> Result<(), EngineError> {
+    let Some(carrier) = carrier else {
+        return Ok(());
+    };
+    engine::resume_pending_continuation_if_priority(state, events)?;
+    let completed = Some(carrier).filter(|_| {
+        state.resolving_stack_entry.is_none()
+            && matches!(
+                state.waiting_for,
+                crate::types::game_state::WaitingFor::Priority { .. }
+            )
+            && state.game_end.is_none()
+            && state.payment_transaction.is_none()
+            && !state.payment_transaction_replay
+            && !triggers::is_pending_trigger_construction_active(state)
+    });
+    let default_wf = state.waiting_for.clone();
+    let waiting_for = engine_priority::run_post_action_pipeline_for_canonical_tail(
+        state,
+        events,
+        event_start,
+        &default_wf,
+        completed,
+    )?;
+    crate::game::public_state::sync_waiting_for(state, &waiting_for);
+    Ok(())
 }
 
 /// Resume only the printed continuation after a staged payment boundary.
@@ -278,6 +347,7 @@ pub(crate) fn apply_pending_action(
             restored.waiting_for = transaction.base_waiting_for;
             restored.cost_payment_failed_flag = true;
             *state = restored;
+            let carrier = state.resolving_stack_entry.as_ref().map(|entry| entry.id);
             let mut continuation_events = Vec::new();
             resolve_root_continuation(
                 state,
@@ -286,6 +356,7 @@ pub(crate) fn apply_pending_action(
                 transaction.resolving_trigger_context.as_ref(),
                 &mut continuation_events,
             )?;
+            settle_canonical_tail(state, &mut continuation_events, 0, carrier)?;
             Ok(ActionResult::applied(
                 continuation_events,
                 state.waiting_for.clone(),
@@ -310,6 +381,8 @@ pub(crate) fn apply_pending_action(
             shadow.payment_transaction = None;
             shadow.payment_transaction_replay = false;
             shadow.payment_transaction_just_handled = false;
+            let carrier = shadow.resolving_stack_entry.as_ref().map(|entry| entry.id);
+            let continuation_event_start = events.len();
             // The payment is committed. Continue the printed rider through the
             // ordinary chain walker, now outside the transaction, so a later
             // pause/failure cannot restore the pre-payment base.
@@ -320,6 +393,7 @@ pub(crate) fn apply_pending_action(
                 transaction.resolving_trigger_context.as_ref(),
                 &mut events,
             )?;
+            settle_canonical_tail(&mut shadow, &mut events, continuation_event_start, carrier)?;
             let waiting_for = shadow.waiting_for.clone();
             *state = shadow;
             Ok(ActionResult::applied(events, waiting_for).with_log_entries(log_entries))
@@ -492,6 +566,7 @@ pub(crate) fn owns_action(state: &GameState, action: &GameAction) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::game_object::ObjectIncarnationRefExt;
 
     use crate::game::deck_loading::DeckEntry;
     use crate::game::zones::create_object;

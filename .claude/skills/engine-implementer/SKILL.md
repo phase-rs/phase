@@ -14,14 +14,14 @@ This is the orchestrator for the phase.rs implementation pipeline. It runs as a 
 | 1. Produce plan | **Fresh agent** invoking `engine-planner` | The plan is shaped by the task, not by the conversation history that led here |
 | 2. Review plan | **Fresh agent** invoking `review-engine-plan` | Honest architectural review, independent of the planner |
 | 3. Implement | **Fresh agent** following [executor.md](executor.md) | Surgical edits and preparatory checks; never commits |
-| 4. Checkpoint + measure | This thread, then a fresh executor in measurement-only mode | The orchestrator creates the candidate commit; an isolated executor measures that immutable candidate |
+| 4. Checkpoint; schedule measurement | This thread; a fresh measurement executor when due | Commit now; batch parser measurement at the final combined candidate unless needed to proceed |
 | 5. Complete verification | This thread | Verify the committed candidate, never an in-flight working tree |
 | 6. Review implementation | **Fresh agent** invoking `review-engine-impl` | Independent review of the immutable base-to-candidate diff |
 | 7. Final acceptance | This thread | Accept only the exact reviewed checkpoint candidate or its Step 6 comment-only correction commit |
 
 **Spawning by runtime.** Skills are invoked as `/name` under Claude Code and `$name` under Codex; both read `.claude/skills/<name>/SKILL.md` (`.agents/skills` and `.codex/skills` link there). Under Claude Code, spawn `general-purpose` agents for Steps 1, 2 and 6 and the `engine-implementation-executor` agent type for Steps 3 and 4, which loads `executor.md`. Under Codex, spawn a worker agent per step and tell it which skill or file to read first — for Steps 3 and 4, `.claude/skills/engine-implementer/executor.md`. A runtime that cannot spawn agents runs each step in a fresh session and hands every reviewer ONLY the artifact under review (the full plan, or the unified diff), the original task, `CLAUDE.md`, the relevant review skill, the attempt history below, and in chartered runs the charter, phase index and deferral allowlist — never the conversation that produced the artifact. Never degrade to reviewing your own work in the same context; that is the failure this skill exists to prevent. If even a fresh session is impossible, say so in the final report and in the PR body under "Validation Failures"; do not claim the review loop ran clean.
 
-Before Step 1, and before Step 6 when its trigger applies, a read-only [scout](scout.md) locates facts for the planner and reviewers. It is not a step and holds no gate.
+Before Step 1, and before Step 6 when its trigger applies, two read-only [scouts](scout.md) locate facts for the planner and reviewers. It is not a step and holds no gate.
 
 The orchestrator never authors content itself. Its only jobs are: spawn agents, route their output to the next step, apply the run limits, own the commit, and close each spawned agent once its output is consumed (under Claude Code, send a `shutdown_request` and wait for the `shutdown_response` ack). The structured report each agent returns is the authoritative step handoff; progress messages are additive.
 
@@ -42,9 +42,9 @@ Either:
 
 The invocation may also name a budget (see [Run limits](#run-limits)).
 
-Before Step 3, prepare and verify a clean `IMPLEMENTATION_WORKTREE` at `START_SHA`. After its checkpoint, prepare clean detached base and candidate projection worktrees at `BASE_SHA` and `CANDIDATE_SHA`, and a distinct clean detached `COMPLETION_WORKTREE` at `CANDIDATE_SHA`; no projection or completion worktree is used for implementation. During an active pipeline session, do not re-ask about worktrees; use the session default.
+Before Step 3, prepare and verify a clean `IMPLEMENTATION_WORKTREE` at `START_SHA`. Create clean detached base/candidate projection worktrees and a distinct clean detached `COMPLETION_WORKTREE` only when their checks are due under Step 5, at the relevant immutable SHAs; no projection or completion worktree is used for implementation. During an active pipeline session, do not re-ask about worktrees; use the session default.
 
-Two build-economy rules govern measurement worktrees. **Build-once directories never pay for incremental state:** every measurement build — projection, completion, any target directory built once and never rebuilt — runs with `CARGO_INCREMENTAL=0`. **Completion allocation is per run-segment, not per candidate:** one completion worktree and one isolated completion target directory per phase (per run when unphased), reset to each round's `CANDIDATE_SHA` — per-candidate allocation multiplies full cold builds for no isolation gain. Reuse is strictly sequential within the owning run; never share a reused directory with any concurrently running agent or lane. A reused completion directory still runs `CARGO_INCREMENTAL=0`, since the disk cost is guaranteed and the warm-rebuild speedup is not. Re-measure if warm completion rebuilds start dominating wall clock.
+Two build-economy rules govern measurement worktrees. **Build-once directories never pay for incremental state:** every measurement build — projection, completion, any target directory built once and never rebuilt — runs with `CARGO_INCREMENTAL=0`. **Completion allocation is per run, not per phase or candidate:** reuse one completion worktree and one isolated completion target directory across sequential phases and fix rounds, resetting to the candidate being checked — per-candidate allocation multiplies full cold builds for no isolation gain. Reuse is strictly sequential within the owning run; never share a reused directory with any concurrently running agent or lane. A reused completion directory still runs `CARGO_INCREMENTAL=0`, since the disk cost is guaranteed and the warm-rebuild speedup is not. Re-measure if warm completion rebuilds start dominating wall clock.
 
 **Sizing for pre-existing plans:** Step 1a needs a Sizing section however the plan arrived. A pre-existing plan lacking one — review-clean (which bypasses Step 1) or a draft — gets a **sizing addendum** from a fresh planner in `engine-planner` sizing-only mode, reviewed in `review-engine-plan` sizing-audit mode under the run limits, with the addendum and each round recorded in the phase-fit record. When Step 1a then fires on an already-clean plan, the charter-mode planner partitions rather than re-plans.
 
@@ -54,7 +54,16 @@ Keep the original requested behavior and acceptance criteria in every handoff. B
 
 **Verification machinery** is code or protocol that produces evidence about the candidate and is neither a committed product test run by the standard runners nor a documented command or supported tool API. Adding or repairing it needs an accepted [expansion case](#run-limits) naming the claim no existing test or command answers. Documented setup, waiting for a legitimate build, ordinary product tests and fixtures, and substituting an existing gate (Step 5's checks, an existing test) need none. A card fix never justifies a general-purpose browser driver, session manager, seeding service, cleanup protocol or framework unless the user asked for that product. Temporary, generated, untracked and outside-repository helpers are machinery too; exclusion from T2 is not permission to build them.
 
-A test that reaches the product and reveals wrong behavior calls for a product fix. Required evidence stays required when tooling blocks it: never drop the check or claim a clean/ready result to escape a limit.
+A test that reaches the product and reveals wrong behavior calls for a product fix. Required evidence stays required at its due boundary; scheduling it later under Step 5 is not dropping it, a failed check, or grounds for an expansion case. Never report a deferred check as passed.
+
+## Real cards
+
+The engine's job is to execute real cards. This rule binds every role in this pipeline and every skill that links here, in every artifact: plans and charters, addenda, executor and final reports, review findings, PR bodies and review replies.
+
+- Every explanation or justification of engine behavior names the real printed card(s), quotes their verbatim Oracle text from Scryfall or MTGJSON, and cites the CR rule grep-verified in `docs/MagicCompRules.txt`.
+- A test name, a synthetic card or an abstract shape is never the justification. A test is evidence for a claim about a real card, not the authority for it.
+- Every card whose text a test exercises is a real printed card with verbatim Oracle text ([card-test](../card-test/SKILL.md)); a textless filler body is not justification and is exempt. A synthetic card is acceptable only where no printed card exhibits the shape; the test then says so and names the nearest printed card. When no printed card exhibits the shape, first ask whether the behavior is needed at all.
+- Reviewers report a violation as a finding that changes the artifact, never as a note.
 
 ## Run limits
 
@@ -133,12 +142,12 @@ The run limits count rounds. They do not see a run that converges slowly, where 
 - review rounds spent on `text` or `machinery` findings;
 - planning plus review time several times the implementation time, with open findings not falling.
 
-A high planning-and-review share is a reason to look and proves nothing by itself. Heavy review that keeps retiring real `behavior` findings and keeps candidates landing is justified. Compare against implementation time; `verification` is its own kind because a cold build is a wait and does not count as process effort. Do not let each round's local justification hide the cumulative cost.
+A high planning-and-review share is a reason to look and proves nothing by itself. Heavy review that keeps retiring real `behavior` findings and keeps candidates landing is justified. Compare against implementation time; `verification` is its own kind, but build and verification waits count toward total delivery cost. If they dominate, apply Step 5's deferral and batching policy before launching another check. Do not let each round's local justification hide the cumulative cost.
 
 **When it is dominant.** Tell the user in the next progress update, before they ask, with the four totals, the rounds and candidates behind them, and the cause. Then make the cuts this skill already allows:
 
 - close a round without `behavior` findings as Steps 2 and 6 describe, with no further review;
-- narrow intermediate Step 5 runs to the touched surface, and stop repeating green checks absent new evidence;
+- defer intermediate builds and verification that can wait, batch them at the final combined candidate, and stop repeating green checks absent new evidence;
 - keep fix rounds to the findings supplied, and do not tighten acceptance mid-loop;
 - pass a reviewer's pattern finding, with its predicate and site list verbatim, to later planners and phases as a constraint, so the next reviewer does not find it again;
 - name a smaller scope or a decomposition ([chartered.md](chartered.md)) as an option in the progress update. The check itself files no expansion case.
@@ -178,7 +187,7 @@ A single-phase verdict proceeds through the pipeline below. Re-adjudicate every 
 
 Spawn a fresh agent and instruct it to invoke `engine-planner`. The agent returns a plan with every mandatory architectural section.
 
-**Spawn inputs:** original task and attempt history; in-scope file/subsystem hints; the precedent pack from the [scout](scout.md), when one was produced; any prior reviewer findings as constraints (none on first round); the requirement to emit the mandatory Sizing section. In chartered runs, per-phase planners run in phase-plan mode with the inputs [chartered.md](chartered.md) lists.
+**Spawn inputs:** original task and attempt history; in-scope file/subsystem hints; the precedent packs from the [scouts](scout.md), when produced; any prior reviewer findings as constraints (none on first round); the requirement to emit the mandatory Sizing section. In chartered runs, per-phase planners run in phase-plan mode with the inputs [chartered.md](chartered.md) lists.
 
 Do not author or edit the plan in this thread; applying `text` findings in Step 2 is the one exception. If the returned plan is missing sections or is superficial, send the same inputs plus an explicit "missing sections" note to a **fresh** planning agent — do not patch it yourself.
 
@@ -186,7 +195,7 @@ Do not author or edit the plan in this thread; applying `text` findings in Step 
 
 Spawn a fresh agent and instruct it to invoke `review-engine-plan` against the full plan. Each review runs in a fresh context — never reuse the previous reviewer's.
 
-**Reviewer spawn inputs:** the full plan; attempt history; the original task description; the same precedent pack the planner received, with the [scout](scout.md)'s hand-on sentence; the phase-fit context declaration (all Step 2 reviews in this pipeline declare it, so the Sizing consistency check is blocking); in chartered runs, the phase-plan inputs [chartered.md](chartered.md) lists.
+**Reviewer spawn inputs:** the full plan; attempt history; the original task description; the same precedent packs the planner received, with the [scouts](scout.md)' hand-on sentence; the phase-fit context declaration (all Step 2 reviews in this pipeline declare it, so the Sizing consistency check is blocking); in chartered runs, the phase-plan inputs [chartered.md](chartered.md) lists.
 
 - **A design round** (any `behavior` finding): when the run limits allow, a fresh planner revises the plan with the findings as constraints, then a fresh reviewer reviews the whole revised plan.
 - **A round without `behavior` findings closes the loop:** the orchestrator applies each `text` finding itself (below), closes each `machinery` finding by substituting an existing gate or through an expansion case, and the plan is clean. No review follows. Closing a `text` finding changes nothing the plan decides, and re-reviewing applied wording only mints more wording findings. A review follows a behavior change, never an edit to text.
@@ -218,19 +227,34 @@ If the executor returns "stop and return" items (plan contradicts current code, 
 
 The checkpoint is the candidate commit, and it is the orchestrator's to make — never the executor's. Stage each approved path by explicit pathspec: never `git add -A`, and never commit without a pathspec, because the shared index can sweep in another agent's staged files. Before staging, confirm no pre-existing change overlaps an approved path; if attribution is ambiguous, stop and return rather than unstage, sweep in, or overwrite another agent's work. Commit, then confirm `git -C "$IMPLEMENTATION_WORKTREE" rev-parse HEAD` equals the `CANDIDATE_SHA` you recorded, and that `START_SHA..CANDIDATE_SHA` contains only the intended paths. Never measure an uncommitted tree or use a moving `HEAD` as the candidate. Verify `HEAD` is attached before any push, never pipe `git push` into `tail`/`head`, and push only through Step 7's ship or when asked.
 
-If the change touches the parser, find out whether it moves parser output: dispatch a fresh executor in measurement-only mode against the base and candidate projection worktrees, which builds the tooling on each side, generates card data from each against the same pinned data root, and diffs the two. Report what changed. `./scripts/gen-card-data.sh` and `cargo coverage` do not answer this question.
+If the change touches the parser, schedule one run-base-to-final-candidate parser-output comparison at the run's final verification boundary (use the fetched upstream base after PR synchronization). Do not build projection tooling or regenerate card data per phase or fix round unless the result is needed for the next implementation decision. When due, dispatch a fresh executor in measurement-only mode against the base and candidate projection worktrees, using the same pinned data root, and report what changed. `./scripts/gen-card-data.sh` and `cargo coverage` do not answer this question.
 
 ### Step 5 — Verify the committed candidate
 
-Run the checks in a clean worktree at `CANDIDATE_SHA`, not in the implementation worktree — a check that passes against uncommitted edits has told you nothing about what you are shipping.
+**If a check can wait, it must wait.** Rust compilation and linking are expensive even for a focused test. Default to batching build-backed checks — tests, clippy, parser projection, card-data generation, coverage and semantic audits — at the final combined candidate. An implementation handoff, checkpoint, review round, or phase boundary is not a reason to run them. Keep writing the required regression tests during implementation; defer their execution, not their creation. This timing policy also governs lint/comment correction reruns and the cadence referenced below.
 
-**Per-commit candidates** run formatting and the executor's focused set only. Report the result as narrowed; it is not a suite pass.
+Intermediate candidates use formatting, scope/diff checks, CR lookups, source inspection and non-compiling parser gates. Run an expensive check early only when its result is needed to choose the next implementation step, resolve a concrete blocker, or satisfy an explicit immediate requirement. Name that dependency and run the smallest check that answers it. Risk determines what must eventually run; it does not by itself require running it now.
 
-**The acceptance candidate** — the candidate Step 6 closes on, which in a chartered run is the phase's last commit — runs every gate the changed surface calls for, once: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, the full workspace test suite, `./scripts/check-interaction-bindings.sh --check`, `cargo coverage` with no card regressed and `cargo semantic-audit` with zero new findings for Rust paths, `pnpm run type-check`, `pnpm lint` and the frontend tests for frontend paths, the parser gate for parser paths. A failure goes to a fix executor, and its candidate repeats this full set. A lint failure — rustfmt, a compiler warning, or a clippy lint in the `style`, `complexity` or `perf` group — closes like a `text` finding, with no Step 6 re-review, only when its correction is semantics-neutral: judged by the orchestrator from the committed diff, it changes no drop timing, locking, error handling, control flow or evaluation order. A pure representation change, such as boxing an enum variant's payload, qualifies, as does removing an unused import; handling a `must_use` result does not. The orchestrator applies a fix the tool states verbatim on the candidate, any other such fix goes to a fix executor, and the commit either one makes reruns only `cargo fmt --all --check`, the check that failed, and the source-reading tests for each changed file (see Comment-only corrections). Every other result carries over from the candidate, because a semantics-neutral change cannot move it. The PR's Validation section names the carried-over results and the commit they were measured at. A lint in any other clippy group, and a correction that is not neutral or whose neutrality is uncertain, are `behavior`: each goes to a fix executor like any other failure, and its candidate returns to Step 6. Markdown-only policy changes need scope and diff checks; do not run Cargo or Tilt for them.
+List deferred checks and their due boundary in the existing handoff/report; no new tracking artifact or approval is needed. Phase acceptance and code review may proceed with checks explicitly deferred. Deferred evidence is not a review finding until due; an observed failure still needs resolution. For local-only work, the final combined candidate is the due boundary. For shipping work, batch checks after the planned upstream synchronization/cherry-pick in [pr-handoff.md](pr-handoff.md), avoiding a pre-sync build that must immediately be repeated. Reuse required CI for checks it already runs when the submission workflow allows; do not run local duplicates. Final verified/merge-ready claims still require the checks to pass.
+
+When a check is due, run it against the clean immutable candidate or use existing evidence covering that candidate's inputs. Never report an uncommitted-tree result as candidate verification.
+
+**Select the final check set by risk.** Follow [project-reference's verification cadence](../project-reference/SKILL.md#verification-cadence-risk-scaled). Neither a phase boundary nor final acceptance automatically requires the full workspace test suite or workspace-wide clippy. Select checks from the changed behavior and its consumers:
+
+- For Rust changes, run `cargo fmt --all --check` and batch the executor's focused tests across the run at the final committed candidate. For localized parser/AST changes, add the parser combinator gate and targeted semantic checks; keep Step 4's parser-output measurement.
+- For non-trivial runtime changes or shared targeting, stack, state-machine, or type changes, add the affected crate/subsystem suites and lint checks, including affected consumers. Widen to workspace-wide checks only when the impact spans the workspace or an explicit user/CI requirement calls for them; name that reason.
+- Run `./scripts/check-interaction-bindings.sh --check` when interaction types or generated bindings can change. Run coverage and semantic audits when parser/card-data/support claims can change, not merely because a Rust file changed; require no card regressions or new semantic findings.
+- For frontend changes, run type-check, lint, and the affected frontend tests; use the full frontend suite when shared behavior warrants it. Markdown-only policy changes need scope and diff checks; do not run Cargo or Tilt for them.
+
+Use fresh Tilt results when they cover the candidate's source and selected checks; do not duplicate those builds. A different checkout's green status is not candidate evidence. Follow project-reference's build coordination rules.
+
+**Run-level checks and retries.** At the due boundary above, assess the aggregate diff and collect the checks its combined impact requires. Do not repeat those broad checks at every phase merely because a phase is accepted. A failure goes to a fix executor; its candidate reruns the failed check and checks whose inputs or behavior the fix can affect, not the entire previous set automatically. Carry forward unaffected results only with their measured commit and an explanation of why the intervening diff cannot invalidate them. Report focused runs as focused, never as a full-suite pass. Required CI and explicit user checks still apply.
+
+**Semantics-neutral lint corrections.** A lint failure — rustfmt, a compiler warning, or a clippy lint in the `style`, `complexity` or `perf` group — closes like a `text` finding, with no Step 6 re-review, only when its correction is semantics-neutral: judged by the orchestrator from the committed diff, it changes no drop timing, locking, error handling, control flow or evaluation order. A pure representation change, such as boxing an enum variant's payload, qualifies, as does removing an unused import; handling a `must_use` result does not. The orchestrator applies a fix the tool states verbatim on the candidate, any other such fix goes to a fix executor, and the commit either one makes reruns only `cargo fmt --all --check`, the check that failed, and the source-reading tests for each changed file (see Comment-only corrections). Every other result carries over from the candidate, because a semantics-neutral change cannot move it. The PR's Validation section names the carried-over results and the commit they were measured at. A lint in any other clippy group, and a correction that is not neutral or whose neutrality is uncertain, are `behavior`: each goes to a fix executor like any other failure, and its candidate returns to Step 6.
 
 ### Step 6 — Review the immutable candidate
 
-Spawn a fresh agent to invoke `review-engine-impl` against `BASE_SHA..CANDIDATE_SHA`, with the original task, reviewed plan, in-scope paths, prior findings (including any small-change-lane constraints), attempt history, and a review pack when the [scout](scout.md)'s trigger applies. It reviews the diff and the checks that were run; additional checks must answer a concrete unresolved claim within the task scope. Missing evidence returns to the orchestrator, not an independent tooling project. After the result, apply the [run limits](#run-limits) before any fix or return to planning.
+Spawn a fresh agent to invoke `review-engine-impl` against `BASE_SHA..CANDIDATE_SHA`, with the original task, reviewed plan, in-scope paths, prior findings (including any small-change-lane constraints), attempt history, and review packs when the [scouts](scout.md)' trigger applies. It reviews the diff, available results, and checks deferred under Step 5. Additional checks must answer a concrete unresolved claim within the task scope; apply Step 5's timing rule before running them. Evidence deferred to a later boundary does not block this review. Evidence missing when due returns to the orchestrator, not an independent tooling project. After the result, apply the [run limits](#run-limits) before any fix or return to planning.
 
 - **A design round** (any `behavior` finding): a fix executor starts from the reviewed `CANDIDATE_SHA` with the findings as constraints, then Steps 4–6 repeat.
 - **A round without `behavior` findings closes the loop:** comment-only corrections (below) are applied by the orchestrator. Other `text` findings go to a fix executor, which applies the supplied text verbatim, followed by Steps 4–5, with no Step 6 re-review, because closing a `text` finding changes nothing the code does. `machinery` findings close as in Step 2.
@@ -244,7 +268,7 @@ A changed fenced code block in a doc comment is a doctest and does not qualify. 
 
 ### Step 7 — Final acceptance
 
-Accept when the plan is clean or closed by the small-change lane; the review returns no `behavior` finding and its `text` findings are applied as Step 6 says (comment-only corrections proven), or only residuals the run limits allow, listed; the completion checks pass at the candidate; and `rev-parse HEAD == CANDIDATE_SHA` — the correction commit when one exists. In a chartered run this is per-phase acceptance, with `PHASE_BASE_SHA` substituted; it emits no Final Report snapshot, ship, or PR handoff, which are run-level only.
+Accept when the plan is clean or closed by the small-change lane; the review returns no `behavior` finding and its `text` findings are applied as Step 6 says (comment-only corrections proven), or only residuals the run limits allow, listed; the checks due at this boundary pass, with later checks explicitly deferred under Step 5; and `rev-parse HEAD == CANDIDATE_SHA` — the correction commit when one exists. In a chartered run this is per-phase acceptance, with `PHASE_BASE_SHA` substituted; it emits no Final Report snapshot, ship, or PR handoff, which are run-level only.
 
 After final acceptance of a run a maintainer invoked directly, ship it with `/ship-commits` as [pr-handoff.md](pr-handoff.md#ship-through-the-merge-queue) describes, unless the task says local-only. Otherwise, when the task includes opening a PR, follow [pr-handoff.md](pr-handoff.md).
 
@@ -256,11 +280,11 @@ Return after final acceptance:
 2. What changed, grouped by subsystem and file.
 3. Key architectural decisions.
 4. `BASE_SHA`, accepted `CANDIDATE_SHA`, the materialized `SCOPE_PATHS` (extensions included), and run-artifact root.
-5. The `START_SHA` each round began from, and what the parser measurement found when the change touched the parser.
-6. Verification commands run and results, separated into preparatory and completion evidence.
+5. The `START_SHA` each round began from, and parser measurement results or their explicit deferred status when the change touched the parser.
+6. Verification commands run and results, separated into preparatory and completion evidence; checks deferred to PR/CI with their due boundary. Do not label the run fully verified while those remain pending.
 7. Implementation-review rounds with each round's finding tags, reviewed SHA, any Step 6 correction commit with its phase-fit entry, and the final result (clean, corrections applied and proven, or listed residuals).
 8. Checkpoint commit hash and staged file list.
-9. Coverage impact for parser changes.
+9. Coverage impact for parser changes, or pending measurement at the stated due boundary.
 10. Deviations from the plan with reasons.
 11. Self-flagged risks and judgment calls (yours + executor's).
 12. Remaining items, if any, with reasons.

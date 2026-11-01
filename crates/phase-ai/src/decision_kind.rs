@@ -193,6 +193,8 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::ChooseAnnouncingOpponent { .. }
         | WaitingFor::ChooseGiftRecipient { .. }
         | WaitingFor::ClashCardPlacement { .. }
+        // Host-driven contest: no seat is ever asked to decide.
+        | WaitingFor::PhysicalContest { .. }
         | WaitingFor::VoteChoice { .. }
         | WaitingFor::SeparatePilesChooseOpponent { .. }
         | WaitingFor::SeparatePilesPartition { .. }
@@ -368,7 +370,8 @@ mod tests {
                 &priority,
                 &GameAction::ActivateAbility {
                     source_id: ObjectId(0),
-                    ability_index: 0
+                    ability_index: 0,
+                    payment_mode: CastPaymentMode::Auto
                 }
             ),
             DecisionKind::ActivateAbility

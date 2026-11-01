@@ -60,24 +60,10 @@ fn ability_graph_has_cast_occurrence(
             .else_ability
             .as_deref()
             .is_none_or(|branch| ability_graph_has_cast_occurrence(branch, expected))
-        && match &ability.effect {
-            Effect::EpicCopy { spell } => ability_graph_has_cast_occurrence(spell, expected),
-            _ => true,
-        }
 }
 
-fn graph_spell_definition(source_id: ObjectId) -> AbilityDefinition {
-    let mut definition = AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::EpicCopy {
-            spell: Box::new(ResolvedAbility::new(
-                Effect::Investigate,
-                Vec::new(),
-                source_id,
-                PlayerId(0),
-            )),
-        },
-    );
+fn graph_spell_definition() -> AbilityDefinition {
+    let mut definition = AbilityDefinition::new(AbilityKind::Spell, Effect::Investigate);
     definition.sub_ability = Some(Box::new(AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Investigate,
@@ -136,7 +122,7 @@ fn standard_cast_stamps_one_occurrence_on_record_object_and_resolved_chain() {
         let object = state.objects.get_mut(&spell).unwrap();
         object.card_types.core_types.push(CoreType::Sorcery);
         object.mana_cost = ManaCost::zero();
-        Arc::make_mut(&mut object.abilities).push(graph_spell_definition(spell));
+        Arc::make_mut(&mut object.abilities).push(graph_spell_definition());
     }
 
     assert_eq!(state.objects[&spell].cast_occurrence, None);
@@ -179,7 +165,7 @@ fn standard_cast_stamps_one_occurrence_on_record_object_and_resolved_chain() {
             shards: vec![ManaCostShard::X],
             generic: 0,
         };
-        Arc::make_mut(&mut object.abilities).push(graph_spell_definition(cancelled));
+        Arc::make_mut(&mut object.abilities).push(graph_spell_definition());
     }
     apply_as_current(
         &mut state,
@@ -737,6 +723,7 @@ fn castability_follows_two_swamps_through_a_filter_land_payment() {
             ability_index: filter_selection
                 .ability_index
                 .expect("the filter land selection names its printed ability"),
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .expect("the filter land must accept the black mana payment");
@@ -909,6 +896,7 @@ fn castability_follows_a_manual_nonland_producer_through_a_filter_land_payment()
         GameAction::ActivateAbility {
             source_id: producer,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .expect("the deterministic nonland producer must resolve through the live reducer");
@@ -925,6 +913,7 @@ fn castability_follows_a_manual_nonland_producer_through_a_filter_land_payment()
             ability_index: filter_selection
                 .ability_index
                 .expect("the filter land selection names its printed ability"),
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .expect("the filter land must spend one of the battery's black mana");
@@ -1054,7 +1043,7 @@ fn tapped_relic_can_use_a_new_legend_to_pay_a_second_creature_spell() {
             candidate.action,
             GameAction::ActivateAbility {
                 source_id,
-                ability_index: 0,
+                ability_index: 0, ..
             } if source_id == relic
         )));
 }
@@ -3348,7 +3337,7 @@ fn foretell_cast_does_not_inherit_sibling_alt_cost_or_spend_rider() {
                 graveyard_replacement: None,
                 mana_spend_permission: Some(ManaSpendPermission::AnyColor),
                 enters_with_counter: None,
-                enters_with_modifications: Vec::new(),
+                enters_with_modifications: Default::default(),
                 cast_cost_modifier: None,
             });
     }
@@ -4636,7 +4625,7 @@ fn exile_with_alt_cost_zero_uses_no_cost_path() {
             graveyard_replacement: None,
             mana_spend_permission: None,
             enters_with_counter: None,
-            enters_with_modifications: Vec::new(),
+            enters_with_modifications: Default::default(),
             cast_cost_modifier: None,
         });
     let prepared = prepare_spell_cast(&state, PlayerId(0), exiled).unwrap();
@@ -6893,7 +6882,7 @@ fn legacy_equip_effect_cost_one_of_is_legal_without_mana_when_discard_available(
             action,
             GameAction::ActivateAbility {
                 source_id,
-                ability_index: 1,
+                ability_index: 1, ..
             } if *source_id == source
         )),
         "legal actions must offer legacy EffectCost equip when discard is affordable"
@@ -7217,6 +7206,7 @@ fn x_composite_mana_tap_activation_rejects_source_only_pending_payment_without_t
         GameAction::ActivateAbility {
             source_id: source,
             ability_index: 1,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -7273,6 +7263,7 @@ fn x_composite_mana_tap_activation_excludes_source_during_pending_payment() {
         GameAction::ActivateAbility {
             source_id: source,
             ability_index: 1,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -7345,6 +7336,7 @@ fn x_phyrexian_composite_mana_tap_activation_excludes_source_during_phyrexian_pr
         GameAction::ActivateAbility {
             source_id: source,
             ability_index: 1,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -7439,6 +7431,7 @@ fn x_phyrexian_composite_mana_tap_activation_keeps_source_untapped_until_choice_
         GameAction::ActivateAbility {
             source_id: source,
             ability_index: 1,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -7536,6 +7529,7 @@ fn phyrexian_tap_activation_preserves_life_and_mana_routes_without_eager_tap() {
         GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .expect("the Phyrexian activation should be legal");
@@ -7645,6 +7639,7 @@ fn phyrexian_tap_activation_rejects_unavailable_mana_route_without_mutation() {
         GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .expect("the life-only Phyrexian activation should be legal");
@@ -9015,6 +9010,7 @@ fn x_cost_activated_composite_tap_prompts_for_x_and_taps_on_resolution() {
         GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -9110,6 +9106,7 @@ fn x_cost_activated_composite_tap_no_double_payment_on_interactive_targets() {
         GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -9429,6 +9426,7 @@ fn activation_discard_replacement_resumes_and_pays_remaining_composite_cost() {
         GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .expect("activation should pause for discard replacement");
@@ -9514,6 +9512,7 @@ fn targeted_activation_replacement_pause_preserves_selected_targets() {
         GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .expect("activation should ask for a target before costs");
@@ -9629,6 +9628,7 @@ fn x_cost_activated_minimum_rejects_zero_and_accepts_one() {
         GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -9762,6 +9762,7 @@ fn kessig_wolf_run_x_pump_grants_dynamic_power_and_trample() {
         GameAction::ActivateAbility {
             source_id: kessig,
             ability_index: pump_ability_index,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .expect("activating the X-cost pump must succeed");
@@ -9862,6 +9863,7 @@ fn x_cost_activated_minimum_above_payable_max_rejects_before_choose_x() {
         GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     );
 
@@ -9936,6 +9938,7 @@ fn activated_discard_cost_prompts_and_resumes_activation() {
         GameAction::ActivateAbility {
             source_id: blood,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -10036,6 +10039,7 @@ fn bare_non_self_discard_activation_does_not_double_prompt() {
         GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -10141,6 +10145,7 @@ fn jhoira_exile_cost_activation_suspends_the_exiled_card() {
         GameAction::ActivateAbility {
             source_id: jhoira,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .expect("Jhoira's exile-cost ability must enter the activation pipeline");
@@ -10298,6 +10303,7 @@ fn jhoira_does_not_regrant_suspend_to_a_natively_suspended_card() {
         GameAction::ActivateAbility {
             source_id: jhoira,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .expect("Jhoira's exile-cost ability must enter the activation pipeline");
@@ -10407,6 +10413,7 @@ fn jhoira_reads_a_suspend_granted_in_exile_after_the_cost_was_paid() {
         GameAction::ActivateAbility {
             source_id: jhoira,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .expect("Jhoira's exile-cost ability must enter the activation pipeline");
@@ -10690,6 +10697,7 @@ fn grim_lavamancer_targets_before_graveyard_exile_cost() {
         GameAction::ActivateAbility {
             source_id: lavamancer,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .expect("Grim Lavamancer activation must enter targeting");
@@ -10804,6 +10812,7 @@ fn targeted_exile_cost_activation_with_no_legal_target_does_not_prompt_or_pay_co
         GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .expect_err("activation with no legal target must fail before cost payment");
@@ -10897,6 +10906,7 @@ fn self_ref_exile_cost_exiles_card_from_hand() {
             GameAction::ActivateAbility {
                 source_id: card,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             },
         )
         .unwrap_or_else(|e| panic!("{name}: activation must enter the pipeline: {e:?}"));
@@ -11063,6 +11073,7 @@ fn jhoira_granted_suspend_installs_upkeep_and_cast_triggers() {
         GameAction::ActivateAbility {
             source_id: jhoira,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .expect("Jhoira's exile-cost ability must enter the activation pipeline");
@@ -11370,6 +11381,7 @@ fn jhoira_granted_suspend_persists_and_ticks_across_upkeep() {
         GameAction::ActivateAbility {
             source_id: jhoira,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .expect("Jhoira's exile-cost ability must enter the activation pipeline");
@@ -11865,6 +11877,7 @@ fn x_cost_activated_composite_sacrifice_bounds_x_by_fixed_portion() {
         GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -14279,21 +14292,28 @@ fn nested_stack_target_self_cost_reduction_matches_stack_entry_targets() {
         let obj = state.objects.get_mut(&opposing_bolt).unwrap();
         obj.card_types.core_types.push(CoreType::Instant);
     }
+    let mut opposing_bolt_ability = ResolvedAbility::new(
+        Effect::Destroy {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            cant_regenerate: false,
+        },
+        vec![],
+        opposing_bolt,
+        PlayerId(1),
+    );
+    assign_targets_in_chain(
+        &state,
+        &mut opposing_bolt_ability,
+        &[TargetRef::Object(large_creature)],
+    )
+    .expect("the spell takes one target");
     state.stack.push_back(StackEntry {
         id: opposing_bolt,
         source_id: opposing_bolt,
         controller: PlayerId(1),
         kind: StackEntryKind::Spell {
             card_id: CardId(997),
-            ability: Some(Box::new(ResolvedAbility::new(
-                Effect::Destroy {
-                    target: TargetFilter::Typed(TypedFilter::creature()),
-                    cant_regenerate: false,
-                },
-                vec![TargetRef::Object(large_creature)],
-                opposing_bolt,
-                PlayerId(1),
-            ))),
+            ability: Some(Box::new(opposing_bolt_ability)),
             casting_variant: CastingVariant::Normal,
             actual_mana_spent: 1,
         },
@@ -14337,21 +14357,28 @@ fn nested_stack_target_self_cost_reduction_matches_stack_entry_targets() {
     );
     let stack_ability_id = ObjectId(state.next_object_id);
     state.next_object_id += 1;
+    let mut stack_ability = ResolvedAbility::new(
+        Effect::Destroy {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            cant_regenerate: false,
+        },
+        vec![],
+        ability_source,
+        PlayerId(1),
+    );
+    assign_targets_in_chain(
+        &state,
+        &mut stack_ability,
+        &[TargetRef::Object(large_creature)],
+    )
+    .expect("the ability takes one target");
     state.stack.push_back(StackEntry {
         id: stack_ability_id,
         source_id: ability_source,
         controller: PlayerId(1),
         kind: StackEntryKind::ActivatedAbility {
             source_id: ability_source,
-            ability: Box::new(ResolvedAbility::new(
-                Effect::Destroy {
-                    target: TargetFilter::Typed(TypedFilter::creature()),
-                    cant_regenerate: false,
-                },
-                vec![TargetRef::Object(large_creature)],
-                ability_source,
-                PlayerId(1),
-            )),
+            ability: Box::new(stack_ability),
         },
     });
     let not_of_this_world_targeting_ability = ResolvedAbility::new(
@@ -15947,10 +15974,16 @@ fn hand_spell_alternative_pay_life_cost_replaces_mana_cost() {
         "payable alternative cost should make the spell castable without mana"
     );
 
-    let mut events = Vec::new();
-    let waiting = handle_cast_spell(&mut state, PlayerId(0), spell_id, CardId(10), &mut events)
-        .expect("cast should reach alternative-cost choice");
-    state.waiting_for = waiting;
+    crate::game::engine::apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: spell_id,
+            card_id: CardId(10),
+            targets: Vec::new(),
+            payment_mode: CastPaymentMode::Auto,
+        },
+    )
+    .expect("cast should reach alternative-cost choice");
     assert!(matches!(
         state.waiting_for,
         WaitingFor::OptionalCostChoice {
@@ -16138,10 +16171,16 @@ fn cast_without_mana_cost_option_checks_commander_control() {
         "controlling a commander should make the free-cast option payable"
     );
 
-    let mut events = Vec::new();
-    let waiting = handle_cast_spell(&mut state, PlayerId(0), spell_id, CardId(10), &mut events)
-        .expect("cast should reach the free-cast choice");
-    state.waiting_for = waiting;
+    crate::game::engine::apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: spell_id,
+            card_id: CardId(10),
+            targets: Vec::new(),
+            payment_mode: CastPaymentMode::Auto,
+        },
+    )
+    .expect("cast should reach the free-cast choice");
     assert!(matches!(
         state.waiting_for,
         WaitingFor::OptionalCostChoice {
@@ -16246,15 +16285,16 @@ fn snuff_out_alt_cost_paid_resolves_destroy_on_chosen_target() {
         .core_types
         .push(CoreType::Creature);
 
-    let waiting = handle_cast_spell(
+    crate::game::engine::apply_as_current(
         &mut state,
-        PlayerId(0),
-        spell_id,
-        CardId(10),
-        &mut Vec::new(),
+        GameAction::CastSpell {
+            object_id: spell_id,
+            card_id: CardId(10),
+            targets: Vec::new(),
+            payment_mode: CastPaymentMode::Auto,
+        },
     )
     .expect("Snuff Out should reach the alternative-cost choice");
-    state.waiting_for = waiting;
     assert!(matches!(
         state.waiting_for,
         WaitingFor::OptionalCostChoice {
@@ -16301,37 +16341,14 @@ fn snuff_out_alt_cost_paid_resolves_destroy_on_chosen_target() {
     ));
 }
 
-// End-to-end variant of the previous test: load Snuff Out from the actual
-// card export so any parser/export drift in `abilities`, `casting_options`,
-// or `condition` shape would surface here.
+// Load Snuff Out from the card database and drive public casting, alternative-cost
+// payment, and priority-based resolution so parser/export drift and announcement
+// carrier lifecycle regressions surface without bypassing action boundaries.
 #[test]
 fn snuff_out_from_card_database_alt_cost_destroys_target() {
-    use std::path::PathBuf;
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join("client")
-        .join("public")
-        .join("card-data.json");
-    if !path.exists() {
-        eprintln!(
-            "skipping: {} not found (run ./scripts/gen-card-data.sh)",
-            path.display()
-        );
-        return;
-    }
-    // The full export contains a deserialization quirk on an unrelated card
-    // in some builds. Extract Snuff Out's record directly via jq-style lookup
-    // so this regression test is robust to that.
-    let raw = std::fs::read_to_string(&path).expect("card-data.json readable");
-    let map: serde_json::Map<String, serde_json::Value> =
-        serde_json::from_str(&raw).expect("card-data.json is a JSON object");
-    let snuff_value = map
-        .get("snuff out")
-        .expect("Snuff Out should be in the export keyed by lowercase name");
-    let snuff: crate::types::card::CardFace =
-        serde_json::from_value(snuff_value.clone()).expect("Snuff Out record parses as CardFace");
-    let snuff = &snuff;
+    let snuff = crate::test_support::shared_card_db()
+        .get_face_by_name("Snuff Out")
+        .expect("Snuff Out should be in the card database");
 
     let mut state = setup_game_at_main_phase();
     state.players[0].life = 20;
@@ -16361,35 +16378,78 @@ fn snuff_out_from_card_database_alt_cost_destroys_target() {
         "Nonblack Bear".to_string(),
         Zone::Battlefield,
     );
-    state
-        .objects
-        .get_mut(&target_id)
-        .unwrap()
-        .card_types
-        .core_types
-        .push(CoreType::Creature);
+    // CR 208.5 + CR 704.5f: give the creature positive P/T so zero toughness
+    // cannot move it to the graveyard before Snuff Out resolves.
+    {
+        let target = state.objects.get_mut(&target_id).unwrap();
+        target.card_types.core_types.push(CoreType::Creature);
+        target.power = Some(2);
+        target.toughness = Some(2);
+        target.base_power = Some(2);
+        target.base_toughness = Some(2);
+    }
 
+    // Route through the production action boundary (as the hand-built sibling
+    // does): targeting now stages announcement events, which requires the
+    // boundary's end_action to drain the spell trigger carrier.
     let card_id = state.objects[&spell_id].card_id;
-    let waiting = handle_cast_spell(&mut state, PlayerId(0), spell_id, card_id, &mut Vec::new())
-        .expect("Snuff Out should reach the alternative-cost choice");
-    state.waiting_for = waiting;
-    assert!(
-        matches!(
-            state.waiting_for,
-            WaitingFor::OptionalCostChoice {
-                cost: AdditionalCost::Choice(AbilityCost::PayLife { .. }, _),
-                ..
-            }
-        ),
-        "expected pay-life alternative cost prompt, got {:?}",
-        state.waiting_for
+    apply_as_current(
+        &mut state,
+        GameAction::CastSpell {
+            object_id: spell_id,
+            card_id,
+            targets: Vec::new(),
+            payment_mode: CastPaymentMode::Auto,
+        },
+    )
+    .expect("Snuff Out should reach the alternative-cost choice");
+
+    // CR 118.9 + CR 118.9a: offer the printed four-life alternative instead
+    // of the printed mana cost, without replacing the exported casting option.
+    let WaitingFor::OptionalCostChoice {
+        player,
+        cost,
+        pending_cast,
+        ..
+    } = &state.waiting_for
+    else {
+        panic!(
+            "expected pay-life alternative cost prompt, got {:?}",
+            state.waiting_for
+        );
+    };
+    assert_eq!(*player, PlayerId(0));
+    assert_eq!(
+        *cost,
+        AdditionalCost::Choice(
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 4 },
+            },
+            AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    shards: vec![ManaCostShard::Black],
+                    generic: 3,
+                },
+            },
+        )
+    );
+    // CR 601.2c: the pending announcement retains this spell and its one target.
+    assert_eq!(pending_cast.object_id, spell_id);
+    assert_eq!(pending_cast.card_id, card_id);
+    assert_eq!(
+        pending_cast.ability.targets.as_slice(),
+        &[TargetRef::Object(target_id)]
     );
 
-    crate::game::engine::apply_as_current(&mut state, GameAction::DecideOptionalCost { pay: true })
+    apply_as_current(&mut state, GameAction::DecideOptionalCost { pay: true })
         .expect("paying 4 life should commit Snuff Out to the stack");
 
+    // CR 118.3b + CR 601.2h + CR 601.2i: pay four life exactly once and finish
+    // casting the same spell, with priority restored before it resolves.
     assert_eq!(state.players[0].life, 16);
     assert_eq!(state.stack.len(), 1);
+    assert_eq!(state.stack[0].id, spell_id);
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
 
     let StackEntryKind::Spell {
         ability: Some(ability),
@@ -16405,16 +16465,54 @@ fn snuff_out_from_card_database_alt_cost_destroys_target() {
              targets = {:?}",
         ability.targets
     );
+    assert_eq!(
+        ability.targets[0],
+        TargetRef::Object(target_id),
+        "Snuff Out must preserve the exact target through alternative-cost payment"
+    );
+    // CR 117.5 + CR 704.5f: the target survives priority's state-based actions;
+    // its eventual graveyard movement must come from resolving the destroy effect.
+    assert_eq!(state.objects[&target_id].zone, Zone::Battlefield);
+    assert_eq!(state.objects[&target_id].toughness, Some(2));
 
     let mut events = Vec::new();
-    crate::game::stack::resolve_top(&mut state, &mut events);
+    // CR 117.4: resolve only by passing priority through the public action path.
+    for _ in 0..8 {
+        match &state.waiting_for {
+            WaitingFor::Priority { .. } if !state.stack.is_empty() => {
+                let result = apply_as_current(&mut state, GameAction::PassPriority)
+                    .expect("priority should pass until Snuff Out resolves");
+                events.extend(result.events);
+            }
+            WaitingFor::Priority { .. } => break,
+            other => panic!("unexpected prompt while resolving Snuff Out: {other:?}"),
+        }
+    }
 
+    // CR 701.8a + CR 701.8b: destruction moves this creature to its owner's
+    // graveyard and must be attributed to Snuff Out, not zero-toughness cleanup.
     let target_zone = state.objects.get(&target_id).map(|o| o.zone);
     assert_eq!(
         target_zone,
         Some(Zone::Graveyard),
         "Snuff Out should have destroyed the target creature on resolution"
     );
+    assert!(state.players[1].graveyard.contains(&target_id));
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            GameEvent::CreatureDestroyed { object_id, source_id }
+                if *object_id == target_id && *source_id == Some(spell_id)
+        )),
+        "Snuff Out must emit destruction of the exact target with itself as source"
+    );
+    // CR 608.2n: the instant goes to its owner's graveyard after resolution.
+    assert_eq!(state.objects[&spell_id].zone, Zone::Graveyard);
+    assert!(state.players[0].graveyard.contains(&spell_id));
+    assert_eq!(state.players[0].life, 16);
+    // CR 117.5: completion includes settled priority, not merely an empty stack.
+    assert!(state.stack.is_empty());
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
 }
 
 /// CR 601.2 + CR 118.9a + CR 903.8 (issue #2000): Dracogenesis lets Dragon
@@ -20670,6 +20768,7 @@ fn cast_from_exile_library_bottom_rider_bottoms_resolved_spell() {
             target: TargetFilter::ParentTarget,
             count: QuantityExpr::Fixed { value: 1 },
             position: LibraryPosition::Bottom,
+            arranger: None,
         },
         vec![],
         kylox,
@@ -20972,7 +21071,7 @@ fn graveyard_in_place_alt_cost_grant_is_consumed_after_one_cast() {
                 graveyard_replacement: None,
                 mana_spend_permission: None,
                 enters_with_counter: None,
-                enters_with_modifications: Vec::new(),
+                enters_with_modifications: Default::default(),
                 cast_cost_modifier: None,
             });
     }
@@ -21028,9 +21127,9 @@ fn graveyard_in_place_alt_cost_grant_is_consumed_after_one_cast() {
     );
 }
 
-/// CR 614.1c + CR 122.1: Osteomancer Adept / The Tomb of Aclazotz —
-/// "you may cast a creature spell from your graveyard this turn. The creature
-/// cast this way enters with a finality counter on it." Drives the FULL cast
+/// CR 614.1c + CR 122.1: the enters-with-counter rider ("The creature cast this
+/// way enters with a finality counter on it.") on a hand-built lingering
+/// `CastFromZone` grant (Osteomancer Adept's rider shape). Drives the FULL cast
 /// pipeline: the `CastFromZone` grant carrying the enters-with-counter rider
 /// stamps `enters_with_counter` on the granted permission; casting the
 /// creature and resolving it onto the battlefield must apply the finality
@@ -21219,7 +21318,8 @@ fn graveyard_cast_without_rider_has_no_finality_counter() {
     );
 }
 
-/// CR 205.1b + CR 611.2c + CR 613.1d — The Tomb of Aclazotz: a creature cast
+/// CR 205.1b + CR 611.2c + CR 613.1d — The Tomb of Aclazotz's compound rider
+/// shape on a hand-built `CastFromZone` grant: a creature cast
 /// from the graveyard under a `CastFromZone` grant carrying the compound rider
 /// ("enters with a finality counter on it AND is a Vampire in addition to its
 /// other types") must, after resolving onto the battlefield:
@@ -21268,9 +21368,12 @@ fn graveyard_cast_this_way_enters_with_type_grant_rider() {
     );
     counter_rider.sub_ability = Some(Box::new(ResolvedAbility::new(
         Effect::AddPendingEntersModifications {
-            modifications: vec![ContinuousModification::AddSubtype {
-                subtype: "Vampire".to_string(),
-            }],
+            rider: crate::types::ability::PendingEntersModifications {
+                modifications: vec![ContinuousModification::AddSubtype {
+                    subtype: "Vampire".to_string(),
+                }],
+                cast_filter: None,
+            },
         },
         vec![],
         ObjectId(9110),
@@ -21309,8 +21412,8 @@ fn graveyard_cast_this_way_enters_with_type_grant_rider() {
                     enters_with_counter: Some(CounterType::Finality),
                     enters_with_modifications,
                     ..
-                } if enters_with_modifications
-                        == &[ContinuousModification::AddSubtype {
+                } if enters_with_modifications.modifications
+                        == [ContinuousModification::AddSubtype {
                             subtype: "Vampire".to_string(),
                         }]
             )),
@@ -21495,7 +21598,7 @@ fn enters_with_counter_does_not_leak_from_non_consumed_permission() {
                     graveyard_replacement: None,
                     mana_spend_permission: None,
                     enters_with_counter: rider_on_consumed.clone(),
-                    enters_with_modifications: Vec::new(),
+                    enters_with_modifications: Default::default(),
                     cast_cost_modifier: None,
                 });
             // P2: foreign-granted (to the opponent) so it never supports
@@ -21514,7 +21617,7 @@ fn enters_with_counter_does_not_leak_from_non_consumed_permission() {
                     graveyard_replacement: None,
                     mana_spend_permission: None,
                     enters_with_counter: Some(CounterType::Finality),
-                    enters_with_modifications: Vec::new(),
+                    enters_with_modifications: Default::default(),
                     cast_cost_modifier: None,
                 });
         }
@@ -21607,12 +21710,13 @@ fn exact_permission_does_not_inherit_sibling_etb_counter() {
                             success_action:
                                 crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
                             delayed_trigger_receipts: Vec::new(),
+                            indicated_action: None,
                         }
                     }),
                     duration: Some(Duration::UntilEndOfTurn),
                     graveyard_replacement: None,
                     enters_with_counter,
-                    enters_with_modifications: Vec::new(),
+                    enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
                 });
@@ -21702,12 +21806,16 @@ fn exact_permission_does_not_inherit_sibling_permanent_modification() {
                             success_action:
                                 crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
                             delayed_trigger_receipts: Vec::new(),
+                            indicated_action: None,
                         }
                     }),
                     duration: Some(Duration::UntilEndOfTurn),
                     graveyard_replacement: None,
                     enters_with_counter: None,
-                    enters_with_modifications,
+                    enters_with_modifications: crate::types::ability::PendingEntersModifications {
+                        modifications: enters_with_modifications,
+                        cast_filter: None,
+                    },
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
                 });
@@ -21736,6 +21844,245 @@ fn exact_permission_does_not_inherit_sibling_permanent_modification() {
     assert!(
         !subtypes.contains(&"Zombie".to_string()),
         "the first sibling's permanent Zombie grant must not apply"
+    );
+}
+
+/// CR 608.2c + CR 611.2a + CR 611.2c: the during-resolution cast request's
+/// `enters_with_modifications` rider (Strago and Relm) must thread through
+/// `install_resolution_cast_permission` into the elected `ExileWithAltCost`
+/// permission and apply EXACTLY ONCE at finalization, as a
+/// `Duration::Permanent` continuous effect scoped to the cast object.
+///
+/// Positive/negative pair on one setup: a request carrying
+/// `[AddKeyword(Haste)]` grants haste through exactly one matching transient
+/// effect; a request with an empty vector grants nothing. Reverting the
+/// request-field threading turns the positive red.
+#[test]
+fn resolution_cast_request_mods_apply_exactly_once() {
+    use crate::types::ability::{ContinuousModification, ResolutionCastCost};
+    use crate::types::keywords::KeywordKind;
+
+    fn cast_exiled_creature_with_mods(
+        mods: Vec<ContinuousModification>,
+    ) -> (crate::types::game_state::GameState, ObjectId) {
+        let mut state = setup_game_at_main_phase();
+        let creature = create_object(
+            &mut state,
+            CardId(8301),
+            PlayerId(0),
+            "Rider Creature".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.mana_cost = ManaCost::zero();
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.base_power = obj.power;
+            obj.base_toughness = obj.toughness;
+        }
+        let face_policy = crate::types::ability::ResolutionCastFacePolicy::new(
+            TargetFilter::Any,
+            creature,
+            PlayerId(0),
+            None,
+        );
+        let cleanup = crate::types::ability::ResolutionCastCleanup {
+            source_id: creature,
+            offer_id: None,
+            face_policy: face_policy.clone(),
+            exiled_misses: Vec::new(),
+            reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
+            success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+            delayed_trigger_receipts: Vec::new(),
+            indicated_action: None,
+        };
+        let initiation = initiate_cast_during_resolution(
+            &mut state,
+            PlayerId(0),
+            creature,
+            ResolutionCastRequest {
+                face_policy,
+                cast_transformed: false,
+                cleanup,
+                graveyard_replacement: None,
+                enters_with_modifications: crate::types::ability::PendingEntersModifications {
+                    modifications: mods,
+                    cast_filter: None,
+                },
+                cost: ResolutionCastCost::Free,
+            },
+            &mut Vec::new(),
+        )
+        .expect("free during-resolution cast must begin");
+        assert!(
+            matches!(initiation, ResolutionCastInitiation::WaitingFor(_)),
+            "a legal free cast must not take the rejection path"
+        );
+        assert_eq!(
+            state.objects[&creature].zone,
+            Zone::Stack,
+            "reach guard: the free cast must reach the stack during resolution"
+        );
+        (state, creature)
+    }
+
+    // Positive — the request's rider applies once and the permanent has haste.
+    let (mut state, creature) =
+        cast_exiled_creature_with_mods(vec![ContinuousModification::AddKeyword {
+            keyword: Keyword::Haste,
+        }]);
+    stack::resolve_top(&mut state, &mut Vec::new());
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(state.objects[&creature].zone, Zone::Battlefield);
+    assert!(
+        crate::game::keywords::object_has_effective_keyword_kind(
+            &state,
+            creature,
+            KeywordKind::Haste,
+        ),
+        "the request's rider must apply to the cast creature"
+    );
+    let applied: Vec<_> = state
+        .transient_continuous_effects
+        .iter()
+        .filter(|effect| {
+            effect.affected == TargetFilter::SpecificObject { id: creature }
+                && effect.modifications
+                    == vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Haste,
+                    }]
+        })
+        .collect();
+    assert_eq!(
+        applied.len(),
+        1,
+        "the rider must apply exactly once, got {} matching transient effects",
+        applied.len()
+    );
+
+    // Negative — an empty rider applies nothing (paired on the same setup).
+    let (mut state, creature) = cast_exiled_creature_with_mods(Vec::new());
+    stack::resolve_top(&mut state, &mut Vec::new());
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(state.objects[&creature].zone, Zone::Battlefield);
+    assert!(
+        !crate::game::keywords::object_has_effective_keyword_kind(
+            &state,
+            creature,
+            KeywordKind::Haste,
+        ),
+        "an empty rider must not grant haste"
+    );
+    assert!(
+        state.transient_continuous_effects.iter().all(|effect| {
+            !(effect.affected == TargetFilter::SpecificObject { id: creature }
+                && effect.modifications
+                    == vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Haste,
+                    }])
+        }),
+        "an empty rider must install no haste modification"
+    );
+}
+
+/// CR 608.2c: two sibling casting permissions on one object with DIFFERENT
+/// `enters_with_modifications` riders — the elected exact index applies only
+/// its own set. Mirrors `exact_permission_does_not_inherit_sibling_permanent_modification`
+/// for the during-resolution request shape the phase threads.
+#[test]
+fn resolution_request_mods_do_not_leak_from_sibling_permission() {
+    use crate::types::ability::ContinuousModification;
+    use crate::types::keywords::KeywordKind;
+
+    let mut state = setup_game_at_main_phase();
+    let creature = create_object(
+        &mut state,
+        CardId(8303),
+        PlayerId(0),
+        "Two Rider Creature".to_string(),
+        Zone::Graveyard,
+    );
+    {
+        let obj = state.objects.get_mut(&creature).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.base_card_types = obj.card_types.clone();
+        obj.mana_cost = ManaCost::zero();
+        obj.power = Some(2);
+        obj.toughness = Some(2);
+        for (index, keyword) in [Keyword::Flying, Keyword::Haste].into_iter().enumerate() {
+            obj.casting_permissions
+                .push(CastingPermission::ExileWithAltCost {
+                    source_id: None,
+                    cost_provenance: crate::types::ability::ExileGrantCostProvenance::Alternative,
+                    cost: ManaCost::zero(),
+                    cast_transformed: false,
+                    constraint: None,
+                    granted_to: Some(PlayerId(0)),
+                    resolution_cleanup: (index == 1).then(|| {
+                        crate::types::ability::ResolutionCastCleanup {
+                            source_id: creature,
+                            offer_id: None,
+                            face_policy: crate::types::ability::ResolutionCastFacePolicy::new(
+                                TargetFilter::Any,
+                                creature,
+                                PlayerId(0),
+                                None,
+                            ),
+                            exiled_misses: Vec::new(),
+                            reject_action:
+                                crate::types::ability::ResolutionMvRejectAction::RemainExiled,
+                            success_action:
+                                crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
+                            delayed_trigger_receipts: Vec::new(),
+                            indicated_action: None,
+                        }
+                    }),
+                    duration: Some(Duration::UntilEndOfTurn),
+                    graveyard_replacement: None,
+                    enters_with_counter: None,
+                    enters_with_modifications: crate::types::ability::PendingEntersModifications {
+                        modifications: vec![ContinuousModification::AddKeyword { keyword }],
+                        cast_filter: None,
+                    },
+                    mana_spend_permission: None,
+                    cast_cost_modifier: None,
+                });
+        }
+    }
+    let prepared = prepare_spell_cast_with_variant_override_inner(
+        &state,
+        PlayerId(0),
+        creature,
+        None,
+        None,
+        Some(CastingPermissionIndex(1)),
+        CastingMode::Actual,
+    )
+    .expect("the exact second permission must prepare");
+    continue_with_prepared(&mut state, PlayerId(0), prepared, &mut Vec::new())
+        .expect("the exact cast must finalize");
+    stack::resolve_top(&mut state, &mut Vec::new());
+    crate::game::layers::evaluate_layers(&mut state);
+
+    assert_eq!(state.objects[&creature].zone, Zone::Battlefield);
+    assert!(
+        crate::game::keywords::object_has_effective_keyword_kind(
+            &state,
+            creature,
+            KeywordKind::Haste,
+        ),
+        "the elected permission's Haste rider must apply"
+    );
+    assert!(
+        !crate::game::keywords::object_has_effective_keyword_kind(
+            &state,
+            creature,
+            KeywordKind::Flying,
+        ),
+        "the non-elected sibling's Flying rider must not leak onto this cast"
     );
 }
 
@@ -21773,7 +22120,7 @@ fn hand_alt_cost_permission_overrides_printed_mana_cost() {
                 graveyard_replacement: None,
                 mana_spend_permission: None,
                 enters_with_counter: None,
-                enters_with_modifications: Vec::new(),
+                enters_with_modifications: Default::default(),
                 cast_cost_modifier: None,
             });
     }
@@ -21825,7 +22172,7 @@ fn beseech_style_permission() -> CastingPermission {
         graveyard_replacement: None,
         mana_spend_permission: None,
         enters_with_counter: None,
-        enters_with_modifications: Vec::new(),
+        enters_with_modifications: Default::default(),
         cast_cost_modifier: None,
     }
 }
@@ -21868,7 +22215,7 @@ fn failing_mana_value_permission_does_not_override_unconstrained_permission() {
                 graveyard_replacement: None,
                 mana_spend_permission: None,
                 enters_with_counter: None,
-                enters_with_modifications: Vec::new(),
+                enters_with_modifications: Default::default(),
                 cast_cost_modifier: None,
             });
     }
@@ -24882,14 +25229,14 @@ fn pay_and_push_emits_targeting_events_for_chained_spell_targets() {
         .push(CoreType::Creature);
     add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
 
-    let ability = ResolvedAbility::new(
+    let mut ability = ResolvedAbility::new(
         Effect::DealDamage {
             amount: QuantityExpr::Fixed { value: 1 },
             target: TargetFilter::Player,
             damage_source: None,
             excess: None,
         },
-        vec![TargetRef::Player(PlayerId(1))],
+        vec![],
         object_id,
         PlayerId(0),
     )
@@ -24898,10 +25245,16 @@ fn pay_and_push_emits_targeting_events_for_chained_spell_targets() {
             target: TargetFilter::Typed(TypedFilter::creature()),
             cant_regenerate: false,
         },
-        vec![TargetRef::Object(creature)],
+        vec![],
         object_id,
         PlayerId(0),
     ));
+    assign_targets_in_chain(
+        &state,
+        &mut ability,
+        &[TargetRef::Player(PlayerId(1)), TargetRef::Object(creature)],
+    )
+    .expect("the chain takes one target per node");
 
     let mut events = Vec::new();
 
@@ -26700,6 +27053,8 @@ fn modal_x_target_legality_chooses_x_before_targets() {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -28257,6 +28612,7 @@ fn activated_modal_x_target_selection_carries_labels_and_pays_mana() {
         GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -28466,6 +28822,7 @@ fn set_triggered_ability_mode_choice(state: &mut GameState, player: PlayerId, so
         ability_cost: None,
         activation_cost_snapshot: None,
         unavailable_modes: vec![],
+        activation_payment_mode: CastPaymentMode::Auto,
     };
 }
 
@@ -28501,6 +28858,7 @@ fn cancel_activated_modal_ability_rolls_back_to_priority() {
         GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -28550,6 +28908,7 @@ fn cancel_activated_modal_ability_rolls_back_to_priority() {
         GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .expect("re-activating after cancel must succeed");
@@ -28624,6 +28983,7 @@ fn activated_modal_mode_choice_offers_cancel_in_legal_actions() {
         GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -28991,7 +29351,7 @@ fn prototype_from_exile_uses_play_permission_any_color_not_alt_cost_sibling() {
             graveyard_replacement: None,
             mana_spend_permission: None,
             enters_with_counter: None,
-            enters_with_modifications: Vec::new(),
+            enters_with_modifications: Default::default(),
             cast_cost_modifier: None,
         },
         CastingPermission::PlayFromExile {
@@ -29320,7 +29680,8 @@ fn can_pay_sacrifice_cost_with_eligible() {
         PlayerId(0),
         source,
         &cost,
-        Some(0)
+        Some(0),
+        &ActivationLifeWindow::Current,
     ));
 }
 
@@ -29346,7 +29707,8 @@ fn cannot_pay_sacrifice_cost_no_eligible() {
         PlayerId(0),
         source,
         &cost,
-        Some(0)
+        Some(0),
+        &ActivationLifeWindow::Current,
     ));
 }
 
@@ -30930,7 +31292,7 @@ fn cast_only_from_zones_blocks_affected_opponent_from_exile() {
             graveyard_replacement: None,
             mana_spend_permission: None,
             enters_with_counter: None,
-            enters_with_modifications: Vec::new(),
+            enters_with_modifications: Default::default(),
             cast_cost_modifier: None,
         });
 
@@ -32072,6 +32434,9 @@ fn chosen_muldrotha_variant_requests_and_consumes_permanent_type_slot() {
                 enters_with_counter: None,
                 required_cast_keyword: None,
                 pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
+                cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
+                mana_spend_permission: None,
+                enters_modifications: Default::default(),
             })
             .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent))),
         );
@@ -32220,6 +32585,9 @@ fn muldrotha_and_graveyard_artifact_creature(state: &mut GameState) -> (ObjectId
                 enters_with_counter: None,
                 required_cast_keyword: None,
                 pool: crate::types::statics::GraveyardPermissionPool::OwnGraveyard,
+                cast_limit: crate::types::statics::PermissionCastLimit::Unlimited,
+                mana_spend_permission: None,
+                enters_modifications: Default::default(),
             })
             .affected(TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent))),
         );
@@ -34235,7 +34603,7 @@ fn cast_with_keyword_convoke_uses_caster_not_stored_controller() {
                 graveyard_replacement: None,
                 mana_spend_permission: None,
                 enters_with_counter: None,
-                enters_with_modifications: Vec::new(),
+                enters_with_modifications: Default::default(),
                 cast_cost_modifier: None,
             });
     }
@@ -35601,8 +35969,16 @@ fn composite_activated_pay_life_cost_deducts_life() {
     let life_before = state.players[0].life;
     let mut events = Vec::new();
 
-    pay_ability_cost_for_activation(&mut state, PlayerId(0), fetch, &cost, Some(0), &mut events)
-        .expect("fetchland-style composite cost should be payable");
+    pay_ability_cost_for_activation(
+        &mut state,
+        PlayerId(0),
+        fetch,
+        &cost,
+        Some(0),
+        &mut None,
+        &mut events,
+    )
+    .expect("fetchland-style composite cost should be payable");
 
     assert_eq!(state.players[0].life, life_before - 1);
     assert_eq!(state.objects.get(&fetch).unwrap().zone, Zone::Graveyard);
@@ -37224,6 +37600,7 @@ mod krrik_life_for_color {
             GameAction::ActivateAbility {
                 source_id: activator,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             },
         )
         .expect("CR 107.4f: targeted activation announcement must succeed");
@@ -37301,6 +37678,7 @@ mod krrik_life_for_color {
         let activate = GameAction::ActivateAbility {
             source_id: creature,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         };
         let result = apply_as_current(&mut state, activate)
             .expect("CR 107.4f: {{B}} activation announcement must succeed");
@@ -37611,6 +37989,7 @@ mod remove_counter_cost {
             source,
             &cost,
             Some(0),
+            &mut None,
             &mut events,
         )
         .expect("cost should pay with 2 +1/+1 counters available");
@@ -37650,11 +38029,18 @@ mod remove_counter_cost {
             selection: CounterCostSelection::SingleObject,
         };
         assert!(
-            !cost.is_payable(&state, PlayerId(0), source),
+            !cost.is_payable_for_spell(&state, PlayerId(0), source),
             "cost must be unpayable when the source has no +1/+1 counters"
         );
         assert!(
-            !can_pay_ability_cost_now(&state, PlayerId(0), source, &cost, Some(0)),
+            !can_pay_ability_cost_now(
+                &state,
+                PlayerId(0),
+                source,
+                &cost,
+                Some(0),
+                &ActivationLifeWindow::Current,
+            ),
             "can_pay_ability_cost_now must reject an unpayable remove-counter cost"
         );
     }
@@ -37670,7 +38056,7 @@ mod remove_counter_cost {
             selection: CounterCostSelection::SingleObject,
         };
         assert!(
-            !cost.is_payable(&state, PlayerId(0), source),
+            !cost.is_payable_for_spell(&state, PlayerId(0), source),
             "cost must be unpayable when the source has fewer than N counters"
         );
     }
@@ -37697,6 +38083,7 @@ mod remove_counter_cost {
             source,
             &cost,
             Some(0),
+            &mut None,
             &mut events,
         )
         .unwrap();
@@ -39158,13 +39545,14 @@ mod unattach_cost {
         let (equipment, creature) = attached_equipment(&mut state);
         let cost = AbilityCost::Unattach;
 
-        assert!(cost.is_payable(&state, PlayerId(0), equipment));
+        assert!(cost.is_payable_for_spell(&state, PlayerId(0), equipment));
         pay_ability_cost_for_activation(
             &mut state,
             PlayerId(0),
             equipment,
             &cost,
             Some(0),
+            &mut None,
             &mut Vec::new(),
         )
         .expect("attached Equipment should be able to unattach as a cost");
@@ -39181,7 +39569,7 @@ mod unattach_cost {
         crate::game::effects::attach::unattach(&mut state, equipment);
 
         assert!(
-            !AbilityCost::Unattach.is_payable(&state, PlayerId(0), equipment),
+            !AbilityCost::Unattach.is_payable_for_spell(&state, PlayerId(0), equipment),
             "unattach cost requires an attached source permanent"
         );
     }
@@ -39201,7 +39589,7 @@ mod unattach_cost {
         assert!(state.objects[&equipment].attached_to.is_some());
         assert!(state.objects[&creature].attachments.contains(&equipment));
         assert!(
-            !AbilityCost::Unattach.is_payable(&state, PlayerId(0), equipment),
+            !AbilityCost::Unattach.is_payable_for_spell(&state, PlayerId(0), equipment),
             "unattach cost is Equipment-only"
         );
     }
@@ -41515,6 +41903,7 @@ mod exert_cost {
             id,
             &AbilityCost::Exert,
             Some(0),
+            &mut None,
             &mut events,
         )
         .expect("exert cost pays");
@@ -41575,6 +41964,7 @@ mod exert_cost {
             id,
             &AbilityCost::Exert,
             Some(0),
+            &mut None,
             &mut events,
         )
         .expect("first exert");
@@ -41584,6 +41974,7 @@ mod exert_cost {
             id,
             &AbilityCost::Exert,
             Some(0),
+            &mut None,
             &mut events,
         )
         .expect("second exert");
@@ -41632,6 +42023,7 @@ mod exert_cost {
             id,
             &AbilityCost::Exert,
             Some(0),
+            &mut None,
             &mut events,
         );
         assert!(matches!(result, Err(EngineError::ActionNotAllowed(_))));
@@ -41652,6 +42044,7 @@ mod exert_cost {
             id,
             &AbilityCost::Exert,
             Some(0),
+            &mut None,
             &mut events,
         )
         .expect("exert cost pays");
@@ -42628,7 +43021,7 @@ mod loyalty_gate {
                 candidate.action,
                 GameAction::ActivateAbility {
                     source_id,
-                    ability_index: 0,
+                    ability_index: 0, ..
                 } if source_id == pw
             )),
             "matching ActivateAsInstant permission must offer the loyalty activation outside sorcery timing"
@@ -45294,7 +45687,7 @@ const PIRANHA_MARSH_ORACLE_FULL: &str =
 ///      earlier event — NOT a simultaneous re-entry, so the 2022-12-08 WotC
 ///      "can't attach to a permanent entering at the same time" ruling does not
 ///      apply here). WGD leaving fires its LTB: "return the exiled cards to the
-///      battlefield" (CR 610.3).
+///      battlefield" (CR 607.2a).
 ///   5. The Aura, the plain land, and Piranha Marsh return as NEW objects
 ///      (CR 400.7). The Aura's Enchant reset to its printed "creature card in a
 ///      graveyard" and legally attaches to WGD-in-graveyard (CR 303.4f). The
@@ -45302,37 +45695,12 @@ const PIRANHA_MARSH_ORACLE_FULL: &str =
 ///      Piranha Marsh's ETB refires, costing P1 1 life (CR 119.3).
 ///   6. The re-attached Aura's ETB reanimates WGD once more, completing one cycle.
 ///
-/// ROOT CAUSE + FIX (2026-07): the failure was a single missing effect-variant
-/// arm in the parser's two-trigger exile-return synthesis, NOT a test-only or
-/// out-of-scope gap. The engine already models "exile X, return X when the source
-/// leaves" generally (Journey to Nowhere / Oblivion Ring, CR 607.1 + CR 607.2a +
-/// CR 406.6, via a CR 610.3 "until"-duration vehicle): the parser pass
-/// `detect_etb_exile_ltb_return` / `apply_etb_exile_ltb_return` stamps
-/// `Duration::UntilHostLeavesPlay` onto the ETB exile at parse time, which makes
-/// `zone_pipeline` create a persistent `ExileLinkKind::UntilSourceLeaves` link for
-/// every exiled object, and `check_exile_returns` (run every priority pass) then
-/// performs the automatic return when the source leaves the battlefield —
-/// independent of whether the card's own printed LTB trigger ever resolves.
-///
-/// The bug: `trigger_is_etb_exile_pending_duration` only matched the single-target
-/// `Effect::ChangeZone`→Exile, not the mass `Effect::ChangeZoneAll`→Exile that
-/// WGD's "exile all other permanents you control" parses to. So WGD's ETB never
-/// got the duration stamp and the entire downstream machinery stayed dormant.
-/// WGD's own printed LTB `ChangeZone{TrackedSet}` return is vestigial for this
-/// class (`TrackedSet(0)` resolves to an empty set — a no-op), exactly like the
-/// Fiend Hunter → Wall of Omens precedent (issue #3673) where the automatic
-/// `check_exile_returns` path, not the printed trigger, is what returns the
-/// cards. (Realm Razer shares WGD's mass-exile ETB shape but its LTB return
-/// carries a "tapped" entry modifier the automatic return path can't apply —
-/// `trigger_is_ltb_return` correctly excludes it from this synthesis rather
-/// than silently dropping that modifier; see `parser/oracle_tests.rs`'s
+/// CR 607.2a + CR 607.3: WGD's ETB exile and its LTB return are linked
+/// abilities. The exile records a `TrackedBySource` link for each exiled object,
+/// and the exiled cards return only when WGD's printed LTB trigger resolves.
+/// (Realm Razer shares WGD's mass-exile ETB shape but its LTB return carries a
+/// "tapped" entry modifier; see `parser/oracle_tests.rs`'s
 /// `mass_exile_ltb_return_with_entry_modifier_is_not_paired`.)
-///
-/// This test drives the real return path: it fires WGD's (now-vestigial) LTB
-/// trigger, then calls `check_exile_returns` over the SAME events vec that carries
-/// WGD's sacrifice `ZoneChanged` event (mirroring `engine_priority.rs:177-210`),
-/// then scans the appended return events so the returned non-Aura permanents' own
-/// ETBs (Piranha Marsh's life loss) fire.
 ///
 /// SCOPE: two independent fixes now compose to close a full cycle. (1) The
 /// mass-exile-return parser fix (this branch): the exiled permanents (the plain
@@ -45547,6 +45915,23 @@ fn worldgorger_dragon_animate_dead_self_loop_single_cycle() {
         Zone::Battlefield,
         "WGD is exempt from its own mass-exile ('all OTHER permanents')"
     );
+    // Measured before the sacrifice: battlefield exit prunes the live links.
+    let tracked_links = state
+        .exile_links
+        .iter()
+        .filter(|link| {
+            link.source_id == wgd_id
+                && matches!(
+                    link.kind,
+                    crate::types::game_state::ExileLinkKind::TrackedBySource
+                )
+        })
+        .count();
+    assert_eq!(
+        tracked_links, 3,
+        "WGD's mass-exile ETB must link each of the 3 exiled objects (Aura, plain \
+         land, Piranha Marsh) to WGD"
+    );
     // The exiled Aura's Enchant correctly RESET to its printed restriction on the
     // exile round-trip (CR 400.7) — refutes the keyword-reset-bug hypothesis.
     // Off-zone object (Exile), so the existence check must go through the
@@ -45593,73 +45978,42 @@ fn worldgorger_dragon_animate_dead_self_loop_single_cycle() {
         "WGD must be sacrificed to the graveyard"
     );
 
-    // Reach-guard (proves the fix's upstream fired): the widened parser predicate
-    // stamped `Duration::UntilHostLeavesPlay` on WGD's mass-exile ETB, so resolving
-    // it in step 3 created a persistent `UntilSourceLeaves` link for every exiled
-    // object. If the `matches!` widening is reverted, no links exist and the
-    // return below is a no-op — this guard flips to zero and the crux fails.
-    let until_source_leaves_links = state
-        .exile_links
-        .iter()
-        .filter(|link| {
-            link.source_id == wgd_id
-                && matches!(
-                    link.kind,
-                    crate::types::game_state::ExileLinkKind::UntilSourceLeaves { .. }
-                )
-        })
-        .count();
-    assert_eq!(
-        until_source_leaves_links, 3,
-        "WGD's mass-exile ETB must create an UntilSourceLeaves link for each of the \
-         3 exiled objects (Aura, plain land, Piranha Marsh) — this is the duration \
-         stamp from the widened parser predicate taking effect"
-    );
-
-    // (5) WGD left the battlefield. First fire + resolve WGD's own printed LTB
-    // trigger, which for this mass-exile class is vestigial: its return effect is
-    // `ChangeZone { target: TrackedSet }` and `TrackedSet` resolves to an empty set,
-    // so it no-ops (the Fiend Hunter → Wall of Omens precedent, issue #3673).
+    // (5) WGD left the battlefield → its LTB trigger goes on the stack. The
+    // exiled objects stay in exile until it resolves (CR 607.2a).
     crate::game::triggers::process_triggers(&mut state, &sac_ev);
     assert_eq!(
         state.stack.len(),
         1,
         "WGD LTB mass-return trigger must be on the stack"
     );
+    assert!(state
+        .stack
+        .back()
+        .is_some_and(|entry| entry.source_id == wgd_id));
+    for (id, name) in [
+        (aura_id, "the Aura"),
+        (plain_land, "the plain land"),
+        (piranha, "Piranha Marsh"),
+    ] {
+        assert_eq!(
+            state.objects[&id].zone,
+            Zone::Exile,
+            "{name} must stay exiled while WGD's LTB trigger is on the stack"
+        );
+    }
     let mut ltb_ev = Vec::new();
     stack::resolve_top(&mut state, &mut ltb_ev);
     crate::game::layers::evaluate_layers(&mut state);
-    // The vestigial LTB trigger returned nothing on its own — the exiled objects
-    // are still in exile at this point. This confirms the printed trigger is NOT
-    // the mechanism; `check_exile_returns` below is.
-    assert_eq!(
-        state.objects[&aura_id].zone,
-        Zone::Exile,
-        "WGD's own printed LTB trigger (empty TrackedSet) must NOT return the cards"
-    );
 
-    // THE FIX'S RUNTIME PATH: `check_exile_returns` reads WGD's sacrifice
-    // `ZoneChanged { from: Battlefield }` event out of `sac_ev` and appends the
-    // return events INTO THE SAME vec (mirroring `engine_priority.rs:177-210`). It
-    // must be passed the vec that actually contains WGD's leave event — a fresh vec
-    // would silently no-op. CR 610.3: the exiled cards return.
-    crate::game::engine::check_exile_returns(&mut state, &mut sac_ev);
-    crate::game::layers::evaluate_layers(&mut state);
-
-    // *** CRUX: the exiled non-Aura permanents must return via the automatic
-    // exile-link mechanism. Before the parser predicate was widened, WGD's ETB
-    // never carried `Duration::UntilHostLeavesPlay`, no `UntilSourceLeaves` links
-    // existed, and this returned NOTHING. Reverting the `matches!` widening drops
-    // the reach-guard above to zero links and flips both of these to `Exile`. ***
     assert_eq!(
         state.objects[&plain_land].zone,
         Zone::Battlefield,
-        "the plain land must return to the battlefield via check_exile_returns (CR 610.3)"
+        "the plain land must return to the battlefield when WGD's LTB resolves"
     );
     assert_eq!(
         state.objects[&piranha].zone,
         Zone::Battlefield,
-        "Piranha Marsh must return to the battlefield via check_exile_returns (CR 610.3)"
+        "Piranha Marsh must return to the battlefield when WGD's LTB resolves"
     );
 
     // THE AURA RE-ENTRY LEG — now CLOSED by PR #6072 (merged from origin/main).
@@ -45672,7 +46026,7 @@ fn worldgorger_dragon_animate_dead_self_loop_single_cycle() {
     // enumerate candidate hosts across whatever zone(s) the Aura's own enchant
     // filter implies, via `TargetFilter::extract_zones()` + `zone_object_ids`
     // (Animate Dead / Dance of the Dead / Necromancy class), so the graveyard host
-    // WGD is now found. The `check_exile_returns` group return above therefore
+    // WGD is now found. The LTB's group return above therefore
     // brought the Aura back onto the battlefield with a single legal host, and the
     // in-pipeline single-host branch auto-attached it (CR 303.4f — controller's
     // choice, resolved with no prompt when exactly one legal host exists).
@@ -46146,6 +46500,85 @@ fn bestow_aura_static_buff_applies_to_enchanted_creature() {
         Some(5),
         "CR 702.103b: enchanted creature's toughness should be buffed by bestow Aura static"
     );
+}
+
+/// CR 303.4 + CR 702.103b: a bestow card on the battlefield as an unattached
+/// creature (Nyxborn Rollicker) must not buff creatures enchanted by other
+/// Auras; only the creature it is attached to gets the bonus.
+#[test]
+fn unattached_bestow_creature_does_not_buff_creatures_enchanted_by_other_auras() {
+    use crate::game::layers::evaluate_layers;
+
+    let mut state = setup_game_at_main_phase();
+    let enchanted = create_target_creature_on_battlefield(&mut state, PlayerId(0), "Knight", 810);
+    let bystander = create_target_creature_on_battlefield(&mut state, PlayerId(0), "Squire", 811);
+    let other_aura = create_object(
+        &mut state,
+        CardId(812),
+        PlayerId(0),
+        "Pacifism".to_string(),
+        Zone::Battlefield,
+    );
+    state
+        .objects
+        .get_mut(&other_aura)
+        .unwrap()
+        .card_types
+        .subtypes
+        .push("Aura".to_string());
+    state.battlefield.push_back(other_aura);
+    super::super::effects::attach::attach_to(&mut state, other_aura, enchanted);
+
+    let rollicker = create_bestow_creature_in_hand(
+        &mut state,
+        PlayerId(0),
+        "Nyxborn Rollicker",
+        813,
+        ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 0,
+        },
+        ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 1,
+        },
+    );
+    {
+        let obj = state.objects.get_mut(&rollicker).unwrap();
+        obj.zone = Zone::Battlefield;
+        let buff = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+            ))
+            .modifications(vec![
+                ContinuousModification::AddPower { value: 1 },
+                ContinuousModification::AddToughness { value: 1 },
+            ]);
+        Arc::make_mut(&mut obj.base_static_definitions).push(buff);
+    }
+    state.players[0].hand.retain(|&id| id != rollicker);
+    state.battlefield.push_back(rollicker);
+
+    evaluate_layers(&mut state);
+
+    // Positive reach guard: the Knight really is enchanted (by Pacifism).
+    assert_eq!(
+        state.objects.get(&enchanted).unwrap().attachments,
+        vec![other_aura]
+    );
+    for id in [enchanted, bystander] {
+        let o = state.objects.get(&id).unwrap();
+        assert_eq!((o.power, o.toughness), (Some(3), Some(3)));
+    }
+
+    // Aura form attached to the Squire: only the Squire is buffed.
+    apply_bestow_aura_form(state.objects.get_mut(&rollicker).unwrap());
+    super::super::effects::attach::attach_to(&mut state, rollicker, bystander);
+    evaluate_layers(&mut state);
+    let o = state.objects.get(&bystander).unwrap();
+    assert_eq!((o.power, o.toughness), (Some(4), Some(4)));
+    let o = state.objects.get(&enchanted).unwrap();
+    assert_eq!((o.power, o.toughness), (Some(3), Some(3)));
 }
 
 /// Issue #310 (Maddening Cacophony / Fractured Sanity): the spell-cast
@@ -47274,7 +47707,7 @@ fn normal_cost_grant(player: PlayerId, cost: ManaCost) -> crate::types::ability:
         duration: None,
         graveyard_replacement: None,
         enters_with_counter: None,
-        enters_with_modifications: vec![],
+        enters_with_modifications: Default::default(),
         mana_spend_permission: None,
         cast_cost_modifier: None,
     }
@@ -47599,7 +48032,7 @@ fn free_cast_grant(player: PlayerId) -> crate::types::ability::CastingPermission
         duration: None,
         graveyard_replacement: None,
         enters_with_counter: None,
-        enters_with_modifications: vec![],
+        enters_with_modifications: Default::default(),
         mana_spend_permission: None,
         cast_cost_modifier: None,
     }
@@ -48236,11 +48669,12 @@ fn resolution_offer_grant(
             reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
             success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
             delayed_trigger_receipts: Vec::new(),
+            indicated_action: None,
         }),
         duration: None,
         graveyard_replacement: None,
         enters_with_counter: None,
-        enters_with_modifications: vec![],
+        enters_with_modifications: Default::default(),
         mana_spend_permission: None,
         cast_cost_modifier: None,
     }
@@ -52260,6 +52694,7 @@ fn agatha_reduced_creature_ability_activates_via_production_path() {
         GameAction::ActivateAbility {
             source_id: creature,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .expect("Agatha-reduced {4}->{1} ability must activate with exactly {1} mana");
@@ -52282,6 +52717,7 @@ fn agatha_reduced_creature_ability_activates_via_production_path() {
         GameAction::ActivateAbility {
             source_id: creature,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     );
     assert!(
@@ -52394,6 +52830,7 @@ fn doc_aurlock_reduced_plot_activates_via_production_path() {
         GameAction::ActivateAbility {
             source_id: plot_card,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     )
     .expect("Doc-Aurlock-reduced {3}->{1} plot must activate with exactly {1} mana");
@@ -52429,6 +52866,7 @@ fn doc_aurlock_reduced_plot_activates_via_production_path() {
         GameAction::ActivateAbility {
             source_id: plot_card,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         },
     );
     assert!(
@@ -52535,6 +52973,7 @@ fn plot_special_action_bypasses_activated_ability_prohibitions() {
             GameAction::ActivateAbility {
                 source_id: plot_card,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             },
         )
         .unwrap_or_else(|e| {
@@ -52872,6 +53311,7 @@ fn plot_special_action_still_enforces_sorcery_speed_timing() {
             GameAction::ActivateAbility {
                 source_id: plot_card,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             },
         );
         assert!(
@@ -52895,6 +53335,7 @@ fn plot_special_action_still_enforces_sorcery_speed_timing() {
             GameAction::ActivateAbility {
                 source_id: plot_card,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             },
         )
         .expect("C0 baseline: plot on own main phase with empty stack must succeed");
@@ -54319,6 +54760,7 @@ mod plot_from_library {
             GameAction::ActivateAbility {
                 source_id: top,
                 ability_index: idx,
+                payment_mode: CastPaymentMode::Auto,
             },
         )
         .expect("activating plot-from-library must be accepted")
@@ -55085,6 +55527,75 @@ fn resolve_graveyard_paid_grant_with_exile_rider(state: &mut GameState, spell: O
     crate::game::effects::cast_from_zone::resolve(state, &grant, &mut Vec::new()).unwrap();
 }
 
+/// A `{U}` creature in `owner`'s graveyard with a nonzero body, for the paid
+/// during-resolution offer rows.
+fn make_graveyard_blue_creature(state: &mut GameState, owner: PlayerId) -> ObjectId {
+    let creature = create_object(
+        state,
+        CardId(8310),
+        owner,
+        "Graveyard Rider Creature".to_string(),
+        Zone::Graveyard,
+    );
+    let obj = state.objects.get_mut(&creature).unwrap();
+    obj.card_types.core_types.push(CoreType::Creature);
+    obj.base_card_types = obj.card_types.clone();
+    obj.mana_cost = ManaCost::Cost {
+        shards: vec![ManaCostShard::Blue],
+        generic: 0,
+    };
+    obj.power = Some(2);
+    obj.toughness = Some(2);
+    obj.base_power = obj.power;
+    obj.base_toughness = obj.toughness;
+    creature
+}
+
+/// Resolve a paid during-resolution `CastFromZone` targeting `spell` with the
+/// gains-modifications rider attached as its sub-ability (when `with_rider`) —
+/// the shape Strago and Relm's rider produces on the paid route.
+fn resolve_graveyard_paid_grant_with_gains_rider(
+    state: &mut GameState,
+    spell: ObjectId,
+    with_rider: bool,
+    cast_filter: Option<TargetFilter>,
+) {
+    let mut grant = ResolvedAbility::new(
+        Effect::CastFromZone {
+            target: TargetFilter::ParentTarget,
+            without_paying_mana_cost: false,
+            mode: CardPlayMode::Cast,
+            cast_transformed: false,
+            alt_ability_cost: None,
+            constraint: None,
+            duration: None,
+            driver: crate::types::ability::CastFromZoneDriver::DuringResolution,
+            mana_spend_permission: Some(ManaSpendPermission::AnyColor),
+            additional_cost: None,
+            cast_cost_modifier: None,
+        },
+        vec![TargetRef::Object(spell)],
+        ObjectId(9200),
+        PlayerId(0),
+    );
+    if with_rider {
+        grant.sub_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::AddPendingEntersModifications {
+                rider: crate::types::ability::PendingEntersModifications {
+                    modifications: vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Haste,
+                    }],
+                    cast_filter,
+                },
+            },
+            vec![],
+            ObjectId(9200),
+            PlayerId(0),
+        )));
+    }
+    crate::game::effects::cast_from_zone::resolve(state, &grant, &mut Vec::new()).unwrap();
+}
+
 /// Install the exact CR 603.7 tail that a paid resolution offer transports.
 /// The effect is observably small (`gain 1 life`), so the accepted-cast test
 /// below proves the receipt is retained through payment and then really fires.
@@ -55259,6 +55770,282 @@ fn graveyard_paid_cast_with_exile_rider_installs_single_redirect_and_exiles_once
     );
 }
 
+/// CR 608.2c + CR 611.2a + CR 611.2c (row 6.2): accepting a paid
+/// during-resolution offer threads the offer's gains-modifications rider into
+/// the elected permission, which applies it exactly once at finalization
+/// scoped to the cast object. Reverting the accept's threading (back to
+/// `Vec::new()`) drops it. Paired: an empty-rider offer applies nothing.
+#[test]
+fn paid_offer_accept_applies_the_gains_rider() {
+    let rider = vec![ContinuousModification::AddKeyword {
+        keyword: Keyword::Haste,
+    }];
+
+    // Positive — the rider-bearing offer applies exactly one scoped effect.
+    let mut state = setup_game_at_main_phase();
+    let creature = make_graveyard_blue_creature(&mut state, PlayerId(0));
+    add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+    resolve_graveyard_paid_grant_with_gains_rider(&mut state, creature, true, None);
+    let WaitingFor::CastOffer {
+        kind:
+            crate::types::game_state::CastOfferKind::GraveyardPaidCast {
+                enters_with_modifications,
+                ..
+            },
+        ..
+    } = &state.waiting_for
+    else {
+        panic!("reach guard: the rider-bearing paid offer must be minted");
+    };
+    assert_eq!(
+        enters_with_modifications.modifications, rider,
+        "reach guard: the mint carries the gains rider"
+    );
+    assert!(
+        enters_with_modifications.cast_filter.is_none(),
+        "the synthetic rider carries no printed quality"
+    );
+    let accepted = apply_as_current(
+        &mut state,
+        GameAction::GraveyardPaidCastChoice {
+            choice: crate::types::actions::CastChoice::Cast,
+        },
+    )
+    .expect("accepting the rider-bearing paid offer must succeed");
+    assert!(matches!(state.waiting_for, WaitingFor::ManaPayment { .. }));
+    let paid = apply_as_current(&mut state, GameAction::PassPriority)
+        .expect("paying the {U} cost must finalize the cast");
+    assert!(
+        state.stack.iter().any(|entry| entry.source_id == creature),
+        "reach guard: the paid rider cast reached the stack"
+    );
+    let applied: Vec<_> = state
+        .transient_continuous_effects
+        .iter()
+        .filter(|effect| {
+            effect.affected == TargetFilter::SpecificObject { id: creature }
+                && effect.modifications == rider
+        })
+        .collect();
+    assert_eq!(
+        applied.len(),
+        1,
+        "the accept must apply the offer's rider exactly once at finalize"
+    );
+    assert!(
+        !accepted
+            .events
+            .iter()
+            .chain(&paid.events)
+            .any(|event| matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: crate::types::ability::EffectKind::AddPendingEntersModifications,
+                    ..
+                }
+            )),
+        "the rider must never resolve standalone"
+    );
+    stack::resolve_top(&mut state, &mut Vec::new());
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(state.objects[&creature].zone, Zone::Battlefield);
+    assert!(
+        crate::game::keywords::object_has_effective_keyword_kind(
+            &state,
+            creature,
+            KeywordKind::Haste,
+        ),
+        "the paid cast creature must have effective haste"
+    );
+
+    // Negative (paired) — an empty-rider offer applies nothing.
+    let mut state = setup_game_at_main_phase();
+    let creature = make_graveyard_blue_creature(&mut state, PlayerId(0));
+    add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+    resolve_graveyard_paid_grant_with_gains_rider(&mut state, creature, false, None);
+    apply_as_current(
+        &mut state,
+        GameAction::GraveyardPaidCastChoice {
+            choice: crate::types::actions::CastChoice::Cast,
+        },
+    )
+    .expect("accepting the empty-rider offer must succeed");
+    apply_as_current(&mut state, GameAction::PassPriority)
+        .expect("paying the {U} cost must finalize the empty-rider cast");
+    assert!(
+        state.stack.iter().any(|entry| entry.source_id == creature),
+        "reach guard: the empty-rider cast must have finalized onto the stack"
+    );
+    assert!(
+        state.transient_continuous_effects.iter().all(|effect| {
+            !(effect.affected == TargetFilter::SpecificObject { id: creature }
+                && effect.modifications == rider)
+        }),
+        "an empty-rider offer must apply no rider"
+    );
+}
+
+/// CR 608.2c + CR 601.2a (review): the rider's typed `cast_filter` is enforced
+/// through the existing request/offer route. A creature cast under a
+/// creature-filtered rider applies exactly one scoped rider effect; a
+/// noncreature cast reaches the stack with NO matching rider effect after
+/// finalization.
+#[test]
+fn paid_offer_rider_quality_filter_gates_the_application() {
+    let rider = vec![ContinuousModification::AddKeyword {
+        keyword: Keyword::Haste,
+    }];
+    let creature_filter =
+        TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::Creature));
+
+    // Positive — a creature cast under the creature filter applies the rider.
+    let mut state = setup_game_at_main_phase();
+    let creature = make_graveyard_blue_creature(&mut state, PlayerId(0));
+    add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+    resolve_graveyard_paid_grant_with_gains_rider(
+        &mut state,
+        creature,
+        true,
+        Some(creature_filter.clone()),
+    );
+    apply_as_current(
+        &mut state,
+        GameAction::GraveyardPaidCastChoice {
+            choice: crate::types::actions::CastChoice::Cast,
+        },
+    )
+    .expect("accepting the filtered-rider offer must succeed");
+    for _ in 0..8 {
+        if !matches!(state.waiting_for, WaitingFor::ManaPayment { .. }) {
+            break;
+        }
+        apply_as_current(&mut state, GameAction::PassPriority)
+            .expect("paying the {U} cost must finalize the filtered-rider cast");
+    }
+    assert!(
+        state.stack.iter().any(|entry| entry.source_id == creature),
+        "reach guard: the filtered-rider creature cast must reach the stack"
+    );
+    let applied: Vec<_> = state
+        .transient_continuous_effects
+        .iter()
+        .filter(|effect| {
+            effect.affected == TargetFilter::SpecificObject { id: creature }
+                && effect.modifications == rider
+        })
+        .collect();
+    assert_eq!(
+        applied.len(),
+        1,
+        "a creature cast under the creature filter must apply the rider exactly once"
+    );
+
+    // Negative — a NONCREATURE cast under the same filter reaches the stack
+    // with no rider effect after finalization.
+    let mut state = setup_game_at_main_phase();
+    let sorcery = make_graveyard_blue_sorcery(&mut state, PlayerId(0));
+    add_mana(&mut state, PlayerId(0), ManaType::Blue, 1);
+    resolve_graveyard_paid_grant_with_gains_rider(&mut state, sorcery, true, Some(creature_filter));
+    apply_as_current(
+        &mut state,
+        GameAction::GraveyardPaidCastChoice {
+            choice: crate::types::actions::CastChoice::Cast,
+        },
+    )
+    .expect("accepting the offer for a noncreature must succeed");
+    for _ in 0..8 {
+        if !matches!(state.waiting_for, WaitingFor::ManaPayment { .. }) {
+            break;
+        }
+        apply_as_current(&mut state, GameAction::PassPriority)
+            .expect("paying the {U} cost must finalize the noncreature cast");
+    }
+    assert!(
+        state.stack.iter().any(|entry| entry.source_id == sorcery),
+        "reach guard: the noncreature cast must reach the stack"
+    );
+    assert!(
+        state
+            .transient_continuous_effects
+            .iter()
+            .all(|effect| { effect.affected != TargetFilter::SpecificObject { id: sorcery } }),
+        "a noncreature cast under the creature filter must receive no rider effect"
+    );
+}
+
+/// CR 608.2c + CR 611.2a (row 6.2 sibling): declining a rider-bearing paid
+/// offer latches nothing — the card stays in the graveyard, no rider effect is
+/// installed, and a later manual move shows no haste.
+#[test]
+fn paid_offer_decline_installs_nothing() {
+    let mut state = setup_game_at_main_phase();
+    let creature = make_graveyard_blue_creature(&mut state, PlayerId(0));
+    resolve_graveyard_paid_grant_with_gains_rider(&mut state, creature, true, None);
+    assert!(
+        matches!(
+            &state.waiting_for,
+            WaitingFor::CastOffer {
+                kind: crate::types::game_state::CastOfferKind::GraveyardPaidCast { .. },
+                ..
+            }
+        ),
+        "reach guard: the rider-bearing paid offer must be minted"
+    );
+
+    let declined = apply_as_current(
+        &mut state,
+        GameAction::GraveyardPaidCastChoice {
+            choice: crate::types::actions::CastChoice::Decline,
+        },
+    )
+    .expect("declining the rider-bearing paid offer must succeed");
+    assert!(
+        !declined.events.iter().any(|event| matches!(
+            event,
+            GameEvent::EffectResolved {
+                kind: crate::types::ability::EffectKind::AddPendingEntersModifications,
+                ..
+            }
+        )),
+        "the decline path must not resolve the rider standalone; events: {:?}",
+        declined.events
+    );
+    assert_eq!(
+        state.objects[&creature].zone,
+        Zone::Graveyard,
+        "a declined offer leaves the card in the graveyard"
+    );
+    assert!(
+        state.transient_continuous_effects.iter().all(|effect| {
+            !(effect.affected == TargetFilter::SpecificObject { id: creature }
+                && effect.modifications
+                    == vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Haste,
+                    }])
+        }),
+        "a declined offer must install no rider effect"
+    );
+
+    // A later route moves the card to the battlefield; the rider must not
+    // manifest.
+    let mut events = Vec::new();
+    crate::game::zones::move_to_zone(&mut state, creature, Zone::Battlefield, &mut events);
+    crate::game::layers::evaluate_layers(&mut state);
+    assert_eq!(
+        state.objects[&creature].zone,
+        Zone::Battlefield,
+        "reach guard: the later route must actually move the card to the battlefield"
+    );
+    assert!(
+        !crate::game::keywords::object_has_effective_keyword_kind(
+            &state,
+            creature,
+            KeywordKind::Haste,
+        ),
+        "a later route must not inherit the declined offer's rider"
+    );
+}
+
 /// TEST 4 (router): the paid gate produces a `CastOffer::GraveyardPaidCast` and
 /// stamps NO lingering permission. Reverting the paid gate falls through to
 /// `grant_lingering_permissions`, which stamps an `ExileWithAltCost` immediately
@@ -55369,6 +56156,7 @@ fn declining_a_paid_offer_withdraws_only_the_triggers_it_recorded() {
             hit_card: spell,
             mana_spend_permission: None,
             graveyard_replacement: None,
+            enters_with_modifications: Default::default(),
             cast_transformed: false,
             additional_cost: None,
             cleanup: crate::types::ability::ResolutionCastCleanup {
@@ -55384,6 +56172,7 @@ fn declining_a_paid_offer_withdraws_only_the_triggers_it_recorded() {
                 reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
                 success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
                 delayed_trigger_receipts: vec![second],
+                indicated_action: None,
             },
         },
     };
@@ -55458,6 +56247,7 @@ fn cancelling_an_accepted_paid_offer_withdraws_its_tail_receipt() {
             hit_card: spell,
             mana_spend_permission: None,
             graveyard_replacement: None,
+            enters_with_modifications: Default::default(),
             cast_transformed: false,
             additional_cost: None,
             cleanup: crate::types::ability::ResolutionCastCleanup {
@@ -55482,6 +56272,7 @@ fn cancelling_an_accepted_paid_offer_withdraws_its_tail_receipt() {
                         source_id: origin.source_id,
                     },
                 ],
+                indicated_action: None,
             },
         },
     };
@@ -55855,13 +56646,14 @@ fn graveyard_paid_offer_uses_exact_appended_permission_over_conflicting_sibling(
                 reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
                 success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
                 delayed_trigger_receipts: Vec::new(),
+                indicated_action: None,
             }),
             duration: None,
             graveyard_replacement: Some(
                 crate::types::ability::SpellStackToGraveyardReplacement::Hand,
             ),
             enters_with_counter: None,
-            enters_with_modifications: Vec::new(),
+            enters_with_modifications: Default::default(),
             mana_spend_permission: None,
             cast_cost_modifier: None,
         });
@@ -55981,6 +56773,7 @@ fn free_during_resolution_cast_auto_resolves_with_empty_pool() {
         reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
         success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
         delayed_trigger_receipts: Vec::new(),
+        indicated_action: None,
     };
     let initiation = initiate_cast_during_resolution(
         &mut state,
@@ -55991,6 +56784,7 @@ fn free_during_resolution_cast_auto_resolves_with_empty_pool() {
             cast_transformed: false,
             cleanup,
             graveyard_replacement: None,
+            enters_with_modifications: Default::default(),
             cost: crate::types::ability::ResolutionCastCost::Free,
         },
         &mut Vec::new(),
@@ -56093,10 +56887,12 @@ fn resolution_test_request(filter: TargetFilter) -> ResolutionCastRequest {
             reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
             success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
             delayed_trigger_receipts: Vec::new(),
+            indicated_action: None,
         },
         face_policy,
         cast_transformed: false,
         graveyard_replacement: None,
+        enters_with_modifications: Default::default(),
         cost: crate::types::ability::ResolutionCastCost::Free,
     }
 }
@@ -56180,6 +56976,243 @@ fn resolution_cast_auto_selects_its_only_legal_spell_face() {
     assert!(state.stack.iter().any(|entry| entry.source_id == spell));
     assert_eq!(state.objects[&spell].name, "Resolution Back");
     assert!(state.objects[&spell].modal_back_face);
+}
+
+/// A free resolution request for the spell//land fixture under `play_mode`,
+/// with an optional frozen cast-time constraint on the policy.
+fn resolution_test_play_request(
+    play_mode: CardPlayMode,
+    constraint: Option<CastPermissionConstraint>,
+) -> ResolutionCastRequest {
+    let mut request = resolution_test_request(TargetFilter::Any);
+    request.face_policy = crate::types::ability::ResolutionCastFacePolicy::new(
+        TargetFilter::Any,
+        ObjectId(83_021),
+        PlayerId(0),
+        constraint,
+    )
+    .with_play_mode(play_mode);
+    request.cleanup.face_policy = request.face_policy.clone();
+    request
+}
+
+/// A spell (sorcery) // land modal double-faced card in exile.
+fn resolution_test_spell_land(state: &mut GameState) -> ObjectId {
+    resolution_test_two_spell_faces(state, CoreType::Sorcery, CoreType::Land)
+}
+
+/// "Mana value 0 or less": with a generic(3) front face, the spell face is
+/// illegal under this constraint while the land face is unaffected.
+fn resolution_test_mv_zero_constraint() -> Option<CastPermissionConstraint> {
+    Some(CastPermissionConstraint::ManaValue {
+        comparator: Comparator::LE,
+        value: QuantityExpr::Fixed { value: 0 },
+    })
+}
+
+/// Read every legal face of `spell` under `request` through the exact
+/// temporary permission, installed on a clone.
+fn resolution_test_face_legality(
+    state: &GameState,
+    spell: ObjectId,
+    request: &ResolutionCastRequest,
+) -> ResolutionFaceLegality {
+    let mut projected = state.clone();
+    let permission =
+        install_resolution_cast_permission(&mut projected, PlayerId(0), spell, request)
+            .expect("the fixture request installs");
+    resolution_face_legality_for_current_permission(
+        &projected,
+        PlayerId(0),
+        spell,
+        &request.face_policy,
+        permission.index,
+    )
+}
+
+/// CR 701.18b + CR 712.12 + CR 305.2b + CR 305.3: only a Play policy admits
+/// the land face of a spell//land modal card, and only while that land play
+/// is legal now. The spell face is judged independently (CR 712.11c).
+#[test]
+fn resolution_face_legality_admits_the_land_face_only_under_a_play_policy() {
+    use ResolutionFaceAction::{Cast, PlayLand};
+    let mut state = setup_game_at_main_phase();
+    let spell = resolution_test_spell_land(&mut state);
+
+    let cast = resolution_test_play_request(CardPlayMode::Cast, None);
+    assert_eq!(
+        resolution_test_face_legality(&state, spell, &cast),
+        ResolutionFaceLegality {
+            front: Some(Cast),
+            back: None,
+        },
+        "a Cast policy never admits a land face"
+    );
+
+    let play = resolution_test_play_request(CardPlayMode::Play, None);
+    assert_eq!(
+        resolution_test_face_legality(&state, spell, &play),
+        ResolutionFaceLegality {
+            front: Some(Cast),
+            back: Some(PlayLand),
+        },
+        "a Play policy admits both the spell face and the land face"
+    );
+
+    let mut at_allowance = state.clone();
+    at_allowance.lands_played_this_turn = 1;
+    at_allowance.players[0].lands_played_this_turn = 1;
+    assert_eq!(
+        resolution_test_face_legality(&at_allowance, spell, &play).back,
+        None,
+        "CR 305.2b: the land face is unavailable at the allowance"
+    );
+
+    let mut opponents_turn = state.clone();
+    opponents_turn.active_player = PlayerId(1);
+    assert_eq!(
+        resolution_test_face_legality(&opponents_turn, spell, &play).back,
+        None,
+        "CR 305.3: the land face is unavailable on another player's turn"
+    );
+
+    let mut constrained = state.clone();
+    constrained.objects.get_mut(&spell).unwrap().mana_cost = ManaCost::generic(3);
+    let play_constrained =
+        resolution_test_play_request(CardPlayMode::Play, resolution_test_mv_zero_constraint());
+    assert_eq!(
+        resolution_test_face_legality(&constrained, spell, &play_constrained),
+        ResolutionFaceLegality {
+            front: None,
+            back: Some(PlayLand),
+        },
+        "an illegal spell face does not suppress the legal land face"
+    );
+}
+
+/// CR 712.12 + CR 305.2a: when the land face is a Play election's only legal
+/// face, it is returned for the caller to play and no temporary permission
+/// remains. The same card under a Cast policy is rejected outright: a Cast
+/// instruction never elects a land face (CR 601.2).
+#[test]
+fn resolution_play_election_plays_the_only_legal_land_face_and_leaves_no_permission() {
+    let mut state = setup_game_at_main_phase();
+    let spell = resolution_test_spell_land(&mut state);
+    state.objects.get_mut(&spell).unwrap().mana_cost = ManaCost::generic(3);
+
+    let mut play_state = state.clone();
+    let initiation = initiate_resolution_election(
+        &mut play_state,
+        PlayerId(0),
+        spell,
+        resolution_test_play_request(CardPlayMode::Play, resolution_test_mv_zero_constraint()),
+        &mut Vec::new(),
+    )
+    .expect("the Play election initiates");
+    assert!(
+        matches!(initiation, ResolutionElectionInitiation::PlayLandFace(_)),
+        "the only legal face is the land face"
+    );
+    assert!(play_state.objects[&spell].casting_permissions.is_empty());
+
+    let mut cast_state = state.clone();
+    let initiation = initiate_resolution_election(
+        &mut cast_state,
+        PlayerId(0),
+        spell,
+        resolution_test_play_request(CardPlayMode::Cast, resolution_test_mv_zero_constraint()),
+        &mut Vec::new(),
+    )
+    .expect("the Cast election initiates");
+    assert!(
+        matches!(
+            initiation,
+            ResolutionElectionInitiation::Cast(ResolutionCastInitiation::Rejected(_))
+        ),
+        "a Cast policy with an illegal spell face rejects; it never elects the land face"
+    );
+    assert!(cast_state.objects[&spell].casting_permissions.is_empty());
+}
+
+/// CR 712.12 + CR 305.2a: with both faces legal, a Play election offers both
+/// plus `CancelCast`; electing the land face plays it during resolution by its
+/// back face, consumes the allowance, and leaves no permission.
+#[test]
+fn resolution_play_election_with_two_legal_faces_plays_the_elected_land_face() {
+    let mut state = setup_game_at_main_phase();
+    let spell = resolution_test_spell_land(&mut state);
+
+    let initiation = initiate_resolution_election(
+        &mut state,
+        PlayerId(0),
+        spell,
+        resolution_test_play_request(CardPlayMode::Play, None),
+        &mut Vec::new(),
+    )
+    .expect("the Play election initiates");
+    let ResolutionElectionInitiation::Cast(ResolutionCastInitiation::WaitingFor(waiting_for)) =
+        initiation
+    else {
+        panic!("two legal faces must open a prompt");
+    };
+    assert!(matches!(
+        waiting_for.as_ref(),
+        WaitingFor::ModalFaceChoice { .. }
+    ));
+    state.waiting_for = *waiting_for;
+    let actions = crate::ai_support::legal_actions(&state);
+    assert!(actions.contains(&GameAction::ChooseModalFace { back_face: false }));
+    assert!(actions.contains(&GameAction::ChooseModalFace { back_face: true }));
+    assert!(actions.contains(&GameAction::CancelCast));
+
+    apply_as_current(&mut state, GameAction::ChooseModalFace { back_face: true })
+        .expect("the elected land face is played");
+
+    let object = &state.objects[&spell];
+    assert_eq!(object.zone, Zone::Battlefield);
+    assert_eq!(object.name, "Resolution Back");
+    assert!(object.modal_back_face);
+    assert!(object.casting_permissions.is_empty());
+    assert_eq!(state.lands_played_this_turn, 1);
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+}
+
+/// CR 608.2d + CR 305.2b: once the allowance is reached, the land face is no
+/// longer offered, and a forged land-face choice is refused with no mutation.
+#[test]
+fn forged_land_face_choice_after_the_allowance_is_rejected_without_mutation() {
+    let mut state = setup_game_at_main_phase();
+    let spell = resolution_test_spell_land(&mut state);
+    let initiation = initiate_resolution_election(
+        &mut state,
+        PlayerId(0),
+        spell,
+        resolution_test_play_request(CardPlayMode::Play, None),
+        &mut Vec::new(),
+    )
+    .expect("the Play election initiates");
+    let ResolutionElectionInitiation::Cast(ResolutionCastInitiation::WaitingFor(waiting_for)) =
+        initiation
+    else {
+        panic!("two legal faces must open a prompt");
+    };
+    state.waiting_for = *waiting_for;
+    state.lands_played_this_turn = 1;
+    state.players[0].lands_played_this_turn = 1;
+
+    let actions = crate::ai_support::legal_actions(&state);
+    assert!(
+        actions.contains(&GameAction::ChooseModalFace { back_face: false }),
+        "reach-guard: the prompt is live and its spell face is still offered"
+    );
+    assert!(!actions.contains(&GameAction::ChooseModalFace { back_face: true }));
+
+    let before = state.clone();
+    assert!(
+        apply_as_current(&mut state, GameAction::ChooseModalFace { back_face: true }).is_err(),
+        "a land face past the allowance is refused"
+    );
+    assert_eq!(state, before, "a refused land-face choice mutates nothing");
 }
 
 /// A paid resolution offer evaluates both independently castable faces. Once a
@@ -56825,6 +57858,7 @@ fn activate_conduit_to_offer(
         .act(GameAction::ActivateAbility {
             source_id: conduit,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activating Conduit's {T} ability must succeed");
     for _ in 0..16 {
@@ -57032,7 +58066,7 @@ fn exact_resolution_offer_does_not_inherit_sibling_cast_transformed() {
                 duration: Some(Duration::UntilEndOfTurn),
                 graveyard_replacement: None,
                 enters_with_counter: None,
-                enters_with_modifications: Vec::new(),
+                enters_with_modifications: Default::default(),
                 mana_spend_permission: None,
                 cast_cost_modifier: None,
             });
@@ -57051,6 +58085,7 @@ fn exact_resolution_offer_does_not_inherit_sibling_cast_transformed() {
         reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
         success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
         delayed_trigger_receipts: Vec::new(),
+        indicated_action: None,
     };
     initiate_cast_during_resolution(
         &mut state,
@@ -57061,6 +58096,7 @@ fn exact_resolution_offer_does_not_inherit_sibling_cast_transformed() {
             cast_transformed: false,
             cleanup,
             graveyard_replacement: None,
+            enters_with_modifications: Default::default(),
             cost: crate::types::ability::ResolutionCastCost::Free,
         },
         &mut Vec::new(),
@@ -57126,6 +58162,7 @@ fn exact_resolution_offer_does_not_consume_sibling_once_per_turn_permission() {
         reject_action: crate::types::ability::ResolutionMvRejectAction::RemainExiled,
         success_action: crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
         delayed_trigger_receipts: Vec::new(),
+        indicated_action: None,
     };
     initiate_cast_during_resolution(
         &mut state,
@@ -57136,6 +58173,7 @@ fn exact_resolution_offer_does_not_consume_sibling_once_per_turn_permission() {
             cast_transformed: false,
             cleanup,
             graveyard_replacement: None,
+            enters_with_modifications: Default::default(),
             cost: crate::types::ability::ResolutionCastCost::Free,
         },
         &mut Vec::new(),
@@ -57199,11 +58237,12 @@ fn exact_resolution_offer_without_concession_does_not_inherit_later_any_color_si
                     success_action:
                         crate::types::ability::ResolutionCastSuccessAction::BottomMisses,
                     delayed_trigger_receipts: Vec::new(),
+                    indicated_action: None,
                 }),
                 duration: None,
                 graveyard_replacement: None,
                 enters_with_counter: None,
-                enters_with_modifications: Vec::new(),
+                enters_with_modifications: Default::default(),
                 mana_spend_permission: None,
                 cast_cost_modifier: None,
             });
@@ -57219,7 +58258,7 @@ fn exact_resolution_offer_without_concession_does_not_inherit_later_any_color_si
                 duration: Some(Duration::UntilEndOfTurn),
                 graveyard_replacement: None,
                 enters_with_counter: None,
-                enters_with_modifications: Vec::new(),
+                enters_with_modifications: Default::default(),
                 mana_spend_permission: Some(ManaSpendPermission::AnyColor),
                 cast_cost_modifier: None,
             });
@@ -58285,7 +59324,7 @@ fn resolve_discard_requirement_fixed_one_empty_hand_is_unpayable_err() {
         Err(EngineError::ActionNotAllowed(_))
     ));
     // CR 601.2h: the payability gate excludes it too.
-    assert!(!cost.is_payable(&state, PlayerId(0), source));
+    assert!(!cost.is_payable_for_spell(&state, PlayerId(0), source));
 
     // Positive reach-guard: with one eligible card the helper resolves the real
     // interactive requirement (not a vacuous early return).
@@ -58309,7 +59348,7 @@ fn resolve_discard_requirement_fixed_one_empty_hand_is_unpayable_err() {
         }
         other => panic!("expected Ok(Some((1, [card]))), got {other:?}"),
     }
-    assert!(cost.is_payable(&state, PlayerId(0), source));
+    assert!(cost.is_payable_for_spell(&state, PlayerId(0), source));
 }
 
 /// Issue #6494 (no over-fire, casting path): a `Discard { Fixed(2) }` with THREE
@@ -58690,6 +59729,7 @@ mod x_sentinel_tap_creatures_activation_cost {
             GameAction::ActivateAbility {
                 source_id: source,
                 ability_index,
+                payment_mode: CastPaymentMode::Auto,
             },
         )
         .expect("CR 107.3a: activating an X-sentinel tap cost with 3 eligible artifacts is legal");
@@ -58748,6 +59788,7 @@ mod x_sentinel_tap_creatures_activation_cost {
                 GameAction::ActivateAbility {
                     source_id: source,
                     ability_index,
+                    payment_mode: CastPaymentMode::Auto,
                 },
             )
             .expect("activation must surface the tap-cost prompt");
@@ -58879,6 +59920,7 @@ mod x_sentinel_tap_creatures_activation_cost {
             GameAction::ActivateAbility {
                 source_id: source,
                 ability_index,
+                payment_mode: CastPaymentMode::Auto,
             },
         )
         .expect("activation must surface the tap-cost prompt");
@@ -59004,6 +60046,7 @@ mod x_sentinel_tap_creatures_activation_cost {
             GameAction::ActivateAbility {
                 source_id: source,
                 ability_index,
+                payment_mode: CastPaymentMode::Auto,
             },
         )
         .expect("a self-matching source must still be able to activate the ability");
@@ -59111,6 +60154,7 @@ mod x_sentinel_tap_creatures_activation_cost {
             GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             },
         )
         .expect("activation must surface the tap-cost prompt");
@@ -59180,6 +60224,7 @@ mod x_sentinel_tap_creatures_activation_cost {
             GameAction::ActivateAbility {
                 source_id: source,
                 ability_index,
+                payment_mode: CastPaymentMode::Auto,
             },
         )
         .expect("activation must surface the tap-cost prompt");
@@ -59484,6 +60529,7 @@ mod hazel_x_sentinel_mana_ability {
             .act(GameAction::ActivateAbility {
                 source_id: hazel,
                 ability_index: index,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect(
                 "CR 107.3a: X=0 is legal, so a 'Tap X untapped tokens you control' mana ability \
@@ -59519,6 +60565,7 @@ mod hazel_x_sentinel_mana_ability {
             .act(GameAction::ActivateAbility {
                 source_id: hazel,
                 ability_index: index,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("activation must surface the tap-cost prompt");
 
@@ -59658,6 +60705,7 @@ mod hazel_x_sentinel_mana_ability {
             .act(GameAction::ActivateAbility {
                 source_id: parents,
                 ability_index: index,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("activation must surface the fixed tap-cost prompt");
         runner
@@ -59710,6 +60758,7 @@ mod hazel_x_sentinel_mana_ability {
             .act(GameAction::ActivateAbility {
                 source_id: hazel,
                 ability_index: index,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("activation must surface the tap-cost prompt");
         assert!(
@@ -59776,6 +60825,7 @@ mod hazel_x_sentinel_mana_ability {
             .act(GameAction::ActivateAbility {
                 source_id: hazel,
                 ability_index: index,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("activation must surface the tap-cost prompt");
 
@@ -60101,6 +61151,7 @@ mod fixed_mana_ability_tap_cost_rejects_partial_payment {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: index,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("activation must surface the tap-cost prompt");
 
@@ -60149,6 +61200,7 @@ mod fixed_mana_ability_tap_cost_rejects_partial_payment {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: index,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("activation must surface the tap-cost prompt");
         runner
@@ -60523,7 +61575,9 @@ fn cost_rider_target_classifiers_cover_every_target_reading_shape() {
         player: PlayerScope::Target
     }));
     assert!(reads(&QuantityRef::LifeTotal {
-        player: PlayerScope::ParentObjectTargetController
+        player: PlayerScope::ParentObjectTarget {
+            possession: crate::types::ability::PossessionAxis::Controller
+        }
     }));
     assert!(!reads(&QuantityRef::HandSize {
         player: PlayerScope::Controller
@@ -60735,8 +61789,13 @@ fn activation_fold_default_order_is_the_minimum_over_every_order() {
                         .enumerate()
                         .map(|(i, &(amount, floor))| entry(i as u8, amount, floor))
                         .collect();
-                    let default =
-                        total_mana(&fold_activation_cost(&base, raise_total, &reductions, None));
+                    let default = total_mana(&fold_activation_cost(
+                        &base,
+                        raise_total,
+                        &reductions,
+                        None,
+                        None,
+                    ));
                     let totals: Vec<u32> = permutations(reductions.len())
                         .into_iter()
                         .map(|order| {
@@ -60747,6 +61806,7 @@ fn activation_fold_default_order_is_the_minimum_over_every_order() {
                                 raise_total,
                                 &reductions,
                                 Some(&order),
+                                None,
                             ))
                         })
                         .collect();
@@ -60793,7 +61853,7 @@ fn activation_fold_applies_raises_before_reductions() {
         minimum_mana: 1,
     };
     assert_eq!(
-        fold_activation_cost(&base, 2, &[floored], None),
+        fold_activation_cost(&base, 2, &[floored], None, None),
         AbilityCost::Mana {
             cost: ManaCost::generic(1)
         }
@@ -60911,7 +61971,7 @@ fn activation_totals_route_on_the_computed_effective_floor() {
     let three = AbilityCost::Mana {
         cost: ManaCost::generic(3),
     };
-    let floor_on = |cost: &AbilityCost| activation_effective_floor(cost, &floored_two);
+    let floor_on = |cost: &AbilityCost| activation_effective_floor(cost, &floored_two, None);
     assert_eq!(floor_on(&red_three), 1);
     assert_eq!(floor_on(&three), 2);
     assert_eq!(
@@ -60982,7 +62042,7 @@ fn activation_totals_survive_saturated_reduction_amounts() {
             point: Default::default(),
         },
     };
-    let outcomes = analyze_activation_cost_election(&snapshot).expect("two totals");
+    let outcomes = analyze_activation_cost_election(&snapshot, None).expect("two totals");
     let offered: Vec<u32> = outcomes
         .iter()
         .map(|o| o.locked_cost.mana_value())
@@ -61044,6 +62104,7 @@ fn activation_cost_visitor_finds_a_non_empty_witness_and_stops_at_its_budget() {
         &base,
         &independent,
         &mut unlimited,
+        &ActivationLifeWindow::Current,
     );
     assert_eq!(verdict, ActivationCostFeasibility::Payable);
     let witness = witness.expect("a payable walk has a witness");
@@ -61062,6 +62123,7 @@ fn activation_cost_visitor_finds_a_non_empty_witness_and_stops_at_its_budget() {
         &base,
         &independent,
         &mut tiny,
+        &ActivationLifeWindow::Current,
     );
     assert_eq!(verdict, ActivationCostFeasibility::Undecided);
     assert_eq!(tiny.charged_total(), 3, "charged == budget");
@@ -61128,6 +62190,7 @@ fn the_x_lock_passes_through_a_carrier_deferred_to_another_point() {
             cost,
             0,
             Some(Box::new(snapshot)),
+            CastPaymentMode::Auto,
         )));
         state
     };
@@ -61278,6 +62341,7 @@ fn an_activation_journal_row_round_trips() {
         source_zone: crate::types::zones::Zone::Battlefield,
         ability_tag: Some(crate::types::ability::AbilityTag::Boast),
         is_loyalty_ability: true,
+        activation_cost: crate::types::events::BoundActivationCost::Unknown,
         targets: vec![
             ActivationTargetFact::Player(PlayerId(1)),
             ActivationTargetFact::Object {
@@ -61381,4 +62445,321 @@ fn quantity_vs_each_opponent_skips_a_player_who_left_the_game() {
         (true, true),
         "P2 left the game, so only P1's one card is compared"
     );
+}
+
+/// PR-C F5 — VISITOR. A `TrackedSet` member filter participates in
+/// chosen-target dependency classification exactly like the `Objects` peer:
+/// a member filter naming a parent target reads the activation's chosen
+/// targets, and an unfiltered set reads none.
+#[test]
+fn tracked_set_member_filter_participates_in_chosen_target_deps() {
+    let source =
+        |filter: Option<TargetFilter>| crate::types::ability::CardTypeSetSource::TrackedSet {
+            set: crate::types::ability::TrackedAnaphorSource::ChainSet,
+            caused_by: None,
+            filter,
+        };
+    assert!(
+        card_type_set_source_reads_chosen_target(
+            &source(Some(TargetFilter::ParentTarget)),
+            TargetRead::Any
+        ),
+        "a member filter naming a parent target must read chosen targets"
+    );
+    assert!(
+        !card_type_set_source_reads_chosen_target(&source(None), TargetRead::Any),
+        "an unfiltered set reads no chosen target"
+    );
+}
+/// CR 116.2m + CR 605.4a + CR 608.2d: a continuation-carrying special action
+/// (Room unlock) pays through `pay_special_action_mana_cost_with_resume`. Its
+/// affordability probe admits a bonus-dependent cost, and the live payment
+/// settles the choice-owing echo BEFORE spending: it suspends on that choice
+/// with the pool untouched instead of failing at affordability or committing a
+/// mana prefix.
+#[test]
+fn resumable_special_action_payment_settles_echo_before_spending() {
+    use crate::game::scenario::{GameScenario, P0};
+    fn floating_colorless(n: usize) -> Vec<ManaUnit> {
+        (0..n)
+            .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+            .collect()
+    }
+    const MIRARI_ORACLE: &str =
+        "Whenever a player taps a land for mana, that player adds one mana of any type that land produced.";
+    const CHAMBER_ORACLE: &str = "This land enters tapped.\nWhen this land enters, return a land you control to its owner's hand.\n{T}: Add {G}{U}.";
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(P0, "Mirari's Wake", MIRARI_ORACLE);
+    scenario.add_land_from_oracle(P0, "Simic Growth Chamber", CHAMBER_ORACLE);
+    // Two floating colorless plus the chamber's base {G}{U} is 4 mana; the
+    // cost needs 5, so only the owed echo bonus can fund it.
+    scenario.with_mana_pool(P0, floating_colorless(2));
+    let mut runner = scenario.build();
+    let cost = ManaCost::Cost {
+        shards: vec![ManaCostShard::Green, ManaCostShard::Blue],
+        generic: 3,
+    };
+
+    assert!(
+        can_pay_special_action_mana_cost_after_auto_tap(
+            runner.state(),
+            P0,
+            None,
+            &cost,
+            crate::types::mana::SpecialAction::UnlockDoor,
+            PausedManaPayment::Resumable,
+        ),
+        "a continuation-carrying live payment suspends for the echo choice, so its preview counts the bonus"
+    );
+
+    let resume = crate::types::game_state::ManaAbilityResume::RoomUnlock {
+        player: P0,
+        object_id: ObjectId(1),
+        door: crate::game::game_object::RoomDoor::Left,
+        cost: cost.clone(),
+    };
+    let mut events = Vec::new();
+    let paused = pay_special_action_mana_cost_with_resume(
+        runner.state_mut(),
+        P0,
+        None,
+        &cost,
+        crate::types::mana::SpecialAction::UnlockDoor,
+        Some(&resume),
+        &mut events,
+    )
+    .expect("a resumable special-action payment must suspend, not fail");
+    assert_eq!(
+        paused,
+        SpecialActionManaPayment::Paused,
+        "the owed echo choice suspends the payment before any mana is spent"
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::ChooseManaColor { .. }
+        ),
+        "the live prompt must be the echo choice, got {:?}",
+        runner.state().waiting_for
+    );
+    let pool = &runner.state().players[P0.0 as usize].mana_pool;
+    assert_eq!(
+        pool.count_color(ManaType::Green),
+        1,
+        "the chamber's base {{G}} is still unspent while the choice is pending"
+    );
+    assert_eq!(
+        pool.count_color(ManaType::Blue),
+        1,
+        "the chamber's base {{U}} is still unspent while the choice is pending"
+    );
+    assert_eq!(
+        pool.count_color(ManaType::Colorless),
+        2,
+        "floating mana is still unspent while the choice is pending"
+    );
+}
+
+/// CR 116.2h + CR 605.3b + CR 616.1: the offer probe that gates the Foretell
+/// special action must admit the same resumable source seam the live payment
+/// uses. The only source here produces {R}{R}, but its own activation cost
+/// (tap, exile itself) owes a CR 616.1 ordering choice between two redirects —
+/// an unresumable probe reports that source as unaffordable, so this test pins
+/// `can_foretell_card` to `PausedManaPayment::Resumable`.
+#[test]
+fn foretell_probe_admits_a_source_whose_own_cost_pauses() {
+    use crate::game::scenario::{GameScenario, P0};
+    use crate::types::zones::EtbTapState;
+    const DOOMSKAR_ORACLE: &str = "Destroy all creatures.\nForetell {1}{W}{W} (During your turn, you may pay {2} and exile this card from your hand face down. Cast it on a later turn for its foretell cost.)";
+    fn redirect_exile_to_graveyard() -> ReplacementDefinition {
+        ReplacementDefinition::new(ReplacementEvent::Moved)
+            .destination_zone(Zone::Exile)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ChangeZone {
+                    destination: Zone::Graveyard,
+                    origin: None,
+                    target: TargetFilter::SelfRef,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+            ))
+    }
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let doomskar = scenario
+        .add_spell_to_hand_from_oracle(P0, "Doomskar", false, DOOMSKAR_ORACLE)
+        .id();
+    scenario
+        .add_creature(P0, "Self-Exiling Mana Source", 1, 1)
+        .with_ability_definition(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Fixed {
+                        colors: vec![ManaColor::Red, ManaColor::Red],
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Tap,
+                    AbilityCost::Exile {
+                        count: 1,
+                        zone: None,
+                        filter: Some(TargetFilter::SelfRef),
+                    },
+                ],
+            }),
+        );
+    for name in ["First Pause Replacement", "Second Pause Replacement"] {
+        scenario
+            .add_creature(P0, name, 0, 0)
+            .as_enchantment()
+            .with_replacement_definition(redirect_exile_to_graveyard());
+    }
+    let runner = scenario.build();
+
+    assert_eq!(
+        runner.state().players[P0.0 as usize].mana_pool.total(),
+        0,
+        "premise: the foretell {{2}} must come entirely from the pausing source"
+    );
+    assert!(
+        super::can_foretell_card(runner.state(), P0, doomskar),
+        "the only source owes a CR 616.1 ordering choice, so the offer must model its resume"
+    );
+    // CONTROL: this is the deleted rootless probe's mode. If `can_foretell_card`
+    // ever stops passing `PausedManaPayment::Resumable`, it silently hides an
+    // action the live continuation can still suspend for and finish.
+    assert!(
+        !can_pay_special_action_mana_cost_after_auto_tap(
+            runner.state(),
+            P0,
+            Some(doomskar),
+            &ManaCost::generic(2),
+            crate::types::mana::SpecialAction::Foretell,
+            PausedManaPayment::Unresumable,
+        ),
+        "control: an unresumable probe rejects the same board"
+    );
+}
+
+#[test]
+fn echo_upper_bound_defers_to_life_payment_permissions() {
+    // CR 107.4f + CR 118.3b: a K'rrik-style grant pays a colored shard with
+    // 2 life instead of mana. `max_life` counts affordable 2-life payments,
+    // so one unit must already defer to the exact echo search rather than
+    // reject a legal payment. One firing and an empty pool make the
+    // minimum-unit check short without the deferral.
+    let cost = ManaCost::Cost {
+        shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+        generic: 0,
+    };
+    let pool = crate::types::mana::ManaPool::default();
+    let life_permission = crate::types::mana::CostPermissionContext {
+        max_life: 1,
+        life_colors: std::iter::once(ManaColor::Black).collect(),
+        ..Default::default()
+    };
+    assert!(
+        !super::echo_bonus_upper_bound_is_short(&cost, &pool, 1, life_permission),
+        "one affordable 2-life payment must defer the mana-only bound"
+    );
+    assert!(
+        super::echo_bonus_upper_bound_is_short(
+            &cost,
+            &pool,
+            1,
+            crate::types::mana::CostPermissionContext::default()
+        ),
+        "without a life-payment permission the same empty pool is still short"
+    );
+}
+
+#[test]
+fn echo_upper_bound_defers_to_spend_any_color_permission() {
+    // CR 609.4b + CR 118.14: under "spend mana as though it were mana of any
+    // color", a green unit pays a black pip. The per-colour demand is not
+    // necessary, so the bound must defer; the minimum-unit demand still holds.
+    let cost = ManaCost::Cost {
+        shards: vec![
+            ManaCostShard::Black,
+            ManaCostShard::Black,
+            ManaCostShard::Black,
+        ],
+        generic: 0,
+    };
+    let mut pool = crate::types::mana::ManaPool::default();
+    pool.add(ManaUnit::new(
+        ManaType::Green,
+        ObjectId(0),
+        false,
+        Vec::new(),
+    ));
+    let any_color = crate::types::mana::CostPermissionContext {
+        mana_spend_permission: Some(ManaSpendPermission::AnyColor),
+        ..Default::default()
+    };
+    assert!(
+        !super::echo_bonus_upper_bound_is_short(&cost, &pool, 2, any_color),
+        "a spend-as-any-colour concession must defer the per-colour bound"
+    );
+    assert!(
+        super::echo_bonus_upper_bound_is_short(
+            &cost,
+            &pool,
+            2,
+            crate::types::mana::CostPermissionContext::default()
+        ),
+        "without the concession the green unit cannot cover the black pips"
+    );
+}
+
+#[test]
+fn split_source_tap_cost_legs_takes_every_tap_and_untap_leg_in_order() {
+    let life = |amount| AbilityCost::PayLife {
+        amount: QuantityExpr::Fixed { value: amount },
+    };
+    let lands = AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::Any, 1));
+    let cost = AbilityCost::Composite {
+        costs: vec![
+            life(1),
+            AbilityCost::Untap,
+            AbilityCost::Composite {
+                costs: vec![lands.clone(), AbilityCost::Tap],
+            },
+            life(2),
+        ],
+    };
+    assert_eq!(
+        split_source_tap_cost_legs(cost),
+        (
+            Some(AbilityCost::Composite {
+                costs: vec![AbilityCost::Untap, AbilityCost::Tap],
+            }),
+            Some(AbilityCost::Composite {
+                costs: vec![life(1), lands, life(2)],
+            }),
+        )
+    );
+    assert_eq!(
+        split_source_tap_cost_legs(AbilityCost::Tap),
+        (Some(AbilityCost::Tap), None)
+    );
+    assert_eq!(split_source_tap_cost_legs(life(3)), (None, Some(life(3))));
 }

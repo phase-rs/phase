@@ -19,15 +19,14 @@
 
 import { serverProtocolRejection, type ServerInfo } from "../adapter/ws-adapter";
 import { OFFICIAL_MULTIPLAYER_SERVER_URL } from "../config/multiplayerServer";
+import { DIRECTORY_VERSION } from "../generated/protocol-versions";
 import { parseWebSocketUrl } from "./serverDetection";
 import { useMultiplayerStore, type LobbySource } from "../stores/multiplayerStore";
 
-/** Version of the ANNOUNCEMENT shape this client understands. Mirrors
- *  `DIRECTORY_VERSION` in `crates/lobby-broker/src/directory.rs`; the two are
- *  pinned together by `scripts/check-protocol-version.mjs`, which runs inside
- *  `pnpm run type-check`. A `GET /servers` body declaring any other version is
- *  ignored whole — a shape this client cannot read is not partially readable. */
-export const DIRECTORY_VERSION = 1;
+/** Registry-owned announcement version. Record changes with
+ *  `node scripts/protocol-versions.mjs bump directory --reason "description"`.
+ *  An unknown version is ignored whole; partial directory reads are unsafe. */
+export { DIRECTORY_VERSION };
 
 /** How long a completed directory read is trusted before another is issued.
  *  Sits deliberately ABOVE the Worker's own `Cache-Control: public, max-age=60`

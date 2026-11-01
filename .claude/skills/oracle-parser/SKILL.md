@@ -35,7 +35,7 @@ These rules are defined in CLAUDE.md and are enforced without exception. Violati
 
 **Nom combinator reference:** See `nom_combinators.md` in this skill directory for the complete list of nom parsers and combinators organized by module. Consult this when choosing which combinator to use.
 
-**Copy-paste patterns + the enforcement gate:** When you need to translate a string-method idiom into combinators, open `crates/engine/src/parser/oracle_nom/PATTERNS.md` — it indexes every common shape (strip prefix, strip suffix, optional trailing clause, alternatives, word-boundary scan, delimiter split, contains-check, peek-without-consume) with copy-pasteable code. The pre-commit hook `scripts/check-parser-combinators.sh` actively rejects new lines containing `.strip_prefix(...)`, `.strip_suffix(...)`, `.contains("...")`, `.starts_with("...")`, `.ends_with("...")`, `.split_once(...)`, `.find("...")`, or `.trim_end_matches("...")` against string literals inside `crates/engine/src/parser/`. If a use is genuinely structural (post-tokenization punctuation cleanup, `TextPair` dual-string stripping, runtime char scans) annotate the line `// allow-noncombinator: <one-line reason>` per PATTERNS.md §9. Existing offenders are grandfathered; new code is gated.
+**Copy-paste patterns + the enforcement gate:** When you need to translate a string-method idiom into combinators, open `crates/phase-parser/src/parser/oracle_nom/PATTERNS.md` — it indexes every common shape (strip prefix, strip suffix, optional trailing clause, alternatives, word-boundary scan, delimiter split, contains-check, peek-without-consume) with copy-pasteable code. The pre-commit hook `scripts/check-parser-combinators.sh` actively rejects new lines containing `.strip_prefix(...)`, `.strip_suffix(...)`, `.contains("...")`, `.starts_with("...")`, `.ends_with("...")`, `.split_once(...)`, `.find("...")`, or `.trim_end_matches("...")` against string literals inside `crates/phase-parser/src/parser/`. If a use is genuinely structural (post-tokenization punctuation cleanup, `TextPair` dual-string stripping, runtime char scans) annotate the line `// allow-noncombinator: <one-line reason>` per PATTERNS.md §9. Existing offenders are grandfathered; new code is gated.
 
 **The only acceptable uses of `starts_with`/`strip_prefix` in parser code:**
 - `TextPair::strip_prefix` for dual-string case-bridging operations (this is structural, not dispatch)
@@ -74,7 +74,7 @@ Each rule below is defined in CLAUDE.md. One-sentence principle + codebase examp
 | **Never match verbatim Oracle text** — decompose every phrase into typed building blocks (grammar + helpers + enums). A verbatim string match handles exactly one card and poisons the architecture. | Contrast: typed `QuantityRef`/`Comparator` vs. literal string |
 | **Compose combinators by dimension** — N independent axes = a sum of per-axis `alt()`/`opt()` calls inside one sequence, never a flat `alt` of full-string `tag`s (the product). Variation in the *middle* or an *optional* segment still factors: `recognize((tag(..), alt(..), tag(..), opt(..), tag(..)))`. Smell: a flat `alt` whose arms share a long common prefix **and** suffix. | `oracle_nom/condition.rs` multi-axis composition; PATTERNS.md §8b |
 | **Nest by prefix dispatch** — shared prefixes use `preceded(tag(...), sub_combinator)` to eliminate redundant matching. | `oracle_trigger.rs` phase trigger nesting |
-| **Word-boundary scanning** — try a combinator at each word boundary via scanning loop, not `contains()` chains. | `oracle_casting.rs::scan_timing_restrictions`, `oracle_trigger.rs::scan_for_phase` |
+| **Word-boundary scanning** — pass a combinator to the shared first/last-match scanners; extend that authority if the required scan semantics are missing rather than copying a caller-local loop. | `oracle_nom/primitives.rs::scan_at_word_boundaries` family; `oracle_trigger.rs::scan_for_phase` |
 | **`parse_inner_condition` is the single authority** for all game-state conditions. Trigger/static parsers MUST delegate to it. | `oracle_nom/condition.rs::parse_inner_condition` |
 | **No boolean flags** — parameterize with typed enums (`ControllerRef`, `Comparator`, `Option<T>`). | `types/ability.rs` effect variants |
 | **No raw `i32` for amounts** — use `QuantityExpr` on all new effects. | `QuantityExpr::Fixed` vs `QuantityExpr::Ref` |
@@ -144,7 +144,7 @@ ParsedAbilities                 — abilities / triggers / statics / replacement
                                   keywords / casting options + parse_warnings
 ```
 
-**`OracleSourceSpan` precision** (`doc.rs`) is typed, and honest about what it knows:
+**`OracleSourceSpan` precision** (`types/oracle_diagnostic.rs`) is typed, and honest about what it knows:
 
 | `SpanPrecision` | Meaning |
 |---|---|
@@ -195,9 +195,9 @@ Per-line classification inside `parse_oracle_ir` (simplified; §3 has the full s
 | Sub-module | Purpose |
 |-----------|---------|
 | `ast.rs` | All parser AST types (`ParsedEffectClause`, `ClauseAst`, modal/loyalty AST — moved here from `oracle_effect/types.rs`, `oracle_modal.rs`, `oracle.rs`) |
-| `doc.rs` | Document-level IR: `OracleDocIr`, `OracleItemIr`, `OracleNodeIr`, `OracleItemId`, `OracleUnitSource`, `OracleSourceSpan`/`SpanPrecision`, `DocumentRelationIr`, `OracleDocBuilder`, `PrintedTriggerIndex` |
+| `doc.rs` | Document-level IR: `OracleDocIr`, `OracleItemIr`, `OracleNodeIr`, `OracleUnitSource`, `DocumentRelationIr`, `OracleDocBuilder`, `PrintedTriggerIndex`; `OracleItemId` and `OracleSourceSpan`/`SpanPrecision` are re-exported from `types/oracle_diagnostic.rs` |
 | `context.rs` | `ParseContext` for stateful parsing (subject, actor, card_name, host_self_reference, …) |
-| `diagnostic.rs` | `OracleDiagnostic` — structured parse warnings |
+| `diagnostic.rs` | Re-exports the `OracleDiagnostic` data family (structured parse warnings) from `types/oracle_diagnostic.rs`; its producers stay in the parser (`swallow_check.rs`, `oracle_effect/gap_diagnosis.rs`, `ParseContext::push_diagnostic`) |
 | `effect_chain.rs` | `EffectChainIr`, `ClauseIr` + **typed clause provenance** (`ClauseId`, `ClauseDisposition`, antecedents, reference uses) and the mandatory `ClauseIrBuilder` |
 | `trigger.rs` | `TriggerIr` + lowering |
 | `static_ir.rs` | `StaticIr` + lowering |
@@ -297,7 +297,7 @@ matching `Effect` variant is the bug this whole layer exists to delete.
 > pool — so `LastEmitted`, `LastWithRole`, and any other nearest-match rule are all output-identical,
 > and a full-pool byte-for-byte parity run cannot tell a correct binding from a wrongly-collapsed one.
 > Validating a binding change needs a **forced diagonal** (drive the selector to a different candidate
-> and confirm the output moves) or a synthetic discriminating card. **Never sign off a binding
+> and confirm the output moves) or a synthetic discriminating card ([real cards](../engine-implementer/SKILL.md#real-cards) governs it). **Never sign off a binding
 > migration on byte-identity alone.**
 
 **Retired in Milestone 1** (do not re-introduce): the category-ordered `parsed_abilities_to_doc_ir`
@@ -322,6 +322,8 @@ All parser branches delegate atomic parsing to shared nom 8.0 combinators:
 | `bridge.rs` | `nom_on_lower`, `nom_on_lower_required`, `nom_parse_lower` — mixed-case bridging |
 | `enchant.rs` | "Enchant {filter}" attachment-restriction combinators |
 | `return_as_aura.rs` | "return ~ ... attached to" / return-as-Aura combinators |
+
+The leaf combinators that `Keyword` decoding needs (`parse_number`, `parse_color`, `parse_subtype`, `parse_zone_filter`, `parse_property_filter`, the enchant legs, `OracleResult`/`OracleError`, …) are defined in `crates/phase-ast/src/types/text_grammar.rs`. Every one that parser code still calls is re-exported at its old parser path; call it by that path. The ones no parser code calls have no parser path: the English-number legs (including `parse_article_number`; reach them through `parse_number`), the other private helpers, and `parse_enchant_player_base`. The nom mandate and the combinator gate bind the new file.
 
 ### Two-Phase Parse/Lower Architecture (clause level)
 
@@ -781,7 +783,7 @@ public `parse_static_line()` (two-phase: `parse_static_line_ir` →
 
 | Module | What Lives Here | Use When |
 |--------|----------------|----------|
-| `oracle_nom/primitives.rs` | Numbers (digits, English words, articles), mana symbols/costs, colors, counter types, P/T modifiers, roman numerals, `parse_article_number` (word-boundary guard — prevents "another" → "a"), `scan_at_word_boundaries`, `scan_contains` | Parsing any atomic Oracle text element |
+| `oracle_nom/primitives.rs` | Numbers (digits, English words, articles), mana symbols/costs, colors, counter types, P/T modifiers, roman numerals, `parse_number`'s article arm (word-boundary guard — prevents "another" → "a"; the private `parse_article_number` is defined in `types/text_grammar.rs`), `scan_at_word_boundaries`, `scan_contains` | Parsing any atomic Oracle text element |
 | `oracle_nom/target.rs` | Target phrase combinators, controller suffix, color prefix, combat status, self-reference, event-context refs | Parsing "target X" or type descriptions in nom pipelines |
 | `oracle_nom/quantity.rs` | Quantity expressions, quantity refs, "equal to" patterns, "for each" patterns | Parsing counts and dynamic amounts in nom pipelines |
 | `oracle_nom/duration.rs` | Duration phrase combinators (`parse_duration`, `parse_optional_duration`, `parse_cast_snapshot_suffix`) | Parsing inline duration phrases in nom pipelines — but see the duration doctrine below for where NEW duration patterns go |
@@ -919,7 +921,7 @@ grep -n "^704.5a" docs/MagicCompRules.txt   # Verify SBA rule
 - [ ] Runtime discriminating test when the change claims runtime behavior (see `/card-test`): parser shape tests alone are acceptable ONLY when unsupported semantics remain honestly `Unimplemented`/red in coverage
 - [ ] Snapshot tests: `oracle_ir/snapshot_tests.rs` (IR + lowered parity, insta), plus per-module `snapshot_tests.rs` in `oracle_static/`
 - [ ] `cargo coverage` — Unimplemented count should decrease
-- [ ] Verify per CLAUDE.md § "Canonical verification pattern" — `cargo fmt --all`, then if `tilt get uiresource clippy >/dev/null 2>&1`: `./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data`; else: `cargo clippy --all-targets -- -D warnings` + `cargo test -p phase-engine` + `./scripts/gen-card-data.sh`.
+- [ ] Verify per CLAUDE.md § "Canonical verification pattern" — `cargo fmt --all`, then if `tilt get uiresource clippy >/dev/null 2>&1`: `./scripts/tilt-wait.sh --timeout 240 clippy test-engine card-data`; else: `cargo clippy --all-targets -- -D warnings` + `cargo test -p phase-parser -p phase-engine` + `./scripts/gen-card-data.sh`.
 
 ### 9b. Adding a New Effect Type
 
@@ -980,9 +982,19 @@ Cross-reference the `/add-trigger` skill. Parser-specific: add pattern in `try_p
 
 ## 11. Diagnostics — Swallow Detectors & `parse_warnings`
 
+To inspect live antecedent decisions, run the normal filtered export with
+`RUST_LOG=engine::parser::binding=debug cargo run -p phase-engine --features cli --bin oracle-gen -- data/ --filter 'Sylvan Library' --output /tmp/binding-cards.json`.
+These stderr logs show card/stage, chain/clause source precision, assembly
+attempts and selection, candidate guard verdicts, and selected arena provenance.
+They cover `AssemblyEnv::resolve` and `resolve_all`; specialized positional
+bindings outside those methods are not covered. These execution logs are
+separate from the stage-comparison JSON report and do not change parse warnings
+or support classification. Node IDs and source offsets retain their local scope.
+
+
 The parser must never silently discard Oracle text. Every clause must either be represented in the parsed AST OR cause the line to fail and yield `Effect::Unimplemented` carrying the original phrase. **Anything in between is a parser lie.**
 
-The `crates/engine/src/parser/swallow_check.rs` module audits each card's parsed `ParsedAbilities` against its original Oracle text and emits a `parse_warning` for every marker phrase that has no AST representation. Findings surface in the coverage report via `CardFace::parse_warnings` (also written into each card's entry in `client/public/card-data.json`).
+The `crates/phase-parser/src/parser/swallow_check.rs` module audits each card's parsed `ParsedAbilities` against its original Oracle text and emits a `parse_warning` for every marker phrase that has no AST representation. Findings surface in the coverage report via `CardFace::parse_warnings` (also written into each card's entry in `client/public/card-data.json`).
 
 **Reading current swallow gaps:**
 

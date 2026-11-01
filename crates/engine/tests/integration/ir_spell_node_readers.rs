@@ -42,9 +42,7 @@ fn retained_ability_slots(parsed: &ParsedAbilities) -> Vec<usize> {
                 additional_modifications,
                 ..
             } => from_mods(additional_modifications, out),
-            Effect::AddPendingEntersModifications { modifications } => {
-                from_mods(modifications, out)
-            }
+            Effect::AddPendingEntersModifications { rider } => from_mods(&rider.modifications, out),
             _ => {}
         }
         if let Some(sub) = def.sub_ability.as_deref() {

@@ -2711,6 +2711,7 @@ pub fn convert_available_action(
         GameAction::ActivateAbility {
             source_id,
             ability_index,
+            ..
         } => AvailableActionConversion::Available(AvailableAction {
             id,
             kind: AvailableActionKind::ActivateAbility(ActivatableAbilityInfo {
@@ -2995,6 +2996,7 @@ pub fn convert_available_action(
         | GameAction::SetPriorityYield { .. }
         | GameAction::SetMayTriggerAutoChoice { .. }
         | GameAction::SetReplacementAutoChoice { .. }
+        | GameAction::UnAction { .. }
         | GameAction::SetTriggerOrderTemplate { .. } => {
             AvailableActionConversion::Unsupported("local.autopass-settings-unsupported")
         }
@@ -4012,6 +4014,7 @@ pub fn convert_payment_action(action: &GameAction, id: String) -> PaymentActionC
         GameAction::ActivateAbility {
             source_id,
             ability_index,
+            ..
         } => PaymentActionConversion::Available(PaymentAction {
             id,
             kind: PaymentActionKind::ActivateManaAbility(ActivatableAbilityInfo {
@@ -6063,6 +6066,13 @@ mod tests {
         let exert = prepared_for(WaitingFor::ExertChoice {
             player: PlayerId(0),
             attacker: ObjectId(1),
+            permission: engine::types::ability::TriggerDefinitionRef {
+                source: engine::types::identifiers::ObjectIncarnationRef::of(ObjectId(1), 0),
+                occurrence: engine::types::ability::TriggerDefinitionOccurrenceRef::Printed {
+                    base_set: engine::types::ability::TriggerBaseSetInstanceRef::INITIAL,
+                    printed_index: 0,
+                },
+            },
             remaining: vec![],
         });
         assert_eq!(
@@ -9217,6 +9227,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             })
             .expect("the activation reaches its election");
         let state = runner.state().clone();

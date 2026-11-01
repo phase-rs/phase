@@ -37,7 +37,9 @@
     "approve": "Zatwierdź",
     "decline": "Odmów",
     "cancel": "Anuluj prośbę",
-    "declinedToast": "Prośba o wycofanie ruchu odrzucona"
+    "declinedToast": "Prośba o wycofanie ruchu odrzucona",
+    "cancelledToast": "Prośba o wycofanie ruchu anulowana",
+    "withdrawnToast": "Prośba o wycofanie ruchu unieważniona: gracz opuścił grę"
   },
   "connectionDot": {
     "connected": "Połączono",
@@ -285,7 +287,8 @@
     "botGameNotice": "Hostujesz grę z Discorda {{code}}. Połączenie i prywatność określa post na Discordzie.",
     "botSeedIgnored": "Niektórych ustawień z posta na Discordzie nie można tu użyć — sprawdź format i liczbę graczy.",
     "botP2PNotice": "Twoje urządzenie prowadzi grę. Pozostaw aplikację otwartą i nie rozłączaj się.",
-    "botServerNotice": "Grę prowadzi serwer dedykowany. Może zwolnić lub przejść w tryb offline."
+    "botServerNotice": "Grę prowadzi serwer dedykowany. Może zwolnić lub przejść w tryb offline.",
+    "poolBracketConflict": "Żadna z {{selected}} wybranych talii nie jest legalna przy obecnych filtrach, więc losowi przeciwnicy korzystają ze wszystkich {{total}} talii."
   },
   "page": {
     "deckRejected": "Talia została odrzucona przez gospodarza.",
@@ -351,5 +354,11 @@
   "deepLink": {
     "gameInProgressTitle": "Gra w toku",
     "gameInProgressBody": "Zakończ lub opuść bieżącą grę, a potem otwórz link ponownie."
+  },
+  "p2pStateWithheld": "Stan gry po tej akcji jest zbyt duży, aby go wysłać, więc ta plansza jest nieaktualna. Aby kontynuować, gracz może w menu gry poprosić o wycofanie ostatniego ruchu (w przypadku pętli wykonaj ją z mniejszą liczbą powtórzeń).",
+  "terminalRecovery": {
+    "finalViewsUnpublished": "Poddanie osiągnęło stan końcowy Full, ale nie udało się opublikować natywnych widoków końcowych.",
+    "concedeUnreconciled": "Nie udało się uzgodnić wyniku poddania; miejsce pozostaje zablokowane.",
+    "receiptUnsent": "Nie udało się wysłać trwałego potwierdzenia odbioru wyniku końcowego; oczekiwanie na ponowne dostarczenie"
   }
 }

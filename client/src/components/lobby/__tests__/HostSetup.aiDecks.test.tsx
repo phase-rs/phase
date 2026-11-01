@@ -38,7 +38,7 @@ vi.mock("../../../services/engineRuntime", async () => ({
 const catalogState = vi.hoisted(() => ({ candidates: [] as unknown[] }));
 vi.mock("../../../services/aiDeckCatalog", async () => ({
   ...(await vi.importActual<typeof import("../../../services/aiDeckCatalog")>("../../../services/aiDeckCatalog")),
-  useAiDeckCatalog: () => ({ candidates: catalogState.candidates, loading: false, error: null }),
+  useAiDeckCatalog: () => ({ candidates: catalogState.candidates, allCandidates: catalogState.candidates, loading: false, error: null }),
 }));
 
 import { HostSetup } from "../HostSetup";
@@ -242,19 +242,21 @@ describe("HostSetup — per-seat AI decks", () => {
     expect(aiSeats[0].deck.data).not.toEqual(aiSeats[1].deck.data);
   });
 
-  it("lists the full legal catalog for pinning when the Random pool is empty", async () => {
+  it("lists the full legal catalog for pinning when soft preferences empty the filtered pool", async () => {
     const user = userEvent.setup();
     rememberTwoAiSeats();
-    // Every deck falls under the coverage floor, so the preference-filtered Random pool is empty.
+    // Every deck falls under the coverage floor, so the soft preferences match
+    // nothing — but the effective pool falls back to the curated pool (both
+    // decks), which is what Random seats draw from.
     catalogState.candidates = [candidate("Alpha", { coveragePct: 60 }), candidate("Bravo", { coveragePct: 70 })];
     usePreferencesStore.getState().setAiCoverageFloor(90);
     const onHost = renderHostSetup();
 
     await waitFor(() => expect(deckPickers()).toHaveLength(2));
-    expect(deckPickers()[0]).toHaveTextContent("Random (0)");
+    expect(deckPickers()[0]).toHaveTextContent("Random (2)");
     await user.click(deckPickers()[0]);
     expect(within(screen.getByRole("listbox")).getAllByRole("option").map((o) => o.textContent)).toEqual([
-      "Random (0)",
+      "Random (2)",
       "Alpha — Precon · 60%",
       "Bravo — Precon · 70%",
     ]);

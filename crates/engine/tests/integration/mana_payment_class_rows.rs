@@ -258,7 +258,7 @@ fn answer(b: &mut Board, done: &mut [bool]) {
             !done[k]
                 && (lands[k].is_some()
                     || flat.iter().any(|x| {
-                        matches!(x, GameAction::ActivateAbility { source_id, ability_index }
+                        matches!(x, GameAction::ActivateAbility { source_id, ability_index, .. }
                             if *source_id == source && *ability_index == index)
                     }))
         });
@@ -267,6 +267,7 @@ fn answer(b: &mut Board, done: &mut [bool]) {
             Some(lands[p].clone().unwrap_or(GameAction::ActivateAbility {
                 source_id: b.acts[p].0,
                 ability_index: b.acts[p].1,
+                payment_mode: CastPaymentMode::Auto,
             }))
         } else {
             let fodder_only = |a: &&GameAction| {
@@ -392,6 +393,7 @@ fn drive(row: &Row) -> (bool, String) {
         let action = land_row(c.r.state(), act, &c.hint).unwrap_or(GameAction::ActivateAbility {
             source_id: act.0,
             ability_index: act.1,
+            payment_mode: CastPaymentMode::Auto,
         });
         if step(&mut c.r, action) {
             answer(&mut c, &mut done);
@@ -631,7 +633,7 @@ const NESTED_SUB_COST: &[Row] = &[
     ("m/Wizards' School (2)", "Wizards' School", "{2}, {T}: Add {W} or {B}.", &[("Wastes", B, 'p'), ("Wastes", B, 'p')], &[], "Metallic Sliver", true, "tt/BF"),
     ("m/Wooded Bastion", "Wooded Bastion", "{G/W}, {T}: Add {G}{G}, {G}{W}, or {W}{W}.", &[("Forest", B, 'p')], &[], "Metallic Sliver", true, "tt/BF"),
     ("m/Yurlok of Scorch Thrash", "Yurlok of Scorch Thrash", "{1}, {T}: Each player adds {B}{R}{G}.", &[("Wastes", B, 'p')], &[], "Metallic Sliver", true, "tt/BF"),
-    ("m/Codie, Vociferous Codex (2)", "Codie, Vociferous Codex", "{4}, {T}: Add {W}{U}{B}{R}{G}. When you next cast a spell this turn, exile cards from the top of your library until you exile an instant or sorcery card with lesser mana value. Until end of turn, you may cast that card without paying its mana cost. Put each other card exiled this way on the bottom of your library in a random order.", &[("Wastes", B, 'p'), ("Wastes", B, 'p'), ("Wastes", B, 'p'), ("Wastes", B, 'p')], &[], "Opt", true, "tt/GY"),
+    ("m/Codie, Vociferous Codex (2)", "Codie, Vociferous Codex", "{4}, {T}: Add {W}{U}{B}{R}{G}. When you next cast a spell this turn, exile cards from the top of your library until you exile an instant or sorcery card with lesser mana value. Until end of turn, you may cast that card without paying its mana cost. Put each other card exiled this way on the bottom of your library in a random order.", &[("Wastes", B, 'p'), ("Wastes", B, 'p'), ("Wastes", B, 'p'), ("Wastes", B, 'p')], &[], "Opt", true, "tt/stk"),
     ("m/Azorius Signet (2)", "Azorius Signet", "{1}, {T}: Add {W}{U}.", &[("Wastes", B, 'p')], &[], "Fugitive Wizard", true, "tt/BF"),
 ];
 
@@ -871,7 +873,8 @@ fn unchanged_boards_read_as_before() {
 const UNCHANGED: &[Row] = &[
     ("t/cryptex", "Cryptex", "{T}, Collect evidence 3: Add one mana of any color. Put an unlock counter on ~.", &[("Hill Giant", G, 'f')], &[], "Llanowar Elves", true, "tt/BF"),
     ("t/master-of-dark-rites", "Master of Dark Rites", "{T}, Sacrifice another creature: Add {B}{B}{B}. Spend this mana only to cast Vampire, Cleric, and/or Demon spells.", &[("Grizzly Bears", B, 'f')], &[], "Vampire Nighthawk", false, "ff/H"),
-    ("t/rubble-rouser", "Rubble Rouser", "{T}, Exile a card from your graveyard: Add {R}. When you do, ~ deals 1 damage to each opponent.", &[("Grizzly Bears", G, 'f')], &[], "Lightning Bolt", true, "ft/H"),
+    // #9812: offered once the bounded reducer witness completes the targeted cast (was ft/H).
+    ("t/rubble-rouser", "Rubble Rouser", "{T}, Exile a card from your graveyard: Add {R}. When you do, ~ deals 1 damage to each opponent.", &[("Grizzly Bears", G, 'f')], &[], "Lightning Bolt", true, "tt/GY"),
     ("t/springjack-pasture", "Springjack Pasture", "{T}, Sacrifice X Goats: Add X mana of any one color. You gain X life.", &[("Mountain Goat", B, 'f')], &[], "Llanowar Elves", false, "ff/H"),
     ("t/thornvault-forager", "Thornvault Forager", "{T}, Forage: Add two mana in any combination of colors.", &[("Hill Giant", G, 'f'), ("Hill Giant", G, 'f'), ("Hill Giant", G, 'f')], &[], "Grizzly Bears", false, "ff/H"),
     ("x/Eldrazi Temple", "Eldrazi Temple", "{T}: Add {C}{C}. Spend this mana only to cast colorless Eldrazi spells or activate abilities of colorless Eldrazi.", &[("Phyrexian Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[], "Glaring Fleshraker", true, "tt/BF"),
@@ -886,7 +889,11 @@ const UNCHANGED: &[Row] = &[
     ("e/Fíli and Kíli, Joyous", "Fíli and Kíli, Joyous", "{T}: Add {R}{R}. Spend this mana only to cast Dwarf, Equipment, and Saga spells.", &[("Ashnod's Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[], "Dwarven Driller", false, "ff/H"),
     ("e/Grinning Ignus", "Grinning Ignus", "{R}, Return ~ to its owner's hand: Add {C}{C}{R}. Activate only as a sorcery.", &[("Mountain", B, 'p'), ("Ashnod's Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[], "Bonebreaker Giant", true, "tt/H"),
     ("e/Lavinia, Foil to Conspiracy", "Lavinia, Foil to Conspiracy", "{T}: Add {C}{C}. Activate only during an opponent's turn.", &[("Phyrexian Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[], "Glaring Fleshraker", false, "ff/H"),
-    ("e/Mage-Ring Network", "Mage-Ring Network", "{T}, Remove any number of storage counters from ~: Add {C} for each storage counter removed this way.", &[("Phyrexian Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[("member", "storage", 2)], "Glaring Fleshraker", false, "ff/H"),
+    // CR 605.3b + CR 602.2b + CR 601.2h: removing both storage counters yields {C}{C}
+    // (the yield reads the counters its cost removed), so with Phyrexian Altar's one
+    // mana the reach guard can cast Glaring Fleshraker; the listed reading stays with the
+    // Rasputin row's (amount-choice sources in the payment step, outside this change).
+    ("e/Mage-Ring Network", "Mage-Ring Network", "{T}, Remove any number of storage counters from ~: Add {C} for each storage counter removed this way.", &[("Phyrexian Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[("member", "storage", 2)], "Glaring Fleshraker", true, "ff/H"),
     ("e/Muraganda Raceway#speed4", "Muraganda Raceway", "Max speed — {T}: Add {C}{C}.", &[("Phyrexian Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[], "Glaring Fleshraker", true, "tt/BF"),
     ("e/Orochi Merge-Keeper", "Orochi Merge-Keeper", "{T}: Add {G}{G}.", &[("Ashnod's Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[("member", "P1P1", 1)], "Axebane Beast", true, "tt/BF"),
     ("e/Quinjet Technician", "Quinjet Technician", "{T}: Add {R}{R}. Spend this mana only to activate power-up abilities.", &[("Ashnod's Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[], "Barbarian Horde", false, "ff/H"),
@@ -908,5 +915,6 @@ const UNCHANGED: &[Row] = &[
     ("h/ignus+mountain/bronze-sable", "Grinning Ignus", "{R}, Return ~ to its owner's hand: Add {C}{C}{R}. Activate only as a sorcery.", &[("Mountain", B, 'p')], &[], "Bronze Sable", true, "ft/H"),
     ("m/ignus+mountain/bronze-sable", "Grinning Ignus", "{R}, Return ~ to its owner's hand: Add {C}{C}{R}. Activate only as a sorcery.", &[("Mountain", B, 'p')], &[], "Bronze Sable", true, "ft/H"),
     ("m/Jack-o'-Lantern (2)#membergy", "Jack-o'-Lantern", "{1}, Exile this card from your graveyard: Add one mana of any color.", &[("Wastes", B, 'p')], &[], "Llanowar Elves", true, "ff/H"),
-    ("m/Wizard's Rockets (2)", "Wizard's Rockets", "{X}, {T}, Sacrifice ~: Add X mana in any combination of colors.", &[("Wastes", B, 'p')], &[], "Llanowar Elves", false, "ff/H"),
+    // Oracle-derived reading is "tt/BF" (X=1 from Wastes adds {G}); the end now matches it (BF), while "ff" pins the pre-existing castability gap for sources whose yield is sized by an announced amount.
+    ("m/Wizard's Rockets (2)", "Wizard's Rockets", "{X}, {T}, Sacrifice ~: Add X mana in any combination of colors.", &[("Wastes", B, 'p')], &[], "Llanowar Elves", false, "ff/BF"),
 ];

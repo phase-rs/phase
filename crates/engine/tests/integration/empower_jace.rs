@@ -6,8 +6,10 @@
 //! on it."
 //!
 //! Every card below uses its verbatim MTGJSON Oracle text, printed reminder
-//! parenthetical included. The one synthetic grammar row is the unbindable
-//! where-X binder in `a2_12_where_x_binders_bind_or_stay_honest`; the synthetic
+//! parenthetical included. The synthetic grammar rows are the unbindable
+//! where-X binder in `a2_12_where_x_binders_bind_or_stay_honest` and the
+//! trigger-context demonstrative in
+//! `a2_12c_trigger_context_excess_binder_stays_honest`; the synthetic
 //! replacement definitions are not Oracle text.
 
 use std::collections::BTreeSet;
@@ -19,9 +21,9 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::token_presets::known_token_preset_by_id;
 use engine::parser::oracle::{parse_oracle_text, ParsedAbilities};
 use engine::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, DamageChannel,
-    Effect, EffectKind, QuantityExpr, QuantityModification, QuantityRef, ReplacementDefinition,
-    ReplacementMode, TargetFilter,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AggregateFunction,
+    ControllerRef, DamageChannel, Effect, EffectKind, QuantityExpr, QuantityModification,
+    QuantityRef, ReplacementDefinition, ReplacementMode, TargetFilter,
 };
 use engine::types::actions::{DebugAction, DebugTokenRequest, GameAction};
 use engine::types::card_type::CoreType;
@@ -697,22 +699,15 @@ fn assert_root_empower(def: &AbilityDefinition, card: &str) {
 }
 
 /// Violent Echoes (C2.7 / M6): the Empower consequent is the damage's
-/// `sub_ability`, gated on `PreviousEffectAmount { channel: Excess }`, and is an
-/// honest `Unimplemented` node — no EmpowerJace anywhere in the parse.
-fn assert_violent_echoes_consequent_is_honest_and_nested() {
+/// `sub_ability`, gated on `PreviousEffectAmount { channel: Excess }`, and its N
+/// is bound to the resolution-local excess read.
+fn assert_violent_echoes_consequent_is_bound_and_nested() {
     let p = parse(
         VIOLENT_ECHOES,
         "Violent Echoes",
         &["Surveil"],
         &["Instant"],
         &[],
-    );
-    assert!(
-        !all_chains(&p)
-            .into_iter()
-            .flat_map(chain_effects)
-            .any(is_empower),
-        "Violent Echoes: no EmpowerJace with an unbound X: {p:#?}"
     );
     let root = &p.abilities[0];
     assert!(
@@ -724,10 +719,6 @@ fn assert_violent_echoes_consequent_is_honest_and_nested() {
         .as_deref()
         .expect("the empower clause is the damage's sub_ability");
     assert!(
-        matches!(*sub.effect, Effect::Unimplemented { .. }),
-        "Violent Echoes: the consequent is an honest Unimplemented node: {sub:#?}"
-    );
-    assert!(
         matches!(
             sub.condition,
             Some(AbilityCondition::PreviousEffectAmount {
@@ -738,6 +729,31 @@ fn assert_violent_echoes_consequent_is_honest_and_nested() {
         "Violent Echoes: the consequent is gated on excess damage, got {:?}",
         sub.condition
     );
+    let Effect::EmpowerJace { count } = &*sub.effect else {
+        panic!(
+            "Violent Echoes: the consequent must be EmpowerJace, got {:?}",
+            sub.effect
+        );
+    };
+    assert_eq!(
+        count,
+        &QuantityExpr::Ref {
+            qty: QuantityRef::PreviousEffectAmount {
+                channel: DamageChannel::Excess,
+                aggregate: AggregateFunction::Sum,
+            },
+        },
+        "CR 107.3c + CR 120.10: X is the excess this resolution dealt"
+    );
+    // Reach guard for the "no gap" claim: the card's whole tree is resolved.
+    for def in all_chains(&p) {
+        assert!(
+            !chain_effects(def)
+                .into_iter()
+                .any(|e| matches!(e, Effect::Unimplemented { .. })),
+            "Violent Echoes: no gap node may remain: {p:#?}"
+        );
+    }
 }
 
 /// A2.6 + C2.9 — CR 701.71a: every host shape the corpus uses parses the full
@@ -934,10 +950,10 @@ fn a2_6_every_host_shape_parses_to_the_empower_leaf() {
 
     // Conditional consequent (C2.7 / M6): the Empower clause sits nested under
     // the excess-damage condition, not as a sibling of the damage. Its "where X
-    // is that excess damage" binder reaches the recogniser unstripped on this
-    // path, so the consequent stays an honest Unimplemented node (the card stays
-    // unsupported) rather than an EmpowerJace carrying a bare X.
-    assert_violent_echoes_consequent_is_honest_and_nested();
+    // is that excess damage" definition is declined by the clause-level count
+    // grammar, deferred by the recogniser, and bound at definition assembly
+    // under the condition's licence.
+    assert_violent_echoes_consequent_is_bound_and_nested();
 }
 
 /// A2.7 — CR 701.71a: a clause naming another walker is not this keyword
@@ -989,11 +1005,14 @@ fn a2_12_where_x_binders_bind_or_stay_honest() {
         "Overwrite: N is the exiled-this-way count, got {count:?}"
     );
     // A2.12a: "that excess damage" (M6 direction): `parse_count_expr` cannot
-    // bind this description, so the recogniser rejects the clause and the
-    // consequent stays honest.
-    assert_violent_echoes_consequent_is_honest_and_nested();
+    // bind this description, so the recogniser defers it and definition
+    // assembly binds it under the excess-damage condition's licence.
+    assert_violent_echoes_consequent_is_bound_and_nested();
 
-    // A2.12b (synthetic grammar row): an unbindable binder.
+    // A2.12b (synthetic grammar row): a definition the def-level binder cannot
+    // represent. The recogniser now accepts the shape (stripping the tail and
+    // leaving `Variable("X")`), and the def-level totality guard converts the
+    // unbound X into an honest `where_x_binding` gap — never a live `Variable("X")`.
     let p = parse(
         "Empower Jace X, where X is the number of glorbs.",
         "Test Sorcery",
@@ -1001,22 +1020,135 @@ fn a2_12_where_x_binders_bind_or_stay_honest() {
         &["Sorcery"],
         &[],
     );
-    // The recogniser's fail-closed tail rejects the unstripped binder residue
-    // (`parse_count_expr` binds "where X is" only when the description parses),
-    // so the clause stays an honest `Unimplemented` gap carrying the binder text
-    // — never an EmpowerJace with a surviving `Variable("X")`.
     let effects: Vec<&Effect> = all_chains(&p).into_iter().flat_map(chain_effects).collect();
     assert!(
         effects.iter().any(|e| matches!(
             e,
-            Effect::Unimplemented { description, .. }
-                if description.as_deref().is_some_and(|d| d.to_lowercase().contains("where x is the number of glorbs"))
+            Effect::Unimplemented { name, description, .. }
+                if name == "where_x_binding"
+                    && description
+                        .as_deref()
+                        .is_some_and(|d| d.to_lowercase().contains("number of glorbs"))
         )),
-        "the unbindable binder stays an honest Unimplemented gap: {p:#?}"
+        "the unbindable binder is reported by the where-X binder as an honest gap: {p:#?}"
     );
     assert!(
         !effects.iter().any(|e| is_empower(e)),
         "no EmpowerJace with a bare X survives: {p:#?}"
+    );
+}
+
+/// A2.13 — CR 120.10 + CR 107.3c + CR 701.71a: Violent Echoes deals 6 to a
+/// 3-toughness creature, so 3 excess is dealt; empower Jace uses that 3.
+#[test]
+fn a2_13_violent_echoes_empowers_for_the_resolution_excess() {
+    let mut scenario = main_phase_scenario();
+    let victim = scenario.add_creature(P1, "Excess Victim", 0, 3).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Violent Echoes", true, VIOLENT_ECHOES)
+        .id();
+    let mut runner = scenario.build();
+
+    let outcome = runner.cast(spell).target_objects(&[victim]).resolve();
+    let events = outcome.events();
+    let state = outcome.state();
+
+    // Reach guard: the live damage instruction stamped the excess channel.
+    assert_eq!(
+        state.last_effect_excess_amount,
+        Some(3),
+        "CR 120.10: 6 damage into 3 toughness is 3 excess"
+    );
+    let tokens = jace_tokens(state, P0);
+    assert_eq!(tokens.len(), 1, "exactly one Jace token");
+    let token = tokens[0];
+    assert_eq!(
+        created_token_ids(events),
+        vec![token],
+        "TokenCreated names the Jace token"
+    );
+    assert!(loyalty_added(events, token, 3), "three loyalty counters");
+    assert_eq!(loyalty(state, token), Some(3));
+    assert_eq!(empower_resolved_count(events), 1);
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+}
+
+/// A2.13b — CR 120.10: 6 damage into 6 toughness is exactly lethal, so no
+/// excess is dealt, the "If" is false, and no empower instruction runs.
+#[test]
+fn a2_13b_no_excess_skips_the_empower() {
+    assert_violent_echoes_consequent_is_bound_and_nested();
+    let mut scenario = main_phase_scenario();
+    let victim = scenario.add_creature(P1, "Lethal Victim", 0, 6).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Violent Echoes", true, VIOLENT_ECHOES)
+        .id();
+    let mut runner = scenario.build();
+
+    let outcome = runner.cast(spell).target_objects(&[victim]).resolve();
+
+    // Reach guard: the damage resolved and was lethal, not excess.
+    assert_eq!(
+        outcome.zone_of(victim),
+        Zone::Graveyard,
+        "CR 120.10: 6 damage to a 6-toughness creature is lethal"
+    );
+    assert_eq!(empower_resolved_count(outcome.events()), 0);
+    assert!(jace_tokens(outcome.state(), P0).is_empty());
+}
+
+/// A2.13c — CR 701.71a: the existing token is chosen and receives the 3
+/// counters; no second token is created.
+#[test]
+fn a2_13c_existing_jace_token_receives_the_excess_counters() {
+    let mut scenario = main_phase_scenario();
+    let victim = scenario.add_creature(P1, "Excess Victim", 0, 3).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Violent Echoes", true, VIOLENT_ECHOES)
+        .id();
+    let mut runner = scenario.build();
+    let token = seed_jace_token(&mut runner, P0, 1);
+
+    let outcome = runner.cast(spell).target_objects(&[victim]).resolve();
+    let state = outcome.state();
+    assert_eq!(jace_tokens(state, P0), vec![token], "no second token");
+    assert_eq!(loyalty(state, token), Some(4), "1 existing + 3 excess");
+    assert!(loyalty_added(outcome.events(), token, 3));
+}
+
+/// A2.12c (synthetic grammar row) — CR 120.10 + CR 107.3c: a trigger-event
+/// antecedent is NOT licensed by a definition-level condition, so the same
+/// demonstrative that binds on Violent Echoes stays an honest gap here.
+#[test]
+fn a2_12c_trigger_context_excess_binder_stays_honest() {
+    const TRIGGERED_EMPOWER: &str = "Whenever a creature is dealt excess noncombat damage, empower Jace X, where X is that excess damage. (Put that many loyalty counters on a Jace token you control. If you don't control one, first create a blue Jace planeswalker token with \"[−1]: Surveil 1\" and \"[−3]: Draw a card.\")";
+    let p = parse(
+        TRIGGERED_EMPOWER,
+        "Test Enchantment",
+        &["Surveil"],
+        &["Enchantment"],
+        &[],
+    );
+    let mut effects: Vec<&Effect> = all_chains(&p).into_iter().flat_map(chain_effects).collect();
+    effects.extend(
+        p.triggers
+            .iter()
+            .filter_map(|t| t.execute.as_deref())
+            .flat_map(chain_effects),
+    );
+    assert!(
+        effects.iter().any(|e| matches!(
+            e,
+            Effect::Unimplemented { name, .. } if name == "where_x_binding"
+        )),
+        "the unlicensed demonstrative is reported as a where-X gap: {p:#?}"
+    );
+    assert!(
+        !effects.iter().any(|e| is_empower(e)),
+        "no EmpowerJace with an unlicensed demonstrative: {p:#?}"
     );
 }
 

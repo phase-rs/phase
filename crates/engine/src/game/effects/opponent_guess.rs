@@ -123,10 +123,10 @@ pub fn resolve(
         source: OpponentGuessSource {
             prompt: PromptSourceBinding::from_trigger_source(&source_context),
         },
-        owner: Some(OpponentGuessOwner {
+        owner: Some(Box::new(OpponentGuessOwner {
             context: source_context,
             committed_choice,
-        }),
+        })),
         proposition_truth,
     };
 

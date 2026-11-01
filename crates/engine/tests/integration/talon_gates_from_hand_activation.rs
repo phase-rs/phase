@@ -100,6 +100,7 @@ fn ordinary_battlefield_ability_unaffected() {
         .act(GameAction::ActivateAbility {
             source_id: beast_id,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("an ordinary battlefield-activated ability must still activate");
 

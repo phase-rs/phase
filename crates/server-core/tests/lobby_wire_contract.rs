@@ -48,6 +48,7 @@ fn canonical_client_frames_parse_via_broker() {
         protocol_version: sc::PROTOCOL_VERSION,
         lobby_protocol_version: Some(sc::LOBBY_PROTOCOL_VERSION),
         wire_formats: Vec::new(),
+        state_codecs: Vec::new(),
     };
     let json = serde_json::to_string(&canonical).unwrap();
     match lb::parse_lobby_client_message(&json) {
@@ -244,9 +245,63 @@ fn server_hello_mode_byte_identical() {
         // broker's ServerHello, which has no public_url field.
         public_url: None,
         wire_formats: Vec::new(),
+        heartbeat: None,
+        command_correlation: None,
+        state_codecs: Vec::new(),
+        selected_state_codec: None,
     };
     assert_eq!(
         serde_json::to_string(&lb_hello).unwrap(),
         serde_json::to_string(&sc_hello).unwrap()
+    );
+}
+
+#[test]
+fn native_codec_capability_is_lost_at_the_broker_boundary() {
+    let canonical = sc::ClientMessage::ClientHello {
+        client_version: "codec-peer".into(),
+        build_commit: "codec-build".into(),
+        protocol_version: sc::PROTOCOL_VERSION,
+        lobby_protocol_version: Some(sc::LOBBY_PROTOCOL_VERSION),
+        wire_formats: Vec::new(),
+        state_codecs: vec![sc::StateCodec::StateCodecV1],
+    };
+    let lb::ParsedFrame::Message(broker) =
+        lb::parse_lobby_client_message(&serde_json::to_string(&canonical).unwrap())
+    else {
+        panic!("broker must accept additive hello metadata")
+    };
+    let projected: sc::ClientMessage =
+        serde_json::from_str(&serde_json::to_string(&broker).unwrap()).unwrap();
+    assert!(matches!(projected,
+        sc::ClientMessage::ClientHello { state_codecs, .. } if state_codecs.is_empty()));
+    // Existing broker unknown-tag behavior, not a new capability authority.
+    assert!(!matches!(
+        lb::parse_lobby_client_message(
+            &serde_json::to_string(&sc::ClientMessage::ResyncState).unwrap()
+        ),
+        lb::ParsedFrame::Message(_)
+    ));
+}
+
+#[test]
+fn omitted_codec_client_hello_is_byte_identical_to_broker() {
+    let canonical = sc::ClientMessage::ClientHello {
+        client_version: "legacy-peer".into(),
+        build_commit: "legacy-build".into(),
+        protocol_version: sc::PROTOCOL_VERSION,
+        lobby_protocol_version: Some(sc::LOBBY_PROTOCOL_VERSION),
+        wire_formats: Vec::new(),
+        state_codecs: Vec::new(),
+    };
+    let broker = lb::LobbyClientMessage::ClientHello {
+        client_version: "legacy-peer".into(),
+        build_commit: "legacy-build".into(),
+        protocol_version: lb::PROTOCOL_VERSION,
+        lobby_protocol_version: Some(lb::LOBBY_PROTOCOL_VERSION),
+    };
+    assert_eq!(
+        serde_json::to_string(&canonical).unwrap(),
+        serde_json::to_string(&broker).unwrap()
     );
 }

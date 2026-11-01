@@ -8,7 +8,7 @@ import type { GameFormat } from "../../../adapter/types";
 import { getSharedAdapter } from "../../../adapter/wasm-adapter";
 import { loadPreconDeckMap } from "../../../hooks/useDecks";
 import { canonicalizeSavedDeckNames } from "../../../services/deckMigrations";
-import { resolveCommander } from "../../../services/deckParser";
+import { resolveCommander } from "../../../services/commanderResolution";
 import { useIsMobile } from "../../../hooks/useIsMobile";
 import {
   ACTIVE_DECK_KEY,
@@ -61,13 +61,9 @@ vi.mock("../../../hooks/useDecks", () => ({
   loadPreconDeckMap: vi.fn(),
 }));
 
-vi.mock("../../../services/deckParser", async () => {
-  const actual = await vi.importActual<typeof import("../../../services/deckParser")>("../../../services/deckParser");
-  return {
-    ...actual,
-    resolveCommander: vi.fn(async (deck) => deck),
-  };
-});
+vi.mock("../../../services/commanderResolution", () => ({
+  resolveCommander: vi.fn(async (deck) => deck),
+}));
 
 vi.mock("../CardSearch", () => ({
   CardSearch: ({ onResults }: { onResults: (cards: unknown[], total: number) => void }) => {

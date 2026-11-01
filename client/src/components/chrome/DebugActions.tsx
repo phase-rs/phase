@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import { useState } from "react";
 
 import type { DebugAction } from "../../adapter/types";
@@ -14,14 +15,10 @@ import { GrantDebugPermissionPanel } from "./GrantDebugPermissionPanel";
 
 type Category = "player" | "object" | "flow" | "create";
 
-const TABS: readonly { key: Category; label: string }[] = [
-  { key: "player", label: "Player" },
-  { key: "object", label: "Object" },
-  { key: "flow", label: "Flow" },
-  { key: "create", label: "Create" },
-] as const;
+const TABS: readonly Category[] = ["player", "object", "flow", "create"];
 
 export function DebugActions() {
+  const { t } = useTranslation("game");
   const [activeTab, setActiveTab] = useState<Category>("player");
   const [status, setStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const dispatch = useGameDispatch();
@@ -57,17 +54,16 @@ export function DebugActions() {
     setStatus(null);
     try {
       await dispatch({ type: "Debug", data: action });
-      setStatus({ type: "success", message: `${action.type} applied` });
+      setStatus({ type: "success", message: t("sandboxTools.actionApplied", { action: action.type }) });
     } catch {
-      setStatus({ type: "error", message: `${action.type} failed` });
+      setStatus({ type: "error", message: t("sandboxTools.actionFailed", { action: action.type }) });
     }
   };
 
   if (!hasPermission) {
     return (
       <div className="px-2 py-3 text-xs text-gray-500">
-        Debug actions are disabled for this seat. The host can grant
-        permission from their own Debug panel.
+        {t("sandboxTools.permissionDenied")}
       </div>
     );
   }
@@ -77,11 +73,11 @@ export function DebugActions() {
       {isHost && hasRevocation && <GrantDebugPermissionPanel />}
       <div className="mb-1 flex items-center justify-between">
         <h3 className="font-mono text-xs font-bold uppercase tracking-wider text-gray-500">
-          Debug Actions
+          {t("sandboxTools.actionsTitle")}
         </h3>
         <button
           onClick={toggleDebugInteractionMode}
-          title="Click Mode: when ON, click any card on the board, in a hand, or in a zone viewer to open a debug menu for it (move zones, modify P/T, add counters, remove) instead of playing it normally. A banner appears at the top while it's active."
+          title={t("sandboxTools.clickModeDescription")}
           className={
             "rounded-full border px-2.5 py-0.5 font-mono text-[10px] uppercase tracking-wider transition-colors " +
             (debugInteractionMode
@@ -89,11 +85,11 @@ export function DebugActions() {
               : "border-amber-600/40 bg-transparent text-amber-500/80 hover:border-amber-500/60 hover:bg-amber-500/10 hover:text-amber-300")
           }
         >
-          {debugInteractionMode ? "● Click Mode ON" : "Click Mode"}
+          {debugInteractionMode ? t("sandboxTools.clickModeOn") : t("sandboxTools.clickMode")}
         </button>
       </div>
       <div className="mb-2 flex flex-wrap gap-1">
-        {TABS.map(({ key, label }) => {
+        {TABS.map((key) => {
           const active = activeTab === key;
           return (
             <button
@@ -106,7 +102,7 @@ export function DebugActions() {
                   : "border-gray-700 bg-transparent text-gray-600 hover:border-gray-600 hover:text-gray-500")
               }
             >
-              {label}
+              {t(`sandboxTools.${key}`)}
             </button>
           );
         })}

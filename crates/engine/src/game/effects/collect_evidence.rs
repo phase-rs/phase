@@ -13,9 +13,20 @@ use super::super::engine::EngineError;
 use super::super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 
 /// CR 701.59a: the cards in `player`'s graveyard that can be exiled as
-/// evidence. CR 601.2a: a spell being cast from the graveyard is on the stack,
-/// so it is never its own evidence.
-fn graveyard_cards(state: &GameState, player: PlayerId) -> Vec<ObjectId> {
+/// evidence. CR 601.2a: a spell is moved to the stack before its costs are
+/// paid, so it is never its own evidence. Once announced it is excluded by
+/// `casting::is_spell_being_cast`, the announcement authority; before that,
+/// while the castability gate prices its cast, the gate names it as
+/// `spell_being_priced`. CR 602.2a: an activated ability's source stays where
+/// it is, so it can be evidence for its own cost (the gate passes `None`).
+///
+/// The single authority for the payability gate, the joint object-leg model
+/// and the `CollectEvidenceChoice` prompt.
+pub(crate) fn evidence_candidates(
+    state: &GameState,
+    player: PlayerId,
+    spell_being_priced: Option<ObjectId>,
+) -> Vec<ObjectId> {
     state
         .players
         .get(player.0 as usize)
@@ -24,7 +35,10 @@ fn graveyard_cards(state: &GameState, player: PlayerId) -> Vec<ObjectId> {
                 .graveyard_of(p.id)
                 .iter()
                 .copied()
-                .filter(|&id| !super::super::casting::is_spell_being_cast(state, id))
+                .filter(|&id| {
+                    Some(id) != spell_being_priced
+                        && !super::super::casting::is_spell_being_cast(state, id)
+                })
                 .collect()
         })
         .unwrap_or_default()
@@ -40,11 +54,22 @@ fn total_mana_value(state: &GameState, cards: &[ObjectId]) -> u32 {
         .sum()
 }
 
-// CR 701.59b: Can't collect evidence if graveyard total mana value < N.
-pub(crate) fn can_collect_evidence(state: &GameState, player: PlayerId, amount: u32) -> bool {
-    total_mana_value(state, &graveyard_cards(state, player)) >= amount
+/// CR 701.59b: Can't collect evidence if the total mana value of the cards
+/// that can be exiled as evidence ([`evidence_candidates`]) is less than N.
+pub(crate) fn can_collect_evidence(
+    state: &GameState,
+    player: PlayerId,
+    spell_being_priced: Option<ObjectId>,
+    amount: u32,
+) -> bool {
+    total_mana_value(
+        state,
+        &evidence_candidates(state, player, spell_being_priced),
+    ) >= amount
 }
 
+/// The prompt runs while a cost is being paid, after any spell paying it was
+/// announced, so `is_spell_being_cast` alone keeps that spell out.
 fn waiting_state(
     state: &GameState,
     player: PlayerId,
@@ -54,7 +79,7 @@ fn waiting_state(
     WaitingFor::CollectEvidenceChoice {
         player,
         minimum_mana_value: amount,
-        cards: graveyard_cards(state, player),
+        cards: evidence_candidates(state, player, None),
         resume: Box::new(resume),
     }
 }
@@ -88,7 +113,7 @@ pub(crate) fn begin_cost_payment(
     pending_cast: PendingCast,
     source: crate::types::game_state::SpellCostSource,
 ) -> Result<WaitingFor, EngineError> {
-    if !can_collect_evidence(state, player, amount) {
+    if !can_collect_evidence(state, player, None, amount) {
         return Err(EngineError::ActionNotAllowed(format!(
             "Not enough total mana value in graveyard to collect evidence {}",
             amount
@@ -121,7 +146,7 @@ pub(crate) fn resolve(
         }
     };
 
-    if can_collect_evidence(state, ability.controller, amount) {
+    if can_collect_evidence(state, ability.controller, None, amount) {
         let pending_ability = ability
             .sub_ability
             .as_ref()
@@ -180,7 +205,7 @@ pub(crate) fn handle_choice(
         }
     }
 
-    let still_legal = graveyard_cards(state, player);
+    let still_legal = evidence_candidates(state, player, None);
     for id in chosen {
         if !still_legal.contains(id) {
             return Err(EngineError::InvalidAction(
@@ -638,6 +663,7 @@ mod tests {
             ability_index: None,
             rules_execution_node: None,
             ability_snapshot: None,
+            announced_source_incarnation: None,
             color_override: None,
             resume: crate::types::game_state::ManaAbilityResume::Priority,
             cost_move_resume: None,
@@ -650,6 +676,7 @@ mod tests {
             chosen_exiled: Vec::new(),
             chosen_sacrificed_battlefield: Vec::new(),
             cost_paid_object: None,
+            cost_removed_counters: None,
             batch_siblings: Vec::new(),
         }
     }

@@ -45,7 +45,7 @@ When you build a helper like this, you're not adding complexity — you're **red
 
 **Target propagation:** Parent targets flow to sub-abilities automatically. "Exile target creature. Its controller gains life equal to its power" → the sub-ability for `GainLife` receives the creature target from the parent `ChangeZone`, without duplicating target data.
 
-**Continuation pattern:** For interactive effects (reveal hand → choose card → exile it), use `pending_continuation`. The resolver sets `WaitingFor` and stashes the remaining sub-ability chain. When the player responds, `engine.rs` picks up the continuation.
+**Continuation pattern:** For interactive effects (reveal hand → choose card → exile it), follow [add-interactive-effect](../add-interactive-effect/SKILL.md). Remaining abilities live in typed frames on `GameState::resolution_stack`, parked through the existing continuation helpers. Resolution-choice handlers finish through the shared resume path; preserve source/target bindings, parent events, and empty/decline results there.
 
 ### When to extend an effect vs. compose a new one
 
@@ -98,7 +98,7 @@ When you build a helper like this, you're not adding complexity — you're **red
 
 Only needed if the effect has a `target: TargetFilter` field that isn't `None`/`SelfRef`/`Controller`.
 
-- [ ] **`crates/engine/src/game/triggers.rs` — `extract_target_filter_from_effect()`**
+- [ ] **`crates/engine/src/types/ability.rs` — `extract_target_filter_from_effect()`**
   Add the variant to the match arm that extracts `&TargetFilter` from effects. **If you skip this, triggered abilities with this effect will go on the stack without requesting targets — they'll silently fail at resolution.**
 
 - [ ] **`crates/engine/src/game/targeting.rs` — verify `find_legal_targets()`**
@@ -215,8 +215,8 @@ Only needed if the effect pauses for player input.
 - [ ] **`crates/engine/src/types/game_state.rs` — `WaitingFor` enum**
   Add a variant (e.g., `RevealChoice { player, cards, filter }`) that carries enough data for the frontend to render the choice UI.
 
-- [ ] **`crates/engine/src/game/engine.rs` — `apply()` match arm**
-  Handle the `(WaitingFor::YourChoice, GameAction::YourResponse)` pair. This is where the player's choice feeds back into the engine.
+- [ ] **`crates/engine/src/game/engine_resolution_choices.rs` — `handles()` and `handle_resolution_choice()`**
+  Register a new prompt in `handles()`, then handle its response in `handle_resolution_choice()`. Validate and deliver the choice through that authority and finish through the shared continuation path, preserving source/target bindings, parent events, and empty or declined results. `engine.rs::apply()` dispatches handled prompts to this module.
 
 - [ ] **`crates/engine/src/types/game_state.rs` — `GameAction` enum**
   Add a variant for the player's response if no existing action fits.
@@ -283,8 +283,8 @@ Tilt-preferred / direct-cargo fallback (see CLAUDE.md § "Canonical verification
 
 | Mistake | Consequence | Fix |
 |---------|-------------|-----|
-| Missing `extract_target_filter_from_effect` arm | Triggered abilities skip targeting — resolve with no targets, hit `MissingParam` error | Add the variant to the match in `extract_target_filter_from_effect()` in `game/triggers.rs` |
-| Missing `extract_target_filter_from_effect` arm in `stack.rs` | Spells don't fizzle when targets become illegal | Ensure the effect's `TargetFilter` is returned by `extract_target_filter_from_effect` |
+| Missing `extract_target_filter_from_effect` arm | Triggered abilities skip targeting — resolve with no targets, hit `MissingParam` error | Add the variant to the match in `extract_target_filter_from_effect()` in `types/ability.rs` |
+| Missing `extract_target_filter_from_effect` arm | Spells don't fizzle when targets become illegal | Add the variant to the match in `types/ability.rs`; `stack.rs` consumes the helper's result |
 | Creating a mega-effect instead of composing | One-off solution that handles one card pattern | Decompose into building blocks with `sub_ability` chains |
 | Boolean flags on `Effect` variants | Undefined combinations, unclear intent | Use enum variants (see `DamageAmount`, `LifeAmount`) |
 | Added parser logic in the wrong AST helper | Pattern parses inconsistently or bypasses continuation absorption | Register it in the smallest matching `parse_*_ast()` helper |
@@ -321,7 +321,7 @@ AbilityDefinition ──────► card-data.json (exported)
                     Card is cast/triggered → goes on stack
                               │
                               ▼
-                    Stack resolves → extract_target_filter (triggers.rs / stack.rs)
+                    Stack resolves → extract_target_filter (types/ability.rs; called from stack.rs)
                               │
                               ▼
                     resolve_effect (effects/mod.rs) → your handler
@@ -330,7 +330,7 @@ AbilityDefinition ──────► card-data.json (exported)
                     GameEvent emitted → frontend renders
                               │
                               ▼
-                    WaitingFor (if interactive) → GameAction response → engine.rs apply()
+                    WaitingFor (if interactive) → GameAction response → engine.rs::apply() dispatch → engine_resolution_choices.rs → shared resume path
 ```
 
 ---

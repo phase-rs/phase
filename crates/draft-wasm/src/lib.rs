@@ -20,11 +20,13 @@ mod bot_ai;
 mod session_cell;
 mod suggest;
 
-use crate::session_cell::{with_draft, with_draft_inner, with_draft_mut, with_draft_mut_inner};
-
 thread_local! {
     static PACK_GEN: Cell<Option<PackGenerator>> = const { Cell::new(None) };
     static DIFFICULTY: Cell<AiDifficulty> = const { Cell::new(AiDifficulty::Medium) };
+    /// Whether bots (and auto-pick) apply the built-in draft guides. Opt-in and
+    /// set by the caller via [`set_draft_pick_enhancements`]; defaults off.
+    static PICK_ENHANCEMENT: Cell<bot_ai::PickEnhancement> =
+        const { Cell::new(bot_ai::PickEnhancement::Off) };
     static RNG: Cell<Option<ChaCha20Rng>> = const { Cell::new(None) };
     /// Per RESEARCH Pitfall 2: draft-wasm has its own CardDatabase, separate
     /// from engine-wasm's thread-local. The frontend loads card-data.json into
@@ -40,6 +42,42 @@ fn to_js<T: Serialize + ?Sized>(value: &T) -> JsValue {
     js_sys::JSON::parse(&json).unwrap_or_else(|e| panic!("JSON.parse failed: {e:?}"))
 }
 
+/// The installed session's flow is checked before any closure runs, so the dormant
+/// runtime never serializes, mutates or consumes RNG for a FIFO session.
+fn admit_legacy_runtime(session: &DraftSession) -> Result<(), String> {
+    session
+        .validate_legacy_admission()
+        .map_err(|_| FIFO_UNSUPPORTED_BY_RUNTIME.to_string())
+}
+
+fn with_draft_inner<R>(f: impl FnOnce(&DraftSession) -> Result<R, String>) -> Result<R, String> {
+    session_cell::with_draft_inner(|session| {
+        admit_legacy_runtime(session).and_then(|()| f(session))
+    })
+}
+
+fn with_draft_mut_inner<R>(
+    f: impl FnOnce(&mut DraftSession) -> Result<R, String>,
+) -> Result<R, String> {
+    session_cell::with_draft_mut_inner(|session| {
+        admit_legacy_runtime(session).and_then(|()| f(session))
+    })
+}
+
+fn with_draft<R>(f: impl FnOnce(&DraftSession) -> R) -> Result<R, JsValue> {
+    session_cell::with_draft(|session| admit_legacy_runtime(session).map(|()| f(session)))?
+        .map_err(|error| JsValue::from_str(&error))
+}
+
+fn with_draft_mut<R>(
+    f: impl FnOnce(&mut DraftSession) -> Result<R, JsValue>,
+) -> Result<R, JsValue> {
+    session_cell::with_draft_mut(|session| {
+        admit_legacy_runtime(session).map_err(|error| JsValue::from_str(&error))?;
+        f(session)
+    })
+}
+
 /// Preserve Limited-deck validation details across the WASM boundary so the
 /// deck builder can tell the player what needs correction.
 fn deck_submission_message(error: DraftError) -> String {
@@ -51,6 +89,19 @@ fn deck_submission_message(error: DraftError) -> String {
             .join("; "),
         error => error.to_string(),
     }
+}
+
+/// Opt bots and auto-pick in or out of the built-in draft-guide pick
+/// enhancements. Independent of difficulty; the frontend sets it from the
+/// player's setting before starting or resuming a draft.
+#[wasm_bindgen]
+pub fn set_draft_pick_enhancements(enabled: bool) {
+    let enhancement = if enabled {
+        bot_ai::PickEnhancement::DraftGuides
+    } else {
+        bot_ai::PickEnhancement::Off
+    };
+    PICK_ENHANCEMENT.with(|cell| cell.set(enhancement));
 }
 
 /// Map a u8 difficulty value to AiDifficulty.
@@ -111,6 +162,9 @@ fn build_quick_cube_config(
     seed: u64,
 ) -> DraftConfig {
     enforce_procedure_minimum_deck_size(DraftConfig {
+        flow: draft_core::types::DraftFlow::LegacyBarrier,
+        selection_policy: draft_core::types::DraftSelectionPolicy::default(),
+        clock_policy: draft_core::types::DraftClockPolicy::default(),
         source: DraftSource::Cube {
             id: "custom-cube".to_string(),
             name: cube_name.to_string(),
@@ -372,6 +426,9 @@ pub fn start_quick_draft(
     let ai_difficulty = map_difficulty(difficulty);
 
     let config = enforce_procedure_minimum_deck_size(DraftConfig {
+        flow: draft_core::types::DraftFlow::LegacyBarrier,
+        selection_policy: draft_core::types::DraftSelectionPolicy::default(),
+        clock_policy: draft_core::types::DraftClockPolicy::default(),
         set_code: selection.source.set_code(),
         source: selection.source,
         kind: DraftKind::Quick,
@@ -431,6 +488,9 @@ pub fn start_sealed_draft(
         ResolvedSetSelection::parse(selection_json, Some(sealed_procedure.packs_per_player))
             .map_err(|e| JsValue::from_str(&e))?;
     let config = DraftConfig {
+        flow: draft_core::types::DraftFlow::LegacyBarrier,
+        selection_policy: draft_core::types::DraftSelectionPolicy::default(),
+        clock_policy: draft_core::types::DraftClockPolicy::default(),
         set_code: selection.source.set_code(),
         source: selection.source,
         kind: DraftKind::Sealed,
@@ -645,6 +705,7 @@ fn apply_human_pick_and_resolve_bots_with_overrides(
                     difficulty,
                     &draft_session.pools[seat as usize],
                     card_db,
+                    PICK_ENHANCEMENT.with(|cell| cell.get()),
                     &mut rng,
                 );
                 // Map indices to ids BEFORE applying — the apply mutates the pack
@@ -737,6 +798,7 @@ pub fn auto_pick() -> Result<JsValue, JsValue> {
                 difficulty,
                 &draft_session.pools[0],
                 db_borrow.as_ref(),
+                PICK_ENHANCEMENT.with(|cell| cell.get()),
                 &mut rng,
             );
             pack.0[pick_idx].instance_id.clone()
@@ -1355,6 +1417,7 @@ pub fn export_draft_session() -> Result<String, JsValue> {
 fn restorable_draft_session_from_json(json: &str) -> Result<DraftSession, String> {
     let mut session: DraftSession = serde_json::from_str(json)
         .map_err(|error| format!("Failed to deserialize draft session: {error}"))?;
+    admit_legacy_runtime(&session)?;
     session.config = enforce_procedure_minimum_deck_size(session.config);
     session
         .validate_persisted_snapshot()
@@ -1371,8 +1434,16 @@ fn restorable_draft_session_from_json(json: &str) -> Result<DraftSession, String
 /// original session's RNG stream, which is fine.
 #[wasm_bindgen]
 pub fn import_draft_session(json: &str, difficulty: u8) -> Result<JsValue, JsValue> {
-    let session =
-        restorable_draft_session_from_json(json).map_err(|error| JsValue::from_str(&error))?;
+    import_draft_session_inner(json, difficulty)
+        .map(|view| to_js(&view))
+        .map_err(|error| JsValue::from_str(&error))
+}
+
+fn import_draft_session_inner(
+    json: &str,
+    difficulty: u8,
+) -> Result<draft_core::view::DraftPlayerView, String> {
+    let session = restorable_draft_session_from_json(json)?;
 
     // The resume-seed offset is derived from `cards_in_pack` /
     // `current_pack_number` / `pick_number`, all of which stay `0` for a
@@ -1392,7 +1463,7 @@ pub fn import_draft_session(json: &str, difficulty: u8) -> Result<JsValue, JsVal
     let view = filter_for_player(&session, 0);
     session_cell::install(session);
 
-    Ok(to_js(&view))
+    Ok(view)
 }
 
 /// Check whether all seats with pending packs have submitted their picks.
@@ -1833,6 +1904,9 @@ fn create_multiplayer_draft_inner(
             )?;
 
             let config = DraftConfig {
+                flow: draft_core::types::DraftFlow::LegacyBarrier,
+                selection_policy: draft_core::types::DraftSelectionPolicy::default(),
+                clock_policy: draft_core::types::DraftClockPolicy::default(),
                 set_code: selection.source.set_code(),
                 source: selection.source,
                 kind: draft_kind,
@@ -1871,6 +1945,9 @@ fn create_multiplayer_draft_inner(
             )?;
 
             let config = DraftConfig {
+                flow: draft_core::types::DraftFlow::LegacyBarrier,
+                selection_policy: draft_core::types::DraftSelectionPolicy::default(),
+                clock_policy: draft_core::types::DraftClockPolicy::default(),
                 set_code: selection.source.set_code(),
                 source: selection.source,
                 kind: draft_kind,
@@ -1948,6 +2025,9 @@ fn create_multiplayer_draft_inner(
 
             // pod_size from settings is overridden by seats.len() — MP authoritative source
             let config = enforce_procedure_minimum_deck_size(DraftConfig {
+                flow: draft_core::types::DraftFlow::LegacyBarrier,
+                selection_policy: draft_core::types::DraftSelectionPolicy::default(),
+                clock_policy: draft_core::types::DraftClockPolicy::default(),
                 source: DraftSource::Cube {
                     id: "custom-cube".to_string(),
                     name: cube_name.clone(),
@@ -1996,13 +2076,21 @@ fn create_multiplayer_draft_inner(
 /// Returns the list of DraftDeltas produced (serialized as a JS array).
 #[wasm_bindgen]
 pub fn apply_draft_action(action_json: &str) -> Result<JsValue, JsValue> {
-    let action: DraftAction = serde_json::from_str(action_json)
-        .map_err(|e| JsValue::from_str(&format!("Failed to parse action: {}", e)))?;
+    apply_draft_action_inner(action_json)
+        .map(|deltas| to_js(&deltas))
+        .map_err(|error| JsValue::from_str(&error))
+}
 
-    with_draft_mut(|draft_session| {
-        let deltas = session::apply(draft_session, action, None)
-            .map_err(|e| JsValue::from_str(&format!("Draft action failed: {}", e)))?;
-        Ok(to_js(&deltas))
+fn apply_draft_action_inner(action_json: &str) -> Result<Vec<DraftDelta>, String> {
+    let action: DraftAction =
+        serde_json::from_str(action_json).map_err(|e| format!("Failed to parse action: {}", e))?;
+    if action.is_fifo_only() {
+        return Err(FIFO_UNSUPPORTED_BY_RUNTIME.to_string());
+    }
+
+    with_draft_mut_inner(|draft_session| {
+        session::apply(draft_session, action, None)
+            .map_err(|e| format!("Draft action failed: {}", e))
     })
 }
 
@@ -2217,6 +2305,9 @@ mod shared_stack_bot_loop_tests {
     /// `bot_ai`'s own tests against a real card database.
     fn started_pod(pod_size: u8, bot_seats: &[u8], rng_seed: u64) -> DraftSession {
         let config = DraftConfig {
+            flow: draft_core::types::DraftFlow::LegacyBarrier,
+            selection_policy: draft_core::types::DraftSelectionPolicy::default(),
+            clock_policy: draft_core::types::DraftClockPolicy::default(),
             source: DraftSource::single_set("TST".to_string()),
             set_code: "TST".to_string(),
             kind: DraftKind::Winston,
@@ -2390,6 +2481,9 @@ mod llm_draft_resolution_tests {
     /// A Quick pod (seat 0 human, seats 1..8 bots), started and dealt.
     fn started_quick_pod() -> DraftSession {
         let config = DraftConfig {
+            flow: draft_core::types::DraftFlow::LegacyBarrier,
+            selection_policy: draft_core::types::DraftSelectionPolicy::default(),
+            clock_policy: draft_core::types::DraftClockPolicy::default(),
             source: DraftSource::single_set("TST".to_string()),
             set_code: "TST".to_string(),
             kind: DraftKind::Quick,
@@ -3130,6 +3224,9 @@ mod create_multiplayer_draft_tests {
     fn persisted_premier_session(layout: SetLayout) -> DraftSession {
         let source = DraftSource::Set { layout };
         let config = DraftConfig {
+            flow: draft_core::types::DraftFlow::LegacyBarrier,
+            selection_policy: draft_core::types::DraftSelectionPolicy::default(),
+            clock_policy: draft_core::types::DraftClockPolicy::default(),
             set_code: source.set_code(),
             source,
             kind: DraftKind::Premier,
@@ -3318,6 +3415,9 @@ mod create_multiplayer_draft_tests {
     fn winston_drafted_by_bots(card_db: Option<&CardDatabase>) -> DraftSession {
         let source = DraftSource::single_set("FIX".to_string());
         let config = DraftConfig {
+            flow: draft_core::types::DraftFlow::LegacyBarrier,
+            selection_policy: draft_core::types::DraftSelectionPolicy::default(),
+            clock_policy: draft_core::types::DraftClockPolicy::default(),
             set_code: source.set_code(),
             source,
             kind: DraftKind::Winston,
@@ -3455,6 +3555,9 @@ mod create_multiplayer_draft_tests {
     fn started_winston_session() -> DraftSession {
         let source = DraftSource::single_set("TST".to_string());
         let config = DraftConfig {
+            flow: draft_core::types::DraftFlow::LegacyBarrier,
+            selection_policy: draft_core::types::DraftSelectionPolicy::default(),
+            clock_policy: draft_core::types::DraftClockPolicy::default(),
             set_code: source.set_code(),
             source,
             kind: DraftKind::Winston,
@@ -3486,6 +3589,314 @@ mod create_multiplayer_draft_tests {
         )
         .expect("a human-only Winston pod starts");
         session
+    }
+
+    fn dormant_fixture(flow: DraftFlow, status: DraftStatus) -> DraftSession {
+        use draft_core::pack_source::FixturePackSource;
+        let template = persisted_premier_session(SetLayout::UniformByRound {
+            codes: vec!["TST".into()],
+        });
+        let mut config = template.config;
+        config.pod_size = 4;
+        config.cards_per_pack = 2;
+        config.flow = flow;
+        if flow == DraftFlow::FifoAsync {
+            config.clock_policy = DraftClockPolicy {
+                pick: PickClockPolicy::Fixed { duration_ms: 1000 },
+                review_duration_ms: 1000,
+            };
+        }
+        let seats = template.seats.into_iter().take(4).collect();
+        let mut draft = match flow {
+            DraftFlow::LegacyBarrier => DraftSession::new(config, seats, "guard-fixture".into()),
+            DraftFlow::FifoAsync => DraftSession::new_fifo(
+                config,
+                seats,
+                "guard-fixture".into(),
+                DraftSessionId("guard-incarnation".into()),
+            )
+            .unwrap(),
+        };
+        session::apply_at(
+            &mut draft,
+            DraftAction::StartDraft,
+            Some(&FixturePackSource {
+                set_code: "TST".into(),
+                cards_per_pack: 2,
+            }),
+            1000,
+        )
+        .unwrap();
+        if status == DraftStatus::Review || status == DraftStatus::Paused {
+            for _ in 0..2 {
+                for seat in 0..4 {
+                    let action = draft_core::pick_pass::legal_auto_selection(&draft, seat).unwrap();
+                    session::apply_at(&mut draft, action, None, 1100).unwrap();
+                }
+            }
+            assert_eq!(draft.status, DraftStatus::Review);
+            if status == DraftStatus::Paused {
+                session::apply_at(
+                    &mut draft,
+                    DraftAction::Control {
+                        control: DraftControl::Pause {
+                            reason: DraftPauseReason::PausedByHost,
+                        },
+                    },
+                    None,
+                    1500,
+                )
+                .unwrap();
+            }
+        }
+        draft.validate_persisted_snapshot().unwrap();
+        assert_eq!(draft.status, status);
+        if flow == DraftFlow::FifoAsync && status == DraftStatus::Drafting {
+            let mut positive = draft.clone();
+            let action = draft_core::pick_pass::legal_auto_selection(&positive, 0).unwrap();
+            session::apply_at(&mut positive, action, None, 1100).unwrap();
+            assert_eq!(positive.pools[0].len(), 1);
+        }
+        draft
+    }
+
+    fn install_guard_cells(draft: DraftSession) {
+        clear_state();
+        install_fixture_db();
+        session_cell::install(draft);
+        DIFFICULTY.with(|cell| cell.set(AiDifficulty::VeryHard));
+        RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(8765))));
+        let pool: LimitedSetPool = serde_json::from_str(&pod_pool_json("TST")).unwrap();
+        PACK_GEN.with(|cell| cell.set(Some(PackGenerator::new(pool))));
+    }
+
+    fn guard_cells_snapshot() -> serde_json::Value {
+        use draft_core::pack_source::PackSource;
+        use rand::RngCore;
+        let session = if session_cell::is_installed() {
+            session_cell::with_installed(|draft| serde_json::to_value(draft).unwrap())
+        } else {
+            serde_json::Value::Null
+        };
+        let rng = RNG.with(|cell| {
+            let value = cell.take();
+            let words = value.as_ref().map(|rng| {
+                let mut copy = rng.clone();
+                (0..4).map(|_| copy.next_u64()).collect::<Vec<_>>()
+            });
+            cell.set(value);
+            words
+        });
+        let generated = PACK_GEN.with(|cell| {
+            let value = cell.take();
+            let cards = value.as_ref().map(|generator| {
+                generator.generate_pack(&mut ChaCha20Rng::seed_from_u64(42), 0, 0)
+            });
+            cell.set(value);
+            cards
+        });
+        let database = CARD_DB.with(|cell| { let value=cell.borrow();value.as_ref().map(|db| serde_json::json!({"count":db.card_count(),"alpha":db.get_face_by_name("Alpha")})) });
+        serde_json::json!({"session":session,"difficulty":DIFFICULTY.with(|cell|format!("{:?}",cell.get())),"rng":rng,"generator":generated,"database":database})
+    }
+
+    #[test]
+    fn dormant_wasm_live_fifo_read_guard_precedes_serialization() {
+        for status in [
+            DraftStatus::Drafting,
+            DraftStatus::Review,
+            DraftStatus::Paused,
+        ] {
+            install_guard_cells(dormant_fixture(DraftFlow::FifoAsync, status));
+            let before = guard_cells_snapshot();
+            let entered = Cell::new(0);
+            let result = with_draft_inner(|draft| {
+                entered.set(entered.get() + 1);
+                serde_json::to_value(filter_for_player(draft, 0)).map_err(|error| error.to_string())
+            });
+            assert_eq!(
+                result,
+                Err("FIFO drafting is not supported by this runtime".into())
+            );
+            assert_eq!(entered.get(), 0);
+            assert_eq!(guard_cells_snapshot(), before);
+        }
+        install_guard_cells(dormant_fixture(
+            DraftFlow::LegacyBarrier,
+            DraftStatus::Drafting,
+        ));
+        let before = guard_cells_snapshot();
+        let entered = Cell::new(0);
+        let result = with_draft_inner(|draft| {
+            entered.set(entered.get() + 1);
+            serde_json::to_value(filter_for_player(draft, 0)).map_err(|error| error.to_string())
+        })
+        .unwrap();
+        assert_eq!(entered.get(), 1);
+        assert_eq!(result["current_pack"].as_array().unwrap().len(), 2);
+        assert_eq!(guard_cells_snapshot(), before);
+        assert_eq!(
+            with_draft_inner::<()>(|_| Err("operation error".into())),
+            Err("operation error".into())
+        );
+        assert_eq!(guard_cells_snapshot(), before);
+        clear_state();
+        DIFFICULTY.with(|cell| cell.set(AiDifficulty::Medium));
+    }
+
+    #[test]
+    fn dormant_wasm_live_fifo_mutable_guard_precedes_effects() {
+        use rand::RngCore;
+        for status in [
+            DraftStatus::Drafting,
+            DraftStatus::Review,
+            DraftStatus::Paused,
+        ] {
+            install_guard_cells(dormant_fixture(DraftFlow::FifoAsync, status));
+            let before = guard_cells_snapshot();
+            let entered = Cell::new(0);
+            let result = with_draft_mut_inner(|draft| {
+                entered.set(entered.get() + 1);
+                if status == DraftStatus::Drafting {
+                    let action = draft_core::pick_pass::legal_auto_selection(draft, 0).unwrap();
+                    session::apply_at(draft, action, None, 1100)
+                        .map_err(|error| error.to_string())?;
+                }
+                RNG.with(|cell| {
+                    let mut rng = cell.take().unwrap();
+                    rng.next_u64();
+                    cell.set(Some(rng));
+                });
+                Ok(())
+            });
+            assert_eq!(
+                result,
+                Err("FIFO drafting is not supported by this runtime".into())
+            );
+            assert_eq!(entered.get(), 0);
+            assert_eq!(guard_cells_snapshot(), before);
+            assert_eq!(
+                submit_pick_for_seat_inner(0, "[\"TST-0-0-0\"]").unwrap_err(),
+                "FIFO drafting is not supported by this runtime"
+            );
+            assert_eq!(guard_cells_snapshot(), before);
+        }
+        install_guard_cells(dormant_fixture(
+            DraftFlow::LegacyBarrier,
+            DraftStatus::Drafting,
+        ));
+        let entered = Cell::new(0);
+        with_draft_mut_inner(|draft| {
+            entered.set(entered.get() + 1);
+            session::apply(
+                draft,
+                DraftAction::Pick {
+                    seat: 0,
+                    card_instance_ids: vec!["TST-0-0-0".into()],
+                },
+                None,
+            )
+            .map_err(|error| error.to_string())
+        })
+        .unwrap();
+        assert_eq!(entered.get(), 1);
+        assert_eq!(
+            guard_cells_snapshot()["session"]["pools"][0]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        install_guard_cells(dormant_fixture(
+            DraftFlow::LegacyBarrier,
+            DraftStatus::Drafting,
+        ));
+        assert_eq!(
+            submit_pick_for_seat_inner(0, "[\"TST-0-0-0\"]")
+                .unwrap()
+                .pool
+                .len(),
+            1
+        );
+        let before = guard_cells_snapshot();
+        let entered = Cell::new(0);
+        assert_eq!(
+            with_draft_mut_inner::<()>(|_| {
+                entered.set(entered.get() + 1);
+                Err("operation error".into())
+            }),
+            Err("operation error".into())
+        );
+        assert_eq!(entered.get(), 1);
+        assert_eq!(guard_cells_snapshot(), before);
+        clear_state();
+        DIFFICULTY.with(|cell| cell.set(AiDifficulty::Medium));
+    }
+
+    #[test]
+    fn dormant_transports_refuse_fifo_before_install() {
+        let legacy = dormant_fixture(DraftFlow::LegacyBarrier, DraftStatus::Drafting);
+        install_guard_cells(legacy.clone());
+        let legacy_json = serde_json::to_string(&legacy).unwrap();
+        assert!(import_draft_session_inner(&legacy_json, 4).is_ok());
+        assert_eq!(
+            submit_pick_for_seat_inner(0, "[\"TST-0-0-0\"]")
+                .unwrap()
+                .pool
+                .len(),
+            1
+        );
+        for status in [
+            DraftStatus::Drafting,
+            DraftStatus::Review,
+            DraftStatus::Paused,
+        ] {
+            let draft = dormant_fixture(DraftFlow::FifoAsync, status);
+            let before = guard_cells_snapshot();
+            assert_eq!(
+                import_draft_session_inner(&serde_json::to_string(&draft).unwrap(), 0).unwrap_err(),
+                "FIFO drafting is not supported by this runtime"
+            );
+            assert_eq!(guard_cells_snapshot(), before);
+        }
+        let fifo = dormant_fixture(DraftFlow::FifoAsync, DraftStatus::Drafting);
+        for malformed in ["missing-flow", "unknown-flow", "unknown-status"] {
+            let mut json = serde_json::to_value(&fifo).unwrap();
+            match malformed {
+                "missing-flow" => {
+                    json["config"].as_object_mut().unwrap().remove("flow");
+                }
+                "unknown-flow" => json["config"]["flow"] = "FutureFlow".into(),
+                "unknown-status" => json["status"] = "FutureStatus".into(),
+                _ => unreachable!(),
+            }
+            let before = guard_cells_snapshot();
+            let error = import_draft_session_inner(&json.to_string(), 0).unwrap_err();
+            if malformed == "missing-flow" {
+                assert_eq!(error, "FIFO drafting is not supported by this runtime");
+            } else {
+                assert!(error.contains("unknown variant"));
+            }
+            assert_eq!(guard_cells_snapshot(), before);
+        }
+        for action in [
+            draft_core::pick_pass::legal_auto_selection(&fifo, 0).unwrap(),
+            DraftAction::Control {
+                control: DraftControl::Resume,
+            },
+            DraftAction::AdvanceClock,
+        ] {
+            let before = guard_cells_snapshot();
+            assert_eq!(
+                apply_draft_action_inner(&serde_json::to_string(&action).unwrap()).unwrap_err(),
+                "FIFO drafting is not supported by this runtime"
+            );
+            assert_eq!(guard_cells_snapshot(), before);
+        }
+        clear_state();
+        let before = guard_cells_snapshot();
+        assert!(import_draft_session_inner(&serde_json::to_string(&fifo).unwrap(), 0).is_err());
+        assert_eq!(guard_cells_snapshot(), before);
+        DIFFICULTY.with(|cell| cell.set(AiDifficulty::Medium));
     }
 
     /// V26. A public backup strips `shared_stack` at the trust boundary, and
@@ -5403,6 +5814,9 @@ mod llm_seat_authority_tests {
     /// authority check exists to stop trusting.
     fn pod(bot_seats: &[u8], pod_size: u8) -> DraftSession {
         let config = DraftConfig {
+            flow: draft_core::types::DraftFlow::LegacyBarrier,
+            selection_policy: draft_core::types::DraftSelectionPolicy::default(),
+            clock_policy: draft_core::types::DraftClockPolicy::default(),
             source: DraftSource::single_set("TST".to_string()),
             set_code: "TST".to_string(),
             kind: DraftKind::Premier,

@@ -135,7 +135,19 @@
       "precon": "Precon"
     },
     "brain": "Contrôlé par",
-    "brainEngine": "IA du moteur"
+    "brainEngine": "IA du moteur",
+    "poolBracketConflict": "Aucun des {{selected}} decks sélectionnés n'est légal avec les filtres actuels, les adversaires aléatoires utiliseront les {{total}} decks."
+  },
+  "randomPool": {
+    "titleHuman": "Votre pool aléatoire",
+    "titleAi": "Pool aléatoire de l'IA",
+    "hint": "Décochez dossiers ou decks pour les retirer des pioches aléatoires.",
+    "count": "{{selected}} sur {{total}}",
+    "emptyWarning": "Tout est exclu, le tirage aléatoire utilisera les {{total}} decks.",
+    "reset": "Réinitialiser",
+    "precons": "Precons",
+    "playable": "{{playable}} jouables",
+    "nonePlayable": "Aucun des {{selected}} decks sélectionnés n'est légal avec les filtres actuels, le tirage aléatoire utilisera les {{total}} decks."
   },
   "feedManager": {
     "title": "Gérer les flux",
@@ -298,7 +310,8 @@
     "sectionStarred": "Favoris",
     "sectionUnfiled": "Non classé",
     "collapseAll": "Tout réduire",
-    "expandAll": "Tout développer"
+    "expandAll": "Tout développer",
+    "poolBracketConflict": "Aucun des {{selected}} decks sélectionnés n'est légal avec les filtres actuels, ton deck aléatoire sera donc tiré parmi les {{total}} decks."
   },
   "subscriptions": {
     "emptyTitle": "Aucun abonnement à un flux",

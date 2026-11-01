@@ -12,7 +12,7 @@ use engine::types::ability::{
     AbilityDefinition, AbilityKind, CastVariantPaid, DrawReplacementScope, Effect, ModalChoice,
     QuantityExpr, QuantityModification, QuantityRef, ReplacementCondition, ReplacementDefinition,
     ReplacementMode, StaticDefinition, TargetFilter, TriggerCondition, TriggerConstraint,
-    TriggerDefinition,
+    TriggerDefinition, TriggerLimitSpend,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -313,7 +313,11 @@ fn once_per_turn_engine(state: &mut GameState) -> ObjectId {
     let obj = state.objects.get_mut(&id).unwrap();
     obj.card_types.core_types.push(CoreType::Creature);
     obj.trigger_definitions
-        .push(drawn_engine_trigger().constraint(TriggerConstraint::OncePerTurn));
+        .push(
+            drawn_engine_trigger().constraint(TriggerConstraint::OncePerTurn {
+                spent_by: TriggerLimitSpend::Triggering,
+            }),
+        );
     id
 }
 
@@ -791,6 +795,7 @@ fn activate(source_id: ObjectId, ability_index: usize) -> CandidateAction {
         action: GameAction::ActivateAbility {
             source_id,
             ability_index,
+            payment_mode: CastPaymentMode::Auto,
         },
         metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
     }
@@ -1429,8 +1434,9 @@ fn mandatory_runtime_execute_substitution_is_a_no_op() {
         source,
         AI,
     );
+    let handle = st.install_replacement_continuation(runtime);
     let obj = st.objects.get_mut(&source).unwrap();
-    obj.replacement_definitions[0].runtime_execute = Some(Box::new(runtime));
+    obj.replacement_definitions[0].runtime_execute = Some(handle);
     let (delta, reason) = draw_spell_verdict(&mut st);
     assert_eq!(reason.kind, "draw_payoff_na");
     assert_eq!(delta, 0.0);

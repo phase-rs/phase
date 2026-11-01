@@ -10,6 +10,7 @@
 use std::sync::Arc;
 
 use engine::game::game_object::AttachTarget;
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
@@ -508,6 +509,9 @@ const PLACEHOLDER: char = '\u{E0004}';
 // `game::effects::token::catalog_rules_text_abilities`; its arm of this corpus
 // property lives in
 // `game::effects::token::tests::catalog_rules_text_abilities_never_leaks_the_placeholder`.
+// The Rock that Toggo, Goblin Weaponsmith creates reaches it through the token
+// entry point (`parser::oracle_effect::token::push_parsed_statics`) inside
+// Toggo's own parse, so Toggo is a member below.
 // ---------------------------------------------------------------------------
 
 const BLAZING_TORCH: &str =
@@ -575,6 +579,13 @@ const SHIFTING_SHADOW: &str = "Enchant creature\nEnchanted creature has haste an
 beginning of your upkeep, destroy this creature. Reveal cards from the top of your library until \
 you reveal a creature card. Put that card onto the battlefield and attach Shifting Shadow to it, \
 then put all other cards revealed this way on the bottom of your library in a random order.\"";
+
+/// Toggo, Goblin Weaponsmith (verbatim, Partner reminder included). The Rock's
+/// nested grant names the token, not Toggo (CR 201.5a).
+const TOGGO: &str = "Landfall \u{2014} Whenever a land you control enters, create a colorless \
+Equipment artifact token named Rock with \"Equipped creature has '{1}, {T}, Sacrifice Rock: This \
+creature deals 2 damage to any target'\" and equip {1}.\nPartner (You can have two commanders if \
+both have partner.)";
 
 const HELLISH_REBUKE: &str = "Until end of turn, permanents your opponents control gain \"When \
 this permanent deals damage to the player who cast Hellish Rebuke, sacrifice this permanent. You \
@@ -673,6 +684,12 @@ const CLASS_CORPUS: &[(&str, &str, &[&str], &[&str])] = &[
         &["Aura"],
     ),
     (HELLISH_REBUKE, "Hellish Rebuke", &["Instant"], &[]),
+    (
+        TOGGO,
+        "Toggo, Goblin Weaponsmith",
+        &["Creature"],
+        &["Goblin"],
+    ),
 ];
 
 const HEARTSEEKER: &str = "Equipped creature gets +2/+1 and has \"{T}, Unattach Heartseeker: \
@@ -1447,6 +1464,7 @@ fn torrent_of_lava_damage_source_channel_not_masked() {
 /// object incarnation; the unbound `ObjectScope::GrantingObject` reads as `Source` in
 /// counter reads.
 mod object_scope_reads {
+    use engine::game::game_object::ObjectIncarnationRefExt;
     use engine::game::layers::evaluate_layers;
     use engine::game::quantity::{resolve_quantity, resolve_quantity_with_targets};
     use engine::game::scenario::{GameScenario, P0};
@@ -1671,6 +1689,7 @@ mod object_scope_reads {
 // ---------------------------------------------------------------------------
 
 mod concretizer_seams {
+    use engine::game::game_object::ObjectIncarnationRefExt;
     use std::sync::Arc;
 
     use engine::game::combat::{can_block_pair, AttackTarget};
@@ -1692,7 +1711,7 @@ mod concretizer_seams {
     use engine::types::card_type::CoreType;
     use engine::types::counter::CounterType;
     use engine::types::events::GameEvent;
-    use engine::types::game_state::{GameState, WaitingFor};
+    use engine::types::game_state::{CastPaymentMode, GameState, WaitingFor};
     use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
     use engine::types::keywords::Keyword;
     use engine::types::mana::{ManaCost, ManaType, ManaUnit};
@@ -1866,6 +1885,7 @@ mod concretizer_seams {
             .act(GameAction::ActivateAbility {
                 source_id: host,
                 ability_index: index,
+                payment_mode: CastPaymentMode::Auto,
             })
             .unwrap();
         if matches!(
@@ -3060,6 +3080,7 @@ mod concretizer_seams {
             .act(GameAction::ActivateAbility {
                 source_id: host,
                 ability_index: index,
+                payment_mode: CastPaymentMode::Auto,
             })
             .unwrap();
         if matches!(
@@ -3113,6 +3134,7 @@ mod concretizer_seams {
             let result = runner.act(GameAction::ActivateAbility {
                 source_id: host,
                 ability_index: index,
+                payment_mode: CastPaymentMode::Auto,
             });
             if pole_tapped {
                 assert!(result.is_err(), "{:?}", runner.state().waiting_for);
@@ -3152,6 +3174,7 @@ mod concretizer_seams {
             .act(GameAction::ActivateAbility {
                 source_id: plague,
                 ability_index: index,
+                payment_mode: CastPaymentMode::Auto,
             })
             .unwrap();
         if matches!(
@@ -3477,6 +3500,7 @@ mod granter_stamp {
     use engine::game::effects::attach::attach_to;
     use engine::game::effects::resolve_ability_chain;
     use engine::game::filter::{matches_target_filter, FilterContext};
+    use engine::game::game_object::ObjectIncarnationRefExt;
     use engine::game::layers::evaluate_layers;
     use engine::game::mana_abilities::can_activate_mana_ability_now;
     use engine::game::quantity::resolve_quantity_with_targets;
@@ -3602,6 +3626,7 @@ mod granter_stamp {
             .act(GameAction::ActivateAbility {
                 source_id: b.host,
                 ability_index: index,
+                payment_mode: CastPaymentMode::Auto,
             })
             .unwrap();
     }
@@ -3980,6 +4005,7 @@ mod granter_stamp {
             .act(GameAction::ActivateAbility {
                 source_id: b.host,
                 ability_index: index,
+                payment_mode: CastPaymentMode::Auto,
             })
             .is_ok()
     }
@@ -4150,6 +4176,7 @@ mod granter_stamp {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: index,
+                payment_mode: CastPaymentMode::Auto,
             })
             .unwrap();
         assert!(b.runner.state().objects[&source].tapped, "{source:?}");
@@ -4206,6 +4233,7 @@ mod granter_stamp {
                 .act(GameAction::ActivateAbility {
                     source_id: killer,
                     ability_index: 0,
+                    payment_mode: CastPaymentMode::Auto,
                 })
                 .unwrap();
             if matches!(
@@ -4307,6 +4335,7 @@ mod granter_stamp {
             .act(GameAction::ActivateAbility {
                 source_id: fb,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .unwrap();
         runner.advance_until_stack_empty();
@@ -4404,6 +4433,64 @@ mod granter_stamp {
         move_to_zone(st, fb, Zone::Battlefield, &mut Vec::new());
         set_charge(&mut runner, fb, 3);
         assert_eq!(token_pt(&runner, ooze), (Some(2), Some(2)));
+    }
+
+    const TOKEN_OWN_SACRIFICE: &str =
+        "a 1/1 green Ooze creature token with \"Sacrifice Foo Bar: You gain 2 life.\"";
+
+    /// CR 111.3 + CR 201.5a: the token's own quoted ability is the token's text, written by
+    /// Foo Bar's ability, so "Sacrifice Foo Bar" names the creator: activating it
+    /// sacrifices Foo Bar, not the token.
+    #[test]
+    fn token_own_ability_naming_its_creator_sacrifices_the_creator() {
+        let (mut runner, fb, ooze) = create_token(TOKEN_OWN_SACRIFICE, 0);
+        let creator = ObjectIncarnationRef::from_object(&runner.state().objects[&fb]);
+        let idx = runner.state().objects[&ooze]
+            .abilities
+            .iter()
+            .position(|a| a.cost.as_ref().and_then(super::sacrifice_target).is_some())
+            .expect("reach-guard: the token carries its own sacrifice ability");
+        let own = &runner.state().objects[&ooze].abilities[idx];
+        assert_eq!(
+            own.cost.as_ref().and_then(super::sacrifice_target),
+            Some(&TargetFilter::GrantingObject {
+                bound: Some(creator)
+            })
+        );
+        assert_eq!(own.granting_object, Some(creator));
+        let out = runner.activate(ooze, idx).pay_with(&[fb]).resolve();
+        // CR 701.21a: Foo Bar, a nontoken permanent, goes to its owner's graveyard.
+        assert_eq!(out.zone_of(fb), Zone::Graveyard);
+        assert_eq!(out.zone_of(ooze), Zone::Battlefield);
+        assert_eq!(out.life_delta(P0), 2);
+        assert!(out.state().stack.is_empty());
+        assert!(matches!(
+            out.final_waiting_for(),
+            WaitingFor::Priority { .. }
+        ));
+    }
+
+    const TOKEN_ANTHEM_OTHERS: &str = "a 2/2 green Ooze creature token with \"Creatures you control get +2/+2 as long as you control two or more artifacts other than Foo Bar.\"";
+
+    /// CR 201.5a + CR 611.3a: a token static that affects other objects still reads its
+    /// creator in its own fields — "other than Foo Bar" excludes the creating Foo Bar.
+    #[test]
+    fn token_anthem_condition_excludes_its_creator() {
+        let power = [1, 2].map(|others| {
+            let (runner, fb, ooze) = create_token(TOKEN_ANTHEM_OTHERS, others);
+            let creator = ObjectIncarnationRef::from_object(&runner.state().objects[&fb]);
+            assert_eq!(
+                runner.state().objects[&ooze].base_static_definitions[0].affected,
+                Some(TargetFilter::Typed(
+                    engine::types::ability::TypedFilter::creature()
+                        .controller(engine::types::ability::ControllerRef::You)
+                )),
+                "reach-guard: the static affects other objects, not only the token"
+            );
+            assert_eq!(token_stamps(&runner, ooze), vec![Some(creator)]);
+            token_pt(&runner, ooze).0
+        });
+        assert_eq!(power, [Some(2), Some(4)]);
     }
 
     /// `create_token`, then a new permanent "Mimic" becomes a copy of the Ooze (CR 707.2).
@@ -4586,6 +4673,7 @@ mod granter_stamp {
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),
@@ -4774,6 +4862,7 @@ mod granter_stamp {
                 .act(GameAction::ActivateAbility {
                     source_id: host,
                     ability_index: index,
+                    payment_mode: CastPaymentMode::Auto,
                 })
                 .unwrap_or_else(|e| panic!("controller={bracelet_controller:?}: {e:?}"));
             let WaitingFor::PayCost { choices, .. } = &runner.state().waiting_for else {
@@ -4876,6 +4965,7 @@ mod granter_stamp {
             .act(GameAction::ActivateAbility {
                 source_id: b.host,
                 ability_index: index,
+                payment_mode: CastPaymentMode::Auto,
             })
             .unwrap();
         let WaitingFor::PayCost { choices, .. } = &b.runner.state().waiting_for else {
@@ -5130,6 +5220,7 @@ mod granter_stamp {
             .act(GameAction::ActivateAbility {
                 source_id: host,
                 ability_index: index,
+                payment_mode: CastPaymentMode::Auto,
             })
             .unwrap();
         runner.advance_until_stack_empty();
@@ -5472,6 +5563,7 @@ mod granter_stamp {
 
     mod bound_granter {
         use super::*;
+        use engine::game::game_object::ObjectIncarnationRefExt;
         use engine::types::game_state::{AutoMayChoice, MayTriggerAutoChoiceScope};
         use engine::types::keywords::KeywordKind;
 
@@ -5978,6 +6070,7 @@ mod granter_stamp {
                     .act(GameAction::ActivateAbility {
                         source_id: fb,
                         ability_index: 0,
+                        payment_mode: CastPaymentMode::Auto,
                     })
                     .unwrap();
                 assert_eq!(remember_accept(&mut b.runner), prompted, "reach-guard");
@@ -6031,6 +6124,7 @@ mod granter_stamp {
                     .act(GameAction::ActivateAbility {
                         source_id: host,
                         ability_index: 0,
+                        payment_mode: CastPaymentMode::Auto,
                     })
                     .unwrap();
                 assert_eq!(remember_accept(&mut runner), prompted, "reach-guard");
@@ -6055,7 +6149,7 @@ mod granted_caster_reference {
     use engine::game::scenario::GameRunner;
     use engine::types::ability::{PlayerFilter, TargetRef};
     use engine::types::actions::GameAction;
-    use engine::types::game_state::WaitingFor;
+    use engine::types::game_state::{CastPaymentMode, WaitingFor};
     use engine::types::mana::ManaCost;
     use engine::types::player::PlayerId;
 
@@ -6139,6 +6233,7 @@ mod granted_caster_reference {
             .act(GameAction::ActivateAbility {
                 source_id: pinger,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("the pinger activates");
         while matches!(
@@ -6345,6 +6440,7 @@ mod granted_caster_reference {
             .act(GameAction::ActivateAbility {
                 source_id: pinger,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("the pinger activates");
         while matches!(
@@ -6468,4 +6564,477 @@ fn emblem_linked_exile_name_is_not_refused() {
         json.contains("\"CreateEmblem\"") && json.contains("ExileCastPermission"),
         "{json}"
     );
+}
+
+/// CR 201.5a: Toggo's full parse lowers its Rock token with the nested grant naming the
+/// Rock — `GrantingObject` in the typed channel and "Sacrifice Rock" in the display
+/// channel — never the creator ("Sacrifice Toggo") or the host ("Sacrifice ~").
+#[test]
+fn toggo_full_parse_names_rock_not_toggo() {
+    let parsed = parse_oracle_text(
+        TOGGO,
+        "Toggo, Goblin Weaponsmith",
+        &[],
+        &["Creature".to_string()],
+        &["Goblin".to_string()],
+    );
+    let json = serde_json::to_string(&parsed).expect("ParsedAbilities serializes");
+    // Reach-guard: the token lowered and its nested grant carries the granter symbol.
+    assert!(json.contains("\"type\":\"Token\""), "{json}");
+    assert!(json.contains("\"type\":\"GrantingObject"), "{json}");
+    assert!(json.contains("Sacrifice Rock"), "{json}");
+    assert!(!json.contains("Sacrifice Toggo"), "{json}");
+    assert!(!json.contains("Sacrifice ~"), "{json}");
+    assert!(!json.contains("granter_reference_unreached"), "{json}");
+    assert!(!json.contains("\"type\":\"Unimplemented\""), "{json}");
+}
+
+/// CR 201.5a: a granter reference in a token static's own fields names the creator, so
+/// the token pass leaves the Ooze's description for the card-level render, which names
+/// Gutter Grime. Rendering every token static with the token's name would print "Ooze".
+#[test]
+fn gutter_grime_token_static_description_names_the_creator() {
+    let trigger = parse_oracle_text(
+        GUTTER_GRIME,
+        "Gutter Grime",
+        &[],
+        &["Enchantment".to_string()],
+        &[],
+    )
+    .triggers
+    .remove(0);
+    let execute = trigger.execute.as_deref().expect("the trigger executes");
+    let Some(Effect::Token {
+        static_abilities, ..
+    }) = find_effect(execute, |e| matches!(e, Effect::Token { .. }))
+    else {
+        panic!("expected a Token effect in {execute:#?}");
+    };
+    let description = static_abilities[0]
+        .description
+        .as_deref()
+        .expect("the Ooze's static carries a description");
+    assert!(
+        description.contains("slime counters on Gutter Grime."),
+        "{description}"
+    );
+    assert!(!description.contains("Ooze"), "{description}");
+}
+
+/// Toggo, Goblin Weaponsmith's Rock through the real pipeline: landfall creates the
+/// token, equip attaches it, and the granted ability is activated and resolved.
+mod toggo_rock {
+    use super::{find_effect, sacrifice_target, GUTTER_GRIME, PLACEHOLDER, TOGGO};
+    use engine::game::game_object::AttachTarget;
+    use engine::game::game_object::ObjectIncarnationRefExt;
+    use engine::game::layers::evaluate_layers;
+    use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+    use engine::parser::oracle::{parse_oracle_text, ParsedAbilities};
+    use engine::types::ability::{Effect, TargetFilter};
+    use engine::types::actions::GameAction;
+    use engine::types::game_state::WaitingFor;
+    use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
+    use engine::types::mana::{ManaType, ManaUnit};
+    use engine::types::phase::Phase;
+    use engine::types::zones::Zone;
+
+    const TOGGO_NAME: &str = "Toggo, Goblin Weaponsmith";
+
+    fn colorless(n: usize) -> Vec<ManaUnit> {
+        (0..n)
+            .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+            .collect()
+    }
+
+    /// CR 305.1 + CR 603.2: plays the Forest from hand and resolves every landfall trigger.
+    fn play_forest(runner: &mut GameRunner, forest: ObjectId) {
+        let card_id = runner.state().objects[&forest].card_id;
+        runner
+            .act(GameAction::PlayLand {
+                object_id: forest,
+                card_id,
+            })
+            .expect("the Forest is playable");
+        runner.advance_until_stack_empty();
+    }
+
+    fn rocks(runner: &GameRunner) -> Vec<ObjectId> {
+        let state = runner.state();
+        state
+            .battlefield
+            .iter()
+            .copied()
+            .filter(|id| state.objects[id].name == "Rock")
+            .collect()
+    }
+
+    /// CR 702.6a + CR 301.5a: activates `rock`'s equip ability targeting `host`.
+    fn equip(runner: &mut GameRunner, rock: ObjectId, host: ObjectId) {
+        let idx = runner.state().objects[&rock]
+            .abilities
+            .iter()
+            .position(|a| matches!(*a.effect, Effect::Attach { .. }))
+            .expect("the Rock has equip");
+        let _ = runner.activate(rock, idx).target_object(host).resolve();
+        assert_eq!(
+            runner.state().objects[&rock].attached_to,
+            Some(AttachTarget::Object(host)),
+            "reach-guard: the Rock is attached"
+        );
+        evaluate_layers(runner.state_mut());
+    }
+
+    /// The index of the Rock-granted sacrifice ability on `host`.
+    fn granted_index(runner: &GameRunner, host: ObjectId) -> usize {
+        runner.state().objects[&host]
+            .abilities
+            .iter()
+            .position(|a| a.cost.as_ref().and_then(sacrifice_target).is_some())
+            .expect("the host carries the Rock's granted ability")
+    }
+
+    fn rock_ref(runner: &GameRunner, rock: ObjectId) -> ObjectIncarnationRef {
+        ObjectIncarnationRef::from_object(&runner.state().objects[&rock])
+    }
+
+    fn assert_resolved(waiting_for: &WaitingFor, stack_empty: bool) {
+        assert!(stack_empty, "the stack is empty after resolution");
+        assert!(
+            matches!(waiting_for, WaitingFor::Priority { .. }),
+            "resolution completed; got {waiting_for:?}"
+        );
+    }
+
+    fn parse_creator(oracle: &str, name: &str) -> ParsedAbilities {
+        parse_oracle_text(
+            oracle,
+            name,
+            &[],
+            &["Creature".to_string()],
+            &["Goblin".to_string()],
+        )
+    }
+
+    /// Whether the card's first trigger lowers a token-creation effect.
+    fn trigger_lowers_token(parsed: &ParsedAbilities) -> bool {
+        parsed.triggers[0]
+            .execute
+            .as_deref()
+            .and_then(|execute| find_effect(execute, |e| matches!(e, Effect::Token { .. })))
+            .is_some()
+    }
+
+    /// CR 201.5a + CR 701.21a: the equipped creature activates the Rock's granted
+    /// ability; "Sacrifice Rock" sacrifices the Rock (the granting object), and the
+    /// equipped creature stays on the battlefield while the 2 damage is dealt.
+    #[test]
+    fn toggo_rock_sacrifices_only_the_rock() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_mana_pool(P0, colorless(4));
+        let toggo = scenario
+            .add_creature_from_oracle(P0, TOGGO_NAME, 2, 2, TOGGO)
+            .id();
+        let bearer = scenario.add_creature(P0, "Bearer", 2, 2).id();
+        let forest = scenario.add_land_to_hand(P0, "Forest").id();
+        let mut runner = scenario.build();
+
+        play_forest(&mut runner, forest);
+        let created = rocks(&runner);
+        assert_eq!(created.len(), 1, "reach-guard: landfall created one Rock");
+        let rock = created[0];
+        equip(&mut runner, rock, bearer);
+
+        let idx = granted_index(&runner, bearer);
+        let granted = &runner.state().objects[&bearer].abilities[idx];
+        // CR 201.5a: "Sacrifice Rock" names the Rock that granted the ability — not the
+        // host (`SelfRef`) and not the token's creator.
+        assert_eq!(
+            granted.cost.as_ref().and_then(sacrifice_target),
+            Some(&TargetFilter::GrantingObject {
+                bound: Some(rock_ref(&runner, rock))
+            })
+        );
+        assert_eq!(granted.granting_object, Some(rock_ref(&runner, rock)));
+        // Display: these must run before activation, which ends the grant.
+        let desc = granted
+            .description
+            .clone()
+            .expect("the granted ability carries a description");
+        assert_eq!(
+            desc, "{1}, {T}, Sacrifice Rock: ~ deals 2 damage to any target",
+            "CR 201.5a: the cost names Rock; CR 201.5b: the damage source stays the host"
+        );
+        assert!(!desc.contains(PLACEHOLDER));
+        // CLIENT PARITY: `renderDescription(desc, host.name)`.
+        let rendered = desc.replace('~', "Bearer");
+        assert_eq!(
+            rendered,
+            "{1}, {T}, Sacrifice Rock: Bearer deals 2 damage to any target"
+        );
+        assert!(!rendered.contains("Sacrifice Bearer") && !rendered.contains("Sacrifice Toggo"));
+
+        let out = runner
+            .activate(bearer, idx)
+            .target_player(P1)
+            .pay_with(&[rock])
+            .resolve();
+        let state = out.state();
+        // CR 701.21a + CR 111.7 + CR 704.5d: the sacrificed Rock token ceases to exist.
+        assert!(!state.objects.contains_key(&rock), "the Rock is sacrificed");
+        assert_eq!(
+            out.zone_of(bearer),
+            Zone::Battlefield,
+            "the equipped creature is not sacrificed"
+        );
+        assert_eq!(out.zone_of(toggo), Zone::Battlefield);
+        // CR 120.3a: 2 damage to a player causes that much life loss.
+        assert_eq!(out.life_delta(P1), -2);
+        assert_resolved(out.final_waiting_for(), state.stack.is_empty());
+    }
+
+    /// CR 201.5a: with the Rock on Toggo itself — host and creator are the same object —
+    /// the granted ability still sacrifices the Rock, not Toggo.
+    #[test]
+    fn rock_equipped_to_toggo_sacrifices_the_rock_not_toggo() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_mana_pool(P0, colorless(4));
+        let toggo = scenario
+            .add_creature_from_oracle(P0, TOGGO_NAME, 2, 2, TOGGO)
+            .id();
+        let forest = scenario.add_land_to_hand(P0, "Forest").id();
+        let mut runner = scenario.build();
+
+        play_forest(&mut runner, forest);
+        let created = rocks(&runner);
+        assert_eq!(created.len(), 1, "reach-guard: landfall created one Rock");
+        let rock = created[0];
+        equip(&mut runner, rock, toggo);
+
+        let idx = granted_index(&runner, toggo);
+        assert_eq!(
+            runner.state().objects[&toggo].abilities[idx]
+                .cost
+                .as_ref()
+                .and_then(sacrifice_target),
+            Some(&TargetFilter::GrantingObject {
+                bound: Some(rock_ref(&runner, rock))
+            })
+        );
+
+        let out = runner
+            .activate(toggo, idx)
+            .target_player(P1)
+            .pay_with(&[rock])
+            .resolve();
+        let state = out.state();
+        assert!(!state.objects.contains_key(&rock), "the Rock is sacrificed");
+        assert_eq!(
+            out.zone_of(toggo),
+            Zone::Battlefield,
+            "Toggo is not sacrificed"
+        );
+        assert_eq!(out.life_delta(P1), -2);
+        assert_resolved(out.final_waiting_for(), state.stack.is_empty());
+    }
+
+    /// CR 201.5: a name refers to that particular object, not any other object with that
+    /// name. Two creators make two Rocks; each Rock's grant binds that Rock.
+    #[test]
+    fn each_rock_grant_binds_its_own_rock() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_mana_pool(P0, colorless(6));
+        let toggo = scenario
+            .add_creature_from_oracle(P0, TOGGO_NAME, 2, 2, TOGGO)
+            .id();
+        let echo = scenario
+            .add_creature_from_oracle(P0, "Toggo Echo", 2, 2, TOGGO)
+            .id();
+        let bearer = scenario.add_creature(P0, "Bearer", 2, 2).id();
+        let forest = scenario.add_land_to_hand(P0, "Forest").id();
+        let mut runner = scenario.build();
+
+        // CR 603.3b: `advance_until_stack_empty` answers any trigger-ordering prompt.
+        play_forest(&mut runner, forest);
+        let created = rocks(&runner);
+        assert_eq!(
+            created.len(),
+            2,
+            "reach-guard: each landfall created a Rock"
+        );
+        let (rock_a, rock_b) = (created[0], created[1]);
+        equip(&mut runner, rock_a, bearer);
+        equip(&mut runner, rock_b, toggo);
+
+        let bearer_idx = granted_index(&runner, bearer);
+        let toggo_idx = granted_index(&runner, toggo);
+        assert_eq!(
+            runner.state().objects[&bearer].abilities[bearer_idx]
+                .cost
+                .as_ref()
+                .and_then(sacrifice_target),
+            Some(&TargetFilter::GrantingObject {
+                bound: Some(rock_ref(&runner, rock_a))
+            })
+        );
+        assert_eq!(
+            runner.state().objects[&toggo].abilities[toggo_idx]
+                .cost
+                .as_ref()
+                .and_then(sacrifice_target),
+            Some(&TargetFilter::GrantingObject {
+                bound: Some(rock_ref(&runner, rock_b))
+            })
+        );
+        let rock_a_ref = rock_ref(&runner, rock_a);
+
+        let out = runner
+            .activate(toggo, toggo_idx)
+            .target_player(P1)
+            .pay_with(&[rock_b])
+            .resolve();
+        let state = out.state();
+        assert!(!state.objects.contains_key(&rock_b), "Rock B is sacrificed");
+        assert_eq!(
+            state.objects[&rock_a].attached_to,
+            Some(AttachTarget::Object(bearer)),
+            "Rock A is untouched"
+        );
+        let bearer_grant = state.objects[&bearer]
+            .abilities
+            .iter()
+            .find_map(|a| a.cost.as_ref().and_then(sacrifice_target))
+            .expect("Bearer keeps Rock A's grant");
+        assert_eq!(
+            bearer_grant,
+            &TargetFilter::GrantingObject {
+                bound: Some(rock_a_ref)
+            }
+        );
+        for creature in [toggo, echo, bearer] {
+            assert_eq!(out.zone_of(creature), Zone::Battlefield);
+        }
+        assert_eq!(out.life_delta(P1), -2);
+        assert_resolved(out.final_waiting_for(), state.stack.is_empty());
+    }
+
+    /// CR 201.5a: "Unattach Rock" is a position the granter masker refuses, so the name
+    /// would read the host; the token clause does not lower (honest red).
+    #[test]
+    fn token_body_refused_granter_name_does_not_lower() {
+        let refused = TOGGO.replace("{1}, {T}, Sacrifice Rock", "{T}, Unattach Rock");
+        let parsed = parse_creator(&refused, "Foo Smith");
+        assert!(!trigger_lowers_token(&parsed), "{parsed:#?}");
+        let json = serde_json::to_string(&parsed).expect("ParsedAbilities serializes");
+        assert!(json.contains("\"type\":\"Unimplemented\""), "{json}");
+
+        // Paired positive: the same frame with "Sacrifice Rock" lowers with the granter.
+        let accepted = TOGGO.replace("{1}, {T}, Sacrifice Rock", "{T}, Sacrifice Rock");
+        let parsed = parse_creator(&accepted, "Foo Smith");
+        assert!(trigger_lowers_token(&parsed), "{parsed:#?}");
+        let json = serde_json::to_string(&parsed).expect("ParsedAbilities serializes");
+        assert!(json.contains("\"type\":\"GrantingObject"), "{json}");
+    }
+
+    /// CR 201.5a: a creator-name reference inside the token's grant to another object would
+    /// bind to the token at layer 6, so the token clause does not lower (honest red).
+    #[test]
+    fn token_nested_grant_naming_its_creator_does_not_lower() {
+        let creator_named = TOGGO.replace("Sacrifice Rock", "Sacrifice Foo Smith");
+        let parsed = parse_creator(&creator_named, "Foo Smith");
+        assert!(!trigger_lowers_token(&parsed), "{parsed:#?}");
+        let json = serde_json::to_string(&parsed).expect("ParsedAbilities serializes");
+        assert!(json.contains("\"type\":\"Unimplemented\""), "{json}");
+
+        // Paired positive: a creator reference in the token static's own fields (Gutter
+        // Grime) still lowers.
+        let gutter_grime = parse_oracle_text(
+            GUTTER_GRIME,
+            "Gutter Grime",
+            &[],
+            &["Enchantment".to_string()],
+            &[],
+        );
+        assert!(trigger_lowers_token(&gutter_grime), "{gutter_grime:#?}");
+    }
+
+    /// CR 111.3 + CR 201.5a: inside a grant made by the token's own quoted ability, the
+    /// token's name names the token, but the creation stamp binds the token's own text to
+    /// its creator; the token clause does not lower (honest red).
+    #[test]
+    fn token_own_ability_grant_naming_the_token_does_not_lower() {
+        const TOGGO_GRANT: &str = "\"Equipped creature has '{1}, {T}, Sacrifice Rock: This creature deals 2 damage to any target'\"";
+        let own_ability_grant = TOGGO.replace(
+            TOGGO_GRANT,
+            "\"{T}: Target creature gains '{1}, Sacrifice Rock: This creature deals 2 damage to any target' until end of turn.\"",
+        );
+        let own_static_grant = TOGGO.replace(
+            TOGGO_GRANT,
+            "\"This artifact has '{T}, Sacrifice Rock: This artifact deals 2 damage to any target.'\"",
+        );
+        for oracle in [&own_ability_grant, &own_static_grant] {
+            assert_ne!(
+                oracle.as_str(),
+                TOGGO,
+                "reach-guard: the fixture replaced the grant"
+            );
+            let parsed = parse_creator(oracle, "Foo Smith");
+            assert!(!trigger_lowers_token(&parsed), "{parsed:#?}");
+            let json = serde_json::to_string(&parsed).expect("ParsedAbilities serializes");
+            assert!(json.contains("\"type\":\"Unimplemented\""), "{json}");
+        }
+
+        // Paired positives: each frame naming the creator lowers, bound at creation.
+        for oracle in [&own_ability_grant, &own_static_grant] {
+            let creator_named = oracle.replace("Sacrifice Rock", "Sacrifice Foo Smith");
+            let parsed = parse_creator(&creator_named, "Foo Smith");
+            assert!(trigger_lowers_token(&parsed), "{parsed:#?}");
+            let json = serde_json::to_string(&parsed).expect("ParsedAbilities serializes");
+            assert!(json.contains("\"type\":\"GrantingObject"), "{json}");
+        }
+    }
+
+    /// CR 111.3 + CR 201.5a: a quoted grant body that is a simple restriction collapses
+    /// into the token static's own fields, which the creation stamp binds to the creator;
+    /// a token-name reference there would be bound to the creator, so the token clause
+    /// does not lower (honest red).
+    #[test]
+    fn token_static_own_field_naming_the_token_does_not_lower() {
+        const TOGGO_GRANT: &str = "\"Equipped creature has '{1}, {T}, Sacrifice Rock: This creature deals 2 damage to any target'\"";
+        let grant_to_another = TOGGO.replace(
+            TOGGO_GRANT,
+            "\"Equipped creature has 'This creature can't be blocked by artifacts other than Rock.'\"",
+        );
+        let grant_to_itself = TOGGO.replace(
+            TOGGO_GRANT,
+            "\"This artifact has 'This artifact can't be blocked by artifacts other than Rock.'\"",
+        );
+        for oracle in [&grant_to_another, &grant_to_itself] {
+            assert_ne!(
+                oracle.as_str(),
+                TOGGO,
+                "reach-guard: the fixture replaced the grant"
+            );
+            let parsed = parse_creator(oracle, "Foo Smith");
+            assert!(!trigger_lowers_token(&parsed), "{parsed:#?}");
+            let json = serde_json::to_string(&parsed).expect("ParsedAbilities serializes");
+            assert!(json.contains("\"type\":\"Unimplemented\""), "{json}");
+
+            // Paired positive: the same frame naming the creator lowers, bound at creation.
+            let creator_named = oracle.replace("other than Rock", "other than Foo Smith");
+            let parsed = parse_creator(&creator_named, "Foo Smith");
+            assert!(trigger_lowers_token(&parsed), "{parsed:#?}");
+            let json = serde_json::to_string(&parsed).expect("ParsedAbilities serializes");
+            assert!(json.contains("\"type\":\"GrantingObject"), "{json}");
+        }
+
+        // Paired positive: the same creator and frame with "Sacrifice Rock" in a nested
+        // grant lowers with the granter.
+        let parsed = parse_creator(TOGGO, "Foo Smith");
+        assert!(trigger_lowers_token(&parsed), "{parsed:#?}");
+        let json = serde_json::to_string(&parsed).expect("ParsedAbilities serializes");
+        assert!(json.contains("\"type\":\"GrantingObject"), "{json}");
+    }
 }

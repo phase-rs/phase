@@ -1,0 +1,46 @@
+---
+source: crates/phase-parser/src/parser/oracle_effect/mod.rs
+assertion_line: 32001
+expression: def
+---
+{
+  "kind": "Spell",
+  "effect": {
+    "type": "GainLife",
+    "amount": {
+      "type": "Fixed",
+      "value": 3
+    }
+  },
+  "cost": null,
+  "sub_ability": {
+    "kind": "Spell",
+    "effect": {
+      "type": "Draw",
+      "count": {
+        "type": "Fixed",
+        "value": 1
+      },
+      "target": {
+        "type": "Controller"
+      }
+    },
+    "cost": null,
+    "sub_ability": null,
+    "duration": null,
+    "description": null,
+    "target_prompt": null,
+    "condition": null,
+    "optional_targeting": false,
+    "optional": false,
+    "forward_result": false,
+    "sub_link": "SequentialSibling"
+  },
+  "duration": null,
+  "description": null,
+  "target_prompt": null,
+  "condition": null,
+  "optional_targeting": false,
+  "optional": false,
+  "forward_result": false
+}

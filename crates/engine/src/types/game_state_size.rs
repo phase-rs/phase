@@ -67,6 +67,45 @@
 //! are already boxed, so nothing large went inline; the ceiling moved to
 //! 14,352.next_multiple_of(256) + 256 = 14,848.
 //!
+//! `GameState` re-measured on x86_64-pc-windows-msvc at 14,864 B when the
+//! scheme-support branch merged main's tracked-set member origins
+//! (`tracked_set_member_origins`, an `im::HashMap`, 24 B inline) alongside
+//! the branch's own named-label scratch (`named_label_this_resolution`,
+//! `Option<String>`, 24 B inline): each side was green alone under 14,848,
+//! and the union crossed it by 16 B. Neither field is a large
+//! rarely-populated one — both are ordinary 24 B fields, and the origins
+//! map is already heap-shared — so the ceiling moves to
+//! 14,864.next_multiple_of(256) + 256 = 15,360.
+//!
+//! Base `GameState` on x86_64-pc-windows-msvc measured 14,336 B at
+//! `nightly-2026-04-19`, exactly at the ceiling of that time. The attacked-player referent
+//! work adds `attack_target: Option<AttackTarget>` to `ZoneChangeCombatStatus`
+//! (7 -> 24 B, align 1 -> 8), so `TriggerSourceContext` grows by 16 B and so does
+//! `WaitingFor::OpponentGuess`, its largest holder, which set the inline size of
+//! `WaitingFor` at 1,760 B. `WaitingFor::OpponentGuess.owner` (an
+//! `OpponentGuessOwner`, 1,656 B, populated only while an opponent guess is
+//! pending) is boxed. On x86_64-pc-windows-msvc `GameState` then measures
+//! 14,208 B, `WaitingFor` 1,632 B and `TriggerSourceContext` 1,496 B, with
+//! `WaitingFor::NamedChoice` (1,631 B) the largest `WaitingFor` variant. The
+//! boxing keeps `GameState` under the ceiling above. Boxing OpponentGuess.owner leaves NamedChoice and
+//! ChooseOneOfBranch more than 200 B apart, so `WaitingFor` carries an intentional
+//! `#[allow(clippy::large_enum_variant)]`; the GameState ceiling above is the bound.
+//!
+//! `GameState` re-measured on x86_64-pc-windows-msvc at 14,864 B when the
+//! CR 603.10d control-change evidence tables (`control_change_captures`,
+//! `control_change_observations`, and their two `u64` id counters) landed.
+//! Both tables are empty outside a resolution, so they are lazily boxed
+//! (`LazyBoxedMap`: unallocated while empty, so an empty clone allocates
+//! nothing); `GameState` then measures 14,832 B, under the unchanged 14,848
+//! ceiling.
+//!
+//! `GameState` re-measured on x86_64-unknown-linux-gnu (`nightly-2026-04-19`) at
+//! 14,896 B with the tracked-set member origins (`tracked_set_member_origins`,
+//! 24 B), the loop-detection held window and decision tally (`loop_detect_held`,
+//! 8 B, and `loop_decision_tally`, 40 B) and the loop shortcut's rising ∞ axes
+//! (`unbounded_rising`, 24 B); none of those fields is a large rarely-populated
+//! one, so the ceiling is 14,896.next_multiple_of(256) + 256 = 15,360.
+//!
 //! When one of these fires, re-run the measurement above and change the number
 //! deliberately — do not widen a ceiling to make a build pass.
 //!
@@ -76,7 +115,7 @@
 const _: () = {
     use core::mem::size_of;
     assert!(
-        size_of::<crate::types::game_state::GameState>() <= 14_848,
+        size_of::<crate::types::game_state::GameState>() <= 15_360,
         "GameState grew past its stack budget. It is moved by value through the \
          phase-server action + AI path, so an overrun is an uncatchable \
          guard-page abort, not a panic. Re-run the -Zprint-type-sizes command in \

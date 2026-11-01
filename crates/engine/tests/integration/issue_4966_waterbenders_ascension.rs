@@ -149,6 +149,7 @@ fn waterbend_tap_to_help_makes_targeted_creature_unblockable() {
         .act(GameAction::ActivateAbility {
             source_id: ascension,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("ActivateAbility must be accepted");
 
@@ -314,6 +315,7 @@ fn waterbend_spell_only_mana_does_not_make_ability_available() {
     let result = runner.act(GameAction::ActivateAbility {
         source_id: ascension,
         ability_index: 0,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     assert!(
         result.is_err(),
@@ -397,7 +399,7 @@ fn tagged_waterbend_with_tag_scoped_mana_is_offered_as_legal_action() {
     assert!(
         legal_actions(runner.state()).iter().any(|action| matches!(
             action,
-            GameAction::ActivateAbility { source_id, ability_index: idx }
+            GameAction::ActivateAbility { source_id, ability_index: idx, .. }
                 if *source_id == ascension && *idx == ability_index
         )),
         "legal-action generation must OFFER the tagged Waterbend activation \

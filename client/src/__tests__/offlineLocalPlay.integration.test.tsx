@@ -259,16 +259,28 @@ vi.mock("../services/engineRuntime", () => ({
   sideboardPolicyForFormat: vi.fn(async () => ({ type: "Limited", data: 15 })),
   signatureSpellSelectionPolicy: vi.fn(async () => ({ type: "NotApplicable" })),
 }));
-vi.mock("../services/aiDeckCatalog", () => ({
-  buildLegalAiDeckCatalog: vi.fn(async () => ({
-    candidates: test.aiCandidates,
-  })),
-  useAiDeckCatalog: () => ({
-    candidates: test.aiCandidates,
-    loading: false,
-    error: null,
-  }),
-}));
+vi.mock("../services/aiDeckCatalog", async () => {
+  const actual = await vi.importActual<typeof import("../services/aiDeckCatalog")>(
+    "../services/aiDeckCatalog",
+  );
+  return {
+    ...actual,
+    buildLegalAiDeckCatalog: vi.fn(async () => ({
+      candidates: test.aiCandidates,
+      allCandidates: test.aiCandidates,
+    })),
+    // The stub answers whatever request the caller makes, so its key is
+    // derived from the caller's own inputs with the real key function —
+    // correctly keyed by construction for the settled snapshot.
+    useAiDeckCatalog: (options: Parameters<typeof actual.useAiDeckCatalog>[0]) => ({
+      candidates: test.aiCandidates,
+      allCandidates: test.aiCandidates,
+      loading: false,
+      error: null,
+      requestKey: actual.catalogRequestKey(options.selectedFormat, options.selectedMatchType),
+    }),
+  };
+});
 vi.mock("../services/scryfall", async (importOriginal) => {
   const actual = await importOriginal<typeof Scryfall>();
   const remote = () => {

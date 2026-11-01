@@ -10,6 +10,7 @@ use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::player::PlayerId;
 
+use crate::ability_chain::AbilityWalk;
 use crate::cast_facts::{
     cast_facts_for_action, collect_definition_effects, collect_definition_effects_with,
     effect_profile_for_action, effective_activated_ability, CastFacts, EffectProfile, ModeWalk,
@@ -164,14 +165,50 @@ impl<'a> PolicyContext<'a> {
     }
 
     pub fn effects(&self) -> Vec<&'a Effect> {
+        self.ability_walks()
+            .into_iter()
+            .flat_map(AbilityWalk::into_effects)
+            .collect()
+    }
+
+    /// [`Self::effects`] without its created-token placements (CR 608.2c +
+    /// CR 111.1: a `PutCounter { LastCreated }` whose nearest preceding publisher
+    /// in the same chain is a `Token` lands on that token). Each ability's walk is
+    /// filtered against its own branch chains (the root chain and each
+    /// `else_ability` / mode head's chain), so a `Token` in one ability or
+    /// branch never pairs with a placement in another.
+    pub(crate) fn effects_without_created_token_placements(&self) -> Vec<&'a Effect> {
+        self.ability_walks()
+            .iter()
+            .flat_map(AbilityWalk::without_created_token_placements)
+            .collect()
+    }
+
+    /// The per-ability walks [`Self::effects`] concatenates, one per ability
+    /// the candidate reads, each carrying the ability it came from so the
+    /// created-token predicate reads one ability's chain at a time.
+    pub(crate) fn ability_walks(&self) -> Vec<AbilityWalk<'a>> {
         // If we're casting/activating, get effects from the source object
         match &self.candidate.action {
-            GameAction::CastSpell { .. } => {
-                return self
-                    .source_object()
-                    .into_iter()
-                    .flat_map(|object| object.abilities.iter().flat_map(collect_definition_effects))
-                    .collect();
+            // CR 113.3a + CR 608.3a: A permanent spell cast puts the card onto the
+            // battlefield; its activated, static, and triggered abilities are not
+            // spell abilities and do not execute on cast. Only spell-kind abilities
+            // (`modal_spell_mode_ability_refs`) represent spell effects for the cast.
+            // CR 113.6: Activated abilities function only on the battlefield, so
+            // they are not part of a spell's effects when cast from hand.
+            action if crate::cast_facts::is_cast_family_action(action) => {
+                return crate::cast_facts::cast_object_for_action(
+                    self.state,
+                    &self.candidate.action,
+                    self.ai_player,
+                )
+                .into_iter()
+                .flat_map(|object| {
+                    modal_spell_mode_ability_refs(object).map(|ability| {
+                        AbilityWalk::of(ability, collect_definition_effects(ability))
+                    })
+                })
+                .collect();
             }
             // CR 700.2a: an activation announces the ability; if it is modal the
             // mode is chosen at the separate `AbilityModeChoice` prompt, which
@@ -185,14 +222,21 @@ impl<'a> PolicyContext<'a> {
             GameAction::ActivateAbility {
                 ability_index,
                 source_id,
+                ..
             } => {
                 return self
                     .state
                     .objects
                     .get(source_id)
                     .and_then(|object| object.abilities.get(*ability_index))
-                    .map(|ability| collect_definition_effects_with(ability, ModeWalk::RootOnly))
-                    .unwrap_or_default();
+                    .map(|ability| {
+                        AbilityWalk::of(
+                            ability,
+                            collect_definition_effects_with(ability, ModeWalk::RootOnly),
+                        )
+                    })
+                    .into_iter()
+                    .collect();
             }
             // CR 601.2b + CR 700.2a: the mode IS chosen here, so report exactly
             // the branches this candidate commits to. Reporting every printed
@@ -209,14 +253,16 @@ impl<'a> PolicyContext<'a> {
             GameAction::SelectModes { indices } => {
                 return selected_mode_abilities(self.state, &self.decision.waiting_for, indices)
                     .into_iter()
-                    .flat_map(collect_definition_effects)
+                    .map(|mode| AbilityWalk::of(mode, collect_definition_effects(mode)))
                     .collect();
             }
             _ => {}
         }
 
-        // During target selection, extract effects from the pending cast/ability/trigger
-        match &self.decision.waiting_for {
+        // During target selection, extract effects from the pending
+        // cast/ability/trigger. A `ResolvedAbility` has no `AbilityDefinition`
+        // behind it, so these walks are unpaired (the conservative default).
+        let effects = match &self.decision.waiting_for {
             WaitingFor::TargetSelection { pending_cast, .. } => {
                 collect_ability_effects(&pending_cast.ability)
             }
@@ -229,8 +275,9 @@ impl<'a> PolicyContext<'a> {
                 .as_ref()
                 .map(|t| collect_ability_effects(&t.ability))
                 .unwrap_or_default(),
-            _ => Vec::new(),
-        }
+            _ => return Vec::new(),
+        };
+        vec![AbilityWalk::unpaired(effects)]
     }
 
     pub fn cast_facts(&self) -> Option<CastFacts<'a>> {
@@ -626,6 +673,7 @@ mod tests {
                 ability_cost: None,
                 activation_cost_snapshot: None,
                 unavailable_modes: Vec::new(),
+                activation_payment_mode: CastPaymentMode::Auto,
             },
             candidates: Vec::new(),
         };
@@ -756,6 +804,7 @@ mod tests {
             action: GameAction::ActivateAbility {
                 source_id,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Ability),
         };
@@ -785,6 +834,7 @@ mod tests {
                 ability_cost: None,
                 activation_cost_snapshot: None,
                 unavailable_modes: Vec::new(),
+                activation_payment_mode: CastPaymentMode::Auto,
             },
             candidates: Vec::new(),
         };
@@ -1369,5 +1419,345 @@ mod tests {
         // already-expired one blocks (covered by
         // `deadline_expired_gates_projection`).
         assert!(ctx.can_afford_projection());
+    }
+
+    // ─── per-ability walks (created-token placements) ────────────────────────
+
+    use crate::policies::tests::created_token_placement_parity::{
+        effect_chain, last_created_placement, token_effect,
+    };
+    use engine::types::ability::SubAbilityLink;
+    use engine::types::counter::CounterType;
+
+    fn p1p1_placement() -> Effect {
+        last_created_placement(CounterType::Plus1Plus1, QuantityExpr::Fixed { value: 1 })
+    }
+
+    fn cast_ctx_effects(abilities: Vec<AbilityDefinition>) -> (usize, usize, usize) {
+        let mut state = GameState::new_two_player(42);
+        let config = AiConfig::default();
+        let context = crate::context::AiContext::empty(&config.weights);
+        let card_id = CardId(77);
+        let spell_id = create_object(
+            &mut state,
+            card_id,
+            PlayerId(0),
+            "Two Abilities".to_string(),
+            Zone::Hand,
+        );
+        state.objects.get_mut(&spell_id).unwrap().abilities = Arc::new(abilities);
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::CastSpell {
+                object_id: spell_id,
+                card_id,
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
+        };
+        let ctx = policy_ctx(&state, &decision, &candidate, &config, &context);
+        let walks = ctx.ability_walks();
+        let concatenated: Vec<&Effect> = walks
+            .iter()
+            .flat_map(|walk| walk.effects().iter().copied())
+            .collect();
+        let effects = ctx.effects();
+        assert_eq!(effects.len(), concatenated.len());
+        assert!(effects
+            .iter()
+            .zip(&concatenated)
+            .all(|(a, b)| std::ptr::eq(*a, *b)));
+        (
+            walks.len(),
+            effects.len(),
+            ctx.effects_without_created_token_placements().len(),
+        )
+    }
+
+    /// D1.2: `effects()` is the concatenation of one walk per ability, and the
+    /// filtered view reads each walk against its own chain, so a `Token` in one
+    /// ability never pairs with a placement in another.
+    #[test]
+    fn created_token_placements_never_pair_across_abilities() {
+        let split = cast_ctx_effects(vec![
+            AbilityDefinition::new(AbilityKind::Spell, token_effect(0, 0, vec![])),
+            AbilityDefinition::new(AbilityKind::Spell, p1p1_placement()),
+        ]);
+        assert_eq!(split, (2, 2, 2), "B's placement must survive the filter");
+
+        let paired = cast_ctx_effects(vec![
+            effect_chain(
+                AbilityKind::Spell,
+                SubAbilityLink::ContinuationStep,
+                vec![token_effect(0, 0, vec![]), p1p1_placement()],
+            ),
+            AbilityDefinition::new(AbilityKind::Spell, p1p1_placement()),
+        ]);
+        assert_eq!(paired, (2, 3, 2), "only A's own placement is filtered");
+    }
+
+    /// N3 (CR 700.2): the CastSpell walk includes every mode, and a mode's own
+    /// `[Token, P]` pair is filtered within that mode's chain.
+    #[test]
+    fn cast_walk_filters_a_mode_branch_created_token_placement() {
+        let mut modal = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp);
+        modal.mode_abilities = vec![
+            effect_chain(
+                AbilityKind::Spell,
+                SubAbilityLink::ContinuationStep,
+                vec![token_effect(0, 0, vec![]), p1p1_placement()],
+            ),
+            AbilityDefinition::new(AbilityKind::Spell, draw(1)),
+        ];
+        assert_eq!(
+            cast_ctx_effects(vec![modal]),
+            (1, 4, 3),
+            "effects() includes the mode placement; the filtered view drops it"
+        );
+    }
+
+    /// An activation reads exactly one walk: the activated ability's.
+    #[test]
+    fn activation_reads_one_walk() {
+        let mut state = GameState::new_two_player(42);
+        let config = AiConfig::default();
+        let context = crate::context::AiContext::empty(&config.weights);
+        let source_id = create_object(
+            &mut state,
+            CardId(78),
+            PlayerId(0),
+            "Fractal Maker".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&source_id).unwrap().abilities = Arc::new(vec![
+            AbilityDefinition::new(AbilityKind::Activated, draw(1)),
+            effect_chain(
+                AbilityKind::Activated,
+                SubAbilityLink::ContinuationStep,
+                vec![token_effect(0, 0, vec![]), p1p1_placement()],
+            ),
+        ]);
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::ActivateAbility {
+                source_id,
+                ability_index: 1,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Ability),
+        };
+        let ctx = policy_ctx(&state, &decision, &candidate, &config, &context);
+        assert_eq!(ctx.ability_walks().len(), 1);
+        assert_eq!(ctx.effects().len(), 2);
+        let filtered = ctx.effects_without_created_token_placements();
+        assert_eq!(filtered.len(), 1);
+        assert!(matches!(filtered[0], Effect::Token { .. }));
+    }
+
+    /// CR 113.6: Activated abilities function only on the battlefield. When
+    /// casting a spell via an alternative cost (e.g., miracle, madness, free),
+    /// only Spell-kind abilities are visible — Activated abilities on the card
+    /// do not produce walks.
+    #[test]
+    fn alternative_cast_includes_spell_abilities_excludes_activated() {
+        let mut state = GameState::new_two_player(42);
+        let config = AiConfig::default();
+        let context = crate::context::AiContext::empty(&config.weights);
+
+        // Card with both a Spell ability (the cast effect) and an Activated ability
+        let card_id = CardId(99);
+        let spell_id = create_object(
+            &mut state,
+            card_id,
+            PlayerId(0),
+            "Miracle Spell".to_string(),
+            Zone::Hand,
+        );
+        *Arc::make_mut(&mut state.objects.get_mut(&spell_id).unwrap().abilities) = vec![
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 2 },
+                    target: TargetFilter::Controller,
+                },
+            ),
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ),
+        ];
+
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+            candidates: Vec::new(),
+        };
+
+        // CastSpellForFree — should see the Spell ability (draw 2), not the Activated
+        let free_candidate = CandidateAction {
+            action: GameAction::CastSpellForFree {
+                object_id: spell_id,
+                card_id,
+                source_id: ObjectId(1), // dummy source for the free-cast effect
+                payment_mode: CastPaymentMode::Auto,
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
+        };
+        let ctx = policy_ctx(&state, &decision, &free_candidate, &config, &context);
+        let effects = ctx.effects();
+        assert_eq!(
+            effects.len(),
+            1,
+            "CastSpellForFree sees only Spell abilities, got {effects:?}"
+        );
+        assert!(matches!(effects[0], Effect::Draw { .. }));
+
+        // CastSpellAsMiracle — same behavior
+        let miracle_candidate = CandidateAction {
+            action: GameAction::CastSpellAsMiracle {
+                object_id: spell_id,
+                card_id,
+                payment_mode: CastPaymentMode::Auto,
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
+        };
+        let ctx = policy_ctx(&state, &decision, &miracle_candidate, &config, &context);
+        let effects = ctx.effects();
+        assert_eq!(
+            effects.len(),
+            1,
+            "CastSpellAsMiracle sees only Spell abilities, got {effects:?}"
+        );
+        assert!(matches!(effects[0], Effect::Draw { .. }));
+
+        // CastSpellAsMadness — same behavior
+        let madness_candidate = CandidateAction {
+            action: GameAction::CastSpellAsMadness {
+                object_id: spell_id,
+                card_id,
+                payment_mode: CastPaymentMode::Auto,
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
+        };
+        let ctx = policy_ctx(&state, &decision, &madness_candidate, &config, &context);
+        let effects = ctx.effects();
+        assert_eq!(
+            effects.len(),
+            1,
+            "CastSpellAsMadness sees only Spell abilities, got {effects:?}"
+        );
+        assert!(matches!(effects[0], Effect::Draw { .. }));
+
+        // CastSpellAsSneak — same behavior
+        let sneak_candidate = CandidateAction {
+            action: GameAction::CastSpellAsSneak {
+                hand_object: spell_id,
+                card_id,
+                creature_to_return: ObjectId(999),
+                payment_mode: CastPaymentMode::Auto,
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
+        };
+        let ctx = policy_ctx(&state, &decision, &sneak_candidate, &config, &context);
+        let effects = ctx.effects();
+        assert_eq!(
+            effects.len(),
+            1,
+            "CastSpellAsSneak sees only Spell abilities, got {effects:?}"
+        );
+        assert!(matches!(effects[0], Effect::Draw { .. }));
+
+        // CastSpellAsWebSlinging — same behavior
+        let webslinging_candidate = CandidateAction {
+            action: GameAction::CastSpellAsWebSlinging {
+                hand_object: spell_id,
+                card_id,
+                creature_to_return: ObjectId(999),
+                payment_mode: CastPaymentMode::Auto,
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
+        };
+        let ctx = policy_ctx(&state, &decision, &webslinging_candidate, &config, &context);
+        let effects = ctx.effects();
+        assert_eq!(
+            effects.len(),
+            1,
+            "CastSpellAsWebSlinging sees only Spell abilities, got {effects:?}"
+        );
+        assert!(matches!(effects[0], Effect::Draw { .. }));
+    }
+
+    /// Positive test: a regular CastSpell also sees only Spell abilities (the
+    /// existing behavior, now unified with the alternative-cast path).
+    #[test]
+    fn cast_spell_includes_spell_abilities_excludes_activated() {
+        let mut state = GameState::new_two_player(42);
+        let config = AiConfig::default();
+        let context = crate::context::AiContext::empty(&config.weights);
+
+        let card_id = CardId(100);
+        let spell_id = create_object(
+            &mut state,
+            card_id,
+            PlayerId(0),
+            "Regular Spell".to_string(),
+            Zone::Hand,
+        );
+        *Arc::make_mut(&mut state.objects.get_mut(&spell_id).unwrap().abilities) = vec![
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 2 },
+                    target: TargetFilter::Controller,
+                },
+            ),
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ),
+        ];
+
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::Priority {
+                player: PlayerId(0),
+            },
+            candidates: Vec::new(),
+        };
+
+        let candidate = CandidateAction {
+            action: GameAction::CastSpell {
+                object_id: spell_id,
+                card_id,
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            },
+            metadata: ActionMetadata::for_actor(Some(PlayerId(0)), TacticalClass::Spell),
+        };
+        let ctx = policy_ctx(&state, &decision, &candidate, &config, &context);
+        let effects = ctx.effects();
+        assert_eq!(
+            effects.len(),
+            1,
+            "CastSpell sees only Spell abilities, got {effects:?}"
+        );
+        assert!(matches!(effects[0], Effect::Draw { .. }));
     }
 }

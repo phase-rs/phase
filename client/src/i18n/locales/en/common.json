@@ -179,6 +179,7 @@
       "exportedTo": "Exported to {{path}}.",
       "exportRequested": "Export requested — {{filename}}.",
       "exportFailed": "Could not export game state.",
+      "exportFailedDetail": "Could not export game state. {{detail}}",
       "replayExported": "Replay saved as {{filename}}.",
       "replayExportUnavailable": "No replay recording is available for this game.",
       "replayExportFailed": "Could not export the replay."
@@ -285,7 +286,9 @@
     "loading": "Loading..."
   },
   "turnBanner": {
-    "turn": "Turn {{number}}"
+    "turn": "Turn {{number}}",
+    "yourTurn": "Your turn",
+    "opponentTurn": "{{name}}'s turn"
   },
   "diceRoll": {
     "rollingForFirst": "Rolling for first player",

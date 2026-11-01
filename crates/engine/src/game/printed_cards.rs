@@ -20,11 +20,12 @@ use crate::types::card::{CardFace, CardLayout, LayoutKind, PrintedCardRef, Print
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::counter::CounterType;
 use crate::types::format::GameFormat;
-use crate::types::game_state::{GameState, MeldPairRecord, OutsideGameFaces};
+use crate::types::game_state::{GameState, MeldPairRecord, OutsideGameFaces, StackEntryKind};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use crate::types::replacements::ReplacementEvent;
+use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 use std::collections::HashMap;
 use std::ops::ControlFlow;
@@ -1179,7 +1180,7 @@ pub fn snapshot_object_base_face(obj: &GameObject) -> BackFaceData {
 // The reusable visitor this file's TODO asked for now exists:
 // `crate::types::ability_visit`. `game/coverage.rs` is still NOT migrated — its
 // pass builds `ParsedItem` trees rather than yielding `Effect`s, and
-// `coverage::ability_tree_any` is deliberately narrower (it has a `_ => {}`
+// `types::ability_visit::ability_tree_any` is deliberately narrower (it has a `_ => {}`
 // wildcard); broadening it would change the coverage report. See the
 // `types::ability_visit` module doc.
 // ---------------------------------------------------------------------------
@@ -1797,6 +1798,7 @@ fn collect_meld_effects_from_ability<'a>(
 /// Does not finalize public state or flush layers.
 fn reapply_printed_faces_from_card_db(state: &mut GameState, db: &CardDatabase) -> (bool, bool) {
     let object_ids: Vec<_> = state.objects.keys().copied().collect();
+    let mut refreshed_ids = Vec::new();
     let mut changed_any = false;
     let mut changed_battlefield = false;
 
@@ -1813,7 +1815,25 @@ fn reapply_printed_faces_from_card_db(state: &mut GameState, db: &CardDatabase) 
             continue;
         };
 
-        let zone = state.objects[&object_id].zone;
+        let object = &state.objects[&object_id];
+        let zone = object.zone;
+        let canonical = StaticDefinition::new(StaticMode::CantBeCountered);
+        // CR 112.1 + CR 611.2c: the paid rules modification belongs to this
+        // actual spell, including its parked resolving carrier, until Stack exit.
+        let cast_prohibition = (zone == Zone::Stack
+            && state.stack.iter().chain(state.resolving_stack_entry.iter()).any(|entry| {
+                entry.id == object_id && entry.source_id == object_id
+                    && matches!(entry.kind, StackEntryKind::Spell { card_id, .. } if card_id == object.card_id)
+            })
+            && !object.base_static_definitions.contains(&canonical))
+            .then(|| object.static_definitions.iter_all().find(|definition| **definition == canonical).cloned())
+            .flatten();
+        // CR 718.3b + CR 718.4 + CR 601.2a: a saved prototype form is live only
+        // for the spell (including one still being cast, which is on the stack)
+        // and the permanent it becomes; in every other zone the card has only
+        // its normal characteristics.
+        let in_prototype_lifetime = matches!(zone, Zone::Stack | Zone::Battlefield)
+            || crate::game::casting::is_spell_being_cast(state, object_id);
         if let Some(obj) = state.objects.get_mut(&object_id) {
             let is_face_down_battlefield = obj.face_down && obj.zone == Zone::Battlefield;
 
@@ -1839,6 +1859,15 @@ fn reapply_printed_faces_from_card_db(state: &mut GameState, db: &CardDatabase) 
                 obj.base_printed_ref = obj.printed_ref.clone();
             } else {
                 apply_card_face_to_object(obj, &card_face);
+                if in_prototype_lifetime {
+                    refreshed_ids.push(object_id);
+                } else if obj.prototype_form.is_some() {
+                    // CR 718.4 + CR 400.7: a form still carried off the stack
+                    // and battlefield (a state saved while replay left it in
+                    // place) is expired; drop it so a later normal cast cannot
+                    // revive it.
+                    crate::game::casting::clear_prototype_form(obj);
+                }
                 // CR 702.103b: Rehydration re-stamps printed characteristics from
                 // card-data.json, which clobbers the synthesized Aura subtype while
                 // `bestow_form` remains set (issue #3253). Re-apply the bestow
@@ -1931,6 +1960,15 @@ fn reapply_printed_faces_from_card_db(state: &mut GameState, db: &CardDatabase) 
             }
 
             populate_back_face_if_dfc(obj, db, &card_face);
+            if let Some(prohibition) = cast_prohibition {
+                if !obj
+                    .static_definitions
+                    .iter_all()
+                    .any(|definition| *definition == prohibition)
+                {
+                    obj.static_definitions.push(prohibition);
+                }
+            }
         }
 
         changed_any = true;
@@ -1939,6 +1977,10 @@ fn reapply_printed_faces_from_card_db(state: &mut GameState, db: &CardDatabase) 
         }
     }
 
+    // CR 718.3b: Printed base refresh must retain the saved alternative
+    // characteristics of a prototyped spell or the permanent it becomes; the
+    // batch holds only objects inside that lifetime (CR 718.4).
+    super::layers::apply_prototype_characteristics(state, refreshed_ids);
     (changed_any, changed_battlefield)
 }
 
@@ -2045,6 +2087,7 @@ pub fn derive_colors_from_mana_cost(mana_cost: &ManaCost) -> Vec<ManaColor> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::game_object::PrototypeFormState;
     use crate::types::ability::ChooseOneOfKind;
     use crate::types::format::FormatConfig;
 
@@ -3542,6 +3585,236 @@ mod tests {
         );
     }
 
+    #[test]
+    fn cast_prohibition_restore_prototype_refresh_excludes_token_face_down_and_missing_faces() {
+        let mut face = test_face(
+            "Form isolation",
+            "form-isolation",
+            vec![CoreType::Creature],
+            ManaCost::Cost {
+                generic: 7,
+                shards: vec![],
+            },
+        );
+        face.power = Some(PtValue::Fixed(4));
+        face.toughness = Some(PtValue::Fixed(3));
+        let db =
+            CardDatabase::from_json_str(&serde_json::json!({ "form isolation": face }).to_string())
+                .unwrap();
+        let form = PrototypeFormState {
+            mana_cost: ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+            },
+            power: 2,
+            toughness: 1,
+            colors: vec![ManaColor::Blue],
+        };
+        let mut state = GameState::new_two_player(42);
+        let mut ids = Vec::new();
+        for _ in 0..6 {
+            ids.push(create_object_from_card_face(
+                &mut state,
+                db.get_face_by_name("Form isolation").unwrap(),
+                PlayerId(0),
+            ));
+        }
+        let [ordinary, token, face_down, missing_ref, missing_face, expired] = ids.as_slice()
+        else {
+            unreachable!()
+        };
+        for id in &ids {
+            let object = state.objects.get_mut(id).unwrap();
+            object.prototype_form = Some(form.clone());
+            object.name = "stale display".to_string();
+            object.power = Some(77);
+        }
+        // CR 718.3b: the ordinary positive is a permanent inside the form's
+        // lifetime; `expired` stays in the library, outside it (CR 718.4).
+        state.objects.get_mut(ordinary).unwrap().zone = Zone::Battlefield;
+        {
+            let object = state.objects.get_mut(token).unwrap();
+            object.is_token = true;
+            object.zone = Zone::Battlefield;
+            object.base_printed_ref = None;
+            object.power = Some(6);
+            object.toughness = Some(8);
+        }
+        {
+            let object = state.objects.get_mut(face_down).unwrap();
+            object.zone = Zone::Battlefield;
+            object.face_down = true;
+            object.back_face = Some(snapshot_object_face(object));
+        }
+        state.objects.get_mut(missing_ref).unwrap().printed_ref = None;
+        state
+            .objects
+            .get_mut(missing_face)
+            .unwrap()
+            .printed_ref
+            .as_mut()
+            .unwrap()
+            .oracle_id = "missing-face".to_string();
+        // Bounded branch isolation before the existing finalizer: saved markers
+        // on tokens/face-down objects deliberately distinguish exclusion from
+        // this new ordinary-refresh batch. Public valid-form lifecycles are
+        // covered independently through Raw/Trusted and Immediate/Defer.
+        rehydrate_game_from_card_db_with_finalization(
+            &mut state,
+            &db,
+            CardDbRehydrationFinalization::Defer,
+        );
+        assert_eq!(state.objects[ordinary].name, "Form isolation");
+        assert_eq!(
+            (
+                state.objects[ordinary].power,
+                state.objects[ordinary].toughness
+            ),
+            (Some(2), Some(1))
+        );
+        assert_eq!(state.objects[ordinary].mana_cost, form.mana_cost);
+        assert_eq!(state.objects[ordinary].color, form.colors);
+        assert_eq!(state.objects[ordinary].base_power, Some(4));
+        assert_eq!(state.objects[ordinary].prototype_form, Some(form.clone()));
+        // CR 718.4: outside the stack and battlefield the refreshed card keeps
+        // only its normal characteristics, and the expired form is dropped.
+        assert_eq!(
+            state.objects[expired].name, "Form isolation",
+            "expired-form card really refreshed"
+        );
+        assert_eq!(
+            (
+                state.objects[expired].power,
+                state.objects[expired].toughness
+            ),
+            (Some(4), Some(3))
+        );
+        assert_eq!(
+            state.objects[expired].mana_cost,
+            ManaCost::Cost {
+                generic: 7,
+                shards: vec![],
+            }
+        );
+        assert!(state.objects[expired].color.is_empty());
+        assert_eq!(state.objects[expired].prototype_form, None);
+        assert_eq!(
+            (state.objects[token].power, state.objects[token].toughness),
+            (Some(6), Some(8))
+        );
+        assert_eq!(state.objects[token].name, "stale display");
+        assert_eq!(
+            state.objects[token].base_printed_ref,
+            state.objects[token].printed_ref
+        );
+        assert!(
+            state.objects[token].base_printed_ref.is_some(),
+            "token display refresh really executed"
+        );
+        assert_eq!(
+            (
+                state.objects[face_down].power,
+                state.objects[face_down].toughness
+            ),
+            (Some(2), Some(2))
+        );
+        assert_eq!(
+            state.objects[face_down].back_face.as_ref().unwrap().name,
+            "Form isolation",
+            "hidden printed face really refreshed"
+        );
+        for id in [missing_ref, missing_face] {
+            assert_eq!(state.objects[id].name, "stale display");
+            assert_eq!(state.objects[id].power, Some(77));
+        }
+    }
+
+    #[test]
+    fn cast_prohibition_restore_two_sources_and_actual_resolution_carrier_transfer() {
+        let face = test_face(
+            "Paired source",
+            "paired-source",
+            vec![CoreType::Creature],
+            ManaCost::default(),
+        );
+        let db =
+            CardDatabase::from_json_str(&serde_json::json!({ "paired source": face }).to_string())
+                .unwrap();
+        let canonical = StaticDefinition::new(StaticMode::CantBeCountered);
+        let mut state = GameState::new_two_player(42);
+        let mut ids = Vec::new();
+        // Bounded identity fixture: no printed paused-Proxy ability is claimed.
+        // Each independent current object has its own matching Spell entry.
+        for _ in 0..2 {
+            let id = create_object_from_card_face(
+                &mut state,
+                db.get_face_by_name("Paired source").unwrap(),
+                PlayerId(0),
+            );
+            super::super::zones::remove_from_zone(&mut state, id, Zone::Library, PlayerId(0));
+            let object = state.objects.get_mut(&id).unwrap();
+            object.zone = Zone::Stack;
+            object.name = "stale display".to_string();
+            object.static_definitions.push(canonical.clone());
+            state.stack.push_back(crate::types::game_state::StackEntry {
+                id,
+                source_id: id,
+                controller: PlayerId(0),
+                kind: StackEntryKind::Spell {
+                    card_id: object.card_id,
+                    ability: None,
+                    casting_variant: crate::types::game_state::CastingVariant::Normal,
+                    actual_mana_spent: 0,
+                },
+            });
+            ids.push(id);
+        }
+        let parked = state.stack.pop_back().unwrap();
+        super::super::stack::begin_resolving_stack_entry(&mut state, parked, None)
+            .expect("one actual resolution carrier transfer");
+        for _ in 0..2 {
+            rehydrate_game_from_card_db_with_finalization(
+                &mut state,
+                &db,
+                CardDbRehydrationFinalization::Defer,
+            );
+            for id in &ids {
+                assert_eq!(state.objects[id].name, "Paired source");
+                assert_eq!(
+                    state.objects[id]
+                        .static_definitions
+                        .iter_all()
+                        .filter(|definition| **definition == canonical)
+                        .count(),
+                    1
+                );
+                assert!(!state.objects[id]
+                    .base_static_definitions
+                    .contains(&canonical));
+            }
+        }
+        // A valid other source must not authorize a cross-wired carrier.
+        state.resolving_stack_entry.as_mut().unwrap().source_id = ids[0];
+        rehydrate_game_from_card_db_with_finalization(
+            &mut state,
+            &db,
+            CardDbRehydrationFinalization::Defer,
+        );
+        assert_eq!(
+            state.objects[&ids[0]]
+                .static_definitions
+                .iter_all()
+                .filter(|definition| **definition == canonical)
+                .count(),
+            1
+        );
+        assert!(!state.objects[&ids[1]]
+            .static_definitions
+            .iter_all()
+            .any(|definition| *definition == canonical));
+        assert_eq!(state.objects[&ids[1]].name, "Paired source");
+    }
+
     fn test_class_face(name: &str, oracle_id: &str) -> CardFace {
         let mut face = test_face(
             name,
@@ -4407,17 +4680,39 @@ mod tests {
         };
         walk_effect(&delayed, &mut names);
 
-        let flip = Effect::FlipCoin {
-            win_effect: Some(Box::new(conjure_ability("flip_win", Zone::Hand))),
-            lose_effect: Some(Box::new(conjure_ability("flip_lose", Zone::Hand))),
-            flipper: crate::types::ability::TargetFilter::Controller,
-        };
-        walk_effect(&flip, &mut names);
+        // `FlipCoins` carries both branches in every run mode; walk each mode's pair.
+        for (run, win, lose) in [
+            (
+                crate::types::ability::CoinFlipRun::single(),
+                "flip_win",
+                "flip_lose",
+            ),
+            (
+                crate::types::ability::CoinFlipRun::Exactly {
+                    count: QuantityExpr::Fixed { value: 2 },
+                },
+                "flips_win",
+                "flips_lose",
+            ),
+            (
+                crate::types::ability::CoinFlipRun::UntilLoss,
+                "until_loss_win",
+                "until_loss_lose",
+            ),
+        ] {
+            let flips = Effect::FlipCoins {
+                flips: run,
+                win_effect: Some(Box::new(conjure_ability(win, Zone::Hand))),
+                lose_effect: Some(Box::new(conjure_ability(lose, Zone::Hand))),
+                flipper: crate::types::ability::TargetFilter::Controller,
+            };
+            walk_effect(&flips, &mut names);
+        }
 
-        let until_lose = Effect::FlipCoinUntilLose {
-            win_effect: Box::new(conjure_ability("until_lose", Zone::Hand)),
+        let contest = Effect::ExileTopCardContest {
+            winner_effect: Box::new(conjure_ability("contest_winner", Zone::Hand)),
         };
-        walk_effect(&until_lose, &mut names);
+        walk_effect(&contest, &mut names);
 
         let roll = Effect::RollDie {
             count: QuantityExpr::Fixed { value: 1 },
@@ -4485,6 +4780,7 @@ mod tests {
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: vec![],
             static_abilities: vec![token_static],
             enter_with_counters: vec![],
@@ -4629,7 +4925,11 @@ mod tests {
             "delayed",
             "flip_win",
             "flip_lose",
-            "until_lose",
+            "flips_win",
+            "flips_lose",
+            "until_loss_win",
+            "until_loss_lose",
+            "contest_winner",
             "roll",
             "choose_one",
             "trigger",
@@ -4782,7 +5082,12 @@ mod tests {
 
         let obj = state.objects.get(&aura_id).unwrap();
         assert_eq!(obj.zone, Zone::Battlefield);
-        assert_eq!(obj.bestow_form, Some(BestowFormState));
+        assert_eq!(
+            obj.bestow_form,
+            Some(BestowFormState {
+                removed_creature_subtypes: vec!["Insect".into(), "Monk".into()],
+            })
+        );
         assert!(
             obj.card_types.subtypes.iter().any(|s| s == "Aura"),
             "live subtypes must include Aura after rehydrate, got {:?}",
@@ -4797,6 +5102,9 @@ mod tests {
             !obj.card_types.core_types.contains(&CoreType::Creature),
             "bestowed object must not keep Creature core type"
         );
+        // CR 205.1a: a bestowed Aura is not a creature, so it has no creature types.
+        assert_eq!(obj.card_types.subtypes, vec!["Aura".to_string()]);
+        assert_eq!(obj.base_card_types.subtypes, vec!["Aura".to_string()]);
     }
 
     /// A graveyard object whose live face is the BACK half and whose stashed

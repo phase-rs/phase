@@ -89,6 +89,7 @@ fn chthonian_nightmare_activates_pays_x_energy_and_reanimates_by_mana_value() {
         .act(GameAction::ActivateAbility {
             source_id: nightmare,
             ability_index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("begin activation");
 

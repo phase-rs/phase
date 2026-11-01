@@ -1,8 +1,11 @@
+import { generateProtocolVersions, protocolGenerationPlugin } from "./protocol-generation";
 import path from "node:path";
 import type { Plugin } from "vite";
 import { defineConfig } from "vitest/config";
 import { resolveMultiplayerServerUrls } from "./src/config/multiplayerServerUrls";
 import { resolveTurnCredentialsUrl } from "./src/config/turnCredentials";
+
+generateProtocolVersions();
 
 const multiplayerServers = resolveMultiplayerServerUrls((name) => process.env[name]);
 
@@ -67,7 +70,7 @@ function pwaRegisterStubPlugin(): Plugin {
 }
 
 export default defineConfig({
-  plugins: [wasmStubPlugin(), pwaRegisterStubPlugin()],
+  plugins: [protocolGenerationPlugin(),wasmStubPlugin(), pwaRegisterStubPlugin()],
   define: {
     __SCRYFALL_DATA_URL__: JSON.stringify("/scryfall-data.json"),
     __SCRYFALL_TOKEN_IMAGES_URL__: JSON.stringify("/scryfall-token-images.json"),

@@ -66,14 +66,19 @@ fn krark_oracle_text_trigger_branches_match_direct_parse() {
         .execute
         .as_ref()
         .expect("trigger should have execute");
-    let Effect::FlipCoin {
+    let Effect::FlipCoins {
+        flips,
         win_effect,
         lose_effect,
         ..
     } = execute.effect.as_ref()
     else {
-        panic!("expected FlipCoin, got {:?}", execute.effect);
+        panic!("expected FlipCoins, got {:?}", execute.effect);
     };
+    assert!(
+        flips.is_single_flip(),
+        "expected a single flip, got {flips:?}"
+    );
     let win = win_effect.as_ref().expect("win branch");
     let lose = lose_effect.as_ref().expect("lose branch");
     assert!(
@@ -124,14 +129,19 @@ fn krark_battlefield_trigger_has_correct_flip_branches() {
         .execute
         .as_ref()
         .expect("execute");
-    let Effect::FlipCoin {
+    let Effect::FlipCoins {
+        flips,
         win_effect,
         lose_effect,
         ..
     } = execute.effect.as_ref()
     else {
-        panic!("expected FlipCoin, got {:?}", execute.effect);
+        panic!("expected FlipCoins, got {:?}", execute.effect);
     };
+    assert!(
+        flips.is_single_flip(),
+        "expected a single flip, got {flips:?}"
+    );
     assert!(matches!(
         win_effect.as_ref().unwrap().effect.as_ref(),
         Effect::CopySpell { .. }

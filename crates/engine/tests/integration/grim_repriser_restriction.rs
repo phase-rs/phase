@@ -109,6 +109,7 @@ fn grim_activation_refused_with_no_damage() {
             .act(GameAction::ActivateAbility {
                 source_id: grim,
                 ability_index,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             })
             .is_err(),
         "the submit path must reject the activation too"
@@ -200,6 +201,7 @@ fn grim_activation_refused_after_combat_damage_only() {
             .act(GameAction::ActivateAbility {
                 source_id: grim,
                 ability_index,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             })
             .is_err(),
         "the submit path must reject the activation too"
@@ -245,6 +247,7 @@ fn grim_activation_refused_after_damage_to_creature_only() {
             .act(GameAction::ActivateAbility {
                 source_id: grim,
                 ability_index,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             })
             .is_err(),
         "the submit path must reject the activation too"

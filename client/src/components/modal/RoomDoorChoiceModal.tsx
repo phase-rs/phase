@@ -1,3 +1,4 @@
+import type { ParseKeys } from "i18next";
 import { useCallback, useState } from "react";
 import { motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
@@ -8,20 +9,20 @@ import { ChoiceOverlay, ConfirmButton } from "./ChoiceOverlay.tsx";
 type ChooseRoomDoor = Extract<WaitingFor, { type: "ChooseRoomDoor" }>;
 
 // CR 709.5c: i18n keys for each door (half) of a Room permanent.
-const DOOR_LABEL_KEYS: Record<RoomDoor, string> = {
+const DOOR_LABEL_KEYS = {
   Left: "roomDoor.left",
   Right: "roomDoor.right",
-};
+} as const satisfies Record<RoomDoor, ParseKeys<"game">>;
 
 // CR 709.5f-g: i18n keys for the operation applied to the chosen half. A
 // resolving prompt never offers `LockOrUnlock` as a leaf option (the engine
 // expands it into concrete `Unlock`/`Lock` entries per eligible door), but the
 // key is mapped for exhaustiveness over the typed union.
-const OP_LABEL_KEYS: Record<DoorLockOp["type"], string> = {
+const OP_LABEL_KEYS = {
   Unlock: "roomDoor.unlock",
   Lock: "roomDoor.lock",
   LockOrUnlock: "roomDoor.lockOrUnlock",
-};
+} as const satisfies Record<DoorLockOp["type"], ParseKeys<"game">>;
 
 export function RoomDoorChoiceModal({
   data,

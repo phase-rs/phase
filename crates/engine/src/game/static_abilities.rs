@@ -1033,7 +1033,8 @@ pub fn check_static_ability_sources(
 
 /// CR 611.1 + CR 611.3: Scan `state.transient_continuous_effects` for an effect
 /// bound to `player_id` (via `TargetFilter::SpecificPlayer { id }`) whose
-/// modifications include `AddStaticMode { mode }` matching the given `mode`.
+/// modifications include `AddStaticMode { mode }`, or `AddKeyword` of the
+/// keyword `mode` corresponds to (`StaticMode::as_keyword`).
 /// Honors `ForAsLongAs` duration conditions and explicit `condition` gates.
 ///
 /// This is the canonical query for player-scoped spell-applied restrictions
@@ -1061,8 +1062,13 @@ pub(crate) fn transient_grants_static_mode_to_player(
         {
             continue;
         }
-        let grants_mode = tce.modifications.iter().any(|m| {
-            matches!(m, ContinuousModification::AddStaticMode { mode: m_mode } if m_mode == mode)
+        // CR 702.11c + CR 702.18a: a resolved "you gain hexproof/shroud" is a keyword grant on the player.
+        let grants_mode = tce.modifications.iter().any(|m| match m {
+            ContinuousModification::AddStaticMode { mode: m_mode } => m_mode == mode,
+            ContinuousModification::AddKeyword { keyword } => {
+                mode.as_keyword().as_ref() == Some(keyword)
+            }
+            _ => false,
         });
         if grants_mode {
             return true;
@@ -1375,7 +1381,7 @@ pub fn build_cost_permission_context(
 /// identical CR 810.8a fold on the can't-lose side.
 pub fn player_has_cant_win(state: &GameState, player_id: PlayerId) -> bool {
     cant_win_active_for(state, player_id)
-        || (super::topology::has_two_headed_giant_shared_resources(state)
+        || (super::topology::has_shared_life(state, player_id)
             && super::players::teammates(state, player_id)
                 .into_iter()
                 .any(|teammate| cant_win_active_for(state, teammate)))
@@ -1425,7 +1431,7 @@ fn life_lock_active_for(state: &GameState, player_id: PlayerId, mode: StaticMode
 /// propagates from either teammate.
 pub fn player_has_cant_gain_life(state: &GameState, player_id: PlayerId) -> bool {
     life_lock_active_for(state, player_id, StaticMode::CantGainLife)
-        || (super::topology::has_two_headed_giant_shared_resources(state)
+        || (super::topology::has_shared_life(state, player_id)
             && super::players::teammates(state, player_id)
                 .into_iter()
                 .any(|teammate| life_lock_active_for(state, teammate, StaticMode::CantGainLife)))
@@ -1443,7 +1449,7 @@ pub fn player_has_cant_gain_life(state: &GameState, player_id: PlayerId) -> bool
 /// — in team-based formats the lock also propagates from either teammate.
 pub fn player_has_cant_lose_life(state: &GameState, player_id: PlayerId) -> bool {
     life_lock_active_for(state, player_id, StaticMode::CantLoseLife)
-        || (super::topology::has_two_headed_giant_shared_resources(state)
+        || (super::topology::has_shared_life(state, player_id)
             && super::players::teammates(state, player_id)
                 .into_iter()
                 .any(|teammate| life_lock_active_for(state, teammate, StaticMode::CantLoseLife)))
@@ -1711,9 +1717,9 @@ pub fn player_has_protection_from_everything(state: &GameState, player_id: Playe
 /// True when a functioning `StaticMode::Hexproof` static's `affected` filter
 /// matches the player (Battlefield/command-zone grantors — Sigarda's player
 /// half, "You have hexproof.") or when a transient continuous effect grants
-/// `AddStaticMode { Hexproof }` to that player specifically. Does **not**
-/// inspect permanent-scope `Keyword::Hexproof` (that is the object target path
-/// in `targeting::can_target`).
+/// `AddStaticMode { Hexproof }` or `AddKeyword { Hexproof }` to that player
+/// specifically. Does **not** inspect permanent-scope `Keyword::Hexproof` (that
+/// is the object target path in `targeting::can_target`).
 pub fn player_has_hexproof(state: &GameState, player_id: PlayerId) -> bool {
     check_static_ability(
         state,
@@ -1728,7 +1734,7 @@ pub fn player_has_hexproof(state: &GameState, player_id: PlayerId) -> bool {
 /// CR 702.18a: Whether `player_id` currently has shroud as a player.
 ///
 /// Symmetric to [`player_has_hexproof`] for `StaticMode::Shroud` / transient
-/// `AddStaticMode { Shroud }` grants. Permanent-scope shroud stays on the
+/// `AddStaticMode { Shroud }` or `AddKeyword { Shroud }` grants. Permanent-scope shroud stays on the
 /// object keyword path.
 pub fn player_has_shroud(state: &GameState, player_id: PlayerId) -> bool {
     check_static_ability(
@@ -1890,6 +1896,10 @@ pub fn player_protection_from_object(
                 | ProtectionTarget::Quality(_)
                 | ProtectionTarget::CardType(_)
                 | ProtectionTarget::Filter(_) => false,
+                // CR 702.16i: no card grants a color-set protection to a player;
+                // inert like the arms above. Object-level sets expand through
+                // `keywords::resolve_granted_protection`.
+                ProtectionTarget::EachColor(_) => false,
             };
             if protects {
                 return true;

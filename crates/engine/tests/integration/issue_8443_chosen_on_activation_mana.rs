@@ -17,9 +17,9 @@ use engine::game::printed_cards::apply_card_face_to_object;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, ChoiceValue,
-    ChooseOneOfKind, ChosenAttribute, ContinuousModification, Duration, Effect, ManaProduction,
-    PlayerFilter, QuantityExpr, ReplacementDefinition, StaticDefinition, TargetFilter,
-    TargetSelectionMode,
+    ChooseOneOfKind, ChosenAttribute, ContinuousModification, ControllerRef, Duration, Effect,
+    ManaProduction, PlayerFilter, QuantityExpr, ReplacementDefinition, StaticDefinition,
+    TargetFilter, TargetSelectionMode,
 };
 use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
@@ -430,6 +430,7 @@ fn astral_harmonize_board() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
 
 fn persisted_color_choice() -> Effect {
     Effect::Choose {
+        chooser: ControllerRef::You,
         choice_type: ChoiceType::color(),
         persist: true,
         selection: TargetSelectionMode::Chosen,
@@ -520,10 +521,7 @@ fn install_unrelated_chooser(
                         .affected(TargetFilter::SpecificObject { id: baloth })
                         .modifications(vec![ContinuousModification::CopyValues {
                             values: Box::new(values),
-                            display_source: Default::default(),
-                            printed_ref: None,
-                            token_image_ref: None,
-                            token_art: None,
+                            display: Default::default(),
                         }])],
                     duration: Some(Duration::UntilEndOfTurn),
                     target: None,
@@ -706,6 +704,7 @@ fn activate_lotus_choosing(runner: &mut GameRunner, lotus: ObjectId, color: Mana
         .act(GameAction::ActivateAbility {
             source_id: lotus,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Nyx Lotus can be activated");
     match &runner.state().waiting_for {
@@ -1317,6 +1316,7 @@ fn nyx_lotus_surplus_color_pays_generic_alongside_ironworks() {
         .act(GameAction::ActivateAbility {
             source_id: lotus,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Nyx Lotus activates");
     runner
@@ -1350,6 +1350,7 @@ fn nyx_lotus_surplus_color_pays_generic_alongside_ironworks() {
         .act(GameAction::ActivateAbility {
             source_id: ironworks.unwrap(),
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Ironworks activates during payment");
     runner
@@ -1613,6 +1614,7 @@ fn nyx_lotus_generic_capacity_follows_the_chosen_color() {
         .act(GameAction::ActivateAbility {
             source_id: board.ogre,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("the Ogre activates at 4 life");
     assert_eq!(board.runner.state().players[0].life, 1);
@@ -1622,6 +1624,7 @@ fn nyx_lotus_generic_capacity_follows_the_chosen_color() {
             .act(GameAction::ActivateAbility {
                 source_id: board.ogre,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .is_err(),
         "CR 119.4: 3 life cannot be paid at 1"

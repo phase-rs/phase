@@ -26,7 +26,8 @@ Commands: `scan` (triage every open PR), `inspect`/`recommend` (one PR),
 
 Invariants:
 - All GitHub access is read-only and goes through run_json (retried).
-- The event log is the only mutable store; append_event is its only writer.
+- The event log is canonical review memory; append_event is its only writer.
+- Dashboard discovery caches are disposable and never authorize GitHub actions.
 - Every tunable threshold lives in the constants block below, not inline.
 - Recommendations are advisory; precedence is the elif ladder in
   recommend_from_packet, ordered so safety (hard_stop) always wins.
@@ -63,6 +64,14 @@ PRIVATE_OVERRIDES = "private-overrides.json"
 DASHBOARD_SCHEMA_VERSION = 2
 DASHBOARD_RECENT_CLOSED_HOURS = 48
 DASHBOARD_DEFAULT_TERMINAL_LIMIT = 200
+# Must exceed the open-PR count: the census fails closed above it, and the
+# discovery cache is keyed on it, so a lower value forces a heavy re-bootstrap.
+DEFAULT_OPEN_PR_LIMIT = 250
+DISCOVERY_CACHE_VERSION = 1
+DISCOVERY_OVERLAP_SECONDS = 60
+DISCOVERY_REST_PAGE_SIZE = 100
+# Two endpoints per sweep: at most 40 REST requests, including replay passes.
+DISCOVERY_REST_MAX_REQUESTS = 20
 SUCCESS_STATES = {"accepted", "merged"}
 BLOCK_STATES = {"blocked", "changes_requested"}
 HOLD_STATES = {"held", "held_ci"}
@@ -542,6 +551,14 @@ def run_json(command: list[str]) -> Any:
     assert last_error is not None
     print((last_error.stderr or "").strip(), file=sys.stderr)
     raise last_error
+
+
+def is_gateway_timeout(error: subprocess.CalledProcessError) -> bool:
+    """GitHub answers a GraphQL read too costly to finish in time with 502/504.
+
+    Retrying the same query cannot succeed, so callers shrink the request.
+    """
+    return bool(re.search(r"HTTP 50[24]", error.stderr or ""))
 
 
 def gh_user() -> str:
@@ -1857,10 +1874,14 @@ def compact_pr_view(pr: dict[str, Any], acting_login: str) -> dict[str, Any]:
         "maintainer_merge_commit_count": maintainer_merge_commit_count(
             pr.get("commits") or [], acting_login
         ),
+        "commentsComplete": pr.get("commentsComplete"),
         "comments": [
             {
                 "author": comment.get("author", {}).get("login"),
+                "id": comment.get("id"),
                 "createdAt": comment.get("createdAt"),
+                "updatedAt": comment.get("updatedAt"),
+                "authorAssociation": comment.get("authorAssociation"),
                 "body_hash": text_hash(comment.get("body")),
                 "body_excerpt": excerpt(comment.get("body"), 300),
                 "requested_changes_expiry_marker": REQUESTED_CHANGES_EXPIRY_MARKER
@@ -1873,6 +1894,9 @@ def compact_pr_view(pr: dict[str, Any], acting_login: str) -> dict[str, Any]:
                 "author": review.get("author", {}).get("login"),
                 "state": review.get("state"),
                 "submittedAt": review.get("submittedAt"),
+                "updatedAt": review.get("updatedAt"),
+                "lastEditedAt": review.get("lastEditedAt"),
+                "authorAssociation": review.get("authorAssociation"),
                 "commit": (review.get("commit") or {}).get("oid"),
                 "body_hash": text_hash(review.get("body")),
                 "body_excerpt": excerpt(review.get("body"), 300),
@@ -1954,8 +1978,14 @@ def artifact_profile(
     policy: Policy,
     files: list[str] | None = None,
     classification: dict[str, Any] | None = None,
+    *,
+    author_is_repository_writer: bool = False,
 ) -> dict[str, Any]:
-    """Evaluate immutable, current-head contributor artifacts separately from proof."""
+    """Evaluate immutable, current-head contributor artifacts separately from proof.
+
+    The artifact contract binds contributors, not repository writers: a writer's
+    failures stay visible but never hold or decline.
+    """
     timing = admission_time_profile(pr, policy)
     body = str(pr.get("body") or "")
     head = str(pr.get("headRefOid") or "").lower()
@@ -2056,9 +2086,11 @@ def artifact_profile(
         "mode": policy.admission_mode,
         "enforcement_cutoff": policy.admission_enforced_after,
         **timing,
+        "hold": timing["hold"] and not author_is_repository_writer,
+        "repository_writer_exempt": author_is_repository_writer,
         "passes": not failures,
-        "would_decline": bool(failures),
-        "decline": timing["enforced"] and bool(failures),
+        "would_decline": bool(failures) and not author_is_repository_writer,
+        "decline": timing["enforced"] and bool(failures) and not author_is_repository_writer,
         "failures": failures,
         "gate_a_head": gate_matches[0][0] if len(gate_matches) == 1 else None,
         "final_review_head": review_matches[0] if len(review_matches) == 1 else None,
@@ -2099,7 +2131,12 @@ def has_accepted_pr_label(pr: dict[str, Any], accepted_label: str | None) -> boo
 
 
 def architecture_scope_profile(
-    pr: dict[str, Any], files: list[str], policy: Policy, private_overrides: dict[str, Any]
+    pr: dict[str, Any],
+    files: list[str],
+    policy: Policy,
+    private_overrides: dict[str, Any],
+    *,
+    author_is_repository_writer: bool = False,
 ) -> dict[str, Any]:
     matched_paths = sorted(
         path for path in files if matches_any(path, policy.architecture_scope_patterns)
@@ -2126,7 +2163,8 @@ def architecture_scope_profile(
         fold_login(str(login))
         for login in private_overrides.get("architecture_scope_authors", [])
     }
-    author_authorized = bool(author) and fold_login(str(author)) in private_authors
+    private_override = bool(author) and fold_login(str(author)) in private_authors
+    author_authorized = author_is_repository_writer or private_override
     issue_evidence_complete = bool(pr.get("closingIssuesReferencesComplete"))
     issues = (
         accepted_closing_issues(pr, policy.architecture_accepted_issue_label)
@@ -2153,7 +2191,8 @@ def architecture_scope_profile(
         "accepted_closing_issues": issues,
         "closing_issue_records": pr.get("closingIssuesReferences", []),
         "closing_issue_count": pr.get("closingIssuesReferencesCount"),
-        "author_private_override": author_authorized,
+        "author_private_override": private_override,
+        "author_repository_writer": author_is_repository_writer,
         "accepted_pr_label": pr_label_authorized,
         "closing_issue_evidence_complete": issue_evidence_complete,
         "files_complete": bool(pr.get("filesComplete")),
@@ -2496,7 +2535,7 @@ def author_activity_after(pr: dict[str, Any], timestamp: str | None) -> bool:
         for comment in pr.get("comments", [])
     ) or any(
         comment_login(review) == author_login
-        and timestamp_after(activity_timestamp(review, "submittedAt"), timestamp)
+        and timestamp_after(activity_timestamp(review, "submittedAt", "updatedAt", "lastEditedAt"), timestamp)
         for review in pr.get("reviews", [])
     )
 
@@ -2525,7 +2564,7 @@ def latest_maintainer_activity_timestamp(pr: dict[str, Any], acting_login: str |
         for comment in pr.get("comments", [])
         if comment_login(comment) == acting_login
     ] + [
-        activity_timestamp(review, "submittedAt")
+        activity_timestamp(review, "submittedAt", "updatedAt", "lastEditedAt")
         for review in pr.get("reviews", [])
         if comment_login(review) == acting_login
     ]
@@ -2551,7 +2590,7 @@ def member_commented_last(pr: dict[str, Any]) -> bool:
         (activity_timestamp(comment, "createdAt", "updatedAt"), comment)
         for comment in pr.get("comments", [])
     ] + [
-        (activity_timestamp(review, "submittedAt"), review)
+        (activity_timestamp(review, "submittedAt", "updatedAt", "lastEditedAt"), review)
         for review in pr.get("reviews", [])
     ]
     dated = [
@@ -2605,8 +2644,8 @@ def latest_requested_changes_review_timestamp(packet: dict[str, Any]) -> str | N
     ]
     if not reviews:
         return None
-    reviews.sort(key=lambda review: review.get("submittedAt") or "")
-    return reviews[-1].get("submittedAt")
+    reviews.sort(key=lambda review: activity_timestamp(review, "submittedAt", "updatedAt", "lastEditedAt") or "")
+    return activity_timestamp(reviews[-1], "submittedAt", "updatedAt", "lastEditedAt")
 
 
 def latest_requested_changes_warning(packet: dict[str, Any]) -> dict[str, Any] | None:
@@ -2796,7 +2835,9 @@ def recommend_from_packet(packet: dict[str, Any]) -> dict[str, Any]:
         # architecture scope is a data/authorization blocker no label can waive.
         action = "review"
         reason = "approved_for_review_label"
-    elif classification.get("hard_stop_paths"):
+    elif classification.get("hard_stop_paths") and not author_policy.get("repository_writer"):
+        # Hard-stop paths guard against contributor tampering; a repository
+        # writer changing CI, skills, or build config falls through to review.
         action = "request_changes"
         reason = "hard_stop"
     elif (packet.get("contributor") or {}).get("standing") == "skip":
@@ -3105,6 +3146,7 @@ def make_packet(
     gittensor: dict[str, Any] | None = None,
     first_block_event: dict[str, Any] | None = None,
     required_check_names: set[str] | None = None,
+    author_is_repository_writer: bool = False,
 ) -> dict[str, Any]:
     files = pr_files_from_view(pr)
     classification = classify_files(files, policy)
@@ -3121,15 +3163,25 @@ def make_packet(
     parse_diff = parse_diff_comment_state(
         pr.get("comments", []), {"github-actions", acting_login}
     )
-    artifacts = artifact_profile(pr, policy, files, classification)
+    artifacts = artifact_profile(
+        pr,
+        policy,
+        files,
+        classification,
+        author_is_repository_writer=author_is_repository_writer,
+    )
     architecture_scope = architecture_scope_profile(
-        pr, files, policy, private_overrides
+        pr,
+        files,
+        policy,
+        private_overrides,
+        author_is_repository_writer=author_is_repository_writer,
     )
     compact_pr = compact_pr_view(pr, acting_login)
     author_policy = {
-        "frontend_review_allowed": frontend_review_allowed(
-            compact_pr.get("author_login"), private_overrides
-        )
+        "repository_writer": author_is_repository_writer,
+        "frontend_review_allowed": author_is_repository_writer
+        or frontend_review_allowed(compact_pr.get("author_login"), private_overrides),
     }
     proof = proof_profile(pr, contributor_summary, gittensor)
     if (
@@ -3261,7 +3313,7 @@ def pr_node_fields(
     review_body = " body" if include_review_body else ""
     comment_body = " body" if include_comment_body else ""
     full_reviews = (
-        f"reviews(first:50){{nodes{{author{{login}} authorAssociation state submittedAt commit{{oid}}{review_body}}}}} "
+        f"reviews(first:50){{nodes{{author{{login}} authorAssociation state submittedAt updatedAt lastEditedAt commit{{oid}}{review_body}}}}} "
         if include_full_reviews
         else ""
     )
@@ -3280,7 +3332,7 @@ def pr_node_fields(
     )
     comments = (
         f"comments(last:{comments_last})"
-        + "{totalCount pageInfo{hasNextPage endCursor} nodes{author{login} authorAssociation createdAt updatedAt"
+        + "{totalCount pageInfo{hasNextPage endCursor} nodes{id author{login} authorAssociation createdAt updatedAt"
         + comment_body
         + "}} "
     )
@@ -3293,7 +3345,7 @@ def pr_node_fields(
         "assignees(first:10){nodes{login}} "
         "isInMergeQueue mergeQueueEntry{position state} autoMergeRequest{enabledAt} "
         "files(first:100){totalCount pageInfo{hasNextPage endCursor} nodes{path}} "
-        f"latestReviews(first:20){{nodes{{author{{login}} authorAssociation state submittedAt commit{{oid}}{review_body}}}}} "
+        f"latestReviews(first:20){{nodes{{author{{login}} authorAssociation state submittedAt updatedAt lastEditedAt commit{{oid}}{review_body}}}}} "
         f"{full_reviews}"
         f"{comments}"
         f"{status_rollup}"
@@ -3317,6 +3369,31 @@ SCAN_PR_QUERY = (
     )
     + "}"
     "}}}"
+)
+
+# Every independent freshness surface is watched without files, bodies or the
+# twenty-commit author history. Creation order cannot move a PR between pages.
+CENSUS_PR_FIELDS = (
+    "number title state isDraft url createdAt updatedAt closedAt mergedAt headRefName headRefOid "
+    "baseRefName mergeStateStatus reviewDecision changedFiles author{login} "
+    "closingIssuesReferences(first:20){totalCount pageInfo{hasNextPage endCursor} "
+    "nodes{number state labels(first:20){totalCount pageInfo{hasNextPage endCursor} nodes{name}}}} "
+    "labels(first:100){totalCount pageInfo{hasNextPage endCursor} nodes{name}} "
+    "assignees(first:10){nodes{login}} "
+    "isInMergeQueue mergeQueueEntry{position state} autoMergeRequest{enabledAt} "
+    "reviews(first:50){nodes{author{login} authorAssociation state submittedAt updatedAt lastEditedAt commit{oid}}} "
+    "latestReviews(first:20){nodes{author{login} authorAssociation state submittedAt updatedAt lastEditedAt commit{oid}}} "
+    "comments(last:100){totalCount pageInfo{hasNextPage endCursor} "
+    "nodes{id author{login} authorAssociation createdAt updatedAt}} "
+    "commits(last:1){nodes{commit{statusCheckRollup{state contexts(first:80){nodes{__typename "
+    "... on CheckRun{name status conclusion} ... on StatusContext{context state}}}}}}}"
+)
+CENSUS_PR_QUERY = (
+    "query($owner:String!,$name:String!,$first:Int!,$after:String){"
+    "repository(owner:$owner,name:$name){"
+    "pullRequests(states:[OPEN], first:$first, after:$after,"
+    " orderBy:{field:CREATED_AT, direction:ASC}){"
+    "pageInfo{hasNextPage endCursor}nodes{" + CENSUS_PR_FIELDS + "}}}}"
 )
 
 TERMINAL_PR_QUERY = (
@@ -3443,6 +3520,8 @@ def graphql_reviews(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "authorAssociation": review.get("authorAssociation"),
             "state": review.get("state"),
             "submittedAt": review.get("submittedAt"),
+            "updatedAt": review.get("updatedAt"),
+            "lastEditedAt": review.get("lastEditedAt"),
             "commit": review.get("commit"),
             "body": review.get("body"),
         }
@@ -3526,6 +3605,7 @@ def normalize_graphql_pr(node: dict[str, Any]) -> dict[str, Any]:
         "filesComplete": graphql_connection_complete(files_connection),
         "comments": [
             {
+                "id": c.get("id"),
                 "author": {"login": (c.get("author") or {}).get("login")},
                 "authorAssociation": c.get("authorAssociation"),
                 "createdAt": c.get("createdAt"),
@@ -3535,6 +3615,7 @@ def normalize_graphql_pr(node: dict[str, Any]) -> dict[str, Any]:
             for c in graphql_nodes(node.get("comments"))
         ],
         "commentsComplete": graphql_connection_complete(node.get("comments")),
+        "commentsCount": (node.get("comments") or {}).get("totalCount"),
         "latestReviews": latest_reviews,
         "reviews": graphql_reviews(full_reviews) if full_reviews else latest_reviews,
         "commits": graphql_commit_authors(node),
@@ -3542,12 +3623,44 @@ def normalize_graphql_pr(node: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def github_repository(result: Any) -> dict[str, Any]:
+    if not isinstance(result, dict) or result.get("errors"):
+        raise ValueError("GitHub GraphQL returned errors or an invalid response")
+    repository = (result.get("data") or {}).get("repository")
+    if not isinstance(repository, dict):
+        raise ValueError("GitHub GraphQL repository is unavailable")
+    return repository
+
+
+def validate_discovery_pr(node: Any) -> None:
+    if (
+        not isinstance(node, dict)
+        or not isinstance(node.get("number"), int)
+        or node.get("state") not in {"OPEN", "CLOSED", "MERGED"}
+        or not node.get("headRefOid")
+    ):
+        raise ValueError("GitHub returned an incomplete or inaccessible PR")
+
+
+def validate_discovery_metadata(node: dict[str, Any], *, detail: bool) -> None:
+    required = {"labels", "comments", "reviews", "latestReviews", "closingIssuesReferences",
+                "commits", "assignees"}
+    if detail:
+        required.add("files")
+    if any(not isinstance(node.get(field), dict) for field in required) or any(
+        field not in node for field in ("author", "updatedAt", "reviewDecision", "isInMergeQueue",
+                                       "mergeQueueEntry", "autoMergeRequest", "baseRefName")
+    ) or (node.get("author") is not None and not isinstance(node["author"], dict)) or (detail and "body" not in node):
+        raise ValueError(f"GitHub returned incomplete freshness metadata for PR {node['number']}")
+
+
 def fetch_pr_nodes(repo: str, limit: int, query: str) -> list[dict[str, Any]]:
     owner, name = repo.split("/", 1)
     nodes: list[dict[str, Any]] = []
     cursor: str | None = None
+    page_limit = SCAN_PAGE_SIZE
     while len(nodes) < limit:
-        page_size = min(limit - len(nodes), SCAN_PAGE_SIZE)
+        page_size = min(limit - len(nodes), page_limit)
         variables = [
             "-f",
             f"owner={owner}",
@@ -3558,13 +3671,33 @@ def fetch_pr_nodes(repo: str, limit: int, query: str) -> list[dict[str, Any]]:
         ]
         if cursor:
             variables += ["-f", f"after={cursor}"]
-        result = run_json(["gh", "api", "graphql", "-f", f"query={query}", *variables])
-        connection = ((result.get("data") or {}).get("repository") or {}).get("pullRequests") or {}
-        nodes.extend(graphql_nodes(connection))
-        page_info = connection.get("pageInfo", {})
-        if not page_info.get("hasNextPage"):
+        try:
+            result = run_json(["gh", "api", "graphql", "-f", f"query={query}", *variables])
+        except subprocess.CalledProcessError as exc:
+            if page_size == 1 or not is_gateway_timeout(exc):
+                raise
+            # Re-read the same cursor with a smaller page for the rest of the walk.
+            page_limit = page_size // 2
+            continue
+        repository = github_repository(result)
+        connection = repository.get("pullRequests")
+        if not isinstance(connection, dict) or not isinstance(connection.get("nodes"), list):
+            raise ValueError("Incomplete GitHub pullRequests response")
+        page_info = connection.get("pageInfo")
+        if not isinstance(page_info, dict) or not isinstance(page_info.get("hasNextPage"), bool):
+            raise ValueError("Incomplete GitHub pullRequests pagination")
+        page_nodes = connection["nodes"]
+        for node in page_nodes:
+            validate_discovery_pr(node)
+            if query in {SCAN_PR_QUERY, CENSUS_PR_QUERY}:
+                validate_discovery_metadata(node, detail=query == SCAN_PR_QUERY)
+        nodes.extend(page_nodes)
+        if not page_info["hasNextPage"]:
             break
-        cursor = page_info.get("endCursor")
+        next_cursor = page_info.get("endCursor")
+        if not next_cursor or next_cursor == cursor or not page_nodes:
+            raise ValueError("GitHub pullRequests pagination did not advance")
+        cursor = next_cursor
     return nodes[:limit]
 
 
@@ -3662,6 +3795,42 @@ def required_checks_by_base(
     }
 
 
+def repository_writer_logins(repo: str) -> frozenset[str]:
+    """Folded logins holding write, maintain, or admin access to ``repo``.
+
+    Repository write access is the policy's maintainer boundary: a PR authored by
+    a writer is exempt from the contributor-only gates (hard-stop paths,
+    architecture scope, frontend policy, artifact admission). ``authorAssociation``
+    cannot answer this — a triage-only collaborator still reports ``COLLABORATOR``.
+    The ``permission=push`` filter includes maintain and admin. A failed lookup
+    returns an empty set, so unknown data never exempts an author.
+    """
+    try:
+        pages = run_json(
+            [
+                "gh",
+                "api",
+                f"repos/{repo}/collaborators",
+                "--method",
+                "GET",
+                "-f",
+                "permission=push",
+                "-F",
+                "per_page=100",
+                "--paginate",
+                "--slurp",
+            ]
+        )
+    except subprocess.CalledProcessError:
+        print(
+            f"could not list repository writers for {repo}; "
+            "applying contributor gates to every author",
+            file=sys.stderr,
+        )
+        return frozenset()
+    return frozenset(fold_login(str(user["login"])) for page in pages for user in page)
+
+
 # ─── Commands ────────────────────────────────────────────────────────────────
 
 
@@ -3677,6 +3846,7 @@ class ReviewContext:
     policy: Policy
     private_overrides: dict[str, Any]
     acting_login: str
+    repository_writers: frozenset[str]
     local_events: dict[tuple[int, str], dict[str, Any]]
     local_latest_events: dict[int, dict[str, Any]]
     local_latest_observations: dict[int, dict[str, Any]]
@@ -3698,6 +3868,7 @@ def load_review_context(args: argparse.Namespace) -> ReviewContext:
         policy=load_policy(args.config),
         private_overrides=load_private_overrides(args.state_dir),
         acting_login=args.acting_login or gh_user(),
+        repository_writers=repository_writer_logins(args.repo),
         local_events=latest_events_by_pr_head(events),
         local_latest_events=latest_events_by_pr(events),
         local_latest_observations=latest_observations_by_pr(events),
@@ -3732,15 +3903,16 @@ def packet_for_pr(
     local_latest_look = context.local_latest_looks.get(pr_number)
     local_latest_action = context.local_latest_actions.get(pr_number)
     first_block_event = context.first_block_events.get(head_key)
+    author_login = (pr.get("author") or {}).get("login")
     contributor_summary = build_contributor_summary(
-        (pr.get("author") or {}).get("login"),
+        author_login,
         pr_number,
         context.analytics_model,
         context.signal_occurrences,
         context.private_overrides,
     )
     gittensor = gittensor_summary(
-        (pr.get("author") or {}).get("login"),
+        author_login,
         context.gittensor_index,
         context.gittensor_warning,
     )
@@ -3755,6 +3927,8 @@ def packet_for_pr(
         gittensor,
         first_block_event,
         required_check_names,
+        author_is_repository_writer=bool(author_login)
+        and fold_login(author_login) in context.repository_writers,
     )
     packet["local_latest_event"] = local_latest_event
     packet["local_latest_observation"] = local_latest_observation
@@ -3868,11 +4042,14 @@ def scan_candidate(
     }
 
 
-def build_scan_output(context: ReviewContext, args: argparse.Namespace) -> dict[str, Any]:
+def build_scan_output(
+    context: ReviewContext, args: argparse.Namespace, nodes: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
     # The repo-wide scan uses small GraphQL pages, but includes individual check
     # contexts so its CI verdict can be restricted to the base branch's actual
     # merge requirements rather than every third-party status.
-    nodes = fetch_open_prs(args.repo, args.limit)
+    if nodes is None:
+        nodes = fetch_open_prs(args.repo, args.limit)
     prs = [normalize_graphql_pr(node) for node in nodes]
     required_checks = required_checks_by_base(args.repo, prs)
     candidates = []
@@ -4012,28 +4189,309 @@ def write_json_atomically(path: Path, value: dict[str, Any]) -> None:
     os.replace(temporary_path, path)
 
 
-def read_dashboard_archive(path: Path) -> dict[int, dict[str, Any]]:
+def read_dashboard_archive(path: Path, repo: str | None = None) -> dict[int, dict[str, Any]]:
     if not path.exists():
         return {}
     try:
         prior_snapshot = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return {}
-    if not isinstance(prior_snapshot, dict):
+    if not isinstance(prior_snapshot, dict) or (repo and prior_snapshot.get("repo", repo) != repo):
         return {}
     return dashboard_archive_rows(prior_snapshot.get("terminal_archive"))
 
 
+def discovery_watch(node: dict[str, Any]) -> dict[str, Any]:
+    """Comparable live metadata shared by full detail and the compact census."""
+    pr = normalize_graphql_pr(node)
+    for field in ("body", "files", "filesComplete", "commits"):
+        pr.pop(field, None)
+    for field in ("comments", "reviews", "latestReviews"):
+        pr[field] = [{key: value for key, value in item.items() if key != "body"}
+                     for item in pr[field]]
+    return pr
+
+
+def read_discovery_cache(path: Path, args: argparse.Namespace) -> dict[str, Any] | None:
+    try:
+        cache = json.loads(path.read_text(encoding="utf-8"))
+        if (
+            cache["version"] != DISCOVERY_CACHE_VERSION
+            or cache["repo"] != args.repo
+            or cache["bootstrap_limits"] != [args.limit, args.terminal_limit]
+            or parse_event_datetime(cache["query_started_at"]) is None
+            or not isinstance(cache["open_nodes"], dict)
+            or not isinstance(cache["watches"], dict)
+            or not isinstance(cache["candidates"], dict)
+            or not isinstance(cache["terminal_archive"], list)
+            or not isinstance(cache["delta_fingerprints"], dict)
+        ):
+            return None
+        if set(cache["open_nodes"]) != set(cache["watches"]) or set(cache["open_nodes"]) != set(cache["candidates"]):
+            return None
+        if any(not isinstance(row, dict) or not isinstance(row.get("pr"), int)
+               or row.get("state") not in {"CLOSED", "MERGED"}
+               for row in cache["terminal_archive"]):
+            return None
+        if any(not isinstance(values, dict) or any(not isinstance(value, str) for value in values.values())
+               for values in cache["delta_fingerprints"].values()):
+            return None
+        for number, node in cache["open_nodes"].items():
+            validate_discovery_pr(node)
+            validate_discovery_metadata(node, detail=True)
+            if str(node["number"]) != number or node["state"] != "OPEN":
+                return None
+            if not isinstance(cache["watches"][number], dict) or not isinstance(cache["candidates"][number], dict):
+                return None
+        return cache
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def fetch_issue_delta(repo: str, endpoint: str, since: str) -> list[dict[str, Any]]:
+    """Read complete REST since membership within a fixed request budget."""
+    # Deletions before a numbered-page offset can skip unread rows. Re-read
+    # multi-page results until membership agrees before advancing the checkpoint.
+    previous_ids: set[int] | None = None
+    rows: dict[int, dict[str, Any]] = {}
+    page = 1
+    requests = 0
+    while True:
+        if requests >= DISCOVERY_REST_MAX_REQUESTS:
+            raise ValueError(f"GitHub {endpoint} delta exceeded its {DISCOVERY_REST_MAX_REQUESTS}-request "
+                             "budget; discovery is incomplete and its checkpoint is unchanged")
+        requests += 1
+        command = ["gh", "api", f"repos/{repo}/{endpoint}", "--method", "GET",
+                   "-f", f"since={since}", "-f", "sort=created", "-f", "direction=asc",
+                   "-F", f"per_page={DISCOVERY_REST_PAGE_SIZE}", "-F", f"page={page}"]
+        if endpoint == "issues":
+            command += ["-f", "state=all"]
+        result = run_json(command)
+        if not isinstance(result, list) or any(
+            not isinstance(row, dict) or not isinstance(row.get("id"), int) for row in result
+        ):
+            raise ValueError(f"Invalid GitHub {endpoint} delta page {page}")
+        for row in result:
+            rows[row["id"]] = row
+        if len(result) < DISCOVERY_REST_PAGE_SIZE:
+            if page == 1 or set(rows) == previous_ids:
+                return list(rows.values())
+            previous_ids = set(rows)
+            rows = {}
+            page = 1
+        else:
+            page += 1
+
+
+def fetch_discovery_details(repo: str, numbers: list[int]) -> list[dict[str, Any]]:
+    owner, name = repo.split("/", 1)
+    fields = pr_node_fields(comments_last=100, include_full_reviews=True,
+                            include_pr_body=True, include_review_body=False,
+                            include_comment_body=True, status_contexts_first=80)
+    nodes = []
+    for start in range(0, len(numbers), SCAN_PAGE_SIZE):
+        nodes.extend(fetch_discovery_detail_chunk(owner, name, fields, numbers[start:start + SCAN_PAGE_SIZE]))
+    return nodes
+
+
+def fetch_discovery_detail_chunk(owner: str, name: str, fields: str, chunk: list[int]) -> list[dict[str, Any]]:
+    aliases = " ".join(f"q{index}:pullRequest(number:{number}){{{fields}}}"
+                       for index, number in enumerate(chunk))
+    query = "query($owner:String!,$name:String!){repository(owner:$owner,name:$name){" + aliases + "}}"
+    try:
+        repository = github_repository(run_json([
+            "gh", "api", "graphql", "-f", f"owner={owner}", "-f", f"name={name}",
+            "-f", f"query={query}"]))
+    except subprocess.CalledProcessError as exc:
+        if len(chunk) == 1 or not is_gateway_timeout(exc):
+            raise
+        half = len(chunk) // 2
+        return (fetch_discovery_detail_chunk(owner, name, fields, chunk[:half])
+                + fetch_discovery_detail_chunk(owner, name, fields, chunk[half:]))
+    nodes = []
+    for index, number in enumerate(chunk):
+        node = repository.get(f"q{index}")
+        validate_discovery_pr(node)
+        validate_discovery_metadata(node, detail=True)
+        if node["number"] != number:
+            raise ValueError(f"GitHub detail response did not match PR {number}")
+        nodes.append(node)
+    return nodes
+
+
+def complete_open_nodes(repo: str, limit: int, query: str) -> list[dict[str, Any]]:
+    # Request one sentinel row so an exactly-full but complete census is valid.
+    nodes = fetch_pr_nodes(repo, limit + 1, query)
+    if len(nodes) > limit:
+        raise ValueError(f"Open PR census exceeds --limit {limit}; increase --limit (checkpoint unchanged)")
+    return nodes
+
+
+def merge_changed_comments(node: dict[str, Any], comments: list[dict[str, Any]]) -> None:
+    """Keep edited old comments visible even outside GraphQL's recent window."""
+    connection = node.get("comments") or {}
+    existing = {comment.get("id"): comment for comment in graphql_nodes(connection) if comment.get("id")}
+    for comment in comments:
+        comment_id = comment.get("node_id")
+        if not comment_id:
+            raise ValueError("Changed GitHub comment is missing node_id")
+        current = existing.get(comment_id)
+        if current and not timestamp_after(comment.get("updated_at"), current.get("updatedAt")):
+            # A later detail read is authoritative; never overwrite a newer live
+            # edit with previously retained REST content.
+            continue
+        existing[comment_id] = {
+            "id": comment_id, "author": {"login": (comment.get("user") or {}).get("login")},
+            "authorAssociation": comment.get("author_association"),
+            "createdAt": comment.get("created_at"), "updatedAt": comment.get("updated_at"),
+            "body": comment.get("body"),
+        }
+    # Existing fixtures and older API payloads can lack IDs; keep those too.
+    connection["nodes"] = [comment for comment in graphql_nodes(connection) if not comment.get("id")] + list(existing.values())
+    node["comments"] = connection
+
+
+def discover_dashboard_prs(
+    args: argparse.Namespace, cache: dict[str, Any] | None
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+    if cache is None:
+        nodes = complete_open_nodes(args.repo, args.limit, SCAN_PR_QUERY)
+        terminal = fetch_terminal_prs(args.repo, args.terminal_limit)
+        watches = {str(node["number"]): discovery_watch(node) for node in nodes}
+        return nodes, terminal, watches, {
+            "mode": "bootstrap", "since": None,
+            "refreshed_prs": sorted(node["number"] for node in nodes),
+            "terminal_changed_prs": sorted(node["number"] for node in terminal),
+            "delta_fingerprints": {},
+        }
+    started = parse_event_datetime(cache["query_started_at"])
+    since = (started - timedelta(seconds=DISCOVERY_OVERLAP_SECONDS)).isoformat().replace("+00:00", "Z")
+    delta = fetch_issue_delta(args.repo, "issues", since)
+    comment_delta = fetch_issue_delta(args.repo, "issues/comments", since)
+    # The overlap deliberately repeats membership. Identical payloads were
+    # already consumed; hashes retain same-second body edits without refetching.
+    fingerprints = {endpoint: {str(row["id"]): text_hash(json_dumps(row)) for row in rows}
+                    for endpoint, rows in (("issues", delta), ("comments", comment_delta))}
+    prior_fingerprints = cache["delta_fingerprints"]
+    delta = [row for row in delta if (prior_fingerprints.get("issues") or {}).get(str(row["id"]))
+             != fingerprints["issues"][str(row["id"])]]
+    comment_delta = [row for row in comment_delta if (prior_fingerprints.get("comments") or {}).get(str(row["id"]))
+                     != fingerprints["comments"][str(row["id"])]]
+    census = complete_open_nodes(args.repo, args.limit, CENSUS_PR_QUERY)
+    nodes = dict(cache["open_nodes"])
+    watches = {str(node["number"]): discovery_watch(node) for node in census}
+    changed = {int(row["number"]) for row in delta if "pull_request" in row}
+    changed.update(int(number) for number, watch in watches.items()
+                   if cache["watches"].get(number) != watch)
+    changed.update(int(number) for number in nodes if number not in watches)
+    # An issue comment endpoint also contains ordinary issues; only confirmed PR
+    # numbers may reach pullRequest(number:). New closed PRs are confirmed by delta.
+    known = set(nodes) | set(watches) | {str(number) for number in changed}
+    known.update(str(row["pr"]) for row in cache["terminal_archive"])
+    comments_by_pr: dict[int, list[dict[str, Any]]] = {}
+    for comment in comment_delta:
+        match = re.fullmatch(r"https://api\.github\.com/repos/" + re.escape(args.repo) + r"/issues/(\d+)",
+                             str(comment.get("issue_url") or ""))
+        if not match or match[1] not in known:
+            continue
+        number = int(match[1])
+        comments_by_pr.setdefault(number, []).append(comment)
+        changed.add(number)
+    terminal = []
+    for node in fetch_discovery_details(args.repo, sorted(changed)):
+        number = node["number"]
+        key = str(number)
+        if node["state"] == "OPEN":
+            # Store the census-compatible fingerprint before appending old edits.
+            watches[key] = discovery_watch(node)
+            retained_edits = (nodes.get(key) or {}).get("discoveryCommentEdits") or []
+            if graphql_connection_complete(node.get("comments")):
+                # Complete live history proves deletion; a bounded window cannot.
+                live_ids = {comment.get("id") for comment in graphql_nodes(node.get("comments"))}
+                retained_edits = [comment for comment in retained_edits if comment.get("node_id") in live_ids]
+            edits = {comment["node_id"]: comment for comment in retained_edits}
+            for comment in comments_by_pr.get(number, []):
+                if not comment.get("node_id"):
+                    raise ValueError("Changed GitHub comment is missing node_id")
+                edits[comment["node_id"]] = comment
+            if edits:
+                merge_changed_comments(node, list(edits.values()))
+                node["discoveryCommentEdits"] = list(edits.values())
+            nodes[key] = node
+        else:
+            nodes.pop(key, None)
+            watches.pop(key, None)
+            terminal.append(node)
+    return list(nodes.values()), terminal, watches, {
+        "mode": "incremental", "since": since,
+        "refreshed_prs": sorted(changed),
+        "terminal_changed_prs": sorted(node["number"] for node in terminal),
+        "census_count": len(census),
+        "delta_fingerprints": fingerprints,
+    }
+
+
+
+def unfinished_disposition(row: dict[str, Any], node: dict[str, Any], acting_login: str) -> bool:
+    action = row["advisory_action"]
+    if action not in {"blocked", "hold", "hold_ci", "defer"}:
+        return False
+    pr = normalize_graphql_pr(node)
+    if action == "blocked":
+        # Local memory alone cannot finish a substantive public disposition.
+        return not any(
+            review.get("state") == "CHANGES_REQUESTED"
+            and (review.get("commit") or {}).get("oid") == node["headRefOid"]
+            and (comment_login(review) == acting_login
+                 or review.get("authorAssociation") in MEMBER_AUTHOR_ASSOCIATIONS)
+            for review in pr["reviews"]
+        )
+    # Local memory cannot establish publication. Only a recognizable visible
+    # disposition bound to this exact head can finish a waiting route.
+    head_pattern = r"(?<![\w-])" + re.escape(node["headRefOid"]) + r"(?![\w-])"
+    for comment in pr["comments"]:
+        if comment_login(comment) != acting_login and comment.get("authorAssociation") not in MEMBER_AUTHOR_ASSOCIATIONS:
+            continue
+        body = comment_text(comment)
+        if not re.search(head_pattern, body):
+            continue
+        if action == "defer":
+            if "<!-- pr-review-deferred -->" in body:
+                return False
+        elif (
+            re.search(r"^\s*(?:#+\s*)?(?:\*\*)?(?:held|hold|on hold)\b", body, re.IGNORECASE | re.MULTILINE)
+            and re.search(r"\b(?:pending|awaiting|waiting for|waiting on|blocked by|external condition:|condition:)\s+\S", body, re.IGNORECASE)
+            and re.search(r"\b(?:next steps?\s*:\s*\S|(?:will )?resume (?:after|once|when)\s+\S|will recheck\s+\S)", body, re.IGNORECASE)
+        ):
+            return False
+    return True
+
+
 def command_dashboard_data(args: argparse.Namespace) -> int:
+    args.state_dir.mkdir(parents=True, exist_ok=True)
+    with (args.state_dir / "github-discovery.lock").open("a", encoding="utf-8") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            return publish_dashboard_data(args)
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def publish_dashboard_data(args: argparse.Namespace) -> int:
+    # Load state after locking; concurrent sweeps must consume the latest cursor.
+    cache_path = args.state_dir / "github-discovery.json"
+    cache = None if getattr(args, "full_refresh", False) else read_discovery_cache(cache_path, args)
     context = load_review_context(args)
-    output = build_scan_output(context, args)
+    query_started_at = now_iso()
+    nodes, terminal_nodes, watches, discovery = discover_dashboard_prs(args, cache)
+    output = build_scan_output(context, args, nodes)
     dashboard_path = args.output or args.state_dir / "review-dashboard.json"
-    terminal_nodes = fetch_terminal_prs(args.repo, args.terminal_limit)
     terminal_rows = [
         dashboard_terminal_row(node, context)
         for node in terminal_nodes
     ]
-    archive = read_dashboard_archive(dashboard_path)
+    archive = (dashboard_archive_rows(cache["terminal_archive"]) if cache
+               else read_dashboard_archive(dashboard_path, args.repo))
     archive.update({row["pr"]: row for row in terminal_rows})
     for candidate in output["candidates_by_action"].values():
         for row in candidate:
@@ -4053,13 +4511,32 @@ def command_dashboard_data(args: argparse.Namespace) -> int:
         reverse=True,
     )
     sections = dashboard_terminal_sections(terminal_archive, datetime.now(UTC))
+    prior_candidates = cache["candidates"] if cache else {}
+    candidates = {str(row["pr"]): row for rows in output["candidates_by_action"].values() for row in rows}
+    refreshed = set(discovery["refreshed_prs"])
+    sweep = {}
+    nodes_by_number = {node["number"]: node for node in nodes}
+    for action, rows in output["candidates_by_action"].items():
+        selected = [row for row in rows if row["pr"] in refreshed
+                    or prior_candidates.get(str(row["pr"])) != row
+                    or action == "review" or action.endswith("_for_handler")
+                    or action in {"request_changes", "decline"}
+                    or unfinished_disposition(row, nodes_by_number[row["pr"]], context.acting_login)]
+        if selected:
+            sweep[action] = selected
+    output["repo"] = args.repo
+    output["sweep_candidates_by_action"] = sweep
+    delta_fingerprints = discovery.pop("delta_fingerprints")
+    output["discovery"] = discovery | {"query_started_at": query_started_at,
+                                        "refreshed_count": len(refreshed)}
     output.update(
         {
             "dashboard": {
                 "terminal_sync": {
                     "fetched_at": now_iso(),
                     "fetch_limit": args.terminal_limit,
-                    "truncated": len(terminal_nodes) == args.terminal_limit,
+                    "truncated": discovery["mode"] == "bootstrap" and len(terminal_nodes) == args.terminal_limit,
+                    "mode": discovery["mode"],
                 },
                 "closed_unmerged": {
                     "recent": sections["closed_recent"],
@@ -4070,7 +4547,7 @@ def command_dashboard_data(args: argparse.Namespace) -> int:
             "terminal_archive": terminal_archive,
         }
     )
-    if len(terminal_nodes) == args.terminal_limit:
+    if discovery["mode"] == "bootstrap" and len(terminal_nodes) == args.terminal_limit:
         output.setdefault("warnings", []).append(
             f"terminal PR count reached --terminal-limit {args.terminal_limit}; increase --terminal-limit"
         )
@@ -4079,6 +4556,15 @@ def command_dashboard_data(args: argparse.Namespace) -> int:
     pr_review_dashboard.write_text_atomically(
         dashboard_html_path, pr_review_dashboard.render_dashboard(output)
     )
+    # Publishing the checkpoint last makes failed API/packet/output work replayable.
+    write_json_atomically(cache_path, {
+        "version": DISCOVERY_CACHE_VERSION, "repo": args.repo,
+        "bootstrap_limits": [args.limit, args.terminal_limit],
+        "query_started_at": query_started_at,
+        "open_nodes": {str(node["number"]): node for node in nodes},
+        "watches": watches, "candidates": candidates, "terminal_archive": terminal_archive,
+        "delta_fingerprints": delta_fingerprints,
+    })
     print(
         json_dumps(
             {
@@ -4503,13 +4989,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     scan = sub.add_parser("scan")
     add_common(scan)
-    scan.add_argument("--limit", type=int, default=100)
+    scan.add_argument("--limit", type=int, default=DEFAULT_OPEN_PR_LIMIT)
     scan.set_defaults(func=command_scan)
 
     dashboard = sub.add_parser("dashboard-data")
     add_common(dashboard)
-    dashboard.add_argument("--limit", type=int, default=100)
+    dashboard.add_argument("--limit", type=int, default=DEFAULT_OPEN_PR_LIMIT)
     dashboard.add_argument("--terminal-limit", type=int, default=DASHBOARD_DEFAULT_TERMINAL_LIMIT)
+    dashboard.add_argument("--full-refresh", action="store_true", help="Rebuild disposable GitHub discovery cache.")
     dashboard.add_argument("--output", type=Path, default=None)
     dashboard.add_argument("--html-output", type=Path, default=None)
     dashboard.set_defaults(func=command_dashboard_data)

@@ -53,6 +53,7 @@ fn savai_triome_hand_cycling_draws() {
         .act(GameAction::ActivateAbility {
             source_id: triome,
             ability_index: cycling_index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate cycling");
 
@@ -98,7 +99,7 @@ fn savai_triome_battlefield_cycling_is_not_legal() {
             action,
             GameAction::ActivateAbility {
                 source_id,
-                ability_index,
+                ability_index, ..
             } if *source_id == triome && *ability_index == cycling_index
         )),
         "legal actions must not offer battlefield cycling"

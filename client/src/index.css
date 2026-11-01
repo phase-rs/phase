@@ -224,6 +224,18 @@ html.game-viewport-lock #root {
   overflow: hidden;
 }
 
+/* Hidden tab (attribute owned by animation/hiddenDocumentMotion.ts): no CSS
+   animation or transition may start. A hidden tab renders no frames, so
+   Chromium holds every CSSAnimation/CSSTransition created by a forced style
+   pass, and with it the element, until the tab is shown. Each unmounted
+   pulsing badge or transitioning card would otherwise stay as detached DOM. */
+html[data-document-hidden] *,
+html[data-document-hidden] *::before,
+html[data-document-hidden] *::after {
+  animation: none !important;
+  transition: none !important;
+}
+
 /* The locked game document cannot act as a fallback scroll container. Keep the
    in-game menu within the visible viewport and let it own vertical touch scroll. */
 .game-menu-scroll {
@@ -1090,3 +1102,19 @@ select.select-dark option {
 .debug-bounds [data-debug-label="Opp Zones"]::after    { background: #fbbf24; }
 .debug-bounds [data-debug-label="Player Bottom"]       { outline-color: #818cf8; }
 .debug-bounds [data-debug-label="Player Bottom"]::after { background: #818cf8; }
+
+/* Eye to Eye / Mouth to Mouth: a lightweight pop on each registered click. Short and
+   non-blocking so rapid clicking is never slowed by the animation. Opted into with
+   Tailwind's `motion-safe:` variant, so reduced-motion users never see it. */
+@keyframes contest-click-pop {
+  from {
+    transform: scale(0.94);
+  }
+  to {
+    transform: scale(1);
+  }
+}
+
+.animate-pulse-once {
+  animation: contest-click-pop 90ms ease-out;
+}

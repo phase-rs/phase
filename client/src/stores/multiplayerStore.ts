@@ -15,6 +15,7 @@ import type {
   PairingId,
   PlayerId,
   PodOutcome,
+  StateWithheldNotice,
   TournamentCreatedReply,
   TournamentCredentialRole,
   TournamentJoinedReply,
@@ -25,7 +26,7 @@ import { AdapterError, AdapterErrorCode, isCustomGameFormat } from "../adapter/t
 import { isFormatConfigShape } from "../adapter/format-config-shape";
 import { findSavedCustomFormat } from "../services/customFormats";
 import { AI_DIFFICULTIES } from "../constants/ai";
-import { FORMAT_REGISTRY } from "../data/formatRegistry";
+import { FORMAT_REGISTRY, isPlanechaseFamilyFormat } from "../data/formatRegistry";
 import {
   MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE,
   MIN_LOBBY_PROTOCOL_FOR_RECOVERABLE_ROTATION,
@@ -127,9 +128,9 @@ import {
   type DraftPhase,
 } from "../adapter/server-draft-adapter";
 import type { DraftPlayerView } from "../adapter/draft-adapter";
-import type { CommanderBracketTier } from "../types/bracketEstimate";
 import type {
   DeckChoice,
+  DeckListData,
   PlayerSlot,
   SeatMutation,
 } from "../multiplayer/seatTypes";
@@ -169,20 +170,21 @@ let serverHostAttempt = 0;
 // A host socket acts only while no `GameStarted` has handed the page off since it was dialed.
 let hostHandoffs = 0;
 
-function asDeckPayload(deck: HostingDeck): {
-  main_deck: string[];
-  sideboard: string[];
-  commander: string[];
-  planar_deck: string[];
-  scheme_deck: string[];
-  bracket_tier?: CommanderBracketTier;
-} {
+function asDeckPayload(deck: HostingDeck): DeckListData {
   return {
     main_deck: deck.main_deck,
     sideboard: deck.sideboard,
     commander: deck.commander,
     planar_deck: deck.planar_deck ?? [],
     scheme_deck: deck.scheme_deck ?? [],
+    // The engine reads an absent list as empty (`#[serde(default)]`), so each
+    // remaining `DeckData` list rides only when it holds cards: a deck without
+    // them is handed off byte-for-byte as before.
+    ...(deck.companion?.length ? { companion: deck.companion } : {}),
+    ...(deck.attraction_deck?.length ? { attraction_deck: deck.attraction_deck } : {}),
+    ...(deck.contraption_deck?.length ? { contraption_deck: deck.contraption_deck } : {}),
+    ...(deck.sticker_sheets?.length ? { sticker_sheets: deck.sticker_sheets } : {}),
+    ...(deck.signature_spell?.length ? { signature_spell: deck.signature_spell } : {}),
     ...(deck.bracket_tier ? { bracket_tier: deck.bracket_tier } : {}),
   };
 }
@@ -206,7 +208,7 @@ function aiSeatRequest(seat: AiSeatConfig) {
 }
 
 function effectiveAiSeats(settings: HostingSettings): AiSeatConfig[] {
-  return settings.formatConfig.team_based || settings.formatConfig.format === "Planechase"
+  return settings.formatConfig.team_based || isPlanechaseFamilyFormat(settings.formatConfig.format)
     ? []
     : settings.aiSeats;
 }
@@ -1482,15 +1484,8 @@ export interface AiSeatConfig {
   deckId?: AiDeckSelection;
 }
 
-export interface HostingDeck {
-  main_deck: string[];
-  sideboard: string[];
-  commander: string[];
-  planar_deck?: string[];
-  scheme_deck?: string[];
-  /** Declared Commander bracket tier; omitted decks default to Core on the engine. */
-  bracket_tier?: CommanderBracketTier;
-}
+/** The host's deck as handed off: every `DeckData` list the engine accepts. */
+export type HostingDeck = DeckListData;
 
 /** Persisted snapshot of the host-setup form so the lobby remembers the
  *  player's last choices across sessions instead of resetting to defaults.
@@ -1664,6 +1659,8 @@ interface MultiplayerState {
   // Action round-trip tracking (ephemeral — not persisted)
   actionPending: boolean;
   latencyMs: number | null;
+  /** The server applied a state it could not send; shown until a state arrives. */
+  stateWithheld: StateWithheldNotice | null;
   playerLatencies: Record<number, number | null>;
   // Hosting session (ephemeral — not persisted)
   hostGameCode: string | null;
@@ -1734,6 +1731,7 @@ interface MultiplayerActions {
   setPlayerReconnected: (playerId: number) => void;
   setActionPending: (pending: boolean) => void;
   setLatency: (ms: number | null) => void;
+  setStateWithheld: (notice: StateWithheldNotice | null) => void;
   // Hosting session actions
   /** `serverUrl` is the server THIS game is hosted on, chosen at host-setup
    *  submit. It is deliberately not `hostingServer`: that field is the P2P /
@@ -2965,6 +2963,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       disconnectedPlayers: new Set(),
       actionPending: false,
       latencyMs: null,
+      stateWithheld: null,
       playerLatencies: {},
       hostGameCode: null,
       hostIsPublic: false,
@@ -3138,6 +3137,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         }),
       setActionPending: (pending) => set({ actionPending: pending }),
       setLatency: (ms) => set({ latencyMs: ms }),
+      setStateWithheld: (notice) => set({ stateWithheld: notice }),
 
       startHosting: (settings, deck, serverUrl) => {
         const aiSeats = effectiveAiSeats(settings);
@@ -3544,10 +3544,13 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
           });
 
           for (const seat of aiSeats) {
+            // An admitted human keeps this seat; a stale AI assignment succeeds
+            // without seating that AI, and setup continues with the other seats.
             await p2pAdapter.applySeatMutation({
               type: "SetKind",
               data: {
                 seatIndex: seat.seatIndex,
+                expectedKind: { type: "WaitingHuman" },
                 kind: {
                   type: "Ai",
                   data: {
@@ -4291,7 +4294,7 @@ useMultiplayerStore.subscribe((state, prev) => {
 });
 
 export function getPlayerDisplayName(playerId: number, myId?: number): string {
-  if (playerId === myId) return "You";
+  if (playerId === myId) return i18n.t("game:player.you");
   return getOpponentDisplayName(playerId);
 }
 
@@ -4299,5 +4302,5 @@ export function getOpponentDisplayName(playerId: number): string {
   const state = useMultiplayerStore.getState();
   const name = state.playerNames.get(playerId);
   if (name) return name;
-  return `Opp ${playerId + 1}`;
+  return i18n.t("game:player.opponent", { seat: playerId + 1 });
 }

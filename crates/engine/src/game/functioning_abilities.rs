@@ -78,6 +78,7 @@
 
 use crate::game::combat::AttackTarget;
 use crate::game::game_object::GameObject;
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::layers::{evaluate_condition_with_context, ConditionContext};
 use crate::types::ability::{
     ReplacementDefinition, StaticDefinition, TargetFilter, TriggerDefinition, TriggerDefinitionRef,

@@ -1,6 +1,6 @@
 ---
 name: project-reference
-description: Reference lookup for phase.rs — build/test/cargo/clippy commands, cargo aliases, WASM build, card-data pipeline and jq lookups, frontend (pnpm) commands, coverage report, crate/workspace architecture, engine internals, WASM bridge, AI engine, multiplayer server, frontend layers, environment variables, releasing (cargo-release), and CI. Use when you need to look up how to build, test, run, generate card data, release, or where a crate, module, command, or env var lives.
+description: Reference lookup for phase.rs — build/test/cargo/clippy commands, cargo aliases, WASM build, card-data pipeline and jq lookups, frontend (pnpm) commands, coverage report, crate/workspace architecture, engine internals, WASM bridge, AI engine, multiplayer server, frontend layers, environment variables, protocol versions, releasing (cargo-release), and CI. Use when you need to look up how to build, test, run, generate card data, bump protocol versions, release, or where a crate, module, command, or env var lives.
 ---
 
 # phase.rs Project Reference
@@ -278,6 +278,40 @@ export RTK_DISABLED=1; export GH_TOKEN=$(command gh auth token)
 ```
 
 Write GraphQL/JSON to `/tmp` before parsing, and fetch PR diffs via `gh api repos/<owner/repo>/pulls/<N>.diff` (or local `git diff origin/main...pr/<N>`), never `gh pr diff`.
+
+## Protocol version changes
+
+Current versions are the immutable `protocol/baseline.json` values plus the count of append-only UUID records selecting each surface in `protocol/changes/`. Each `bump` invocation creates one record and increments each selected surface once.
+
+| Surface | Contract |
+|---|---|
+| `game` | Shorthand for `full` + `wire` |
+| `full` | Server/client game protocol |
+| `wire` | P2P game envelope |
+| `lobby` | Lobby/broker messages |
+| `draft` | P2P draft protocol |
+| `directory` | Server directory protocol |
+
+Prefer `game` for shared game-state/action changes; explicitly select any additional affected surfaces. Assess compatibility using the [protocol policy](../../../crates/lobby-broker/src/protocol.rs), including old-peer behavior for optional/defaulted additions: missing-field fallback and silent capability loss matter, and defaults alone do not establish compatibility. Contributors must decide whether a bump is needed and which surfaces it affects; the CLI and CI do not automatically detect missing schema bumps.
+
+Run from the repository root, choosing the bump command appropriate to the change:
+
+```bash
+node scripts/protocol-versions.mjs bump game --reason "Describe the incompatible change"
+node scripts/protocol-versions.mjs bump game lobby --reason "Describe the shared contract change"
+node scripts/protocol-versions.mjs show --json
+node scripts/protocol-versions.mjs generate
+node scripts/protocol-versions.mjs check
+node scripts/check-protocol-version.mjs --base origin/main
+```
+
+Generate before checking in a fresh checkout. `check` validates generated output; `check-protocol-version.mjs --base` also checks ownership, policy, and append-only history. Use a fetched/current intended integration base for `origin/main`, or pass an explicit base SHA/ref. Do not run `bump` merely to verify the workflow.
+
+Commit the new `protocol/changes/<uuid>.json` with the implementation. Do not edit the baseline, alter/delete existing records, manually update numeric mirrors, or append numbered shared-constant history for ordinary bumps; the record's reason holds the change rationale. Reverting an incompatible change requires a new record. If a bump reports generation failed after retaining its record, run `generate` to recover; do not bump again.
+
+After merging or rebasing, retain both branches' records and regenerate: the combined records determine the version. Equal-count unmerged branches can still share numbers; these versions are not schema fingerprints and do not eliminate all conflicts.
+
+`client/src/generated/protocol-versions.ts` is ignored and disposable; native constants are generated into `OUT_DIR` by `crates/lobby-broker/build.rs`. Existing build/dev entry points generate mirrors; explicit `generate` is the standalone/recovery command. `minimumLobby` and historical capability floors are compatibility policy, not routine current-version increments. Changing that policy is a separate deliberate change, not baseline editing.
 
 ## Releasing
 

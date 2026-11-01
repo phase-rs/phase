@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useLocation } from "react-router";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
@@ -11,8 +11,12 @@ import {
   type SeatKind,
 } from "../../stores/multiplayerStore";
 import { useAiDeckCatalog } from "../../services/aiDeckCatalog";
+import { applyPoolSelection, withCatalogSavedNames } from "../../services/randomPoolSelection";
+import { usePoolFolderIndex } from "../../hooks/usePoolFolderIndex";
+import { usePreferencesStore } from "../../stores/preferencesStore";
 import { formatJoinShare } from "../../services/serverDetection";
 import { expandParsedDeck } from "../../services/deckParser";
+import { deckListIdentityKey } from "../../multiplayer/deckListData";
 import { formatSuppliesDeck } from "../../data/formatRegistry";
 import { suppliedAiDeckChoice } from "../../services/pileSource";
 import { SelectField } from "../ui/SelectField";
@@ -28,7 +32,7 @@ function deckChoiceKey(choice: DeckChoice): string {
     case "Named":
       return `Named:${choice.data}`;
     case "DeckList":
-      return JSON.stringify(choice.data);
+      return deckListIdentityKey(choice.data);
   }
 }
 
@@ -77,7 +81,7 @@ function SeatRow({
   hideDeckPicker: boolean;
   mutate: (mutation: SeatMutation) => void;
 }) {
-  const { t } = useTranslation();
+  const { t } = useTranslation(["common", "menu"]);
   const isOpen = slot.kind.type === "WaitingHuman";
   const kickLabel = slot.name || t("hostControl.fallbackPlayerName", { number: slot.playerId + 1 });
   const aiSeat = slot.kind.type === "Ai" ? slot.kind : null;
@@ -116,6 +120,7 @@ function SeatRow({
                     type: "SetKind",
                     data: {
                       seatIndex: slot.playerId,
+                      expectedKind: { type: "WaitingHuman" },
                       kind: {
                         type: "Ai",
                         data: { difficulty: "Medium", deck },
@@ -296,7 +301,7 @@ export function HostControlTile() {
   const serverInfo = useMultiplayerStore((s) => s.serverInfo);
   const navigate = useNavigate();
   const location = useLocation();
-  const { t } = useTranslation();
+  const { t } = useTranslation(["common", "menu"]);
 
   // The reachable `<code>@<host>` join string, available only when the server
   // advertised a public URL (server-run hosting). P2P/broker hosts have no
@@ -309,18 +314,43 @@ export function HostControlTile() {
     selectedFormat: hostSession?.formatConfig.format,
     selectedMatchType: hostSession?.matchType,
   });
+  const aiPoolSelection = usePreferencesStore((s) => s.aiPoolSelection);
+  // Reactive folder revision: the curated pool below recomputes when a deck
+  // moves between folders instead of serving stale membership.
+  const poolFolderIndex = usePoolFolderIndex();
 
   const isConnecting = hostingStatus === "connecting";
   const minPlayers = hostSession?.formatConfig.min_players ?? 2;
   // A supplied-deck format's AI seats submit nothing; the one empty entry feeds every deck consumer below.
   const suppliedFormat = hostSession ? formatSuppliesDeck(hostSession.formatConfig.format) : false;
-  const deckChoices = suppliedFormat
-    ? [suppliedAiDeckChoice()]
-    : aiDeckCatalog.candidates.map((candidate) => ({
-        id: candidate.id,
-        label: candidate.name,
-        choice: { type: "DeckList" as const, data: expandParsedDeck(candidate.deck) },
-      }));
+  const deckChoices = useMemo(
+    () =>
+      suppliedFormat
+        ? [suppliedAiDeckChoice()]
+        : aiDeckCatalog.candidates.map((candidate) => ({
+            id: candidate.id,
+            label: candidate.name,
+            choice: { type: "DeckList" as const, data: expandParsedDeck(candidate.deck) },
+          })),
+    [suppliedFormat, aiDeckCatalog.candidates],
+  );
+  // The dropdown lists every legal deck (any of them can be pinned), but fresh
+  // seats draw from the curated pool — falling back to the full catalog when
+  // the selection matches nothing. The fallback flag is kept (not dropped):
+  // live Fill-with-AI assignments would otherwise draw excluded decks with
+  // no notice, contradicting the warn-plus-fallback setup surfaces.
+  const poolResolution = useMemo(() => {
+    if (suppliedFormat) return { choices: deckChoices, fellBack: false };
+    const { pool, fellBack } = applyPoolSelection(
+      withCatalogSavedNames(aiDeckCatalog.candidates),
+      aiPoolSelection,
+      poolFolderIndex,
+    );
+    const keep = new Set(pool.map((candidate) => candidate.id));
+    return { choices: deckChoices.filter(({ id }) => keep.has(id)), fellBack };
+  }, [suppliedFormat, deckChoices, aiDeckCatalog.candidates, aiPoolSelection, poolFolderIndex]);
+  const poolChoices = poolResolution.choices;
+  const poolFellBack = poolResolution.fellBack;
   // Pick a random format-legal deck for each fresh AI-seat assignment.
   // Previously this defaulted to `deckChoices[0]`, which meant every AI seat
   // got the same deck — uninteresting and exposed catalog ordering. The
@@ -328,11 +358,11 @@ export function HostControlTile() {
   // `STARTER_DECKS` (Standard-format hardcoded list) and would produce an
   // illegal deck for any non-Standard format. `aiDeckCatalog.candidates` is
   // already filtered by `selectedFormat`, so picking from it gives a random
-  // format-legal deck.
+  // format-legal deck, further narrowed by the AI pool curation.
   const pickRandomAiDeck = (): DeckChoice | null => {
-    if (deckChoices.length === 0) return null;
-    const idx = Math.floor(Math.random() * deckChoices.length);
-    return deckChoices[idx].choice;
+    if (poolChoices.length === 0) return null;
+    const idx = Math.floor(Math.random() * poolChoices.length);
+    return poolChoices[idx].choice;
   };
   // Used only for the dropdown's fallback/disabled state — buttons that
   // assign a deck call `pickRandomAiDeck()` per-seat instead.
@@ -387,6 +417,7 @@ export function HostControlTile() {
           type: "SetKind",
           data: {
             seatIndex: slot.playerId,
+            expectedKind: { type: "WaitingHuman" },
             kind: { type: "Ai", data: { difficulty: "Medium", deck } },
           },
         });
@@ -532,6 +563,14 @@ export function HostControlTile() {
             <div className="mb-2 text-xs uppercase tracking-wide text-slate-500">
               {t("hostControl.seatsOccupied", { occupied: occupiedSeats, total: playerSlots.length })}
             </div>
+            {poolFellBack && (
+              <div
+                role="status"
+                className="mb-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-200"
+              >
+                {t("menu:randomPool.emptyWarning", { total: deckChoices.length })}
+              </div>
+            )}
             <div className="flex flex-wrap gap-2">
               {waitingSeats.length === 0 ? (
                 <button

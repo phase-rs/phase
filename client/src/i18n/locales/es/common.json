@@ -179,6 +179,7 @@
       "exportedTo": "Se exportó a {{path}}.",
       "exportRequested": "Exportación solicitada: {{filename}}.",
       "exportFailed": "No se pudo exportar el estado de la partida.",
+      "exportFailedDetail": "No se pudo exportar el estado de la partida. {{detail}}",
       "replayExported": "Repetición guardada como {{filename}}.",
       "replayExportUnavailable": "No hay ninguna grabación de repetición disponible para esta partida.",
       "replayExportFailed": "No se pudo exportar la repetición."
@@ -285,7 +286,9 @@
     "loading": "Cargando..."
   },
   "turnBanner": {
-    "turn": "Turno {{number}}"
+    "turn": "Turno {{number}}",
+    "yourTurn": "Tu turno",
+    "opponentTurn": "Turno de {{name}}"
   },
   "diceRoll": {
     "rollingForFirst": "Tirada para ver quién empieza",

@@ -64,6 +64,12 @@ describe("DeckBuilderPage format routing", () => {
     expect(capturedProps?.format).toBe("Planechase");
   });
 
+  it("accepts Planechase Commander as a deck-builder format", () => {
+    renderDeckBuilderPage("/deck-builder?format=planechasecommander");
+
+    expect(capturedProps?.format).toBe("PlanechaseCommander");
+  });
+
   it("falls back when the URL browse legality filter is Two-Headed Giant", () => {
     renderDeckBuilderPage("/deck-builder?browseFormat=twoheadedgiant");
 
@@ -74,5 +80,11 @@ describe("DeckBuilderPage format routing", () => {
     renderDeckBuilderPage("/deck-builder?browseFormat=planechase");
 
     expect(capturedProps?.searchFilters.browseFormat).toBe("Planechase");
+  });
+
+  it("accepts Planechase Commander as a browse legality filter", () => {
+    renderDeckBuilderPage("/deck-builder?browseFormat=planechasecommander");
+
+    expect(capturedProps?.searchFilters.browseFormat).toBe("PlanechaseCommander");
   });
 });

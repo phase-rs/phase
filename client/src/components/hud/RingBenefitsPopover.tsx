@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
 
+import { DesignationArt } from "./HudBadges.tsx";
+
 interface Props {
   anchorEl: HTMLElement;
   /** Current ring level (0–4); levels ≤ this are active/unlocked. */
@@ -62,8 +64,19 @@ export function RingBenefitsPopover({ anchorEl, level, bearerName }: Props) {
       aria-hidden
     >
       <div className="w-72 rounded-2xl border border-amber-300/40 bg-slate-950/95 p-3 text-left shadow-[0_18px_36px_rgba(0,0,0,0.55)] backdrop-blur-md">
-        <div className="mb-1 text-[12px] font-bold tracking-wide text-amber-200">
-          {t("badges.ringTooltip", { level })}
+        <div className="mb-1 flex items-center gap-2">
+          <DesignationArt
+            art="ring"
+            className="h-8 w-8 shrink-0 rounded-full object-cover ring-1 ring-amber-300/50"
+            fallback={
+              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-amber-500/20 text-[14px] leading-none text-amber-300 ring-1 ring-amber-300/50">
+                ◆
+              </span>
+            }
+          />
+          <div className="text-[12px] font-bold tracking-wide text-amber-200">
+            {t("badges.ringTooltip", { level })}
+          </div>
         </div>
         <div className="mb-2 text-[11px] text-slate-300">
           {bearerName

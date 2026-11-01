@@ -41,6 +41,7 @@ interface ChoiceModalProps {
    * inspectObject for the floating full-card view. */
   previewObjectId?: ObjectId;
   footer?: ReactNode;
+  scrollable?: boolean;
 }
 
 export function ChoiceModal({
@@ -53,6 +54,7 @@ export function ChoiceModal({
   previewCardTypes,
   previewObjectId,
   footer,
+  scrollable,
 }: ChoiceModalProps) {
   return (
     <DialogShell
@@ -60,6 +62,7 @@ export function ChoiceModal({
       subtitle={subtitle ? <RichLabel text={subtitle} size="xs" /> : undefined}
       onClose={onClose}
       previewObjectId={previewObjectId}
+      scrollable={scrollable}
     >
       {previewCardName && (
         <div className="px-3 pt-3 lg:px-5 lg:pt-4">

@@ -27,6 +27,9 @@ impl TournamentHarness {
     pub fn new_premier_draft() -> Self {
         let mut manager = DraftSessionManager::new();
         let config = DraftConfig {
+            flow: draft_core::types::DraftFlow::LegacyBarrier,
+            selection_policy: draft_core::types::DraftSelectionPolicy::default(),
+            clock_policy: draft_core::types::DraftClockPolicy::default(),
             source: DraftSource::single_set("TST".to_string()),
             set_code: "TST".to_string(),
             kind: DraftKind::Premier,
@@ -126,13 +129,17 @@ impl TournamentHarness {
 
     /// Simulate a seat disconnecting.
     pub fn disconnect_seat(&mut self, seat: usize) {
-        self.manager.handle_disconnect(&self.draft_code, seat);
+        self.manager
+            .handle_disconnect(&self.draft_code, seat, std::time::Instant::now());
     }
 
     /// Simulate a seat reconnecting. Returns the refreshed view.
     pub fn reconnect_seat(&mut self, seat: usize) -> Result<DraftPlayerView, String> {
-        self.manager
-            .handle_reconnect(&self.draft_code, &self.tokens[seat])
+        self.manager.handle_reconnect(
+            &self.draft_code,
+            &self.tokens[seat],
+            std::time::Instant::now(),
+        )
     }
 
     /// Get current draft status.
@@ -150,7 +157,9 @@ impl TournamentHarness {
         // Create fresh manager (simulates server restart)
         let mut new_manager = DraftSessionManager::new();
         let restored: crate::persist::PersistedDraftSession = serde_json::from_str(&json).unwrap();
-        new_manager.restore_session(restored);
+        new_manager
+            .restore_session(restored)
+            .expect("valid legacy tournament snapshot");
 
         // Reconstruct source (not serializable — test fixture only)
         let source = FixturePackSource {

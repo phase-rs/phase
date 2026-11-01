@@ -188,6 +188,14 @@ note "building $APP_ID"
 rm -rf "$BUILDDIR"
 flatpak-builder --force-clean --repo="$REPO" "$BUILDDIR" "$MANIFEST"
 
+# A packaged binary must remain exactly the one staged from the release.
+# Catch ELF modifications (including loss of PT_INTERP/.dynamic) at build time,
+# before distributing or installing a Flatpak that segfaults on startup.
+packaged_binary="$BUILDDIR/files/bin/phase-tauri"
+[ -f "$packaged_binary" ] || die "packaged binary missing: $packaged_binary"
+cmp -s "$STAGE/phase-tauri" "$packaged_binary" \
+  || die "packaged phase-tauri differs from the staged release binary"
+
 if [ "$do_install" -eq 1 ]; then
   note "installing into the user installation"
   flatpak remote-add --user --no-gpg-verify --if-not-exists phase-local "$REPO"

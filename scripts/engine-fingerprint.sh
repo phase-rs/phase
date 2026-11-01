@@ -15,7 +15,7 @@ card_data_sha256=$(sha256sum "$card_data_path" | awk '{print $1}')
 draft_pools_sha256=$(sha256sum "$draft_pools_path" | awk '{print $1}')
 
 {
-    git ls-tree --full-tree -r "$commit_sha" -- crates Cargo.lock rust-toolchain.toml
+    git ls-tree --full-tree -r "$commit_sha" -- crates Cargo.lock rust-toolchain.toml protocol
     printf '%s\n' "$card_data_sha256"
     printf '%s\n' "$draft_pools_sha256"
 } | sha256sum | awk '{print substr($1, 1, 16)}'

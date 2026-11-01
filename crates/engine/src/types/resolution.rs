@@ -15,25 +15,28 @@ pub use frame_vec::ChildStackDepth;
 use frame_vec::{FrameSlot, FrameVec};
 
 use crate::types::ability::{
-    AbilityDefinition, DieResultBranch, DieRollIgnoreRule, DieRollModifier, DiscardedCardResult,
-    EffectKind, ResolvedAbility, TargetRef,
+    AbilityDefinition, ContinuousEffectOnset, DieResultBranch, DieRollIgnoreRule, DieRollModifier,
+    DiscardedCardResult, EffectKind, ForwardedResultContext, ResolvedAbility, TargetRef,
 };
+use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    CostResume, DrainStatus, DrawSequenceStack, GameState, GameStateDecode, GameStateDecodeMode,
-    PayCostKind, PendingBatchDeliveries, PendingChangeZoneIteration, PendingChooseOneOf,
-    PendingConniveReentry, PendingContinuation, PendingCopyTokenResolution,
-    PendingCounterAdditionQueue, PendingCounterMoveQueue, PendingCounterRemoval,
-    PendingCounterRemovalInFlight, PendingCounterRemovalQueue, PendingDebugCardEntries,
-    PendingEachPlayerCopyChosen, PendingLifeTotalAssignment, PendingMultiDraw,
-    PendingPerCategoryZoneChoice, PendingPerPlayerZoneChoice, PendingRepeatIteration,
-    PendingRepeatUntil, PendingSpellResolution, PendingVoteBallotIteration, PostReplacementDrain,
-    PostReplacementDrainDispatch, PostReplacementDrainStack, PostReplacementFrameId,
-    ResidentDrainPolicy, ResolvingTriggerContext, WaitingFor,
+    AbilityOnsetRecord, ChangeZoneMemberEntry, CostResume, DrainStatus, DrawSequenceStack,
+    GameState, GameStateDecode, GameStateDecodeMode, PayCostKind, PendingBatchDeliveries,
+    PendingChangeZoneIteration, PendingChooseOneOf, PendingConniveReentry, PendingContinuation,
+    PendingCopyTokenResolution, PendingCounterAdditionQueue, PendingCounterMoveQueue,
+    PendingCounterRemoval, PendingCounterRemovalInFlight, PendingCounterRemovalQueue,
+    PendingDebugCardEntries, PendingEachPlayerCopyChosen, PendingLifeTotalAssignment,
+    PendingMultiDraw, PendingPerCategoryZoneChoice, PendingPerPlayerZoneChoice,
+    PendingRepeatIteration, PendingRepeatUntil, PendingSpellResolution, PendingVoteBallotIteration,
+    PostReplacementDrain, PostReplacementDrainDispatch, PostReplacementDrainStack,
+    PostReplacementFrameId, RepeatIterationChoice, ResidentDrainPolicy, ResolvingTriggerContext,
+    WaitingFor, ABILITY_ONSET_RECORD_FIELD,
 };
-use crate::types::identifiers::{DiscardFrameId, ObjectId};
+use crate::types::identifiers::{DiscardFrameId, ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
+use crate::types::zones::EtbTapState;
 
 /// The complete shipped draw authority carried by one `MultiDraw` frame.
 ///
@@ -104,22 +107,102 @@ pub struct OptionalEffectFrame {
     pub return_result_occurrence: Option<crate::types::game_state::ReturnResultOccurrenceId>,
 }
 
-/// CR 705.1 + CR 614.1a: Discriminates which multi-flip resolver paused for a
-/// Krark's Thumb keep-one choice, carrying the loop position needed to re-enter.
+/// CR 705.1 + CR 614.1a: where a coin-flip run paused for a Krark's Thumb keep choice.
+///
+/// CR 608.2c: the position is everything the run needs to follow its remaining
+/// instructions in order once the kept flip settles. The frames written before
+/// resolution-wire version 8 (`Single`, `FlipN`, `UntilLose`) are read losslessly
+/// through [`PendingCoinFlipKindWire`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "PendingCoinFlipKindWire")]
 pub enum PendingCoinFlipKind {
-    /// `Effect::FlipCoin` — a single logical flip.
-    Single,
-    /// `Effect::FlipCoins { count }` — `remaining` flips still to perform after
-    /// the one currently paused for a keep choice.
-    FlipN { remaining: u32 },
-    /// `Effect::FlipCoinUntilLose` — `wins_so_far` flips won before the one
-    /// currently paused for a keep choice.
-    UntilLose { wins_so_far: u32 },
+    /// CR 705.1: flips still owed after the one paused for the keep choice.
+    Exactly { remaining: u32 },
+    /// CR 705.2 + CR 608.2c: flips won so far in this run, before the paused one. Their
+    /// rewards are still owed: they are paid after the losing flip.
+    UntilLoss { wins_so_far: u32 },
 }
 
-/// CR 705.1 + CR 614.1a: Full resolution context and loop position for a
-/// multi-flip resolver paused at a Krark's Thumb keep-one choice.
+/// CR 608.2c: What a coin-flip branch inherits from the resolution that
+/// flipped: the players chosen earlier in it, and a completed-but-empty
+/// forwarded result (CR 609.3) so a branch naming that absent object does
+/// nothing.
+///
+/// `forwarded_result_context` is set ONLY when the flipping node's result is
+/// completed-but-empty (`Some([])`); a non-empty result already rides the
+/// branch's `targets`. It reuses the existing [`ForwardedResultContext`]
+/// vocabulary rather than a new marker type, so "named nothing" has exactly one
+/// representation.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlipBranchContext {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chosen_players: Vec<PlayerId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forwarded_result_context: Option<Box<ForwardedResultContext>>,
+}
+
+impl FlipBranchContext {
+    /// Capture what the flipping `ability` hands to its branches. A non-empty
+    /// forwarded result is deliberately not captured: it already reaches the
+    /// branch through its `targets`.
+    pub fn from_ability(ability: &ResolvedAbility) -> Self {
+        Self {
+            chosen_players: ability.chosen_players.clone(),
+            forwarded_result_context: ability
+                .context
+                .forwarded_result_context
+                .as_deref()
+                .filter(|context| context.targets.is_empty())
+                .cloned()
+                .map(Box::new),
+        }
+    }
+
+    /// `true` when the branch inherits nothing (the serialized default).
+    pub fn is_empty(&self) -> bool {
+        self.chosen_players.is_empty() && self.forwarded_result_context.is_none()
+    }
+}
+
+/// The persisted shapes of [`PendingCoinFlipKind`]: the current kinds plus the
+/// pre-version-8 kinds, each mapped totally and losslessly onto a current kind.
+///
+/// Shape rules: the current-shape variants mirror [`PendingCoinFlipKind`] field for
+/// field, so a later serde-defaulted frame field is a pure addition to both.
+#[derive(Deserialize)]
+enum PendingCoinFlipKindWire {
+    Exactly {
+        remaining: u32,
+    },
+    UntilLoss {
+        wins_so_far: u32,
+    },
+    /// Legacy single flip: the same resume behaviour as `Exactly { remaining: 0 }`.
+    Single,
+    /// Legacy N-flip run: the same meaning as `Exactly { remaining }`.
+    FlipN {
+        remaining: u32,
+    },
+    /// Legacy until-loss run: the same meaning as `UntilLoss { wins_so_far }`.
+    UntilLose {
+        wins_so_far: u32,
+    },
+}
+
+impl From<PendingCoinFlipKindWire> for PendingCoinFlipKind {
+    fn from(wire: PendingCoinFlipKindWire) -> Self {
+        match wire {
+            PendingCoinFlipKindWire::Exactly { remaining }
+            | PendingCoinFlipKindWire::FlipN { remaining } => Self::Exactly { remaining },
+            PendingCoinFlipKindWire::Single => Self::Exactly { remaining: 0 },
+            PendingCoinFlipKindWire::UntilLoss { wins_so_far }
+            | PendingCoinFlipKindWire::UntilLose { wins_so_far } => Self::UntilLoss { wins_so_far },
+        }
+    }
+}
+
+/// CR 705.1 + CR 614.1a: Full resolution context and run position for a
+/// coin-flip run paused at a Krark's Thumb keep-one choice.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingCoinFlip {
     pub source_id: ObjectId,
@@ -143,11 +226,50 @@ pub struct PendingCoinFlip {
     /// existed.
     #[serde(default)]
     pub chain_root_targets: Vec<TargetRef>,
+    /// CR 608.2c: what the flip's branches inherit from the flipping
+    /// resolution, carried across the Krark's Thumb keep-choice suspension so a
+    /// resumed branch reads the same chosen players and completed-empty result
+    /// as an inline one. `#[serde(default)]` decodes a frame written before this
+    /// field existed (wire version 8 or earlier) to the default, which is
+    /// exactly those versions' semantics: the branch inherited nothing.
+    #[serde(default, skip_serializing_if = "FlipBranchContext::is_empty")]
+    pub branch_context: FlipBranchContext,
+    /// CR 608.2c + CR 400.7e: the suspension's owning scope. `Some` with empty
+    /// channels clears foreign ambient authority; `None` preserves legacy no-push behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_context: Option<ResolvingTriggerContext>,
 }
 
 /// CR 706.6 + CR 614.1a: Full resolution context for a die-roll resolver paused
 /// at an "ignore the lowest roll" choice (Barbarian Class, Pixie Guide, Wyll).
 ///
+/// CR 608.2c: the declared slot-context capture of a suspending ability,
+/// taken through the single capture authority
+/// (`targeting::capture_parked_slot_context`) while the ability is still in
+/// scope. Carried as `Option` on the parked die-roll frames: `None` means no
+/// capture ran (pre-M2 frames keep the legacy root path), while `Some` — even
+/// with empty lists — is an authoritative capture the resume path must honor
+/// instead of the legacy lists. The presence bit is structural: a `bool`
+/// alongside separately writable lists cannot express "recorded empty".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapturedDeclarationPayload {
+    /// CR 608.2c: the declared (target, pin) entries counted from the slot
+    /// base. Resume indexes these — never the legacy chain-root list — so
+    /// modal bases, downstream offsets, and repeated IDs resolve exactly
+    /// like the live authority.
+    #[serde(default)]
+    pub targets: Vec<TargetRef>,
+    /// CR 400.7: the announced pin of each declared entry, aligned with
+    /// `targets`. Positional — repeated IDs keep distinct pins.
+    #[serde(default)]
+    pub target_pins: Vec<Option<ObjectIncarnationRef>>,
+    /// CR 608.2b: the slot base's offset in root numbering, so resume judges
+    /// the root-numbered illegality stamp at `ahead + index` like the live
+    /// authority.
+    #[serde(default)]
+    pub ahead: usize,
+}
+
 /// The dice have all been rolled (`results` holds their NATURAL values) but no
 /// `GameEvent::DieRolled` has been emitted yet: CR 706.6 says an ignored roll
 /// "is considered to have never happened", so emission is deferred to
@@ -159,6 +281,20 @@ pub struct PendingDieRoll {
     /// CR 706.6: the player who rolled, and therefore the player who chooses
     /// which of several tied-lowest rolls to ignore.
     pub roller: PlayerId,
+    /// CR 109.5 + CR 706.2: the printed controller the inline modifier read
+    /// (`original_controller.unwrap_or(controller)`), captured independently
+    /// of the roller so a scoped seat keeps reading "you" as the printed
+    /// player after a suspension. `None` on pre-field frames, which keep the
+    /// acting controller (the legacy read). Skipped on the wire when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quantity_controller: Option<PlayerId>,
+    /// CR 109.5 + CR 706.2: the ability's scoped-player binding, captured
+    /// independently of the roller so a resumed `ControllerRef::ScopedPlayer`
+    /// member read measures the same seat the inline path measured instead
+    /// of falling back to the triggering player or printed controller.
+    /// `None` on pre-field frames, which keep the legacy fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scoped_player: Option<PlayerId>,
     pub targets: Vec<TargetRef>,
     pub sides: u8,
     /// CR 706.2 + CR 706.6: the NATURAL results — "the number indicated on the
@@ -237,6 +373,56 @@ pub struct PendingDieRoll {
     /// serialized before this field existed.
     #[serde(default)]
     pub chain_root_targets: Vec<TargetRef>,
+    /// CR 608.2c + CR 400.7e: the post-roll instruction's owning scope, retained
+    /// unchanged across results-table child pauses. An explicit empty scope is
+    /// distinct from unavailable authority in legacy frames.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_context: Option<ResolvingTriggerContext>,
+    /// CR 608.2b: declared slots (chain-root numbering) stamped illegal as
+    /// the chain began to resolve, captured at park time so a resumed
+    /// indexed read applies the same legality the live slot authority
+    /// would. `#[serde(default)]` for in-flight states serialized before
+    /// this field existed.
+    #[serde(default)]
+    pub illegal_target_slots: Vec<usize>,
+    /// CR 400.7: announced pins aligned position-for-position with
+    /// `chain_root_targets` (`None` for players and unpinned occurrences),
+    /// captured at park time so a resumed indexed read applies the same
+    /// incarnation check the live slot authority would. Currency is
+    /// evaluated at resume, not at park. `#[serde(default)]` for
+    /// in-flight states serialized before this field existed.
+    #[serde(default)]
+    pub chain_root_target_pins: Vec<Option<ObjectIncarnationRef>>,
+    /// CR 608.2c: the declared slot-context capture (see
+    /// `CapturedDeclarationPayload`). `None` on pre-M2 frames — which keep
+    /// the legacy root path — and on frames built without a capture;
+    /// `Some`, even with empty lists, is authoritative on resume. Skipped on
+    /// the wire when absent; `#[serde(default)]` for in-flight states
+    /// serialized before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_capture: Option<CapturedDeclarationPayload>,
+    /// CR 400.7: the suspending node's own positional pins, aligned with
+    /// `targets`, for the local fallback and occurrence-aware parked reads.
+    #[serde(default)]
+    pub local_target_pins: Vec<Option<ObjectIncarnationRef>>,
+    /// CR 400.7 + CR 603.7c: the keyed delayed-referent pins
+    /// (`ResolvedAbility::target_incarnations`), captured at park time so a
+    /// resumed indexed read applies the same eligibility guard the live
+    /// slot authority would. Keyed by object id, not positional — an id
+    /// with no entry passes (fail-open). Currency is evaluated at resume,
+    /// not at park. `#[serde(default)]` for in-flight states serialized
+    /// before this field existed.
+    #[serde(default)]
+    pub keyed_target_incarnations: Vec<ObjectIncarnationRef>,
+    /// CR 608.2c: the live declared-player verdict
+    /// (`filter::declared_target_player`), captured at park time so a
+    /// resumed player-axis read answers exactly what the live path would.
+    /// Carried separately from the mode-relative declared list, which
+    /// cannot see an earlier mode's player. `None` (pre-capture frames and
+    /// in-flight states serialized before this field existed) resumes
+    /// through the legacy reconstruction.
+    #[serde(default)]
+    pub declared_player: Option<crate::game::filter::DeclaredPlayerTarget>,
 }
 
 /// CR 706.1 + CR 616.1: A die-roll INSTRUCTION parked across a replacement
@@ -247,10 +433,9 @@ pub struct PendingDieRoll {
 /// Class + Pixie Guide), CR 616.1 makes the affected player order them, which
 /// suspends the resolver on `WaitingFor::ReplacementChoice` — and unlike the
 /// CR 706.6 ignore choice, the dice do NOT exist yet, so `PendingDieRoll`
-/// cannot carry it. This frame carries the instruction's non-event context
-/// (results table, modifier, targets, source) so the resume path can finish the
-/// roll with the fully-modified `ProposedEvent::RollDice` the pipeline hands
-/// back.
+/// cannot carry it. This carrier retains the instruction's results table,
+/// modifier, targets, source, and owning trigger scope so the resume path can
+/// finish the roll with the fully-modified `ProposedEvent::RollDice`.
 ///
 /// The `sides` and the die count both ride the proposed event, not this frame:
 /// a replacement may change how many dice are rolled (CR 706.1), so re-reading
@@ -270,6 +455,20 @@ pub struct PendingDieRollInstruction {
     /// CR 706.6: the player who rolls, and therefore the player who breaks an
     /// ignore tie once the dice exist.
     pub roller: PlayerId,
+    /// CR 109.5 + CR 706.2: the printed controller the inline modifier
+    /// reads, carried across the CR 616.1 choice so it survives into the
+    /// `PendingDieRoll` this instruction produces. `None` for frames built
+    /// without a capture. Skipped on the wire when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quantity_controller: Option<PlayerId>,
+    /// CR 109.5 + CR 706.2: the ability's scoped-player binding, carried
+    /// across the CR 616.1 choice so a resumed `ControllerRef::ScopedPlayer`
+    /// member read measures the same seat the inline path measured instead
+    /// of falling back to the triggering player or printed controller.
+    /// `None` for frames built without a capture. Skipped on the wire when
+    /// absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scoped_player: Option<PlayerId>,
     pub targets: Vec<TargetRef>,
     pub results_table: Vec<DieResultBranch>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -280,6 +479,11 @@ pub struct PendingDieRollInstruction {
     /// boundary, and the CR 616.1 ordering choice is such a boundary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub die_result: Option<i32>,
+    /// CR 608.2c + CR 400.7e + CR 616.1: the rolling resolution's scope,
+    /// captured before replacement ordering. Some(empty) clears foreign input;
+    /// None preserves legacy no-push behavior and the non-resolution visit path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_context: Option<ResolvingTriggerContext>,
     /// Which caller owns the completion of this roll (see the type docs).
     #[serde(default)]
     pub continuation: DieRollContinuation,
@@ -289,6 +493,41 @@ pub struct PendingDieRollInstruction {
     /// for in-flight states serialized before this field existed.
     #[serde(default)]
     pub chain_root_targets: Vec<TargetRef>,
+    /// CR 608.2b: declared slots stamped illegal, carried across the CR
+    /// 616.1 choice so they survive into the `PendingDieRoll` this
+    /// instruction produces. `#[serde(default)]` for in-flight states
+    /// serialized before this field existed.
+    #[serde(default)]
+    pub illegal_target_slots: Vec<usize>,
+    /// CR 400.7: announced pins aligned with `chain_root_targets`, carried
+    /// across the CR 616.1 choice so they survive into the `PendingDieRoll`
+    /// this instruction produces. `#[serde(default)]` for in-flight states
+    /// serialized before this field existed.
+    #[serde(default)]
+    pub chain_root_target_pins: Vec<Option<ObjectIncarnationRef>>,
+    /// CR 608.2c: the declared slot-context capture (see
+    /// `CapturedDeclarationPayload`), carried across the CR 616.1 choice so
+    /// it survives into the `PendingDieRoll` this instruction produces.
+    /// Skipped on the wire when absent; `#[serde(default)]` for in-flight
+    /// states serialized before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_capture: Option<CapturedDeclarationPayload>,
+    /// CR 400.7: the suspending node's positional pins aligned with
+    /// `targets`, carried across the CR 616.1 choice. `#[serde(default)]`
+    /// for in-flight states serialized before this field existed.
+    #[serde(default)]
+    pub local_target_pins: Vec<Option<ObjectIncarnationRef>>,
+    /// CR 400.7 + CR 603.7c: the keyed delayed-referent pins, carried
+    /// across the CR 616.1 choice so they survive into the `PendingDieRoll`
+    /// this instruction produces. `#[serde(default)]` for in-flight states
+    /// serialized before this field existed.
+    #[serde(default)]
+    pub keyed_target_incarnations: Vec<ObjectIncarnationRef>,
+    /// CR 608.2c: the live declared-player verdict, carried across the
+    /// CR 616.1 choice so it survives into the `PendingDieRoll` this
+    /// instruction produces. `None` for frames built without a capture.
+    #[serde(default)]
+    pub declared_player: Option<crate::game::filter::DeclaredPlayerTarget>,
 }
 
 /// CR 706.1: Which caller finishes a parked die-roll instruction once a CR 616.1
@@ -1042,6 +1281,37 @@ impl ResolutionStack {
             Some(ResolutionFrame::AbilityContinuation(frame)) => Some(frame),
             Some(_) | None => None,
         }
+    }
+
+    /// CR 107.3f + CR 608.2c: the rider a paused resolution-time payment parked
+    /// and marked with `announcement`, found by walking down from the top one
+    /// adjacent frame at a time. Frames above it (an unmarked chain parked over
+    /// the rider) are passed over untouched.
+    ///
+    /// The stack carries no per-resolution boundary marker, and none is needed:
+    /// a mark exists only from the moment a payment prompt opens until that
+    /// prompt's answer consumes it, only one payment prompt can be open at a time,
+    /// and no other resolution starts while it is open. So at most one frame is
+    /// marked, and the topmost marked frame is the open payment's own rider.
+    pub(crate) fn x_announcement_rider_mut(
+        &mut self,
+        announcement: crate::types::game_state::ContinuationXAnnouncement,
+    ) -> Option<&mut AbilityContinuationFrame> {
+        let mut slot = self.frames.top();
+        while let Some(current) = slot {
+            if matches!(
+                self.frames.get(current),
+                Some(ResolutionFrame::AbilityContinuation(frame))
+                    if frame.pending.x_announcement == Some(announcement)
+            ) {
+                return match self.frames.get_mut(current) {
+                    Some(ResolutionFrame::AbilityContinuation(frame)) => Some(frame),
+                    _ => None,
+                };
+            }
+            slot = self.frames.below(current);
+        }
+        None
     }
 
     /// Returns the active continuation only when the exact discard operation
@@ -1994,6 +2264,18 @@ impl ResolutionStack {
         }
     }
 
+    /// CR 104.4b + CR 608.2d: a descendant choice belongs to every
+    /// unfinished enclosing iteration. This changes evidence, never ownership.
+    pub(crate) fn note_repeat_until_descendant_choice(&mut self) {
+        for frame in self.frames.iter_mut() {
+            if let ResolutionFrame::RepeatUntil(pending) = frame {
+                if let Some(witness) = pending.iteration_progress.as_mut() {
+                    witness.choice = RepeatIterationChoice::OptionalOffered;
+                }
+            }
+        }
+    }
+
     /// Park a newly active repeat-until owner.
     pub fn push_repeat_until(&mut self, frame: PendingRepeatUntil) {
         self.push_inner(ResolutionFrame::RepeatUntil(frame));
@@ -2937,6 +3219,16 @@ impl ResolutionStack {
         }
     }
 
+    /// CR 616.1g: the drain count of the frame `id` names, if it is still
+    /// resident. Identity-addressed, like the dispatcher's own cleanup.
+    pub(crate) fn post_replacement_frame_drain_count(
+        &self,
+        id: PostReplacementFrameId,
+    ) -> Option<usize> {
+        self.post_replacement_frame(id)
+            .map(PostReplacementDrainStack::len)
+    }
+
     /// The mutable twin of [`Self::post_replacement_frame`].
     fn post_replacement_frame_mut(
         &mut self,
@@ -3376,6 +3668,22 @@ impl ResolutionStack {
                         context.events.iter_mut().for_each(&mut *f);
                     }
                 }
+                ResolutionFrame::CoinFlip(frame) => {
+                    if let Some(context) = frame.trigger_context.as_mut() {
+                        if let Some(event) = context.event.as_mut() {
+                            f(event);
+                        }
+                        context.events.iter_mut().for_each(&mut *f);
+                    }
+                }
+                ResolutionFrame::DieRoll(frame) => {
+                    if let Some(context) = frame.trigger_context.as_mut() {
+                        if let Some(event) = context.event.as_mut() {
+                            f(event);
+                        }
+                        context.events.iter_mut().for_each(&mut *f);
+                    }
+                }
                 // Exhaustive on purpose: a frame family that starts retaining a
                 // trigger event must be visited here.
                 ResolutionFrame::RepeatFor(_)
@@ -3392,8 +3700,6 @@ impl ResolutionStack {
                 | ResolutionFrame::VoteBallot(_)
                 | ResolutionFrame::PerPlayerZoneChoice(_)
                 | ResolutionFrame::PerCategoryZoneChoice(_)
-                | ResolutionFrame::CoinFlip(_)
-                | ResolutionFrame::DieRoll(_)
                 | ResolutionFrame::Proliferate(_)
                 | ResolutionFrame::MultiDraw(_)
                 | ResolutionFrame::Discard(_)
@@ -3790,7 +4096,15 @@ impl ResolutionStack {
 /// from the legacy actor fallback stored in `valid_card`. Version 4 requires
 /// every draw frame to carry its result owner explicitly, including `null`.
 /// Version 5 adds the simultaneous-draw dealer to the draw frame.
-pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 5;
+/// Version 6 retains deferred Clash bottom choices until the final answer.
+/// Version 7 carries each unprocessed member of a parked ChangeZone with the
+/// entry modifications resolved before the event's first member moved
+/// (`ChangeZoneMemberEntry`) in place of a bare id and the raw entry gates.
+/// Version 8 replaces the coin-flip frame's `Single`/`FlipN`/`UntilLose` kinds with `Exactly`/`UntilLoss`; the older kinds are still read losslessly.
+/// Version 9 carries the coin-flip branch's inherited resolution context
+/// (`PendingCoinFlip.branch_context`).
+/// Version 10 retains the owning trigger scope on paused coin and post-roll die frames.
+pub const RESOLUTION_STATE_WIRE_VERSION: u64 = 10;
 
 /// Historical full-state resolution wire version accepted only for migration.
 ///
@@ -3808,6 +4122,144 @@ const LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION: u64 = 3;
 /// Last wire version written before a draw frame could carry a simultaneous-draw
 /// dealer. It is also the first version that requires `delivery_owner`.
 const LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION: u64 = 4;
+
+/// Last wire version whose parked ChangeZone carrier held bare member ids
+/// with carrier-level entry modifications and gates. Its readers migrate or
+/// refuse that carrier before the typed decode
+/// (`migrate_legacy_change_zone_member_entries` for v2–v6 frames and the v1
+/// reader arm for v1, both through `migrate_legacy_change_zone_carrier`).
+const LEGACY_UNRESOLVED_CHANGE_ZONE_MEMBER_RESOLUTION_STATE_WIRE_VERSION: u64 = 6;
+
+/// Last wire version whose coin-flip frame kinds were `Single`/`FlipN`/
+/// `UntilLose`; `PendingCoinFlipKindWire` reads them losslessly.
+const LEGACY_COIN_FLIP_KIND_RESOLUTION_STATE_WIRE_VERSION: u64 = 7;
+
+/// Last wire version written before a parked coin flip could carry its
+/// branch's inherited resolution context. Its frames decode to the default
+/// `FlipBranchContext`, which is exactly that version's semantics: the branch
+/// inherited nothing. No migration is needed.
+const LEGACY_UNINHERITED_FLIP_BRANCH_RESOLUTION_STATE_WIRE_VERSION: u64 = 8;
+
+/// Last wire version before random-result frames retained their owning trigger scope.
+const LEGACY_UNSCOPED_RANDOM_RESULT_RESOLUTION_STATE_WIRE_VERSION: u64 = 9;
+
+/// Stable, machine-recognizable restore refusal for a v1–v6 save paused inside
+/// a multi-object ChangeZone whose unprocessed members' entry modifications
+/// depend on an entry gate. CR 603.6a + CR 614.12: each member's gate is read
+/// against the board as it was before the event's first member moved, and that
+/// board is not in the save, so no member entry can be reconstructed. Player-
+/// visible copy (see `reject_viewer_projection_as_authority` for the frames
+/// that wrap it): it neither repeats "could not restore" nor announces a new
+/// game.
+pub const LEGACY_GATED_CHANGE_ZONE_ENTRY_RESTORE_ERROR: &str = "RESTORE_INCOMPATIBLE_GATED_CHANGE_ZONE_ENTRY: This saved game was paused while several cards were entering the battlefield at once, and whether each remaining card enters with counters, tapped, or attacking depends on the battlefield as it was before any of them entered. That battlefield is not part of the save, so the move cannot be finished as the rules require.";
+
+/// Stable, machine-recognizable restore refusal for a state written before ability onsets were
+/// recorded (CR 611.2e). Player-visible; written to read correctly inside the engine-wasm and
+/// client frames named at `LEGACY_GATED_CHANGE_ZONE_ENTRY_RESTORE_ERROR` (no "could not restore",
+/// no "new game").
+pub const PRE_ENTRY_ONSET_RESTORE_ERROR: &str = "RESTORE_INCOMPATIBLE_PRE_ENTRY_ONSET: This saved game was made by an earlier version of the game that did not record when some effects apply to a permanent entering the battlefield, so it cannot be continued as the rules require.";
+
+/// CR 611.2e: admits a persisted state's ability onsets. A payload whose `ability_onset_record` is
+/// absent or `Unrecorded` was written by an engine that did not stamp `entry_onset`, so every node
+/// decodes with the `WhenFollowed` default whether its instruction was "is/has" or not. Admits it,
+/// recording `Recorded`, only when no ability node of an onset-admitting kind
+/// (`ContinuousEffectOnset::kind_admits_with_entry`) exists anywhere in it; otherwise refuses with
+/// [`PRE_ENTRY_ONSET_RESTORE_ERROR`]. A `Recorded` payload is untouched: its `WhenFollowed` nodes
+/// are explicit current onsets.
+fn admit_entry_onset_record(value: &mut Value) -> Result<(), String> {
+    match read_entry_onset_record(value)? {
+        Some(AbilityOnsetRecord::Recorded) => return Ok(()),
+        Some(AbilityOnsetRecord::Unrecorded) | None => {}
+    }
+    refuse_onset_undecidable_carrier(value)?;
+    let recorded =
+        serde_json::to_value(AbilityOnsetRecord::Recorded).map_err(|error| error.to_string())?;
+    value
+        .as_object_mut()
+        .expect("checked above: the resolution state wire is a JSON object")
+        .insert(ABILITY_ONSET_RECORD_FIELD.to_string(), recorded);
+    Ok(())
+}
+
+/// The `ability_onset_record` a resolution state wire was written with; `None` when the key is
+/// absent (a writer that predates the record).
+fn read_entry_onset_record(wire: &Value) -> Result<Option<AbilityOnsetRecord>, String> {
+    wire.as_object()
+        .ok_or_else(|| "resolution state wire must be a JSON object".to_string())?
+        .get(ABILITY_ONSET_RECORD_FIELD)
+        .map(|record| {
+            serde_json::from_value::<AbilityOnsetRecord>(record.clone()).map_err(|error| {
+                format!("invalid {ABILITY_ONSET_RECORD_FIELD} in persisted state: {error}")
+            })
+        })
+        .transpose()
+}
+
+/// CR 611.2e: the refusal of an unrecorded writer's carrier, shared by the in-state admission
+/// (`admit_entry_onset_record`) and the detached-carrier admission
+/// ([`PersistedEntryOnsetRecord::admit_detached_carrier`]).
+fn refuse_onset_undecidable_carrier(carrier: &Value) -> Result<(), String> {
+    if holds_onset_undecidable_ability_node(carrier) {
+        Err(PRE_ENTRY_ONSET_RESTORE_ERROR.to_string())
+    } else {
+        Ok(())
+    }
+}
+
+/// CR 611.2e: the onset record a persisted state's writer wrote, read BEFORE the state is decoded.
+///
+/// Decoding admits an unrecorded state that holds no onset-admitting node by stamping it
+/// `Recorded`, so the decoded state no longer says whether its writer recorded onsets. A
+/// persistence boundary that stores an ability carrier detached from the state it was lifted out
+/// of (the server's `deck_pools_json` column) reads this record from the serialized state first and
+/// admits the carrier against it with [`Self::admit_detached_carrier`] — the refusal the state's
+/// own admission (`admit_entry_onset_record`) applies to every carrier still inside it. The field
+/// is private, so a boundary cannot supply a record its payload did not carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PersistedEntryOnsetRecord(Option<AbilityOnsetRecord>);
+
+impl PersistedEntryOnsetRecord {
+    /// Reads the record of a serialized `PersistedGameState`, before it is decoded. A trusted
+    /// envelope `{state, …}` (the dispatch `PersistedGameState::deserialize` makes) holds it in
+    /// `state`; a raw state holds it at its root.
+    pub fn of_persisted_state(persisted_state: &Value) -> Result<Self, String> {
+        read_entry_onset_record(persisted_state.get("state").unwrap_or(persisted_state)).map(Self)
+    }
+
+    /// Admits `carrier`, a serialized ability carrier stored detached from this record's state.
+    /// Refuses it with [`PRE_ENTRY_ONSET_RESTORE_ERROR`] exactly when the state's own admission
+    /// would have, had the carrier stayed inside it: the record is absent or `Unrecorded` and the
+    /// carrier holds an ability node of an onset-admitting kind. A `Recorded` writer's carrier is
+    /// admitted untouched — its `WhenFollowed` nodes are explicit current onsets.
+    pub fn admit_detached_carrier(self, carrier: &Value) -> Result<(), String> {
+        match self.0 {
+            Some(AbilityOnsetRecord::Recorded) => Ok(()),
+            Some(AbilityOnsetRecord::Unrecorded) | None => {
+                refuse_onset_undecidable_carrier(carrier)
+            }
+        }
+    }
+}
+
+/// Whether any serialized ability node (`AbilityDefinition` / `ResolvedAbility`, the only shapes
+/// with both a `kind` key and an `effect` object) anywhere in `value` has an effect whose tag is an
+/// onset-admitting kind. A whole-value walk, so every carrier is covered without enumeration.
+/// Unknown tags and legacy aliases are not onset-admitting kinds.
+fn holds_onset_undecidable_ability_node(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => {
+            let undecidable = object.contains_key("kind")
+                && object
+                    .get("effect")
+                    .and_then(|effect| effect.get("type"))
+                    .and_then(|tag| serde_json::from_value::<EffectKind>(tag.clone()).ok())
+                    .is_some_and(ContinuousEffectOnset::kind_admits_with_entry);
+            undecidable || object.values().any(holds_onset_undecidable_ability_node)
+        }
+        Value::Array(items) => items.iter().any(holds_onset_undecidable_ability_node),
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => false,
+    }
+}
 
 /// The `GameState` fields whose serialized form is UNCONDITIONAL: each carries
 /// `#[serde(default …)]` but NO `skip_serializing_if`, so the derived
@@ -3965,6 +4417,117 @@ fn has_draw_sequence_delivery_owner(value: &Value) -> Result<bool, String> {
     }))
 }
 
+/// One parked ChangeZone member as written by some wire version. Only the shape
+/// is inspected: it dates an unversioned payload.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ChangeZoneBoundaryMember {
+    /// A v1–v6 bare member id; only the shape is inspected.
+    BareId(#[allow(dead_code)] ObjectId),
+    /// A v7 `ChangeZoneMemberEntry`; only the shape is inspected.
+    Resolved(#[allow(dead_code)] Map<String, Value>),
+}
+
+#[derive(Debug, Deserialize)]
+struct ChangeZoneBoundaryCarrier {
+    #[serde(default)]
+    remaining: Vec<ChangeZoneBoundaryMember>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChangeZoneBoundaryData {
+    #[serde(default)]
+    pending: Option<ChangeZoneBoundaryCarrier>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+enum ChangeZoneBoundaryFrame {
+    ChangeZone {
+        data: ChangeZoneBoundaryData,
+    },
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChangeZoneBoundaryStack {
+    #[serde(default)]
+    frames: Vec<ChangeZoneBoundaryFrame>,
+}
+
+/// Whether any parked ChangeZone carrier in a serialized `ResolutionStack`
+/// holds a v7 member record (`ChangeZoneMemberEntry`) rather than a bare id.
+fn carries_resolved_change_zone_members(stack: &Value) -> Result<bool, String> {
+    let stack = serde_json::from_value::<ChangeZoneBoundaryStack>(stack.clone())
+        .map_err(|error| format!("typed resolution frame boundary is malformed: {error}"))?;
+    Ok(stack.frames.iter().any(|frame| match frame {
+        ChangeZoneBoundaryFrame::ChangeZone { data } => {
+            data.pending.as_ref().is_some_and(|carrier| {
+                carrier
+                    .remaining
+                    .iter()
+                    .any(|member| matches!(member, ChangeZoneBoundaryMember::Resolved(_)))
+            })
+        }
+        ChangeZoneBoundaryFrame::Other => false,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct RandomResultBoundaryData {
+    #[serde(default)]
+    branch_context: Option<Map<String, Value>>,
+    #[serde(default)]
+    trigger_context: Option<Map<String, Value>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+enum RandomResultBoundaryFrame {
+    CoinFlip {
+        data: RandomResultBoundaryData,
+    },
+    DieRoll {
+        data: RandomResultBoundaryData,
+    },
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Debug, Deserialize)]
+struct RandomResultBoundaryStack {
+    #[serde(default)]
+    frames: Vec<RandomResultBoundaryFrame>,
+}
+
+/// Non-null random-result authority (including an explicit empty scope) dates
+/// raw frames to v10. Coin branch inheritance alone dates them only to v9.
+fn random_result_context_version(stack: &Value) -> Result<Option<u64>, String> {
+    let stack = serde_json::from_value::<RandomResultBoundaryStack>(stack.clone())
+        .map_err(|error| format!("typed resolution frame boundary is malformed: {error}"))?;
+    let mut version = None;
+    for frame in stack.frames {
+        match frame {
+            RandomResultBoundaryFrame::CoinFlip { data } => {
+                if data.trigger_context.is_some() {
+                    return Ok(Some(RESOLUTION_STATE_WIRE_VERSION));
+                }
+                if data.branch_context.is_some() {
+                    version = Some(LEGACY_UNSCOPED_RANDOM_RESULT_RESOLUTION_STATE_WIRE_VERSION);
+                }
+            }
+            RandomResultBoundaryFrame::DieRoll { data } => {
+                if data.trigger_context.is_some() {
+                    return Ok(Some(RESOLUTION_STATE_WIRE_VERSION));
+                }
+            }
+            RandomResultBoundaryFrame::Other => {}
+        }
+    }
+    Ok(version)
+}
+
 fn validate_draw_sequence_delivery_owner_fields(
     value: &Value,
     version: u64,
@@ -4081,6 +4644,140 @@ fn reject_ambiguous_legacy_paused_draw_result(value: &Value, version: u64) -> Re
     Ok(())
 }
 
+/// The carrier fields a v1–v6 parked ChangeZone wrote and v7 replaced with
+/// per-member records.
+const LEGACY_CHANGE_ZONE_ENTRY_FIELDS: &[&str] = &[
+    "enter_tapped",
+    "enters_attacking",
+    "enter_with_counters",
+    "conditional_enter_with_counters",
+    "enters_modified_if",
+];
+
+/// The v1–v6 carrier's unprocessed members, written as bare ids.
+#[derive(Deserialize)]
+struct LegacyChangeZoneMembers {
+    remaining: Vec<ObjectId>,
+}
+
+/// The v1–v6 carrier-level entry modifications. The gates are read for presence
+/// only: their content is the pre-event authority this migration never consults.
+#[derive(Deserialize)]
+struct LegacyChangeZoneEntrySpec {
+    #[serde(default, with = "crate::types::zones::etb_tap_bool_compat")]
+    enter_tapped: EtbTapState,
+    enters_attacking: bool,
+    #[serde(default)]
+    enter_with_counters: Vec<(CounterType, u32)>,
+    #[serde(default)]
+    conditional_enter_with_counters: Vec<serde::de::IgnoredAny>,
+    #[serde(default)]
+    enters_modified_if: Option<serde::de::IgnoredAny>,
+}
+
+impl LegacyChangeZoneEntrySpec {
+    /// CR 614.12: whether a member's entry depends on a gate verdict. Conditional
+    /// counters always do. A rider gate matters only when a rider is set:
+    /// `effective_enter_mods` yields `(Unspecified, false)` on a mismatch, so a
+    /// gate over default riders gives every member the same entry either way.
+    fn entry_depends_on_gate(&self) -> bool {
+        !self.conditional_enter_with_counters.is_empty()
+            || (self.enters_modified_if.is_some()
+                && (!self.enter_tapped.is_unspecified() || self.enters_attacking))
+    }
+}
+
+/// Rewrites one v1–v6 parked ChangeZone carrier into its v7 shape, or refuses
+/// it when its members' entries depend on a gate the save cannot evaluate.
+fn migrate_legacy_change_zone_carrier(carrier: &mut Value) -> Result<(), String> {
+    let object = carrier
+        .as_object_mut()
+        .ok_or_else(|| "legacy ChangeZone carrier must be a JSON object".to_string())?;
+    let mut entry_fields = Map::new();
+    for field in LEGACY_CHANGE_ZONE_ENTRY_FIELDS {
+        if let Some(field_value) = object.remove(*field) {
+            entry_fields.insert((*field).to_string(), field_value);
+        }
+    }
+    let mut members_value = Map::new();
+    if let Some(remaining) = object.get("remaining") {
+        members_value.insert("remaining".to_string(), remaining.clone());
+    }
+    let members = serde_json::from_value::<LegacyChangeZoneMembers>(Value::Object(members_value))
+        .map_err(|error| format!("legacy ChangeZone carrier is malformed: {error}"))?
+        .remaining;
+    // The gate fields only ever drove the per-member loop, so a carrier with no
+    // unprocessed member loses nothing when they are dropped.
+    if members.is_empty() {
+        return Ok(());
+    }
+    let spec = serde_json::from_value::<LegacyChangeZoneEntrySpec>(Value::Object(entry_fields))
+        .map_err(|error| format!("legacy ChangeZone carrier is malformed: {error}"))?;
+    if spec.entry_depends_on_gate() {
+        // CR 603.6a + CR 614.12: the gate reads the board before the event's
+        // first member moved, which the save does not hold.
+        return Err(LEGACY_GATED_CHANGE_ZONE_ENTRY_RESTORE_ERROR.to_string());
+    }
+    // CR 614.12: with no gate, each member's entry is the carrier's own
+    // modifications, exactly as `resolve_change_zone_member_entry` resolves them.
+    let entries = members
+        .into_iter()
+        .map(|object_id| ChangeZoneMemberEntry {
+            object_id,
+            enter_with_counters: spec.enter_with_counters.clone(),
+            enter_tapped: spec.enter_tapped,
+            enters_attacking: spec.enters_attacking,
+        })
+        .collect::<Vec<_>>();
+    object.insert(
+        "remaining".to_string(),
+        serde_json::to_value(entries).map_err(|error| error.to_string())?,
+    );
+    Ok(())
+}
+
+/// The v2–v6 typed-frame half of the → v7 migration for parked ChangeZone
+/// carriers. Runs before any typed carrier decode: every ungated frame carrier
+/// is expanded into per-member records from its own fields, and every carrier
+/// whose unprocessed members' entries depend on a gate is refused with
+/// [`LEGACY_GATED_CHANGE_ZONE_ENTRY_RESTORE_ERROR`]. The v1 top-level carrier
+/// is migrated by the v1 reader arm of `ResolutionStateWire::from_value`
+/// through the same `migrate_legacy_change_zone_carrier`, which stays the
+/// single per-carrier authority. v7 and later decode directly.
+fn migrate_legacy_change_zone_member_entries(
+    value: &mut Value,
+    version: u64,
+) -> Result<(), String> {
+    // v1 carries its carrier at a top-level v1 key, which only the v1 reader
+    // arm of `ResolutionStateWire::from_value` may read; it migrates it there.
+    if !(LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION
+        ..=LEGACY_UNRESOLVED_CHANGE_ZONE_MEMBER_RESOLUTION_STATE_WIRE_VERSION)
+        .contains(&version)
+    {
+        return Ok(());
+    }
+    let Some(frames) = value
+        .get_mut("resolution_frames")
+        .and_then(|stack| stack.get_mut("frames"))
+        .and_then(Value::as_array_mut)
+    else {
+        return Ok(());
+    };
+    for frame in frames {
+        if frame.get("type").and_then(Value::as_str) != Some("ChangeZone") {
+            continue;
+        }
+        if let Some(carrier) = frame
+            .get_mut("data")
+            .and_then(|data| data.get_mut("pending"))
+            .filter(|carrier| !carrier.is_null())
+        {
+            migrate_legacy_change_zone_carrier(carrier)?;
+        }
+    }
+    Ok(())
+}
+
 /// Declares the resolution-wire shape of an UNVERSIONED raw `GameState`
 /// payload. The only place in the engine permitted to infer a wire version.
 ///
@@ -4168,6 +4865,16 @@ pub(crate) fn declare_raw_resolution_wire(value: &mut Value) -> Result<(), Strin
         .map(has_draw_sequence_delivery_owner)
         .transpose()?
         .unwrap_or(false);
+    let unversioned_stack_has_resolved_change_zone_members = object
+        .get("resolution_stack")
+        .map(carries_resolved_change_zone_members)
+        .transpose()?
+        .unwrap_or(false);
+    let unversioned_random_result_context_version = object
+        .get("resolution_stack")
+        .map(random_result_context_version)
+        .transpose()?
+        .flatten();
     // An undeclared payload carrying BOTH carriers is ambiguous, and inferring
     // from one would move `resolution_stack` onto the `resolution_frames` key
     // and discard the declared `resolution_frames` silently. Refuse instead.
@@ -4242,13 +4949,24 @@ pub(crate) fn declare_raw_resolution_wire(value: &mut Value) -> Result<(), Strin
     match object.remove("resolution_stack") {
         Some(frames) => {
             object.insert("resolution_frames".to_string(), frames);
+            // A ChangeZone member record is written only by the v7 carrier, so
+            // it dates the payload exactly as `delivery_owner` dates v4. A
+            // stack written that late also carries `delivery_owner` on every
+            // draw frame, which v7 validation still requires. Random-result
+            // fields distinguish v9 branch inheritance from v10 owned scope.
+            let declared_version = if let Some(version) = unversioned_random_result_context_version
+            {
+                version
+            } else if unversioned_stack_has_resolved_change_zone_members {
+                LEGACY_COIN_FLIP_KIND_RESOLUTION_STATE_WIRE_VERSION
+            } else if unversioned_stack_has_delivery_owner {
+                LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION
+            } else {
+                LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION
+            };
             object.insert(
                 "resolution_state_version".to_string(),
-                Value::from(if unversioned_stack_has_delivery_owner {
-                    LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION
-                } else {
-                    LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION
-                }),
+                Value::from(declared_version),
             );
         }
         None => {
@@ -4342,9 +5060,19 @@ impl ResolutionStateWire {
     /// Decodes persisted full-game state at the resolution compatibility boundary.
     ///
     /// Version 1 is read only through the legacy migration path below. Versions
-    /// 2 and 3 share the typed-frame reader; versions 4 and 5 use the same frame
-    /// layout with an explicit draw-result-owner presence check, and a version-4
-    /// draw frame simply has no dealer.
+    /// 2 and 3 share the typed-frame reader; versions 4 through 8 use the same
+    /// frame layout with an explicit draw-result-owner presence check, and a
+    /// version-4 draw frame simply has no dealer. A v2–v6 parked ChangeZone
+    /// frame carrier is migrated or refused first by
+    /// `migrate_legacy_change_zone_member_entries`; the v1 top-level carrier,
+    /// by the v1 reader arm before that arm's validation and legacy decodes.
+    ///
+    /// Every version then passes the onset admission (`admit_entry_onset_record`, CR 611.2e): a
+    /// payload written before ability onsets were recorded is admitted only when it holds no
+    /// ability node of an onset-admitting kind, and is refused with
+    /// [`PRE_ENTRY_ONSET_RESTORE_ERROR`] otherwise. It runs after the wire-level legacy refusals
+    /// above it and after the provenance migration, so those keep message precedence and the walk
+    /// sees the migrated value.
     fn from_value(mut value: Value) -> Result<Self, String> {
         let version = {
             let object = value
@@ -4367,12 +5095,16 @@ impl ResolutionStateWire {
             LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION => {
                 GameStateDecodeMode::ResolutionWireV3
             }
-            LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION | RESOLUTION_STATE_WIRE_VERSION => {
-                GameStateDecodeMode::ResolutionWireV4
-            }
+            LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION
+            | 5
+            | LEGACY_UNRESOLVED_CHANGE_ZONE_MEMBER_RESOLUTION_STATE_WIRE_VERSION
+            | LEGACY_COIN_FLIP_KIND_RESOLUTION_STATE_WIRE_VERSION
+            | LEGACY_UNINHERITED_FLIP_BRANCH_RESOLUTION_STATE_WIRE_VERSION
+            | LEGACY_UNSCOPED_RANDOM_RESULT_RESOLUTION_STATE_WIRE_VERSION
+            | RESOLUTION_STATE_WIRE_VERSION => GameStateDecodeMode::ResolutionWireV4,
             _ => {
                 return Err(format!(
-                    "unsupported resolution_state_version {version}; expected 1, 2, {LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION}, or {RESOLUTION_STATE_WIRE_VERSION}"
+                    "unsupported resolution_state_version {version}; expected 1, 2, {LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION}, 5, {LEGACY_UNRESOLVED_CHANGE_ZONE_MEMBER_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_COIN_FLIP_KIND_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNINHERITED_FLIP_BRANCH_RESOLUTION_STATE_WIRE_VERSION}, {LEGACY_UNSCOPED_RANDOM_RESULT_RESOLUTION_STATE_WIRE_VERSION}, or {RESOLUTION_STATE_WIRE_VERSION}"
                 ));
             }
         };
@@ -4380,6 +5112,7 @@ impl ResolutionStateWire {
             validate_draw_sequence_delivery_owner_fields(&value, version, None)?;
         }
         reject_ambiguous_legacy_paused_draw_result(&value, version)?;
+        migrate_legacy_change_zone_member_entries(&mut value, version)?;
         // `ResolutionStateWire` is a public persistence boundary in its own
         // right. Its historic-shape preparation and raw-state materialization
         // both belong to `GameStateDecode`; no wire branch gets a private
@@ -4402,11 +5135,27 @@ impl ResolutionStateWire {
             &mut value,
             additional_live_event_roots,
         )?;
+        admit_entry_onset_record(&mut value)?;
 
         match decode_mode {
             // V1 reader compatibility path: historical keys are consumed here
             // and projected into typed frames before runtime state is restored.
             GameStateDecodeMode::ResolutionWireV1 => {
+                // CR 603.6a + CR 614.12: a v1 save paused inside a multi-object
+                // ChangeZone wrote bare member ids with carrier-level entry
+                // modifications. Migrate (or refuse, when a gate decides the
+                // entries) before this arm's validation or the `LegacyChangeZoneWire`
+                // decode reads it. Unlike the v2–v6 frame migration, this runs after
+                // `prepare_resolution_wire` and the provenance migration. Their
+                // whole-value walks reach this carrier, but they only rewrite or
+                // refuse shapes a writer never puts in its `remaining` or entry
+                // fields, so the migrated result is unchanged.
+                if let Some(carrier) = value
+                    .get_mut("pending_change_zone_iteration")
+                    .filter(|carrier| !carrier.is_null())
+                {
+                    migrate_legacy_change_zone_carrier(carrier)?;
+                }
                 let legacy_draw_sequence_frames = value
                     .get("draw_sequences")
                     .and_then(|stack| stack.get("frames"))
@@ -4585,6 +5334,7 @@ impl ResolutionStateWire {
                     .validate(&legacy.waiting_for)
                     .map_err(|error| error.to_string())?;
                 crate::types::game_state::validate_trigger_firing_coherence(&legacy)?;
+                crate::types::game_state::validate_owed_spell_final_part_coherence(&legacy)?;
                 crate::types::game_state::validate_return_result_occurrence_coherence(&legacy)?;
                 #[cfg(debug_assertions)]
                 debug_assert_runtime_resolution_invariants(&legacy);
@@ -4648,6 +5398,7 @@ impl ResolutionStateWire {
                     );
                 }
                 crate::types::game_state::validate_trigger_firing_coherence(&projected)?;
+                crate::types::game_state::validate_owed_spell_final_part_coherence(&projected)?;
                 crate::types::game_state::validate_return_result_occurrence_coherence(&projected)?;
                 #[cfg(debug_assertions)]
                 debug_assert_runtime_resolution_invariants(&projected);
@@ -4690,6 +5441,8 @@ fn normalize_legacy_completed_resolution_carrier(state: &mut GameState) {
     {
         state.resolving_stack_entry = None;
         state.resolving_trigger_firing = None;
+        state.resolving_spell_final_part = None;
+        state.resolving_stack_object = None;
         state.resolution_source_relatch = None;
     }
 }
@@ -6021,18 +6774,13 @@ mod tests {
                 origin: None,
                 destination: Zone::Battlefield,
                 enter_transformed: false,
-                enter_tapped: EtbTapState::Unspecified,
                 enters_under_player: None,
-                enters_attacking: false,
-                enter_with_counters: Vec::new(),
-                conditional_enter_with_counters: Vec::new(),
                 duration: None,
                 track_exiled_by_source: false,
                 face_down_in_exile: crate::types::ability::ExileConcealment::Public,
                 moved_count: None,
                 face_down_profile: None,
                 library_placement: None,
-                enters_modified_if: None,
                 enter_attached_to: None,
                 effect_kind: EffectKind::ChangeZone,
             }),
@@ -6585,8 +7333,10 @@ mod tests {
             targets: Vec::new(),
             win_effect: None,
             lose_effect: None,
-            kind: PendingCoinFlipKind::Single,
+            kind: PendingCoinFlipKind::Exactly { remaining: 0 },
             chain_root_targets: Vec::new(),
+            branch_context: FlipBranchContext::default(),
+            trigger_context: None,
         });
         let mut stack = ResolutionStack::default();
         stack.push_inner(frame);
@@ -6649,8 +7399,10 @@ mod tests {
             targets: Vec::new(),
             win_effect: None,
             lose_effect: None,
-            kind: PendingCoinFlipKind::Single,
+            kind: PendingCoinFlipKind::Exactly { remaining: 0 },
             chain_root_targets: Vec::new(),
+            branch_context: FlipBranchContext::default(),
+            trigger_context: None,
         }));
         assert_eq!(
             optional_effect.validate(&WaitingFor::CoinFlipKeepChoice {
@@ -6963,8 +7715,10 @@ mod tests {
             targets: Vec::new(),
             win_effect: None,
             lose_effect: None,
-            kind: PendingCoinFlipKind::Single,
+            kind: PendingCoinFlipKind::Exactly { remaining: 0 },
             chain_root_targets: Vec::new(),
+            branch_context: FlipBranchContext::default(),
+            trigger_context: None,
         };
 
         let mut v1 = serde_json::to_value(&state).expect("legacy state serializes");
@@ -6991,19 +7745,102 @@ mod tests {
         );
     }
 
+    /// CR 705.1 + CR 705.2: every pre-version-8 coin-flip kind is read onto the
+    /// current kind with the same meaning, so no persisted frame is refused.
     #[test]
-    fn resolution_wire_contract_pins_v5_and_the_legacy_readers() {
-        assert_eq!(RESOLUTION_STATE_WIRE_VERSION, 5);
-        assert_eq!(LEGACY_RESOLUTION_STATE_WIRE_VERSION, 1);
-        assert_eq!(LEGACY_TYPED_FRAME_RESOLUTION_STATE_WIRE_VERSION, 2);
-        assert_eq!(LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION, 3);
-        assert_eq!(LEGACY_DEALERLESS_RESOLUTION_STATE_WIRE_VERSION, 4);
+    fn coin_flip_kind_reader_maps_every_legacy_kind() {
+        let read = |json: Value| {
+            serde_json::from_value::<PendingCoinFlipKind>(json)
+                .expect("every coin-flip kind shape is readable")
+        };
 
-        let mut v1 =
-            serde_json::to_value(GameState::new_two_player(57)).expect("legacy state serializes");
-        v1["resolution_state_version"] = Value::from(1_u64);
-        serde_json::from_value::<ResolutionStateWire>(v1)
-            .expect("the v1 reader remains available for historical saves");
+        // Legacy kinds map totally and losslessly.
+        assert_eq!(
+            read(serde_json::json!("Single")),
+            PendingCoinFlipKind::Exactly { remaining: 0 }
+        );
+        assert_eq!(
+            read(serde_json::json!({ "FlipN": { "remaining": 2 } })),
+            PendingCoinFlipKind::Exactly { remaining: 2 }
+        );
+        assert_eq!(
+            read(serde_json::json!({ "UntilLose": { "wins_so_far": 0 } })),
+            PendingCoinFlipKind::UntilLoss { wins_so_far: 0 }
+        );
+        assert_eq!(
+            read(serde_json::json!({ "UntilLose": { "wins_so_far": 3 } })),
+            PendingCoinFlipKind::UntilLoss { wins_so_far: 3 }
+        );
+
+        // Positive control: the current kinds round-trip, and are written in the current shape.
+        for kind in [
+            PendingCoinFlipKind::Exactly { remaining: 4 },
+            PendingCoinFlipKind::UntilLoss { wins_so_far: 7 },
+        ] {
+            let written = serde_json::to_value(&kind).expect("current kind serializes");
+            assert_eq!(read(written.clone()), kind);
+            assert!(
+                written.get("Exactly").is_some() || written.get("UntilLoss").is_some(),
+                "current kinds are written as named-field variants, got {written}"
+            );
+        }
+
+        // A v1 `pending_coin_flip` carrying the legacy `Single` kind converts through
+        // `ResolutionStateWire` onto the current frame.
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::CoinFlipKeepChoice {
+            player: PlayerId(0),
+            results: vec![true, false],
+            keep_count: 1,
+        };
+        let expected = PendingCoinFlip {
+            source_id: ObjectId(5),
+            controller: PlayerId(0),
+            flipper: PlayerId(0),
+            targets: Vec::new(),
+            win_effect: None,
+            lose_effect: None,
+            kind: PendingCoinFlipKind::Exactly { remaining: 0 },
+            chain_root_targets: Vec::new(),
+            branch_context: FlipBranchContext::default(),
+            trigger_context: None,
+        };
+        let mut v1 = serde_json::to_value(&state).expect("legacy state serializes");
+        let mut legacy_frame = serde_json::to_value(&expected).expect("frame serializes");
+        legacy_frame["kind"] = serde_json::json!("Single");
+        v1["pending_coin_flip"] = legacy_frame;
+        v1["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
+        let wire: ResolutionStateWire =
+            serde_json::from_value(v1).expect("a v1 frame with the legacy Single kind converts");
+        assert_eq!(wire.game_state().active_coin_flip_frame(), Some(&expected));
+
+        // A version-6 payload (the last version before the reshape) still decodes.
+        let mut v6 = serde_json::to_value(&wire).expect("current wire serializes");
+        v6["resolution_state_version"] = Value::from(6_u64);
+        let restored: ResolutionStateWire =
+            serde_json::from_value(v6).expect("a version-6 payload decodes");
+        assert_eq!(
+            restored.into_game_state().active_coin_flip_frame(),
+            Some(&expected)
+        );
+    }
+
+    #[test]
+    fn resolution_wire_keeps_all_legacy_readers_available() {
+        let state = GameState::new_two_player(57);
+        for version in 1..=LEGACY_UNSCOPED_RANDOM_RESULT_RESOLUTION_STATE_WIRE_VERSION {
+            let mut value = if version == LEGACY_RESOLUTION_STATE_WIRE_VERSION {
+                serde_json::to_value(&state).unwrap()
+            } else {
+                serde_json::to_value(ResolutionStateWire::from_game_state(state.clone())).unwrap()
+            };
+            value["resolution_state_version"] = Value::from(version);
+            let restored = serde_json::from_value::<ResolutionStateWire>(value)
+                .expect("every historical reader remains available")
+                .into_game_state();
+            assert_eq!(restored.players, state.players);
+            assert!(restored.resolution_stack.is_empty());
+        }
     }
 
     #[test]
@@ -7383,8 +8220,10 @@ mod tests {
                 targets: Vec::new(),
                 win_effect: None,
                 lose_effect: None,
-                kind: PendingCoinFlipKind::Single,
+                kind: PendingCoinFlipKind::Exactly { remaining: 0 },
                 chain_root_targets: Vec::new(),
+                branch_context: FlipBranchContext::default(),
+                trigger_context: None,
             },
         );
         apply_as_current(
@@ -7479,6 +8318,7 @@ mod tests {
             restored.stop_progress, None,
             "a legacy payload carries no baseline, and `None` can never stop the repeat"
         );
+        assert_eq!(restored.iteration_progress, None);
         // Positive reach-guard: the payload really parsed — the frame's ability
         // survived intact, so `stop_progress == None` is not a parse failure.
         assert_eq!(
@@ -7505,6 +8345,12 @@ mod tests {
         let frame = PendingRepeatUntil {
             ability: Box::new(repeat_ability),
             stop_progress: Some(witness.clone()),
+            iteration_progress: Some(crate::types::game_state::RepeatUntilIterationWitness {
+                choice: RepeatIterationChoice::MandatoryOnly(
+                    crate::types::game_state::RepeatIterationMovement::Stationary,
+                ),
+                zone_changes_before: 3,
+            }),
         };
         let round_tripped: PendingRepeatUntil =
             serde_json::from_str(&serde_json::to_string(&frame).expect("frame serializes"))
@@ -7554,6 +8400,7 @@ mod tests {
             PendingRepeatUntil {
                 ability: Box::new(repeat_ability),
                 stop_progress: None,
+                iteration_progress: None,
             },
         ));
         assert!(matches!(
@@ -7826,6 +8673,7 @@ mod tests {
                 chooser: Chooser::Controller.into(),
                 candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: true,
                 selection: CardSelectionMode::Chosen,
                 constraint: None,
@@ -8615,6 +9463,7 @@ mod tests {
             may_cost_paid: false,
             may_cost_remaining: None,
             delivery_boundary: None,
+            unrepresentable_life_change: Default::default(),
         });
         spell.waiting_for =
             crate::game::replacement::replacement_choice_waiting_for(PlayerId(0), &spell);
@@ -8730,8 +9579,10 @@ mod tests {
             targets: Vec::new(),
             win_effect: None,
             lose_effect: None,
-            kind: PendingCoinFlipKind::Single,
+            kind: PendingCoinFlipKind::Exactly { remaining: 0 },
             chain_root_targets: Vec::new(),
+            branch_context: FlipBranchContext::default(),
+            trigger_context: None,
         };
         let mut multiple_direct = serde_json::to_value(multiple_direct).expect("v1 serializes");
         multiple_direct["pending_coin_flip"] =
@@ -8906,8 +9757,10 @@ mod tests {
             targets: Vec::new(),
             win_effect: None,
             lose_effect: None,
-            kind: PendingCoinFlipKind::Single,
+            kind: PendingCoinFlipKind::Exactly { remaining: 0 },
             chain_root_targets: Vec::new(),
+            branch_context: FlipBranchContext::default(),
+            trigger_context: None,
         }));
         assert!(
             serde_json::from_value::<ResolutionStateWire>(v2_fixture_with_frames(
@@ -9025,9 +9878,596 @@ mod tests {
 
         let mut future = current;
         future["resolution_state_version"] = Value::from(RESOLUTION_STATE_WIRE_VERSION + 1);
-        let error = serde_json::from_value::<ResolutionStateWire>(future)
-            .expect_err("an unknown version is refused")
+        assert!(serde_json::from_value::<ResolutionStateWire>(future).is_err());
+    }
+
+    /// A Krark's-Thumb-parked coin flip over `branch_context`.
+    fn state_with_parked_coin_flip(branch_context: FlipBranchContext) -> GameState {
+        let mut state = GameState::new_two_player(42);
+        state.waiting_for = WaitingFor::CoinFlipKeepChoice {
+            player: PlayerId(0),
+            results: vec![true, false],
+            keep_count: 1,
+        };
+        state.push_coin_flip_frame(PendingCoinFlip {
+            source_id: ObjectId(7),
+            controller: PlayerId(0),
+            flipper: PlayerId(0),
+            targets: Vec::new(),
+            win_effect: None,
+            lose_effect: None,
+            kind: PendingCoinFlipKind::Exactly { remaining: 0 },
+            chain_root_targets: Vec::new(),
+            branch_context,
+            trigger_context: None,
+        });
+        state
+    }
+
+    /// The serialized `data` of the wire's one coin-flip frame.
+    fn coin_flip_frame_data(wire: &Value) -> &Map<String, Value> {
+        wire["resolution_frames"]["frames"]
+            .as_array()
+            .and_then(|frames| frames.iter().find(|frame| frame["type"] == "CoinFlip"))
+            .and_then(|frame| frame["data"].as_object())
+            .expect("premise: a parked coin-flip frame")
+    }
+
+    fn non_empty_branch_context(state: &GameState) -> FlipBranchContext {
+        FlipBranchContext {
+            chosen_players: vec![PlayerId(1)],
+            forwarded_result_context: Some(Box::new(ForwardedResultContext::from_object_ids(
+                state,
+                &[],
+            ))),
+        }
+    }
+
+    /// U-E2b: a parked coin flip whose branch inherits something writes the
+    /// current version and the `branch_context` key, and round-trips equal.
+    /// REVERT: dropping the field, or keeping the writer at 8, fails the
+    /// version, key or equality assertion.
+    #[test]
+    fn a_parked_coin_flip_branch_context_survives_the_current_wire() {
+        let branch_context = non_empty_branch_context(&GameState::new_two_player(42));
+        let state = state_with_parked_coin_flip(branch_context.clone());
+
+        let wire = serde_json::to_value(ResolutionStateWire::from_game_state(state))
+            .expect("wire serializes");
+        assert_eq!(
+            wire["resolution_state_version"],
+            Value::from(RESOLUTION_STATE_WIRE_VERSION)
+        );
+        assert!(coin_flip_frame_data(&wire).contains_key("branch_context"));
+
+        let restored = serde_json::from_value::<ResolutionStateWire>(wire)
+            .expect("current wire restores")
+            .into_game_state();
+        assert_eq!(
+            restored
+                .active_coin_flip_frame()
+                .map(|frame| &frame.branch_context),
+            Some(&branch_context)
+        );
+    }
+
+    /// U-E2a: a version-8 payload carries no `branch_context` and restores with
+    /// the default context, which is exactly version 8's semantics: the branch
+    /// inherited nothing. The default is also never written.
+    #[test]
+    fn a_version_8_coin_flip_frame_restores_with_an_empty_branch_context() {
+        let default_wire = serde_json::to_value(ResolutionStateWire::from_game_state(
+            state_with_parked_coin_flip(FlipBranchContext::default()),
+        ))
+        .expect("wire serializes");
+        assert!(
+            !coin_flip_frame_data(&default_wire).contains_key("branch_context"),
+            "reach: the default context is skipped, so a v8 writer's frame has the same shape"
+        );
+
+        let mut v7 = default_wire;
+        v7["resolution_state_version"] =
+            Value::from(LEGACY_UNINHERITED_FLIP_BRANCH_RESOLUTION_STATE_WIRE_VERSION);
+        let restored = serde_json::from_value::<ResolutionStateWire>(v7)
+            .expect("a version-8 payload decodes")
+            .into_game_state();
+        assert_eq!(
+            restored
+                .active_coin_flip_frame()
+                .map(|frame| &frame.branch_context),
+            Some(&FlipBranchContext::default())
+        );
+    }
+
+    /// An unversioned raw payload is dated by what its frames carry: a coin-flip
+    /// `branch_context` is written only by version 9.
+    #[test]
+    fn an_unversioned_coin_flip_branch_context_dates_the_payload_to_version_9() {
+        let declared_version = |branch_context: FlipBranchContext| {
+            let mut raw =
+                serde_json::to_value(state_with_parked_coin_flip(branch_context)).expect("raw");
+            assert!(
+                raw.get("resolution_state_version").is_none()
+                    && raw.get("resolution_stack").is_some(),
+                "premise: an unversioned payload carrying the frame stack"
+            );
+            declare_raw_resolution_wire(&mut raw).expect("the payload declares a version");
+            raw["resolution_state_version"].clone()
+        };
+
+        assert_eq!(
+            declared_version(non_empty_branch_context(&GameState::new_two_player(42))),
+            Value::from(LEGACY_UNSCOPED_RANDOM_RESULT_RESOLUTION_STATE_WIRE_VERSION)
+        );
+        assert_eq!(
+            declared_version(FlipBranchContext::default()),
+            Value::from(LEGACY_RESULT_OWNERSHIP_RESOLUTION_STATE_WIRE_VERSION),
+            "the same frame without the key is not dated to the current version"
+        );
+    }
+
+    #[test]
+    fn random_result_owned_scope_survives_current_legacy_and_raw_ingress() {
+        let retained = |state: &GameState, die| {
+            if die {
+                state
+                    .resolution_stack
+                    .active_die_roll()
+                    .unwrap()
+                    .trigger_context
+                    .clone()
+            } else {
+                state
+                    .active_coin_flip_frame()
+                    .unwrap()
+                    .trigger_context
+                    .clone()
+            }
+        };
+        for die in [false, true] {
+            for context in [
+                None,
+                Some(ResolvingTriggerContext {
+                    event: None,
+                    events: vec![],
+                    match_count: None,
+                    die_result: None,
+                }),
+                Some(ResolvingTriggerContext {
+                    event: None,
+                    events: vec![],
+                    match_count: Some(7),
+                    die_result: Some(13),
+                }),
+            ] {
+                let mut state = state_with_parked_coin_flip(FlipBranchContext::default());
+                state.active_coin_flip_frame_mut().unwrap().trigger_context = context.clone();
+                if die {
+                    state.take_active_coin_flip_frame().unwrap();
+                    state.push_die_roll_frame(PendingDieRoll {
+                        source_id: ObjectId(7),
+                        controller: PlayerId(0),
+                        roller: PlayerId(0),
+                        quantity_controller: None,
+                        scoped_player: None,
+                        targets: vec![],
+                        sides: 1,
+                        results: vec![1, 1],
+                        ignore_rules: vec![crate::types::ability::DieRollIgnoreRule::Lowest],
+                        results_table: vec![],
+                        modifier: None,
+                        die_result: None,
+                        next_index: 0,
+                        running_total: 0,
+                        rolled_any: false,
+                        forced_ignored: vec![],
+                        chain_root_targets: vec![],
+                        trigger_context: context.clone(),
+                        illegal_target_slots: vec![],
+                        chain_root_target_pins: vec![],
+                        declared_capture: None,
+                        local_target_pins: vec![],
+                        keyed_target_incarnations: vec![],
+                        declared_player: None,
+                    });
+                    state.waiting_for = WaitingFor::DieKeepChoice {
+                        player: PlayerId(0),
+                        results: vec![1, 1],
+                        ignorable_indices: vec![0, 1],
+                        ignore_count: 1,
+                    };
+                }
+                let mut raw = serde_json::to_value(&state).unwrap();
+                declare_raw_resolution_wire(&mut raw).unwrap();
+                if context.is_some() {
+                    assert_eq!(
+                        raw["resolution_state_version"],
+                        RESOLUTION_STATE_WIRE_VERSION
+                    );
+                }
+                let restored = serde_json::from_value::<ResolutionStateWire>(raw)
+                    .unwrap()
+                    .into_game_state();
+                assert_eq!(retained(&restored, die), context);
+                let mut wire =
+                    serde_json::to_value(ResolutionStateWire::from_game_state(state)).unwrap();
+                let restored = serde_json::from_value::<ResolutionStateWire>(wire.clone())
+                    .unwrap()
+                    .into_game_state();
+                assert_eq!(retained(&restored, die), context);
+                wire["resolution_state_version"] =
+                    Value::from(LEGACY_UNSCOPED_RANDOM_RESULT_RESOLUTION_STATE_WIRE_VERSION);
+                wire["resolution_frames"]["frames"][0]["data"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("trigger_context");
+                let restored = serde_json::from_value::<ResolutionStateWire>(wire)
+                    .unwrap()
+                    .into_game_state();
+                assert_eq!(retained(&restored, die), None);
+            }
+        }
+    }
+
+    /// `FlipBranchContext::from_ability` keeps a completed-but-empty forwarded
+    /// result and drops a non-empty one (which already rides the branch's
+    /// `targets`).
+    #[test]
+    fn flip_branch_context_captures_only_the_empty_forwarded_result() {
+        use crate::types::ability::{Effect, QuantityExpr, TargetFilter};
+        let state = GameState::new_two_player(42);
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        );
+        assert!(FlipBranchContext::from_ability(&ability).is_empty());
+
+        ability.chosen_players = vec![PlayerId(1)];
+        ability.context.forwarded_result_context = Some(Box::new(
+            ForwardedResultContext::from_object_ids(&state, &[]),
+        ));
+        let captured = FlipBranchContext::from_ability(&ability);
+        assert_eq!(captured.chosen_players, vec![PlayerId(1)]);
+        assert!(captured.forwarded_result_context.is_some());
+
+        ability.context.forwarded_result_context = Some(Box::new(
+            ForwardedResultContext::from_object_ids(&state, &[ObjectId(3)]),
+        ));
+        assert!(
+            FlipBranchContext::from_ability(&ability)
+                .forwarded_result_context
+                .is_none(),
+            "a non-empty result is not captured"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // CR 611.2e: persisted onset admission (`admit_entry_onset_record`).
+    // -----------------------------------------------------------------------
+
+    /// An onset-admitting `GenericEffect` with the `WhenFollowed` default.
+    fn onset_admitting_effect() -> Effect {
+        Effect::GenericEffect {
+            static_abilities: Vec::new(),
+            duration: None,
+            target: None,
+            end_cost: None,
+        }
+    }
+
+    /// A serialized `ResolvedAbility` node (`kind` + `effect`) of an onset-admitting kind.
+    fn onset_admitting_resolved_node() -> Value {
+        serde_json::to_value(ResolvedAbility::new(
+            onset_admitting_effect(),
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        ))
+        .expect("the resolved node serializes")
+    }
+
+    /// A serialized `AbilityDefinition` node (`kind` + `effect`) of an onset-admitting kind.
+    fn onset_admitting_definition_node() -> Value {
+        serde_json::to_value(AbilityDefinition::new(
+            AbilityKind::Spell,
+            onset_admitting_effect(),
+        ))
+        .expect("the definition node serializes")
+    }
+
+    /// A board with one plain battlefield object and no ability node of any onset-admitting
+    /// kind, and that object's id.
+    fn onset_free_board() -> (GameState, ObjectId) {
+        let mut state = GameState::new_two_player(611);
+        let object = crate::game::zones::create_object(
+            &mut state,
+            CardId(611),
+            PlayerId(0),
+            "Plain permanent".to_string(),
+            Zone::Battlefield,
+        );
+        (state, object)
+    }
+
+    /// The current resolution wire of `state` with the onset record removed: what an engine
+    /// that predates the record writes for it.
+    fn unrecorded_wire(state: &GameState) -> Value {
+        let mut wire = serde_json::to_value(ResolutionStateWire::from_game_state(state.clone()))
+            .expect("the resolution wire serializes");
+        assert_eq!(
+            wire.as_object_mut()
+                .expect("the wire is an object")
+                .remove(ABILITY_ONSET_RECORD_FIELD),
+            Some(Value::from("Recorded")),
+            "reach guard: the current writer emits the record"
+        );
+        wire
+    }
+
+    fn assert_onset_refusal(wire: Value, label: &str) {
+        let error = serde_json::from_value::<ResolutionStateWire>(wire)
+            .expect_err(label)
             .to_string();
-        assert!(error.contains("1, 2, 3, 4, or 5"), "{error}");
+        assert!(
+            error.starts_with("RESTORE_INCOMPATIBLE_PRE_ENTRY_ONSET:"),
+            "{label}: {error}"
+        );
+    }
+
+    /// U1: the admission walk is total and keys on the `kind` + `effect` fingerprint. An
+    /// unrecorded payload whose only onset-admitting node sits in any one carrier is refused;
+    /// the decoy shapes that carry an `effect` but are not ability nodes, a non-admitting kind
+    /// and an unknown legacy tag are not counted.
+    #[test]
+    fn unrecorded_onset_admitting_node_in_any_carrier_is_refused() {
+        let (state, object) = onset_free_board();
+        let object_key = object.0.to_string();
+
+        // Reach guard: the same board with no onset-admitting node is admitted.
+        let admitted = serde_json::from_value::<ResolutionStateWire>(unrecorded_wire(&state))
+            .expect("an unrecorded payload with no onset-admitting node is admitted")
+            .into_game_state();
+        assert_eq!(admitted.ability_onset_record, AbilityOnsetRecord::Recorded);
+
+        // (a) a v1 `pending_continuation`.
+        let mut v1 = unrecorded_wire(&state);
+        v1.as_object_mut()
+            .expect("the wire is an object")
+            .remove("resolution_frames");
+        v1["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
+        v1["pending_continuation"] = serde_json::to_value(PendingContinuation::new(
+            Box::new(ResolvedAbility::new(
+                onset_admitting_effect(),
+                Vec::new(),
+                object,
+                PlayerId(0),
+            )),
+            &state,
+        ))
+        .expect("the legacy continuation serializes");
+        assert_onset_refusal(v1, "(a) v1 pending_continuation");
+
+        // (b) the resolved-rules journal.
+        let mut journal = unrecorded_wire(&state);
+        journal["resolved_rules_journal"]["entries"] = serde_json::json!([
+            { "command": { "StackEntryFinalize": { "ability": onset_admitting_resolved_node() } } }
+        ]);
+        assert_onset_refusal(journal, "(b) resolved_rules_journal");
+
+        // (c) an object's abilities.
+        let mut abilities = unrecorded_wire(&state);
+        abilities["objects"][&object_key]["abilities"] =
+            serde_json::json!([onset_admitting_definition_node()]);
+        assert_onset_refusal(abilities, "(c) objects.*.abilities");
+
+        // (d) the stack.
+        let mut stack = unrecorded_wire(&state);
+        stack["stack"] = serde_json::json!([{
+            "id": 900,
+            "source_id": object.0,
+            "controller": 0,
+            "kind": { "type": "ActivatedAbility", "data": { "source_id": object.0,
+                "ability": onset_admitting_resolved_node() } }
+        }]);
+        assert_onset_refusal(stack, "(d) stack");
+
+        // (e) the current-version parked `AbilityContinuation` chain.
+        let mut frames = unrecorded_wire(&state);
+        frames["resolution_frames"]["frames"] = serde_json::json!([{
+            "type": "AbilityContinuation",
+            "data": { "pending": { "chain": onset_admitting_resolved_node() } }
+        }]);
+        assert_onset_refusal(frames, "(e) resolution_frames.frames[0].data.pending.chain");
+
+        // (f) a retained token's trigger chain.
+        let mut trigger = unrecorded_wire(&state);
+        let mut execute = onset_admitting_definition_node();
+        execute["effect"] = serde_json::json!({ "type": "Draw",
+            "count": { "type": "Fixed", "value": 1 }, "target": { "type": "Controller" } });
+        execute["sub_ability"] = onset_admitting_definition_node();
+        trigger["objects"][&object_key]["trigger_definitions"] =
+            serde_json::json!([{ "execute": execute }]);
+        assert_onset_refusal(
+            trigger,
+            "(f) objects.*.trigger_definitions[0].execute.sub_ability",
+        );
+
+        // Not counted: a `DelayedAbilityOrigin`-shaped `{effect, creator, condition}` (no `kind`),
+        // an `AbilityCost::EffectCost` `{type, effect}` (no `kind`), a non-admitting kind and an
+        // unknown legacy tag. A payload holding only these is admitted and becomes `Recorded`.
+        let mut decoys = unrecorded_wire(&state);
+        decoys["decoys"] = serde_json::json!([
+            { "effect": { "type": "GenericEffect" }, "creator": 0, "condition": null },
+            { "type": "EffectCost", "effect": { "type": "GenericEffect" } },
+            { "kind": "Spell", "effect": { "type": "Draw" } },
+            { "kind": "Spell", "effect": { "type": "Tap" } },
+        ]);
+        assert!(
+            !holds_onset_undecidable_ability_node(&decoys),
+            "no decoy is an onset-undecidable ability node"
+        );
+        admit_entry_onset_record(&mut decoys).expect("a decoy-only payload is admitted");
+        assert_eq!(decoys[ABILITY_ONSET_RECORD_FIELD], Value::from("Recorded"));
+    }
+
+    /// U2: a `Recorded` payload short-circuits — its `WhenFollowed` nodes are explicit current
+    /// onsets — while an explicit `"Unrecorded"` record is walked like an absent one, and a
+    /// record value that is not an `AbilityOnsetRecord` is a decode error naming the field.
+    #[test]
+    fn recorded_payload_short_circuits_the_onset_walk() {
+        let (mut state, object) = onset_free_board();
+        std::sync::Arc::make_mut(
+            &mut state
+                .objects
+                .get_mut(&object)
+                .expect("the object exists")
+                .abilities,
+        )
+        .push(AbilityDefinition::new(
+            AbilityKind::Activated,
+            onset_admitting_effect(),
+        ));
+
+        let recorded = serde_json::to_value(ResolutionStateWire::from_game_state(state.clone()))
+            .expect("the resolution wire serializes");
+        assert_eq!(
+            recorded[ABILITY_ONSET_RECORD_FIELD],
+            Value::from("Recorded")
+        );
+        assert!(
+            recorded["objects"][object.0.to_string()]["abilities"][0]
+                .get("entry_onset")
+                .is_none(),
+            "reach guard: the default onset is omitted on the wire"
+        );
+        let restored = serde_json::from_value::<ResolutionStateWire>(recorded.clone())
+            .expect("a Recorded payload is admitted")
+            .into_game_state();
+        let ability = &restored
+            .objects
+            .get(&object)
+            .expect("the object is restored")
+            .abilities[0];
+        assert!(matches!(*ability.effect, Effect::GenericEffect { .. }));
+        assert_eq!(ability.entry_onset, ContinuousEffectOnset::WhenFollowed);
+        assert!(
+            serde_json::to_value(ability)
+                .expect("the restored ability serializes")
+                .get("entry_onset")
+                .is_none(),
+            "the admitted node keeps the default onset"
+        );
+
+        let mut explicit = recorded.clone();
+        explicit[ABILITY_ONSET_RECORD_FIELD] = Value::from("Unrecorded");
+        assert_onset_refusal(explicit, "an explicit Unrecorded record is walked");
+
+        let mut malformed = recorded;
+        malformed[ABILITY_ONSET_RECORD_FIELD] = Value::from(7);
+        let error = serde_json::from_value::<ResolutionStateWire>(malformed)
+            .expect_err("a malformed record is a decode error")
+            .to_string();
+        assert!(error.contains(ABILITY_ONSET_RECORD_FIELD), "{error}");
+        assert!(
+            !error.starts_with("RESTORE_INCOMPATIBLE_PRE_ENTRY_ONSET:"),
+            "{error}"
+        );
+    }
+
+    /// U3: an unrecorded payload with no onset-admitting node is admitted as `Recorded`.
+    #[test]
+    fn admitted_unrecorded_payload_becomes_recorded() {
+        let state = GameState::new_two_player(1);
+        let wire = unrecorded_wire(&state);
+        assert!(!holds_onset_undecidable_ability_node(&wire));
+        let restored = serde_json::from_value::<ResolutionStateWire>(wire)
+            .expect("the unrecorded payload is admitted")
+            .into_game_state();
+        assert_eq!(restored.ability_onset_record, AbilityOnsetRecord::Recorded);
+    }
+
+    /// U3b: a carrier stored detached from its state is admitted against the record read from the
+    /// serialized state before decode, in both persisted shapes (trusted envelope and raw root).
+    /// An unrecorded writer's carrier holding an onset-admitting node is refused; the same carrier
+    /// beside a `Recorded` state, and an onset-free carrier beside an unrecorded one, are admitted.
+    #[test]
+    fn detached_carrier_is_admitted_against_the_pre_decode_record() {
+        let state = GameState::new_two_player(1);
+        let onset_carrier = serde_json::json!([{ "card": {
+            "abilities": [onset_admitting_definition_node()] } }]);
+        let onset_free_carrier = serde_json::json!([{ "card": { "abilities": [] } }]);
+
+        let trusted = serde_json::to_value(crate::types::game_state::PersistedGameState::capture(
+            state.clone(),
+        ))
+        .expect("the persisted envelope serializes");
+        let mut unrecorded_trusted = trusted.clone();
+        unrecorded_trusted["state"]
+            .as_object_mut()
+            .expect("the envelope's state is an object")
+            .remove(ABILITY_ONSET_RECORD_FIELD);
+        let unrecorded_raw = unrecorded_wire(&state);
+
+        for (label, persisted) in [
+            ("trusted envelope", &unrecorded_trusted),
+            ("raw root", &unrecorded_raw),
+        ] {
+            let record =
+                PersistedEntryOnsetRecord::of_persisted_state(persisted).expect("the record reads");
+            let error = record
+                .admit_detached_carrier(&onset_carrier)
+                .expect_err(label);
+            assert!(
+                error.starts_with("RESTORE_INCOMPATIBLE_PRE_ENTRY_ONSET:"),
+                "{label}: {error}"
+            );
+            record
+                .admit_detached_carrier(&onset_free_carrier)
+                .expect("an onset-free detached carrier is admitted");
+        }
+
+        PersistedEntryOnsetRecord::of_persisted_state(&trusted)
+            .expect("the record reads")
+            .admit_detached_carrier(&onset_carrier)
+            .expect("a Recorded writer's detached carrier is admitted untouched");
+
+        let mut malformed = trusted;
+        malformed["state"][ABILITY_ONSET_RECORD_FIELD] = Value::from(7);
+        let error = PersistedEntryOnsetRecord::of_persisted_state(&malformed)
+            .expect_err("a malformed record is a read error");
+        assert!(error.contains(ABILITY_ONSET_RECORD_FIELD), "{error}");
+    }
+
+    /// U4: every writer emits the record under its serde name — the derived serializer, the
+    /// trusted persistence envelope and the client wire.
+    #[test]
+    fn every_writer_emits_the_onset_record() {
+        let state = GameState::new_two_player(1);
+        let derived = serde_json::to_value(&state).expect("the state serializes");
+        assert_eq!(derived[ABILITY_ONSET_RECORD_FIELD], Value::from("Recorded"));
+
+        let persisted = serde_json::to_value(
+            crate::types::game_state::PersistedGameState::capture(state.clone()),
+        )
+        .expect("the persisted envelope serializes");
+        assert_eq!(
+            persisted["state"][ABILITY_ONSET_RECORD_FIELD],
+            Value::from("Recorded")
+        );
+
+        let client = serde_json::to_value(crate::game::derived_views::ClientGameStateRef::wrap(
+            &state, None,
+        ))
+        .expect("the client wire serializes");
+        assert_eq!(
+            client["state"][ABILITY_ONSET_RECORD_FIELD],
+            Value::from("Recorded"),
+            "the client wire does not strip the record"
+        );
     }
 }

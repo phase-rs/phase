@@ -727,3 +727,80 @@ fn first_trigger_target_slot(runner: &GameRunner) -> Vec<TargetRef> {
     );
     pinned
 }
+
+/// CR 508.3e + CR 508.5a: the firing for P2 ranges over the creatures attacking
+/// P2 even when the Mentor itself is attacking P1 and two creatures attack P2.
+/// Those two share one defending player, so the observer firing has one answer
+/// for "that player" and it is not the source's own defender.
+///
+/// Revert-failing: with the event's attackers answering only when exactly one
+/// is named, the source's own defender (P1) answers the P2 firing, so neither
+/// Bear is a legal target and neither gains first strike.
+#[test]
+fn ordruun_mentor_firing_for_a_group_attacking_one_player_targets_that_group() {
+    use engine::types::keywords::Keyword;
+
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(engine::types::phase::Phase::PreCombatMain);
+    let mentor = {
+        let mut builder = scenario.add_creature(P0, "Ordruun Mentor", 3, 2);
+        builder.from_oracle_text(
+            "Mentor (Whenever this creature attacks, put a +1/+1 counter on target attacking creature with lesser power.)\n\
+             Whenever you attack a player, target creature that's attacking that player gains first strike until end of turn.",
+        );
+        builder.id()
+    };
+    let bear_b = scenario.add_creature(P0, "Bear B", 2, 2).id();
+    let bear_c = scenario.add_creature(P0, "Bear C", 2, 2).id();
+
+    let mut runner = scenario.build();
+    evaluate_layers(runner.state_mut());
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[
+            (mentor, AttackTarget::Player(P1)),
+            (bear_b, AttackTarget::Player(P2)),
+            (bear_c, AttackTarget::Player(P2)),
+        ])
+        .expect("DeclareAttackers should succeed");
+
+    for _ in 0..80 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(engine::types::actions::GameAction::PassPriority)
+                    .expect("pass priority");
+            }
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                runner
+                    .act(engine::types::actions::GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    })
+                    .expect("order triggers");
+            }
+            WaitingFor::TriggerTargetSelection { .. } | WaitingFor::TargetSelection { .. } => {
+                runner.choose_first_legal_target().expect("choose a target");
+            }
+            other => panic!("unexpected waiting state while resolving Mentor triggers: {other:?}"),
+        }
+    }
+    assert!(runner.state().stack.is_empty(), "the stack must drain");
+
+    let first_strike = |id: ObjectId| {
+        runner
+            .state()
+            .objects
+            .get(&id)
+            .expect("object must exist")
+            .has_keyword(&Keyword::FirstStrike)
+    };
+    assert!(
+        first_strike(mentor),
+        "reach guard: the firing for P1 resolved and targeted the only creature attacking P1"
+    );
+    assert!(
+        first_strike(bear_b) || first_strike(bear_c),
+        "the firing for P2 must target a creature attacking P2"
+    );
+}

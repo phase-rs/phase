@@ -12,6 +12,7 @@
 //! removed, never refunded.
 
 use engine::ai_support::legal_actions;
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::keywords::object_has_effective_keyword_kind;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
@@ -3598,6 +3599,7 @@ fn sourced_ability_still_respects_protection_from_red() {
         .act(GameAction::ActivateAbility {
             source_id: pyro,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("announce the Pyromancer activation");
     match &runner.state().waiting_for {

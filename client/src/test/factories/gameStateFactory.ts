@@ -54,6 +54,7 @@ type OptionalEffectChoiceWaitingFor = Extract<
   WaitingFor,
   { type: "OptionalEffectChoice" }
 >;
+type ChooseFromZoneChoiceWaitingFor = Extract<WaitingFor, { type: "ChooseFromZoneChoice" }>;
 type OpponentMayChoiceWaitingFor = Extract<WaitingFor, { type: "OpponentMayChoice" }>;
 type WaitingForWithData = Extract<WaitingFor, { data: object }>;
 
@@ -228,6 +229,21 @@ export const optionalEffectChoiceWaitingForFactory =
       description: undefined,
       may_trigger_key: undefined,
       same_card_may_trigger_choice_available: false,
+    },
+  }));
+
+export class ChooseFromZoneChoiceWaitingForFactory extends PlayerWaitingForFactory<ChooseFromZoneChoiceWaitingFor> {}
+
+export const chooseFromZoneChoiceWaitingForFactory =
+  ChooseFromZoneChoiceWaitingForFactory.define((): ChooseFromZoneChoiceWaitingFor => ({
+    type: "ChooseFromZoneChoice",
+    data: {
+      player: 0,
+      source_id: 1,
+      cards: [],
+      count: 0,
+      up_to: true,
+      constraint: null,
     },
   }));
 
@@ -671,6 +687,10 @@ export class WaitingForVariantFactory extends Factory<WaitingFor, WaitingForTran
     return this.variant(optionalEffectChoiceWaitingForFactory.withData(data).build());
   }
 
+  chooseFromZoneChoice(data: Partial<ChooseFromZoneChoiceWaitingFor["data"]> = {}) {
+    return this.variant(chooseFromZoneChoiceWaitingForFactory.withData(data).build());
+  }
+
   opponentMayChoice(data: Partial<OpponentMayChoiceWaitingFor["data"]> = {}) {
     return this.variant(opponentMayChoiceWaitingForFactory.withData(data).build());
   }
@@ -948,6 +968,10 @@ export class GameStateFactory extends Factory<GameState> {
 
   optionalEffectChoice(data: Partial<OptionalEffectChoiceWaitingFor["data"]> = {}) {
     return this.waitingFor(waitingForFactory.optionalEffectChoice(data).build());
+  }
+
+  chooseFromZoneChoice(data: Partial<ChooseFromZoneChoiceWaitingFor["data"]> = {}) {
+    return this.waitingFor(waitingForFactory.chooseFromZoneChoice(data).build());
   }
 
   opponentMayChoice(data: Partial<OpponentMayChoiceWaitingFor["data"]> = {}) {

@@ -23,7 +23,7 @@ use engine::types::card::TokenImageRef;
 use engine::types::card_type::CoreType;
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
-use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -542,6 +542,72 @@ fn host_copying_a_token_donor_routes_token_display() {
             .map(|r| r.preset_id.as_str()),
         Some("angel_4_4"),
         "the source token's token_image_ref rides along with the copy"
+    );
+}
+
+/// CR 111.1 + CR 707.2: a token donor WITHOUT an exact `token_image_ref` is
+/// rendered from its intrinsic `token_art` descriptor. The host's copy effect and
+/// the latched `LatchedCopiableSnapshot` (CR 707.2b/c) must both carry that
+/// descriptor — art routing, not a copiable value. The snapshot used to drop
+/// `token_art`, so any consumer reading the latch lost the shape-based lookup.
+#[test]
+fn host_copying_a_refless_token_donor_carries_token_art() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let donor = scenario.add_creature(P0, "Angel", 4, 4).id();
+    let host = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let aura = stage_metamorphic(&mut scenario);
+    blue_pool(&mut scenario);
+
+    let mut runner = scenario.build();
+    {
+        // The layer pass re-derives a token's descriptor from its `base_*`
+        // characteristics, so shape the donor through its base.
+        let d = runner.state_mut().objects.get_mut(&donor).unwrap();
+        d.is_token = true;
+        d.base_printed_ref = None;
+        d.token_image_ref = None;
+        d.base_card_types.subtypes = vec!["Angel".to_string()];
+        d.base_color = vec![ManaColor::White];
+    }
+    runner
+        .cast(aura)
+        .target_object(host)
+        .copy_target(donor)
+        .resolve();
+
+    let donor_art = runner.state().objects[&donor]
+        .token_art
+        .clone()
+        .expect("a ref-less token donor carries an intrinsic descriptor");
+    // Reach-guard: the descriptor is the donor's real shape, not an empty one.
+    assert_eq!(donor_art.subtypes, vec!["Angel".to_string()]);
+    let host_obj = &runner.state().objects[&host];
+    assert_eq!(
+        host_obj.name, "Angel",
+        "reach-guard: the host became the copy"
+    );
+    assert_eq!(host_obj.display_source, DisplaySource::Token);
+    assert_eq!(host_obj.token_image_ref, None, "the donor has no exact ref");
+    assert_eq!(
+        host_obj.token_art.as_ref(),
+        Some(&donor_art),
+        "the host renders from the source token's descriptor"
+    );
+
+    let latched = runner.state().objects[&aura]
+        .chosen_attributes
+        .iter()
+        .find_map(|a| match a {
+            ChosenAttribute::CopiableSnapshot(snapshot) => Some(snapshot),
+            _ => None,
+        })
+        .expect("the answer path latches a CopiableSnapshot on the Aura");
+    assert_eq!(
+        latched.display.token_art.as_ref(),
+        Some(&donor_art),
+        "the latched snapshot carries the source token's descriptor"
     );
 }
 

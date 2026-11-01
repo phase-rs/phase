@@ -13,6 +13,7 @@
 //! one sacrifice leg.
 
 use engine::game::casting::can_activate_ability_now;
+use engine::game::cost_payability::AbilityCostPayability;
 use engine::game::game_object::AttachTarget;
 use engine::game::quantity::resolve_quantity;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
@@ -23,6 +24,7 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::{PayCostKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaColor;
@@ -161,6 +163,7 @@ fn jarad_single_dual_land_activation_is_refused_without_payment() {
     let activated = runner.act(GameAction::ActivateAbility {
         source_id: jarad,
         ability_index: ability,
+        payment_mode: CastPaymentMode::Auto,
     });
     assert!(
         activated.is_err(),
@@ -197,6 +200,7 @@ fn jarad_swamp_leg_keeps_the_dual_land_for_the_forest_leg() {
         .act(GameAction::ActivateAbility {
             source_id: jarad,
             ability_index: ability,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activation starts");
 
@@ -324,6 +328,7 @@ fn recurring_nightmare_sacrifice_leg_excludes_the_returned_permanent() {
         .act(GameAction::ActivateAbility {
             source_id: nightmare,
             ability_index: ability,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activation starts");
     // The single graveyard creature card may need an explicit target choice.
@@ -529,6 +534,7 @@ fn probe_multi_object_leg_overlapping_another_leg_is_refused_without_payment() {
         let activated = runner.act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         });
         assert!(
             activated.is_err(),
@@ -567,6 +573,7 @@ fn probe_control_disjoint_lands_pay_through_the_replacements() {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("activation starts");
         let (swamps, forest) = (vec![lands[0], lands[1]], lands[2]);
@@ -797,6 +804,7 @@ fn probe_overlapping_discard_outside_the_printed_order_sequence_is_refused_witho
             let activated = runner.act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             });
             if activated.is_ok() {
                 // The board's actions, so a regression shows what it pays.
@@ -854,6 +862,7 @@ fn probe_control_sequenced_and_disjoint_discards_pay_through_the_replacements() 
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("activation starts");
         let picks: Vec<Vec<ObjectId>> = match cost {
@@ -917,6 +926,7 @@ fn probe_nested_discard_leg_overlapping_another_discard_is_refused_without_payme
         let activated = runner.act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         });
         assert!(activated.is_err(), "{cost:?} is refused at activation");
         let state = runner.state();
