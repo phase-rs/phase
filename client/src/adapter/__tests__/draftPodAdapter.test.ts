@@ -402,10 +402,16 @@ describe("DraftPodHostAdapter", () => {
       resolveInitialize = resolve;
     }));
     const observed: string[] = [];
+    // The listener runs synchronously inside `initialize()`, so the rejection
+    // assertion is started there (attaching its handler immediately) and
+    // awaited in the test body once the restoration events have been seen.
+    const prematureUpdates: Promise<void>[] = [];
     adapter.onEvent((event) => {
       if (event.type === "workspaceRestored") {
         observed.push(`workspace:${event.workspaceState === null ? "null" : "state"}`);
-        void expect(adapter.updateWorkspace(restoredWorkspace)).rejects.toThrow("Host not initialized");
+        prematureUpdates.push(
+          expect(adapter.updateWorkspace(restoredWorkspace)).rejects.toThrow("Host not initialized"),
+        );
       }
       if (event.type === "viewUpdated") observed.push("view");
     });
@@ -423,6 +429,8 @@ describe("DraftPodHostAdapter", () => {
       `workspace:${state === null ? "null" : "state"}`,
       "view",
     ]));
+    expect(prematureUpdates).toHaveLength(1);
+    await Promise.all(prematureUpdates);
     expect(mockHostInitialize).toHaveBeenCalledOnce();
     expect(mockHostUpdateWorkspace).not.toHaveBeenCalled();
     resolveInitialize();
