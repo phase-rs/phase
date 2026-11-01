@@ -3415,24 +3415,7 @@ fn parse_subject_application_for(
         {
             return None;
         }
-        let mut filter = merge_partial_type_phrase_filter(filter, rest);
-        // CR 608.2c: an instant or sorcery is never a member of a population of
-        // permanents, so its "each other <X>" excludes the object the chain
-        // already targeted, not the spell ("… target creature an opponent
-        // controls. Each other creature that player controls …").
-        if ctx.source_is_instant_or_sorcery() && ctx.chain_declared_object_target.is_some() {
-            if let TargetFilter::Typed(typed) = &mut filter {
-                if let Some(prop) = typed
-                    .properties
-                    .iter_mut()
-                    .find(|prop| matches!(prop, FilterProp::Another))
-                {
-                    *prop = FilterProp::DistinctFrom {
-                        reference: Box::new(TargetFilter::ParentTarget),
-                    };
-                }
-            }
-        }
+        let filter = merge_partial_type_phrase_filter(filter, rest);
         return subject_filter_application(filter, false);
     }
     if alt((

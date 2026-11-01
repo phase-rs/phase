@@ -3130,9 +3130,65 @@ fn match_and_or_connector(lower: &str) -> Option<usize> {
     .map(|(tail, _)| lower.len() - tail.len())
 }
 
+/// CR 508.1a / CR 509.1h: consume a run of status adjectives at `pos`. An "X or
+/// Y" pair ("attacking or blocking creature") is one property disjunction: an
+/// attacking creature OR a blocking creature, not both.
+fn consume_status_prefix_run(
+    lower: &str,
+    pos: &mut usize,
+    properties: &mut Vec<FilterProp>,
+    disjunction_ranges: &mut Vec<(usize, usize)>,
+) {
+    while let Some((prop, consumed)) = parse_combat_status_prefix(&lower[*pos..]) {
+        let disjunction_start = properties.len();
+        properties.push(prop);
+        *pos += consumed;
+        if let Ok((after_or, _)) = tag::<_, _, OracleError<'_>>("or ").parse(&lower[*pos..]) {
+            if let Some((next_prop, next_consumed)) = parse_combat_status_prefix(after_or) {
+                properties.push(next_prop);
+                disjunction_ranges.push((disjunction_start, 2));
+                *pos += "or ".len() + next_consumed;
+            }
+        }
+    }
+}
+
 /// Context-aware variant of `parse_type_phrase_folding`. Enables relative-player scope
 /// resolution via `ctx.relative_player_scope`.
 pub fn parse_type_phrase_folding_with_ctx<'a>(
+    text: &'a str,
+    ctx: &mut ParseContext,
+) -> (TargetFilter, &'a str) {
+    let (mut filter, rest) = parse_type_phrase_folding_unbound(text, ctx);
+    exclude_parent_target_from_its_controllers_others(&mut filter);
+    (filter, rest)
+}
+
+/// CR 608.2c + CR 109.4: "<target> …. Each other creature that player
+/// controls …" — a population controlled by the parent target's controller is
+/// the target's fellow objects, so its "other" excludes that target, not the
+/// ability's source (Craterous Stomp, Mark for Death, Flames of the Raze-Boar).
+pub(crate) fn exclude_parent_target_from_its_controllers_others(filter: &mut TargetFilter) {
+    match filter {
+        TargetFilter::Typed(typed)
+            if typed.controller == Some(ControllerRef::ParentTargetController) =>
+        {
+            for prop in &mut typed.properties {
+                if matches!(prop, FilterProp::Another) {
+                    *prop = FilterProp::DistinctFrom {
+                        reference: Box::new(TargetFilter::ParentTarget),
+                    };
+                }
+            }
+        }
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => filters
+            .iter_mut()
+            .for_each(exclude_parent_target_from_its_controllers_others),
+        _ => {}
+    }
+}
+
+fn parse_type_phrase_folding_unbound<'a>(
     text: &'a str,
     ctx: &mut ParseContext,
 ) -> (TargetFilter, &'a str) {
@@ -3243,23 +3299,15 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
         }
     }
 
-    // CR 509.1h: Consume combat status prefixes (unblocked, attacking, blocking).
-    // A status word after a `non-` prefix is re-checked once negation is consumed.
-    // Handles "or" compound as a property disjunction: "attacking or blocking
-    // creature" means attacking creature OR blocking creature, not both.
-    while let Some((prop, consumed)) = parse_combat_status_prefix(&lower[pos..]) {
-        let disjunction_start = properties.len();
-        properties.push(prop);
-        pos += consumed;
-        // Check for "or " followed by another combat status prefix
-        if let Ok((after_or, _)) = tag::<_, _, OracleError<'_>>("or ").parse(&lower[pos..]) {
-            if let Some((next_prop, next_consumed)) = parse_combat_status_prefix(after_or) {
-                properties.push(next_prop);
-                property_disjunction_ranges.push((disjunction_start, 2));
-                pos += "or ".len() + next_consumed;
-            }
-        }
-    }
+    // CR 508.1a / CR 509.1h: Consume combat status prefixes (unblocked,
+    // attacking, blocking). A status run after a `non-` or other adjective
+    // prefix is consumed again once those are (see below).
+    consume_status_prefix_run(
+        &lower,
+        &mut pos,
+        &mut properties,
+        &mut property_disjunction_ranges,
+    );
 
     // CR 205.4a: Parse supertype prefix: "legendary", "basic", "snow"
     // Must come BEFORE color prefix so "legendary white creature" works:
@@ -3514,16 +3562,17 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
         }
     }
 
-    // CR 509.1h: A combat-status adjective can also appear AFTER a
-    // `non-` negation prefix ("nonartifact attacking creature" — Broken Visage;
-    // "nontoken attacking creature" — Sophina, Spearsage Deserter). The
-    // pre-negation loop above only fires when the status word leads the phrase.
-    if let Some((prop, consumed)) = parse_combat_status_prefix(&lower[pos..]) {
-        if !properties.contains(&prop) {
-            properties.push(prop);
-            pos += consumed;
-        }
-    }
+    // CR 508.1a / CR 509.1h: A combat-status run can also follow a `non-`
+    // negation or adjective prefix ("nonartifact attacking creature" — Broken
+    // Visage; "nontoken attacking creature" — Sophina, Spearsage Deserter; "a
+    // goaded attacking or blocking creature" — Baeloth Barrityl). The run above
+    // only fires when the status word leads the phrase.
+    consume_status_prefix_run(
+        &lower,
+        &mut pos,
+        &mut properties,
+        &mut property_disjunction_ranges,
+    );
 
     let mut adjective_type_filters: Vec<TypeFilter> = Vec::new();
 

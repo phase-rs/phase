@@ -2021,6 +2021,11 @@ fn bind_casting_spell_referent(
     filter: &TargetFilter,
     spell: Option<ObjectId>,
 ) -> std::borrow::Cow<'_, TargetFilter> {
+    if !crate::game::filter::filter_operands_contain(filter, &|node| {
+        matches!(node, TargetFilter::CastingSpell)
+    }) {
+        return std::borrow::Cow::Borrowed(filter);
+    }
     let mut bound = filter.clone();
     let mut referenced = false;
     let mut complete = true;

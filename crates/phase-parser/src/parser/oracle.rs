@@ -2965,8 +2965,8 @@ fn apply_linked_choice_persisted_player(
 // --- CR 607.2d: persisted odd/even choice → source-bound parity readers ---
 
 /// CR 607.2d: A permanent that persists an "As ~ enters, choose odd or even"
-/// choice links its statics and replacements that read "the chosen quality" to
-/// that choice (Ashling's Prerogative). Without the link those readers would
+/// choice links its statics, replacements and triggers that read "the chosen
+/// quality" to that choice (Ashling's Prerogative; Gollum, Riddle Master). Without the link those readers would
 /// consult the last odd/even choice any resolution named, which a static ability
 /// or replacement has no resolution of its own to supply.
 fn detect_linked_choice_persisted_parity(
@@ -3009,6 +3009,9 @@ fn detect_linked_choice_persisted_parity(
                 || item_replacement(item)
                     .and_then(|def| def.valid_card.as_ref())
                     .is_some_and(reads_named_parity)
+                || item_trigger(item)
+                    .and_then(|def| def.valid_card.clone())
+                    .is_some_and(|filter| reads_named_parity(&filter))
         })
         .map(|item| item.id)
         .collect();
@@ -3025,6 +3028,7 @@ fn apply_linked_choice_persisted_parity(
     relations: &[DocumentRelationIr],
     static_ids: &[OracleItemId],
     replacement_ids: &[OracleItemId],
+    trigger_ids: &[OracleItemId],
 ) {
     for relation in relations {
         let DocumentRelationIr::LinkedChoice(LinkedChoiceKind::PersistedParity { readers }) =
@@ -3039,6 +3043,10 @@ fn apply_linked_choice_persisted_parity(
                 rebind_chosen_parity_to_source(filter);
             } else if let Some(filter) = position_of(replacement_ids, *id)
                 .and_then(|pos| result.replacements[pos].valid_card.as_mut())
+            {
+                rebind_chosen_parity_to_source(filter);
+            } else if let Some(filter) = position_of(trigger_ids, *id)
+                .and_then(|pos| result.triggers[pos].valid_card.as_mut())
             {
                 rebind_chosen_parity_to_source(filter);
             }
@@ -4514,7 +4522,13 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
     // actually reads.
     deliver_coordinated_graveyard_permission(&mut result);
     apply_linked_choice_persisted_player(&mut result, &ir.relations, &ability_ids, &trigger_ids);
-    apply_linked_choice_persisted_parity(&mut result, &ir.relations, &static_ids, &replacement_ids);
+    apply_linked_choice_persisted_parity(
+        &mut result,
+        &ir.relations,
+        &static_ids,
+        &replacement_ids,
+        &trigger_ids,
+    );
 
     // Architectural rule: the parser must never silently discard Oracle text. Run
     // the swallow audit against the parsed result so any unrepresented clause

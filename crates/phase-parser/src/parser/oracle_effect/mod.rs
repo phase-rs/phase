@@ -26751,28 +26751,20 @@ fn anaphor_rewrite_would_drop_this_way_binding(text_lower: &str, effect: &Effect
             .is_some_and(TargetFilter::references_tracked_set)
 }
 
-/// Replace the target filter on an effect with ParentTarget.
-/// Used for anaphoric "it"/"that creature" references in compound sub-effects.
 /// CR 608.2c: whether a gate counts members of the chain's tracked set.
 fn condition_measures_tracked_set(condition: &AbilityCondition) -> bool {
-    let measures = |expr: &QuantityExpr| {
+    condition.any_quantity_expr(&|expr| {
         matches!(
             expr,
             QuantityExpr::Ref {
                 qty: QuantityRef::TrackedSetSize | QuantityRef::FilteredTrackedSetSize { .. }
             }
         )
-    };
-    match condition {
-        AbilityCondition::QuantityCheck { lhs, rhs, .. } => measures(lhs) || measures(rhs),
-        AbilityCondition::Not { condition } => condition_measures_tracked_set(condition),
-        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
-            conditions.iter().any(condition_measures_tracked_set)
-        }
-        _ => false,
-    }
+    })
 }
 
+/// Replace the target filter on an effect with ParentTarget.
+/// Used for anaphoric "it"/"that creature" references in compound sub-effects.
 fn replace_target_with_parent(effect: &mut Effect) {
     // CR 115.10a: a target carrying the `Another` property excludes the
     // referenced object by definition, so it is never the parent target — an

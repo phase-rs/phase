@@ -64,12 +64,16 @@ pub fn resolve(
     // The object whose counters change: the ability's own source ("it" on a
     // permanent's triggered ability), or the single target supplied via the
     // parent-target chain.
+    // CR 400.7: "it" is the source object only while it is still that object;
+    // a source that left or returned as a new object has no counters to adjust.
     let subject_id = match subject {
-        TargetFilter::SelfRef => Some(ability.source_id),
-        _ => ability.targets.iter().find_map(|t| match t {
+        TargetFilter::SelfRef => ability.self_ref_binding(state),
+        TargetFilter::ParentTarget => ability.targets.iter().find_map(|t| match t {
             TargetRef::Object(id) => Some(*id),
             TargetRef::Player(_) => None,
         }),
+        // The parser emits only the two subjects above; any other fails closed.
+        _ => None,
     };
     let Some(target_id) = subject_id else {
         no_op(state, events);

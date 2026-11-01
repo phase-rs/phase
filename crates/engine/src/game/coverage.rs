@@ -802,7 +802,8 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::TriggeringSpellOwner => "triggering spell's owner".into(),
         TargetFilter::TriggeringSourceController => "triggering source's controller".into(),
         TargetFilter::TriggeringPlayer => "triggering player".into(),
-        TargetFilter::TriggeringSource | TargetFilter::CastingSpell => "triggering source".into(),
+        TargetFilter::TriggeringSource => "triggering source".into(),
+        TargetFilter::CastingSpell => "the spell being cast".into(),
         TargetFilter::EventTarget => "object targeted by the triggering event".into(),
         TargetFilter::EventTargetController => {
             "controller of the object targeted by the triggering event".into()

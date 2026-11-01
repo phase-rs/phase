@@ -42178,3 +42178,74 @@ fn type_phrase_keeps_post_negation_status_and_plural_shared_color_reference() {
         )
     );
 }
+
+fn parsed_json(name: &str, text: &str, card_type: &str) -> String {
+    let parsed =
+        crate::parser::oracle::parse_oracle_text(text, name, &[], &[card_type.to_string()], &[]);
+    serde_json::to_string(&(&parsed.abilities, &parsed.triggers)).expect("parse serializes")
+}
+
+/// Neighbours of the repaired grammars stay honest: each either parses to its
+/// printed meaning or keeps an explicit gap instead of a silently wrong shape.
+#[test]
+fn repaired_grammar_neighbours_parse_to_their_meaning_or_an_explicit_gap() {
+    // CR 608.2c + CR 109.4: "Other creatures that player controls" excludes the
+    // target (Mark for Death), not the spell.
+    let mark = parsed_json(
+        "Mark for Death",
+        "Target creature an opponent controls blocks this turn if able. Untap that creature. Other creatures that player controls can't block this turn.",
+        "Sorcery",
+    );
+    assert!(
+        mark.contains(r#""controller":"ParentTargetController","properties":[{"type":"DistinctFrom","reference":{"type":"ParentTarget"}}]"#),
+        "{mark}"
+    );
+    // CR 508.1a / CR 509.1h: "goaded attacking or blocking" keeps both legs goaded.
+    let baeloth = parsed_json(
+        "Baeloth Barrityl, Entertainer",
+        "Whenever a goaded attacking or blocking creature dies, you create a Treasure token.",
+        "Creature",
+    );
+    assert!(
+        baeloth.contains(r#"[{"type":"Goaded"},{"type":"Attacking"}]"#),
+        "{baeloth}"
+    );
+    assert!(
+        baeloth.contains(r#"[{"type":"Goaded"},{"type":"Blocking"}]"#),
+        "{baeloth}"
+    );
+    // CR 607.2d: a trigger reading "the chosen quality" binds the persisted choice.
+    let gollum = parsed_json(
+        "Gollum, Riddle Master",
+        "As Gollum enters, choose odd or even. (Zero is even.)\nWhenever an opponent casts a spell with mana value of the chosen quality, you draw a card.",
+        "Creature",
+    );
+    assert!(
+        gollum.contains(r#""parity":{"type":"SourceChosen"}"#),
+        "{gollum}"
+    );
+    // Unmodeled riders and targeted fixed-kind adjustments stay explicit gaps.
+    for (name, text, card_type) in [
+        (
+            "Watcher of Hours",
+            "Whenever you remove a time counter from this card while it's exiled, surveil 1.",
+            "Creature",
+        ),
+        (
+            "Sigurd, Jarl of Ravensthorpe",
+            "Boast \u{2014} {1}: Put a lore counter on target Saga you control or remove one from it.",
+            "Creature",
+        ),
+        (
+            "Discover the Formula",
+            "Seek three nonland cards, then nonland cards in your hand perpetually gain \"This spell costs {1} less to cast.\"",
+            "Instant",
+        ),
+    ] {
+        let json = parsed_json(name, text, card_type);
+        assert!(
+            json.contains("Unknown") || json.contains("Unimplemented"),
+            "{name} must stay an explicit gap: {json}"
+        );
+    }
+}

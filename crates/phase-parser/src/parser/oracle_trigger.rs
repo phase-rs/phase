@@ -22636,7 +22636,13 @@ fn try_parse_counter_removed(lower: &str) -> Option<(TriggerMode, TriggerDefinit
         let mut def = make_base();
         def.mode = TriggerMode::CounterRemoved;
         if let Ok((subject, _)) = tag::<_, _, OracleError<'_>>(" from ").parse(rest) {
-            let (filter, _) = parse_single_subject(subject.trim(), &mut ParseContext::default());
+            // A subject rider this arm doesn't model ("… from this card while
+            // it's exiled") declines rather than being dropped.
+            let (filter, remainder) =
+                parse_single_subject(subject.trim(), &mut ParseContext::default());
+            if !remainder.trim().is_empty() {
+                return None;
+            }
             def.valid_card = Some(filter);
         } else if !rest.trim().is_empty() {
             return None;

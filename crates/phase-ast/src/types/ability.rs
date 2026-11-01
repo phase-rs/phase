@@ -37337,6 +37337,28 @@ pub enum AbilityCondition {
 }
 
 impl AbilityCondition {
+    /// CR 608.2c: whether any quantity this condition compares satisfies `pred`,
+    /// through the `Not` / `ConditionInstead` / `And` / `Or` wrappers. The single
+    /// traversal for "does this gate measure <population>" questions (a gate that
+    /// counts the chain's tracked set consumes it).
+    pub fn any_quantity_expr(&self, pred: &dyn Fn(&QuantityExpr) -> bool) -> bool {
+        match self {
+            AbilityCondition::QuantityCheck { lhs, rhs, .. } => pred(lhs) || pred(rhs),
+            AbilityCondition::QuantityQuality { quantity, .. } => pred(quantity),
+            AbilityCondition::PreviousEffectAmount { rhs, .. } => pred(rhs),
+            AbilityCondition::Not { condition }
+            | AbilityCondition::ConditionInstead { inner: condition } => {
+                condition.any_quantity_expr(pred)
+            }
+            AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+                conditions
+                    .iter()
+                    .any(|condition| condition.any_quantity_expr(pred))
+            }
+            _ => false,
+        }
+    }
+
     /// CR 608.2k: does this ability condition read the cost-paid object?
     pub fn references_cost_paid_object(&self) -> bool {
         match self {

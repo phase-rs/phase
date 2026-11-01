@@ -493,6 +493,19 @@ fn circadian_struggle_seeks_color_sharing_cards_and_reduces_each_by_color_count(
     let outcome = runner.cast(white).resolve();
     outcome.assert_zone(&[white], Zone::Graveyard);
     assert_eq!(outcome.mana_pool_total(P0), 0);
+
+    // Every sought card carries the grant, not only the first: {3}{U} → {1}{U}.
+    runner.state_mut().add_mana_to_pool(
+        P0,
+        ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
+    );
+    runner.state_mut().add_mana_to_pool(
+        P0,
+        ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+    );
+    let outcome = runner.cast(blue).resolve();
+    outcome.assert_zone(&[blue], Zone::Graveyard);
+    assert_eq!(outcome.mana_pool_total(P0), 0);
 }
 
 /// CR 601.2f + CR 201.2a: Locket reduces each spell by {1} per card with that
