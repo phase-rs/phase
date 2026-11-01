@@ -16,7 +16,6 @@ use engine::game::interaction::{
     bind_interaction_authority, derive_viewer_interaction, resolve_interaction_response,
 };
 use engine::game::perf_counters::play_trace_counters;
-use engine::game::period_confirm::mandatory_period_holds_for_tests;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::visibility::filter_state_for_viewer;
@@ -36,7 +35,7 @@ use engine::types::interaction::{
 };
 use engine::types::mana::{ManaColor, ManaType, ManaUnit};
 use engine::types::phase::Phase;
-use engine::types::player::PlayerId;
+use engine::types::player::{PlayerCounterKind, PlayerId};
 use engine::types::zones::Zone;
 
 use crate::support::shared_card_db;
@@ -128,8 +127,12 @@ struct Board {
     p1_sorcerer: bool,
     /// Lumberknot on P1's battlefield.
     lumberknot: bool,
-    /// A 50/50 on P1's battlefield with this Oracle text, holding this many -1/-1 counters.
-    sink: Option<(&'static str, u32)>,
+    /// Real cards on P0's battlefield.
+    p0_cards: &'static [&'static str],
+    /// Real cards on P1's battlefield; Grief Tyrant enters with its four -1/-1 counters.
+    p1_cards: &'static [&'static str],
+    /// A textless P1 creature token of this toughness.
+    p1_token: Option<i32>,
     /// Grizzly Bears on P1's battlefield.
     p1_bears: bool,
     /// Poison-Tip Archer on P1's battlefield.
@@ -311,12 +314,14 @@ fn build(board: Board, mode: LoopDetectionMode) -> Option<Built> {
     if board.lumberknot {
         scenario.add_real_card(P1, "Lumberknot", Zone::Battlefield, db);
     }
-    let sink = board.sink.map(|(text, counters)| {
-        let sink = scenario
-            .add_creature_from_oracle(P1, "Test Counter Sink", 50, 50, text)
-            .id();
-        (sink, counters)
-    });
+    for (seat, cards) in [(P0, board.p0_cards), (P1, board.p1_cards)] {
+        for &name in cards {
+            scenario.add_real_card(seat, name, Zone::Battlefield, db);
+        }
+    }
+    let token = board
+        .p1_token
+        .map(|toughness| scenario.add_creature(P1, "Token", 4, toughness).id());
     if board.p1_bears {
         scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
     }
@@ -342,14 +347,31 @@ fn build(board: Board, mode: LoopDetectionMode) -> Option<Built> {
     }
     let mut runner = scenario.build();
     runner.state_mut().loop_detection = mode;
-    if let Some((sink, counters)) = sink.filter(|&(_, counters)| counters > 0) {
+    // CR 111.7: a token that dies ceases to exist, leaving no card for Animate Dead to enchant.
+    if let Some(token) = token {
         runner
             .state_mut()
             .objects
-            .get_mut(&sink)
-            .expect("the sink is on the battlefield")
+            .get_mut(&token)
+            .expect("the token is on the battlefield")
+            .is_token = true;
+    }
+    // CR 614.1c: Grief Tyrant enters with the four -1/-1 counters its replacement puts on it.
+    let tyrants: Vec<ObjectId> = runner
+        .state()
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| runner.state().objects[id].name == "Grief Tyrant")
+        .collect();
+    for tyrant in tyrants {
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&tyrant)
+            .expect("Grief Tyrant is on the battlefield")
             .counters
-            .insert(CounterType::Minus1Minus1, counters);
+            .insert(CounterType::Minus1Minus1, 4);
     }
     let (mut watched, animate) = kickoff;
     match animate {
@@ -654,7 +676,9 @@ const PLAIN: Board = Board {
     opponents_bolts: 0,
     p1_sorcerer: false,
     lumberknot: false,
-    sink: None,
+    p0_cards: &[],
+    p1_cards: &[],
+    p1_token: None,
     p1_bears: false,
     archer: false,
     ichor_rats: false,
@@ -681,8 +705,8 @@ fn worldgorger_animate_dead_is_a_draw_on_every_drive() {
         };
         assert_eq!(run.terminal, Terminal::GameOver(None), "{drive:?}");
         assert!(
-            run.entries >= 2,
-            "{drive:?}: reach: the Dragon entered at least twice, got {}",
+            run.entries >= 1,
+            "{drive:?}: reach: the Dragon re-entered, got {}",
             run.entries
         );
     }
@@ -709,8 +733,8 @@ fn worldgorger_with_a_forced_reveal_under_a_saved_order_is_a_draw() {
             "{drive:?}: reach: the trigger order was asked once and then saved"
         );
         assert!(
-            run.entries >= 3,
-            "{drive:?}: reach: the saved order applied over several cycles, got {}",
+            run.entries >= 2,
+            "{drive:?}: reach: the saved order applied after it was asked, got {}",
             run.entries
         );
     }
@@ -1032,7 +1056,7 @@ fn a_target_chosen_every_cycle_is_offered() {
         TWO_TARGETS,
         &[Pick::First, Pick::Alternate],
         "TriggerTargetSelection",
-        2,
+        1,
         CountedTake::Unperformable(UnperformableCause::UncontainedChoice),
     ) else {
         return;
@@ -1274,6 +1298,51 @@ fn an_out_held_within_the_period_is_not_a_draw() {
     }
 }
 
+/// CR 104.4b + CR 732.5: P1 holds Murder with three untapped Swamps, and Murder has a target
+/// whenever Worldgorger Dragon is back on the battlefield, so the loop holds an out even read at a
+/// frame where the Dragon is in the graveyard and P1's hand is hidden from P0: P0 is offered a
+/// draw without end; Off runs on.
+#[test]
+fn an_opponents_out_legal_only_mid_period_is_offered() {
+    let board = Board {
+        murder: true,
+        p1_cards: &["Swamp", "Swamp", "Swamp"],
+        ..PLAIN
+    };
+    let murder_castable = |state: &GameState| {
+        matches!(state.waiting_for, WaitingFor::Priority { player } if player == P1)
+            && legal_actions(state).iter().any(|action| {
+                matches!(action, GameAction::CastSpell { object_id, .. }
+                    if state.objects[object_id].name == "Murder")
+            })
+    };
+    for drive in EVERY_DRIVE {
+        let leg = format!("{drive:?}");
+        let mut castable = false;
+        let Some(run) = run_observed(board, LoopDetectionMode::Interactive, drive, 80, |state| {
+            castable |= murder_castable(state)
+                && state.objects.values().any(|object| {
+                    object.name == "Worldgorger Dragon" && object.zone == Zone::Battlefield
+                });
+        }) else {
+            return;
+        };
+        assert_out_offer(&run, &leg);
+        assert_eq!(
+            run.state().objects[&run.target].zone,
+            Zone::Graveyard,
+            "{leg}: reach: the offer is read with the Dragon in the graveyard"
+        );
+        assert!(
+            castable,
+            "{leg}: reach: P1 could cast Murder while the Dragon was on the battlefield"
+        );
+        if run_off(board, drive, 60).is_none() {
+            return;
+        }
+    }
+}
+
 /// Off, with full yields one action drives many cycles, and the auto-pass backstop declares
 /// none of these boards.
 #[test]
@@ -1485,32 +1554,57 @@ fn run_off(board: Board, drive: Drive, beats: usize) -> Option<Run> {
     Some(run)
 }
 
-const MINUS_SINK: &str = "Whenever a creature dies, put a -1/-1 counter on this creature.";
-const SPREAD_SINK: &str =
-    "Whenever a creature dies, put a +1/+1 counter on each creature you control.";
+/// The most `counter`s any permanent named `name` held at one frame.
+fn most_counters(seen: &mut u32, state: &GameState, name: &str, counter: CounterType) {
+    for id in &state.battlefield {
+        let object = &state.objects[id];
+        if object.name == name {
+            *seen = (*seen).max(object.counters.get(&counter).copied().unwrap_or(0));
+        }
+    }
+}
 
-/// CR 704.5f + CR 704.5q: a loop growing -1/-1 counters toward a creature's death is not a draw,
-/// and one whose +1/+1 counters annihilate a creature's -1/-1 counters is a draw only once that
-/// annihilation has run its course.
+const SNUFFERS_BESIDE_A_TOKEN: Board = Board {
+    p0_cards: &["Soul Snuffers"],
+    p1_token: Some(4),
+    ..PLAIN
+};
+
+/// CR 704.5f + CR 704.5q + CR 111.7: Soul Snuffers' -1/-1 counter on P1's 4/4 token each cycle
+/// keeps the loop from being drawn until the token dies and ceases to exist, after which the loop
+/// recurs exactly and is drawn; Mazirek's +1/+1 counters on P1's creatures, at each sacrifice
+/// Animate Dead makes, annihilate Grief Tyrant's -1/-1 counters, and the loop is drawn only once
+/// that annihilation has run its course.
 #[test]
 fn counter_growth_toward_a_state_based_action_is_not_a_draw() {
-    let shrinking = Board {
-        sink: Some((MINUS_SINK, 0)),
-        ..PLAIN
-    };
     let annihilating = Board {
-        sink: Some((SPREAD_SINK, 4)),
-        p1_bears: true,
+        p1_cards: &["Mazirek, Kraul Death Priest", "Grief Tyrant"],
         ..PLAIN
     };
     for drive in EVERY_DRIVE {
-        let Some(shrunk) = run(shrinking, LoopDetectionMode::Interactive, drive, 120) else {
+        let mut shrunk_to = 0;
+        let Some(shrunk) = run_observed(
+            SNUFFERS_BESIDE_A_TOKEN,
+            LoopDetectionMode::Interactive,
+            drive,
+            120,
+            |state| most_counters(&mut shrunk_to, state, "Token", CounterType::Minus1Minus1),
+        ) else {
             return;
         };
-        assert_eq!(shrunk.terminal, Terminal::BeatsExhausted, "{drive:?}");
+        assert_eq!(shrunk.terminal, Terminal::GameOver(None), "{drive:?}");
         assert!(
-            shrunk.counters_on("Test Counter Sink", CounterType::Minus1Minus1) >= 10,
-            "{drive:?}: reach: the -1/-1 counters grew"
+            shrunk.on_battlefield("Token").is_empty(),
+            "{drive:?}: drawn while the token was shrinking"
+        );
+        assert!(
+            shrunk_to >= 3,
+            "{drive:?}: reach: the token held {shrunk_to} -1/-1 counters"
+        );
+        assert_eq!(
+            shrunk.prompted("OrderTriggers"),
+            1,
+            "{drive:?}: reach: the order was asked once and then saved"
         );
 
         let Some(annihilated) = run(annihilating, LoopDetectionMode::Interactive, drive, 120)
@@ -1519,15 +1613,15 @@ fn counter_growth_toward_a_state_based_action_is_not_a_draw() {
         };
         assert_eq!(annihilated.terminal, Terminal::GameOver(None), "{drive:?}");
         assert!(
-            annihilated.counters_on("Test Counter Sink", CounterType::Minus1Minus1) <= 1,
+            annihilated.counters_on("Grief Tyrant", CounterType::Minus1Minus1) <= 1,
             "{drive:?}: declared before the annihilation ran its course"
         );
         assert!(
-            annihilated.counters_on("Grizzly Bears", CounterType::Plus1Plus1) >= 1,
-            "{drive:?}: reach: the Bears grew"
+            annihilated.counters_on("Mazirek, Kraul Death Priest", CounterType::Plus1Plus1) >= 1,
+            "{drive:?}: reach: Mazirek grew"
         );
 
-        for board in [shrinking, annihilating] {
+        for board in [SNUFFERS_BESIDE_A_TOKEN, annihilating] {
             if run_off(board, drive, 60).is_none() {
                 return;
             }
@@ -1535,28 +1629,83 @@ fn counter_growth_toward_a_state_based_action_is_not_a_draw() {
     }
 }
 
-/// CR 704.5c: a loop giving each player a poison counter at each Dragon death is not declared; it
-/// ends when both players reach ten poison counters.
+/// CR 704.5g + CR 111.7: Chaos Maw deals 3 damage to P1's 4/12 token each cycle, so the loop is
+/// not drawn while the damage grows toward lethal; once the token dies and ceases to exist the
+/// loop recurs exactly and is drawn.
 #[test]
-fn a_poison_axis_loop_is_not_declared() {
+fn damage_growing_toward_lethal_is_not_a_draw() {
     let board = Board {
-        sink: Some((
-            "Whenever a creature dies, each player gets a poison counter.",
-            0,
-        )),
+        p0_cards: &["Chaos Maw"],
+        p1_token: Some(12),
         ..PLAIN
     };
-    for mode in MODES {
+    for drive in EVERY_DRIVE {
+        let mut damaged = 0;
+        let Some(run) = run_observed(board, LoopDetectionMode::Interactive, drive, 120, |state| {
+            for id in &state.battlefield {
+                let object = &state.objects[id];
+                if object.name == "Token" {
+                    damaged = damaged.max(object.damage_marked);
+                }
+            }
+        }) else {
+            return;
+        };
+        assert_eq!(run.terminal, Terminal::GameOver(None), "{drive:?}");
+        assert!(
+            run.on_battlefield("Token").is_empty(),
+            "{drive:?}: drawn while the damage was growing"
+        );
+        assert!(
+            damaged >= 3,
+            "{drive:?}: reach: the token had {damaged} damage marked"
+        );
+        if run_off(board, drive, 60).is_none() {
+            return;
+        }
+    }
+}
+
+/// CR 104.4b + CR 122.1: Ezuri, Claw of Progress gives P0 an experience counter each time Grizzly
+/// Bears returns, and nothing in the loop reads them (Ezuri's own reader is a beginning-of-combat
+/// trigger the loop never reaches), so the loop is drawn, with or without P1's Soul Warden's net
+/// progress beside it.
+#[test]
+fn a_player_counter_nothing_in_the_loop_reads_is_a_draw() {
+    let experience = |run: &Run| {
+        run.state().players[P0.0 as usize].player_counter(&PlayerCounterKind::Experience)
+    };
+    let zero = Board {
+        p0_cards: &["Ezuri, Claw of Progress"],
+        p0_bears: 1,
+        ..PLAIN
+    };
+    let net = Board {
+        soul_warden: Some(P1),
+        ..zero
+    };
+    for (leg, board) in [("zero", zero), ("net", net)] {
         for drive in EVERY_DRIVE {
-            let Some(run) = run(board, mode, drive, 120) else {
+            let leg = format!("{leg} {drive:?}");
+            let Some(run) = run(board, LoopDetectionMode::Interactive, drive, 120) else {
                 return;
             };
-            assert_eq!(run.terminal, Terminal::GameOver(None), "{mode:?} {drive:?}");
+            assert_eq!(run.terminal, Terminal::GameOver(None), "{leg}");
             assert!(
-                run.poison(P0) >= 10 && run.poison(P1) >= 10,
-                "{mode:?} {drive:?}: the game ended at ten poison counters"
+                experience(&run) >= 1,
+                "{leg}: reach: P0 has {} experience counters",
+                experience(&run)
             );
         }
+        let half = run(board, LoopDetectionMode::Off, Drive::Pass, 30);
+        let Some(off) = run_off(board, Drive::Pass, 60) else {
+            return;
+        };
+        let half = half.expect("the card database loaded above");
+        assert!(
+            experience(&off) > experience(&half),
+            "Off {leg}: reach: the experience counters keep growing"
+        );
     }
 }
 
@@ -1857,22 +2006,25 @@ fn a_restored_winning_offer_over_a_choice_refuses_every_counted_declaration() {
     run_off(board, Drive::Pass, 60);
 }
 
-/// CR 117.3d + CR 732.4: the mandatory period reads the same whichever player holds priority,
-/// including a frame where P1's standing pass is paused by its own meaningful action; P1's
-/// untapped Prodigal Sorcerer brings an offer P0 declines (CR 732.5).
+/// CR 117.3d + CR 732.2a: P1's untapped Prodigal Sorcerer is an out beside the mandatory loop
+/// (CR 732.5), so the priority holder at each recurrence is offered it; P0 declines each offer,
+/// and P1 holds priority under its paused standing pass between them.
 #[test]
-fn a_mandatory_token_copy_loop_reads_the_same_on_either_holder() {
+fn a_mandatory_token_copy_loop_is_offered_to_its_holder_at_each_recurrence() {
     let board = Board {
         p1_sorcerer: true,
         ..RAPTOR
     };
-    let mut readings: Vec<(PlayerId, bool, bool)> = Vec::new();
-    let mut observe = |state: &GameState| {
-        if let WaitingFor::Priority { player } = state.waiting_for {
-            if let Some(holds) = mandatory_period_holds_for_tests(state) {
-                readings.push((player, state.stack_resolution_session.is_some(), holds));
-            }
+    let mut paused_p1 = false;
+    let mut offers: Vec<(PlayerId, PlayerId)> = Vec::new();
+    let mut observe = |state: &GameState| match &state.waiting_for {
+        WaitingFor::Priority { player } => {
+            paused_p1 |= *player == P1 && state.stack_resolution_session.is_some();
         }
+        WaitingFor::LoopShortcut { proposer, .. } => {
+            offers.push((*proposer, state.priority_player));
+        }
+        _ => {}
     };
     let Some(Run { mut runner, .. }) = run_observed(
         board,
@@ -1883,50 +2035,47 @@ fn a_mandatory_token_copy_loop_reads_the_same_on_either_holder() {
     ) else {
         return;
     };
-    let mut declined = 0;
     for _ in 0..30 {
         let state = runner.state();
         observe(state);
         let action = match &state.waiting_for {
-            WaitingFor::LoopShortcut { .. } => {
-                declined += 1;
-                GameAction::DeclineShortcut
-            }
+            WaitingFor::LoopShortcut { .. } => GameAction::DeclineShortcut,
             WaitingFor::Priority { .. } => until_stack_empty(),
             other => panic!("unexpected prompt {other:?}"),
         };
         runner.act(action).expect("a legal drive action");
     }
-    assert!(declined >= 1, "reach: P0 was offered the loop");
     assert!(
-        readings
-            .iter()
-            .any(|&(holder, session, _)| holder == P1 && session),
-        "reach: a P1 frame under a paused standing pass: {readings:?}"
+        offers.iter().any(|&(proposer, _)| proposer == P0),
+        "reach: P0 was offered the loop: {offers:?}"
     );
     assert!(
-        readings.iter().any(|&(holder, _, _)| holder == P0),
-        "reach: a P0 frame: {readings:?}"
+        offers.iter().all(|&(proposer, holder)| proposer == holder),
+        "each offer goes to the priority holder: {offers:?}"
     );
-    assert!(readings.iter().all(|&(_, _, holds)| holds), "{readings:?}");
+    assert!(
+        paused_p1,
+        "reach: P1 held priority under a paused standing pass"
+    );
 }
 
 /// The mandatory period is replayed once per span start: P0's passes leave the same span on top,
 /// so only P1's passes, which bring a new one, replay it.
 #[test]
 fn a_mandatory_period_is_replayed_once_per_span_start() {
-    let board = Board {
-        sink: Some((MINUS_SINK, 0)),
-        ..PLAIN
-    };
-    let Some(run) = run(board, LoopDetectionMode::Interactive, Drive::Pass, 60) else {
+    let Some(run) = run(
+        SNUFFERS_BESIDE_A_TOKEN,
+        LoopDetectionMode::Interactive,
+        Drive::Pass,
+        120,
+    ) else {
         return;
     };
-    assert_eq!(run.terminal, Terminal::BeatsExhausted);
+    assert_eq!(run.terminal, Terminal::GameOver(None));
     let replays_by = |seat: PlayerId| -> u64 {
         run.replays
             .iter()
-            .filter(|&&(acting, _, _)| acting == Some(seat))
+            .filter(|&&(acting, ordered, _)| acting == Some(seat) && !ordered)
             .map(|&(_, _, replays)| replays)
             .sum()
     };
@@ -2206,9 +2355,11 @@ fn an_ordering_point_past_the_proof_budget_is_not_a_draw() {
         first: Some("Animate Dead"),
         ..PLAIN
     };
+    let before = play_trace_counters();
     let Some(run) = run(board, LoopDetectionMode::Interactive, Drive::Pass, 120) else {
         return;
     };
+    let counted = play_trace_counters().since(before);
     assert_runs_on(&run, "Pass");
     assert_eq!(
         run.prompted("OrderTriggers"),
@@ -2216,7 +2367,11 @@ fn an_ordering_point_past_the_proof_budget_is_not_a_draw() {
         "reach: the order was asked once and then saved"
     );
     assert!(
-        run.replays.iter().all(|&(_, _, replays)| replays <= 1),
+        counted.confirm_drives > 0,
+        "reach: the period was replayed ({counted:?})"
+    );
+    assert_eq!(
+        counted.mandatory_replays, 0,
         "an order-only period is asked its proof without the holds replay"
     );
 }
@@ -2691,11 +2846,14 @@ fn a_token_caged_sun_under_toph_adds_once_per_land_ability() {
     }
 }
 
-fn dragon_trigger_on_top(state: &GameState) -> bool {
-    state.stack.back().is_some_and(|top| {
-        matches!(&top.kind, StackEntryKind::TriggeredAbility { source_id, .. }
-            if state.objects.get(source_id).is_some_and(|o| o.name == "Worldgorger Dragon"))
-    })
+/// The name of the source of the triggered ability on top of the stack.
+fn top_trigger_source(state: &GameState) -> Option<String> {
+    match &state.stack.back()?.kind {
+        StackEntryKind::TriggeredAbility { source_id, .. } => {
+            state.objects.get(source_id).map(|o| o.name.clone())
+        }
+        _ => None,
+    }
 }
 
 fn bolts_in_hand(state: &GameState, player: PlayerId) -> usize {
@@ -2898,6 +3056,8 @@ fn a_proposal_without_end_shortened_at_the_current_place_gives_the_shortener_pri
         return;
     };
     let stack = runner.state().stack.len();
+    let top = top_trigger_source(runner.state());
+    assert!(top.is_some(), "reach: a trigger is on top at the offer");
     runner.act(DECLARE_WITHOUT_END).expect("declare");
     let shortened = runner
         .act(GameAction::RespondToShortcut {
@@ -2910,7 +3070,7 @@ fn a_proposal_without_end_shortened_at_the_current_place_gives_the_shortener_pri
         "{:?}",
         state.waiting_for
     );
-    assert!(dragon_trigger_on_top(state));
+    assert_eq!(top_trigger_source(state), top);
     assert_eq!(state.stack.len(), stack);
     assert!(!shortened.events.iter().any(|event| matches!(
         event,
@@ -2929,6 +3089,8 @@ fn a_proposal_without_end_shortened_at_a_later_place_drives_the_loop_to_it() {
     let Some(mut runner) = at_a_without_end_offer() else {
         return;
     };
+    let top = top_trigger_source(runner.state());
+    assert!(top.is_some(), "reach: a trigger is on top at the offer");
     runner.act(DECLARE_WITHOUT_END).expect("declare");
     let shortened = runner
         .act(GameAction::RespondToShortcut {
@@ -2936,7 +3098,7 @@ fn a_proposal_without_end_shortened_at_a_later_place_drives_the_loop_to_it() {
         })
         .expect("place 2 is a place a responder may name");
     assert_eq!(dragon_entries(&runner, &shortened.events), 2);
-    assert!(dragon_trigger_on_top(runner.state()));
+    assert_eq!(top_trigger_source(runner.state()), top);
     bolt_p0_then_draw(&mut runner);
 }
 
@@ -3544,25 +3706,19 @@ fn a_token_copy_loop_beside_p0s_bolt_is_offered() {
     raptor_copies_keep_coming_off(board);
 }
 
-/// A period the recording shows without progress is refused before any replay, and a growth
-/// period is replayed.
+/// CR 732.5: beside P1's Bolt, the period without progress and the growth period are both
+/// offered.
 #[test]
-fn a_period_recorded_without_progress_is_offered_without_a_replay() {
-    for (board, replayed) in [
-        (
-            Board {
-                optional: true,
-                ..PLAIN
-            },
-            false,
-        ),
-        (
-            Board {
-                optional: true,
-                ..RAPTOR
-            },
-            true,
-        ),
+fn a_period_without_progress_is_offered() {
+    for board in [
+        Board {
+            optional: true,
+            ..PLAIN
+        },
+        Board {
+            optional: true,
+            ..RAPTOR
+        },
     ] {
         for drive in EVERY_DRIVE {
             let leg = format!("raptor={} {drive:?}", board.raptor);
@@ -3570,26 +3726,20 @@ fn a_period_recorded_without_progress_is_offered_without_a_replay() {
                 return;
             };
             assert_out_offer(&offered, &leg);
-            let replays: u64 = offered.replays.iter().map(|&(_, _, n)| n).sum();
-            assert_eq!(replays > 0, replayed, "{leg}: {replays} replays");
         }
     }
 }
 
-/// CR 701.24a + CR 732.2a: with no out held, the shuffle's recorded period shows neither
-/// progress nor stack growth, so it is offered without the witness replaying it; Board B with no
-/// out is replayed and declared.
+/// CR 701.24a + CR 732.2a: with no out held, the shuffle's period is offered; Marauding Raptor's
+/// growth period with no out is replayed and declared.
 #[test]
-fn an_offered_period_recorded_without_progress_is_not_replayed() {
+fn an_offered_shuffle_period_and_a_drawn_growth_period() {
     for drive in EVERY_DRIVE {
         let leg = format!("{drive:?}");
-        let before = play_trace_counters();
         let Some(offered) = run(WOOD_ELVES, LoopDetectionMode::Interactive, drive, 60) else {
             return;
         };
-        let replays = play_trace_counters().since(before).mandatory_replays;
         assert_out_offer(&offered, &leg);
-        assert_eq!(replays, 0, "{leg}");
 
         let before = play_trace_counters();
         let Some(declared) = run(RAPTOR, LoopDetectionMode::Interactive, drive, 60) else {

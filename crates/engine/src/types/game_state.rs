@@ -22355,15 +22355,6 @@ pub struct LoopDecisionTally {
     pub resolution_set: u64,
 }
 
-impl LoopDecisionTally {
-    /// Whether a choice the every-option proof reads was made since `first`.
-    pub(crate) fn provable_moved_since(&self, first: &Self) -> bool {
-        self.trigger_order != first.trigger_order
-            || self.announced_target != first.announced_target
-            || self.resolution_set != first.resolution_set
-    }
-}
-
 /// CR 732.5: whether some living player held a meaningful priority action at a sampled beat.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PriorityOut {

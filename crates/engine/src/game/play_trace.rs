@@ -522,7 +522,7 @@ impl PlayTrace {
             carried: im::Vector::new(),
             carried_named: im::Vector::new(),
             carrying: im::HashMap::new(),
-            witnessed: [None; 2],
+            witnessed: [None, None],
             ordered: None,
             held: None,
         }
@@ -1864,11 +1864,14 @@ fn trigger_top_cause(trace: &PlayTrace, node: usize) -> Option<(usize, NamingCau
 }
 
 /// CR 104.4b + CR 732.2a: what a mandatory-recurrence span was read as.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Witnessed {
     Declared,
-    /// Offered, with the counted take the replay that read it minted.
-    Offered(crate::analysis::loop_check::CountedTake),
+    /// Offered, with the counted take and the board residual the replay that read it minted.
+    Offered {
+        counted_take: crate::analysis::loop_check::CountedTake,
+        residual: crate::analysis::resource::BoardDelta,
+    },
     Refused,
 }
 
@@ -1883,8 +1886,9 @@ fn out_slot(out: PriorityOut) -> usize {
 /// computed under `out`.
 pub(crate) fn witnessed(state: &GameState, start: usize, out: PriorityOut) -> Option<Witnessed> {
     current(state)?.witnessed[out_slot(out)]
-        .filter(|&(at, _)| at == start)
-        .map(|(_, verdict)| verdict)
+        .as_ref()
+        .filter(|(at, _)| *at == start)
+        .map(|(_, verdict)| verdict.clone())
 }
 
 /// Keeps `verdict` for the mandatory-recurrence span of the current window starting at `start`,
@@ -2354,10 +2358,13 @@ mod tests {
         note_witnessed(&mut state, 3, Absent, Witnessed::Refused);
         assert_eq!(witnessed(&state, 3, Absent), Some(Witnessed::Refused));
         assert_eq!(witnessed(&state, 3, Held), None);
-        let offered = Witnessed::Offered(crate::analysis::loop_check::CountedTake::Unperformable(
-            crate::analysis::loop_check::UnperformableCause::UndelimitedCover,
-        ));
-        note_witnessed(&mut state, 3, Held, offered);
+        let offered = Witnessed::Offered {
+            counted_take: crate::analysis::loop_check::CountedTake::Unperformable(
+                crate::analysis::loop_check::UnperformableCause::UndelimitedCover,
+            ),
+            residual: Default::default(),
+        };
+        note_witnessed(&mut state, 3, Held, offered.clone());
         assert_eq!(witnessed(&state, 3, Held), Some(offered));
         assert_eq!(witnessed(&state, 3, Absent), Some(Witnessed::Refused));
         assert_eq!(witnessed(&state, 4, Absent), None);

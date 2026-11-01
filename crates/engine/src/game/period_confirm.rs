@@ -1255,10 +1255,14 @@ struct ReplayedPeriod {
 /// CR 117.3d + CR 732.2a: the frame a replay starts from, `holder`'s view with the standing-pass
 /// overlays cleared, since the replay takes only the period's own passes.
 fn replay_base(frame: &GameState, holder: PlayerId) -> GameState {
-    let mut base = crate::game::visibility::proposer_hidden_view(frame, holder);
-    base.auto_pass.clear();
-    base.stack_resolution_session = None;
-    base
+    without_standing_passes(crate::game::visibility::proposer_hidden_view(frame, holder))
+}
+
+/// CR 117.3d: `state` with its standing-pass overlays cleared.
+fn without_standing_passes(mut state: GameState) -> GameState {
+    state.auto_pass.clear();
+    state.stack_resolution_session = None;
+    state
 }
 
 /// CR 405.5 + CR 608.1 + CR 400.7: the bottom of `frame`'s stack that `next` keeps unchanged,
@@ -1537,15 +1541,14 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
 pub(crate) struct HeldPeriod {
     /// Performs only when a ring drain's delimiter fires at a settle frame the replay reaches.
     pub(crate) counted_take: crate::analysis::loop_check::CountedTake,
-    /// The decision members the replayed period itself drew, such as a shuffle's randomness
-    /// (CR 701.24a).
-    pub(crate) replayed: crate::types::game_state::LoopDecisionProfile,
 }
 
 /// CR 104.4b + CR 732.4: whether the mandatory span `span`, replayed twice from `frame`, recurs
-/// for every living player with net progress and nothing moving toward a state-based action:
-/// no loss axis (CR 704.5c), no driving resource falling on a carried permanent (CR 704.5g,
-/// CR 704.5i, CR 704.5q), and no -1/-1 counter growth (CR 704.5f).
+/// for every living player, with net progress or none, and nothing moving toward a state-based
+/// action: no loss axis (CR 704.5c), no driving resource falling on a carried permanent and no
+/// marked damage growing (CR 704.5g, CR 704.5i, CR 704.5q), and no -1/-1 counter growth
+/// (CR 704.5f). A player counter nothing in the loop reads is no way to stop it (CR 122.1), so
+/// no unmeasured axis bars the period.
 pub(crate) fn mandatory_period_holds(frame: &GameState, span: NamedSpan) -> Option<HeldPeriod> {
     #[cfg(feature = "test-support")]
     crate::game::perf_counters::record_play_trace(|counters| counters.mandatory_replays += 1);
@@ -1584,7 +1587,9 @@ pub(crate) fn mandatory_period_holds(frame: &GameState, span: NamedSpan) -> Opti
     let delta = period_delta(&s_n1, &s_n2);
     // CR 104.4b + CR 405.5: entries the period buries are its unbounded axis.
     let buried_rises = buried_growth && floors[2] > floors[1];
-    let holds = period_recurs_without_end(&delta, buried_rises)
+    // CR 104.4b: a period that recurs exactly is a sequence of events with no way to stop.
+    let holds = (period_recurs_without_end(&delta, buried_rises)
+        || delta.axis_components().is_empty())
         && living
             .iter()
             .all(|&seat| driving_resources_non_decreasing_carried(&s_n1, &s_n2, seat, Some(&s_n)))
@@ -1607,17 +1612,91 @@ pub(crate) fn mandatory_period_holds(frame: &GameState, span: NamedSpan) -> Opti
             crate::analysis::loop_check::UnperformableCause::UndelimitedCover,
         )
     };
-    let mut replayed = crate::types::game_state::LoopDecisionProfile::default();
-    // CR 701.24a: a shuffle the replay performs draws randomness the recorded span may not hold.
-    if s_n.rng.get_word_pos() != s_n1.rng.get_word_pos() {
-        replayed
-            .members
-            .insert(crate::types::game_state::LoopDecision::Random);
+    Some(HeldPeriod { counted_take })
+}
+
+/// What a mandatory span's authoritative replay shows: its decision profile, the resources and
+/// board one cycle moves, and the single player it drives every other living player's loss for.
+pub(crate) struct MandatoryReading {
+    pub(crate) profile: crate::types::game_state::LoopDecisionProfile,
+    pub(crate) delta: ResourceVector,
+    pub(crate) residual: crate::analysis::resource::BoardDelta,
+    pub(crate) winner: Option<PlayerId>,
+}
+
+/// CR 104.4b + CR 732.5: the mandatory span `span` replayed for two cycles from `frame` itself,
+/// not from its holder's view: the engine, not a player, declares the draw or the win, and an out
+/// in any player's hand that is legal only mid-period is a way to stop the loop.
+pub(crate) fn mandatory_reading(frame: &GameState, span: NamedSpan) -> Option<MandatoryReading> {
+    use crate::types::game_state::{LoopDecision, LoopDecisionProfile, PriorityOut};
+    let WaitingFor::Priority { player: holder } = frame.waiting_for else {
+        return None;
+    };
+    let items = period_items(play_trace::span_entries(frame, span)?, span, frame);
+    let out = PriorityOut::at(frame);
+    #[cfg(feature = "test-support")]
+    crate::game::perf_counters::record_play_trace(|counters| counters.confirm_drives += 1);
+    let _probe = SimulationProbeGuard::enter();
+    let mut replay = without_standing_passes(frame.clone());
+    let end = FrameEnd::of(&replay, holder, span.reach);
+    replay_cycle(
+        &mut replay,
+        &items,
+        &end,
+        &mut Vec::new(),
+        None,
+        &mut Vec::new(),
+    )
+    .ok()?;
+    let s1 = replay.clone();
+    let mut frames = Vec::new();
+    replay_cycle(
+        &mut replay,
+        &items,
+        &end,
+        &mut Vec::new(),
+        Some(&mut frames),
+        &mut Vec::new(),
+    )
+    .ok()?;
+    let s2 = replay;
+    let mut profile = LoopDecisionProfile::of_window(
+        [&s1.loop_decision_marks_with(out)],
+        &s2.loop_decision_marks_with(out),
+    );
+    // CR 732.5: an out held at any frame of the period, read as `of_window` reads one.
+    if !profile.members.contains(&LoopDecision::Optional)
+        && frames
+            .iter()
+            .any(|frame| PriorityOut::at(frame) == PriorityOut::Held)
+    {
+        profile.members.insert(LoopDecision::Outs);
     }
-    Some(HeldPeriod {
-        counted_take,
-        replayed,
+    let delta = period_delta(&s1, &s2);
+    let fallers: Vec<PlayerId> = seats(&s2)
+        .into_iter()
+        .filter(|seat| delta.life.get(seat).copied().unwrap_or(0) < 0)
+        .collect();
+    let read: Vec<&GameState> = frames.iter().collect();
+    // CR 704.5a + CR 104.2a: the winner never dips, and two or more fallers cross lethal together.
+    let winner = crate::analysis::loop_check::live_mandatory_loop_winner(&s1, &s2, &delta).filter(
+        |&winner| {
+            crate::analysis::loop_check::winner_life_never_dips(&read, winner)
+                && (fallers.len() < 2
+                    || crate::analysis::loop_check::fallers_lives_pairwise_equal(&read, &fallers))
+        },
+    );
+    Some(MandatoryReading {
+        profile,
+        residual: crate::analysis::resource::board_delta(&s1, &s2),
+        delta,
+        winner,
     })
+}
+
+/// CR 603.3b: the every-option proof of the mandatory span `span`, read from the trace when kept.
+pub(crate) fn span_option_proof(state: &GameState, span: NamedSpan) -> OptionProof {
+    play_trace::order_proof(state, span.start).unwrap_or_else(|| decision_points(state, span))
 }
 
 /// The resources a period from `before` to `after` moved, counting each token it mints.
@@ -1963,14 +2042,6 @@ pub(crate) fn decision_points(frame: &GameState, span: NamedSpan) -> OptionProof
             }))
         },
     )
-}
-
-/// [`mandatory_period_holds`] on the mandatory span at `state`, a priority frame; `None` when
-/// there is no such span.
-#[cfg(any(test, feature = "test-support"))]
-pub fn mandatory_period_holds_for_tests(state: &GameState) -> Option<bool> {
-    let span = play_trace::mandatory_recurrence_span(state)?;
-    Some(mandatory_period_holds(state, span).is_some())
 }
 
 /// CR 732.2a: the most repetitions the counting replay performs for one offer. An offer at the cap

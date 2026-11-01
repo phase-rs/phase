@@ -7050,20 +7050,6 @@ fn object_resource_axes_match(prior: &GameState, current: &GameState) -> bool {
     })
 }
 
-/// CR 120.3e + CR 704.5g + CR 122.1: the axes the relaxed projection drops and
-/// [`ResourceVector::snapshot`] never measures — marked damage, per-object counters
-/// and player counters — strict-compared, so a terminal verdict cannot rest on a
-/// period that changed one of them unseen.
-pub(crate) fn unmeasured_resource_axes_match(prior: &GameState, current: &GameState) -> bool {
-    object_resource_axes_match(prior, current)
-        && prior.players.len() == current.players.len()
-        && prior
-            .players
-            .iter()
-            .zip(current.players.iter())
-            .all(|(a, b)| projected_player_maps(a) == projected_player_maps(b))
-}
-
 /// Normalize a stack into behavioral-identity clones for coverability counting:
 /// zero the volatile top-level `id`/`source_id` and the per-kind inner `source_id`,
 /// strip nested `source_id`s from the embedded ability, and retain the associated

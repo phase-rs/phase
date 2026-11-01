@@ -2573,26 +2573,47 @@ fn reconcile_terminal_sba(state: &mut GameState, result: &mut ActionResult) {
     settle_finished_game(state, result);
 }
 
-/// The named spans the recorded road may offer; a mandatory recurrence is never one.
-fn offerable_spans(named: Vec<super::play_trace::NamedSpan>) -> Vec<super::play_trace::NamedSpan> {
+/// The named spans split by their consumer: (mandatory recurrences, spans the recorded road may
+/// offer).
+fn partition_named(
+    named: Vec<super::play_trace::NamedSpan>,
+) -> (
+    Vec<super::play_trace::NamedSpan>,
+    Vec<super::play_trace::NamedSpan>,
+) {
     use super::play_trace::NamingCause;
-    named
-        .into_iter()
-        .filter(|span| match span.cause {
-            NamingCause::Repeat
-            | NamingCause::TriggerTop
-            | NamingCause::Restored
-            | NamingCause::LegalNow => true,
-            NamingCause::MandatoryRecurrence => false,
-        })
-        .collect()
+    named.into_iter().partition(|span| match span.cause {
+        NamingCause::MandatoryRecurrence => true,
+        NamingCause::Repeat
+        | NamingCause::TriggerTop
+        | NamingCause::Restored
+        | NamingCause::LegalNow => false,
+    })
 }
 
-/// CR 732.2a: the loop-shortcut half of [`reconcile_terminal_result`] — the ring road, then the
-/// recorded road. Evaluated once per priority frame: a boundary whose auto-pass loop did not
-/// advance re-runs only [`reconcile_terminal_sba`].
+/// CR 732.2a: the loop-shortcut half of [`reconcile_terminal_result`] — the recorded road's
+/// mandatory outcomes, then the ring road, then the recorded road's offers. Evaluated once per
+/// priority frame: a boundary whose auto-pass loop did not advance re-runs only
+/// [`reconcile_terminal_sba`].
 fn reconcile_loop_shortcut(state: &mut GameState, result: &mut ActionResult) {
-    let named = super::play_trace::name_window(state);
+    let (mandatory, offerable) = partition_named(super::play_trace::name_window(state));
+    // CR 104.4b + CR 732.4: a mandatory period's outcome is no offer, so no ring offer may mask
+    // it. Gated like the recorded offers below (opt-in + top-level-only).
+    if !matches!(state.waiting_for, WaitingFor::GameOver { .. })
+        && matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && !in_simulation_probe()
+    {
+        match state.loop_detection {
+            LoopDetectionMode::Interactive => {
+                for span in mandatory.into_iter().rev() {
+                    if mandatory_outcome(state, result, span) {
+                        return;
+                    }
+                }
+            }
+            LoopDetectionMode::On | LoopDetectionMode::Off => {}
+        }
+    }
     // CR 732.2a + CR 704.5a: shortcut a NET-PROGRESS mandatory cascade to the loss of every
     // living player but its winner. Runs AFTER the CR 704 state-based actions
     // (CR 704.3 ordering), so a player ALREADY at 0 life loses via the real
@@ -2625,8 +2646,8 @@ fn reconcile_loop_shortcut(state: &mut GameState, result: &mut ActionResult) {
         && !in_simulation_probe()
     {
         // Dispatch the confirmed-loop body by mode. `Interactive` routes to the general
-        // classification bridge (offer + APNAP window + CR 732.4 draw). `Off` is
-        // unreachable: the `samples()` guard above excludes it.
+        // classification bridge (offer + APNAP window). `Off` is unreachable: the `samples()`
+        // guard above excludes it.
         match state.loop_detection {
             LoopDetectionMode::On => {
                 // Clone the Arc handles (cheap refcount bumps) to release the borrow on the
@@ -2711,7 +2732,6 @@ fn reconcile_loop_shortcut(state: &mut GameState, result: &mut ActionResult) {
     // the window before that the confirmer confirms. It runs after the ring road and only while
     // `waiting_for` is still `Priority`, so a ring mint above takes precedence, gated identically
     // (opt-in + top-level-only). INV-2: this OFFERS the interactive shortcut (never auto-resolves).
-    let offerable = offerable_spans(named);
     if !matches!(state.waiting_for, WaitingFor::GameOver { .. })
         && state.loop_detection.samples()
         && !in_simulation_probe()
@@ -2739,20 +2759,16 @@ fn reconcile_loop_shortcut(state: &mut GameState, result: &mut ActionResult) {
     }
 }
 
-/// PR-7 Phase 3 (CR 732.2a/b/c + CR 732.4 + CR 704.5a): the `Interactive`-mode branch of
-/// the reconcile shortcut block. Routes the SAME confirmed live loop signal the `On` arm
-/// consumes through the GENERAL classification instead of only the lethal auto-win:
+/// PR-7 Phase 3 (CR 732.2a/b/c + CR 704.5a): the `Interactive`-mode branch of the reconcile
+/// shortcut block, read once the recorded road has decided no mandatory period at this frame.
+/// Routes the SAME confirmed live loop signal the `On` arm consumes through the GENERAL
+/// classification instead of only the lethal auto-win:
 ///
 /// - **Path A — determinate lethal single-winner** (constant-depth OR ω growing cascade,
 ///   via the reused, UN-widened [`crate::analysis::loop_check::live_mandatory_loop_winner`]):
-///   if the loop is mandatory (CR 732.5: no living player can break it) and its period holds
-///   only mandatory actions, this AUTO-WINS (mandatory winning drain); a period holding a game
-///   choice no declaration contains is played out; otherwise it OFFERS the interactive shortcut
-///   (CR 732.2a) via `WaitingFor::LoopShortcut`.
-/// - **Path B — CR 732.4 all-mandatory, net-progress, no-loss draw**: a confirmed cycle
-///   with no determinate winner that drives NO player toward a loss and that no living
-///   player can break is a draw (CR 104.4b / 104.4f). One whose only non-mandatory member is
-///   an out is offered as a draw instead (CR 732.5).
+///   a period holding only outs or choices proven to continue is OFFERED (CR 732.2a) via
+///   `WaitingFor::LoopShortcut`; a period of mandatory actions alone is the recorded road's, and
+///   a period holding a game choice no declaration contains is played out.
 ///
 /// Runs inside the same top-level-only `!in_simulation_probe()` guard as the `On` arm.
 ///
@@ -2761,39 +2777,9 @@ fn reconcile_loop_shortcut(state: &mut GameState, result: &mut ActionResult) {
 /// players into fallers (life falling or poison rising) vs non-fallers and requires EXACTLY one
 /// non-faller (`nonfallers.len() == 1`; CR 104.2a — a winner is determinate only when every
 /// other living player falls). A loop lethal to only SOME opponents leaves a surviving
-/// bystander as a second non-faller ⇒ `None` ⇒ Path A names no winner, Path B refuses it (a
-/// loss axis is present, so it is not a CR 732.4 no-loss draw), and only Path D
+/// bystander as a second non-faller ⇒ `None` ⇒ Path A names no winner, and only Path D
 /// (`try_offer_bounded_cycle_shortcut`) may offer it, with no predicted winner.
 fn interactive_loop_bridge(state: &mut GameState, result: &mut ActionResult) {
-    let option_proof = OptionProofCell::new();
-    interactive_loop_bridge_paths(state, result, &option_proof);
-    if let Some((_, Some((start, proof)))) = option_proof.get().copied() {
-        super::play_trace::note_order_proof(state, start, proof);
-    }
-}
-
-/// The every-option proof, computed at most once per bridge run and only by its first reader;
-/// the second half is a fresh proof the bridge keeps once its scans release the state.
-type OptionProofCell = std::cell::OnceCell<(
-    Option<super::period_confirm::OptionProof>,
-    Option<(usize, super::period_confirm::OptionProof)>,
-)>;
-
-/// CR 603.3b: the every-option proof read through `cell`, computing it on the first read.
-fn lazy_option_proof(
-    cell: &OptionProofCell,
-    state: &GameState,
-) -> super::period_confirm::OptionProof {
-    cell.get_or_init(|| option_proof(state))
-        .0
-        .unwrap_or(super::period_confirm::OptionProof::Undecided)
-}
-
-fn interactive_loop_bridge_paths(
-    state: &mut GameState,
-    result: &mut ActionResult,
-    option_proof: &OptionProofCell,
-) {
     // The CONTAINER of the five reduction sites this function reaches, so the parts have
     // something to be a share of. A `Drop` guard, because each path returns from its own
     // exit and a duplicated `elapsed()` at one of them would eventually be the one missed.
@@ -2805,15 +2791,19 @@ fn interactive_loop_bridge_paths(
     // engine already computes — not a new stored flag.
     let mandatory = no_living_player_has_meaningful_priority_action(state);
     // CR 603.3b: a decision point inside a period that holds an out is proved as in a
-    // mandatory one; the proof is asked only of a period that already recurs.
+    // mandatory one, on the mandatory span at the top of the stack.
     let resolve = |state: &GameState, profile: crate::types::game_state::LoopDecisionProfile| {
-        profile.with_option_proof(|| lazy_option_proof(option_proof, state))
+        profile.with_option_proof(|| {
+            super::play_trace::mandatory_recurrence(state)
+                .map_or(super::period_confirm::OptionProof::Undecided, |span| {
+                    super::period_confirm::span_option_proof(state, span)
+                })
+        })
     };
 
     // Path A: determinate lethal single-winner drain.
     if let Some((winner, delta, prior)) = find_live_loop_winner(state) {
-        // CR 732.2b: a period holding only outs is offered, so each other player may shorten it;
-        // only a period of mandatory actions alone is won outright.
+        // CR 732.2b: a period holding only outs is offered, so each other player may shorten it.
         let start = state
             .loop_detect_ring
             .iter()
@@ -2844,54 +2834,44 @@ fn interactive_loop_bridge_paths(
         };
         let counted_take =
             crate::analysis::loop_check::CountedTake::Performs.naming_the_choice(&profile);
-        if profile.is_forced() {
-            // FIRM #1 — mandatory winning drain: identical to the `On` auto-win.
-            // CR 732.2a: mark the loop's unbounded axes; CR 704.5a: terminal GameOver.
-            state.mark_unbounded_loop(
-                winner,
-                &delta.unbounded_axes_for(winner),
-                &delta.rising_unbounded_axes_for(winner),
-            );
-            super::elimination::end_game(state, Some(winner), &mut result.events);
-        } else if !counted_take.is_performs() {
-            // CR 732.2a + CR 732.2c: a period whose choices no template-less declaration contains
-            // is played out, not offered.
+        // CR 732.2a + CR 732.2c: a forced period is the recorded road's to win, and one whose
+        // choices no template-less declaration contains is played out, not offered.
+        if profile.is_forced() || !counted_take.is_performs() {
             return;
-        } else {
-            // CR 732.2a: OPTIONAL winning drain — only the player with priority may propose
-            // the shortcut. Keep that proposer distinct from the already-measured winner; a
-            // loop can be detected during a different player's priority window.
-            // `build_cert`'s only use of the frame is `board_delta(prior, state)`, a
-            // comparand read ⇒ the CR 104.4b `.normalized` half.
-            let certificate = build_cert(&prior.normalized, state, &delta, winner, None);
-            // CR 732.2a: a non-targeted drain reifies no per-iteration player choice ⇒ carry an
-            // empty pin list; only the `iteration_count` (from `win_kind`) is populated.
-            let WaitingFor::Priority { player: proposer } = state.waiting_for else {
-                unreachable!("interactive bridge only runs during priority")
-            };
-            // CR 732.2a: a non-targeted drain publishes no decision points, and this path
-            // MEASURES no CR 704 repetition threshold — `UntilLethal` is terminated by the
-            // real SBA, not by a caller-supplied count — so it passes the absence and the
-            // constructor derives the ceiling from the engine's own budget.
-            let schema = build_shortcut_schema(
-                Vec::new(),
-                shortcut_iteration_count(certificate.win_kind),
-                None,
-            );
-            state.waiting_for = WaitingFor::LoopShortcut {
-                proposer,
-                predicted_winner: Some(winner),
-                certificate,
-                schema,
-                // CR 732.2a: Path A publishes no decision points at all (the pin list above is
-                // empty), so there is nothing for a declaration to pin.
-                declaration: None,
-                road: crate::analysis::loop_check::OfferRoad::Ring,
-                counted_take,
-                period: Default::default(),
-            };
-            result.waiting_for = state.waiting_for.clone();
         }
+        // CR 732.2a: OPTIONAL winning drain — only the player with priority may propose
+        // the shortcut. Keep that proposer distinct from the already-measured winner; a
+        // loop can be detected during a different player's priority window.
+        // `build_cert`'s only use of the frame is `board_delta(prior, state)`, a
+        // comparand read ⇒ the CR 104.4b `.normalized` half.
+        let certificate = build_cert(&prior.normalized, state, &delta, winner, None);
+        // CR 732.2a: a non-targeted drain reifies no per-iteration player choice ⇒ carry an
+        // empty pin list; only the `iteration_count` (from `win_kind`) is populated.
+        let WaitingFor::Priority { player: proposer } = state.waiting_for else {
+            unreachable!("interactive bridge only runs during priority")
+        };
+        // CR 732.2a: a non-targeted drain publishes no decision points, and this path
+        // MEASURES no CR 704 repetition threshold — `UntilLethal` is terminated by the
+        // real SBA, not by a caller-supplied count — so it passes the absence and the
+        // constructor derives the ceiling from the engine's own budget.
+        let schema = build_shortcut_schema(
+            Vec::new(),
+            shortcut_iteration_count(certificate.win_kind),
+            None,
+        );
+        state.waiting_for = WaitingFor::LoopShortcut {
+            proposer,
+            predicted_winner: Some(winner),
+            certificate,
+            schema,
+            // CR 732.2a: Path A publishes no decision points at all (the pin list above is
+            // empty), so there is nothing for a declaration to pin.
+            declaration: None,
+            road: crate::analysis::loop_check::OfferRoad::Ring,
+            counted_take,
+            period: Default::default(),
+        };
+        result.waiting_for = state.waiting_for.clone();
         return;
     }
 
@@ -2900,129 +2880,12 @@ fn interactive_loop_bridge_paths(
     // CR 104.2a's determinacy requirement (`loop_check`'s crown gate) refuses to crown and
     // Path A returns `None`. This seam routes AROUND that gate rather than weakening it: it
     // never calls `live_mandatory_loop_winner` and writes `predicted_winner: None`.
-    // Placed before Path B because Path B's CR 732.4 verdict is TERMINAL (it writes
-    // `GameOver` and returns), so a seam ordered after it could never be reached on a state
-    // Path B accepts. The two are disjoint anyway and the ordering does not paper over an
-    // overlap: Path B requires `has_no_loss_axis(&delta)`, while this seam only offers when
-    // `elimination_cascade` MEASURED a threshold at all, which happens only when the
-    // cycle drives some living seat toward a CR 704.5a / CR 704.5c / CR 104.3c threshold —
-    // i.e. exactly a loss axis.
     if let Ok(offer) = try_offer_bounded_cycle_shortcut(state, mandatory) {
         state.waiting_for = offer;
         result.waiting_for = state.waiting_for.clone();
         return;
     }
 
-    // Path B: CR 732.4 all-mandatory draw, on zero progress or on net progress with no loss
-    // axis, over a period that left every unmeasured axis unchanged. Only reached when Path A
-    // found no determinate winner.
-    {
-        let _timed = crate::analysis::resource::CostTimer::start(if mandatory {
-            |cost| {
-                (
-                    &mut cost.recurrence_scan_mandatory_ns,
-                    &mut cost.recurrence_scan_mandatory_calls,
-                )
-            }
-        } else {
-            |cost| {
-                (
-                    &mut cost.recurrence_scan_optional_ns,
-                    &mut cost.recurrence_scan_optional_calls,
-                )
-            }
-        });
-        let priors: Vec<std::sync::Arc<crate::types::LoopDetectSample>> =
-            state.loop_detect_ring.iter().cloned().collect();
-        let cur = crate::analysis::resource::ResourceVector::snapshot(state);
-        // The current side is the same state for every prior, so its two projections are
-        // derived ONCE for the whole ring instead of twice per prior. The frames BORROW
-        // `state`, which is why the verdict is carried out of the scan and acted on below: a
-        // mutation inside the walk would be a borrow-check error rather than a walk that keeps
-        // comparing against a state it already changed.
-        // CR 732.5: `mandatory` is the out verdict at the current position.
-        let current_marks = state.loop_decision_marks_with(if mandatory {
-            crate::types::game_state::PriorityOut::Absent
-        } else {
-            crate::types::game_state::PriorityOut::Held
-        });
-        let mut outs_offer: Option<(usize, crate::analysis::loop_check::CountedTake)> = None;
-        let drawn = !priors.is_empty() && {
-            let frames = crate::analysis::resource::SharedCurrentFrames::new(state);
-            let ring_live: Vec<&GameState> = priors.iter().map(|sample| &sample.live).collect();
-            // A span-0 pair is the state against its own sample, which trivially recurs.
-            let spanning: Vec<usize> = candidate_windows(&ring_live)
-                .map(|(idx, _, _)| idx)
-                .collect();
-            priors.iter().enumerate().any(|(idx, sample)| {
-                let prior = &sample.normalized;
-                let delta = crate::analysis::resource::ResourceVector::delta(
-                    &crate::analysis::resource::ResourceVector::snapshot(prior),
-                    &cur,
-                );
-                let recurs = crate::analysis::resource::loop_states_equal_modulo_resources_side(
-                    prior, &frames,
-                );
-                let unmeasured = crate::analysis::resource::unmeasured_resource_axes_match(
-                    prior,
-                    frames.current(),
-                );
-                // CR 104.4b + CR 732.4: a mandatory loop whose position recurs with no resource change is a draw.
-                let zero_progress =
-                    recurs && spanning.contains(&idx) && delta.axis_components().is_empty();
-                // CR 732.2a board-recurrence (constant-depth OR ω growing cascade) + net
-                // progress + NO loss axis for anyone ⇒ the loop grinds forever with nobody
-                // able to win or lose ⇒ CR 732.4 / 104.4b draw.
-                unmeasured
-                    && (zero_progress
-                        || ((recurs
-                            || crate::analysis::resource::loop_states_cover_modulo_growth(
-                                prior, &frames,
-                            ))
-                            && delta.is_net_progress()
-                            && has_no_loss_axis(&delta)))
-                    // CR 104.4b: a period holding an optional action, a decision or an out is
-                    // no draw.
-                    && {
-                        let profile = resolve(
-                            state,
-                            crate::types::game_state::LoopDecisionProfile::of_window(
-                                priors[idx..].iter().map(|sample| &**sample),
-                                &current_marks,
-                            ),
-                        );
-                        // The ring legs recur on the drain's own delimiter, so only a choice
-                        // refuses their counted take.
-                        if outs_offer.is_none() && profile.is_offered() {
-                            outs_offer = Some((
-                                idx,
-                                crate::analysis::loop_check::CountedTake::Performs
-                                    .naming_the_choice(&profile),
-                            ));
-                        }
-                        profile.is_forced()
-                    }
-            })
-        };
-        // CR 732.4 + CR 732.5: a period the ring cannot show recurring is drawn or offered on its recorded witness.
-        let drawn = drawn
-            || mandatory_recurrence_witnessed(
-                state,
-                &priors,
-                &current_marks,
-                option_proof,
-                &mut outs_offer,
-            ) == super::play_trace::Witnessed::Declared;
-        if drawn {
-            super::elimination::end_game(state, None, &mut result.events);
-            return;
-        }
-        // CR 732.2a + CR 732.5: a period of outs and choices proven to continue is offered, not drawn.
-        if let Some((idx, counted_take)) = outs_offer {
-            offer_draw_without_end(state, result, &priors[idx].normalized, counted_take);
-            return;
-        }
-    }
     // Path C: CR 104.4b + CR 732.5: an optional net-progress no-loss loop of advantage for the
     // driver, recurring on a counter-growth cover too, is offered when its only non-mandatory
     // member is an out.
@@ -3037,8 +2900,8 @@ fn interactive_loop_bridge_paths(
         let priors: Vec<std::sync::Arc<crate::types::LoopDetectSample>> =
             state.loop_detect_ring.iter().cloned().collect();
         let cur = crate::analysis::resource::ResourceVector::snapshot(state);
-        // Hoisted for the same reason as Path B's, and with the same consequence: the frames
-        // borrow `state`, so the offer below happens after the scan rather than inside it.
+        // The frames borrow `state`, so the offer below happens after the scan rather than
+        // inside it.
         let hit = if priors.is_empty() {
             None
         } else {
@@ -3104,153 +2967,138 @@ fn interactive_loop_bridge_paths(
             })
         };
         if let Some((idx, counted_take)) = hit {
-            offer_draw_without_end(state, result, &priors[idx].normalized, counted_take);
+            let residual = crate::analysis::resource::board_delta(&priors[idx].normalized, state);
+            offer_draw_without_end(state, result, residual, counted_take);
         }
     }
     // else: staggered-pod loss / non-beneficial optional loop ⇒ nothing is offered or decided.
 }
 
-/// CR 104.4b + CR 732.4: what the mandatory span the play trace holds at the top of the stack
-/// is: declared a draw, offered, or neither. The ring's last sample at or before the span's start
-/// must be in this window and begin the period read; an offered period's sample index and counted
-/// take are written to `outs_offer` when it holds none. The span's replayed reading is kept per span start and out
-/// verdict, so a verdict computed under one out verdict is never read under the other.
-fn mandatory_recurrence_witnessed(
+/// What the reading of a mandatory span decides.
+enum MandatoryDecision {
+    /// CR 104.2a: the loop is won by this player; a win ends the game, so nothing is kept.
+    Won {
+        winner: PlayerId,
+        delta: crate::analysis::resource::ResourceVector,
+    },
+    Keep(super::play_trace::Witnessed),
+}
+
+/// CR 104.4b + CR 732.4 + CR 732.5: writes the outcome of the mandatory span `span` — a draw, a
+/// forced win, or a draw offered without end — and returns whether it wrote one. A span's
+/// verdict is kept per span start and out verdict, so its reading and proof run once.
+fn mandatory_outcome(
     state: &mut GameState,
-    priors: &[std::sync::Arc<crate::types::LoopDetectSample>],
-    current_marks: &crate::types::game_state::LoopDecisionMarks,
-    option_proof: &OptionProofCell,
-    outs_offer: &mut Option<(usize, crate::analysis::loop_check::CountedTake)>,
-) -> super::play_trace::Witnessed {
+    result: &mut ActionResult,
+    span: super::play_trace::NamedSpan,
+) -> bool {
     use super::play_trace::Witnessed;
-    use crate::types::game_state::PriorityOut;
-    let Some(span) = super::play_trace::mandatory_recurrence(state) else {
-        return Witnessed::Refused;
-    };
-    let out = current_marks.out;
-    let kept = super::play_trace::witnessed(state, span.start, out);
-    if let Some(verdict @ (Witnessed::Declared | Witnessed::Refused)) = kept {
-        return verdict;
-    }
-    let window = super::play_trace::WindowKey::of(state);
-    let Some(base) = priors.iter().rposition(|sample| {
-        sample.trace_at.is_some_and(|at| at <= span.start)
-            && super::play_trace::WindowKey::of(&sample.live) == window
-    }) else {
-        return Witnessed::Refused;
-    };
-    let verdict = match kept {
-        Some(verdict) => verdict,
+    let out = crate::types::game_state::PriorityOut::at(state);
+    let verdict = match super::play_trace::witnessed(state, span.start, out) {
+        Some(kept) => kept,
         None => {
-            // CR 104.4b + CR 704.5a + CR 704.5b + CR 704.5c: with an out held, a recorded period with neither progress nor stack growth, or with a loss axis, is refused before any proof or replay.
-            match out {
-                PriorityOut::Held if !recorded_window_recurs(&priors[base].live, state) => {
-                    return Witnessed::Refused;
-                }
-                PriorityOut::Held | PriorityOut::Absent => {}
+            let proof = std::cell::OnceCell::new();
+            let decision = decide_mandatory_span(state, span, &proof);
+            if let Some(&proof) = proof.get() {
+                super::play_trace::note_order_proof(state, span.start, proof);
             }
-            let profile = crate::types::game_state::LoopDecisionProfile::of_window(
-                priors[base..].iter().map(|sample| &**sample),
-                current_marks,
-            );
-            let settle =
-                |profile: &crate::types::game_state::LoopDecisionProfile,
-                 counted_take: crate::analysis::loop_check::CountedTake| {
-                    if profile.is_forced() {
-                        Witnessed::Declared
-                    } else if profile.is_offered() {
-                        Witnessed::Offered(counted_take.naming_the_choice(profile))
-                    } else {
-                        Witnessed::Refused
-                    }
-                };
-            // Randomness the replayed period draws, such as a shuffle's (CR 701.24a), is a member
-            // of the period too.
-            let joined = |mut profile: crate::types::game_state::LoopDecisionProfile,
-                          held: &super::period_confirm::HeldPeriod| {
-                profile
-                    .members
-                    .extend(held.replayed.members.iter().copied());
-                profile
-            };
-            let verdict = if profile.holds_unproven_option() {
-                // An option tree costs more than the replay, so only a period that holds is asked it.
-                match super::period_confirm::mandatory_period_holds(state, span) {
-                    Some(held) => settle(
-                        &joined(
-                            profile.with_option_proof(|| lazy_option_proof(option_proof, state)),
-                            &held,
-                        ),
-                        held.counted_take,
-                    ),
-                    None => Witnessed::Refused,
+            match decision {
+                MandatoryDecision::Won { winner, delta } => {
+                    // CR 732.2a: mark the loop's unbounded axes; CR 704.5a: terminal GameOver.
+                    state.mark_unbounded_loop(
+                        winner,
+                        &delta.unbounded_axes_for(winner),
+                        &delta.rising_unbounded_axes_for(winner),
+                    );
+                    super::elimination::end_game(state, Some(winner), &mut result.events);
+                    return true;
                 }
-            } else {
-                let profile = profile.with_option_proof(|| lazy_option_proof(option_proof, state));
-                let verdict = settle(&profile, crate::analysis::loop_check::CountedTake::Performs);
-                // A profile neither drawn nor offered is refused before any replay.
-                if verdict == Witnessed::Refused {
-                    return Witnessed::Refused;
+                MandatoryDecision::Keep(verdict) => {
+                    super::play_trace::note_witnessed(state, span.start, out, verdict.clone());
+                    verdict
                 }
-                // CR 104.4b + CR 704.5a + CR 704.5b + CR 704.5c: with no out held, an offered period is replayed only when its recorded window shows progress or stack growth and no loss axis.
-                if matches!(verdict, Witnessed::Offered(_)) {
-                    match out {
-                        PriorityOut::Absent
-                            if !recorded_window_recurs(&priors[base].live, state) =>
-                        {
-                            return Witnessed::Refused;
-                        }
-                        PriorityOut::Absent | PriorityOut::Held => {}
-                    }
-                }
-                match super::period_confirm::mandatory_period_holds(state, span) {
-                    Some(held) => settle(&joined(profile, &held), held.counted_take),
-                    None => Witnessed::Refused,
-                }
-            };
-            super::play_trace::note_witnessed(state, span.start, out, verdict);
-            verdict
+            }
         }
     };
-    if let Witnessed::Offered(counted_take) = verdict {
-        outs_offer.get_or_insert((base, counted_take));
+    match verdict {
+        Witnessed::Declared => {
+            super::elimination::end_game(state, None, &mut result.events);
+            true
+        }
+        Witnessed::Offered {
+            counted_take,
+            residual,
+        } => {
+            offer_draw_without_end(state, result, residual, counted_take);
+            true
+        }
+        Witnessed::Refused => false,
     }
-    verdict
 }
 
-/// Whether the recorded window from `before` to `now` shows progress or stack growth, standing in
-/// for buried entries, and no loss axis.
-fn recorded_window_recurs(before: &GameState, now: &GameState) -> bool {
-    super::period_confirm::period_recurs_without_end(
-        &super::period_confirm::period_delta(before, now),
-        now.stack.len() > before.stack.len(),
-    )
-}
-
-/// CR 603.3b: the every-option proof of the mandatory span at `state`, kept per span start;
-/// `None` when no choice the proof reads was made since the ring's first sample. A proof replayed
-/// here rather than read from the play trace is also returned with its span start, for the caller
-/// to keep.
-fn option_proof(
+/// CR 104.4b + CR 104.2a + CR 603.3b: what the authoritative reading of the mandatory span
+/// `span` decides; `proof` keeps the every-option proof when one is asked.
+fn decide_mandatory_span(
     state: &GameState,
-) -> (
-    Option<super::period_confirm::OptionProof>,
-    Option<(usize, super::period_confirm::OptionProof)>,
-) {
-    let Some(first) = state.loop_detect_ring.front() else {
-        return (None, None);
+    span: super::play_trace::NamedSpan,
+    proof: &std::cell::OnceCell<super::period_confirm::OptionProof>,
+) -> MandatoryDecision {
+    use super::play_trace::Witnessed;
+    use crate::analysis::loop_check::CountedTake;
+    let Some(reading) = super::period_confirm::mandatory_reading(state, span) else {
+        return MandatoryDecision::Keep(Witnessed::Refused);
     };
-    if !state.loop_decision_tally.provable_moved_since(&first.tally) {
-        return (None, None);
+    let prove = || *proof.get_or_init(|| super::period_confirm::span_option_proof(state, span));
+    if !has_no_loss_axis(&reading.delta) {
+        // A choice named before the every-option proof stays named after it, so the proof is
+        // asked only when none is.
+        let profile = if CountedTake::Performs
+            .naming_the_choice(&reading.profile)
+            .is_performs()
+        {
+            reading.profile.with_option_proof(prove)
+        } else {
+            reading.profile
+        };
+        // CR 104.2a: a loss period without a single forced winner is not decided here.
+        return match reading.winner {
+            Some(winner) if profile.is_forced() => MandatoryDecision::Won {
+                winner,
+                delta: reading.delta,
+            },
+            Some(_) | None => MandatoryDecision::Keep(Witnessed::Refused),
+        };
     }
-    let Some(span) = super::play_trace::mandatory_recurrence(state) else {
-        return (None, None);
+    let settle = |profile: &crate::types::game_state::LoopDecisionProfile,
+                  held: super::period_confirm::HeldPeriod| {
+        if profile.is_forced() {
+            Witnessed::Declared
+        } else if profile.is_offered() {
+            Witnessed::Offered {
+                counted_take: held.counted_take.naming_the_choice(profile),
+                residual: reading.residual.clone(),
+            }
+        } else {
+            Witnessed::Refused
+        }
     };
-    if let Some(proof) = super::play_trace::order_proof(state, span.start) {
-        return (Some(proof), None);
-    }
-    let proof = super::period_confirm::decision_points(state, span);
-    (Some(proof), Some((span.start, proof)))
+    let profile = reading.profile;
+    let verdict = if profile.holds_unproven_option() {
+        // An option tree costs more than the replay, so only a period that holds is asked it.
+        super::period_confirm::mandatory_period_holds(state, span)
+            .map_or(Witnessed::Refused, |held| {
+                settle(&profile.with_option_proof(prove), held)
+            })
+    } else {
+        let profile = profile.with_option_proof(prove);
+        // A profile neither drawn nor offered is refused before any replay.
+        if !profile.is_forced() && !profile.is_offered() {
+            return MandatoryDecision::Keep(Witnessed::Refused);
+        }
+        super::period_confirm::mandatory_period_holds(state, span)
+            .map_or(Witnessed::Refused, |held| settle(&profile, held))
+    };
+    MandatoryDecision::Keep(verdict)
 }
 
 /// CR 732.2a + CR 732.5: offers the priority holder a draw for a recurring period whose only
@@ -3258,7 +3106,7 @@ fn option_proof(
 fn offer_draw_without_end(
     state: &mut GameState,
     result: &mut ActionResult,
-    prior: &GameState,
+    residual: crate::analysis::resource::BoardDelta,
     counted_take: crate::analysis::loop_check::CountedTake,
 ) {
     let WaitingFor::Priority { player: proposer } = state.waiting_for else {
@@ -3273,7 +3121,7 @@ fn offer_draw_without_end(
             win_kind: None,
             win_kind_at: None,
             mandatory: false,
-            residual_board_delta: crate::analysis::resource::board_delta(prior, state),
+            residual_board_delta: residual,
             per_cycle: None,
         },
         schema: build_shortcut_schema(
@@ -26125,9 +25973,36 @@ mod kilo_interruptibility_tests {
         crate::analysis::decision_template::ShortcutDecisionSchema,
         crate::game::period_confirm::ConfirmedPeriod,
     )> {
-        let spans = offerable_spans(crate::game::play_trace::current_named(state));
+        let (_, spans) = partition_named(crate::game::play_trace::current_named(state));
         try_offer_object_growth_shortcut(&mut state.clone(), &spans)
             .map(|(certificate, schema, period, _)| (certificate, schema, period))
+    }
+
+    /// A mandatory recurrence goes to the mandatory consumer and every other cause to the
+    /// recorded offers.
+    #[test]
+    fn each_naming_cause_reaches_exactly_one_consumer() {
+        use crate::game::play_trace::{NamedSpan, NamingCause, PeriodReach, SpanSource};
+        let span = |cause| NamedSpan {
+            start: 0,
+            end: 1,
+            cause,
+            source: SpanSource::Window,
+            reach: PeriodReach::InStep,
+        };
+        let causes = [
+            NamingCause::Repeat,
+            NamingCause::TriggerTop,
+            NamingCause::Restored,
+            NamingCause::LegalNow,
+            NamingCause::MandatoryRecurrence,
+        ];
+        let (mandatory, offerable) = partition_named(causes.map(span).to_vec());
+        assert_eq!(mandatory, vec![span(NamingCause::MandatoryRecurrence)]);
+        assert_eq!(
+            offerable,
+            causes[..4].iter().copied().map(span).collect::<Vec<_>>()
+        );
     }
 
     fn load_migrated_dump() -> GameState {
@@ -31115,171 +30990,6 @@ mod legacy_copy_announcement_tests {
             r.act(GameAction::PassPriority).expect("resolve");
         }
         assert_eq!(elementals(&r), 1, "no Elemental for the abandoned copy");
-    }
-}
-
-#[cfg(test)]
-mod mandatory_draw_unmeasured_axis_tests {
-    use super::*;
-    use crate::game::scenario::{GameScenario, P0, P1};
-    use crate::types::game_state::LoopDetectionMode;
-    use crate::types::player::PlayerCounterKind;
-    use std::sync::Arc;
-
-    /// Runs Path B on a mandatory state whose ring is `[prior, own sample]`, the state
-    /// being the prior after `change`, and reports whether it drew.
-    fn draws(change: impl Fn(&mut GameState, ObjectId)) -> bool {
-        let mut scenario = GameScenario::new();
-        scenario.at_phase(Phase::PreCombatMain);
-        let creature = scenario.add_creature(P1, "Wall", 0, 10).id();
-        let runner = scenario.build();
-        let mut prior = runner.state().clone();
-        prior.loop_detection = LoopDetectionMode::Interactive;
-        prior.objects.get_mut(&creature).unwrap().damage_marked = 1;
-        let mut current = prior.clone();
-        change(&mut current, creature);
-        draws_from(&prior, current)
-    }
-
-    /// Runs Path B on `current` with the ring `[prior, own sample]`.
-    fn draws_from(prior: &GameState, mut current: GameState) -> bool {
-        let sample = |state: &GameState| {
-            Arc::new(crate::types::LoopDetectSample {
-                normalized: state.normalize_for_loop(),
-                live: state.clone(),
-                tally: state.loop_decision_tally,
-                trace_at: None,
-            })
-        };
-        let own = sample(&current);
-        current.loop_detect_ring = [sample(prior), own].into_iter().collect();
-        assert!(
-            no_living_player_has_meaningful_priority_action(&current),
-            "reach guard: the loop is mandatory"
-        );
-        let mut result = ActionResult::applied(Vec::new(), current.waiting_for.clone());
-        interactive_loop_bridge(&mut current, &mut result);
-        matches!(current.waiting_for, WaitingFor::GameOver { winner: None })
-    }
-
-    fn experience(state: &mut GameState) {
-        state.players[0]
-            .player_counters
-            .insert(PlayerCounterKind::Experience, 1);
-    }
-
-    /// CR 104.4b + CR 732.4: a mandatory draw needs the period to leave marked damage,
-    /// counters and player counters unchanged, on both the zero-progress and the
-    /// net-progress leg.
-    #[test]
-    fn a_mandatory_draw_requires_every_unmeasured_axis_unchanged() {
-        assert!(draws(|_, _| {}), "identical: the zero-progress leg draws");
-        assert!(
-            draws(|state, _| state.players[0].life += 3),
-            "life +3: the net-progress leg draws"
-        );
-        assert!(
-            !draws(|state, creature| state.objects.get_mut(&creature).unwrap().tapped = true),
-            "control: a tapped creature is a different position"
-        );
-        assert!(
-            !draws(|state, creature| state.objects.get_mut(&creature).unwrap().damage_marked = 9),
-            "damage grew unmeasured"
-        );
-        assert!(
-            !draws(|state, creature| {
-                state.players[0].life += 3;
-                state.objects.get_mut(&creature).unwrap().damage_marked = 9;
-            }),
-            "net progress over damage that grew unmeasured"
-        );
-        assert!(
-            !draws(|state, _| experience(state)),
-            "a player counter grew unmeasured"
-        );
-        assert!(
-            !draws(|state, _| {
-                state.players[0].life += 3;
-                experience(state);
-            }),
-            "net progress over a player counter that grew unmeasured"
-        );
-    }
-
-    #[derive(Clone, Copy)]
-    enum LifeReplacements {
-        None,
-        OptionalPrevention,
-        TwoOrdered,
-    }
-
-    /// Runs Path B across one life gain through the replacement pipeline, under a choice
-    /// remembered before the prior was sampled.
-    fn draws_across_a_life_gain(replacements: LifeReplacements) -> bool {
-        use crate::types::ability::{QuantityModification, ReplacementDefinition, ReplacementMode};
-        use crate::types::actions::ReplacementAutoChoice;
-        use crate::types::replacements::ReplacementEvent;
-        let (modifications, mode, remember) = match replacements {
-            LifeReplacements::None => (vec![], ReplacementMode::Mandatory, None),
-            LifeReplacements::OptionalPrevention => (
-                vec![QuantityModification::Prevent],
-                ReplacementMode::Optional { decline: None },
-                Some(ReplacementAutoChoice::Optional { index: 0 }),
-            ),
-            LifeReplacements::TwoOrdered => (
-                vec![
-                    QuantityModification::Times { factor: 2 },
-                    QuantityModification::Plus { value: 1 },
-                ],
-                ReplacementMode::Mandatory,
-                Some(ReplacementAutoChoice::Order { order: vec![0, 1] }),
-            ),
-        };
-        let mut scenario = GameScenario::new();
-        scenario.at_phase(Phase::PreCombatMain);
-        for modification in modifications {
-            scenario
-                .add_creature(P0, "Life modifier", 1, 1)
-                .with_replacement_definition(
-                    ReplacementDefinition::new(ReplacementEvent::GainLife)
-                        .quantity_modification(modification)
-                        .mode(mode.clone()),
-                );
-        }
-        let spell = scenario
-            .add_spell_to_hand_from_oracle(P0, "Life spell", true, "You gain 1 life.")
-            .id();
-        let mut runner = scenario.build();
-        runner.cast(spell).resolve();
-        if let Some(choice) = remember {
-            runner
-                .act(GameAction::ChooseReplacementAndRemember { choice })
-                .expect("the first life gain remembers its replacement choice");
-        }
-        let mut prior = runner.state().clone();
-        prior.loop_detection = LoopDetectionMode::Interactive;
-        let mut current = prior.clone();
-        crate::game::effects::life::apply_life_gain(&mut current, P0, 1, &mut Vec::new())
-            .expect("reach: the remembered choice applies without a prompt");
-        draws_from(&prior, current)
-    }
-
-    /// CR 104.4b + CR 603.5 + CR 616.1: a period over a remembered optional replacement, or a
-    /// remembered order of replacements, holds a choice and is no draw.
-    #[test]
-    fn a_remembered_replacement_choice_in_the_period_is_no_draw() {
-        assert!(
-            draws_across_a_life_gain(LifeReplacements::None),
-            "control: the same life gain with no replacement to choose draws"
-        );
-        assert!(
-            !draws_across_a_life_gain(LifeReplacements::OptionalPrevention),
-            "a remembered optional prevention is an optional action"
-        );
-        assert!(
-            !draws_across_a_life_gain(LifeReplacements::TwoOrdered),
-            "a remembered order of two replacements is a decision"
-        );
     }
 }
 
