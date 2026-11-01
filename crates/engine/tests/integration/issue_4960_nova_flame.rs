@@ -35,7 +35,7 @@
 //!
 //! Fix: `target_filter_is_distinct_recipient` (nee
 //! `target_filter_is_fresh_opponent_typed`,
-//! `crates/engine/src/parser/oracle_effect/mod.rs`) now also recognizes an
+//! `crates/phase-parser/src/parser/oracle_effect/mod.rs`) now also recognizes an
 //! `Another`-tagged typed recipient as structurally distinct from the
 //! anaphoric subject, so `bind_anaphoric_damage_subject_keep_recipient` binds
 //! `damage_source = Some(Target)` for this class too — the boosted/counter'd

@@ -29,7 +29,7 @@ Static abilities produce continuous effects that modify game objects through the
 
 ## Key Types
 
-### `StaticDefinition` — `crates/engine/src/types/ability.rs`
+### `StaticDefinition` — `crates/phase-ast/src/types/ability.rs`
 
 ```rust
 pub struct StaticDefinition {
@@ -46,7 +46,7 @@ pub struct StaticDefinition {
 
 Only `StaticMode::Continuous` is evaluated through the layer system. Other modes (`CantAttack`, `CantBlock`, `ReduceCost`, etc.) are checked directly in their respective game modules.
 
-### `ContinuousModification` — `crates/engine/src/types/ability.rs`
+### `ContinuousModification` — `crates/phase-ast/src/types/ability.rs`
 
 Each variant carries its own data and knows its layer implicitly via `modification.layer()`:
 
@@ -68,7 +68,7 @@ Each variant carries its own data and knows its layer implicitly via `modificati
 | `AddPower { value }` | ModifyPT (7c) | 613.4c |
 | `AddToughness { value }` | ModifyPT (7c) | 613.4c |
 
-### `Layer` Enum — `crates/engine/src/types/layers.rs`
+### `Layer` Enum — `crates/phase-ast/src/types/layers.rs`
 
 Evaluation order (fixed):
 
@@ -80,7 +80,7 @@ Copy (1) → Control (2) → Text (3) → Type (4) → Color (5) → Ability (6)
 - Layers 1-4, 6, 7a-b: **dependency-aware** ordering (topological sort)
 - Layers 7c-e: **timestamp** ordering
 
-### `StaticCondition` — `crates/engine/src/types/ability.rs`
+### `StaticCondition` — `crates/phase-ast/src/types/ability.rs`
 
 When a static ability is conditionally active:
 
@@ -91,7 +91,7 @@ When a static ability is conditionally active:
 - `QuantityComparison { lhs, comparator, rhs }` — Active when a quantity expression comparison is satisfied (e.g., "hand size > life total"). Uses `QuantityExpr` which can be `Ref(QuantityRef)` or `Fixed(i32)`
 - `None` — Always active
 
-### `StaticMode` — `crates/engine/src/types/statics.rs`
+### `StaticMode` — `crates/phase-ast/src/types/statics.rs`
 
 Which system evaluates this static:
 
@@ -205,16 +205,16 @@ match modification {
 
 ### Phase 1 — Type Definition
 
-- [ ] **`crates/engine/src/types/ability.rs` — `ContinuousModification` enum**
+- [ ] **`crates/phase-ast/src/types/ability.rs` — `ContinuousModification` enum**
   Add a new variant if the modification isn't expressible with existing variants. Include any data the modification needs as typed fields.
 
-- [ ] **`crates/engine/src/types/layers.rs` — `ContinuousModification::layer()` impl**
+- [ ] **`crates/phase-ast/src/types/layers.rs` — `ContinuousModification::layer()` impl**
   Add a match arm returning the correct `Layer` for your new variant. Consult the MTG Comprehensive Rules §613 for which layer applies.
 
-- [ ] **`crates/engine/src/types/ability.rs` — `StaticCondition` enum** (if new condition type)
+- [ ] **`crates/phase-ast/src/types/ability.rs` — `StaticCondition` enum** (if new condition type)
   Add a variant if the static's activation condition isn't covered by existing conditions.
 
-- [ ] **`crates/engine/src/types/statics.rs` — `StaticMode` enum** (if non-continuous)
+- [ ] **`crates/phase-ast/src/types/statics.rs` — `StaticMode` enum** (if non-continuous)
   Only needed if the static doesn't go through layers (e.g., a new restriction type).
 
 ### Phase 2 — Layer Evaluation
@@ -233,17 +233,17 @@ match modification {
 
 ### Phase 3 — Parser
 
-- [ ] **`crates/engine/src/parser/oracle.rs` — `is_static_pattern()`**
+- [ ] **`crates/phase-parser/src/parser/oracle_classifier.rs` — `is_static_pattern()`**
   Add a pattern check so the Oracle parser routes your text to `parse_static_line()` instead of treating it as an effect. This is a simple check — use `lower.contains("your pattern")` for classification routing, or nom `tag("prefix").parse(lower).is_ok()` for prefix-based dispatch.
 
-- [ ] **`crates/engine/src/parser/oracle_static.rs` — `parse_static_line()`**
+- [ ] **`crates/phase-parser/src/parser/oracle_static/mod.rs` — `parse_static_line()`**
   Add a parsing branch that:
   1. Detects the Oracle text pattern
   2. Extracts the `TargetFilter` for affected objects
   3. Calls `parse_continuous_modifications()` or constructs modifications directly
   4. Returns `Some(StaticDefinition { mode: Continuous, affected, modifications, ... })`
 
-- [ ] **`crates/engine/src/parser/oracle_static.rs` — `parse_continuous_modifications()`** (if extending)
+- [ ] **`crates/phase-parser/src/parser/oracle_static/keyword_grant.rs` — `parse_continuous_modifications()`** (if extending)
   This helper parses "gets +N/+M" and "has keyword" patterns. Extend if your modification uses a new syntax.
 
 ### Phase 4 — Non-Continuous Statics (if applicable)
@@ -330,15 +330,15 @@ rg -q "fn gather_active_continuous_effects" crates/engine/src/game/layers.rs && 
 rg -q "fn apply_continuous_effect" crates/engine/src/game/layers.rs && \
 rg -q "fn layer_pass_materializes_keywords" crates/engine/src/game/layers.rs && \
 rg -q "off_zone_characteristics" crates/engine/src/game/keywords.rs && \
-rg -q "fn parse_static_line" crates/engine/src/parser/oracle_static/mod.rs && \
-rg -q "fn parse_continuous_modifications" crates/engine/src/parser/oracle_static/keyword_grant.rs && \
-rg -q "fn is_static_pattern" crates/engine/src/parser/oracle_classifier.rs && \
-rg -q "enum ContinuousModification" crates/engine/src/types/ability.rs && \
-rg -q "struct StaticDefinition" crates/engine/src/types/ability.rs && \
-rg -q "enum StaticCondition" crates/engine/src/types/ability.rs && \
-rg -q "enum StaticMode" crates/engine/src/types/statics.rs && \
-rg -q "enum Layer" crates/engine/src/types/layers.rs && \
-rg -q "fn layer\b" crates/engine/src/types/layers.rs && \
+rg -q "fn parse_static_line" crates/phase-parser/src/parser/oracle_static/mod.rs && \
+rg -q "fn parse_continuous_modifications" crates/phase-parser/src/parser/oracle_static/keyword_grant.rs && \
+rg -q "fn is_static_pattern" crates/phase-parser/src/parser/oracle_classifier.rs && \
+rg -q "enum ContinuousModification" crates/phase-ast/src/types/ability.rs && \
+rg -q "struct StaticDefinition" crates/phase-ast/src/types/ability.rs && \
+rg -q "enum StaticCondition" crates/phase-ast/src/types/ability.rs && \
+rg -q "enum StaticMode" crates/phase-ast/src/types/statics.rs && \
+rg -q "enum Layer" crates/phase-ast/src/types/layers.rs && \
+rg -q "fn layer\b" crates/phase-ast/src/types/layers.rs && \
 echo "✓ add-static-ability skill references valid" || \
 echo "✗ STALE — update skill references"
 ```

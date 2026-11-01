@@ -27,7 +27,7 @@ Keywords are strongly-typed abilities stored on GameObjects and evaluated across
 
 ## Key Types
 
-### `Keyword` Enum — `crates/engine/src/types/keywords.rs`
+### `Keyword` Enum — `crates/phase-ast/src/types/keywords.rs`
 
 Three categories of variants:
 
@@ -65,23 +65,23 @@ Convenience functions: `has_flying()`, `has_haste()`, `has_flash()`, `has_hexpro
 
 ### Phase 1 — Type Definition
 
-- [ ] **`crates/engine/src/types/keywords.rs` — `Keyword` enum**
+- [ ] **`crates/phase-ast/src/types/keywords.rs` — `Keyword` enum**
   Add the variant. Choose the right category:
   - Unit: `YourKeyword,` (no data)
   - Parameterized (numeric): `YourKeyword(u32),`
   - Parameterized (cost): `YourKeyword(ManaCost),`
   - Special: struct-like variant with named fields
 
-- [ ] **`crates/engine/src/types/keywords.rs` — `FromStr` impl**
+- [ ] **`crates/phase-ast/src/types/keywords.rs` — `FromStr` impl**
   Add parsing in the `from_str()` match. Three locations depending on type:
   - **Unit keywords**: Add to the lowercase match block (~line 310-380). Pattern: `"yourkeyword" => Ok(Keyword::YourKeyword),`
   - **Parameterized (u32)**: Add to the split-on-colon block. Pattern: `"yourkeyword" => Ok(Keyword::YourKeyword(value.parse()?))`
   - **Parameterized (ManaCost)**: Add to the `parse_keyword_mana_cost()` delegation block. Pattern: `"yourkeyword" => parse_keyword_mana_cost(value).map(Keyword::YourKeyword)`
 
-- [ ] **`crates/engine/src/types/keywords.rs` — `keyword_from_tagged()`**
+- [ ] **`crates/phase-ast/src/types/keywords.rs` — `keyword_from_tagged()`**
   Add a match arm for JSON deserialization (externally-tagged format). This handles the `{"YourKeyword": data}` format from card-data.json.
 
-- [ ] **`crates/engine/src/types/keywords.rs` — `Display` impl** (if exists)
+- [ ] **`crates/phase-ast/src/types/keywords.rs` — `Display` impl** (if exists)
   Add formatting for debug/log output.
 
 ### Phase 2 — Runtime Behavior
@@ -159,16 +159,16 @@ any count. The migration is complete (task #123) — do not reintroduce it.
 
 - [ ] **Oracle text parsing** — Keywords on their own line (e.g., "Flying\nTrample") are handled by the line classifier in `oracle.rs`, which routes through `parse_router_keyword_list()` and ultimately `Keyword::from_str()`. No parser changes needed if `FromStr` is correct.
 
-- [ ] **`crates/engine/src/parser/oracle_keyword.rs` — the router registry** (parameterized/cost-bearing keywords only)
+- [ ] **`crates/phase-parser/src/parser/oracle_keyword.rs` — the router registry** (parameterized/cost-bearing keywords only)
   Add the keyword's prefix to the candidate recognizer `is_keyword_cost_line()` **and** a matching case to `ROUTER_KEYWORD_CASES` (the `#[cfg(test)]` typed family registry) in the same change. A set-equality test pins the two against each other: a prefix added to the recognizer without a strict parser, a valid fixture, a semantic-suffix rejection, and a declared production reach fails the build. That test is deliberate friction — it is the exact hole silent swallowing comes back through.
 
-- [ ] **`crates/engine/src/parser/oracle_static/grammar.rs` — `map_keyword()`**
+- [ ] **`crates/phase-parser/src/parser/oracle_static/grammar.rs` — `map_keyword()`**
   This delegates to `Keyword::from_str()`. No changes needed unless the keyword has non-standard Oracle text.
 
-- [ ] **`crates/engine/src/parser/oracle_effect/token.rs` — `parse_token_keyword_clause()`** (if applicable)
+- [ ] **`crates/phase-parser/src/parser/oracle_effect/token.rs` — `parse_token_keyword_clause()`** (if applicable)
   If the keyword appears in token descriptions ("create a 1/1 white Spirit creature token with flying"), ensure it's recognized here.
 
-- [ ] **`crates/engine/src/parser/oracle_effect/token.rs` — `map_token_keyword()`** (if applicable)
+- [ ] **`crates/phase-parser/src/parser/oracle_effect/token.rs` — `map_token_keyword()`** (if applicable)
   Maps token-description keywords to `Keyword` variants.
 
 ### Phase 5 — Synthesis (if applicable)
@@ -185,7 +185,7 @@ Some keywords require synthesis in `synthesis.rs` — converting the keyword int
 
 ### Phase 7 — Tests
 
-- [ ] **`crates/engine/src/types/keywords.rs` — `FromStr` tests**
+- [ ] **`crates/phase-ast/src/types/keywords.rs` — `FromStr` tests**
   Test parsing: `assert_eq!("yourkeyword".parse::<Keyword>().unwrap(), Keyword::YourKeyword);`
   For parameterized: `assert_eq!("yourkeyword:3".parse().unwrap(), Keyword::YourKeyword(3));`
 
@@ -239,21 +239,21 @@ After completing work using this skill:
 ### Verification
 
 ```bash
-rg -q "enum Keyword" crates/engine/src/types/keywords.rs && \
-rg -q "fn from_str" crates/engine/src/types/keywords.rs && \
-rg -q "fn keyword_from_tagged" crates/engine/src/types/keywords.rs && \
+rg -q "enum Keyword" crates/phase-ast/src/types/keywords.rs && \
+rg -q "fn from_str" crates/phase-ast/src/types/keywords.rs && \
+rg -q "fn keyword_from_tagged" crates/phase-ast/src/types/keywords.rs && \
 rg -q "fn has_keyword" crates/engine/src/game/keywords.rs && \
 rg -q "fn protection_prevents_from" crates/engine/src/game/keywords.rs && \
 rg -q "fn parse_keywords" crates/engine/src/game/keywords.rs && \
 rg -q "fn synthesize_equip" crates/engine/src/database/synthesis.rs && \
 rg -q "fn synthesize_changeling_cda" crates/engine/src/database/synthesis.rs && \
 rg -q "fn check_keywords" crates/engine/src/game/coverage.rs && \
-rg -q "fn map_keyword" crates/engine/src/parser/oracle_static/grammar.rs && \
-rg -q "fn parse_router_keyword_list" crates/engine/src/parser/oracle_keyword.rs && \
-rg -q "fn parse_router_keyword_fragment" crates/engine/src/parser/oracle_keyword.rs && \
-rg -q "enum KeywordRemainderPolicy" crates/engine/src/parser/oracle_keyword.rs && \
-rg -q "fn is_keyword_cost_line" crates/engine/src/parser/oracle_keyword.rs && \
-rg -q "ROUTER_KEYWORD_CASES" crates/engine/src/parser/oracle_keyword.rs && \
+rg -q "fn map_keyword" crates/phase-parser/src/parser/oracle_static/grammar.rs && \
+rg -q "fn parse_router_keyword_list" crates/phase-parser/src/parser/oracle_keyword.rs && \
+rg -q "fn parse_router_keyword_fragment" crates/phase-parser/src/parser/oracle_keyword.rs && \
+rg -q "enum KeywordRemainderPolicy" crates/phase-parser/src/parser/oracle_keyword.rs && \
+rg -q "fn is_keyword_cost_line" crates/phase-parser/src/parser/oracle_keyword.rs && \
+rg -q "ROUTER_KEYWORD_CASES" crates/phase-parser/src/parser/oracle_keyword.rs && \
 rg -q "AddKeyword" crates/engine/src/types/ability.rs && \
 echo "✓ add-keyword skill references valid" || \
 echo "✗ STALE — update skill references"

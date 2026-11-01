@@ -1206,6 +1206,34 @@ fn discovered_manifest() -> BTreeMap<String, DiscoveredOwner> {
             "src/game/effects/choose_one_of.rs",
             include_str!("../../src/game/effects/choose_one_of.rs"),
         ),
+        (
+            "../phase-ast/src/types/ability.rs",
+            include_str!("../../../phase-ast/src/types/ability.rs"),
+        ),
+        (
+            "../phase-ast/src/types/player.rs",
+            include_str!("../../../phase-ast/src/types/player.rs"),
+        ),
+        (
+            "../phase-ast/src/types/game_state_kinds.rs",
+            include_str!("../../../phase-ast/src/types/game_state_kinds.rs"),
+        ),
+        (
+            "../phase-ast/src/types/event_kinds.rs",
+            include_str!("../../../phase-ast/src/types/event_kinds.rs"),
+        ),
+        (
+            "../phase-ast/src/types/object_data.rs",
+            include_str!("../../../phase-ast/src/types/object_data.rs"),
+        ),
+        (
+            "../phase-ast/src/types/attack_target.rs",
+            include_str!("../../../phase-ast/src/types/attack_target.rs"),
+        ),
+        (
+            "../phase-ast/src/types/token_spec.rs",
+            include_str!("../../../phase-ast/src/types/token_spec.rs"),
+        ),
     ] {
         discover_file(&mut discovered, file, source);
     }

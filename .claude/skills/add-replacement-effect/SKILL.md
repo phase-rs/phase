@@ -27,7 +27,7 @@ Replacement effects modify or prevent game events before they happen (MTG Rule 6
 
 ## Key Types
 
-### `ReplacementDefinition` — `crates/engine/src/types/ability.rs`
+### `ReplacementDefinition` — `crates/phase-ast/src/types/ability.rs`
 
 ```rust
 pub struct ReplacementDefinition {
@@ -112,7 +112,7 @@ ReplacementResult::Execute(modified_event) → caller processes the event
 - [ ] **`crates/engine/src/types/replacements.rs` — `ReplacementEvent` enum** (if new event type)
   Add a variant for the event being intercepted. Skip if an existing variant fits.
 
-- [ ] **`crates/engine/src/types/ability.rs` — `ReplacementCondition` enum** (if new condition)
+- [ ] **`crates/phase-ast/src/types/ability.rs` — `ReplacementCondition` enum** (if new condition)
   Add a variant if the replacement needs a condition beyond `valid_card` filtering.
 
 ### Phase 2 — Registry & Handler
@@ -125,7 +125,7 @@ ReplacementResult::Execute(modified_event) → caller processes the event
 
 ### Phase 3 — Parser
 
-- [ ] **`crates/engine/src/parser/oracle_replacement.rs` — parsing function**
+- [ ] **`crates/phase-parser/src/parser/oracle_replacement.rs` — parsing function**
   Write a parser that recognizes the Oracle text pattern and returns `Option<ReplacementDefinition>`.
 
   Entry point: `parse_replacement(text: &str) -> Option<ReplacementDefinition>` — called from the main Oracle parser.
@@ -135,7 +135,7 @@ ReplacementResult::Execute(modified_event) → caller processes the event
   - `parse_enters_tapped()` — Mandatory mode with `enter_tapped` flag
   - `parse_etb_counter()` — Mandatory mode that modifies entering state
 
-- [ ] **`crates/engine/src/parser/oracle.rs` — routing**
+- [ ] **`crates/phase-parser/src/parser/oracle.rs` — routing**
   Ensure the Oracle parser calls your new parser at the right priority. Replacement text is detected and routed before effect parsing.
 
 ### Phase 4 — Engine Integration (if post-replacement effect)
@@ -266,13 +266,13 @@ rg -q "fn pipeline_loop" crates/engine/src/game/replacement.rs && \
 rg -q "fn apply_post_replacement_effect" crates/engine/src/game/engine_replacement.rs && \
 rg -q "fn handle_replacement_choice" crates/engine/src/game/engine_replacement.rs && \
 rg -q "fn build_replacement_registry" crates/engine/src/game/replacement.rs && \
-rg -q "struct ReplacementDefinition" crates/engine/src/types/ability.rs && \
-rg -q "enum ReplacementMode" crates/engine/src/types/ability.rs && \
+rg -q "struct ReplacementDefinition" crates/phase-ast/src/types/ability.rs && \
+rg -q "enum ReplacementMode" crates/phase-ast/src/types/ability.rs && \
 rg -q "post_replacement_effect" crates/engine/src/types/game_state.rs && \
 rg -q "enum ProposedEvent" crates/engine/src/types/proposed_event.rs && \
-rg -q "fn parse_shock_land" crates/engine/src/parser/oracle_replacement.rs && \
-rg -q "enum ClauseDisposition" crates/engine/src/parser/oracle_ir/effect_chain.rs && \
-rg -q "enum ReplaceMeaningKind" crates/engine/src/parser/oracle_ir/effect_chain.rs && \
+rg -q "fn parse_shock_land" crates/phase-parser/src/parser/oracle_replacement.rs && \
+rg -q "enum ClauseDisposition" crates/phase-parser/src/parser/oracle_ir/effect_chain.rs && \
+rg -q "enum ReplaceMeaningKind" crates/phase-parser/src/parser/oracle_ir/effect_chain.rs && \
 rg -q "else_ability" crates/engine/src/types/ability.rs && \
 echo "✓ add-replacement-effect skill references valid" || \
 echo "✗ STALE — update skill references"
