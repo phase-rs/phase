@@ -1637,6 +1637,7 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
                 object_incarnations: Vec::new(),
             }));
         }
+        let die_mark = events.len();
         let mut chain_progress = None;
         if !player_scope_queue_end {
             if bound_result_is_empty(&chain)
@@ -1702,8 +1703,27 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
         // CR 608.2c: the detached "after each player" tail is the rest of the same
         // ability, so it runs under the frame's trigger context too; restore the
         // outer context only once both the chain and its tail have run.
+        // CR 706.4 + CR 608.2c: a die instruction that settled inside this drain owns
+        // `die_result_this_resolution` (the survivors' aggregate, or the CR 614.6 clear
+        // for a prevented roll); the caller's pre-push snapshot must not overwrite it.
+        let published_die = events[die_mark..]
+            .iter()
+            .any(|event| {
+                matches!(
+                    event,
+                    GameEvent::DieRolled { .. }
+                        | GameEvent::EffectResolved {
+                            kind: EffectKind::RollDie,
+                            ..
+                        }
+                )
+            })
+            .then_some(state.die_result_this_resolution);
         if let Some(snapshot) = trigger_snapshot {
             super::triggers::restore_trigger_event_context(state, snapshot);
+        }
+        if let Some(value) = published_die {
+            state.die_result_this_resolution = value;
         }
         if let Some(kind) = parent_kind {
             events.push(GameEvent::EffectResolved {
@@ -28740,6 +28760,97 @@ mod tests {
         ChooseOneOfKind, CoinFlipRun, LibraryInstructionActor, LibraryPosition,
         ParentTargetMissingReason, SearchSelectionConstraint, SpentColor, UNION_DEPTH_BUDGET,
     };
+
+    fn continuation_die_context_fixture(effect: Effect) -> (GameState, ObjectId, GameEvent) {
+        let mut state = GameState::new_two_player(42);
+        let source = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(1),
+            P0,
+            "Continuation context owner".into(),
+            Zone::Battlefield,
+        );
+        state.die_result_this_resolution = Some(7);
+        let chain = ResolvedAbility::new(effect, vec![], source, P0);
+        let pending = PendingContinuation::new(Box::new(chain), &state);
+        state.park_ability_continuation(pending);
+        let ambient = GameEvent::EffectResolved {
+            kind: EffectKind::GainLife,
+            source_id: source,
+            subject: None,
+        };
+        state.current_trigger_event = Some(ambient.clone());
+        state.current_trigger_events = vec![ambient.clone()];
+        state.current_trigger_match_count = Some(17);
+        state.die_result_this_resolution = Some(11);
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+        (state, source, ambient)
+    }
+
+    /// Composed fixture: no printed card exhibits this continuation/context shape.
+    /// Box of Free-Range Goblins and Boing! are the nearest printed die payload anchors.
+    #[test]
+    fn continuation_drain_preserves_a_die_result_settled_inside_it() {
+        use crate::types::ability::{AbilityDefinition, AbilityKind, DieResultBranch};
+
+        let (mut state, _, ambient) = continuation_die_context_fixture(Effect::RollDie {
+            count: QuantityExpr::Fixed { value: 1 },
+            sides: 1,
+            modifier: None,
+            results: vec![DieResultBranch {
+                min: 1,
+                max: 1,
+                effect: Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Ref {
+                            qty: QuantityRef::EventContextAmount,
+                        },
+                        player: TargetFilter::Controller,
+                    },
+                )),
+            }],
+        });
+        let before = state.players[0].life;
+        let mut events = vec![];
+        drain_pending_continuation(&mut state, &mut events);
+
+        assert_eq!(state.players[0].life, before + 1);
+        // CR 706.4 + CR 608.2c: the settled die, not the caller's old scalar, owns the result.
+        assert_eq!(state.die_result_this_resolution, Some(1));
+        assert_eq!(state.current_trigger_event, Some(ambient.clone()));
+        assert_eq!(state.current_trigger_events, vec![ambient]);
+        assert_eq!(state.current_trigger_match_count, Some(17));
+        assert!(state.resolution_stack.is_empty());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    }
+
+    /// Composed control for the die fixture above; no die instruction runs in this drain.
+    #[test]
+    fn continuation_drain_without_a_die_restores_the_callers_context() {
+        let (mut state, source, ambient) = continuation_die_context_fixture(Effect::GainLife {
+            amount: QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            },
+            player: TargetFilter::Controller,
+        });
+        let before = state.players[0].life;
+        // An earlier die completion in the action must not count as a roll inside this drain.
+        let mut events = vec![GameEvent::EffectResolved {
+            kind: EffectKind::RollDie,
+            source_id: source,
+            subject: None,
+        }];
+        drain_pending_continuation(&mut state, &mut events);
+
+        assert_eq!(state.players[0].life, before + 7);
+        assert_eq!(state.die_result_this_resolution, Some(11));
+        assert_eq!(state.current_trigger_event, Some(ambient.clone()));
+        assert_eq!(state.current_trigger_events, vec![ambient]);
+        assert_eq!(state.current_trigger_match_count, Some(17));
+        assert!(state.resolution_stack.is_empty());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    }
 
     /// CR 603.2h + CR 608.2d: the "would it prompt" authority agrees with production for
     /// an instance whose controller already took the ability's indicated action — no gate
