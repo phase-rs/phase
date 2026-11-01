@@ -1,5 +1,6 @@
 // CR 604 / CR 613 - shared static parser grammar utilities.
 
+use super::anthem::PrintedSubject;
 use super::evasion::combine_conditions;
 use super::oracle_trigger::NthEventTimingKind;
 #[allow(unused_imports)]
@@ -731,9 +732,12 @@ pub(crate) fn parse_enchanted_equipped_predicate(
         // ("has deathtouch during your turn"). Strip it to DuringYourTurn, then
         // parse the bare keyword grant.
         let (head_predicate, turn_condition) = strip_suffix_turn_condition(head);
-        if let Some(mut primary) =
-            parse_continuous_gets_has(&head_predicate, affected.clone(), description)
-        {
+        if let Some(mut primary) = parse_continuous_gets_has(
+            &head_predicate,
+            affected.clone(),
+            description,
+            PrintedSubject::Other,
+        ) {
             // Recover the head's EFFECTIVE gating condition (CR 611.3a — the
             // companion must be the strict complement of whatever gates the head):
             //   (a) a trailing turn condition ("during your turn") stripped above
@@ -765,9 +769,12 @@ pub(crate) fn parse_enchanted_equipped_predicate(
                     } else {
                         tail_orig.trim().to_string()
                     };
-                if let Some(mut companion) =
-                    parse_continuous_gets_has(&tail_predicate, affected.clone(), description)
-                {
+                if let Some(mut companion) = parse_continuous_gets_has(
+                    &tail_predicate,
+                    affected.clone(),
+                    description,
+                    PrintedSubject::Other,
+                ) {
                     // CR 611.3a + CR 613.1f: companion is the strict complement gate
                     // of the head's effective condition. Mutually exclusive so the
                     // two clauses never apply simultaneously.
@@ -1138,9 +1145,12 @@ pub(crate) fn parse_enchanted_equipped_predicate(
     if let Some((before_cond, after_cond)) = pred_tp.split_around_outside_quotes(" as long as ") {
         let continuous_text = before_cond.original;
         let condition_text = after_cond.original.trim().trim_end_matches('.');
-        if let Some(mut def) =
-            parse_continuous_gets_has(continuous_text, affected.clone(), description)
-        {
+        if let Some(mut def) = parse_continuous_gets_has(
+            continuous_text,
+            affected.clone(),
+            description,
+            PrintedSubject::Other,
+        ) {
             let condition = parse_attached_static_condition(condition_text).unwrap_or(
                 StaticCondition::Unrecognized {
                     text: condition_text.to_string(),
@@ -1178,9 +1188,12 @@ pub(crate) fn parse_enchanted_equipped_predicate(
         // attach any trailing `suffix_condition` (Heroic Defiance: "gets +3/+3
         // unless it shares a color with the most common color among all
         // permanents"), rather than parsing the whole predicate and dropping it.
-        if let Some(mut def) =
-            parse_continuous_gets_has(body_tp.original, affected.clone(), description)
-        {
+        if let Some(mut def) = parse_continuous_gets_has(
+            body_tp.original,
+            affected.clone(),
+            description,
+            PrintedSubject::Other,
+        ) {
             if let Some(condition) = &suffix_condition {
                 // Same enforcement-point bar as the evasion branches above: a
                 // CR 118.12a payment gate on a `Continuous` grant has no prompt
