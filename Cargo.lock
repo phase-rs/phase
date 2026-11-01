@@ -1980,6 +1980,7 @@ dependencies = [
  "petgraph",
  "phase-ast",
  "phase-engine",
+ "phase-parser",
  "pretty_assertions",
  "proptest",
  "rand 0.9.4",
@@ -2012,6 +2013,22 @@ dependencies = [
  "serde",
  "serde_json",
  "url",
+]
+
+[[package]]
+name = "phase-parser"
+version = "0.119.0"
+dependencies = [
+ "insta",
+ "nom",
+ "phase-ast",
+ "serde",
+ "serde_json",
+ "sha2",
+ "strum",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -238,10 +238,6 @@ mod tests {
                 "SECOND WAVE, disclosed not routed: region slices of a source string.",
             ),
             (
-                "src/parser/oracle_condition.rs",
-                "SECOND WAVE, disclosed not routed: whole-file `body.contains(..)` family probe.",
-            ),
-            (
                 "tests/integration/interaction_contract.rs",
                 "SECOND WAVE, disclosed not routed: whole-file signature/arithmetic probes.",
             ),
@@ -251,7 +247,9 @@ mod tests {
             ),
             (
                 "tests/integration/no_top_level_test_binaries.rs",
-                "SECOND WAVE, disclosed not routed: collects `mod` registrations from main.rs.",
+                "SECOND WAVE, disclosed not routed: collects `mod` registrations from the shard \
+                 roots, plus one whole-FILE boolean signal (`src.contains(\"#[test]\")`) on each \
+                 shared helper; a comment naming `#[test]` there reds the guard loudly.",
             ),
             (
                 "tests/integration/waiting_for_actor_authority_census.rs",
