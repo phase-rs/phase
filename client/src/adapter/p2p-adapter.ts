@@ -294,7 +294,12 @@ class NativeP2PBridge {
   private pendingHostTerminalRevision: number | null = null;
   /** Each seat's takeback notices in arrival order, each held until the revision
    * that seat had been sent when it arrived has been fanned out. */
-  private pendingSeatNotices: Array<{ playerId: PlayerId; revision: number; event: TakebackEvent }> = [];
+  private pendingSeatNotices: Array<{
+    playerId: PlayerId;
+    client: WebSocketAdapter;
+    revision: number;
+    event: TakebackEvent;
+  }> = [];
   private gameCode: string | null = null;
   private fullKey: FullSessionKey | null = null;
   /** Clients still in their pregame handshake; `dispose()` releases them. */
@@ -705,7 +710,7 @@ class NativeP2PBridge {
       ) {
         const playerId = client.playerId;
         if (this.disposed || playerId === null) return;
-        this.pendingSeatNotices.push({ playerId, revision: this.seatRevision(playerId), event });
+        this.pendingSeatNotices.push({ playerId, client, revision: this.seatRevision(playerId), event });
         this.enqueueSeatNoticeBarrier();
         return;
       }
@@ -811,12 +816,16 @@ class NativeP2PBridge {
       .catch((error) => console.error("[NativeP2PBridge] takeback notice fan-out failed:", error));
   }
 
-  /** A seat's notice follows the state it was sent before it, as on that seat's socket. */
+  /** A seat's notice follows the state it was sent before it, as on that seat's socket.
+   * A notice dies with its attachment: the server replays a still-open vote over the next one. */
   private async releaseSeatNoticesThroughDeliveredRevision(): Promise<void> {
     const released = this.pendingSeatNotices.filter((notice) => notice.revision <= this.deliveredRevision);
     if (released.length === 0) return;
     this.pendingSeatNotices = this.pendingSeatNotices.filter((notice) => notice.revision > this.deliveredRevision);
-    for (const notice of released) await this.onSeatNotice(notice.playerId, notice.event);
+    for (const notice of released) {
+      if (this.clients.get(notice.playerId) !== notice.client) continue;
+      await this.onSeatNotice(notice.playerId, notice.event);
+    }
   }
 
   private enqueueHostTerminalBarrier(): void {

@@ -1028,21 +1028,35 @@ fn hosted_capture(
 }
 
 /// After a human mutation that `hosted_capture` captured: record it with the
-/// ledger, and report the vote it ended, if any.
+/// ledger, and report the mutation's result with the vote it ended, if any.
 fn hosted_record(
     state: &mut GameState,
     actor: PlayerId,
     capture: Option<TakebackCapture>,
     action: &GameAction,
-    result: &ActionResult,
-) -> Option<TakebackNotice> {
-    let capture = capture?;
-    let resolution = with_hosted_takeback(|hosted| {
+    result: ActionResult,
+) -> (ActionResult, Option<TakebackNotice>) {
+    let Some(capture) = capture else {
+        return (result, None);
+    };
+    let Some(Some(resolution)) = with_hosted_takeback(|hosted| {
         hosted
             .ledger
-            .record_human_action(state, actor, capture, action, result, &hosted.ai_seats)
-    })??;
-    Some(conclude_takeback(state, resolution, Some(actor)))
+            .record_human_action(state, actor, capture, action, &result, &hosted.ai_seats)
+    }) else {
+        return (result, None);
+    };
+    let notice = conclude_takeback(state, resolution, Some(actor));
+    // An approval restored the target state, which the action's own result does not describe.
+    let result = match notice.resolution {
+        TakebackResolution::Approved => {
+            ActionResult::applied(Vec::new(), state.waiting_for.clone())
+        }
+        TakebackResolution::Declined
+        | TakebackResolution::Cancelled
+        | TakebackResolution::Withdrawn => result,
+    };
+    (result, Some(notice))
 }
 
 thread_local! {
@@ -2249,8 +2263,8 @@ fn submit_action_inner(actor: PlayerId, action: GameAction) -> Result<SubmittedA
             Ok(result) => result,
             Err(rejection) => return Ok(SubmittedAction::Rejected { rejection }),
         };
-        let takeback = with_installed_state_mut(|state| {
-            hosted_record(state, actor, capture, &action, &result)
+        let (result, takeback) = with_installed_state_mut(|state| {
+            hosted_record(state, actor, capture, &action, result)
         })?;
         return Ok(SubmittedAction::Applied {
             result: Box::new(result),
@@ -2267,7 +2281,7 @@ fn submit_action_inner(actor: PlayerId, action: GameAction) -> Result<SubmittedA
         };
         record_replay_action(is_debug_action, actor, action.clone());
         invalidate_ai_proposals();
-        let takeback = hosted_record(state, actor, capture, &action, &result);
+        let (result, takeback) = hosted_record(state, actor, capture, &action, result);
         SubmittedAction::Applied {
             result: Box::new(result),
             takeback,
@@ -2531,10 +2545,10 @@ fn submit_interaction_inner(
         let capture = hosted_capture(state, None)?;
         let applied = submit_interaction_with_rejection(state, actor, submission)?;
         // No vote is open here (refused above), so no resolution can arise.
-        let _ = hosted_record(state, actor, capture, &applied.action, &applied.result);
+        let (result, _) = hosted_record(state, actor, capture, &applied.action, applied.result);
         record_replay_action(false, actor, applied.action);
         invalidate_ai_proposals();
-        Ok(applied.result)
+        Ok(result)
     })
 }
 
@@ -10116,11 +10130,20 @@ mod hosted_takeback_tests {
             TakebackReply::Requested(vote(P0, &[P1]))
         );
 
+        let SubmittedAction::Applied { result, takeback } =
+            submit(P1, GameAction::Concede { player_id: P1 })
+        else {
+            panic!("P1's concession is admitted during the vote");
+        };
         assert_eq!(
-            concede(P1),
+            takeback,
             Some(notice(TakebackResolution::Approved, Some(P1)))
         );
         let restored = installed();
+        assert_eq!(
+            *result,
+            ActionResult::applied(Vec::new(), restored.waiting_for.clone())
+        );
         assert_eq!(
             serde_json::to_value(&restored.stack).unwrap(),
             serde_json::to_value(&target.stack).unwrap()

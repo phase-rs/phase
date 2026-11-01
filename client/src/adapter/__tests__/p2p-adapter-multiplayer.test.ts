@@ -11857,6 +11857,37 @@ describe("P2P takeback transport", () => {
     } finally { t.adapter.dispose(); }
   });
 
+  it.each([
+    ["TakebackRequested", { requester: 0, requester_name: "Host", voters: [1, 2] }, "takeback_requested"],
+    ["TakebackResolved", { resolution: "cancelled", resolved_by: 0 }, "takeback_resolved"],
+    ["RequestRejected", { reason: "stale refusal" }, "request_rejected"],
+  ] as const)(
+    "N4b: a native %s held behind a revision does not outlive the seat's suspended attachment",
+    async (frame, data, wireType) => {
+      const t = await nativeTable();
+      try {
+        const [s0, s1, s2] = AuditSocket.sockets;
+        const token = await playerToken(t.p1);
+        // Seat 2 withholds its report of revision 2, so seat 1's notice waits behind it.
+        t.stateUpdate(s0, 2, remoteState("revision 2"));
+        t.stateUpdate(s1, 2, remoteState("revision 2"));
+        await flushPromises(20);
+        s1.frame(frame, data);
+        t.p1.simulateClose();
+        await vi.waitFor(() => expect(s1.readyState).toBe(3));
+        s0.frame("TakebackResolved", { resolution: "cancelled", resolved_by: 0 });
+        const reconnecting = joinGuest(t.emitConnection, { type: "reconnect", playerToken: token });
+        await t.reattachSeat(3, 2, remoteState("revision 2"));
+        const back = await reconnecting;
+        await vi.waitFor(async () => expect(typesOf(await back.getSentMessages())).toContain("reconnect_ack"));
+        t.stateUpdate(s2, 2, remoteState("revision 2"));
+        await vi.waitFor(() => expect(t.events).toContainEqual({ type: "takebackResolved", resolution: "cancelled", resolvedBy: 0 }));
+        await flushPromises(40);
+        expect(typesOf(await back.getSentMessages())).not.toContain(wireType);
+      } finally { t.adapter.dispose(); }
+    },
+  );
+
   it("N5: a native approval restores a closed state-based loser, holds it away from the server, and replays the next vote", async () => {
     const t = await nativeTable();
     try {
