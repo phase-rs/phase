@@ -591,6 +591,20 @@ impl OracleDiagnostic {
         }
     }
 
+    /// Changes only the line coordinate, without computing audit spans or evidence.
+    ///
+    /// Document parsing applies this after retention and equality-based
+    /// deduplication. Do not apply it to an already-attributed audit finding:
+    /// changing its line alone could desynchronize its line and unit span.
+    pub fn stamp_line(&mut self, line: usize) {
+        match self {
+            Self::TargetFallback { line_index, .. }
+            | Self::IgnoredRemainder { line_index, .. }
+            | Self::SwallowedClause { line_index, .. }
+            | Self::CascadeLoss { line_index, .. } => *line_index = line,
+        }
+    }
+
     /// Diagnostic category name for regression tracking (D-08).
     pub fn category_name(&self) -> &'static str {
         match self {
@@ -939,5 +953,43 @@ mod tests {
             line_index: 5,
         };
         assert_eq!(diag.line_index(), 5);
+    }
+
+    #[test]
+    fn stamp_line_preserves_every_non_line_field() {
+        let diagnostics = [
+            OracleDiagnostic::TargetFallback {
+                context: "target classifier".into(),
+                text: "unclassified target".into(),
+                line_index: 0,
+            },
+            OracleDiagnostic::IgnoredRemainder {
+                parser: "effect parser".into(),
+                text: "unconsumed suffix".into(),
+                line_index: 0,
+            },
+            OracleDiagnostic::swallowed_clause(
+                "Condition_If",
+                "if an unsupported condition holds",
+                Some(ClauseGap::Condition {
+                    guard: "unsupported condition".into(),
+                }),
+            ),
+            OracleDiagnostic::CascadeLoss {
+                slot: CascadeSlot::Condition,
+                effect_name: "DealDamage".into(),
+                line_index: 0,
+            },
+        ];
+        for mut diagnostic in diagnostics {
+            let mut expected = serde_json::to_value(&diagnostic).expect("diagnostic serializes");
+            expected["line_index"] = 7.into();
+            diagnostic.stamp_line(7);
+            assert_eq!(diagnostic.line_index(), 7);
+            assert_eq!(
+                serde_json::to_value(&diagnostic).expect("stamped diagnostic serializes"),
+                expected,
+            );
+        }
     }
 }

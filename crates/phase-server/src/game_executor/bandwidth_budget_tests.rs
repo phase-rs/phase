@@ -26,8 +26,8 @@
 //! sends none), `command_id` is `None`, only seat `StateUpdate`s are measured
 //! (no `GameStarted`, no spectator frames), and no deck pools are attached.
 //!
-//! The codec lanes are test-only modelling before #90: production transports and
-//! protocol are unchanged, so these numbers do not claim deployed savings.
+//! The pinned codec lanes below remain a test-only model, distinct from the
+//! negotiated production encoder measured by the opt-in resource entry.
 //! Initial FULL frames count in both codec lanes. Every selected serialized frame
 //! must be no larger than forced FULL; every seat must reach DELTA and save wire
 //! bytes. A separate completion-envelope regression checks top-level `command_id`
@@ -107,11 +107,62 @@
 //! that prints "per turn (all seats)" shows that per-seat-turn figure
 //! multiplied by the seats per game, so compare like with like.
 //!
-//! The measuring copies below mirror production code and name their sources:
-//! the `ActionResult` tuple (`server_core::session`, `handle_action_with_card_db_outcome`),
-//! the per-seat publish (`StateUpdatePublisher::publish`; its seat-range and
-//! closed-sender skips and the completion `command_id` are deliberately
-//! omitted), and the frame encode (`socket_io::encode_application`).
+//! The budget's measuring copies mirror the submission tuple and per-seat
+//! projection; the new resource entry instead calls the real ConnectionEncoder,
+//! real PendingWrite/write_socket acknowledgement, and real commit. Its script
+//! visitor preserves the budget's sequence, assertions, pins and tolerances.
+//!
+//! # Production resource measurements
+//!
+//! Explicit optimized command (three repetitions; default suites skip it):
+//! `cargo test --locked --profile server-release -p phase-server --bin phase-server
+//! production_encoder_resource_acceptance -- --ignored --nocapture --test-threads=1`.
+//! `production_encoder_resource_smoke` selects one repetition with the same lanes.
+//! Four seats and two independently owned spectator connections replay the
+//! existing richer round. Setup first completes a real mixed four-seat game via
+//! network_tests; its final projections supply actual post-game idle content.
+//!
+//! One optimized smoke on Linux x86_64, Intel Core i5-12400T, rustc
+//! 1.97.0-nightly (0febdbab2 2026-04-18), 187 publications/recipient, measured:
+//! These are single-run smoke observations, distinct from the three-run acceptance
+//! report, and are not deployment predictions, tolerances or timing/savings targets.
+//!
+//! | Lane | Encoding | Six-owner payload bytes | Full / Delta | Mean prepare Full / Delta (us) |
+//! | --- | --- | ---: | ---: | ---: |
+//! | Legacy | plain | 84794997 | 0 / 0 | n/a (StateUpdate 122.559) |
+//! | Legacy | gzip | 6982078 | 0 / 0 | n/a (StateUpdate 408.854) |
+//! | Continuous | plain | 4773479 | 6 / 1116 | 171.050 / 1370.203 |
+//! | Continuous | gzip | 1406359 | 6 / 1116 | 456.839 / 1432.089 |
+//! | Reconnect-heavy | plain | 58171825 | 750 / 372 | 191.688 / 1862.068 |
+//! | Reconnect-heavy | gzip | 5137539 | 750 / 372 | 487.730 / 1925.576 |
+//!
+//! The output reports count/total/mean/median/p95/max for synchronous prepare
+//! and commit, first/subsequent and actual frame kind, per connection and
+//! seats/spectators/game; enqueue-to-successful-writer-ack wait is separate.
+//! CPU-work service elapsed can include OS descheduling: it is NOT OS thread CPU
+//! or server utilization. Projection, fixture generation, independent reference
+//! serialization/decode and memory observation are outside the CPU timers.
+//! A collecting Sink's queue/flush wait is harness cost, not real-network RTT.
+//!
+//! Separate accounting owners initialize the estimator's lazy caches. Reported
+//! JSON/index-key/object-hash storage is fully indexed logical storage and can
+//! overstate cache allocation on early-Full paths, not passive heap observation.
+//! In the smoke, six-owner simultaneous scripted retained storage peaked at
+//! 673648 bytes; precommit old+candidate+final-payload subtotals peaked at
+//! 760367..802477 bytes across codec lanes. Terminal idle retained components
+//! were [461072, 20737, 8192] bytes for three seats, [462255, 20737, 8192]
+//! for the winning seat, and [461074, 20737, 8192] for each spectator.
+//! Non-state traffic/yield left all six unchanged (2941193 bytes in total).
+//! Legacy retained no codec baseline. All measured owners dropped; a fresh owner
+//! had no baseline and emitted independently decodable Full.
+//!
+//! These subtotals are NOT a heap-peak upper bound or RSS/deallocation claim.
+//! Excluded: allocator headers/fragmentation, Arc/owner/key/viewer small structs,
+//! capacity beyond measured JSON/payload lengths, temporary Envelope JSON,
+//! codec diff/assemble/Frame/serde/compression workspace and framing overlap,
+//! server game/session/projection storage, queued Envelopes/socket buffers,
+//! Tokio tasks/stacks, receiver/reference/report storage, OS/network buffers
+//! and process RSS. Unobserved preparation transients are excluded, not zero.
 
 use std::collections::VecDeque;
 
@@ -894,6 +945,7 @@ fn measure_publication(result: &ActionResult, revision: u64, totals: &mut [SeatM
             message,
             command_id: None,
             quota_refusal: None,
+            state_encoding: crate::socket_mailbox::StateEncoding::Automatic,
         })
         .expect("StateUpdate serializes");
         let frames = total.baselines.deliver(&json, revision);
@@ -913,8 +965,20 @@ fn measure_publication(result: &ActionResult, revision: u64, totals: &mut [SeatM
 }
 
 fn play_round() -> Vec<SeatMeasurements> {
-    let mut game = build_game();
     let mut totals: Vec<SeatMeasurements> = (0..SEATS).map(SeatMeasurements::new).collect();
+    visit_round(|result, revision| measure_publication(result, revision, &mut totals));
+    assert!(
+        totals
+            .iter()
+            .all(|t| t.legacy.updates > 0 && t.legacy.updates == totals[0].legacy.updates),
+        "every seat receives the same positive number of updates"
+    );
+    totals
+}
+
+/// Stream the unchanged script once per pass; do not archive the whole stream.
+fn visit_round(mut publication: impl FnMut(&ActionResult, u64)) {
+    let mut game = build_game();
 
     let mut revision = 0u64;
     let mut reached_end = false;
@@ -926,7 +990,7 @@ fn play_round() -> Vec<SeatMeasurements> {
             .unwrap_or_else(|error| panic!("scripted action {action:?} rejected: {error:?}"));
         let result = server_action_result(game.runner.state(), applied);
         revision += 1;
-        measure_publication(&result, revision, &mut totals);
+        publication(&result, revision);
         if game.runner.state().turn_number >= END_TURN {
             reached_end = true;
             break;
@@ -985,13 +1049,6 @@ fn play_round() -> Vec<SeatMeasurements> {
         state.players[1].graveyard.contains(&game.bolt_victim),
         "the Bolted creature is in its owner's graveyard"
     );
-    assert!(
-        totals
-            .iter()
-            .all(|t| t.legacy.updates > 0 && t.legacy.updates == totals[0].legacy.updates),
-        "every seat receives the same positive number of updates"
-    );
-    totals
 }
 
 #[test]
@@ -1072,6 +1129,7 @@ fn completion_envelope_removes_command_id_through_delta() {
             message,
             command_id,
             quota_refusal: None,
+            state_encoding: crate::socket_mailbox::StateEncoding::Automatic,
         })
         .expect("completion Envelope serializes");
         let original: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -1102,4 +1160,595 @@ fn completion_envelope_removes_command_id_through_delta() {
             }
         }
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Traffic {
+    Continuous,
+    ReconnectHeavy,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ResourceLane {
+    Legacy,
+    Codec(Traffic),
+}
+
+impl ResourceLane {
+    fn owner(self) -> crate::socket_io::resource_probe::Owner {
+        use crate::socket_io::resource_probe::Owner;
+        match self {
+            Self::Legacy => Owner::legacy(),
+            Self::Codec(_) => Owner::codec(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ResourcePass {
+    Cpu,
+    Memory,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SamplePosition {
+    First,
+    Subsequent,
+}
+
+struct ResourceSample {
+    kind: crate::metrics::WsFrameType,
+    position: SamplePosition,
+    prepare: std::time::Duration,
+    commit: std::time::Duration,
+    wait: std::time::Duration,
+}
+
+#[derive(Default)]
+struct ResourceTotals {
+    frames: [usize; 4],
+    bytes: [u64; 4],
+    reconnect_full: usize,
+    continuing_delta: usize,
+    samples: Vec<ResourceSample>,
+    /// Component maxima need not occur together; total_peak is simultaneous.
+    retained_component_peaks: [usize; 3],
+    retained_total_peak: usize,
+    old_component_peaks: [usize; 3],
+    candidate_component_peaks: [usize; 3],
+    /// initial-empty, normal Delta, automatic Full, reconnect Full.
+    precommit_counts: [usize; 4],
+    precommit_subtotal_peaks: [usize; 4],
+}
+
+fn memory_components(usage: Option<state_codec::BaselineMemoryUsage>) -> [usize; 3] {
+    usage.map_or([0; 3], |usage| {
+        [
+            usage.json_bytes,
+            usage.index_key_bytes,
+            usage.object_hash_bytes,
+        ]
+    })
+}
+
+fn component_peaks(peaks: &mut [usize; 3], current: [usize; 3]) {
+    for (peak, value) in peaks.iter_mut().zip(current) {
+        *peak = (*peak).max(value);
+    }
+}
+
+fn payload(frame: &Message) -> &[u8] {
+    match frame {
+        Message::Text(text) => text.as_bytes(),
+        Message::Binary(bytes) => bytes,
+        other => panic!("resource application payload: {other:?}"),
+    }
+}
+
+fn resource_slot(kind: crate::metrics::WsFrameType) -> usize {
+    use crate::metrics::WsFrameType;
+    match kind {
+        WsFrameType::Full => 0,
+        WsFrameType::Delta => 1,
+        WsFrameType::StateUpdate => 2,
+        WsFrameType::GameStarted => 3,
+        WsFrameType::Other | WsFrameType::Control => panic!("expected state frame"),
+    }
+}
+
+async fn assert_resource_output(
+    frame: Message,
+    expected: &str,
+    revision: u64,
+    lane: ResourceLane,
+    encoding: crate::socket_control::Encoding,
+    receiver: &mut Option<WireState>,
+) {
+    match lane {
+        ResourceLane::Legacy => {
+            let reference = crate::wire::encode_json_message_sync(
+                expected.to_owned(),
+                encoding == crate::socket_control::Encoding::GzipEnvelope,
+            )
+            .unwrap();
+            assert_eq!(
+                payload(&frame),
+                payload(&reference),
+                "SAME-Envelope legacy framing"
+            );
+            assert!(
+                receiver.is_none(),
+                "legacy retains no receiver codec baseline"
+            );
+        }
+        ResourceLane::Codec(_) => {
+            let json = match frame {
+                Message::Text(text) => text.to_string(),
+                Message::Binary(bytes) => {
+                    crate::wire::decode_client_envelope(bytes.to_vec(), 16 * 1024 * 1024)
+                        .await
+                        .unwrap()
+                }
+                other => panic!("codec application frame: {other:?}"),
+            };
+            let frame = Frame::from_bytes(json.as_bytes()).unwrap();
+            let decoded = decode(receiver.as_ref(), &frame).unwrap();
+            assert_eq!(
+                decoded.as_bytes(),
+                expected.as_bytes(),
+                "exact complete Envelope bytes"
+            );
+            assert_eq!(decoded.revision(), Some(revision));
+            *receiver = Some(decoded);
+        }
+    }
+}
+
+fn duration_distribution(values: impl Iterator<Item = std::time::Duration>) -> serde_json::Value {
+    let mut ns: Vec<_> = values.map(|value| value.as_nanos()).collect();
+    ns.sort_unstable();
+    let total: u128 = ns.iter().sum();
+    if ns.is_empty() {
+        return serde_json::json!({"count": 0});
+    }
+    serde_json::json!({
+        "count": ns.len(), "total_ns": total, "mean_ns": total as f64 / ns.len() as f64,
+        "median_ns": ns[ns.len() / 2], "p95_ns": ns[(ns.len() * 95).div_ceil(100) - 1],
+        "max_ns": ns.last().unwrap()
+    })
+}
+
+fn report_samples(label: &str, samples: &[&ResourceSample]) {
+    use crate::metrics::WsFrameType;
+    for position in [SamplePosition::First, SamplePosition::Subsequent] {
+        let selected: Vec<_> = samples
+            .iter()
+            .copied()
+            .filter(|sample| sample.position == position)
+            .collect();
+        println!(
+            "P5 CPU {label} position={position:?} prepare={} commit={} queue_flush={}",
+            duration_distribution(selected.iter().map(|sample| sample.prepare)),
+            duration_distribution(selected.iter().map(|sample| sample.commit)),
+            duration_distribution(selected.iter().map(|sample| sample.wait))
+        );
+    }
+    for kind in [
+        WsFrameType::Full,
+        WsFrameType::Delta,
+        WsFrameType::StateUpdate,
+        WsFrameType::GameStarted,
+    ] {
+        let selected: Vec<_> = samples
+            .iter()
+            .copied()
+            .filter(|sample| sample.kind == kind)
+            .collect();
+        if !selected.is_empty() {
+            println!(
+                "P5 CPU {label} kind={kind:?} prepare={} commit={} queue_flush={}",
+                duration_distribution(selected.iter().map(|sample| sample.prepare)),
+                duration_distribution(selected.iter().map(|sample| sample.commit)),
+                duration_distribution(selected.iter().map(|sample| sample.wait))
+            );
+        }
+    }
+}
+
+fn resource_envelope(message: server_core::protocol::ServerMessage) -> Envelope {
+    Envelope {
+        message,
+        command_id: None,
+        quota_refusal: None,
+        state_encoding: crate::socket_mailbox::StateEncoding::Automatic,
+    }
+}
+
+/// No accounting call touches the CPU owners. Projection, reference serialization,
+/// independent decode, writer setup and fixture generation are outside CPU timers.
+fn resource_pass(
+    runtime: &tokio::runtime::Runtime,
+    run: usize,
+    lane: ResourceLane,
+    encoding: crate::socket_control::Encoding,
+    pass: ResourcePass,
+    terminal: &[Envelope],
+) -> [u64; 6] {
+    use crate::metrics::WsFrameType;
+    let mut owners: Vec<_> = (0..6).map(|_| lane.owner()).collect();
+    let mut receivers: Vec<Option<WireState>> = (0..6).map(|_| None).collect();
+    let mut totals: Vec<ResourceTotals> = (0..6).map(|_| ResourceTotals::default()).collect();
+    let mut current = [[0_usize; 3]; 6];
+    // Seats, spectators, game: aggregate simultaneous observations, not peaks.
+    let mut simultaneous_retained_peak = [[0_usize; 3]; 3];
+    let mut simultaneous_retained_total_peak = [0_usize; 3];
+    let mut simultaneous_precommit_subtotal_peak = [0_usize; 3];
+    let mut publication = 0_usize;
+    visit_round(|result, revision| {
+        let source = StateUpdateSource::from_result(result, revision);
+        let source = source.guarded("RESOURCE").unwrap();
+        let key = FullSessionKey {
+            game_code: "RESOURCE".into(),
+            generation: 1,
+        };
+        for index in 0..6 {
+            let reconnect = matches!(lane, ResourceLane::Codec(Traffic::ReconnectHeavy))
+                && publication > 0
+                && publication % 3 != 2;
+            if reconnect {
+                owners[index] = lane.owner();
+                receivers[index] = None;
+                current[index] = [0; 3];
+            }
+            let fresh = publication == 0 || reconnect;
+            let message = if index < SEATS {
+                crate::build_state_update_message(
+                    &source,
+                    &key,
+                    seat(index),
+                    Vec::new(),
+                    &source.state.eliminated_players,
+                )
+            } else {
+                crate::build_spectator_state_update_message(
+                    &key,
+                    source.state,
+                    source.events,
+                    source.log_entries,
+                    revision,
+                )
+                .unwrap()
+            };
+            let envelope = resource_envelope(message);
+            // Compute the exact reference from THIS Envelope, before moving it.
+            let expected = serde_json::to_string(&envelope).unwrap();
+            let old = match pass {
+                ResourcePass::Cpu => [0; 3],
+                ResourcePass::Memory => memory_components(owners[index].memory()),
+            };
+            let (prepared, prepare) = owners[index].prepare(envelope, encoding);
+            let kind = prepared.frame_type();
+            let slot = resource_slot(kind);
+            let bytes = payload(prepared.frame()).len();
+            if fresh && matches!(lane, ResourceLane::Codec(_)) {
+                assert_eq!(
+                    kind,
+                    WsFrameType::Full,
+                    "fresh sender must emit independent Full"
+                );
+            }
+            totals[index].frames[slot] += 1;
+            totals[index].bytes[slot] += bytes as u64;
+            totals[index].reconnect_full += usize::from(reconnect && kind == WsFrameType::Full);
+            totals[index].continuing_delta += usize::from(!fresh && kind == WsFrameType::Delta);
+            if let ResourcePass::Memory = pass {
+                let candidate = memory_components(prepared.memory());
+                component_peaks(&mut totals[index].old_component_peaks, old);
+                component_peaks(&mut totals[index].candidate_component_peaks, candidate);
+                if matches!(lane, ResourceLane::Codec(_)) {
+                    assert!(candidate[0] > 0);
+                    let class = if reconnect {
+                        3
+                    } else if fresh {
+                        0
+                    } else if kind == WsFrameType::Delta {
+                        1
+                    } else {
+                        2
+                    };
+                    let subtotal =
+                        old.iter().sum::<usize>() + candidate.iter().sum::<usize>() + bytes;
+                    totals[index].precommit_counts[class] += 1;
+                    totals[index].precommit_subtotal_peaks[class] =
+                        totals[index].precommit_subtotal_peaks[class].max(subtotal);
+                    for (group, range) in [0..4, 4..6, 0..6].into_iter().enumerate() {
+                        let transient = if range.contains(&index) {
+                            candidate.iter().sum::<usize>() + bytes
+                        } else {
+                            0
+                        };
+                        let simultaneous =
+                            current[range].iter().flatten().sum::<usize>() + transient;
+                        simultaneous_precommit_subtotal_peak[group] =
+                            simultaneous_precommit_subtotal_peak[group].max(simultaneous);
+                    }
+                } else {
+                    assert_eq!(old, [0; 3]);
+                    assert_eq!(candidate, [0; 3]);
+                }
+            }
+            let delivery = runtime.block_on(owners[index].deliver(prepared));
+            runtime.block_on(assert_resource_output(
+                delivery.frame,
+                &expected,
+                revision,
+                lane,
+                encoding,
+                &mut receivers[index],
+            ));
+            if let ResourcePass::Cpu = pass {
+                totals[index].samples.push(ResourceSample {
+                    kind,
+                    position: if fresh {
+                        SamplePosition::First
+                    } else {
+                        SamplePosition::Subsequent
+                    },
+                    prepare,
+                    commit: delivery.commit,
+                    wait: delivery.queue_flush,
+                });
+            } else {
+                current[index] = memory_components(owners[index].memory());
+                component_peaks(&mut totals[index].retained_component_peaks, current[index]);
+                totals[index].retained_total_peak = totals[index]
+                    .retained_total_peak
+                    .max(current[index].iter().sum());
+                for (group, range) in [0..4, 4..6, 0..6].into_iter().enumerate() {
+                    let aggregate = std::array::from_fn(|component| {
+                        current[range.clone()]
+                            .iter()
+                            .map(|owner| owner[component])
+                            .sum()
+                    });
+                    component_peaks(&mut simultaneous_retained_peak[group], aggregate);
+                    simultaneous_retained_total_peak[group] = simultaneous_retained_total_peak
+                        [group]
+                        .max(aggregate.iter().sum::<usize>());
+                }
+            }
+        }
+        publication += 1;
+    });
+    assert!(publication > 0);
+    for (index, total) in totals.iter().enumerate() {
+        match lane {
+            ResourceLane::Legacy => {
+                assert_eq!(&total.frames[..2], &[0, 0]);
+                assert_eq!(total.frames[2], publication);
+            }
+            ResourceLane::Codec(Traffic::Continuous) => {
+                assert!(
+                    total.frames[0] > 0 && total.frames[1] > total.frames[0],
+                    "actual Delta-heavy class"
+                );
+            }
+            ResourceLane::Codec(Traffic::ReconnectHeavy) => {
+                assert!(
+                    total.frames[0] > total.frames[1]
+                        && total.reconnect_full > 0
+                        && total.continuing_delta > 0,
+                    "actual Full-heavy/reconnect and continuing Delta reach"
+                );
+            }
+        }
+        println!("P5 RESOURCE run={run} pass={pass:?} lane={lane:?} encoding={encoding:?} recipient={index} publications={publication} frames={:?} payload_bytes={:?} reconnect_full={} continuing_delta={}",
+            total.frames, total.bytes, total.reconnect_full, total.continuing_delta);
+        match pass {
+            ResourcePass::Cpu => {
+                assert_eq!(total.samples.len(), publication);
+                report_samples(&format!("run={run} lane={lane:?} encoding={encoding:?} recipient={index}"), &total.samples.iter().collect::<Vec<_>>());
+            }
+            ResourcePass::Memory => println!("P5 MEMORY run={run} lane={lane:?} encoding={encoding:?} recipient={index} fully_indexed_retained_component_peaks={:?} simultaneous_owner_retained_total_peak={} old_component_peaks={:?} candidate_component_peaks={:?} precommit_class_counts={:?} old_plus_candidate_plus_frame_subtotal_peaks={:?}",
+                total.retained_component_peaks, total.retained_total_peak, total.old_component_peaks,
+                total.candidate_component_peaks, total.precommit_counts, total.precommit_subtotal_peaks),
+        }
+    }
+    for (audience, range) in [("seats", 0..4), ("spectators", 4..6), ("game", 0..6)] {
+        let selected = &totals[range];
+        let bytes: u64 = selected.iter().flat_map(|total| total.bytes).sum();
+        let frames: usize = selected.iter().flat_map(|total| total.frames).sum();
+        println!("P5 RESOURCE aggregate run={run} pass={pass:?} lane={lane:?} encoding={encoding:?} audience={audience} frames={frames} payload_bytes={bytes}");
+        if let ResourcePass::Cpu = pass {
+            report_samples(
+                &format!("run={run} lane={lane:?} encoding={encoding:?} audience={audience}"),
+                &selected
+                    .iter()
+                    .flat_map(|total| &total.samples)
+                    .collect::<Vec<_>>(),
+            );
+        }
+    }
+    if let ResourcePass::Memory = pass {
+        for (group, audience) in ["seats", "spectators", "game"].into_iter().enumerate() {
+            println!("P5 MEMORY aggregate run={run} lane={lane:?} encoding={encoding:?} audience={audience} simultaneous_retained_component_peaks={:?} simultaneous_retained_total_peak={} simultaneous_precommit_subtotal_peak={}",
+                simultaneous_retained_peak[group], simultaneous_retained_total_peak[group], simultaneous_precommit_subtotal_peak[group]);
+        }
+        assert_eq!(terminal.len(), owners.len());
+        for (index, envelope) in terminal.iter().enumerate() {
+            let revision = match &envelope.message {
+                server_core::protocol::ServerMessage::StateUpdate {
+                    state,
+                    state_revision,
+                    ..
+                } => {
+                    assert!(matches!(
+                        state.waiting_for,
+                        WaitingFor::GameOver { winner: Some(_) }
+                    ));
+                    *state_revision
+                }
+                other => panic!("terminal projected StateUpdate: {other:?}"),
+            };
+            let envelope = resource_envelope(envelope.message.clone());
+            let expected = serde_json::to_string(&envelope).unwrap();
+            let old = memory_components(owners[index].memory());
+            let (prepared, _) = owners[index].prepare(envelope, encoding);
+            let candidate = memory_components(prepared.memory());
+            let framed = payload(prepared.frame()).len();
+            let subtotal = old.iter().sum::<usize>() + candidate.iter().sum::<usize>() + framed;
+            println!("P5 MEMORY terminal_precommit run={run} lane={lane:?} encoding={encoding:?} recipient={index} old={old:?} candidate={candidate:?} final_frame_payload={framed} accounted_subtotal={subtotal}");
+            let delivery = runtime.block_on(owners[index].deliver(prepared));
+            runtime.block_on(assert_resource_output(
+                delivery.frame,
+                &expected,
+                revision,
+                lane,
+                encoding,
+                &mut receivers[index],
+            ));
+            let before = memory_components(owners[index].memory());
+            let nonstate =
+                resource_envelope(server_core::protocol::ServerMessage::Pong { timestamp: 717 });
+            let expected = serde_json::to_string(&nonstate).unwrap();
+            let (prepared, _) = owners[index].prepare(nonstate, encoding);
+            assert_eq!(prepared.frame_type(), WsFrameType::Other);
+            assert!(prepared.memory().is_none());
+            let framed = payload(prepared.frame()).len();
+            println!("P5 MEMORY nonstate_precommit run={run} lane={lane:?} encoding={encoding:?} recipient={index} old={before:?} candidate=absent final_frame_payload={framed} accounted_subtotal={}",
+                before.iter().sum::<usize>() + framed);
+            let delivery = runtime.block_on(owners[index].deliver(prepared));
+            // Non-state traffic remains ordinary in both lanes.
+            runtime.block_on(assert_resource_output(
+                delivery.frame,
+                &expected,
+                revision,
+                ResourceLane::Legacy,
+                encoding,
+                &mut None,
+            ));
+            runtime.block_on(tokio::task::yield_now());
+            let after = memory_components(owners[index].memory());
+            assert_eq!(
+                before, after,
+                "terminal/non-state/idle must retain the last baseline"
+            );
+            match lane {
+                ResourceLane::Legacy => assert_eq!(after, [0; 3]),
+                ResourceLane::Codec(_) => assert!(after[0] > 0),
+            }
+            println!("P5 IDLE run={run} lane={lane:?} encoding={encoding:?} recipient={index} terminal_before={before:?} after_nonstate_yield={after:?}");
+            current[index] = after;
+        }
+        for (audience, range) in [("seats", 0..4), ("spectators", 4..6), ("game", 0..6)] {
+            let components: [usize; 3] = std::array::from_fn(|component| {
+                current[range.clone()]
+                    .iter()
+                    .map(|owner| owner[component])
+                    .sum()
+            });
+            println!("P5 IDLE aggregate run={run} lane={lane:?} encoding={encoding:?} audience={audience} fully_indexed_terminal_components={components:?} simultaneous_total={}",
+                components.iter().sum::<usize>());
+        }
+    }
+    let bytes = std::array::from_fn(|index| totals[index].bytes.iter().sum());
+    owners.clear();
+    assert!(
+        owners.is_empty(),
+        "all measured server owners and prepared tokens dropped"
+    );
+    let mut fresh = ResourceLane::Codec(Traffic::Continuous).owner();
+    assert!(fresh.memory().is_none());
+    let envelope = resource_envelope(terminal[0].message.clone());
+    let expected = serde_json::to_string(&envelope).unwrap();
+    let revision = match &envelope.message {
+        server_core::protocol::ServerMessage::StateUpdate { state_revision, .. } => *state_revision,
+        _ => unreachable!("proven terminal fixture"),
+    };
+    let (prepared, _) = fresh.prepare(envelope, encoding);
+    assert_eq!(prepared.frame_type(), WsFrameType::Full);
+    let delivery = runtime.block_on(fresh.deliver(prepared));
+    runtime.block_on(assert_resource_output(
+        delivery.frame,
+        &expected,
+        revision,
+        ResourceLane::Codec(Traffic::Continuous),
+        encoding,
+        &mut None,
+    ));
+    drop(fresh);
+    runtime.block_on(tokio::task::yield_now());
+    println!("P5 TEARDOWN run={run} pass={pass:?} lane={lane:?} encoding={encoding:?} remaining_accounted_server_owners=0; fresh owner absent then independent Full");
+    bytes
+}
+
+fn production_resource_runs(repetitions: usize) {
+    use crate::socket_control::Encoding;
+    if cfg!(debug_assertions) {
+        panic!("run cargo test --locked --profile server-release -p phase-server --bin phase-server production_encoder_resource_acceptance -- --ignored --nocapture --test-threads=1");
+    }
+    assert!(
+        std::env::var_os(UPDATE_ENV_VAR).is_none(),
+        "never rebaseline resource acceptance"
+    );
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let terminal = runtime.block_on(super::network_tests::completed_terminal_envelopes());
+    let _entered = runtime.enter();
+    println!("P5 RESOURCE profile=server-release optimized arch={} os={} repetitions={repetitions}; CPU-work service elapsed, not OS CPU/utilization; prepare/commit exclude projection/reference/decode/accounting; queue_flush is collecting-sink harness wait, not network RTT",
+        std::env::consts::ARCH, std::env::consts::OS);
+    println!("P5 MEMORY fully indexed logical storage, not passive allocator observation; precommit subtotal=old+candidate+final frame, NOT heap-peak upper bound. Excludes allocator headers/fragmentation, Arc/small handles/key/viewer/owner structs, spare JSON/payload capacity, transient Envelope JSON/diff/assemble/Frame/serde/compression workspaces and overlap, game/session/projection storage, queued Envelopes/socket buffers, Tokio tasks/stacks, receiver/reference/report storage, OS/network buffers and RSS.");
+    let mut all_runs = Vec::new();
+    for run in 1..=repetitions {
+        for encoding in [Encoding::Plain, Encoding::GzipEnvelope] {
+            let legacy = resource_pass(
+                &runtime,
+                run,
+                ResourceLane::Legacy,
+                encoding,
+                ResourcePass::Cpu,
+                &terminal,
+            );
+            resource_pass(
+                &runtime,
+                run,
+                ResourceLane::Legacy,
+                encoding,
+                ResourcePass::Memory,
+                &terminal,
+            );
+            for traffic in [Traffic::Continuous, Traffic::ReconnectHeavy] {
+                let lane = ResourceLane::Codec(traffic);
+                let measured =
+                    resource_pass(&runtime, run, lane, encoding, ResourcePass::Cpu, &terminal);
+                resource_pass(
+                    &runtime,
+                    run,
+                    lane,
+                    encoding,
+                    ResourcePass::Memory,
+                    &terminal,
+                );
+                let ratios: [f64; 6] =
+                    std::array::from_fn(|index| measured[index] as f64 / legacy[index] as f64);
+                println!("P5 MATCHED run={run} lane={lane:?} encoding={encoding:?} codec_to_legacy_payload_ratios={ratios:?}; independent map order may vary across replays, no exact cross-run byte pin");
+                all_runs.push((run, format!("{encoding:?}/{traffic:?}"), measured));
+            }
+        }
+    }
+    println!("P5 RESOURCE repetitions_complete={repetitions} all_run_payload_totals={all_runs:?}; report all repetitions/spread, not fastest only");
+}
+
+#[test]
+#[ignore = "optimized production encoder measurement; three full repetitions"]
+fn production_encoder_resource_acceptance() {
+    production_resource_runs(3);
+}
+
+#[test]
+#[ignore = "establish-first optimized resource smoke; one full repetition"]
+fn production_encoder_resource_smoke() {
+    production_resource_runs(1);
 }

@@ -38,7 +38,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 LEDGER="$SCRIPT_DIR/prelowered-ratchet.txt"
-SCOPE="crates/engine/src/parser"
+SCOPE="crates/phase-parser/src/parser"
 NEEDLE="PreLowered"
 
 cd "$REPO_ROOT"
