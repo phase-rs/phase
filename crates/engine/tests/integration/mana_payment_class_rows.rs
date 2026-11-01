@@ -873,14 +873,17 @@ fn unchanged_boards_read_as_before() {
 const UNCHANGED: &[Row] = &[
     ("t/cryptex", "Cryptex", "{T}, Collect evidence 3: Add one mana of any color. Put an unlock counter on ~.", &[("Hill Giant", G, 'f')], &[], "Llanowar Elves", true, "tt/BF"),
     ("t/master-of-dark-rites", "Master of Dark Rites", "{T}, Sacrifice another creature: Add {B}{B}{B}. Spend this mana only to cast Vampire, Cleric, and/or Demon spells.", &[("Grizzly Bears", B, 'f')], &[], "Vampire Nighthawk", false, "ff/H"),
-    ("t/rubble-rouser", "Rubble Rouser", "{T}, Exile a card from your graveyard: Add {R}. When you do, ~ deals 1 damage to each opponent.", &[("Grizzly Bears", G, 'f')], &[], "Lightning Bolt", true, "ft/H"),
+    // #9812: offered once the bounded reducer witness completes the targeted cast (was ft/H).
+    ("t/rubble-rouser", "Rubble Rouser", "{T}, Exile a card from your graveyard: Add {R}. When you do, ~ deals 1 damage to each opponent.", &[("Grizzly Bears", G, 'f')], &[], "Lightning Bolt", true, "tt/GY"),
     ("t/springjack-pasture", "Springjack Pasture", "{T}, Sacrifice X Goats: Add X mana of any one color. You gain X life.", &[("Mountain Goat", B, 'f')], &[], "Llanowar Elves", false, "ff/H"),
     ("t/thornvault-forager", "Thornvault Forager", "{T}, Forage: Add two mana in any combination of colors.", &[("Hill Giant", G, 'f'), ("Hill Giant", G, 'f'), ("Hill Giant", G, 'f')], &[], "Grizzly Bears", false, "ff/H"),
     ("x/Eldrazi Temple", "Eldrazi Temple", "{T}: Add {C}{C}. Spend this mana only to cast colorless Eldrazi spells or activate abilities of colorless Eldrazi.", &[("Phyrexian Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[], "Glaring Fleshraker", true, "tt/BF"),
     ("x/Rafi, Retro Racer", "Rafi, Retro Racer", "{R}, Sacrifice ~: Each player adds {R}{R}{R}.", &[("Mountain", B, 'p')], &[], "Fearless Halberdier", true, "tt/BF"),
     ("x/Satyr Hedonist", "Satyr Hedonist", "{R}, Sacrifice ~: Add {R}{R}{R}.", &[("Mountain", B, 'p')], &[], "Fearless Halberdier", true, "tt/BF"),
     ("x/Vessel of Volatility", "Vessel of Volatility", "{1}{R}, Sacrifice ~: Add {R}{R}{R}{R}.", &[("Mountain", B, 'p'), ("Wastes", B, 'p')], &[], "Barbarian Horde", true, "tt/BF"),
-    ("e/Archaeomancer's Spade#spellgy", "Archaeomancer's Spade", "{T}: Add {R}{W}. This mana can't be spent to cast spells from your hand.", &[("Ashnod's Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[], "Electric Revelation", true, "ft/GY"),
+    // CR 601.2h: Electric Revelation's "discard a card" can't be paid from an
+    // empty hand, so neither the legality predicate nor the offer admits it.
+    ("e/Archaeomancer's Spade#spellgy", "Archaeomancer's Spade", "{T}: Add {R}{W}. This mana can't be spent to cast spells from your hand.", &[("Ashnod's Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[], "Electric Revelation", false, "ff/GY"),
     ("e/Cloudpost", "Cloudpost", "{T}: Add {C} for each Locus on the battlefield.", &[("Glimmerpost", B, 'p'), ("Phyrexian Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[], "Glaring Fleshraker", true, "tt/BF"),
     ("e/Codsworth, Handy Helper", "Codsworth, Handy Helper", "{T}: Add {W}{W}. Spend this mana only to cast Aura and/or Equipment spells.", &[("Ashnod's Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[], "Suppression Bonds", false, "ff/H"),
     ("e/Elfhame Druid", "Elfhame Druid", "{T}: Add {G}{G}. Spend this mana only to cast kicked spells.", &[("Ashnod's Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[], "Axebane Beast", false, "ff/H"),

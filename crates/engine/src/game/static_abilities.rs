@@ -112,6 +112,7 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     registry.insert(StaticMode::CantGainLife, handle_rule_mod);
     registry.insert(StaticMode::CantLoseLife, handle_rule_mod);
     registry.insert(StaticMode::UnspentManaLossCausesLifeLoss, handle_rule_mod);
+    registry.insert(StaticMode::WinFirstCoinFlipSetEachTurn, handle_rule_mod);
     registry.insert(StaticMode::MustAttack, handle_rule_mod);
     registry.insert(StaticMode::MustBlock, handle_rule_mod);
     // Note: CantDraw is a data-carrying variant — runtime enforcement is in
@@ -1462,6 +1463,22 @@ pub fn player_unspent_mana_loss_causes_life_loss(state: &GameState, player_id: P
     check_static_ability(
         state,
         StaticMode::UnspentManaLossCausesLifeLoss,
+        &StaticCheckContext {
+            player_id: Some(player_id),
+            ..Default::default()
+        },
+    )
+}
+
+/// CR 705.3 + CR 109.5: Whether `player_id`'s first set of coin flips each turn
+/// comes up heads and is won (Edgar, King of Figaro). This is an existence
+/// query, so multiple active instances fix the same set once. The per-turn
+/// window itself is `GameState::players_who_flipped_coins_this_turn`, read by
+/// the single flip seam in `effects::flip_coin`.
+pub fn player_wins_first_coin_flip_set_each_turn(state: &GameState, player_id: PlayerId) -> bool {
+    check_static_ability(
+        state,
+        StaticMode::WinFirstCoinFlipSetEachTurn,
         &StaticCheckContext {
             player_id: Some(player_id),
             ..Default::default()

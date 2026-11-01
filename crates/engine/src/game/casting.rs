@@ -8,8 +8,9 @@ use crate::types::ability::{
     CostObjectCount, CostPaidObjectSnapshot, CostReduction, CounterCostSelection, Duration, Effect,
     EffectKind, FilterProp, GameRestriction, ModalSelectionCondition, NameStickerSet, ObjectScope,
     ParsedCondition, PlayerFilter, PlayerScope, ProhibitedActivity, QuantityExpr, QuantityRef,
-    ResolvedAbility, RestrictionExpiry, RestrictionPlayerScope, StaticCondition, StaticDefinition,
-    SubAbilityLink, TapCreaturesRequirement, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+    ResolvedAbility, RestrictionExpiry, RestrictionPlayerScope, SacrificeCost,
+    SacrificeRequirement, StaticCondition, StaticDefinition, SubAbilityLink,
+    TapCreaturesRequirement, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use crate::types::actions::{AlternativeCastDecision, GameAction};
 use crate::types::card::LayoutKind;
@@ -1877,7 +1878,7 @@ fn can_pay_escape_additional_cost(
     let Some((_, residual)) = super::keywords::effective_escape_data(state, escape_obj_id) else {
         return false;
     };
-    residual.is_payable(state, player, escape_obj_id)
+    residual.is_payable_for_spell(state, player, escape_obj_id)
 }
 
 /// CR 702.180: Check if an object has the Harmonize keyword. Off-zone-aware so a
@@ -18102,7 +18103,7 @@ fn evoke_cast_choice_eligibility(
     });
     let evoke_non_mana_affordable = evoke_non_mana_part
         .as_ref()
-        .is_none_or(|cost| cost.is_payable(state, player, object_id));
+        .is_none_or(|cost| cost.is_payable_for_spell(state, player, object_id));
 
     Some(EvokeCastChoiceEligibility {
         offer: EvokeCastChoiceOffer {
@@ -18208,6 +18209,16 @@ pub fn handle_cast_spell_with_payment_mode(
     if let Some(obj) = state.objects.get(&object_id) {
         if cast_face_choice_offered_from_zone(state, obj) && alternative_spell_layout(obj).is_some()
         {
+            // CR 715.3a + CR 601.2: the prompt offers only faces castable now
+            // (the same authority as its candidate list); with none it would
+            // be a choice with no legal answer, so the cast is refused.
+            if !can_cast_adventure_face_now(state, player, object_id, true)
+                && !can_cast_adventure_face_now(state, player, object_id, false)
+            {
+                return Err(EngineError::InvalidAction(format!(
+                    "Neither face of {object_id:?} can be cast now (CR 715.3a)",
+                )));
+            }
             return Ok(WaitingFor::CastOffer {
                 player,
                 kind: CastOfferKind::Adventure {
@@ -21502,7 +21513,7 @@ fn can_cast_prepared_now_with_probe(
         if let Some(FlashbackCost::NonMana(ref cost)) =
             super::keywords::effective_flashback_cost(state, prepared.object_id)
         {
-            if !cost.is_payable(state, player, prepared.object_id) {
+            if !cost.is_payable_for_spell(state, player, prepared.object_id) {
                 return false;
             }
         }
@@ -21560,7 +21571,10 @@ fn can_cast_prepared_now_with_probe(
             _ => None,
         };
         if let Some(extra) = static_extra {
-            if !extra.cost.is_payable(state, player, prepared.object_id) {
+            if !extra
+                .cost
+                .is_payable_for_spell(state, player, prepared.object_id)
+            {
                 return false;
             }
         }
@@ -21588,6 +21602,18 @@ fn can_cast_prepared_now_with_probe(
         // the action never reaches `legal_actions_full`; the payment step in
         // `casting_costs.rs` is the backstop for a directly submitted `CastSpell`.
         if matches!(cost, AbilityCost::Unimplemented { .. }) {
+            return false;
+        }
+        // CR 601.2b + CR 601.2h: every non-mana leg of a REQUIRED additional
+        // cost (sacrifice, discard, exile, tap…) must be payable as well. The
+        // reducer simulation hides this gap for ordinary spells, but an
+        // Adventure/Omen cast stops at its CR 715.3a face prompt before any
+        // cost is paid, so this predicate is the only gate there (Allure of
+        // Power, My Precious's Adventure, with no creature to sacrifice).
+        // Waterbend is a mana leg settled by the spell's own payment step.
+        if !matches!(cost, AbilityCost::Waterbend { .. })
+            && !cost.is_payable_for_spell(state, player, prepared.object_id)
+        {
             return false;
         }
     }
@@ -25479,15 +25505,16 @@ pub(super) fn find_waterbend_cost(cost: &AbilityCost) -> Option<&ManaCost> {
     }
 }
 
-/// Walk a cost tree and return the first non-SelfRef sacrifice `(count, filter)`
-/// found, if any. The `count` is honored so multi-permanent sacrifice costs
-/// ("Sacrifice two creatures:") are modeled correctly.
-pub(super) fn find_non_self_sacrifice_cost(cost: &AbilityCost) -> Option<(u32, &TargetFilter)> {
+/// Walk a cost tree and return the first non-SelfRef, non-aggregate sacrifice
+/// leg found, if any.
+pub(super) fn find_non_self_sacrifice_cost(cost: &AbilityCost) -> Option<&SacrificeCost> {
     match cost {
-        AbilityCost::Sacrifice(cost) if !matches!(cost.target, TargetFilter::SelfRef) => cost
-            .requirement
-            .fixed_count()
-            .map(|count| (count, &cost.target)),
+        AbilityCost::Sacrifice(cost)
+            if !matches!(cost.target, TargetFilter::SelfRef)
+                && !cost.requirement.is_aggregate() =>
+        {
+            Some(cost)
+        }
         AbilityCost::Composite { costs } => costs.iter().find_map(find_non_self_sacrifice_cost),
         _ => None,
     }
@@ -25512,21 +25539,21 @@ pub(super) enum RemovalKind {
 /// per-kind walker after mana payment.
 pub(super) fn find_non_self_battlefield_removal_cost(
     cost: &AbilityCost,
-) -> Option<(u32, &TargetFilter, RemovalKind)> {
-    if let Some((n, f)) = find_non_self_sacrifice_cost(cost) {
-        return Some((n, f, RemovalKind::Sacrifice));
+) -> Option<(&TargetFilter, RemovalKind)> {
+    if let Some(sacrifice) = find_non_self_sacrifice_cost(cost) {
+        return Some((&sacrifice.target, RemovalKind::Sacrifice));
     }
-    if let Some((n, f)) = find_battlefield_exile_cost(cost) {
-        return Some((n, f, RemovalKind::Exile));
+    if let Some((_, f)) = find_battlefield_exile_cost(cost) {
+        return Some((f, RemovalKind::Exile));
     }
-    if let Some((n, Some(f))) = find_return_to_hand_cost(cost) {
+    if let Some((_, Some(f))) = find_return_to_hand_cost(cost) {
         // Mirror the Sacrifice/Exile SelfRef exclusion: a self-bounce is the
         // source's own removal, not a board-shrinking non-mana leg in the
         // CR 601.2h ordering sense. Recognizing it would let the lone witness
         // remove the source and false-REJECT a self-bounce whose mana leg the
         // source itself feeds.
         if !matches!(f, TargetFilter::SelfRef) {
-            return Some((n, f, RemovalKind::ReturnToHand));
+            return Some((f, RemovalKind::ReturnToHand));
         }
     }
     None
@@ -25880,7 +25907,7 @@ pub(super) fn remove_selected_non_self_sacrifice_cost(cost: AbilityCost) -> Opti
     match cost {
         AbilityCost::Sacrifice(sacrifice)
             if !matches!(sacrifice.target, TargetFilter::SelfRef)
-                && sacrifice.requirement.fixed_count().is_some() =>
+                && !sacrifice.requirement.is_aggregate() =>
         {
             None
         }
@@ -26482,19 +26509,42 @@ pub(super) fn remove_selected_return_to_hand_cost(cost: AbilityCost) -> Option<A
 pub(super) fn split_return_to_hand_cost_legs(
     cost: AbilityCost,
 ) -> (Option<AbilityCost>, Option<AbilityCost>) {
+    let (returns, automatic) = partition_cost_legs(cost, |cost| {
+        matches!(cost, AbilityCost::ReturnToHand { .. })
+    });
+    (automatic, returns)
+}
+
+/// CR 107.5 + CR 107.6 + CR 601.2h: splits an activation residual into the
+/// source's own {T}/{Q} legs, which can be paid only while the source is still
+/// a permanent, and every other leg, for a payment that removes the source.
+pub(super) fn split_source_tap_cost_legs(
+    cost: AbilityCost,
+) -> (Option<AbilityCost>, Option<AbilityCost>) {
+    partition_cost_legs(cost, |cost| {
+        matches!(cost, AbilityCost::Tap | AbilityCost::Untap)
+    })
+}
+
+/// Partitions the legs reachable through `Composite` into `(matching, rest)`,
+/// each in its original order.
+fn partition_cost_legs(
+    cost: AbilityCost,
+    is_match: impl Fn(&AbilityCost) -> bool + Copy,
+) -> (Option<AbilityCost>, Option<AbilityCost>) {
     match cost {
-        cost @ AbilityCost::ReturnToHand { .. } => (None, Some(cost)),
         AbilityCost::Composite { costs } => {
-            let mut automatic = Vec::new();
-            let mut returns = Vec::new();
+            let mut matching = Vec::new();
+            let mut rest = Vec::new();
             for cost in costs {
-                let (automatic_leg, return_leg) = split_return_to_hand_cost_legs(cost);
-                automatic.extend(automatic_leg);
-                returns.extend(return_leg);
+                let (matching_leg, rest_leg) = partition_cost_legs(cost, is_match);
+                matching.extend(matching_leg);
+                rest.extend(rest_leg);
             }
-            (combine_cost_legs(automatic), combine_cost_legs(returns))
+            (combine_cost_legs(matching), combine_cost_legs(rest))
         }
-        cost => (Some(cost), None),
+        cost if is_match(&cost) => (Some(cost), None),
+        cost => (None, Some(cost)),
     }
 }
 
@@ -26968,7 +27018,7 @@ fn alternative_cost_offer_payable(
     let state = terms_state.as_ref().unwrap_or(state);
     if !residual
         .as_ref()
-        .is_none_or(|cost| cost.is_payable(state, player, object_id))
+        .is_none_or(|cost| cost.is_payable_for_spell(state, player, object_id))
     {
         return false;
     }
@@ -27004,7 +27054,7 @@ fn alternative_cost_offer_payable(
             // required-cost flow applies; the combined life is priced above.
             && imposed
                 .as_ref()
-                .is_none_or(|cost| cost.is_payable(state, player, object_id))
+                .is_none_or(|cost| cost.is_payable_for_spell(state, player, object_id))
             // CR 118.3: a zero mana cost is always payable.
             && mana.as_ref().is_none_or(|m| {
                 can_pay_cost_after_auto_tap(state, player, object_id, m)
@@ -27259,49 +27309,126 @@ pub(crate) fn find_eligible_sacrifice_targets_for_scope(
     filter: &TargetFilter,
     scope: Option<&super::costs::PaymentScope>,
 ) -> Vec<ObjectId> {
-    let is_turn_face_up = matches!(scope, Some(super::costs::PaymentScope::TurnFaceUp { .. }));
     state
         .battlefield
         .iter()
         .copied()
         .filter(|&id| {
-            let Some(obj) = state.objects.get(&id) else {
-                return false;
-            };
-            if obj.controller != player {
-                return false;
-            }
-            // CR 702.37e: the permanent being turned face up is not excluded — the rule
-            // only requires paying the morph cost, so a face-down permanent matching the
-            // cost's filter may pay it with itself unless the cost says "another", which
-            // the filter carries.
-            if !is_turn_face_up
-                && super::static_abilities::player_cant_sacrifice_as_cost(state, player, id)
-            {
-                return false;
-            }
-            // CR 109.5 + CR 701.21a: the only object-level bar check. An
-            // installer-bound bar (Call for Aid binds its caster) excludes the
-            // object for that actor alone; an unbound bar (printed or granted
-            // "can't be sacrificed", e.g. Assault Suit) excludes it for every
-            // actor. Same authority as execution
-            // (`object_cant_be_sacrificed_by`); no actor-blind check may run
-            // before it or later controllers stay barred.
-            if super::static_abilities::object_cant_be_sacrificed_by(state, player, id) {
-                return false;
-            }
-            // CR 109.5 + CR 113.8: An activated cost's “you” refers to its activator.
-            // CR 118.12a: An instructed player may pay a normalized "unless" cost.
-            // The selected cost's payer remains authoritative if its source leaves play.
-            super::filter::matches_target_filter(
-                state,
-                id,
-                filter,
-                &super::filter::FilterContext::from_source_with_controller(source_id, player)
-                    .with_granting_object(granting_object),
-            )
+            is_sacrifice_cost_candidate(state, player, source_id, granting_object, filter, id)
+                && may_sacrifice_for_cost(state, player, id, scope)
         })
         .collect()
+}
+
+/// CR 601.2h + CR 118.3: the determined set of a "sacrifice all <filter>" cost (every candidate), or None when any member can't be sacrificed; partial payment is not allowed.
+pub(crate) fn find_determined_sacrifice_set(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    granting_object: Option<ObjectIncarnationRef>,
+    filter: &TargetFilter,
+) -> Option<Vec<ObjectId>> {
+    let set: Vec<ObjectId> = state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|&id| {
+            is_sacrifice_cost_candidate(state, player, source_id, granting_object, filter, id)
+        })
+        .collect();
+    set.iter()
+        .all(|&id| may_sacrifice_for_cost(state, player, id, None))
+        .then_some(set)
+}
+
+/// CR 404.3 + CR 701.21a: the members of a determined sacrifice set the payer arranges — the
+/// cards it owns; a token is not a card (CR 111.1). Another owner's cards keep set order (owner
+/// arrangement: #10508).
+pub(crate) fn payer_arranged_sacrifice_members(
+    state: &GameState,
+    player: PlayerId,
+    set: &[ObjectId],
+) -> Vec<ObjectId> {
+    set.iter()
+        .copied()
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|obj| obj.owner == player && !obj.is_token)
+        })
+        .collect()
+}
+
+/// CR 404.3 + CR 601.2h: `set` in sacrifice order — the payer's `arrangement` of its own cards,
+/// then every other member. Refuses an arrangement that is not exactly those cards.
+pub(crate) fn arrange_determined_sacrifice_set(
+    state: &GameState,
+    player: PlayerId,
+    set: Vec<ObjectId>,
+    arrangement: &[ObjectId],
+) -> Result<Vec<ObjectId>, EngineError> {
+    let arranged = payer_arranged_sacrifice_members(state, player, &set);
+    if arrangement.len() != arranged.len()
+        || arrangement.iter().any(|id| !arranged.contains(id))
+        || super::mana_abilities::contains_duplicate_object_id(arrangement)
+    {
+        return Err(EngineError::ActionNotAllowed(
+            "The arrangement must order every card of the determined sacrifice set you own"
+                .to_string(),
+        ));
+    }
+    let mut ordered = arrangement.to_vec();
+    ordered.extend(set.into_iter().filter(|id| !arranged.contains(id)));
+    Ok(ordered)
+}
+
+fn is_sacrifice_cost_candidate(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    granting_object: Option<ObjectIncarnationRef>,
+    filter: &TargetFilter,
+    id: ObjectId,
+) -> bool {
+    state
+        .objects
+        .get(&id)
+        .is_some_and(|obj| obj.controller == player)
+        // CR 109.5 + CR 113.8: An activated cost's “you” refers to its activator.
+        // CR 118.12a: An instructed player may pay a normalized "unless" cost.
+        // The selected cost's payer remains authoritative if its source leaves play.
+        && super::filter::matches_target_filter(
+            state,
+            id,
+            filter,
+            &super::filter::FilterContext::from_source_with_controller(source_id, player)
+                .with_granting_object(granting_object),
+        )
+}
+
+fn may_sacrifice_for_cost(
+    state: &GameState,
+    player: PlayerId,
+    id: ObjectId,
+    scope: Option<&super::costs::PaymentScope>,
+) -> bool {
+    // CR 702.37e: the permanent being turned face up is not excluded — the rule
+    // only requires paying the morph cost, so a face-down permanent matching the
+    // cost's filter may pay it with itself unless the cost says "another", which
+    // the filter carries.
+    // CR 109.5 + CR 701.21a: the only object-level bar check. An
+    // installer-bound bar (Call for Aid binds its caster) excludes the
+    // object for that actor alone; an unbound bar (printed or granted
+    // "can't be sacrificed", e.g. Assault Suit) excludes it for every
+    // actor, regardless of payment scope. Same authority as execution
+    // (`object_cant_be_sacrificed_by`); no actor-blind check may run
+    // before it or later controllers stay barred.
+    if super::static_abilities::object_cant_be_sacrificed_by(state, player, id) {
+        return false;
+    }
+    matches!(scope, Some(super::costs::PaymentScope::TurnFaceUp { .. }))
+        || !super::static_abilities::player_cant_sacrifice_as_cost(state, player, id)
 }
 
 pub fn find_eligible_sacrifice_targets(
@@ -27344,6 +27471,12 @@ pub(crate) fn can_pay_ability_cost_now(
     ability_index: Option<usize>,
     life: &ActivationLifeWindow,
 ) -> bool {
+    // Un-card: reject SayPhrase costs (including inside Composite/OneOf) for
+    // players who have not opted in, before the dry run reaches the payment
+    // authority. Uses the shared helper to handle all cost shapes uniformly.
+    if super::un_actions::cost_requires_unavailable_speech(state, player, cost) {
+        return false;
+    }
     let excluded_sources = ability_mana_payment_excluded_sources(cost, source_id);
     payable_with_mana_ability_window_life(state, player, source_id, cost, life, |state, cost| {
         super::costs::can_pay(
@@ -28344,8 +28477,9 @@ pub(crate) fn activation_verdict(
                 Ok(TargetSlotBuildOutcome::RequiresChosenX) => {
                     ability_def.cost.as_ref().is_some_and(|cost| {
                         casting_costs::extract_x_mana_cost(cost).is_some()
-                            || find_non_self_sacrifice_cost(cost)
-                                .is_some_and(|(count, _)| count == u32::MAX)
+                            || find_non_self_sacrifice_cost(cost).is_some_and(|c| {
+                                c.requirement == SacrificeRequirement::count(u32::MAX)
+                            })
                             || casting_costs::activation_cost_needs_x_choice(&resolved, cost)
                     })
                 }
@@ -30837,7 +30971,7 @@ fn activate_with_cost_carrier(
                 {
                     return Ok(waiting_for);
                 }
-                if pending_interactive.deferred_random_discard_cost.is_some() {
+                if pending_interactive.deferred_hand_discard_cost.is_some() {
                     return casting_costs::finish_pending_cost_or_cast(
                         state,
                         player,
@@ -33120,10 +33254,13 @@ pub enum ActivationCostGuardSite {
     /// `finish_counter_cost_payment`, the counter-cost tail shared by the
     /// selected handlers and the deferred-removal resume.
     CounterCostTail = 8,
+    /// `handle_sacrifice_for_cost`'s source tap/untap leg, paid before a
+    /// sacrifice that includes the source.
+    SacrificeSource = 9,
 }
 
 impl ActivationCostGuardSite {
-    pub const COUNT: usize = 9;
+    pub const COUNT: usize = 10;
 }
 
 /// CR 601.2f + CR 601.2h: an activation's cost is paid only after its total is

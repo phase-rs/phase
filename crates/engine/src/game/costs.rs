@@ -69,6 +69,7 @@ use super::filter::FilterContext;
 use super::life_costs::can_pay_life_cost;
 use super::quantity::{resolve_quantity, resolve_quantity_with_targets};
 use super::speed::{effective_speed, set_speed};
+use super::un_actions::cost_requires_unavailable_speech;
 use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 use crate::types::ability::ResolvedAbility;
 
@@ -1049,6 +1050,7 @@ fn pay_ability_cost_for_activation_with_cost_move_replacement(
         },
         Some(cost_removed_counters),
         None,
+        false,
     )?;
     // CR 601.2h: "Unpayable costs can't be paid." Activation scope maps a
     // payment failure to an illegal action — the authority's `Failed` is the
@@ -1070,6 +1072,14 @@ pub(crate) fn pay_ability_cost_for_resolution(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<PaymentOutcome, EngineError> {
+    // Un-card: fail payment if the payer has disabled Un-card spoken actions.
+    if matches!(cost, AbilityCost::SayPhrase { .. })
+        && !super::un_actions::player_can_say_phrases(state, payer)
+    {
+        return Ok(payment_failed(
+            "Player has not opted in to Un-card spoken actions".to_string(),
+        ));
+    }
     let outcome = pay_ability_cost_for_resolution_with_cost_move_root(
         state,
         payer,
@@ -1133,6 +1143,7 @@ pub(crate) fn pay_ability_cost_for_turn_face_up(
         },
         None,
         Some(cost),
+        false,
     )?;
     match outcome {
         PaymentOutcome::Paid => {
@@ -1170,6 +1181,7 @@ fn pay_ability_cost_for_resolution_with_cost_move_root(
         // CR 118.12: a resolution-time PayCost has no activation to own a count.
         None,
         Some(cost),
+        false,
     )
 }
 
@@ -1247,6 +1259,10 @@ pub(crate) fn pay_counter_cost_removals(
 /// `cost_removed_counters` is the paying activation's ledger (CR 602.2b). `None`
 /// is resolution scope (CR 118.12) and the `can_pay` dry run: no activation
 /// reads the count.
+///
+/// `dry_run`: when true, the function validates payability without emitting
+/// events or mutating observable state (e.g., Gotcha offers). Used by the
+/// `can_pay` activation dry-run (CR 601.2h).
 #[allow(clippy::too_many_arguments)]
 fn pay_ability_cost_inner(
     state: &mut GameState,
@@ -1257,6 +1273,7 @@ fn pay_ability_cost_inner(
     scope: &PaymentScope,
     mut cost_removed_counters: Option<&mut Option<u32>>,
     resume_cost: Option<&AbilityCost>,
+    dry_run: bool,
 ) -> Result<PaymentOutcome, EngineError> {
     // CR 118.3 / CR 601.2h: at resolution there is no interactive interceptor or
     // activation-window mana detour, so any shape outside the resolution-payable
@@ -1276,6 +1293,27 @@ fn pay_ability_cost_inner(
         ));
     }
     match cost {
+        // Un-card (no CR entry): saying the phrase is the whole payment.
+        AbilityCost::SayPhrase { phrase } => {
+            if !super::un_actions::player_can_say_phrases(state, player) {
+                return Ok(payment_failed(
+                    "Player has not opted in to Un-card spoken actions".to_string(),
+                ));
+            }
+            if !dry_run {
+                events.push(GameEvent::PhraseSaid {
+                    player,
+                    phrase: phrase.clone(),
+                });
+                super::un_actions::record_tell(
+                    state,
+                    player,
+                    &crate::types::un_actions::UnTell::Said {
+                        text: phrase.clone(),
+                    },
+                );
+            }
+        }
         AbilityCost::Tap => {
             let obj = state
                 .objects
@@ -1526,6 +1564,7 @@ fn pay_ability_cost_inner(
                     scope,
                     cost_removed_counters.as_deref_mut(),
                     matches!(scope, PaymentScope::Resolution { .. }).then_some(&sub_resume_cost),
+                    false,
                 )?;
                 match outcome {
                     PaymentOutcome::Paid => {
@@ -2869,6 +2908,10 @@ pub(crate) fn can_pay(
 ) -> bool {
     match scope {
         PaymentScope::Activation { ability_index, .. } => {
+            // Un-card: fail payability if the payer has disabled Un-card spoken actions.
+            if cost_requires_unavailable_speech(state, payer, cost) {
+                return false;
+            }
             // CR 601.2f + CR 602.2b: Judge an offer using the cost that would
             // lock before mana abilities, without committing that lock here.
             let locked = lock_half_life_activation_cost(state, payer, source_id, cost);
@@ -2927,6 +2970,7 @@ pub(crate) fn can_pay(
                     scope,
                     None,
                     None,
+                    true,
                 ),
                 Ok(PaymentOutcome::Paid | PaymentOutcome::Paused { .. })
             );
@@ -3246,6 +3290,7 @@ pub(crate) fn resolution_cost_includes_impossible_event(
         | AbilityCost::ManaDynamic { .. }
         | AbilityCost::Tap
         | AbilityCost::Untap
+        | AbilityCost::SayPhrase { .. }
         | AbilityCost::Loyalty { .. }
         | AbilityCost::Sacrifice(_)
         | AbilityCost::PayLife { .. }
@@ -3290,6 +3335,8 @@ fn can_pay_resolution(
 ) -> bool {
     use crate::types::ability::{CardSelectionMode, DiscardSelfScope};
     match cost {
+        // Un-card: saying a phrase needs no resources, only a player who opted in.
+        AbilityCost::SayPhrase { .. } => state.un_actions.is_enabled(payer),
         AbilityCost::Mana { cost: mana_cost } => {
             can_pay_effect_mana_cost_after_auto_tap(
                 state,
@@ -3550,6 +3597,34 @@ mod tests {
 
     const P0: PlayerId = PlayerId(0);
 
+    /// Un-card: an activation whose cost is a spoken phrase is unpayable for a
+    /// player who has not opted in, and the dry run emits no event.
+    #[test]
+    fn say_phrase_activation_requires_un_actions_opt_in() {
+        let mut scenario = GameScenario::new();
+        let source = scenario
+            .add_enchantment_from_oracle(P0, "Phrase Source", "Flying")
+            .id();
+        let mut runner = scenario.build();
+        let cost = AbilityCost::SayPhrase {
+            phrase: "Gotcha!".to_string(),
+        };
+        let excluded = HashSet::new();
+        let scope = PaymentScope::Activation {
+            excluded_sources: &excluded,
+            ability_index: None,
+        };
+        assert!(
+            !can_pay(runner.state(), P0, source, &cost, &scope),
+            "opted-out player cannot pay a say-it activation cost"
+        );
+        runner.state_mut().un_actions.set_enabled(P0, true);
+        assert!(
+            can_pay(runner.state(), P0, source, &cost, &scope),
+            "reach guard: opted-in player can pay"
+        );
+    }
+
     #[test]
     fn half_life_activation_lock_fixes_only_explicit_typed_leaf() {
         let mut scenario = GameScenario::new();
@@ -3673,6 +3748,9 @@ mod tests {
             },
             AbilityCost::Tap => AbilityCost::Tap,
             AbilityCost::Untap => AbilityCost::Untap,
+            AbilityCost::SayPhrase { .. } => AbilityCost::SayPhrase {
+                phrase: "Gotcha!".to_string(),
+            },
             AbilityCost::Loyalty { .. } => AbilityCost::Loyalty { amount: 1 },
             AbilityCost::Sacrifice(_) => {
                 AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1))
@@ -4038,6 +4116,7 @@ mod tests {
                 &scope,
                 None,
                 None,
+                true,
             )
             .unwrap();
             assert!(
@@ -4069,6 +4148,7 @@ mod tests {
             &scope,
             None,
             None,
+            false,
         )
         .unwrap();
         assert!(matches!(outcome, PaymentOutcome::Paid));
@@ -4088,6 +4168,7 @@ mod tests {
             &scope,
             None,
             None,
+            false,
         );
         assert!(
             result.is_err(),
@@ -4829,6 +4910,7 @@ mod tests {
             &scope,
             None,
             None,
+            false,
         )
         .unwrap();
         assert!(
@@ -4847,6 +4929,7 @@ mod tests {
             &scope,
             None,
             None,
+            false,
         )
         .unwrap();
         assert!(
@@ -5144,6 +5227,7 @@ mod tests {
             },
             None,
             None,
+            false,
         )
         .expect("resolution-time tap-creatures payment must not error")
     }

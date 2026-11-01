@@ -25,6 +25,9 @@ const WALL_OF_NETS: &str = "Defender (This creature can't attack.)\nAt end of co
 const WHIP_VINE: &str = "Defender; reach (This creature can block creatures with flying.)\nYou may choose not to untap this creature during your untap step.\n{T}: Tap target creature with flying blocked by this creature. That creature doesn't untap during its controller's untap step for as long as this creature remains tapped.";
 const KJELDORAN_FROSTBEAST: &str =
     "At end of combat, destroy all creatures blocking or blocked by this creature.";
+const PLAGUE_WIGHT: &str =
+    "Whenever this creature becomes blocked, each creature blocking it gets -1/-1 until end of turn.";
+const BANECLAW_MARAUDER: &str = "Whenever this creature becomes blocked, each creature blocking it gets -1/-1 until end of turn.\nWhenever a creature blocking this creature dies, that creature's controller loses 1 life.\nNightbound (If a player casts at least two spells during their own turn, it becomes day next turn.)";
 const CROMAT: &str = "{W}{B}: Destroy target creature blocking or blocked by Cromat.\n{U}{R}: Cromat gains flying until end of turn.\n{B}{G}: Regenerate Cromat.\n{R}{W}: Cromat gets +1/+1 until end of turn.\n{G}{U}: Put Cromat on top of its owner's library.";
 const ALMS_BEAST: &str = "Creatures blocking or blocked by this creature have lifelink.";
 const LABYRINTH_OF_SKOPHOS: &str =
@@ -34,6 +37,8 @@ const ROLLING_STONES: &str = "Wall creatures can attack as though they didn't ha
 const SHOCK: &str = "Shock deals 2 damage to any target.";
 const UNSUMMON: &str = "Return target creature to its owner's hand.";
 const MURDER: &str = "Destroy target creature.";
+const CLOUDSHIFT: &str =
+    "Exile target creature you control, then return that card to the battlefield under your control.";
 const REGENERATE: &str = "Regenerate target creature. (The next time that creature would be destroyed this turn, instead tap it, remove it from combat, and heal all damage on it.)";
 
 // ── Drivers ─────────────────────────────────────────────────────────────
@@ -875,6 +880,270 @@ fn alms_beast_grants_lifelink_only_to_its_partner() {
         "A (lifelink) dealt 2; E did not gain"
     );
     assert_eq!(runner.life(P1), p1_before, "every attacker was blocked");
+}
+
+// ── BlockingSource: Plague Wight and Baneclaw Marauder ──────────────────
+
+fn pt(runner: &GameRunner, id: ObjectId) -> (Option<i32>, Option<i32>) {
+    let object = &runner.state().objects[&id];
+    (object.power, object.toughness)
+}
+
+fn murder_in_hand(scenario: &mut GameScenario) -> ObjectId {
+    let mut spell = scenario.add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER);
+    spell.with_mana_cost(ManaCost::Cost {
+        shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+        generic: 1,
+    });
+    spell.id()
+}
+
+/// P1: Plague Wight is removed in response to its becomes-blocked trigger, to a
+/// public or a hidden zone. Ruling (2019-01-25) + CR 608.2h: "the creatures that
+/// were blocking it before it left the battlefield get -1/-1." The other
+/// attacker's blocker and the bystander are untouched. Base read the pruned
+/// live map and shrank nobody.
+#[test]
+fn plague_wight_removed_in_response_still_shrinks_its_blockers() {
+    for (name, oracle, mana, expected) in [
+        ("Murder", MURDER, &[ManaType::Black; 3][..], Zone::Graveyard),
+        ("Unsummon", UNSUMMON, &[ManaType::Blue][..], Zone::Hand),
+    ] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let wight = scenario
+            .add_creature_from_oracle(P0, "Plague Wight", 2, 2, PLAGUE_WIGHT)
+            .id();
+        let other = scenario.add_creature(P0, "Other Attacker", 2, 2).id();
+        let removal = if name == "Murder" {
+            murder_in_hand(&mut scenario)
+        } else {
+            scenario
+                .add_spell_to_hand_from_oracle(P0, name, true, oracle)
+                .id()
+        };
+        let b1 = scenario.add_creature(P1, "Blocker B1", 2, 4).id();
+        let b2 = scenario.add_creature(P1, "Blocker B2", 3, 5).id();
+        let d = scenario.add_creature(P1, "Other Blocker", 4, 6).id();
+        let h = scenario.add_creature(P1, "Bystander H", 4, 6).id();
+        let mut runner = scenario.build();
+
+        attack_and_block(
+            &mut runner,
+            &[wight, other],
+            &[(b1, wight), (b2, wight), (d, other)],
+        );
+        assert!(
+            runner.state().stack.iter().any(|e| e.source_id == wight),
+            "reach guard: the trigger is on the stack"
+        );
+        cast_at(&mut runner, removal, wight, mana);
+        drain_stack(&mut runner, "the removal, then the Wight's trigger");
+
+        assert_zone(&runner, &[wight], expected, "reach guard: removal resolved");
+        assert_eq!(pt(&runner, b1), (Some(1), Some(3)), "{name}: B1 blocked it");
+        assert_eq!(pt(&runner, b2), (Some(2), Some(4)), "{name}: B2 blocked it");
+        assert_eq!(pt(&runner, d), (Some(4), Some(6)), "{name}: blocks another");
+        assert_eq!(pt(&runner, h), (Some(4), Some(6)), "{name}: not blocking");
+    }
+}
+
+/// P1b: Plague Wight is blinked in response, so its source is back on the
+/// battlefield as a new object (CR 400.7) that nothing is blocking. Ruling
+/// (2019-01-25) + CR 608.2h: the trigger still answers from the pairings the
+/// departed incarnation had, not the live Wight's empty ones.
+#[test]
+fn plague_wight_blinked_in_response_still_shrinks_its_blockers() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let wight = scenario
+        .add_creature_from_oracle(P0, "Plague Wight", 2, 2, PLAGUE_WIGHT)
+        .id();
+    let cloudshift = {
+        let mut spell = scenario.add_spell_to_hand_from_oracle(P0, "Cloudshift", true, CLOUDSHIFT);
+        spell.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 0,
+        });
+        spell.id()
+    };
+    let b1 = scenario.add_creature(P1, "Blocker B1", 2, 4).id();
+    let h = scenario.add_creature(P1, "Bystander H", 4, 6).id();
+    let mut runner = scenario.build();
+
+    attack_and_block(&mut runner, &[wight], &[(b1, wight)]);
+    let incarnation_before = runner.state().objects[&wight].incarnation;
+    cast_at(&mut runner, cloudshift, wight, &[ManaType::White]);
+    drain_stack(&mut runner, "Cloudshift, then the Wight's trigger");
+
+    assert_zone(
+        &runner,
+        &[cloudshift],
+        Zone::Graveyard,
+        "reach guard: Cloudshift resolved",
+    );
+    let returned = runner
+        .state()
+        .battlefield
+        .iter()
+        .copied()
+        .find(|id| runner.state().objects[id].name == "Plague Wight")
+        .expect("reach guard: the Wight returned");
+    assert!(
+        runner.state().objects[&returned].incarnation > incarnation_before,
+        "CR 400.7: the returned Wight is a new object"
+    );
+    assert!(
+        !runner
+            .state()
+            .combat
+            .as_ref()
+            .is_some_and(|combat| combat.attackers.iter().any(|a| a.object_id == returned)),
+        "reach guard: the new object is not attacking"
+    );
+    assert_eq!(pt(&runner, b1), (Some(1), Some(3)), "B1 blocked it");
+    assert_eq!(pt(&runner, h), (Some(4), Some(6)), "not blocking");
+}
+
+/// P2: B1 is removed from combat and then the Wight is destroyed, both in
+/// response. CR 506.4: B1 is no longer blocking anything, so last known
+/// pairings answer only for B2.
+#[test]
+fn plague_wight_blocker_removed_from_combat_in_response_is_spared() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let wight = scenario
+        .add_creature_from_oracle(P0, "Plague Wight", 2, 2, PLAGUE_WIGHT)
+        .id();
+    let land = labyrinth(&mut scenario);
+    let murder = murder_in_hand(&mut scenario);
+    let b1 = scenario.add_creature(P1, "Blocker B1", 2, 4).id();
+    let b2 = scenario.add_creature(P1, "Blocker B2", 3, 5).id();
+    let mut runner = scenario.build();
+
+    attack_and_block(&mut runner, &[wight], &[(b1, wight), (b2, wight)]);
+    remove_from_combat_with_labyrinth(&mut runner, land, b1);
+    cast_at(&mut runner, murder, wight, &[ManaType::Black; 3]);
+    drain_stack(&mut runner, "Murder, then the Wight's trigger");
+
+    assert_zone(&runner, &[wight], Zone::Graveyard, "reach guard: Murder");
+    assert_eq!(pt(&runner, b1), (Some(2), Some(4)), "out of combat");
+    assert_eq!(pt(&runner, b2), (Some(2), Some(4)), "still blocking");
+}
+
+fn life(runner: &GameRunner, player: PlayerId) -> i32 {
+    runner.state().players[player.0 as usize].life
+}
+
+/// B1: a creature blocking the Marauder dies in combat, and so does one
+/// blocking a different attacker. CR 603.10a: the dying creature's own recorded
+/// pairing fires the trigger once, and its controller loses 1 life. Base never
+/// fired it (the snapshot arm always rejected the subject).
+#[test]
+fn baneclaw_marauder_trigger_reads_only_its_own_blockers() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let marauder = scenario
+        .add_creature_from_oracle(P0, "Baneclaw Marauder", 4, 4, BANECLAW_MARAUDER)
+        .id();
+    let other = scenario.add_creature(P0, "Other Attacker", 4, 4).id();
+    let b = scenario.add_creature(P1, "Blocker B", 2, 2).id();
+    let d = scenario.add_creature(P1, "Other Blocker", 1, 1).id();
+    let mut runner = scenario.build();
+
+    attack_and_block(
+        &mut runner,
+        &[marauder, other],
+        &[(b, marauder), (d, other)],
+    );
+    // The becomes-blocked trigger shrinks only the Marauder's blocker.
+    drain_stack(&mut runner, "resolve the becomes-blocked trigger");
+    assert_eq!(pt(&runner, b), (Some(1), Some(1)), "B blocks the Marauder");
+    assert_eq!(pt(&runner, d), (Some(1), Some(1)), "D blocks another");
+    assert_zone(&runner, &[b], Zone::Battlefield, "B survives the -1/-1");
+    pass_until(&mut runner, "combat damage", |state| {
+        state.objects[&b].zone == Zone::Graveyard
+    });
+    assert_eq!(
+        runner.state().phase,
+        Phase::CombatDamage,
+        "B died to combat damage"
+    );
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .filter(|e| e.source_id == marauder)
+            .count(),
+        1,
+        "exactly one of the two deaths triggers"
+    );
+    drain_stack(&mut runner, "resolve the Marauder's trigger");
+
+    assert_zone(&runner, &[b, d], Zone::Graveyard, "reach guard: both died");
+    assert_eq!(life(&runner, P1), 19, "the blocker's controller loses 1");
+    assert_eq!(life(&runner, P0), 20, "not the Marauder's controller");
+}
+
+/// B2: the Marauder and its blocker die to the same combat damage. CR 603.10a:
+/// the Marauder looks back and sees the creature blocking it die, whichever of
+/// the two the batch moves first, so both creation orders are exercised.
+#[test]
+fn baneclaw_marauder_dying_with_its_blocker_still_triggers() {
+    for marauder_first in [true, false] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let early = marauder_first.then(|| {
+            scenario
+                .add_creature_from_oracle(P0, "Baneclaw Marauder", 2, 2, BANECLAW_MARAUDER)
+                .id()
+        });
+        let b = scenario.add_creature(P1, "Blocker B", 3, 3).id();
+        let marauder = early.unwrap_or_else(|| {
+            scenario
+                .add_creature_from_oracle(P0, "Baneclaw Marauder", 2, 2, BANECLAW_MARAUDER)
+                .id()
+        });
+        let mut runner = scenario.build();
+
+        attack_and_block(&mut runner, &[marauder], &[(b, marauder)]);
+        drain_stack(&mut runner, "resolve the becomes-blocked trigger");
+        assert_eq!(pt(&runner, b), (Some(2), Some(2)), "B is 2/2 after -1/-1");
+        pass_until(&mut runner, "combat damage", |state| {
+            state.objects[&b].zone == Zone::Graveyard
+        });
+        drain_stack(&mut runner, "resolve the Marauder's trigger");
+
+        assert_zone(&runner, &[b, marauder], Zone::Graveyard, "both died");
+        assert_eq!(life(&runner, P1), 19, "marauder_first={marauder_first}");
+    }
+}
+
+/// B3: the blocker is removed from combat before it dies. CR 506.4: it is no
+/// longer blocking the Marauder when it dies, so nothing triggers.
+#[test]
+fn baneclaw_marauder_ignores_a_former_blocker_dying() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let marauder = scenario
+        .add_creature_from_oracle(P0, "Baneclaw Marauder", 4, 4, BANECLAW_MARAUDER)
+        .id();
+    let land = labyrinth(&mut scenario);
+    let murder = murder_in_hand(&mut scenario);
+    let b = scenario.add_creature(P1, "Blocker B", 2, 2).id();
+    let mut runner = scenario.build();
+
+    attack_and_block(&mut runner, &[marauder], &[(b, marauder)]);
+    drain_stack(&mut runner, "resolve the becomes-blocked trigger");
+    assert_eq!(pt(&runner, b), (Some(1), Some(1)), "B is 1/1 after -1/-1");
+    remove_from_combat_with_labyrinth(&mut runner, land, b);
+    drain_stack(&mut runner, "Labyrinth settled");
+    cast_at(&mut runner, murder, b, &[ManaType::Black; 3]);
+    drain_stack(&mut runner, "Murder resolves");
+
+    assert_zone(&runner, &[b], Zone::Graveyard, "reach guard: Murder");
+    assert_eq!(life(&runner, P1), 20, "it was not blocking when it died");
 }
 
 // ── Trigger ordering (CR 603.3b) ────────────────────────────────────────

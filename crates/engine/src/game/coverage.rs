@@ -8208,7 +8208,7 @@ fn check_trigger(
         );
     }
     // CR 603.8: StateCondition triggers are handled by the priority pipeline
-    // (check_state_triggers), not the event-based trigger registry. They are supported.
+    // (collect_state_triggers), not the event-based trigger registry. They are supported.
     // CR 615.13 (Matt M5): qualifier-bearing prevention defs surface the same
     // gap — the def AS SPECIFIED cannot fire (shared refusal authority on
     // `TriggerDefinition`).
@@ -8224,7 +8224,7 @@ fn check_trigger(
 
 /// Whether a printed (battlefield) trigger mode can fire: recognised, and either
 /// in the event-trigger registry or a CR 603.8 state trigger (handled by the
-/// priority pipeline's `check_state_triggers`). Delayed triggers use the
+/// priority pipeline's `collect_state_triggers`). Delayed triggers use the
 /// stricter `delayed_trigger_mode_is_supported`.
 fn trigger_mode_is_supported(
     mode: &TriggerMode,
@@ -10934,7 +10934,7 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::Or { .. } => ("Or", Handled),
         // CR 608.2c: Logical negation — handled by evaluate_condition (effects/mod.rs).
         AbilityCondition::Not { .. } => ("Not", Handled),
-        // CR 730.2a: Daybound/Nightbound ETB initialization — handled by evaluate_condition.
+        // CR 702.145d + CR 731.1: Daybound/Nightbound ETB initialization — handled by evaluate_condition.
         AbilityCondition::DayNightIsNeither => ("DayNightIsNeither", Handled),
         // CR 731.1: Day/night designation check — handled by evaluate_condition.
         AbilityCondition::DayNightIs { .. } => ("DayNightIs", Handled),
@@ -12846,6 +12846,12 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             StaticMode::UnspentManaLossCausesLifeLoss => {
                 effective_lower.contains("losing unspent mana")
                     && effective_lower.contains("causes that player to lose that much life")
+            }
+            // CR 705.3: Edgar's Two-Headed Coin. Anchor on both the window and
+            // the indicated result so an unrelated flip line can't false-match.
+            StaticMode::WinFirstCoinFlipSetEachTurn => {
+                effective_lower.contains("the first time you flip one or more coins each turn")
+                    && effective_lower.contains("come up heads and you win those flips")
             }
             StaticMode::CanAttackWithDefender => {
                 effective_lower.contains("as though it didn't have defender")
@@ -18145,7 +18151,7 @@ mod tests {
         //
         //     ./scripts/fetch-token-sets.sh   # populates the gitignored input
         //     cargo run --bin tokens-gen -- --input data/mtgjson/sets --output /tmp/kt.toml
-        //     cmp /tmp/kt.toml crates/engine/data/known-tokens.toml
+        //     cmp /tmp/kt.toml crates/phase-ast/data/known-tokens.toml
         assert_eq!(summary.supported_tokens, summary.total_tokens);
         assert_eq!(summary.parsed_rules_text_tokens, summary.rules_text_tokens);
         assert!(
