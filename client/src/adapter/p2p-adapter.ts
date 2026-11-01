@@ -824,7 +824,7 @@ class NativeP2PBridge {
   }
 
   /** A seat's notice follows the state it was sent before it, as on that seat's socket.
-   * A notice dies with its guest session: the server replays a still-open vote to the next one. */
+   * A notice dies with its guest session. */
   private async releaseSeatNoticesThroughDeliveredRevision(): Promise<void> {
     const released = this.pendingSeatNotices.filter((notice) => notice.revision <= this.deliveredRevision);
     if (released.length === 0) return;
