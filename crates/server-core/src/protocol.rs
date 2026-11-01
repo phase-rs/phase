@@ -19,7 +19,7 @@ use phase_ai::config::AiDifficulty;
 use serde::{Deserialize, Serialize};
 
 use crate::session::{AiDriverFault, FullSessionKey};
-use crate::takeback::{RewindOption, RewindTarget};
+use crate::takeback::{RewindOption, RewindTarget, TakebackResolution};
 
 /// Full game wire protocol version. Kept numerically aligned with the lobby
 /// broker while state/action messages share the same WebSocket protocol enum.
@@ -1140,13 +1140,14 @@ pub enum ServerMessage {
     TakebackRequested {
         requester: PlayerId,
         requester_name: String,
+        /// The seats asked to approve; the UI offers Approve/Decline only to them.
+        voters: Vec<PlayerId>,
     },
-    /// The pending takeback request has been resolved, either by unanimous
-    /// approval, a decline, or the requester cancelling it. When
-    /// `approved` is true, a `StateUpdate` carrying the rolled-back state
-    /// is sent to every seat immediately before this message.
+    /// The pending takeback vote ended, for `resolution`'s reason. On
+    /// `approved`, a `StateUpdate` carrying the rolled-back state is sent to
+    /// every seat immediately before this message.
     TakebackResolved {
-        approved: bool,
+        resolution: TakebackResolution,
         /// The player whose response concluded the request: the decliner,
         /// or the requester on self-cancel. `None` when every human seat
         /// approved without a final distinguished responder (e.g. the
@@ -4244,6 +4245,7 @@ mod tests {
         let msg = ServerMessage::TakebackRequested {
             requester: PlayerId(1),
             requester_name: "Alice".to_string(),
+            voters: vec![PlayerId(0), PlayerId(2)],
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
@@ -4251,9 +4253,11 @@ mod tests {
             ServerMessage::TakebackRequested {
                 requester,
                 requester_name,
+                voters,
             } => {
                 assert_eq!(requester, PlayerId(1));
                 assert_eq!(requester_name, "Alice");
+                assert_eq!(voters, vec![PlayerId(0), PlayerId(2)]);
             }
             _ => panic!("wrong variant"),
         }
@@ -4261,28 +4265,50 @@ mod tests {
 
     #[test]
     fn server_message_takeback_resolved_roundtrips() {
-        let msg = ServerMessage::TakebackResolved {
-            approved: true,
-            resolved_by: Some(PlayerId(0)),
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
-        match parsed {
-            ServerMessage::TakebackResolved {
-                approved,
-                resolved_by,
-            } => {
-                assert!(approved);
-                assert_eq!(resolved_by, Some(PlayerId(0)));
+        for resolution in [
+            TakebackResolution::Approved,
+            TakebackResolution::Declined,
+            TakebackResolution::Cancelled,
+            TakebackResolution::Withdrawn,
+        ] {
+            let msg = ServerMessage::TakebackResolved {
+                resolution,
+                resolved_by: Some(PlayerId(0)),
+            };
+            let json = serde_json::to_string(&msg).unwrap();
+            let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+            match parsed {
+                ServerMessage::TakebackResolved {
+                    resolution: parsed_resolution,
+                    resolved_by,
+                } => {
+                    assert_eq!(parsed_resolution, resolution);
+                    assert_eq!(resolved_by, Some(PlayerId(0)));
+                }
+                _ => panic!("wrong variant"),
             }
-            _ => panic!("wrong variant"),
         }
+    }
+
+    #[test]
+    fn server_message_takeback_resolved_wire_bytes_name_the_resolution() {
+        let msg = ServerMessage::TakebackResolved {
+            resolution: TakebackResolution::Withdrawn,
+            resolved_by: Some(PlayerId(2)),
+        };
+        assert_eq!(
+            serde_json::to_value(&msg).unwrap(),
+            serde_json::json!({
+                "type": "TakebackResolved",
+                "data": { "resolution": "withdrawn", "resolved_by": 2 },
+            })
+        );
     }
 
     #[test]
     fn server_message_takeback_resolved_omits_resolved_by_when_none() {
         let msg = ServerMessage::TakebackResolved {
-            approved: false,
+            resolution: TakebackResolution::Declined,
             resolved_by: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
