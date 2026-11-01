@@ -157,6 +157,7 @@ mod extinction_event_3270;
 mod extra_turn_quantity;
 mod extract_power_each_player_exile;
 mod eyetwitch_learn_decline_lesson;
+mod ezuri_predation_pairing;
 mod face_down_cast_offer;
 mod face_down_cause_marker;
 mod face_down_spell_cost_filter;
