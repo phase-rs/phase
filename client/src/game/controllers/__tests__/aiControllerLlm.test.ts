@@ -301,7 +301,7 @@ describe("LLM-driven AI seats", () => {
     controller.dispose();
   });
 
-  it("falls back to heuristic AI when default opponent was deselected, even if seat had prior LLM binding", async () => {
+  it("falls back to heuristic AI when seat's profile is removed, even if it was previously the default opponent", async () => {
     const id = useLlmStore.getState().addProfile({
       provider: "OpenAi",
       model: "gpt-5",
@@ -311,9 +311,10 @@ describe("LLM-driven AI seats", () => {
     useLlmStore.getState().setDefaultOpponentProfileId(id);
     useLlmStore.getState().bindSeat(0, id);
 
-    // Deselect default opponent back to engine AI
-    useLlmStore.getState().setDefaultOpponentProfileId(null);
+    // Remove the profile (which was also default opponent)
+    useLlmStore.getState().removeProfile(id);
     expect(useLlmStore.getState().defaultOpponentProfileId).toBeNull();
+    expect(useLlmStore.getState().seatBindings[0]).toBeUndefined();
 
     const heuristic = proposal(PASS, "heuristic");
     const buildLlmDecisionRequest = vi.fn();

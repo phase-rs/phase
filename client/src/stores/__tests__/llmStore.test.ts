@@ -184,29 +184,34 @@ describe("llmStore", () => {
       expect(profileForSeat(useLlmStore.getState(), 0, CATALOG)).toBeUndefined();
     });
 
-    it("is cleared when its profile is removed", () => {
+    it("is cleared when its profile is removed while preserving surviving seat bindings", () => {
+      const id = addUsable("Claude");
+      const other = addUsable("Other");
+      useLlmStore.getState().setDefaultOpponentProfileId(id);
+      useLlmStore.getState().bindSeat(0, other);
+      useLlmStore.getState().bindSeat(1, null);
+      useLlmStore.getState().bindSeat(2, id);
+
+      useLlmStore.getState().removeProfile(id);
+      expect(useLlmStore.getState().defaultOpponentProfileId).toBeNull();
+      expect(useLlmStore.getState().seatBindings).toEqual({ 0: other, 1: null });
+      expect(profileForSeat(useLlmStore.getState(), 0, CATALOG)?.id).toBe(other);
+      expect(profileForSeat(useLlmStore.getState(), 1, CATALOG)).toBeUndefined();
+      expect(profileForSeat(useLlmStore.getState(), 2, CATALOG)).toBeUndefined();
+    });
+
+    it("preserves seat bindings when default opponent is reset to null", () => {
       const id = addUsable("Claude");
       const other = addUsable("Other");
       useLlmStore.getState().setDefaultOpponentProfileId(id);
       useLlmStore.getState().bindSeat(0, other);
       useLlmStore.getState().bindSeat(1, null);
 
-      useLlmStore.getState().removeProfile(id);
-      expect(useLlmStore.getState().defaultOpponentProfileId).toBeNull();
-      expect(useLlmStore.getState().seatBindings).toEqual({ 1: null });
-    });
-
-    it("clears LLM seat bindings when default opponent is reset to null while preserving explicit engine bindings", () => {
-      const id = addUsable("Claude");
-      useLlmStore.getState().setDefaultOpponentProfileId(id);
-      useLlmStore.getState().bindSeat(0, id);
-      useLlmStore.getState().bindSeat(1, null);
-
       useLlmStore.getState().setDefaultOpponentProfileId(null);
 
       expect(useLlmStore.getState().defaultOpponentProfileId).toBeNull();
-      expect(useLlmStore.getState().seatBindings).toEqual({ 1: null });
-      expect(profileForSeat(useLlmStore.getState(), 0, CATALOG)).toBeUndefined();
+      expect(useLlmStore.getState().seatBindings).toEqual({ 0: other, 1: null });
+      expect(profileForSeat(useLlmStore.getState(), 0, CATALOG)?.id).toBe(other);
       expect(profileForSeat(useLlmStore.getState(), 1, CATALOG)).toBeUndefined();
     });
 

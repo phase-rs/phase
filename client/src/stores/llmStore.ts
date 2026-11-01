@@ -343,19 +343,15 @@ export const useLlmStore = create<LlmState>()(
       removeProfile(id) {
         const { seatBindings, draftProfileId, defaultOpponentProfileId } = get();
         // Drop every binding to the removed profile in the same commit, so no
-        // seat is left pointing at a profile that no longer exists. If the
-        // removed profile was the default opponent, unselecting the default
-        // also scrubs any lingering LLM seat bindings.
-        const removedWasDefault = defaultOpponentProfileId === id;
+        // seat is left pointing at a profile that no longer exists. Bindings to
+        // other surviving profiles (or explicit engine choices) are preserved.
         const remainingBindings = Object.fromEntries(
-          Object.entries(seatBindings).filter(([, profileId]) =>
-            profileId !== id && (!removedWasDefault || profileId === null),
-          ),
+          Object.entries(seatBindings).filter(([, profileId]) => profileId !== id),
         );
         set((state) => ({
           profiles: state.profiles.filter((profile) => profile.id !== id),
           seatBindings: remainingBindings,
-          defaultOpponentProfileId: removedWasDefault ? null : defaultOpponentProfileId,
+          defaultOpponentProfileId: defaultOpponentProfileId === id ? null : defaultOpponentProfileId,
           draftProfileId: draftProfileId === id ? null : draftProfileId,
         }));
       },
@@ -368,16 +364,7 @@ export const useLlmStore = create<LlmState>()(
       },
 
       setDefaultOpponentProfileId(defaultOpponentProfileId) {
-        // When unselecting the default opponent (reverting to built-in engine),
-        // clear any seat bindings pointing to LLM profiles so stale seat
-        // overrides do not continue forcing LLM gameplay across matches.
-        // Explicit engine choices (`null`) are preserved.
-        set((state) => ({
-          defaultOpponentProfileId,
-          seatBindings: defaultOpponentProfileId === null
-            ? Object.fromEntries(Object.entries(state.seatBindings).filter(([, pId]) => pId === null))
-            : state.seatBindings,
-        }));
+        set({ defaultOpponentProfileId });
       },
 
       setDraftEnabled(draftEnabled) {
