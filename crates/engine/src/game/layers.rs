@@ -13513,7 +13513,7 @@ mod tests {
             }
             let thopter = scenario
                 .add_creature_from_oracle(P0, "Ornithopter", 0, 2, "Flying")
-                .as_artifact()
+                .as_artifact_creature()
                 .id();
             let mut runner = scenario.build();
             let state = runner.state_mut();
@@ -13537,6 +13537,17 @@ mod tests {
                 "positive live-grant reach guard"
             );
             let entered = BTreeSet::from([thopter]);
+            assert!(
+                state.objects[&thopter]
+                    .card_types
+                    .core_types
+                    .contains(&CoreType::Artifact)
+                    && state.objects[&thopter]
+                        .card_types
+                        .core_types
+                        .contains(&CoreType::Creature),
+                "positive printed artifact-creature reach guard"
+            );
             assert!(state.objects[&thopter].color.is_empty());
             assert!(
                 !active_effects_force_incremental_escalation(state, &entered, &active),
