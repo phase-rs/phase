@@ -489,6 +489,10 @@ pub enum TriggerMode {
     Evolve,
     /// CR 702.100b: Triggers when a creature evolves.
     Evolved,
+    /// Un-card Gotcha (no CR entry): fires on the source when its controller calls
+    /// "Gotcha!" — the "When you do" reflexive trigger. The watched condition lives
+    /// in `TriggerDefinition::gotcha_condition`.
+    GotchaSaid,
     /// CR 701.44: Triggers when a creature explores.
     Explored,
     /// CR 702.110: Exploit trigger — when a creature exploits another creature.
@@ -825,6 +829,7 @@ impl FromStr for TriggerMode {
             "EntersOrHauntedCreatureDies" => TriggerMode::EntersOrHauntedCreatureDies,
             "Evolve" => TriggerMode::Evolve,
             "Evolved" => TriggerMode::Evolved,
+            "GotchaSaid" => TriggerMode::GotchaSaid,
             "ExcessDamage" => TriggerMode::ExcessDamage,
             "ExcessDamageAll" => TriggerMode::ExcessDamageAll,
             "Exerted" => TriggerMode::Exerted,
@@ -1270,6 +1275,7 @@ mod tests {
             "EntersOrHauntedCreatureDies",
             "Evolve",
             "Evolved",
+            "GotchaSaid",
             "ExcessDamage",
             "ExcessDamageAll",
             "Exerted",

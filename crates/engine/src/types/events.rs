@@ -14,7 +14,9 @@ use super::card::PrintedCardRef;
 use super::card_type::{CardType, CoreType, Supertype};
 pub use super::event_kinds::{ActivatedAbilityKind, BendingType, ClashResult, PlayerActionKind};
 use super::game_state::{LKISnapshot, TriggerSourceContext, ZoneChangeRecord};
-use super::identifiers::{CardId, ObjectId, ObjectIncarnationRef, TrackedSetId};
+use super::identifiers::{
+    CardId, ObjectId, ObjectIdentityBinding, ObjectIncarnationRef, TrackedSetId,
+};
 use super::keywords::Keyword;
 use super::mana::ManaCost;
 use super::mana::{ManaColor, ManaType};
@@ -1492,6 +1494,27 @@ pub enum GameEvent {
     /// put on it as a result of its evolve ability resolving.
     Evolved {
         object_id: ObjectId,
+    },
+    /// Un-card gesture (no CR entry): `player` performed `tell` from the
+    /// Un-actions menu. Drives client animations and opens Gotcha windows.
+    UnTellPerformed {
+        player: PlayerId,
+        tell: super::un_actions::UnTell,
+    },
+    /// Un-card speech (no CR entry): `player` said `phrase` aloud to pay an
+    /// `AbilityCost::SayPhrase`. Drives client animations.
+    PhraseSaid {
+        player: PlayerId,
+        phrase: String,
+    },
+    /// Un-card Gotcha (no CR entry): `player` called "Gotcha!" for the Gotcha
+    /// ability on `source` (exact occurrence), naming `returns` (exact card
+    /// occurrence) as the card to return. Consumed by `TriggerMode::GotchaSaid` —
+    /// the "When you do" reflexive trigger.
+    GotchaSaid {
+        player: PlayerId,
+        source: ObjectIdentityBinding,
+        returns: ObjectIdentityBinding,
     },
     CounterRemoved {
         object_id: ObjectId,

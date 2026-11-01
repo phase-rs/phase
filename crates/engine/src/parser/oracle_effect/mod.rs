@@ -26791,7 +26791,6 @@ fn replace_target_with_parent(effect: &mut Effect) {
         | Effect::GainControl { target }
         | Effect::Fight { target, .. }
         | Effect::Bounce { target, .. }
-        | Effect::DealDamage { target, .. }
         | Effect::Pump { target, .. }
         | Effect::Counter { target, .. }
         | Effect::Transform { target, .. }
@@ -26807,6 +26806,17 @@ fn replace_target_with_parent(effect: &mut Effect) {
         | Effect::ForceBlock { target, .. }
         | Effect::ForceAttack { target, .. }
             if !matches!(target, TargetFilter::ParentTargetController) =>
+        {
+            *target = TargetFilter::ParentTarget;
+        }
+        // Damage is the only one of these whose subject can be a player
+        // (CR 120.1 — damage is dealt to a player, planeswalker, or
+        // creature). Spells and abilities can deal damage to players;
+        // a player-scope target must never be rebound to ParentTarget, so
+        // the object-effect guard does not apply here.
+        Effect::DealDamage { target, .. }
+            if !matches!(target, TargetFilter::ParentTargetController)
+                && !target.is_player_scope() =>
         {
             *target = TargetFilter::ParentTarget;
         }
@@ -51721,6 +51731,28 @@ fn extract_resolution_unless_pay_modifier(
     // clause after a malformed span is still found.
     let masked = nom_primitives::mask_double_quoted_spans_preserving_len(&lower);
 
+    // CR 118.12a + Un-card (no CR entry): "[Effect] unless that player says \"...\""
+    // (Rod of Spanking) — the unless-cost is saying a quoted phrase. The quoted
+    // span is masked, so the payer is recognized on the mask and the phrase is
+    // read from the ORIGINAL text at the same byte offset.
+    if let Some((before_unless, payer, after_says)) =
+        nom_primitives::scan_preceded(&masked, parse_unless_says_payer)
+    {
+        let phrase_start = masked.len() - after_says.len();
+        if let Ok((_, phrase)) = parse_quoted_phrase(&text[phrase_start..]) {
+            let cleaned = text[..before_unless.len()].trim().to_string();
+            return (
+                cleaned,
+                Some(UnlessPayModifier {
+                    cost: AbilityCost::SayPhrase {
+                        phrase: phrase.trim().to_string(),
+                    },
+                    payer,
+                }),
+            );
+        }
+    }
+
     // CR 118.12a: "[Effect] unless a player has [~] deal N to them" (Barbarian
     // Bully). Checked before the generic "unless " scan so the player-have-deal
     // shape is not misclassified as a mana-payment unless.
@@ -51890,6 +51922,41 @@ fn extract_resolution_unless_pay_modifier(
     // See the note above: slice original at the untrimmed offset (mask-safe).
     let cleaned = text[..before.len()].trim().to_string();
     (cleaned, Some(UnlessPayModifier { cost, payer }))
+}
+
+/// Un-card: the payer of an "unless <payer> says" clause, through the trailing
+/// "says " (the quoted phrase follows). "that player" / "its controller" name the
+/// player target or permanent controller of the preceding effect.
+fn parse_unless_says_payer(input: &str) -> OracleResult<'_, TargetFilter> {
+    preceded(
+        tag("unless "),
+        terminated(
+            alt((
+                value(
+                    TargetFilter::ParentTargetController,
+                    alt((
+                        tag("that player"),
+                        tag("that opponent"),
+                        tag("its controller"),
+                        tag("that permanent's controller"),
+                    )),
+                ),
+                value(TargetFilter::Controller, tag("you")),
+            )),
+            alt((tag(" says "), tag(" say "))),
+        ),
+    )
+    .parse(input)
+}
+
+/// Un-card: a double-quoted spoken phrase, returning its contents.
+pub(super) fn parse_quoted_phrase(input: &str) -> OracleResult<'_, &str> {
+    delimited(
+        nom::character::complete::char('"'),
+        take_until("\""),
+        nom::character::complete::char('"'),
+    )
+    .parse(input)
 }
 
 fn parse_resolution_unless_payer(input: &str) -> OracleResult<'_, TargetFilter> {

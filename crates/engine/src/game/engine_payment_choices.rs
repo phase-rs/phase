@@ -1,7 +1,7 @@
 use crate::game::filter;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, Effect, EffectKind, EffectScope, ResolvedAbility,
+    AbilityCondition, AbilityCost, ControllerRef, Effect, EffectKind, EffectScope, ResolvedAbility,
     SacrificeRequirement, SubAbilityLink, TapStateChange, TargetFilter, TargetRef,
 };
 use crate::types::events::{GameEvent, PlayerActionKind};
@@ -428,6 +428,19 @@ fn handle_opponent_may_choice_inner(
             ability.optional = false;
             ability.optional_for = None;
 
+            // CR 701.21a + CR 608.2c: only a permanent's controller can sacrifice
+            // it, so an accepted "any player/opponent may sacrifice a creature"
+            // instruction is performed by the accepting player. Bind the head's
+            // pool to them: the parsed scope (`Opponent` for Desecration Demon,
+            // none for Argothian Wurm) names the offer, not the sacrificer.
+            if let Effect::Sacrifice {
+                target: TargetFilter::Typed(typed),
+                ..
+            } = &mut ability.effect
+            {
+                typed.controller = Some(ControllerRef::ScopedPlayer);
+            }
+
             let target_selection = match &ability.effect {
                 // CR 701.21a (sacrifice) / CR 701.26a (tap): an optional
                 // sacrifice or single-target tap cost. Tap requires an untapped
@@ -446,6 +459,17 @@ fn handle_opponent_may_choice_inner(
                             ..
                         }
                     );
+                    // CR 701.21a: the sacrifice pool is read in the ability's own
+                    // frame, exactly as the Sacrifice resolver reads it. Tap
+                    // keeps the acceptor's frame.
+                    let filter_ctx = if require_untapped {
+                        filter::FilterContext::from_source_with_controller(
+                            ability.source_id,
+                            promptee,
+                        )
+                    } else {
+                        filter::FilterContext::from_ability(&ability)
+                    };
                     let legal: Vec<ObjectId> = state
                         .objects
                         .iter()
@@ -453,24 +477,42 @@ fn handle_opponent_may_choice_inner(
                             obj.zone == Zone::Battlefield
                                 && obj.controller == promptee
                                 && (!require_untapped || !obj.tapped)
-                                && filter::matches_target_filter(
-                                    state,
-                                    obj.id,
-                                    target,
-                                    &filter::FilterContext::from_source_with_controller(
-                                        ability.source_id,
-                                        promptee,
-                                    ),
-                                )
+                                && filter::matches_target_filter(state, obj.id, target, &filter_ctx)
+                                // CR 701.21a + CR 609.3: an option to sacrifice
+                                // is one a player can't take when the sacrifice
+                                // can't happen (Sigarda, Host of Herons).
+                                && (require_untapped
+                                    || effects::sacrifice::can_sacrifice_for_ability(
+                                        state, &ability, obj.id, promptee,
+                                    ))
                         })
                         .map(|(id, _)| *id)
                         .collect();
-                    Some(legal)
+                    // CR 608.2d: the printed count is exact ("sacrifice two
+                    // creatures"), so a smaller pool can't perform the option.
+                    let required = match &ability.effect {
+                        Effect::Sacrifice { count, .. } => {
+                            let (count, _) = count.peel_up_to();
+                            crate::game::quantity::resolve_quantity_with_targets(
+                                state, count, &ability,
+                            )
+                            .max(1) as usize
+                        }
+                        _ => 1,
+                    };
+                    Some((
+                        if legal.len() < required {
+                            Vec::new()
+                        } else {
+                            legal
+                        },
+                        required,
+                    ))
                 }
                 _ => None,
             };
 
-            if let Some(legal) = target_selection {
+            if let Some((legal, required)) = target_selection {
                 if !legal.is_empty() {
                     state
                         .take_active_optional_effect_frame()
@@ -492,6 +534,8 @@ fn handle_opponent_may_choice_inner(
                         // sacrifice/tap target is chosen — otherwise the
                         // consequence (e.g. "put this creature on top of its
                         // owner's library") is silently skipped.
+                        // `handle_multi_target_selection` retracts the mark if
+                        // the chosen instruction then does nothing.
                         sub.context = ability.context.clone();
                         sub.context.optional_effect_performed = true;
                         state.park_ability_continuation(PendingContinuation::new(sub, state));
@@ -499,8 +543,8 @@ fn handle_opponent_may_choice_inner(
                     state.waiting_for = WaitingFor::MultiTargetSelection {
                         player: promptee,
                         legal_targets: legal,
-                        min_targets: 1,
-                        max_targets: 1,
+                        min_targets: required,
+                        max_targets: required,
                         pending_ability: ability,
                     };
                     return Ok(state.waiting_for.clone());
@@ -708,6 +752,11 @@ pub(super) fn handle_unless_payment_choose_cost(
                 return Err(EngineError::InvalidAction(
                     "CR 614.17b: a player can't choose to pay a cost that includes an event that can't happen"
                         .to_string(),
+                ));
+            }
+            if crate::game::un_actions::cost_requires_unavailable_speech(state, player, &picked) {
+                return Err(EngineError::InvalidAction(
+                    "Player has not opted in to Un-card spoken actions".to_string(),
                 ));
             }
             // strict-failure: CR 118.12a disjunctive unless-costs with a counter branch are
@@ -1139,22 +1188,35 @@ pub(super) fn handle_unless_payment(
             // Phase 3). Resolution scope auto-taps via `pay_effect_mana_cost`
             // — the same final mana path the old `pay_unless_cost` shim used —
             // and maps an unpayable cost to the "unless" branch fall-through.
-            AbilityCost::Mana { .. } => {
-                match costs::pay_ability_cost_for_resolution(
+            // Un-card: `SayPhrase` pays through the same authority (no resources move).
+            AbilityCost::Mana { .. } | AbilityCost::SayPhrase { .. } => {
+                // Un-card: SayPhrase requires the player to have opted in. If they
+                // have not, the cost is unpaid and the "unless" branch fires
+                // exactly as if they had declined (CR 118.12a). Otherwise pay
+                // through the single payment authority.
+                if crate::game::un_actions::cost_requires_unavailable_speech(
                     state,
                     player,
                     &cost,
-                    pending_effect.as_ref(),
-                    events,
-                )? {
-                    PaymentOutcome::Paid => {}
-                    PaymentOutcome::Failed { .. } => payment_failed = true,
-                    // CR 118.12 + CR 605.3b + CR 616.1: An auto-tapped mana
-                    // ability can pause on a replacement-aware zone cost.
-                    // Its cursor owns the exact UnlessPayment continuation;
-                    // preserve that choice instead of resolving the effect.
-                    PaymentOutcome::Paused { .. } => {
-                        return Ok(action_result(events, state.waiting_for.clone()));
+                ) {
+                    payment_failed = true;
+                } else {
+                    match costs::pay_ability_cost_for_resolution(
+                        state,
+                        player,
+                        &cost,
+                        pending_effect.as_ref(),
+                        events,
+                    )? {
+                        PaymentOutcome::Paid => {}
+                        PaymentOutcome::Failed { .. } => payment_failed = true,
+                        // CR 118.12 + CR 605.3b + CR 616.1: An auto-tapped mana
+                        // ability can pause on a replacement-aware zone cost.
+                        // Its cursor owns the exact UnlessPayment continuation;
+                        // preserve that choice instead of resolving the effect.
+                        PaymentOutcome::Paused { .. } => {
+                            return Ok(action_result(events, state.waiting_for.clone()));
+                        }
                     }
                 }
             }
@@ -1910,6 +1972,8 @@ fn finish_unless_payment(
                     *p,
                     &poll_cost,
                     pending_effect.as_ref(),
+                ) && !crate::game::un_actions::cost_requires_unavailable_speech(
+                    state, *p, &poll_cost,
                 )
             })
             .and_then(|head| remaining[head..].split_first())

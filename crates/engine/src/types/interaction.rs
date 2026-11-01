@@ -629,6 +629,8 @@ pub enum InteractionActionCode {
     PrecastCopyShortcut,
     /// CR 116.2c: pay a continuous effect's printed termination cost to end it.
     EndContinuousEffect,
+    /// Un-card actions: opt-in toggle, gestures, and "Gotcha!" (no CR entry).
+    UnAction,
     Debug,
 }
 

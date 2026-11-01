@@ -7,7 +7,7 @@ use nom::multi::separated_list1;
 use nom::sequence::{pair, preceded, separated_pair, terminated};
 use nom::Parser;
 
-use super::oracle_effect::imperative::parse_discard_card_filter;
+use super::oracle_effect::imperative::{parse_discard_card_filter, parse_say_phrase_payment};
 use super::oracle_modal::split_short_label_prefix;
 use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::primitives as nom_primitives;
@@ -821,6 +821,15 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
 
     if let Some(cost) = parse_behold_cost(&lower) {
         return cost;
+    }
+
+    // Un-card (no CR entry): `say "<phrase>" [in a <adjective> voice]` as an
+    // activation cost (Infernal Spawn of Evil). Must precede the effect-parser
+    // fallback, whose `EffectCost { PayCost(SayPhrase) }` wrapper is unpayable.
+    if let Some((_, rest)) = nom_on_lower(text, &lower, |i| value((), tag("say ")).parse(i)) {
+        if let Ok((_, phrase)) = parse_say_phrase_payment(rest) {
+            return AbilityCost::SayPhrase { phrase };
+        }
     }
 
     // CR 701.4a + CR 601.2f: spelled-out "choose … or reveal …" behold cost

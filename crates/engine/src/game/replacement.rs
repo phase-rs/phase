@@ -1455,6 +1455,7 @@ fn optional_replacement_choice_labels(
 /// forces a deliberate label decision here.
 fn replacement_cost_description(cost: &AbilityCost) -> String {
     match cost {
+        AbilityCost::SayPhrase { phrase } => format!("Say \"{phrase}\""),
         AbilityCost::Mana { cost } => match cost {
             crate::types::mana::ManaCost::NoCost => "Pay no mana".to_string(),
             crate::types::mana::ManaCost::Cost { shards, generic } => {
@@ -1937,7 +1938,9 @@ fn pay_replacement_may_cost(
         );
         return MayCostOutcome::Unpaid;
     }
-    if !cost.is_payable(state, player, source_id) {
+    // CR 614.1c: an "as this enters, you may pay" cost is offered by a
+    // replacement effect, not a cast, so its source isn't a spell being cast.
+    if !cost.is_payable_for_replacement(state, player, source_id) {
         return MayCostOutcome::Unpaid;
     }
     let paid = match cost {

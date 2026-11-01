@@ -3,7 +3,7 @@ use nom::bytes::complete::{tag, take_till, take_till1};
 use nom::character::complete::{multispace0, one_of, satisfy, space1};
 use nom::combinator::{eof, map, map_opt, not, opt, peek, success, value, verify};
 use nom::multi::many0;
-use nom::sequence::{preceded, terminated};
+use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
 
 use crate::types::ability::{
@@ -6911,7 +6911,7 @@ pub(crate) fn parse_source_blocked_history_clause(
 /// (`TriggeringSource`, `ParentTarget`, …) has no sound `CombatRelationSubject`
 /// — `ParentTarget` there denotes a target announced by the same instruction —
 /// so the clause stays unconsumed and the swallow audit reports it.
-fn bare_pronoun_names_ability_source(ctx: &ParseContext) -> bool {
+pub(crate) fn bare_pronoun_names_ability_source(ctx: &ParseContext) -> bool {
     match &ctx.object_pronoun_ref {
         Some(pin) => matches!(pin, TargetFilter::SelfRef),
         None => matches!(ctx.subject, Some(TargetFilter::SelfRef)),
@@ -6966,6 +6966,23 @@ fn parse_combat_relation_suffix(text: &str, ctx: &ParseContext) -> Option<(Filte
             },
             text.len() - rest.len(),
         ));
+    }
+    // CR 509.1g: "blocking <it|~|this creature>" — the creatures currently
+    // blocking the ability's source (Plague Wight's "each creature blocking
+    // it"). Tried before the pairing clause; its "blocking or blocked by" head
+    // fails the subject-word parse here, so the two never overlap.
+    if let Ok((rest, word)) = delimited(
+        tag::<_, _, OracleError<'_>>(" blocking "),
+        parse_source_subject_word,
+        peek(alt((value((), eof), value((), one_of(" ,."))))),
+    )
+    .parse(text)
+    {
+        return matches!(
+            resolve_relation_subject(word, ctx)?,
+            CombatRelationSubject::Source
+        )
+        .then(|| (FilterProp::BlockingSource, text.len() - rest.len()));
     }
     let (rest, (form, word)) = preceded(tag(" "), parse_block_pairing_clause)
         .parse(text)
@@ -12744,6 +12761,34 @@ mod tests {
                 },
             ]))
         );
+    }
+
+    /// CR 509.1g: the postnominal "blocking <it|~|this creature>" clause folds
+    /// to `BlockingSource` on a type phrase (Plague Wight), binding a bare "it"
+    /// only on `SelfRef` evidence, and never swallowing "blocking or blocked by".
+    #[test]
+    fn type_phrase_folds_blocking_source_clause() {
+        let blocking_source = TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::BlockingSource]),
+        );
+        for text in [
+            "creature blocking ~",
+            "creatures blocking this creature",
+            "creature blocking it",
+        ] {
+            let mut ctx = ParseContext {
+                subject: Some(TargetFilter::SelfRef),
+                ..Default::default()
+            };
+            let (filter, rest) = parse_type_phrase_folding_with_ctx(text, &mut ctx);
+            assert_eq!(rest, "", "{text}");
+            assert_eq!(filter, blocking_source, "{text}");
+        }
+        // A bare "it" with no source evidence stays unconsumed.
+        let mut blank = ParseContext::default();
+        let (filter, rest) = parse_type_phrase_folding_with_ctx("creature blocking it", &mut blank);
+        assert_eq!(rest, " blocking it");
+        assert_eq!(filter, TargetFilter::Typed(TypedFilter::creature()));
     }
 
     /// CR 608.2k: a bare "it" subject of the pairing clause binds the source

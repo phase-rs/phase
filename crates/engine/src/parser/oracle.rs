@@ -5990,6 +5990,21 @@ fn parse_normalized_oracle_ir(
 
         let lower = line.to_lowercase();
 
+        // Un-card Gotcha (no CR entry): `Gotcha — If an opponent <behavior>, you may
+        // say "Gotcha!" When you do, <effect>.` is one printed trigger — recognized
+        // before the generic classifiers so the quoted "Gotcha!" is never read as
+        // a clause of its own.
+        if let Some((condition, effect_text)) = super::oracle_un::split_gotcha_line(&line, &lower) {
+            ctx.subject = None;
+            ctx.actor = None;
+            let effect_def =
+                parse_effect_chain_with_context(effect_text.trim(), AbilityKind::Spell, &mut ctx);
+            let trigger = super::oracle_un::gotcha_trigger(condition, effect_def, &line);
+            emitter.trigger_ir_at(item_line, TriggerNodeIr::from_definition(&line, trigger));
+            i += 1;
+            continue;
+        }
+
         // Priority 8b (early): "As an additional cost to cast this spell" — must
         // precede static-pattern classifiers (Priority 7) that match embedded
         // "This spell costs {N} less..." tails on combined lines (Rottenmouth
@@ -8731,6 +8746,9 @@ fn activation_zone_from_self_cost(cost: &AbilityCost) -> Option<Zone> {
         AbilityCost::Sacrifice(sacrifice) if sacrifice.target == TargetFilter::SelfRef => {
             Some(Zone::Battlefield)
         }
+        // CR 113.6j: an ability whose cost reveals its own card from hand
+        // ("Reveal this card from your hand") functions from the hand.
+        AbilityCost::Reveal { filter: None, .. } => Some(Zone::Hand),
         AbilityCost::Composite { costs } => costs.iter().find_map(activation_zone_from_self_cost),
         _ => None,
     }
@@ -10297,6 +10315,7 @@ fn demote_lifetimes_in_cost(cost: &mut AbilityCost) {
         | AbilityCost::ManaDynamic { .. }
         | AbilityCost::Tap
         | AbilityCost::Untap
+        | AbilityCost::SayPhrase { .. }
         | AbilityCost::Loyalty { .. }
         | AbilityCost::Sacrifice(..)
         | AbilityCost::PayLife { .. }

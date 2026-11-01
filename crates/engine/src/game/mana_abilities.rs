@@ -2035,6 +2035,7 @@ pub(crate) fn mana_ability_ready_without_simulation_gated(
                     source_id,
                     Some(ability_index),
                     super::cost_payability::ObjectLegPayment::Unguided,
+                    super::cost_payability::CostSourceRole::AbilitySource,
                 ) {
                     return false;
                 }
@@ -2507,6 +2508,7 @@ pub(super) fn advance_mana_ability_activation(
                 if !super::effects::collect_evidence::can_collect_evidence(
                     state,
                     pending.player,
+                    None,
                     amount,
                 ) {
                     return Err(EngineError::ActionNotAllowed(

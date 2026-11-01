@@ -18682,6 +18682,15 @@ pub enum AbilityCost {
     Loyalty {
         amount: i32,
     },
+    /// Un-card (no CR entry): the "cost" is saying `phrase` aloud — Rod of
+    /// Spanking's "unless that player says \"Thank you, sir. May I have
+    /// another?\"", Impounding Lot-Bot's "you may say \"INCARCERATE!\"". Costs
+    /// no resources; the payer pays by choosing to say it, and only a player who
+    /// opted in to Un-card actions is offered the choice
+    /// (`un_actions::player_can_say_phrases`).
+    SayPhrase {
+        phrase: String,
+    },
     Sacrifice(SacrificeCost),
     /// CR 119.4: Pay life as an activation or additional cost. `amount` is a
     /// `QuantityExpr` so dynamic references (e.g.
@@ -18948,6 +18957,8 @@ pub fn is_direct_resolution_optional_payment_branch(cost: &AbilityCost) -> bool 
     use crate::types::ability::{CardSelectionMode, DiscardSelfScope, QuantityExpr};
 
     match cost {
+        // Un-card: "you may say \"...\". If you do" is a direct optional payment.
+        AbilityCost::SayPhrase { .. } => true,
         AbilityCost::Mana { cost } => !cost.has_x(),
         AbilityCost::Discard {
             count: QuantityExpr::Fixed { value },
@@ -19020,6 +19031,7 @@ pub fn supported_at_resolution(cost: &AbilityCost) -> bool {
         | AbilityCost::ManaDynamic { .. }
         | AbilityCost::PayLife { .. }
         | AbilityCost::PayEnergy { .. }
+        | AbilityCost::SayPhrase { .. }
         | AbilityCost::PaySpeed { .. }
         | AbilityCost::TapCreatures { .. }
         | AbilityCost::Composite { .. }
@@ -19170,6 +19182,7 @@ macro_rules! define_ability_cost_quantity_walk {
             AbilityCost::Mana { .. }
             | AbilityCost::Tap
             | AbilityCost::Untap
+            | AbilityCost::SayPhrase { .. }
             | AbilityCost::Loyalty { .. }
             | AbilityCost::Sacrifice(_)
             | AbilityCost::Exile { .. }
@@ -19218,6 +19231,7 @@ impl AbilityCost {
             | AbilityCost::ManaDynamic { .. }
             | AbilityCost::Tap
             | AbilityCost::Untap
+            | AbilityCost::SayPhrase { .. }
             | AbilityCost::Loyalty { .. }
             | AbilityCost::Sacrifice(_)
             | AbilityCost::PayLife { .. }
@@ -19412,6 +19426,7 @@ impl AbilityCost {
             // CR 701.26a/b: tap/untap are status changes, not zone changes.
             | AbilityCost::Tap
             | AbilityCost::Untap
+            | AbilityCost::SayPhrase { .. }
             | AbilityCost::TapCreatures { .. }
             | AbilityCost::Exert
             // CR 701.3d: unattaching leaves the object on the battlefield.
@@ -19480,6 +19495,7 @@ impl AbilityCost {
             // cannot settle it — it must still simulate.
             | AbilityCost::ExileWithAggregate { .. }
             | AbilityCost::TapCreatures { .. }
+            | AbilityCost::SayPhrase { .. }
             | AbilityCost::RemoveCounter { .. }
             | AbilityCost::PayEnergy { .. }
             | AbilityCost::PaySpeed { .. }
@@ -19590,6 +19606,7 @@ impl AbilityCost {
             // `CostNotPayableNow` tells the player.
             AbilityCost::Tap
             | AbilityCost::Untap
+            | AbilityCost::SayPhrase { .. }
             | AbilityCost::Mana { .. }
             | AbilityCost::ManaDynamic { .. }
             | AbilityCost::Loyalty { .. }
@@ -19693,6 +19710,8 @@ impl AbilityCost {
             AbilityCost::ManaDynamic { .. } => vec![CostCategory::ManaOnly],
             AbilityCost::Tap => vec![CostCategory::TapsSelf],
             AbilityCost::Untap => vec![CostCategory::UntapsSelf],
+            // Un-card: saying a phrase pays no resource, so it has no cost category.
+            AbilityCost::SayPhrase { .. } => Vec::new(),
             AbilityCost::Loyalty { .. } => vec![CostCategory::PaysLoyalty],
             AbilityCost::Sacrifice(_) => {
                 vec![CostCategory::SacrificesPermanent]
@@ -19798,6 +19817,7 @@ impl AbilityCost {
             | AbilityCost::ManaDynamic { .. }
             | AbilityCost::Tap
             | AbilityCost::Untap
+            | AbilityCost::SayPhrase { .. }
             | AbilityCost::Loyalty { .. }
             | AbilityCost::Sacrifice(_)
             | AbilityCost::PayLife { .. }
@@ -19857,6 +19877,7 @@ impl AbilityCost {
             | AbilityCost::ManaDynamic { .. }
             | AbilityCost::Tap
             | AbilityCost::Untap
+            | AbilityCost::SayPhrase { .. }
             | AbilityCost::Loyalty { .. }
             | AbilityCost::Sacrifice(_)
 
@@ -19914,6 +19935,7 @@ impl AbilityCost {
             | AbilityCost::ManaDynamic { .. }
             | AbilityCost::Tap
             | AbilityCost::Untap
+            | AbilityCost::SayPhrase { .. }
             | AbilityCost::Loyalty { .. }
             | AbilityCost::PayLife { .. }
             | AbilityCost::Discard { .. }
@@ -39330,6 +39352,10 @@ pub struct TriggerDefinition {
     /// "Whenever you roll a d20". `None` accepts any die.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub die_sides: Option<u8>,
+    /// Un-card Gotcha: the opponent behavior this ability watches for. `Some`
+    /// only with `TriggerMode::GotchaSaid`; read by `un_actions::open_gotcha_offers`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gotcha_condition: Option<crate::types::un_actions::GotchaCondition>,
     /// CR 700.14: Expend threshold — fires when cumulative mana spent on spells crosses N.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expend_threshold: Option<u32>,
@@ -40095,6 +40121,7 @@ impl TriggerDefinition {
             unless_pay: None,
             batched: false,
             die_sides: None,
+            gotcha_condition: None,
             expend_threshold: None,
             attack_target_filter: None,
             player_actions: None,
@@ -46239,6 +46266,7 @@ mod tests {
             unless_pay: None,
             batched: false,
             die_sides: None,
+            gotcha_condition: None,
             expend_threshold: None,
             attack_target_filter: None,
             player_actions: None,

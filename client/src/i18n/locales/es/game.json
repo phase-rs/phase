@@ -1,5 +1,10 @@
 {
-  "playerLatency": {"host":"Anfitrión","waiting":"Esperando","value":"{{ms}} ms","description":"Latencia de ida y vuelta al anfitrión. La falta de respuesta no desconecta la partida."},
+  "playerLatency": {
+    "host": "Anfitrión",
+    "waiting": "Esperando",
+    "value": "{{ms}} ms",
+    "description": "Latencia de ida y vuelta al anfitrión. La falta de respuesta no desconecta la partida."
+  },
   "abilityBlock": {
     "badge": "Bloqueada",
     "cantBeActivated": "Esta habilidad no puede activarse",
@@ -2903,6 +2908,36 @@
       "winner": "{{name}} ha ganado el concurso.",
       "tie": "Empate: no pasa nada.",
       "cancelled": "El concurso se canceló: no pasa nada."
+    }
+  },
+  "unActions": {
+    "menu": {
+      "title": "Un-Actions",
+      "open": "Open Un-actions menu",
+      "close": "Close Un-actions menu",
+      "TouchFace": "Touch your face",
+      "TouchTable": "Slap the table",
+      "Laugh": "Laugh out loud",
+      "FlickCards": "Flick your cards",
+      "saysWord": "Say a word…",
+      "saysNumber": "Say a number…",
+      "wordPlaceholder": "A word",
+      "numberPlaceholder": "A number",
+      "say": "Say it!"
+    },
+    "gotcha": {
+      "button": "Gotcha!"
+    },
+    "sayPhrase": {
+      "title": "Say it to stop the effect",
+      "say": "Say “{{phrase}}”",
+      "stayQuiet": "Stay quiet"
+    },
+    "fx": {
+      "touchFace": "*smack*",
+      "touchTable": "SLAP!",
+      "laugh": "HA HA HA!",
+      "flickCards": "thwip thwip!"
     }
   }
 }
