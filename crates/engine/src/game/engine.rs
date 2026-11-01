@@ -2753,8 +2753,9 @@ fn interactive_loop_bridge(state: &mut GameState, result: &mut ActionResult) {
             // CR 732.2a: OPTIONAL winning drain — only the player with priority may propose
             // the shortcut. Keep that proposer distinct from the already-measured winner; a
             // loop can be detected during a different player's priority window.
-            // `build_cert`'s only use of the frame is `board_delta(prior, state)`, a
-            // comparand read ⇒ the CR 104.4b `.normalized` half.
+            // `build_cert` reads the frame for `board_delta(prior, state)`, a comparand read ⇒ the
+            // CR 104.4b `.normalized` half, and for `with_life_attributed`'s life fields and
+            // per-turn counters, which `normalize_for_loop` leaves untouched.
             let certificate = build_cert(&prior.normalized, state, &delta, winner, None);
             // CR 732.2a: a non-targeted drain reifies no per-iteration player choice ⇒ carry an
             // empty pin list; only the `iteration_count` (from `win_kind`) is populated.
@@ -3851,7 +3852,8 @@ fn bounded_offer_tail(
 
     // (8) The certificate, with the two fields the bounded class states differently from
     // Path A's spelled out at the site rather than mutated after the fact.
-    // `build_cert`'s only use of the pair is `board_delta`, a comparand read.
+    // `build_cert` reads the pair for `board_delta`, a comparand read, and for
+    // `with_life_attributed`'s life fields and per-turn counters.
     let mut base = build_cert(cert_prior, current, &periodic.delta, proposer, None);
     // CR 500.7 + CR 121.4: a turn-cycle period grows its caster's extra turns and consumes its
     // library, which the cascade bounds.
@@ -6689,7 +6691,9 @@ fn departure_verdict(
 enum TakeRoute {
     /// The confirmed period, performed now (`drive_persistent_axis_collapse`).
     Replay,
-    /// CR 732.1b: the ∞ mark, whose count its controller names when the step ends.
+    /// CR 732.1b: the ∞ mark. Its batched life lands at the take, at the accepted count
+    /// (CR 732.2c); its tokens and counters are applied when the step ends, at the count its
+    /// controller names there.
     Mark(Box<PeriodGrowth>),
     /// The ring drain.
     Ring,
