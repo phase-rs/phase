@@ -48,8 +48,9 @@ use super::super::oracle_static::{
     parse_targeting_bypass_tail, peel_compound_all_quantified_conjuncts,
 };
 use super::super::oracle_target::{
-    parse_block_filter_phrase, parse_target, parse_target_with_ctx, parse_target_with_syntax,
-    parse_type_phrase_folding, parse_type_phrase_folding_with_ctx, BlockFilterPhrase, TargetSyntax,
+    bare_pronoun_names_ability_source, parse_block_filter_phrase, parse_target,
+    parse_target_with_ctx, parse_target_with_syntax, parse_type_phrase_folding,
+    parse_type_phrase_folding_with_ctx, BlockFilterPhrase, TargetSyntax,
 };
 use super::super::oracle_util::{
     merge_or_filters, parse_number, TextPair, SELF_REF_PARSE_ONLY_PHRASES, SELF_REF_TYPE_PHRASES,
@@ -3393,9 +3394,28 @@ fn parse_subject_application_for(
         }
         let consumed = lower.len() - rest_lower.len();
         let phrase = &subject[consumed..];
-        let (filter, rest) = ctx
-            .with_player_antecedents(|scoped| parse_type_phrase_folding_with_ctx(phrase, scoped));
-        let filter = merge_partial_type_phrase_filter(filter, rest.trim());
+        // CR 509.1g + CR 608.2k: the sub-parse drops object anaphors, so carry
+        // the one binding it can express. A postnominal "blocking it" names the
+        // source only when a nearer pinned antecedent does not outrank it
+        // (Plague Wight, but not "... target creature. Each creature blocking
+        // it ...").
+        let source_subject =
+            bare_pronoun_names_ability_source(ctx).then_some(TargetFilter::SelfRef);
+        let (filter, rest) = ctx.with_player_antecedents(|scoped| {
+            scoped.subject = source_subject;
+            parse_type_phrase_folding_with_ctx(phrase, scoped)
+        });
+        let rest = rest.trim();
+        // CR 608.2c: blockers of an antecedent `BlockingSource` cannot express
+        // (Bob the Claymore's equipped creature) are not every creature. Leave
+        // the subject unbound rather than dropping the clause.
+        if tag::<_, _, OracleError<'_>>("blocking ")
+            .parse(rest)
+            .is_ok()
+        {
+            return None;
+        }
+        let filter = merge_partial_type_phrase_filter(filter, rest);
         return subject_filter_application(filter, false);
     }
     if alt((
@@ -13170,6 +13190,48 @@ mod tests {
             Some(CLAUSE),
             "the gap must quote the WHOLE printed clause, subject included"
         );
+    }
+
+    /// CR 608.2k: a postnominal "blocking it" binds the source only when no
+    /// nearer pinned antecedent outranks it, whichever rung supplies `SelfRef`.
+    #[test]
+    fn each_creature_blocking_it_binds_source_through_pronoun_precedence() {
+        let blocking_source = TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::BlockingSource]),
+        );
+        for mut ctx in [
+            ParseContext {
+                subject: Some(TargetFilter::SelfRef),
+                ..Default::default()
+            },
+            ParseContext {
+                object_pronoun_ref: Some(TargetFilter::SelfRef),
+                ..Default::default()
+            },
+        ] {
+            let application = parse_subject_application("each creature blocking it", &mut ctx)
+                .expect("the source's blockers are expressible");
+            assert_eq!(application.affected, blocking_source);
+        }
+    }
+
+    /// CR 608.2c + CR 608.2k: "blocking it" with any other antecedent has no
+    /// `BlockingSource` reading, so the subject stays unbound instead of
+    /// dropping the clause and widening to every creature.
+    #[test]
+    fn each_creature_blocking_nearer_antecedent_stays_unbound() {
+        let mut pinned = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+            object_pronoun_ref: Some(TargetFilter::ParentTarget),
+            ..Default::default()
+        };
+        assert!(parse_subject_application("each creature blocking it", &mut pinned).is_none());
+
+        let mut blank = ParseContext::default();
+        assert!(parse_subject_application("each creature blocking it", &mut blank).is_none());
+
+        // Reach-guard: the same type phrase binds without the relative clause.
+        assert!(parse_subject_application("each creature", &mut blank).is_some());
     }
 
     /// CR 608.2c: a non-targeted MASS player subject ("each opponent") stated

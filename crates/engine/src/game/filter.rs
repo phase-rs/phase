@@ -10055,13 +10055,24 @@ fn matches_filter_prop(
             .is_some_and(|combat| combat.blocker_to_attacker.contains_key(&object_id)),
         // CR 509.1g: A blocking creature is blocking the attacking creature it
         // was assigned to block. ExtraBlockers can allow one blocker to block
-        // multiple attackers, so read the reverse map's full assignment list.
-        FilterProp::BlockingSource => state.combat.as_ref().is_some_and(|combat| {
-            combat
-                .blocker_to_attacker
-                .get(&object_id)
-                .is_some_and(|attackers| attackers.contains(&source.id))
-        }),
+        // multiple attackers, so the pairing reads the reverse map's full
+        // assignment list. CR 608.2h: a source that has left answers from the
+        // last known pairings on its departure row (Plague Wight removed with
+        // its trigger on the stack).
+        FilterProp::BlockingSource => {
+            combat_relation_subject_ref(state, CombatRelationSubject::Source, source).is_some_and(
+                |attacker| {
+                    current_block_pair_holds(
+                        state,
+                        attacker,
+                        combat::BlockHistoryPair {
+                            blocker: ObjectIncarnationRef::from_object(obj),
+                            attacker,
+                        },
+                    )
+                },
+            )
+        }
         FilterProp::CombatRelation { relation, subject } => matches_combat_relation(
             state,
             ObjectIncarnationRef::from_object(obj),
@@ -11271,9 +11282,32 @@ fn zone_change_record_matches_property(
                 }
         }
         FilterProp::Blocking => record.combat_status.blocking,
-        // `ZoneChangeCombatStatus` snapshots role, not the blocker-to-attacker
-        // relation, and this predicate reads live `combat.blocker_to_attacker`.
-        FilterProp::BlockingSource => false,
+        // CR 509.1g + CR 603.10a: `ZoneChangeCombatStatus` snapshots role, not
+        // the relation, so the look-back reads the pairings recorded at the
+        // departure. Creatures that leave together are moved one at a time and
+        // each move prunes the pairing from live combat, so only the first to
+        // move recorded it; the source's own departure row covers the other
+        // order (a Baneclaw Marauder and its blocker dying to combat damage).
+        // CR 400.7: the record's exact departing incarnation is its own
+        // pre-change authority; a record without one fails closed.
+        FilterProp::BlockingSource => {
+            let Some(blocker) = record
+                .trigger_source_context()
+                .map(|context| context.identity.reference)
+            else {
+                return false;
+            };
+            combat_relation_subject_ref(state, CombatRelationSubject::Source, source).is_some_and(
+                |attacker| {
+                    let pair = combat::BlockHistoryPair { blocker, attacker };
+                    record.block_pairs.contains(&pair)
+                        || crate::types::game_state::exact_battlefield_departure_row(
+                            state, attacker,
+                        )
+                        .is_some_and(|row| row.block_pairs.contains(&pair))
+                },
+            )
+        }
         FilterProp::CombatRelation { relation, subject } => match relation {
             // CR 506.4: a departed candidate was removed from combat, so it is
             // in no current pairing; candidate-side last known pairings are not
