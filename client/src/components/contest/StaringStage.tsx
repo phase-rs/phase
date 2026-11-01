@@ -3,6 +3,7 @@ import type { CSSProperties } from "react";
 
 import type { ContestState } from "../../adapter/types.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
+import { useSpectatorMode } from "../../hooks/useSpectatorMode.ts";
 import { useContestStore } from "../../stores/contestStore.ts";
 import {
   STARE_FINALE_MS,
@@ -186,9 +187,10 @@ export function StaringStage({ contest }: { contest: ContestState | null }) {
   const staring = contest?.kind === "Staring" ? contest : null;
   const strain = useStareStrain(staring);
   const me = usePlayerId();
+  const spectating = useSpectatorMode();
   const announcement = useContestStore((s) => s.announcement);
   const announcementId = announcement?.id;
-  const finale = announcement ? stareFinale(announcement, me) : null;
+  const finale = announcement ? stareFinale(announcement, spectating ? null : me) : null;
 
   const [playedFinale, setPlayedFinale] = useState<number | null>(null);
   useEffect(() => {

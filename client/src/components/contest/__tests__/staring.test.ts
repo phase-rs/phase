@@ -47,6 +47,7 @@ describe("stareFinale", () => {
   it("blinks the eye when the viewer did not lose, spectators included", () => {
     expect(stareFinale(staring(decided(0, 1)), 0)).toBe("EyeBlinks");
     expect(stareFinale(staring(decided(0, 1)), 5)).toBe("EyeBlinks");
+    expect(stareFinale(staring(decided(1, 0)), null)).toBe("EyeBlinks");
   });
 
   it("blinks the viewer when the viewer lost", () => {

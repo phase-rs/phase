@@ -514,6 +514,18 @@ describe("ContestOverlay staring eye", () => {
     expect(screen.queryByTestId("stare-squeezed-tear")).not.toBeInTheDocument();
   });
 
+  it("never closes a spectator's eyes, though the board shows them seat 0's side", () => {
+    useMultiplayerStore.setState({ isSpectator: true });
+    showContest(contestState("Active"), { submitContestClick: vi.fn(() => true) });
+    render(<ContestOverlay />);
+
+    settle({ Outcome: { Decided: { winner: 1, loser: 0, reason: "Inactivity" } } });
+    useMultiplayerStore.setState({ isSpectator: false });
+
+    expect(screen.getByTestId("staring-stage")).toHaveAttribute("data-pose", "EyeBlinks");
+    expect(screen.queryByTestId("stare-viewer-blink")).not.toBeInTheDocument();
+  });
+
   it("closes both sides on a tie", () => {
     showContest(contestState("Active"), { submitContestClick: vi.fn(() => true) });
     render(<ContestOverlay />);

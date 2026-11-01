@@ -35,10 +35,11 @@ export function stareStrain(elapsedMs: number): number {
 }
 
 /** The closing beat for a settled contest. Display-only reading of the engine's result:
- *  a cancelled contest had no loser, so nobody blinks. */
+ *  a cancelled contest had no loser, so nobody blinks. `viewer` is null for a spectator,
+ *  who holds no seat and so can never be the one who blinked. */
 export function stareFinale(
   announcement: { kind: ContestKind; result: ContestResult },
-  viewer: PlayerId,
+  viewer: PlayerId | null,
 ): StareFinale | null {
   const { kind, result } = announcement;
   if (kind !== "Staring" || "Cancelled" in result) return null;
