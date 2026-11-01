@@ -918,8 +918,10 @@ fn mind_funeral_stops_at_four_lands_revealed() {
     );
 }
 
-/// CR 701.20a: When the library is exhausted before 4 lands are found, the loop
+/// CR 701.20a + CR 609.3: When the library is exhausted before 4 lands are found, the loop
 /// terminates with whatever was found and all revealed cards are put into the graveyard.
+/// CR 609.3 ("If an effect attempts to do something impossible, it does only as much
+/// as possible") governs stopping at an empty library with fewer than four lands.
 #[test]
 fn mind_funeral_exhausts_library_when_fewer_than_four_lands() {
     let mut scenario = GameScenario::new();

@@ -587,15 +587,7 @@ fn parse_reveal_until_matched_set_to_zone<'a>(
 fn parse_reveal_until_all_to_zone_continuation(input: &str) -> OracleResult<'_, ContinuationAst> {
     type E<'a> = OracleError<'a>;
     let (input, _) = opt(alt((tag::<_, _, E>("then "), tag("and ")))).parse(input)?;
-    let (input, _) = opt(alt((
-        tag::<_, _, E>("that player "),
-        tag("the player "),
-        tag("they "),
-        tag("you "),
-        tag("each player "),
-        tag("those players "),
-    )))
-    .parse(input)?;
+    let (input, _) = opt(tag::<_, _, E>("that player ")).parse(input)?;
     let (input, _) = alt((tag::<_, _, E>("puts "), tag("put "))).parse(input)?;
     let (input, _) = alt((
         tag::<_, _, E>("those cards"),

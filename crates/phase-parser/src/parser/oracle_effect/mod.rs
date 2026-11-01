@@ -16847,21 +16847,38 @@ fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEf
     // "land cards" → "land"). Tunnel Vision's captured = "card with that name" (no " card" suffix — handled by HasChosenName).
     let (_, filter_text) = parse_reveal_until_passive_filter_text(captured).ok()?;
 
+    // CR 608.2c / CR 701.20a: Reject compound stopping conditions where a second
+    // stopping condition is joined by "or" (e.g. Thought Dissector: "until an artifact
+    // card or X cards are revealed, whichever comes first"). If any disjunct is a count
+    // expression or number, this is a compound stopping condition rather than a simple card filter.
+    if let Some(disjuncts) = split_reveal_filter_disjuncts(filter_text) {
+        if disjuncts.iter().any(|d| {
+            let trimmed = d.trim();
+            trimmed == "x"
+                || nom_primitives::parse_number_or_x.parse(trimmed).is_ok()
+                || parse_reveal_until_count(trimmed).is_ok()
+        }) {
+            return None;
+        }
+    }
+
     let filter = build_reveal_until_filter(filter_text);
     // CR 107.3c: fail honestly instead of fabricating a raw-text placeholder.
     let count = apply_where_x_quantity_expression(raw_count, where_x_expression.as_deref())?;
 
-    // CR 406.2: Detect inline "and exiles that card" suffix. When present, the kept
-    // card goes directly to Exile.
-    let inline_exile = alt((
-        tag::<_, _, OracleError<'_>>(" and exiles that card"),
-        tag(" and exiles those cards"),
-        tag(" and exile that card"),
-        tag(" and exile those cards"),
-    ))
-    .parse(remainder)
-    .is_ok();
-    let kept_destination = if inline_exile {
+    // CR 406.2: Consume the remainder after " is revealed" / " are revealed".
+    // The only recognized trailing suffix on a passive reveal-until clause is an optional
+    // inline "and exiles that card" (Indomitable Creativity) followed by terminal
+    // punctuation. Any unconsumed tail (such as Thought Dissector's ", whichever comes first")
+    // causes this branch to fail honestly and fall through.
+    let (after_inline_exile, inline_exile) =
+        opt(tag::<_, _, OracleError<'_>>(" and exiles that card"))
+            .parse(remainder)
+            .ok()?;
+    if !imperative::terminal_punctuation_only(after_inline_exile) {
+        return None;
+    }
+    let kept_destination = if inline_exile.is_some() {
         Zone::Exile
     } else {
         Zone::Hand
