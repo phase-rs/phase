@@ -601,6 +601,8 @@ mod tests {
                 colors: vec![],
                 keywords: vec![],
                 enters_attacking: false,
+                attack_destination:
+                    engine::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![(

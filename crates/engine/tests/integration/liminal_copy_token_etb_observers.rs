@@ -226,6 +226,7 @@ fn enter_plain_creature(runner: &mut GameRunner) {
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),

@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "CombatState gains removed_attackers_this_combat, which decides whether declare blockers and combat damage are skipped after an empty attack (CR 508.8); an older peer defaults it empty and would make a different skip decision"
+}

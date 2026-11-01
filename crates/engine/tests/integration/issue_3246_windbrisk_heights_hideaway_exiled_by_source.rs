@@ -25,7 +25,7 @@
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
-use engine::types::ability::CastingPermission;
+use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::{ObjectId, TrackedSetId};
@@ -34,6 +34,13 @@ use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
 use crate::support::shared_card_db as load_db;
+
+/// Windbrisk Heights, verbatim Oracle text. Built from its text rather than the
+/// committed card fixture so the play ability is lowered by the live parser.
+const WINDBRISK_HEIGHTS: &str = "Hideaway 4 (When this land enters, look at the top four cards of your library, exile one face down, then put the rest on the bottom in a random order.)
+This land enters tapped.
+{T}: Add {W}.
+{W}, {T}: You may play the exiled card without paying its mana cost if you attacked with three or more creatures this turn.";
 
 /// Add one white mana directly to `P0`'s pool — an external source, distinct
 /// from Windbrisk Heights' own `{T}: Add {W}` ability (which cannot be used
@@ -95,12 +102,11 @@ fn play_windbrisk_and_hide(
 }
 
 /// Drive Windbrisk's second ability once activated: accept the "you may
-/// play" optional choice and pass priority until the stack settles. Windbrisk's
-/// `mode: Play` + no `duration`/`DuringResolution` driver means CR 305.1's
-/// generic "play" grants a LINGERING `CastingPermission::PlayFromExile`
-/// (`grant_lingering_permissions` in `cast_from_zone.rs`) rather than casting
-/// the card immediately during this resolution — so accepting the optional
-/// choice is the whole activation; no further target selection happens here.
+/// play" optional choice and pass priority until the stack settles. "You may
+/// play the exiled card without paying its mana cost" states no duration, so
+/// the hidden card is cast AS THE ABILITY RESOLVES (CR 701.18b + CR 608.2g):
+/// the hidden Shock's own target prompt opens during the resolution and is
+/// answered with P1.
 fn drive_windbrisk_second_ability(runner: &mut GameRunner) {
     for step in 0..64 {
         match runner.state().waiting_for.clone() {
@@ -108,6 +114,13 @@ fn drive_windbrisk_second_ability(runner: &mut GameRunner) {
                 runner
                     .act(GameAction::DecideOptionalEffect { accept: true })
                     .expect("accept the optional free cast");
+            }
+            WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Player(P1)),
+                    })
+                    .expect("choose Shock's target");
             }
             WaitingFor::Priority { .. } if runner.state().stack.is_empty() => return,
             WaitingFor::Priority { .. } => {
@@ -136,7 +149,10 @@ fn windbrisk_heights_plays_correct_hidden_card_across_unrelated_tracked_set_acti
     scenario.at_phase(Phase::PreCombatMain);
 
     // Windbrisk Heights in hand, ready to play as this turn's land drop.
-    let windbrisk = scenario.add_real_card(P0, "Windbrisk Heights", Zone::Hand, db);
+    let windbrisk = scenario
+        .add_land_to_hand(P0, "Windbrisk Heights")
+        .from_oracle_text(WINDBRISK_HEIGHTS)
+        .id();
     // The library holds exactly one real card — Shock — so the Hideaway 4
     // look-at-top-4 deterministically finds and hides it (CR 701.20e: looking
     // at fewer than N cards when the library has fewer than N is legal).
@@ -206,6 +222,7 @@ fn windbrisk_heights_plays_correct_hidden_card_across_unrelated_tracked_set_acti
         .unwrap()
         .tapped = false;
     fund_white(&mut runner);
+    let p1_life_before = runner.state().players[1].life;
 
     runner
         .act(GameAction::ActivateAbility {
@@ -217,43 +234,25 @@ fn windbrisk_heights_plays_correct_hidden_card_across_unrelated_tracked_set_acti
 
     drive_windbrisk_second_ability(&mut runner);
 
-    // DISCRIMINATOR: the granted `ExileWithAltCost` free-cast permission
-    // (CR 118.9: "without paying its mana cost") lands on the hidden Shock
-    // (via `ExiledBySource` → `exile_links`), never on the unrelated
-    // Lightning Bolt decoy sitting in `TrackedSet(0)`. Pre-fix
-    // (`CastFromZone { ParentTarget }`, no linked-exile lookup) this could
-    // not reliably resolve to Windbrisk's own hidden card at all — reverting
-    // the fix flips this assertion to false (no permission on Shock).
-    let shock_has_permission = runner.state().objects[&shock]
-        .casting_permissions
-        .iter()
-        .any(|p| matches!(p, CastingPermission::ExileWithAltCost { granted_to: Some(p), .. } if *p == P0));
-    assert!(
-        shock_has_permission,
-        "Windbrisk must grant an ExileWithAltCost free-cast permission on the hidden Shock \
-         via ExiledBySource, got {:?}",
-        runner.state().objects[&shock].casting_permissions
+    // DISCRIMINATOR: the instruction played Windbrisk's OWN hidden Shock (via
+    // `ExiledBySource` → `exile_links`), never the unrelated Lightning Bolt
+    // decoy sitting in `TrackedSet(0)`. Shock was cast during the resolution
+    // and dealt 2 to P1; the decoy was neither cast nor granted anything.
+    assert_eq!(
+        runner.state().players[1].life,
+        p1_life_before - 2,
+        "the hidden Shock was cast during the resolution and hit P1"
     );
-    let shock_has_play_from_exile_permission = runner.state().objects[&shock]
-        .casting_permissions
-        .iter()
-        .any(|p| {
-            matches!(
-                p,
-                CastingPermission::PlayFromExile {
-                    granted_to,
-                    exiled_by_ability_controller,
-                    card_filter,
-                    ..
-                } if *granted_to == P0
-                    && *exiled_by_ability_controller == Some(P0)
-                    && card_filter.is_none()
-            )
-        });
+    assert_eq!(
+        runner.state().objects.get(&shock).map(|o| o.zone),
+        Some(Zone::Graveyard),
+        "the cast Shock resolved into its owner's graveyard"
+    );
     assert!(
-        shock_has_play_from_exile_permission,
-        "Windbrisk must also grant a PlayFromExile look/play permission on the hidden Shock \
-         (face-down exile authority), got {:?}",
+        runner.state().objects[&shock]
+            .casting_permissions
+            .is_empty(),
+        "no permission outlives the resolution, got {:?}",
         runner.state().objects[&shock].casting_permissions
     );
     assert!(
@@ -262,13 +261,6 @@ fn windbrisk_heights_plays_correct_hidden_card_across_unrelated_tracked_set_acti
             .is_empty(),
         "the unrelated TrackedSet(0) decoy must NOT receive a play permission, got {:?}",
         runner.state().objects[&bolt_decoy].casting_permissions
-    );
-    assert!(
-        !runner.state().objects[&bolt_decoy]
-            .casting_permissions
-            .iter()
-            .any(|p| matches!(p, CastingPermission::PlayFromExile { .. })),
-        "the unrelated TrackedSet(0) decoy must not receive PlayFromExile"
     );
     assert_eq!(
         runner.state().objects.get(&bolt_decoy).map(|o| o.zone),

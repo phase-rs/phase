@@ -207,9 +207,20 @@ pub fn roll_to_visit_attractions(
         results_table: Vec::new(),
         modifier: None,
         die_result: None,
+        trigger_context: None,
         continuation: DieRollContinuation::RollToVisitAttractions,
         // CR 608.2h: no resolution context — see the reach-guard comment above.
         chain_root_targets: Vec::new(),
+        illegal_target_slots: Vec::new(),
+        chain_root_target_pins: Vec::new(),
+        // No capture ran: the turn-based action has no resolution context,
+        // so resume keeps the legacy path.
+        declared_capture: None,
+        quantity_controller: None,
+        scoped_player: None,
+        local_target_pins: Vec::new(),
+        keyed_target_incarnations: Vec::new(),
+        declared_player: None,
     }));
     let proposal = roll_die::propose_roll(state, player, 1, 6, events);
     if !matches!(proposal, roll_die::RollProposal::Suspended) {

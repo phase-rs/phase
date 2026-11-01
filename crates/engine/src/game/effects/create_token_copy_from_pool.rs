@@ -35,7 +35,7 @@ use crate::types::game_state::GameState;
 use crate::types::game_state::PendingCopyTokenBatch;
 use crate::types::game_state::RandomDraw;
 use crate::types::mana::ManaCost;
-use crate::types::proposed_event::CopyTokenSpec;
+use crate::types::proposed_event::{CopyTokenSpec, TokenAttackRequest};
 use rand::Rng;
 use std::collections::VecDeque;
 
@@ -158,9 +158,12 @@ pub fn resolve(
             additional_modifications: Vec::new(),
             tapped,
             enters_attacking,
+            attack_request: TokenAttackRequest::Unspecified,
             sacrifice_at: ability.duration.clone(),
             source_id: ability.source_id,
             controller: ability.controller,
+            // Pool-drawn values name no donor object; empty mods are stamp-proof.
+            donor: None,
         }),
     });
 

@@ -139,6 +139,19 @@ pub(crate) fn apply_sacrifice_after_replacement(
                     if let SacrificeApply::NeedsChoice(player) =
                         deliver_sacrifice_zone_change(state, zone_event, events)
                     {
+                        if let Some(pending) = state.pending_replacement.as_mut() {
+                            pending.sacrifice_provenance = Some(PendingSacrificeProvenance {
+                                object_id: oid,
+                                player_id: pid,
+                            });
+                        } else {
+                            // CR 701.21: The delivery move completed; only an ordinary post-effect
+                            // child prompt paused. Emit the sacrifice event now so observers trigger.
+                            events.push(GameEvent::PermanentSacrificed {
+                                object_id: oid,
+                                player_id: pid,
+                            });
+                        }
                         return SacrificeApply::NeedsChoice(player);
                     }
                 }

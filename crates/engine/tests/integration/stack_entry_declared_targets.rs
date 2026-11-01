@@ -2277,7 +2277,9 @@ fn a_trigger_in_a_save_written_before_target_records_targets_the_opponent_it_was
     )
     .read_to_string(&mut json)
     .expect("inflate");
-    let envelope: serde_json::Value = serde_json::from_str(&json).expect("parse");
+    let mut envelope: serde_json::Value = serde_json::from_str(&json).expect("parse");
+    // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+    engine::types::game_state::record_captured_onsets(&mut envelope);
     let restored = serde_json::from_value::<PersistedGameState>(envelope["gameState"].clone())
         .expect("decode")
         .into_game_state()

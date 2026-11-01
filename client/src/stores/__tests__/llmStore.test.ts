@@ -123,6 +123,20 @@ describe("llmStore", () => {
     expect(draftProfile(useLlmStore.getState(), CATALOG)?.id).toBe(id);
   });
 
+  it("requires a key for OpenRouter like the other hosted providers", () => {
+    const catalog: LlmProviderCatalogEntry[] = [
+      ...CATALOG,
+      { provider: "OpenRouter", value: "OpenRouter", displayName: "OpenRouter", defaultBaseUrl: "https://openrouter.ai/api/v1", defaultModel: "openrouter/auto", requiresApiKey: true, apiKeyUrl: "", models: [] },
+    ];
+    const id = useLlmStore.getState().addProfile({ provider: "OpenRouter", model: "openrouter/auto", enabled: true });
+    const profile = () => useLlmStore.getState().profiles.find((p) => p.id === id);
+    expect(profile()?.provider).toBe("OpenRouter");
+    expect(isProfileUsable(profile(), catalog)).toBe(false);
+
+    useLlmStore.getState().updateProfile(id, { apiKey: "sk-or-test" });
+    expect(isProfileUsable(profile(), catalog)).toBe(true);
+  });
+
   it("lets a keyless provider such as a local server be used without a key", () => {
     const id = useLlmStore.getState().addProfile({
       model: "llama3",

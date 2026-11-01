@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "ProposedEvent::CreateToken gains appended (TokenBatch list), the batches a replacement adds to one token-creation event (CR 614.1a + CR 616.1f), and PendingCounterPostAction gains ContinueTokenEventDelivery, the cursor that resumes such an event after one of its batches pauses. Both are serialized in GameState (pending_replacement and the counter-additions resolution frames); appended is omitted when empty and defaulted when absent, but a peer on the previous version cannot decode the new post-action variant or would drop appended batches. Full-game and P2P wire move in lockstep."
+}

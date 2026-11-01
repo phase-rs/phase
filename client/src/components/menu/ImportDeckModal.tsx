@@ -13,11 +13,11 @@ import {
   detectAndParseDeck,
   expandParsedDeck,
   parsedDeckHasCards,
-  resolveCommander,
   type ParsedDeck,
 } from "../../services/deckParser";
+import { resolveCommander } from "../../services/commanderResolution";
 import { canonicalizeDeckNames } from "../../services/canonicalCardNames";
-import { fetchDeckFromUrl } from "../../services/deckUrlImport";
+import { fetchDeckFromUrl, IMPORT_ERROR_KEYS } from "../../services/deckUrlImport";
 import {
   isCardCommanderEligibleForFormat,
   signatureSpellSelectionPolicy,
@@ -25,11 +25,6 @@ import {
 import { useAppNotificationStore } from "../../stores/appToastStore";
 import { useEffectiveOffline } from "../../stores/connectivityStore";
 import { useImportSession, type ImportSession } from "./importSession";
-
-// Frontend-authored error messages from deckUrlImport.ts arrive as translation
-// keys prefixed `importDeck.`. Worker-authored messages flow through as-is
-// (server pass-through, per client/src/i18n/README.md).
-const I18N_KEY_PREFIX = "importDeck.";
 
 type ImportTab = "paste" | "url" | "file";
 
@@ -72,7 +67,7 @@ function initialSignatureSpell(deck: ParsedDeck, candidates: string[]): string {
 }
 
 export function ImportDeckModal({ open, onClose, onImported }: ImportDeckModalProps) {
-  const { t } = useTranslation("menu");
+  const { t } = useTranslation(["menu", "common"]);
   const effectiveOffline = useEffectiveOffline();
   const showNotification = useAppNotificationStore((s) => s.showNotification);
   const [tab, setTab] = useState<ImportTab>("paste");
@@ -243,7 +238,8 @@ export function ImportDeckModal({ open, onClose, onImported }: ImportDeckModalPr
       }
     } catch (err) {
       const raw = err instanceof Error ? err.message : t("importDeck.errorGeneric");
-      setUrlError(raw.startsWith(I18N_KEY_PREFIX) ? t(raw) : raw);
+      const key = Object.values(IMPORT_ERROR_KEYS).find((k) => k === raw);
+      setUrlError(key ? t(key) : raw);
     } finally {
       setUrlLoading(false);
     }

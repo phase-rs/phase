@@ -5,9 +5,10 @@ use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::players;
 use crate::game::topology;
 use crate::types::ability::{
-    ChooseFromZoneConstraint, Effect, EffectError, EffectKind, ForEachCategoryAction,
-    ParentTargetMissingReason, PerPlayerScope, ReciprocalZoneChoiceRole, ResolvedAbility,
-    TargetFilter, TargetRef, ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneOwner,
+    CardSelectionMode, ChooseFromZoneConstraint, Effect, EffectError, EffectKind,
+    ForEachCategoryAction, ParentTargetMissingReason, PerPlayerScope, ReciprocalZoneChoiceRole,
+    ResolvedAbility, TargetFilter, TargetRef, ZoneChoiceCandidateSource, ZoneChoiceChooser,
+    ZoneChoiceGatherRole, ZoneOwner,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -66,6 +67,21 @@ pub fn resolve(
         ),
         _ => return Err(EffectError::MissingParam("ChooseFromZone".to_string())),
     };
+
+    // CR 401.2: a top-of-library pool is identified by the library's order
+    // alone. No player looks at it or chooses from it, so it is settled whole
+    // here, before the per-player and prompting paths below.
+    if candidate_source == ZoneChoiceCandidateSource::LibraryTop {
+        return resolve_library_top(state, ability, events);
+    }
+    // A gather role is honored only by the `LibraryTop` pick above and the
+    // random single-owner `Direct` pick (`resolve_random_in_chain`). Every other
+    // path refuses it before any prompt.
+    if gather_role_of(&ability.effect).is_some() {
+        return Err(EffectError::MissingParam(
+            "ChooseFromZone gather_role on a path that does not gather".to_string(),
+        ));
+    }
 
     // CR 101.4 + CR 608.2c: "For each player, choose ... in that player's zone"
     // iterates every player in APNAP order, parking one choice per player and
@@ -773,6 +789,23 @@ pub(crate) fn resolve_random_in_chain(
             _ => return false,
         };
 
+    // A gather role is honored only on the random single-owner `Direct` pick
+    // below. On any other random shape it fails closed before any draw: the
+    // pool counts as empty, published by role exactly as an empty pool is, so
+    // an opening leg still opens its instruction's (empty) set and the
+    // instruction's action never reads an earlier instruction's set.
+    let gather_role = gather_role_of(&ability.effect);
+    if gather_role.is_some() && !random_pick_gathers(&ability.effect) {
+        state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::ChooseFromZone);
+        publish_gathered_pick(state, gather_role, Vec::new());
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::ChooseFromZone,
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return true;
+    }
+
     // CR 404.1 + CR 608.2c: a per-player random pick ("exile a card at random
     // from each opponent's graveyard" — Kefka, Dancing Mad) selects `count`
     // cards from EACH iterated player's own pool. No player chooses, so there
@@ -781,15 +814,19 @@ pub(crate) fn resolve_random_in_chain(
     // iteration accumulates them, for the `ChangeZoneAll { TrackedSet }` after
     // it.
     if let ZoneOwner::Each(scope) = zone_owner {
-        let spec = PerPlayerSpec::of(ability).expect("matched ChooseFromZone above");
         let mut picked = Vec::new();
-        for player in per_player_iteration_population(state, ability, scope) {
-            let pool = spec.pool(state, ability, player);
-            let clamped = count.min(pool.len());
-            picked.extend(
-                pool.choose_multiple(state.rng.draw(RandomDraw::Outcome), clamped)
-                    .copied(),
-            );
+        // A refused shape (`PerPlayerSpec::of` refuses every `LibraryTop`
+        // pick) fails closed before any draw: every pool counts as empty, the
+        // same outcome as this branch's all-pools-empty case.
+        if let Ok(spec) = PerPlayerSpec::of(ability) {
+            for player in per_player_iteration_population(state, ability, scope) {
+                let pool = spec.pool(state, ability, player);
+                let clamped = count.min(pool.len());
+                picked.extend(
+                    pool.choose_multiple(state.rng.draw(RandomDraw::Outcome), clamped)
+                        .copied(),
+                );
+            }
         }
         super::publish_fresh_tracked_set(state, picked.clone());
         ability.targets = picked.iter().map(|&id| TargetRef::Object(id)).collect();
@@ -813,9 +850,12 @@ pub(crate) fn resolve_random_in_chain(
     .unwrap_or_default();
 
     // CR 609.3: An empty pool (or count 0) does nothing; the chain then skips
-    // any continuation that depends on the missing pick.
+    // any continuation that depends on the missing pick. CR 608.2b: a pool
+    // whose owner can't be determined (the subject became an illegal target)
+    // is empty too. An opening gather leg still opens its instruction's set.
     if cards.is_empty() || count == 0 {
         state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::ChooseFromZone);
+        publish_gathered_pick(state, gather_role, Vec::new());
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::ChooseFromZone,
             source_id: ability.source_id,
@@ -831,6 +871,7 @@ pub(crate) fn resolve_random_in_chain(
         .copied()
         .collect();
     ability.set_unpinned_targets(picked.iter().map(|&id| TargetRef::Object(id)).collect());
+    publish_gathered_pick(state, gather_role, picked);
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::ChooseFromZone,
@@ -865,16 +906,25 @@ impl PerPlayerSpec {
                 constraint,
                 candidate_source,
                 ..
-            } => Ok(Self {
-                count: *count as usize,
-                zone: *zone,
-                additional_zones: additional_zones.clone(),
-                filter: filter.clone(),
-                chooser: *chooser,
-                up_to: *up_to,
-                constraint: constraint.clone(),
-                candidate_source: *candidate_source,
-            }),
+            } => {
+                // A `LibraryTop` pool is one owner's library, never a
+                // per-player iteration's, so the shape fails closed here.
+                if *candidate_source == ZoneChoiceCandidateSource::LibraryTop {
+                    return Err(EffectError::MissingParam(
+                        "ChooseFromZone LibraryTop reads a single owner's library".to_string(),
+                    ));
+                }
+                Ok(Self {
+                    count: *count as usize,
+                    zone: *zone,
+                    additional_zones: additional_zones.clone(),
+                    filter: filter.clone(),
+                    chooser: *chooser,
+                    up_to: *up_to,
+                    constraint: constraint.clone(),
+                    candidate_source: *candidate_source,
+                })
+            }
             _ => Err(EffectError::MissingParam("ChooseFromZone".to_string())),
         }
     }
@@ -926,6 +976,8 @@ fn per_player_order_chooser(
         ZoneChoiceChooser::Opponent => None,
         // A single-pool reciprocal consumer, never a per-player population.
         ZoneChoiceChooser::ImmediatePriorSelectedCardOwner { .. } => None,
+        // No per-player producer announces a player for its choice.
+        ZoneChoiceChooser::DeclaredPlayer { .. } => None,
     }
 }
 
@@ -1117,6 +1169,7 @@ fn advance_per_player_iteration(
         ZoneChoiceChooser::Opponent => Some(base_maker),
         // A single-pool reciprocal consumer, never a per-player population.
         ZoneChoiceChooser::ImmediatePriorSelectedCardOwner { .. } => Some(base_maker),
+        ZoneChoiceChooser::DeclaredPlayer { .. } => Some(base_maker),
     };
     let cursor = PerPlayerCursor {
         remaining,
@@ -1140,17 +1193,18 @@ fn advance_per_player_iteration(
         }
         None => {
             // CR 800.4g + CR 800.4h: the object requires this pick of a player
-            // who has left; the next player in turn order after the object's
-            // controller elects another player to make it. The pending pool
-            // (`current`) is carried through the election unchanged.
-            let elector = players::next_player_in_turn_order(state, ability.controller);
-            let candidates: Vec<PlayerId> = players::apnap_order(state)
-                .into_iter()
-                .filter(|&player| players::is_alive(state, player))
-                .collect();
+            // who has left; the controller of the object (live, or last-known
+            // once it has left the stack) — or, when that player has left, the
+            // next player in turn order after them — elects another player to
+            // make it. The pending pool (`current`) is carried through the
+            // election unchanged.
+            let object = state.resolving_stack_entry.as_ref().expect(
+                "admit_per_player_park admitted this iteration only with a resolution carrier installed (CR 608.2)",
+            );
+            let election = players::substitute_chooser_election(state, object);
             state.waiting_for = WaitingFor::ChooseFromZoneOpponentChooser {
-                player: elector,
-                candidates,
+                player: election.elector,
+                candidates: election.candidates,
                 ability: Box::new(ability.clone()),
                 purpose: ZoneOpponentChooserPurpose::SubstituteChooser,
             };
@@ -1216,7 +1270,8 @@ fn take_frame_for_prompt(
             frame.current.is_some() && frame.nominee.is_none()
         }
         ZoneOpponentChooserPurpose::Ordinary
-        | ZoneOpponentChooserPurpose::BindReciprocalConsume => false,
+        | ZoneOpponentChooserPurpose::BindReciprocalConsume
+        | ZoneOpponentChooserPurpose::SubstituteArranger => false,
     };
     if !frame_awaits_prompt || frame.ability.source_id != prompt_ability.source_id {
         return Err(EffectError::InvalidParam(
@@ -1596,6 +1651,16 @@ fn resolve_candidate_cards(
                 filter,
             );
         }
+        ZoneChoiceCandidateSource::LibraryTop => {
+            library_top_shape(&ability.effect)?;
+            let Effect::ChooseFromZone { count, .. } = &ability.effect else {
+                return Err(EffectError::MissingParam(
+                    "ChooseFromZone LibraryTop count".to_string(),
+                ));
+            };
+            let owner = resolve_zone_owner(state, ability, zone_owner)?;
+            return Ok(library_top_candidates(state, owner, *count as usize));
+        }
         ZoneChoiceCandidateSource::Tracked
         | ZoneChoiceCandidateSource::CostPaidObjects
         | ZoneChoiceCandidateSource::ParentTargets => {
@@ -1652,7 +1717,9 @@ fn source_bound_candidates(
     candidate_source: ZoneChoiceCandidateSource,
 ) -> Option<Vec<ObjectId>> {
     match candidate_source {
-        ZoneChoiceCandidateSource::Direct | ZoneChoiceCandidateSource::Legacy => None,
+        ZoneChoiceCandidateSource::Direct
+        | ZoneChoiceCandidateSource::Legacy
+        | ZoneChoiceCandidateSource::LibraryTop => None,
         ZoneChoiceCandidateSource::Tracked => Some(retain_matching_candidates(
             state,
             ability,
@@ -1770,6 +1837,145 @@ fn retain_matching_candidates(
 fn chain_tracked_set_cards(state: &GameState) -> Option<Vec<ObjectId>> {
     let chain_id = state.chain_tracked_set_id?;
     state.tracked_object_sets.get(&chain_id).cloned()
+}
+
+/// The shape a [`ZoneChoiceCandidateSource::LibraryTop`] pick requires,
+/// returning the pick's gather role. The pool is exactly the top `count` cards
+/// of one owner's declared library (`zone` is the library, with no
+/// `additional_zones`, no `filter` and a single-owner `zone_owner`), and it is
+/// taken whole by [`resolve_library_top`], so nothing may shape a selection
+/// from it: the selection is the default (not `Random`, whose chain route
+/// spends a random draw permuting the pool), with no `up_to`, no `constraint`
+/// and no reciprocal role. The `selection` and `chooser` are inert
+/// placeholders, pinned to their defaults (`Chosen`, `Controller`) so no other
+/// value is read as meaning something. The pick exists only inside a gathering
+/// instruction, so it must carry a gather role.
+// CR 401.2: players can't look at cards in a library, so the top-of-library pool is identified by order alone and never offered to a chooser.
+fn library_top_shape(effect: &Effect) -> Result<ZoneChoiceGatherRole, EffectError> {
+    match effect {
+        Effect::ChooseFromZone {
+            zone: Zone::Library,
+            additional_zones,
+            zone_owner,
+            filter: None,
+            selection: CardSelectionMode::Chosen,
+            chooser: ZoneChoiceChooser::Controller,
+            up_to: false,
+            constraint: None,
+            reciprocal_role: None,
+            gather_role: Some(role),
+            ..
+        } if additional_zones.is_empty() && names_single_owner(*zone_owner) => Ok(*role),
+        _ => Err(EffectError::MissingParam(
+            "ChooseFromZone LibraryTop requires a gathered, unfiltered single-owner library pool taken whole"
+                .to_string(),
+        )),
+    }
+}
+
+/// Does `zone_owner` name one player's zone, rather than a per-player
+/// iteration or every owner's zone at once?
+fn names_single_owner(zone_owner: ZoneOwner) -> bool {
+    match zone_owner {
+        ZoneOwner::Controller
+        | ZoneOwner::TargetedPlayer
+        | ZoneOwner::Opponent
+        | ZoneOwner::ScopedPlayer => true,
+        ZoneOwner::Each(_) | ZoneOwner::AllOwners => false,
+    }
+}
+
+/// The pick's role in its gathering instruction, if it has one.
+fn gather_role_of(effect: &Effect) -> Option<ZoneChoiceGatherRole> {
+    match effect {
+        Effect::ChooseFromZone { gather_role, .. } => *gather_role,
+        _ => None,
+    }
+}
+
+/// Is this random pick the one random shape that honors a gather role: a
+/// `Direct` read of one owner's zone, with no reciprocal role?
+fn random_pick_gathers(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::ChooseFromZone {
+            zone_owner,
+            candidate_source: ZoneChoiceCandidateSource::Direct,
+            reciprocal_role: None,
+            ..
+        } if names_single_owner(*zone_owner)
+    )
+}
+
+/// CR 608.2c + CR 608.2f: publish one pick of a gathering instruction as its
+/// role says. `Opens` publishes a fresh set even when the pick is empty, so the
+/// instruction's single action never reads a set an earlier instruction of the
+/// same resolution published; `Joins` adds a non-empty pick to the set the
+/// opener opened. `None` publishes nothing: an ordinary pick is handed on as its
+/// targets only.
+fn publish_gathered_pick(
+    state: &mut GameState,
+    gather_role: Option<ZoneChoiceGatherRole>,
+    picked: Vec<ObjectId>,
+) {
+    match gather_role {
+        None => {}
+        Some(ZoneChoiceGatherRole::Opens) => {
+            super::publish_fresh_tracked_set(state, picked);
+        }
+        Some(ZoneChoiceGatherRole::Joins) if !picked.is_empty() => {
+            super::publish_tracked_set(state, picked);
+        }
+        Some(ZoneChoiceGatherRole::Joins) => {}
+    }
+}
+
+/// CR 401.2: settle a [`ZoneChoiceCandidateSource::LibraryTop`] pick. Its
+/// pool is the top `count` cards of the single owner's library, top first, and
+/// it is taken whole: no prompt is raised and no random draw is made. A refused
+/// shape ([`library_top_shape`]) fails closed before anything happens; a
+/// per-player owner is one such shape, as `PerPlayerSpec::of` refuses it.
+///
+/// The pick reaches the following text through the gathering instruction's
+/// tracked set, published by its role ([`publish_gathered_pick`]). CR 608.2b:
+/// when the owner can't be determined (the subject the pick reads became an
+/// illegal target), the part of the effect that needs it doesn't happen, so the
+/// pool is empty — and an opening leg still opens its instruction's set, so the
+/// instruction's action never falls back to an earlier instruction's set.
+fn resolve_library_top(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let gather_role = library_top_shape(&ability.effect)?;
+    let Effect::ChooseFromZone {
+        count, zone_owner, ..
+    } = &ability.effect
+    else {
+        return Err(EffectError::MissingParam("ChooseFromZone".to_string()));
+    };
+    let picked = resolve_zone_owner(state, ability, *zone_owner)
+        .map(|owner| library_top_candidates(state, owner, *count as usize))
+        .unwrap_or_default();
+    if picked.is_empty() {
+        state.last_parent_target_missing_reason = Some(ParentTargetMissingReason::ChooseFromZone);
+    }
+    publish_gathered_pick(state, Some(gather_role), picked);
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::ChooseFromZone,
+        source_id: ability.source_id,
+        subject: None,
+    });
+    Ok(())
+}
+
+/// CR 401.2: the top `count` cards of `owner`'s library, top first. The
+/// library's order identifies them; nobody looks at them.
+fn library_top_candidates(state: &GameState, owner: PlayerId, count: usize) -> Vec<ObjectId> {
+    object_ids_in_player_zone(state, owner, Zone::Library)
+        .into_iter()
+        .take(count)
+        .collect()
 }
 
 fn collect_direct_zone_cards(
@@ -2050,6 +2256,16 @@ fn resolve_chooser(
                 "reciprocal ChooseFromZone consumer has no bound card owner".to_string(),
             )
         }),
+        // CR 608.2b: an announced player who is no longer a legal target names nobody.
+        ZoneChoiceChooser::DeclaredPlayer { group } => {
+            crate::game::targeting::resolve_live_declared_player(state, ability, group).ok_or_else(
+                || {
+                    EffectError::MissingParam(
+                        "ChooseFromZone declared-player chooser names no player".to_string(),
+                    )
+                },
+            )
+        }
     }
 }
 
@@ -2477,6 +2693,7 @@ mod tests {
                 chooser: Chooser::Controller.into(),
                 candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Direct,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: false,
                 constraint: None,
                 selection: crate::types::ability::CardSelectionMode::Chosen,
@@ -2531,6 +2748,7 @@ mod tests {
                 chooser: Chooser::Controller.into(),
                 candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: false,
                 constraint: None,
                 selection: crate::types::ability::CardSelectionMode::Chosen,
@@ -2625,6 +2843,7 @@ mod tests {
                 chooser: Chooser::Controller.into(),
                 candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: false,
                 constraint: None,
                 selection: crate::types::ability::CardSelectionMode::Chosen,
@@ -2710,6 +2929,7 @@ mod tests {
                 chooser: Chooser::Opponent.into(),
                 candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: false,
                 constraint: None,
                 selection: crate::types::ability::CardSelectionMode::Chosen,
@@ -2789,6 +3009,7 @@ mod tests {
                 chooser: Chooser::Opponent.into(),
                 candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: false,
                 constraint: None,
                 selection: crate::types::ability::CardSelectionMode::Chosen,
@@ -2843,6 +3064,7 @@ mod tests {
                 chooser: Chooser::Opponent.into(),
                 candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: false,
                 constraint: None,
                 selection: crate::types::ability::CardSelectionMode::Chosen,
@@ -2881,6 +3103,7 @@ mod tests {
                 chooser: Chooser::Opponent.into(),
                 candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: false,
                 constraint: None,
                 selection: crate::types::ability::CardSelectionMode::Chosen,
@@ -2927,6 +3150,7 @@ mod tests {
                 chooser: Chooser::Controller.into(),
                 candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: false,
                 constraint: None,
                 selection: crate::types::ability::CardSelectionMode::Chosen,
@@ -2985,6 +3209,7 @@ mod tests {
                 chooser: Chooser::Controller.into(),
                 candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: false,
                 constraint: None,
                 selection: crate::types::ability::CardSelectionMode::Chosen,
@@ -3041,6 +3266,7 @@ mod tests {
                 chooser: Chooser::Controller.into(),
                 candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: false,
                 constraint: None,
                 selection: crate::types::ability::CardSelectionMode::Chosen,
@@ -3083,6 +3309,7 @@ mod tests {
                 chooser: Chooser::Controller.into(),
                 candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: false,
                 constraint: None,
                 selection: crate::types::ability::CardSelectionMode::Chosen,
@@ -3273,6 +3500,7 @@ mod tests {
                     chooser: Chooser::Controller.into(),
                     candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
                     reciprocal_role: None,
+                    gather_role: None,
                     up_to: true,
                     constraint: Some(ChooseFromZoneConstraint::DistinctCardTypes { categories }),
                     selection: crate::types::ability::CardSelectionMode::Chosen,
@@ -3371,6 +3599,7 @@ mod tests {
                 chooser: Chooser::Controller.into(),
                 candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: true,
                 constraint: Some(ChooseFromZoneConstraint::DistinctCardTypes { categories }),
                 selection: crate::types::ability::CardSelectionMode::Chosen,
@@ -3453,6 +3682,7 @@ mod tests {
                 target: TargetFilter::ExiledBySource,
                 count: QuantityExpr::Fixed { value: 0 },
                 position: LibraryPosition::Bottom,
+                arranger: None,
             },
             vec![],
             source,
@@ -3493,6 +3723,7 @@ mod tests {
                     chooser: Chooser::Controller.into(),
                     candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
                     reciprocal_role: None,
+                    gather_role: None,
                     up_to: true,
                     constraint: Some(ChooseFromZoneConstraint::DistinctCardTypes {
                         categories: vec![CoreType::Creature, CoreType::Instant, CoreType::Land],
@@ -3580,6 +3811,7 @@ mod tests {
                 chooser: Chooser::Controller.into(),
                 candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: false,
                 constraint: None,
                 selection: crate::types::ability::CardSelectionMode::Random,
@@ -3618,6 +3850,7 @@ mod tests {
                 chooser: Chooser::Controller.into(),
                 candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: false,
                 constraint: None,
                 selection: crate::types::ability::CardSelectionMode::Chosen,
@@ -3632,6 +3865,991 @@ mod tests {
             &mut ability,
             &mut events
         ));
+    }
+
+    /// A `count`-card `LibraryTop` pick over `zone_owner`'s library that opens
+    /// its gathering instruction's set, with the default selection the parser
+    /// emits.
+    fn library_top_choice(count: u32, zone_owner: ZoneOwner) -> Effect {
+        Effect::ChooseFromZone {
+            count,
+            zone: Zone::Library,
+            additional_zones: Vec::new(),
+            zone_owner,
+            filter: None,
+            chooser: Chooser::Controller.into(),
+            candidate_source: ZoneChoiceCandidateSource::LibraryTop,
+            reciprocal_role: None,
+            gather_role: Some(ZoneChoiceGatherRole::Opens),
+            up_to: false,
+            constraint: None,
+            selection: CardSelectionMode::default(),
+        }
+    }
+
+    /// `effect` resolving from `ObjectId(100)` for P0 with `targets`, followed
+    /// by `sub` when given.
+    fn ability_then(
+        effect: Effect,
+        targets: Vec<TargetRef>,
+        sub: Option<Effect>,
+    ) -> ResolvedAbility {
+        let mut ability = ResolvedAbility::new(effect, targets, ObjectId(100), PlayerId(0));
+        ability.sub_ability = sub.map(|sub| {
+            Box::new(ResolvedAbility::new(
+                sub,
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            ))
+        });
+        ability
+    }
+
+    /// `ChangeZoneAll { origin: None, Exile, TrackedSet(0) }` — the
+    /// subject-exile list's single mover, which reads the chain set.
+    fn exile_tracked_set() -> Effect {
+        Effect::ChangeZoneAll {
+            origin: None,
+            destination: Zone::Exile,
+            target: TargetFilter::TrackedSet {
+                id: TrackedSetId(0),
+            },
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            enter_with_counters: vec![],
+            face_down_profile: None,
+            library_position: None,
+            library_shuffle: Default::default(),
+            random_order: false,
+        }
+    }
+
+    fn choose_from_zone_resolutions(events: &[GameEvent]) -> usize {
+        events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::ChooseFromZone,
+                        ..
+                    }
+                )
+            })
+            .count()
+    }
+
+    /// The game RNG's position: outcome draws made, and the generator's word
+    /// position. Unchanged means no random draw at all.
+    fn rng_position(state: &GameState) -> (u64, u128) {
+        (state.rng.outcome_draws(), state.rng.get_word_pos())
+    }
+
+    /// Library cards for `owner`, created in order; the first is on top.
+    fn library_cards(state: &mut GameState, owner: PlayerId, names: &[&str]) -> Vec<ObjectId> {
+        names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                create_object(
+                    state,
+                    CardId(200 + owner.0 as u64 * 10 + i as u64),
+                    owner,
+                    name.to_string(),
+                    Zone::Library,
+                )
+            })
+            .collect()
+    }
+
+    /// `resolve_candidate_cards` for `ability`'s own `ChooseFromZone` fields.
+    fn candidates_of(
+        state: &GameState,
+        ability: &ResolvedAbility,
+    ) -> Result<Vec<ObjectId>, EffectError> {
+        let Effect::ChooseFromZone {
+            zone,
+            additional_zones,
+            zone_owner,
+            filter,
+            candidate_source,
+            ..
+        } = &ability.effect
+        else {
+            panic!("expected ChooseFromZone, got {:?}", ability.effect);
+        };
+        resolve_candidate_cards(
+            state,
+            ability,
+            *zone,
+            additional_zones,
+            *zone_owner,
+            filter.as_ref(),
+            *candidate_source,
+        )
+    }
+
+    /// R10b. CR 401.2: the `LibraryTop` pool is the top `count` cards of the
+    /// owner's library, top first.
+    #[test]
+    fn library_top_pool_is_the_top_count_cards() {
+        let mut state = GameState::new_two_player(42);
+        let lib = library_cards(&mut state, PlayerId(1), &["A", "B", "C"]);
+        assert_eq!(
+            state
+                .library_of(PlayerId(1))
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            lib,
+            "fixture: the first created card is on top"
+        );
+
+        let single = ResolvedAbility::new(
+            library_top_choice(2, ZoneOwner::TargetedPlayer),
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        assert_eq!(
+            candidates_of(&state, &single).unwrap(),
+            vec![lib[0], lib[1]]
+        );
+    }
+
+    /// R10b. CR 401.2: `LibraryTop` refuses any pick other than an unfiltered,
+    /// library-only pool taken whole — a random selection, `up_to`, a
+    /// constraint or a reciprocal role would each shape a selection from it, and
+    /// a chooser other than the inert default would read as one. It exists only
+    /// inside a gathering instruction, so a pick with no gather role is refused,
+    /// and so is a pool read from every owner at once.
+    #[test]
+    fn library_top_rejects_invalid_shape() {
+        let mut state = GameState::new_two_player(42);
+        library_cards(&mut state, PlayerId(1), &["A", "B"]);
+        let ability = |effect: Effect| {
+            ResolvedAbility::new(
+                effect,
+                vec![TargetRef::Player(PlayerId(1))],
+                ObjectId(100),
+                PlayerId(0),
+            )
+        };
+        let mutate = |edit: &dyn Fn(&mut Effect)| {
+            let mut effect = library_top_choice(1, ZoneOwner::TargetedPlayer);
+            edit(&mut effect);
+            effect
+        };
+        let invalid: [&dyn Fn(&mut Effect); 10] = [
+            &|e: &mut Effect| {
+                if let Effect::ChooseFromZone { gather_role, .. } = e {
+                    *gather_role = None;
+                }
+            },
+            &|e: &mut Effect| {
+                if let Effect::ChooseFromZone { zone_owner, .. } = e {
+                    *zone_owner = ZoneOwner::AllOwners;
+                }
+            },
+            &|e: &mut Effect| {
+                if let Effect::ChooseFromZone { filter, .. } = e {
+                    *filter = Some(TargetFilter::Any);
+                }
+            },
+            &|e: &mut Effect| {
+                if let Effect::ChooseFromZone {
+                    additional_zones, ..
+                } = e
+                {
+                    additional_zones.push(Zone::Graveyard);
+                }
+            },
+            &|e: &mut Effect| {
+                if let Effect::ChooseFromZone { zone, .. } = e {
+                    *zone = Zone::Graveyard;
+                }
+            },
+            &|e: &mut Effect| {
+                if let Effect::ChooseFromZone { selection, .. } = e {
+                    *selection = CardSelectionMode::Random;
+                }
+            },
+            &|e: &mut Effect| {
+                if let Effect::ChooseFromZone { chooser, .. } = e {
+                    *chooser = ZoneChoiceChooser::OwningPlayer;
+                }
+            },
+            &|e: &mut Effect| {
+                if let Effect::ChooseFromZone { up_to, .. } = e {
+                    *up_to = true;
+                }
+            },
+            &|e: &mut Effect| {
+                if let Effect::ChooseFromZone { constraint, .. } = e {
+                    *constraint = Some(ChooseFromZoneConstraint::DistinctCardTypes {
+                        categories: vec![CoreType::Creature],
+                    });
+                }
+            },
+            &|e: &mut Effect| {
+                if let Effect::ChooseFromZone {
+                    reciprocal_role, ..
+                } = e
+                {
+                    *reciprocal_role = Some(ReciprocalZoneChoiceRole::Produce);
+                }
+            },
+        ];
+
+        // Reach-guard: the valid shape is accepted.
+        let valid = ability(library_top_choice(1, ZoneOwner::TargetedPlayer));
+        assert!(!candidates_of(&state, &valid).unwrap().is_empty());
+
+        for edit in invalid {
+            let single = ability(mutate(edit));
+            assert!(
+                candidates_of(&state, &single).is_err(),
+                "shape must be refused: {:?}",
+                single.effect
+            );
+        }
+    }
+
+    /// R10b (F2). CR 401.2: a count-2 `LibraryTop` pick, through the
+    /// dispatcher's non-random resolver, takes the top two cards whole: the
+    /// chain set holds them top first, no prompt is raised and the game RNG is
+    /// not drawn.
+    #[test]
+    fn library_top_takes_the_top_cards_in_order_without_a_draw_or_prompt() {
+        let mut state = GameState::new_two_player(42);
+        let lib = library_cards(&mut state, PlayerId(1), &["Top", "Second", "Third"]);
+        let ability = ability_then(
+            library_top_choice(2, ZoneOwner::TargetedPlayer),
+            vec![TargetRef::Player(PlayerId(1))],
+            Some(exile_tracked_set()),
+        );
+        let rng_before = rng_position(&state);
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).expect("LibraryTop resolves");
+
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ChooseFromZoneChoice { .. }),
+            "no player is shown the library cards (CR 401.2): {:?}",
+            state.waiting_for
+        );
+        assert_eq!(rng_position(&state), rng_before, "no random draw");
+        let set = state
+            .chain_tracked_set_id
+            .expect("the consumed pick is published");
+        assert_eq!(state.tracked_object_sets[&set], vec![lib[0], lib[1]]);
+        assert_eq!(choose_from_zone_resolutions(&events), 1);
+    }
+
+    /// R10b (F2): the same pick through the chain driver exiles exactly the top
+    /// two cards with no draw and no prompt; the third card stays on top.
+    #[test]
+    fn library_top_chain_exiles_the_top_cards_without_a_draw() {
+        let mut state = GameState::new_two_player(42);
+        let lib = library_cards(&mut state, PlayerId(1), &["Top", "Second", "Third"]);
+        let ability = ability_then(
+            library_top_choice(2, ZoneOwner::TargetedPlayer),
+            vec![TargetRef::Player(PlayerId(1))],
+            Some(exile_tracked_set()),
+        );
+        let rng_before = rng_position(&state);
+        let mut events = Vec::new();
+
+        super::super::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert_eq!(state.objects[&lib[0]].zone, Zone::Exile);
+        assert_eq!(state.objects[&lib[1]].zone, Zone::Exile);
+        assert_eq!(
+            state
+                .library_of(PlayerId(1))
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![lib[2]]
+        );
+        assert_eq!(rng_position(&state), rng_before, "no random draw");
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ChooseFromZoneChoice { .. }),
+            "{:?}",
+            state.waiting_for
+        );
+    }
+
+    /// R10b (X-F6). CR 401.2: a `LibraryTop` pool is one owner's library order,
+    /// so a per-player `LibraryTop` pick fails closed on every path that reads
+    /// it — the dispatcher, the per-player spec and the single-owner pool — with
+    /// no prompt, no draw and no set published.
+    #[test]
+    fn each_library_top_is_refused_without_a_prompt_or_draw() {
+        let mut state = GameState::new_two_player(42);
+        let p1 = library_cards(&mut state, PlayerId(1), &["P1 Top", "P1 Below"]);
+        library_cards(&mut state, PlayerId(0), &["P0 Top", "P0 Below"]);
+
+        // Reach-guard: the single-owner shape resolves and takes the top card.
+        let single = ability_then(
+            library_top_choice(1, ZoneOwner::TargetedPlayer),
+            vec![TargetRef::Player(PlayerId(1))],
+            Some(exile_tracked_set()),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &single, &mut events).expect("single-owner LibraryTop resolves");
+        let set = state.chain_tracked_set_id.expect("the pick is published");
+        assert_eq!(state.tracked_object_sets[&set], vec![p1[0]]);
+
+        let each = ability_then(
+            library_top_choice(1, ZoneOwner::Each(PerPlayerScope::AllPlayers)),
+            vec![],
+            Some(exile_tracked_set()),
+        );
+        let rng_before = rng_position(&state);
+        let chain_before = state.chain_tracked_set_id;
+        let mut events = Vec::new();
+        assert!(resolve(&mut state, &each, &mut events).is_err());
+        assert!(PerPlayerSpec::of(&each).is_err());
+        assert!(candidates_of(&state, &each).is_err());
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::ChooseFromZoneChoice { .. }),
+            "{:?}",
+            state.waiting_for
+        );
+        assert_eq!(rng_position(&state), rng_before, "no random draw");
+        assert_eq!(state.chain_tracked_set_id, chain_before, "no set published");
+        assert_eq!(choose_from_zone_resolutions(&events), 0);
+    }
+
+    /// R10b (X-F4 + X-F2). CR 608.2c: the library leg opens its gathering
+    /// instruction's set: a fresh set holding only its pick, never the set an
+    /// earlier instruction of the resolution published — and a bound, empty
+    /// one when the library is empty.
+    #[test]
+    fn library_top_opens_a_fresh_set_even_when_empty() {
+        // An earlier instruction's set `[earlier]` is the chain set.
+        let with_earlier_set = || {
+            let mut state = GameState::new_two_player(42);
+            let earlier = create_object(
+                &mut state,
+                CardId(300),
+                PlayerId(1),
+                "Earlier Instruction".to_string(),
+                Zone::Exile,
+            );
+            state
+                .tracked_object_sets
+                .insert(TrackedSetId(1), vec![earlier]);
+            state.chain_tracked_set_id = Some(TrackedSetId(1));
+            state.next_tracked_set_id = 2;
+            (state, earlier)
+        };
+        let ability = ability_then(
+            library_top_choice(1, ZoneOwner::TargetedPlayer),
+            vec![TargetRef::Player(PlayerId(1))],
+            Some(exile_tracked_set()),
+        );
+
+        let (mut state, earlier) = with_earlier_set();
+        let lib = library_cards(&mut state, PlayerId(1), &["Top", "Below"]);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).expect("LibraryTop resolves");
+        let opened = state.chain_tracked_set_id.expect("the pick is published");
+        assert_ne!(opened, TrackedSetId(1), "a fresh set, not the earlier one");
+        assert_eq!(state.tracked_object_sets[&opened], vec![lib[0]]);
+        assert_eq!(state.tracked_object_sets[&TrackedSetId(1)], vec![earlier]);
+
+        // An empty library still opens a fresh, empty set.
+        let (mut empty, _) = with_earlier_set();
+        assert!(empty.library_of(PlayerId(1)).is_empty());
+        let mut events = Vec::new();
+        resolve(&mut empty, &ability, &mut events).expect("LibraryTop resolves");
+        assert_eq!(choose_from_zone_resolutions(&events), 1);
+        let opened = empty
+            .chain_tracked_set_id
+            .expect("an empty set is published");
+        assert_ne!(opened, TrackedSetId(1));
+        assert_eq!(empty.tracked_object_sets.get(&opened), Some(&Vec::new()));
+    }
+
+    /// R10b (F2). A random `LibraryTop` pick is a refused shape, so the random
+    /// chain step fails closed on both paths before drawing: no panic, nothing
+    /// picked, the RNG untouched.
+    #[test]
+    fn random_library_top_is_refused_without_a_draw() {
+        let mut state = GameState::new_two_player(42);
+        library_cards(&mut state, PlayerId(0), &["P0 Top", "P0 Below"]);
+        library_cards(&mut state, PlayerId(1), &["P1 Top", "P1 Below"]);
+        // No gather role: the refusal under test is the `LibraryTop` shape's.
+        let random = |candidate_source: ZoneChoiceCandidateSource, zone_owner: ZoneOwner| {
+            let mut effect = library_top_choice(1, zone_owner);
+            if let Effect::ChooseFromZone {
+                selection,
+                candidate_source: source,
+                gather_role,
+                ..
+            } = &mut effect
+            {
+                *selection = CardSelectionMode::Random;
+                *source = candidate_source;
+                *gather_role = None;
+            }
+            effect
+        };
+        let each = ZoneOwner::Each(PerPlayerScope::AllPlayers);
+
+        // Reach-guard: a random `Direct` per-player library pick runs the same
+        // branch, draws, and picks one card from each library.
+        let mut direct = ability_then(
+            random(ZoneChoiceCandidateSource::Direct, each),
+            vec![],
+            None,
+        );
+        let draws_before = state.rng.outcome_draws();
+        let mut events = Vec::new();
+        assert!(resolve_random_in_chain(
+            &mut state,
+            &mut direct,
+            &mut events
+        ));
+        assert_eq!(direct.targets.len(), 2);
+        assert!(state.rng.outcome_draws() > draws_before);
+
+        let rng_before = rng_position(&state);
+        let mut per_player = ability_then(
+            random(ZoneChoiceCandidateSource::LibraryTop, each),
+            vec![],
+            None,
+        );
+        let mut events = Vec::new();
+        assert!(resolve_random_in_chain(
+            &mut state,
+            &mut per_player,
+            &mut events
+        ));
+        assert!(per_player.targets.is_empty());
+        let fresh = state
+            .chain_tracked_set_id
+            .expect("a fresh set is published");
+        assert_eq!(state.tracked_object_sets.get(&fresh), Some(&Vec::new()));
+        assert_eq!(choose_from_zone_resolutions(&events), 1);
+
+        let mut single = ability_then(
+            random(
+                ZoneChoiceCandidateSource::LibraryTop,
+                ZoneOwner::TargetedPlayer,
+            ),
+            vec![TargetRef::Player(PlayerId(1))],
+            None,
+        );
+        let mut events = Vec::new();
+        assert!(resolve_random_in_chain(
+            &mut state,
+            &mut single,
+            &mut events
+        ));
+        assert!(!single
+            .targets
+            .iter()
+            .any(|t| matches!(t, TargetRef::Object(_))));
+        assert_eq!(choose_from_zone_resolutions(&events), 1);
+        assert_eq!(rng_position(&state), rng_before, "no random draw");
+    }
+
+    /// A random single-pool graveyard pick from the controller's graveyard,
+    /// followed by `sub`.
+    fn random_graveyard_pick_then(sub: Effect) -> ResolvedAbility {
+        let mut ability = ResolvedAbility::new(
+            Effect::ChooseFromZone {
+                count: 1,
+                zone: Zone::Graveyard,
+                additional_zones: Vec::new(),
+                zone_owner: ZoneOwner::Controller,
+                filter: None,
+                chooser: Chooser::Controller.into(),
+                candidate_source: ZoneChoiceCandidateSource::Direct,
+                reciprocal_role: None,
+                gather_role: None,
+                up_to: false,
+                constraint: None,
+                selection: CardSelectionMode::Random,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.sub_ability = Some(Box::new(ResolvedAbility::new(
+            sub,
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )));
+        ability
+    }
+
+    /// Chain set `[x]` already published by an earlier leg, plus one graveyard
+    /// card for the pick.
+    fn chain_set_with_graveyard_card(state: &mut GameState) -> (ObjectId, ObjectId) {
+        let x = create_object(
+            state,
+            CardId(300),
+            PlayerId(1),
+            "Earlier Leg".to_string(),
+            Zone::Library,
+        );
+        let g = create_object(
+            state,
+            CardId(301),
+            PlayerId(0),
+            "Graveyard Card".to_string(),
+            Zone::Graveyard,
+        );
+        state.tracked_object_sets.insert(TrackedSetId(1), vec![x]);
+        state.chain_tracked_set_id = Some(TrackedSetId(1));
+        state.next_tracked_set_id = 2;
+        (x, g)
+    }
+
+    /// `ability` with its `ChooseFromZone` gather role set to `role`.
+    fn with_gather(mut ability: ResolvedAbility, role: ZoneChoiceGatherRole) -> ResolvedAbility {
+        if let Effect::ChooseFromZone { gather_role, .. } = &mut ability.effect {
+            *gather_role = Some(role);
+        }
+        ability
+    }
+
+    /// The tracked-set bookkeeping a publish could change.
+    fn tracked_sets_snapshot(
+        state: &GameState,
+    ) -> (
+        Option<TrackedSetId>,
+        u64,
+        std::collections::BTreeMap<TrackedSetId, Vec<ObjectId>>,
+    ) {
+        (
+            state.chain_tracked_set_id,
+            state.next_tracked_set_id,
+            state
+                .tracked_object_sets
+                .iter()
+                .map(|(id, members)| (*id, members.clone()))
+                .collect(),
+        )
+    }
+
+    /// MED-2 (b). A random `Direct` pick with no gather role publishes nothing,
+    /// as at base, even when the following text reads the chain's tracked set
+    /// and an earlier set is open (Signal the Clans' "choose a creature card at
+    /// random from among them" after a search): the pick is handed on as its
+    /// targets only, and the earlier set is left byte-identical.
+    #[test]
+    fn random_direct_pick_without_gather_role_leaves_chain_set_unchanged() {
+        let mut state = GameState::new_two_player(42);
+        let (_, g) = chain_set_with_graveyard_card(&mut state);
+        let mut ability = random_graveyard_pick_then(exile_tracked_set());
+        let before = tracked_sets_snapshot(&state);
+        let mut events = Vec::new();
+        assert!(resolve_random_in_chain(
+            &mut state,
+            &mut ability,
+            &mut events
+        ));
+        // Reach-guard: the pick was made.
+        assert_eq!(ability.targets, vec![TargetRef::Object(g)]);
+        assert_eq!(tracked_sets_snapshot(&state), before);
+    }
+
+    /// R11 (U4): with no tracked-set consumer after it, the pick is handed on
+    /// as targets only and the chain set is unchanged.
+    #[test]
+    fn random_direct_pick_does_not_publish_without_consumer() {
+        let mut state = GameState::new_two_player(42);
+        let (x, g) = chain_set_with_graveyard_card(&mut state);
+        let mut ability = random_graveyard_pick_then(Effect::ChangeZone {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Exile,
+            target: TargetFilter::ParentTarget,
+            owner_library: false,
+            enter_transformed: false,
+            enters_under: None,
+            enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        });
+        let mut events = Vec::new();
+        assert!(resolve_random_in_chain(
+            &mut state,
+            &mut ability,
+            &mut events
+        ));
+        assert_eq!(ability.targets, vec![TargetRef::Object(g)]);
+        assert_eq!(state.tracked_object_sets[&TrackedSetId(1)], vec![x]);
+    }
+
+    /// MED-2 (c). CR 608.2c + CR 608.2f: a random `Direct` pick that `Joins`
+    /// its instruction adds its pick to the set the opener opened.
+    #[test]
+    fn random_direct_joins_pick_extends_the_open_set() {
+        let mut state = GameState::new_two_player(42);
+        let (x, g) = chain_set_with_graveyard_card(&mut state);
+        let mut ability = with_gather(
+            random_graveyard_pick_then(exile_tracked_set()),
+            ZoneChoiceGatherRole::Joins,
+        );
+        let mut events = Vec::new();
+        assert!(resolve_random_in_chain(
+            &mut state,
+            &mut ability,
+            &mut events
+        ));
+        assert_eq!(ability.targets, vec![TargetRef::Object(g)]);
+        assert_eq!(state.chain_tracked_set_id, Some(TrackedSetId(1)));
+        assert_eq!(state.tracked_object_sets[&TrackedSetId(1)], vec![x, g]);
+    }
+
+    /// MED-2 (c). CR 608.2c + CR 608.2f: a random `Direct` pick that `Opens`
+    /// its instruction publishes a fresh set holding only its pick; the set an
+    /// earlier instruction published is neither extended nor read.
+    #[test]
+    fn random_direct_opens_pick_publishes_a_fresh_set() {
+        let mut state = GameState::new_two_player(42);
+        let (x, g) = chain_set_with_graveyard_card(&mut state);
+        let mut ability = with_gather(
+            random_graveyard_pick_then(exile_tracked_set()),
+            ZoneChoiceGatherRole::Opens,
+        );
+        let mut events = Vec::new();
+        assert!(resolve_random_in_chain(
+            &mut state,
+            &mut ability,
+            &mut events
+        ));
+        let opened = state.chain_tracked_set_id.expect("a set is opened");
+        assert_ne!(opened, TrackedSetId(1), "a fresh set, not the earlier one");
+        assert_eq!(state.tracked_object_sets[&opened], vec![g]);
+        assert_eq!(state.tracked_object_sets[&TrackedSetId(1)], vec![x]);
+    }
+
+    /// MED-2 (c) + MED-1. CR 609.3 + CR 608.2b: an opening random pick whose
+    /// pool is empty, or whose owner can't be determined because the subject it
+    /// reads is no longer a legal target, still opens a fresh, empty set. A
+    /// joining pick in the same position publishes nothing.
+    #[test]
+    fn random_direct_gather_publishes_by_role_for_an_empty_or_ownerless_pool() {
+        // P1's graveyard pick, read through the targeted subject.
+        let pick = |targets: Vec<TargetRef>, role: ZoneChoiceGatherRole| {
+            let mut ability = with_gather(random_graveyard_pick_then(exile_tracked_set()), role);
+            if let Effect::ChooseFromZone { zone_owner, .. } = &mut ability.effect {
+                *zone_owner = ZoneOwner::TargetedPlayer;
+            }
+            ability.targets = targets;
+            ability
+        };
+        let earlier_set = || {
+            let mut state = GameState::new_two_player(42);
+            let x = create_object(
+                &mut state,
+                CardId(300),
+                PlayerId(1),
+                "Earlier Instruction".to_string(),
+                Zone::Exile,
+            );
+            state.tracked_object_sets.insert(TrackedSetId(1), vec![x]);
+            state.chain_tracked_set_id = Some(TrackedSetId(1));
+            state.next_tracked_set_id = 2;
+            state
+        };
+        let subject = vec![TargetRef::Player(PlayerId(1))];
+
+        // Reach-guard: with a card in the subject's graveyard the opener picks it.
+        let mut state = earlier_set();
+        let card = create_object(
+            &mut state,
+            CardId(301),
+            PlayerId(1),
+            "Subject Graveyard".to_string(),
+            Zone::Graveyard,
+        );
+        let mut ability = pick(subject.clone(), ZoneChoiceGatherRole::Opens);
+        assert!(resolve_random_in_chain(
+            &mut state,
+            &mut ability,
+            &mut Vec::new()
+        ));
+        let opened = state.chain_tracked_set_id.expect("a set is opened");
+        assert_eq!(state.tracked_object_sets[&opened], vec![card]);
+
+        for targets in [subject, Vec::new()] {
+            let mut state = earlier_set();
+            let mut opener = pick(targets.clone(), ZoneChoiceGatherRole::Opens);
+            let mut events = Vec::new();
+            assert!(resolve_random_in_chain(
+                &mut state,
+                &mut opener,
+                &mut events
+            ));
+            assert_eq!(choose_from_zone_resolutions(&events), 1);
+            let opened = state.chain_tracked_set_id.expect("an empty set is opened");
+            assert_ne!(opened, TrackedSetId(1), "{targets:?}");
+            assert_eq!(state.tracked_object_sets.get(&opened), Some(&Vec::new()));
+
+            let mut state = earlier_set();
+            let before = tracked_sets_snapshot(&state);
+            let mut joiner = pick(targets.clone(), ZoneChoiceGatherRole::Joins);
+            assert!(resolve_random_in_chain(
+                &mut state,
+                &mut joiner,
+                &mut Vec::new()
+            ));
+            assert_eq!(tracked_sets_snapshot(&state), before, "{targets:?}");
+        }
+    }
+
+    /// MED-2 (c) + MED-1. CR 608.2c + CR 608.2b: a `LibraryTop` pick that joins
+    /// its instruction adds the top card to the open set; with no determinable
+    /// owner (the subject is an illegal target), an opening pick still opens a
+    /// fresh, empty set and a joining one publishes nothing — neither is an
+    /// error that skips the publish.
+    #[test]
+    fn library_top_publishes_by_role_with_and_without_an_owner() {
+        let earlier_set = || {
+            let mut state = GameState::new_two_player(42);
+            let x = create_object(
+                &mut state,
+                CardId(300),
+                PlayerId(1),
+                "Earlier Instruction".to_string(),
+                Zone::Exile,
+            );
+            state.tracked_object_sets.insert(TrackedSetId(1), vec![x]);
+            state.chain_tracked_set_id = Some(TrackedSetId(1));
+            state.next_tracked_set_id = 2;
+            (state, x)
+        };
+        let pick = |targets: Vec<TargetRef>, role: ZoneChoiceGatherRole| {
+            with_gather(
+                ability_then(
+                    library_top_choice(1, ZoneOwner::TargetedPlayer),
+                    targets,
+                    Some(exile_tracked_set()),
+                ),
+                role,
+            )
+        };
+
+        let (mut state, x) = earlier_set();
+        let lib = library_cards(&mut state, PlayerId(1), &["Top", "Below"]);
+        resolve(
+            &mut state,
+            &pick(
+                vec![TargetRef::Player(PlayerId(1))],
+                ZoneChoiceGatherRole::Joins,
+            ),
+            &mut Vec::new(),
+        )
+        .expect("a joining LibraryTop pick resolves");
+        assert_eq!(state.chain_tracked_set_id, Some(TrackedSetId(1)));
+        assert_eq!(state.tracked_object_sets[&TrackedSetId(1)], vec![x, lib[0]]);
+
+        // No player target: the subject can't be determined.
+        let (mut state, _) = earlier_set();
+        library_cards(&mut state, PlayerId(1), &["Top", "Below"]);
+        let mut events = Vec::new();
+        resolve(
+            &mut state,
+            &pick(Vec::new(), ZoneChoiceGatherRole::Opens),
+            &mut events,
+        )
+        .expect("an ownerless opening pick resolves as an empty pool");
+        assert_eq!(choose_from_zone_resolutions(&events), 1);
+        let opened = state.chain_tracked_set_id.expect("an empty set is opened");
+        assert_ne!(opened, TrackedSetId(1));
+        assert_eq!(state.tracked_object_sets.get(&opened), Some(&Vec::new()));
+
+        let (mut state, _) = earlier_set();
+        library_cards(&mut state, PlayerId(1), &["Top", "Below"]);
+        let before = tracked_sets_snapshot(&state);
+        resolve(
+            &mut state,
+            &pick(Vec::new(), ZoneChoiceGatherRole::Joins),
+            &mut Vec::new(),
+        )
+        .expect("an ownerless joining pick resolves as an empty pool");
+        assert_eq!(tracked_sets_snapshot(&state), before);
+    }
+
+    /// A gather role is honored only by a `LibraryTop` pick and a random
+    /// single-owner `Direct` pick. On every other path it fails closed: the
+    /// prompting resolver returns an error with no prompt, and a random pick of
+    /// any other shape makes no draw and picks nothing. Its empty pick is
+    /// published by role, as an empty pool is: an opening pick opens a fresh,
+    /// empty set, so the instruction's action cannot read the earlier
+    /// instruction's set, and a joining pick publishes nothing.
+    #[test]
+    fn gather_role_off_its_two_paths_is_refused_without_a_prompt_or_draw() {
+        let state_with_graveyard_cards = || {
+            let mut state = GameState::new_two_player(42);
+            for (i, owner) in [PlayerId(0), PlayerId(1)].into_iter().enumerate() {
+                create_object(
+                    &mut state,
+                    CardId(310 + i as u64),
+                    owner,
+                    "Graveyard Card".to_string(),
+                    Zone::Graveyard,
+                );
+            }
+            let x = create_object(
+                &mut state,
+                CardId(300),
+                PlayerId(1),
+                "Earlier Instruction".to_string(),
+                Zone::Exile,
+            );
+            state.tracked_object_sets.insert(TrackedSetId(1), vec![x]);
+            state.chain_tracked_set_id = Some(TrackedSetId(1));
+            state.next_tracked_set_id = 2;
+            state
+        };
+        let random_pick = || random_graveyard_pick_then(exile_tracked_set());
+
+        // The prompting path. Reach-guard: without a role it prompts.
+        let chosen = || {
+            let mut ability = random_pick();
+            if let Effect::ChooseFromZone { selection, .. } = &mut ability.effect {
+                *selection = CardSelectionMode::Chosen;
+            }
+            ability
+        };
+        let mut state = state_with_graveyard_cards();
+        resolve(&mut state, &chosen(), &mut Vec::new()).expect("an ordinary choice prompts");
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ChooseFromZoneChoice { .. }
+        ));
+        let mut state = state_with_graveyard_cards();
+        let before = (tracked_sets_snapshot(&state), rng_position(&state));
+        let mut events = Vec::new();
+        assert!(resolve(
+            &mut state,
+            &with_gather(chosen(), ZoneChoiceGatherRole::Opens),
+            &mut events
+        )
+        .is_err());
+        assert!(!matches!(
+            state.waiting_for,
+            WaitingFor::ChooseFromZoneChoice { .. }
+        ));
+        assert_eq!(
+            (tracked_sets_snapshot(&state), rng_position(&state)),
+            before
+        );
+        assert_eq!(choose_from_zone_resolutions(&events), 0);
+
+        // The random paths. Reach-guard: the supported shape draws and joins.
+        let mut state = state_with_graveyard_cards();
+        let draws_before = state.rng.outcome_draws();
+        let mut joining = with_gather(random_pick(), ZoneChoiceGatherRole::Joins);
+        assert!(resolve_random_in_chain(
+            &mut state,
+            &mut joining,
+            &mut Vec::new()
+        ));
+        assert!(state.rng.outcome_draws() > draws_before);
+        assert_eq!(state.tracked_object_sets[&TrackedSetId(1)].len(), 2);
+
+        let refused: [&dyn Fn(&mut Effect); 4] = [
+            &|e: &mut Effect| {
+                if let Effect::ChooseFromZone { zone_owner, .. } = e {
+                    *zone_owner = ZoneOwner::Each(PerPlayerScope::AllPlayers);
+                }
+            },
+            &|e: &mut Effect| {
+                if let Effect::ChooseFromZone { zone_owner, .. } = e {
+                    *zone_owner = ZoneOwner::AllOwners;
+                }
+            },
+            &|e: &mut Effect| {
+                if let Effect::ChooseFromZone {
+                    candidate_source, ..
+                } = e
+                {
+                    *candidate_source = ZoneChoiceCandidateSource::Tracked;
+                }
+            },
+            &|e: &mut Effect| {
+                if let Effect::ChooseFromZone {
+                    reciprocal_role, ..
+                } = e
+                {
+                    *reciprocal_role = Some(ReciprocalZoneChoiceRole::Produce);
+                }
+            },
+        ];
+        for edit in refused {
+            for role in [ZoneChoiceGatherRole::Opens, ZoneChoiceGatherRole::Joins] {
+                let mut state = state_with_graveyard_cards();
+                let mut ability = with_gather(random_pick(), role);
+                edit(&mut ability.effect);
+                let (sets_before, rng_before) =
+                    (tracked_sets_snapshot(&state), rng_position(&state));
+                let mut events = Vec::new();
+                assert!(resolve_random_in_chain(
+                    &mut state,
+                    &mut ability,
+                    &mut events
+                ));
+                assert!(
+                    ability.targets.is_empty(),
+                    "nothing picked: {:?}",
+                    ability.effect
+                );
+                assert_eq!(
+                    rng_position(&state),
+                    rng_before,
+                    "no draw: {:?}",
+                    ability.effect
+                );
+                match role {
+                    ZoneChoiceGatherRole::Opens => {
+                        let opened = state
+                            .chain_tracked_set_id
+                            .expect("an opening pick opens a set");
+                        assert_ne!(
+                            opened,
+                            TrackedSetId(1),
+                            "a fresh set, not the earlier one: {:?}",
+                            ability.effect
+                        );
+                        assert_eq!(
+                            state.tracked_object_sets.get(&opened),
+                            Some(&Vec::new()),
+                            "the opened set is empty: {:?}",
+                            ability.effect
+                        );
+                        assert_eq!(
+                            state.tracked_object_sets.get(&TrackedSetId(1)),
+                            sets_before.2.get(&TrackedSetId(1)),
+                            "the earlier set is untouched: {:?}",
+                            ability.effect
+                        );
+                    }
+                    ZoneChoiceGatherRole::Joins => assert_eq!(
+                        tracked_sets_snapshot(&state),
+                        sets_before,
+                        "a joining pick publishes nothing: {:?}",
+                        ability.effect
+                    ),
+                }
+                assert_eq!(choose_from_zone_resolutions(&events), 1);
+            }
+        }
     }
 
     /// A random per-opponent graveyard pick of one card from `source`, run
@@ -3651,6 +4869,7 @@ mod tests {
                 chooser: Chooser::Controller.into(),
                 candidate_source,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: false,
                 constraint: None,
                 selection: crate::types::ability::CardSelectionMode::Random,
@@ -3761,6 +4980,7 @@ mod tests {
                     chooser: Chooser::Controller.into(),
                     candidate_source: source,
                     reciprocal_role: None,
+                    gather_role: None,
                     up_to: false,
                     constraint: None,
                     selection: crate::types::ability::CardSelectionMode::Chosen,
@@ -4696,6 +5916,7 @@ mod tests {
                 chooser: Chooser::Controller.into(),
                 candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: true,
                 constraint: None,
                 selection: crate::types::ability::CardSelectionMode::Chosen,
@@ -4789,6 +6010,7 @@ mod tests {
                 chooser: Chooser::Controller.into(),
                 candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: true,
                 constraint: None,
                 selection: crate::types::ability::CardSelectionMode::Chosen,
@@ -4893,6 +6115,7 @@ mod tests {
                     chooser: Chooser::Controller.into(),
                     candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
                     reciprocal_role: None,
+                    gather_role: None,
                     up_to: false,
                     constraint: None,
                     selection: crate::types::ability::CardSelectionMode::Chosen,
@@ -4972,6 +6195,7 @@ mod tests {
                     chooser: Chooser::Controller.into(),
                     candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
                     reciprocal_role: None,
+                    gather_role: None,
                     up_to: false,
                     constraint: None,
                     selection: crate::types::ability::CardSelectionMode::Chosen,
@@ -5201,6 +6425,7 @@ mod tests {
                 chooser: Chooser::Controller.into(),
                 candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: false,
                 constraint: None,
                 selection: crate::types::ability::CardSelectionMode::Chosen,

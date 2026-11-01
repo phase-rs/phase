@@ -873,7 +873,8 @@ fn unchanged_boards_read_as_before() {
 const UNCHANGED: &[Row] = &[
     ("t/cryptex", "Cryptex", "{T}, Collect evidence 3: Add one mana of any color. Put an unlock counter on ~.", &[("Hill Giant", G, 'f')], &[], "Llanowar Elves", true, "tt/BF"),
     ("t/master-of-dark-rites", "Master of Dark Rites", "{T}, Sacrifice another creature: Add {B}{B}{B}. Spend this mana only to cast Vampire, Cleric, and/or Demon spells.", &[("Grizzly Bears", B, 'f')], &[], "Vampire Nighthawk", false, "ff/H"),
-    ("t/rubble-rouser", "Rubble Rouser", "{T}, Exile a card from your graveyard: Add {R}. When you do, ~ deals 1 damage to each opponent.", &[("Grizzly Bears", G, 'f')], &[], "Lightning Bolt", true, "ft/H"),
+    // #9812: offered once the bounded reducer witness completes the targeted cast (was ft/H).
+    ("t/rubble-rouser", "Rubble Rouser", "{T}, Exile a card from your graveyard: Add {R}. When you do, ~ deals 1 damage to each opponent.", &[("Grizzly Bears", G, 'f')], &[], "Lightning Bolt", true, "tt/GY"),
     ("t/springjack-pasture", "Springjack Pasture", "{T}, Sacrifice X Goats: Add X mana of any one color. You gain X life.", &[("Mountain Goat", B, 'f')], &[], "Llanowar Elves", false, "ff/H"),
     ("t/thornvault-forager", "Thornvault Forager", "{T}, Forage: Add two mana in any combination of colors.", &[("Hill Giant", G, 'f'), ("Hill Giant", G, 'f'), ("Hill Giant", G, 'f')], &[], "Grizzly Bears", false, "ff/H"),
     ("x/Eldrazi Temple", "Eldrazi Temple", "{T}: Add {C}{C}. Spend this mana only to cast colorless Eldrazi spells or activate abilities of colorless Eldrazi.", &[("Phyrexian Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[], "Glaring Fleshraker", true, "tt/BF"),
@@ -914,5 +915,6 @@ const UNCHANGED: &[Row] = &[
     ("h/ignus+mountain/bronze-sable", "Grinning Ignus", "{R}, Return ~ to its owner's hand: Add {C}{C}{R}. Activate only as a sorcery.", &[("Mountain", B, 'p')], &[], "Bronze Sable", true, "ft/H"),
     ("m/ignus+mountain/bronze-sable", "Grinning Ignus", "{R}, Return ~ to its owner's hand: Add {C}{C}{R}. Activate only as a sorcery.", &[("Mountain", B, 'p')], &[], "Bronze Sable", true, "ft/H"),
     ("m/Jack-o'-Lantern (2)#membergy", "Jack-o'-Lantern", "{1}, Exile this card from your graveyard: Add one mana of any color.", &[("Wastes", B, 'p')], &[], "Llanowar Elves", true, "ff/H"),
-    ("m/Wizard's Rockets (2)", "Wizard's Rockets", "{X}, {T}, Sacrifice ~: Add X mana in any combination of colors.", &[("Wastes", B, 'p')], &[], "Llanowar Elves", false, "ff/H"),
+    // Oracle-derived reading is "tt/BF" (X=1 from Wastes adds {G}); the end now matches it (BF), while "ff" pins the pre-existing castability gap for sources whose yield is sized by an announced amount.
+    ("m/Wizard's Rockets (2)", "Wizard's Rockets", "{X}, {T}, Sacrifice ~: Add X mana in any combination of colors.", &[("Wastes", B, 'p')], &[], "Llanowar Elves", false, "ff/BF"),
 ];

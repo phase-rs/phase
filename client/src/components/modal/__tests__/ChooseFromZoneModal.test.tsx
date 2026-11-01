@@ -120,6 +120,22 @@ describe("ChooseFromZone modal", () => {
     confirm([42, 44]);
   });
 
+  it("requires one public recipient and submits the reselected card", () => {
+    const first = gameObjectFactory.creature().onBattlefield().withId(10).named("Runeclaw Bear").build();
+    const second = gameObjectFactory.creature().onBattlefield().withId(11).named("Silvercoat Lion").build();
+    seed([first, second], { count: 1, upTo: false, constraint: null, sourceId: 20 });
+    render(<CardChoiceModal />);
+    expect(screen.getByRole("button", { name: "Confirm" })).toBeDisabled();
+    select(second);
+    confirm([11]);
+    expect(dispatchMock).toHaveBeenLastCalledWith({ type: "SelectCards", data: { cards: [11] } });
+    select(second);
+    expect(screen.getByRole("button", { name: "Confirm" })).toBeDisabled();
+    select(first);
+    confirm([10]);
+    expect(dispatchMock).toHaveBeenLastCalledWith({ type: "SelectCards", data: { cards: [10] } });
+  });
+
   it("hides another player's choice after an own-player positive control", () => {
     const card = artifactCreature(42, 6);
     seed([card]);

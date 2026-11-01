@@ -16,17 +16,29 @@
 //! lowercase letter and its uppercase equivalent are the same letter (CR
 //! 123.6e; letter occurrences, CR 123.6d).
 
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::stickers::set_player_sticker_sheets;
-use engine::types::ability::TargetRef;
+use engine::game::zones::move_to_zone;
+use engine::types::ability::{
+    AbilityDefinition, AbilityKind, Effect, LetterQuery, NameStickerSet, QuantityExpr, QuantityRef,
+    StickerTicketCostPayment, SubAbilityLink, TargetFilter, TargetRef, TriggerDefinition,
+};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
-use engine::types::game_state::{StackEntryKind, WaitingFor};
-use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+use engine::types::events::GameEvent;
+use engine::types::game_state::{
+    AutoMayChoice, MayTriggerAutoChoiceScope, PersistedGameState, PersistedRestoreFinalization,
+    StackEntryKind, WaitingFor,
+};
+use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
+use engine::types::keywords::Keyword;
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
-use engine::types::player::PlayerId;
+use engine::types::player::{PlayerCounterKind, PlayerId};
+use engine::types::proposed_event::AppliedReplacementKey;
 use engine::types::stickers::{AppliedSticker, StickerKind, StickerLocator};
+use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
 const GOBLIN: &str = "When this creature enters, you may put a name sticker on it. Add {R} for each unique vowel on that sticker. (The vowels are A, E, I, O, U, and Y.)";
@@ -53,6 +65,10 @@ const UNIQUE_SHEET: &str = "Unique Charmed Pants";
 const SASSY_SHEET: &str = "Sassy Gremlin Blood";
 /// Name stickers "Deep-Fried", "Plague", "Myr".
 const MYR_SHEET: &str = "Deep-Fried Plague Myr";
+
+const SCAMPIRE: &str = "When Scampire enters, you get {TK}, then you may put a sticker on a creature card in your graveyard.\n{3}{B}: Return target creature card with a sticker on it from your graveyard to the battlefield. That creature gains haste. Exile it at the beginning of the next end step. Activate only as a sorcery.";
+const FINISHING_MOVE: &str = "You get {TK}{TK}, then you may put a sticker on a nonland permanent you own. Target creature you control deals damage equal to its power to target creature you don't control.";
+const PRIZE_WALL: &str = "Defender\n{U}, {T}: You get {TK}.\n{4}{U}, {T}: You may put a sticker on a nonland permanent you own. Activate only as a sorcery.";
 
 fn mana(types: &[ManaType]) -> Vec<ManaUnit> {
     types
@@ -202,9 +218,13 @@ fn drive(
                 }
             }
             WaitingFor::ChooseOneOfBranch {
+                player,
+                controller,
                 branch_descriptions,
                 ..
             } => {
+                assert_eq!(player, P0, "same-controller source choices belong to P0");
+                assert_eq!(controller, P0, "placing authority remains P0");
                 branch_prompts += 1;
                 if branch_descriptions
                     .iter()
@@ -222,6 +242,23 @@ fn drive(
                     })
                     .unwrap_or(0);
                 GameAction::ChooseBranch { index }
+            }
+            WaitingFor::ChooseFromZoneChoice {
+                cards,
+                count,
+                up_to,
+                ..
+            } => {
+                assert_eq!(count, 1);
+                assert!(!up_to);
+                let chosen = answers
+                    .targets
+                    .iter()
+                    .find(|id| cards.contains(id))
+                    .expect("the intended recipient must be offered");
+                GameAction::SelectCards {
+                    cards: vec![*chosen],
+                }
             }
             WaitingFor::DigChoice {
                 cards,
@@ -556,7 +593,10 @@ fn blank_goblin_blinked_in_response_gets_one_sticker_from_its_new_trigger_only()
     // CR 400.7: the original trigger places no second sticker.
     assert_eq!(outcome.stickers, 1, "{outcome:?}");
     assert_eq!(outcome.kinds, vec![StickerKind::Name]);
-    assert_eq!(outcome.branch_prompts, 1, "{outcome:?}");
+    assert_eq!(
+        outcome.branch_prompts, 2,
+        "distinct locator and position decisions: {outcome:?}"
+    );
     assert!(outcome.stack_empty);
     // CR 608.2c: the stale original trigger resolves last and places nothing,
     // so it leaves no "that sticker".
@@ -968,4 +1008,1876 @@ fn wolf_in_blank_clothing_targets_up_to_x_creatures() {
     assert!(no_sheet.trigger_target_slots.is_empty(), "{no_sheet:?}");
     assert!(no_sheet.stack_empty, "{no_sheet:?}");
     assert_eq!(dead, 0, "CR 603.12: {no_sheet:?}");
+}
+
+fn assert_placement_idle(runner: &GameRunner) {
+    let state = runner.state();
+    assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    assert!(state.stack.is_empty());
+    assert!(
+        state.resolution_stack.is_empty(),
+        "all placement continuations must drain"
+    );
+    assert!(state.pending_trigger.is_none());
+    assert!(state.pending_trigger_entry.is_none());
+    assert!(state.deferred_triggers.is_empty());
+}
+
+fn restore_placement(runner: &GameRunner, trusted: bool) -> GameRunner {
+    let saved = if trusted {
+        PersistedGameState::capture(runner.state().clone())
+    } else {
+        PersistedGameState::Raw(Box::new(runner.state().clone()))
+    };
+    let decoded: PersistedGameState =
+        serde_json::from_value(serde_json::to_value(saved).unwrap()).unwrap();
+    let state = decoded
+        .prepare_for_restore(PersistedRestoreFinalization::Immediate)
+        .expect("a real placement pause is resumable")
+        .finalize_immediately()
+        .expect("checked restore finalizes");
+    GameRunner::from_state(state)
+}
+
+#[test]
+fn scampire_ticket_survives_empty_no_sheet_decline_and_graveyard_choice() {
+    for (population, sheet, accept, restore) in [
+        (0, true, true, None),
+        (1, false, true, None),
+        (1, true, false, None),
+        (1, true, true, None),
+        (2, true, true, None),
+        (2, true, true, Some(false)),
+        (2, true, true, Some(true)),
+    ] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario
+            .add_creature_to_hand(P0, "Scampire", 1, 3)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Black],
+                generic: 2,
+            })
+            .from_oracle_text(SCAMPIRE)
+            .id();
+        let candidates: Vec<_> = (0..population)
+            .map(|_| {
+                scenario
+                    .add_creature(P0, "Runeclaw Bear", 2, 2)
+                    .controlled_by(P1)
+                    .id()
+            })
+            .collect();
+        let land = scenario.add_land_to_graveyard(P0, "Forest").id();
+        let other = scenario
+            .add_creature_to_graveyard(P1, "Centaur Courser", 3, 3)
+            .id();
+        let orphan = scenario
+            .add_creature_to_graveyard(P0, "Silvercoat Lion", 2, 2)
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            mana(&[ManaType::Black, ManaType::Colorless, ManaType::Colorless]),
+        );
+        let mut runner = scenario.build();
+        for id in &candidates {
+            let mut events = Vec::new();
+            move_to_zone(runner.state_mut(), *id, Zone::Graveyard, &mut events);
+            assert!(events.iter().any(
+                |event| matches!(event, GameEvent::ZoneChanged { object_id, .. } if object_id == id)
+            ));
+            assert!(runner.state().players[0].graveyard.contains(id));
+            assert_eq!(runner.state().objects[id].owner, P0);
+            assert_eq!(
+                runner.state().lki_cache[id].controller,
+                P1,
+                "real battlefield departure retains the opponent controller's LKI"
+            );
+        }
+        runner.state_mut().players[0]
+            .graveyard
+            .retain(|id| *id != orphan);
+        if sheet {
+            select_sheet(&mut runner, UNIQUE_SHEET);
+        }
+        runner.cast(source).commit();
+        let chosen = candidates.last().copied();
+        let mut entered = false;
+        let mut trigger_seen = false;
+        let mut optional = 0;
+        let mut recipient_prompts = 0;
+        let mut locator = 0;
+        let mut position = 0;
+        let mut placements = Vec::new();
+        for _ in 0..30 {
+            let state = runner.state();
+            if !entered && state.objects[&source].zone == Zone::Battlefield {
+                entered = true;
+                assert!(
+                    state
+                        .stack
+                        .iter()
+                        .any(|entry| matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })),
+                    "the actual entry must admit its mandatory Ticket trigger"
+                );
+                assert_eq!(
+                    state.players[0].player_counter(&PlayerCounterKind::Ticket),
+                    0
+                );
+            }
+            trigger_seen |= state
+                .stack
+                .iter()
+                .any(|entry| matches!(entry.kind, StackEntryKind::TriggeredAbility { .. }));
+            if trigger_seen
+                && state.stack.is_empty()
+                && matches!(state.waiting_for, WaitingFor::Priority { .. })
+            {
+                break;
+            }
+            let action = match state.waiting_for.clone() {
+                WaitingFor::Priority { .. } => GameAction::PassPriority,
+                WaitingFor::OptionalEffectChoice { player, .. } => {
+                    assert_eq!(player, P0);
+                    assert_eq!(
+                        state.players[0].player_counter(&PlayerCounterKind::Ticket),
+                        1
+                    );
+                    optional += 1;
+                    GameAction::DecideOptionalEffect { accept }
+                }
+                WaitingFor::ChooseFromZoneChoice {
+                    player,
+                    cards,
+                    count,
+                    up_to,
+                    ..
+                } => {
+                    assert_eq!(player, P0);
+                    assert_eq!(count, 1);
+                    assert!(!up_to);
+                    assert_eq!(cards.len(), candidates.len());
+                    assert!(candidates.iter().all(|id| cards.contains(id)));
+                    assert!(!cards.contains(&land));
+                    assert!(!cards.contains(&other));
+                    assert!(!cards.contains(&orphan));
+                    recipient_prompts += 1;
+                    GameAction::SelectCards {
+                        cards: vec![chosen.unwrap()],
+                    }
+                }
+                WaitingFor::ChooseOneOfBranch {
+                    player,
+                    controller,
+                    branches,
+                    branch_descriptions,
+                    ..
+                } => {
+                    assert_eq!(
+                        (player, controller),
+                        (P0, P0),
+                        "graveyard cards use owner, never stale controller"
+                    );
+                    let positions = branches.iter().all(|b| {
+                        matches!(
+                            b.effect.as_ref(),
+                            engine::types::ability::Effect::ApplySticker { .. }
+                        )
+                    });
+                    let index = if positions {
+                        position += 1;
+                        branch_descriptions
+                            .iter()
+                            .position(|d| d == "Name — Charmed at position 2")
+                            .expect("chosen name's nondefault position")
+                    } else {
+                        locator += 1;
+                        branch_descriptions
+                            .iter()
+                            .position(|d| d == "Name — Charmed")
+                            .expect("non-first discrete name locator")
+                    };
+                    GameAction::ChooseBranch { index }
+                }
+                other => panic!("no announcement targeting for Scampire: {other:?}"),
+            };
+            if let Some(trusted) = restore {
+                if !matches!(action, GameAction::PassPriority) {
+                    runner = restore_placement(&runner, trusted);
+                }
+            }
+            placements.extend(
+                runner
+                    .act(action)
+                    .unwrap()
+                    .events
+                    .into_iter()
+                    .filter(|e| matches!(e, GameEvent::StickerPlaced { .. })),
+            );
+        }
+        assert!(entered && trigger_seen);
+        assert_placement_idle(&runner);
+        assert_eq!(
+            runner.state().players[0].player_counter(&PlayerCounterKind::Ticket),
+            1
+        );
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        if population > 0 && sheet && accept {
+            assert_eq!((locator, position), (1, 1));
+            assert_eq!(recipient_prompts, usize::from(population > 1));
+            assert_eq!(
+                placements,
+                vec![GameEvent::StickerPlaced {
+                    player_id: P0,
+                    object_id: chosen.unwrap(),
+                    kind: StickerKind::Name
+                }]
+            );
+            assert!(
+                matches!(&runner.state().objects[&chosen.unwrap()].stickers[0], AppliedSticker::Name { locator, position: 1, .. } if locator.index == 1 && locator.sheet == UNIQUE_SHEET)
+            );
+            assert_eq!(
+                runner.state().objects[&chosen.unwrap()].zone,
+                Zone::Graveyard
+            );
+        } else {
+            assert!(placements.is_empty());
+            assert_eq!((locator, position, recipient_prompts), (0, 0, 0));
+            assert_eq!(optional, usize::from(population > 0 && sheet));
+            assert!(runner.state().placed_sticker_this_resolution.is_none());
+        }
+    }
+}
+
+#[test]
+fn finishing_move_keeps_two_targets_and_splits_name_actors_through_restore() {
+    for restore_stage in 0..=4 {
+        for trusted in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let spell = scenario
+                .add_spell_to_hand_from_oracle(P0, "Finishing Move", false, FINISHING_MOVE)
+                .with_mana_cost(ManaCost::Cost {
+                    shards: vec![ManaCostShard::Green],
+                    generic: 2,
+                })
+                .id();
+            let source = scenario.add_creature(P0, "Runeclaw Bear", 2, 2).id();
+            let damaged = scenario.add_creature(P1, "Centaur Courser", 3, 3).id();
+            let recipient = scenario
+                .add_creature(P0, "Silvercoat Lion", 2, 2)
+                .controlled_by(P1)
+                .with_keyword(Keyword::Shroud)
+                .id();
+            let alternate = scenario.add_creature(P0, "Hill Giant", 3, 3).id();
+            let land = scenario.add_basic_land(P0, ManaColor::Green);
+            scenario.with_mana_pool(
+                P0,
+                mana(&[ManaType::Green, ManaType::Colorless, ManaType::Colorless]),
+            );
+            let mut runner = scenario.build();
+            select_sheet(&mut runner, UNIQUE_SHEET);
+            runner
+                .act(GameAction::CastSpell {
+                    object_id: spell,
+                    card_id: runner.state().objects[&spell].card_id,
+                    targets: vec![],
+                    payment_mode: Default::default(),
+                })
+                .unwrap();
+            for expected in [source, damaged] {
+                let WaitingFor::TargetSelection {
+                    ref target_slots,
+                    ref selection,
+                    ..
+                } = runner.state().waiting_for
+                else {
+                    panic!("both printed targets must be announced")
+                };
+                assert_eq!(
+                    target_slots.len(),
+                    2,
+                    "untargeted sticker recipient must not claim a third slot"
+                );
+                assert!(selection
+                    .current_legal_targets
+                    .contains(&TargetRef::Object(expected)));
+                assert!(
+                    !selection
+                        .current_legal_targets
+                        .contains(&TargetRef::Object(recipient)),
+                    "shroud still excludes actual targets"
+                );
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(expected)),
+                    })
+                    .unwrap();
+            }
+            assert!(runner
+                .state()
+                .stack
+                .iter()
+                .any(|entry| entry.source_id == spell));
+            for _ in 0..4 {
+                if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+                    break;
+                }
+                runner.act(GameAction::PassPriority).unwrap();
+            }
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { player: P0, .. }
+            ));
+            assert_eq!(
+                runner.state().players[0].player_counter(&PlayerCounterKind::Ticket),
+                2
+            );
+            if restore_stage == 1 {
+                runner = restore_placement(&runner, trusted);
+            }
+            runner
+                .act(GameAction::DecideOptionalEffect { accept: true })
+                .unwrap();
+            let WaitingFor::ChooseFromZoneChoice {
+                ref cards,
+                count: 1,
+                up_to: false,
+                player: P0,
+                ..
+            } = runner.state().waiting_for
+            else {
+                panic!("resolution must choose its own recipient")
+            };
+            assert!(
+                cards.contains(&recipient) && cards.contains(&alternate) && cards.contains(&source)
+            );
+            assert!(!cards.contains(&damaged) && !cards.contains(&land));
+            let legal = engine::ai_support::legal_actions(runner.state());
+            for id in cards {
+                let action = GameAction::SelectCards { cards: vec![*id] };
+                assert!(legal.contains(&action));
+                let mut cloned = runner.state().clone();
+                engine::game::engine::apply(&mut cloned, P0, action).unwrap();
+                assert!(matches!(
+                    cloned.waiting_for,
+                    WaitingFor::ChooseOneOfBranch { player: P0, .. }
+                ));
+            }
+            for (actor, cards) in [
+                (P1, vec![recipient]),
+                (P0, vec![]),
+                (P0, vec![recipient, recipient]),
+                (P0, vec![recipient, alternate]),
+                (P0, vec![damaged]),
+            ] {
+                let before = runner.state().waiting_for.clone();
+                let frames = runner.state().resolution_stack.clone();
+                assert!(engine::game::engine::apply(
+                    runner.state_mut(),
+                    actor,
+                    GameAction::SelectCards { cards }
+                )
+                .is_err());
+                assert_eq!(runner.state().waiting_for, before);
+                assert_eq!(runner.state().resolution_stack, frames);
+                assert_eq!(
+                    runner.state().players[0].player_counter(&PlayerCounterKind::Ticket),
+                    2
+                );
+            }
+            if restore_stage == 2 {
+                runner = restore_placement(&runner, trusted);
+            }
+            runner
+                .act(GameAction::SelectCards {
+                    cards: vec![recipient],
+                })
+                .unwrap();
+            let WaitingFor::ChooseOneOfBranch {
+                player,
+                controller,
+                ref branches,
+                ref branch_descriptions,
+                ref parent_occurrences,
+                ..
+            } = runner.state().waiting_for
+            else {
+                panic!("P0 chooses the discrete name")
+            };
+            assert_eq!((player, controller), (P0, P0));
+            assert!(branches.len() >= 2);
+            assert_eq!(
+                parent_occurrences.occurrences()[0].0,
+                TargetRef::Object(recipient)
+            );
+            assert!(parent_occurrences.occurrences()[0].1.is_some());
+            let locator_index = branch_descriptions
+                .iter()
+                .position(|d| d == "Name — Charmed")
+                .expect("second discrete name");
+            assert!(locator_index > 0);
+            assert!(engine::game::engine::apply(
+                runner.state_mut(),
+                P1,
+                GameAction::ChooseBranch {
+                    index: locator_index
+                }
+            )
+            .is_err());
+            if restore_stage == 3 {
+                runner = restore_placement(&runner, trusted);
+            }
+            runner
+                .act(GameAction::ChooseBranch {
+                    index: locator_index,
+                })
+                .unwrap();
+            let WaitingFor::ChooseOneOfBranch {
+                player,
+                controller,
+                ref branches,
+                ref branch_descriptions,
+                ref parent_occurrences,
+                ..
+            } = runner.state().waiting_for
+            else {
+                panic!("P1 chooses only Charmed's position")
+            };
+            assert_eq!((player, controller), (P1, P0));
+            assert_eq!(
+                parent_occurrences.occurrences()[0].0,
+                TargetRef::Object(recipient)
+            );
+            assert!(branches.iter().all(|branch| matches!(branch.effect.as_ref(), engine::types::ability::Effect::ApplySticker { target: engine::types::ability::TargetFilter::SpecificObject { id }, sticker: AppliedSticker::Name { locator, .. }, .. } if *id == recipient && locator.index == 1 && locator.sheet == UNIQUE_SHEET)));
+            let position_index = branch_descriptions
+                .iter()
+                .position(|d| d == "Name — Charmed at position 2")
+                .unwrap();
+            assert!(position_index > 0);
+            assert!(engine::ai_support::legal_actions(runner.state()).contains(
+                &GameAction::ChooseBranch {
+                    index: position_index
+                }
+            ));
+            assert!(engine::game::engine::apply(
+                runner.state_mut(),
+                P0,
+                GameAction::ChooseBranch {
+                    index: position_index
+                }
+            )
+            .is_err());
+            if restore_stage == 4 {
+                runner = restore_placement(&runner, trusted);
+            }
+            let result = engine::game::engine::apply(
+                runner.state_mut(),
+                P1,
+                GameAction::ChooseBranch {
+                    index: position_index,
+                },
+            )
+            .unwrap();
+            assert_eq!(result.events.iter().filter(|e| matches!(e, GameEvent::StickerPlaced { player_id: P0, object_id, kind: StickerKind::Name } if *object_id == recipient)).count(), 1);
+            assert_eq!(
+                result
+                    .events
+                    .iter()
+                    .filter(|e| matches!(e, GameEvent::DamageDealt { .. }))
+                    .count(),
+                1
+            );
+            assert_placement_idle(&runner);
+            let state = runner.state();
+            assert_eq!(state.objects[&spell].zone, Zone::Graveyard);
+            assert_eq!(state.objects[&source].damage_marked, 0);
+            assert_eq!(state.objects[&damaged].damage_marked, 2);
+            assert_eq!(
+                state.players[0].player_counter(&PlayerCounterKind::Ticket),
+                2
+            );
+            assert_eq!(
+                state.players[1].player_counter(&PlayerCounterKind::Ticket),
+                0
+            );
+            assert_eq!(state.objects[&recipient].stickers.len(), 1);
+            assert!(
+                matches!(&state.objects[&recipient].stickers[0], AppliedSticker::Name { locator, position: 1, .. } if locator.index == 1 && locator.sheet == UNIQUE_SHEET)
+            );
+            assert!(state.objects[&alternate].stickers.is_empty());
+            assert_eq!(state.players[0].mana_pool.total(), 0);
+        }
+    }
+}
+
+#[test]
+fn finishing_move_decline_and_no_sheet_preserve_ticket_and_independent_damage() {
+    for sheet in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Finishing Move", false, FINISHING_MOVE)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 2,
+            })
+            .id();
+        let source = scenario.add_creature(P0, "Runeclaw Bear", 2, 2).id();
+        let damaged = scenario.add_creature(P1, "Centaur Courser", 3, 3).id();
+        scenario.with_mana_pool(
+            P0,
+            mana(&[ManaType::Green, ManaType::Colorless, ManaType::Colorless]),
+        );
+        let mut runner = scenario.build();
+        if sheet {
+            select_sheet(&mut runner, UNIQUE_SHEET);
+        }
+        runner
+            .cast(spell)
+            .target_objects(&[source, damaged])
+            .commit();
+        assert!(runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| entry.source_id == spell));
+        let mut optional = 0;
+        for _ in 0..10 {
+            if runner.state().stack.is_empty()
+                && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            {
+                break;
+            }
+            let action = match runner.state().waiting_for {
+                WaitingFor::Priority { .. } => GameAction::PassPriority,
+                WaitingFor::OptionalEffectChoice { .. } => {
+                    optional += 1;
+                    assert_eq!(
+                        runner.state().players[0].player_counter(&PlayerCounterKind::Ticket),
+                        2
+                    );
+                    GameAction::DecideOptionalEffect { accept: false }
+                }
+                ref other => panic!("decline/no-sheet cannot choose a sticker: {other:?}"),
+            };
+            runner.act(action).unwrap();
+        }
+        assert_placement_idle(&runner);
+        assert_eq!(optional, usize::from(sheet));
+        assert_eq!(runner.state().objects[&damaged].damage_marked, 2);
+        assert_eq!(runner.state().objects[&source].damage_marked, 0);
+        assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+        assert_eq!(
+            runner.state().players[0].player_counter(&PlayerCounterKind::Ticket),
+            2
+        );
+        assert!(runner.state().objects[&source].stickers.is_empty());
+        assert!(runner.state().placed_sticker_this_resolution.is_none());
+    }
+}
+
+#[test]
+fn sticker_activations_keep_normal_costs_and_live_restrictions() {
+    let tusk = "Whenever you put an ability sticker on a creature, put a +1/+1 counter on that creature.\n{2}{G}{W}, {T}: You get {TK}. You may put a sticker on a nonland permanent you own.";
+    let bleater = "Whenever another creature you own enters, you get {TK}.\n{W}, {T}: You may put a sticker on a creature you own that entered this turn.";
+    for (name, text, index, pool, ticket) in [
+        (
+            "Prize Wall",
+            PRIZE_WALL,
+            1,
+            vec![
+                ManaType::Blue,
+                ManaType::Colorless,
+                ManaType::Colorless,
+                ManaType::Colorless,
+                ManaType::Colorless,
+            ],
+            0,
+        ),
+        (
+            "Tusk and Whiskers",
+            tusk,
+            0,
+            vec![
+                ManaType::Green,
+                ManaType::White,
+                ManaType::Colorless,
+                ManaType::Colorless,
+            ],
+            1,
+        ),
+        ("Park Bleater", bleater, 0, vec![ManaType::White], 0),
+    ] {
+        for (sheet, accept) in [(true, true), (true, false), (false, true)] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let (power, toughness) = match name {
+                "Prize Wall" => (0, 4),
+                "Tusk and Whiskers" => (4, 4),
+                _ => (2, 2),
+            };
+            let source = scenario
+                .add_creature_from_oracle(P0, name, power, toughness, text)
+                .id();
+            let first = scenario
+                .add_creature(P0, "Runeclaw Bear", 2, 2)
+                .with_summoning_sickness()
+                .id();
+            let recipient = scenario
+                .add_creature(P0, "Silvercoat Lion", 2, 2)
+                .with_summoning_sickness()
+                .hexproof()
+                .id();
+            let old = scenario.add_creature(P0, "Hill Giant", 3, 3).id();
+            let other = scenario.add_creature(P1, "Centaur Courser", 3, 3).id();
+            let land = scenario.add_basic_land(P0, ManaColor::Green);
+            scenario.with_mana_pool(P0, mana(&pool));
+            let mut runner = scenario.build();
+            if sheet {
+                select_sheet(&mut runner, UNIQUE_SHEET);
+            }
+            runner
+                .act(GameAction::ActivateAbility {
+                    source_id: source,
+                    ability_index: index,
+                    payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+                })
+                .unwrap();
+            assert!(runner.state().objects[&source].tapped);
+            assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+            assert!(
+                matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+                "no recipient announcement"
+            );
+            assert!(runner
+                .state()
+                .stack
+                .iter()
+                .any(|entry| entry.source_id == source
+                    && matches!(entry.kind, StackEntryKind::ActivatedAbility { .. })));
+            let mut recipients = 0;
+            let mut names = 0;
+            let mut positions = 0;
+            let mut optional = 0;
+            for _ in 0..18 {
+                if runner.state().stack.is_empty()
+                    && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+                {
+                    break;
+                }
+                let action = match runner.state().waiting_for.clone() {
+                    WaitingFor::Priority { .. } => GameAction::PassPriority,
+                    WaitingFor::OptionalEffectChoice { .. } => {
+                        optional += 1;
+                        assert_eq!(
+                            runner.state().players[0].player_counter(&PlayerCounterKind::Ticket),
+                            ticket
+                        );
+                        GameAction::DecideOptionalEffect { accept }
+                    }
+                    WaitingFor::ChooseFromZoneChoice { cards, .. } => {
+                        recipients += 1;
+                        assert!(cards.contains(&first) && cards.contains(&recipient));
+                        assert!(!cards.contains(&other) && !cards.contains(&land));
+                        assert_eq!(cards.contains(&old), name != "Park Bleater");
+                        assert_eq!(cards.contains(&source), name != "Park Bleater");
+                        GameAction::SelectCards {
+                            cards: vec![recipient],
+                        }
+                    }
+                    WaitingFor::ChooseOneOfBranch {
+                        player,
+                        controller,
+                        branches,
+                        branch_descriptions,
+                        ..
+                    } => {
+                        assert_eq!((player, controller), (P0, P0));
+                        let position = branches.iter().all(|branch| {
+                            matches!(
+                                branch.effect.as_ref(),
+                                engine::types::ability::Effect::ApplySticker { .. }
+                            )
+                        });
+                        let expected = if position {
+                            positions += 1;
+                            "Name — Charmed at position 2"
+                        } else {
+                            names += 1;
+                            "Name — Charmed"
+                        };
+                        GameAction::ChooseBranch {
+                            index: branch_descriptions
+                                .iter()
+                                .position(|d| d == expected)
+                                .unwrap(),
+                        }
+                    }
+                    other => panic!("ordinary sticker activation: {other:?}"),
+                };
+                runner.act(action).unwrap();
+            }
+            assert_placement_idle(&runner);
+            assert_eq!(
+                runner.state().players[0].player_counter(&PlayerCounterKind::Ticket),
+                ticket
+            );
+            assert_eq!(
+                (recipients, names, positions),
+                if sheet && accept {
+                    (1, 1, 1)
+                } else {
+                    (0, 0, 0)
+                }
+            );
+            assert_eq!(optional, usize::from(sheet));
+            assert_eq!(
+                runner.state().objects[&recipient].stickers.len(),
+                usize::from(sheet && accept)
+            );
+        }
+    }
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let wall = scenario
+        .add_creature_from_oracle(P0, "Prize Wall", 0, 4, PRIZE_WALL)
+        .id();
+    scenario.with_mana_pool(P0, mana(&[ManaType::Blue]));
+    let mut runner = scenario.build();
+    runner.activate(wall, 0).resolve();
+    assert_placement_idle(&runner);
+    assert!(runner.state().objects[&wall].tapped);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    assert_eq!(
+        runner.state().players[0].player_counter(&PlayerCounterKind::Ticket),
+        1
+    );
+    assert!(runner.state().objects[&wall].stickers.is_empty());
+}
+
+#[test]
+fn rocketship_count_keeps_one_recipient_and_distinct_name_stickers() {
+    for count in 0..=2 {
+        for trusted in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let source = scenario
+                .add_artifact_to_hand_from_oracle(P0, "_____ _____ Rocketship", ROCKETSHIP)
+                .with_subtypes(vec!["Vehicle"])
+                .with_mana_cost(ManaCost::generic(4))
+                .id();
+            scenario.with_mana_pool(P0, mana(&[ManaType::Colorless; 4]));
+            let mut runner = scenario.build();
+            select_sheet(&mut runner, UNIQUE_SHEET);
+            runner.cast(source).commit();
+            for _ in 0..6 {
+                if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+                    break;
+                }
+                runner.act(GameAction::PassPriority).unwrap();
+            }
+            assert_eq!(runner.state().objects[&source].zone, Zone::Battlefield);
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { .. }
+            ));
+            runner
+                .act(GameAction::DecideOptionalEffect { accept: true })
+                .unwrap();
+            assert!(matches!(
+                runner.state().waiting_for,
+                WaitingFor::ChooseOneOfBranch { player: P0, .. }
+            ));
+            runner = restore_placement(&runner, trusted);
+            runner
+                .act(GameAction::ChooseBranch { index: count })
+                .unwrap();
+            for expected in ["Unique", "Charmed"].into_iter().take(count) {
+                let WaitingFor::ChooseOneOfBranch {
+                    player,
+                    controller,
+                    ref branch_descriptions,
+                    ..
+                } = runner.state().waiting_for
+                else {
+                    panic!("each sticker has a discrete locator choice")
+                };
+                assert_eq!((player, controller), (P0, P0));
+                let index = branch_descriptions
+                    .iter()
+                    .position(|d| d == &format!("Name — {expected}"))
+                    .unwrap();
+                runner.act(GameAction::ChooseBranch { index }).unwrap();
+                let WaitingFor::ChooseOneOfBranch {
+                    player,
+                    controller,
+                    ref branch_descriptions,
+                    ..
+                } = runner.state().waiting_for
+                else {
+                    panic!("each name has its own position choice")
+                };
+                assert_eq!((player, controller), (P0, P0));
+                let index = branch_descriptions
+                    .iter()
+                    .position(|d| d == &format!("Name — {expected} at position 2"))
+                    .unwrap();
+                runner = restore_placement(&runner, trusted);
+                runner.act(GameAction::ChooseBranch { index }).unwrap();
+            }
+            assert_placement_idle(&runner);
+            let stickers = &runner.state().objects[&source].stickers;
+            assert_eq!(stickers.len(), count);
+            assert_eq!(
+                stickers
+                    .iter()
+                    .map(|s| s.locator().clone())
+                    .collect::<std::collections::HashSet<_>>()
+                    .len(),
+                count
+            );
+            assert!(stickers
+                .iter()
+                .all(|s| matches!(s, AppliedSticker::Name { position: 1, .. })));
+            assert_eq!(
+                runner.state().players[0].player_counter(&PlayerCounterKind::Ticket),
+                0
+            );
+            assert_eq!(
+                runner.state().placed_sticker_this_resolution.is_some(),
+                count > 0
+            );
+        }
+    }
+}
+
+#[test]
+fn sequential_placement_decline_clears_sticker_and_tracked_result() {
+    for accept_second in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let first = scenario.add_creature(P0, "First recipient", 2, 2).id();
+        let second = scenario.add_creature(P0, "Second recipient", 2, 2).id();
+        let placement = |id| {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PutSticker {
+                    target: TargetFilter::SpecificObject { id },
+                    kind: Some(StickerKind::Name),
+                    count: QuantityExpr::Fixed { value: 1 },
+                    max_ticket_cost: None,
+                    ticket_cost_payment: StickerTicketCostPayment::PayNormally,
+                },
+            )
+        };
+        let life = |amount| {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount,
+                    player: TargetFilter::Controller,
+                },
+            )
+        };
+        let mut tail = life(QuantityExpr::Ref {
+            qty: QuantityRef::NameStickerLetterCount {
+                stickers: NameStickerSet::ThatSticker,
+                letters: LetterQuery::UniqueVowels,
+            },
+        })
+        .sub_ability(
+            life(QuantityExpr::Ref {
+                qty: QuantityRef::TrackedSetSize,
+            })
+            .sub_ability(life(QuantityExpr::Fixed { value: 1 })),
+        );
+        tail.sub_link = SubAbilityLink::SequentialSibling;
+        let second_def = placement(second).optional().sub_ability(tail);
+        let spell = scenario
+            .add_spell_to_hand(P0, "Composed placement fixture", false)
+            .with_ability_definition(placement(first).sub_ability(second_def))
+            .id();
+        let mut runner = scenario.build();
+        select_sheet(&mut runner, UNIQUE_SHEET);
+        runner.cast(spell).commit();
+        let mut optional = 0;
+        let mut placements = 0;
+        for _ in 0..20 {
+            if runner.state().stack.is_empty()
+                && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            {
+                break;
+            }
+            let action = match runner.state().waiting_for.clone() {
+                WaitingFor::Priority { .. } => GameAction::PassPriority,
+                WaitingFor::OptionalEffectChoice { .. } => {
+                    optional += 1;
+                    assert_eq!(
+                        runner.state().objects[&first].stickers.len(),
+                        1,
+                        "first producer really placed its sticker"
+                    );
+                    assert!(
+                        runner
+                            .state()
+                            .tracked_object_sets
+                            .values()
+                            .any(|members| members == &vec![first]),
+                        "first producer really published a nonempty set"
+                    );
+                    assert!(
+                        runner.state().placed_sticker_this_resolution.is_none(),
+                        "new instruction starts empty before its decision"
+                    );
+                    GameAction::DecideOptionalEffect {
+                        accept: accept_second,
+                    }
+                }
+                WaitingFor::ChooseOneOfBranch {
+                    branch_descriptions,
+                    ..
+                } => {
+                    let name = if placements == 0 { "Unique" } else { "Charmed" };
+                    let index = branch_descriptions
+                        .iter()
+                        .position(|d| {
+                            d == &format!("Name — {name}")
+                                || d == &format!("Name — {name} at position 2")
+                        })
+                        .unwrap();
+                    GameAction::ChooseBranch { index }
+                }
+                other => panic!("composed ordinary placement: {other:?}"),
+            };
+            placements += runner
+                .act(action)
+                .unwrap()
+                .events
+                .iter()
+                .filter(|event| matches!(event, GameEvent::StickerPlaced { .. }))
+                .count();
+        }
+        assert_placement_idle(&runner);
+        assert_eq!(optional, 1);
+        assert_eq!(placements, if accept_second { 2 } else { 1 });
+        assert_eq!(
+            runner.state().players[0].life,
+            if accept_second { 24 } else { 21 }
+        );
+        assert_eq!(
+            runner.state().objects[&second].stickers.len(),
+            usize::from(accept_second)
+        );
+        assert_eq!(
+            runner.state().placed_sticker_this_resolution.is_some(),
+            accept_second
+        );
+    }
+}
+
+#[test]
+fn sticker_count_and_locator_pauses_preserve_live_trigger_amount() {
+    for trusted in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let placement = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutSticker {
+                target: TargetFilter::SelfRef,
+                kind: Some(StickerKind::Name),
+                count: QuantityExpr::UpTo {
+                    max: Box::new(QuantityExpr::Fixed { value: 2 }),
+                },
+                max_ticket_cost: None,
+                ticket_cost_payment: StickerTicketCostPayment::PayNormally,
+            },
+        )
+        .sub_ability(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                player: TargetFilter::Controller,
+            },
+        ));
+        let mut trigger = TriggerDefinition::new(TriggerMode::DamageReceived).execute(placement);
+        trigger.valid_card = Some(TargetFilter::SelfRef);
+        let recipient = scenario
+            .add_creature(P0, "Event amount fixture", 2, 9)
+            .with_trigger_definition(trigger)
+            .id();
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Lightning Bolt",
+                true,
+                "Lightning Bolt deals 3 damage to any target.",
+            )
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 0,
+            })
+            .id();
+        scenario.with_mana_pool(P0, mana(&[ManaType::Red]));
+        let mut runner = scenario.build();
+        select_sheet(&mut runner, UNIQUE_SHEET);
+        runner.cast(spell).target_object(recipient).commit();
+        let mut counts = 0;
+        let mut locators = 0;
+        let mut positions = 0;
+        for _ in 0..20 {
+            if runner.state().stack.is_empty()
+                && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            {
+                break;
+            }
+            let action = match runner.state().waiting_for.clone() {
+                WaitingFor::Priority { .. } => GameAction::PassPriority,
+                WaitingFor::ChooseOneOfBranch {
+                    branch_descriptions,
+                    trigger_context,
+                    ..
+                } => {
+                    assert!(
+                        trigger_context.is_some(),
+                        "each pause carries the actual damage event"
+                    );
+                    let index = if let Some(index) = branch_descriptions
+                        .iter()
+                        .position(|d| d == "Put 1 sticker")
+                    {
+                        counts += 1;
+                        index
+                    } else if let Some(index) = branch_descriptions
+                        .iter()
+                        .position(|d| d == "Name — Charmed")
+                    {
+                        locators += 1;
+                        index
+                    } else {
+                        positions += 1;
+                        branch_descriptions
+                            .iter()
+                            .position(|d| d == "Name — Charmed at position 2")
+                            .unwrap()
+                    };
+                    GameAction::ChooseBranch { index }
+                }
+                other => panic!("actual event-triggered fixture: {other:?}"),
+            };
+            if !matches!(action, GameAction::PassPriority) {
+                runner = restore_placement(&runner, trusted);
+            }
+            runner.act(action).unwrap();
+        }
+        assert_placement_idle(&runner);
+        assert_eq!((counts, locators, positions), (1, 1, 1));
+        assert_eq!(runner.state().objects[&recipient].damage_marked, 3);
+        assert_eq!(runner.state().objects[&recipient].stickers.len(), 1);
+        assert_eq!(
+            runner.state().players[0].life,
+            23,
+            "damage amount survives count, locator and position pauses"
+        );
+    }
+}
+
+#[test]
+fn sole_name_locator_still_prompts_for_its_position() {
+    for exhausted in [false, true] {
+        let mut scenario = GameScenario::new();
+        let source = goblin_scenario(&mut scenario, 1)[0];
+        let holder = scenario.add_creature(P0, "Prior sticker holder", 2, 2).id();
+        let mut runner = scenario.build();
+        select_sheet(&mut runner, UNIQUE_SHEET);
+        let mut used = vec![
+            name_sticker(UNIQUE_SHEET, 0, "Unique"),
+            name_sticker(UNIQUE_SHEET, 2, "Pants"),
+        ];
+        if exhausted {
+            used.push(name_sticker(UNIQUE_SHEET, 1, "Charmed"));
+        }
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&holder)
+            .unwrap()
+            .stickers = used;
+        runner.cast(source).commit();
+        let outcome = drive(
+            &mut runner,
+            source,
+            Answers::new(true, "Charmed at position 2"),
+            None,
+        );
+        if exhausted {
+            assert_eq!(
+                (
+                    outcome.branch_prompts,
+                    outcome.optional_prompts,
+                    outcome.stickers,
+                    outcome.red
+                ),
+                (0, 0, 0, 0)
+            );
+            assert!(outcome.record.is_none());
+        } else {
+            assert_eq!(
+                outcome.branch_prompts, 1,
+                "the sole locator omits only its locator decision"
+            );
+            assert_one_name_sticker(&outcome);
+            assert!(
+                matches!(&outcome.stickers_on_source[0], AppliedSticker::Name { locator, position: 1, .. } if locator.index == 1)
+            );
+            assert_eq!(outcome.red, 2);
+        }
+        assert_placement_idle(&runner);
+    }
+}
+
+#[test]
+fn carnival_battlefield_population_and_paid_sticker_use_the_placer() {
+    for paid in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario.add_creature_to_hand(P0, "Carnival Carnivore", 4, 6)
+            .with_mana_cost(ManaCost::Cost { shards: vec![ManaCostShard::Black], generic: 5 })
+            .from_oracle_text("Deathtouch\nWhen Carnival Carnivore enters, you get {TK}, then you may put a sticker on a nonland permanent you own.").id();
+        let recipient = scenario
+            .add_creature(P0, "Silvercoat Lion", 2, 2)
+            .controlled_by(P1)
+            .hexproof()
+            .id();
+        let unowned = scenario
+            .add_creature(P1, "Centaur Courser", 3, 3)
+            .controlled_by(P0)
+            .id();
+        let phased = scenario.add_creature(P0, "Hill Giant", 3, 3).id();
+        let land = scenario.add_basic_land(P0, ManaColor::Green);
+        scenario.with_mana_pool(
+            P0,
+            mana(&[
+                ManaType::Black,
+                ManaType::Colorless,
+                ManaType::Colorless,
+                ManaType::Colorless,
+                ManaType::Colorless,
+                ManaType::Colorless,
+            ]),
+        );
+        let mut runner = scenario.build();
+        select_sheet(&mut runner, UNIQUE_SHEET);
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&phased)
+            .unwrap()
+            .phase_status = engine::game::game_object::PhaseStatus::PhasedOut {
+            cause: engine::game::game_object::PhaseOutCause::Directly,
+        };
+        runner.state_mut().players[0].add_player_counters(&PlayerCounterKind::Ticket, 1);
+        runner.state_mut().players[1].add_player_counters(&PlayerCounterKind::Ticket, 5);
+        runner.cast(source).commit();
+        for _ in 0..6 {
+            if !matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+                break;
+            }
+            runner.act(GameAction::PassPriority).unwrap();
+        }
+        assert_eq!(runner.state().objects[&source].zone, Zone::Battlefield);
+        assert_eq!(
+            runner.state().players[0].player_counter(&PlayerCounterKind::Ticket),
+            2
+        );
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ));
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: true })
+            .unwrap();
+        let WaitingFor::ChooseFromZoneChoice { ref cards, .. } = runner.state().waiting_for else {
+            panic!("battlefield recipient choice")
+        };
+        assert!(cards.contains(&recipient) && cards.contains(&source));
+        assert!(!cards.contains(&unowned) && !cards.contains(&phased) && !cards.contains(&land));
+        runner
+            .act(GameAction::SelectCards {
+                cards: vec![recipient],
+            })
+            .unwrap();
+        let WaitingFor::ChooseOneOfBranch {
+            player: P0,
+            controller: P0,
+            ref branches,
+            ref branch_descriptions,
+            ..
+        } = runner.state().waiting_for
+        else {
+            panic!("placer chooses sticker")
+        };
+        let index = if paid {
+            branches
+                .iter()
+                .position(|b| {
+                    matches!(
+                        b.effect.as_ref(),
+                        Effect::ApplySticker {
+                            sticker: AppliedSticker::Ability { ticket_cost: 2, .. },
+                            pay_ticket: true,
+                            ..
+                        }
+                    )
+                })
+                .expect("affordable paid ability sticker")
+        } else {
+            branch_descriptions
+                .iter()
+                .position(|d| d == "Name — Charmed")
+                .unwrap()
+        };
+        let result = runner.act(GameAction::ChooseBranch { index }).unwrap();
+        let events = if paid {
+            result.events
+        } else {
+            let WaitingFor::ChooseOneOfBranch {
+                player: P1,
+                controller: P0,
+                ref branch_descriptions,
+                ..
+            } = runner.state().waiting_for
+            else {
+                panic!("recipient controller chooses name position")
+            };
+            let index = branch_descriptions
+                .iter()
+                .position(|d| d == "Name — Charmed at position 2")
+                .unwrap();
+            runner
+                .act(GameAction::ChooseBranch { index })
+                .unwrap()
+                .events
+        };
+        assert_eq!(events.iter().filter(|e| matches!(e, GameEvent::StickerPlaced { player_id: P0, object_id, .. } if *object_id == recipient)).count(), 1);
+        assert_placement_idle(&runner);
+        assert_eq!(
+            runner.state().players[0].player_counter(&PlayerCounterKind::Ticket),
+            if paid { 0 } else { 2 }
+        );
+        assert_eq!(
+            runner.state().players[1].player_counter(&PlayerCounterKind::Ticket),
+            5
+        );
+        assert_eq!(runner.state().objects[&recipient].stickers.len(), 1);
+    }
+}
+
+#[test]
+fn pin_collection_uses_announced_x_and_places_without_ticket_payment() {
+    let text = "When this Equipment enters, you may put an ability sticker with ticket cost X or less on it without paying that sticker's ticket cost.\nEquipped creature gets +1/+1 and has all abilities of ability stickers on this Equipment.\nEquip {2}";
+    for x in [0, 2, 4] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario
+            .add_artifact_to_hand_from_oracle(P0, "Pin Collection", text)
+            .with_subtypes(vec!["Equipment"])
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::X, ManaCostShard::White],
+                generic: 0,
+            })
+            .id();
+        let pool: Vec<_> = std::iter::once(ManaType::White)
+            .chain(std::iter::repeat_n(ManaType::Colorless, x as usize))
+            .collect();
+        scenario.with_mana_pool(P0, mana(&pool));
+        let mut runner = scenario.build();
+        select_sheet(&mut runner, "Playable Delusionary Hydra");
+        runner.cast(source).x(x).commit();
+        let mut entered = false;
+        let mut optional = 0;
+        for _ in 0..14 {
+            entered |= runner.state().objects[&source].zone == Zone::Battlefield;
+            if entered
+                && runner.state().stack.is_empty()
+                && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            {
+                break;
+            }
+            let action = match runner.state().waiting_for.clone() {
+                WaitingFor::Priority { .. } => GameAction::PassPriority,
+                WaitingFor::OptionalEffectChoice { .. } => {
+                    optional += 1;
+                    GameAction::DecideOptionalEffect { accept: true }
+                }
+                WaitingFor::ChooseOneOfBranch {
+                    player,
+                    controller,
+                    branches,
+                    ..
+                } => {
+                    assert_eq!((player, controller), (P0, P0));
+                    assert!(branches.iter().all(|branch| matches!(branch.effect.as_ref(), Effect::ApplySticker { sticker: AppliedSticker::Ability { ticket_cost, .. }, pay_ticket: false, .. } if u32::from(*ticket_cost) <= x)));
+                    let index = branches
+                        .iter()
+                        .position(|branch| {
+                            matches!(
+                                branch.effect.as_ref(),
+                                Effect::ApplySticker {
+                                    sticker: AppliedSticker::Ability { ticket_cost: 4, .. },
+                                    ..
+                                }
+                            )
+                        })
+                        .expect("X4 admits the four-ticket ability");
+                    GameAction::ChooseBranch { index }
+                }
+                other => panic!("actual X-cost equipment ETB: {other:?}"),
+            };
+            runner.act(action).unwrap();
+        }
+        assert!(entered);
+        assert_placement_idle(&runner);
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        assert_eq!(
+            runner.state().players[0].player_counter(&PlayerCounterKind::Ticket),
+            0
+        );
+        assert_eq!(optional, usize::from(x > 0));
+        let stickers = &runner.state().objects[&source].stickers;
+        if x == 0 {
+            assert!(stickers.is_empty());
+        } else {
+            assert_eq!(stickers.len(), 1);
+            assert!(
+                matches!(stickers[0], AppliedSticker::Ability { ticket_cost, .. } if u32::from(ticket_cost) == x)
+            );
+        }
+    }
+}
+
+#[test]
+fn finishing_move_retargets_only_its_two_printed_targets() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Finishing Move", false, FINISHING_MOVE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 2,
+        })
+        .id();
+    let redirect = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Redirect",
+            true,
+            "You may choose new targets for target spell.",
+        )
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+            generic: 0,
+        })
+        .id();
+    let original_source = scenario.add_creature(P0, "Runeclaw Bear", 2, 2).id();
+    let original_victim = scenario.add_creature(P1, "Centaur Courser", 3, 3).id();
+    let new_source = scenario.add_creature(P0, "Hill Giant", 3, 3).id();
+    let new_victim = scenario.add_creature(P1, "Pillarfield Ox", 2, 4).id();
+    scenario.with_mana_pool(
+        P0,
+        mana(&[
+            ManaType::Green,
+            ManaType::Colorless,
+            ManaType::Colorless,
+            ManaType::Blue,
+            ManaType::Blue,
+        ]),
+    );
+    let mut runner = scenario.build();
+    select_sheet(&mut runner, UNIQUE_SHEET);
+    runner
+        .cast(spell)
+        .target_objects(&[original_source, original_victim])
+        .commit();
+    let entry = runner.state().stack.last().unwrap().id;
+    runner.cast(redirect).target_object(entry).commit();
+    let mut retargets = 0;
+    let mut optionals = 0;
+    for _ in 0..20 {
+        if runner.state().stack.is_empty()
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        {
+            break;
+        }
+        let action = match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            WaitingFor::RetargetChoice {
+                current_targets,
+                slots,
+                slot_pools,
+                ..
+            } => {
+                assert_eq!(
+                    current_targets,
+                    &vec![
+                        TargetRef::Object(original_source),
+                        TargetRef::Object(original_victim)
+                    ]
+                );
+                assert_eq!(slots.len(), 2);
+                assert_eq!(slot_pools.len(), 2);
+                assert!(slot_pools[0].contains(&TargetRef::Object(new_source)));
+                assert!(slot_pools[1].contains(&TargetRef::Object(new_victim)));
+                retargets += 1;
+                GameAction::RetargetSpell {
+                    new_targets: vec![
+                        Some(TargetRef::Object(new_source)),
+                        Some(TargetRef::Object(new_victim)),
+                    ],
+                }
+            }
+            WaitingFor::OptionalEffectChoice { source_id, .. } => {
+                optionals += 1;
+                GameAction::DecideOptionalEffect {
+                    accept: *source_id == redirect,
+                }
+            }
+            other => panic!("retarget production entry: {other:?}"),
+        };
+        runner.act(action).unwrap();
+    }
+    assert_placement_idle(&runner);
+    assert_eq!(retargets, 1);
+    assert!(optionals >= 1);
+    assert_eq!(runner.state().objects[&new_victim].damage_marked, 3);
+    for id in [original_source, original_victim, new_source] {
+        assert_eq!(runner.state().objects[&id].damage_marked, 0);
+    }
+    assert_eq!(
+        runner.state().players[0].player_counter(&PlayerCounterKind::Ticket),
+        2
+    );
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+}
+
+#[test]
+fn scampire_remembered_live_origin_keeps_its_ticket_when_population_becomes_empty() {
+    for choice in [AutoMayChoice::Accept, AutoMayChoice::Decline] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario
+            .add_creature_to_hand(P0, "Scampire", 1, 3)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Black],
+                generic: 2,
+            })
+            .from_oracle_text(SCAMPIRE)
+            .id();
+        let recipient = scenario
+            .add_creature_to_graveyard(P0, "Runeclaw Bear", 2, 2)
+            .id();
+        scenario.with_mana_pool(
+            P0,
+            mana(&[ManaType::Black, ManaType::Colorless, ManaType::Colorless]),
+        );
+        let mut runner = scenario.build();
+        select_sheet(&mut runner, UNIQUE_SHEET);
+        runner.cast(source).commit();
+        for _ in 0..6 {
+            if runner.state().objects[&source].zone == Zone::Battlefield {
+                break;
+            }
+            runner.act(GameAction::PassPriority).unwrap();
+        }
+        assert_eq!(runner.state().objects[&source].zone, Zone::Battlefield);
+        assert!(runner
+            .state()
+            .stack
+            .iter()
+            .any(|entry| matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })));
+        let admitted = runner.state().clone();
+        for _ in 0..6 {
+            if matches!(
+                runner.state().waiting_for,
+                WaitingFor::OptionalEffectChoice { .. }
+            ) {
+                break;
+            }
+            runner.act(GameAction::PassPriority).unwrap();
+        }
+        let WaitingFor::OptionalEffectChoice {
+            may_trigger_key: Some(ref key),
+            ..
+        } = runner.state().waiting_for
+        else {
+            panic!("actual live keyed Scampire origin");
+        };
+        assert_eq!(key.source_id, source);
+        assert_eq!(
+            runner.state().players[0].player_counter(&PlayerCounterKind::Ticket),
+            1
+        );
+        runner
+            .act(GameAction::DecideOptionalEffectAndRemember {
+                choice,
+                scope: MayTriggerAutoChoiceScope::ExactInstance,
+            })
+            .unwrap();
+        let preferences = runner.state().may_trigger_auto_choices.clone();
+        assert_eq!(preferences.len(), 1);
+        for _ in 0..10 {
+            if runner.state().stack.is_empty()
+                && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            {
+                break;
+            }
+            let action = match &runner.state().waiting_for {
+                WaitingFor::Priority { .. } => GameAction::PassPriority,
+                WaitingFor::ChooseOneOfBranch {
+                    branch_descriptions,
+                    ..
+                } => GameAction::ChooseBranch {
+                    index: branch_descriptions
+                        .iter()
+                        .position(|d| d == "Name — Charmed" || d == "Name — Charmed at position 2")
+                        .unwrap(),
+                },
+                other => panic!("remembered live placement: {other:?}"),
+            };
+            runner.act(action).unwrap();
+        }
+        assert_placement_idle(&runner);
+        assert_eq!(
+            runner.state().objects[&recipient].stickers.len(),
+            usize::from(choice == AutoMayChoice::Accept)
+        );
+        // Reuse the actual admitted origin, carrying only the preference established
+        // by its real prompt. Its recipient leaves before that saved trigger resolves.
+        let mut empty = GameRunner::from_state(admitted);
+        empty.state_mut().may_trigger_auto_choices = preferences;
+        let mut events = Vec::new();
+        move_to_zone(empty.state_mut(), recipient, Zone::Exile, &mut events);
+        assert!(events.iter().any(
+            |e| matches!(e, GameEvent::ZoneChanged { object_id, .. } if *object_id == recipient)
+        ));
+        for _ in 0..8 {
+            if empty.state().stack.is_empty()
+                && matches!(empty.state().waiting_for, WaitingFor::Priority { .. })
+            {
+                break;
+            }
+            assert!(
+                matches!(empty.state().waiting_for, WaitingFor::Priority { .. }),
+                "empty remembered branch must finish without a choice"
+            );
+            empty.act(GameAction::PassPriority).unwrap();
+        }
+        assert_placement_idle(&empty);
+        assert_eq!(
+            empty.state().players[0].player_counter(&PlayerCounterKind::Ticket),
+            1
+        );
+        assert!(empty.state().objects[&recipient].stickers.is_empty());
+        assert!(empty.state().placed_sticker_this_resolution.is_none());
+    }
+}
+
+#[test]
+fn typed_paid_sticker_siblings_require_tickets_and_preserve_free_placement() {
+    for kind in [StickerKind::Ability, StickerKind::PowerToughness] {
+        for (tickets, payment) in [
+            (0, StickerTicketCostPayment::PayNormally),
+            (2, StickerTicketCostPayment::PayNormally),
+            (0, StickerTicketCostPayment::WithoutPaying),
+        ] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let recipient = scenario.add_creature(P0, "Runeclaw Bear", 2, 2).id();
+            let spell = scenario
+                .add_spell_to_hand(P0, "Typed sticker fixture", false)
+                .with_ability_definition(
+                    AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::PutSticker {
+                            target: TargetFilter::SpecificObject { id: recipient },
+                            kind: Some(kind),
+                            count: QuantityExpr::Fixed { value: 1 },
+                            max_ticket_cost: Some(QuantityExpr::Fixed { value: 2 }),
+                            ticket_cost_payment: payment,
+                        },
+                    )
+                    .optional(),
+                )
+                .id();
+            let mut runner = scenario.build();
+            select_sheet(&mut runner, "Playable Delusionary Hydra");
+            runner.state_mut().players[0].add_player_counters(&PlayerCounterKind::Ticket, tickets);
+            runner.cast(spell).commit();
+            let mut placements = 0;
+            let mut optional = 0;
+            for _ in 0..10 {
+                if runner.state().stack.is_empty()
+                    && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+                {
+                    break;
+                }
+                let action = match runner.state().waiting_for {
+                    WaitingFor::Priority { .. } => GameAction::PassPriority,
+                    WaitingFor::OptionalEffectChoice { .. } => {
+                        optional += 1;
+                        GameAction::DecideOptionalEffect { accept: true }
+                    }
+                    WaitingFor::ChooseOneOfBranch { .. } => GameAction::ChooseBranch { index: 0 },
+                    ref other => panic!("typed payment control: {other:?}"),
+                };
+                placements += runner
+                    .act(action)
+                    .unwrap()
+                    .events
+                    .iter()
+                    .filter(|e| matches!(e, GameEvent::StickerPlaced { .. }))
+                    .count();
+            }
+            let placed = tickets == 2 || payment == StickerTicketCostPayment::WithoutPaying;
+            assert_placement_idle(&runner);
+            assert_eq!(optional, usize::from(placed));
+            assert_eq!(placements, usize::from(placed));
+            assert_eq!(
+                runner.state().objects[&recipient].stickers.len(),
+                usize::from(placed)
+            );
+            assert_eq!(
+                runner.state().players[0].player_counter(&PlayerCounterKind::Ticket),
+                0
+            );
+        }
+    }
+}
+
+#[test]
+fn fixed_count_placement_preserves_replacement_stamp_across_each_nested_pause() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let recipient = scenario.add_creature(P0, "Runeclaw Bear", 2, 2).id();
+    let spell = scenario
+        .add_spell_to_hand(P0, "Fixed-count placement fixture", false)
+        .with_ability_definition(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutSticker {
+                target: TargetFilter::SpecificObject { id: recipient },
+                kind: Some(StickerKind::Name),
+                count: QuantityExpr::Fixed { value: 2 },
+                max_ticket_cost: None,
+                ticket_cost_payment: StickerTicketCostPayment::PayNormally,
+            },
+        ))
+        .id();
+    let mut runner = scenario.build();
+    select_sheet(&mut runner, UNIQUE_SHEET);
+    runner.cast(spell).commit();
+    let stamp = AppliedReplacementKey::Floating { index: 17 };
+    runner
+        .state_mut()
+        .stack
+        .iter_mut()
+        .last()
+        .unwrap()
+        .ability_mut()
+        .unwrap()
+        .replacement_applied
+        .insert(stamp);
+    let mut placements = 0;
+    let mut pauses = 0;
+    for _ in 0..12 {
+        if runner.state().stack.is_empty()
+            && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+        {
+            break;
+        }
+        let action = match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } => GameAction::PassPriority,
+            WaitingFor::ChooseOneOfBranch {
+                replacement_applied,
+                branch_descriptions,
+                parent_occurrences,
+                ..
+            } => {
+                assert!(
+                    replacement_applied.contains(&stamp),
+                    "fixed-count expansion must carry the incoming replacement provenance"
+                );
+                let occurrences = parent_occurrences.occurrences();
+                assert_eq!(
+                    occurrences
+                        .iter()
+                        .filter(|(target, _)| matches!(target, TargetRef::Object(_)))
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                    vec![(
+                        TargetRef::Object(recipient),
+                        Some(ObjectIncarnationRef::from_object(
+                            &runner.state().objects[&recipient]
+                        ))
+                    )]
+                );
+                assert!(occurrences.iter().all(|(target, _)| match target {
+                    TargetRef::Object(id) => *id == recipient,
+                    TargetRef::Player(player) => *player == P0,
+                }));
+                pauses += 1;
+                let name = if placements == 0 { "Unique" } else { "Charmed" };
+                let index = branch_descriptions
+                    .iter()
+                    .position(|d| {
+                        d == &format!("Name — {name}")
+                            || d == &format!("Name — {name} at position 2")
+                    })
+                    .unwrap();
+                GameAction::ChooseBranch { index }
+            }
+            other => panic!("fixed-count placement: {other:?}"),
+        };
+        placements += runner
+            .act(action)
+            .unwrap()
+            .events
+            .iter()
+            .filter(|e| matches!(e, GameEvent::StickerPlaced { .. }))
+            .count();
+    }
+    assert_placement_idle(&runner);
+    assert_eq!((pauses, placements), (4, 2));
+    let stickers = &runner.state().objects[&recipient].stickers;
+    assert_eq!(stickers.len(), 2);
+    assert!(
+        matches!(&stickers[0], AppliedSticker::Name { locator, position: 1, .. } if locator.index == 0)
+    );
+    assert!(
+        matches!(&stickers[1], AppliedSticker::Name { locator, position: 1, .. } if locator.index == 1)
+    );
+}
+
+#[test]
+fn angelic_harold_auto_accept_keeps_untargeted_optional_root_trigger() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario.add_creature_to_hand(P0, "Angelic Harold", 2, 2)
+        .with_mana_cost(ManaCost::Cost { shards: vec![ManaCostShard::White, ManaCostShard::Blue], generic: 1 })
+        .from_oracle_text("Flying\nWhen Angelic Harold enters, you may put a name sticker on a nonland permanent you own.\nEach creature you control with three or more words in its name gets +1/+1.").id();
+    let recipient = scenario.add_creature(P0, "Silvercoat Lion", 2, 2).id();
+    scenario.with_mana_pool(
+        P0,
+        mana(&[ManaType::White, ManaType::Blue, ManaType::Colorless]),
+    );
+    let mut runner = scenario.build();
+    select_sheet(&mut runner, UNIQUE_SHEET);
+    runner.cast(source).commit();
+    assert_eq!(runner.state().objects[&source].zone, Zone::Stack);
+    let committed = runner.state().clone();
+    // Inline Oracle fixtures have no printed metadata for SameCard. Replaying
+    // the same actual entry preserves its dynamically generated exact origin;
+    // only the preference learned at the live prompt is transferred.
+    for replayed in [false, true] {
+        let mut entered = false;
+        let mut optional = 0;
+        let mut recipients = 0;
+        let mut placements = 0;
+        for _ in 0..20 {
+            if !entered && runner.state().objects[&source].zone == Zone::Battlefield {
+                entered = true;
+                let trigger = runner.state().stack.iter().find(|entry| entry.source_id == source && matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })).expect("remembered accept must admit the real optional ETB trigger, despite zero announcement slots");
+                let ability = trigger.ability().unwrap();
+                assert!(
+                    ability.optional && ability.sub_ability.is_none(),
+                    "reach the optional-root/no-subability feasibility branch"
+                );
+                assert_eq!(
+                    ability.target_choice_timing,
+                    engine::types::ability::TargetChoiceTiming::Resolution
+                );
+            }
+            if entered
+                && runner.state().stack.is_empty()
+                && matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            {
+                break;
+            }
+            let action = match &runner.state().waiting_for {
+                WaitingFor::Priority { .. } => GameAction::PassPriority,
+                WaitingFor::OptionalEffectChoice {
+                    may_trigger_key: Some(key),
+                    same_card_may_trigger_choice_available,
+                    ..
+                } => {
+                    assert!(
+                        !replayed,
+                        "the learned exact-instance preference must replace this decision"
+                    );
+                    assert_eq!(key.source_id, source);
+                    assert!(
+                        !same_card_may_trigger_choice_available,
+                        "no fabricated printed provenance"
+                    );
+                    optional += 1;
+                    GameAction::DecideOptionalEffectAndRemember {
+                        choice: AutoMayChoice::Accept,
+                        scope: MayTriggerAutoChoiceScope::ExactInstance,
+                    }
+                }
+                WaitingFor::ChooseFromZoneChoice {
+                    cards,
+                    count,
+                    up_to,
+                    ..
+                } => {
+                    assert_eq!(cards.len(), 2);
+                    assert!(cards.contains(&source) && cards.contains(&recipient));
+                    assert_eq!((*count, *up_to), (1, false));
+                    recipients += 1;
+                    GameAction::SelectCards {
+                        cards: vec![recipient],
+                    }
+                }
+                WaitingFor::ChooseOneOfBranch {
+                    player,
+                    controller,
+                    branch_descriptions,
+                    ..
+                } => {
+                    assert_eq!((*player, *controller), (P0, P0));
+                    GameAction::ChooseBranch {
+                        index: branch_descriptions
+                            .iter()
+                            .position(|d| {
+                                d == "Name — Charmed" || d == "Name — Charmed at position 2"
+                            })
+                            .unwrap(),
+                    }
+                }
+                other => {
+                    panic!("real optional-root entry must not announce a recipient: {other:?}")
+                }
+            };
+            placements += runner.act(action).unwrap().events.iter().filter(|e| matches!(e, GameEvent::StickerPlaced { player_id: P0, object_id, .. } if *object_id == recipient)).count();
+        }
+        assert_placement_idle(&runner);
+        assert!(entered);
+        assert_eq!(
+            (optional, recipients, placements),
+            (usize::from(!replayed), 1, 1)
+        );
+        assert!(
+            matches!(&runner.state().objects[&recipient].stickers[0], AppliedSticker::Name { locator, position: 1, .. } if locator.index == 1 && locator.sheet == UNIQUE_SHEET)
+        );
+        assert!(runner.state().objects[&source].stickers.is_empty());
+        assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+        assert_eq!(runner.state().may_trigger_auto_choices.len(), 1);
+        if !replayed {
+            let learned = runner.state().may_trigger_auto_choices.clone();
+            runner = GameRunner::from_state(committed.clone());
+            runner.state_mut().may_trigger_auto_choices = learned;
+        }
+    }
 }

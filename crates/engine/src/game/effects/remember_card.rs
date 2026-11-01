@@ -1,4 +1,5 @@
 use crate::game::filter::{matches_target_filter, FilterContext};
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::targeting::resolve_tracked_set_sentinel;
 use crate::types::ability::{ChosenAttribute, Effect, EffectError, ResolvedAbility};
 use crate::types::events::GameEvent;

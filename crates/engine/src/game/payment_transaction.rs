@@ -566,6 +566,7 @@ pub(crate) fn owns_action(state: &GameState, action: &GameAction) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::game_object::ObjectIncarnationRefExt;
 
     use crate::game::deck_loading::DeckEntry;
     use crate::game::zones::create_object;

@@ -451,8 +451,9 @@ fn targeted_activation_surfaces_reveal_cost_after_target_selection() {
     let source = scenario
         .add_creature(P0, "Targeted Reveal Cost", 1, 1)
         .with_ability_definition(targeted_damage_cost_ability(AbilityCost::Reveal {
-            count: 1,
+            count: QuantityExpr::Fixed { value: 1 },
             filter: Some(TargetFilter::Typed(TypedFilter::creature())),
+            shared_quality: None,
         }))
         .id();
     let revealed = scenario
@@ -466,7 +467,12 @@ fn targeted_activation_surfaces_reveal_cost_after_target_selection() {
     let WaitingFor::PayCost { kind, choices, .. } = runner.state().waiting_for.clone() else {
         panic!("target declaration must surface the reveal cost");
     };
-    assert_eq!(kind, PayCostKind::Reveal);
+    assert_eq!(
+        kind,
+        PayCostKind::Reveal {
+            shared_quality: None
+        }
+    );
     assert!(choices.contains(&revealed));
 
     runner

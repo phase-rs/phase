@@ -977,10 +977,10 @@ mod tests {
         let mut rng = SmallRng::seed_from_u64(0); // any seed: rank/score/probability are seed-invariant here
         let selection = crate::search::choose_action_with_session_diagnostic(
             state,
-            P0,
             &config,
             &mut rng,
             &crate::AiSession::arc_from_game(state),
+            &engine::ai_support::AiDecisionContract::issue(state, P0),
         );
         let receipt = selection
             .receipt
@@ -1340,7 +1340,7 @@ mod tests {
     #[test]
     fn two_headed_giant_teammate_evasion_target_is_judged_by_the_attacking_teams_authority() {
         let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
-        state.phase = Phase::DeclareAttackers;
+        state.phase = Phase::BeginCombat;
         state.active_player = PlayerId(1);
         let source = creature(&mut state, P0, "Source");
         let futile = creature(&mut state, P0, "Futile Teammate Target");
@@ -1374,7 +1374,7 @@ mod tests {
         assert!(matches!(
             effect_timing_verdict(&state, &target_candidate(ready), &AiConfig::default()),
             PolicyVerdict::Score { delta: 0.0, reason }
-                if reason.kind == "effect_timing_no_pair_blockable_evasion_target"
+                if reason.kind == "effect_timing_evasion_target_na"
         ));
     }
 

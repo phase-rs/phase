@@ -169,6 +169,8 @@ pub fn end_continuous_effect_candidates(
                 None,
                 &candidate.cost,
                 SpecialAction::EndContinuousEffect,
+                // Live payment carries `ManaAbilityResume::EndContinuousEffect`.
+                casting::PausedManaPayment::Resumable,
             )
         })
         .collect()
@@ -274,6 +276,8 @@ pub fn handle_end_continuous_effect(
         None,
         &candidate.cost,
         SpecialAction::EndContinuousEffect,
+        // Live payment carries `ManaAbilityResume::EndContinuousEffect`.
+        casting::PausedManaPayment::Resumable,
     ) {
         return Err(EngineError::ActionNotAllowed(
             "Cannot pay the cost to end that continuous effect".to_string(),

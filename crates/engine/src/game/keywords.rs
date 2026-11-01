@@ -77,6 +77,14 @@ pub fn has_keyword_kind(obj: &GameObject, kind: KeywordKind) -> bool {
     obj.keywords.iter().any(|keyword| keyword.kind() == kind)
 }
 
+/// Whether generic keyword removal strips this candidate.
+/// CR 702.11d + CR 702.11e: losing hexproof removes all qualified hexproof
+/// abilities. Other removal operands keep their existing same-variant scope.
+pub(crate) fn keyword_matches_removal(candidate: &Keyword, removed: &Keyword) -> bool {
+    std::mem::discriminant(candidate) == std::mem::discriminant(removed)
+        || (removed == &Keyword::Hexproof && candidate.kind() == KeywordKind::Hexproof)
+}
+
 /// CR 603.10 + CR 608.2i + CR 400.7: what a filter door holds when it asks
 /// about an object's keywords. The door declares it; the authority never
 /// infers liveness from an address.
@@ -406,6 +414,29 @@ pub(crate) fn resolve_keyword_mana_cost(
     }
 }
 
+/// CR 118.6 + CR 202.1b: "An ability can also have an unpayable cost if its cost
+/// is based on the mana cost of an object with no mana cost." True when `cost` is
+/// a placeholder bound to the recipient's MANA COST (`SelfManaCost`,
+/// `SelfManaCostReduced`) and the recipient has none, so the concretized
+/// `ManaCost::NoCost` would otherwise read as "pay nothing" on the activated-
+/// ability payment path. `SelfManaValue` is excluded: a no-mana-cost object's
+/// mana value is 0 (CR 202.3a), which is a payable {0}.
+pub(crate) fn self_mana_cost_is_unpayable(
+    state: &GameState,
+    object_id: ObjectId,
+    cost: &ManaCost,
+) -> bool {
+    match cost {
+        ManaCost::SelfManaCost | ManaCost::SelfManaCostReduced { .. } => matches!(
+            resolve_keyword_mana_cost(state, object_id, cost),
+            ManaCost::NoCost
+        ),
+        // A concrete cost is payable as written; `SelfManaValue` concretizes to
+        // the recipient's mana value, which is 0 for a no-mana-cost object.
+        ManaCost::NoCost | ManaCost::Cost { .. } | ManaCost::SelfManaValue => false,
+    }
+}
+
 /// CR 601.2f + CR 602.1a: Resolve `SelfManaCost` / `SelfManaValue` placeholders
 /// anywhere in an `AbilityCost` tree before affordability or payment. The mana
 /// payment path treats those placeholders as free, so every payable cost must
@@ -477,21 +508,24 @@ pub(crate) fn concretize_encore_mana_value_in_ability_cost(
     }
 }
 
-/// CR 702.97a / CR 702.128a / CR 702.129a / CR 702.141a + CR 602.1a: Resolve a
-/// `ManaCost::SelfManaCost` or `ManaCost::SelfManaValue` payload carried by a
-/// granted graveyard activated keyword to the recipient card's concrete mana
-/// sub-cost. Encore / Scavenge / Embalm / Eternalize are graveyard *activated*
-/// abilities whose mana sub-cost is paid through `AbilityCost::Mana`, and that
-/// payment path treats self-referential placeholders as free — so they must be
-/// concretized before the activated ability is synthesized. Non-self-referential
-/// keywords (printed Embalm `{3}{W}`, Encore `{5}`, or any other keyword) pass
-/// through unchanged.
+/// CR 702.84a / CR 702.97a / CR 702.128a / CR 702.129a / CR 702.141a + CR 602.1a:
+/// Resolve a `ManaCost::SelfManaCost` or `ManaCost::SelfManaValue` payload
+/// carried by a granted graveyard activated keyword to the recipient card's
+/// concrete mana sub-cost. Unearth / Encore / Scavenge / Embalm / Eternalize are
+/// graveyard *activated* abilities whose mana sub-cost is paid through
+/// `AbilityCost::Mana`, and that payment path treats self-referential
+/// placeholders as free — so they must be concretized before the activated
+/// ability is synthesized. Non-self-referential keywords (printed Embalm
+/// `{3}{W}`, Encore `{5}`, or any other keyword) pass through unchanged.
 pub fn resolve_self_cost_graveyard_activated_keyword(
     state: &GameState,
     object_id: ObjectId,
     keyword: &Keyword,
 ) -> Keyword {
     match keyword {
+        Keyword::Unearth(cost) => {
+            Keyword::Unearth(resolve_keyword_mana_cost(state, object_id, cost))
+        }
         Keyword::Encore(cost) => Keyword::Encore(resolve_keyword_mana_cost(state, object_id, cost)),
         Keyword::Scavenge(cost) => {
             Keyword::Scavenge(resolve_keyword_mana_cost(state, object_id, cost))
@@ -1384,6 +1418,72 @@ mod tests {
             "Test".to_string(),
             Zone::Battlefield,
         )
+    }
+
+    #[test]
+    fn lose_hexproof_removal_matches_every_quality() {
+        use crate::types::keywords::HexproofFilter;
+
+        // CR 702.11d/e: losing hexproof removes every qualified hexproof ability.
+        for candidate in [
+            Keyword::Hexproof,
+            Keyword::HexproofFrom(HexproofFilter::Color(ManaColor::Black)),
+            Keyword::HexproofFrom(HexproofFilter::Color(ManaColor::Blue)),
+            Keyword::HexproofFrom(HexproofFilter::CardType("Artifact".into())),
+            Keyword::HexproofFrom(HexproofFilter::Quality("multicolored".into())),
+            Keyword::HexproofFrom(HexproofFilter::ChosenColor),
+        ] {
+            assert!(
+                keyword_matches_removal(&candidate, &Keyword::Hexproof),
+                "lose hexproof must remove {candidate:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn lose_hexproof_removal_preserves_unrelated_and_reverse_boundary() {
+        use crate::types::keywords::{HexproofFilter, WardCost};
+
+        let qualified = Keyword::HexproofFrom(HexproofFilter::Color(ManaColor::Black));
+        assert!(keyword_matches_removal(
+            &Keyword::Hexproof,
+            &Keyword::Hexproof
+        ));
+        assert!(keyword_matches_removal(&qualified, &qualified));
+        assert!(!keyword_matches_removal(&Keyword::Hexproof, &qualified));
+        for candidate in [
+            Keyword::Shroud,
+            Keyword::Ward(WardCost::Mana(ManaCost::generic(2))),
+            Keyword::Protection(ProtectionTarget::Color(ManaColor::White)),
+            Keyword::Indestructible,
+            Keyword::Flying,
+        ] {
+            assert!(!keyword_matches_removal(&candidate, &Keyword::Hexproof));
+        }
+    }
+
+    #[test]
+    fn lose_hexproof_removal_preserves_existing_variant_scope() {
+        use crate::types::keywords::WardCost;
+
+        assert!(keyword_matches_removal(
+            &Keyword::Ward(WardCost::PayLife(3)),
+            &Keyword::Ward(WardCost::Mana(ManaCost::generic(2))),
+        ));
+        assert_eq!(Keyword::Banding.kind(), KeywordKind::Unknown);
+        assert_eq!(Keyword::Toxic(1).kind(), KeywordKind::Unknown);
+        assert!(keyword_matches_removal(
+            &Keyword::Toxic(2),
+            &Keyword::Toxic(1)
+        ));
+        assert!(!keyword_matches_removal(
+            &Keyword::Banding,
+            &Keyword::Toxic(1)
+        ));
+        assert!(!keyword_matches_removal(
+            &Keyword::Toxic(1),
+            &Keyword::Banding
+        ));
     }
 
     #[test]
