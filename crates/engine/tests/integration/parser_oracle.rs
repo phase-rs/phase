@@ -874,7 +874,9 @@ fn render_net_effect_carrier_census() {
         );
     }
 
-    let oracle_src = crate::source_census::code_lines(include_str!("../../src/parser/oracle.rs"));
+    let oracle_src = crate::source_census::code_lines(include_str!(
+        "../../../phase-parser/src/parser/oracle.rs"
+    ));
     let net = census_body(&oracle_src, "fn render_effect_descriptions(");
     let mut arms: Vec<String> = Vec::new();
     for (i, _) in net.match_indices("Effect::") {

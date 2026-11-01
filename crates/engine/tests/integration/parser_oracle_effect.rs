@@ -498,7 +498,7 @@ fn reveal_until_x_matched_set_into_graveyard_old_stickfingers() {
 /// (`ability.optional_player.is_none()`).
 #[test]
 fn the_they_may_detector_write_is_guarded_by_an_is_none_precedence_check() {
-    let text = include_str!("../../src/parser/oracle_trigger.rs");
+    let text = include_str!("../../../phase-parser/src/parser/oracle_trigger.rs");
     let lines: Vec<&str> = text.lines().collect();
     let needle = "ability.optional_player = Some(";
     let guard = "optional_player.is_none()";

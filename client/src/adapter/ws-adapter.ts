@@ -23,6 +23,8 @@ import type {
   StateWithheldNotice,
   SubmitResult,
   FormatConfig,
+  TakebackEvent,
+  TakebackResolution,
   WithheldFrame,
 } from "./types";
 import type {
@@ -1507,6 +1509,8 @@ export type WsAdapterEvent =
   | { type: "reconnecting"; attempt: number; maxAttempts: number }
   /** `inGame` is false when the session resumed into a hosting lobby (GameCreated). */
   | { type: "reconnected"; inGame: boolean }
+  /** The authority sent this seat a fresh bootstrap; it replays a still-open takeback vote after this event. */
+  | { type: "bootstrapDelivered" }
   | { type: "reconnectFailed" }
   | { type: "terminalDelivery"; delivery: FullTerminalDelivery }
   | { type: "terminalUnavailable"; message: string }
@@ -1523,12 +1527,7 @@ export type WsAdapterEvent =
   | { type: "contestProgress"; contest: number; clicks: [PlayerId, number][] }
   | { type: "conceded"; player: PlayerId }
   | { type: "timerUpdate"; player: PlayerId; remainingSeconds: number }
-  | { type: "takebackRequested"; requester: PlayerId; requesterName: string }
-  | { type: "takebackResolved"; approved: boolean; resolvedBy: PlayerId | null }
-  /** The server refused a fire-and-forget request (e.g. `RequestTakeback`).
-   *  Distinct from `error`, which the native session treats as terminal:
-   *  this one is survivable and carries a server-authored reason to show. */
-  | { type: "requestRejected"; reason: string };
+  | TakebackEvent;
 
 type WsAdapterEventListener = (event: WsAdapterEvent) => void;
 
@@ -1579,7 +1578,8 @@ const NATIVE_AI_RECONNECT_POLICY: ReconnectPolicy = {
  */
 export class WebSocketAdapter implements EngineAdapter {
   readonly supportsMatchConcede = true;
-  readonly supportsServerRewind = true;
+  readonly supportsTakeback = true;
+  readonly supportsTurnRewind = true;
   private ws: PhaseSocketTransport | null = null;
   /**
    * The single cached engine pair, rebuilt (and re-stamped) once per inbound
@@ -2886,6 +2886,7 @@ export class WebSocketAdapter implements EngineAdapter {
         if (nativeReconnect) {
           if (!this.acceptFullSessionKey(data.full_key)) break;
         }
+        this.emit({ type: "bootstrapDelivered" });
         if (this.reconnectInFlight) {
           this.completeReconnect(true);
         } else if (this.hostWaitingForOpponent) {
@@ -3090,6 +3091,7 @@ export class WebSocketAdapter implements EngineAdapter {
           // The notice is this client's only seat assignment; GamePage resets the reconnect state on it, so it precedes the failure.
           const seat = data.withheld.data.your_player;
           this._playerId = seat;
+          this.emit({ type: "bootstrapDelivered" });
           this.emit({ type: "playerIdentity", playerId: seat, opponentName: null });
           this.rejectInitialization(new AdapterError(AdapterErrorCode.REQUEST_FAILED, data.reason, true));
           if (this.reconnectInFlight) {
@@ -3101,6 +3103,7 @@ export class WebSocketAdapter implements EngineAdapter {
         }
         if (!this.acceptFollowUpFullSessionKey(data.full_key)) break;
         if (data.withheld.type === "GameStarted") {
+          this.emit({ type: "bootstrapDelivered" });
           if (this.reconnectInFlight) this.completeReconnect(true);
         } else {
           const pending = this.submission.take(msg.command_id);
@@ -3346,20 +3349,21 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "TakebackRequested": {
-        const data = msg.data as { requester: PlayerId; requester_name: string };
+        const data = msg.data as { requester: PlayerId; requester_name: string; voters: PlayerId[] };
         this.emit({
           type: "takebackRequested",
           requester: data.requester,
           requesterName: data.requester_name,
+          voters: data.voters,
         });
         break;
       }
 
       case "TakebackResolved": {
-        const data = msg.data as { approved: boolean; resolved_by?: PlayerId | null };
+        const data = msg.data as { resolution: TakebackResolution; resolved_by?: PlayerId | null };
         this.emit({
           type: "takebackResolved",
-          approved: data.approved,
+          resolution: data.resolution,
           resolvedBy: data.resolved_by ?? null,
         });
         break;
