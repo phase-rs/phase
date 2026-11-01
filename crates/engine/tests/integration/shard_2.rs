@@ -28,6 +28,7 @@ mod added_untap_step_is_not_a_turn_start;
 mod additional_combat_anchor_and_recipient;
 mod additional_phase_recipient_kinds;
 mod advanced_reconstruction_regression;
+mod adventure_offer_castable_faces;
 mod affinity_plural_subtype;
 mod agency_coroner_suspected_cost_paid;
 mod ai_decision_contract;

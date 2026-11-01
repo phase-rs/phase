@@ -89,6 +89,7 @@ mod each_opponent_after_elimination_cost_rider;
 mod each_player_they_control_scope;
 mod eagles_delayed_result_phase3;
 mod ebondeath_not_named_died_condition;
+mod edgar_king_of_figaro_two_headed_coin;
 mod edgar_markov_eminence_command_zone;
 mod electrostatic_bolt;
 mod elemental_spectacle_regression;

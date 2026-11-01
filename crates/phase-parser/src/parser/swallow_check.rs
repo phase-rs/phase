@@ -358,7 +358,7 @@ fn detect_replacement(
     // `StaticMode::EntersWithAdditionalCounters` and carries no ReplacementDefinition at
     // all. Completeness grep over the type definitions:
     //
-    //   $ rg '^    \w*Enter\w*\s*[,{(]' crates/engine/src/types/
+    //   $ rg '^    \w*Enter\w*\s*[,{(]' crates/engine/src/types/ crates/phase-ast/src/types/
     //     StaticMode::EntersWithAdditionalCounters   StaticMode::CantEnterBattlefieldFrom
     //     ContinuousModification::AddCounterOnEnter  Effect::AddPendingEntersModifications
     //
@@ -5570,7 +5570,7 @@ fn detect_duration_this_turn(
     //     These arms are the COMPLETE closed set of `*ThisTurn` variants, generated from
     //     the type definitions rather than hand-picked:
     //
-    //       $ rg '^    (\w*ThisTurn\w*)\s*[,{(]' crates/engine/src/types/
+    //       $ rg '^    (\w*ThisTurn\w*)\s*[,{(]' crates/engine/src/types/ crates/phase-ast/src/types/
     //         QuantityRef       20      TriggerCondition   8
     //         ParsedCondition   18      FilterProp         7
     //         AbilityCondition   3      StaticCondition    2

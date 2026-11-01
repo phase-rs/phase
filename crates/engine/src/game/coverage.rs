@@ -12772,6 +12772,12 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 effective_lower.contains("losing unspent mana")
                     && effective_lower.contains("causes that player to lose that much life")
             }
+            // CR 705.3: Edgar's Two-Headed Coin. Anchor on both the window and
+            // the indicated result so an unrelated flip line can't false-match.
+            StaticMode::WinFirstCoinFlipSetEachTurn => {
+                effective_lower.contains("the first time you flip one or more coins each turn")
+                    && effective_lower.contains("come up heads and you win those flips")
+            }
             StaticMode::CanAttackWithDefender => {
                 effective_lower.contains("as though it didn't have defender")
             }
@@ -17991,7 +17997,7 @@ mod tests {
         //
         //     ./scripts/fetch-token-sets.sh   # populates the gitignored input
         //     cargo run --bin tokens-gen -- --input data/mtgjson/sets --output /tmp/kt.toml
-        //     cmp /tmp/kt.toml crates/engine/data/known-tokens.toml
+        //     cmp /tmp/kt.toml crates/phase-ast/data/known-tokens.toml
         assert_eq!(summary.supported_tokens, summary.total_tokens);
         assert_eq!(summary.parsed_rules_text_tokens, summary.rules_text_tokens);
         assert!(

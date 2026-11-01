@@ -10369,6 +10369,7 @@ fn static_mode_reads_filter_population(
         | StaticMode::PayLifeAsColoredMana { .. }
         | StaticMode::StepEndUnspentMana { .. }
         | StaticMode::UnspentManaLossCausesLifeLoss
+        | StaticMode::WinFirstCoinFlipSetEachTurn
         | StaticMode::CanAttackWithDefender
         | StaticMode::IgnoreLandwalkForBlocking { .. }
         | StaticMode::CanActivateAbilitiesAsThoughHaste
