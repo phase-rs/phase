@@ -37,9 +37,18 @@ fn wrens_run_vanquisher_cast_by_revealing_elf() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
-    // Provide 2 lands for {1}{G} base cost.
+    // CR 601.2h: five lands, so BOTH listed options are payable and the choice
+    // is really a choice. With only the base {1}{G} available the pay-{3} option
+    // is unpayable, so the announcement is narrowed to the reveal and paid
+    // without a prompt — covered by
+    // `wrens_run_vanquisher_auto_reveals_when_the_mana_leg_is_unpayable`.
     let forest = add_forest(&mut scenario);
     let wastes = add_wastes(&mut scenario);
+    let spare_lands = [
+        add_wastes(&mut scenario),
+        add_wastes(&mut scenario),
+        add_wastes(&mut scenario),
+    ];
 
     // An Elf card in hand to reveal.
     let elf = scenario
@@ -83,7 +92,7 @@ fn wrens_run_vanquisher_cast_by_revealing_elf() {
     match runner.state().waiting_for.clone() {
         WaitingFor::OptionalCostChoice { cost, .. } => {
             assert!(
-                matches!(cost, engine::types::ability::AdditionalCost::Choice(_, _)),
+                matches!(cost, engine::types::ability::AdditionalCost::Choice(_)),
                 "must offer AdditionalCost::Choice"
             );
         }
@@ -134,7 +143,9 @@ fn wrens_run_vanquisher_cast_by_revealing_elf() {
         "revealed Elf must remain in hand (CR 701.20b)"
     );
 
-    // CR 118.3 & CR 601.2h: Assert base cost {1}{G} was paid with both lands tapped.
+    // CR 118.3 & CR 601.2h: only the base {1}{G} was paid — revealing costs no
+    // mana, so exactly two of the five lands are tapped and the three spares
+    // stay up.
     assert!(
         runner.state().objects[&forest].tapped,
         "Forest must be tapped to pay {{1}}{{G}}"
@@ -143,6 +154,12 @@ fn wrens_run_vanquisher_cast_by_revealing_elf() {
         runner.state().objects[&wastes].tapped,
         "Wastes must be tapped to pay {{1}}{{G}}"
     );
+    for land in spare_lands {
+        assert!(
+            !runner.state().objects[&land].tapped,
+            "revealing an Elf pays no mana, so {land:?} must stay untapped"
+        );
+    }
 
     // CR 701.20a: A CardsRevealed event must be emitted for the revealed Elf.
     assert!(
@@ -241,6 +258,80 @@ fn wrens_run_vanquisher_cast_by_paying_three() {
         Zone::Battlefield,
         "Wren's Run Vanquisher must resolve onto the battlefield"
     );
+}
+
+/// CR 601.2h: the mana leg can be the unpayable one. With only the base {1}{G}
+/// available the pay-{3} option is not announceable, so the reveal — the sole
+/// payable option — is paid with no prompt. The mirror of the no-Elf test below,
+/// and the only card-visible consequence of narrowing LATER options rather than
+/// just the first.
+#[test]
+fn wrens_run_vanquisher_auto_reveals_when_the_mana_leg_is_unpayable() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // Exactly the printed {1}{G} — nothing left for the {3}.
+    let forest = add_forest(&mut scenario);
+    let wastes = add_wastes(&mut scenario);
+
+    let elf = scenario
+        .add_creature_to_hand(P0, "Llanowar Elves", 1, 1)
+        .with_subtypes(vec!["Elf"])
+        .id();
+
+    let mut builder = scenario.add_creature_to_hand_from_oracle(
+        P0,
+        "Wren's Run Vanquisher",
+        3,
+        3,
+        WRENS_RUN_VANQUISHER_ORACLE,
+    );
+    builder.with_mana_cost(ManaCost::Cost {
+        generic: 1,
+        shards: vec![ManaCostShard::Green],
+    });
+    builder.with_subtypes(vec!["Elf", "Warrior"]);
+    let spell = builder.id();
+
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting Wren's Run Vanquisher must be accepted");
+
+    // No announcement: one payable option leaves nothing to choose.
+    match runner.state().waiting_for.clone() {
+        WaitingFor::PayCost {
+            kind: PayCostKind::Reveal { .. },
+            choices,
+            ..
+        } => assert_eq!(
+            choices,
+            vec![elf],
+            "the reveal is the only payable option, so it is paid directly"
+        ),
+        other => panic!("expected the reveal payment with no announcement, got {other:?}"),
+    }
+
+    runner
+        .act(GameAction::SelectCards { cards: vec![elf] })
+        .expect("revealing the Elf must complete the cost");
+    assert_eq!(
+        runner.state().objects[&spell].zone,
+        Zone::Stack,
+        "the cast must complete"
+    );
+    for land in [forest, wastes] {
+        assert!(
+            runner.state().objects[&land].tapped,
+            "only the printed {{1}}{{G}} is paid ({land:?})"
+        );
+    }
 }
 
 #[test]

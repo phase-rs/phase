@@ -3,7 +3,7 @@
 //! second player-chosen X.
 
 use engine::game::scenario::{GameScenario, P0};
-use engine::types::ability::{AbilityCost, AdditionalCost};
+use engine::types::ability::AbilityCost;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -44,15 +44,17 @@ fn kentaro_offers_and_pays_the_matching_samurai_mana_value() {
 
     match &runner.state().waiting_for {
         WaitingFor::OptionalCostChoice { cost, .. } => assert!(matches!(
-            cost,
-            AdditionalCost::Choice(
-                AbilityCost::Mana {
-                    cost: ManaCost::Cost {
-                        shards,
-                        generic: 3,
+            cost.choice_options(),
+            Some(
+                [
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            shards,
+                            generic: 3,
+                        },
                     },
-                },
-                _
+                    _,
+                ]
             ) if shards.is_empty()
         )),
         other => panic!("expected Kentaro alternative-cost choice, got {other:?}"),

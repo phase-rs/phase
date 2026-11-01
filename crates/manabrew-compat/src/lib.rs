@@ -1134,7 +1134,7 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 94] = [
     UnsupportedCapability {
         code: "local.activation-cost-choice-unsupported",
         area: "prompts",
-        reason: "GameAction::ChooseActivationCostBranch picks among several costs an activated ability offers. Same shape and same cause as local.cost-prevention-unsupported's branching half: a pick-one over labelled costs, which is ChooseFromSelection. Two codes exist because the engine has two states; the gap is one.",
+        reason: "GameAction::ChooseActivationCostBranch picks among several costs an activated ability offers, and GameAction::ChooseAdditionalCostBranch picks among the several additional costs a spell offers (CR 601.2b). Same shape and same cause as local.cost-prevention-unsupported's branching half: a pick-one over labelled costs, which is ChooseFromSelection. Two codes exist because the engine has two states; the gap is one.",
         suggested_protocol_extension: "None needed upstream — adapter work; close it together with local.cost-prevention-unsupported.",
     },
     UnsupportedCapability {
@@ -2930,7 +2930,11 @@ pub fn convert_available_action(
         GameAction::ChooseUnlessCostBranch { .. } => {
             AvailableActionConversion::Unsupported("local.cost-prevention-unsupported")
         }
-        GameAction::ChooseActivationCostBranch { .. } => {
+        // CR 118.12a / CR 601.2b: both pick one cost out of several the engine
+        // offers — an activation's disjunctive cost and a spell's N-way choice
+        // of additional costs. Same prompt shape, same gap.
+        GameAction::ChooseActivationCostBranch { .. }
+        | GameAction::ChooseAdditionalCostBranch { .. } => {
             AvailableActionConversion::Unsupported("local.activation-cost-choice-unsupported")
         }
         GameAction::PayCombatTax { .. } => {

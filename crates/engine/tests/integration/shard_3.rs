@@ -82,6 +82,7 @@ mod dream_salvage_target_opponent_discards;
 mod dredgers_insight_mill_from_among;
 mod druid_of_purification_destroy_chosen_4780;
 mod duggan_private_detective_punch;
+mod dusk_mangler_three_way_additional_cost;
 mod duskmantle_seer_each_player_reveal;
 mod dwarven_armorer_counter_choice;
 mod dynamic_x_cost_reduction;

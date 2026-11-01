@@ -120,6 +120,47 @@ describe("OptionalCostModalContent (issue #454)", () => {
     });
   });
 
+  // CR 118.8 + CR 601.2b (issue #10442): a three-way choice of additional
+  // costs dispatches the INDEX of the announced cost. `DecideOptionalCost
+  // { pay }` reaches only the first and the last, so the middle option is
+  // unreachable without this action.
+  it("announces the middle option of a three-way choice by index", () => {
+    const waitingFor: OptionalCostWaitingFor = {
+      type: "OptionalCostChoice",
+      data: {
+        player: 0,
+        cost: {
+          type: "Choice",
+          data: [
+            { type: "Sacrifice", count: 1 },
+            { type: "Discard", count: { type: "Fixed", value: 1 } },
+            { type: "PayLife", amount: { type: "Fixed", value: 4 } },
+          ],
+        },
+        times_kicked: 0,
+        pending_cast: {} as OptionalCostWaitingFor["data"]["pending_cast"],
+      },
+    };
+    const dispatch = renderModal(waitingFor);
+
+    // CR 601.2f: a mandatory choice has no abort affordance.
+    expect(screen.queryByRole("button", { name: "Close" })).toBeNull();
+
+    const discardButton = screen.getByRole("button", { name: /discard/i });
+    fireEvent.click(discardButton);
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "ChooseAdditionalCostBranch",
+      data: { index: 1 },
+    });
+
+    dispatch.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: /life/i }));
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "ChooseAdditionalCostBranch",
+      data: { index: 2 },
+    });
+  });
+
   // CR 702.174g: the one promised gift that is not an object. The label switch
   // falls back to "a card" for anything it does not name, so an unlabelled kind
   // does not look unlabelled — it looks like a DIFFERENT promise (#7286).

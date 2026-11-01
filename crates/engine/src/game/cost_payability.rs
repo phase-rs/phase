@@ -12,7 +12,8 @@
 //! This is the authoritative gate consulted before:
 //!   - Offering an `OptionalCostChoice` prompt (if unpayable, the prompt is skipped).
 //!   - Paying a `Required` additional cost (if unpayable, the spell cannot be cast).
-//!   - Falling through an `AdditionalCost::Choice(A, B)` when A is unpayable.
+//!   - Narrowing an `AdditionalCost::Choice` to the options a caster can pay,
+//!     and paying the sole survivor without an announcement (CR 601.2b).
 //!   - Activating an ability whose cost requires a choice-of-object.
 //!
 //! The predicate is pure: it reads `&GameState` and never mutates. Delegate to

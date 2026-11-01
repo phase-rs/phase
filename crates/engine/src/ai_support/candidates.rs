@@ -2243,18 +2243,36 @@ pub fn candidate_actions_broad_with_probe(
             }
             actions
         }
-        WaitingFor::OptionalCostChoice { player, .. } => vec![
-            candidate(
-                GameAction::DecideOptionalCost { pay: true },
-                TacticalClass::Selection,
-                Some(*player),
-            ),
-            candidate(
-                GameAction::DecideOptionalCost { pay: false },
-                TacticalClass::Selection,
-                Some(*player),
-            ),
-        ],
+        // CR 601.2b: a `Choice` of additional costs has one candidate per
+        // offered option, whatever the count — the engine advertises exactly the
+        // answer surface the prompt takes, so a two-option choice is not
+        // answered one way here and another way by the UI. A card's own options
+        // were already narrowed to the payable ones (CR 601.2h); the two legs of
+        // the synthesized CR 118.9 election are both answerable by definition.
+        // Every other announcement shape is a two-outcome pay/decline decision.
+        WaitingFor::OptionalCostChoice { player, cost, .. } => match cost.choice_options() {
+            Some(options) => (0..options.len())
+                .map(|index| {
+                    candidate(
+                        GameAction::ChooseAdditionalCostBranch { index },
+                        TacticalClass::Selection,
+                        Some(*player),
+                    )
+                })
+                .collect(),
+            None => vec![
+                candidate(
+                    GameAction::DecideOptionalCost { pay: true },
+                    TacticalClass::Selection,
+                    Some(*player),
+                ),
+                candidate(
+                    GameAction::DecideOptionalCost { pay: false },
+                    TacticalClass::Selection,
+                    Some(*player),
+                ),
+            ],
+        },
         // CR 702.47a–e: splice another eligible card onto the spell, or finish.
         WaitingFor::SpliceOffer {
             player, eligible, ..

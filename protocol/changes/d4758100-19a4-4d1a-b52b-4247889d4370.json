@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "AdditionalCost::Choice becomes a LIST of alternative additional costs (CR 118.8 + CR 601.2b): a card may list three, which the former two-field tuple variant could not represent (Dusk Mangler, 'sacrifice a creature, discard a card, or pay 4 life'). Two-option values keep their {\"type\":\"Choice\",\"data\":[a,b]} encoding, so a previous full-game or P2P peer decodes those unchanged but cannot decode a three-or-more-option list. GameAction gains ChooseAdditionalCostBranch { index }, which announces WHICH listed cost is paid (DecideOptionalCost { pay } reaches only the first and the last); a previous peer rejects that action, leaving an N-way announcement unanswerable. GameAction::ChooseAdditionalCostBranch is appended after the existing variants, so the derived GameActionKind ordering the deterministic replay sort depends on is unchanged."
+}

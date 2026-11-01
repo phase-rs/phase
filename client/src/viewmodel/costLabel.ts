@@ -671,12 +671,20 @@ export function formatAbilityCost(cost: SerializedAbilityCost): string {
 }
 
 /**
- * A single option in the OptionalCostChoice modal. `pay` maps to
- * `DecideOptionalCost { pay: true }`, `decline` to `{ pay: false }`. The two
- * `id`s are stable so `OptionalCostModal` can dispatch the right action.
+ * The action an `AdditionalCostOption` dispatches. `pay` maps to
+ * `DecideOptionalCost { pay: true }` and `decline` to `{ pay: false }`;
+ * `option:<index>` maps to `ChooseAdditionalCostBranch { index }`, which an
+ * N-way `Choice` of additional costs needs because no bool can name a third
+ * option (CR 601.2b).
+ */
+export type AdditionalCostOptionId = "pay" | "decline" | `option:${number}`;
+
+/**
+ * A single option in the OptionalCostChoice modal. The `id`s are stable so
+ * `OptionalCostModal` can dispatch the right action.
  */
 export interface AdditionalCostOption {
-  id: "pay" | "decline";
+  id: AdditionalCostOptionId;
   label: string;
   description?: string;
 }
@@ -783,13 +791,18 @@ export function additionalCostChoices(
           { id: "decline", label: "Cancel" },
         ],
       };
+    // CR 601.2b: one button per listed cost, in printed order, and no decline
+    // leg — a choice of additional costs is part of the total cost (CR 601.2f).
+    // The engine filters a card's own options down to the payable ones
+    // (CR 601.2h); the two-element CR 118.9 election it synthesizes is not
+    // filtered that way, so its printed-cost leg can still fail at payment.
     case "Choice":
       return {
         title: "Choose additional cost",
-        options: [
-          { id: "pay", label: formatAbilityCost(cost.data[0]) },
-          { id: "decline", label: formatAbilityCost(cost.data[1]) },
-        ],
+        options: cost.data.map((option, index): AdditionalCostOption => ({
+          id: `option:${index}`,
+          label: formatAbilityCost(option),
+        })),
       };
   }
 }
