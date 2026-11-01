@@ -193,6 +193,7 @@ mod pass_priority_structural_legality;
 mod period_confirm_rows;
 mod perpetual_gains;
 mod perrie_the_pulverizer_attack_trigger_6219;
+mod petals_of_insight;
 mod play_trace;
 mod power_fist_combat_damage_regression;
 mod preacher_of_the_schism_life_gates;

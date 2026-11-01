@@ -42,13 +42,13 @@ use crate::types::ability::{
     AttackSubject, CardTypeSetSource, CastCostModifier, CastFromZoneDriver,
     CastPermissionConstraint, CastingPermission, CoinFlipRun, CombatHistoryScope, Comparator,
     ConjureSource, ContinuousEffectOnset, ContinuousModification, ControllerRef, CountBinding,
-    DamageChannel, DamageSource, DelayedTriggerCondition, Duration, Effect, EffectScope,
-    ExiledSpellRider, FilterProp, GameRestriction, LibraryPosition, MultiTargetSpec,
-    NameStickerSet, ObjectProperty, ObjectScope, PermissionGrantee, PlayerFilter, PlayerRelation,
-    PreventionAmount, PreventionScope, PropertyAggregate, PtValue, QuantityExpr, QuantityRef,
-    RestrictionPlayerScope, RoundingMode, SpellStackToGraveyardReplacement, StaticCondition,
-    StaticDefinition, SubAbilityLink, TargetChoiceTiming, TargetFilter, TargetSelectionMode,
-    TypeFilter, TypedFilter,
+    DamageChannel, DamageSource, DelayedTriggerCondition, DigRestOrder, DigSource, Duration,
+    Effect, EffectScope, ExiledSpellRider, FilterProp, GameRestriction, LibraryPosition,
+    MultiTargetSpec, NameStickerSet, ObjectProperty, ObjectScope, PermissionGrantee, PlayerFilter,
+    PlayerRelation, PreventionAmount, PreventionScope, PropertyAggregate, PtValue, QuantityExpr,
+    QuantityRef, RestrictionPlayerScope, RoundingMode, SpellStackToGraveyardReplacement,
+    StaticCondition, StaticDefinition, SubAbilityLink, TargetChoiceTiming, TargetFilter,
+    TargetSelectionMode, TypeFilter, TypedFilter,
 };
 use crate::types::ability_visit::nodes_mut::visit_ability_def;
 use crate::types::ability_visit::DefinitionNodeMut;
@@ -3735,6 +3735,67 @@ pub(super) fn resolve_those_tokens_anaphors(defs: &mut [AbilityDefinition]) {
         let prev = &prev_rest[i - 1];
         let cur = &mut cur_rest[0];
         rewrite_those_tokens_from_antecedent(&mut cur.effect, &prev.effect);
+    }
+}
+
+/// CR 701.20e + CR 608.2c: In "Look at the top N cards ... You may put those cards
+/// on the bottom of your library in any order" (Petals of Insight / Lim-Dûl's Vault),
+/// "those cards" refers to the cards looked at by the preceding private peek Dig.
+/// The subsequent placement on the bottom of the library lowers as an imperative
+/// `PutAtLibraryPosition` targeting `TrackedSet` (the noun "those cards").
+/// Rebind it to a `DigSource::PriorLook` Dig with `keep_count: Some(0)` and
+/// `rest_destination: Some(Zone::Library)` so it reads `state.private_look_ids`
+/// and routes all looked-at cards to the bottom of the library via the shared
+/// rest-partition pipeline.
+pub(super) fn resolve_prior_look_library_bottom_anaphors(defs: &mut [AbilityDefinition]) {
+    for i in 1..defs.len() {
+        let prev_is_bare_peek = matches!(
+            &*defs[i - 1].effect,
+            Effect::Dig {
+                keep_count: Some(0),
+                destination: None,
+                rest_destination: None,
+                source,
+                ..
+            } if source.is_library()
+        );
+        if !prev_is_bare_peek {
+            continue;
+        }
+
+        if let Effect::PutAtLibraryPosition {
+            position: LibraryPosition::Bottom,
+            target,
+            ..
+        } = &*defs[i].effect
+        {
+            if matches!(
+                target,
+                TargetFilter::TrackedSet { .. } | TargetFilter::ParentTarget
+            ) {
+                *defs[i].effect = Effect::Dig {
+                    player: TargetFilter::Controller,
+                    count: QuantityExpr::Fixed { value: 0 },
+                    keep_count: Some(0),
+                    keep_count_expr: None,
+                    up_to: false,
+                    filter: TargetFilter::Any,
+                    destination: None,
+                    rest_destination: Some(Zone::Library),
+                    rest_split_top_count: None,
+                    rest_order: DigRestOrder::Preserve,
+                    reveal: false,
+                    enter_tapped: false,
+                    enters_attacking: false,
+                    source: DigSource::PriorLook,
+                };
+                if defs[i].description.is_none() {
+                    defs[i].description = Some(
+                        "Put those cards on the bottom of your library in any order".to_string(),
+                    );
+                }
+            }
+        }
     }
 }
 
