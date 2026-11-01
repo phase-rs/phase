@@ -31,8 +31,8 @@ use super::oracle_ir::effect_chain::{
     ClauseDisposition, ClauseIr, DieResultBranchIr, EffectChainIr,
 };
 use super::oracle_ir::trigger::{
-    effect_chain_has_terminal_roll_die, FirstTimeLimit, ReflexiveParent, ReflexiveParentIr,
-    TriggerBody, TriggerIr, TriggerModifiers, TriggerNodeIr,
+    effect_chain_has_terminal_roll_die, FirstTimeLimit, ReflexiveConnector, ReflexiveParent,
+    ReflexiveParentIr, TriggerBody, TriggerIr, TriggerModifiers, TriggerNodeIr,
 };
 use super::oracle_modal::try_parse_inline_modal_ir;
 use super::oracle_nom::bridge::nom_on_lower;
@@ -1975,7 +1975,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                     cost,
                     payment_chain: None,
                 },
-                connector,
+                connector: ReflexiveConnector::Condition(connector),
                 effect_chain,
                 modal: None,
             })))
@@ -2306,6 +2306,27 @@ fn filter_uses_departure_attachment_prop(filter: &TargetFilter) -> bool {
     }
 }
 
+/// CR 603.12: a reflexive triggered ability keyed on an event — created as the
+/// parent's next instruction, it triggers only on that event having occurred
+/// earlier during the same resolution.
+pub(crate) fn reflexive_event_trigger(
+    event: &TriggerDefinition,
+    body: AbilityDefinition,
+) -> AbilityDefinition {
+    AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::WhenNextEvent {
+                trigger: Box::new(event.clone()),
+                or_trigger: None,
+                lifetime: crate::types::ability::DelayedTriggerLifetime::Reflexive,
+            },
+            effect: Box::new(body),
+            uses_tracked_set: false,
+        },
+    )
+}
+
 pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
     let mut def = ir.partial_def.clone();
     let modifiers = &ir.modifiers;
@@ -2333,7 +2354,9 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
                 modifiers,
                 reflexive_die_results,
             );
-            reflexive_ability.condition = Some(reflexive.connector.clone());
+            if let ReflexiveConnector::Condition(connector) = &reflexive.connector {
+                reflexive_ability.condition = Some(connector.clone());
+            }
 
             if let Some(modal) = &reflexive.modal {
                 reflexive_ability = reflexive_ability.with_modal(
@@ -2376,6 +2399,12 @@ pub(crate) fn lower_trigger_ir(ir: &TriggerIr) -> TriggerDefinition {
                 // flag and no decline prompt.
                 ReflexiveParent::Mandatory { instruction } => {
                     lower_trigger_effect_chain(instruction, modifiers, parent_die_results)
+                }
+            };
+            let reflexive_ability = match &reflexive.connector {
+                ReflexiveConnector::Condition(_) => reflexive_ability,
+                ReflexiveConnector::Event(event) => {
+                    reflexive_event_trigger(event, reflexive_ability)
                 }
             };
             parent_ability.sub_ability = Some(Box::new(reflexive_ability));
@@ -22642,6 +22671,44 @@ fn try_parse_counter_removed(lower: &str) -> Option<(TriggerMode, TriggerDefinit
     )))
     .parse(lower)
     .ok()?;
+    // CR 122.1 + CR 603.12: active voice — "you remove a [type] counter [from
+    // <subject>]" ("When you remove a counter this way", Immard, the
+    // Stormcleaver). With no "from" subject any object's removal matches.
+    if let Ok((rest, counter_type)) = (
+        tag::<_, _, OracleError<'_>>("you remove "),
+        alt((tag("a "), tag("an "), tag("one or more "))),
+        opt(terminated(
+            nom_primitives::parse_counter_type_typed,
+            tag::<_, _, OracleError<'_>>(" "),
+        )),
+        alt((tag("counters"), tag("counter"))),
+    )
+        .map(|(_, _, counter_type, _)| counter_type)
+        .parse(after_prefix)
+    {
+        let mut def = make_base();
+        def.mode = TriggerMode::CounterRemoved;
+        if let Ok((subject, _)) = tag::<_, _, OracleError<'_>>(" from ").parse(rest) {
+            // A subject rider this arm doesn't model ("… from this card while
+            // it's exiled") declines rather than being dropped.
+            let (filter, remainder) =
+                parse_single_subject(subject.trim(), &mut ParseContext::default());
+            if !remainder.trim().is_empty() {
+                return None;
+            }
+            def.valid_card = Some(filter);
+        } else if !rest.trim().is_empty() {
+            return None;
+        }
+        if let Some(counter_type) = counter_type {
+            def.description = Some(format!("{} counter", counter_type.as_str()));
+            def.counter_filter = Some(CounterTriggerFilter {
+                counter_type,
+                threshold: None,
+            });
+        }
+        return Some((TriggerMode::CounterRemoved, def));
+    }
     let (after_a, ()) = value((), tag::<_, _, OracleError<'_>>("a "))
         .parse(after_prefix)
         .ok()?;

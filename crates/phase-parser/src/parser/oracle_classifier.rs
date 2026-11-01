@@ -273,6 +273,23 @@ pub(crate) fn should_defer_spell_to_effect(lower: &str) -> bool {
         return false;
     }
 
+    // CR 111.3 + CR 604.3a: "Create a … token. Its power is equal to … and its
+    // toughness is equal to …" defines the created token's power and toughness.
+    // A spell's characteristic-defining ability can't define another object's
+    // characteristics, so the sentence belongs to the creation instruction and
+    // the whole line is the spell's effect chain (Broken Visage).
+    if has_token_pt_followup_sentence(lower) {
+        return true;
+    }
+
+    // Digital-only Alchemy: a quoted ability that cards "perpetually gain" is the
+    // grant's payload, not a static ability of the spell itself, so the line is
+    // the spell's effect chain (Circadian Struggle: "… those cards perpetually
+    // gain \"This spell costs {1} less to cast.\"").
+    if scan_contains(lower, "perpetually gain \"") || scan_contains(lower, "perpetually gains \"") {
+        return true;
+    }
+
     if is_spell_resolution_cast_from_hand_free(lower) {
         return true;
     }
@@ -322,6 +339,30 @@ fn is_spell_resolution_cast_from_hand_free(lower: &str) -> bool {
         && (scan_contains(lower, "without paying its mana cost")
             || scan_contains(lower, "without paying their mana cost")
             || scan_contains(lower, "without paying their mana costs"))
+}
+
+/// CR 111.3: a sentence after a token-creation sentence that the effect
+/// parser's token P/T follow-up grammar reads in full.
+fn has_token_pt_followup_sentence(lower: &str) -> bool {
+    let Ok((_, sentences)) = nom::multi::separated_list1(
+        tag::<_, _, OracleError<'_>>(". "),
+        alt((take_until(". "), nom::combinator::rest)),
+    )
+    .parse(lower) else {
+        return false;
+    };
+    let mut after_creation = false;
+    sentences.into_iter().any(|sentence| {
+        let followup = after_creation
+            && super::oracle_effect::sequence::parse_token_source_power_toughness_followup(
+                sentence,
+            )
+            .is_some();
+        after_creation |= tag::<_, _, OracleError<'_>>("create ")
+            .parse(sentence)
+            .is_ok();
+        followup
+    })
 }
 
 fn is_self_spell_cost_modification(lower: &str) -> bool {
