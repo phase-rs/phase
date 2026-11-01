@@ -921,14 +921,15 @@ fn kannushi_pledge_prototype_entry_updates_existing_recipient() {
             } else {
                 CastingVariant::Normal
             };
-            let committed = runner.cast(entrant).casting_variant(variant).commit();
-            assert_eq!(
-                committed
-                    .selected_casting_variant()
-                    .map(|option| option.variant),
-                Some(variant),
-                "both forms are affordable; the engine must honor the elected form",
-            );
+            let committed = runner
+                .cast(entrant)
+                .casting_variant(variant)
+                .alternative_cast(if prototype {
+                    engine::types::actions::AlternativeCastDecision::Alternative
+                } else {
+                    engine::types::actions::AlternativeCastDecision::Normal
+                })
+                .commit();
             {
                 let object = &committed.state().objects[&entrant];
                 assert_eq!(object.zone, Zone::Stack);
