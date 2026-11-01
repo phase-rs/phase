@@ -35,7 +35,8 @@ enum GeneratorLayout {
 
 impl PackGenerator {
     /// A generator whose every booster comes from one set.
-    pub fn new(set_pool: LimitedSetPool) -> Self {
+    pub fn new(mut set_pool: LimitedSetPool) -> Self {
+        crate::set_pool::normalize_pack_variants(&set_pool.code, &mut set_pool.pack_variants);
         Self {
             pools: vec![set_pool],
             layout: GeneratorLayout::UniformByRound(vec![0]),
@@ -46,9 +47,12 @@ impl PackGenerator {
     /// order. `pools` supplies the distinct sets; `sequence` names which of
     /// them fills each booster, so the same set may appear more than once.
     pub fn for_sequence(
-        pools: Vec<LimitedSetPool>,
+        mut pools: Vec<LimitedSetPool>,
         sequence: &[String],
     ) -> Result<Self, DraftError> {
+        for pool in &mut pools {
+            crate::set_pool::normalize_pack_variants(&pool.code, &mut pool.pack_variants);
+        }
         if sequence.is_empty() {
             return Err(DraftError::InvalidPackSequence {
                 reason: "a draft must open at least one pack".to_string(),
@@ -100,12 +104,15 @@ impl PackGenerator {
     /// not to select one of its entries, so no selectable pool can evade
     /// preflight at the construction boundary.
     pub fn for_chaos(
-        pools: Vec<LimitedSetPool>,
+        mut pools: Vec<LimitedSetPool>,
         candidate_codes: &[String],
         assignments: &[Vec<String>],
         seat_count: u8,
         pack_count: u8,
     ) -> Result<Self, DraftError> {
+        for pool in &mut pools {
+            crate::set_pool::normalize_pack_variants(&pool.code, &mut pool.pack_variants);
+        }
         if candidate_codes.is_empty() {
             return Err(DraftError::InvalidPackSequence {
                 reason: "a Chaos draft must name at least one candidate set".to_string(),
@@ -1043,5 +1050,165 @@ mod tests {
         let mut rng = ChaCha8Rng::seed_from_u64(1);
 
         assert_eq!(select_sheet_cards(&mut rng, &sheet, 2), vec![0, 0]);
+    }
+
+    #[test]
+    fn unglued_pool_generates_uniform_ten_card_packs() {
+        let sheet_card = |name: &str, rarity: Rarity| SheetCard {
+            name: name.to_string(),
+            set_code: "UGL".to_string(),
+            collector_number: name.to_string(),
+            rarity,
+            weight: 1,
+            colors: vec![],
+            cmc: 0,
+            type_line: String::new(),
+            draft_effect: None,
+        };
+
+        let mut sheets = std::collections::BTreeMap::new();
+        sheets.insert(
+            "basic".to_string(),
+            SheetDefinition {
+                cards: vec![sheet_card("Forest", Rarity::Common)],
+                total_weight: 1,
+                ..Default::default()
+            },
+        );
+        sheets.insert(
+            "common".to_string(),
+            SheetDefinition {
+                cards: (0..10)
+                    .map(|i| sheet_card(&format!("Common {i}"), Rarity::Common))
+                    .collect(),
+                total_weight: 10,
+                ..Default::default()
+            },
+        );
+        sheets.insert(
+            "uncommon".to_string(),
+            SheetDefinition {
+                cards: (0..5)
+                    .map(|i| sheet_card(&format!("Uncommon {i}"), Rarity::Uncommon))
+                    .collect(),
+                total_weight: 5,
+                ..Default::default()
+            },
+        );
+        sheets.insert(
+            "rare".to_string(),
+            SheetDefinition {
+                cards: vec![sheet_card("Rare Card", Rarity::Rare)],
+                total_weight: 1,
+                ..Default::default()
+            },
+        );
+
+        // Raw MTGJSON variants: variant 0 has 2 uncommons (size 10), variant 1 has 1 uncommon (size 9)
+        let unglued_raw = LimitedSetPool {
+            code: "UGL".to_string(),
+            name: "Unglued".to_string(),
+            release_date: None,
+            pack_variants: vec![
+                PackVariant {
+                    contents: vec![
+                        PackSlot {
+                            slot: "basic".to_string(),
+                            count: 1,
+                            choices: vec![WeightedSheetChoice {
+                                sheet: "basic".to_string(),
+                                weight: 1,
+                            }],
+                        },
+                        PackSlot {
+                            slot: "common".to_string(),
+                            count: 6,
+                            choices: vec![WeightedSheetChoice {
+                                sheet: "common".to_string(),
+                                weight: 1,
+                            }],
+                        },
+                        PackSlot {
+                            slot: "rare".to_string(),
+                            count: 1,
+                            choices: vec![WeightedSheetChoice {
+                                sheet: "rare".to_string(),
+                                weight: 1,
+                            }],
+                        },
+                        PackSlot {
+                            slot: "uncommon".to_string(),
+                            count: 2,
+                            choices: vec![WeightedSheetChoice {
+                                sheet: "uncommon".to_string(),
+                                weight: 1,
+                            }],
+                        },
+                    ],
+                    weight: 3,
+                },
+                PackVariant {
+                    contents: vec![
+                        PackSlot {
+                            slot: "basic".to_string(),
+                            count: 1,
+                            choices: vec![WeightedSheetChoice {
+                                sheet: "basic".to_string(),
+                                weight: 1,
+                            }],
+                        },
+                        PackSlot {
+                            slot: "common".to_string(),
+                            count: 6,
+                            choices: vec![WeightedSheetChoice {
+                                sheet: "common".to_string(),
+                                weight: 1,
+                            }],
+                        },
+                        PackSlot {
+                            slot: "rare".to_string(),
+                            count: 1,
+                            choices: vec![WeightedSheetChoice {
+                                sheet: "rare".to_string(),
+                                weight: 1,
+                            }],
+                        },
+                        PackSlot {
+                            slot: "uncommon".to_string(),
+                            count: 1,
+                            choices: vec![WeightedSheetChoice {
+                                sheet: "uncommon".to_string(),
+                                weight: 1,
+                            }],
+                        },
+                    ],
+                    weight: 2,
+                },
+            ],
+            pack_variants_total_weight: 5,
+            sheets,
+            prints: vec![],
+            basic_lands: vec!["Forest".to_string()],
+        };
+
+        let generator = PackGenerator::new(unglued_raw);
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+
+        // Generate multiple packs across seats and rounds to exercise both variants
+        for seat in 0..8 {
+            for pack_num in 0..3 {
+                let pack = generator.generate_pack(&mut rng, seat, pack_num);
+                assert_eq!(
+                    pack.0.len(),
+                    10,
+                    "every Unglued pack must contain exactly 10 cards"
+                );
+                let uncommon_count = pack.0.iter().filter(|c| c.rarity == "uncommon").count();
+                assert_eq!(
+                    uncommon_count, 2,
+                    "every Unglued pack must contain 2 uncommons"
+                );
+            }
+        }
     }
 }

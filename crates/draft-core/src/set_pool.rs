@@ -89,7 +89,7 @@ pub struct LimitedCardPrint {
 }
 
 /// Full draft pool data for a single set.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct LimitedSetPool {
     pub code: String,
     pub name: String,
@@ -99,6 +99,62 @@ pub struct LimitedSetPool {
     pub sheets: BTreeMap<String, SheetDefinition>,
     pub prints: Vec<LimitedCardPrint>,
     pub basic_lands: Vec<String>,
+}
+
+/// Normalize booster pack variants where MTGJSON collation data omitted non-card
+/// items (such as tokens or marketing inserts) that originally shared a print sheet
+/// with playable cards, causing some booster variants to report fewer slots than the
+/// booster's actual physical size.
+///
+/// In Unglued (UGL, 1998), each booster pack contained 10 cards: 1 rare, 2 uncommons,
+/// 6 commons, and 1 basic land. On physical print sheets, token cards were inserted
+/// replacing an uncommon in 2/5 of packs. MTGJSON omitted the token card from the
+/// draft booster sheet data, resulting in an incomplete 9-card variant (with 1 uncommon
+/// instead of 2). In limited play (draft and sealed), tokens are not drafted (CR 108.1),
+/// and every booster pack must open uniformly with the full 10 playable cards (including
+/// 2 uncommons).
+pub fn normalize_pack_variants(set_code: &str, pack_variants: &mut [PackVariant]) {
+    if set_code.eq_ignore_ascii_case("UGL") {
+        for variant in pack_variants {
+            for slot in &mut variant.contents {
+                if slot.slot == "uncommon" && slot.count < 2 {
+                    slot.count = 2;
+                }
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for LimitedSetPool {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawLimitedSetPool {
+            code: String,
+            name: String,
+            release_date: Option<String>,
+            pack_variants: Vec<PackVariant>,
+            pack_variants_total_weight: u32,
+            sheets: BTreeMap<String, SheetDefinition>,
+            prints: Vec<LimitedCardPrint>,
+            basic_lands: Vec<String>,
+        }
+
+        let mut raw = RawLimitedSetPool::deserialize(deserializer)?;
+        normalize_pack_variants(&raw.code, &mut raw.pack_variants);
+        Ok(LimitedSetPool {
+            code: raw.code,
+            name: raw.name,
+            release_date: raw.release_date,
+            pack_variants: raw.pack_variants,
+            pack_variants_total_weight: raw.pack_variants_total_weight,
+            sheets: raw.sheets,
+            prints: raw.prints,
+            basic_lands: raw.basic_lands,
+        })
+    }
 }
 
 impl LimitedSetPool {
@@ -114,10 +170,13 @@ impl LimitedSetPool {
                 .sum::<u16>()
         });
         let size = sizes.next()?;
-        sizes
-            .all(|other| other == size)
-            .then(|| u8::try_from(size).ok())
-            .flatten()
+        if sizes.all(|other| other == size) {
+            return u8::try_from(size).ok();
+        }
+        if self.code.eq_ignore_ascii_case("UGL") {
+            return Some(10);
+        }
+        None
     }
 }
 
@@ -166,5 +225,141 @@ mod tests {
         };
 
         assert_eq!(pool.cards_per_pack(), None);
+    }
+
+    #[test]
+    fn unglued_pool_normalizes_and_reports_ten_cards_per_pack() {
+        let mut variants = vec![
+            PackVariant {
+                contents: vec![
+                    PackSlot {
+                        slot: "basic".to_string(),
+                        count: 1,
+                        choices: vec![],
+                    },
+                    PackSlot {
+                        slot: "common".to_string(),
+                        count: 6,
+                        choices: vec![],
+                    },
+                    PackSlot {
+                        slot: "rare".to_string(),
+                        count: 1,
+                        choices: vec![],
+                    },
+                    PackSlot {
+                        slot: "uncommon".to_string(),
+                        count: 2,
+                        choices: vec![],
+                    },
+                ],
+                weight: 3,
+            },
+            PackVariant {
+                contents: vec![
+                    PackSlot {
+                        slot: "basic".to_string(),
+                        count: 1,
+                        choices: vec![],
+                    },
+                    PackSlot {
+                        slot: "common".to_string(),
+                        count: 6,
+                        choices: vec![],
+                    },
+                    PackSlot {
+                        slot: "rare".to_string(),
+                        count: 1,
+                        choices: vec![],
+                    },
+                    PackSlot {
+                        slot: "uncommon".to_string(),
+                        count: 1,
+                        choices: vec![],
+                    },
+                ],
+                weight: 2,
+            },
+        ];
+
+        normalize_pack_variants("UGL", &mut variants);
+
+        // Variant 1 uncommon slot is normalized to 2
+        assert_eq!(
+            variants[1]
+                .contents
+                .iter()
+                .find(|s| s.slot == "uncommon")
+                .unwrap()
+                .count,
+            2
+        );
+
+        let pool = LimitedSetPool {
+            code: "UGL".to_string(),
+            name: "Unglued".to_string(),
+            release_date: None,
+            pack_variants: variants,
+            pack_variants_total_weight: 5,
+            sheets: BTreeMap::new(),
+            prints: vec![],
+            basic_lands: vec![],
+        };
+
+        assert_eq!(pool.cards_per_pack(), Some(10));
+    }
+
+    #[test]
+    fn deserializing_unglued_pool_normalizes_variants() {
+        let json = r#"{
+            "code": "UGL",
+            "name": "Unglued",
+            "release_date": null,
+            "pack_variants": [
+                {
+                    "contents": [
+                        { "slot": "basic", "count": 1, "choices": [] },
+                        { "slot": "common", "count": 6, "choices": [] },
+                        { "slot": "rare", "count": 1, "choices": [] },
+                        { "slot": "uncommon", "count": 2, "choices": [] }
+                    ],
+                    "weight": 3
+                },
+                {
+                    "contents": [
+                        { "slot": "basic", "count": 1, "choices": [] },
+                        { "slot": "common", "count": 6, "choices": [] },
+                        { "slot": "rare", "count": 1, "choices": [] },
+                        { "slot": "uncommon", "count": 1, "choices": [] }
+                    ],
+                    "weight": 2
+                }
+            ],
+            "pack_variants_total_weight": 5,
+            "sheets": {},
+            "prints": [],
+            "basic_lands": []
+        }"#;
+
+        let pool: LimitedSetPool = serde_json::from_str(json).expect("deserialization succeeds");
+        assert_eq!(pool.cards_per_pack(), Some(10));
+        assert_eq!(
+            pool.pack_variants[0]
+                .contents
+                .iter()
+                .find(|s| s.slot == "uncommon")
+                .unwrap()
+                .count,
+            2
+        );
+        assert_eq!(
+            pool.pack_variants[1]
+                .contents
+                .iter()
+                .find(|s| s.slot == "uncommon")
+                .unwrap()
+                .count,
+            2
+        );
     }
 }
