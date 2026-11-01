@@ -1254,8 +1254,8 @@ fn fire_delayed_ability_of_host(merge_first: bool) -> (Board, ObjectId) {
     (board, entry)
 }
 
-/// A delayed ability keeps the source context stored when it was created (CR 603.7d), while
-/// its row's name is latched when it fires. After the source is merged under a mutating card
+/// A delayed ability created by an ability has that ability's source (CR 603.7e) and keeps the
+/// source context stored when it was created, while its row's name is latched when it fires. After the source is merged under a mutating card
 /// the row names the merged permanent, so it must not carry the printing the older context
 /// holds beside the name of the card that was there before.
 #[test]
