@@ -88,7 +88,7 @@ Full procedure, two tracks (developer / non-developer), and copy-paste prompts f
 - wasm32 target: `rustup target add wasm32-unknown-unknown` (Windows: see below)
 - wasm-bindgen-cli: `cargo install wasm-bindgen-cli@0.2.121` (must match the `wasm-bindgen` version in `Cargo.lock`)
 - wasm-opt (optional): `brew install binaryen` or `apt install binaryen`
-- [Node.js](https://nodejs.org/) 22+ and [pnpm](https://pnpm.io/): `npm i -g pnpm`
+- [Node.js](https://nodejs.org/) 24+ (`.nvmrc` pins the exact version) and [pnpm](https://pnpm.io/): `npm i -g pnpm`
 
 #### Windows
 
@@ -223,7 +223,7 @@ get.
 
 ### Android APKs
 
-Android builds require Node.js 22, pnpm 9.15.9, JDK 17, Android SDK platform
+Android builds require Node.js 22 (exception to the general 24+ requirement), pnpm 9.15.9, JDK 17, Android SDK platform
 36/build-tools 36.0.0, Android NDK 28.2.13676358, and the Rust Android targets:
 
 ```bash
