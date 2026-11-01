@@ -40,8 +40,18 @@ pub fn resolve(
             TargetRef::Player(_) => None,
         })
         .collect();
+    // The ability's own object occurrences, aligned with `source_ids` while
+    // the sources are its targets (empty for a tracked-set population).
+    let mut source_positions: Vec<usize> = ability
+        .targets
+        .iter()
+        .enumerate()
+        .filter(|(_, target)| matches!(target, TargetRef::Object(_)))
+        .map(|(position, _)| position)
+        .collect();
 
     if source_ids.is_empty() && references_tracked_set(target_filter) {
+        source_positions.clear();
         let ctx = FilterContext::from_ability(ability);
         // CR 608.2c: Resolve the tracked-set sentinel from the resolving effect's
         // last known context before collecting the affected objects.
@@ -106,9 +116,17 @@ pub fn resolve(
         let copy_id =
             cast_one_copy(state, source_id, ability, events).map_err(EffectError::InvalidParam)?;
 
-        if open_copy_target_selection(state, copy_id, ability.controller, None)
+        if !open_copy_target_selection(state, copy_id, ability.controller, None)
             .map_err(EffectError::InvalidParam)?
         {
+            crate::game::casting_costs::commit_copy_cast(
+                state,
+                copy_id,
+                ability.controller,
+                events,
+            )
+            .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
+        } else {
             let mut resume = ability.clone();
             resume.effect = Effect::CastCopyOfCard {
                 target: TargetFilter::None,
@@ -117,13 +135,22 @@ pub fn resolve(
             };
             resume.sub_ability = None;
             if index + 1 < source_ids.len() {
-                resume.targets = source_ids[index + 1..]
-                    .iter()
-                    .copied()
-                    .map(TargetRef::Object)
-                    .collect();
+                if source_positions.len() == source_ids.len() {
+                    // The remaining sources are this ability's own target
+                    // occurrences: project them, pins included.
+                    resume.project_target_occurrences(&source_positions[index + 1..]);
+                } else {
+                    // A tracked-set population: fresh, unpinned.
+                    resume.set_unpinned_targets(
+                        source_ids[index + 1..]
+                            .iter()
+                            .copied()
+                            .map(TargetRef::Object)
+                            .collect(),
+                    );
+                }
             } else {
-                resume.targets.clear();
+                resume.clear_targets();
             }
             super::append_to_pending_continuation(state, Some(Box::new(resume)));
             return Ok(());
@@ -166,12 +193,16 @@ fn cast_one_copy(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<ObjectId, String> {
-    let (source, card_id, origin_zone) = {
+    let (mut source, card_id, origin_zone) = {
         let Some(source) = state.objects.get(&source_id) else {
             return Err(format!("copy source {source_id:?} not found"));
         };
         (source.clone(), source.card_id, source.zone)
     };
+    // CR 123.1 + CR 707.2 + CR 707.12: the copy has the card's copiable values;
+    // stickers and their changes aren't among them. Stripped before anything
+    // (the spell ability, the keyword snapshot) is derived from the clone.
+    crate::game::stickers::remove_stickers_from_copy(&mut source);
     crate::game::ledger::validate_spell_cast_recording(state, ability.controller)
         .map_err(cast_copy_spell_cast_ledger_error)?;
 
@@ -220,16 +251,14 @@ fn cast_one_copy(
     // a printed-Cascade card would carry an empty snapshot and silently drop its
     // Cascade trigger. `effective_spell_keyword_instances` preserves multi-instance
     // keywords (Cascade x2, Ripple) exactly as the seams' instance counting expects.
-    let cast_spell_keywords =
-        crate::game::casting::effective_spell_keyword_instances(state, ability.controller, copy_id);
-    if let Some(copy_mut) = state.objects.get_mut(&copy_id) {
-        copy_mut.cast_spell_keywords = cast_spell_keywords;
-    }
+    crate::game::casting::snapshot_cast_spell_keywords(state, ability.controller, copy_id);
 
     let mut resolved =
         ability_def.map(|def| build_resolved_from_def(&def, copy_id, ability.controller));
     if let Some(resolved) = resolved.as_mut() {
         resolved.context.cast_from_zone = Some(origin_zone);
+        // CR 707.12: a cast copy declares only the targets chosen for it.
+        resolved.start_target_record_recursive();
     }
 
     // CR 707.12 + CR 707.10: the copy-onto-stack authority emits `StackPushed`.
@@ -255,36 +284,9 @@ fn cast_one_copy(
         None,
         events,
     );
-    events.push(GameEvent::SpellCast {
-        card_id,
-        controller: ability.controller,
-        object_id: copy_id,
-        cast_mana_value: Some(
-            state
-                .objects
-                .get(&copy_id)
-                .expect("cast copy must remain available for SpellCast event")
-                .spell_mana_value(),
-        ),
-    });
-    if let Some(obj) = state.objects.get(&copy_id).cloned() {
-        // CR 707.12 + CR 601.2i: casting the object copy is a real cast, so the
-        // ledger mints a fresh occurrence and the finalized stack carriers are
-        // stamped exactly like an ordinary cast.
-        let occurrence = crate::game::restrictions::record_spell_cast_from_zone(
-            state,
-            ability.controller,
-            &obj,
-            origin_zone,
-            CastingVariant::Normal,
-        )
-        .map_err(cast_copy_spell_cast_ledger_error)?;
-        crate::game::casting_costs::stamp_cast_occurrence_on_stack_spell(
-            state, copy_id, occurrence,
-        )
-        .map_err(|error| error.to_string())?;
-    }
-
+    // CR 707.12 + CR 601.2i: the copy becomes cast once its announcement is
+    // complete (`casting_costs::commit_copy_cast`): immediately when it has
+    // no target to announce, else at the end of its announcement walk.
     Ok(copy_id)
 }
 
@@ -351,6 +353,9 @@ mod tests {
         let mut events = Vec::new();
 
         let copy_id = cast_one_copy(&mut state, source_id, &ability, &mut events)
+            .expect("the card copy is put on the stack");
+        // CR 601.2i: the copy becomes cast when its announcement completes.
+        crate::game::casting_costs::commit_copy_cast(&mut state, copy_id, PlayerId(0), &mut events)
             .expect("the card copy is cast");
         let expected = crate::types::game_state::CastOccurrence {
             caster: PlayerId(0),

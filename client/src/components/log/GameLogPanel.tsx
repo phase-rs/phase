@@ -1,3 +1,4 @@
+import type { ParseKeys } from "i18next";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -24,13 +25,13 @@ import { copyText } from "../../services/copyText";
 const EMPTY_LOG: GameLogEntry[] = [];
 const VIEWS: LogView[] = ["timeline", "details", "diagnostics"];
 
-const VIEW_LABEL_KEYS: Record<LogView, string> = {
+const VIEW_LABEL_KEYS = {
   timeline: "log.viewTimeline",
   details: "log.viewDetails",
   diagnostics: "log.viewDiagnostics",
-};
+} as const satisfies Record<LogView, ParseKeys<"game">>;
 
-const CATEGORY_LABEL_KEYS: Record<LogCategory, string> = {
+const CATEGORY_LABEL_KEYS = {
   Game: "log.categoryGame",
   Turn: "log.categoryTurn",
   Stack: "log.categoryStack",
@@ -44,7 +45,7 @@ const CATEGORY_LABEL_KEYS: Record<LogCategory, string> = {
   Special: "log.categorySpecial",
   Destroy: "log.categoryDestroy",
   Debug: "log.categoryDebug",
-};
+} as const satisfies Record<LogCategory, ParseKeys<"game">>;
 
 function isNearBottom(element: HTMLDivElement): boolean {
   return element.scrollHeight - element.scrollTop - element.clientHeight < 32;

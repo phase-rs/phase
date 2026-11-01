@@ -15,6 +15,7 @@ use engine::types::ability::{
 };
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
+use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -31,6 +32,7 @@ const CROAKING_COUNTERPART: &str =
 const THE_SCARAB_GOD: &str = "At the beginning of your upkeep, each opponent loses X life and you scry X, where X is the number of Zombies you control.\n{2}{U}{B}: Exile target creature card from a graveyard. Create a token that's a copy of it, except it's a 4/4 black Zombie.\nWhen The Scarab God dies, return it to its owner's hand at the beginning of the next end step.";
 const SAW_IN_HALF: &str = "Destroy target creature. If that creature dies this way, its controller creates two tokens that are copies of that creature, except their power is half that creature's power and their toughness is half that creature's toughness. Round up each time.";
 const TARMOGOYF: &str = "Tarmogoyf's power is equal to the number of card types among cards in all graveyards and its toughness is equal to that number plus 1.";
+const GLORIOUS_ANTHEM: &str = "Creatures you control get +1/+1.";
 
 fn copy_exception_modifications(
     oracle: &str,
@@ -751,4 +753,135 @@ fn resolution_time_copy_exceptions_survive_layered_fallback_without_leaking_ride
     assert_eq!(state.objects[&second].loyalty, Some(7));
     assert_eq!(state.objects[&second].power, Some(2));
     assert_eq!(state.objects[&second].counters.get(&charge), None);
+}
+
+/// CR 707.9b + CR 608.2h: Saw in Half halves the DONOR's live power and
+/// toughness (last-known values once the donor has left), not the token's own
+/// copied base. A live 1/2 Tarmogoyf (one card type in graveyards) yields two
+/// 1/1 tokens; the copied P/T CDA stays pruned (CR 707.9d) — after the donor
+/// card reaches the yard a wrongly copied CDA would read 2/3 instead.
+#[test]
+fn saw_in_half_halves_donor_live_power_toughness() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_spell_to_graveyard(P0, "Evidence", true);
+    let tarmogoyf = scenario
+        .add_creature_from_oracle(P0, "Tarmogoyf", 0, 1, TARMOGOYF)
+        .id();
+    let saw_in_half = scenario
+        .add_spell_to_hand_from_oracle(P0, "Saw in Half", true, SAW_IN_HALF)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 2,
+            shards: vec![ManaCostShard::Black],
+        })
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Colorless, ObjectId(9_230), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(9_231), false, vec![]),
+            ManaUnit::new(ManaType::Black, ObjectId(9_232), false, vec![]),
+        ],
+    );
+
+    let mut runner = scenario.build();
+    runner.state_mut().layers_dirty.mark_full();
+    evaluate_layers(runner.state_mut());
+    assert_eq!(
+        (
+            runner.state().objects[&tarmogoyf].power,
+            runner.state().objects[&tarmogoyf].toughness,
+        ),
+        (Some(1), Some(2)),
+        "reach-guard: the donor's live CDA must read 1/2 before Saw"
+    );
+
+    let outcome = runner.cast(saw_in_half).target_object(tarmogoyf).resolve();
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "Saw with no copied payment completes to Priority with no prompt, got {:?}",
+        outcome.final_waiting_for()
+    );
+    assert!(runner.state().stack.is_empty());
+
+    let tokens: Vec<_> = runner
+        .state()
+        .objects
+        .values()
+        .filter(|object| object.is_token && object.name == "Tarmogoyf")
+        .collect();
+    assert_eq!(tokens.len(), 2, "Saw must mint two copy tokens");
+    assert!(
+        tokens
+            .iter()
+            .all(|token| (token.power, token.toughness) == (Some(1), Some(1))),
+        "tokens halve the donor's live 1/2 to 1/1 (a copied CDA would read 2/3): {tokens:?}"
+    );
+}
+
+/// CR 707.9b + CR 608.2h: the halved source includes continuous modifiers —
+/// a 2/2 under Glorious Anthem is live 3/3, so Saw stamps a 2/2 base (live
+/// 3/3 under the anthem). The base pin (not just live) proves the halving
+/// read the donor's live values rather than the token's own copied base.
+#[test]
+fn saw_in_half_halving_includes_continuous_modifiers() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_enchantment_from_oracle(P0, "Glorious Anthem", GLORIOUS_ANTHEM);
+    let donor = scenario.add_creature(P0, "Vanilla Donor", 2, 2).id();
+    let saw_in_half = scenario
+        .add_spell_to_hand_from_oracle(P0, "Saw in Half", true, SAW_IN_HALF)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 2,
+            shards: vec![ManaCostShard::Black],
+        })
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Colorless, ObjectId(9_240), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(9_241), false, vec![]),
+            ManaUnit::new(ManaType::Black, ObjectId(9_242), false, vec![]),
+        ],
+    );
+
+    let mut runner = scenario.build();
+    runner.state_mut().layers_dirty.mark_full();
+    evaluate_layers(runner.state_mut());
+    assert_eq!(
+        (
+            runner.state().objects[&donor].power,
+            runner.state().objects[&donor].toughness,
+        ),
+        (Some(3), Some(3)),
+        "reach-guard: the anthem-boosted donor must read live 3/3 before Saw"
+    );
+
+    let outcome = runner.cast(saw_in_half).target_object(donor).resolve();
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "Saw with no copied payment completes to Priority with no prompt, got {:?}",
+        outcome.final_waiting_for()
+    );
+    assert!(runner.state().stack.is_empty());
+
+    let tokens: Vec<_> = runner
+        .state()
+        .objects
+        .values()
+        .filter(|object| object.is_token && object.name == "Vanilla Donor")
+        .collect();
+    assert_eq!(tokens.len(), 2, "Saw must mint two copy tokens");
+    assert!(
+        tokens
+            .iter()
+            .all(|token| (token.base_power, token.base_toughness) == (Some(2), Some(2))),
+        "tokens stamp half of the donor's live 3/3 as their base: {tokens:?}"
+    );
+    assert!(
+        tokens
+            .iter()
+            .all(|token| (token.power, token.toughness) == (Some(3), Some(3))),
+        "stamped 2/2 base reads 3/3 live under the anthem: {tokens:?}"
+    );
 }

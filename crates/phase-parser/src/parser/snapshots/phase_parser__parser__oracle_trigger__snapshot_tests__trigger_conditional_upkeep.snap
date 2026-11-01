@@ -1,0 +1,74 @@
+---
+source: crates/phase-parser/src/parser/oracle_trigger.rs
+assertion_line: 13811
+expression: def
+---
+{
+  "mode": "Phase",
+  "execute": {
+    "kind": "Spell",
+    "effect": {
+      "type": "Sacrifice",
+      "target": {
+        "type": "SelfRef"
+      },
+      "count": {
+        "type": "Fixed",
+        "value": 1
+      }
+    },
+    "cost": null,
+    "sub_ability": null,
+    "duration": null,
+    "description": null,
+    "target_prompt": null,
+    "condition": null,
+    "optional_targeting": false,
+    "optional": false,
+    "forward_result": false
+  },
+  "valid_card": null,
+  "origin": null,
+  "destination": null,
+  "trigger_zones": [
+    "Battlefield"
+  ],
+  "phase": "Upkeep",
+  "optional": false,
+  "damage_kind": "Any",
+  "secondary": false,
+  "valid_target": null,
+  "valid_source": null,
+  "description": "At the beginning of your upkeep, if you control no creatures, sacrifice Test Card.",
+  "constraint": {
+    "type": "OnlyDuringYourTurn"
+  },
+  "condition": {
+    "type": "QuantityComparison",
+    "lhs": {
+      "type": "Ref",
+      "qty": {
+        "type": "ObjectCount",
+        "filter": {
+          "type": "Typed",
+          "type_filters": [
+            "Creature"
+          ],
+          "controller": "You",
+          "properties": [
+            {
+              "type": "InZone",
+              "zone": "Battlefield"
+            }
+          ]
+        }
+      }
+    },
+    "comparator": "EQ",
+    "rhs": {
+      "type": "Fixed",
+      "value": 0
+    }
+  },
+  "batched": false
+}

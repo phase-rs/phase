@@ -295,6 +295,82 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     },
   },
   {
+    format: "TwoHeadedGiantCommander",
+    label: "Two-Headed Giant Commander",
+    short_label: "2HGC",
+    description: "2v2 Commander, 60 shared life per team",
+    group: "Commander",
+    legality_key: "commander",
+    default_config: {
+      format: "TwoHeadedGiantCommander",
+      starting_life: 60,
+      min_players: 4,
+      max_players: 4,
+      deck_size: { type: "Exactly", data: 100 },
+      singleton: true,
+      command_zone: true,
+      commander_damage_threshold: 21,
+      range_of_influence: null,
+      team_based: true,
+      uses_commander: true,
+      supplies_fixed_deck: false,
+      sideboard_policy: { type: "Forbidden" },
+      default_deck_copy_limit: { type: "UpTo", data: 1 },
+      allow_debug_actions: false,
+    },
+  },
+  {
+    format: "ArchenemyCommander",
+    label: "Archenemy Commander",
+    short_label: "ARCC",
+    description: "1-vs-many Commander, 60 life each side",
+    group: "Commander",
+    legality_key: "commander",
+    default_config: {
+      format: "ArchenemyCommander",
+      starting_life: 60,
+      min_players: 2,
+      max_players: 6,
+      deck_size: { type: "Exactly", data: 100 },
+      singleton: true,
+      command_zone: true,
+      commander_damage_threshold: 21,
+      range_of_influence: null,
+      team_based: false,
+      uses_commander: true,
+      supplies_fixed_deck: false,
+      sideboard_policy: { type: "Forbidden" },
+      default_deck_copy_limit: { type: "UpTo", data: 1 },
+      archenemy_player: 0,
+      allow_debug_actions: false,
+    },
+  },
+  {
+    format: "PlanechaseCommander",
+    label: "Planechase Commander",
+    short_label: "PLCC",
+    description: "Commander multiplayer with a communal planar deck",
+    group: "Commander",
+    legality_key: "commander",
+    default_config: {
+      format: "PlanechaseCommander",
+      starting_life: 40,
+      min_players: 2,
+      max_players: 6,
+      deck_size: { type: "Exactly", data: 100 },
+      singleton: true,
+      command_zone: true,
+      commander_damage_threshold: 21,
+      range_of_influence: null,
+      team_based: false,
+      uses_commander: true,
+      supplies_fixed_deck: false,
+      sideboard_policy: { type: "Forbidden" },
+      default_deck_copy_limit: { type: "UpTo", data: 1 },
+      allow_debug_actions: false,
+    },
+  },
+  {
     format: "DuelCommander",
     label: "Duel Commander",
     short_label: "DUC",
@@ -645,6 +721,31 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
       allow_debug_actions: false,
     },
   },
+  {
+    format: "Dandan",
+    label: "Dandân",
+    short_label: "DAN",
+    description: "Shared library and graveyard, fixed 80-card deck",
+    group: "Multiplayer",
+    legality_key: null,
+    default_config: {
+      format: "Dandan",
+      starting_life: 20,
+      min_players: 2,
+      max_players: 2,
+      deck_size: { type: "Exactly", data: 80 },
+      singleton: false,
+      command_zone: false,
+      commander_damage_threshold: null,
+      range_of_influence: null,
+      team_based: false,
+      uses_commander: false,
+      supplies_fixed_deck: true,
+      sideboard_policy: { type: "Forbidden" },
+      default_deck_copy_limit: { type: "Unlimited" },
+      allow_debug_actions: false,
+    },
+  },
 ];
 
 export function formatMetadata(format: GameFormat): FormatMetadata | undefined {
@@ -674,4 +775,15 @@ export const DECK_CONSTRUCTION_FORMATS = FORMAT_REGISTRY.filter(isDeckConstructi
  */
 export function formatSuppliesDeck(format: GameFormat): boolean {
   return formatMetadata(format)?.default_config.supplies_fixed_deck ?? false;
+}
+
+/**
+ * Whether the format brings the planar die: the communal planar deck,
+ * starting-plane reveal, and chaos rolls. Mirrors the engine's
+ * `GameFormat::is_planechase_family` (the authority — update both if the
+ * family ever grows); the die needs a mid-game decision the AI seats cannot
+ * make, so every AI gate keys off this instead of a format literal.
+ */
+export function isPlanechaseFamilyFormat(format: GameFormat | undefined | null): boolean {
+  return format === "Planechase" || format === "PlanechaseCommander";
 }

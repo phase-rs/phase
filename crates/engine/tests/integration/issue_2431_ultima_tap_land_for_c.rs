@@ -13,7 +13,7 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
-use engine::types::game_state::{LoopAction, LoopDetectionMode};
+use engine::types::game_state::LoopDetectionMode;
 use engine::types::mana::ManaType;
 use engine::types::phase::Phase;
 use engine::types::triggers::TriggerMode;
@@ -104,13 +104,18 @@ fn ultima_tap_land_for_c_doubles_colorless_mana() {
         .act(action)
         .expect("tapping a colorless land must succeed");
 
+    let entries = engine::game::play_trace_view(runner.state())
+        .expect("the tap is traced")
+        .entries;
     assert!(matches!(
-        &runner.state().last_loop_action_sequence[..],
-        [step]
-            if matches!(
-                &step.action,
-                LoopAction::TapLandForMana { selection } if selection == &expected_selection
-            )
+        &entries[..],
+        [engine::game::TraceEntry {
+            kind: engine::game::EntryKind::Play {
+                action: GameAction::TapLandForMana { selection },
+                ..
+            },
+            ..
+        }] if selection == &expected_selection
     ));
 
     assert_eq!(

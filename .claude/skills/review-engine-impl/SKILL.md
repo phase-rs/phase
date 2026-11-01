@@ -7,6 +7,15 @@ description: Review an implementation in scope, such as an uncommitted diff, a j
 
 Review for gaps: things that are missing or wrong. Do not spend findings on style nits, CI-enforced formatting, or a diff recap.
 
+## Review the change
+
+This applies in every mode. Findings are defects in the change under review: what it introduces, the premises it rests on, and what it states it delivers but does not.
+
+- A defect is **pre-existing** when it reproduces at the change's base. The change **depends on** it when a test or acceptance row the change asserts cannot pass, or would have to be weakened, without fixing it. Run that one probe only when the answer changes what happens next.
+- A pre-existing defect the change depends on is a finding (`behavior`; in charter mode, a decision finding).
+- Any other pre-existing defect goes in a separate **Pre-existing** list after the findings, once, with its evidence. It is untagged, never blocks, and is not repeated in a later round.
+- Aim probes at the change's own claims. Do not hunt for pre-existing defects.
+
 ## Workflow
 
 1. Identify the changed surface from the diff, commit, or named files.
@@ -14,7 +23,7 @@ Review for gaps: things that are missing or wrong. Do not spend findings on styl
 3. Apply only the relevant lenses below.
 4. If the scope is a PR, fetch whatever external review comments exist (CodeRabbit, human reviewers) and confirm-or-refute each against the current head with code evidence, folding confirmed findings into your own. **Assume none exist by default** — Gemini Code Assist has been sunset, so no bot is guaranteed to have pre-screened this PR. Your own lenses are the complete review, not a supplement to a bot's; do not under-invest expecting a backstop. Where an external finding *does* exist, silently omitting it — or returning a verdict less severe than an open, unrefuted finding from another reviewer — is itself a defect. Review comments, checks, and uploaded/sticky artifacts count only when their evidence identifies the current PR head SHA; otherwise report the evidence as missing rather than attributing it to the current diff.
 5. If the scope is a PR touching engine/parser source, the parse-diff sticky comment (marker `<!-- coverage-parse-diff -->`) is required evidence: fetch its full body and confront the card-level diff against the PR's claimed scope. Unexplained gained/lost/changed cards are findings (unintended parser blast radius). A *Baseline pending* body means the diff is unavailable — flag it so the handler brings the branch current to regenerate it; an absent comment despite changed engine source, or a comment/artifact not bound to the current PR head SHA, means CI evidence is missing for the current head. This PR-head requirement does not apply to Engine-Implementer Checkpoint Mode: review the committed `BASE_SHA..CANDIDATE_SHA` diff instead.
-6. Report findings only. Silence means LGTM.
+6. Report findings, then the **Pre-existing** list when it has entries. Silence on both means LGTM.
 
 When `pr-contribution-handler` explicitly requests the manual quality gate, add `Quality Gate: PASS|FAIL` before findings. PASS requires all three current-PR facts: (1) claimed parse-impact count equals the measured parse-diff count and the normalized card sets are identical, using the full artifact when the sticky comment truncates examples; (2) the change is at an existing authority/right seam and reuses its vocabulary; and (3) a production-pipeline test is demonstrated to fail when the production change is reverted. On PASS, return the applicable existing praise tokens (`right-seam`, `scope-discipline`, `discriminating-runtime-test`, `parameterized-not-proliferated`) for the ordinary review/enqueue event. Never infer quality from Tier or standing and never create a `quality_recommended` event.
 
@@ -29,17 +38,19 @@ Skip checks CI already enforces:
 
 Default review output is findings-only. Exception: when `/engine-implementer` invokes this skill against a checkpointed candidate, it supplies `BASE_SHA`, `CANDIDATE_SHA`, the in-scope paths, the named `START_SHA`, what the completion checks were and how they came out, the existing maintainer-simulation matrix, and the original task with shared scope/attempt history. Confirm the first round has `START_SHA == BASE_SHA` and each fix round starts from the prior reviewed candidate.
 
+The maintainer-simulation matrix and production-path coverage map are one table, as defined in [executor.md](../engine-implementer/executor.md#maintainer-simulation-matrix). Review the same rows for both requirements; do not request a duplicate artifact.
+
 In this mode, emit these lines before findings:
 
 ```text
 Review Head: <CANDIDATE_SHA>
-Completion Gate: PASS|FAIL
+Completion Gate: PASS|DEFERRED|FAIL
 Maintainer-Simulation Gate: PASS|FAIL
 ```
 
 `Review Head` must be the supplied `CANDIDATE_SHA`, and the reviewed diff must reproduce from exactly `BASE_SHA..CANDIDATE_SHA`; otherwise report a blocking finding.
 
-`Completion Gate` passes when every check [engine-implementer Step 5](../engine-implementer/SKILL.md#step-5--verify-the-committed-candidate) calls for on the changed surface was run against the committed candidate and passed. Check the set against the candidate diff rather than against the plan, and re-run anything you doubt — you have the candidate SHA and a shell. A check run against uncommitted edits, or against a different tree, does not count. In all engine-implementer review modes, additional checks must address a concrete unresolved claim within the original task. Follow the orchestrator's [task scope](../engine-implementer/SKILL.md#task-scope-and-verification-work) and [run limits](../engine-implementer/SKILL.md#run-limits); do not independently construct or repair verification machinery. Return missing evidence to the orchestrator without claiming completion, including when a proposed probe needs redesign before it can run. This does not waive required checks or current-candidate evidence.
+`Completion Gate` follows [engine-implementer Step 5](../engine-implementer/SKILL.md#step-5--verify-the-committed-candidate), including its verification timing. Emit `PASS` when all applicable checks passed with valid candidate evidence; `DEFERRED` when checks due now passed and remaining checks are explicitly scheduled for a later boundary under Step 5; `FAIL` for an observed failure or evidence missing when due. `DEFERRED` does not block phase acceptance or code review and is not a claim of completed verification. Check the set against the candidate diff rather than against the plan. Run an additional check only when it answers a concrete unresolved claim and its result is needed now under Step 5; otherwise defer it. A check run against uncommitted edits, or against a different tree, does not count unless Step 5 permits carrying forward unaffected evidence. In all engine-implementer review modes, additional checks must address a concrete unresolved claim within the original task. Follow the orchestrator's [task scope](../engine-implementer/SKILL.md#task-scope-and-verification-work) and [run limits](../engine-implementer/SKILL.md#run-limits); do not independently construct or repair verification machinery. Return missing evidence to the orchestrator without claiming completion, including when a proposed probe needs redesign before it can run. This does not waive required checks or current-candidate evidence.
 
 ## Phase Mode (chartered runs)
 
@@ -48,7 +59,7 @@ Activated when the spawn inputs include a phase charter and **one phase's deferr
 - **Deferred ≠ gap; foreclosure = gap.** An item on the phase's deferral list is chartered to a named later phase: do not report it as missing, dropped, or incomplete. DO report any code that forecloses or contradicts a deferred item.
 - **Lens scoping:** the new-field-threading, sibling-coverage, claim-to-test, and serialized-surface lenses evaluate consumers against the charter's phase attribution — a consumer attributed to a later phase is deferred, not silently dropped. The class-vs-single-case lens is satisfied from the charter's class attribution — an infrastructure phase's class coverage lives in the charter and lands with its consumer phase.
 - **Maintainer-Simulation Gate carve-out:** a matrix row whose consuming function or hostile fixture is deferral-listed to a named later phase is recorded `DEFERRED(phase n)` and does not FAIL the gate; a row the phase's own code forecloses still FAILs. "FAIL when any row is missing" is otherwise unchanged.
-- **Checkpoint mode's gates are untouched** — phase mode scopes what counts as a finding, never what counts as a valid check. The supplied `BASE_SHA` is the phase base, and the reviewed span is that phase's `BASE_SHA..CANDIDATE_SHA`.
+- **Checkpoint mode's evidence rules still apply**, including Step 5's verification deferrals and the `DEFERRED` completion verdict. Deferring test execution does not require deferring the underlying feature or omitting its tests. The supplied `BASE_SHA` is the phase base, and the reviewed span is that phase's `BASE_SHA..CANDIDATE_SHA`.
 
 ## Integration Mode (chartered runs, final review)
 
@@ -72,9 +83,10 @@ Two gates lead every review; apply them before the rest.
 
 - **Class vs single case:** Does the change cover a reusable class? Name at least three examples in that class. If there is only one, flag a special-case smell.
 - **Sibling coverage:** If one site in a class changed, name siblings that needed the same treatment and verify they were handled or intentionally unaffected.
-- **Test adequacy:** Ensure tests exercise the failure path and the building block, not only one card or a constructor shortcut that bypasses production wiring.
+- **Test adequacy:** Ensure tests exercise the failure path and the building block, not only one card or a constructor shortcut that bypasses production wiring. Use [card-test](../card-test/SKILL.md) for the matching production entry and completion boundary: required prompts are unconditional assertions, and empty stack alone does not prove an interactive continuation finished.
+- **Real cards:** Apply [real cards](../engine-implementer/SKILL.md#real-cards) to every test the diff adds and to every justification in the PR body, addenda, reports and review replies. Flag a card whose text the test exercises that is not printed, unless the test states that no printed card exhibits the shape and names the nearest printed card; if no printed card exhibits the shape, flag the behavior unless the change shows why it is needed. Flag any claim whose authority is a test name, a synthetic card or an abstract shape instead of a printed card's verbatim Oracle text and the CR. At least MED.
 - **Vacuous negative assertions:** For every negative assertion (`!detector(...)`, "does not parse to X", "counter NOT applied"), verify the input actually reached the code under test. An upstream short-circuit makes the negative pass for the wrong reason — canonical instance: `check_swallowed_clauses` returns early when any parsed ability contains `Effect::Unimplemented`, so `!has_swallowed_clause(...)` passes on a card that failed to parse at all. Require a paired positive reach-guard in the same test (parse succeeded, zero `Effect::Unimplemented`, expected positive shape) or a runtime assertion that flips on revert. This is the highest-frequency contributor-PR finding — check it on every test the diff adds.
-- **New-field threading:** When the diff adds a field to an existing enum variant or struct, grep every construction and consumption site of that variant across the workspace. Flag any site that silently defaults or drops the field — resume/continuation paths, single-pick vs multi-pick branches, batch handlers, and WASM/adapter/serialization payload constructors are the recurring drop points. Each site must thread the field or carry an explicit reason why the default is correct there.
+- **New-field threading and semantic consumers:** Sweep constructions and consumers when a field is added **or its meaning, cardinality, scope, or binding changes**. Flag silent drops/defaults in resume paths, single/multi-pick branches, batch handlers, AST visitors, and adapter/serialization constructors. Each affected site must carry the new semantics or explain why its behavior is still correct. Prefer the existing scoped traversal in `types/ability_visit.rs` when it fits; preserve own-resolution vs registered-later boundaries.
 - **Claim-to-test map:** For every behavior the PR claims to support, identify the changed seam/function, production entry point, and test that reaches it. Flag any behavior tested only through a helper, constructor, parsed AST, or direct resolver call when production reaches it through `apply()`, `WaitingFor`, `GameAction`, stack/casting, combat declaration, replacement handling, or the scenario runner. Parser shape tests do not satisfy runtime semantics or coverage-support claims; they are acceptable for parser-only work only when unsupported semantics remain red/honest.
 - **Fixture path-divergence:** A test can drive the *real* production entry point and still miss the bug if its fixtures are shaped so simply that they take a *different internal branch* than production inputs. Technique: trace the fix's entry through its first input-shape dispatches — `is_none()`/`is_some()`, `is_empty()`/`len()`, variant `match`, and "has-X" guards (e.g. `if ability_def.is_none() { return fast_path() }`). For each such branch the fix can reach, map every test fixture to the arm it triggers, and flag any production-reachable arm with **no** fixture. Smell: every fixture is degenerate in the same way (no ability/effect, no targets, empty or single-element collection, default/`None` field), so only the trivial shortcut arm runs while the arm real data takes ships untested. Name the unexercised arm and the minimal fixture change that would reach it.
 - **Coverage honesty:** If parser code accepts full Oracle text while intentionally ignoring any semantic rider, replacement, delayed trigger, restriction, granted ability, continuation, or other rules-bearing clause, coverage must remain honest. Flag changes that make `cargo coverage` mark a card/class supported while those semantics are deferred or dropped instead of preserved as `Effect::unimplemented`, an equivalent strict-failure marker, or unchanged unsupported coverage.
@@ -103,6 +115,7 @@ Two gates lead every review; apply them before the rest.
 - Verify plural, possessive, opponent, non-X, another, and sibling phrase variants for new parser arms — including article/quantity word-forms (`a`/`an`/`one`/`two`/`N`/`X`/`each`) when dispatch splits on a count or article boundary.
 - When one parser arm rejects a value to defer to another (e.g. a multi-count arm returns `None` for count==1 so the single-count arm handles it), trace the receiving arm and prove it actually accepts that form — do not trust the comment. A deferral to a path that doesn't handle the form silently drops the card to Unimplemented (precedent: "roll one d6" — the multi-die arm rejected count==1 and the single-die arm only matched `"a "`/`"an "`, so the word "one" parsed nowhere despite a comment claiming otherwise).
 - Prefer composable `nom` axes over cartesian lists of full `tag()` strings.
+- For multi-position phrases, use the `oracle_nom::primitives::scan_at_word_boundaries` family. New caller-local `.find(' ')` scanning loops duplicate that authority; structural cursor operations inside the shared primitive are not parsing dispatch.
 
 ### Frontend / UI
 
@@ -137,9 +150,13 @@ Use this exact finding shape:
 **[HIGH/MED/LOW]** <short summary>. Evidence: <path:line>. Why it matters: <one sentence>. Suggested fix: <one line>.
 ```
 
+When a finding turns on what a card does, its evidence names the printed card and quotes its Oracle text and the CR ([real cards](../engine-implementer/SKILL.md#real-cards)).
+
 In engine-implementer reviews, including the final PR review, append the orchestrator's tag to each finding — `[behavior]`, `[text]` or `[machinery]`, as its [run limits](../engine-implementer/SKILL.md#run-limits) define them; when in doubt, `[behavior]`. A `[text]` finding quotes the old text and gives the replacement. A finding that names a pattern gives the predicate, the command, and every matching site with its disposition; that list is the fix's scope. On a fix round, check the fix executor's unrequested edits first: a sentence added beyond the prior finding's supplied text is the least-reviewed line in the diff.
 
 Severity calibration: a latent bug — one not reachable today because a guard or parser blocks it — is still a finding. Rate it by what happens when the form is reached or the guard removed, not by today's reachability: if it then produces a wrong result for a card-class the feature appears to cover, it is at least MED, and "unreachable today" belongs in the evidence, not as a reason to downgrade to LOW. A feature that ships silently incorrect for a sub-class it looks like it handles (e.g. a multi-die roll that overwrites the stored result each iteration instead of supporting the aggregate) is a MED the maintainer must see — never a NIT.
+
+A concrete violation of a mandatory architecture rule is also at least MED even when current outputs are correct. Cite the rule and the existing authority or typed alternative that fits the change; do not invent a runtime bug to justify the severity. A merely different implementation preference without that evidence is not a finding. In engine-implementer reviews, a repair that changes a non-comment line of code is `[behavior]`, not `[text]` because its observable output happens to be unchanged.
 
 Findings first. No praise, no diff recap.
 

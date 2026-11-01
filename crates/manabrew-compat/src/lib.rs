@@ -22,6 +22,7 @@ use engine::game::turn_control;
 use engine::types::ability::TargetRef;
 use engine::types::card::CardFace;
 use engine::types::casting_costs::{CostReductionEntry, CostReductionOutcome};
+use engine::types::format::SharedZones;
 use engine::types::game_state::{
     GameState, ManaChoice, ManaChoicePrompt, MulliganDecisionPhase, PendingMulliganAction,
     ShardChoice, StackEntryKind, WaitingFor,
@@ -635,6 +636,13 @@ pub fn prepare_snapshot_with_prompt_id(
             count: raw_state.players.len(),
         });
     }
+    // `ZoneDto` is one entry per (zone, owner) pair, so a library or graveyard
+    // shared by every seat has no owner to be reported under.
+    if raw_state.format_config.format.shared_zones() != SharedZones::NONE {
+        return Err(AdapterError::UnsupportedProtocolFeature {
+            code: "upstream.shared-zone-ownership-missing",
+        });
+    }
 
     let (actions, spell_costs, legal_actions_by_object) =
         legal_actions_for_viewer(raw_state, viewer);
@@ -683,7 +691,7 @@ pub fn unsupported_protocol_capabilities() -> &'static [UnsupportedCapability] {
 /// `upstream.` = the protocol has no primitive for something the engine can do.
 /// `local.` = the protocol has the primitive but this engine cannot source it,
 /// or a documented adapter-local extension is intentionally in use.
-static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 93] = [
+static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 94] = [
     UnsupportedCapability {
         code: "upstream.object-selection-missing",
         area: "prompts",
@@ -1266,6 +1274,12 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 93] = [
         area: "actions",
         reason: "ActivatableAbilityInfo::is_class_level_up has no direct engine source. GameAction::ActivateAbility carries only source_id and ability_index; classifying an activation by inspecting its lowered ability definition would re-interpret engine state in this adapter. The field is therefore left None.",
         suggested_protocol_extension: "No protocol change: have the engine include an explicit class-level-up presentation flag with each activatable ability.",
+    },
+    UnsupportedCapability {
+        code: "upstream.shared-zone-ownership-missing",
+        area: "formats",
+        reason: "Searched manabrew-protocol 5.2.0 for a table-level or ownerless zone and found none: the ZoneDto layout is documented as \"One entry per (zone, owner) pair\" and build_zones reads player.library, player.graveyard and player.hand once per seat, so a library or graveyard shared by every seat cannot be reported under any one owner without misstating the other seat's zone. MulliganOutput in 5.2.0 has the single variant MulliganDecision { keep: bool } (plus this adapter's local Serum Powder extension), so a free mulligan taken by revealing a hand has no output either. GameFormat::shared_zones() is the engine answer, and Dandan is the only built-in format whose answer is not SharedZones::NONE; prepare_snapshot refuses such a state.",
+        suggested_protocol_extension: "Add a table-level owner for a shared ZoneDto, and a reveal-hand free-mulligan output beside MulliganOutput::MulliganDecision.",
     },
 ];
 
@@ -2697,6 +2711,7 @@ pub fn convert_available_action(
         GameAction::ActivateAbility {
             source_id,
             ability_index,
+            ..
         } => AvailableActionConversion::Available(AvailableAction {
             id,
             kind: AvailableActionKind::ActivateAbility(ActivatableAbilityInfo {
@@ -2981,6 +2996,7 @@ pub fn convert_available_action(
         | GameAction::SetPriorityYield { .. }
         | GameAction::SetMayTriggerAutoChoice { .. }
         | GameAction::SetReplacementAutoChoice { .. }
+        | GameAction::UnAction { .. }
         | GameAction::SetTriggerOrderTemplate { .. } => {
             AvailableActionConversion::Unsupported("local.autopass-settings-unsupported")
         }
@@ -3555,7 +3571,7 @@ fn build_player_dto(
         is_human: player.id == viewer,
         life: player.life,
         counters,
-        mana_pool: mana_pool_counts(&player.mana_pool.mana),
+        mana_pool: mana_pool_counts(&player.mana_pool),
         commander_damage,
         has_city_blessing: state.city_blessing.contains(&player_id),
         has_enduring_story: state.enduring_story.contains(&player_id),
@@ -3998,6 +4014,7 @@ pub fn convert_payment_action(action: &GameAction, id: String) -> PaymentActionC
         GameAction::ActivateAbility {
             source_id,
             ability_index,
+            ..
         } => PaymentActionConversion::Available(PaymentAction {
             id,
             kind: PaymentActionKind::ActivateManaAbility(ActivatableAbilityInfo {
@@ -4588,10 +4605,10 @@ fn parse_attack_target_id(value: &str) -> Result<AttackTarget> {
 }
 
 /// CR 106.4: the viewer's floating mana, one entry per color actually held.
-fn mana_pool_counts(units: &[engine::types::mana::ManaUnit]) -> BTreeMap<ManaColorDto, u32> {
+fn mana_pool_counts(pool: &engine::types::mana::ManaPool) -> BTreeMap<ManaColorDto, u32> {
     let mut counts = BTreeMap::new();
-    for unit in units {
-        *counts.entry(mana_color_dto(unit.color)).or_insert(0) += 1;
+    for (shape, count) in pool.shapes() {
+        *counts.entry(mana_color_dto(shape.color)).or_insert(0) += count as u32;
     }
     counts
 }
@@ -4861,6 +4878,7 @@ fn waiting_for_type(waiting_for: &WaitingFor) -> &'static str {
         WaitingFor::CombatTaxPayment { .. } => "CombatTaxPayment",
         WaitingFor::ChooseManaColor { .. } => "ChooseManaColor",
         WaitingFor::PayManaAbilityMana { .. } => "PayManaAbilityMana",
+        WaitingFor::ManaAbilityManaPayment { .. } => "ManaAbilityManaPayment",
         WaitingFor::GameOver { .. } => "GameOver",
         _ => "Unsupported",
     }
@@ -6048,6 +6066,13 @@ mod tests {
         let exert = prepared_for(WaitingFor::ExertChoice {
             player: PlayerId(0),
             attacker: ObjectId(1),
+            permission: engine::types::ability::TriggerDefinitionRef {
+                source: engine::types::identifiers::ObjectIncarnationRef::of(ObjectId(1), 0),
+                occurrence: engine::types::ability::TriggerDefinitionOccurrenceRef::Printed {
+                    base_set: engine::types::ability::TriggerBaseSetInstanceRef::INITIAL,
+                    printed_index: 0,
+                },
+            },
             remaining: vec![],
         });
         assert_eq!(
@@ -6091,17 +6116,20 @@ mod tests {
                 "mulligan",
                 WaitingFor::MulliganDecision {
                     pending: vec![MulliganDecisionEntry {
+                        free_reveals_taken: 0,
                         player: PlayerId(0),
                         mulligan_count: 1,
                         phase: MulliganDecisionPhase::Declare,
                     }],
                     free_first_mulligan: false,
+                    declared: Vec::new(),
                 },
             ),
             (
                 "mulliganPutBack",
                 WaitingFor::MulliganDecision {
                     pending: vec![MulliganDecisionEntry {
+                        free_reveals_taken: 0,
                         player: PlayerId(0),
                         mulligan_count: 1,
                         phase: MulliganDecisionPhase::BottomCards {
@@ -6110,6 +6138,7 @@ mod tests {
                         },
                     }],
                     free_first_mulligan: false,
+                    declared: Vec::new(),
                 },
             ),
             (
@@ -6297,6 +6326,7 @@ mod tests {
         state.waiting_for = WaitingFor::TopOrBottomChoice {
             player: PlayerId(0),
             object_id,
+            top_position: Default::default(),
         };
         bind_interaction_authority(&mut state, InteractionSessionId("generic-path".to_string()))
             .expect("valid interaction authority binding");
@@ -6330,6 +6360,39 @@ mod tests {
         )
         .expect("the echoed index resolves back through the engine");
         assert_eq!(action, GameAction::ChooseTopOrBottom { top: true });
+    }
+
+    /// CR 401.7: for "second from the top or on the bottom" the projected "top"
+    /// label must name the slot instead of reading as plain "top".
+    #[test]
+    fn nth_from_top_choice_is_labelled_with_its_position() {
+        let mut state = GameState::new_two_player(7);
+        let object_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Tucked Card".to_string(),
+            Zone::Library,
+        );
+        state.waiting_for = WaitingFor::TopOrBottomChoice {
+            player: PlayerId(0),
+            object_id,
+            top_position: engine::types::ability::LibraryPosition::NthFromTop { n: 2 },
+        };
+        bind_interaction_authority(&mut state, InteractionSessionId("nth-top".to_string()))
+            .expect("valid interaction authority binding");
+        let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
+        let prompt = build_prompt_input(&prepared, &lookup).expect("projection prompt");
+        let PromptInput::Upstream(UpstreamPromptInput::ChooseFromSelection(input)) = prompt else {
+            panic!("expected ChooseFromSelection, got {prompt:?}");
+        };
+        let labels: Vec<_> = input.options.iter().map(|o| o.label.clone()).collect();
+        assert!(
+            labels.iter().any(|l| l == "position 2 from the top")
+                && labels.iter().any(|l| l == "bottom")
+                && !labels.iter().any(|l| l == "top"),
+            "got {labels:?}"
+        );
     }
 
     /// The `Select` half of the generic path: a subset choice, not a one-of.
@@ -6773,6 +6836,7 @@ mod tests {
         state.waiting_for = WaitingFor::TopOrBottomChoice {
             player: PlayerId(0),
             object_id,
+            top_position: Default::default(),
         };
 
         let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
@@ -7904,11 +7968,13 @@ mod tests {
         let mut state = GameState::new_two_player(7);
         state.waiting_for = WaitingFor::MulliganDecision {
             pending: vec![MulliganDecisionEntry {
+                free_reveals_taken: 0,
                 player: PlayerId(0),
                 mulligan_count: 0,
                 phase: MulliganDecisionPhase::Declare,
             }],
             free_first_mulligan: false,
+            declared: Vec::new(),
         };
 
         assert!(matches!(
@@ -7958,11 +8024,13 @@ mod tests {
         );
         state.waiting_for = WaitingFor::MulliganDecision {
             pending: vec![MulliganDecisionEntry {
+                free_reveals_taken: 0,
                 player: PlayerId(0),
                 mulligan_count: 0,
                 phase: MulliganDecisionPhase::Declare,
             }],
             free_first_mulligan: false,
+            declared: Vec::new(),
         };
 
         assert!(matches!(
@@ -7982,6 +8050,7 @@ mod tests {
 
         state.waiting_for = WaitingFor::MulliganDecision {
             pending: vec![MulliganDecisionEntry {
+                free_reveals_taken: 0,
                 player: PlayerId(0),
                 mulligan_count: 1,
                 phase: MulliganDecisionPhase::BottomCards {
@@ -7990,6 +8059,7 @@ mod tests {
                 },
             }],
             free_first_mulligan: false,
+            declared: Vec::new(),
         };
         let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 7).unwrap();
         let PromptInput::MulliganPutBack(input) = build_prompt_input(&prepared, &lookup).unwrap()
@@ -8723,13 +8793,13 @@ mod tests {
     #[test]
     fn unsupported_capability_registry_is_well_formed() {
         let capabilities = unsupported_protocol_capabilities();
-        assert_eq!(capabilities.len(), 93);
+        assert_eq!(capabilities.len(), 94);
 
         let codes: HashSet<_> = capabilities
             .iter()
             .map(|capability| capability.code)
             .collect();
-        assert_eq!(codes.len(), 93, "capability codes must be unique");
+        assert_eq!(codes.len(), 94, "capability codes must be unique");
 
         for capability in capabilities {
             assert!(
@@ -8965,6 +9035,32 @@ mod tests {
         ));
     }
 
+    /// A format whose library and graveyard are shared by every seat cannot be
+    /// reported by the one-owner-per-zone protocol, so preparation refuses it
+    /// with a code the registry declares.
+    #[test]
+    fn prepare_snapshot_refuses_a_format_with_shared_zones() {
+        // Reach-guard: the same two-player state prepares under the stock
+        // format, so the refusal below is the shared-zone guard and not the
+        // player-count guard.
+        let stock = GameState::new_two_player(7);
+        assert!(prepare_snapshot(&stock, PlayerId(0), "game-x").is_ok());
+
+        let mut shared = GameState::new_two_player(7);
+        shared.format_config = engine::types::format::FormatConfig::dandan();
+        assert_eq!(shared.players.len(), 2);
+        let refusal = prepare_snapshot(&shared, PlayerId(0), "game-x").unwrap_err();
+        assert_eq!(
+            refusal,
+            AdapterError::UnsupportedProtocolFeature {
+                code: "upstream.shared-zone-ownership-missing"
+            }
+        );
+        assert!(unsupported_protocol_capabilities()
+            .iter()
+            .any(|capability| capability.code == "upstream.shared-zone-ownership-missing"));
+    }
+
     /// Both vendor extensions are deliberate, but their safety arguments differ.
     ///
     /// `excludedCardId` is genuinely additive: `MulliganPutBackInput` has no
@@ -9166,6 +9262,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             })
             .expect("the activation reaches its election");
         let state = runner.state().clone();

@@ -40,7 +40,7 @@ fn resonating_lute_draw_not_activatable_below_seven_cards() {
             a,
             GameAction::ActivateAbility {
                 source_id,
-                ability_index: 0,
+                ability_index: 0, ..
             } if *source_id == lute_id
         )
     });
@@ -75,7 +75,7 @@ fn resonating_lute_draw_activatable_at_seven_cards() {
             a,
             GameAction::ActivateAbility {
                 source_id,
-                ability_index: 0,
+                ability_index: 0, ..
             } if *source_id == lute_id
         )),
         "draw ability must be legal with 7 cards in hand; got {lute_actions:?}"
@@ -116,7 +116,7 @@ fn resonating_lute_from_card_db_respects_hand_size_restriction() {
             a,
             GameAction::ActivateAbility {
                 source_id,
-                ability_index,
+                ability_index, ..
             } if *source_id == lute_id && *ability_index == draw_index
         )),
         "card-data Resonating Lute draw must not be legal with 4 cards in hand; got {lute_actions:?}"
@@ -134,6 +134,7 @@ fn resonating_lute_from_card_db_respects_hand_size_restriction() {
         .act(GameAction::ActivateAbility {
             source_id: lute_id,
             ability_index: draw_index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect_err("handle_activate must reject draw below hand-size threshold");
     assert!(

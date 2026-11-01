@@ -197,7 +197,7 @@ fn resolve_revealed_from_library_top(
         .iter()
         .find(|p| p.id == controller)
         .ok_or(EffectError::PlayerNotFound)?;
-    let reveal_count = (count as usize).min(player.library.len());
+    let reveal_count = (count as usize).min(state.library_of(player.id).len());
 
     if reveal_count == 0 {
         events.push(GameEvent::EffectResolved {
@@ -208,7 +208,12 @@ fn resolve_revealed_from_library_top(
         return Ok(());
     }
 
-    let revealed_ids: Vec<ObjectId> = player.library.iter().take(reveal_count).copied().collect();
+    let revealed_ids: Vec<ObjectId> = state
+        .library_of(player.id)
+        .iter()
+        .take(reveal_count)
+        .copied()
+        .collect();
 
     // CR 701.20a: Mark cards as revealed and emit CardsRevealed event.
     for &card_id in &revealed_ids {
@@ -386,7 +391,7 @@ pub fn apply_pile_effect(
         for &object_id in chosen.iter() {
             let mut chain =
                 sub_effect_as_resolved(chosen_pile_effect, source_id, source_controller);
-            chain.targets = vec![crate::types::ability::TargetRef::Object(object_id)];
+            chain.set_unpinned_targets(vec![crate::types::ability::TargetRef::Object(object_id)]);
             super::resolve_ability_chain(state, &chain, events, 1)?;
         }
     }
@@ -431,7 +436,7 @@ pub fn apply_unchosen_pile_effect(
         for &object_id in unchosen.iter() {
             let mut chain =
                 sub_effect_as_resolved(unchosen_pile_effect, source_id, source_controller);
-            chain.targets = vec![crate::types::ability::TargetRef::Object(object_id)];
+            chain.set_unpinned_targets(vec![crate::types::ability::TargetRef::Object(object_id)]);
             super::resolve_ability_chain(state, &chain, events, 1)?;
         }
     }
@@ -459,6 +464,7 @@ fn sub_effect_as_resolved(
     resolved.description = def.description.clone();
     resolved.min_x_value = def.min_x_value;
     resolved.cant_be_copied = def.cant_be_copied;
+    resolved.illegal_targets_disposition = def.illegal_targets_disposition;
     resolved.forward_result = def.forward_result;
     // CR 700.3: The per-object loop in `apply_pile_effect` already iterates
     // over each pile member — the parsed `player_scope` (e.g. "Each opponent")
@@ -470,6 +476,8 @@ fn sub_effect_as_resolved(
     resolved.starting_with = def.starting_with.clone();
     resolved.target_selection_mode = def.target_selection_mode;
     resolved.sub_link = def.sub_link;
+    // CR 611.2e: carry the parser-stamped onset like every other def → resolved copy.
+    resolved.entry_onset = def.entry_onset;
     resolved
 }
 

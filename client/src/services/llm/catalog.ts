@@ -1,12 +1,12 @@
 /**
  * The engine-owned LLM provider catalog, for the settings UI.
  *
- * Loaded straight from the engine WASM rather than through a game adapter: the
- * settings modal is usually opened outside a game, and the catalog is a pure
- * constant table (`phase_llm::catalog`) with no game state behind it.
+ * A stateless query on the shared adapter's engine: the settings modal is
+ * usually opened outside a game, and the catalog is a pure constant table
+ * (`phase_llm::catalog`) with no game state behind it.
  */
 
-import { ensureWasmInit } from "../engineRuntime";
+import { getSharedAdapter } from "../../adapter/wasm-adapter";
 import type { LlmProviderCatalogEntry } from "./types";
 
 let cached: LlmProviderCatalogEntry[] | null = null;
@@ -17,9 +17,7 @@ export async function loadProviderCatalog(): Promise<LlmProviderCatalogEntry[]> 
   if (inFlight) return inFlight;
   inFlight = (async () => {
     try {
-      await ensureWasmInit();
-      const wasm = await import("@wasm/engine");
-      const rows = wasm.llmProviderCatalog() as unknown;
+      const rows: unknown = await getSharedAdapter().query("llmProviderCatalog");
       cached = Array.isArray(rows) ? (rows as LlmProviderCatalogEntry[]) : [];
       return cached;
     } catch {

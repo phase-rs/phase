@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { GameState } from "../../../../adapter/types.ts";
+import { useGameStore } from "../../../../stores/gameStore.ts";
+import { buildGameState } from "../../../../test/factories/gameStateFactory.ts";
 import { objectAnchorSelector } from "../../../../utils/objectAnchorSelector.ts";
 import {
   faceImages,
@@ -43,6 +46,7 @@ function mount(attributes: Record<string, string>, box: Box | null = { left: 0, 
 }
 
 afterEach(() => {
+  useGameStore.setState({ gameState: null });
   document.body.replaceChildren();
   vi.restoreAllMocks();
 });
@@ -224,6 +228,40 @@ function mountImg(parent: HTMLElement, width: number, height: number, complete: 
   parent.appendChild(img);
   return img;
 }
+
+describe("shared pile anchors", () => {
+  const share = (derived: GameState["derived"]) =>
+    useGameStore.setState({ gameState: buildGameState({ derived }) });
+
+  it("a card owned by a non-holder seat resolves to the holder's pile in every pile selector", () => {
+    share({ shared_piles: { library: 0, graveyard: 0 } });
+    const gyHolder = mount({ "data-graveyard-pile": "0", "data-grouped-ids": String(X) });
+    const gyOwner = mount({ "data-graveyard-pile": "1", "data-grouped-ids": String(X) });
+    const libHolder = mount({ "data-library-pile": "0" });
+    mount({ "data-library-pile": "1" });
+    // Reach-guard: the owner's own-seat pile exists, so only the holder lookup can pick the holder's node.
+    expect(document.querySelector('[data-graveyard-pile="1"]')).toBe(gyOwner);
+
+    expect(sourceElement(castFrom("Graveyard"), X)).toBe(gyHolder);
+    expect(ownNode({ from: "Stack", to: "Graveyard", ownerId: 1 }, X)).toBe(gyHolder);
+    expect(sourceElement(castFrom("Library"), X)).toBe(libHolder);
+
+    gyHolder.setAttribute("data-grouped-ids", "3");
+    expect(provisionalNode({ from: "Stack", to: "Graveyard", ownerId: 1 })).toBe(gyHolder);
+  });
+
+  it("a per-player format keeps each owner's own pile", () => {
+    share({});
+    mount({ "data-graveyard-pile": "0", "data-grouped-ids": String(X) });
+    const gyOwner = mount({ "data-graveyard-pile": "1", "data-grouped-ids": String(X) });
+    mount({ "data-library-pile": "0" });
+    const libOwner = mount({ "data-library-pile": "1" });
+
+    expect(sourceElement({ ...castFrom("Graveyard"), ownerId: 1 }, X)).toBe(gyOwner);
+    expect(sourceElement({ ...castFrom("Library"), ownerId: 1 }, X)).toBe(libOwner);
+    expect(provisionalNode({ from: "Stack", to: "Graveyard", ownerId: 1 })).toBe(gyOwner);
+  });
+});
 
 describe("surface measurement", () => {
   it("V3-5f: opacity is the product over the node and its ancestors, and own aims carry it", () => {

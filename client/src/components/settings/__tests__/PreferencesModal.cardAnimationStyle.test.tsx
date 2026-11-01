@@ -22,15 +22,16 @@ describe("PreferencesModal card animation style", () => {
   it("switches between the New and Classic card animations", () => {
     render(<PreferencesModal onClose={vi.fn()} initialTab="visual" />);
 
-    const group = screen.getByText("Card Animations").parentElement!;
-    expect(within(group).getAllByRole("button").map((button) => button.textContent)).toEqual(["New", "Classic"]);
+    const group = screen.getByRole("radiogroup", { name: "Card Animations" });
+    expect(within(group).getByRole("radio", { name: "New" })).toBeChecked();
+    expect(within(group).getByRole("radio", { name: "Classic" })).not.toBeChecked();
 
-    fireEvent.click(within(group).getByRole("button", { name: "Classic" }));
+    fireEvent.click(within(group).getByRole("radio", { name: "Classic" }));
 
     expect(usePreferencesStore.getState().cardAnimationStyle).toBe("classic");
     expect(usePreferencesStore.getState().vfxQuality).toBe("full");
 
-    fireEvent.click(within(group).getByRole("button", { name: "New" }));
+    fireEvent.click(within(group).getByRole("radio", { name: "New" }));
 
     expect(usePreferencesStore.getState().cardAnimationStyle).toBe("webgl");
     expect(usePreferencesStore.getState().vfxQuality).toBe("full");

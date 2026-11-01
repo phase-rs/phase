@@ -7,7 +7,9 @@ use crate::database::synthesis::{
     merge_extracted_keywords, parse_oracle_with_cleave_brackets, synthesize_all,
 };
 use crate::game::game_object::GameObject;
-use crate::types::ability::{ContinuousModification, TargetFilter};
+use crate::types::ability::{
+    ContinuousModification, FilterProp, TargetFilter, TypeFilter, TypedFilter,
+};
 use crate::types::card::CardFace;
 use crate::types::card_type::CardType;
 use crate::types::events::GameEvent;
@@ -87,11 +89,10 @@ pub fn set_player_sticker_sheets(state: &mut GameState, player: PlayerId, names:
     }
 }
 
+/// CR 123.5 + CR 400.2: an object keeps its stickers in the public zones and
+/// loses them in the hidden ones; the single zone predicate is `Zone::is_public`.
 pub fn zone_retains_stickers(zone: Zone) -> bool {
-    matches!(
-        zone,
-        Zone::Battlefield | Zone::Graveyard | Zone::Exile | Zone::Stack | Zone::Command
-    )
+    zone.is_public()
 }
 
 pub fn object_is_stickered(obj: &GameObject) -> bool {
@@ -109,11 +110,166 @@ pub(crate) fn may_put_sticker_on(object: &GameObject, player: PlayerId) -> bool 
     object.owner == player
 }
 
+/// CR 123.5 + CR 123.6c + CR 123.7: re-derive a card's name and ability
+/// stickers from its printed characteristics in a public zone other than the
+/// battlefield and the stack (P/T stickers ride the ordered layer pass).
 pub fn rebuild_public_zone_stickers(obj: &mut GameObject) {
     obj.revert_layered_characteristics_to_base();
     apply_name_stickers_from_base(obj);
     apply_ability_stickers(obj);
-    apply_power_toughness_stickers(obj);
+}
+
+/// CR 702.33h + CR 123.6b + CR 123.7: a sticker put on a spell modifies the
+/// spell as it is. A spell carries state fixed as it was cast — its prototype
+/// form (CR 718.3b) and cast-bound effects such as Cavern of Souls' "that
+/// spell can't be countered" — that no printed baseline records, so the spell
+/// is never reverted: only the new sticker's name words and abilities are
+/// added. Its P/T sticker is applied by the ordered layer pass (CR 613.4b).
+fn apply_sticker_to_spell(obj: &mut GameObject, sticker: &AppliedSticker) {
+    match sticker {
+        AppliedSticker::Name { text, position, .. } => {
+            let mut words = current_name_words(obj);
+            insert_name_sticker_words(&mut words, text, *position);
+            obj.name = words.join(" ");
+        }
+        AppliedSticker::Ability { text, .. } => grant_ability_sticker(obj, text),
+        AppliedSticker::PowerToughness { .. } | AppliedSticker::Art { .. } => {}
+    }
+}
+
+/// CR 123.1 + CR 707.2 + CR 707.10 + CR 707.12: a copy of a spell or card
+/// acquires the original's copiable values, and changes from stickers aren't
+/// copiable values; the stickers themselves are markers on the original, not on
+/// its copy. Given a copy cloned from a stickered object, remove its stickers
+/// and undo exactly what each one added — its name words, its granted
+/// abilities and its P/T — in reverse placement order, leaving every other
+/// characteristic as cloned.
+///
+/// The single authority every object-cloning copy birth calls, before it
+/// derives anything else from the clone: `copy_spell.rs` (copy a spell),
+/// `cast_copy_of_card.rs` (cast a copy of a card), `paradigm.rs` (the exiled
+/// Paradigm source), `epic.rs` (the Epic card) and `prepare.rs` (the prepare
+/// copy in exile). Token copies are built fresh, with no stickers.
+pub(crate) fn remove_stickers_from_copy(copy: &mut GameObject) {
+    let stickers = std::mem::take(&mut copy.stickers);
+    for sticker in stickers.iter().rev() {
+        match sticker {
+            AppliedSticker::Name { text, position, .. } => {
+                let mut words = current_name_words(copy);
+                remove_name_sticker_words(&mut words, text, *position);
+                copy.name = words.join(" ");
+            }
+            AppliedSticker::Ability { text, .. } => revoke_ability_sticker(copy, text),
+            AppliedSticker::PowerToughness { .. } | AppliedSticker::Art { .. } => {}
+        }
+    }
+    // CR 613.4b: a P/T sticker's setter lives only in the layer pass, which no
+    // longer reaches a copy without stickers; return the copy to its own P/T
+    // baseline for the pass to build on.
+    if stickers
+        .iter()
+        .any(|sticker| sticker.kind() == StickerKind::PowerToughness)
+    {
+        reset_pt_to_object_baseline(copy);
+    }
+}
+
+/// CR 718.3b: an object's own P/T baseline, which a P/T sticker's layer-7b
+/// setter writes over — its prototype values for a prototyped spell, else its
+/// printed P/T.
+pub(crate) fn reset_pt_to_object_baseline(obj: &mut GameObject) {
+    let (power, toughness) = obj
+        .prototype_form
+        .as_ref()
+        .map_or((obj.base_power, obj.base_toughness), |form| {
+            (Some(form.power), Some(form.toughness))
+        });
+    obj.power = power;
+    obj.toughness = toughness;
+    obj.layer_base_power = power;
+    obj.layer_base_toughness = toughness;
+}
+
+/// The inverse of [`insert_name_sticker_words`] (CR 123.6b + CR 123.6c): the
+/// sticker's words sit at its recorded placement — `position` words in, or at
+/// the end when the name then had fewer words — once every later name sticker
+/// has been removed first (callers undo in reverse placement order). If the
+/// words there are not the sticker's, the name was rewritten by something
+/// other than this sticker after it was placed; nothing is removed rather than
+/// guessing which occurrence of those words the sticker added.
+fn remove_name_sticker_words(words: &mut Vec<String>, text: &str, position: u8) {
+    let sticker_words: Vec<&str> = text.split_whitespace().collect();
+    let count = sticker_words.len();
+    if count == 0 || count > words.len() {
+        return;
+    }
+    let placed_at = usize::min(position as usize, words.len() - count);
+    let placed = words[placed_at..placed_at + count]
+        .iter()
+        .map(String::as_str)
+        .eq(sticker_words.iter().copied());
+    if placed {
+        words.drain(placed_at..placed_at + count);
+    }
+}
+
+/// The inverse of [`grant_ability_sticker`]: remove one occurrence (the last)
+/// of each keyword and definition the sticker's text grants.
+fn revoke_ability_sticker(obj: &mut GameObject, text: &str) {
+    let parsed = parse_sticker_ability_face(text);
+    for keyword in &parsed.keywords {
+        // allow-raw-authority: structural edit of this object's own keyword list (removing the instance the sticker added); the helpers only answer has/has-not.
+        if let Some(index) = obj.keywords.iter().rposition(|k| k == keyword) {
+            obj.keywords.remove(index);
+        }
+    }
+    for ability in &parsed.abilities {
+        if let Some(index) = obj.abilities.iter().rposition(|a| a == ability) {
+            Arc::make_mut(&mut obj.abilities).remove(index);
+        }
+    }
+    for trigger in parsed.triggers {
+        let entry = crate::types::ability::TriggerEntry::unmaterialized_legacy(trigger);
+        remove_last_equal(&mut obj.trigger_definitions, &entry);
+    }
+    for replacement in &parsed.replacements {
+        remove_last_equal(&mut obj.replacement_definitions, replacement);
+    }
+    for static_ability in &parsed.static_abilities {
+        remove_last_equal(&mut obj.static_definitions, static_ability);
+    }
+}
+
+fn remove_last_equal<T: Clone + PartialEq>(
+    definitions: &mut crate::types::definitions::Definitions<T>,
+    item: &T,
+) {
+    // Structural edit of the definition list, not a functioning read.
+    let Some(target) = definitions.iter_all().rposition(|d| d == item) else {
+        return;
+    };
+    let mut index = 0;
+    definitions.retain(|_| {
+        let keep = index != target;
+        index += 1;
+        keep
+    });
+}
+
+/// CR 123.7 + CR 613.1f: the keywords the object's ability stickers grant. The
+/// stack seed of a full layer pass resets a spell's keywords to its printed
+/// ones; these are re-granted with them so a stickered spell keeps them.
+pub(crate) fn ability_sticker_keywords(obj: &GameObject) -> Vec<Keyword> {
+    obj.stickers
+        .iter()
+        .filter_map(|sticker| match sticker {
+            AppliedSticker::Ability { text, .. } => Some(parse_sticker_ability_face(text).keywords),
+            AppliedSticker::Name { .. }
+            | AppliedSticker::PowerToughness { .. }
+            | AppliedSticker::Art { .. } => None,
+        })
+        .flatten()
+        .collect()
 }
 
 pub fn apply_battlefield_name_and_ability_stickers(
@@ -135,7 +291,35 @@ pub fn apply_battlefield_name_and_ability_stickers(
     has_ability_sticker
 }
 
-pub fn append_battlefield_pt_sticker_effects(
+/// The one enumeration of objects carrying a sticker of `kind` in a zone that
+/// retains stickers: the zone's actual population (`zone_object_ids`, so
+/// phased-out permanents, phantom stack objects and Attraction/Contraption deck
+/// objects are excluded) whose `zone` agrees with the container.
+pub(crate) fn public_zone_sticker_carriers(
+    state: &GameState,
+    kind: StickerKind,
+) -> impl Iterator<Item = (Zone, ObjectId)> + '_ {
+    Zone::ALL
+        .into_iter()
+        .filter(|zone| zone_retains_stickers(*zone))
+        .flat_map(move |zone| {
+            crate::game::targeting::zone_object_ids(state, zone)
+                .into_iter()
+                .map(move |id| (zone, id))
+        })
+        .filter(move |(zone, id)| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|obj| obj.zone == *zone && object_has_sticker_kind(obj, kind))
+        })
+}
+
+/// CR 123.8 + CR 613.4b + CR 112.1: P/T stickers set P/T in layer 7b for
+/// creatures on the battlefield and creature or Vehicle cards (including
+/// creature spells) in other public zones; eligibility is read after layer 4
+/// (CR 613.1d). Each sticker is a setter with its own timestamp (CR 613.7k).
+pub fn append_public_zone_pt_sticker_effects(
     state: &GameState,
     effects: &mut [(Layer, Vec<ActiveContinuousEffect>)],
 ) {
@@ -143,9 +327,26 @@ pub fn append_battlefield_pt_sticker_effects(
         return;
     };
 
-    for id in state.battlefield_phased_in_ids() {
+    for (zone, id) in public_zone_sticker_carriers(state, StickerKind::PowerToughness) {
         let Some(obj) = state.objects.get(&id) else {
             continue;
+        };
+        let (type_filter, properties) = if zone == Zone::Battlefield {
+            (TypeFilter::Creature, vec![FilterProp::InZone { zone }])
+        } else {
+            (
+                TypeFilter::AnyOf(vec![
+                    TypeFilter::Creature,
+                    TypeFilter::Subtype("Vehicle".to_string()),
+                ]),
+                vec![FilterProp::InZone { zone }, FilterProp::RepresentedByCard],
+            )
+        };
+        let affected_filter = TargetFilter::And {
+            filters: vec![
+                TargetFilter::SpecificObject { id },
+                TargetFilter::Typed(TypedFilter::new(type_filter).properties(properties)),
+            ],
         };
         for sticker in &obj.stickers {
             let AppliedSticker::PowerToughness {
@@ -169,10 +370,11 @@ pub fn append_battlefield_pt_sticker_effects(
                 layer: Layer::SetPT,
                 timestamp: *timestamp,
                 modification: ContinuousModification::SetPower { value: *power },
-                affected_filter: TargetFilter::SpecificObject { id },
+                affected_filter: affected_filter.clone(),
                 condition: None,
                 mode: crate::types::statics::StaticMode::Continuous,
                 characteristic_defining: false,
+                granter: None,
             });
             bucket.push(ActiveContinuousEffect {
                 source_id: id,
@@ -185,10 +387,11 @@ pub fn append_battlefield_pt_sticker_effects(
                 layer: Layer::SetPT,
                 timestamp: *timestamp,
                 modification: ContinuousModification::SetToughness { value: *toughness },
-                affected_filter: TargetFilter::SpecificObject { id },
+                affected_filter: affected_filter.clone(),
                 condition: None,
                 mode: crate::types::statics::StaticMode::Continuous,
                 characteristic_defining: false,
+                granter: None,
             });
         }
     }
@@ -405,31 +608,26 @@ pub fn apply_selected_sticker(
         }
     }
 
-    let timestamp = state.next_timestamp();
-    match &mut sticker {
-        AppliedSticker::Name {
-            timestamp: slot, ..
-        }
-        | AppliedSticker::Ability {
-            timestamp: slot, ..
-        }
-        | AppliedSticker::PowerToughness {
-            timestamp: slot, ..
-        }
-        | AppliedSticker::Art {
-            timestamp: slot, ..
-        } => *slot = timestamp,
-    }
+    // CR 613.7k: a sticker receives a new timestamp each time it's put on an object.
+    sticker.set_timestamp(state.next_timestamp());
 
     let Some(obj) = state.objects.get_mut(&target_id) else {
         return;
     };
     obj.stickers.push(sticker.clone());
 
-    if obj.zone == Zone::Battlefield {
+    // CR 123.8 + CR 613.4b: every public-zone recipient is re-settled by the
+    // ordered layer pass; off the battlefield the name/ability stickers are
+    // applied first — from the printed card in a card zone, and onto the spell
+    // as it is on the stack.
+    match obj.zone {
+        Zone::Battlefield => {}
+        Zone::Stack => apply_sticker_to_spell(obj, &sticker),
+        Zone::Graveyard | Zone::Exile | Zone::Command => rebuild_public_zone_stickers(obj),
+        Zone::Library | Zone::Hand => {}
+    }
+    if zone_retains_stickers(obj.zone) {
         state.layers_dirty.mark_full();
-    } else if zone_retains_stickers(obj.zone) {
-        rebuild_public_zone_stickers(obj);
     }
     // CR 608.2c: latch "that sticker" for the rest of this resolution.
     state.placed_sticker_this_resolution = Some(sticker.clone());
@@ -478,11 +676,7 @@ fn apply_name_stickers(obj: &mut GameObject, source_name: &str) {
         let AppliedSticker::Name { text, position, .. } = sticker else {
             continue;
         };
-        let insert_at = usize::min(*position as usize, words.len());
-        let sticker_words: Vec<String> = text.split_whitespace().map(str::to_string).collect();
-        for (offset, word) in sticker_words.into_iter().enumerate() {
-            words.insert(insert_at + offset, word);
-        }
+        insert_name_sticker_words(&mut words, text, *position);
     }
 
     obj.name = words.join(" ");
@@ -491,49 +685,58 @@ fn apply_name_stickers(obj: &mut GameObject, source_name: &str) {
     }
 }
 
-fn apply_ability_stickers(obj: &mut GameObject) {
-    for sticker in &obj.stickers {
-        let AppliedSticker::Ability { text, .. } = sticker else {
-            continue;
-        };
-        let parsed = parse_sticker_ability_face(text);
-        for keyword in parsed.keywords {
-            obj.keywords.push(keyword);
-        }
-        Arc::make_mut(&mut obj.abilities).extend(parsed.abilities);
-        for trigger in parsed.triggers {
-            // FIXME(stickers): needs a real occurrence ref. Unlike the other
-            // sites in this change, a sticker-granted trigger is NOT a printed
-            // slot — `rebuild_public_zone_stickers` reverts to base and
-            // re-applies, so pushing to `base_trigger_definitions` would make
-            // the sticker permanent. It wants a Layer-6 grant producer key, but
-            // neither `TriggerProducerOrigin::Static` (no owning static
-            // definition) nor `Transient` (no continuous-effect id) describes a
-            // sticker without a design decision. Left explicit rather than
-            // guessed; a stickered object still fails to serialize.
-            obj.trigger_definitions.push(
-                crate::types::ability::TriggerEntry::unmaterialized_legacy(trigger),
-            );
-        }
-        for replacement in parsed.replacements {
-            obj.replacement_definitions.push(replacement);
-        }
-        for static_ability in parsed.static_abilities {
-            obj.static_definitions.push(static_ability);
-        }
+/// CR 123.6b + CR 123.6c: a name sticker's words go after `position` words of
+/// the current name, or at its end when the name now has fewer words.
+fn insert_name_sticker_words(words: &mut Vec<String>, text: &str, position: u8) {
+    let insert_at = usize::min(position as usize, words.len());
+    for (offset, word) in text.split_whitespace().enumerate() {
+        words.insert(insert_at + offset, word.to_string());
     }
 }
 
-fn apply_power_toughness_stickers(obj: &mut GameObject) {
-    for sticker in &obj.stickers {
-        let AppliedSticker::PowerToughness {
-            power, toughness, ..
-        } = sticker
-        else {
-            continue;
-        };
-        obj.power = Some(*power);
-        obj.toughness = Some(*toughness);
+fn apply_ability_stickers(obj: &mut GameObject) {
+    let texts: Vec<String> = obj
+        .stickers
+        .iter()
+        .filter_map(|sticker| match sticker {
+            AppliedSticker::Ability { text, .. } => Some(text.clone()),
+            AppliedSticker::Name { .. }
+            | AppliedSticker::PowerToughness { .. }
+            | AppliedSticker::Art { .. } => None,
+        })
+        .collect();
+    for text in &texts {
+        grant_ability_sticker(obj, text);
+    }
+}
+
+/// CR 123.7: the object gains the abilities printed on an ability sticker.
+fn grant_ability_sticker(obj: &mut GameObject, text: &str) {
+    let parsed = parse_sticker_ability_face(text);
+    for keyword in parsed.keywords {
+        obj.keywords.push(keyword);
+    }
+    Arc::make_mut(&mut obj.abilities).extend(parsed.abilities);
+    for trigger in parsed.triggers {
+        // FIXME(stickers): needs a real occurrence ref. Unlike the other
+        // sites in this change, a sticker-granted trigger is NOT a printed
+        // slot — `rebuild_public_zone_stickers` reverts to base and
+        // re-applies, so pushing to `base_trigger_definitions` would make
+        // the sticker permanent. It wants a Layer-6 grant producer key, but
+        // neither `TriggerProducerOrigin::Static` (no owning static
+        // definition) nor `Transient` (no continuous-effect id) describes a
+        // sticker without a design decision. Left explicit rather than
+        // guessed; a stickered object still fails to serialize.
+        obj.trigger_definitions
+            .push(crate::types::ability::TriggerEntry::unmaterialized_legacy(
+                trigger,
+            ));
+    }
+    for replacement in parsed.replacements {
+        obj.replacement_definitions.push(replacement);
+    }
+    for static_ability in parsed.static_abilities {
+        obj.static_definitions.push(static_ability);
     }
 }
 

@@ -401,6 +401,8 @@ fn legacy_save_restores_a_search_found_prompt_as_search_found_not_ordering() {
         lifelink_bonus: 0,
         may_cost_paid: false,
         may_cost_remaining: None,
+        delivery_boundary: None,
+        unrepresentable_life_change: Default::default(),
     });
     let parked = engine::game::replacement::replacement_choice_waiting_for(P0, runner.state());
     runner.state_mut().waiting_for = parked;

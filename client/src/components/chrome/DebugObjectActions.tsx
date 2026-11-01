@@ -77,11 +77,11 @@ function MoveToZoneForm({ onDispatch }: Props) {
   return (
     <>
       <ObjectSelect value={objectId} onChange={setObjectId} />
-      <FieldRow label="To Zone">
+      <FieldRow label={t("sandboxTools.toZone")}>
         <SelectInput value={toZone} onChange={setToZone} options={ZONES} />
       </FieldRow>
       {toZone === "Library" && (
-        <FieldRow label="Position">
+        <FieldRow label={t("sandboxTools.position")}>
           <SelectInput
             value={libraryPosition}
             onChange={setLibraryPosition}
@@ -111,13 +111,14 @@ function MoveToZoneForm({ onDispatch }: Props) {
           })
         }
       >
-        Move
+        {t("sandboxTools.move")}
       </SubmitButton>
     </>
   );
 }
 
 function RemoveObjectForm({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
   const [objectId, setObjectId] = useState<ObjectId | null>(null);
 
   return (
@@ -130,7 +131,7 @@ function RemoveObjectForm({ onDispatch }: Props) {
           onDispatch({ type: "RemoveObject", data: { object_id: objectId } })
         }
       >
-        Remove
+        {t("sandboxTools.remove")}
       </SubmitButton>
     </>
   );
@@ -148,10 +149,10 @@ function CreateTokenCopyForm({ onDispatch }: Props) {
       <ObjectSelect
         value={sourceId}
         onChange={setSourceId}
-        label="Source"
-        placeholder="Pick object to copy…"
+        label={t("sandboxTools.source")}
+        placeholder={t("sandboxTools.pickCopySource")}
       />
-      <FieldRow label="Owner">
+      <FieldRow label={t("sandboxTools.owner")}>
         <PlayerSelect value={owner} onChange={setOwner} />
       </FieldRow>
       <FieldRow label={t("debugCreate.copies")}>
@@ -161,7 +162,7 @@ function CreateTokenCopyForm({ onDispatch }: Props) {
         <CheckboxInput
           checked={nonlegendary}
           onChange={setNonlegendary}
-          label="Make nonlegendary"
+          label={t("sandboxTools.nonlegendary")}
         />
       </FieldRow>
       <SubmitButton
@@ -174,13 +175,14 @@ function CreateTokenCopyForm({ onDispatch }: Props) {
           })
         }
       >
-        Copy Object
+        {t("sandboxTools.copyObject")}
       </SubmitButton>
     </>
   );
 }
 
 function SetBasePTForm({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
   const [objectId, setObjectId] = useState<ObjectId | null>(null);
   const [power, setPower] = useState(0);
   const [toughness, setToughness] = useState(0);
@@ -188,10 +190,10 @@ function SetBasePTForm({ onDispatch }: Props) {
   return (
     <>
       <ObjectSelect value={objectId} onChange={setObjectId} filter={onBattlefield} />
-      <FieldRow label="Power">
+      <FieldRow label={t("sandboxTools.power")}>
         <NumberInput value={power} onChange={setPower} />
       </FieldRow>
-      <FieldRow label="Toughness">
+      <FieldRow label={t("sandboxTools.toughness")}>
         <NumberInput value={toughness} onChange={setToughness} />
       </FieldRow>
       <SubmitButton
@@ -204,13 +206,14 @@ function SetBasePTForm({ onDispatch }: Props) {
           })
         }
       >
-        Set P/T
+        {t("sandboxTools.setPT")}
       </SubmitButton>
     </>
   );
 }
 
 function ModifyCountersForm({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
   const [objectId, setObjectId] = useState<ObjectId | null>(null);
   const [counterType, setCounterType] = useState<CounterType>("P1P1");
   const [delta, setDelta] = useState(1);
@@ -225,14 +228,14 @@ function ModifyCountersForm({ onDispatch }: Props) {
   return (
     <>
       <ObjectSelect value={objectId} onChange={setObjectId} filter={onBattlefield} />
-      <FieldRow label="Counter">
+      <FieldRow label={t("sandboxTools.counter")}>
         <SelectInput
           value={counterType}
           onChange={setCounterType}
           options={counterTypes}
         />
       </FieldRow>
-      <FieldRow label="Delta">
+      <FieldRow label={t("sandboxTools.delta")}>
         <NumberInput value={delta} onChange={setDelta} />
       </FieldRow>
       <SubmitButton
@@ -245,20 +248,21 @@ function ModifyCountersForm({ onDispatch }: Props) {
           })
         }
       >
-        Modify Counters
+        {t("sandboxTools.modifyCounters")}
       </SubmitButton>
     </>
   );
 }
 
 function SetTappedForm({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
   const [objectId, setObjectId] = useState<ObjectId | null>(null);
   const [tapped, setTapped] = useState(true);
 
   return (
     <>
       <ObjectSelect value={objectId} onChange={setObjectId} filter={onBattlefield} />
-      <CheckboxInput checked={tapped} onChange={setTapped} label="Tapped" />
+      <CheckboxInput checked={tapped} onChange={setTapped} label={t("sandboxTools.tapped")} />
       <SubmitButton
         disabled={objectId == null}
         onClick={() =>
@@ -266,20 +270,21 @@ function SetTappedForm({ onDispatch }: Props) {
           onDispatch({ type: "SetTapped", data: { object_id: objectId, tapped } })
         }
       >
-        Set Tap State
+        {t("sandboxTools.setTapState")}
       </SubmitButton>
     </>
   );
 }
 
 function SetPreparedForm({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
   const [objectId, setObjectId] = useState<ObjectId | null>(null);
   const [prepared, setPrepared] = useState(true);
 
   return (
     <>
       <ObjectSelect value={objectId} onChange={setObjectId} filter={onBattlefield} />
-      <CheckboxInput checked={prepared} onChange={setPrepared} label="Prepared" />
+      <CheckboxInput checked={prepared} onChange={setPrepared} label={t("sandboxTools.prepared")} />
       <SubmitButton
         disabled={objectId == null}
         onClick={() =>
@@ -287,20 +292,21 @@ function SetPreparedForm({ onDispatch }: Props) {
           onDispatch({ type: "SetPrepared", data: { object_id: objectId, prepared } })
         }
       >
-        Set Prepared State
+        {t("sandboxTools.setPreparedState")}
       </SubmitButton>
     </>
   );
 }
 
 function SetControllerForm({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
   const [objectId, setObjectId] = useState<ObjectId | null>(null);
   const [controller, setController] = useState<PlayerId>(0);
 
   return (
     <>
       <ObjectSelect value={objectId} onChange={setObjectId} filter={onBattlefield} />
-      <FieldRow label="Controller">
+      <FieldRow label={t("sandboxTools.controller")}>
         <PlayerSelect value={controller} onChange={setController} />
       </FieldRow>
       <SubmitButton
@@ -313,20 +319,21 @@ function SetControllerForm({ onDispatch }: Props) {
           })
         }
       >
-        Set Controller
+        {t("sandboxTools.setController")}
       </SubmitButton>
     </>
   );
 }
 
 function SetSummoningSicknessForm({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
   const [objectId, setObjectId] = useState<ObjectId | null>(null);
   const [sick, setSick] = useState(false);
 
   return (
     <>
       <ObjectSelect value={objectId} onChange={setObjectId} filter={onBattlefield} />
-      <CheckboxInput checked={sick} onChange={setSick} label="Summoning Sick" />
+      <CheckboxInput checked={sick} onChange={setSick} label={t("sandboxTools.summoningSick")} />
       <SubmitButton
         disabled={objectId == null}
         onClick={() =>
@@ -334,13 +341,14 @@ function SetSummoningSicknessForm({ onDispatch }: Props) {
           onDispatch({ type: "SetSummoningSickness", data: { object_id: objectId, sick } })
         }
       >
-        Set Summoning Sickness
+        {t("sandboxTools.setSummoningSickness")}
       </SubmitButton>
     </>
   );
 }
 
 function SetFaceStateForm({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
   const [objectId, setObjectId] = useState<ObjectId | null>(null);
   const [faceDown, setFaceDown] = useState(false);
   const [transformed, setTransformed] = useState(false);
@@ -349,9 +357,9 @@ function SetFaceStateForm({ onDispatch }: Props) {
   return (
     <>
       <ObjectSelect value={objectId} onChange={setObjectId} />
-      <CheckboxInput checked={faceDown} onChange={setFaceDown} label="Face Down" />
-      <CheckboxInput checked={transformed} onChange={setTransformed} label="Transformed" />
-      <CheckboxInput checked={flipped} onChange={setFlipped} label="Flipped" />
+      <CheckboxInput checked={faceDown} onChange={setFaceDown} label={t("sandboxTools.faceDown")} />
+      <CheckboxInput checked={transformed} onChange={setTransformed} label={t("sandboxTools.transformed")} />
+      <CheckboxInput checked={flipped} onChange={setFlipped} label={t("sandboxTools.flipped")} />
       <SubmitButton
         disabled={objectId == null}
         onClick={() =>
@@ -362,13 +370,14 @@ function SetFaceStateForm({ onDispatch }: Props) {
           })
         }
       >
-        Set Face State
+        {t("sandboxTools.setFaceState")}
       </SubmitButton>
     </>
   );
 }
 
 function AttachForm({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
   const [sourceId, setSourceId] = useState<ObjectId | null>(null);
   const [targetKind, setTargetKind] = useState<"Object" | "Player">("Object");
   const [targetObjectId, setTargetObjectId] = useState<ObjectId | null>(null);
@@ -407,11 +416,11 @@ function AttachForm({ onDispatch }: Props) {
         value={sourceId}
         onChange={setSourceId}
         filter={isAttachable}
-        label="Attach"
-        placeholder="Pick an Aura/Equipment…"
+        label={t("sandboxTools.attach")}
+        placeholder={t("sandboxTools.pickAttachment")}
       />
       {info.canTargetPlayer && info.canTargetObject && (
-        <FieldRow label="Target Kind">
+        <FieldRow label={t("sandboxTools.targetKind")}>
           <SelectInput
             value={targetKind}
             onChange={setTargetKind}
@@ -424,12 +433,12 @@ function AttachForm({ onDispatch }: Props) {
           value={targetObjectId}
           onChange={setTargetObjectId}
           filter={info.objectFilter}
-          label="To Object"
-          placeholder="Pick a host…"
+          label={t("sandboxTools.toObject")}
+          placeholder={t("sandboxTools.pickHost")}
         />
       )}
       {targetKind === "Player" && (
-        <FieldRow label="To Player">
+        <FieldRow label={t("sandboxTools.toPlayer")}>
           <PlayerSelect value={targetPlayerId} onChange={setTargetPlayerId} />
         </FieldRow>
       )}
@@ -441,13 +450,14 @@ function AttachForm({ onDispatch }: Props) {
           }
         }}
       >
-        Attach
+        {t("sandboxTools.attach")}
       </SubmitButton>
     </>
   );
 }
 
 function DetachForm({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
   const [objectId, setObjectId] = useState<ObjectId | null>(null);
 
   return (
@@ -459,51 +469,52 @@ function DetachForm({ onDispatch }: Props) {
           objectId != null && onDispatch({ type: "Detach", data: { object_id: objectId } })
         }
       >
-        Detach
+        {t("sandboxTools.detach")}
       </SubmitButton>
     </>
   );
 }
 
 export function DebugObjectActions({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
   const { expanded, toggle } = useAccordion();
 
   return (
     <div>
-      <AccordionItem label="Move to Zone" expanded={expanded === "move"} onToggle={() => toggle("move")}>
+      <AccordionItem label={t("sandboxTools.moveToZone")} expanded={expanded === "move"} onToggle={() => toggle("move")}>
         <MoveToZoneForm onDispatch={onDispatch} />
       </AccordionItem>
-      <AccordionItem label="Remove Object" expanded={expanded === "remove"} onToggle={() => toggle("remove")}>
+      <AccordionItem label={t("sandboxTools.removeObject")} expanded={expanded === "remove"} onToggle={() => toggle("remove")}>
         <RemoveObjectForm onDispatch={onDispatch} />
       </AccordionItem>
-      <AccordionItem label="Copy Object" expanded={expanded === "copy"} onToggle={() => toggle("copy")}>
+      <AccordionItem label={t("sandboxTools.copyObject")} expanded={expanded === "copy"} onToggle={() => toggle("copy")}>
         <CreateTokenCopyForm onDispatch={onDispatch} />
       </AccordionItem>
-      <AccordionItem label="Set Base P/T" expanded={expanded === "pt"} onToggle={() => toggle("pt")}>
+      <AccordionItem label={t("sandboxTools.setBasePT")} expanded={expanded === "pt"} onToggle={() => toggle("pt")}>
         <SetBasePTForm onDispatch={onDispatch} />
       </AccordionItem>
-      <AccordionItem label="Modify Counters" expanded={expanded === "counters"} onToggle={() => toggle("counters")}>
+      <AccordionItem label={t("sandboxTools.modifyCounters")} expanded={expanded === "counters"} onToggle={() => toggle("counters")}>
         <ModifyCountersForm onDispatch={onDispatch} />
       </AccordionItem>
-      <AccordionItem label="Set Tapped" expanded={expanded === "tapped"} onToggle={() => toggle("tapped")}>
+      <AccordionItem label={t("sandboxTools.setTapped")} expanded={expanded === "tapped"} onToggle={() => toggle("tapped")}>
         <SetTappedForm onDispatch={onDispatch} />
       </AccordionItem>
-      <AccordionItem label="Set Prepared" expanded={expanded === "prepared"} onToggle={() => toggle("prepared")}>
+      <AccordionItem label={t("sandboxTools.setPrepared")} expanded={expanded === "prepared"} onToggle={() => toggle("prepared")}>
         <SetPreparedForm onDispatch={onDispatch} />
       </AccordionItem>
-      <AccordionItem label="Set Controller" expanded={expanded === "controller"} onToggle={() => toggle("controller")}>
+      <AccordionItem label={t("sandboxTools.setController")} expanded={expanded === "controller"} onToggle={() => toggle("controller")}>
         <SetControllerForm onDispatch={onDispatch} />
       </AccordionItem>
-      <AccordionItem label="Summoning Sickness" expanded={expanded === "sick"} onToggle={() => toggle("sick")}>
+      <AccordionItem label={t("sandboxTools.summoningSickness")} expanded={expanded === "sick"} onToggle={() => toggle("sick")}>
         <SetSummoningSicknessForm onDispatch={onDispatch} />
       </AccordionItem>
-      <AccordionItem label="Face State" expanded={expanded === "face"} onToggle={() => toggle("face")}>
+      <AccordionItem label={t("sandboxTools.faceState")} expanded={expanded === "face"} onToggle={() => toggle("face")}>
         <SetFaceStateForm onDispatch={onDispatch} />
       </AccordionItem>
-      <AccordionItem label="Attach" expanded={expanded === "attach"} onToggle={() => toggle("attach")}>
+      <AccordionItem label={t("sandboxTools.attach")} expanded={expanded === "attach"} onToggle={() => toggle("attach")}>
         <AttachForm onDispatch={onDispatch} />
       </AccordionItem>
-      <AccordionItem label="Detach" expanded={expanded === "detach"} onToggle={() => toggle("detach")}>
+      <AccordionItem label={t("sandboxTools.detach")} expanded={expanded === "detach"} onToggle={() => toggle("detach")}>
         <DetachForm onDispatch={onDispatch} />
       </AccordionItem>
     </div>

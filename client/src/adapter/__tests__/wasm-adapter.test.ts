@@ -22,6 +22,7 @@ import type {
   SubmitResult,
 } from "../types";
 import { AdapterError, AdapterErrorCode } from "../types";
+import { PLAYER_ID } from "../../constants/game";
 import { buildGameState, gameStateFactory } from "../../test/factories/gameStateFactory";
 
 const ensureWasmInit = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
@@ -33,14 +34,16 @@ const initializeMultiplayerHostGameJs = vi.hoisted(() =>
 );
 const getGameStateJs = vi.hoisted(() => vi.fn());
 const getLegalActionsJs = vi.hoisted(() => vi.fn());
+const getLegalActionsForViewerJs = vi.hoisted(() => vi.fn());
 const getViewerTransitionSnapshotJs = vi.hoisted(() => vi.fn());
 const setMultiplayerModeJs = vi.hoisted(() => vi.fn());
 const clearGameStateJs = vi.hoisted(() => vi.fn());
 const canonicalCardNamesJs = vi.hoisted(() => vi.fn());
 
-vi.mock("../../services/cardData", () => ({
+vi.mock("../main-thread-engine", () => ({
   ensureWasmInit,
   ensureCardDatabase: vi.fn().mockResolvedValue(100),
+  loadEngineModule: () => import("@wasm/engine"),
 }));
 
 vi.mock("@wasm/engine", () => ({
@@ -50,6 +53,7 @@ vi.mock("@wasm/engine", () => ({
   initialize_multiplayer_host_game: initializeMultiplayerHostGameJs,
   get_game_state: getGameStateJs,
   get_legal_actions_js: getLegalActionsJs,
+  get_legal_actions_for_viewer_js: getLegalActionsForViewerJs,
   get_viewer_transition_snapshot_js: getViewerTransitionSnapshotJs,
   set_multiplayer_mode: setMultiplayerModeJs,
   clear_game_state: clearGameStateJs,
@@ -75,6 +79,7 @@ const mockWorkerClient = {
   getCardParseDetails: vi.fn().mockResolvedValue([{ category: "ability" }]),
   getCardRulings: vi.fn().mockResolvedValue([{ date: "2020-01-01", text: "Test" }]),
   canonicalCardNames: vi.fn().mockResolvedValue([]),
+  query: vi.fn().mockResolvedValue("answer"),
   initializeGame: vi
     .fn()
     .mockResolvedValue({ events: [{ type: "GameStarted" }], log_entries: [] }),
@@ -98,6 +103,7 @@ const mockWorkerClient = {
     phase: "Untap",
   })),
   getLegalActions: vi.fn().mockResolvedValue({ actions: [], autoPassRecommended: false }),
+  getSnapshot: vi.fn(),
   getViewerTransitionSnapshot: vi.fn(),
   exportState: vi.fn().mockResolvedValue("{}"),
   restoreState: vi.fn().mockResolvedValue(undefined),
@@ -147,6 +153,7 @@ describe("WasmAdapter", () => {
     });
     getGameStateJs.mockReturnValue(buildGameState());
     getLegalActionsJs.mockReturnValue({ actions: [], autoPassRecommended: false });
+    getLegalActionsForViewerJs.mockReturnValue({ actions: [], autoPassRecommended: false });
     const restored = {
       presentation: {
         outcome: "noop" as const,
@@ -679,6 +686,24 @@ describe("WasmAdapter", () => {
     });
   });
 
+  describe("query", () => {
+    it("loads the card database before a query that reads it", async () => {
+      await expect(adapter.query("classifyDeck", ["Forest"])).resolves.toBe("answer");
+
+      expect(mockWorkerClient.loadCardDbFromUrl).toHaveBeenCalledOnce();
+      expect(mockWorkerClient.query).toHaveBeenCalledWith("classifyDeck", [["Forest"]]);
+    });
+
+    // The Play setup screen asks for the format's deck supply before any game
+    // starts; it must not pull the ~90 MB database in to answer.
+    it("answers a format query without loading the card database", async () => {
+      await expect(adapter.query("deckSupplyForFormat", "Standard")).resolves.toBe("answer");
+
+      expect(mockWorkerClient.loadCardDbFromUrl).not.toHaveBeenCalled();
+      expect(mockWorkerClient.query).toHaveBeenCalledWith("deckSupplyForFormat", ["Standard"]);
+    });
+  });
+
   describe("submitAction", () => {
     const createCard = (count: number) => ({
       type: "Debug" as const,
@@ -929,6 +954,7 @@ describe("WasmAdapter", () => {
       expect(mockWorkerClient.loadCardDbFromUrl).toHaveBeenCalledOnce();
       expect(mockWorkerClient.resumeMultiplayerHostState).toHaveBeenCalledWith(
         JSON.stringify(mockState),
+        PLAYER_ID,
       );
       expect(mockWorkerClient.loadCardDbFromUrl.mock.invocationCallOrder[0])
         .toBeLessThan(
@@ -963,6 +989,61 @@ describe("WasmAdapter", () => {
         "resume failed",
       );
       expect(resumeMultiplayerHostState).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe("local-seat legal actions", () => {
+    const seatList = { actions: [], autoPassRecommended: false, seat: PLAYER_ID };
+
+    it("asks the worker for the local seat's own list on every read", async () => {
+      await adapter.initialize();
+      mockWorkerClient.getSnapshot.mockResolvedValue({
+        state: buildGameState(),
+        legalResult: seatList,
+      });
+
+      await adapter.getLegalActions();
+      await adapter.getSnapshot();
+      await adapter.resumeRestoredGameState();
+      await adapter.resumeMultiplayerHostState(buildGameState());
+
+      expect(mockWorkerClient.getLegalActions).toHaveBeenCalledWith(PLAYER_ID);
+      expect(mockWorkerClient.getSnapshot).toHaveBeenCalledWith(PLAYER_ID);
+      expect(mockWorkerClient.resumeRestoredGameState).toHaveBeenCalledWith(PLAYER_ID);
+      expect(mockWorkerClient.resumeMultiplayerHostState).toHaveBeenCalledWith(
+        expect.any(String),
+        PLAYER_ID,
+      );
+    });
+
+    it("main-thread fallback reads the viewer-scoped export, never the seat-agnostic one", async () => {
+      mockWorkerClient.initialize.mockRejectedValueOnce(new Error("worker unavailable"));
+      getLegalActionsForViewerJs.mockReturnValue(seatList);
+      resumeRestoredGameState.mockReturnValue({
+        outcome: "noop",
+        automatedResolutionCount: 0,
+        omittedEventCount: 0,
+        logEntries: [],
+      });
+      resumeMultiplayerHostState.mockReturnValue({
+        outcome: "noop",
+        automatedResolutionCount: 0,
+        omittedEventCount: 0,
+        logEntries: [],
+      });
+      await adapter.initialize();
+
+      const lists = [
+        await adapter.getLegalActions(),
+        (await adapter.getSnapshot()).legalResult,
+        (await adapter.resumeRestoredGameState()).snapshot.legalResult,
+        (await adapter.resumeMultiplayerHostState(buildGameState())).snapshot.legalResult,
+      ];
+
+      expect(lists).toEqual(Array(4).fill(seatList));
+      expect(getLegalActionsForViewerJs).toHaveBeenCalledTimes(4);
+      expect(getLegalActionsForViewerJs).toHaveBeenCalledWith(PLAYER_ID);
+      expect(getLegalActionsJs).not.toHaveBeenCalled();
     });
   });
 

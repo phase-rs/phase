@@ -2,7 +2,7 @@
 //!
 //! Parser AST verification — VERIFIED:
 //! - `CardFace.card_type.subtypes: Vec<String>` at
-//!   `crates/engine/src/types/card_type.rs:109` (CR 205.3: subtypes).
+//!   `crates/phase-ast/src/types/card_type.rs` (CR 205.3: subtypes).
 //! - `CardFace.card_type.core_types: Vec<CoreType>`; `CoreType::Creature`,
 //!   `CoreType::Kindred`, `CoreType::Tribal` present at `card_type.rs:74-77`
 //!   (CR 308: Kindred cards share creature subtypes).
@@ -612,6 +612,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    engine::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: Vec::new(),
                 static_abilities: Vec::new(),
                 enter_with_counters: Vec::new(),

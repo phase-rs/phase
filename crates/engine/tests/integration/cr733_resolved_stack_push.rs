@@ -29,6 +29,7 @@
 //! make a crossing replay fail closed by design — the fix there is to journal
 //! them, never to relax this applier's precondition.
 
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::game::stack::apply_resolved_stack_push;
 use engine::types::ability::TargetRef;
@@ -269,6 +270,7 @@ fn recorded_push_carries_the_bound_force_block_source() {
         .act(GameAction::ActivateAbility {
             source_id: sled,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("the real force-block ability must activate");
     if let WaitingFor::TargetSelection { .. } = runner.state().waiting_for.clone() {

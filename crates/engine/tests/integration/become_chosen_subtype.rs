@@ -41,12 +41,34 @@
 
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::{ChoiceType, Effect, ManaProduction};
+use engine::parser::oracle::{parse_oracle_text, ParsedAbilities};
+use engine::types::ability::{
+    AbilityDefinition, ChoiceType, ChosenSubtypeKind, ContinuousModification, ControllerRef,
+    Duration, Effect, ManaProduction, QuantityExpr, TargetFilter, TypeFilter,
+};
+use engine::types::actions::GameAction;
+use engine::types::card_type::SubtypeSet;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::zones::Zone;
+
+/// Terraformer {2}{U} Creature — Human Wizard 2/2 — verbatim.
+const TERRAFORMER: &str =
+    "{1}: Choose a basic land type. Each land you control becomes that type until end of turn.";
+
+/// Elsewhere Flask {2} Artifact — verbatim, including its independent ETB.
+const ELSEWHERE_FLASK: &str =
+    "When this artifact enters, draw a card.\nSacrifice this artifact: Choose a basic land type. \
+     Each land you control becomes that type until end of turn.";
+
+/// Mistform Wakecaster {4}{U} Creature — Illusion 2/3 — verbatim.
+const MISTFORM_WAKECASTER: &str =
+    "Flying\n{1}: This creature becomes the creature type of your choice until end of turn.\n\
+     {2}{U}{U}, {T}: Choose a creature type. Each creature you control becomes that type until \
+     end of turn.";
 
 /// Mistform Stalker {1}{U} Creature — Illusion 1/1 — verbatim.
 const MISTFORM_STALKER: &str =
@@ -141,6 +163,323 @@ fn is_creature_type_choice(choice_type: &ChoiceType) -> bool {
 
 fn is_basic_land_type_choice(choice_type: &ChoiceType) -> bool {
     matches!(choice_type, ChoiceType::BasicLandType)
+}
+
+fn parse_supported(oracle: &str, name: &str, core_type: &str) -> ParsedAbilities {
+    parse_supported_with_keywords(oracle, name, core_type, &[])
+}
+
+fn parse_supported_with_keywords(
+    oracle: &str,
+    name: &str,
+    core_type: &str,
+    keywords: &[String],
+) -> ParsedAbilities {
+    let parsed = parse_oracle_text(oracle, name, keywords, &[core_type.to_string()], &[]);
+    let debug = format!("{parsed:#?}");
+    assert!(!debug.contains("Unimplemented"), "{name}: {debug}");
+    parsed
+}
+
+fn replacement_modifications(ability: &AbilityDefinition) -> &[ContinuousModification] {
+    let Effect::GenericEffect {
+        static_abilities,
+        duration,
+        target,
+        ..
+    } = &*ability.effect
+    else {
+        panic!("expected a type-changing continuation: {ability:#?}");
+    };
+    // CR 611.2a: the printed until-end-of-turn window survives lowering.
+    assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
+    assert_eq!(ability.duration, Some(Duration::UntilEndOfTurn));
+    assert!(target.is_none(), "these mass changes are untargeted");
+    assert_eq!(static_abilities.len(), 1);
+    &static_abilities[0].modifications
+}
+
+/// SHAPE: the full audited Oracle texts select the existing land replacement
+/// operation, while Flask's separate draw trigger remains represented.
+#[test]
+fn chosen_basic_land_type_full_oracle_shape() {
+    for (name, oracle, core_type) in [
+        ("Terraformer", TERRAFORMER, "Creature"),
+        ("Elsewhere Flask", ELSEWHERE_FLASK, "Artifact"),
+    ] {
+        let parsed = parse_supported(oracle, name, core_type);
+        assert_eq!(parsed.abilities.len(), 1);
+        let chooser = &parsed.abilities[0];
+        assert!(matches!(
+            &*chooser.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::BasicLandType,
+                ..
+            }
+        ));
+        let apply = chooser.sub_ability.as_deref().expect("choice continuation");
+        assert_eq!(
+            replacement_modifications(apply),
+            &[ContinuousModification::SetChosenBasicLandType]
+        );
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &*apply.effect
+        else {
+            unreachable!();
+        };
+        assert!(matches!(
+            &static_abilities[0].affected,
+            Some(TargetFilter::Typed(filter))
+                if filter.type_filters == [TypeFilter::Land]
+                    && filter.controller == Some(ControllerRef::You)
+                    && filter.properties.is_empty()
+        ));
+        assert!(apply.sub_ability.is_none());
+    }
+    let flask = parse_supported(ELSEWHERE_FLASK, "Elsewhere Flask", "Artifact");
+    assert_eq!(flask.triggers.len(), 1);
+    assert!(matches!(
+        &*flask.triggers[0]
+            .execute
+            .as_ref()
+            .expect("draw trigger")
+            .effect,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller
+        }
+    ));
+}
+
+/// SHAPE: a creature-domain producer selects subtype replacement too. This
+/// unrestricted chooser avoids the separate "other than Wall" producer gap.
+#[test]
+fn chosen_creature_type_full_oracle_shape() {
+    let parsed = parse_supported_with_keywords(
+        MISTFORM_WAKECASTER,
+        "Mistform Wakecaster",
+        "Creature",
+        &["Flying".into()],
+    );
+    assert_eq!(parsed.abilities.len(), 2);
+    let chooser = &parsed.abilities[1];
+    assert!(matches!(
+        &*chooser.effect,
+        Effect::Choose {
+            choice_type: ChoiceType::CreatureType { .. },
+            ..
+        }
+    ));
+    assert_eq!(
+        replacement_modifications(chooser.sub_ability.as_deref().expect("continuation")),
+        &[
+            ContinuousModification::RemoveAllSubtypes {
+                set: SubtypeSet::Creature
+            },
+            ContinuousModification::AddChosenSubtype {
+                kind: ChosenSubtypeKind::CreatureType
+            },
+        ]
+    );
+}
+
+/// SHAPE: unsupported anaphors stay explicit gaps. Each valid producer is
+/// asserted before the consumer, so an upstream parse failure cannot pass.
+#[test]
+fn that_type_requires_a_same_chain_subtype_producer() {
+    for (oracle, choices) in [
+        ("{1}: Each land you control becomes that type until end of turn.", 0),
+        ("{1}: Choose a color. Each land you control becomes that type until end of turn.", 1),
+        ("{1}: Choose a basic land type. Choose a color. Each land you control becomes that type until end of turn.", 2),
+    ] {
+        let parsed = parse_oracle_text(oracle, "Choice fixture", &[], &["Creature".into()], &[]);
+        assert_eq!(parsed.abilities.len(), 1);
+        let mut consumer = &parsed.abilities[0];
+        for _ in 0..choices {
+            assert!(matches!(&*consumer.effect, Effect::Choose { .. }));
+            consumer = consumer.sub_ability.as_deref().expect("next instruction");
+        }
+        assert!(matches!(
+            &*consumer.effect,
+            Effect::Unimplemented { name, .. } if name == "chosen_subtype_context"
+        ), "{oracle}: {consumer:#?}");
+    }
+    let parsed = parse_oracle_text(
+        "{1}: Choose a basic land type.\n{2}: Each land you control becomes that type until end of turn.",
+        "Independent choice fixture", &[], &["Creature".into()], &[],
+    );
+    assert_eq!(parsed.abilities.len(), 2);
+    assert!(matches!(
+        &*parsed.abilities[0].effect,
+        Effect::Choose {
+            choice_type: ChoiceType::BasicLandType,
+            ..
+        }
+    ));
+    assert!(
+        matches!(&*parsed.abilities[1].effect, Effect::Unimplemented { name, .. } if name == "chosen_subtype_context")
+    );
+}
+
+/// SHAPE: the nearest producer, rather than the recipient's card type, owns
+/// the domain. These are deliberately synthetic composition fixtures.
+#[test]
+fn that_type_uses_the_nearest_choice_domain() {
+    for (first, second, expected) in [
+        (
+            "creature type",
+            "basic land type",
+            vec![ContinuousModification::SetChosenBasicLandType],
+        ),
+        (
+            "basic land type",
+            "creature type",
+            vec![
+                ContinuousModification::RemoveAllSubtypes {
+                    set: SubtypeSet::Creature,
+                },
+                ContinuousModification::AddChosenSubtype {
+                    kind: ChosenSubtypeKind::CreatureType,
+                },
+            ],
+        ),
+    ] {
+        let oracle = format!("{{1}}: Choose a {first}. Choose a {second}. Each land you control becomes that type until end of turn.");
+        let parsed = parse_supported(&oracle, "Two-domain fixture", "Creature");
+        assert_eq!(parsed.abilities.len(), 1);
+        let first = &parsed.abilities[0];
+        assert!(matches!(&*first.effect, Effect::Choose { .. }));
+        let second = first.sub_ability.as_deref().expect("second choice");
+        assert!(matches!(&*second.effect, Effect::Choose { .. }));
+        let apply = second.sub_ability.as_deref().expect("consumer");
+        assert_eq!(replacement_modifications(apply), expected.as_slice());
+    }
+}
+
+/// CR 305.7 + CR 305.6: setting a chosen basic land type removes the old
+/// land subtype and printed abilities, and supplies working intrinsic mana.
+#[test]
+fn terraformer_replaces_land_types_printed_abilities_and_mana() {
+    parse_supported(TERRAFORMER, "Terraformer", "Creature");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let terraformer = scenario
+        .add_creature_from_oracle(P0, "Terraformer", 2, 2, TERRAFORMER)
+        .id();
+    // Synthetic support land: both mana and a non-mana printed ability must
+    // be replaced. The type-changing ability itself uses verbatim Oracle.
+    let forest = scenario
+        .add_land_from_oracle(
+            P0,
+            "Ability-bearing Forest",
+            "{T}: Add {G}.\n{T}: You gain 1 life.",
+        )
+        .with_subtypes(vec!["Forest"])
+        .id();
+    let opposing_forest = scenario.add_basic_land(P1, ManaColor::Green);
+    scenario.with_mana_pool(P0, blue_mana(1));
+    let mut runner = scenario.build();
+    relayer(&mut runner);
+    assert!(has_subtype(&runner, forest, "Forest"));
+    assert!(has_mana_ability_for(&runner, forest, ManaColor::Green));
+    assert!(runner.state().objects[&forest]
+        .abilities
+        .iter()
+        .any(|a| matches!(&*a.effect, Effect::GainLife { .. })));
+    let index = choose_ability_index(&runner, terraformer, is_basic_land_type_choice)
+        .expect("Terraformer's basic-land-type choice");
+    let outcome = runner
+        .activate(terraformer, index)
+        .choose_option("Island")
+        .resolve();
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+    relayer(&mut runner);
+    assert_eq!(subtypes(&runner, forest), ["Island"]);
+    assert!(has_mana_ability_for(&runner, forest, ManaColor::Blue));
+    assert!(!has_mana_ability_for(&runner, forest, ManaColor::Green));
+    assert!(!runner.state().objects[&forest]
+        .abilities
+        .iter()
+        .any(|a| matches!(&*a.effect, Effect::GainLife { .. })));
+    assert_eq!(subtypes(&runner, opposing_forest), ["Forest"]);
+    assert!(has_mana_ability_for(
+        &runner,
+        opposing_forest,
+        ManaColor::Green
+    ));
+    let mana_index = runner.state().objects[&forest]
+        .abilities
+        .iter()
+        .position(|a| matches!(&*a.effect, Effect::Mana { .. }))
+        .expect("intrinsic mana ability");
+    runner.activate(forest, mana_index).resolve();
+    assert!(runner.state().objects[&forest].tapped);
+    let pool = &runner.state().players[0].mana_pool;
+    assert_eq!(pool.total(), 1);
+    assert_eq!(pool.count_color(ManaType::Blue), 1);
+}
+
+/// CR 113.7a + CR 608.2d: Flask's sacrifice is paid before its resolution
+/// choice, and the chosen type still reaches the continuation without a source.
+#[test]
+fn elsewhere_flask_choice_continues_after_sacrifice() {
+    parse_supported(ELSEWHERE_FLASK, "Elsewhere Flask", "Artifact");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let flask = scenario
+        .add_artifact_from_oracle(P0, "Elsewhere Flask", ELSEWHERE_FLASK)
+        .id();
+    let forest = scenario.add_basic_land(P0, ManaColor::Green);
+    let mountain = scenario.add_basic_land(P0, ManaColor::Red);
+    let opposing_forest = scenario.add_basic_land(P1, ManaColor::Green);
+    let mut runner = scenario.build();
+    relayer(&mut runner);
+    let index = choose_ability_index(&runner, flask, is_basic_land_type_choice)
+        .expect("Flask's basic-land-type choice");
+    let paused = runner.activate(flask, index).pay_with(&[flask]).resolve();
+    paused.assert_zone(&[flask], Zone::Graveyard);
+    let WaitingFor::NamedChoice {
+        player,
+        choice_type,
+        options,
+        ..
+    } = paused.final_waiting_for()
+    else {
+        panic!(
+            "expected land choice after sacrifice: {:?}",
+            paused.final_waiting_for()
+        );
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(*choice_type, ChoiceType::BasicLandType);
+    // CR 305.6: exactly the five basic land types are offered.
+    let mut options = options.clone();
+    options.sort();
+    assert_eq!(options, ["Forest", "Island", "Mountain", "Plains", "Swamp"]);
+    assert_eq!(subtypes(&runner, forest), ["Forest"]);
+    assert_eq!(subtypes(&runner, mountain), ["Mountain"]);
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "Island".into(),
+        })
+        .expect("legal Island choice");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    relayer(&mut runner);
+    assert_eq!(runner.state().objects[&flask].zone, Zone::Graveyard);
+    for land in [forest, mountain] {
+        assert_eq!(subtypes(&runner, land), ["Island"]);
+        assert!(has_mana_ability_for(&runner, land, ManaColor::Blue));
+        assert!(!has_mana_ability_for(&runner, land, ManaColor::Green));
+        assert!(!has_mana_ability_for(&runner, land, ManaColor::Red));
+    }
+    assert_eq!(subtypes(&runner, opposing_forest), ["Forest"]);
 }
 
 /// R1 — CR 205.1a + CR 608.2h. Mistform Stalker becomes ONLY the chosen
@@ -345,6 +684,9 @@ fn mistform_sliver_two_activations_keep_both_chosen_types() {
 /// recipients each keep their own chosen type.
 #[test]
 fn unnatural_selection_two_targets_keep_their_own_types() {
+    // The consumer is tested with legal choices only; the independent
+    // "other than Wall" chooser-exclusion gap is outside this regression.
+    parse_supported(UNNATURAL_SELECTION, "Unnatural Selection", "Enchantment");
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let selection = scenario
@@ -363,6 +705,8 @@ fn unnatural_selection_two_targets_keep_their_own_types() {
     seed_creature_types(&mut runner);
     relayer(&mut runner);
 
+    assert!(has_subtype(&runner, bear_a, "Bear"));
+    assert!(has_subtype(&runner, bear_b, "Bear"));
     let index = choose_ability_index(&runner, selection, is_creature_type_choice)
         .expect("Unnatural Selection must carry its creature-type choice ability");
 
@@ -399,6 +743,9 @@ fn unnatural_selection_two_targets_keep_their_own_types() {
         "bear B must be a Goblin: {:?}",
         subtypes(&runner, bear_b)
     );
+    // CR 205.1a: each bare "becomes that type" replaces creature subtypes.
+    assert!(!has_subtype(&runner, bear_a, "Bear"));
+    assert!(!has_subtype(&runner, bear_b, "Bear"));
     assert!(
         !has_subtype(&runner, bear_a, "Goblin"),
         "CR 608.2h: bear A must not read activation 2's answer: {:?}",

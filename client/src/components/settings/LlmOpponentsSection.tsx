@@ -56,7 +56,10 @@ export function LlmOpponentsSection() {
   const catalog = useLlmProviderCatalog();
 
   const usableProfiles = profiles.filter((profile) => isProfileUsable(profile, catalog));
-  const defaultOpponent = usableProfiles.find((profile) => profile.id === defaultOpponentProfileId);
+  const defaultOpponent = profiles.find((profile) => profile.id === defaultOpponentProfileId);
+  const opponentOptions = defaultOpponent && !usableProfiles.some((p) => p.id === defaultOpponent.id)
+    ? [defaultOpponent, ...usableProfiles]
+    : usableProfiles;
 
   return (
     <div className="flex flex-col gap-4">
@@ -107,7 +110,7 @@ export function LlmOpponentsSection() {
           selectedValue={defaultOpponent?.id ?? DEFAULT_OPPONENT_ENGINE}
           items={[
             { value: DEFAULT_OPPONENT_ENGINE, label: t("llm.defaultOpponent.engine") },
-            ...usableProfiles.map((profile) => ({
+            ...opponentOptions.map((profile) => ({
               value: profile.id,
               label: profileLabel(profile, t("llm.unnamed")),
             })),
@@ -315,7 +318,12 @@ function ProfileCard({
           type="url"
           inputMode="url"
           value={endpointDraft}
-          placeholder={entry?.defaultBaseUrl ?? t("llm.endpointPlaceholder")}
+          placeholder={
+            entry?.defaultBaseUrl
+            ?? (profile.provider === "Jev"
+              ? t("llm.jevEndpointPlaceholder")
+              : t("llm.endpointPlaceholder"))
+          }
           aria-label={t("llm.endpoint")}
           // Committed on blur (or Enter), never per keystroke. Changing the
           // endpoint clears the credential — it is scoped to the server it was
@@ -328,6 +336,11 @@ function ProfileCard({
           }}
           className={FIELD_CLASS}
         />
+        {profile.provider === "Jev" ? (
+          <p className="mt-1 text-[10px] leading-relaxed text-slate-500">
+            {t("llm.jevEndpointHint")}
+          </p>
+        ) : null}
       </Field>
 
       <Field label={t("llm.apiKey")}>
@@ -390,13 +403,19 @@ function ProfileCard({
         )}
       </div>
 
-      {isProfileUsable(profile, catalog) && (
+      {isDefaultOpponent ? (
         <DefaultOpponentPrompt
           connected={test.status === "ok"}
-          isDefault={isDefaultOpponent}
+          isDefault={true}
           onMakeDefault={onMakeDefaultOpponent}
         />
-      )}
+      ) : isProfileUsable(profile, catalog) ? (
+        <DefaultOpponentPrompt
+          connected={test.status === "ok"}
+          isDefault={false}
+          onMakeDefault={onMakeDefaultOpponent}
+        />
+      ) : null}
     </div>
   );
 }

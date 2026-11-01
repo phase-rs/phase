@@ -4,6 +4,7 @@ const STORAGE_KEY = "phase-diagnostic-history-v1";
 export const DIAGNOSTIC_HISTORY_MAX_AGE_MS = 60 * 60 * 1000;
 export const DIAGNOSTIC_HISTORY_LIMIT = 30;
 const MAX_BYTES = 64 * 1024;
+export const WEBSOCKET_CLOSE_REASONS = ["", "redacted", "idle timeout", "server shutdown", "server restarting", "protocol error", "rate limit exceeded", "session expired"] as const;
 type Check = (value: unknown) => boolean;
 const number: Check = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0;
 const boolean: Check = (value) => typeof value === "boolean";
@@ -47,6 +48,13 @@ const schemas: Record<DiagnosticHistoryEntry["kind"], Check> = {
   disconnect: shape({ ...common, kind: oneOf("disconnect"), cause: oneOf("send-error", "connection-close", "connection-error", "remote-disconnect", "local-close"),
     error: optional(oneOf("negotiation-failed", "connection-closed", "message-too-big", "unknown")),
     transport, preClose: nullable(transport), candidates: optional(nullable(candidates)) }),
+  "transport-transition": shape({ ...common, kind: oneOf("transport-transition"),
+    event: oneOf("connectionstatechange", "iceconnectionstatechange", "open", "closing", "close", "error"), transport }),
+  "websocket-loss": shape({ ...common, kind: oneOf("websocket-loss"), code: nullable(number),
+    reason: oneOf(...WEBSOCKET_CLOSE_REASONS), reasonLength: number, wasClean: boolean,
+    receiveAgeMs: nullable(number), sendAgeMs: nullable(number), visibility: oneOf("visible", "hidden"),
+    online: boolean, silenceExceeded: boolean, reconnectAttempt: number,
+    outcome: oneOf("pending", "resumed", "failed", "gave-up", "not-attempted") }),
   "engine-not-initialized": shape({ ...common, kind: oneOf("engine-not-initialized"), engine,
     operation: oneOf("submitAction", "submitInteraction", "previewManaPayment", "previewInteraction", "getState", "getFilteredState", "getLegalActions", "getLegalActionsForViewer", "getSnapshot", "getViewerSnapshot", "getAiActionProposal", "getAiTacticalActionProposal", "submitAiActionProposal", "restoreState", "resumeRestoredGameState", "exportPersistenceState", "setMultiplayerMode", "applySeatMutation", "projectSeatView", "resumeMultiplayerHostState", "estimateBracket", "ping", "initializeGame", "initializeMultiplayerHostGame") }),
 };

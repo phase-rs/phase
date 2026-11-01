@@ -7,9 +7,9 @@
 //! where the two authorities can be contrasted on ONE state.
 
 use engine::analysis::decision_template::{
-    resolve, AnnouncementSubject, ConcreteDecision, ConcreteTarget, DecisionGroupKey, DecisionKind,
-    DecisionSlot, DecisionTemplate, IterationCount, PinnedDecision, Ranking, ReplayFailure,
-    ReplayMode, TargetPin, TargetSchedule,
+    resolve, AnnouncementSubject, ChoicePoint, ConcreteDecision, ConcreteTarget, DecisionGroupKey,
+    DecisionKind, DecisionSlot, DecisionTemplate, IterationCount, PinnedDecision, Ranking,
+    ReplayFailure, ReplayMode, TargetPin, TargetSchedule,
 };
 use engine::game::scenario::GameScenario;
 use engine::types::ability::{ControllerRef, StaticDefinition, TargetFilter, TypedFilter};
@@ -85,6 +85,7 @@ fn slot_for(source: ObjectId, state: &GameState) -> DecisionSlot {
             incarnation: Some(state.objects[&source].incarnation),
             trigger_description: None,
         },
+        point: ChoicePoint::AnnouncedTarget,
         index: 0,
     }
 }

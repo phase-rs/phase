@@ -1,4 +1,6 @@
 import type { ObjectId, PlayerId, Zone } from "../../../adapter/types.ts";
+import { useGameStore } from "../../../stores/gameStore.ts";
+import { resolvePileSeat } from "../../../viewmodel/gameStateView.ts";
 import type { CardFlightRoute, FlightDestination } from "./cardFlightSpecs.ts";
 
 /** A card's on-screen pose in canvas-local CSS px: centre, laid-out size with
@@ -135,6 +137,10 @@ function firstRenderedOf(selectors: readonly string[]): HTMLElement | null {
   return null;
 }
 
+/** The seat whose pile node holds `ownerId`'s `zone` cards: the shared pile's holder when the format shares it. */
+const pileSeat = (zone: "library" | "graveyard", ownerId: PlayerId) =>
+  resolvePileSeat(useGameStore.getState().gameState, zone, ownerId);
+
 /** Permanent `id`'s card, else the collapsed group standing in for it. */
 const permanentSelectors = (id: ObjectId) => [
   `[data-permanent-card="${id}"]`,
@@ -145,13 +151,16 @@ const permanentSelectors = (id: ObjectId) => [
 // `[data-object-id]` matches one object in several zones at once.
 /** The selectors, in priority order, for object `id`'s surface in each zone.
  *  A zone with none (the command zone) has no surface to fly from or to. A
- *  hidden library card shows as its owner's pile. */
+ *  hidden library card shows as its pile (the holder's, in a shared-zone format). */
 const ZONE_SURFACES: Record<Zone, (id: ObjectId, ownerId: PlayerId) => readonly string[]> = {
   Hand: (id) => [`[data-hand-card][data-object-id="${id}"]`, `[data-opponent-hand-card="${id}"]`],
-  Library: (id, ownerId) => [`[data-library-pile] [data-grouped-ids~="${id}"]`, `[data-library-pile="${ownerId}"]`],
+  Library: (id, ownerId) => [
+    `[data-library-pile] [data-grouped-ids~="${id}"]`,
+    `[data-library-pile="${pileSeat("library", ownerId)}"]`,
+  ],
   Graveyard: (id, ownerId) => [
     `[data-zone-fan-card="Graveyard"][data-object-id="${id}"]`,
-    `[data-graveyard-pile="${ownerId}"][data-grouped-ids~="${id}"]`,
+    `[data-graveyard-pile="${pileSeat("graveyard", ownerId)}"][data-grouped-ids~="${id}"]`,
   ],
   // A face-down exiled card is only in its owner's pile's count.
   Exile: (id, ownerId) => [
@@ -190,7 +199,7 @@ export function exileGhostNode(id: ObjectId): HTMLElement | null {
 /** Nodes that stand in for a destination before the object's own node exists. */
 const PROVISIONAL_SURFACES: Record<FlightDestination, (ownerId: PlayerId) => HTMLElement | null> = {
   Stack: () => lastRendered("[data-stack-entry]"),
-  Graveyard: (ownerId) => firstRendered(`[data-graveyard-pile="${ownerId}"]`),
+  Graveyard: (ownerId) => firstRendered(`[data-graveyard-pile="${pileSeat("graveyard", ownerId)}"]`),
   Battlefield: () => null,
   Hand: () => null,
   // Their own surfaces fall back to the owner's pile, which stands in for itself.
