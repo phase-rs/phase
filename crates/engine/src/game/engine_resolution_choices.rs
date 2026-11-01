@@ -15895,7 +15895,8 @@ mod random_result_resolution_context_tests {
         resume(&mut state, Boundary::Coin, &mut events).unwrap();
 
         assert_eq!(state.players[0].life, before + 3);
-        // CR 706.4 + CR 608.2c: a die settled by the coin's drain survives context restoration.
+        // CR 706.2 + CR 608.2c: the post-modifier result of a die settled by the coin's
+        // drain survives context restoration for the continuation.
         assert_eq!(state.die_result_this_resolution, Some(1));
         assert_scope(&state, &ambient);
         assert!(state.resolution_stack.is_empty());

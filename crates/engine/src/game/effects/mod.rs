@@ -1708,9 +1708,11 @@ pub(crate) fn drain_pending_continuation(state: &mut GameState, events: &mut Vec
         // CR 608.2c: the detached "after each player" tail is the rest of the same
         // ability, so it runs under the frame's trigger context too; restore the
         // outer context only once both the chain and its tail have run.
-        // CR 706.4 + CR 608.2c: a die instruction that settled inside this drain owns
-        // `die_result_this_resolution` (the survivors' aggregate, or the CR 614.6 clear
-        // for a prevented roll); the caller's pre-push snapshot must not overwrite it.
+        // CR 706.2 + CR 608.2c: each die's result is its final value after modifiers;
+        // the ability's own instruction determines how multiple dice are used.
+        // A die instruction settled inside this drain owns `die_result_this_resolution`
+        // (the instructed survivors' aggregate, or the CR 614.6 clear for a prevented
+        // roll); the caller's pre-push snapshot must not overwrite it.
         let published_die = events
             .get(die_mark..)
             .unwrap_or_default()
@@ -28823,7 +28825,8 @@ mod tests {
         drain_pending_continuation(&mut state, &mut events);
 
         assert_eq!(state.players[0].life, before + 1);
-        // CR 706.4 + CR 608.2c: the settled die, not the caller's old scalar, owns the result.
+        // CR 706.2 + CR 608.2c: the settled post-modifier die result, not the caller's
+        // old scalar, survives context restoration for the continuation.
         assert_eq!(state.die_result_this_resolution, Some(1));
         assert_eq!(state.current_trigger_event, Some(ambient.clone()));
         assert_eq!(state.current_trigger_events, vec![ambient]);
