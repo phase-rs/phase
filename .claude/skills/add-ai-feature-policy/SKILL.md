@@ -104,7 +104,7 @@ This table is the single biggest research-saver. Every column has been verified 
 
 | Concept | AST type | File:line |
 |---|---|---|
-| Card face (the deck-time entity) | `CardFace { name, card_type, mana_cost, abilities, triggers, static_abilities, replacements, keywords, power, toughness, ... }` | `crates/engine/src/types/card.rs:30+` |
+| Card face (the deck-time entity) | `CardFace { name, card_type, mana_cost, abilities, triggers, static_abilities, replacements, keywords, power, toughness, ... }` | `crates/phase-ast/src/types/card.rs:30+` |
 | Core type set | `CardFace.card_type.core_types: Vec<CoreType>`; `CoreType::{Creature, Instant, Sorcery, Land, Artifact, Enchantment, Planeswalker, Battle, Tribal, Kindred}` | `card_type.rs:74-77` |
 | Mana cost / value | `CardFace.mana_cost: ManaCost`; `ManaCost::mana_value() -> u32` | `card.rs:51`; `mana.rs:468` |
 | Face-level keywords | `CardFace.keywords: Vec<Keyword>` (including `Keyword::Prowess`, `Keyword::Haste`, `Keyword::EtbCounter { counter_type, count }`, etc.) | `card.rs:60`; `keywords.rs:24+` |
@@ -137,7 +137,7 @@ This table is the single biggest research-saver. Every column has been verified 
 
 Every feature must produce ALL of these:
 
-1. **AST verification table in module docstring** — one line per axis citing the exact `crates/engine/src/types/...:line` where the type lives + a CR number where applicable. Mirror `landfall.rs:1-12` and `aggro_pressure.rs:1-25`. This is your proof that the AST supports detection without parser changes.
+1. **AST verification table in module docstring** — one line per axis citing the exact `crates/phase-ast/src/types/...:line` where the type lives + a CR number where applicable. Mirror `landfall.rs:1-12` and `aggro_pressure.rs:1-25`. This is your proof that the AST supports detection without parser changes.
 2. **`<Name>Feature` struct** — counters as `u32`, ratios as `f32`, identity-lookup lists as `Vec<String>`, single `commitment: f32` (0.0..=1.0). NO bool fields. Document each field with a CR if it implements a rule.
 3. **Commitment formula** with calibration anchor in a doc comment. Commitments are density-normalized per 60 nonland cards so 60-card and 99-card decks with the same density score the same. Use only the shared helpers in `features/commitment.rs`: `commitment::density_per_60(count, total_nonland)`, `commitment::weighted_sum(&[(weight, density)])`, and `commitment::geometric_mean(&[pillar_density])`. Show the math AND a real-deck calibration ("Mono-Red Burn: ~16 one-drops + 4 burn → commitment ≈ 0.85"). Anti-calibration ("UW control → commitment ≈ 0.0") is also required. Two formula shapes are established:
    - **Weighted sum, clamped** (when missing pillars are tolerable). Pattern: control, aggro_pressure, spellslinger.

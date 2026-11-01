@@ -133,7 +133,7 @@ ReplacementResult::Execute(modified_event) → caller processes the event
   Follow existing patterns:
   - `parse_shock_land()` — Optional mode with accept/decline AbilityDefinitions
   - `parse_enters_tapped()` — Mandatory mode with `enter_tapped` flag
-  - `parse_etb_counter()` — Mandatory mode that modifies entering state
+  - `parse_enters_with_counters()` — Mandatory mode that modifies entering state
 
 - [ ] **`crates/phase-parser/src/parser/oracle.rs` — routing**
   Ensure the Oracle parser calls your new parser at the right priority. Replacement text is detected and routed before effect parsing.

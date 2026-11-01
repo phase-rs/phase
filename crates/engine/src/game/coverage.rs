@@ -17991,7 +17991,7 @@ mod tests {
         //
         //     ./scripts/fetch-token-sets.sh   # populates the gitignored input
         //     cargo run --bin tokens-gen -- --input data/mtgjson/sets --output /tmp/kt.toml
-        //     cmp /tmp/kt.toml crates/engine/data/known-tokens.toml
+        //     cmp /tmp/kt.toml crates/phase-ast/data/known-tokens.toml
         assert_eq!(summary.supported_tokens, summary.total_tokens);
         assert_eq!(summary.parsed_rules_text_tokens, summary.rules_text_tokens);
         assert!(
