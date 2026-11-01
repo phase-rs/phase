@@ -2796,8 +2796,9 @@ fn v12_disa_singular_exclusion_preserves_complete_subject() {
     );
 }
 
-/// Synthetic strict failure; nearest printed texts are Syr Konrad's Squire
-/// (disjunctive self exclusion) and Narcomoeba (self library-to-graveyard).
+/// SHAPE: synthetic strict failures; nearest printed texts are Syr Konrad's Squire
+/// (disjunctive self exclusion), Narcomoeba (self library-to-graveyard), and
+/// Stormfront Riders (mixed self/other battlefield-to-hand).
 /// CR 603.2 + CR 603.6c: matching destination events must trigger; "from anywhere"
 /// is not a leaves-the-battlefield trigger. Do not advertise a dead self head.
 #[test]
@@ -2806,18 +2807,35 @@ fn v12_synthetic_self_exclusion_fails_closed_without_rejecting_disa() {
     assert_eq!(control.triggers.len(), 2);
     assert_exclusion_subject(&control.triggers[0], TriggerMode::ChangesZone);
 
-    let parsed = parse_oracle_text(
-        "When this card is put into your graveyard from anywhere other than the battlefield, you gain 2 life.",
-        "Synthetic self exclusion observer",
-        &[],
-        &[],
-        &[],
-    );
-    assert_eq!(parsed.triggers.len(), 1, "{parsed:?}");
+    let riders = parse_oracle_text(RIDERS, "Stormfront Riders", &["Flying".into()], &[], &[]);
+    assert_eq!(riders.triggers.len(), 2, "{riders:?}");
+    let returned = &riders.triggers[1];
+    assert_eq!(returned.mode, TriggerMode::ChangesZone, "{returned:?}");
+    assert_eq!(returned.origin, Some(Zone::Battlefield));
+    assert_eq!(returned.destination, Some(Zone::Hand));
+    assert!(returned.execute.is_some(), "{returned:?}");
     assert!(
-        matches!(parsed.triggers[0].mode, TriggerMode::Unknown(_)),
-        "unsupported self source admission must fail closed: {parsed:?}"
+        matches!(returned.valid_card, Some(TargetFilter::Or { .. })),
+        "the supported control must retain its mixed subject: {returned:?}"
     );
+
+    for text in [
+        "When this card is put into your graveyard from anywhere other than the battlefield, you gain 2 life.",
+        "When this card or another creature card is put into your graveyard from anywhere other than the battlefield, you gain 2 life.",
+    ] {
+        let parsed = parse_oracle_text(
+            text,
+            "Synthetic self exclusion observer",
+            &[],
+            &[],
+            &[],
+        );
+        assert_eq!(parsed.triggers.len(), 1, "{text}: {parsed:?}");
+        assert!(
+            matches!(parsed.triggers[0].mode, TriggerMode::Unknown(_)),
+            "unsupported self source admission must fail closed: {text}: {parsed:?}"
+        );
+    }
 }
 
 /// V12: full-Oracle Disa returns only the owned Lhurgoyf card that was milled.

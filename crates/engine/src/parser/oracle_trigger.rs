@@ -23004,8 +23004,8 @@ fn try_parse_put_into_graveyard(
     // CR 603.2 + CR 603.6c: destination triggers must observe the matching event;
     // "from anywhere" is not a leaves-the-battlefield trigger. The exclusion
     // clause drops scalar SelfRef source-zone inference, so fail closed for
-    // required-self subjects until that source admission is supported.
-    if filter_requires_self(subject) && matches!(origin, OriginConstraint::NotEquals(_)) {
+    // self-referencing subjects until that source admission is supported.
+    if filter_references_self(subject) && matches!(origin, OriginConstraint::NotEquals(_)) {
         return Some(unknown_trigger_definition(rest));
     }
     let destination_owner = graveyard_owner_scope(possessive);
