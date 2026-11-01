@@ -767,13 +767,13 @@ fn gix_offers_no_land_on_an_opponents_turn() {
 }
 
 /// Magus of the Mind: "Until end of turn, you may play lands and cast spells
-/// from among cards exiled this way without paying their mana costs." CR 611.2a
-/// + CR 701.18b: the dated Play grant lets the exiled land be played as a land
-/// later in the turn. Magus's own exile clause ("exile the top X cards, where X
-/// is one plus the number of spells cast this turn") is still a parse gap
-/// (`where_x_binding`), so the batch is staged as exiled with Magus — the link
-/// and per-turn record the exile resolver writes — and the printed grant
-/// clause is what resolves.
+/// from among cards exiled this way without paying their mana costs."
+/// CR 611.2a + CR 701.18b: the dated Play grant lets the exiled land be played
+/// as a land later in the turn. Magus's own exile clause ("exile the top X
+/// cards, where X is one plus the number of spells cast this turn") is still a
+/// parse gap (`where_x_binding`), so the batch is staged as exiled with Magus —
+/// the link and per-turn record the exile resolver writes — and the printed
+/// grant clause is what resolves.
 #[test]
 fn magus_of_the_minds_dated_grant_lets_the_exiled_land_be_played_this_turn() {
     let Some(db) = load_db() else { return };
