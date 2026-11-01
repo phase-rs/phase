@@ -1830,6 +1830,9 @@ fn build_prompt_input(
         WaitingFor::CombatTaxPayment { .. } => {
             unsupported_prompt(waiting_for, "local.pay-combat-cost-unsupported")
         }
+        WaitingFor::SecretAgendaChoice { .. } => {
+            unsupported_prompt(waiting_for, "local.secret-agenda-unsupported")
+        }
         _ => interaction_prompt(prepared, card_lookup),
     }
 }
@@ -6306,6 +6309,26 @@ mod tests {
             result,
             Err(AdapterError::UnsupportedPrompt {
                 code: "local.resolution-optional-payment-selection-unsupported",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn secret_agenda_prompt_is_explicitly_unsupported() {
+        let result = build_prompt(
+            &prepared_for(WaitingFor::SecretAgendaChoice {
+                player: PlayerId(0),
+                object_id: ObjectId(1),
+                name_count: 1,
+            }),
+            &lookup,
+        );
+
+        assert!(matches!(
+            result,
+            Err(AdapterError::UnsupportedPrompt {
+                code: "local.secret-agenda-unsupported",
                 ..
             })
         ));
