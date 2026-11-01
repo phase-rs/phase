@@ -24777,6 +24777,14 @@ declare_game_state! {
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
     pub players_who_created_token_this_turn: HashSet<PlayerId>,
+    /// CR 705.3: Players who have flipped one or more coins this turn. Written
+    /// by the single flip seam (`effects::flip_coin`) when a set of flips
+    /// begins, for every player regardless of which statics are active, so a
+    /// flip made before Edgar, King of Figaro arrived still spends that
+    /// player's "first time … each turn" window. Cleared at turn start.
+    #[serde(default)]
+    #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
+    pub players_who_flipped_coins_this_turn: HashSet<PlayerId>,
     /// CR 111.2: Token creation snapshots this turn, preserving creation-time
     /// characteristics for filtered "tokens you created this turn" quantities.
     #[serde(default, skip_serializing_if = "im::Vector::is_empty")]
@@ -33026,6 +33034,7 @@ impl GameState {
             attacker_declarations_this_turn: Vec::new(),
             creatures_blocked_this_turn: HashSet::new(),
             players_who_created_token_this_turn: HashSet::new(),
+            players_who_flipped_coins_this_turn: HashSet::new(),
             created_tokens_this_turn: im::Vector::new(),
             counter_added_this_turn: im::Vector::new(),
             players_who_discarded_card_this_turn: HashSet::new(),
@@ -36835,6 +36844,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         attacker_declarations_this_turn: _,
         creatures_blocked_this_turn: _,
         players_who_created_token_this_turn: _,
+        players_who_flipped_coins_this_turn: _,
         created_tokens_this_turn: _,
         counter_added_this_turn: _,
         players_who_discarded_card_this_turn: _,
@@ -37222,6 +37232,7 @@ impl PartialEq for GameState {
             && self.attacker_declarations_this_turn == other.attacker_declarations_this_turn
             && self.creatures_blocked_this_turn == other.creatures_blocked_this_turn
             && self.players_who_created_token_this_turn == other.players_who_created_token_this_turn
+            && self.players_who_flipped_coins_this_turn == other.players_who_flipped_coins_this_turn
             && self.created_tokens_this_turn == other.created_tokens_this_turn
             && self.counter_added_this_turn == other.counter_added_this_turn
             && self.players_who_discarded_card_this_turn

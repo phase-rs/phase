@@ -512,7 +512,7 @@ export function legal_targets_for_castables_js(object_ids: any): any;
 
 /**
  * Returns the engine-typed catalog of debug-spawnable token presets,
- * loaded from `crates/engine/data/known-tokens.toml`. Read by the debug UI
+ * loaded from `crates/phase-ast/data/known-tokens.toml`. Read by the debug UI
  * to populate the Create Token dropdown — frontend never derives this list.
  */
 export function list_token_presets_js(): any;
