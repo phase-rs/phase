@@ -21,6 +21,7 @@ pub fn filter_events_for_player(
 
 #[cfg(test)]
 mod tests {
+    use engine::game::game_object::ObjectIncarnationRefExt;
     use std::sync::Arc;
 
     use super::*;

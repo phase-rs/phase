@@ -1,15 +1,20 @@
 use crate::game::filter;
 use crate::game::layers::evaluate_condition;
-use crate::game::quantity::{quantity_expr_uses_recipient, resolve_quantity_with_targets};
+use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{
-    ContinuousModification, ControllerRef, Duration, Effect, EffectError, EffectKind, QuantityExpr,
-    QuantityRef, ResolvedAbility, StaticCondition, StaticDefinition, TargetFilter, TargetRef,
-    TypedFilter,
+    quantity_expr_uses_recipient, ContinuousModification, ControllerRef, Duration, Effect,
+    EffectError, EffectKind, QuantityExpr, QuantityRef, ResolvedAbility, StaticCondition,
+    StaticDefinition, TargetFilter, TargetRef, TypedFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{EndEffectPermission, GameState, TransientContinuousEffectBindings};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
+
+pub use crate::types::ability::{
+    generic_effect_affected_uses_inherited_targets, generic_effect_application_filter,
+    generic_effect_population_filter,
+};
 
 /// Effect handler: creates transient continuous effects from a GenericEffect.
 ///
@@ -123,6 +128,24 @@ pub fn resolve(
                     // continuous effect for the rest of the turn (CR 611.2c).
                     ContinuousModification::GrantStaticAbility { definition } => {
                         snapshot_granted_cost_modifier(state, ability, definition);
+                        // CR 611.2c + CR 608.2h: a granted graveyard cast
+                        // permission modifies the rules of the game, so its
+                        // card set stays live — but the information its filter
+                        // reads (the players it names, e.g. "from that player's
+                        // graveyard" — Whispersteel Dagger, and any quantity
+                        // bound) is determined once, now, while the resolving
+                        // ability's context (for Whispersteel Dagger, its
+                        // trigger event — CR 608.2c) still exists.
+                        if matches!(
+                            definition.mode,
+                            crate::types::statics::StaticMode::GraveyardCastPermission { .. }
+                        ) {
+                            definition.affected = definition.affected.take().map(|affected| {
+                                crate::game::effects::cast_from_zone::freeze_resolution_cast_filter(
+                                    state, ability, affected, None,
+                                )
+                            });
+                        }
                         // CR 109.5 + CR 508.1c + CR 611.2c: A resolving
                         // one-shot effect that grants a bare recipient-local
                         // attack prohibition fixes the installing player as
@@ -250,7 +273,9 @@ fn evaluate_static_condition_for_ability(
 /// pay-to-end permission into the state-level construction authority so the
 /// field rides INSIDE the journaled `ResolvedContinuousEffectCommand` rather
 /// than being post-stamped after the fact (which is what `duration_subject`
-/// does, and which a journal replay would lose).
+/// does, and which a journal replay would lose). It also passes the creating
+/// ability, so an `UntilEvent` deadline is bound to that ability's own source
+/// (`ResolvedAbility::effect_source_ref`).
 ///
 /// Every `register_transient_effect` branch installs through here, so a branch
 /// that forgets the permission is impossible to write: the parameter is
@@ -293,6 +318,9 @@ fn install_transient(
             granting_object: ability.context.granting_object,
             ..TransientContinuousEffectBindings::default()
         },
+        // CR 113.7a: an event deadline is bound to the creating ability's own
+        // source (or its last known information), not to whatever now holds the id.
+        Some(ability),
     )
 }
 
@@ -601,9 +629,9 @@ fn bind_transient_effect(
         && static_def
             .affected
             .as_ref()
-            .is_some_and(crate::game::ability_utils::filter_references_target_player);
+            .is_some_and(crate::types::ability::filter_references_target_player);
     let forwarded_parent_target = ability.context.forwarded_result_context.is_some()
-        && application_filter.is_some_and(crate::game::effects::filter_refs_parent_target);
+        && application_filter.is_some_and(crate::types::ability::filter_refs_parent_target);
     let inherited_object_target = (static_def
         .affected
         .as_ref()
@@ -659,7 +687,7 @@ fn bind_transient_effect(
         && !static_affected_references_target_player
     {
         let skip_companion_player_target = target_filter
-            .is_some_and(crate::game::ability_utils::filter_references_target_player)
+            .is_some_and(crate::types::ability::filter_references_target_player)
             && matches!(ability.targets.first(), Some(TargetRef::Player(_)));
         for bound_filter in transient_bound_filters(
             state,
@@ -991,6 +1019,7 @@ fn binds_as_player(filter: &TargetFilter) -> bool {
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
         | TargetFilter::AttackedPlayerOrPlaneswalker
@@ -1164,77 +1193,6 @@ fn forwarded_result_object_targets(
                 .into_iter()
                 .filter(|id| context.object_pin_is_current(*id, state))
                 .collect()
-        })
-}
-
-pub fn generic_effect_affected_uses_inherited_targets(filter: &TargetFilter) -> bool {
-    matches!(
-        filter,
-        TargetFilter::TriggeringSource
-            | TargetFilter::ParentTarget
-            | TargetFilter::ParentTargetSlot { .. }
-            | TargetFilter::CostPaidObject
-            // CR 701.47c: "the amassed Army" is a resolution-local single-object
-            // reference (`ResolvedAbility.amassed_army_object`), not a broadcast
-            // population — mirrors `CostPaidObject` immediately above. This
-            // routes a future "amass N, then the amassed Army gains/gets ..."
-            // continuous grant to the dedicated `amassed_army_object` arm below
-            // (mirroring the `CostPaidObject` arm) and to the matching
-            // early-return guard in the broadcast-scan arm, instead of relying
-            // on the battlefield re-scan happening to narrow to one object.
-            | TargetFilter::AmassedArmy
-    )
-}
-
-/// CR 608.2c: Choose the filter that governs *where modifications land* at
-/// resolution. The outer `GenericEffect.target` slot names what the player
-/// chose; `static_def.affected` names how that choice is bound onto objects.
-/// Inherited-reference `affected` values (`ParentTarget`, …) win over the
-/// targeting descriptor so a `target: Typed(Creature)` + `affected:
-/// ParentTarget` pair binds to the chosen creature, not every creature.
-pub fn generic_effect_application_filter<'a>(
-    target_filter: Option<&'a TargetFilter>,
-    static_affected: Option<&'a TargetFilter>,
-) -> Option<&'a TargetFilter> {
-    if static_affected.is_some_and(generic_effect_affected_uses_inherited_targets) {
-        static_affected
-    } else {
-        target_filter.or(static_affected)
-    }
-}
-
-/// CR 508.1a + CR 608.2c + CR 611.2c: SINGLE AUTHORITY for "which static on this
-/// `GenericEffect` names the population `those creatures` freezes" — shared by the
-/// parser's population-publisher routing (`oracle_effect::lower`) and the runtime's
-/// publish arm (`effects::affected_objects_from_events`) so lowering can never mark
-/// a head a publisher that resolution then declines to publish.
-///
-/// Eligible modes are the ones whose population is FROZEN at resolution rather than
-/// re-evaluated live at each future check: a coercion requirement (`MustAttack` /
-/// `MustAttackDefender`, CR 508.1a/d) or a `Continuous` grant.
-///
-/// Selection is `find_map`, NOT `find`-then-ask: a chain may carry an earlier
-/// eligible static with no application filter (a `Continuous` coercion with neither
-/// an outer `target` nor an `affected`), and taking it would suppress a later
-/// application-bearing broadcast static — so neither routing nor publishing would
-/// see the actual population. Shape mirrors the `any`-quantified sibling
-/// `is_mass_coerce_static` (`oracle_effect/mod.rs`) rather than a first-wins scan.
-pub fn generic_effect_population_filter<'a>(
-    target_filter: Option<&'a TargetFilter>,
-    static_abilities: &'a [StaticDefinition],
-) -> Option<&'a TargetFilter> {
-    static_abilities
-        .iter()
-        .filter(|static_def| {
-            matches!(
-                static_def.mode,
-                crate::types::statics::StaticMode::MustAttack
-                    | crate::types::statics::StaticMode::MustAttackDefender { .. }
-                    | crate::types::statics::StaticMode::Continuous
-            )
-        })
-        .find_map(|static_def| {
-            generic_effect_application_filter(target_filter, static_def.affected.as_ref())
         })
 }
 
@@ -1610,6 +1568,7 @@ fn defended_scope_uses_source_controller_anchor(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::game_object::ObjectIncarnationRefExt;
     use crate::game::zones::create_object;
     use crate::types::ability::{
         BasicLandType, ChoiceValue, ChosenSubtypeKind, ContinuousModification, ControllerRef,

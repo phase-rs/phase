@@ -2,6 +2,7 @@ use crate::game::ability_utils::{resolve_multi_target_bounds, MultiTargetBounds}
 use crate::game::engine::{PriorityAnnouncementFacadeAccess, PriorityPrincipal};
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::AttachTarget;
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::targeting::resolved_object_ids_for_filter;
 use crate::types::ability::{
     AbilityCondition, AttachCardinality, AttachSelection, AttachmentReferent, Effect, EffectError,
@@ -212,7 +213,7 @@ fn resolve_attachment_ids<'a>(
             .or_else(|| resolve_object_filter(state, ability, attachment_filter, target_slots))
             .into_iter()
             .collect()
-    } else if crate::game::ability_utils::attach_attachment_claims_announcement_slot(
+    } else if crate::types::ability::attach_attachment_claims_announcement_slot(
         attachment_filter,
         &attach_selection(ability),
     ) {
@@ -300,7 +301,7 @@ fn resolve_bound_attachment_operation(
     if ability.optional_targeting
         && ability.attach_host_target().is_none()
         && !host_slot_announced(state, ability, target_filter)
-        && crate::game::ability_utils::attach_host_filter_needs_target_slot(target_filter)
+        && crate::types::ability::attach_host_filter_needs_target_slot(target_filter)
         && target_filter.denotes_battlefield_objects()
     {
         events.push(GameEvent::EffectResolved {
@@ -721,7 +722,7 @@ fn prompt_resolution_attachment_choice(
         if ability.target_choice_timing == TargetChoiceTiming::Resolution
             && ability.attach_host_target().is_none()
             && attachment_filter.is_context_ref()
-            && crate::game::ability_utils::attach_host_filter_needs_target_slot(host_filter)
+            && crate::types::ability::attach_host_filter_needs_target_slot(host_filter)
             && host_filter.denotes_battlefield_objects()
         {
             return prompt_described_host_choice(
@@ -744,7 +745,7 @@ fn prompt_resolution_attachment_choice(
             Ok(AttachPromptOutcome::Execute)
         };
     }
-    if !crate::game::ability_utils::attach_attachment_filter_needs_target_slot(attachment_filter) {
+    if !crate::types::ability::attach_attachment_filter_needs_target_slot(attachment_filter) {
         return Ok(AttachPromptOutcome::Execute);
     }
     // CR 115.1a/c/d/e + CR 608.2d: only a PRINTED-target attachment operand may be
@@ -1267,7 +1268,7 @@ fn parked_attach_choice_selects_host(operation: &ResolvedAbility) -> bool {
             Effect::Attach { attachment, .. } => {
                 !operation.attach_attachment_candidates().is_empty()
                     || (attachment.is_context_ref()
-                        && !crate::game::ability_utils::attach_attachment_filter_needs_target_slot(
+                        && !crate::types::ability::attach_attachment_filter_needs_target_slot(
                             attachment,
                         ))
             }
@@ -3164,6 +3165,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],

@@ -89,7 +89,7 @@ fn continue_declare_attackers_after_commit(
         return Ok(waiting_for);
     }
 
-    finish_declare_attackers(state, events, attacks.is_empty())
+    finish_declare_attackers(state, events, declaration_start, attacks.is_empty())
 }
 
 /// CR 508.1g–j + CR 701.43b: Snapshot each eligible ability occurrence before
@@ -352,15 +352,19 @@ fn process_declaration_triggers_with_delayed_phase(
 pub(super) fn finish_declare_attackers(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
+    declaration_start: usize,
     attacks_empty: bool,
 ) -> Result<WaitingFor, EngineError> {
     // CR 508.2: process the buffered declaration events together with any
     // `CreatureExerted` events from the exert sub-step. In the common (no-exert)
-    // path the buffer is empty and the per-action `events` slice carries the
-    // declaration events.
+    // path the buffer is empty and `events[declaration_start..]` carries the
+    // declaration events. The action buffer can also contain earlier
+    // micro-frame events — a taxed declaration pays its cost before committing,
+    // and that payment's tap events were already settled by the payment
+    // boundary — so the batch must start at `declaration_start`, not 0.
     let deferred = std::mem::take(&mut state.pending_attack_trigger_events);
     if deferred.is_empty() {
-        let trigger_events = events.clone();
+        let trigger_events = events[declaration_start.min(events.len())..].to_vec();
         if let Some(prompt) =
             process_declaration_triggers_with_delayed_phase(state, &trigger_events, events)
         {
@@ -463,53 +467,15 @@ pub(super) fn handle_pay_combat_tax(
     };
 
     if accept {
-        let accepted_block_assignments = match &pending {
-            CombatTaxPending::Block { assignments } => {
-                let restored = super::combat::block_declaration_from_snapshot(state, assignments);
-                if restored.len() != assignments.len() {
-                    return Err(EngineError::InvalidAction(
-                        "Block declaration changed while its tax payment was pending".to_string(),
-                    ));
-                }
-                // CR 509.1d: the declaration and its cost were fixed before
-                // the mana-ability/payment window. Do not rescore, revalidate,
-                // or reprice this exact snapshot here; only reject a stale
-                // incarnation atomically before any payment is taken.
-                Some(restored)
-            }
-            CombatTaxPending::Attack { .. } => None,
-        };
-
-        // CR 508.1i–j / CR 509.1e–f: pay the locked-in total through the shared
-        // unless-cost mana path. Failures bubble up to the caller.
-        super::casting::pay_unless_cost(state, player, &total_cost, events)?;
-        events.push(GameEvent::CombatTaxPaid {
+        return accept_combat_tax(
+            state,
             player,
-            total_mana_value: total_cost.mana_value(),
-        });
-        match pending {
-            CombatTaxPending::Attack { attacks, bands } => {
-                // CR 508.1k + CR 400.7: commit the already-validated snapshot,
-                // keeping only current-incarnation, still-team-controlled refs.
-                // Requirements/restrictions/taxes are NOT re-evaluated.
-                let declaration_start = events.len();
-                let committed = super::combat::commit_attack_declaration_from_snapshot(
-                    state, &attacks, &bands, events,
-                );
-                return continue_declare_attackers_after_commit(
-                    state,
-                    player,
-                    &committed,
-                    declaration_start,
-                    events,
-                );
-            }
-            CombatTaxPending::Block { assignments: _ } => {
-                let assignments = accepted_block_assignments
-                    .expect("block tax snapshots are restored and validated before payment");
-                return resume_declare_blockers(state, player, &assignments, events);
-            }
-        }
+            context,
+            total_cost,
+            per_creature,
+            pending,
+            events,
+        );
     }
 
     match pending {
@@ -539,6 +505,124 @@ pub(super) fn handle_pay_combat_tax(
             ))
         }
     }
+}
+
+/// CR 508.1i–j + CR 509.1e–f + CR 605.4a: the single accept path for a locked
+/// combat-tax quote.
+///
+/// It pays the quote through the effect-time mana authority with this
+/// declaration as the typed continuation, so a pre-spend mana choice suspends
+/// here with nothing spent and nothing committed. `Ok` is either the commit
+/// continuation or the pause prompt; the resume root re-enters this exact
+/// function once the bonus is in the pool.
+fn accept_combat_tax(
+    state: &mut GameState,
+    player: PlayerId,
+    context: CombatTaxContext,
+    total_cost: crate::types::mana::ManaCost,
+    per_creature: Vec<(ObjectId, crate::types::mana::ManaCost)>,
+    pending: CombatTaxPending,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    // CR 605.4a: the declaration's own tax payment carries this exact
+    // continuation, so a pre-spend mana choice suspends the payment before any
+    // mana of the cost is spent and before the declaration commits.
+    let resume = crate::types::game_state::ManaAbilityResume::CombatTaxPayment {
+        player,
+        context,
+        total_cost: total_cost.clone(),
+        per_creature,
+        pending: pending.clone(),
+    };
+    let accepted_block_assignments = match &pending {
+        CombatTaxPending::Block { assignments } => {
+            let restored = super::combat::block_declaration_from_snapshot(state, assignments);
+            if restored.len() != assignments.len() {
+                return Err(EngineError::InvalidAction(
+                    "Block declaration changed while its tax payment was pending".to_string(),
+                ));
+            }
+            // CR 509.1d: the declaration and its cost were fixed before
+            // the mana-ability/payment window. Do not rescore, revalidate,
+            // or reprice this exact snapshot here; only reject a stale
+            // incarnation atomically before any payment is taken.
+            Some(restored)
+        }
+        CombatTaxPending::Attack { .. } => None,
+    };
+
+    // CR 508.1i–j / CR 509.1e–f + CR 605.4a: pay the locked-in total through
+    // the effect-time mana authority, naming this declaration as the typed
+    // continuation. A pre-spend mana choice suspends before the spend.
+    let payment = super::casting::pay_effect_mana_cost_with_resume(
+        state,
+        player,
+        ObjectId(0),
+        &total_cost,
+        Some(&resume),
+        events,
+    );
+    // CR 605.4a + CR 605.3b + CR 616.1: the choice (or an auto-tapped source's
+    // own paused cost move) owns the live prompt; the declaration stays
+    // uncommitted and the frozen snapshot above travels in the resume root.
+    if state.pending_triggered_mana_resume.is_some()
+        || super::casting::mana_ability_cost_payment_is_paused(state)
+    {
+        return Ok(state.waiting_for.clone());
+    }
+    payment?;
+
+    events.push(GameEvent::CombatTaxPaid {
+        player,
+        total_mana_value: total_cost.mana_value(),
+    });
+    match pending {
+        CombatTaxPending::Attack { attacks, bands } => {
+            // CR 508.1k + CR 400.7: commit the already-validated snapshot,
+            // keeping only current-incarnation, still-team-controlled refs.
+            // Requirements/restrictions/taxes are NOT re-evaluated.
+            let declaration_start = events.len();
+            let committed = super::combat::commit_attack_declaration_from_snapshot(
+                state, &attacks, &bands, events,
+            );
+            continue_declare_attackers_after_commit(
+                state,
+                player,
+                &committed,
+                declaration_start,
+                events,
+            )
+        }
+        CombatTaxPending::Block { assignments: _ } => {
+            let assignments = accepted_block_assignments
+                .expect("block tax snapshots are restored and validated before payment");
+            resume_declare_blockers(state, player, &assignments, events)
+        }
+    }
+}
+
+/// CR 508.1d + CR 509.1c + CR 605.4a: resume a combat declaration whose tax
+/// payment suspended for a pre-spend mana choice. The frozen proposal and its
+/// price are the authority; the payment is retried in full with the bonus now
+/// in the pool, and only then does the declaration commit.
+pub(super) fn resume_combat_tax_payment(
+    state: &mut GameState,
+    player: PlayerId,
+    context: CombatTaxContext,
+    total_cost: crate::types::mana::ManaCost,
+    per_creature: Vec<(ObjectId, crate::types::mana::ManaCost)>,
+    pending: CombatTaxPending,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    accept_combat_tax(
+        state,
+        player,
+        context,
+        total_cost,
+        per_creature,
+        pending,
+        events,
+    )
 }
 
 fn resume_declare_blockers(
@@ -936,6 +1020,7 @@ fn next_blocker_or_finish_declaration(
 mod tests {
     use super::*;
     use crate::game::combat::{AttackerInfo, CombatState};
+    use crate::game::game_object::ObjectIncarnationRefExt;
     use crate::game::zones::create_object;
     use crate::types::ability::{StaticDefinition, TargetFilter};
     use crate::types::game_state::CombatDamageAssignmentMode;

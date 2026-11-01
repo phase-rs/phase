@@ -29,6 +29,7 @@
 //! make a crossing replay fail closed by design — the fix there is to journal
 //! them, never to relax this applier's precondition.
 
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::game::stack::apply_resolved_stack_push;
 use engine::types::ability::TargetRef;

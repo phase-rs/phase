@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "SearchSelectionConstraint::DistinctQualities is renamed SharesQualities and gains a relation (Shares | DoesNotShare); WaitingFor::SearchChoice.constraint and Effect::SearchLibrary.selection_constraint now serialize as {type: SharesQualities, qualities, relation}. New peers read the legacy DistinctQualities tag (serde alias, relation defaults to DoesNotShare), but an old peer cannot deserialize the new tag and would fail on any search prompt or stacked search effect with a constraint."
+}

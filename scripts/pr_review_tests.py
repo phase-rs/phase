@@ -4247,6 +4247,42 @@ class IncrementalDashboardTests(unittest.TestCase):
                 self.assertEqual(self.cache_bytes(), previous)
                 self.assertEqual((self.state_dir / "review-dashboard.json").read_bytes(), dashboard)
 
+    def test_gateway_timeouts_shrink_heavy_graphql_reads(self) -> None:
+        self.nodes = {number: self.node(number) for number in (1, 2, 3)}
+        original = self.github
+
+        def timeout_unless_single(command):
+            query = next((item for item in command if item.startswith("query=")), "")
+            first = next((int(item.split("=", 1)[1]) for item in command if item.startswith("first=")), 1)
+            if ("pullRequests(states:[OPEN]" in query and first > 1) or query.count(":pullRequest(") > 1:
+                raise subprocess.CalledProcessError(1, command, stderr="gh: HTTP 504")
+            return original(command)
+
+        with mock.patch.object(pr_review, "run_json", side_effect=timeout_unless_single):
+            self.assertEqual(self.run_dashboard()["discovery"]["refreshed_prs"], [1, 2, 3])
+            self.issues = [{"id": number, "number": number, "pull_request": {"url": "pull"}} for number in (1, 2, 3)]
+            self.assertEqual(self.run_dashboard()["discovery"]["refreshed_prs"], [1, 2, 3])
+
+    def test_non_timeout_graphql_failure_is_not_retried_smaller(self) -> None:
+        self.nodes = {number: self.node(number) for number in (1, 2)}
+        self.run_dashboard()
+        previous = self.cache_bytes()
+        self.issues = [{"id": number, "number": number, "pull_request": {"url": "pull"}} for number in (1, 2)]
+        original = self.github
+
+        def unauthorized_detail(command):
+            if any("q0:pullRequest(" in item for item in command):
+                self.calls.append(command)
+                raise subprocess.CalledProcessError(1, command, stderr="gh: HTTP 401")
+            return original(command)
+
+        self.calls = []
+        with mock.patch.object(pr_review, "run_json", side_effect=unauthorized_detail):
+            with self.assertRaises(subprocess.CalledProcessError):
+                self.run_dashboard()
+        self.assertEqual(len(self.detail_calls()), 1)
+        self.assertEqual(self.cache_bytes(), previous)
+
     def test_second_rest_page_failure_replays_and_does_not_consume_changes(self) -> None:
         self.run_dashboard()
         previous = self.cache_bytes()

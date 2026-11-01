@@ -4,6 +4,7 @@
 
 use engine::game::effects::attach::attach_to;
 use engine::game::filter::{matches_target_filter, FilterContext};
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::game_object::{PhaseOutCause, PhaseStatus};
 use engine::game::layers::flush_layers;
 use engine::game::scenario::{CastOutcome, GameRunner, GameScenario, P0, P1};
@@ -173,7 +174,7 @@ fn take_control(runner: &mut GameRunner, source: ObjectId, recipient: ObjectId) 
     // CR 611.2b + CR 613.1b: the positive reach guard is actual control.
     assert_eq!(outcome.state().objects[&recipient].controller, P0);
     assert!(outcome.events().iter().any(|event| matches!(event,
-        GameEvent::ControllerChanged { object_id, old_controller: P1, new_controller: P0 }
+        GameEvent::ControllerChanged { object_id, old_controller: P1, new_controller: P0, .. }
             if *object_id == recipient
     )));
 }
@@ -246,7 +247,7 @@ fn commandeer_preserves_permanent_spell_control_on_battlefield_entry() {
         control_changed |= result.events.iter().any(|event| {
             matches!(
                 event,
-                GameEvent::ControllerChanged { object_id, old_controller: P0, new_controller: P1 }
+                GameEvent::ControllerChanged { object_id, old_controller: P0, new_controller: P1, .. }
                     if *object_id == permanent
             )
         });

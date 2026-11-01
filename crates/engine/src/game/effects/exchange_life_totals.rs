@@ -117,6 +117,9 @@ pub fn resolve(
         // CR 616.1: a competing replacement required a player choice; the helper
         // installed the WaitingFor and the resume path completes resolution.
         LifeAssignmentOutcome::Deferred => Ok(()),
+        // Nothing was exchanged. The window record makes the enclosing action
+        // boundary reject and restore.
+        LifeAssignmentOutcome::Unrepresentable => Ok(()),
         LifeAssignmentOutcome::Applied => {
             events.push(GameEvent::EffectResolved {
                 kind: resolved_kind,

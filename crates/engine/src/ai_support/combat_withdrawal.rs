@@ -8,6 +8,7 @@
 use std::ops::ControlFlow;
 
 use crate::game::combat_damage::{assess_combat_impact, CombatImpact};
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{Effect, ResolvedAbility, TargetRef};
 use crate::types::ability_visit::visit_ability_def;
 use crate::types::actions::GameAction;

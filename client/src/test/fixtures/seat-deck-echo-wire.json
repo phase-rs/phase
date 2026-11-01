@@ -1,0 +1,126 @@
+{
+  "plain": {
+    "type": "Ai",
+    "data": {
+      "difficulty": "Medium",
+      "deck": {
+        "type": "DeckList",
+        "data": {
+          "main_deck": [
+            "Island"
+          ],
+          "sideboard": [],
+          "commander": [],
+          "companion": [],
+          "attraction_deck": [],
+          "planar_deck": [],
+          "scheme_deck": [],
+          "contraption_deck": [],
+          "sticker_sheets": [],
+          "signature_spell": [],
+          "bracket_tier": "core"
+        }
+      }
+    }
+  },
+  "companion": {
+    "type": "Ai",
+    "data": {
+      "difficulty": "Medium",
+      "deck": {
+        "type": "DeckList",
+        "data": {
+          "main_deck": [
+            "Island"
+          ],
+          "sideboard": [],
+          "commander": [],
+          "companion": [
+            "Lurrus of the Dream-Den"
+          ],
+          "attraction_deck": [],
+          "planar_deck": [],
+          "scheme_deck": [],
+          "contraption_deck": [],
+          "sticker_sheets": [],
+          "signature_spell": [],
+          "bracket_tier": "core"
+        }
+      }
+    }
+  },
+  "declaredTier": {
+    "type": "Ai",
+    "data": {
+      "difficulty": "Medium",
+      "deck": {
+        "type": "DeckList",
+        "data": {
+          "main_deck": [
+            "Island"
+          ],
+          "sideboard": [],
+          "commander": [],
+          "companion": [],
+          "attraction_deck": [],
+          "planar_deck": [],
+          "scheme_deck": [],
+          "contraption_deck": [],
+          "sticker_sheets": [],
+          "signature_spell": [],
+          "bracket_tier": "optimized"
+        }
+      }
+    }
+  },
+  "forestIsland": {
+    "type": "Ai",
+    "data": {
+      "difficulty": "Medium",
+      "deck": {
+        "type": "DeckList",
+        "data": {
+          "main_deck": [
+            "Forest",
+            "Island"
+          ],
+          "sideboard": [],
+          "commander": [],
+          "companion": [],
+          "attraction_deck": [],
+          "planar_deck": [],
+          "scheme_deck": [],
+          "contraption_deck": [],
+          "sticker_sheets": [],
+          "signature_spell": [],
+          "bracket_tier": "core"
+        }
+      }
+    }
+  },
+  "islandForest": {
+    "type": "Ai",
+    "data": {
+      "difficulty": "Medium",
+      "deck": {
+        "type": "DeckList",
+        "data": {
+          "main_deck": [
+            "Island",
+            "Forest"
+          ],
+          "sideboard": [],
+          "commander": [],
+          "companion": [],
+          "attraction_deck": [],
+          "planar_deck": [],
+          "scheme_deck": [],
+          "contraption_deck": [],
+          "sticker_sheets": [],
+          "signature_spell": [],
+          "bracket_tier": "core"
+        }
+      }
+    }
+  }
+}

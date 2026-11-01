@@ -519,6 +519,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             | GameEvent::GameOver { .. }
             // CR 732.2: a halted-resolution notification dirties no display state.
             | GameEvent::ResolutionHalted { .. }
+            | GameEvent::ShortcutRepetition { .. }
             | GameEvent::SpellCountered { .. }
             | GameEvent::EffectResolved { .. }
             | GameEvent::Unattached { .. }
@@ -558,6 +559,9 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             // it is rendered from the structured event log, not derived state.
             | GameEvent::DieRollIgnored { .. }
             | GameEvent::CoinFlipped { .. }
+            | GameEvent::UnTellPerformed { .. }
+            | GameEvent::PhraseSaid { .. }
+            | GameEvent::GotchaSaid { .. }
             // CR 103.1: starting-player contest carries no public-state delta;
             // it is rendered from the structured event log, not derived state.
             | GameEvent::StartingPlayerContest { .. }
@@ -587,6 +591,7 @@ pub fn mark_public_state_from_events(state: &mut GameState, events: &[GameEvent]
             | GameEvent::PhysicalContestStarted { .. }
             | GameEvent::PhysicalContestResolved { .. }
             | GameEvent::VoteCast { .. }
+            | GameEvent::CardNamed { .. }
             | GameEvent::VoteResolved { .. }
             | GameEvent::PowerToughnessChanged { .. }
             | GameEvent::CascadeMissed { .. }
@@ -940,6 +945,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],

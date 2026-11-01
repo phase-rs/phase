@@ -1,3 +1,4 @@
+import type { ParseKeys } from "i18next";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -66,7 +67,7 @@ function ChangelogBody({ body }: { body: string }) {
  * Record over the ChangelogTag union means adding a tag without giving it a
  * style is a compile error — the lookup can never miss at runtime.
  */
-const TAG_META: Record<ChangelogTag, { labelKey: string; chipClass: string }> = {
+const TAG_META: Record<ChangelogTag, { labelKey: ParseKeys<"menu">; chipClass: string }> = {
   "new-cards": { labelKey: "whatsNew.tag.new-cards", chipClass: "bg-emerald-500/15 text-emerald-300" },
   "card-fixes": { labelKey: "whatsNew.tag.card-fixes", chipClass: "bg-amber-500/15 text-amber-300" },
   gameplay: { labelKey: "whatsNew.tag.gameplay", chipClass: "bg-rose-500/15 text-rose-300" },

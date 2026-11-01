@@ -1736,6 +1736,8 @@ fn legacy_pending_save(state: &engine::types::game_state::GameState) -> serde_js
 /// is canceled, including after save/restore. Deferred casualty stays unpaid.
 #[test]
 fn canceling_a_linked_cast_restores_prior_life_or_discard_and_settles_the_chapter() {
+    let _reference = engine::game::CastUndoReferenceCheck::enable();
+    engine::game::perf_counters::reset();
     for discard in [false, true] {
         for (reload, library_operation) in [(false, 0u8), (true, 0), (false, 2), (false, 1)] {
             let library_disclosure = library_operation != 0;
@@ -2057,6 +2059,10 @@ fn canceling_a_linked_cast_restores_prior_life_or_discard_and_settles_the_chapte
             assert_eq!(cast_completions(&events, saga), 1);
         }
     }
+    assert!(
+        engine::game::perf_counters::cast_undo_record_snapshot().reference_checks > 0,
+        "reach: the linked casts recorded and compared changed-member reversals"
+    );
 }
 
 /// CR 118.9d + CR 601.2b/f: the alternative declaration and the printed
@@ -2610,6 +2616,8 @@ fn canceling_a_linked_cast_refunds_prior_life_and_a_later_mana_sacrifice() {
 /// a mana increase, so the selecting input pays life and leaves payment open.
 #[test]
 fn canceling_a_linked_cast_preserves_its_parent_when_the_first_input_pays_life() {
+    let _reference = engine::game::CastUndoReferenceCheck::enable();
+    engine::game::perf_counters::reset();
     for (cancel, reload) in [(true, false), (true, true), (false, false)] {
         let Board {
             mut runner,
@@ -2716,6 +2724,10 @@ fn canceling_a_linked_cast_preserves_its_parent_when_the_first_input_pays_life()
             );
         }
     }
+    assert!(
+        engine::game::perf_counters::cast_undo_record_snapshot().cast_start_reference_checks > 0,
+        "reach: the selecting input folded its cast-start boundary"
+    );
 }
 
 /// Verbatim Oracle text (MTGJSON `text`): U+2014 row separators, U+2212 minus signs.

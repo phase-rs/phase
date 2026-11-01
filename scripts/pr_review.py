@@ -64,6 +64,9 @@ PRIVATE_OVERRIDES = "private-overrides.json"
 DASHBOARD_SCHEMA_VERSION = 2
 DASHBOARD_RECENT_CLOSED_HOURS = 48
 DASHBOARD_DEFAULT_TERMINAL_LIMIT = 200
+# Must exceed the open-PR count: the census fails closed above it, and the
+# discovery cache is keyed on it, so a lower value forces a heavy re-bootstrap.
+DEFAULT_OPEN_PR_LIMIT = 250
 DISCOVERY_CACHE_VERSION = 1
 DISCOVERY_OVERLAP_SECONDS = 60
 DISCOVERY_REST_PAGE_SIZE = 100
@@ -548,6 +551,14 @@ def run_json(command: list[str]) -> Any:
     assert last_error is not None
     print((last_error.stderr or "").strip(), file=sys.stderr)
     raise last_error
+
+
+def is_gateway_timeout(error: subprocess.CalledProcessError) -> bool:
+    """GitHub answers a GraphQL read too costly to finish in time with 502/504.
+
+    Retrying the same query cannot succeed, so callers shrink the request.
+    """
+    return bool(re.search(r"HTTP 50[24]", error.stderr or ""))
 
 
 def gh_user() -> str:
@@ -3647,8 +3658,9 @@ def fetch_pr_nodes(repo: str, limit: int, query: str) -> list[dict[str, Any]]:
     owner, name = repo.split("/", 1)
     nodes: list[dict[str, Any]] = []
     cursor: str | None = None
+    page_limit = SCAN_PAGE_SIZE
     while len(nodes) < limit:
-        page_size = min(limit - len(nodes), SCAN_PAGE_SIZE)
+        page_size = min(limit - len(nodes), page_limit)
         variables = [
             "-f",
             f"owner={owner}",
@@ -3659,7 +3671,14 @@ def fetch_pr_nodes(repo: str, limit: int, query: str) -> list[dict[str, Any]]:
         ]
         if cursor:
             variables += ["-f", f"after={cursor}"]
-        result = run_json(["gh", "api", "graphql", "-f", f"query={query}", *variables])
+        try:
+            result = run_json(["gh", "api", "graphql", "-f", f"query={query}", *variables])
+        except subprocess.CalledProcessError as exc:
+            if page_size == 1 or not is_gateway_timeout(exc):
+                raise
+            # Re-read the same cursor with a smaller page for the rest of the walk.
+            page_limit = page_size // 2
+            continue
         repository = github_repository(result)
         connection = repository.get("pullRequests")
         if not isinstance(connection, dict) or not isinstance(connection.get("nodes"), list):
@@ -4271,20 +4290,32 @@ def fetch_discovery_details(repo: str, numbers: list[int]) -> list[dict[str, Any
                             include_comment_body=True, status_contexts_first=80)
     nodes = []
     for start in range(0, len(numbers), SCAN_PAGE_SIZE):
-        chunk = numbers[start:start + SCAN_PAGE_SIZE]
-        aliases = " ".join(f"q{index}:pullRequest(number:{number}){{{fields}}}"
-                           for index, number in enumerate(chunk))
-        query = "query($owner:String!,$name:String!){repository(owner:$owner,name:$name){" + aliases + "}}"
+        nodes.extend(fetch_discovery_detail_chunk(owner, name, fields, numbers[start:start + SCAN_PAGE_SIZE]))
+    return nodes
+
+
+def fetch_discovery_detail_chunk(owner: str, name: str, fields: str, chunk: list[int]) -> list[dict[str, Any]]:
+    aliases = " ".join(f"q{index}:pullRequest(number:{number}){{{fields}}}"
+                       for index, number in enumerate(chunk))
+    query = "query($owner:String!,$name:String!){repository(owner:$owner,name:$name){" + aliases + "}}"
+    try:
         repository = github_repository(run_json([
             "gh", "api", "graphql", "-f", f"owner={owner}", "-f", f"name={name}",
             "-f", f"query={query}"]))
-        for index, number in enumerate(chunk):
-            node = repository.get(f"q{index}")
-            validate_discovery_pr(node)
-            validate_discovery_metadata(node, detail=True)
-            if node["number"] != number:
-                raise ValueError(f"GitHub detail response did not match PR {number}")
-            nodes.append(node)
+    except subprocess.CalledProcessError as exc:
+        if len(chunk) == 1 or not is_gateway_timeout(exc):
+            raise
+        half = len(chunk) // 2
+        return (fetch_discovery_detail_chunk(owner, name, fields, chunk[:half])
+                + fetch_discovery_detail_chunk(owner, name, fields, chunk[half:]))
+    nodes = []
+    for index, number in enumerate(chunk):
+        node = repository.get(f"q{index}")
+        validate_discovery_pr(node)
+        validate_discovery_metadata(node, detail=True)
+        if node["number"] != number:
+            raise ValueError(f"GitHub detail response did not match PR {number}")
+        nodes.append(node)
     return nodes
 
 
@@ -4958,12 +4989,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     scan = sub.add_parser("scan")
     add_common(scan)
-    scan.add_argument("--limit", type=int, default=100)
+    scan.add_argument("--limit", type=int, default=DEFAULT_OPEN_PR_LIMIT)
     scan.set_defaults(func=command_scan)
 
     dashboard = sub.add_parser("dashboard-data")
     add_common(dashboard)
-    dashboard.add_argument("--limit", type=int, default=100)
+    dashboard.add_argument("--limit", type=int, default=DEFAULT_OPEN_PR_LIMIT)
     dashboard.add_argument("--terminal-limit", type=int, default=DASHBOARD_DEFAULT_TERMINAL_LIMIT)
     dashboard.add_argument("--full-refresh", action="store_true", help="Rebuild disposable GitHub discovery cache.")
     dashboard.add_argument("--output", type=Path, default=None)

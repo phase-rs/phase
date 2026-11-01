@@ -1,3 +1,4 @@
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
     cost_paid_object_snapshot_ids_eq, AbilityKind, ContinuousEffectOnset, ContinuousModification,
     CopyCountStatus, DetachedRemainder, Duration, Effect, EffectKind, IllegalTargetsDisposition,
@@ -1748,16 +1749,11 @@ fn resolving_saga_chapter(entry: &StackEntry) -> Option<ResolvingSagaChapter> {
     let StackEntryKind::TriggeredAbility { ability, .. } = &entry.kind else {
         return None;
     };
-    let occurrence = &ability.trigger_definition_ref.as_ref()?.occurrence;
     let saga = ability.trigger_source.as_ref()?;
 
     // CR 714.2: chapter numbers come from the chapter-symbol provenance on the
     // source incarnation's own trigger entries, never from a live lore count.
-    let chapter = saga
-        .trigger_entries
-        .iter()
-        .find(|entry| &entry.occurrence == occurrence)
-        .and_then(|entry| entry.definition.saga_chapter)?;
+    let chapter = ability.triggered_definition()?.saga_chapter?;
     // CR 714.2d: greatest chapter number among that same incarnation's chapter
     // abilities.
     let final_chapter = saga
@@ -3261,7 +3257,9 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
                             // mark the battlefield object transformed without
                             // swapping faces again. Casting-variant-specific, so
                             // it stays caller-side (the pipeline tail only knows
-                            // the generic `enter_transformed` face-swap).
+                            // the generic `enter_transformed` face-swap). This
+                            // entry is not a CR 701.27a transform, so it emits
+                            // no `GameEvent::Transformed`.
                             if matches!(
                                 casting_variant,
                                 CastingVariant::MoreThanMeetsTheEye | CastingVariant::Disturb
@@ -3276,7 +3274,6 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) -> u32 {
                                 }
                                 if marked {
                                     crate::game::layers::mark_layers_full(state);
-                                    events.push(GameEvent::Transformed { object_id });
                                 }
                             }
                         }
@@ -4865,6 +4862,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         modal,
         mode_abilities,
         parent_target_missing_reason,
+        control_change_instruction,
     } = ability;
 
     let self_counter = matches!(
@@ -4962,6 +4960,7 @@ fn self_counter_ability_is_batch_candidate(ability: &ResolvedAbility) -> bool {
         && modal.is_none()
         && mode_abilities.is_empty()
         && parent_target_missing_reason.is_none()
+        && control_change_instruction.is_none()
 }
 
 /// CR 117.3b + CR 117.3d + CR 117.5 + CR 608.2 + CR 704.3 + CR 119.3: Fixed
@@ -5119,6 +5118,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         modal,
         mode_abilities,
         parent_target_missing_reason,
+        control_change_instruction,
     } = ability;
 
     let fixed_controller_gain_life = matches!(
@@ -5193,6 +5193,7 @@ fn fixed_controller_gain_life_ability_is_batch_candidate(ability: &ResolvedAbili
         && modal.is_none()
         && mode_abilities.is_empty()
         && parent_target_missing_reason.is_none()
+        && control_change_instruction.is_none()
 }
 
 /// CR 117.3b + CR 117.3d + CR 117.5 + CR 608.2 + CR 704.3: Fixed opponent-
@@ -5352,6 +5353,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         modal,
         mode_abilities,
         parent_target_missing_reason,
+        control_change_instruction,
     } = ability;
 
     let fixed_opponent_effect = matches!(
@@ -5430,6 +5432,7 @@ fn fixed_opponent_effect_ability_is_batch_candidate(ability: &ResolvedAbility) -
         && modal.is_none()
         && mode_abilities.is_empty()
         && parent_target_missing_reason.is_none()
+        && control_change_instruction.is_none()
 }
 
 fn optional_ability_is_inert_under_auto_choice(
@@ -5478,7 +5481,7 @@ fn ability_has_no_legal_resolution_targets(
         // etc.), all of which are ALWAYS resolvable. Testing raw `target_filter()`
         // here would fork from that authority and silently drop an auto-accepted
         // "you may put a creature from your hand …" trigger (Kaalia et al.).
-        (super::triggers::extract_target_filter_from_effect(&ability.effect).is_some()
+        (crate::types::ability::extract_target_filter_from_effect(&ability.effect).is_some()
             && slots.is_empty())
             || (!slots.is_empty() && slots.iter().all(|slot| slot.legal_targets.is_empty()))
     });
@@ -5707,6 +5710,10 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         illegal_target_slots: a_illegal_target_slots,
         unjudged_target_slots: a_unjudged_target_slots,
         illegal_local_target_slots: a_illegal_local_target_slots,
+        // CR 608.2e: a player-scope driver's transient capture, never on a
+        // stack entry; guaranteed `None` ONE HOP upstream by the
+        // batch-candidate checks, like the modal ordinal.
+        control_change_instruction: _,
     } = a;
     let ResolvedAbility {
         effect: b_effect,
@@ -5796,6 +5803,10 @@ fn inert_trigger_abilities_eq_ignoring_provenance(
         illegal_target_slots: b_illegal_target_slots,
         unjudged_target_slots: b_unjudged_target_slots,
         illegal_local_target_slots: b_illegal_local_target_slots,
+        // CR 608.2e: a player-scope driver's transient capture, never on a
+        // stack entry; guaranteed `None` ONE HOP upstream by the
+        // batch-candidate checks, like the modal ordinal.
+        control_change_instruction: _,
     } = b;
 
     a_effect == b_effect
@@ -7070,19 +7081,8 @@ mod tests {
         state.objects.insert(source_id, source);
         state.objects.insert(copy_id, copy);
 
-        let mut root = ResolvedAbility::new(
-            Effect::EpicCopy {
-                spell: Box::new(ResolvedAbility::new(
-                    Effect::Investigate,
-                    Vec::new(),
-                    source_id,
-                    PlayerId(0),
-                )),
-            },
-            Vec::new(),
-            source_id,
-            PlayerId(0),
-        );
+        let mut root =
+            ResolvedAbility::new(Effect::Investigate, Vec::new(), source_id, PlayerId(0));
         root.sub_ability = Some(Box::new(ResolvedAbility::new(
             Effect::Investigate,
             Vec::new(),
@@ -7123,10 +7123,6 @@ mod tests {
             ability.cast_occurrence.is_none()
                 && ability.sub_ability.as_deref().is_none_or(graph_is_clear)
                 && ability.else_ability.as_deref().is_none_or(graph_is_clear)
-                && match &ability.effect {
-                    Effect::EpicCopy { spell } => graph_is_clear(spell),
-                    _ => true,
-                }
         }
 
         assert_eq!(state.objects[&source_id].cast_occurrence, Some(occurrence));
@@ -10351,6 +10347,7 @@ mod tests {
             resolve_next_with_limit, resolve_proven_inert_trigger_batch_with_proof_hook,
             resolve_top, run_member_abilities, self_counter_run_len,
         };
+        use crate::game::game_object::ObjectIncarnationRefExt;
         // Test fixtures from the parent `tests` module.
         use super::{pending_spell_entry, setup};
         use crate::game::triggers;
@@ -10452,6 +10449,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -10691,6 +10690,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -12226,6 +12227,7 @@ mod tests {
                 enter_with_counters: vec![],
                 tapped: false,
                 enters_attacking: false,
+                attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
                 sacrifice_at: None,
                 source_id: ObjectId(1),
                 controller: PlayerId(0),
@@ -12309,6 +12311,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],
@@ -12574,6 +12578,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 source_filter: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
                 extra_keywords: vec![],

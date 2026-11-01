@@ -609,7 +609,7 @@ fn face_down_fireblast_board(
             StaticDefinition::continuous()
                 .affected(TargetFilter::SpecificObject { id: fireblast })
                 .modifications(vec![ContinuousModification::AddKeyword {
-                    keyword: Keyword::Morph(ManaCost::generic(4)),
+                    keyword: Keyword::Morph(ManaCost::generic(4).into()),
                 }]),
         );
     let mut runner = scenario.build();

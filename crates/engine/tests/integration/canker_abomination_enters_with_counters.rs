@@ -95,6 +95,7 @@ fn cast_and_answer_opponent_prompt(runner: &mut GameRunner, canker: ObjectId) {
 
     // The as-enters replacement must pause on the fronted opponent choice.
     let WaitingFor::NamedChoice {
+        player: choice_player,
         choice_type,
         options,
         ..
@@ -105,6 +106,7 @@ fn cast_and_answer_opponent_prompt(runner: &mut GameRunner, canker: ObjectId) {
             runner.waiting_for_kind()
         );
     };
+    assert_eq!(choice_player, P0, "prompt actor must be controller P0");
     assert!(
         matches!(
             choice_type,
@@ -117,6 +119,11 @@ fn cast_and_answer_opponent_prompt(runner: &mut GameRunner, canker: ObjectId) {
         options,
         vec![P1.0.to_string()],
         "only P1 is a legal opponent"
+    );
+    assert_eq!(
+        runner.state().objects[&canker].zone,
+        Zone::Stack,
+        "CR 614.12a: permanent must still be on the stack while choice is pending"
     );
 
     // Answer the choice and let entry complete.
@@ -134,6 +141,7 @@ fn cast_and_answer_opponent_prompt(runner: &mut GameRunner, canker: ObjectId) {
 fn chosen_opponent_creatures_determine_minus_one_counters() {
     let (outcome, canker) = cast_canker_abomination(P1, 2);
     outcome.assert_counters(canker, CounterType::Minus1Minus1, 2);
+    outcome.assert_power_toughness(canker, 4, 4);
 }
 
 /// Negative polarity: the chosen opponent P1 controls no creatures while the
@@ -176,6 +184,10 @@ fn no_opponent_creatures_no_counters() {
             .unwrap_or(0),
         0,
         "the chosen opponent controls no creatures, so no -1/-1 counters"
+    );
+    assert_eq!(
+        (abomination.power, abomination.toughness),
+        (Some(6), Some(6))
     );
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
@@ -225,6 +237,7 @@ fn chooses_chosen_opponent_not_first_opponent() {
         "Canker Abomination must resolve onto the battlefield"
     );
     outcome.assert_counters(canker, CounterType::Minus1Minus1, 5);
+    outcome.assert_power_toughness(canker, 1, 1);
 }
 
 /// The as-enters opponent choice is surfaced as a genuine `ChoiceType::Opponent`

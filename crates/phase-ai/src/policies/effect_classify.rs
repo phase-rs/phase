@@ -305,6 +305,10 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         | Effect::AdditionalPhase { .. }
         | Effect::AddPendingETBCounters { .. }
         | Effect::AddPendingEntersModifications { .. }
+        // CR 701.33: abandoning an ongoing scheme turns it face down onto the
+        // bottom of its owner's scheme deck — whether that is good depends on
+        // the scheme (ongoing pressure vs. cycling to the next scheme).
+        | Effect::AbandonScheme
         | Effect::AddRestriction { .. }
         | Effect::AddTargetReplacement { .. }
         | Effect::Amass { .. }
@@ -929,6 +933,9 @@ pub(crate) fn filter_domain(filter: &TargetFilter) -> FilterDomain {
         // unlike `EventTarget` (the recipient object itself) below.
         | TargetFilter::EventTargetController
         | TargetFilter::ParentTargetOwner
+        // CR 108.3 + CR 508.1d: per-member owner anchor — denotes players,
+        // never the affected objects themselves.
+        | TargetFilter::AffectedObjectOwner
         | TargetFilter::SourceChosenPlayer
         | TargetFilter::OriginalController
         | TargetFilter::PostReplacementSourceController

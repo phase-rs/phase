@@ -1,5 +1,6 @@
 use crate::types::ability::{
     Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+    TokenAttackDestination,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -76,6 +77,7 @@ pub fn create_token_copy(
             owner: TargetFilter::Controller,
             source_filter: None,
             enters_attacking: false,
+            attack_destination: TokenAttackDestination::ControllerChooses,
             tapped: false,
             count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
             extra_keywords: vec![],

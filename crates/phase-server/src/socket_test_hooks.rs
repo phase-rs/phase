@@ -1,4 +1,5 @@
-//! Test-only barriers observe real socket delivery without delaying game work.
+//! Instance-scoped barriers observe bootstrap, resync ownership and publication
+//! lease boundaries in the real socket path; unarmed hooks never delay work.
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -20,6 +21,7 @@ pub(crate) struct Hooks {
     quota_flush: Arc<Mutex<Option<Arc<BootstrapGate>>>>,
     parser_work: Arc<Mutex<Option<Arc<ParserWork>>>>,
     hello_accept: Arc<Mutex<Option<Arc<BootstrapGate>>>>,
+    resync: Arc<Mutex<ResyncGates>>,
 }
 
 /// One connection's real parser calls, with a frozen quota window so wire tests
@@ -143,13 +145,94 @@ impl ParserWork {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum ResyncPoint {
+    Dispatch,
+    Built,
+    Enqueued,
+    ActionPreflight,
+    Encoding,
+}
+
+#[derive(Default)]
+struct ResyncGates {
+    dispatch: Option<Arc<BootstrapGate>>,
+    built: Option<Arc<BootstrapGate>>,
+    enqueued: Option<Arc<BootstrapGate>>,
+    action_preflight: Option<Arc<BootstrapGate>>,
+    encoding: Option<Arc<BootstrapGate>>,
+}
+
+impl ResyncGates {
+    fn slot(&mut self, point: ResyncPoint) -> &mut Option<Arc<BootstrapGate>> {
+        match point {
+            ResyncPoint::Dispatch => &mut self.dispatch,
+            ResyncPoint::Built => &mut self.built,
+            ResyncPoint::Enqueued => &mut self.enqueued,
+            ResyncPoint::ActionPreflight => &mut self.action_preflight,
+            ResyncPoint::Encoding => &mut self.encoding,
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct BootstrapGate {
     pub(crate) entered: Notify,
     pub(crate) release: Notify,
+    pub(crate) snapshot: Mutex<Option<(server_core::FullSessionKey, u64)>>,
 }
 
 impl Hooks {
+    pub(crate) fn arm_resync(&self, point: ResyncPoint) -> Arc<BootstrapGate> {
+        let gate = Arc::new(BootstrapGate::default());
+        *self.resync.lock().slot(point) = Some(gate.clone());
+        gate
+    }
+
+    async fn resync_boundary(
+        &self,
+        point: ResyncPoint,
+        snapshot: Option<(server_core::FullSessionKey, u64)>,
+    ) {
+        let gate = self.resync.lock().slot(point).take();
+        if let Some(gate) = gate {
+            *gate.snapshot.lock() = snapshot;
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
+    }
+
+    pub(crate) async fn before_resync_dispatch(&self) {
+        self.resync_boundary(ResyncPoint::Dispatch, None).await;
+    }
+
+    pub(crate) async fn after_resync_build(
+        &self,
+        key: &server_core::FullSessionKey,
+        revision: u64,
+    ) {
+        self.resync_boundary(ResyncPoint::Built, Some((key.clone(), revision)))
+            .await;
+    }
+
+    pub(crate) async fn after_resync_enqueue(
+        &self,
+        key: &server_core::FullSessionKey,
+        revision: u64,
+    ) {
+        self.resync_boundary(ResyncPoint::Enqueued, Some((key.clone(), revision)))
+            .await;
+    }
+
+    pub(crate) async fn before_action_preflight(&self) {
+        self.resync_boundary(ResyncPoint::ActionPreflight, None)
+            .await;
+    }
+
+    pub(crate) async fn before_resync_encode(&self) {
+        self.resync_boundary(ResyncPoint::Encoding, None).await;
+    }
+
     pub(crate) fn arm_hello_accept(&self) -> Arc<BootstrapGate> {
         let gate = Arc::new(BootstrapGate::default());
         *self.hello_accept.lock() = Some(gate.clone());
@@ -597,6 +680,230 @@ fn fresh_join_bootstrap_precedes_a_concurrent_room_start() {
         .await;
         server.abort();
         result.expect("fresh-join bootstrap or room start stalled");
+    });
+}
+
+#[test]
+fn queued_conditional_assignment_preserves_joining_human_over_real_sockets() {
+    run_async_test(|| async {
+        use crate::game_submission_tests::{basic_land_test_database, connect_and_hello};
+        use crate::issue_4548_full_create_tests::{
+            recv_server_message, send_test_message, spawn_full_mode_server_with_db,
+        };
+        use engine::types::player::PlayerId;
+        use futures_util::SinkExt;
+        use server_core::protocol::{ClientMessage, DeckData, SeatKind};
+        use std::time::Duration;
+        use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+        let (url, server, _directory, app) =
+            spawn_full_mode_server_with_db(basic_land_test_database()).await;
+        let result = tokio::time::timeout(Duration::from_secs(15), async {
+            let deck = DeckData {
+                main_deck: vec!["Network Test Land".to_string(); 60],
+                ..Default::default()
+            };
+            let mut host = connect_and_hello(url.clone()).await;
+            let mut request = room_request(deck.clone(), 4, None);
+            if let ClientMessage::CreateGameWithSettings {
+                start_when_full, ..
+            } = &mut request
+            {
+                *start_when_full = false;
+            }
+            send_test_message(&mut host, &request, false).await;
+            let (code, host_token) = loop {
+                match recv_server_message(&mut host).await {
+                    ServerMessage::GameCreated {
+                        game_code,
+                        player_token,
+                        ..
+                    } => {
+                        break (game_code, player_token);
+                    }
+                    ServerMessage::Error { message, .. } => panic!("create: {message}"),
+                    _ => {}
+                }
+            };
+            let mut other = connect_and_hello(url.clone()).await;
+            send_test_message(
+                &mut other,
+                &ClientMessage::JoinGame {
+                    game_code: code.clone(),
+                    deck: deck.clone(),
+                },
+                false,
+            )
+            .await;
+            let other_token = loop {
+                if let ServerMessage::SessionAttached {
+                    player_id,
+                    player_token,
+                    ..
+                } = recv_server_message(&mut other).await
+                {
+                    assert_eq!(player_id, PlayerId(1));
+                    break player_token;
+                }
+            };
+            // SessionAttached precedes slot enqueueing; the bootstrap follows
+            // it. Wait for the first guest's bootstrap and host slot publication.
+            loop {
+                match recv_server_message(&mut other).await {
+                    ServerMessage::StateUpdate { .. } => break,
+                    ServerMessage::Error { message, .. } => panic!("other join: {message}"),
+                    _ => {}
+                }
+            }
+            // The first join's publication follows creation on the host's
+            // application mailbox. Drain through that observable state, not Pong.
+            loop {
+                match recv_server_message(&mut host).await {
+                    ServerMessage::PlayerSlotsUpdate { slots }
+                        if slots[1].kind == SeatKind::JoinedHuman =>
+                    {
+                        assert_eq!(slots[2].kind, SeatKind::WaitingHuman);
+                        break;
+                    }
+                    ServerMessage::Error { message, .. } => panic!("initial slots: {message}"),
+                    _ => {}
+                }
+            }
+
+            let gate = app.context.socket_hooks.arm_cutover();
+            let mut guest = connect_and_hello(url).await;
+            send_test_message(
+                &mut guest,
+                &ClientMessage::JoinGame {
+                    game_code: code.clone(),
+                    deck: deck.clone(),
+                },
+                false,
+            )
+            .await;
+            gate.entered.notified().await;
+            // JSON keeps the same witness runnable against the old receiver:
+            // old serde ignores expectedKind instead of failing compilation.
+            let mut mutation = serde_json::json!({
+                "type": "SeatMutate", "data": { "mutation": {
+                    "type": "SetKind", "data": {
+                        "seatIndex": 2,
+                        "kind": { "type": "Ai", "data": {
+                            "difficulty": "Medium",
+                            "deck": { "type": "DeckList", "data": deck }
+                        }},
+                        "expectedKind": { "type": "WaitingHuman" }
+                    }
+                }}
+            });
+            host.send(WsMessage::Text(mutation.to_string().into()))
+                .await
+                .unwrap();
+            send_test_message(&mut host, &ClientMessage::Ping { timestamp: 2 }, false).await;
+            // Pong proves decoder receipt, not application completion. Await it
+            // while the joining guest still holds the session lease.
+            loop {
+                match recv_server_message(&mut host).await {
+                    ServerMessage::Pong { timestamp: 2 } => break,
+                    ServerMessage::Error { message, .. } => panic!("queued assignment: {message}"),
+                    _ => {}
+                }
+            }
+            gate.release.notify_one();
+            // Host commands are handled sequentially. This successful edit's
+            // publication follows the stale assignment on the same mailbox.
+            mutation["data"]["mutation"]["data"]["seatIndex"] = 3.into();
+            host.send(WsMessage::Text(mutation.to_string().into()))
+                .await
+                .unwrap();
+            let guest_token = loop {
+                match recv_server_message(&mut guest).await {
+                    ServerMessage::SessionAttached {
+                        player_id,
+                        player_token,
+                        ..
+                    } => {
+                        assert_eq!(player_id, PlayerId(2));
+                        break player_token;
+                    }
+                    ServerMessage::Error { message, .. } => panic!("join: {message}"),
+                    _ => {}
+                }
+            };
+            loop {
+                match recv_server_message(&mut host).await {
+                    ServerMessage::PlayerSlotsUpdate { slots } => {
+                        assert_eq!(
+                            slots[2].kind,
+                            SeatKind::JoinedHuman,
+                            "the queued assignment displaced the joining guest"
+                        );
+                        if matches!(slots[3].kind, SeatKind::Ai { .. }) {
+                            break;
+                        }
+                    }
+                    ServerMessage::Error { message, .. } => {
+                        panic!("conditional assignment: {message}")
+                    }
+                    _ => {}
+                }
+            }
+            {
+                let session = crate::lock_session(&app.sessions, &code).await.unwrap();
+                assert_eq!(session.player_tokens[2], guest_token);
+                assert_eq!(session.seat_state().seats[2], SeatKind::JoinedHuman);
+                assert_eq!(session.player_tokens[0], host_token);
+                assert_eq!(session.player_tokens[1], other_token);
+                assert!(session.connected[2]);
+            }
+            assert_eq!(
+                app.sessions.lock().await.game_for_token(&guest_token),
+                Some(code.as_str())
+            );
+            mutation["data"]["mutation"]["data"]["seatIndex"] = 2.into();
+            mutation["data"]["mutation"]["data"]
+                .as_object_mut()
+                .unwrap()
+                .remove("expectedKind");
+            host.send(WsMessage::Text(mutation.to_string().into()))
+                .await
+                .unwrap();
+            loop {
+                match recv_server_message(&mut host).await {
+                    ServerMessage::PlayerSlotsUpdate { slots }
+                        if matches!(slots[2].kind, SeatKind::Ai { .. }) =>
+                    {
+                        assert_eq!(slots[1].kind, SeatKind::JoinedHuman);
+                        break;
+                    }
+                    ServerMessage::Error { message, .. } => {
+                        panic!("explicit replacement: {message}")
+                    }
+                    _ => {}
+                }
+            }
+            loop {
+                if let ServerMessage::Error { message, .. } = recv_server_message(&mut guest).await
+                {
+                    assert!(message.contains("removed from the room"));
+                    break;
+                }
+            }
+            let registry = app.sessions.lock().await;
+            assert_eq!(registry.game_for_token(&guest_token), None);
+            assert_eq!(registry.game_for_token(&host_token), Some(code.as_str()));
+            assert_eq!(registry.game_for_token(&other_token), Some(code.as_str()));
+            assert!(!app
+                .connections
+                .lock()
+                .await
+                .get(&code)
+                .unwrap()
+                .contains_key(&PlayerId(2)));
+        })
+        .await;
+        server.abort();
+        result.expect("queued conditional seat assignment or follow-on publication stalled");
     });
 }
 

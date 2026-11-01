@@ -13,6 +13,7 @@
 //! reached the graveyard (row I9), not through the +1.
 
 use crate::support::shared_card_db;
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::layers::flush_layers;
 use engine::game::printed_cards::{
     rehydrate_game_from_card_db_with_finalization, CardDbRehydrationFinalization,

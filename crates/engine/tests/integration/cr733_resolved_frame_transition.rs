@@ -50,6 +50,7 @@ fn coin_flip_frame() -> ResolutionFrame {
         kind: PendingCoinFlipKind::Exactly { remaining: 0 },
         chain_root_targets: Vec::new(),
         branch_context: Default::default(),
+        trigger_context: None,
     })
 }
 

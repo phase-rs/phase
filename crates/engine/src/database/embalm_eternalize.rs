@@ -37,7 +37,7 @@
 
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification, Effect, QuantityExpr,
-    TargetFilter,
+    TargetFilter, TokenAttackDestination,
 };
 use crate::types::card::CardFace;
 use crate::types::keywords::{EmbalmCost, EternalizeCost, Keyword};
@@ -71,7 +71,7 @@ pub fn synthesize_embalm_eternalize(face: &mut CardFace) {
 /// runtime** (e.g. Cursecloth Wrappings' "target creature card in your graveyard
 /// gains embalm until end of turn. The embalm cost is equal to its mana cost.").
 /// Mirrors `database::synthesis::graveyard_activated_ability_for_keyword` for the
-/// Encore / Scavenge family: the `AddKeyword` continuous-effect seam installs
+/// Unearth / Encore / Scavenge family: the `AddKeyword` continuous-effect seam installs
 /// only the keyword, so the activatable ability must be synthesized on demand.
 /// Returns `None` for any non-Embalm/Eternalize keyword.
 ///
@@ -184,6 +184,7 @@ fn token_copy_ability(
         owner: TargetFilter::Controller,
         source_filter: None,
         enters_attacking: false,
+        attack_destination: TokenAttackDestination::ControllerChooses,
         tapped: false,
         count: QuantityExpr::Fixed { value: 1 },
         extra_keywords: vec![],

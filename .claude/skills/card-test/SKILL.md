@@ -74,7 +74,8 @@ fn my_card_does_the_thing() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let spell = scenario
-        .add_spell_to_hand_from_oracle(P0, "My Card", /* is_instant */ true, ORACLE)
+        // NAME and ORACLE: a printed card's name and verbatim Scryfall/MTGJSON Oracle text.
+        .add_spell_to_hand_from_oracle(P0, NAME, /* is_instant */ true, ORACLE)
         .id();
     // ... stage targets / mana / library as needed ...
     let mut runner = scenario.build();
@@ -206,6 +207,9 @@ fn my_card_does_the_thing() {
   Paraphrased text can take a different parser branch than the real card, so
   the test goes green while the actual card stays broken until card-data is
   regenerated (see `project_parser_fix_inert_until_data_regen`).
+- **The card under test is a real printed card.** A synthetic card is
+  acceptable only where no printed card exhibits the shape; the test then says so and names the nearest
+  printed card. See [real cards](../engine-implementer/SKILL.md#real-cards).
 - **Regenerate the integration fixture when your parser change touches a card
   it contains.** `add_real_card` reads the committed
   `crates/engine/tests/fixtures/integration_cards.json` snapshot.
