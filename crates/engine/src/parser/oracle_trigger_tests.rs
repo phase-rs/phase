@@ -3824,12 +3824,15 @@ fn parse_syr_konrad_trigger_lines_stays_single_disjunctive_trigger() {
 /// Public-parser acceptance boundary, not a runtime claim for unsupported heads.
 /// Synthetic inputs combine Disa's exclusion with Voracious Brood's batching,
 /// "Name Sticker" Goblin's exclusion list, and Oglor's inclusion union.
-/// CR 400.3 + CR 603.2: do not admit heads whose owner, source admission, or
-/// batch count cannot be preserved. Printed Disa and Syr Konrad remain controls.
+/// CR 400.3 + CR 603.2 + CR 603.2c + CR 608.2c: do not admit heads whose
+/// owner, source admission, or batch count cannot be preserved. Printed Disa
+/// and Syr Konrad remain controls.
 #[test]
 fn trigger_graveyard_narrowing_preserves_base_acceptance() {
     for oracle in [
         "Whenever one or more creature cards are put into your graveyard from anywhere other than the battlefield, put that many +1/+1 counters on this creature.",
+        "Whenever a land card or one or more creature cards are put into your graveyard from anywhere other than the battlefield, put that many +1/+1 counters on this creature.",
+        "Whenever another creature card or one or more creature cards are put into your graveyard from anywhere other than the battlefield, put that many +1/+1 counters on this creature.",
         "Whenever a creature card is put into your graveyard from anywhere other than the battlefield or your library, you gain 2 life.",
         "Whenever one or more creature cards are put into your graveyard from anywhere other than the battlefield or your library, you gain 2 life.",
         "Whenever a creature card is put into an opponent's graveyard from anywhere other than your library, you gain 2 life.",
@@ -3841,6 +3844,23 @@ fn trigger_graveyard_narrowing_preserves_base_acceptance() {
             matches!(parsed.triggers[0].mode, TriggerMode::Unknown(_)),
             "base-rejected shape must stay unsupported: {oracle}: {parsed:?}"
         );
+    }
+
+    // Synthetic Disa/Voracious Brood compound subjects: the embedded quantifier
+    // must still parse with inclusion origins and retain its scalar count filter.
+    for oracle in [
+        "Whenever a land card or one or more creature cards are put into your graveyard from anywhere, put that many +1/+1 counters on this creature.",
+        "Whenever another creature card or one or more creature cards are put into your graveyard from your library, put that many +1/+1 counters on this creature.",
+    ] {
+        let parsed = parse_oracle_text(
+            oracle, "Synthetic Disa and Voracious Brood inclusion control", &[], &[], &[],
+        );
+        assert_eq!(parsed.triggers.len(), 1, "{oracle}: {parsed:?}");
+        let trigger = &parsed.triggers[0];
+        assert_eq!(trigger.mode, TriggerMode::ChangesZone, "{oracle}: {parsed:?}");
+        assert!(trigger.batched, "{oracle}: {trigger:?}");
+        assert!(trigger.valid_card.is_some(), "{oracle}: {trigger:?}");
+        assert!(trigger.zone_change_clauses.is_empty(), "{oracle}: {trigger:?}");
     }
 
     // Synthetic Narcomoeba/Oglor self-arrival plus an independent death event:

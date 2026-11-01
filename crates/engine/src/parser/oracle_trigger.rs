@@ -13514,7 +13514,16 @@ pub(crate) fn parse_trigger_condition(
 
     // Parse event verb from the remaining text.
     let subject_text = &after_keyword[..after_keyword.len() - rest.len()];
-    if let Some((mode, mut def)) = try_parse_event(&subject, subject_text, rest, &lower, ctx) {
+    // CR 603.2 + CR 603.2c + CR 608.2c: every batched subject must retain
+    // the scalar filter used to count matching arrivals for "that many".
+    let graveyard_origins = if is_batched {
+        GraveyardHeadOrigins::InclusionOnly
+    } else {
+        GraveyardHeadOrigins::SingleBattlefieldExclusion
+    };
+    if let Some((mode, mut def)) =
+        try_parse_event(&subject, subject_text, rest, &lower, graveyard_origins, ctx)
+    {
         // Re-emit subject diagnostics — the trigger parsed but the subject degraded to Any.
         ctx.diagnostics.extend(subject_diagnostics);
         // CR 109.2: the type-phrase parser swallows the trailing "card" of "a
@@ -15538,6 +15547,7 @@ fn try_parse_event(
     subject_text: &str,
     rest: &str,
     full_lower: &str,
+    graveyard_origins: GraveyardHeadOrigins,
     ctx: &mut ParseContext,
 ) -> Option<(TriggerMode, TriggerDefinition)> {
     let rest = rest.trim_start();
@@ -16290,7 +16300,7 @@ fn try_parse_event(
         };
 
         // CR 700.4: "is put into a graveyard from [zone]" / "is put into [possessive] graveyard [from zone]"
-        if let Some(result) = try_parse_put_into_graveyard(subject, rest) {
+        if let Some(result) = try_parse_put_into_graveyard(subject, rest, graveyard_origins) {
             return Some(result);
         }
 
@@ -23000,6 +23010,7 @@ fn parse_disjunctive_zone_change_condition(condition: &str) -> Option<Vec<ZoneCh
 fn try_parse_put_into_graveyard(
     subject: &TargetFilter,
     rest: &str,
+    origins: GraveyardHeadOrigins,
 ) -> Option<(TriggerMode, TriggerDefinition)> {
     // Recognized unsupported heads must not escape through broader fallbacks.
     peek(preceded(
@@ -23008,9 +23019,7 @@ fn try_parse_put_into_graveyard(
     ))
     .parse(rest)
     .ok()?;
-    let Ok((_, (possessive, origin))) =
-        put_into_graveyard_head(rest, GraveyardHeadOrigins::SingleBattlefieldExclusion)
-    else {
+    let Ok((_, (possessive, origin))) = put_into_graveyard_head(rest, origins) else {
         return Some(unknown_trigger_definition(rest));
     };
     let origin = destination_graveyard_origin(subject, origin);
