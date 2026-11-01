@@ -213,7 +213,7 @@ fn resolve_attachment_ids<'a>(
             .or_else(|| resolve_object_filter(state, ability, attachment_filter, target_slots))
             .into_iter()
             .collect()
-    } else if crate::game::ability_utils::attach_attachment_claims_announcement_slot(
+    } else if crate::types::ability::attach_attachment_claims_announcement_slot(
         attachment_filter,
         &attach_selection(ability),
     ) {
@@ -745,7 +745,7 @@ fn prompt_resolution_attachment_choice(
             Ok(AttachPromptOutcome::Execute)
         };
     }
-    if !crate::game::ability_utils::attach_attachment_filter_needs_target_slot(attachment_filter) {
+    if !crate::types::ability::attach_attachment_filter_needs_target_slot(attachment_filter) {
         return Ok(AttachPromptOutcome::Execute);
     }
     // CR 115.1a/c/d/e + CR 608.2d: only a PRINTED-target attachment operand may be
@@ -1268,7 +1268,7 @@ fn parked_attach_choice_selects_host(operation: &ResolvedAbility) -> bool {
             Effect::Attach { attachment, .. } => {
                 !operation.attach_attachment_candidates().is_empty()
                     || (attachment.is_context_ref()
-                        && !crate::game::ability_utils::attach_attachment_filter_needs_target_slot(
+                        && !crate::types::ability::attach_attachment_filter_needs_target_slot(
                             attachment,
                         ))
             }

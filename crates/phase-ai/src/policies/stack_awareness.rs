@@ -123,11 +123,7 @@ pub(crate) fn foreign_counter_target_of_ai(
     entry: &StackEntry,
     ai_player: PlayerId,
 ) -> Option<f64> {
-    let reaches = stack_entry_node_reach(state, entry);
-    let counters: Vec<&NodeReach<'_>> = reaches
-        .iter()
-        .filter(|reach| matches!(reach.node.effect, Effect::Counter { .. }))
-        .collect();
+    let counters = judged_reaches(state, entry, is_counter);
     if counters.is_empty() {
         return None;
     }
@@ -228,14 +224,9 @@ fn score_pump_response(ctx: &PolicyContext<'_>, target_id: ObjectId) -> f64 {
 
     let has_opponent_pump = ctx.state.stack.iter().any(|entry| {
         entry.controller != ctx.ai_player
-            && stack_entry_node_reach(ctx.state, entry)
+            && judged_reaches(ctx.state, entry, is_pump)
                 .iter()
-                .any(|reach| {
-                    matches!(
-                        reach.node.effect,
-                        Effect::Pump { .. } | Effect::DoublePT { .. }
-                    ) && acts_on(reach, target_id)
-                })
+                .any(|reach| acts_on(reach, target_id))
     });
 
     if has_opponent_pump {
@@ -312,19 +303,148 @@ fn acts_on(reach: &NodeReach<'_>, object: ObjectId) -> bool {
     reach.acted_on.contains(&TargetRef::Object(object))
 }
 
+/// Whether a node of `entry`'s chain (the root, its `sub_ability` subtree and
+/// its `else_ability` subtree, [`collect_resolved_abilities`]) has an effect
+/// `judged` accepts. False for an entry with no ability.
+///
+/// Every [`NodeReach::node`] that [`stack_entry_node_reach`] returns for
+/// `entry` is borrowed from this chain (its `push_node` pushes a node and walks
+/// its two children, `push_unanswered_below` pushes the nodes below a stop). So
+/// when this is false no node of the entry's reach is one `judged` accepts,
+/// and a reader that reads only such nodes skips the entry before building its
+/// reach ([`judged_reaches`]).
+pub(crate) fn chain_has_effect(entry: &StackEntry, judged: fn(&Effect) -> bool) -> bool {
+    entry.ability().is_some_and(|root| {
+        collect_resolved_abilities(root)
+            .into_iter()
+            .any(|node| judged(&node.effect))
+    })
+}
+
+/// The nodes of `entry`'s reach ([`stack_entry_node_reach`]) whose effect
+/// `judged` accepts, in reach order. When no node of the entry's chain has
+/// such an effect ([`chain_has_effect`]) the answer is empty and the reach is
+/// not built: every reach node is a node of that chain.
+///
+/// The one place a stack reader pairs its chain prefilter with its node
+/// filter, so the entries a reader skips and the nodes it reads are decided
+/// by the same predicate.
+pub(crate) fn judged_reaches<'a>(
+    state: &GameState,
+    entry: &'a StackEntry,
+    judged: fn(&Effect) -> bool,
+) -> Vec<NodeReach<'a>> {
+    if !chain_has_effect(entry, judged) {
+        return Vec::new();
+    }
+    stack_entry_node_reach(state, entry)
+        .into_iter()
+        .filter(|reach| judged(&reach.node.effect))
+        .collect()
+}
+
+/// A harmful effect ([`effect_polarity`]): the nodes [`has_pending_removal`],
+/// `self_protection_classify::any_stack_harmful_answerable_by_grants` and
+/// `spellskite_priority::stack_has_redirectable_threat` read.
+pub(crate) fn is_harmful(effect: &Effect) -> bool {
+    matches!(effect_polarity(effect), EffectPolarity::Harmful)
+}
+
+/// What a node that acts on an object does to it, as the walks in
+/// [`will_target_die_from_stack`] and
+/// `tactical_gate::pump_can_save_from_hostile_stack` read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RemovalStep {
+    /// CR 701.8a: destroys it.
+    Destroy,
+    /// CR 701.6a: counters it.
+    Counter,
+    /// Returns it to a hand or the zone the bounce names.
+    Bounce,
+    /// Moves it to `destination`.
+    ChangeZone { destination: Zone },
+    /// CR 120.3: deals damage to it.
+    Damage,
+}
+
+/// The [`RemovalStep`] a node with `effect` takes, or `None` for an effect
+/// neither walk acts on. Both walks match on this, and
+/// [`removes_or_damages`] is whether it answers a step, so the entries and
+/// nodes their prefilter skips are exactly those neither walk reads.
+pub(crate) fn removal_step(effect: &Effect) -> Option<RemovalStep> {
+    match effect {
+        Effect::Destroy { .. } => Some(RemovalStep::Destroy),
+        Effect::Counter { .. } => Some(RemovalStep::Counter),
+        Effect::Bounce { .. } => Some(RemovalStep::Bounce),
+        Effect::ChangeZone { destination, .. } => Some(RemovalStep::ChangeZone {
+            destination: *destination,
+        }),
+        Effect::DealDamage { .. } => Some(RemovalStep::Damage),
+        _ => None,
+    }
+}
+
+/// Whether `effect` takes a [`RemovalStep`]: the nodes the walks in
+/// [`will_target_die_from_stack`] and
+/// `tactical_gate::pump_can_save_from_hostile_stack` read.
+pub(crate) fn removes_or_damages(effect: &Effect) -> bool {
+    removal_step(effect).is_some()
+}
+
+/// The [`RemovalStep`] of each node that acts on `object_id`, with the node,
+/// in the order the entries resolve ([`nodes_acting_on`]).
+pub(crate) fn removal_steps_acting_on(
+    state: &GameState,
+    object_id: ObjectId,
+) -> Vec<(RemovalStep, NodeReach<'_>)> {
+    nodes_acting_on(state, object_id, removes_or_damages)
+        .into_iter()
+        .filter_map(|reach| removal_step(&reach.node.effect).map(|step| (step, reach)))
+        .collect()
+}
+
+/// Whether `object` is a creature permanent `player` controls: a creature that
+/// is a phased-in permanent ([`GameObject::is_phased_in_permanent`], the
+/// engine's existence test for a permanent: CR 109.2 + CR 110.1). A phased-out
+/// permanent is treated as though it does not exist and is not on the
+/// battlefield (CR 702.26b + CR 702.26d), and a card that left the battlefield
+/// is a new object (CR 400.7), so neither is a creature a pump or a protective
+/// grant can reach.
+pub(crate) fn is_creature_permanent_controlled_by(object: &GameObject, player: PlayerId) -> bool {
+    object.is_phased_in_permanent()
+        && object.controller == player
+        && object.card_types.core_types.contains(&CoreType::Creature)
+}
+
+/// The effects [`score_pump_response`] reads: a pump of power and toughness.
+fn is_pump(effect: &Effect) -> bool {
+    matches!(effect, Effect::Pump { .. } | Effect::DoublePT { .. })
+}
+
+/// The effect [`foreign_counter_target_of_ai`] reads.
+fn is_counter(effect: &Effect) -> bool {
+    matches!(effect, Effect::Counter { .. })
+}
+
+/// The effect whose damage
+/// `self_protection_classify::any_stack_harmful_answerable_by_grants` totals.
+pub(crate) fn is_damage(effect: &Effect) -> bool {
+    matches!(effect, Effect::DealDamage { .. })
+}
+
 /// Whether another stack entry has a harmful node that acts on this object
 /// ([`stack_entry_node_reach`]). An entry is not its own pending removal: a
-/// spell that exiles itself does so only by resolving.
+/// spell that exiles itself does so only by resolving. An entry with no
+/// harmful node ([`judged_reaches`]) is skipped before its reach is built.
 pub(crate) fn has_pending_removal(state: &GameState, target_id: ObjectId) -> bool {
     state
         .stack
         .iter()
         .filter(|entry| entry.id != target_id)
         .any(|entry| {
-            stack_entry_node_reach(state, entry).iter().any(|reach| {
-                acts_on(reach, target_id)
-                    && matches!(effect_polarity(&reach.node.effect), EffectPolarity::Harmful)
-            })
+            judged_reaches(state, entry, is_harmful)
+                .iter()
+                .any(|reach| acts_on(reach, target_id))
         })
 }
 
@@ -336,26 +456,27 @@ pub(crate) fn will_target_die_from_stack(state: &GameState, target_id: ObjectId)
 
     let mut dealt = Vec::new();
 
-    for reach in nodes_acting_on(state, target_id) {
-        match &reach.node.effect {
+    for (step, reach) in removal_steps_acting_on(state, target_id) {
+        match step {
             // Destroy is lethal unless target is indestructible
-            Effect::Destroy { .. } if can_be_destroyed(object) => {
+            RemovalStep::Destroy if can_be_destroyed(object) => {
                 return true;
             }
             // Counter removes the spell from the stack. CR 101.2: unless
             // it can't be countered.
-            Effect::Counter { .. } if spell_can_be_countered(state, target_id) => return true,
+            RemovalStep::Counter if spell_can_be_countered(state, target_id) => return true,
             // Bounce removes from battlefield
-            Effect::Bounce { .. } => return true,
+            RemovalStep::Bounce => return true,
             // ChangeZone to non-battlefield removes from battlefield
-            Effect::ChangeZone {
+            RemovalStep::ChangeZone {
                 destination: Zone::Exile | Zone::Graveyard | Zone::Hand | Zone::Library,
-                ..
             } => {
                 return true;
             }
-            Effect::DealDamage { .. } => dealt.extend(node_damage(state, reach.node, object)),
-            _ => {}
+            RemovalStep::Damage => dealt.extend(node_damage(state, reach.node, object)),
+            // An indestructible object, a spell that can't be countered and a
+            // move to another zone: the read goes on.
+            RemovalStep::Destroy | RemovalStep::Counter | RemovalStep::ChangeZone { .. } => {}
         }
     }
 
@@ -367,16 +488,24 @@ pub(crate) fn can_be_destroyed(object: &GameObject) -> bool {
     !object.has_keyword(&Keyword::Indestructible)
 }
 
-/// The nodes that act on `object_id` ([`stack_entry_node_reach`]) of every
-/// stack entry except the one whose id is `object_id`, in the order the entries
-/// resolve (CR 405.5: the top one first).
-pub(crate) fn nodes_acting_on(state: &GameState, object_id: ObjectId) -> Vec<NodeReach<'_>> {
+/// The nodes with an effect `judged` accepts that act on `object_id`
+/// ([`stack_entry_node_reach`]) of every stack entry except the one whose id is
+/// `object_id`, in the order the entries resolve (CR 405.5: the top one first).
+///
+/// A caller passes every effect its walk acts on. An entry with no such node
+/// ([`judged_reaches`]) is skipped before its reach is built, and leaving
+/// out the other nodes keeps the order of the rest.
+pub(crate) fn nodes_acting_on(
+    state: &GameState,
+    object_id: ObjectId,
+    judged: fn(&Effect) -> bool,
+) -> Vec<NodeReach<'_>> {
     state
         .stack
         .iter()
         .rev()
         .filter(|entry| entry.id != object_id)
-        .flat_map(|entry| stack_entry_node_reach(state, entry))
+        .flat_map(|entry| judged_reaches(state, entry, judged))
         .filter(|reach| acts_on(reach, object_id))
         .collect()
 }
@@ -1834,6 +1963,408 @@ mod tests {
                     "reach guard: the pump earns the response, got {score}"
                 );
             }
+        }
+    }
+
+    /// A predicate the stack readers pass to [`chain_has_effect`], with its name.
+    type NamedJudge = (&'static str, fn(&Effect) -> bool);
+
+    /// The predicates the stack readers pass to [`chain_has_effect`], named.
+    const JUDGED: [NamedJudge; 5] = [
+        ("is_harmful", is_harmful),
+        ("removes_or_damages", removes_or_damages),
+        ("is_pump", is_pump),
+        ("is_counter", is_counter),
+        ("is_damage", is_damage),
+    ];
+
+    #[test]
+    fn chain_has_effect_finds_a_judged_effect_on_any_node_reach_answers() {
+        use crate::test_support::with_landfall_triggers;
+        let mut state = make_state();
+        let victim = add_creature(&mut state, PlayerId(0), 2, 2);
+        let countered = spell_object(&mut state, PlayerId(0), 2);
+        // A root that does nothing, with damage below it.
+        let damage_source = spell_object(&mut state, PlayerId(1), 1);
+        let mut damage_root =
+            ResolvedAbility::new(Effect::NoOp, Vec::new(), damage_source, PlayerId(1));
+        damage_root.sub_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+            vec![TargetRef::Object(victim)],
+            damage_source,
+            PlayerId(1),
+        )));
+        let damage = push_chain(&mut state, PlayerId(1), damage_root);
+        // A root that does nothing, with a counter in its else leg.
+        let counter_source = spell_object(&mut state, PlayerId(1), 1);
+        let mut counter_root =
+            ResolvedAbility::new(Effect::NoOp, Vec::new(), counter_source, PlayerId(1));
+        counter_root.else_ability = Some(Box::new(ResolvedAbility::new(
+            counter_effect(),
+            vec![TargetRef::Object(countered)],
+            counter_source,
+            PlayerId(1),
+        )));
+        let counter = push_chain(&mut state, PlayerId(1), counter_root);
+        // A permanent spell, which has no ability.
+        let permanent = spell_object(&mut state, PlayerId(1), 2);
+        state.stack.push_back(StackEntry {
+            id: permanent,
+            source_id: permanent,
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                ability: None,
+                card_id: CardId(permanent.0),
+                casting_variant: Default::default(),
+                actual_mana_spent: 0,
+            },
+        });
+        let state = with_landfall_triggers(&state, PlayerId(0));
+        let landfall = state.stack[0].id;
+        assert!(
+            matches!(state.stack[0].kind, StackEntryKind::TriggeredAbility { .. }),
+            "reach guard: a landfall trigger is at the bottom"
+        );
+
+        // Per entry, what each of `JUDGED` answers.
+        for (id, expected) in [
+            (landfall, [false, false, false, false, false]),
+            (damage, [true, true, false, false, true]),
+            (counter, [true, true, false, true, false]),
+            (permanent, [false, false, false, false, false]),
+        ] {
+            let entry = state.stack.iter().find(|e| e.id == id).expect("entry");
+            let reaches = stack_entry_node_reach(&state, entry);
+            for ((name, judged), expected) in JUDGED.into_iter().zip(expected) {
+                // The reach answers for the judged node too: a chain answer
+                // of false would drop a node a reader reads.
+                assert_eq!(
+                    reaches.iter().any(|reach| judged(&reach.node.effect)),
+                    expected,
+                    "reach guard: {name} on the reach of entry {id:?}"
+                );
+                assert_eq!(
+                    chain_has_effect(entry, judged),
+                    expected,
+                    "{name} on the chain of entry {id:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pending_removal_is_found_among_landfall_triggers_without_reading_their_reach() {
+        use crate::test_support::{reading_with_reach_count, with_landfall_triggers};
+        use engine::game::scenario::P0;
+        let mut state = make_state();
+        let creature = add_creature(&mut state, PlayerId(0), 3, 3);
+        let other = add_creature(&mut state, PlayerId(0), 2, 2);
+        push_stack_entry(
+            &mut state,
+            Effect::Destroy {
+                target: TargetFilter::Any,
+                cant_regenerate: false,
+            },
+            vec![TargetRef::Object(creature)],
+        );
+        let landfall = with_landfall_triggers(&state, PlayerId(0));
+        assert_eq!(
+            landfall.stack.len(),
+            3,
+            "reach guard: a landfall trigger below and above the removal"
+        );
+        for (object, removed) in [(creature, true), (other, false)] {
+            let (found, builds) = reading_with_reach_count(|| has_pending_removal(&state, object));
+            assert_eq!(found, removed);
+            assert!(builds > 0, "reach guard: the removal's reach is read");
+            assert_eq!(
+                reading_with_reach_count(|| has_pending_removal(&landfall, object)),
+                (removed, builds),
+                "the same answer, without reading the triggers' reach"
+            );
+        }
+
+        // The production entry: the AI's destroy spell choosing P1's creature
+        // that P0's Shock damages without killing.
+        let (runner, victim) = shock_at(3, &[]);
+        assert!(
+            has_pending_removal(runner.state(), victim)
+                && !will_target_die_from_stack(runner.state(), victim),
+            "reach guard: pending removal that does not kill"
+        );
+        let expected = AiConfig::default()
+            .policy_penalties
+            .redundant_damage_penalty
+            * 0.5;
+        assert!(expected < 0.0, "reach guard: a penalty");
+        for board in [
+            runner.state().clone(),
+            with_landfall_triggers(runner.state(), P0),
+        ] {
+            let (decision, candidate) = make_target_ctx(
+                &board,
+                victim,
+                Effect::Destroy {
+                    target: TargetFilter::Any,
+                    cant_regenerate: false,
+                },
+            );
+            assert_eq!(score_policy(&board, &decision, &candidate), expected);
+        }
+    }
+
+    #[test]
+    fn stack_damage_is_judged_among_landfall_triggers_without_reading_their_reach() {
+        use crate::test_support::{reading_with_reach_count, with_landfall_triggers};
+        use engine::game::scenario::P0;
+        for (toughness, dies) in [(2, true), (3, false)] {
+            let (runner, victim) = shock_at(toughness, &[]);
+            let plain = runner.state();
+            let landfall = with_landfall_triggers(plain, P0);
+            let (answer, builds) =
+                reading_with_reach_count(|| will_target_die_from_stack(plain, victim));
+            assert_eq!(answer, dies, "2 damage to toughness {toughness}");
+            assert!(builds > 0, "reach guard: the Shock's reach is read");
+            assert_eq!(
+                reading_with_reach_count(|| will_target_die_from_stack(&landfall, victim)),
+                (dies, builds),
+                "the same answer, without reading the triggers' reach"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pump_response_is_found_among_landfall_triggers_without_reading_their_reach() {
+        use crate::test_support::{reading_with_reach_count, with_landfall_triggers};
+        use engine::game::scenario::P0;
+        use engine::types::ability::{DoublePTMode, PtValue};
+        for pump in [
+            Effect::Pump {
+                power: PtValue::Fixed(3),
+                toughness: PtValue::Fixed(3),
+                target: TargetFilter::Any,
+            },
+            Effect::DoublePT {
+                mode: DoublePTMode::PowerAndToughness,
+                target: TargetFilter::Any,
+                factor: 2,
+            },
+        ] {
+            // The AI's ping at P0's creature, answered by P0's pump.
+            let (mut state, victim) = ping_at(None, 5, &[]);
+            let pump_source = spell_object(&mut state, P0, 1);
+            push_chain(
+                &mut state,
+                P0,
+                ResolvedAbility::new(pump, vec![TargetRef::Object(victim)], pump_source, P0),
+            );
+            let landfall = with_landfall_triggers(&state, P0);
+            let (score, builds) = reading_with_reach_count(|| pump_response(&state, victim));
+            assert!(
+                score > 0.0,
+                "reach guard: the pump earns the response, got {score}"
+            );
+            assert_eq!(
+                reading_with_reach_count(|| pump_response(&landfall, victim)),
+                (score, builds),
+                "the same answer, without reading the triggers' reach"
+            );
+        }
+    }
+
+    #[test]
+    fn a_foreign_counter_is_valued_among_landfall_triggers_without_reading_their_reach() {
+        use crate::test_support::{reading_with_reach_count, with_landfall_triggers};
+        let mut state = make_state();
+        let ai_spell = spell_object(&mut state, PlayerId(1), 4);
+        push_chain(
+            &mut state,
+            PlayerId(1),
+            ResolvedAbility::new(Effect::NoOp, Vec::new(), ai_spell, PlayerId(1)),
+        );
+        let counter_source = spell_object(&mut state, PlayerId(0), 2);
+        let counter = push_chain(
+            &mut state,
+            PlayerId(0),
+            ResolvedAbility::new(
+                counter_effect(),
+                vec![TargetRef::Object(ai_spell)],
+                counter_source,
+                PlayerId(0),
+            ),
+        );
+        let landfall = with_landfall_triggers(&state, PlayerId(0));
+        let entry_in = |state: &GameState| {
+            state
+                .stack
+                .iter()
+                .find(|e| e.id == counter)
+                .cloned()
+                .expect("the counter")
+        };
+        let entry = entry_in(&state);
+        let (worth, builds) =
+            reading_with_reach_count(|| foreign_counter_target_of_ai(&state, &entry, PlayerId(1)));
+        assert!(
+            worth.is_some_and(|worth| worth > 0.0),
+            "reach guard: the counter is aimed at the AI's spell"
+        );
+        assert_eq!(builds, 1);
+        let entry = entry_in(&landfall);
+        assert_eq!(
+            reading_with_reach_count(|| foreign_counter_target_of_ai(
+                &landfall,
+                &entry,
+                PlayerId(1)
+            )),
+            (worth, 1)
+        );
+        let triggers: Vec<StackEntry> = landfall
+            .stack
+            .iter()
+            .filter(|e| matches!(e.kind, StackEntryKind::TriggeredAbility { .. }))
+            .cloned()
+            .collect();
+        assert_eq!(triggers.len(), 3, "reach guard: three landfall triggers");
+        for trigger in &triggers {
+            assert_eq!(
+                reading_with_reach_count(|| foreign_counter_target_of_ai(
+                    &landfall,
+                    trigger,
+                    PlayerId(1)
+                )),
+                (None, 0),
+                "a trigger without a counter is no counter, and its reach is not read"
+            );
+        }
+    }
+
+    /// P1 casts a pump with damage below it, both aimed at P0's 2/2 creature.
+    /// Returns the creature and the chain's stack entry id.
+    fn pump_with_damage_below(state: &mut GameState) -> (ObjectId, ObjectId) {
+        use engine::types::ability::PtValue;
+        let victim = add_creature(state, PlayerId(0), 2, 2);
+        let source = spell_object(state, PlayerId(1), 1);
+        // A pump with damage below it, both aimed at the creature.
+        let mut root = ResolvedAbility::new(
+            Effect::Pump {
+                power: PtValue::Fixed(1),
+                toughness: PtValue::Fixed(1),
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(victim)],
+            source,
+            PlayerId(1),
+        );
+        root.sub_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+            vec![TargetRef::Object(victim)],
+            source,
+            PlayerId(1),
+        )));
+        let chain = push_chain(state, PlayerId(1), root);
+        (victim, chain)
+    }
+
+    #[test]
+    fn nodes_acting_on_reads_only_the_judged_nodes_that_act_on_the_object() {
+        let mut state = make_state();
+        let (victim, chain) = pump_with_damage_below(&mut state);
+        let entry = state.stack.iter().find(|e| e.id == chain).expect("chain");
+        let reaches = stack_entry_node_reach(&state, entry);
+        assert!(
+            reaches.len() == 2
+                && reaches
+                    .iter()
+                    .all(|reach| reach.acted_on == vec![TargetRef::Object(victim)]),
+            "reach guard: both nodes act on the creature"
+        );
+
+        let kinds = |judged: fn(&Effect) -> bool| -> Vec<EffectKind> {
+            nodes_acting_on(&state, victim, judged)
+                .iter()
+                .map(|reach| EffectKind::from(&reach.node.effect))
+                .collect()
+        };
+        assert_eq!(kinds(is_damage), vec![EffectKind::DealDamage]);
+        assert_eq!(kinds(is_pump), vec![EffectKind::Pump]);
+    }
+
+    #[test]
+    fn judged_reaches_reads_only_the_judged_nodes_of_an_entry_whose_chain_has_one() {
+        use crate::test_support::reading_with_reach_count;
+        let mut state = make_state();
+        let (_, chain) = pump_with_damage_below(&mut state);
+        let entry = state.stack.iter().find(|e| e.id == chain).expect("chain");
+        assert_eq!(
+            stack_entry_node_reach(&state, entry).len(),
+            2,
+            "reach guard: the reach has the pump and the damage"
+        );
+        let kinds = |judged: fn(&Effect) -> bool| {
+            reading_with_reach_count(|| {
+                judged_reaches(&state, entry, judged)
+                    .iter()
+                    .map(|reach| EffectKind::from(&reach.node.effect))
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(kinds(is_damage), (vec![EffectKind::DealDamage], 1));
+        assert_eq!(kinds(is_pump), (vec![EffectKind::Pump], 1));
+        // No counter in the chain: nothing, and the reach is not built.
+        assert_eq!(kinds(is_counter), (Vec::new(), 0));
+    }
+
+    #[test]
+    fn removal_step_names_what_each_effect_the_walks_read_does() {
+        use engine::parser::oracle::parse_oracle_text;
+        for (name, text, card_type, step) in [
+            (
+                "Murder",
+                "Destroy target creature.",
+                "Instant",
+                Some(RemovalStep::Destroy),
+            ),
+            ("Cancel", CANCEL, "Instant", Some(RemovalStep::Counter)),
+            (
+                "Unsummon",
+                "Return target creature to its owner's hand.",
+                "Instant",
+                Some(RemovalStep::Bounce),
+            ),
+            (
+                "Cremate",
+                "Exile target card from a graveyard.\nDraw a card.",
+                "Instant",
+                Some(RemovalStep::ChangeZone {
+                    destination: Zone::Exile,
+                }),
+            ),
+            (
+                "Zombify",
+                "Return target creature card from your graveyard to the battlefield.",
+                "Sorcery",
+                Some(RemovalStep::ChangeZone {
+                    destination: Zone::Battlefield,
+                }),
+            ),
+            ("Shock", SHOCK, "Instant", Some(RemovalStep::Damage)),
+            ("Giant Growth", GIANT_GROWTH, "Instant", None),
+        ] {
+            let parsed = parse_oracle_text(text, name, &[], &[card_type.to_string()], &[]);
+            let effect = &parsed.abilities[0].effect;
+            assert_eq!(removal_step(effect), step, "{name}");
+            assert_eq!(removes_or_damages(effect), step.is_some(), "{name}");
         }
     }
 }

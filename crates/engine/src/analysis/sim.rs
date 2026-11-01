@@ -16,9 +16,8 @@
 //! has *both* halves populated — the measurement a CR 732.2a net-progress
 //! detector (PR-2) consumes.
 //!
-//! It is **purely offline / additive**: it only *observes* the runner. It never
-//! mutates game state, never alters resolution, SBAs, or the reducer, and emits
-//! no game events of its own. The detector hook itself is PR-2.
+//! It drives the runner only through [`LoopProbe::act`], reading each action's events and
+//! the boundary snapshots, and emits no game events of its own.
 
 use crate::analysis::resource::{ResourceVector, TriggerKind};
 use crate::game::engine::EngineError;
@@ -158,9 +157,8 @@ pub fn accumulate_events(acc: &mut ResourceVector, events: &[GameEvent]) {
 /// iteration* — already a per-iteration quantity — so they are taken verbatim, not
 /// differenced. (Differencing them would cancel a steady per-cycle gain to zero.)
 ///
-/// CR 732.2a: this is exactly the per-cycle measurement a net-progress shortcut
-/// detector reads. The probe itself takes no game decisions and changes no game
-/// state; it only observes the runner.
+/// The probe takes no game decisions: it applies only the actions its caller passes to
+/// [`LoopProbe::act`].
 pub struct LoopProbe<'r> {
     runner: &'r mut GameRunner,
     /// State-readable resources at the most recent iteration boundary (event-fed

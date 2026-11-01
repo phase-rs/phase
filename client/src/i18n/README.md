@@ -63,7 +63,7 @@ Namespaces: `common` (default), `menu`, `game`, `deck-builder`, `draft`,
 ## Conventions
 
 - Keys: nested dot paths, `camelCase` leaves, `<componentOrFeature>.<element>`.
-- Opt into a namespace: `const { t } = useTranslation("game")`. `common` is implicit.
+- Opt into a namespace: `const { t } = useTranslation("game")`. `useTranslation()` defaults to `common`. A `ns:`-prefixed key needs its namespace in the array: `useTranslation(["game", "common"])`, then `t("common:…")`.
 - Plurals: `key_one` / `key_other` + `t(key, { count })` (CLDR rules per locale).
   Don't hand-roll `count === 1 ? "" : "s"`.
 - Numbers needing locale grouping: `{{value, number}}`.

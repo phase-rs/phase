@@ -19,7 +19,8 @@ import { getCardImageSrcSetProps } from "./cardImageSrcSet.ts";
 // Most-relevant-first zone ordering. `Library` is intentionally absent — the
 // visibility helper hides library cards, and top-of-library reveals are out of
 // scope (plan §5).
-const ZONE_ORDER: Zone[] = ["Stack", "Battlefield", "Hand", "Graveyard", "Exile", "Command"];
+type ReportZone = Exclude<Zone, "Library">;
+const ZONE_ORDER: ReportZone[] = ["Stack", "Battlefield", "Hand", "Graveyard", "Exile", "Command"];
 
 /** A representative object plus how many copies it stands in for. Duplicate
  *  copies sharing the report dedup key (`oracle_id || name`) — e.g. several
@@ -30,7 +31,7 @@ interface ZoneEntry {
 }
 
 interface ZoneGroup {
-  zone: Zone;
+  zone: ReportZone;
   entries: ZoneEntry[];
 }
 
@@ -100,18 +101,19 @@ export function CardReportDialog({
   // null = show every seat's cards; otherwise restrict to one seat's cards.
   const [playerFilter, setPlayerFilter] = useState<PlayerId | null>(null);
   // null = show every zone's cards; otherwise restrict to one zone.
-  const [zoneFilter, setZoneFilter] = useState<Zone | null>(null);
+  const [zoneFilter, setZoneFilter] = useState<ReportZone | null>(null);
 
   const { groups, seats, zones } = useMemo(() => {
     if (!gameState) {
-      return { groups: [] as ZoneGroup[], seats: [] as PlayerId[], zones: [] as Zone[] };
+      return { groups: [] as ZoneGroup[], seats: [] as PlayerId[], zones: [] as ReportZone[] };
     }
     const query = search.trim().toLowerCase();
     const seatSet = new Set<PlayerId>();
-    const zoneSet = new Set<Zone>();
-    const byZone = new Map<Zone, GameObject[]>();
+    const zoneSet = new Set<ReportZone>();
+    const byZone = new Map<ReportZone, GameObject[]>();
     for (const obj of Object.values(gameState.objects)) {
-      if (!ZONE_ORDER.includes(obj.zone)) continue; // excludes Library
+      const zone = obj.zone;
+      if (zone === "Library") continue;
       if (!isObjectReportableToViewer(gameState, obj, viewerId)) continue;
       // Basic lands are vanilla (CR 305.6) — nothing to parse or misbehave — and
       // usually the most numerous cards on the board, so they're pure noise in a
@@ -127,13 +129,13 @@ export function CardReportDialog({
       // filter never removes the chips for the others.
       const seat = labelSeatForZone(obj);
       seatSet.add(seat);
-      zoneSet.add(obj.zone);
+      zoneSet.add(zone);
       if (playerFilter != null && seat !== playerFilter) continue;
-      if (zoneFilter != null && obj.zone !== zoneFilter) continue;
+      if (zoneFilter != null && zone !== zoneFilter) continue;
       if (query && !reportIdentity(obj).name.toLowerCase().includes(query)) continue;
-      const list = byZone.get(obj.zone) ?? [];
+      const list = byZone.get(zone) ?? [];
       list.push(obj);
-      byZone.set(obj.zone, list);
+      byZone.set(zone, list);
     }
     const groups = ZONE_ORDER.flatMap((zone) => {
       const list = byZone.get(zone);

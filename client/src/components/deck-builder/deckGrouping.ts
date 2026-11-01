@@ -27,7 +27,12 @@ export const COLOR_GROUP_ORDER = [
   "Lands",
 ] as const;
 
-const COLOR_NAMES: Record<string, string> = {
+export type TypeGroup = (typeof TYPE_GROUP_ORDER)[number];
+export type ColorGroup = (typeof COLOR_GROUP_ORDER)[number];
+/** A main-deck section, spelled as its i18n sub-path under `deckList.` / `stack.`. */
+export type DeckGroup = `group.${TypeGroup}` | `colorGroup.${ColorGroup}`;
+
+const COLOR_NAMES: Record<string, ColorGroup> = {
   W: "White",
   U: "Blue",
   B: "Black",
@@ -38,7 +43,7 @@ const COLOR_NAMES: Record<string, string> = {
 /** First-match precedence: land-before-creature preserves the prior
  *  getTypeRank precedence, and MDFC `"//"` type lines classify by the first
  *  matching face (pre-existing behavior, intentional). */
-export function classifyByType(card: ScryfallCard | undefined): string {
+export function classifyByType(card: ScryfallCard | undefined): TypeGroup {
   const typeLine = card?.type_line.toLowerCase() ?? "";
   if (typeLine.includes("land")) return "Lands";
   if (typeLine.includes("creature")) return "Creatures";
@@ -51,7 +56,7 @@ export function classifyByType(card: ScryfallCard | undefined): string {
   return "Other";
 }
 
-export function classifyByColor(card: ScryfallCard | undefined): string {
+export function classifyByColor(card: ScryfallCard | undefined): ColorGroup {
   if (!card) return "Colorless";
   if (card.type_line.toLowerCase().includes("land")) return "Lands";
   const ci = card.color_identity;
@@ -60,22 +65,21 @@ export function classifyByColor(card: ScryfallCard | undefined): string {
   return COLOR_NAMES[ci[0]] ?? "Colorless";
 }
 
-export function groupKey(mode: GroupMode, card: ScryfallCard | undefined): string {
-  return mode === "type" ? classifyByType(card) : classifyByColor(card);
+export function groupKey(mode: GroupMode, card: ScryfallCard | undefined): DeckGroup {
+  return mode === "type" ? `group.${classifyByType(card)}` : `colorGroup.${classifyByColor(card)}`;
 }
 
-export function groupOrder(mode: GroupMode): readonly string[] {
-  return mode === "type" ? TYPE_GROUP_ORDER : COLOR_GROUP_ORDER;
+const TYPE_GROUPS = TYPE_GROUP_ORDER.map((group): DeckGroup => `group.${group}`);
+const COLOR_GROUPS = COLOR_GROUP_ORDER.map((group): DeckGroup => `colorGroup.${group}`);
+
+export function groupOrder(mode: GroupMode): readonly DeckGroup[] {
+  return mode === "type" ? TYPE_GROUPS : COLOR_GROUPS;
 }
 
 export function groupRank(mode: GroupMode, card: ScryfallCard | undefined): number {
   const order = groupOrder(mode);
   const index = order.indexOf(groupKey(mode, card));
   return index === -1 ? order.length : index;
-}
-
-export function groupTitleKey(mode: GroupMode, key: string): string {
-  return (mode === "type" ? "group." : "colorGroup.") + key;
 }
 
 /** A section-header accent: a small leading bar color and a matching title
@@ -115,9 +119,8 @@ const GROUP_ACCENTS: Record<string, GroupAccent> = {
  *  in the stack view) or any unrecognized key. */
 const NEUTRAL_ACCENT: GroupAccent = { bar: "bg-white/15", text: "text-slate-400" };
 
-/** Resolve a header accent. Accepts either a raw group key (`"White"`, as the
- *  list view holds) or a title sub-path (`"colorGroup.White"` / `"group.Lands"`
- *  / `"sideboardGroup"`, as the stack view stores on each group). */
+/** Resolve a header accent from a title sub-path (`"colorGroup.White"` /
+ *  `"group.Lands"` / `"sideboardGroup"`), as the list and stack views hold. */
 export function groupAccent(key: string): GroupAccent {
   const raw = key.includes(".") ? key.slice(key.lastIndexOf(".") + 1) : key;
   return GROUP_ACCENTS[raw] ?? NEUTRAL_ACCENT;

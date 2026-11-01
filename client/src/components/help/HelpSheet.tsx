@@ -28,7 +28,7 @@ interface ResolvedHelpEntry extends HelpEntry {
   body: string;
 }
 
-const HELP_ENTRIES: HelpEntry[] = [
+const HELP_ENTRIES = [
   { section: "Flow", id: "automaticPhaseSkips" },
   { section: "Flow", id: "phaseStops" },
   { section: "Flow", id: "fullControl", shortcut: "F" },
@@ -43,7 +43,7 @@ const HELP_ENTRIES: HelpEntry[] = [
   { section: "Shortcuts", id: "advancedDebugPanel", shortcut: "`" },
   { section: "Recovery", id: "reportOrExportState" },
   { section: "Recovery", id: "boardRightClickMenu" },
-];
+] as const satisfies readonly HelpEntry[];
 
 const SECTION_ORDER: HelpSection[] = ["Flow", "Shortcuts", "Recovery"];
 
@@ -217,7 +217,7 @@ export function HelpSheet() {
   });
 
   const filteredEntries = useMemo<ResolvedHelpEntry[]>(() => {
-    const resolved = HELP_ENTRIES.map((entry) => ({
+    const resolved = HELP_ENTRIES.map((entry): ResolvedHelpEntry => ({
       ...entry,
       title: t(`help.entries.${entry.id}.title`),
       body: t(`help.entries.${entry.id}.body`),
@@ -262,7 +262,8 @@ export function HelpSheet() {
       })
       .catch((err: unknown) => {
         if (err instanceof DOMException && err.name === "AbortError") return;
-        setStatus(t("help.status.exportFailed"));
+        const detail = err instanceof Error ? err.message : String(err);
+        setStatus(t("help.status.exportFailedDetail", { detail }));
       });
   };
 

@@ -144,6 +144,35 @@ describe("LifeTotal", () => {
     expect(screen.getByText("20")).toBeInTheDocument();
   });
 
+  it("renders the engine's unbounded life as ∞ and still flashes a life change", () => {
+    useGameStore.setState({
+      gameState: buildGameState({ derived: { life_magnitude: { 1: "Unbounded" } } }),
+    });
+    render(
+      <>
+        <LifeTotal playerId={0} hideLabel />
+        <LifeTotal playerId={1} hideLabel />
+      </>,
+    );
+
+    const readout = screen.getByText("∞");
+    expect(readout).toHaveAttribute("title", "Unbounded life (∞)");
+    expect(readout).toHaveAttribute("aria-label", "Unbounded life (∞)");
+    expect(readout).toHaveClass("text-green-400");
+    expect(screen.getByText("20")).not.toHaveAttribute("title");
+
+    act(() => {
+      useAnimationStore.setState({
+        activeStep: {
+          duration: 300,
+          snapshotSeq: 1,
+          effects: [{ event: { type: "LifeChanged", data: { player_id: 1, amount: 3 } }, duration: 300 }],
+        },
+      });
+    });
+    expect(screen.getByText("∞")).toHaveClass("bg-green-500/30");
+  });
+
   it("does not derive a lifelink gain from a grouped flurry display event", () => {
     render(<LifeTotal playerId={1} />);
     expect(screen.getByText("20")).toBeInTheDocument();
