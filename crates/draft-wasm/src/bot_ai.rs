@@ -64,6 +64,7 @@ use draft_core::view::{DraftPlayerView, SharedStackPileView, SharedStackView};
 use engine::database::CardDatabase;
 use phase_ai::config::AiDifficulty;
 use phase_ai::draft_eval;
+use phase_ai::draft_profile::{DraftProfile, ProfileCard};
 use phase_ai::winston_eval::{
     draft_progress, valuate_turn, CardContext, ColorPassTally, DraftCardFacts, OpponentRead,
     WinstonStrategy, WinstonTurn,
@@ -210,31 +211,54 @@ fn pick_by_evaluation(
     let on_color_bonus: f64 = if strict { 6.0 } else { 4.0 };
     let off_color_penalty: f64 = if strict { -2.0 } else { 0.0 };
 
+    // The pool is re-read on every pick, so a set-family profile's adaptive
+    // policy (see `phase_ai::draft_profile`) tracks the draft with no stored state.
+    let pool: Vec<ProfileCard<'_>> = prior_picks
+        .iter()
+        .map(|c| profile_card(c, Some(card_db)))
+        .collect();
+
+    let score = |card: &DraftCardInstance| match DraftProfile::for_set(&card.set_code) {
+        Some(profile) => profile
+            .score_pick(
+                &profile_card(card, Some(card_db)),
+                &pool,
+                card_quality(card, Some(card_db)),
+                curve_bonus(card.cmc, pick_number) as f64,
+            )
+            .map_or(0.0, |s| s.total),
+        None => eval_score(
+            card,
+            card_db,
+            &preferred_colors,
+            pick_number,
+            on_color_bonus,
+            off_color_penalty,
+        ),
+    };
+
     pack.iter()
         .enumerate()
         .max_by(|(_, a), (_, b)| {
-            let score_a = eval_score(
-                a,
-                card_db,
-                &preferred_colors,
-                pick_number,
-                on_color_bonus,
-                off_color_penalty,
-            );
-            let score_b = eval_score(
-                b,
-                card_db,
-                &preferred_colors,
-                pick_number,
-                on_color_bonus,
-                off_color_penalty,
-            );
-            score_a
-                .partial_cmp(&score_b)
+            score(a)
+                .partial_cmp(&score(b))
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
         .map(|(i, _)| i)
         .unwrap_or(0)
+}
+
+/// Project a published card and its database face into the profile scorer's input.
+fn profile_card<'a>(
+    card: &'a DraftCardInstance,
+    card_db: Option<&'a CardDatabase>,
+) -> ProfileCard<'a> {
+    ProfileCard {
+        name: &card.name,
+        set_code: &card.set_code,
+        colors: &card.colors,
+        face: card_db.and_then(|db| db.get_face_by_name(&card.name)),
+    }
 }
 
 /// Pick-context score for a card: intrinsic card quality (`phase_ai::draft_eval`)
