@@ -18,6 +18,10 @@ import {
 
 /** Events that produce no visual output and are skipped entirely. */
 const NON_VISUAL_EVENTS = new Set([
+  // Un-card gags play out-of-band (`flashUnActionEvents` → UnActionOverlay).
+  "UnTellPerformed",
+  "PhraseSaid",
+  "GotchaSaid",
   "PriorityPassed",
   "MulliganStarted",
   "GameStarted",
@@ -52,6 +56,9 @@ const NON_VISUAL_EVENTS = new Set([
   "DieRollIgnored",
   "StartingPlayerContest",
   "CoinFlipped",
+  // Engine bookkeeping with nothing on the board to show: the repetition's own events animate.
+  "ResolutionHalted",
+  "ShortcutRepetition",
 ]);
 
 /** Whether an event produces no visual output. CR 605.3b: a mana ability's

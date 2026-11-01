@@ -629,6 +629,8 @@ pub enum InteractionActionCode {
     PrecastCopyShortcut,
     /// CR 116.2c: pay a continuous effect's printed termination cost to end it.
     EndContinuousEffect,
+    /// Un-card actions: opt-in toggle, gestures, and "Gotcha!" (no CR entry).
+    UnAction,
     Debug,
 }
 
@@ -1111,6 +1113,7 @@ pub enum InteractionResponseSpec {
 pub enum InteractionShortcutCountSpec {
     Fixed { min: u32, max: u32, suggested: u32 },
     UntilLethal,
+    WithoutEnd,
 }
 
 /// The display family one shortcut-preview magnitude belongs to — the projection-layer code

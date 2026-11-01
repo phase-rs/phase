@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "IterationCount gains WithoutEnd: a loop-shortcut proposal with no ending point"
+}

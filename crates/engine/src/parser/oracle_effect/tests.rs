@@ -9512,33 +9512,40 @@ fn effect_counter_unless_pays_plus_additional_for_each_concerted_defense() {
 }
 
 // Issue #3308 GAP A — Rune Snag's "card named Rune Snag in each graveyard"
-// for-each subject lives OFF the battlefield, where the shared
-// `parse_for_each_clause` mis-models it (it folds " in each graveyard" into
-// the card name and counts on the battlefield, yielding a silently-wrong
-// dynamic cost). The off-battlefield-zone honesty guard
-// (`for_each_clause_references_offbattlefield_zone`) declines that case, and
-// the unless mana-cost tail (`parse_unless_mana_cost_tail`) treats the decline
-// as final: the counter fails closed (`unless_payment`) instead of charging the
-// flat {2} base with the per-card increment dropped. A riderless unless cost
-// still lowers to the flat cost. (Spell Stutter / Concerted Defense reference
-// battlefield subjects and still flip to a correct dynamic cost.)
+// for-each subject lives OFF the battlefield. The shared named-filter parser
+// re-attaches the locative zone as `InZone { Graveyard }` (CR 201.2 + CR 400.1),
+// so the unless cost counts every graveyard rather than the battlefield.
 #[test]
-fn effect_counter_unless_plus_additional_offbattlefield_rider_fails_closed() {
+fn effect_counter_unless_plus_additional_offbattlefield_rider_counts_graveyard() {
     let def = parse_effect_chain(
             "Counter target spell unless its controller pays {2} plus an additional {2} for each card named Rune Snag in each graveyard",
             AbilityKind::Spell,
         );
-    let Effect::Unimplemented { name, .. } = def.effect.as_ref() else {
-        panic!(
-            "an untyped plus-additional rider must fail the counter closed, got {:?}",
-            def.effect
-        );
-    };
-    assert_eq!(name, "unless_payment");
-    assert!(
-        def.unless_pay.is_none(),
-        "the dropped rider must not leave a flat unless cost: {:?}",
-        def.unless_pay
+    assert!(matches!(*def.effect, Effect::Counter { .. }));
+    assert_eq!(
+        def.unless_pay.expect("unless_pay").cost,
+        AbilityCost::ManaDynamic {
+            quantity: QuantityExpr::Sum {
+                exprs: vec![
+                    QuantityExpr::Fixed { value: 2 },
+                    QuantityExpr::Multiply {
+                        factor: 2,
+                        inner: Box::new(QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(TypedFilter::card().properties(vec![
+                                    FilterProp::Named {
+                                        name: "rune snag".to_string(),
+                                    },
+                                    FilterProp::InZone {
+                                        zone: Zone::Graveyard,
+                                    },
+                                ]),),
+                            },
+                        }),
+                    },
+                ],
+            },
+        }
     );
 
     // Positive control: the riderless unless cost is the flat {2}.
@@ -9675,14 +9682,10 @@ fn issue_3308_full_card_parse_has_no_swallow_warnings() {
         }
 }
 
-// Issue #3308 GAP A — honest gap preserved. Rune Snag's off-battlefield
-// for-each subject is declined by the honesty guard, so its full-card parse
-// fails closed: the counter is `Unimplemented{unless_payment}` carrying the
-// unparsed rider, never a `Counter` charging the flat {2} base with the
-// per-card increment dropped. This is the coverage-honest counterpart to the
-// no-warnings test above — the gap stays visible to CI.
+// Issue #3308 GAP A — Rune Snag's full-card parse is a typed `Counter` with a
+// graveyard-scoped dynamic unless cost, not an `Unimplemented{unless_payment}`.
 #[test]
-fn issue_3308_rune_snag_fails_closed_on_additional_per_card_rider() {
+fn issue_3308_rune_snag_parses_graveyard_scaled_unless_cost() {
     let instant = ["Instant".to_string()];
     let r = crate::parser::parse_oracle_text(
             "Counter target spell unless its controller pays {2} plus an additional {2} for each card named Rune Snag in each graveyard.",
@@ -9697,24 +9700,15 @@ fn issue_3308_rune_snag_fails_closed_on_additional_per_card_rider() {
         "expected one ability: {:?}",
         r.abilities
     );
-    let Effect::Unimplemented { name, description } = r.abilities[0].effect.as_ref() else {
-        panic!(
-            "Rune Snag must fail closed, got {:?}",
-            r.abilities[0].effect
-        );
-    };
-    assert_eq!(name, "unless_payment");
     assert!(
-        description
-            .as_deref()
-            .is_some_and(|d| d.contains("plus an additional {2} for each card named Rune Snag")),
-        "the marker must carry the unparsed rider: {description:?}"
+        matches!(r.abilities[0].effect.as_ref(), Effect::Counter { .. }),
+        "Rune Snag must parse as Counter, got {:?}",
+        r.abilities[0].effect
     );
-    assert!(
-        r.abilities[0].unless_pay.is_none(),
-        "no flat unless cost may survive: {:?}",
-        r.abilities[0].unless_pay
-    );
+    assert!(matches!(
+        r.abilities[0].unless_pay.as_ref().map(|u| &u.cost),
+        Some(AbilityCost::ManaDynamic { .. })
+    ));
 }
 
 /// CR 118.12a + CR 608.2h: the unless mana-cost tail is the single authority for

@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "GameObject.split_from_merge_survivor retypes from a bare ObjectId to ObjectIncarnationRef (CR 400.7); a peer one version behind cannot decode the populated field."
+}
