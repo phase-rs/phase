@@ -1356,8 +1356,11 @@ fn main() {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "oracle_gen=info,engine=info".parse().unwrap()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                "oracle_gen=info,engine=info,phase_parser=info"
+                    .parse()
+                    .unwrap()
+            }),
         )
         .init();
 
@@ -1671,8 +1674,11 @@ fn run_semantic_audit(remaining_args: &[String]) {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "oracle_gen=info,engine=info".parse().unwrap()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                "oracle_gen=info,engine=info,phase_parser=info"
+                    .parse()
+                    .unwrap()
+            }),
         )
         .init();
 
