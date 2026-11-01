@@ -1,10 +1,10 @@
 //! #10088: "cards in [your ]opponents' graveyards" is read by the shared nom
 //! quantity grammar (`parse_quantity_ref` → `parse_zone_card_count` →
 //! `parse_scoped_zone_ref`), not by a substring fallback arm inside
-//! `parse_cda_quantity`. Extended text — an extremum head, a supertype
-//! qualifier, a trailing relative clause — must fail closed instead of being
-//! silently truncated to a bare opponents'-graveyard count, and the arithmetic
-//! forms must compose over the whole-phrase reading.
+//! `parse_cda_quantity`. Unread extended text — an extremum head or a trailing
+//! relative clause — must fail closed instead of being silently truncated to a
+//! bare opponents'-graveyard count. Supertype qualifiers must be preserved, and
+//! arithmetic forms must compose over the whole-phrase reading.
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{ContinuousModification, Effect};
@@ -71,7 +71,6 @@ fn issue_10088_extended_opponents_graveyard_tails_place_no_counter() {
     for quantity in [
         "the greatest number of cards an opponent has drawn this turn among cards in your \
          opponents' graveyards",
-        "the number of nonbasic land cards in your opponents' graveyards",
         "the number of cards in your opponents' graveyards that were put there from the \
          battlefield this turn",
     ] {
@@ -121,8 +120,8 @@ fn issue_10088_extended_opponents_graveyard_tails_place_no_counter() {
 /// and a nonbasic land card in P0's own graveyard, Consuming Aberration is 2/2
 /// (the count includes every card in opponents' graveyards) while Detritivore
 /// is 0/0 (there are no nonbasic land cards in opponents' graveyards). A reading
-/// that drops the "nonbasic land" qualifier would give 2/2 for Detritivore. The
-/// CDA line must not become a dynamic P/T static when it cannot be read.
+/// that drops the "nonbasic land" qualifier would give 2/2 for Detritivore.
+/// Both CDA lines must be read as dynamic P/T statics.
 #[test]
 fn issue_10088_detritivore_does_not_count_unqualified_opponent_graveyard_cards() {
     let mut scenario = GameScenario::new();
@@ -147,10 +146,6 @@ fn issue_10088_detritivore_does_not_count_unqualified_opponent_graveyard_cards()
     assert_eq!(pt(aberration), (Some(2), Some(2)));
     // Derived from the Oracle text: no nonbasic land cards in opponents' graveyards -> 0.
     assert_eq!(pt(detritivore), (Some(0), Some(0)));
-    // Strict-failure guard: the unread CDA line must not be rebuilt as a
-    // dynamic P/T static.
-    assert!(!has_dynamic_pt_static(&runner, detritivore));
-    // ... and it is reported as an honest gap (an `Unimplemented` ability that
-    // carries the line), not silently dropped.
-    assert!(has_unimplemented_ability(&runner, detritivore));
+    assert!(has_dynamic_pt_static(&runner, detritivore));
+    assert!(!has_unimplemented_ability(&runner, detritivore));
 }

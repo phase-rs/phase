@@ -2968,7 +2968,35 @@ fn parse_defending_player_hand_count(input: &str) -> OracleResult<'_, QuantityRe
     ))
 }
 
+fn is_supertype_qualified_zone_card_filter(filter: &TargetFilter) -> bool {
+    matches!(filter, TargetFilter::Typed(TypedFilter { type_filters, controller: None, properties })
+        if !type_filters.is_empty()
+            && properties.iter().any(|property| matches!(property,
+                FilterProp::HasSupertype { .. } | FilterProp::NotSupertype { .. })))
+}
+
 fn parse_zone_card_count(input: &str) -> OracleResult<'_, QuantityRef> {
+    // CR 205.4a + CR 604.3: a supertype-qualified type line is not a type
+    // list. Preserve the folded qualifier in the CDA's per-card zone filter,
+    // which matches_zone_card_filter ANDs with any card-type restrictions.
+    if let Ok((after_cards, noun)) =
+        terminated(take_until(" cards"), tag::<_, _, OracleError<'_>>(" cards")).parse(input)
+    {
+        let (filter, remainder) = parse_type_phrase_folding(noun);
+        if remainder.trim().is_empty() && is_supertype_qualified_zone_card_filter(&filter) {
+            let (rest, _) = tag(" in ").parse(after_cards)?;
+            let (rest, (zone, scope)) = parse_scoped_zone_ref(rest)?;
+            return Ok((
+                rest,
+                QuantityRef::ZoneCardCount {
+                    zone,
+                    card_types: Vec::new(),
+                    filter: Some(filter),
+                    scope,
+                },
+            ));
+        }
+    }
     let (rest, card_types) = if let Ok((typed_rest, typed_filters)) = parse_type_filter_list(input)
     {
         if let Ok((rest, _)) = parse_card_word(typed_rest) {
