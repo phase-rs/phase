@@ -310,6 +310,7 @@ mod horobi_becomes_target_battlefield_only;
 mod howlsquad_max_speed_reads_controller;
 mod human_torch_combat_damage_redirect;
 mod hundred_battle_veteran_counter_kind_gate;
+mod huskburster_swarm_zone_disjunction;
 mod i_call_for_slaughter;
 mod ichneumon_druid;
 mod identity_crisis_multi_zone_exile;
