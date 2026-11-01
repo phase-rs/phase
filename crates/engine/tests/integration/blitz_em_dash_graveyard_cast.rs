@@ -2818,25 +2818,185 @@ fn blitz_with_a_defiler_and_a_required_life_cost_is_not_offered_when_unpayable()
     assert_not_offered_and_refused(&mut runner, sabin, "3 life, 3 mana");
 }
 
-/// The limitation, pinned so offer and payment keep agreeing: at 4 life the
-/// rules allow the reduced blitz (2 + 2 life), but the payment pipeline pays an
-/// object's own required additional cost before the Defiler prompt and can't
-/// complete it (measured: "Cannot pay mana cost"). The offer doesn't credit
-/// the Defiler in that case, so the cast isn't offered rather than offered and
-/// refused. No printed card has this combination.
+/// CR 601.2b + CR 601.2f + CR 601.2h + CR 119.4: the reduced blitz is legal at
+/// 5 life: Sabin's own required 2 life and the Defiler's 2 are payable
+/// together, and the Defiler's {R} makes three red mana enough. The offer
+/// credits the Defiler, the required cost's declaration credits it too, and the
+/// cast completes through the offered legal action: both life payments, the
+/// discard, and all three red.
 #[test]
-fn blitz_with_a_defiler_and_a_required_life_cost_is_not_offered_through_the_defiler() {
-    let (mut runner, sabin, _) = sabin_with_defiler_and_a_required_life_cost(3, 4);
-    assert_not_offered_and_refused(&mut runner, sabin, "4 life, 3 mana");
+fn blitz_with_a_defiler_and_a_required_life_cost_completes_through_the_defiler() {
+    let (mut runner, sabin, filler) = sabin_with_defiler_and_a_required_life_cost(3, 5);
+    let action = offered_cast(&runner, sabin).expect("the reduced blitz is a legal action");
+    runner.act(action).expect("the offered cast is accepted");
+    let mut prompts = Vec::new();
+    for _ in 0..8 {
+        let action = match &runner.state().waiting_for {
+            WaitingFor::AlternativeCastChoice { .. } => GameAction::ChooseAlternativeCast {
+                choice: AlternativeCastDecision::Alternative,
+            },
+            WaitingFor::DefilerPayment { .. } => GameAction::DecideOptionalCost { pay: true },
+            WaitingFor::PayCost { choices, .. } => GameAction::SelectCards {
+                cards: choices.first().copied().into_iter().collect(),
+            },
+            _ => break,
+        };
+        prompts.push(runner.waiting_for_kind());
+        runner.act(action).expect("each step of the blitz is legal");
+    }
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0),
+        "the cast completes, got {:?} after {prompts:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        prompts.iter().filter(|p| **p == "DefilerPayment").count(),
+        1
+    );
+    assert_eq!(runner.state().objects[&sabin].zone, Zone::Stack);
+    assert_eq!(runner.state().players[0].life, 1, "2 required + 2 Defiler");
+    assert_eq!(
+        runner.state().objects[&filler].zone,
+        Zone::Graveyard,
+        "discard"
+    );
+    assert_eq!(
+        runner.state().players[0].mana_pool.total(),
+        0,
+        "blitz {{2}}{{R}}{{R}} less {{R}}"
+    );
+}
+
+const ZINNIA: &str = "Flying\nZinnia gets +X/+0, where X is the number of other creatures you control with base power 1.\nCreature spells you cast gain offspring {2} as you cast them. (You may pay an additional {2} as you cast a creature spell. If you do, when that creature enters, create a 1/1 token copy of it.)";
+const DEFILER_OF_FLESH: &str = "Menace\nAs an additional cost to cast black permanent spells, you may pay 2 life. Those spells cost {B} less to cast if you paid life this way. This effect reduces only the amount of black mana you pay.\nWhenever you cast a black permanent spell, target creature you control gets +1/+1 and gains menace until end of turn.";
+
+/// Tenacious Underdog in the graveyard (its own blitz permission), Defiler of
+/// Flesh out (statics only), Zinnia when `zinnia`, five black mana, P0 at `life`.
+fn underdog_with_defiler_of_flesh(zinnia: bool, life: i32) -> (GameRunner, ObjectId) {
+    let parsed = parse_oracle_text(
+        UNDERDOG,
+        "Tenacious Underdog",
+        &[],
+        &["Creature".into()],
+        &["Human".into(), "Warrior".into()],
+    );
+    let kw = blitz_keyword(&parsed);
+    let gy_static = parsed
+        .statics
+        .first()
+        .expect("graveyard-cast permission static must parse")
+        .clone();
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let defiler = parse_oracle_text(
+        DEFILER_OF_FLESH,
+        "Defiler of Flesh",
+        &["Menace".into()],
+        &["Creature".into()],
+        &["Phyrexian".into(), "Horror".into()],
+    );
+    let mut source = scenario.add_creature(P0, "Defiler of Flesh", 4, 4);
+    for s in defiler.statics {
+        source.with_static_definition(s);
+    }
+    if zinnia {
+        scenario
+            .add_creature(P0, "Zinnia, Valley's Voice", 1, 3)
+            .from_oracle_text_with_keywords(&["Flying"], ZINNIA);
+    }
+    let dog = scenario
+        .add_creature_to_graveyard(P0, "Tenacious Underdog", 3, 2)
+        .with_static_definition(gy_static)
+        .with_mana_cost(ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Black],
+        })
+        .with_keyword(kw)
+        .with_color(vec![ManaColor::Black])
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().players[0].life = life;
+    add_mana(&mut runner, ManaType::Black, 5);
+    (runner, dog)
+}
+
+/// Blitz Underdog from the graveyard, answering the Defiler with `defiler` and
+/// every optional cost (Zinnia's offspring) with `optional`. Returns the prompts.
+fn blitz_underdog(
+    runner: &mut GameRunner,
+    dog: ObjectId,
+    defiler: bool,
+    optional: bool,
+) -> Vec<&'static str> {
+    let action = offered_cast(runner, dog).expect("the blitz is a legal action");
+    runner.act(action).expect("the offered cast is accepted");
+    let mut prompts = Vec::new();
+    for _ in 0..8 {
+        let action = match &runner.state().waiting_for {
+            WaitingFor::AlternativeCastChoice { .. } => GameAction::ChooseAlternativeCast {
+                choice: AlternativeCastDecision::Alternative,
+            },
+            WaitingFor::DefilerPayment { .. } => GameAction::DecideOptionalCost { pay: defiler },
+            WaitingFor::OptionalCostChoice { .. } => {
+                GameAction::DecideOptionalCost { pay: optional }
+            }
+            _ => break,
+        };
+        prompts.push(runner.waiting_for_kind());
+        runner.act(action).expect("each step of the blitz is legal");
+    }
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0),
+        "the cast completes, got {:?} after {prompts:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(runner.state().objects[&dog].zone, Zone::Stack);
+    prompts
+}
+
+/// CR 601.2h + CR 119.4: Zinnia's offspring (the keyword queue) doesn't hide
+/// the blitz's own "Pay 2 life" or the Defiler, and each life payment is
+/// counted once when the Defiler is judged: at 5 life, blitz 2 + Defiler 2 is
+/// payable. The offspring {2} is affordable once the Defiler's {B} is taken:
+/// {2}{B}{B} less {B} plus {2} is all five black.
+#[test]
+fn blitz_with_offspring_and_a_defiler_counts_each_life_payment_once() {
+    let (mut runner, dog) = underdog_with_defiler_of_flesh(true, 5);
+    let prompts = blitz_underdog(&mut runner, dog, true, true);
+    assert_eq!(prompts, ["DefilerPayment", "OptionalCostChoice"]);
+    assert_eq!(runner.state().players[0].life, 1, "blitz 2 + Defiler 2");
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+}
+
+/// Control without Zinnia: the same blitz and Defiler, no offspring prompt.
+#[test]
+fn blitz_with_a_defiler_and_no_offspring_pays_the_same_life() {
+    let (mut runner, dog) = underdog_with_defiler_of_flesh(false, 5);
+    let prompts = blitz_underdog(&mut runner, dog, true, true);
+    assert_eq!(prompts, ["DefilerPayment"]);
+    assert_eq!(runner.state().players[0].life, 1);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 2);
+}
+
+/// CR 601.2h + CR 119.4: at 3 life the blitz's 2 and the Defiler's 2 can't both
+/// be paid, so the Defiler isn't offered; the blitz still pays its own 2 life.
+#[test]
+fn blitz_with_offspring_does_not_offer_a_defiler_whose_life_is_unpayable() {
+    let (mut runner, dog) = underdog_with_defiler_of_flesh(true, 3);
+    let prompts = blitz_underdog(&mut runner, dog, true, false);
+    assert!(!prompts.contains(&"DefilerPayment"), "{prompts:?}");
+    assert_eq!(runner.state().players[0].life, 1, "the blitz's 2 life");
+    assert_eq!(
+        runner.state().players[0].mana_pool.total(),
+        1,
+        "{{2}}{{B}}{{B}}"
+    );
 }
 
 /// Control: the required cost is priced, not refused. Caldaia Guardian (blitz
 /// {2}{G}, no non-mana residual) under Muldrotha with a required "pay 2 life"
 /// additional cost, the full blitz mana and 3 life: the blitz is offered and
-/// completes, paying three mana and the 2 life. (A residual-free blitz keeps
-/// this control off a separate, pre-existing gap: an object's own required
-/// additional cost currently suppresses an alternative cost's non-mana
-/// residual, which no printed card combines.)
+/// completes, paying three mana and the 2 life.
 #[test]
 fn blitz_with_a_required_life_cost_completes_without_the_defiler() {
     let mut scenario = GameScenario::new();

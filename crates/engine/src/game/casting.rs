@@ -26997,17 +26997,6 @@ fn alternative_cost_offer_payable(
     {
         return false;
     }
-    // CR 601.2b + CR 601.2h: a cast whose object carries its own REQUIRED
-    // additional cost pays that cost's declaration before the Defiler prompt,
-    // and that declaration can't see a Defiler's reduction, so the payment
-    // pipeline can't complete a cast that needs the reduction. The offer then
-    // doesn't credit it either: offer and payment agree (an honest gap for that
-    // combination, which no printed card has) rather than offering a cast that
-    // payment refuses.
-    let defiler_creditable = !state
-        .objects
-        .get(&object_id)
-        .is_some_and(|obj| matches!(obj.additional_cost, Some(AdditionalCost::Required(_))));
     target_assignments.iter().any(|targets| {
         let mut pricing = ResolvedAbility::new(Effect::NoOp, targets.clone(), object_id, player);
         if let Some(authority) = authority {
@@ -27033,17 +27022,16 @@ fn alternative_cost_offer_payable(
             // CR 118.3: a zero mana cost is always payable.
             && mana.as_ref().is_none_or(|m| {
                 can_pay_cost_after_auto_tap(state, player, object_id, m)
-                    || (defiler_creditable
-                        && casting_costs::defiler_reduced_cost_alongside(
-                            state,
-                            player,
-                            object_id,
-                            m,
-                            committed_life,
-                        )
-                        .is_some_and(|reduced| {
-                            can_pay_cost_after_auto_tap(state, player, object_id, &reduced)
-                        }))
+                    || casting_costs::defiler_reduced_cost_alongside(
+                        state,
+                        player,
+                        object_id,
+                        m,
+                        committed_life,
+                    )
+                    .is_some_and(|reduced| {
+                        can_pay_cost_after_auto_tap(state, player, object_id, &reduced)
+                    })
             })
     })
 }
