@@ -43755,6 +43755,7 @@ fn parse_exile_object_and_top_face_down_pile_ir(
 }
 
 pub(crate) fn finalize_effect_chain(def: &mut AbilityDefinition) {
+    imperative::scope_shuffle_after_library_move(def);
     sequence::patch_reveal_until_for_library_category_exile(def);
     sequence::promote_labeled_card_predicate_choices_for_chosen_kind(def);
     sequence::rewrite_reorder_dig_backref_reveal_to_top(def);
@@ -53383,7 +53384,21 @@ fn issue_2406_chaos_warp_owner_library_shuffle_and_reveal() {
         shuffle.effect.target_filter(),
         Some(&TargetFilter::ParentTargetOwner)
     );
-    assert_eq!(shuffle.player_scope, None);
+    // CR 701.24a + CR 701.24c: the terminal shuffle is the instruction's single
+    // randomization, scoped to the owners of the moved population; the move defers
+    // its own shuffle to it. The owner anaphor itself is unchanged so the reveal
+    // below still anchors on it.
+    assert!(
+        matches!(
+            shuffle.player_scope,
+            Some(PlayerFilter::TrackedSetPossessor {
+                caused_by: Some(ThisWayCause::OwnerLibraryShuffleSubject),
+                ..
+            })
+        ),
+        "terminal shuffle must carry the owner-library scope, got {:?}",
+        shuffle.player_scope
+    );
     let reveal = shuffle
         .sub_ability
         .as_ref()

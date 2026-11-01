@@ -121,6 +121,7 @@ mod shiko_reflexive_copy_draw_1370;
 mod shilgengar_return_each_to_battlefield;
 mod shinryu_chosen_player_loses_game_9768;
 mod shorten_efficacy;
+mod shuffle_into_library_single_event;
 mod shuffle_that_pile_manifest;
 mod shuffle_them_into_libraries;
 mod shuri_wakandan_inventor_copy_recipient;

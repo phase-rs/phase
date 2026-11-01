@@ -249,6 +249,25 @@ const DOCUMENTED_OVER_PROMPT: &[&str] = &[
     // Exploration misparse-fix fixture regen surfaced this card in the sweep
     // corpus; same adjudication as the #7031 branch).
     "arashin sovereign",
+    // ---- owner-library terminal shuffle, batch (CR 701.24a + CR 701.24c) ----
+    // dies/leaves-batch "[you may] shuffle ~ into [its owner's] library" (AST
+    // measured: ChangeZone{SelfRef → Library} → Shuffle carrying the owner-library
+    // `TrackedSetPossessor` scope): each co-departing copy moves ONLY its own
+    // graveyard card (CR 603.6c first-zone check) into its OWN owner's library and
+    // shuffles that library, so the members' moves are disjoint (owner-misaligned
+    // copies route to different libraries entirely) and a shuffle's result is a
+    // uniform permutation whichever order the two run in; the optional "may" is a
+    // resolution-time choice (CR 603.5) of the batch's one controller (production
+    // ordering groups are partitioned per controller, CR 603.3b). The prompt is
+    // conservative: the terminal shuffle's `TrackedSetPossessor` scope reads the
+    // per-resolution tracked set, which `rw_player_filter` classifies member-bound
+    // (refusing batch-T1) because no context-free recognizer distinguishes the
+    // chain's OWN prospective owner publication from a look-back read of a sibling's
+    // members. Fail-closed, never an under-prompt.
+    "guan yu, sainted warrior",
+    // Same shape on an artifact: "When ~ is put into a graveyard from the battlefield,
+    // its owner shuffles it into their library" (non-optional).
+    "lembas",
     // ---- commander-census read × token-creation write (CR 903.3d) ----
     // "At the beginning of your upkeep, if you control a commander, create a token
     // that's a copy of this creature." The CR 603.4 intervening-if is a LIVE

@@ -10826,9 +10826,8 @@ fn lower_target_referenced_search_library(
 pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause {
     let shuffle_target = match &effect {
         // CR 400.3: A single object going to its owner's library keeps that
-        // object's owner as the anaphoric shuffle subject. Unlike a mass move,
-        // this already has one exact parent object and needs no tracked-set
-        // population fan-out (Chaos Warp and prevention follow-ups).
+        // object's owner as the anaphoric shuffle subject (Chaos Warp and
+        // prevention follow-ups anchor their own "their library" clauses on it).
         Effect::ChangeZone {
             owner_library: true,
             ..
@@ -10836,7 +10835,20 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
         Effect::ChangeZoneAll { .. } => TargetFilter::ScopedPlayer,
         _ => TargetFilter::Controller,
     };
-    let tracks_owner_population = matches!(&effect, Effect::ChangeZoneAll { .. });
+    // CR 701.24a + CR 701.24c: every "[move] into a library, then shuffle" pair is
+    // ONE shuffle instruction. The terminal `Shuffle` owns the single
+    // randomization of each affected library, so it is scoped to the owners of the
+    // exact subject population — one object or many — and the move's own per-object
+    // auto-shuffle is suppressed by that scope marker (see
+    // `change_zone::terminal_shuffle_member_placement`).
+    let tracks_owner_population = matches!(
+        &effect,
+        Effect::ChangeZoneAll { .. }
+            | Effect::ChangeZone {
+                destination: Zone::Library,
+                ..
+            }
+    );
     if let Effect::ChangeZoneAll {
         destination: Zone::Library,
         library_shuffle,
@@ -10848,15 +10860,16 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
     // CR 701.24c-e + CR 400.3: the terminal shuffle is driven by the owners of
     // the exact prospective subject population. Cause filtering prevents an
     // unrelated tracked-set producer in the same chain from selecting players.
-    let mut shuffle = AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::Shuffle {
-            target: shuffle_target,
-        },
-    );
-    if tracks_owner_population {
-        shuffle.player_scope = Some(owner_library_shuffle_scope());
-    }
+    let shuffle = if tracks_owner_population {
+        owner_library_terminal_shuffle(shuffle_target)
+    } else {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Shuffle {
+                target: shuffle_target,
+            },
+        )
+    };
     ParsedEffectClause {
         optional_targeting: false,
         unlowered_guard: None,
@@ -10869,6 +10882,53 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
         optional: false,
         unless_pay: None,
         entry_onset: ContinuousEffectOnset::WhenFollowed,
+    }
+}
+
+/// CR 701.24a + CR 701.24c-e: The terminal `Shuffle` of a compound "move into
+/// owners' libraries, then shuffle" instruction, scoped to the owners of the exact
+/// prospective subject population. Single authority for the `Shuffle` node of every
+/// parser-built compound (imperative clauses and the "shuffle it into its owner's
+/// library instead" replacement outcome); `scope_shuffle_after_library_move` stamps
+/// the same scope on a separately parsed `Shuffle`, so the move's chain-scope
+/// detection and the shuffle's own subject stay in sync.
+///
+/// `target` is the clause's own owner anaphor. A `ScopedPlayer` shuffle (the mass
+/// form) is fanned out per owner by the chain executor; any other anaphor
+/// (`ParentTargetOwner`, `Owner`, ...) is kept so the parser's downstream "their
+/// library" anchors still read it, and the shuffle iterates the owner population
+/// itself (`shuffle::resolve`).
+pub(crate) fn owner_library_terminal_shuffle(target: TargetFilter) -> AbilityDefinition {
+    let mut shuffle = AbilityDefinition::new(AbilityKind::Spell, Effect::Shuffle { target });
+    shuffle.player_scope = Some(owner_library_shuffle_scope());
+    shuffle
+}
+
+/// CR 701.24a + CR 701.24c: "Put X on top of their owners' libraries, then those
+/// players shuffle" (Gomazoa, Vortex Elemental) reaches the chain as two separately
+/// parsed clauses — a move into a library followed directly by a bare `Shuffle` —
+/// rather than through [`with_shuffle_sub_ability`]. It is still ONE shuffle
+/// instruction, so the `Shuffle` that directly follows a move into a library takes
+/// the same owner-population scope as the compound form and owns the single
+/// randomization (the move defers its own, see
+/// `change_zone::terminal_shuffle_member_placement`). A `Shuffle` already scoped by
+/// its producer, or not directly following such a move, is left alone.
+pub(crate) fn scope_shuffle_after_library_move(def: &mut AbilityDefinition) {
+    let follows_library_move = matches!(
+        &*def.effect,
+        Effect::ChangeZone {
+            destination: Zone::Library,
+            ..
+        }
+    );
+    if let Some(sub) = def.sub_ability.as_deref_mut() {
+        if follows_library_move
+            && matches!(&*sub.effect, Effect::Shuffle { .. })
+            && sub.player_scope.is_none()
+        {
+            sub.player_scope = Some(owner_library_shuffle_scope());
+        }
+        scope_shuffle_after_library_move(sub);
     }
 }
 

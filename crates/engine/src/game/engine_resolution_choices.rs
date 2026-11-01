@@ -6587,7 +6587,8 @@ pub(super) fn handle_resolution_choice(
             // its prospective owner population before any selected member enters
             // the replacement pipeline. The prompt seam already retained an
             // empty typed participant when necessary; this extends that set.
-            if matches!(effect_kind, EffectKind::ChangeZone) {
+            // Only a move INTO a library has owners of a shuffled population.
+            if matches!(effect_kind, EffectKind::ChangeZone) && destination == Some(Zone::Library) {
                 if let Some(continuation) = state
                     .active_ability_continuation()
                     .map(|continuation| (*continuation.chain).clone())
@@ -7117,7 +7118,14 @@ pub(super) fn handle_resolution_choice(
                             // DOWN with the specified characteristics instead of
                             // resuming face up and exposing the real object.
                             face_down_profile: face_down_profile.clone(),
-                            library_placement: None,
+                            // CR 701.24a + CR 701.24c: a chain whose terminal
+                            // owner-library `Shuffle` is parked as the continuation
+                            // owns the single randomization; the chosen member defers
+                            // its own shuffle to it.
+                            library_placement:
+                                effects::change_zone::terminal_shuffle_resume_placement(
+                                    state, dest_zone,
+                                ),
                             enter_attached_to: None,
                         };
                         let anticipated_pause =
@@ -9171,11 +9179,21 @@ fn publish_effect_zone_choice_tracked_set(
     let active_continuation = state
         .active_ability_continuation()
         .map(|continuation| (*continuation.chain).clone());
+    // CR 701.24a + CR 400.3: only a choice that moves cards INTO a library has owners of
+    // a shuffled population; any other interactive choice ahead of the terminal shuffle
+    // (exile, sacrifice, tap, cast) must not publish its owners as subjects.
+    let moves_into_library = match effect_kind {
+        EffectKind::ChangeZone => destination == Some(Zone::Library),
+        EffectKind::PutAtLibraryPosition => true,
+        _ => false,
+    };
     if let Some(continuation) = active_continuation {
-        if matches!(
-            effects::tracked_set_publication_mode(&continuation),
-            effects::TrackedSetPublicationMode::Prospective { .. }
-        ) {
+        if moves_into_library
+            && matches!(
+                effects::tracked_set_publication_mode(&continuation),
+                effects::TrackedSetPublicationMode::Prospective { .. }
+            )
+        {
             let participants =
                 effects::prospective_subject_participants(state, &continuation, chosen);
             effects::publish_tracked_set_for_resolution(

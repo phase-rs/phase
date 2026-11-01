@@ -15437,21 +15437,38 @@ pub(crate) enum TrackedSetPublicationInput<'a> {
     },
 }
 
-fn is_owner_library_shuffle_consumer(ability: &ResolvedAbility) -> bool {
+/// CR 701.24c-e + CR 400.3: The typed marker the parser stamps on the terminal
+/// `Shuffle` of a compound "move into owners' libraries, then shuffle" instruction.
+/// The scope — not the shuffle's target filter — identifies the instruction: the
+/// mass form targets `ScopedPlayer`, the single-object form keeps its owner anaphor
+/// (`ParentTargetOwner`, `Owner`, ...) for the parser's downstream anchors, and both
+/// resolve to the owners of the exact prospective subject population.
+pub(crate) fn is_owner_library_shuffle_scope(scope: Option<&PlayerFilter>) -> bool {
     matches!(
-        (&ability.effect, ability.player_scope.as_ref()),
-        (
-            Effect::Shuffle {
-                target: TargetFilter::ScopedPlayer,
-            },
-            Some(PlayerFilter::TrackedSetPossessor {
-                relation: PlayerRelation::All,
-                possession: PossessionAxis::Owner,
-                filter: TargetFilter::Any,
-                caused_by: Some(ThisWayCause::OwnerLibraryShuffleSubject),
-            })
-        )
+        scope,
+        Some(PlayerFilter::TrackedSetPossessor {
+            relation: PlayerRelation::All,
+            possession: PossessionAxis::Owner,
+            filter: TargetFilter::Any,
+            caused_by: Some(ThisWayCause::OwnerLibraryShuffleSubject),
+        })
     )
+}
+
+fn is_owner_library_shuffle_consumer(ability: &ResolvedAbility) -> bool {
+    matches!(&ability.effect, Effect::Shuffle { .. })
+        && is_owner_library_shuffle_scope(ability.player_scope.as_ref())
+}
+
+/// An owner-library terminal `Shuffle` whose clause kept its own owner anaphor
+/// (not `ScopedPlayer`): it iterates the owner population itself, so the chain
+/// executor must neither fan it out nor detach its continuation (the follow-up's
+/// "their library" anchor still reads the shuffle's parent targets).
+pub(super) fn is_self_iterating_owner_library_shuffle(ability: &ResolvedAbility) -> bool {
+    matches!(
+        &ability.effect,
+        Effect::Shuffle { target } if *target != TargetFilter::ScopedPlayer
+    ) && is_owner_library_shuffle_scope(ability.player_scope.as_ref())
 }
 
 fn first_tracked_set_consumer_mode(
@@ -22065,11 +22082,14 @@ fn resolve_chain_body(
     // EXCEPTION (same category): `EachPlayerCopyChosen` is likewise a
     // self-iterating APNAP effect — it seeds its own per-player continuation and
     // must receive `player_scope` intact rather than being fanned out here.
+    // EXCEPTION (same category): a single-object owner-library terminal `Shuffle`
+    // iterates its owner population itself (`shuffle::resolve`), keeping its
+    // continuation attached to the parent targets its anchors read.
     let driver_scope = ability.player_scope.as_ref().filter(|_| {
         !matches!(
             ability.effect,
             Effect::ChooseAndSacrificeRest { .. } | Effect::EachPlayerCopyChosen { .. }
-        )
+        ) && !is_self_iterating_owner_library_shuffle(ability)
     });
     if let Some(scope) = driver_scope {
         let scoped_events_before = events.len();
