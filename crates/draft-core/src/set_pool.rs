@@ -110,9 +110,9 @@ pub struct LimitedSetPool {
 /// 6 commons, and 1 basic land. On physical print sheets, token cards were inserted
 /// replacing an uncommon in 2/5 of packs. MTGJSON omitted the token card from the
 /// draft booster sheet data, resulting in an incomplete 9-card variant (with 1 uncommon
-/// instead of 2). In limited play (draft and sealed), tokens are not drafted (CR 108.1),
-/// and every booster pack must open uniformly with the full 10 playable cards (including
-/// 2 uncommons).
+/// instead of 2). Token inserts are not drafted, so as a platform collation policy every
+/// limited (draft and sealed) booster opens uniformly with the full 10 playable cards
+/// (including 2 uncommons).
 pub fn normalize_pack_variants(set_code: &str, pack_variants: &mut [PackVariant]) {
     if set_code.eq_ignore_ascii_case("UGL") {
         for variant in pack_variants {
