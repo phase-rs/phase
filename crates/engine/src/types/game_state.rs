@@ -18502,6 +18502,11 @@ pub enum WaitingFor {
     TopOrBottomChoice {
         player: PlayerId,
         object_id: ObjectId,
+        /// CR 401.7: where `ChooseTopOrBottom { top: true }` places the object.
+        /// `Top` for a plain "top or bottom" choice; `NthFromTop` for "second
+        /// from the top or on the bottom". `top: false` is always the bottom.
+        #[serde(default, skip_serializing_if = "LibraryPosition::is_top")]
+        top_position: LibraryPosition,
     },
     /// CR 701.36a: Choose a creature token you control to create a copy of.
     PopulateChoice {
