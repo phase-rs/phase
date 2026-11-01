@@ -658,7 +658,40 @@ mod tests {
                     "unexpected error reason: {reason}"
                 );
             }
-            other => panic!("expected InvalidPackSequence, got {other:?}"),
+            DraftError::InvalidConfiguration { .. }
+            | DraftError::InvalidSnapshot { .. }
+            | DraftError::IncompatibleFlow
+            | DraftError::ExplicitTimeRequired
+            | DraftError::StalePrompt
+            | DraftError::ExpiredPrompt
+            | DraftError::InvalidSelectionCount { .. }
+            | DraftError::InvalidSelection { .. }
+            | DraftError::InvalidClockBounds
+            | DraftError::InvalidTransition { .. }
+            | DraftError::SeatOutOfRange { .. }
+            | DraftError::CardNotInPack { .. }
+            | DraftError::DraftEffectCardNotInPool { .. }
+            | DraftError::InvalidDraftEffectSelection { .. }
+            | DraftError::NoPendingPack { .. }
+            | DraftError::ValidationFailed { .. }
+            | DraftError::PairingNotFound { .. }
+            | DraftError::PairingNotInCurrentRound { .. }
+            | DraftError::MatchWinnerRequired { .. }
+            | DraftError::SeatNotInPairing { .. }
+            | DraftError::UnsupportedTournamentSize { .. }
+            | DraftError::InsufficientCards { .. }
+            | DraftError::WrongPickCardCount { .. }
+            | DraftError::DuplicatePickCardId { .. }
+            | DraftError::SeatAlreadyPickedThisRound { .. }
+            | DraftError::SeatIsBot { .. }
+            | DraftError::SealedRequiresSetSource
+            | DraftError::InvalidSealedConfiguration { .. }
+            | DraftError::InvalidSealedSnapshot { .. }
+            | DraftError::PodBelowMinimumSize { .. }
+            | DraftError::InvalidSharedStackConfiguration { .. }
+            | DraftError::SharedStackDecisionRefused { .. } => {
+                panic!("expected InvalidPackSequence, got {err:?}");
+            }
         }
     }
 
