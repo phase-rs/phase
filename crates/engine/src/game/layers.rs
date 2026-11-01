@@ -6489,7 +6489,14 @@ fn active_effects_force_incremental_escalation(
             let you = active_effect_condition_controller(state, e);
             if entered_ids.iter().any(|id| {
                 state.objects.get(id).is_some_and(|obj| {
-                    obj.is_phased_in_permanent() && obj.controller == you && !obj.color.is_empty()
+                    // CR 718.3b: saved prototype colors are intrinsic and reapplied after reset.
+                    obj.is_phased_in_permanent()
+                        && obj.controller == you
+                        && (!obj.color.is_empty()
+                            || obj
+                                .prototype_form
+                                .as_ref()
+                                .is_some_and(|form| !form.colors.is_empty()))
                 })
             }) {
                 return true;
