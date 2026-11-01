@@ -466,6 +466,22 @@ else
   echo "WARNING: decks projection failed; leaving existing $DECKS_OUTPUT in place." >&2
 fi
 
+# --- Group 6: Simplified-Chinese content sidecar (best-effort) ---
+# The one locale whose card text does NOT come from MTGJSON `foreignData`, so it
+# needs its own generator rather than another entry in oracle-gen's locale map.
+# MTGJSON's own Simplified Chinese stops at sets released on or before
+# 2024-07-05 (ACR) — Bloomburrow onward is 0% — so sourcing Chinese from MTGJSON
+# would ship a catalog with no data for any current set; magic-cards-zhs covers
+# through the present and beyond.
+#
+# Best-effort like the groups above: this reaches GitHub over the network, which
+# can be unavailable or blocked, and a failure here must not take down a card-data
+# run whose MTGJSON half succeeded. A stale or absent zh sidecar degrades to
+# English card text at runtime.
+if ! ./scripts/gen-zhs-card-data.sh; then
+  echo "WARNING: Simplified-Chinese sidecar generation failed; leaving existing ${OUTPUT_DIR}/card-data.zh.json in place." >&2
+fi
+
 # Summary
 FILE_SIZE=$(du -h "$OUTPUT" | cut -f1)
 NAMES_SIZE=$(du -h "$NAMES_OUTPUT" | cut -f1)

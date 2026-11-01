@@ -171,6 +171,29 @@ jobs:
             mtgjson_download AtomicCards.json data/mtgjson/AtomicCards.json
           fi
 
+      - name: Restore Simplified-Chinese card data
+        id: zhs-cache
+        # `gen-card-data.sh` calls gen-zhs-card-data.sh, which needs the
+        # magic-cards-zhs release archive (~78 MB) to produce the
+        # `card-data.zh.json` that data-files.json now publishes. Cache the
+        # archive directory so that download happens once per cache lifetime
+        # rather than on every deploy. Same restore/save split as the MTGJSON
+        # cache directly above, for the same reason: a cache entry must only be
+        # written when the directory is whole.
+        #
+        # Keyed on the hash of the generator, which pins the release tag the
+        # archive name is derived from — bumping MAGIC_CARDS_ZHS_RELEASE to
+        # refresh the data rolls this key, so a refreshed pin can never be served
+        # a stale archive. The fallback restore-key deliberately reaches for
+        # older entries: the generator's own file-existence guard is what decides
+        # whether a download happens, so a stale entry means "already present".
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: data/magic-cards-zhs
+          key: magic-cards-zhs-${{ hashFiles('scripts/gen-zhs-card-data.sh') }}
+          restore-keys: |
+            magic-cards-zhs-
+
       - name: Generate card data and coverage (from source)
         # Single source of truth: scripts/gen-card-data.sh produces all public
         # JSON files. The deploy must use the same generator the local dev
@@ -179,6 +202,20 @@ jobs:
         run: |
           mkdir -p data
           ./scripts/gen-card-data.sh
+
+      - name: Save Simplified-Chinese card data
+        # `success()` alone is NOT sufficient here. gen-card-data.sh runs the
+        # Chinese generator best-effort (one flaky third-party download must not
+        # kill a card-data run whose MTGJSON half succeeded), so a failed
+        # download still exits 0 — and saving that directory would freeze a
+        # truncated archive under a key later runs restore, where it would fail
+        # `gzip -t` forever. Gate on the archive actually existing: hashFiles is
+        # empty when the download never produced one.
+        if: ${{ success() && steps.zhs-cache.outputs.cache-hit != 'true' && hashFiles('data/magic-cards-zhs/*.tar.gz') != '' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: data/magic-cards-zhs
+          key: magic-cards-zhs-${{ hashFiles('scripts/gen-zhs-card-data.sh') }}
 
       - name: Download draft set data
         id: draft-sets
