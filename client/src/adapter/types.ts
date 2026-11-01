@@ -2308,10 +2308,9 @@ export interface StackEntryDisplay {
 
 // ── Pending Cast (for target selection) ──────────────────────────────────
 
-export interface DeferredSacrificeSelection {
-  object_id: ObjectId;
-  filter: TargetFilter;
-}
+export type DeferredSpellSacrifice =
+  | { type: "Selected"; object_id: ObjectId; filter: TargetFilter }
+  | { type: "All"; filter: TargetFilter };
 
 export interface PendingCast {
   object_id: ObjectId;
@@ -2321,7 +2320,7 @@ export interface PendingCast {
   activation_cost?: SerializedAbilityCost;
   activation_ability_index?: number;
   target_constraints?: Array<{ type: string }>;
-  deferred_sacrificed_permanents?: DeferredSacrificeSelection[];
+  deferred_sacrificed_permanents?: DeferredSpellSacrifice[];
   // CR 118.3a: pip ids the caster pinned to direct payment. `#[serde(default,
   // skip_serializing_if = "Vec::is_empty")]` — absent when no pin is recorded.
   pinned_pool_units?: number[];
@@ -2994,6 +2993,7 @@ export type WaitingFor =
       enters_attacking?: boolean;
       owner_library?: boolean;
       track_exiled_by_source?: boolean;
+      library_position?: LibraryPosition;
     } }
   | { type: "DrawnThisTurnTopdeckChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; min_count: number; life_payment: number; source_id: ObjectId } }
   | { type: "RetargetChoice"; data: { player: PlayerId; stack_entry_index: number; scope: RetargetScope; current_targets: TargetRef[]; slots: RetargetSlotAddress[]; slot_pools: TargetRef[][]; legal_new_targets: TargetRef[]; keep_is_distinct?: boolean[] } }
@@ -4931,8 +4931,50 @@ export function isActionRejection(value: unknown): value is ActionRejection {
     ));
 }
 
+/** Why a takeback vote ended (the engine's `TakebackResolution`). */
+export type TakebackResolution = "approved" | "declined" | "cancelled" | "withdrawn";
+
+const TAKEBACK_RESOLUTIONS: readonly TakebackResolution[] = [
+  "approved",
+  "declined",
+  "cancelled",
+  "withdrawn",
+];
+
+/** How a takeback vote ended and which seat ended it (`null` when auto-approved). */
+export interface TakebackNotice {
+  resolution: TakebackResolution;
+  resolvedBy: PlayerId | null;
+}
+
+function isTakebackNotice(value: unknown): value is TakebackNotice {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  return keys.length === 2
+    && TAKEBACK_RESOLUTIONS.includes(record.resolution as TakebackResolution)
+    && (record.resolvedBy === null || (
+      typeof record.resolvedBy === "number"
+      && Number.isSafeInteger(record.resolvedBy)
+      && record.resolvedBy >= 0
+    ));
+}
+
+/** An open takeback vote: who asked, and the seats asked to approve. */
+export interface TakebackVote {
+  requester: PlayerId;
+  voters: PlayerId[];
+}
+
+/** engine-wasm's reply to a takeback request, response or cancel. */
+export type TakebackReply =
+  | ({ status: "requested" } & TakebackVote)
+  | { status: "recorded" }
+  | ({ status: "resolved" } & TakebackNotice)
+  | { status: "rejected"; reason: string };
+
 export type ActionOutcome<T> =
-  | { status: "applied"; result: T }
+  | { status: "applied"; result: T; takeback?: TakebackNotice }
   | { status: "rejected"; rejection: ActionRejection };
 
 /** Validates the exact tagged WASM outcome shape before its result is trusted. */
@@ -4941,7 +4983,9 @@ export function isActionOutcome(value: unknown): value is ActionOutcome<unknown>
   const record = value as Record<string, unknown>;
   const keys = Object.keys(record);
   if (record.status === "applied") {
-    return keys.length === 2 && keys.includes("status") && keys.includes("result");
+    if (!keys.includes("status") || !keys.includes("result")) return false;
+    if (keys.length === 2) return true;
+    return keys.length === 3 && keys.includes("takeback") && isTakebackNotice(record.takeback);
   }
   return record.status === "rejected"
     && keys.length === 2
@@ -5166,6 +5210,20 @@ export function isStaleReorderMessage(message: string): boolean {
 export interface SubmitResult {
   events: GameEvent[];
   log_entries?: GameLogEntry[];
+  /** Present when the action ended a takeback vote (a browser-hosted concession). */
+  takeback?: TakebackNotice;
+}
+
+/** The `SubmitResult` of an applied `submit_action` outcome. */
+export function appliedSubmitResult(
+  outcome: { status: "applied"; result: unknown; takeback?: TakebackNotice },
+): SubmitResult {
+  const actionResult = outcome.result as { events?: GameEvent[]; log_entries?: GameLogEntry[] };
+  return {
+    events: actionResult.events ?? [],
+    log_entries: actionResult.log_entries ?? [],
+    ...(outcome.takeback ? { takeback: outcome.takeback } : {}),
+  };
 }
 
 /** Bundles legal actions with the engine's auto-pass recommendation. */
@@ -5427,6 +5485,8 @@ export interface LlmHttpRequestSpec {
 
 /** Engine output for one LLM decision request, or an engine-authored refusal. */
 export interface LlmDecisionRequestResult {
+  proposal?: AiActionProposal;
+  reasoning?: string;
   fingerprint?: string;
   optionCount?: number;
   /** Characters of prompt the request carries (system + user). */
@@ -5604,25 +5664,52 @@ export type RewindTarget =
   | { readonly kind: "turn_start"; readonly turn_number: number };
 
 /**
- * Optional transport capability for a *server-authoritative* rollback. Shaped
- * exactly like `MatchConcedeCapability` above, and for the same reason: only
- * the adapter that can actually bind the request to an authenticated wire
- * session declares it, so no other adapter is forced to answer a question it
- * has no meaningful answer to. A local-authority adapter rewinds its own state
- * instead and must NOT claim this.
+ * Optional transport capability for a takeback vote decided by a remote
+ * authority. Shaped like `MatchConcedeCapability` above: only an adapter that
+ * binds the request to an authenticated seat declares it.
  */
-export interface ServerRewindCapability {
-  readonly supportsServerRewind: true;
+export interface TakebackCapability {
+  readonly supportsTakeback: true;
+  sendRequestTakeback(): void;
+  sendRespondTakeback(approve: boolean): void;
+  sendCancelTakeback(): void;
+}
+
+export function supportsTakeback(
+  adapter: EngineAdapter | null,
+): adapter is EngineAdapter & TakebackCapability {
+  if (adapter === null) return false;
+  const candidate = adapter as Partial<TakebackCapability>;
+  return candidate.supportsTakeback === true
+    && typeof candidate.sendRequestTakeback === "function"
+    && typeof candidate.sendRespondTakeback === "function"
+    && typeof candidate.sendCancelTakeback === "function";
+}
+
+/**
+ * Optional transport capability for a rollback to a chosen turn. Declared only
+ * by the adapter that can address a server turn ring with a `RewindTarget`; a
+ * local-authority adapter rewinds its own state instead and must NOT claim this.
+ */
+export interface TurnRewindCapability {
+  readonly supportsTurnRewind: true;
   sendRequestTakeback(target?: RewindTarget): void;
 }
 
-export function supportsServerRewind(
+export function supportsTurnRewind(
   adapter: EngineAdapter | null,
-): adapter is EngineAdapter & ServerRewindCapability {
+): adapter is EngineAdapter & TurnRewindCapability {
   return adapter !== null
-    && (adapter as Partial<ServerRewindCapability>).supportsServerRewind === true
-    && typeof (adapter as Partial<ServerRewindCapability>).sendRequestTakeback === "function";
+    && (adapter as Partial<TurnRewindCapability>).supportsTurnRewind === true
+    && typeof (adapter as Partial<TurnRewindCapability>).sendRequestTakeback === "function";
 }
+
+/** The takeback events every takeback-capable adapter emits. */
+export type TakebackEvent =
+  | { type: "takebackRequested"; requester: PlayerId; requesterName: string; voters: PlayerId[] }
+  | { type: "takebackResolved"; resolution: TakebackResolution; resolvedBy: PlayerId | null }
+  /** The authority refused a fire-and-forget request (a takeback request among them). */
+  | { type: "requestRejected"; reason: string };
 
 // ── Tournament organizer (lobby protocol 4) ──────────────────────────────
 //

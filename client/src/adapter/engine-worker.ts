@@ -11,6 +11,10 @@ import init, {
   initialize_multiplayer_host_game,
   submit_action,
   drive_contest_js,
+  request_takeback_js,
+  respond_takeback_js,
+  cancel_takeback_js,
+  pending_takeback_js,
   submit_interaction_js,
   get_game_state,
   get_filtered_game_state,
@@ -62,6 +66,7 @@ import init, {
 import * as engineWasm from "@wasm/engine";
 
 import {
+  appliedSubmitResult,
   isActionOutcome,
   type ActionRejection,
   type AiActionProposal,
@@ -110,6 +115,10 @@ type EngineRequest =
       awayPlayers: number[];
       clicks: unknown[];
     }
+  | { type: "requestTakeback"; id: number; actor: number; aiPlayers: number[] }
+  | { type: "respondTakeback"; id: number; actor: number; approve: boolean; aiPlayers: number[] }
+  | { type: "cancelTakeback"; id: number; actor: number }
+  | { type: "pendingTakeback"; id: number }
   | { type: "submitInteraction"; id: number; actor: number; submission: InteractionSubmission }
   | { type: "previewManaPayment"; id: number; actor: number; action: GameAction }
   | { type: "previewInteraction"; id: number; actor: number; request: InteractionPreviewRequest }
@@ -441,11 +450,7 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           rejectionError(msg.id, outcome.rejection);
           break;
         }
-        const actionResult = outcome.result as { events?: unknown[]; log_entries?: unknown[] };
-        result(msg.id, {
-          events: actionResult.events ?? [],
-          log_entries: actionResult.log_entries ?? [],
-        });
+        result(msg.id, appliedSubmitResult(outcome));
         break;
       }
 
@@ -461,6 +466,29 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           break;
         }
         result(msg.id, outcome);
+        break;
+      }
+
+      case "requestTakeback": {
+        result(msg.id, request_takeback_js(msg.actor, Uint8Array.from(msg.aiPlayers)));
+        break;
+      }
+
+      case "respondTakeback": {
+        result(
+          msg.id,
+          respond_takeback_js(msg.actor, msg.approve, Uint8Array.from(msg.aiPlayers)),
+        );
+        break;
+      }
+
+      case "cancelTakeback": {
+        result(msg.id, cancel_takeback_js(msg.actor));
+        break;
+      }
+
+      case "pendingTakeback": {
+        result(msg.id, pending_takeback_js() ?? null);
         break;
       }
 

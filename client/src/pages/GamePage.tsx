@@ -22,11 +22,14 @@ import type {
   ObjectId,
   SerializedAbilityCost,
   AiDecisionDiagnosticReceipt,
+  TakebackEvent,
+  TakebackResolution,
 } from "../adapter/types";
 import {
   supportsAiDecisionDiagnostics,
   supportsDebugHandReveal,
   supportsMatchConcede,
+  supportsTakeback,
 } from "../adapter/types";
 import type {
   InteractionManaRestriction,
@@ -258,6 +261,14 @@ const HOSTING_FAILURE_MESSAGE_KEYS = {
   room_still_claimed: "gamePage.toasts.roomStillClaimed",
 } as const satisfies Record<Extract<P2PAdapterEvent, { type: "hostingFailed" }>["reason"], ParseKeys<"game">>;
 
+/** The toast each takeback resolution shows; an approval's feedback is the restored board. */
+const TAKEBACK_RESOLUTION_TOAST_KEYS = {
+  approved: null,
+  declined: "takebackDialog.declinedToast",
+  cancelled: "takebackDialog.cancelledToast",
+  withdrawn: "takebackDialog.withdrawnToast",
+} as const satisfies Record<TakebackResolution, ParseKeys<"multiplayer"> | null>;
+
 export function GamePage() {
   const { t } = useTranslation(["game", "multiplayer"]);
   const navigate = useNavigate();
@@ -391,8 +402,37 @@ export function GamePage() {
   const hasConcededRef = useRef(false);
   // GH #1507: "request takeback" — the table-wide pending request, if any.
   const [pendingTakeback, setPendingTakeback] = useState<
-    { requester: number; requesterName: string } | null
+    { requester: number; requesterName: string; voters: number[] } | null
   >(null);
+
+  const handleTakebackEvent = useCallback((event: TakebackEvent) => {
+    switch (event.type) {
+      case "takebackRequested":
+        setPendingTakeback({
+          requester: event.requester,
+          requesterName: event.requesterName,
+          voters: event.voters,
+        });
+        break;
+      case "takebackResolved": {
+        setPendingTakeback(null);
+        const toastKey = TAKEBACK_RESOLUTION_TOAST_KEYS[event.resolution];
+        if (toastKey !== null) {
+          useMultiplayerStore.getState().showToast(t(toastKey, { ns: "multiplayer" }));
+        }
+        break;
+      }
+      case "requestRejected":
+        // The authority refused a request; the session is intact. Deliberately
+        // does NOT touch `reconnectState` — that is the whole point of this
+        // case existing beside `error` rather than being folded into it.
+        // `event.reason` is authority-authored and so passes through raw, per
+        // `client/src/i18n/README.md` ("a string gets `t()` if and only if the
+        // frontend authored it").
+        useMultiplayerStore.getState().showToast(event.reason);
+        break;
+    }
+  }, [t]);
 
   const handleWsEvent = useCallback((event: WsAdapterEvent) => {
     switch (event.type) {
@@ -494,16 +534,12 @@ export function GamePage() {
         }));
         break;
       case "takebackRequested":
-        setPendingTakeback({
-          requester: event.requester,
-          requesterName: event.requesterName,
-        });
-        break;
       case "takebackResolved":
+      case "requestRejected":
+        handleTakebackEvent(event);
+        break;
+      case "bootstrapDelivered":
         setPendingTakeback(null);
-        if (!event.approved) {
-          useMultiplayerStore.getState().showToast(t("multiplayer:takebackDialog.declinedToast"));
-        }
         break;
       case "playerDisconnected":
         // Multiplayer (3+ players): a specific player disconnected
@@ -566,15 +602,6 @@ export function GamePage() {
           setReconnectState({ status: "failed" });
         }
         break;
-      case "requestRejected":
-        // The server refused a request; the session is intact. Deliberately
-        // does NOT touch `reconnectState` — that is the whole point of this
-        // case existing beside `error` rather than being folded into it.
-        // `event.reason` is server-authored and so passes through raw, per
-        // `client/src/i18n/README.md` ("a string gets `t()` if and only if the
-        // frontend authored it").
-        useMultiplayerStore.getState().showToast(event.reason);
-        break;
       case "deckRejected":
         navigate("/multiplayer", {
           state: {
@@ -588,10 +615,18 @@ export function GamePage() {
         });
         break;
     }
-  }, [gameId, navigate, joinCode, serverParam, isOnlineMode, t]);
+  }, [gameId, navigate, joinCode, serverParam, isOnlineMode, t, handleTakebackEvent]);
 
   const handleP2PEvent = useCallback((event: P2PAdapterEvent) => {
     switch (event.type) {
+      case "takebackRequested":
+      case "takebackResolved":
+      case "requestRejected":
+        handleTakebackEvent(event);
+        break;
+      case "bootstrapDelivered":
+        setPendingTakeback(null);
+        break;
       case "roomCreated": {
         setHostGameCode(event.roomCode);
         const effectivePlayerCount = playerCount ?? formatConfig?.max_players ?? 2;
@@ -751,7 +786,7 @@ export function GamePage() {
         break;
       }
     }
-  }, [navigate, formatConfig, matchConfig, playerCount, gameId, joinCode, t]);
+  }, [navigate, formatConfig, matchConfig, playerCount, gameId, joinCode, t, handleTakebackEvent]);
 
   const handleReady = useCallback(() => {
     setWaitingForOpponent(false);
@@ -788,6 +823,9 @@ export function GamePage() {
     setResumeResetReason(reason);
   }, []);
 
+  const routesWsEvents = mode === "ai" || mode === "online" || mode === "spectate";
+  const routesP2PEvents = mode === "p2p-host" || mode === "p2p-join";
+
   if (!gameId) return null;
 
   return (
@@ -806,10 +844,8 @@ export function GamePage() {
       draftId={draftIdParam}
       serverUrl={serverParam}
       pile={pileParam}
-      onWsEvent={mode === "ai" || mode === "online" || mode === "spectate" ? handleWsEvent : undefined}
-      onP2PEvent={
-        mode === "p2p-host" || mode === "p2p-join" ? handleP2PEvent : undefined
-      }
+      onWsEvent={routesWsEvents ? handleWsEvent : undefined}
+      onP2PEvent={routesP2PEvents ? handleP2PEvent : undefined}
       onReady={
         mode === "online" || mode === "spectate" || mode === "p2p-host" || mode === "p2p-join"
           ? handleReady
@@ -823,6 +859,7 @@ export function GamePage() {
         gameId={gameId}
         mode={rawMode}
         isOnlineMode={isOnlineMode}
+        receivesAdapterEvents={routesWsEvents || routesP2PEvents}
         hostGameCode={hostGameCode}
         waitingForOpponent={waitingForOpponent}
         opponentDisconnected={opponentDisconnected}
@@ -858,6 +895,8 @@ interface GamePageContentProps {
   gameId: string;
   mode: string | null;
   isOnlineMode: boolean;
+  /** Whether this page routes its adapter's events to a handler. */
+  receivesAdapterEvents: boolean;
   hostGameCode: string | null;
   waitingForOpponent: boolean;
   opponentDisconnected: boolean;
@@ -876,7 +915,7 @@ interface GamePageContentProps {
   timerRemaining: Record<number, number>;
   gameStartedAt: number | null;
   terminalReason: string | null;
-  pendingTakeback: { requester: number; requesterName: string } | null;
+  pendingTakeback: { requester: number; requesterName: string; voters: number[] } | null;
   onCloseTakebackDialog: () => void;
   // 3-4p P2P additions
   disconnectChoice: { playerId: number; gracePeriodMs: number } | null;
@@ -893,6 +932,7 @@ function GamePageContent({
   gameId,
   mode,
   isOnlineMode,
+  receivesAdapterEvents,
   hostGameCode,
   waitingForOpponent: _waitingForOpponent,
   opponentDisconnected,
@@ -1186,14 +1226,14 @@ function GamePageContent({
   // GH #1507: "request takeback" — ask every other human player to approve
   // rolling the game back to before this player's last action.
   const handleRequestTakeback = useCallback(() => {
-    if (adapter && adapter instanceof WebSocketAdapter) {
+    if (supportsTakeback(adapter)) {
       adapter.sendRequestTakeback();
     }
   }, [adapter]);
 
   const handleRespondTakeback = useCallback(
     (approve: boolean) => {
-      if (adapter && adapter instanceof WebSocketAdapter) {
+      if (supportsTakeback(adapter)) {
         adapter.sendRespondTakeback(approve);
       }
       onCloseTakebackDialog();
@@ -1202,7 +1242,7 @@ function GamePageContent({
   );
 
   const handleCancelTakeback = useCallback(() => {
-    if (adapter && adapter instanceof WebSocketAdapter) {
+    if (supportsTakeback(adapter)) {
       adapter.sendCancelTakeback();
     }
     onCloseTakebackDialog();
@@ -1801,24 +1841,9 @@ function GamePageContent({
         menuTriggerRef={gameMenuTriggerRef}
         onHelpClick={() => setHelpSheetOpen(true)}
         onConcede={onShowConcedeDialog}
-        // Takeback is a TRANSPORT capability, not a mode policy: only
-        // `WebSocketAdapter` implements `sendRequestTakeback`, which is why
-        // `handleRequestTakeback` already guards on the adapter type. Gating
-        // the prop the same way makes the button's presence agree with the
-        // handler instead of duplicating a different rule.
-        //
-        // `isOnlineMode` was wrong twice over. It is URL-derived and can never
-        // see `native-ai` (desktop solo arrives as `mode=ai`), so desktop solo
-        // — which has a real server-authoritative takeback and no client-side
-        // undo — never got the button. And it showed the button to spectators,
-        // whom `request_takeback` rejects server-side.
-        //
-        // A mode-based replacement would be wrong in the other direction:
-        // `p2p-host`/`p2p-join`/`draft-match` are also wire-authoritative but
-        // do not necessarily carry a `WebSocketAdapter`, so they would get a
-        // dead button that silently no-ops inside the handler's own guard.
+        // Offered when the adapter carries takeback and this page renders its takeback events.
         onRequestTakeback={
-          adapter instanceof WebSocketAdapter && mode !== "spectate"
+          supportsTakeback(adapter) && receivesAdapterEvents && mode !== "spectate"
             ? handleRequestTakeback
             : undefined
         }
@@ -2312,6 +2337,15 @@ function GamePageContent({
             )}
 
           {/* Multiplayer UX overlays */}
+          <TakebackRequestDialog
+            isOpen={pendingTakeback !== null
+              && (pendingTakeback.requester === playerId || pendingTakeback.voters.includes(playerId))}
+            requesterName={pendingTakeback?.requesterName ?? ""}
+            isOwnRequest={pendingTakeback?.requester === playerId}
+            onApprove={() => handleRespondTakeback(true)}
+            onDecline={() => handleRespondTakeback(false)}
+            onCancel={handleCancelTakeback}
+          />
           {isOnlineMode && (
             <>
               <ConcedeDialog
@@ -2328,14 +2362,6 @@ function GamePageContent({
                 }
                 onCancel={onHideConcedeDialog}
                 returnFocusRef={gameMenuTriggerRef}
-              />
-              <TakebackRequestDialog
-                isOpen={pendingTakeback !== null}
-                requesterName={pendingTakeback?.requesterName ?? ""}
-                isOwnRequest={pendingTakeback?.requester === playerId}
-                onApprove={() => handleRespondTakeback(true)}
-                onDecline={() => handleRespondTakeback(false)}
-                onCancel={handleCancelTakeback}
               />
               {!isSpectatorMode && (
                 <EmoteOverlay
