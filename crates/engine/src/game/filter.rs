@@ -11044,6 +11044,25 @@ pub(crate) fn card_names_match(a: &str, b: &str) -> bool {
     }
 }
 
+/// CR 709.4a + CR 709.4d: An object has the chosen name if one of its names is the
+/// chosen name; a fused split spell on the stack has both halves' names.
+/// `source_name` is a last-known-information name for a departed source and takes
+/// precedence over the live object's front name.
+pub(crate) fn source_has_chosen_name(
+    source: Option<&GameObject>,
+    source_name: Option<&str>,
+    chosen: &str,
+) -> bool {
+    let front_name = source_name.or_else(|| source.map(|o| o.name.as_str()));
+    front_name.is_some_and(|name| card_names_match(name, chosen))
+        || source.is_some_and(|o| {
+            o.fused_split_spell
+                && o.back_face
+                    .as_ref()
+                    .is_some_and(|back| card_names_match(&back.name, chosen))
+        })
+}
+
 /// CR 603.10: Evaluate a `FilterProp` against a zone-change event snapshot.
 ///
 /// Properties fall into four groups:
@@ -27980,5 +27999,42 @@ mod parser_oracle_trigger_tests {
         assert!(crate::game::filter::filter_denotes_battlefield_permanent(
             bare.valid_card.as_ref().unwrap()
         ));
+    }
+
+    /// CR 709.4a + CR 709.4d: an object has the chosen name if one of its names is the
+    /// chosen name; only a fused split spell carries both halves' names.
+    #[test]
+    fn source_has_chosen_name_covers_fused_split_halves_only() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let id = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(1),
+            crate::types::player::PlayerId(0),
+            "Toil".to_string(),
+            crate::types::zones::Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.back_face = Some(crate::game::game_object::BackFaceData {
+                name: "Trouble".to_string(),
+                ..Default::default()
+            });
+        }
+        let obj = &state.objects[&id];
+        assert!(super::source_has_chosen_name(Some(obj), None, "toil"));
+        assert!(!super::source_has_chosen_name(Some(obj), None, "Trouble"));
+
+        state.objects.get_mut(&id).unwrap().fused_split_spell = true;
+        let obj = &state.objects[&id];
+        assert!(super::source_has_chosen_name(Some(obj), None, "Trouble"));
+        assert!(super::source_has_chosen_name(Some(obj), None, "Toil"));
+        assert!(!super::source_has_chosen_name(Some(obj), None, "Other"));
+        // A last-known name takes precedence over the live front name.
+        assert!(super::source_has_chosen_name(
+            Some(obj),
+            Some("Clone"),
+            "Clone"
+        ));
+        assert!(!super::source_has_chosen_name(None, None, "Toil"));
     }
 }

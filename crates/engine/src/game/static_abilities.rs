@@ -1922,11 +1922,11 @@ pub fn player_protection_from_object_with_source_name(
                 // chosen as the granting permanent (e.g. Runed Halo) entered. Evaluates against
                 // the effective source name (LKI name for departed sources, live object name
                 // for live sources).
-                ProtectionTarget::ChosenCardName => effective_name.is_some_and(|name| {
-                    src_obj
-                        .chosen_card_name()
-                        .is_some_and(|chosen| crate::game::filter::card_names_match(name, chosen))
-                }),
+                ProtectionTarget::ChosenCardName => {
+                    src_obj.chosen_card_name().is_some_and(|chosen| {
+                        crate::game::filter::source_has_chosen_name(source, source_name, chosen)
+                    })
+                }
                 // CR 702.16k: "Protection from [a player]" at the player level — the
                 // protected player has protection from each object the specified
                 // player(s) control. "Each of your opponents" (CR 702.16i) → the

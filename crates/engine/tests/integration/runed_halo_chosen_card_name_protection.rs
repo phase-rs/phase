@@ -29,7 +29,7 @@ use engine::types::ability::{
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{CastPaymentMode, StackEntry, StackEntryKind, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::keywords::{Keyword, ProtectionTarget};
 use engine::types::mana::{ManaCost, ManaCostShard};
@@ -254,24 +254,6 @@ fn runed_halo_prevents_noncombat_damage_from_named_card() {
         runner.state().players[0].life,
         20,
         "P0 life must remain 20 after prevented damage"
-    );
-
-    // 1b. CR 702.16e: Ordinary Effect::DealDamage from Grizzly Bears resolved through the stack.
-    let ability_bear_stack = damage_ability(bear, P1, TargetRef::Player(P0));
-    runner.state_mut().stack.push_back(StackEntry {
-        id: ObjectId(999),
-        kind: StackEntryKind::ActivatedAbility {
-            source_id: bear,
-            ability: Box::new(ability_bear_stack),
-        },
-        controller: P1,
-        source_id: bear,
-    });
-    runner.advance_until_stack_empty();
-    assert_eq!(
-        runner.state().players[0].life,
-        20,
-        "P0 life must remain 20 after stack-resolved ordinary DealDamage from Grizzly Bears is prevented"
     );
 
     // 2. Damage from Hill Giant to P0 is NOT prevented.
@@ -744,4 +726,136 @@ fn runed_halo_prevents_targeting_from_departed_token_source() {
         legal_targets.contains(&TargetRef::Player(P1)),
         "P1 must be a legal target for ceased token Goblin, got {legal_targets:?}"
     );
+}
+
+const BOLT_ORACLE: &str = "Lightning Bolt deals 3 damage to any target.";
+const ORCISH_ARTILLERY_ORACLE: &str =
+    "{T}: This creature deals 2 damage to any target and 3 damage to you.";
+
+fn red_cost() -> ManaCost {
+    ManaCost::Cost {
+        shards: vec![ManaCostShard::Red],
+        generic: 0,
+    }
+}
+
+fn halo_on_battlefield(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_enchantment_from_oracle(P0, "Runed Halo", RUNED_HALO_ORACLE)
+        .id()
+}
+
+fn name_halo_choice(runner: &mut engine::game::scenario::GameRunner, halo: ObjectId, chosen: &str) {
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&halo)
+        .unwrap()
+        .chosen_attributes
+        .push(engine::types::ability::ChosenAttribute::CardName(
+            chosen.to_string(),
+        ));
+}
+
+/// CR 702.16b: a printed Lightning Bolt cast through the runner is aimed at P0.
+/// Returns `(P0 life, P1 life)` once the stack is empty.
+fn cast_bolt_aimed_at_p0(chosen: &str) -> (i32, i32) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let halo = halo_on_battlefield(&mut scenario);
+    scenario.with_mana_pool(
+        P0,
+        vec![engine::types::mana::ManaUnit::new(
+            engine::types::mana::ManaType::Red,
+            ObjectId(0),
+            false,
+            vec![],
+        )],
+    );
+    let bolt = scenario
+        .add_spell_to_hand_from_oracle(P0, "Lightning Bolt", false, BOLT_ORACLE)
+        .as_instant()
+        .with_mana_cost(red_cost())
+        .id();
+    let mut runner = scenario.build();
+    name_halo_choice(&mut runner, halo, chosen);
+
+    assert_eq!(runner.state().objects[&bolt].zone, Zone::Hand);
+    runner.cast(bolt).target_player(P0).resolve();
+    runner.advance_until_stack_empty();
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(
+        runner.state().objects[&bolt].zone,
+        Zone::Graveyard,
+        "reach guard: the Bolt was cast and resolved"
+    );
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0, "{{R}} paid");
+    (
+        runner.state().players[0].life,
+        runner.state().players[1].life,
+    )
+}
+
+#[test]
+fn runed_halo_blocks_printed_bolt_from_targeting_its_controller() {
+    // P0 is not a legal target, so the only legal target (P1) takes the Bolt.
+    assert_eq!(cast_bolt_aimed_at_p0("Lightning Bolt"), (20, 17));
+}
+
+#[test]
+fn runed_halo_naming_other_card_lets_printed_bolt_target_its_controller() {
+    assert_eq!(cast_bolt_aimed_at_p0("Shock"), (17, 20));
+}
+
+/// CR 702.16e: Orcish Artillery's untargeted "3 damage to you" is prevented when the
+/// controller has protection from "Orcish Artillery"; its targeted 2 damage still lands.
+fn activate_artillery(chosen: &str) -> (i32, i32) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let halo = halo_on_battlefield(&mut scenario);
+    let artillery = scenario
+        .add_creature_from_oracle(P0, "Orcish Artillery", 1, 3, ORCISH_ARTILLERY_ORACLE)
+        .id();
+    let mut runner = scenario.build();
+    name_halo_choice(&mut runner, halo, chosen);
+
+    let index = runner.state().objects[&artillery]
+        .abilities
+        .iter()
+        .position(|a| a.cost.is_some())
+        .expect("Orcish Artillery's tap ability");
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: artillery,
+            ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activating Orcish Artillery");
+    if let WaitingFor::TargetSelection { .. } = runner.state().waiting_for.clone() {
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Player(P1)),
+            })
+            .expect("targeting P1");
+    }
+    assert!(
+        runner.state().objects[&artillery].tapped,
+        "the tap cost is paid"
+    );
+    runner.advance_until_stack_empty();
+    assert!(runner.state().stack.is_empty());
+    (
+        runner.state().players[0].life,
+        runner.state().players[1].life,
+    )
+}
+
+#[test]
+fn runed_halo_prevents_artillery_self_damage_when_named() {
+    assert_eq!(activate_artillery("Orcish Artillery"), (20, 18));
+}
+
+#[test]
+fn runed_halo_does_not_prevent_artillery_self_damage_for_other_name() {
+    assert_eq!(activate_artillery("Shock"), (17, 18));
 }

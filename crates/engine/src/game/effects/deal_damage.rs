@@ -21,7 +21,7 @@ use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{DamageRecord, GameState, TriggerSourceRead};
 use crate::types::identifiers::ObjectId;
-use crate::types::keywords::KeywordKind;
+use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::player::{PlayerCounterKind, PlayerId};
 use crate::types::proposed_event::ProposedEvent;
 
@@ -1225,9 +1225,7 @@ fn stash_remaining_damage_chain(
     damage_source_id: ObjectId,
     remaining: impl IntoIterator<Item = (TargetRef, u32)>,
 ) {
-    let controller = ability.controller;
-    let mut iter = remaining.into_iter();
-    let Some((first_target, first_amount)) = iter.next() else {
+    let Some(mut head) = remaining_damage_chain(ability, damage_source_id, remaining) else {
         // No remaining batch work — still forward the parent's sub_ability so the
         // downstream chain resumes after the pending replacement choice resolves.
         if let Some(sub) = ability.sub_ability.as_ref() {
@@ -1238,17 +1236,33 @@ fn stash_remaining_damage_chain(
         }
         return;
     };
-
-    let mut head =
-        build_remaining_damage_node(damage_source_id, controller, first_target, first_amount);
-    for (target, amount) in iter {
-        let node = build_remaining_damage_node(damage_source_id, controller, target, amount);
-        append_to_sub_chain(&mut head, node);
-    }
     if let Some(sub) = ability.sub_ability.as_ref() {
         append_to_sub_chain(&mut head, cast_tail_with_parent_targets(sub, ability));
     }
     append_to_pending_continuation(state, Some(Box::new(head)));
+}
+
+/// CR 113.7a + CR 608.2h: Link the remaining (target, amount) recipients into a
+/// `sub_ability` chain. Every node keeps the parent's latched trigger source so a
+/// departed source is still evaluated by its last known information.
+fn remaining_damage_chain(
+    ability: &ResolvedAbility,
+    damage_source_id: ObjectId,
+    remaining: impl IntoIterator<Item = (TargetRef, u32)>,
+) -> Option<ResolvedAbility> {
+    let node = |target, amount| {
+        let mut node =
+            build_remaining_damage_node(damage_source_id, ability.controller, target, amount);
+        node.trigger_source = ability.trigger_source.clone();
+        node
+    };
+    let mut iter = remaining.into_iter();
+    let (first_target, first_amount) = iter.next()?;
+    let mut head = node(first_target, first_amount);
+    for (target, amount) in iter {
+        append_to_sub_chain(&mut head, node(target, amount));
+    }
+    Some(head)
 }
 
 /// CR 608.2c + CR 616.1e: Clone a damage effect's `sub_ability` tail for a
@@ -1568,11 +1582,26 @@ fn damage_context_from_ability(state: &GameState, ability: &ResolvedAbility) -> 
             ctx
         }
         Some(TriggerSourceRead::Latched(latched)) => {
-            let mut ctx = DamageContext::from_source(state, ability.source_id)
-                .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller));
-            ctx.source_name = Some(latched.lki.name.clone());
-            ctx.controller = latched.lki.controller;
-            ctx.source_is_creature = latched.lki.card_types.contains(&CoreType::Creature);
+            // CR 608.2h + CR 400.7: the captured observation, not the object now
+            // occupying the id, supplies the source's characteristics.
+            let lki = &latched.lki;
+            let has_keyword = |kind: KeywordKind| lki.keywords.iter().any(|k| k.kind() == kind);
+            let mut ctx = DamageContext::fallback(ability.source_id, lki.controller);
+            ctx.source_incarnation = Some(latched.identity.reference.incarnation);
+            ctx.source_name = Some(lki.name.clone());
+            ctx.source_is_creature = lki.card_types.contains(&CoreType::Creature);
+            ctx.has_deathtouch = has_keyword(KeywordKind::Deathtouch);
+            ctx.has_lifelink = has_keyword(KeywordKind::Lifelink);
+            ctx.has_wither = has_keyword(KeywordKind::Wither);
+            ctx.has_infect = has_keyword(KeywordKind::Infect);
+            ctx.combat_damage_poison = lki
+                .keywords
+                .iter()
+                .map(|k| match k {
+                    Keyword::Toxic(n) => *n,
+                    _ => 0,
+                })
+                .sum();
             ctx
         }
         None => {
@@ -8541,5 +8570,57 @@ mod attacked_referent_recipient_tests {
             resolve_effect_recipients(&state, &ability, &referent, false),
             vec![TargetRef::Player(PlayerId(1))]
         );
+    }
+
+    /// CR 113.7a + CR 608.2h: continuation nodes built for the recipients left after a
+    /// replacement pause keep the latched trigger source, so a departed source (a
+    /// ceased token) is still read by its last known name on resume.
+    #[test]
+    fn remaining_damage_chain_nodes_keep_latched_trigger_source() {
+        let mut state = GameState::new_two_player(42);
+        let token = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Goblin".to_string(),
+            Zone::Battlefield,
+        );
+        let latched =
+            crate::game::triggers::trigger_source_context_for_latch(&state, &state.objects[&token]);
+        state.objects.remove(&token);
+
+        let mut ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+            vec![],
+            token,
+            PlayerId(1),
+        );
+        ability.trigger_source = Some(latched);
+
+        let head = remaining_damage_chain(
+            &ability,
+            token,
+            [
+                (TargetRef::Player(PlayerId(0)), 1),
+                (TargetRef::Player(PlayerId(1)), 2),
+                (TargetRef::Player(PlayerId(0)), 3),
+            ],
+        )
+        .expect("three remaining recipients");
+
+        let mut count = 0;
+        let mut node = Some(&head);
+        while let Some(n) = node {
+            count += 1;
+            let ctx = damage_context_from_ability(&state, n);
+            assert_eq!(ctx.source_name.as_deref(), Some("Goblin"));
+            node = n.sub_ability.as_deref();
+        }
+        assert_eq!(count, 3, "positive guard: every recipient node was visited");
     }
 }

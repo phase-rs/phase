@@ -668,17 +668,14 @@ pub fn protection_prevents_from_with_source_name(
     source: Option<&GameObject>,
     source_name: Option<&str>,
 ) -> bool {
-    let effective_name = source_name.or_else(|| source.map(|o| o.name.as_str()));
     for kw in &target.keywords {
         if let Keyword::Protection(ref pt) = kw {
             match pt {
                 ProtectionTarget::ChosenCardName => {
-                    if let Some(name) = effective_name {
-                        if target.chosen_card_name().is_some_and(|chosen| {
-                            crate::game::filter::card_names_match(name, chosen)
-                        }) {
-                            return true;
-                        }
+                    if target.chosen_card_name().is_some_and(|chosen| {
+                        crate::game::filter::source_has_chosen_name(source, source_name, chosen)
+                    }) {
+                        return true;
                     }
                 }
                 _ => {
@@ -722,9 +719,9 @@ pub fn source_matches_protection_target(
             .is_some_and(|quality| source_matches_card_type(source, quality)),
         // CR 702.16a + CR 201.2: "Protection from the chosen card
         // name" — resolved from the protected permanent's own chosen card name.
-        ProtectionTarget::ChosenCardName => protected
-            .chosen_card_name()
-            .is_some_and(|name| crate::game::filter::card_names_match(&source.name, name)),
+        ProtectionTarget::ChosenCardName => protected.chosen_card_name().is_some_and(|name| {
+            crate::game::filter::source_has_chosen_name(Some(source), None, name)
+        }),
         // CR 702.16k: Resolve "the chosen player" from the protected
         // permanent's persisted choice. Protection covers objects that player
         // controls and objects they own that no other player controls; CR

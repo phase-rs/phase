@@ -164,6 +164,25 @@ pub fn player_is_legal_target(
     player_is_legal_target_with_source_name(state, player, source_id, source_controller, None)
 }
 
+/// CR 608.2h + CR 702.16: The name protection checks compare a target source against.
+/// A captured trigger source contributes its live name only while `ExactLive`;
+/// otherwise its last-known name. Without one, the live source object's name.
+fn source_projection_name<'a>(
+    state: &'a GameState,
+    target_ctx: &'a super::filter::FilterContext,
+    source_id: ObjectId,
+) -> Option<&'a str> {
+    target_ctx
+        .trigger_source
+        .map(|source| match source.source_read(state) {
+            crate::types::game_state::TriggerSourceRead::ExactLive(obj) => obj.name.as_str(),
+            crate::types::game_state::TriggerSourceRead::Latched(latched) => {
+                latched.lki.name.as_str()
+            }
+        })
+        .or_else(|| state.objects.get(&source_id).map(|obj| obj.name.as_str()))
+}
+
 /// CR 702.16b + CR 608.2h: Player target legality with an optional source name
 /// projection (from captured LKI for departed sources, or live object).
 pub fn player_is_legal_target_with_source_name(
@@ -226,15 +245,7 @@ fn find_legal_targets_with_context(
     // CR 608.2h + CR 702.16: Determine the effective source name for protection checks.
     // When the ability carries a captured trigger source, use the live object only if
     // `ExactLive`; otherwise use the captured LKI name.
-    let source_projection_name: Option<&str> = target_ctx
-        .trigger_source
-        .map(|source| match source.source_read(state) {
-            crate::types::game_state::TriggerSourceRead::ExactLive(obj) => obj.name.as_str(),
-            crate::types::game_state::TriggerSourceRead::Latched(latched) => {
-                latched.lki.name.as_str()
-            }
-        })
-        .or_else(|| state.objects.get(&source_id).map(|obj| obj.name.as_str()));
+    let source_projection_name = source_projection_name(state, target_ctx, source_id);
 
     // SpecificObject is runtime-bound (not used for target selection)
     if matches!(filter, TargetFilter::SpecificObject { .. }) {
@@ -596,15 +607,7 @@ fn has_legal_target_with_context(
     let source_ignores_hexproof =
         crate::game::static_abilities::player_ignores_hexproof(state, source_controller);
 
-    let source_projection_name: Option<&str> = target_ctx
-        .trigger_source
-        .map(|source| match source.source_read(state) {
-            crate::types::game_state::TriggerSourceRead::ExactLive(obj) => obj.name.as_str(),
-            crate::types::game_state::TriggerSourceRead::Latched(latched) => {
-                latched.lki.name.as_str()
-            }
-        })
-        .or_else(|| state.objects.get(&source_id).map(|obj| obj.name.as_str()));
+    let source_projection_name = source_projection_name(state, target_ctx, source_id);
 
     let explicit_zones = extract_explicit_zones(filter);
     if !explicit_zones.is_empty() {
