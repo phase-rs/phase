@@ -5084,8 +5084,19 @@ pub(super) fn parse_choose_ast(
             // unclassified fragments into new card-coverage diagnostics.
             // The former parse_target wrapper discarded those diagnostics.
             let diagnostic_count = ctx.diagnostics.len();
-            let (target, _) = parse_target_with_ctx(rest, ctx);
+            let (target, remainder) = parse_target_with_ctx(rest, ctx);
             ctx.diagnostics.truncate(diagnostic_count);
+            // CR 115.10a + CR 608.2d: only a fully parsed, untargeted object
+            // choice establishes that the object is chosen during resolution.
+            // Random selections must not become controller-choice prompts.
+            if remainder.trim().is_empty()
+                && ctx.target_selection_mode == TargetSelectionMode::Chosen
+                && !nom_primitives::scan_contains(rest_lower, "target ")
+                && !target.is_context_ref()
+                && !target.denotes_player_target()
+            {
+                ctx.declared_target_choice_timing = Some(TargetChoiceTiming::Resolution);
+            }
             return Some(ChooseImperativeAst::TargetOnly { target });
         }
     }

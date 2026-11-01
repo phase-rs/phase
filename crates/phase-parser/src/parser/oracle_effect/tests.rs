@@ -78391,61 +78391,47 @@ fn bare_choose_printed_cards_use_resolution_timing() {
     assert_eq!(copy.target_choice_timing, TargetChoiceTiming::Stack);
 }
 
-/// SHAPE: only the existing mandatory single-object chooser may be retimed.
+/// SHAPE: a partially parsed object phrase cannot establish resolution timing.
 #[test]
-fn bare_choose_classifier_preserves_selection_boundaries() {
-    let text = "Choose a creature you control.";
-    let parsed = parse_effect_clause(text, &mut ParseContext::default());
-    assert!(matches!(parsed.effect, Effect::TargetOnly { .. }));
-    let timing = |parsed: &ParsedEffectClause, fragment: &str, multi, selection| {
-        super::lower::target_choice_timing_for_parsed(parsed, fragment, None, multi, selection)
-    };
+fn bare_choose_partial_object_phrase_keeps_stack_timing() {
+    let rest = "a creature you control that hasn't attacked this turn";
+    let (target, remainder) = parse_target_with_ctx(rest, &mut ParseContext::default());
+    assert_eq!(remainder, " that hasn't attacked this turn");
     assert_eq!(
-        timing(&parsed, text, false, TargetSelectionMode::Chosen),
-        TargetChoiceTiming::Resolution
+        target,
+        TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
     );
-    // The resolution prompt supports neither multiple objects nor random selection.
+
+    let text = "Choose a creature you control that hasn't attacked this turn";
+    let mut ctx = ParseContext::default();
     assert_eq!(
-        timing(&parsed, text, true, TargetSelectionMode::Chosen),
-        TargetChoiceTiming::Stack
+        super::imperative::parse_choose_ast(text, &text.to_ascii_lowercase(), &mut ctx),
+        Some(ChooseImperativeAst::TargetOnly {
+            target: target.clone(),
+        })
     );
-    let mut multi = parsed.clone();
-    multi.multi_target = Some(MultiTargetSpec::fixed(1, 2));
+    assert_eq!(ctx.declared_target_choice_timing, None);
+
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    assert_eq!(def.effect.as_ref(), &Effect::TargetOnly { target });
+    assert_eq!(def.target_choice_timing, TargetChoiceTiming::Stack);
+}
+
+/// SHAPE: a random object selection must not enter the controller-choice path.
+#[test]
+fn bare_choose_random_object_keeps_stack_timing() {
+    let def = parse_effect_chain(
+        "Choose a creature you control at random.",
+        AbilityKind::Spell,
+    );
     assert_eq!(
-        timing(&multi, text, false, TargetSelectionMode::Chosen),
-        TargetChoiceTiming::Stack
+        def.effect.as_ref(),
+        &Effect::TargetOnly {
+            target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+        }
     );
-    assert_eq!(
-        timing(&parsed, text, false, TargetSelectionMode::Random),
-        TargetChoiceTiming::Stack
-    );
-    let mut optional = parsed.clone();
-    optional.optional_targeting = true;
-    assert_eq!(
-        timing(&optional, text, false, TargetSelectionMode::Chosen),
-        TargetChoiceTiming::Stack
-    );
-    for target in [
-        TargetFilter::ParentTarget,
-        TargetFilter::SelfRef,
-        TargetFilter::Player,
-    ] {
-        let mut reference = parsed.clone();
-        reference.effect = Effect::TargetOnly { target };
-        assert_eq!(
-            timing(&reference, text, false, TargetSelectionMode::Chosen),
-            TargetChoiceTiming::Stack
-        );
-    }
-    assert_eq!(
-        timing(
-            &parsed,
-            "Each opponent chooses a creature they control.",
-            false,
-            TargetSelectionMode::Chosen
-        ),
-        TargetChoiceTiming::Stack
-    );
+    assert_eq!(def.target_selection_mode, TargetSelectionMode::Random);
+    assert_eq!(def.target_choice_timing, TargetChoiceTiming::Stack);
 }
 
 /// Keep the coin-branch representation in one helper for the FlipCoins rebase.

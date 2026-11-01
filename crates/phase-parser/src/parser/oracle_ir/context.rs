@@ -608,6 +608,12 @@ pub struct ParseContext {
     /// outranks the scan. `None` (the default) leaves the ladder in charge, so
     /// every incumbent clause is unaffected.
     ///
+    /// The legacy bare-choose producer declares `Resolution` only after the
+    /// target parser consumes the entire object phrase, with chosen selection
+    /// and no printed target, context reference, or player target. A partial
+    /// phrase leaves this unset; `TargetOnly` then defaults to `Stack`,
+    /// without a filter-shape inference.
+    ///
     /// Set and consumed within a single chunk parse; never serialized. A
     /// speculative sub-parse that discards its cloned context discards this too.
     pub declared_target_choice_timing: Option<TargetChoiceTiming>,
