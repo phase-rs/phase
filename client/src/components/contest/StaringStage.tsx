@@ -2,11 +2,14 @@ import { useEffect, useState } from "react";
 import type { CSSProperties } from "react";
 
 import type { ContestState } from "../../adapter/types.ts";
+import { GAME_Z_LAYER } from "../../constants/ui.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useSpectatorMode } from "../../hooks/useSpectatorMode.ts";
 import { useContestStore } from "../../stores/contestStore.ts";
+import { useGameStore } from "../../stores/gameStore.ts";
 import {
   STARE_FINALE_MS,
+  localContestSeats,
   stareContestPose,
   stareElapsedMs,
   stareFinale,
@@ -77,6 +80,22 @@ function useStareStrain(contest: ContestState | null): number {
   return strain;
 }
 
+/** Swallows the activation keys while `active`. A player who has just won is still
+ *  mashing them, and the contest's own guard ended with the contest: the next press
+ *  would pass priority on a board they cannot see yet. */
+function useHoldActivationKeys(active: boolean) {
+  useEffect(() => {
+    if (!active) return;
+    const hold = (event: KeyboardEvent) => {
+      if (event.key !== " " && event.key !== "Enter") return;
+      event.preventDefault();
+      event.stopPropagation();
+    };
+    window.addEventListener("keydown", hold, { capture: true });
+    return () => window.removeEventListener("keydown", hold, { capture: true });
+  }, [active]);
+}
+
 /** The eye itself. Decorative: the contest and its result are always named in text.
  *  Pose and strain live here; every movement they imply is in `index.css`. */
 function StaringEye({ pose, strain }: { pose: StarePose; strain: number }) {
@@ -85,7 +104,7 @@ function StaringEye({ pose, strain }: { pose: StarePose; strain: number }) {
   return (
     <svg
       viewBox="24 46 432 186"
-      className="stare-eye size-full overflow-visible"
+      className="stare-eye aspect-[432/186] max-h-full w-full overflow-visible"
       aria-hidden="true"
       focusable="false"
     >
@@ -180,8 +199,9 @@ function StaringEye({ pose, strain }: { pose: StarePose; strain: number }) {
  * against the other side. If the viewer is the one who lost, it is the viewer's own
  * eyelids that close over the screen while the eye stays open. Mounted alongside the
  * contest panel rather than inside it because this outlives the contest: the engine
- * has already moved on by the time the blink plays, so it is non-interactive and never
- * holds the game up. Other contest kinds, and a cancelled contest, have no stage.
+ * has already moved on by the time the blink plays, so for that beat the stage takes
+ * the player's input, which is still aimed at a contest that is over. Other contest
+ * kinds, and a cancelled contest, have no stage.
  */
 export function StaringStage({ contest }: { contest: ContestState | null }) {
   const staring = contest?.kind === "Staring" ? contest : null;
@@ -190,7 +210,14 @@ export function StaringStage({ contest }: { contest: ContestState | null }) {
   const spectating = useSpectatorMode();
   const announcement = useContestStore((s) => s.announcement);
   const announcementId = announcement?.id;
-  const finale = announcement ? stareFinale(announcement, spectating ? null : me) : null;
+  const gameMode = useGameStore((s) => s.gameMode);
+  const aiSeatIds = useGameStore((s) => s.aiSeatIds);
+  const finale = announcement
+    ? stareFinale(
+        announcement,
+        spectating ? [] : localContestSeats(announcement.participants, gameMode, me, aiSeatIds),
+      )
+    : null;
 
   const [playedFinale, setPlayedFinale] = useState<number | null>(null);
   useEffect(() => {
@@ -199,11 +226,14 @@ export function StaringStage({ contest }: { contest: ContestState | null }) {
     return () => window.clearTimeout(timer);
   }, [finale, announcementId]);
 
+  // Any running contest takes over from a finale: it owns the screen and the keys.
   const pose: StarePose | null = staring
     ? stareContestPose(staring)
-    : playedFinale === announcementId
+    : contest || playedFinale === announcementId
       ? null
       : finale;
+  const inFinale = !contest && pose != null;
+  useHoldActivationKeys(inFinale);
   if (pose == null) return null;
 
   const viewerBlinks = pose === "ViewerBlinks" || pose === "BothBlink";
@@ -211,11 +241,16 @@ export function StaringStage({ contest }: { contest: ContestState | null }) {
     <div
       data-testid="staring-stage"
       data-pose={pose}
+      data-paused={staring?.paused_since_ms != null ? "" : undefined}
       aria-hidden="true"
-      className="stare-stage pointer-events-none fixed inset-0 z-50 overflow-hidden"
+      className={[
+        "stare-stage fixed inset-0 overflow-hidden",
+        GAME_Z_LAYER.modal,
+        inFinale ? "pointer-events-auto" : "pointer-events-none",
+      ].join(" ")}
       style={{ "--stare-strain": strain, "--stare-finale": `${STARE_FINALE_MS}ms` } as CSSProperties}
     >
-      <div className="absolute inset-x-0 top-0 h-[44dvh] p-2 [@media(max-height:600px)]:h-full [@media(max-height:600px)]:w-1/2">
+      <div className="stare-eye-slot">
         <StaringEye pose={pose} strain={strain} />
       </div>
       {viewerBlinks && (

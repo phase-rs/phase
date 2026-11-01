@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { ContestResult, ContestState } from "../../../adapter/types.ts";
-import { stareContestPose, stareElapsedMs, stareFinale, stareStrain } from "../staring.ts";
+import { localContestSeats, stareContestPose, stareElapsedMs, stareFinale, stareStrain } from "../staring.ts";
 
 describe("stareElapsedMs", () => {
   it("is the snapshot's time since GO plus the local time since it arrived", () => {
@@ -42,25 +42,49 @@ describe("stareFinale", () => {
   const decided = (winner: number, loser: number): ContestResult => ({
     Outcome: { Decided: { winner, loser, reason: "Inactivity" } },
   });
-  const staring = (result: ContestResult) => ({ kind: "Staring" as const, result });
-
-  it("blinks the eye when the viewer did not lose, spectators included", () => {
-    expect(stareFinale(staring(decided(0, 1)), 0)).toBe("EyeBlinks");
-    expect(stareFinale(staring(decided(0, 1)), 5)).toBe("EyeBlinks");
-    expect(stareFinale(staring(decided(1, 0)), null)).toBe("EyeBlinks");
+  const staring = (result: ContestResult) => ({
+    kind: "Staring" as const,
+    participants: [0, 1],
+    result,
   });
 
-  it("blinks the viewer when the viewer lost", () => {
-    expect(stareFinale(staring(decided(1, 0)), 0)).toBe("ViewerBlinks");
+  it("blinks the eye when the contestant at this screen won", () => {
+    expect(stareFinale(staring(decided(0, 1)), [0])).toBe("EyeBlinks");
+  });
+
+  it("blinks the viewer when the contestant at this screen lost", () => {
+    expect(stareFinale(staring(decided(1, 0)), [0])).toBe("ViewerBlinks");
   });
 
   it("blinks both on a tie and neither on a cancellation", () => {
-    expect(stareFinale(staring({ Outcome: "Tie" }), 0)).toBe("BothBlink");
-    expect(stareFinale(staring({ Cancelled: "TimeLimit" }), 0)).toBeNull();
+    expect(stareFinale(staring({ Outcome: "Tie" }), [0])).toBe("BothBlink");
+    expect(stareFinale(staring({ Cancelled: "TimeLimit" }), [0])).toBeNull();
+  });
+
+  it.each<[string, number[]]>([
+    ["a spectator", []],
+    ["a seat outside the contest", [5]],
+    ["hotseat's two players", [0, 1]],
+  ])("always blinks the eye for %s, who have no one viewer to blink", (_name, seats) => {
+    expect(stareFinale(staring(decided(0, 1)), seats)).toBe("EyeBlinks");
+    expect(stareFinale(staring(decided(1, 0)), seats)).toBe("EyeBlinks");
+    expect(stareFinale(staring({ Outcome: "Tie" }), seats)).toBe("EyeBlinks");
   });
 
   it("belongs to staring contests only", () => {
-    expect(stareFinale({ kind: "BreathHolding", result: decided(0, 1) }, 0)).toBeNull();
+    expect(stareFinale({ ...staring(decided(0, 1)), kind: "BreathHolding" }, [0])).toBeNull();
+  });
+});
+
+describe("localContestSeats", () => {
+  it("is this client's own seat, if it has one in the contest", () => {
+    expect(localContestSeats([0, 1], "ai", 1, [0])).toEqual([1]);
+    expect(localContestSeats([0, 1], "ai", 5, [])).toEqual([]);
+  });
+
+  it("is every human in hotseat", () => {
+    expect(localContestSeats([0, 1], "local", 0, [])).toEqual([0, 1]);
+    expect(localContestSeats([0, 1], "local", 0, [1])).toEqual([0]);
   });
 });
 
@@ -68,12 +92,12 @@ describe("stareContestPose", () => {
   const contest = (phase: ContestState["phase"], paused_since_ms?: number) =>
     ({ phase, paused_since_ms }) as ContestState;
 
-  it("waits, stares, and holds through a pause", () => {
+  it("waits until GO, stares from then on, and a pause changes neither", () => {
     expect(stareContestPose(contest("Pending"))).toBe("Preparing");
     expect(stareContestPose(contest("Preparing"))).toBe("Preparing");
     expect(stareContestPose(contest("Active"))).toBe("Staring");
     expect(stareContestPose(contest("Resolving"))).toBe("Staring");
-    expect(stareContestPose(contest("Active", 1_000))).toBe("Paused");
-    expect(stareContestPose(contest("Preparing", 1_000))).toBe("Paused");
+    expect(stareContestPose(contest("Active", 1_000))).toBe("Staring");
+    expect(stareContestPose(contest("Preparing", 1_000))).toBe("Preparing");
   });
 });

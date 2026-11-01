@@ -8,6 +8,7 @@ import type {
   EngineAdapter,
   EngineSnapshot,
   GameEvent,
+  GameState,
 } from "../../../adapter/types.ts";
 import { isWaitingForHandled } from "../../../game/waitingForRegistry.ts";
 import { useContestStore } from "../../../stores/contestStore.ts";
@@ -454,7 +455,7 @@ describe("ContestOverlay staring eye", () => {
     });
     render(<ContestOverlay />);
     const stage = screen.getByTestId("staring-stage");
-    expect(stage).toHaveAttribute("data-pose", "Paused");
+    expect(stage).toHaveAttribute("data-paused");
     const frozen = strainOf(stage);
     expect(frozen).toBeGreaterThan(0);
 
@@ -467,7 +468,7 @@ describe("ContestOverlay staring eye", () => {
         submitContestClick: vi.fn(() => true),
       }),
     );
-    expect(stage).toHaveAttribute("data-pose", "Staring");
+    expect(stage).not.toHaveAttribute("data-paused");
     expect(strainOf(stage)).toBe(frozen);
   });
 
@@ -497,9 +498,8 @@ describe("ContestOverlay staring eye", () => {
     expect(strainOf(stage)).toBe(reached);
     expect(screen.getAllByTestId("stare-squeezed-tear").length).toBeGreaterThan(0);
     expect(screen.queryByTestId("stare-viewer-blink")).not.toBeInTheDocument();
-    // The engine has moved on: the blink plays over the board without holding it.
+    // The engine has moved on: the panel is gone and the stage plays over the board.
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    expect(stage).toHaveClass("pointer-events-none");
     expect(screen.getByText("You won the contest!")).toBeInTheDocument();
   });
 
@@ -519,8 +519,69 @@ describe("ContestOverlay staring eye", () => {
     showContest(contestState("Active"), { submitContestClick: vi.fn(() => true) });
     render(<ContestOverlay />);
 
+    settle({ Outcome: "Tie" });
     settle({ Outcome: { Decided: { winner: 1, loser: 0, reason: "Inactivity" } } });
     useMultiplayerStore.setState({ isSpectator: false });
+
+    expect(screen.getByTestId("staring-stage")).toHaveAttribute("data-pose", "EyeBlinks");
+    expect(screen.queryByTestId("stare-viewer-blink")).not.toBeInTheDocument();
+  });
+
+  it("lets clicks through to the contest, then keeps a mashing winner off the board", () => {
+    dispatchActionMock.mockClear();
+    const submitContestClick = vi.fn(() => true);
+    showContest(contestState("Active"), { submitContestClick });
+    render(
+      <>
+        <GlobalShortcuts />
+        <ContestOverlay />
+      </>,
+    );
+    expect(screen.getByTestId("staring-stage")).toHaveClass("pointer-events-none");
+    useGameStore.setState({ gameState: {} as GameState });
+
+    settle({ Outcome: { Decided: { winner: 0, loser: 1, reason: "Inactivity" } } });
+    expect(screen.getByTestId("staring-stage")).toHaveClass("pointer-events-auto");
+    fireEvent.keyDown(document.body, { key: " " });
+    fireEvent.keyDown(document.body, { key: "Enter" });
+    expect(dispatchActionMock).not.toHaveBeenCalled();
+
+    // The beat over, the same key belongs to the game again.
+    act(() => void vi.advanceTimersByTime(STARE_FINALE_MS));
+    expect(screen.queryByTestId("staring-stage")).not.toBeInTheDocument();
+    fireEvent.keyDown(document.body, { key: " " });
+    expect(dispatchActionMock).toHaveBeenCalledWith({ type: "PassPriority" });
+    useGameStore.setState({ gameState: null });
+  });
+
+  it("gives the keys to a breath-holding contest that starts during the blink", () => {
+    const submitContestClick = vi.fn(() => true);
+    showContest(contestState("Active"), { submitContestClick });
+    render(<ContestOverlay />);
+    settle({ Outcome: { Decided: { winner: 0, loser: 1, reason: "Inactivity" } } });
+    expect(screen.getByTestId("staring-stage")).toHaveAttribute("data-pose", "EyeBlinks");
+
+    act(() =>
+      useGameStore.setState({
+        waitingFor: {
+          type: "PhysicalContest",
+          data: { contest: contestState("Active", { id: 2, kind: "BreathHolding" }), source_id: 8 },
+        },
+      }),
+    );
+
+    expect(screen.queryByTestId("staring-stage")).not.toBeInTheDocument();
+    fireEvent.keyDown(screen.getByRole("button", { name: "Keep clicking!" }), { key: " " });
+    expect(submitContestClick).toHaveBeenCalledWith(2, 1);
+  });
+
+  it("does not take a hotseat seat for the viewer, whichever of them lost", () => {
+    useGameStore.setState({ aiSeatIds: [] });
+    showContest(contestState("Active"), { driveContest: vi.fn() });
+    useGameStore.setState({ gameMode: "local" });
+    render(<ContestOverlay />);
+
+    settle({ Outcome: { Decided: { winner: 1, loser: 0, reason: "Inactivity" } } });
 
     expect(screen.getByTestId("staring-stage")).toHaveAttribute("data-pose", "EyeBlinks");
     expect(screen.queryByTestId("stare-viewer-blink")).not.toBeInTheDocument();

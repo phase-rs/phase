@@ -1137,8 +1137,36 @@ select.select-dark option {
   --stare-lower: 14px;
 }
 
-.stare-stage[data-pose="Paused"] * {
+.stare-stage[data-paused] * {
   animation-play-state: paused;
+}
+
+/* The eye sits above the panel, or beside it wherever stacking would cover the eye:
+   a landscape screen too short for both, from a laptop down to a sideways phone. */
+.stare-eye-slot {
+  position: absolute;
+  inset-inline: 0;
+  top: 0;
+  height: 44dvh;
+  padding: 0.5rem;
+}
+
+.stare-dialog {
+  align-items: flex-end;
+}
+
+@media (max-height: 860px) and (min-aspect-ratio: 1 / 1) {
+  .stare-eye-slot {
+    right: min(30rem, 60%);
+    display: flex;
+    align-items: center;
+    height: 100%;
+  }
+
+  .stare-dialog {
+    align-items: center;
+    justify-content: flex-end;
+  }
 }
 
 .stare-stage[data-pose="EyeBlinks"],
@@ -1181,7 +1209,7 @@ select.select-dark option {
   stroke-width: 2.5;
   stroke-linecap: round;
   stroke-dasharray: 1;
-  stroke-dashoffset: calc(1 - var(--stare-strain) * 1.25);
+  stroke-dashoffset: max(0, calc(1 - var(--stare-strain) * 1.25));
   opacity: calc(var(--stare-strain) * 3);
 }
 

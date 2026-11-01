@@ -13,9 +13,9 @@ import { playContestCue } from "../../game/contestAudio.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { CONTEST_RESULT_BANNER_MS, useContestStore } from "../../stores/contestStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
-import type { GameMode } from "../../stores/gameStore.ts";
 import { getOpponentDisplayName } from "../../stores/multiplayerStore.ts";
 import { StaringStage } from "./StaringStage.tsx";
+import { localContestSeats } from "./staring.ts";
 
 /** Wall-clock cadence of the local countdown redraw. Cosmetic only. */
 const COUNTDOWN_REDRAW_MS = 100;
@@ -45,23 +45,6 @@ function countedClicks(
   const confirmed = contest.contestants.find((c) => c.player === player)?.clicks ?? 0;
   const live = progress.contest === contest.id ? (progress.clicks[player] ?? 0) : 0;
   return Math.max(confirmed, live);
-}
-
-/**
- * The contestants this client plays: its own seat, or — in human hotseat, where one
- * client seats every non-AI player — each of them. The established seating
- * configuration (`aiSeatIds`, `gameMode`) decides; nothing is guessed from who is
- * "not me".
- */
-function localContestSeats(
-  contest: ContestState,
-  gameMode: GameMode | null,
-  me: PlayerId,
-  aiSeatIds: readonly PlayerId[],
-): PlayerId[] {
-  const seats = contest.contestants.map((c) => c.player);
-  if (gameMode === "local") return seats.filter((seat) => !aiSeatIds.includes(seat));
-  return seats.filter((seat) => seat === me);
 }
 
 /** Display-only: the localized sentence for a settled contest. */
@@ -159,7 +142,12 @@ function ContestPanel({ contest }: { contest: ContestState }) {
   const gameMode = useGameStore((s) => s.gameMode);
   const aiSeatIds = useGameStore((s) => s.aiSeatIds);
   const progress = useContestStore((s) => s.progress);
-  const localSeats = localContestSeats(contest, gameMode, me, aiSeatIds);
+  const localSeats = localContestSeats(
+    contest.contestants.map((c) => c.player),
+    gameMode,
+    me,
+    aiSeatIds,
+  );
   const isParticipant = localSeats.length > 0;
   const paused = contest.paused_since_ms != null;
   // A staring contest plays out under the stage's eye, which replaces the glyph and
@@ -279,15 +267,13 @@ function ContestPanel({ contest }: { contest: ContestState }) {
       onBlur={keepFocusInside}
       className={[
         "fixed inset-0 z-50 flex justify-center p-4 outline-none",
-        isStaring
-          ? "items-end [@media(max-height:600px)]:items-center [@media(max-height:600px)]:justify-end"
-          : "items-center bg-black/75",
+        isStaring ? "stare-dialog" : "items-center bg-black/75",
       ].join(" ")}
       role="dialog"
       aria-modal="true"
       aria-labelledby="contest-title"
     >
-      <div className="flex w-full max-w-md flex-col items-center gap-4 rounded-2xl border border-white/20 bg-slate-900 p-5 text-center text-white shadow-2xl">
+      <div className="flex max-h-full w-full max-w-md flex-col items-center gap-4 overflow-y-auto rounded-2xl border border-white/20 bg-slate-900 p-5 text-center text-white shadow-2xl">
         {!isStaring && <BreathGlyph />}
         <h2 id="contest-title" className="text-xl font-semibold">
           {isStaring
@@ -379,7 +365,11 @@ function ResultBannerBody({
     <div
       role="status"
       aria-live="polite"
-      className="pointer-events-none fixed inset-x-0 top-24 z-50 flex justify-center px-4"
+      // Below the eye of a staring contest, whose closing beat plays under this.
+      className={[
+        "pointer-events-none fixed inset-x-0 z-50 flex justify-center px-4",
+        announcement.kind === "Staring" ? "bottom-24" : "top-24",
+      ].join(" ")}
     >
       <p className="rounded-xl border border-white/30 bg-slate-900/95 px-5 py-3 text-lg font-bold text-white shadow-xl">
         {text}

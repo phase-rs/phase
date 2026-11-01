@@ -1,4 +1,5 @@
 import type { ContestKind, ContestResult, ContestState, PlayerId } from "../../adapter/types.ts";
+import type { GameMode } from "../../stores/gameStore.ts";
 
 /** How long the eye's closing beat lasts once the engine has settled the contest.
  *  Shorter than the result banner, so the banner has the last word. */
@@ -9,11 +10,27 @@ export const STARE_FINALE_MS = 2400;
 const STRAIN_TIME_CONSTANT_MS = 10_000;
 
 /** Who blinks when the contest ends. The eye stands for the other side of the stare,
- *  so anyone watching it who did not lose sees the eye give in. */
+ *  so anyone who is not the one side facing it sees the eye give in. */
 export type StareFinale = "EyeBlinks" | "ViewerBlinks" | "BothBlink";
 
 /** What the eye is doing right now. */
-export type StarePose = "Preparing" | "Staring" | "Paused" | StareFinale;
+export type StarePose = "Preparing" | "Staring" | StareFinale;
+
+/**
+ * The contestants this client plays: its own seat, or — in human hotseat, where one
+ * client seats every non-AI player — each of them. The established seating
+ * configuration (`aiSeatIds`, `gameMode`) decides; nothing is guessed from who is
+ * "not me".
+ */
+export function localContestSeats(
+  seats: readonly PlayerId[],
+  gameMode: GameMode | null,
+  me: PlayerId,
+  aiSeatIds: readonly PlayerId[],
+): PlayerId[] {
+  if (gameMode === "local") return seats.filter((seat) => !aiSeatIds.includes(seat));
+  return seats.filter((seat) => seat === me);
+}
 
 /** Milliseconds of unpaused Active play as of this snapshot plus the local time since
  *  it arrived. The host's clock is never compared against ours; a resume shifts
@@ -35,20 +52,26 @@ export function stareStrain(elapsedMs: number): number {
 }
 
 /** The closing beat for a settled contest. Display-only reading of the engine's result:
- *  a cancelled contest had no loser, so nobody blinks. `viewer` is null for a spectator,
- *  who holds no seat and so can never be the one who blinked. */
+ *  a cancelled contest had no loser, so nobody blinks. Only a screen with exactly one
+ *  contestant at it has a viewer to blink: spectators have none, and hotseat's two
+ *  players share the eye between them, so for both the eye gives in whoever lost. */
 export function stareFinale(
-  announcement: { kind: ContestKind; result: ContestResult },
-  viewer: PlayerId | null,
+  announcement: {
+    kind: ContestKind;
+    participants: readonly PlayerId[];
+    result: ContestResult;
+  },
+  localSeats: readonly PlayerId[],
 ): StareFinale | null {
-  const { kind, result } = announcement;
+  const { kind, participants, result } = announcement;
   if (kind !== "Staring" || "Cancelled" in result) return null;
+  const facing = participants.filter((seat) => localSeats.includes(seat));
+  if (facing.length !== 1) return "EyeBlinks";
   if (result.Outcome === "Tie") return "BothBlink";
-  return result.Outcome.Decided.loser === viewer ? "ViewerBlinks" : "EyeBlinks";
+  return result.Outcome.Decided.loser === facing[0] ? "ViewerBlinks" : "EyeBlinks";
 }
 
 /** The pose of a running contest. */
 export function stareContestPose(contest: ContestState): StarePose {
-  if (contest.paused_since_ms != null) return "Paused";
   return contest.phase === "Pending" || contest.phase === "Preparing" ? "Preparing" : "Staring";
 }
