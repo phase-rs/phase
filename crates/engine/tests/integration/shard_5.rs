@@ -142,6 +142,7 @@ mod snow_mana_production;
 mod solar_tide_entwine_non_mana;
 mod solitude_up_to_one_exile_lifegain_rider;
 mod song_of_inspiration_target_set_aggregate;
+mod sorcery_timing_queries;
 mod sothera_supervoid_edict_reanimate;
 mod soul_tether_heartwood_token;
 mod source_counter_gate_anaphor_8549;

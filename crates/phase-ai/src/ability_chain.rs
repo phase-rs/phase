@@ -12,8 +12,9 @@
 //! unconditional chain: `else_ability` (the CR 608.2c "Otherwise, ..." leg) and
 //! `mode_abilities` (the CR 700.2 modal alternatives). Whether they belong in
 //! the walk depends on the question being asked, which is what [`AbilityScope`]
-//! names — see its docs. [`collect_scoped_effects`] is the single authority for
-//! both walks; `collect_chain_effects` is the unconditional shorthand.
+//! names — see its docs. [`collect_scoped_nodes`] is the single authority for
+//! both walks, [`collect_scoped_effects`] is its effects-only view, and
+//! `collect_chain_effects` is the unconditional shorthand.
 //!
 //! A created-token placement is the one cross-effect reading this module owns:
 //! a `PutCounter { target: LastCreated }` whose nearest preceding publisher of
@@ -57,6 +58,8 @@ pub(crate) enum AbilityScope {
     Unconditional,
     /// The full tree: `Unconditional` plus the `else_ability` branch (CR
     /// 608.2c) and every entry of `mode_abilities` (CR 700.2), recursively.
+    /// Also the walk of a fail-closed live stand-down (`activation_patience`),
+    /// whose answer is `any`, not a price.
     Potential,
 }
 
@@ -70,19 +73,31 @@ pub(crate) fn collect_scoped_effects(
     ability: &AbilityDefinition,
     scope: AbilityScope,
 ) -> Vec<&Effect> {
-    let mut effects: Vec<&Effect> = Vec::new();
-    push_scoped_effects(ability, scope, &mut effects);
-    effects
+    collect_scoped_nodes(ability, scope)
+        .into_iter()
+        .map(|node| &*node.effect)
+        .collect()
 }
 
-fn push_scoped_effects<'a>(
+/// [`collect_scoped_effects`]'s walk, yielding each node, for a question an effect alone can't
+/// answer: `player_scope` lives on the node.
+pub(crate) fn collect_scoped_nodes(
+    ability: &AbilityDefinition,
+    scope: AbilityScope,
+) -> Vec<&AbilityDefinition> {
+    let mut nodes = Vec::new();
+    push_scoped_nodes(ability, scope, &mut nodes);
+    nodes
+}
+
+fn push_scoped_nodes<'a>(
     ability: &'a AbilityDefinition,
     scope: AbilityScope,
-    out: &mut Vec<&'a Effect>,
+    out: &mut Vec<&'a AbilityDefinition>,
 ) {
-    out.push(&ability.effect);
+    out.push(ability);
     if let Some(sub) = &ability.sub_ability {
-        push_scoped_effects(sub, scope, out);
+        push_scoped_nodes(sub, scope, out);
     }
     if scope == AbilityScope::Unconditional {
         return;
@@ -90,11 +105,11 @@ fn push_scoped_effects<'a>(
     // CR 608.2c: the "Otherwise, ..." leg is one of two mutually exclusive
     // outcomes, so it is potential rather than unconditional.
     if let Some(other) = &ability.else_ability {
-        push_scoped_effects(other, scope, out);
+        push_scoped_nodes(other, scope, out);
     }
     // CR 700.2: each mode is an alternative the controller may choose.
     for mode in &ability.mode_abilities {
-        push_scoped_effects(mode, scope, out);
+        push_scoped_nodes(mode, scope, out);
     }
 }
 

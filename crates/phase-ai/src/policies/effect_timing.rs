@@ -19,7 +19,10 @@ use crate::features::DeckFeatures;
 
 use super::activation::turn_only;
 use super::context::{collect_ability_effects, PolicyContext};
-use super::effect_classify::{extract_target_filter, targets_creatures_only};
+use super::effect_classify::{
+    effect_is_combat_trick_payload, extract_target_filter, precombat_main_is_last_trick_window,
+    spell_resolution_effects, targets_creatures_only, CombatBinding, TimingSubject,
+};
 use super::registry::{
     DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy, STRONG_MAX,
 };
@@ -44,12 +47,34 @@ impl EffectTimingPolicy {
                 Effect::Destroy { .. } => removal_score(ctx),
                 Effect::DealDamage { .. } => burn_score(ctx),
                 Effect::Counter { .. } => counterspell_score(ctx),
-                Effect::Pump { .. } | Effect::DoublePT { .. } => combat_trick_score(ctx),
                 _ => 0.0,
             };
         }
 
+        // CR 611.2a + CR 514.2: a combat-window payload is priced only when the candidate itself
+        // resolves it, so a permanent spell is not timed by what its abilities do later, and it is
+        // priced once per candidate. A payload beside value that lands elsewhere keeps the combat
+        // window and takes no penalty out of it: waiting would cost the rest.
+        score += match CombatBinding::of_candidate(ctx, &own_resolution_effects(ctx)) {
+            CombatBinding::Whole => combat_trick_score(ctx),
+            CombatBinding::Partial => combat_trick_score(ctx).max(0.0),
+            CombatBinding::Unbound => 0.0,
+        };
+
         score
+    }
+}
+
+/// The effects the candidate itself resolves. A cast spell resolves its spell abilities
+/// ([`spell_resolution_effects`]); every other candidate's [`PolicyContext::effects`] is
+/// already the one ability it activates, chooses modes for, or targets with.
+fn own_resolution_effects<'a>(ctx: &PolicyContext<'a>) -> Vec<&'a Effect> {
+    match &ctx.candidate.action {
+        GameAction::CastSpell { .. } => ctx
+            .cast_facts()
+            .map(|facts| spell_resolution_effects(&facts))
+            .unwrap_or_default(),
+        _ => ctx.effects(),
     }
 }
 
@@ -406,6 +431,8 @@ fn removal_score(ctx: &PolicyContext<'_>) -> f64 {
 
     // Incentivize casting removal now when opponent has pump spells on the stack —
     // killing the pumped creature wastes both the creature and the pump (2-for-1).
+    // This asks whether a pump is on the stack, not whether combat is its whole value, so it
+    // reads any payload on the entry.
     let pump_response = if !ctx.state.stack.is_empty()
         && ctx.state.stack.iter().any(|entry| {
             entry.controller != ctx.ai_player
@@ -414,7 +441,7 @@ fn removal_score(ctx: &PolicyContext<'_>) -> f64 {
                     .map(|a| {
                         collect_ability_effects(a)
                             .iter()
-                            .any(|e| matches!(e, Effect::Pump { .. } | Effect::DoublePT { .. }))
+                            .any(|e| effect_is_combat_trick_payload(e))
                     })
                     .unwrap_or(false)
         }) {
@@ -557,6 +584,7 @@ fn threatened_own_spell_value(state: &GameState, ai_player: PlayerId) -> f64 {
 }
 
 fn combat_trick_score(ctx: &PolicyContext<'_>) -> f64 {
+    // CR 514.2: until-end-of-turn effects end in the cleanup step.
     // Pump effects expire at cleanup — casting outside combat has no lasting impact.
     // Penalty must exceed max search continuation bonus to prevent selection.
     if matches!(
@@ -566,7 +594,19 @@ fn combat_trick_score(ctx: &PolicyContext<'_>) -> f64 {
         return -2.0;
     }
 
-    // Main phases with no active combat: pump spells waste mana for zero board impact.
+    // CR 505.1a + CR 307.1 + CR 307.5: a payload the candidate can deliver only at sorcery
+    // speed has no later window before this turn's combat, and it lasts through that combat
+    // (CR 611.2a + CR 514.2), so timing has nothing to price. Whether it is worth casting is
+    // the continuation's and the other policies' question.
+    if TimingSubject::of_candidate(ctx).is_some_and(|subject| {
+        precombat_main_is_last_trick_window(ctx.state, ctx.ai_player, subject)
+    }) {
+        return 0.0;
+    }
+
+    // Main phases with no active combat: in the precombat main an instant-speed trick can wait
+    // for combat, and a postcombat main usually has the turn's combat behind it (CR 505.1a); an
+    // added combat phase (CR 500.8) is not read here.
     // Apply a strong penalty that overrides other positive signals.
     if matches!(
         ctx.state.phase,
@@ -604,7 +644,11 @@ mod tests {
     use engine::game::combat::{
         get_valid_attacker_ids, get_valid_block_targets, AttackTarget, AttackerInfo, CombatState,
     };
-    use engine::game::scenario::{GameScenario, P0};
+    use engine::game::layers::evaluate_layers;
+    use engine::game::restrictions::{
+        ability_confined_to_sorcery_timing, spell_confined_to_sorcery_timing,
+    };
+    use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
     use engine::game::zones::create_object;
     use engine::types::ability::{
         AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification,
@@ -617,7 +661,7 @@ mod tests {
         TargetSelectionProgress, TargetSelectionSlot, WaitingFor,
     };
     use engine::types::identifiers::{CardId, ExtraPhaseId, ObjectId};
-    use engine::types::mana::ManaCost;
+    use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
     use engine::types::phase::{PhaseGroup, TurnSegment};
     use engine::types::player::PlayerId;
     use engine::types::statics::StaticMode;
@@ -2586,5 +2630,1459 @@ mod tests {
             removal >= 0.3,
             "the removal mode must earn removal_score at the mode prompt, got {removal}"
         );
+    }
+
+    // ---- D1: a non-protective until-end-of-turn GenericEffect pump is a combat trick ----
+
+    const COORDINATED_ASSAULT: &str = "Up to two target creatures each get +1/+0 and gain first strike until end of turn. (They deal combat damage before creatures without first strike.)";
+    const GIANT_GROWTH: &str = "Target creature gets +3/+3 until end of turn.";
+    const UNLEASH_FURY: &str = "Double the power of target creature until end of turn.";
+    const DWARVEN_SONG: &str = "One or more target creatures become red until end of turn.";
+    const HEROIC_INTERVENTION: &str =
+        "Permanents you control gain hexproof and indestructible until end of turn.";
+    const ADAMANT_WILL: &str = "Target creature gets +2/+2 and gains indestructible until end of turn. (Damage and effects that say \"destroy\" don't destroy it.)";
+    const MURDER: &str = "Destroy target creature.";
+    const MOTHER_OF_RUNES: &str = "{T}: Target creature you control gains protection from the color of your choice until end of turn.";
+    const WELLWISHER: &str = "{T}: You gain 1 life for each Elf on the battlefield.";
+
+    fn parsed(oracle_text: &str, name: &str, core_type: &str) -> Vec<AbilityDefinition> {
+        engine::parser::oracle::parse_oracle_text(
+            oracle_text,
+            name,
+            &[],
+            &[core_type.to_string()],
+            &[],
+        )
+        .abilities
+    }
+
+    /// The first ability's effect of an instant parsed from `oracle_text`.
+    fn instant_effect(oracle_text: &str, name: &str) -> Effect {
+        (*parsed(oracle_text, name, "Instant")[0].effect).clone()
+    }
+
+    /// An instant in `controller`'s hand, built from its verbatim Oracle text.
+    fn oracle_instant(
+        state: &mut GameState,
+        controller: PlayerId,
+        name: &str,
+        oracle_text: &str,
+    ) -> ObjectId {
+        oracle_spell(state, controller, name, oracle_text, CoreType::Instant)
+    }
+
+    /// An instant or sorcery in `controller`'s hand, built from its verbatim Oracle text.
+    fn oracle_spell(
+        state: &mut GameState,
+        controller: PlayerId,
+        name: &str,
+        oracle_text: &str,
+        core_type: CoreType,
+    ) -> ObjectId {
+        let abilities = parsed(oracle_text, name, &core_type.to_string());
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            controller,
+            name.to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(core_type);
+        obj.abilities = std::sync::Arc::new(abilities);
+        id
+    }
+
+    /// A creature on `controller`'s battlefield, able to tap, built from its verbatim Oracle text.
+    fn oracle_creature(
+        state: &mut GameState,
+        controller: PlayerId,
+        name: &str,
+        oracle_text: &str,
+    ) -> ObjectId {
+        let abilities = parsed(oracle_text, name, "Creature");
+        let id = creature(state, controller, name);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.power = Some(1);
+        obj.toughness = Some(1);
+        obj.summoning_sick = false;
+        obj.abilities = std::sync::Arc::new(abilities);
+        id
+    }
+
+    fn cast_candidate(state: &GameState, object_id: ObjectId) -> CandidateAction {
+        CandidateAction {
+            action: GameAction::CastSpell {
+                object_id,
+                card_id: state.objects[&object_id].card_id,
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            },
+            metadata: ActionMetadata::for_actor(Some(P0), TacticalClass::Spell),
+        }
+    }
+
+    fn activate_candidate(source_id: ObjectId) -> CandidateAction {
+        CandidateAction {
+            action: GameAction::ActivateAbility {
+                source_id,
+                ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
+            },
+            metadata: ActionMetadata::for_actor(Some(P0), TacticalClass::Ability),
+        }
+    }
+
+    /// The registry-scaled EffectTiming delta for `candidate`.
+    fn timing_delta(state: &GameState, candidate: &CandidateAction) -> f64 {
+        match effect_timing_verdict(state, candidate, &AiConfig::default()) {
+            PolicyVerdict::Score { delta, .. } => delta,
+            PolicyVerdict::Reject { reason } => panic!("EffectTiming rejected: {}", reason.kind),
+        }
+    }
+
+    /// P0 holds priority on an empty stack in `phase` of `active`'s turn, with a creature on each
+    /// side. Turn 5, so the turn-phase activation is 1.0.
+    fn d1_board(phase: Phase, active: PlayerId) -> GameState {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 5;
+        state.phase = phase;
+        state.active_player = active;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+        creature(&mut state, P0, "Own Bear");
+        creature(&mut state, PlayerId(1), "Opposing Bear");
+        state
+    }
+
+    /// CR 611.2a + CR 514.2: Coordinated Assault's "+1/+0 and gain first strike until end of
+    /// turn" (an until-end-of-turn `GenericEffect`, not a `Pump`) and Giant Growth's "+3/+3
+    /// until end of turn" both end at cleanup, so EffectTiming prices them the same: the trick
+    /// penalty in the own Draw step, the combat bonus in DeclareAttackers. Unleash Fury's
+    /// doubled power (CR 701.10b: +X/+0) reads as Giant Growth does. Dwarven Song's colour
+    /// change is not a trick in either row.
+    #[test]
+    fn effect_timing_prices_a_generic_effect_pump_as_a_combat_trick() {
+        assert!(
+            matches!(
+                instant_effect(COORDINATED_ASSAULT, "Coordinated Assault"),
+                Effect::GenericEffect {
+                    duration: Some(Duration::UntilEndOfTurn),
+                    ..
+                }
+            ),
+            "premise: Coordinated Assault parses as an until-end-of-turn GenericEffect"
+        );
+        assert!(
+            matches!(
+                instant_effect(UNLEASH_FURY, "Unleash Fury"),
+                Effect::DoublePT { .. }
+            ),
+            "premise: Unleash Fury parses as DoublePT"
+        );
+        assert!(
+            matches!(
+                instant_effect(GIANT_GROWTH, "Giant Growth"),
+                Effect::Pump { .. }
+            ),
+            "premise: Giant Growth parses as Pump"
+        );
+
+        for (phase, combat) in [(Phase::Draw, false), (Phase::DeclareAttackers, true)] {
+            let mut state = d1_board(phase, P0);
+            if combat {
+                state.combat = Some(CombatState::default());
+            }
+            let ca = oracle_instant(&mut state, P0, "Coordinated Assault", COORDINATED_ASSAULT);
+            let gg = oracle_instant(&mut state, P0, "Giant Growth", GIANT_GROWTH);
+            let uf = oracle_instant(&mut state, P0, "Unleash Fury", UNLEASH_FURY);
+            let ds = oracle_instant(&mut state, P0, "Dwarven Song", DWARVEN_SONG);
+            let d = |id| timing_delta(&state, &cast_candidate(&state, id));
+            let (d_ca, d_gg, d_uf, d_ds) = (d(ca), d(gg), d(uf), d(ds));
+            assert!(
+                (d_ca - d_gg).abs() < 1e-9,
+                "{phase:?}: Coordinated Assault {d_ca} must price as Giant Growth {d_gg}"
+            );
+            assert!(
+                (d_uf - d_gg).abs() < 1e-9,
+                "{phase:?}: Unleash Fury {d_uf} must price as Giant Growth {d_gg}"
+            );
+            if combat {
+                assert!(d_gg > 0.0, "{phase:?}: the combat bonus fires, got {d_gg}");
+            } else {
+                assert!(d_gg < 0.0, "{phase:?}: the trick penalty fires, got {d_gg}");
+            }
+            assert_eq!(d_ds, 0.0, "{phase:?}: a colour change is not a trick");
+        }
+    }
+
+    /// CR 608.2b: removal that kills a creature an opposing until-end-of-turn pump targets
+    /// leaves the pump with nothing to do, so an opposing Coordinated Assault on the stack earns
+    /// the AI's Murder the same response bonus as an opposing Giant Growth. The AI's own pump on
+    /// the stack earns nothing.
+    #[test]
+    fn removal_answers_an_opposing_generic_effect_pump_on_the_stack() {
+        let murder_delta = |stack: Option<(PlayerId, &str, &str)>| {
+            let mut state = d1_board(Phase::PreCombatMain, PlayerId(1));
+            let murder = oracle_instant(&mut state, P0, "Murder", MURDER);
+            let own_target = creature(&mut state, P0, "Own Pump Target");
+            let opposing_target = creature(&mut state, PlayerId(1), "Opposing Pump Target");
+            if let Some((controller, name, oracle_text)) = stack {
+                let target = if controller == P0 {
+                    own_target
+                } else {
+                    opposing_target
+                };
+                push_spell(
+                    &mut state,
+                    controller,
+                    1,
+                    None,
+                    instant_effect(oracle_text, name),
+                    vec![TargetRef::Object(target)],
+                );
+            }
+            timing_delta(&state, &cast_candidate(&state, murder))
+        };
+        let empty = murder_delta(None);
+        let gg_bonus = murder_delta(Some((PlayerId(1), "Giant Growth", GIANT_GROWTH))) - empty;
+        assert!(
+            gg_bonus > 0.0,
+            "reach: an opposing Giant Growth on the stack earns removal a bonus, got {gg_bonus}"
+        );
+        let ca_bonus = murder_delta(Some((
+            PlayerId(1),
+            "Coordinated Assault",
+            COORDINATED_ASSAULT,
+        ))) - empty;
+        assert!(
+            (ca_bonus - gg_bonus).abs() < 1e-9,
+            "an opposing Coordinated Assault earns the Giant Growth bonus {gg_bonus}, got {ca_bonus}"
+        );
+        let undying = murder_delta(Some((PlayerId(1), "Undying Evil", UNDYING_EVIL))) - empty;
+        assert!(
+            undying.abs() < 1e-9,
+            "a grant bound to no combat is not a pump to answer, got {undying}"
+        );
+        let own_ca = murder_delta(Some((P0, "Coordinated Assault", COORDINATED_ASSAULT))) - empty;
+        assert!(
+            own_ca.abs() < 1e-9,
+            "the AI's own pump on the stack earns nothing, got {own_ca}"
+        );
+    }
+
+    /// The opponent's main phase, with its Murder on the stack aimed at a creature of P0's.
+    fn under_murder() -> GameState {
+        let mut state = d1_board(Phase::PreCombatMain, PlayerId(1));
+        let victim = creature(&mut state, P0, "Victim");
+        push_spell(
+            &mut state,
+            PlayerId(1),
+            3,
+            None,
+            instant_effect(MURDER, "Murder"),
+            vec![TargetRef::Object(victim)],
+        );
+        state
+    }
+
+    /// CR 702.11b + CR 702.12b + CR 702.16b: hexproof, indestructible and protection pay off
+    /// against removal in any phase, so a protective grant is not priced as a combat trick,
+    /// whoever it affects. With an opposing Murder on the stack in the opponent's main phase,
+    /// and in the AI's own End step, Heroic Intervention and Adamant Will price as Dwarven Song,
+    /// and Mother of Runes' activation as Wellwisher's, while Coordinated Assault takes the
+    /// trick penalty on the same boards.
+    #[test]
+    fn effect_timing_does_not_price_a_protective_grant_as_a_combat_trick() {
+        use crate::policies::effect_classify::effect_is_temporary_combat_modifier;
+        use crate::policies::self_protection_classify::{
+            effect_has_defensive_payload, is_self_protection_effect,
+        };
+
+        let adamant = instant_effect(ADAMANT_WILL, "Adamant Will");
+        assert!(
+            effect_is_temporary_combat_modifier(&adamant) && effect_has_defensive_payload(&adamant),
+            "premise: Adamant Will is a temporary combat modifier with a protective payload, so \
+             its protective keyword is what refuses it: {adamant:?}"
+        );
+        assert!(
+            !is_self_protection_effect(&adamant),
+            "premise: Adamant Will is not self-scoped, so the boundary must be scope-free"
+        );
+
+        let boards = [
+            ("opponent's main phase, Murder on the stack", under_murder()),
+            ("own End step", d1_board(Phase::End, P0)),
+        ];
+        for (label, mut state) in boards {
+            let hi = oracle_instant(&mut state, P0, "Heroic Intervention", HEROIC_INTERVENTION);
+            let aw = oracle_instant(&mut state, P0, "Adamant Will", ADAMANT_WILL);
+            let ds = oracle_instant(&mut state, P0, "Dwarven Song", DWARVEN_SONG);
+            let ca = oracle_instant(&mut state, P0, "Coordinated Assault", COORDINATED_ASSAULT);
+            let mor = oracle_creature(&mut state, P0, "Mother of Runes", MOTHER_OF_RUNES);
+            let ww = oracle_creature(&mut state, P0, "Wellwisher", WELLWISHER);
+            let cast = |id| timing_delta(&state, &cast_candidate(&state, id));
+            let activate = |id| timing_delta(&state, &activate_candidate(id));
+            let d_ds = cast(ds);
+            assert!(
+                cast(ca) < d_ds - 1.5,
+                "{label}: reach: the trick penalty fires on this board"
+            );
+            assert!(
+                (cast(hi) - d_ds).abs() < 1e-9,
+                "{label}: Heroic Intervention must price as Dwarven Song"
+            );
+            assert!(
+                (cast(aw) - d_ds).abs() < 1e-9,
+                "{label}: Adamant Will must price as Dwarven Song"
+            );
+            assert!(
+                (activate(mor) - activate(ww)).abs() < 1e-9,
+                "{label}: Mother of Runes' activation must price as Wellwisher's"
+            );
+        }
+    }
+
+    const PAST_IN_FLAMES: &str = "Each instant and sorcery card in your graveyard gains flashback until end of turn. The flashback cost is equal to its mana cost.\nFlashback {4}{R} (You may cast this card from your graveyard for its flashback cost. Then exile it.)";
+    const FLASHBACK: &str = "Target instant or sorcery card in your graveyard gains flashback until end of turn. The flashback cost is equal to its mana cost. (You may cast that card from your graveyard for its flashback cost. Then exile it.)";
+    const UNDYING_EVIL: &str = "Target creature gains undying until end of turn. (When it dies, if it had no +1/+1 counters on it, return it to the battlefield under its owner's control with a +1/+1 counter on it.)";
+    const CAULDRON_HAZE: &str = "Choose any number of target creatures. Each of those creatures gains persist until end of turn. (When it dies, if it had no -1/-1 counters on it, return it to the battlefield under its owner's control with a -1/-1 counter on it.)";
+    const ANTLER_SKULKIN: &str = "{2}: Target white creature gains persist until end of turn. (When it dies, if it had no -1/-1 counters on it, return it to the battlefield under its owner's control with a -1/-1 counter on it.)";
+    const AMOEBOID_CHANGELING: &str = "Changeling (This card is every creature type.)\n{T}: Target creature gains all creature types until end of turn.\n{T}: Target creature loses all creature types until end of turn.";
+    const BLADES_OF_VELIS_VEL: &str = "Changeling (This card is every creature type.)\nUp to two target creatures each get +2/+0 and gain all creature types until end of turn.";
+    const CORPOREAL_PROJECTION: &str = "Target creature you control gains myriad until end of turn. (Whenever it attacks, for each opponent other than defending player, you may create a token copy that's tapped and attacking that player or a planeswalker they control. Exile the tokens at end of combat.)\nOverload {3}{U}{U}{R}{R} (You may cast this spell for its overload cost. If you do, change \"target\" in its text to \"each.\")";
+
+    /// CR 702.93a + CR 702.79a: undying and persist pay off when the creature dies, in whatever
+    /// phase that happens, and CR 702.34a: flashback when the card is cast from the graveyard.
+    /// None of that value is bound to this turn's combat, and a bare creature-type grant
+    /// (CR 702.73a) has none there either, so each cast reads as Dwarven Song and each
+    /// activation as Wellwisher's on every board. CR 702.116a: Corporeal Projection's myriad is
+    /// paid out when the creature attacks, and Blades of Velis Vel still gives +2/+0, so both
+    /// stay priced as Coordinated Assault is, and Akki Drillmaster's haste does too. The
+    /// sorcery-speed row is exempt only in a precombat main, where no later window opens for it.
+    #[test]
+    fn effect_timing_does_not_price_a_grant_whose_value_lands_outside_combat() {
+        use crate::policies::effect_classify::effect_is_temporary_combat_modifier;
+
+        for (name, oracle_text) in [
+            ("Past in Flames", PAST_IN_FLAMES),
+            ("Flashback", FLASHBACK),
+            ("Undying Evil", UNDYING_EVIL),
+            ("Cauldron Haze", CAULDRON_HAZE),
+            ("Blades of Velis Vel", BLADES_OF_VELIS_VEL),
+            ("Corporeal Projection", CORPOREAL_PROJECTION),
+        ] {
+            let abilities = parsed(oracle_text, name, "Instant");
+            assert!(
+                crate::cast_facts::collect_definition_effects(&abilities[0])
+                    .into_iter()
+                    .any(effect_is_temporary_combat_modifier),
+                "premise: {name} resolves a temporary combat modifier, so the keyword is what \
+                 refuses or keeps it: {abilities:?}"
+            );
+        }
+
+        let boards = [
+            ("own precombat main", d1_board(Phase::PreCombatMain, P0)),
+            ("own postcombat main", d1_board(Phase::PostCombatMain, P0)),
+            ("own End step", d1_board(Phase::End, P0)),
+            ("opponent's main phase, Murder on the stack", under_murder()),
+        ];
+        for (label, mut state) in boards {
+            let ds = oracle_instant(&mut state, P0, "Dwarven Song", DWARVEN_SONG);
+            let ca = oracle_instant(&mut state, P0, "Coordinated Assault", COORDINATED_ASSAULT);
+            let bv = oracle_instant(&mut state, P0, "Blades of Velis Vel", BLADES_OF_VELIS_VEL);
+            let cp = oracle_spell(
+                &mut state,
+                P0,
+                "Corporeal Projection",
+                CORPOREAL_PROJECTION,
+                CoreType::Sorcery,
+            );
+            let pif = oracle_spell(
+                &mut state,
+                P0,
+                "Past in Flames",
+                PAST_IN_FLAMES,
+                CoreType::Sorcery,
+            );
+            let unpriced_casts = [
+                ("Past in Flames", pif),
+                (
+                    "Flashback",
+                    oracle_instant(&mut state, P0, "Flashback", FLASHBACK),
+                ),
+                (
+                    "Undying Evil",
+                    oracle_instant(&mut state, P0, "Undying Evil", UNDYING_EVIL),
+                ),
+                (
+                    "Cauldron Haze",
+                    oracle_instant(&mut state, P0, "Cauldron Haze", CAULDRON_HAZE),
+                ),
+            ];
+            let ww = oracle_creature(&mut state, P0, "Wellwisher", WELLWISHER);
+            let akki = oracle_creature(&mut state, P0, "Akki Drillmaster", AKKI_DRILLMASTER);
+            let unpriced_activations = [
+                (
+                    "Antler Skulkin",
+                    oracle_creature(&mut state, P0, "Antler Skulkin", ANTLER_SKULKIN),
+                ),
+                (
+                    "Amoeboid Changeling",
+                    oracle_creature(&mut state, P0, "Amoeboid Changeling", AMOEBOID_CHANGELING),
+                ),
+            ];
+            let cast = |id| timing_delta(&state, &cast_candidate(&state, id));
+            let activate = |id| timing_delta(&state, &activate_candidate(id));
+            let (d_ds, d_ww) = (cast(ds), activate(ww));
+
+            for (name, id) in unpriced_casts {
+                let delta = cast(id);
+                assert!(
+                    (delta - d_ds).abs() < 1e-9,
+                    "{label}: {name} {delta} must price as Dwarven Song {d_ds}"
+                );
+            }
+            for (name, id) in unpriced_activations {
+                let delta = activate(id);
+                assert!(
+                    (delta - d_ww).abs() < 1e-9,
+                    "{label}: {name} {delta} must price as Wellwisher {d_ww}"
+                );
+            }
+
+            assert!(
+                cast(ca) < d_ds - 1.5,
+                "{label}: reach: the trick penalty fires on this board"
+            );
+            assert!(
+                (cast(bv) - cast(ca)).abs() < 1e-9,
+                "{label}: Blades of Velis Vel's +2/+0 is a trick, whatever types it adds"
+            );
+            assert!(
+                activate(akki) < d_ww - 1.5,
+                "{label}: Akki Drillmaster's haste stays priced"
+            );
+            if state.phase == Phase::PreCombatMain {
+                assert!(
+                    (cast(cp) - d_ds).abs() < 1e-9,
+                    "{label}: a sorcery's last window before combat prices nothing"
+                );
+            } else {
+                assert!(
+                    cast(cp) < d_ds - 1.5,
+                    "{label}: Corporeal Projection's myriad stays priced"
+                );
+            }
+        }
+    }
+
+    const AKKI_DRILLMASTER: &str = "{T}: Target creature gains haste until end of turn.";
+    const SHIVAN_DRAGON: &str = "Flying\n{R}: This creature gets +1/+0 until end of turn.";
+
+    /// A creature card in P0's hand with `mana_cost` and `abilities`.
+    fn creature_in_hand(
+        state: &mut GameState,
+        name: &str,
+        mana_cost: ManaCost,
+        abilities: Vec<AbilityDefinition>,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            P0,
+            name.to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.mana_cost = mana_cost;
+        obj.abilities = std::sync::Arc::new(abilities);
+        id
+    }
+
+    /// CR 113.3b + CR 608.3a + CR 611.2a: a permanent spell's activated pump resolves only once
+    /// it is activated, after the permanent has entered, so it does not make the cast a combat
+    /// trick. Akki Drillmaster's "{T}: Target creature gains haste until end of turn." (an
+    /// until-end-of-turn `GenericEffect`) and Shivan Dragon's "{R}: This creature gets +1/+0
+    /// until end of turn." (a `Pump`) price their precombat-main cast as a vanilla creature of
+    /// the same cost does, on a board where Coordinated Assault takes the trick penalty.
+    #[test]
+    fn effect_timing_does_not_price_a_permanent_spells_activated_pump_as_a_combat_trick() {
+        use engine::types::mana::ManaCostShard::Red;
+
+        let cost = |shards: Vec<_>, generic| ManaCost::Cost { shards, generic };
+        for (name, oracle_text, keywords, mana_cost) in [
+            (
+                "Akki Drillmaster",
+                AKKI_DRILLMASTER,
+                &[][..],
+                cost(vec![Red], 2),
+            ),
+            (
+                "Shivan Dragon",
+                SHIVAN_DRAGON,
+                &["Flying"][..],
+                cost(vec![Red, Red], 4),
+            ),
+        ] {
+            let keywords: Vec<String> = keywords.iter().map(|k| k.to_string()).collect();
+            let abilities = engine::parser::oracle::parse_oracle_text(
+                oracle_text,
+                name,
+                &keywords,
+                &["Creature".to_string()],
+                &[],
+            )
+            .abilities;
+            assert!(
+                abilities.iter().all(|a| a.kind != AbilityKind::Spell)
+                    && abilities.iter().any(|a| a.kind == AbilityKind::Activated
+                        && effect_is_combat_trick_payload(&a.effect)),
+                "premise: {name} carries a combat-trick payload in an activated ability and has \
+                 no spell ability: {abilities:?}"
+            );
+
+            let mut state = d1_board(Phase::PreCombatMain, P0);
+            let card = creature_in_hand(&mut state, name, mana_cost.clone(), abilities);
+            let vanilla = creature_in_hand(&mut state, "Vanilla", mana_cost, Vec::new());
+            let ca = oracle_instant(&mut state, P0, "Coordinated Assault", COORDINATED_ASSAULT);
+            let d = |id| timing_delta(&state, &cast_candidate(&state, id));
+            let d_vanilla = d(vanilla);
+            assert!(
+                d(ca) < d_vanilla - 1.5,
+                "{name}: reach: the trick penalty fires on this board"
+            );
+            assert!(
+                (d(card) - d_vanilla).abs() < 1e-9,
+                "{name}: the cast {} must price as a vanilla creature's {d_vanilla}",
+                d(card)
+            );
+        }
+    }
+
+    const BARGE_IN: &str = "Target attacking creature gets +2/+2 until end of turn. Each attacking non-Human creature gains trample until end of turn.";
+    const ARM_THE_CATHARS: &str = "Until end of turn, target creature gets +3/+3, up to one other target creature gets +2/+2, and up to one other target creature gets +1/+1. Those creatures gain vigilance until end of turn.";
+
+    /// The combat-trick payload effects in the spell ability chain of a card parsed from
+    /// `oracle_text`.
+    fn trick_payloads(oracle_text: &str, name: &str, core_type: CoreType) -> Vec<Effect> {
+        parsed(oracle_text, name, &core_type.to_string())
+            .iter()
+            .filter(|a| a.kind == AbilityKind::Spell)
+            .flat_map(crate::cast_facts::collect_definition_effects)
+            .filter(|effect| effect_is_combat_trick_payload(effect))
+            .cloned()
+            .collect()
+    }
+
+    /// CR 611.2a + CR 514.2: one spell is one combat trick, however many until-end-of-turn
+    /// payloads its resolution carries. Barge In's `Pump` plus trample grant, and Arm the
+    /// Cathars' three `Pump`s plus vigilance grant, price as Giant Growth's single `Pump` does:
+    /// the trick penalty out of combat, the combat bonus in DeclareAttackers. Arm the Cathars is a
+    /// sorcery, so it is priced in its controller's postcombat main phase, a window it can be cast in (CR 307.1) with the turn's combat behind it (CR 505.1a).
+    #[test]
+    fn effect_timing_prices_a_multi_payload_trick_once() {
+        let barge_in = trick_payloads(BARGE_IN, "Barge In", CoreType::Instant);
+        assert!(
+            barge_in.len() >= 2
+                && barge_in.iter().any(|e| matches!(e, Effect::Pump { .. }))
+                && barge_in
+                    .iter()
+                    .any(|e| matches!(e, Effect::GenericEffect { .. })),
+            "premise: Barge In carries a Pump and a GenericEffect trick payload: {barge_in:?}"
+        );
+        let arm = trick_payloads(ARM_THE_CATHARS, "Arm the Cathars", CoreType::Sorcery);
+        assert!(
+            arm.iter()
+                .filter(|e| matches!(e, Effect::Pump { .. }))
+                .count()
+                >= 2,
+            "premise: Arm the Cathars carries several Pump trick payloads: {arm:?}"
+        );
+
+        for (phase, combat) in [(Phase::End, false), (Phase::DeclareAttackers, true)] {
+            let mut state = d1_board(phase, P0);
+            if combat {
+                state.combat = Some(CombatState::default());
+            }
+            let bi = oracle_instant(&mut state, P0, "Barge In", BARGE_IN);
+            let gg = oracle_instant(&mut state, P0, "Giant Growth", GIANT_GROWTH);
+            let d = |id| timing_delta(&state, &cast_candidate(&state, id));
+            let (d_bi, d_gg) = (d(bi), d(gg));
+            if combat {
+                assert!(d_gg > 0.0, "{phase:?}: the combat bonus fires, got {d_gg}");
+            } else {
+                assert!(d_gg < 0.0, "{phase:?}: the trick penalty fires, got {d_gg}");
+            }
+            assert!(
+                (d_bi - d_gg).abs() < 1e-9,
+                "{phase:?}: Barge In {d_bi} must price as Giant Growth {d_gg}"
+            );
+        }
+
+        let mut state = d1_board(Phase::PostCombatMain, P0);
+        let arm = oracle_spell(
+            &mut state,
+            P0,
+            "Arm the Cathars",
+            ARM_THE_CATHARS,
+            CoreType::Sorcery,
+        );
+        let gg = oracle_instant(&mut state, P0, "Giant Growth", GIANT_GROWTH);
+        let d = |id| timing_delta(&state, &cast_candidate(&state, id));
+        let (d_arm, d_gg) = (d(arm), d(gg));
+        assert!(d_gg < 0.0, "reach: the trick penalty fires, got {d_gg}");
+        assert!(
+            (d_arm - d_gg).abs() < 1e-9,
+            "Arm the Cathars {d_arm} must price as Giant Growth {d_gg}"
+        );
+    }
+
+    // ---- A payload confined to sorcery timing has no later window before combat ----
+
+    const OVERRUN: &str = "Creatures you control get +3/+3 and gain trample until end of turn. (Each of those creatures can deal excess combat damage to the player or planeswalker it's attacking.)";
+    const OVERCOME: &str = "Creatures you control get +2/+2 and gain trample until end of turn. (Each of those creatures can deal excess combat damage to the player or planeswalker it's attacking.)";
+    const BURST_OF_SPEED: &str = "Creatures you control gain haste until end of turn. (They can attack and {T} even if they just came under your control.)";
+    const DEAFENING_CLARION: &str = "Choose one or both —\n• Deafening Clarion deals 3 damage to each creature.\n• Creatures you control gain lifelink until end of turn.";
+    const SWELTERING_SUNS: &str =
+        "Sweltering Suns deals 3 damage to each creature.\nCycling {3} ({3}, Discard this card: Draw a card.)";
+    const GARRUK_WILDSPEAKER: &str = "[+1]: Untap two target lands.\n[−1]: Create a 3/3 green Beast creature token.\n[−4]: Creatures you control get +3/+3 and gain trample until end of turn.";
+    const BRAVE_KIN_DUO: &str =
+        "{1}, {T}: Target creature gets +1/+1 until end of turn. Activate only as a sorcery.";
+    const ROCKFACE_VILLAGE: &str = "{T}: Add {C}.\n{T}: Add {R}. Spend this mana only to cast a creature spell.\n{R}, {T}: Target Lizard, Mouse, Otter, or Raccoon you control gets +1/+0 and gains haste until end of turn. Activate only as a sorcery.";
+    const ELSPETH_KNIGHT_ERRANT: &str = "[+1]: Create a 1/1 white Soldier creature token.\n[+1]: Target creature gets +3/+3 and gains flying until end of turn.\n[−8]: You get an emblem with \"Artifacts, creatures, enchantments, and lands you control have indestructible.\"";
+    const SORIN_VAMPIRE_LORD: &str = "[+1]: Up to one target creature gets +2/+0 until end of turn.\n[−2]: Sorin deals 4 damage to any target. You gain 4 life.\n[−8]: Until end of turn, each Vampire you control gains \"{T}: Gain control of target creature.\"";
+    const NISSA_GENESIS_MAGE: &str = "[+2]: Untap up to two target creatures and up to two target lands.\n[−3]: Target creature gets +5/+5 until end of turn.\n[−10]: Look at the top ten cards of your library. You may put any number of creature and/or land cards from among them onto the battlefield. Put the rest on the bottom of your library in a random order.";
+    const ROWANS_TALENT: &str = "Enchant planeswalker\nEnchanted planeswalker has \"[+1]: Up to one target creature gets +2/+0 and gains first strike and trample until end of turn.\"\nWhenever you activate a loyalty ability of enchanted planeswalker, copy that ability. You may choose new targets for the copy.";
+    const THE_WANDERING_EMPEROR: &str = "Flash\nAs long as The Wandering Emperor entered this turn, you may activate her loyalty abilities any time you could cast an instant.\n[+1]: Put a +1/+1 counter on up to one target creature. It gains first strike until end of turn.\n[−1]: Create a 2/2 white Samurai creature token with vigilance.\n[−2]: Exile target tapped creature. You gain 2 life.";
+    const LEYLINE_OF_ANTICIPATION: &str = "If this card is in your opening hand, you may begin the game with it on the battlefield.\nYou may cast spells as though they had flash.";
+    const HEROIC_REINFORCEMENTS: &str = "Create two 1/1 white Soldier creature tokens. Until end of turn, creatures you control get +1/+1 and gain haste. (They can attack and {T} this turn.)";
+    const GOBLIN_WAR_PARTY: &str = "Choose one —\n• Create three 1/1 red Goblin creature tokens.\n• Creatures you control get +1/+1 and gain haste until end of turn.\nEntwine {2}{R} (Choose both if you pay the entwine cost.)";
+    const MONSTROUS_RAGE: &str = "Target creature gets +2/+0 until end of turn. Create a Monster Role token attached to it. (If you control another Role on it, put that one into the graveyard. Enchanted creature gets +1/+1 and has trample.)";
+    const AFFLICT: &str = "Target creature gets -1/-1 until end of turn.\nDraw a card.";
+    const MOMENT_OF_TRIUMPH: &str =
+        "Target creature gets +2/+2 until end of turn. You gain 2 life.";
+    const GERRARDS_COMMAND: &str = "Untap target creature. It gets +3/+3 until end of turn.";
+    const STABBING_PAIN: &str = "Target creature gets -1/-1 until end of turn. Tap that creature.";
+    const ECHOING_COURAGE: &str = "Target creature and all other creatures with the same name as that creature get +2/+2 until end of turn.";
+    const MONSTROUS_STEP: &str = "Target creature gets +7/+7 until end of turn. Up to one other target creature blocks it this turn if able.\nCycling {2} ({2}, Discard this card: Draw a card.)";
+    const GIVE_NO_GROUND: &str = "Target creature gets +2/+6 until end of turn and can block any number of creatures this turn.";
+    const EMERGENT_GROWTH: &str =
+        "Target creature gets +5/+5 until end of turn and must be blocked this turn if able.";
+    const INVIGORATED_RAMPAGE: &str = "Choose one —\n• Target creature gets +4/+0 and gains trample until end of turn.\n• Two target creatures each get +2/+0 and gain trample until end of turn.";
+    const PYRIC_SALAMANDER: &str = "{R}: This creature gets +1/+0 until end of turn. Sacrifice this creature at the beginning of the next end step.";
+    const VECTIS_AGENTS: &str =
+        "{U}{B}: This creature gets -2/-0 until end of turn and can't be blocked this turn.";
+    const MOBILE_FORT: &str = "Defender (This creature can't attack.)\n{3}: This creature gets +3/-1 until end of turn and can attack this turn as though it didn't have defender. Activate only once each turn.";
+    const DRAGON_MASK: &str = "{3}, {T}: Target creature you control gets +2/+2 until end of turn. Return it to its owner's hand at the beginning of the next end step. (Return it only if it's on the battlefield.)";
+
+    fn mana(generic: u32, shards: Vec<ManaCostShard>) -> ManaCost {
+        ManaCost::Cost { shards, generic }
+    }
+
+    /// P0 at its precombat main with three of each basic land and a Bear on each side.
+    fn trick_scenario() -> GameScenario {
+        let mut s = GameScenario::new_n_player(2, 42);
+        s.at_phase(Phase::PreCombatMain);
+        for color in [
+            ManaColor::White,
+            ManaColor::Blue,
+            ManaColor::Black,
+            ManaColor::Red,
+            ManaColor::Green,
+        ] {
+            for _ in 0..3 {
+                s.add_basic_land(P0, color);
+            }
+        }
+        s.add_creature(P0, "Bear", 2, 2);
+        s.add_creature(P1, "Bear", 2, 2);
+        s
+    }
+
+    fn add_spell(
+        s: &mut GameScenario,
+        name: &str,
+        is_instant: bool,
+        oracle_text: &str,
+        cost: ManaCost,
+    ) -> ObjectId {
+        s.add_spell_to_hand_from_oracle(P0, name, is_instant, oracle_text)
+            .with_mana_cost(cost)
+            .id()
+    }
+
+    fn add_overrun(s: &mut GameScenario) -> ObjectId {
+        use ManaCostShard::Green;
+        add_spell(
+            s,
+            "Overrun",
+            false,
+            OVERRUN,
+            mana(2, vec![Green, Green, Green]),
+        )
+    }
+
+    fn add_assault(s: &mut GameScenario) -> ObjectId {
+        add_spell(
+            s,
+            "Coordinated Assault",
+            true,
+            COORDINATED_ASSAULT,
+            mana(0, vec![ManaCostShard::Red]),
+        )
+    }
+
+    fn add_leyline(s: &mut GameScenario, controller: PlayerId) {
+        s.add_enchantment_from_oracle(
+            controller,
+            "Leyline of Anticipation",
+            LEYLINE_OF_ANTICIPATION,
+        );
+    }
+
+    /// Turn 5, so the turn-phase activation is 1.0, and a layer pass, which refreshes the
+    /// static-mode presence index the timing authorities read.
+    fn settle(runner: &mut GameRunner) {
+        let state = runner.state_mut();
+        state.turn_number = 5;
+        evaluate_layers(state);
+    }
+
+    /// As `granted_loyalty_ability_timing.rs` builds her: she has no planeswalker subtype, and
+    /// "entered this turn" reads `entered_battlefield_turn`.
+    fn set_emperor_entered(runner: &mut GameRunner, emperor: ObjectId, entered_this_turn: bool) {
+        let state = runner.state_mut();
+        let turn = state.turn_number;
+        let obj = state.objects.get_mut(&emperor).unwrap();
+        obj.card_types.subtypes.clear();
+        obj.base_card_types = obj.card_types.clone();
+        obj.entered_battlefield_turn = Some(if entered_this_turn { turn } else { turn - 1 });
+    }
+
+    fn loyalty_index(state: &GameState, id: ObjectId, amount: i32) -> usize {
+        state.objects[&id]
+            .abilities
+            .iter()
+            .position(|a| matches!(a.cost, Some(AbilityCost::Loyalty { amount: n }) if n == amount))
+            .expect("the loyalty ability is printed")
+    }
+
+    /// The last ability at this loyalty cost: Elspeth's second [+1], or a granted one, which
+    /// follows the printed abilities.
+    fn last_loyalty_index(state: &GameState, id: ObjectId, amount: i32) -> usize {
+        state.objects[&id]
+            .abilities
+            .iter()
+            .rposition(
+                |a| matches!(a.cost, Some(AbilityCost::Loyalty { amount: n }) if n == amount),
+            )
+            .expect("the loyalty ability is on the permanent")
+    }
+
+    /// The printed index of the card's last activated ability: its only one, or the one after
+    /// its mana abilities.
+    fn last_activated_index(state: &GameState, id: ObjectId) -> usize {
+        state.objects[&id]
+            .abilities
+            .iter()
+            .rposition(|a| a.kind == AbilityKind::Activated)
+            .expect("the card prints an activated ability")
+    }
+
+    /// The engine's own candidate for casting `id`. A cast it does not offer is a reach failure.
+    fn offered_cast(state: &GameState, id: ObjectId) -> CandidateAction {
+        build_decision_context(state)
+            .candidates
+            .into_iter()
+            .find(
+                |c| matches!(c.action, GameAction::CastSpell { object_id, .. } if object_id == id),
+            )
+            .unwrap_or_else(|| panic!("reach: {}'s cast must be offered", state.objects[&id].name))
+    }
+
+    /// The engine's own candidate for activating `index` of `source`.
+    fn offered_activation(state: &GameState, source: ObjectId, index: usize) -> CandidateAction {
+        build_decision_context(state)
+            .candidates
+            .into_iter()
+            .find(|c| {
+                matches!(
+                    c.action,
+                    GameAction::ActivateAbility { source_id, ability_index, .. }
+                        if source_id == source && ability_index == index
+                )
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "reach: {}'s ability {index} must be offered",
+                    state.objects[&source].name
+                )
+            })
+    }
+
+    fn cast_delta(state: &GameState, id: ObjectId) -> f64 {
+        timing_delta(state, &offered_cast(state, id))
+    }
+
+    fn activation_delta(state: &GameState, source: ObjectId, index: usize) -> f64 {
+        timing_delta(state, &offered_activation(state, source, index))
+    }
+
+    /// CR 505.1a + CR 307.1 + CR 307.5: a sorcery's cast (Overrun, Overcome, Burst of Speed, Arm
+    /// the Cathars), a loyalty ability (CR 606.3: Garruk's −4) and an "activate only as a
+    /// sorcery" ability (CR 602.5d: Rockface Village, Brave-Kin Duo) have no later window before
+    /// this turn's combat, and their until-end-of-turn payload lasts through it (CR 611.2a +
+    /// CR 514.2), so timing prices them neutral in the precombat main, while the instants and the
+    /// unrestricted Shivan Dragon on the same board keep the trick penalty. Deafening Clarion's
+    /// cast reads as Sweltering Suns, which has only its damage clause. In a postcombat main the
+    /// turn's combat is behind every one of them (CR 505.1a), so the penalty stands.
+    #[test]
+    fn sorcery_confined_trick_is_neutral_in_its_own_precombat_main() {
+        use ManaCostShard::{Green, Red, White};
+
+        let mut s = trick_scenario();
+        let overrun = add_overrun(&mut s);
+        let overcome = add_spell(
+            &mut s,
+            "Overcome",
+            false,
+            OVERCOME,
+            mana(3, vec![Green, Green]),
+        );
+        let burst = add_spell(
+            &mut s,
+            "Burst of Speed",
+            false,
+            BURST_OF_SPEED,
+            mana(0, vec![Red]),
+        );
+        let arm = add_spell(
+            &mut s,
+            "Arm the Cathars",
+            false,
+            ARM_THE_CATHARS,
+            mana(1, vec![White, White]),
+        );
+        let clarion = add_spell(
+            &mut s,
+            "Deafening Clarion",
+            false,
+            DEAFENING_CLARION,
+            mana(1, vec![Red, White]),
+        );
+        let suns = add_spell(
+            &mut s,
+            "Sweltering Suns",
+            false,
+            SWELTERING_SUNS,
+            mana(1, vec![Red, Red]),
+        );
+        let assault = add_assault(&mut s);
+        let giant_growth = add_spell(
+            &mut s,
+            "Giant Growth",
+            true,
+            GIANT_GROWTH,
+            mana(0, vec![Green]),
+        );
+        // Printed loyalty 3; 4 is the first board that can pay the −4.
+        let garruk = s
+            .add_planeswalker_from_oracle(P0, "Garruk Wildspeaker", "Garruk", 4, GARRUK_WILDSPEAKER)
+            .id();
+        let brave_kin = s
+            .add_creature_from_oracle(P0, "Brave-Kin Duo", 1, 1, BRAVE_KIN_DUO)
+            .with_mana_cost(mana(0, vec![White]))
+            .with_subtypes(vec!["Rabbit", "Mouse"])
+            .id();
+        let rockface = s
+            .add_land_from_oracle(P0, "Rockface Village", ROCKFACE_VILLAGE)
+            .id();
+        let shivan = s
+            .add_creature_from_oracle(P0, "Shivan Dragon", 5, 5, SHIVAN_DRAGON)
+            .with_mana_cost(mana(4, vec![Red, Red]))
+            .id();
+        let wellwisher = s
+            .add_creature_from_oracle(P0, "Wellwisher", 1, 1, WELLWISHER)
+            .with_mana_cost(mana(1, vec![Green]))
+            .with_subtypes(vec!["Elf"])
+            .id();
+        let mut runner = s.build();
+        settle(&mut runner);
+        let state = runner.state();
+        assert!(
+            matches!(
+                *state.objects[&overrun].abilities[0].effect,
+                Effect::GenericEffect {
+                    duration: Some(Duration::UntilEndOfTurn),
+                    ..
+                }
+            ),
+            "premise: Overrun parses as an until-end-of-turn GenericEffect"
+        );
+        let minus_four = loyalty_index(state, garruk, -4);
+        let brave_kin_ix = last_activated_index(state, brave_kin);
+        let rockface_ix = last_activated_index(state, rockface);
+        let shivan_ix = last_activated_index(state, shivan);
+        let wellwisher_ix = last_activated_index(state, wellwisher);
+
+        let d_wellwisher = activation_delta(state, wellwisher, wellwisher_ix);
+        assert!(
+            cast_delta(state, assault) < -1.5 && cast_delta(state, giant_growth) < -1.5,
+            "reach: the instants keep the trick penalty on this board"
+        );
+        assert!(
+            activation_delta(state, shivan, shivan_ix) < d_wellwisher - 1.5,
+            "reach: the activation path fires on this board"
+        );
+
+        for (name, id) in [
+            ("Overrun", overrun),
+            ("Overcome", overcome),
+            ("Burst of Speed", burst),
+            ("Arm the Cathars", arm),
+        ] {
+            assert_eq!(cast_delta(state, id), 0.0, "{name} is neutral");
+        }
+        assert_eq!(
+            activation_delta(state, garruk, minus_four),
+            0.0,
+            "Garruk's −4 is neutral"
+        );
+        assert_eq!(
+            activation_delta(state, rockface, rockface_ix),
+            0.0,
+            "Rockface Village's ability is neutral"
+        );
+        assert!(
+            (activation_delta(state, brave_kin, brave_kin_ix) - d_wellwisher).abs() < 1e-9,
+            "Brave-Kin Duo's activation prices as Wellwisher's {d_wellwisher}"
+        );
+        assert!(
+            (cast_delta(state, clarion) - cast_delta(state, suns)).abs() < 1e-9,
+            "Deafening Clarion's cast prices as Sweltering Suns'"
+        );
+
+        // A stale candidate reads the object the cast authority falls back to, in hand.
+        let stale = CandidateAction {
+            action: GameAction::CastSpell {
+                object_id: ObjectId(u64::MAX),
+                card_id: state.objects[&overrun].card_id,
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            },
+            metadata: ActionMetadata::for_actor(Some(P0), TacticalClass::Spell),
+        };
+        assert_eq!(
+            timing_delta(state, &stale),
+            0.0,
+            "the subject is the cast authority's object, not the candidate's id"
+        );
+
+        let mut postcombat = state.clone();
+        postcombat.phase = Phase::PostCombatMain;
+        let state = &postcombat;
+        let d_giant_growth = cast_delta(state, giant_growth);
+        assert!(d_giant_growth < -1.5, "reach, got {d_giant_growth}");
+        for (name, delta) in [
+            ("Overrun", cast_delta(state, overrun)),
+            ("Arm the Cathars", cast_delta(state, arm)),
+            ("Garruk's −4", activation_delta(state, garruk, minus_four)),
+            (
+                "Rockface Village",
+                activation_delta(state, rockface, rockface_ix),
+            ),
+        ] {
+            assert!(
+                (delta - d_giant_growth).abs() < 1e-9,
+                "{name} {delta} must price as Giant Growth {d_giant_growth} postcombat"
+            );
+        }
+    }
+
+    /// CR 601.3b + CR 702.8a + CR 304.5: the engine's authority decides, not the card type. With
+    /// its controller's Leyline of Anticipation, Overrun can wait for combat and prices as
+    /// Coordinated Assault; an opponent's Leyline opens nothing for P0. The Wandering Emperor's
+    /// counter keeps her +1 neutral in both rows: the turn she entered, the permission's window,
+    /// and a later turn.
+    #[test]
+    fn a_timing_permission_keeps_a_sorcery_speed_trick_priced() {
+        for (leyline_controller, confined) in [(P0, false), (P1, true)] {
+            let mut s = trick_scenario();
+            let overrun = add_overrun(&mut s);
+            let assault = add_assault(&mut s);
+            add_leyline(&mut s, leyline_controller);
+            let mut runner = s.build();
+            settle(&mut runner);
+            let state = runner.state();
+            assert_eq!(
+                spell_confined_to_sorcery_timing(state, P0, overrun),
+                confined,
+                "premise: the query, {leyline_controller:?}'s Leyline"
+            );
+            let (d_overrun, d_assault) = (cast_delta(state, overrun), cast_delta(state, assault));
+            assert!(d_assault < -1.5, "reach: the instant is priced");
+            if confined {
+                assert_eq!(d_overrun, 0.0, "an opponent's Leyline opens nothing for P0");
+            } else {
+                assert!(
+                    (d_overrun - d_assault).abs() < 1e-9,
+                    "Overrun {d_overrun} under its Leyline must price as Assault {d_assault}"
+                );
+            }
+        }
+
+        for (entered_this_turn, confined) in [(true, false), (false, true)] {
+            let mut s = trick_scenario();
+            let emperor = s
+                .add_planeswalker_from_oracle(
+                    P0,
+                    "The Wandering Emperor",
+                    "",
+                    3,
+                    THE_WANDERING_EMPEROR,
+                )
+                .id();
+            let shivan = s
+                .add_creature_from_oracle(P0, "Shivan Dragon", 5, 5, SHIVAN_DRAGON)
+                .with_mana_cost(mana(4, vec![ManaCostShard::Red, ManaCostShard::Red]))
+                .id();
+            let mut runner = s.build();
+            settle(&mut runner);
+            set_emperor_entered(&mut runner, emperor, entered_this_turn);
+            settle(&mut runner);
+            let state = runner.state();
+            let plus_one = loyalty_index(state, emperor, 1);
+            assert_eq!(
+                ability_confined_to_sorcery_timing(state, P0, emperor, plus_one),
+                confined,
+                "premise: the query, entered this turn: {entered_this_turn}"
+            );
+            let d_shivan = activation_delta(state, shivan, last_activated_index(state, shivan));
+            assert!(
+                d_shivan < -1.5,
+                "reach: Shivan Dragon is priced, {d_shivan}"
+            );
+            assert_eq!(
+                activation_delta(state, emperor, plus_one),
+                0.0,
+                "her counter stays, entered this turn: {entered_this_turn}"
+            );
+        }
+    }
+
+    /// Own-turn sorcery `name`, cast in `phase` with no modes chosen: its `[0]`, `[1]` and
+    /// `[0, 1]` deltas at the mode prompt. The prompt and all three candidates are unconditional.
+    fn mode_deltas(
+        phase: Phase,
+        leyline: bool,
+        name: &str,
+        oracle_text: &str,
+        cost: ManaCost,
+    ) -> [f64; 3] {
+        let mut s = trick_scenario();
+        let spell = add_spell(&mut s, name, false, oracle_text, cost);
+        if leyline {
+            add_leyline(&mut s, P0);
+        }
+        let mut runner = s.build();
+        runner.state_mut().phase = phase;
+        settle(&mut runner);
+        let card_id = runner.state().objects[&spell].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell,
+                card_id,
+                targets: Vec::new(),
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("reach: the cast begins");
+        let state = runner.state();
+        let WaitingFor::ModeChoice {
+            player,
+            pending_cast,
+            ..
+        } = &state.waiting_for
+        else {
+            panic!("reach: expected the mode prompt: {:?}", state.waiting_for);
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(pending_cast.object_id, spell);
+        assert_eq!(
+            spell_confined_to_sorcery_timing(state, P0, spell),
+            !leyline,
+            "premise: the engine query, read mid-cast"
+        );
+
+        let candidates = build_decision_context(state).candidates;
+        [vec![0], vec![1], vec![0, 1]].map(|indices| {
+            let candidate = candidates
+                .iter()
+                .find(|c| {
+                    c.action
+                        == GameAction::SelectModes {
+                            indices: indices.clone(),
+                        }
+                })
+                .unwrap_or_else(|| panic!("reach: SelectModes {indices:?} must be offered"));
+            timing_delta(state, candidate)
+        })
+    }
+
+    fn clarion_mode_deltas(phase: Phase, leyline: bool) -> [f64; 3] {
+        use ManaCostShard::{Red, White};
+
+        let cost = mana(1, vec![Red, White]);
+        mode_deltas(phase, leyline, "Deafening Clarion", DEAFENING_CLARION, cost)
+    }
+
+    /// CR 601.2b + CR 700.2a: a spell's modes are chosen while it is being cast, so the mode
+    /// prompt reads the pending cast's object. Deafening Clarion's lifelink mode (CR 611.2a +
+    /// CR 514.2) has its last window in the precombat main and reads as its damage mode; a
+    /// postcombat main keeps the penalty. The Leyline run reads the engine query mid-cast, and
+    /// there a selection with a lasting mode is neutral.
+    #[test]
+    fn mode_prompt_of_a_sorcery_confined_spell_prices_its_pump_mode_neutral() {
+        let [damage, lifelink, _] = clarion_mode_deltas(Phase::PostCombatMain, false);
+        assert!(
+            lifelink < damage - 1.5,
+            "reach: the trick term fires on this path, {lifelink} vs {damage}"
+        );
+
+        let [damage, lifelink, both] = clarion_mode_deltas(Phase::PreCombatMain, false);
+        assert_eq!(damage, 0.0, "the damage mode carries no timing term");
+        assert_eq!(lifelink, 0.0, "the lifelink mode is in its last window");
+        assert_eq!(both, 0.0, "both modes together are in their last window");
+
+        let [damage, _, both] = clarion_mode_deltas(Phase::PreCombatMain, true);
+        assert_eq!(damage, 0.0, "the damage mode carries no timing term");
+        assert_eq!(both, 0.0, "the damage in both modes lands in any phase");
+    }
+
+    /// CR 700.2a: only the chosen modes are read at the prompt. A selection with a lasting mode
+    /// is neutral out of combat (CR 611.2a: the tokens stay), the pump mode alone keeps the
+    /// price, and entwine's `[0, 1]` (CR 702.42a) reads as any other pair.
+    #[test]
+    fn mode_prompt_prices_a_selection_by_its_own_modes() {
+        use ManaCostShard::Red;
+
+        let phase = Phase::PostCombatMain;
+        for (name, [lasting, pump, both]) in [
+            ("Deafening Clarion", clarion_mode_deltas(phase, false)),
+            (
+                "Goblin War Party",
+                mode_deltas(
+                    phase,
+                    false,
+                    "Goblin War Party",
+                    GOBLIN_WAR_PARTY,
+                    mana(3, vec![Red]),
+                ),
+            ),
+        ] {
+            assert_eq!(lasting, 0.0, "{name}: the lasting mode carries no price");
+            assert!(pump < -1.5, "{name}: the pump mode is priced, {pump}");
+            assert_eq!(both, 0.0, "{name}: both modes keep the lasting value");
+        }
+    }
+
+    /// CR 611.2a + CR 514.2: the trick price needs combat to be the candidate's whole value. A
+    /// counter, tokens, a card, life, a damage mode or a Role lands outside combat, so those
+    /// candidates take no penalty there, while a pump with only riders does: an untap or a tap,
+    /// a group pump, a forced block, an attack or block static, or a delayed removal of what was
+    /// pumped. In combat the payload still earns the window (combat is priced by policy, so only
+    /// the sign is the card's).
+    #[test]
+    fn trick_price_needs_combat_to_be_the_whole_value() {
+        use ManaCostShard::{Black, Blue, Green, Red, White};
+
+        let mut s = trick_scenario();
+        let reinforcements = add_spell(
+            &mut s,
+            "Heroic Reinforcements",
+            false,
+            HEROIC_REINFORCEMENTS,
+            mana(2, vec![Red, White]),
+        );
+        let war_party = add_spell(
+            &mut s,
+            "Goblin War Party",
+            false,
+            GOBLIN_WAR_PARTY,
+            mana(3, vec![Red]),
+        );
+        let clarion = add_spell(
+            &mut s,
+            "Deafening Clarion",
+            false,
+            DEAFENING_CLARION,
+            mana(1, vec![Red, White]),
+        );
+        let suns = add_spell(
+            &mut s,
+            "Sweltering Suns",
+            false,
+            SWELTERING_SUNS,
+            mana(1, vec![Red, Red]),
+        );
+        let rage = add_spell(
+            &mut s,
+            "Monstrous Rage",
+            true,
+            MONSTROUS_RAGE,
+            mana(0, vec![Red]),
+        );
+        let triumph = add_spell(
+            &mut s,
+            "Moment of Triumph",
+            true,
+            MOMENT_OF_TRIUMPH,
+            mana(0, vec![White]),
+        );
+        let afflict = add_spell(&mut s, "Afflict", true, AFFLICT, mana(2, vec![Black]));
+        let assault = add_assault(&mut s);
+        let giant_growth = add_spell(
+            &mut s,
+            "Giant Growth",
+            true,
+            GIANT_GROWTH,
+            mana(0, vec![Green]),
+        );
+        let riders = [
+            add_spell(
+                &mut s,
+                "Gerrard's Command",
+                true,
+                GERRARDS_COMMAND,
+                mana(0, vec![Green, White]),
+            ),
+            add_spell(
+                &mut s,
+                "Echoing Courage",
+                true,
+                ECHOING_COURAGE,
+                mana(1, vec![Green]),
+            ),
+            add_spell(
+                &mut s,
+                "Stabbing Pain",
+                true,
+                STABBING_PAIN,
+                mana(0, vec![Black]),
+            ),
+            add_spell(
+                &mut s,
+                "Monstrous Step",
+                false,
+                MONSTROUS_STEP,
+                mana(4, vec![Green]),
+            ),
+            add_spell(
+                &mut s,
+                "Give No Ground",
+                true,
+                GIVE_NO_GROUND,
+                mana(3, vec![White]),
+            ),
+            add_spell(
+                &mut s,
+                "Emergent Growth",
+                false,
+                EMERGENT_GROWTH,
+                mana(3, vec![Green]),
+            ),
+            add_spell(
+                &mut s,
+                "Invigorated Rampage",
+                true,
+                INVIGORATED_RAMPAGE,
+                mana(1, vec![Red]),
+            ),
+        ];
+        let emperor = s
+            .add_planeswalker_from_oracle(P0, "The Wandering Emperor", "", 3, THE_WANDERING_EMPEROR)
+            .id();
+        let salamander = s
+            .add_creature_from_oracle(P0, "Pyric Salamander", 1, 1, PYRIC_SALAMANDER)
+            .with_mana_cost(mana(1, vec![Red]))
+            .id();
+        let vectis = s
+            .add_creature_from_oracle(P0, "Vectis Agents", 4, 3, VECTIS_AGENTS)
+            .with_mana_cost(mana(3, vec![Blue, Black]))
+            .id();
+        let fort = s
+            .add_creature_from_oracle(P0, "Mobile Fort", 0, 6, MOBILE_FORT)
+            .with_mana_cost(mana(4, vec![]))
+            .id();
+        let mask = s
+            .add_artifact_from_oracle(P0, "Dragon Mask", DRAGON_MASK)
+            .with_mana_cost(mana(3, vec![]))
+            .id();
+        let mut runner = s.build();
+        runner.state_mut().phase = Phase::PostCombatMain;
+        settle(&mut runner);
+        set_emperor_entered(&mut runner, emperor, false);
+        settle(&mut runner);
+        let state = runner.state();
+
+        let d_giant_growth = cast_delta(state, giant_growth);
+        assert!(d_giant_growth < -1.5, "reach, got {d_giant_growth}");
+        let d_assault = cast_delta(state, assault);
+        assert!(d_assault < -1.5, "reach, got {d_assault}");
+
+        for (name, delta) in [
+            ("Heroic Reinforcements", cast_delta(state, reinforcements)),
+            ("Goblin War Party", cast_delta(state, war_party)),
+            ("Monstrous Rage", cast_delta(state, rage)),
+            ("Moment of Triumph", cast_delta(state, triumph)),
+            (
+                "The Wandering Emperor's +1",
+                activation_delta(state, emperor, loyalty_index(state, emperor, 1)),
+            ),
+        ] {
+            assert_eq!(delta, 0.0, "{name}'s lasting value takes no penalty");
+        }
+        let (d_clarion, d_suns) = (cast_delta(state, clarion), cast_delta(state, suns));
+        assert!(
+            (d_clarion - d_suns).abs() < 1e-9,
+            "Deafening Clarion {d_clarion} prices as Sweltering Suns {d_suns}"
+        );
+        let d_afflict = cast_delta(state, afflict);
+        assert!(
+            (d_afflict - 0.15).abs() < 1e-9,
+            "Afflict keeps only the postcombat draw bonus, got {d_afflict}"
+        );
+
+        for rider in riders {
+            let delta = cast_delta(state, rider);
+            assert!(
+                (delta - d_giant_growth).abs() < 1e-9,
+                "{} {delta} must price as Giant Growth {d_giant_growth}",
+                state.objects[&rider].name
+            );
+        }
+        for id in [salamander, vectis, fort, mask] {
+            let delta = activation_delta(state, id, last_activated_index(state, id));
+            assert!(
+                delta < -1.5,
+                "{} is priced, got {delta}",
+                state.objects[&id].name
+            );
+        }
+
+        // The payload still earns the window, and the rest does not cost it.
+        let mut state = d1_board(Phase::DeclareAttackers, P0);
+        state.combat = Some(engine::game::combat::CombatState::default());
+        let growth = oracle_instant(&mut state, P0, "Giant Growth", GIANT_GROWTH);
+        let rage = oracle_instant(&mut state, P0, "Monstrous Rage", MONSTROUS_RAGE);
+        let afflict = oracle_instant(&mut state, P0, "Afflict", AFFLICT);
+        let d_growth = timing_delta(&state, &cast_candidate(&state, growth));
+        assert!(d_growth > 0.0, "reach: the window pays, got {d_growth}");
+        for (name, id) in [("Monstrous Rage", rage), ("Afflict", afflict)] {
+            let delta = timing_delta(&state, &cast_candidate(&state, id));
+            assert!(
+                (delta - d_growth).abs() < 1e-9,
+                "{name} {delta} must keep Giant Growth's window {d_growth}"
+            );
+        }
+
+        let mut state = d1_board(Phase::End, P0);
+        let growth = oracle_instant(&mut state, P0, "Giant Growth", GIANT_GROWTH);
+        let rage = oracle_instant(&mut state, P0, "Monstrous Rage", MONSTROUS_RAGE);
+        let d_growth = timing_delta(&state, &cast_candidate(&state, growth));
+        assert!(d_growth < -1.5, "reach, got {d_growth}");
+        assert_eq!(
+            timing_delta(&state, &cast_candidate(&state, rage)),
+            0.0,
+            "the Role outlasts the End step"
+        );
+    }
+
+    /// CR 606.4 + CR 606.3: a positive loyalty cost keeps its counters whatever the phase, and a
+    /// permanent's one loyalty activation of the turn is not banked by passing, so combat is not
+    /// the activation's whole value. A negative cost pays counters out for the pump alone. The
+    /// effect reading is `Whole` on every row, so the cost is the whole difference; a cost read
+    /// through the printed abilities would miss Rowan's Talent's grant.
+    #[test]
+    fn a_positive_loyalty_cost_is_value_outside_combat() {
+        use crate::cast_facts::{collect_definition_effects_with, ModeWalk};
+
+        let mut s = trick_scenario();
+        let elspeth = s
+            .add_planeswalker_from_oracle(
+                P0,
+                "Elspeth, Knight-Errant",
+                "Elspeth",
+                4,
+                ELSPETH_KNIGHT_ERRANT,
+            )
+            .id();
+        let sorin = s
+            .add_planeswalker_from_oracle(P0, "Sorin, Vampire Lord", "Sorin", 4, SORIN_VAMPIRE_LORD)
+            .id();
+        let nissa = s
+            .add_planeswalker_from_oracle(P0, "Nissa, Genesis Mage", "Nissa", 5, NISSA_GENESIS_MAGE)
+            .id();
+        let garruk = s
+            .add_planeswalker_from_oracle(P0, "Garruk Wildspeaker", "Garruk", 4, GARRUK_WILDSPEAKER)
+            .id();
+        let talent = s
+            .add_enchantment_from_oracle(P0, "Rowan's Talent", ROWANS_TALENT)
+            .with_subtypes(vec!["Aura"])
+            .id();
+        let mut runner = s.build();
+        runner.state_mut().phase = Phase::PostCombatMain;
+        engine::game::effects::attach::attach_to(runner.state_mut(), talent, garruk);
+        settle(&mut runner);
+        let state = runner.state();
+
+        let elspeth_pump = last_loyalty_index(state, elspeth, 1);
+        let granted = last_loyalty_index(state, garruk, 1);
+        assert!(
+            granted >= GARRUK_WILDSPEAKER.lines().count(),
+            "reach: Rowan's Talent's [+1] follows Garruk's printed abilities, got {granted}"
+        );
+        let sorin_pump = loyalty_index(state, sorin, 1);
+        let nissa_pump = loyalty_index(state, nissa, -3);
+        let garruk_pump = loyalty_index(state, garruk, -4);
+        for (name, source, index) in [
+            ("Elspeth's +1", elspeth, elspeth_pump),
+            ("Sorin's +1", sorin, sorin_pump),
+            ("Rowan's Talent's +1", garruk, granted),
+            ("Nissa's −3", nissa, nissa_pump),
+            ("Garruk's −4", garruk, garruk_pump),
+        ] {
+            let walk = collect_definition_effects_with(
+                &state.objects[&source].abilities[index],
+                ModeWalk::RootOnly,
+            );
+            assert_eq!(
+                CombatBinding::of_resolution(&walk),
+                CombatBinding::Whole,
+                "premise: {name}'s effects read as a whole trick"
+            );
+        }
+
+        for (name, delta) in [
+            (
+                "Elspeth's +1",
+                activation_delta(state, elspeth, elspeth_pump),
+            ),
+            ("Sorin's +1", activation_delta(state, sorin, sorin_pump)),
+            (
+                "Rowan's Talent's +1",
+                activation_delta(state, garruk, granted),
+            ),
+        ] {
+            assert_eq!(delta, 0.0, "{name} keeps its counter out of combat");
+        }
+        for (name, delta) in [
+            ("Nissa's −3", activation_delta(state, nissa, nissa_pump)),
+            ("Garruk's −4", activation_delta(state, garruk, garruk_pump)),
+        ] {
+            assert!(delta < -1.5, "{name} is priced, got {delta}");
+        }
     }
 }

@@ -45,10 +45,14 @@
 
 use engine::game::zones::create_object;
 use engine::parser::oracle::parse_oracle_text;
-use engine::types::ability::ActivationRestriction;
+use engine::types::ability::{
+    AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, ControllerRef,
+    DelayedTriggerCondition, Effect, LibraryPosition, PlayerFilter, ResolvedAbility, TargetFilter,
+    TriggerConstraint, TriggerDefinition,
+};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
-use engine::types::game_state::{GameState, WaitingFor};
+use engine::types::game_state::{DelayedTrigger, GameState, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -57,6 +61,7 @@ use std::sync::Arc;
 
 use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
 
+use crate::ability_chain::collect_chain_effects;
 use crate::config::AiConfig;
 use crate::context::AiContext;
 use crate::policies::activation_patience::ActivationPatiencePolicy;
@@ -180,6 +185,11 @@ fn add_subtyped_permanent(state: &mut GameState, subtype: &str) -> ObjectId {
 }
 
 fn verdict_for(board: &Board) -> PolicyVerdict {
+    verdict_for_ability(board, 0)
+}
+
+/// [`verdict_for`] for the pinger's ability at `ability_index`.
+fn verdict_for_ability(board: &Board, ability_index: usize) -> PolicyVerdict {
     let config = AiConfig::default();
     let mut session = AiSession::empty();
     session.features.insert(AI, Default::default());
@@ -190,7 +200,7 @@ fn verdict_for(board: &Board) -> PolicyVerdict {
     let candidate = CandidateAction {
         action: GameAction::ActivateAbility {
             source_id: board.pinger,
-            ability_index: 0,
+            ability_index,
             payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
         metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
@@ -431,33 +441,39 @@ fn a_precombat_main_trigger_stands_the_draw_step_down() {
     assert_eq!(delta, 0.0);
 }
 
+/// A delayed trigger (CR 603.7) the AI created, firing on `condition` and drawing a card.
+fn delayed_trigger(condition: DelayedTriggerCondition) -> DelayedTrigger {
+    let effect = parse_oracle_text("Draw a card.", "Probe", &[], &["Sorcery".to_string()], &[])
+        .abilities
+        .into_iter()
+        .next()
+        .expect("a one-line spell parses")
+        .effect;
+    DelayedTrigger::new(
+        condition,
+        Box::new(ResolvedAbility::new(*effect, vec![], ObjectId(1), AI)),
+        AI,
+        ObjectId(1),
+        true,
+    )
+}
+
+/// `AtNextPhaseForPlayer { phase, player }` with default gate and binding.
+fn at_next_phase_for(phase: Phase, player: PlayerId) -> DelayedTriggerCondition {
+    DelayedTriggerCondition::AtNextPhaseForPlayer {
+        phase,
+        player,
+        gate: Default::default(),
+        binding: Default::default(),
+    }
+}
+
 /// CR 603.7: a delayed trigger set for the AI's next precombat main phase fires as it
 /// begins (Mana Drain, "at the beginning of your next main phase"), so the draw step is
 /// not held; one set for an opponent's next main phase does not stand it down.
 #[test]
 fn a_delayed_main_phase_trigger_stands_the_draw_step_down() {
-    use engine::types::ability::{DelayedTriggerCondition, ResolvedAbility};
-    use engine::types::game_state::DelayedTrigger;
-    let delayed = |player| {
-        let effect = parse_oracle_text("Draw a card.", "Probe", &[], &["Sorcery".to_string()], &[])
-            .abilities
-            .into_iter()
-            .next()
-            .expect("a one-line spell parses")
-            .effect;
-        DelayedTrigger::new(
-            DelayedTriggerCondition::AtNextPhaseForPlayer {
-                phase: Phase::PreCombatMain,
-                player,
-                gate: Default::default(),
-                binding: Default::default(),
-            },
-            Box::new(ResolvedAbility::new(*effect, vec![], ObjectId(1), AI)),
-            AI,
-            ObjectId(1),
-            true,
-        )
-    };
+    let delayed = |player| delayed_trigger(at_next_phase_for(Phase::PreCombatMain, player));
     let mut board = build_board(Phase::Draw, 20, 20);
     board.state.delayed_triggers.push(delayed(OPP));
     let (_, reason) = score_and_reason(&verdict_for(&board));
@@ -766,7 +782,12 @@ fn retained_floating_mana_leaves_the_hold() {
 }
 
 /// A permanent `owner` controls carrying the first trigger parsed from `text`.
-fn add_trigger_permanent(state: &mut GameState, owner: PlayerId, name: &str, text: &str) {
+fn add_trigger_permanent(
+    state: &mut GameState,
+    owner: PlayerId,
+    name: &str,
+    text: &str,
+) -> ObjectId {
     let trigger = parse_oracle_text(text, name, &[], &["Artifact".to_string()], &[])
         .triggers
         .into_iter()
@@ -779,6 +800,7 @@ fn add_trigger_permanent(state: &mut GameState, owner: PlayerId, name: &str, tex
         .unwrap()
         .trigger_definitions
         .push(trigger);
+    id
 }
 
 /// CR 117.3a + CR 603.4: an opponent's Blinkmoth Urn ("At the beginning of each player's first
@@ -838,6 +860,183 @@ fn an_opponents_each_player_upkeep_trigger_ends_the_pristine_upkeep() {
     );
 }
 
+/// Voltaic Key, verified against MTGJSON AtomicCards.
+const VOLTAIC_KEY: &str = "{1}, {T}: Untap target artifact.";
+/// Howling Mine, verified against MTGJSON AtomicCards.
+const HOWLING_MINE: &str = "At the beginning of each player's draw step, if this artifact is untapped, that player draws an additional card.";
+/// Avaricious Dragon, verified against MTGJSON AtomicCards.
+const AVARICIOUS_DRAGON: &str = "Flying\nAt the beginning of your draw step, draw an additional card.\nAt the beginning of your end step, discard your hand.";
+
+/// [`build_board`] in `phase` with Voltaic Key as `board.pinger`, as in the Blinkmoth row. The
+/// Prodigal Sorcerer it replaced stays on the battlefield; its id is returned beside the board.
+fn voltaic_key_board(phase: Phase) -> (Board, ObjectId) {
+    let mut board = build_board(phase, 20, 20);
+    let sorcerer = board.pinger;
+    board.pinger = creature(
+        &mut board.state,
+        &mut Ids(8_800),
+        AI,
+        "Voltaic Key",
+        0,
+        1,
+        Some(VOLTAIC_KEY),
+    );
+    (board, sorcerer)
+}
+
+/// The trigger definition `add_trigger_permanent` put on `id`, read back for a premise.
+fn only_trigger(state: &GameState, id: ObjectId) -> &TriggerDefinition {
+    let mut entries = state.objects[&id].trigger_definitions.iter_unchecked();
+    let entry = entries
+        .next()
+        .expect("premise: the permanent carries a trigger");
+    assert!(entries.next().is_none(), "premise: exactly one trigger");
+    entry.definition()
+}
+
+/// The policy stands down: neutral, under the not-applicable reason.
+fn assert_stands_down(board: &Board, label: &str) {
+    let (delta, reason) = score_and_reason(&verdict_for(board));
+    assert_eq!(reason, "activation_patience_na", "{label}");
+    assert_eq!(delta, 0.0, "{label}");
+}
+
+/// CR 117.3a + CR 603.4: a trigger at the beginning of the AI's draw step goes on the stack
+/// before the AI next has priority, and checks its intervening-if as the step begins. Howling
+/// Mine ("At the beginning of each player's draw step, if this artifact is untapped, that player
+/// draws an additional card.") untapped by Voltaic Key ("{1}, {T}: Untap target artifact.") in
+/// the upkeep draws the extra card; untapped in the main phase it does not, so the Key's
+/// activation is not held. Any reaching draw-step trigger stands the whole upkeep down, whatever
+/// the activation and whatever the trigger's condition reads now: the AI's tapped Mine, the
+/// Prodigal Sorcerer's ping beside it, an opponent's Mine ("each player's"), and the AI's
+/// Avaricious Dragon ("At the beginning of your draw step, draw an additional card."). An
+/// opponent's Dragon triggers on its controller's draw step only, so it leaves the hold. In the
+/// draw step the trigger is behind its priority (CR 504.2), so the draw step still holds.
+#[test]
+fn a_draw_step_trigger_stands_the_upkeep_down() {
+    let (board, _) = voltaic_key_board(Phase::Upkeep);
+    let (delta, reason) = score_and_reason(&verdict_for(&board));
+    assert_eq!(
+        reason, "activation_patience_hold",
+        "reach: the Key alone is held in the upkeep"
+    );
+    assert!(delta < 0.0, "reach: got {delta}");
+
+    // (1) The AI's own Howling Mine, tapped: its intervening-if is false now.
+    let (mut board, sorcerer) = voltaic_key_board(Phase::Upkeep);
+    let mine = add_trigger_permanent(&mut board.state, AI, "Howling Mine", HOWLING_MINE);
+    let trigger = only_trigger(&board.state, mine);
+    assert!(
+        trigger.phase == Some(Phase::Draw) && trigger.condition.is_some(),
+        "premise: Howling Mine is a beginning-of-draw-step trigger with an intervening-if, got \
+         {:?} / {:?}",
+        trigger.phase,
+        trigger.condition
+    );
+    board.state.objects.get_mut(&mine).unwrap().tapped = true;
+    assert_stands_down(&board, "(1) the AI's tapped Howling Mine");
+
+    // (2) The same board, the Prodigal Sorcerer's ping: the whole upkeep stands down.
+    board.pinger = sorcerer;
+    assert_stands_down(&board, "(2) the ping beside the AI's Howling Mine");
+
+    // (3) An opponent's Howling Mine: "each player's" reaches the AI's draw step too.
+    let (mut board, _) = voltaic_key_board(Phase::Upkeep);
+    add_trigger_permanent(&mut board.state, OPP, "Howling Mine", HOWLING_MINE);
+    assert_stands_down(&board, "(3) an opponent's Howling Mine");
+
+    // An opponent's Avaricious Dragon: "your draw step" is its controller's, not the AI's.
+    let (mut board, _) = voltaic_key_board(Phase::Upkeep);
+    add_trigger_permanent(
+        &mut board.state,
+        OPP,
+        "Avaricious Dragon",
+        AVARICIOUS_DRAGON,
+    );
+    assert_eq!(
+        score_and_reason(&verdict_for(&board)).1,
+        "activation_patience_hold",
+        "an opponent's \"your draw step\" trigger does not reach the AI's draw step"
+    );
+
+    // (4) The AI's own Avaricious Dragon.
+    let (mut board, _) = voltaic_key_board(Phase::Upkeep);
+    let dragon =
+        add_trigger_permanent(&mut board.state, AI, "Avaricious Dragon", AVARICIOUS_DRAGON);
+    let trigger = only_trigger(&board.state, dragon);
+    assert!(
+        trigger.phase == Some(Phase::Draw)
+            && trigger.constraint == Some(TriggerConstraint::OnlyDuringYourTurn),
+        "premise: Avaricious Dragon's first trigger is a \"your draw step\" trigger, got {:?} / \
+         {:?}",
+        trigger.phase,
+        trigger.constraint
+    );
+    assert_stands_down(&board, "(4) the AI's Avaricious Dragon");
+
+    // CR 504.2: in the draw step the Mine's trigger is behind the AI's priority.
+    let (mut board, _) = voltaic_key_board(Phase::Draw);
+    add_trigger_permanent(&mut board.state, AI, "Howling Mine", HOWLING_MINE);
+    assert_eq!(
+        score_and_reason(&verdict_for(&board)).1,
+        "activation_patience_hold_for_main",
+        "the draw step is unaffected"
+    );
+}
+
+/// The same stand-down from an upkeep whose triggers resolved (Phyrexian Arena's upkeep
+/// trigger), which is otherwise held for the main phase: the draw step is still ahead of it
+/// (CR 117.3a + CR 603.4). An upkeep trigger is not a draw-step trigger, so Arena alone
+/// leaves that hold in place.
+#[test]
+fn a_draw_step_trigger_stands_an_upkeep_with_triggers_down() {
+    let (mut board, _) = voltaic_key_board(Phase::Upkeep);
+    add_upkeep_trigger_source(&mut board.state);
+    assert_eq!(
+        score_and_reason(&verdict_for(&board)).1,
+        "activation_patience_hold_for_main",
+        "reach: with Phyrexian Arena alone the upkeep is held for the main phase"
+    );
+    add_trigger_permanent(&mut board.state, AI, "Howling Mine", HOWLING_MINE);
+    assert_stands_down(&board, "Phyrexian Arena and the AI's Howling Mine");
+}
+
+/// CR 603.7: a delayed trigger set for the AI's next draw step fires as that step begins, so it
+/// stands the upkeep down like a printed one; one set for an opponent's next draw step does not.
+/// No card creates one today; this is the delayed arm of the phase-parameterized trigger scan.
+#[test]
+fn a_delayed_draw_step_trigger_stands_the_upkeep_down() {
+    let (mut board, _) = voltaic_key_board(Phase::Upkeep);
+    assert_eq!(
+        score_and_reason(&verdict_for(&board)).1,
+        "activation_patience_hold",
+        "reach: without a delayed trigger the Key is held"
+    );
+    board
+        .state
+        .delayed_triggers
+        .push(delayed_trigger(at_next_phase_for(Phase::Draw, OPP)));
+    assert_eq!(
+        score_and_reason(&verdict_for(&board)).1,
+        "activation_patience_hold",
+        "an opponent's next draw step is not the AI's"
+    );
+    board
+        .state
+        .delayed_triggers
+        .push(delayed_trigger(at_next_phase_for(Phase::Draw, AI)));
+    assert_stands_down(&board, "(1) a delayed trigger at the AI's next draw step");
+
+    let (mut board, _) = voltaic_key_board(Phase::Upkeep);
+    board
+        .state
+        .delayed_triggers
+        .push(delayed_trigger(DelayedTriggerCondition::AtNextPhase {
+            phase: Phase::Draw,
+        }));
+    assert_stands_down(&board, "(2) a delayed trigger at the next draw step");
+}
+
 /// CR 614.4: Words of Worship ("{1}: The next time you would draw a card this turn, you gain
 /// 5 life instead.", verified against MTGJSON) must be activated before the draw it replaces.
 /// In the upkeep — pristine or after Phyrexian Arena's trigger — the draw step's draw is still
@@ -883,6 +1082,980 @@ fn a_draw_replacement_is_not_held_while_the_draw_is_ahead() {
         "activation_patience_hold_for_main",
         "control: once the draw is behind, the replacement can wait"
     );
+}
+
+const SENSEIS_DIVINING_TOP: &str = "{1}: Look at the top three cards of your library, then put them back in any order.\n{T}: Draw a card, then put this artifact on top of its owner's library.";
+const WATCHFUL_AUTOMATON: &str =
+    "{2}{U}: Scry 1. (Look at the top card of your library. You may put that card on the bottom.)";
+const ELEMENTAL_AUGURY: &str =
+    "{3}: Look at the top three cards of target player's library, then put them back in any order.";
+const CRYSTAL_BALL: &str = "{1}, {T}: Scry 2. (Look at the top two cards of your library, then put any number of them on the bottom and the rest on top in any order.)";
+
+/// Put `name` (built from its verbatim Oracle text) on the AI's battlefield as the board's
+/// activation source.
+fn set_arranger(board: &mut Board, name: &str, oracle_text: &str) -> ObjectId {
+    let id = creature(
+        &mut board.state,
+        &mut Ids(8_800),
+        AI,
+        name,
+        1,
+        1,
+        Some(oracle_text),
+    );
+    board.pinger = id;
+    id
+}
+
+/// Whose library an arrangement's player slot names, as the rows pin it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Slot {
+    /// "your library" (`TargetFilter::Controller`).
+    Controller,
+    /// "target player's library" (`TargetFilter::Player`, CR 115.1): the AI may name itself.
+    AnyPlayer,
+    /// "target opponent's library": the AI can't name itself.
+    Opponent,
+    /// "its controller" read off a parent target, which the player-filter authority can't answer
+    /// without ability context.
+    ParentTargetController,
+}
+
+/// The player slot of an arrangement shape the hatch reads (CR 701.22a scry, CR 701.25a
+/// surveil, CR 701.20e a look-and-reorder dig), or `None` when `effect` is not one.
+fn arrangement_slot(effect: &engine::types::ability::Effect) -> Option<Slot> {
+    use engine::types::ability::{ControllerRef, Effect, TargetFilter};
+    let player = match effect {
+        Effect::Scry { target: player, .. }
+        | Effect::Surveil { target: player, .. }
+        | Effect::Dig {
+            player,
+            destination: Some(Zone::Library),
+            rest_destination: Some(Zone::Library),
+            keep_count: None,
+            keep_count_expr: None,
+            ..
+        } => player,
+        _ => return None,
+    };
+    Some(match player {
+        TargetFilter::Controller => Slot::Controller,
+        TargetFilter::Player => Slot::AnyPlayer,
+        TargetFilter::ParentTargetController => Slot::ParentTargetController,
+        TargetFilter::Typed(typed)
+            if typed.type_filters.is_empty()
+                && typed.properties.is_empty()
+                && typed.controller == Some(ControllerRef::Opponent) =>
+        {
+            Slot::Opponent
+        }
+        other => panic!("no row pins an arrangement slot of {other:?}"),
+    })
+}
+
+/// Rewrite Elemental Augury's `Dig` player slot to `player`, keeping the rest of its arrangement.
+fn set_dig_player(
+    ability: &mut engine::types::ability::AbilityDefinition,
+    player: engine::types::ability::TargetFilter,
+) {
+    match &mut *ability.effect {
+        engine::types::ability::Effect::Dig { player: slot, .. } => *slot = player,
+        other => panic!("premise: Elemental Augury parses as a Dig, got {other:?}"),
+    }
+}
+
+/// CR 504.1 + CR 121.1: the draw step's draw takes the top card, and in the upkeep it is still
+/// ahead. An arrangement of the top of the AI's own library made in the upkeep chooses the card
+/// that draw takes; one made later arranges a later draw, so waiting forfeits that choice and
+/// the arrangement is not held. That holds whatever the ability costs: one paid in mana, life
+/// or energy, one that taps its source, and one capped by a restriction (CR 602.5b, CR 702.177a
+/// exhaust) are all exempt, and whether the tap or the capped activation is worth spending is
+/// left to resource valuation. In the draw step the draw is behind and every arrangement is
+/// held; an ability that only draws is held in the upkeep
+/// (`an_upkeep_own_library_change_is_not_held_while_the_draw_is_ahead`).
+///
+/// The arrangement need not name the AI's library outright. Elemental Augury's "target player's
+/// library" (CR 115.1) can be the AI's own, so it is exempt; so is a slot the player-filter
+/// authority can't answer without ability context, which may still name the AI when the ability
+/// resolves. Only a slot that can't name the AI, "target opponent's library", is held.
+#[test]
+fn an_upkeep_library_top_arrangement_is_not_held_while_the_draw_is_ahead() {
+    use engine::types::ability::{AbilityCost, CostCategory, QuantityExpr};
+
+    struct Row {
+        label: &'static str,
+        name: &'static str,
+        oracle_text: &'static str,
+        ability_index: usize,
+        after_trigger: bool,
+        phase: Phase,
+        edit: Option<fn(&mut engine::types::ability::AbilityDefinition)>,
+        categories: &'static [CostCategory],
+        slot: Option<Slot>,
+        expected: &'static str,
+    }
+    let row = |label, name, oracle_text, expected| Row {
+        label,
+        name,
+        oracle_text,
+        ability_index: 0,
+        after_trigger: false,
+        phase: Phase::Upkeep,
+        edit: None,
+        categories: &[CostCategory::ManaOnly],
+        slot: Some(Slot::Controller),
+        expected,
+    };
+    let rows = [
+        // Positives: arrangements in the upkeep, whatever their cost.
+        row(
+            "Top ability 0 (Dig reorder), pristine upkeep",
+            "Sensei's Divining Top",
+            SENSEIS_DIVINING_TOP,
+            "activation_patience_library_top",
+        ),
+        row(
+            "Watchful Automaton (Scry), pristine upkeep",
+            "Watchful Automaton",
+            WATCHFUL_AUTOMATON,
+            "activation_patience_library_top",
+        ),
+        Row {
+            after_trigger: true,
+            ..row(
+                "Rummaging Wizard (Surveil), upkeep after a trigger",
+                "Rummaging Wizard",
+                "{2}{U}: Surveil 1. (Look at the top card of your library. You may put that card into your graveyard.)",
+                "activation_patience_library_top",
+            )
+        },
+        Row {
+            // The fixture parses without MTGJSON's keyword list, so its "Flying, trample" line
+            // takes slot 0 and the printed Surveil ability is at index 1 here.
+            ability_index: 1,
+            categories: &[CostCategory::PaysLife],
+            ..row(
+                "Doom Whisperer (PaysLife), pristine upkeep",
+                "Doom Whisperer",
+                "Flying, trample\nPay 2 life: Surveil 2. (Look at the top two cards of your library, then put any number of them into your graveyard and the rest on top of your library in any order.)",
+                "activation_patience_library_top",
+            )
+        },
+        Row {
+            edit: Some(|ability| {
+                ability.cost = Some(AbilityCost::PayEnergy {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                });
+            }),
+            categories: &[CostCategory::PaysEnergy],
+            ..row(
+                "Watchful Automaton paying energy, pristine upkeep",
+                "Watchful Automaton",
+                WATCHFUL_AUTOMATON,
+                "activation_patience_library_top",
+            )
+        },
+        // Positives that spend a tap or a capped activation: still exempt in the upkeep.
+        Row {
+            categories: &[CostCategory::ManaOnly, CostCategory::TapsSelf],
+            ..row(
+                "Crystal Ball (taps its source), pristine upkeep",
+                "Crystal Ball",
+                CRYSTAL_BALL,
+                "activation_patience_library_top",
+            )
+        },
+        Row {
+            // As for Doom Whisperer, the unlisted "Defender" keyword line takes slot 0.
+            ability_index: 1,
+            after_trigger: true,
+            categories: &[CostCategory::ManaOnly, CostCategory::TapsSelf],
+            ..row(
+                "Coastal Bulwark (taps its source), upkeep after a trigger",
+                "Coastal Bulwark",
+                "Defender\nThis creature gets +2/+0 as long as you control an Island.\n{2}, {T}: Surveil 1. (Look at the top card of your library. You may put that card into your graveyard.)",
+                "activation_patience_library_top",
+            )
+        },
+        Row {
+            ability_index: 1,
+            ..row(
+                "Audacious Knuckleblade ability 1 (exhaust), pristine upkeep",
+                "Audacious Knuckleblade",
+                "Exhaust — {2}{G}: Seek a card named Audacious Knuckleblade and put it onto the battlefield tapped.\nExhaust — {1}{U}: Surveil 2, then untap this creature.\nExhaust — {R}: Creatures you control gain haste until end of turn.",
+                "activation_patience_library_top",
+            )
+        },
+        Row {
+            edit: Some(|ability| {
+                ability
+                    .activation_restrictions
+                    .push(ActivationRestriction::OnlyOnceEachTurn);
+            }),
+            ..row(
+                "Watchful Automaton, once each turn, pristine upkeep",
+                "Watchful Automaton",
+                WATCHFUL_AUTOMATON,
+                "activation_patience_library_top",
+            )
+        },
+        Row {
+            edit: Some(|ability| {
+                ability
+                    .activation_restrictions
+                    .push(ActivationRestriction::MaxTimesEachTurn { count: 2 });
+            }),
+            ..row(
+                "Watchful Automaton, at most twice each turn, pristine upkeep",
+                "Watchful Automaton",
+                WATCHFUL_AUTOMATON,
+                "activation_patience_library_top",
+            )
+        },
+        // Siblings and boundaries.
+        Row {
+            phase: Phase::Draw,
+            ..row(
+                "Top ability 0 in the draw step (the draw is behind)",
+                "Sensei's Divining Top",
+                SENSEIS_DIVINING_TOP,
+                "activation_patience_hold_for_main",
+            )
+        },
+        Row {
+            phase: Phase::Draw,
+            categories: &[CostCategory::ManaOnly, CostCategory::TapsSelf],
+            ..row(
+                "Crystal Ball in the draw step (the draw is behind)",
+                "Crystal Ball",
+                CRYSTAL_BALL,
+                "activation_patience_hold_for_main",
+            )
+        },
+        Row {
+            slot: Some(Slot::AnyPlayer),
+            ..row(
+                "Elemental Augury (target player's library), pristine upkeep",
+                "Elemental Augury",
+                ELEMENTAL_AUGURY,
+                "activation_patience_library_top",
+            )
+        },
+        Row {
+            edit: Some(|ability| {
+                set_dig_player(ability, engine::types::ability::TargetFilter::ParentTargetController);
+            }),
+            slot: Some(Slot::ParentTargetController),
+            ..row(
+                "Elemental Augury with a slot the authority can't answer, pristine upkeep",
+                "Elemental Augury",
+                ELEMENTAL_AUGURY,
+                "activation_patience_library_top",
+            )
+        },
+        Row {
+            phase: Phase::Draw,
+            slot: Some(Slot::AnyPlayer),
+            ..row(
+                "Elemental Augury in the draw step (the draw is behind)",
+                "Elemental Augury",
+                ELEMENTAL_AUGURY,
+                "activation_patience_hold_for_main",
+            )
+        },
+        Row {
+            ability_index: 1,
+            categories: &[CostCategory::TapsSelf],
+            slot: None,
+            ..row(
+                "Top ability 1 (its draw puts the Top back on top), pristine upkeep",
+                "Sensei's Divining Top",
+                SENSEIS_DIVINING_TOP,
+                "activation_patience_library_top",
+            )
+        },
+        Row {
+            // Second Sight's and Tahngarth's Glare's "target opponent's library" slot, on an
+            // activated ability: the AI can't name itself, so the arrangement can't reach its draw.
+            edit: Some(|ability| {
+                set_dig_player(
+                    ability,
+                    engine::types::ability::TargetFilter::Typed(
+                        engine::types::ability::TypedFilter::default()
+                            .controller(engine::types::ability::ControllerRef::Opponent),
+                    ),
+                );
+            }),
+            slot: Some(Slot::Opponent),
+            ..row(
+                "Elemental Augury on target opponent's library, pristine upkeep",
+                "Elemental Augury",
+                ELEMENTAL_AUGURY,
+                "activation_patience_hold",
+            )
+        },
+    ];
+
+    for row in rows {
+        let mut board = build_board(row.phase, 20, 20);
+        if row.after_trigger {
+            add_upkeep_trigger_source(&mut board.state);
+        }
+        let id = set_arranger(&mut board, row.name, row.oracle_text);
+        if let Some(edit) = row.edit {
+            edit(
+                &mut Arc::make_mut(&mut board.state.objects.get_mut(&id).unwrap().abilities)
+                    [row.ability_index],
+            );
+        }
+        let ability = &board.state.objects[&id].abilities[row.ability_index];
+        assert_eq!(
+            arrangement_slot(&ability.effect),
+            row.slot,
+            "{}: premise: the effect's arrangement slot, got {:?}",
+            row.label,
+            ability.effect
+        );
+        assert_eq!(
+            ability.cost_categories(),
+            row.categories,
+            "{}: premise: cost categories",
+            row.label
+        );
+        if row.name == "Audacious Knuckleblade" {
+            assert!(
+                ability
+                    .activation_restrictions
+                    .contains(&ActivationRestriction::OnlyOnce),
+                "{}: premise: exhaust parses as an only-once restriction (CR 702.177a)",
+                row.label
+            );
+        }
+        let (delta, reason) = score_and_reason(&verdict_for_ability(&board, row.ability_index));
+        assert_eq!(reason, row.expected, "{}", row.label);
+        if row.expected == "activation_patience_library_top" {
+            assert_eq!(delta, 0.0, "{}", row.label);
+        } else {
+            assert!(delta < 0.0, "{}: held, got {delta}", row.label);
+        }
+    }
+}
+
+/// The player slot "target opponent" (or "target opponent's library"), which can't name the AI.
+fn names_an_opponent(filter: &TargetFilter) -> bool {
+    matches!(
+        filter,
+        TargetFilter::Typed(typed)
+            if typed.type_filters.is_empty()
+                && typed.controller == Some(ControllerRef::Opponent)
+    )
+}
+
+/// `{1}, {T}`-style look at the top of a library that keeps nothing itself (CR 701.20e), with the
+/// player whose library it is.
+fn look_player(effect: &Effect) -> Option<&TargetFilter> {
+    match effect {
+        Effect::Dig {
+            player,
+            destination: None,
+            keep_count: Some(0),
+            rest_destination: None,
+            ..
+        } => Some(player),
+        _ => None,
+    }
+}
+
+const ACADEMY_RUINS: &str = "{T}: Add {C}.\n{1}{U}, {T}: Put target artifact card from your graveyard on top of your library.";
+const EXCAVATED_WALL: &str =
+    "Defender\n{1}, {T}: Mill a card. (Put the top card of your library into your graveyard.)";
+
+/// CR 504.1 + CR 121.1: in the upkeep the draw step's draw is still ahead, and any change to a
+/// library that can be the AI's own changes what that draw takes, so the activation does not
+/// commute with it and waiting does not reproduce it. Each row is a shape of that class or a
+/// shape that stays held, built from its verbatim Oracle text; each asserts its parse premise,
+/// and each hold row's reason is its positive reach.
+///
+/// Held: a draw (both draws take the same two cards), a search with its own instructions, a
+/// look whose card nothing then acts on, and a change that can only reach an opponent's library
+/// (a scope or slot that can't name the AI). Held in the draw step whatever the shape: CR 504.2
+/// puts the draw behind that priority, so the main phase reproduces the activation.
+///
+/// Reito Lantern pins an accepted over-reach: bottom placement changes this draw only on an
+/// empty library (CR 704.5b), and a card slot names no player, so it fails closed.
+#[test]
+fn an_upkeep_own_library_change_is_not_held_while_the_draw_is_ahead() {
+    struct Row {
+        label: &'static str,
+        name: &'static str,
+        oracle_text: &'static str,
+        ability_index: usize,
+        premise: fn(&AbilityDefinition) -> bool,
+        phase: Phase,
+        after_trigger: bool,
+        expected: &'static str,
+    }
+    const TOP: &str = "activation_patience_library_top";
+    const HOLD: &str = "activation_patience_hold";
+    const HOLD_FOR_MAIN: &str = "activation_patience_hold_for_main";
+    let row = |label,
+               name,
+               oracle_text,
+               ability_index,
+               premise: fn(&AbilityDefinition) -> bool,
+               expected| Row {
+        label,
+        name,
+        oracle_text,
+        ability_index,
+        premise,
+        phase: Phase::Upkeep,
+        after_trigger: false,
+        expected,
+    };
+    let puts_on_top = |ability: &AbilityDefinition| {
+        matches!(
+            *ability.effect,
+            Effect::PutAtLibraryPosition {
+                position: LibraryPosition::Top,
+                ..
+            }
+        ) && ability.condition.is_none()
+    };
+    let mills_controller = |ability: &AbilityDefinition| {
+        matches!(
+            *ability.effect,
+            Effect::Mill {
+                target: TargetFilter::Controller,
+                ..
+            }
+        ) && ability.player_scope.is_none()
+    };
+    let reveal_gates_its_payoff = |ability: &AbilityDefinition| {
+        matches!(
+            *ability.effect,
+            Effect::RevealTop {
+                player: TargetFilter::Controller,
+                ..
+            }
+        ) && ability.condition.is_none()
+            && ability.sub_ability.as_ref().is_some_and(|sub| {
+                matches!(
+                    sub.condition,
+                    Some(AbilityCondition::RevealedHasCardType { .. })
+                )
+            })
+    };
+    let searches = |ability: &AbilityDefinition| {
+        matches!(
+            collect_chain_effects(ability).as_slice(),
+            [
+                Effect::SearchLibrary { .. },
+                Effect::ChangeZone {
+                    origin: Some(Zone::Library),
+                    ..
+                },
+                Effect::Shuffle { .. }
+            ]
+        )
+    };
+    let rows = [
+        // Top placement.
+        row(
+            "Academy Ruins ability 1 (a card put on top)",
+            "Academy Ruins",
+            ACADEMY_RUINS,
+            1,
+            puts_on_top,
+            TOP,
+        ),
+        row(
+            "Volrath's Stronghold ability 1 (a card put on top)",
+            "Volrath's Stronghold",
+            "{T}: Add {C}.\n{1}{B}, {T}: Put target creature card from your graveyard on top of your library.",
+            1,
+            puts_on_top,
+            TOP,
+        ),
+        // Mill: whose library reads `player_scope` first, then the slot.
+        row(
+            "Excavated Wall (self-mill)",
+            "Excavated Wall",
+            EXCAVATED_WALL,
+            1,
+            mills_controller,
+            TOP,
+        ),
+        row(
+            "Cathartic Adept (target player mills)",
+            "Cathartic Adept",
+            "{T}: Target player mills a card.",
+            0,
+            |ability| {
+                matches!(
+                    *ability.effect,
+                    Effect::Mill {
+                        target: TargetFilter::Player,
+                        ..
+                    }
+                )
+            },
+            TOP,
+        ),
+        row(
+            "Whetstone (each player mills)",
+            "Whetstone",
+            "{3}: Each player mills two cards.",
+            0,
+            |ability| {
+                matches!(*ability.effect, Effect::Mill { .. })
+                    && ability.player_scope == Some(PlayerFilter::All)
+            },
+            TOP,
+        ),
+        row(
+            "Folio of Fancies ability 1 (each opponent mills)",
+            "Folio of Fancies",
+            "Players have no maximum hand size.\n{X}{X}, {T}: Each player draws X cards.\n{2}{U}, {T}: Each opponent mills cards equal to the number of cards in their hand.",
+            1,
+            |ability| {
+                matches!(
+                    *ability.effect,
+                    Effect::Mill {
+                        target: TargetFilter::Controller,
+                        ..
+                    }
+                ) && ability.player_scope == Some(PlayerFilter::Opponent)
+            },
+            HOLD,
+        ),
+        // Cards taken from the top.
+        row(
+            "Ornate Kanzashi (target opponent exiles their top card)",
+            "Ornate Kanzashi",
+            "{2}, {T}: Target opponent exiles the top card of their library. You may play that card this turn.",
+            0,
+            |ability| {
+                matches!(
+                    &*ability.effect,
+                    Effect::ExileTop { player, .. } if names_an_opponent(player)
+                )
+            },
+            HOLD,
+        ),
+        row(
+            "Thoughtpicker Witch (a look at an opponent's library whose card moves)",
+            "Thoughtpicker Witch",
+            "{1}, Sacrifice a creature: Look at the top two cards of target opponent's library, then exile one of them.",
+            0,
+            |ability| {
+                look_player(&ability.effect).is_some_and(names_an_opponent)
+                    && ability.sub_ability.as_ref().is_some_and(|sub| {
+                        matches!(
+                            *sub.effect,
+                            Effect::ChangeZone {
+                                origin: None,
+                                target: TargetFilter::ParentTarget,
+                                ..
+                            }
+                        )
+                    })
+            },
+            HOLD,
+        ),
+        row(
+            "Thought Dissector (a reveal of an opponent's library whose card moves)",
+            "Thought Dissector",
+            "{X}, {T}: Target opponent reveals cards from the top of their library until an artifact card or X cards are revealed, whichever comes first. If an artifact card is revealed this way, put it onto the battlefield under your control and sacrifice this artifact. Put the rest of the revealed cards into that player's graveyard.",
+            0,
+            |ability| {
+                let chain = collect_chain_effects(ability);
+                matches!(
+                    chain.first(),
+                    Some(Effect::RevealTop { player, .. }) if names_an_opponent(player)
+                ) && chain.iter().any(|effect| {
+                    matches!(
+                        effect,
+                        Effect::ChangeZone {
+                            origin: None,
+                            destination: Zone::Battlefield,
+                            target: TargetFilter::ParentTarget,
+                            ..
+                        }
+                    )
+                }) && chain.iter().any(|effect| {
+                    matches!(
+                        effect,
+                        Effect::ChangeZoneAll {
+                            origin: Some(Zone::Exile),
+                            destination: Zone::Graveyard,
+                            ..
+                        }
+                    )
+                })
+            },
+            HOLD,
+        ),
+        row(
+            "Dark-Dweller Oracle (exiles the AI's top card)",
+            "Dark-Dweller Oracle",
+            "{1}, Sacrifice a creature: Exile the top card of your library. You may play that card this turn. (You still pay its costs. You can play a land this way only if you have an available land play remaining.)",
+            0,
+            |ability| {
+                matches!(
+                    *ability.effect,
+                    Effect::ExileTop {
+                        player: TargetFilter::Controller,
+                        ..
+                    }
+                )
+            },
+            TOP,
+        ),
+        row(
+            "Legion Vanguard (explore, a node with no slot)",
+            "Legion Vanguard",
+            "{1}, Sacrifice another creature: This creature explores. (Reveal the top card of your library. Put that card into your hand if it's a land. Otherwise, put a +1/+1 counter on this creature, then put the card back or put it into your graveyard.)",
+            0,
+            |ability| matches!(*ability.effect, Effect::Explore),
+            TOP,
+        ),
+        row(
+            "Fomori Vault ability 1 (a dig that keeps one)",
+            "Fomori Vault",
+            "{T}: Add {C}.\n{3}, {T}, Discard a card: Look at the top X cards of your library, where X is the number of artifacts you control. Put one of those cards into your hand and the rest on the bottom of your library in a random order.",
+            1,
+            |ability| {
+                matches!(
+                    *ability.effect,
+                    Effect::Dig {
+                        keep_count: Some(1),
+                        destination: Some(Zone::Hand),
+                        ..
+                    }
+                )
+            },
+            TOP,
+        ),
+        row(
+            "Feldon's Cane (the graveyard shuffled into the library)",
+            "Feldon's Cane",
+            "{T}, Exile this artifact: Shuffle your graveyard into your library.",
+            0,
+            |ability| {
+                matches!(
+                    collect_chain_effects(ability).as_slice(),
+                    [
+                        Effect::ChangeZoneAll {
+                            destination: Zone::Library,
+                            ..
+                        },
+                        Effect::Shuffle { .. }
+                    ]
+                )
+            },
+            TOP,
+        ),
+        // A look or reveal whose card then moves: the look answers for the mover's anaphor.
+        row(
+            "Zoologist (a reveal whose card then moves)",
+            "Zoologist",
+            "{3}{G}, {T}: Reveal the top card of your library. If it's a creature card, put it onto the battlefield. Otherwise, put it into your graveyard.",
+            0,
+            |ability| {
+                matches!(
+                    collect_chain_effects(ability).as_slice(),
+                    [
+                        Effect::RevealTop {
+                            player: TargetFilter::Controller,
+                            ..
+                        },
+                        Effect::ChangeZone { origin: None, .. },
+                        ..
+                    ]
+                )
+            },
+            TOP,
+        ),
+        row(
+            "Lurking Informant (a look whose card then moves)",
+            "Lurking Informant",
+            "({U/B} can be paid with either {U} or {B}.)\n{2}, {T}: Look at the top card of target player's library. You may put that card into that player's graveyard.",
+            0,
+            |ability| {
+                look_player(&ability.effect) == Some(&TargetFilter::Player)
+                    && ability.sub_ability.as_ref().is_some_and(|sub| {
+                        matches!(*sub.effect, Effect::ChangeZone { origin: None, .. })
+                    })
+            },
+            TOP,
+        ),
+        // A reveal whose card then gates a payoff: nothing moves, but which card it reads does.
+        row(
+            "Iron Lad, Diverging Destiny ability 1 (a reveal whose card gates a draw)",
+            "Iron Lad, Diverging Destiny",
+            "Flying, vigilance\nYou may look at the top card of your library any time.\n{T}: Reveal the top card of your library. If it's an artifact card, draw a card.",
+            1,
+            reveal_gates_its_payoff,
+            TOP,
+        ),
+        row(
+            "Brutal Deceiver ability 1 (a reveal whose card gates a pump)",
+            "Brutal Deceiver",
+            "{1}: Look at the top card of your library.\n{2}: Reveal the top card of your library. If it's a land card, this creature gets +1/+0 and gains first strike until end of turn. Activate only once each turn.",
+            1,
+            reveal_gates_its_payoff,
+            TOP,
+        ),
+        // A shuffle with no search, and bottom placement.
+        row(
+            "Myr Mindservant (a bare shuffle)",
+            "Myr Mindservant",
+            "{2}, {T}: Shuffle your library.",
+            0,
+            |ability| {
+                matches!(
+                    collect_chain_effects(ability).as_slice(),
+                    [Effect::Shuffle { .. }]
+                )
+            },
+            TOP,
+        ),
+        row(
+            "Reito Lantern (bottom placement, the accepted over-reach)",
+            "Reito Lantern",
+            "{3}: Put target card from a graveyard on the bottom of its owner's library.",
+            0,
+            |ability| {
+                matches!(
+                    *ability.effect,
+                    Effect::PutAtLibraryPosition {
+                        position: LibraryPosition::Bottom,
+                        ..
+                    }
+                )
+            },
+            TOP,
+        ),
+        // Costs (CR 602.1a): the effect after the colon leaves the library alone.
+        row(
+            "Hidden Retreat (a card put on top as a cost)",
+            "Hidden Retreat",
+            "Put a card from your hand on top of your library: Prevent all damage that would be dealt by target instant or sorcery spell this turn.",
+            0,
+            |ability| {
+                matches!(ability.cost, Some(AbilityCost::EffectCost { .. }))
+                    && !ability.effect.moves_card_to_or_from_library()
+            },
+            TOP,
+        ),
+        row(
+            "Leashling (a card put on top as a cost)",
+            "Leashling",
+            "Put a card from your hand on top of your library: Return this creature to its owner's hand.",
+            0,
+            |ability| {
+                matches!(ability.cost, Some(AbilityCost::EffectCost { .. }))
+                    && matches!(
+                        *ability.effect,
+                        Effect::Bounce {
+                            target: TargetFilter::SelfRef,
+                            ..
+                        }
+                    )
+            },
+            TOP,
+        ),
+        row(
+            "Royal Herbalist (the top card exiled as a cost, inside a composite)",
+            "Royal Herbalist",
+            "{2}, Exile the top card of your library: You gain 1 life.",
+            0,
+            |ability| {
+                matches!(
+                    &ability.cost,
+                    Some(AbilityCost::Composite { costs }) if costs.iter().any(|cost| matches!(
+                        cost,
+                        AbilityCost::Exile {
+                            zone: Some(Zone::Library),
+                            ..
+                        }
+                    ))
+                ) && !ability.effect.moves_card_to_or_from_library()
+            },
+            TOP,
+        ),
+        // Modes: the library change is only in one.
+        row(
+            "Bow of Nylea (a library change in one mode only)",
+            "Bow of Nylea",
+            "Attacking creatures you control have deathtouch.\n{1}{G}, {T}: Choose one —\n• Put a +1/+1 counter on target creature.\n• Bow of Nylea deals 2 damage to target creature with flying.\n• You gain 3 life.\n• Put up to four target cards from your graveyard on the bottom of your library in any order.",
+            0,
+            |ability| {
+                !collect_chain_effects(ability)
+                    .iter()
+                    .any(|effect| effect.moves_card_to_or_from_library())
+                    && ability.mode_abilities.iter().any(|mode| {
+                        matches!(
+                            *mode.effect,
+                            Effect::PutAtLibraryPosition {
+                                position: LibraryPosition::Bottom,
+                                ..
+                            }
+                        )
+                    })
+            },
+            TOP,
+        ),
+        // A tutored card put back on the library.
+        row(
+            "Sterling Grove (a tutored card put on top)",
+            "Sterling Grove",
+            "Other enchantments you control have shroud. (They can't be the targets of spells or abilities.)\n{1}, Sacrifice this enchantment: Search your library for an enchantment card, reveal it, then shuffle and put that card on top.",
+            0,
+            |ability| {
+                matches!(
+                    collect_chain_effects(ability).as_slice(),
+                    [
+                        Effect::SearchLibrary { .. },
+                        Effect::Shuffle { .. },
+                        Effect::PutAtLibraryPosition {
+                            target: TargetFilter::Any,
+                            position: LibraryPosition::Top,
+                            ..
+                        },
+                        ..
+                    ]
+                )
+            },
+            TOP,
+        ),
+        // Held: draws commute with the draw (CR 121.1).
+        row(
+            "Jayemdae Tome (a draw)",
+            "Jayemdae Tome",
+            "{4}, {T}: Draw a card.",
+            0,
+            |ability| {
+                matches!(
+                    collect_chain_effects(ability).as_slice(),
+                    [Effect::Draw { .. }]
+                )
+            },
+            HOLD,
+        ),
+        row(
+            "Merfolk Looter (a draw, then a discard)",
+            "Merfolk Looter",
+            "{T}: Draw a card, then discard a card.",
+            0,
+            |ability| {
+                matches!(
+                    collect_chain_effects(ability).as_slice(),
+                    [Effect::Draw { .. }, Effect::Discard { .. }]
+                )
+            },
+            HOLD,
+        ),
+        // Held: a search and its own instructions.
+        row(
+            "Flooded Strand (a search and its shuffle)",
+            "Flooded Strand",
+            "{T}, Pay 1 life, Sacrifice this land: Search your library for a Plains or Island card, put it onto the battlefield, then shuffle.",
+            0,
+            searches,
+            HOLD,
+        ),
+        row(
+            "Expedition Map (a search and its shuffle)",
+            "Expedition Map",
+            "{2}, {T}, Sacrifice this artifact: Search your library for a land card, reveal it, put it into your hand, then shuffle.",
+            0,
+            searches,
+            HOLD,
+        ),
+        // Held: a look whose card nothing then acts on.
+        row(
+            "Orcish Spy (a look alone)",
+            "Orcish Spy",
+            "{T}: Look at the top three cards of target player's library.",
+            0,
+            |ability| {
+                look_player(&ability.effect) == Some(&TargetFilter::Player)
+                    && ability.sub_ability.is_none()
+            },
+            HOLD,
+        ),
+        row(
+            "Mishra's Bauble (a look and a delayed trigger)",
+            "Mishra's Bauble",
+            "{T}, Sacrifice this artifact: Look at the top card of target player's library. Draw a card at the beginning of the next turn's upkeep.",
+            0,
+            |ability| {
+                look_player(&ability.effect).is_some()
+                    && ability.sub_ability.as_ref().is_some_and(|sub| {
+                        matches!(*sub.effect, Effect::CreateDelayedTrigger { .. })
+                    })
+            },
+            HOLD,
+        ),
+        // The draw step: the draw is behind (CR 504.2).
+        Row {
+            phase: Phase::Draw,
+            ..row(
+                "Academy Ruins ability 1 in the draw step",
+                "Academy Ruins",
+                ACADEMY_RUINS,
+                1,
+                puts_on_top,
+                HOLD_FOR_MAIN,
+            )
+        },
+        Row {
+            phase: Phase::Draw,
+            ..row(
+                "Excavated Wall in the draw step",
+                "Excavated Wall",
+                EXCAVATED_WALL,
+                1,
+                mills_controller,
+                HOLD_FOR_MAIN,
+            )
+        },
+        // An upkeep whose triggers have resolved still precedes the draw.
+        Row {
+            after_trigger: true,
+            ..row(
+                "Academy Ruins ability 1, upkeep after a trigger",
+                "Academy Ruins",
+                ACADEMY_RUINS,
+                1,
+                puts_on_top,
+                TOP,
+            )
+        },
+    ];
+
+    for row in rows {
+        let mut board = build_board(row.phase, 20, 20);
+        if row.after_trigger {
+            add_upkeep_trigger_source(&mut board.state);
+        }
+        let id = set_arranger(&mut board, row.name, row.oracle_text);
+        let ability = &board.state.objects[&id].abilities[row.ability_index];
+        assert!(
+            (row.premise)(ability),
+            "{}: premise: the parse shape, got {ability:?}",
+            row.label
+        );
+        let (delta, reason) = score_and_reason(&verdict_for_ability(&board, row.ability_index));
+        assert_eq!(reason, row.expected, "{}", row.label);
+        if row.expected == TOP {
+            assert_eq!(delta, 0.0, "{}", row.label);
+        } else {
+            assert!(delta < 0.0, "{}: held, got {delta}", row.label);
+        }
+    }
 }
 
 /// CR 602.5: an ability restricted to the upkeep can't be activated in the main
