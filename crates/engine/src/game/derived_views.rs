@@ -15,9 +15,10 @@
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::num::NonZeroUsize;
 
 use crate::analysis::resource::ResourceAxis;
-use crate::game::ability_utils::declared_targets_in_chain;
+use crate::game::ability_utils::{declared_targets_in_chain, flatten_targets_in_chain};
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::game_object::{AttachTarget, DisplaySource};
 use crate::game::stack::{
@@ -33,7 +34,6 @@ use crate::types::card::TokenImageRef;
 use crate::types::card_type::CoreType;
 use crate::types::counter::{positive_counter_entries, CounterType};
 use crate::types::events::GameEvent;
-use crate::types::format::GameFormat;
 use crate::types::game_state::{
     CastingVariant, CombatDamageSubStep, GameState, StackEntry, StackEntryKind, StackPaidSnapshot,
     SyntheticTriggerProvenance, WaitingFor,
@@ -94,6 +94,10 @@ pub struct StackEntryDisplay {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_image_ref: Option<TokenImageRef>,
     pub kind_label: String,
+    /// The typed template behind `kind_label` for activated and triggered
+    /// ability entries (`StackAbilityKindView`); `None` for every other kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ability_kind: Option<StackAbilityKindView>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ability_description: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -117,6 +121,40 @@ pub struct StackEntryDisplay {
     /// renders one engine-provided value and never picks between two.
     #[serde(default)]
     pub controller: PlayerId,
+}
+
+/// Presentation-only discriminant for the ability template `kind_label` names,
+/// published beside it so a localized display layer formats the label from
+/// typed data instead of parsing the English string.
+///
+/// This mirrors the label `stack_entry_detail` chooses, not a rules
+/// classification: keyword-action entries (Equip, Crew, …) are labelled by
+/// their keyword and carry no value here, and nothing in game logic may read
+/// it. `StackAbilityKind` in `types::ability` is the rules-filter axis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum StackAbilityKindView {
+    /// `number` is the 1-based printed position from
+    /// `ResolvedAbility::ability_index`; absent when the ability carries none.
+    Activated {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        number: Option<NonZeroUsize>,
+    },
+    Triggered,
+}
+
+impl StackAbilityKindView {
+    /// The single authority for the English ability label, so `kind_label`
+    /// and this value can never disagree.
+    fn english_label(self) -> String {
+        match self {
+            Self::Activated {
+                number: Some(number),
+            } => format!("Activated ability {number}"),
+            Self::Activated { number: None } => "Activated ability".to_string(),
+            Self::Triggered => "Triggered ability".to_string(),
+        }
+    }
 }
 
 /// A single player-affecting condition the HUD surfaces as a status icon.
@@ -328,12 +366,11 @@ pub struct UnboundedFamilyView {
     pub state: FamilyCollapseState,
 }
 
-/// CR 122.1 + CR 732.2a: whether a counter row's count is a real quantity or one an accepted
-/// shortcut pumps without bound. Typed rather than a bool because the row is engine-classified
-/// data, not a render-time guess. `Finite` is the dominant case and is therefore the serde
-/// default, so the wire stays quiet for it.
+/// CR 732.2a: whether a displayed quantity — a counter row's count (CR 122.1) or a player's life
+/// total (CR 119.3) — is real or pumped without bound by an accepted shortcut. `Finite` is the
+/// dominant case and is therefore the serde default, so the wire stays quiet for it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum CounterMagnitude {
+pub enum DisplayMagnitude {
     #[default]
     Finite,
     Unbounded,
@@ -341,8 +378,8 @@ pub enum CounterMagnitude {
 
 /// `skip_serializing_if` predicate for [`CounterRowView`]'s `magnitude`, mirroring the free-fn
 /// `is_false` shape every sibling display row in this module already uses.
-fn is_finite(magnitude: &CounterMagnitude) -> bool {
-    matches!(magnitude, CounterMagnitude::Finite)
+fn is_finite(magnitude: &DisplayMagnitude) -> bool {
+    matches!(magnitude, DisplayMagnitude::Finite)
 }
 
 /// One RENDERABLE counter row on one object: an (object, counter) pair. CR 122.1 — a counter is a
@@ -364,7 +401,7 @@ pub struct CounterRowView {
     pub counter: CounterType,
     pub count: u32,
     #[serde(default, skip_serializing_if = "is_finite")]
-    pub magnitude: CounterMagnitude,
+    pub magnitude: DisplayMagnitude,
 }
 
 /// Every counter row one object renders, PRE-PARTITIONED by where it renders — so the display
@@ -942,6 +979,11 @@ pub struct DerivedViews {
     /// omits the channel entirely for a counterless board.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub counter_display: HashMap<ObjectId, ObjectCounterDisplay>,
+
+    /// CR 119.3 + CR 732.2a: per-player life-readout magnitude — `Unbounded` while some marked
+    /// `Life` axis for that seat is rising; only non-`Finite` entries are emitted.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub life_magnitude: BTreeMap<PlayerId, DisplayMagnitude>,
 }
 
 /// Serialize-only wrapper. The wire shape is
@@ -1056,6 +1098,20 @@ impl<'a> ClientGameStateRef<'a> {
             None => crate::game::visibility::filter_state_for_unseated_viewer(state),
         };
         Self::from_projection(state, Cow::Owned(projection), viewer)
+    }
+
+    /// [`Self::wrap`] for a seated viewer with an explicit hand-disclosure
+    /// choice (the local "Show AI Hand" toggle). The engine decides whether the
+    /// viewer may receive it; an unauthorized request yields the rules projection.
+    pub fn wrap_with_hand_disclosure(
+        state: &'a GameState,
+        viewer: PlayerId,
+        disclosure: crate::game::visibility::HandDisclosure,
+    ) -> Self {
+        let projection = crate::game::visibility::filter_state_for_viewer_with_hand_disclosure(
+            state, viewer, disclosure,
+        );
+        Self::from_projection(state, Cow::Owned(projection), Some(viewer))
     }
 
     /// Wrap a viewer-filtered state while deriving rules-authoritative fields
@@ -1687,7 +1743,7 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         views.pending_payment_remaining = pending_payment_remaining(state, viewer);
     }
 
-    if state.format_config.format == GameFormat::Planechase {
+    if state.format_config.format.is_planechase_family() {
         let roll_player = crate::game::turn_control::priority_seat(state);
         let can_viewer_roll = viewer.is_some_and(|viewer| {
             crate::game::turn_control::authorized_submitter_for_player(state, roll_player) == viewer
@@ -1702,7 +1758,7 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
         });
     }
 
-    if state.format_config.format == GameFormat::Archenemy {
+    if state.format_config.format.is_archenemy_family() {
         if let Some(archenemy) = crate::game::topology::archenemy(state) {
             let hero_player_ids = state
                 .seat_order
@@ -1767,25 +1823,14 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     // repeated indefinitely — a CR-732.1b-SHAPED capability, which is the same sense the rest of
     // this crate cites CR 732.1b in. `∞` renders that live mark honestly.
     //
-    // WHAT THIS PROJECTION DOES **NOT** CLAIM: that the mark is REVOCABLE for this class. The
-    // zone-exit defuse (`zones::apply_zone_exit_cleanup`) is gated on a NON-EMPTY
-    // `unbounded_loop_enablers`, and the only production writer of that map is the Interactive
-    // Path-C arm (`engine.rs`'s `register_unbounded_loop_enablers` call).
-    // `materialize_object_growth_shortcut` never registers enablers, so for the OBJECT-GROWTH class
-    // — which is exactly the token and counter families this projection displays — the defuse gate
-    // never matches and is INERT. `engine_resolution_choices.rs` documents that gap in those words
-    // and tracks it as a pre-existing deferred follow-up; it is not introduced here.
-    //
-    // CONSEQUENCE, STATED RATHER THAN BURIED: because that defuse is inert for this class, an
+    // CONSEQUENCE, STATED RATHER THAN BURIED: an
     // enabler leaving the battlefield between accept and boundary leaves a STALE `∞` in the STORE.
-    // The store is deliberately NOT filtered (the defuse and the boundary both read it), so the
+    // The store is deliberately NOT filtered (the boundary reads it), so the
     // live-authority check lives HERE, at the projection: `object_growth_backing` drops a row whose
     // whole registered display set has left the battlefield, exactly as the pile and counter loops
     // already drop individual departed members. That is a DISPLAY revocation only — it never
     // touches `pending_unbounded_materialization`, so the growth the table accepted still lands.
-    // Registering enablers instead would route this through `clear_unbounded_loop`, a SIX-map wipe
-    // that also destroys the accepted collapse stash and its CR 732.2c bound; see
-    // `types::game_state::clear_unbounded_loop`. What ends the MARK for this class is still the
+    // What ends the MARK for this class is still the
     // boundary, below.
     //
     // And hiding it is strictly worse on display coherence, which is what the old "the badge is a
@@ -1832,10 +1877,7 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     // (CR 732.2c — the shortcut is already taken), never remove one.
     // Naming WHO reads the schedule is a claim every future consumer can break; naming what the
     // schedule may not DO is not. The stores are not filtered either:
-    // `unbounded_resources` keeps the mark until the boundary applies the growth. (`unbounded_loop_enablers` is held in
-    // lockstep with it as an ENGINE-STATE invariant required by no CR — but see the inertness note
-    // above: for the object-growth class that map is EMPTY, so the lockstep is vacuously satisfied
-    // here and is load-bearing only for the Interactive Path-C class that populates it.)
+    // `unbounded_resources` keeps the mark until the boundary applies the growth.
     //
     // What ends each `∞` is the boundary, never this projection:
     // `clear_collapsed_materializations` drops the collapsed axes once the growth is applied, and
@@ -1872,6 +1914,17 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
                 && object_growth_backing(state, controller, axis) == Some(false)
             {
                 continue;
+            }
+            // CR 119.3 + CR 732.2a: a seat's readout is ∞ while some controller's surviving row
+            // marks its life as rising.
+            if let ResourceAxis::Life(p) = axis {
+                if state
+                    .unbounded_rising
+                    .get(&controller)
+                    .is_some_and(|rising| rising.contains(&axis))
+                {
+                    views.life_magnitude.insert(p, DisplayMagnitude::Unbounded);
+                }
             }
             let player = attribution_player(axis, controller);
             let state_for_axis = if accepted_axes.contains(&axis) {
@@ -2038,7 +2091,7 @@ fn counter_display_views(state: &GameState) -> HashMap<ObjectId, ObjectCounterDi
             CounterRowView {
                 counter: ct.clone(),
                 count,
-                magnitude: CounterMagnitude::Unbounded,
+                magnitude: DisplayMagnitude::Unbounded,
             },
         );
         annotated.entry(*id).or_default().insert(ct);
@@ -2056,7 +2109,7 @@ fn counter_display_views(state: &GameState) -> HashMap<ObjectId, ObjectCounterDi
                 CounterRowView {
                     counter: counter.clone(),
                     count,
-                    magnitude: CounterMagnitude::Finite,
+                    magnitude: DisplayMagnitude::Finite,
                 },
             );
         }
@@ -2164,7 +2217,7 @@ fn debug_library_cards(state: &GameState, viewer: Option<PlayerId>) -> Vec<Debug
     let Some(viewer) = viewer else {
         return Vec::new();
     };
-    if !state.debug_mode || !state.debug_permitted.contains(&viewer) {
+    if !crate::game::visibility::viewer_has_debug_identity_access(state, viewer) {
         return Vec::new();
     }
     let mut cards = state
@@ -2404,10 +2457,7 @@ fn attribution_player(axis: ResourceAxis, controller: PlayerId) -> PlayerId {
 /// `bridge_drift_on_cease_to_exist_fails_open`.
 ///
 /// Read-only: recomputed from live state on every `derive_views` call, nothing is stored,
-/// so nothing can go stale. Deliberately not a `clear_unbounded_loop` from the zone-exit
-/// defuse — that call drops six maps including `pending_unbounded_materialization` and its
-/// CR 732.2c bound, i.e. it would cancel growth the table has already unanimously accepted
-/// ("the shortcut is taken" the moment the last player accepts). Revoking the BADGE is a
+/// so nothing can go stale. Revoking the BADGE is a
 /// display decision; revoking the agreed GROWTH is not ours to make here.
 fn object_growth_backing(
     state: &GameState,
@@ -2641,36 +2691,49 @@ fn stack_entry_details(state: &GameState) -> HashMap<ObjectId, StackEntryDisplay
 fn stack_entry_detail(state: &GameState, entry: &StackEntry) -> StackEntryDisplay {
     let source_name = stack_source_name(state, entry);
     let effective_ability = effective_stack_ability(state, entry);
-    let (kind_label, ability_description) = match &entry.kind {
+    let (kind_label, ability_kind, ability_description) = match &entry.kind {
         StackEntryKind::Spell { ability, .. } => (
             "Spell".to_string(),
+            None,
             ability
                 .as_ref()
                 .and_then(|ability| ability.description.clone()),
         ),
-        StackEntryKind::ActivatedAbility { ability, .. } => (
-            ability
-                .ability_index
-                .map(|idx| format!("Activated ability {}", idx + 1))
-                .unwrap_or_else(|| "Activated ability".to_string()),
-            ability.description.clone(),
-        ),
+        StackEntryKind::ActivatedAbility { ability, .. } => {
+            let kind = StackAbilityKindView::Activated {
+                number: ability
+                    .ability_index
+                    .map(|idx| NonZeroUsize::MIN.saturating_add(idx)),
+            };
+            (
+                kind.english_label(),
+                Some(kind),
+                ability.description.clone(),
+            )
+        }
         StackEntryKind::TriggeredAbility {
             ability,
             description,
             ..
-        } => (
-            "Triggered ability".to_string(),
-            description.clone().or_else(|| ability.description.clone()),
-        ),
-        StackEntryKind::KeywordAction { action } => (keyword_action_label(action), None),
-        StackEntryKind::CombatDamage { sub_step, .. } => (combat_damage_label(*sub_step), None),
+        } => {
+            let kind = StackAbilityKindView::Triggered;
+            (
+                kind.english_label(),
+                Some(kind),
+                description.clone().or_else(|| ability.description.clone()),
+            )
+        }
+        StackEntryKind::KeywordAction { action } => (keyword_action_label(action), None, None),
+        StackEntryKind::CombatDamage { sub_step, .. } => {
+            (combat_damage_label(*sub_step), None, None)
+        }
     };
 
     StackEntryDisplay {
         source_name,
         token_image_ref: stack_source_token_image_ref(state, entry),
         kind_label,
+        ability_kind,
         ability_description,
         selected_mode_labels: effective_ability
             .ability
@@ -2762,7 +2825,15 @@ fn stack_entry_targets(state: &GameState, entry: &StackEntry) -> Vec<StackTarget
         StackEntryKind::KeywordAction { action } => keyword_action_targets(action),
         _ => effective_stack_ability(state, entry)
             .ability
-            .map(declared_targets_in_chain)
+            .map(|ability| {
+                let declared = declared_targets_in_chain(ability);
+                // An entry that declared no target shows what it holds.
+                if declared.is_empty() {
+                    flatten_targets_in_chain(ability)
+                } else {
+                    declared
+                }
+            })
             .unwrap_or_default(),
     };
     targets
@@ -3011,11 +3082,12 @@ fn zone_label(zone: Option<Zone>) -> &'static str {
 mod tests {
     use super::*;
     use crate::game::combat::CombatState;
+    use crate::game::game_object::ObjectIncarnationRefExt;
     use crate::game::triggers::{PendingTrigger, PendingTriggerContext};
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        DelayedTriggerCondition, Duration, Effect, EffectKind, ModalChoice, ResolvedAbility,
-        RestrictionExpiry, StaticCondition, TargetFilter, TargetRef,
+        DelayedTriggerCondition, DelayedTriggerKind, Duration, Effect, EffectKind, ModalChoice,
+        ResolvedAbility, RestrictionExpiry, StaticCondition, TargetFilter, TargetRef,
     };
     use crate::types::card_type::CoreType;
     use crate::types::format::FormatConfig;
@@ -3400,7 +3472,11 @@ mod tests {
                 "Pentad Prism".to_string(),
                 Zone::Battlefield,
             );
-            state.mark_unbounded_loop(PlayerId(0), &[plus1_axis, generic_axis]);
+            state.mark_unbounded_loop(
+                PlayerId(0),
+                &[plus1_axis, generic_axis],
+                &[plus1_axis, generic_axis],
+            );
             // CR 701.34a: the registered backing is the GENERIC channel's, derived axis-blind.
             // Nothing here backs `plus1_axis` — that is the whole point.
             state.register_unbounded_counter_targets(
@@ -3480,7 +3556,11 @@ mod tests {
                 "Saproling".to_string(),
                 Zone::Battlefield,
             );
-            state.mark_unbounded_loop(p0, &[ResourceAxis::TokensCreated]);
+            state.mark_unbounded_loop(
+                p0,
+                &[ResourceAxis::TokensCreated],
+                &[ResourceAxis::TokensCreated],
+            );
             state.register_unbounded_loop_pile(p0, BTreeSet::from([token]));
             if accepted {
                 state.register_pending_materialization(
@@ -3565,7 +3645,7 @@ mod tests {
                 Zone::Battlefield,
             );
             let axis = collapsed_counter_axis(&state, prism, &charge);
-            state.mark_unbounded_loop(p0, &[axis]);
+            state.mark_unbounded_loop(p0, &[axis], &[axis]);
             state.register_unbounded_counter_targets(p0, vec![(prism, charge.clone())]);
             if accepted {
                 state.register_pending_materialization(
@@ -3683,7 +3763,7 @@ mod tests {
             "reach: a CREATURE bearer derives the Creature-classed axis — if this is `Other` the \
              rig lost its core_types and the drift below would be invisible"
         );
-        state.mark_unbounded_loop(p0, &[axis]);
+        state.mark_unbounded_loop(p0, &[axis], &[axis]);
         state.register_unbounded_counter_targets(p0, vec![(bearer, CounterType::Plus1Plus1)]);
 
         // BASELINE: the bearer leaves the battlefield but still EXISTS, so it still derives the
@@ -3993,10 +4073,7 @@ mod tests {
             TargetFilter::SpecificObject { id: clone },
             vec![ContinuousModification::CopyValues {
                 values: Box::new(values.clone()),
-                display_source: DisplaySource::Card,
-                printed_ref: None,
-                token_image_ref: None,
-                token_art: None,
+                display: Default::default(),
             }],
             None,
         );
@@ -4007,10 +4084,7 @@ mod tests {
             TargetFilter::SpecificObject { id: hidden_copy },
             vec![ContinuousModification::CopyValues {
                 values: Box::new(values),
-                display_source: DisplaySource::Card,
-                printed_ref: None,
-                token_image_ref: None,
-                token_art: None,
+                display: Default::default(),
             }],
             None,
         );
@@ -4083,10 +4157,7 @@ mod tests {
                 TargetFilter::SpecificObject { id: source },
                 vec![ContinuousModification::CopyValues {
                     values: Box::new(values),
-                    display_source: DisplaySource::Card,
-                    printed_ref: None,
-                    token_image_ref: None,
-                    token_art: None,
+                    display: Default::default(),
                 }],
                 None,
                 crate::types::game_state::TransientContinuousEffectBindings {
@@ -4184,10 +4255,7 @@ mod tests {
                 TargetFilter::SpecificObject { id: host },
                 vec![ContinuousModification::CopyValues {
                     values: Box::new(values),
-                    display_source: DisplaySource::Card,
-                    printed_ref: None,
-                    token_image_ref: None,
-                    token_art: None,
+                    display: Default::default(),
                 }],
                 None,
             )
@@ -4228,10 +4296,7 @@ mod tests {
             TargetFilter::SpecificObject { id: hidden },
             vec![ContinuousModification::CopyValues {
                 values: Box::new(values),
-                display_source: DisplaySource::Card,
-                printed_ref: None,
-                token_image_ref: None,
-                token_art: None,
+                display: Default::default(),
             }],
             None,
         );
@@ -5119,6 +5184,229 @@ mod tests {
         );
     }
 
+    /// `stack_entry_detail` publishes the typed template behind `kind_label`
+    /// for ability entries, numbered exactly as the label is, and nothing for
+    /// spells or keyword actions. The numbered entry is stamped by the real
+    /// activation path (`GameAction::ActivateAbility`).
+    #[test]
+    fn stack_entry_details_publish_structured_ability_kind_beside_kind_label() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::actions::GameAction;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = scenario
+            .add_creature_from_oracle(
+                P0,
+                "Twin Pumper",
+                2,
+                2,
+                "{0}: This creature gets +1/+1 until end of turn.\n{0}: This creature gets +0/+1 until end of turn.",
+            )
+            .id();
+        let mut runner = scenario.build();
+        let second = runner.state().objects[&source]
+            .abilities
+            .iter()
+            .enumerate()
+            .filter(|(_, ability)| ability.cost.is_some())
+            .nth(1)
+            .map(|(index, _)| index)
+            .expect("the fixture has two activated abilities");
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: second,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
+            })
+            .expect("activate the second ability");
+
+        let activated = runner
+            .state()
+            .stack
+            .back()
+            .expect("the activation is on the stack")
+            .clone();
+        let StackEntryKind::ActivatedAbility { ability, .. } = &activated.kind else {
+            panic!("the top stack entry is the activated ability");
+        };
+        assert_eq!(
+            ability.ability_index,
+            Some(second),
+            "the activation path stamps the printed ability index"
+        );
+
+        let state = runner.state_mut();
+        let inert = |source: ObjectId| {
+            ResolvedAbility::new(
+                Effect::unimplemented("inert", "inert fixture effect"),
+                Vec::new(),
+                source,
+                PlayerId(0),
+            )
+        };
+        let trigger = create_object(
+            state,
+            CardId(91),
+            PlayerId(0),
+            "Trigger".to_string(),
+            Zone::Stack,
+        );
+        state.stack.push_back(StackEntry {
+            id: trigger,
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: source,
+                ability: Box::new(inert(source)),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: "Twin Pumper".to_string(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
+        let unnumbered = create_object(
+            state,
+            CardId(92),
+            PlayerId(0),
+            "Unnumbered".to_string(),
+            Zone::Stack,
+        );
+        state.stack.push_back(StackEntry {
+            id: unnumbered,
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(inert(source)),
+            },
+        });
+        let spell = create_object(
+            state,
+            CardId(93),
+            PlayerId(0),
+            "Spell".to_string(),
+            Zone::Stack,
+        );
+        state.stack.push_back(StackEntry {
+            id: spell,
+            source_id: spell,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(93),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        let equipment = create_object(
+            state,
+            CardId(94),
+            PlayerId(0),
+            "Equipment".to_string(),
+            Zone::Battlefield,
+        );
+        let equip = create_object(
+            state,
+            CardId(95),
+            PlayerId(0),
+            "Equip".to_string(),
+            Zone::Stack,
+        );
+        state.stack.push_back(StackEntry {
+            id: equip,
+            source_id: equipment,
+            controller: PlayerId(0),
+            kind: StackEntryKind::KeywordAction {
+                action: KeywordAction::Equip {
+                    equipment_id: equipment,
+                    target_creature_id: source,
+                },
+            },
+        });
+
+        let views = derive_views(runner.state(), Some(P0));
+        let details = &views.stack_entry_details;
+
+        let numbered = &details[&activated.id];
+        assert_eq!(
+            numbered.ability_kind,
+            Some(StackAbilityKindView::Activated {
+                number: NonZeroUsize::new(second + 1),
+            }),
+            "the numbered activated entry carries its 1-based printed position"
+        );
+        assert_eq!(
+            numbered.kind_label,
+            format!("Activated ability {}", second + 1)
+        );
+
+        assert_eq!(
+            details[&trigger].ability_kind,
+            Some(StackAbilityKindView::Triggered)
+        );
+        assert_eq!(details[&trigger].kind_label, "Triggered ability");
+
+        assert_eq!(
+            details[&unnumbered].ability_kind,
+            Some(StackAbilityKindView::Activated { number: None }),
+            "an activated ability with no printed index stays unnumbered"
+        );
+        assert_eq!(details[&unnumbered].kind_label, "Activated ability");
+
+        assert_eq!(details[&spell].kind_label, "Spell");
+        assert_eq!(details[&spell].ability_kind, None);
+        assert_eq!(details[&equip].kind_label, "Equip");
+        assert_eq!(
+            details[&equip].ability_kind, None,
+            "keyword actions are labelled by their keyword, not an ability template"
+        );
+
+        for detail in details.values() {
+            if let Some(kind) = detail.ability_kind {
+                assert_eq!(
+                    kind.english_label(),
+                    detail.kind_label,
+                    "kind_label is derived from the typed ability kind"
+                );
+            }
+        }
+
+        let wire = serde_json::to_value(ClientGameStateRef::wrap(runner.state(), Some(P0)))
+            .expect("serialize client game state");
+        let wire_details = &wire["derived"]["stack_entry_details"];
+        assert_eq!(
+            wire_details[activated.id.0.to_string()]["ability_kind"],
+            serde_json::json!({"type": "Activated", "data": {"number": second + 1}}),
+        );
+        assert_eq!(
+            wire_details[unnumbered.0.to_string()]["ability_kind"],
+            serde_json::json!({"type": "Activated", "data": {}}),
+        );
+        assert_eq!(
+            wire_details[trigger.0.to_string()]["ability_kind"],
+            serde_json::json!({"type": "Triggered"}),
+        );
+        let spell_wire = wire_details[spell.0.to_string()]
+            .as_object()
+            .expect("the spell has a stack detail");
+        assert_eq!(spell_wire["kind_label"], "Spell");
+        assert!(
+            !spell_wire.contains_key("ability_kind"),
+            "entries without an ability template omit the key"
+        );
+
+        let decoded: DerivedViews =
+            serde_json::from_value(wire["derived"].clone()).expect("decode derived views");
+        assert_eq!(
+            decoded.stack_entry_details[&activated.id].ability_kind, numbered.ability_kind,
+            "the structured kind round-trips through the client wire"
+        );
+    }
+
     #[test]
     fn pending_modal_spell_details_survive_filtering_and_client_wire_round_trip() {
         let mut state = GameState::new_two_player(42);
@@ -5207,6 +5495,7 @@ mod tests {
             source_name: "Spell".to_string(),
             token_image_ref: None,
             kind_label: "Spell".to_string(),
+            ability_kind: None,
             ability_description: None,
             selected_mode_labels: Vec::new(),
             is_pending: false,
@@ -5221,11 +5510,16 @@ mod tests {
             !empty_json.contains("selected_mode_labels") && !empty_json.contains("is_pending"),
             "empty additions must preserve the legacy wire shape",
         );
+        assert!(
+            !empty_json.contains("ability_kind"),
+            "an entry without an ability template must not emit `ability_kind`",
+        );
         let legacy: StackEntryDisplay =
             serde_json::from_str(r#"{"source_name":"Spell","kind_label":"Spell"}"#)
                 .expect("legacy display payload deserializes");
         assert!(legacy.selected_mode_labels.is_empty());
         assert!(!legacy.is_pending);
+        assert!(legacy.ability_kind.is_none());
 
         let mut selected = empty;
         selected.selected_mode_labels = vec!["Choose this mode.".to_string()];
@@ -5289,12 +5583,15 @@ mod tests {
                 linked_exile_snapshot: Vec::new(),
                 is_token: false,
                 combat_status: Default::default(),
+                block_pairs: Vec::new(),
                 co_departed: Vec::new(),
                 attached_to: None,
                 entered_incarnation: None,
                 turn_zone_change_index: 0,
                 recorded_turn_number: 0,
                 is_suspected: false,
+                was_prepared: false,
+                departure: crate::types::game_state::ZoneDeparture::Moved,
             }),
         };
         let ability = ResolvedAbility::new(
@@ -5431,6 +5728,7 @@ mod tests {
             controller: PlayerId(0),
             source_id: source,
             one_shot: true,
+            kind: DelayedTriggerKind::Ordinary,
             provenance: crate::types::identifiers::DelayedInstallIdentity::ReceiptEligible(
                 provenance,
             ),
@@ -5615,6 +5913,7 @@ mod tests {
                 hit_card,
                 mana_spend_permission: None,
                 graveyard_replacement: None,
+                enters_with_modifications: Default::default(),
                 cast_transformed: false,
                 additional_cost: None,
                 cleanup: ResolutionCastCleanup {
@@ -5635,6 +5934,7 @@ mod tests {
                         instance: DelayedTriggerInstanceId(41),
                         source_id: source,
                     }],
+                    indicated_action: None,
                 },
             },
         };
@@ -5780,12 +6080,13 @@ mod tests {
                     instance: DelayedTriggerInstanceId(42),
                     source_id: source,
                 }],
+                indicated_action: None,
             }),
             duration: None,
             source_id: None,
             graveyard_replacement: None,
             enters_with_counter: None,
-            enters_with_modifications: Vec::new(),
+            enters_with_modifications: Default::default(),
             mana_spend_permission: None,
             cast_cost_modifier: None,
         }];
@@ -6337,6 +6638,7 @@ mod tests {
                     single_use: false,
                     cast_cost_modifier: None,
                     alt_ability_cost: None,
+                    without_paying_mana_cost: false,
                     land_enter_tapped: crate::types::zones::EtbTapState::Unspecified,
                 });
         }
@@ -6609,8 +6911,8 @@ mod tests {
         let axis = ResourceAxis::Life(victim);
 
         // Both controllers run their own drain loop on the same victim.
-        state.mark_unbounded_loop(p0, &[axis]);
-        state.mark_unbounded_loop(p1, &[axis]);
+        state.mark_unbounded_loop(p0, &[axis], &[]);
+        state.mark_unbounded_loop(p1, &[axis], &[]);
         // Only P1's collapse has been accepted.
         state.register_pending_materialization(
             p1,
@@ -6714,8 +7016,8 @@ mod tests {
         // `Some(p1)` depending on iteration order — which is exactly the order-dependence the join
         // laws exist to forbid.
         let mut both = GameState::new(FormatConfig::commander(), 3, 42);
-        both.mark_unbounded_loop(p0, &[axis]);
-        both.mark_unbounded_loop(p1, &[axis]);
+        both.mark_unbounded_loop(p0, &[axis], &[]);
+        both.mark_unbounded_loop(p1, &[axis], &[]);
         for controller in [p0, p1] {
             both.register_pending_materialization(
                 controller,
@@ -6740,7 +7042,7 @@ mod tests {
         // MUTATION: emit `player` (the attribution seat) instead of `controller` ⇒ the `assert_ne!`
         // below reds, because on this rig `player` IS the victim.
         let mut agreed = GameState::new(FormatConfig::commander(), 3, 42);
-        agreed.mark_unbounded_loop(p1, &[axis]);
+        agreed.mark_unbounded_loop(p1, &[axis], &[]);
         agreed.register_pending_materialization(
             p1,
             PersistentAxisMaterialization::Life {
@@ -6792,7 +7094,11 @@ mod tests {
             "the controller has no Life axis — the drain is on the victim P1"
         );
 
-        state.mark_unbounded_loop(PlayerId(0), &cert_axes);
+        state.mark_unbounded_loop(
+            PlayerId(0),
+            &cert_axes,
+            &delta.rising_unbounded_axes_for(PlayerId(0)),
+        );
         let views = derive_views(&state, None);
         assert!(
             views.unbounded_resources.contains(&UnboundedResourceView {
@@ -6839,6 +7145,7 @@ mod tests {
                 ResourceAxis::DamageDealt(PlayerId(1)),
                 ResourceAxis::Life(PlayerId(1)),
             ],
+            &[ResourceAxis::DamageDealt(PlayerId(1))],
         );
 
         let views = derive_views(&state, None);
@@ -6905,7 +7212,11 @@ mod tests {
     #[test]
     fn non_mana_axis_projects_to_controller_hud() {
         let mut state = GameState::new(FormatConfig::standard(), 2, 42);
-        state.mark_unbounded_loop(PlayerId(0), &[ResourceAxis::TokensCreated]);
+        state.mark_unbounded_loop(
+            PlayerId(0),
+            &[ResourceAxis::TokensCreated],
+            &[ResourceAxis::TokensCreated],
+        );
 
         let views = derive_views(&state, None);
         assert!(
@@ -6999,7 +7310,7 @@ mod tests {
             if also_poison {
                 axes.push(ResourceAxis::Poison(p0));
             }
-            state.mark_unbounded_loop(p0, &axes);
+            state.mark_unbounded_loop(p0, &axes, &axes);
             // Only the counter axis is accepted; `Poison` is marked ∞ but unscheduled.
             state.register_pending_materialization(
                 p0,
@@ -7084,6 +7395,10 @@ mod tests {
         let mut state = GameState::new(FormatConfig::standard(), 2, 42);
         state.mark_unbounded_loop(
             p0,
+            &[
+                ResourceAxis::Mana(ManaType::Green),
+                ResourceAxis::Mana(ManaType::White),
+            ],
             &[
                 ResourceAxis::Mana(ManaType::Green),
                 ResourceAxis::Mana(ManaType::White),
@@ -7379,19 +7694,21 @@ mod tests {
         use crate::types::mana::ManaType;
 
         let mut state = GameState::new(FormatConfig::standard(), 2, 42);
-        state.mark_unbounded_loop(
-            PlayerId(0),
-            &[
-                ResourceAxis::Mana(ManaType::Red),
-                ResourceAxis::Life(PlayerId(1)),
-                // Victim-keyed poison axis (PlayerId-transparent wire shape).
-                ResourceAxis::Poison(PlayerId(1)),
-                // A non-poison Counter keeps the tuple externally-tagged wire shape covered.
-                ResourceAxis::Counter(CounterClass::Energy, ObjectClass::Player),
-                ResourceAxis::Trigger(TriggerKind::Proliferate),
-                ResourceAxis::TokensCreated,
-            ],
-        );
+        let axes = [
+            ResourceAxis::Mana(ManaType::Red),
+            ResourceAxis::Life(PlayerId(1)),
+            // Victim-keyed poison axis (PlayerId-transparent wire shape).
+            ResourceAxis::Poison(PlayerId(1)),
+            // A non-poison Counter keeps the tuple externally-tagged wire shape covered.
+            ResourceAxis::Counter(CounterClass::Energy, ObjectClass::Player),
+            ResourceAxis::Trigger(TriggerKind::Proliferate),
+            ResourceAxis::TokensCreated,
+        ];
+        let rising: Vec<ResourceAxis> = axes
+            .into_iter()
+            .filter(|axis| *axis != ResourceAxis::Life(PlayerId(1)))
+            .collect();
+        state.mark_unbounded_loop(PlayerId(0), &axes, &rising);
 
         let json =
             serde_json::to_string(&ClientGameStateRef::wrap(&state, None)).expect("serialize");
@@ -7423,6 +7740,9 @@ mod tests {
         assert!(rows
             .iter()
             .any(|r| r.player == PlayerId(1) && r.axis == ResourceAxis::Life(PlayerId(1))));
+        // CR 119.3 + CR 732.2a: a victim-keyed Life axis under P0 marks neither seat's readout.
+        assert!(round.derived.life_magnitude.is_empty());
+        assert!(!json.contains("life_magnitude"));
 
         // Empty case: skip_serializing_if omits the key entirely.
         let empty = GameState::new(FormatConfig::standard(), 2, 42);
@@ -7625,7 +7945,7 @@ mod tests {
             pills: vec![CounterRowView {
                 counter: CounterType::Plus1Plus1,
                 count: 3,
-                magnitude: CounterMagnitude::Finite,
+                magnitude: DisplayMagnitude::Finite,
             }],
             loyalty: None,
         };
@@ -7689,12 +8009,12 @@ mod tests {
                     CounterRowView {
                         counter: charge,
                         count: 4,
-                        magnitude: CounterMagnitude::Unbounded,
+                        magnitude: DisplayMagnitude::Unbounded,
                     },
                     CounterRowView {
                         counter: CounterType::Plus1Plus1,
                         count: 2,
-                        magnitude: CounterMagnitude::Finite,
+                        magnitude: DisplayMagnitude::Finite,
                     },
                 ],
                 loyalty: None,
@@ -7715,7 +8035,7 @@ mod tests {
         let finite_row = CounterRowView {
             counter: CounterType::Plus1Plus1,
             count: 1,
-            magnitude: CounterMagnitude::Finite,
+            magnitude: DisplayMagnitude::Finite,
         };
 
         let mut unmarked = GameState::new(FormatConfig::standard(), 2, 42);
@@ -7747,7 +8067,7 @@ mod tests {
                     CounterRowView {
                         counter: charge,
                         count: 0,
-                        magnitude: CounterMagnitude::Unbounded,
+                        magnitude: DisplayMagnitude::Unbounded,
                     },
                     finite_row,
                 ],
@@ -7793,7 +8113,7 @@ mod tests {
                 loyalty: Some(CounterRowView {
                     counter: CounterType::Loyalty,
                     count: 4,
-                    magnitude: CounterMagnitude::Finite,
+                    magnitude: DisplayMagnitude::Finite,
                 }),
             }),
             "arm 1: a planeswalker's loyalty counters drive the TOTAL, never a stray pill"
@@ -7804,7 +8124,7 @@ mod tests {
                 pills: vec![CounterRowView {
                     counter: CounterType::Loyalty,
                     count: 1,
-                    magnitude: CounterMagnitude::Finite,
+                    magnitude: DisplayMagnitude::Finite,
                 }],
                 loyalty: None,
             }),
@@ -7820,12 +8140,12 @@ mod tests {
         let finite = CounterRowView {
             counter: CounterType::Plus1Plus1,
             count: 2,
-            magnitude: CounterMagnitude::Finite,
+            magnitude: DisplayMagnitude::Finite,
         };
         let unbounded = CounterRowView {
             counter: CounterType::Plus1Plus1,
             count: 2,
-            magnitude: CounterMagnitude::Unbounded,
+            magnitude: DisplayMagnitude::Unbounded,
         };
 
         let finite_wire = serde_json::to_value(&finite).expect("the finite row serializes");
@@ -7921,7 +8241,7 @@ mod tests {
                 pills: vec![CounterRowView {
                     counter: CounterType::Plus1Plus1,
                     count: 2,
-                    magnitude: CounterMagnitude::Finite,
+                    magnitude: DisplayMagnitude::Finite,
                 }],
                 loyalty: None,
             }),
@@ -7998,6 +8318,7 @@ mod tests {
             ability_cost: None,
             activation_cost_snapshot: None,
             unavailable_modes: Vec::new(),
+            activation_payment_mode: crate::types::game_state::CastPaymentMode::Auto,
         };
 
         let trusted = serde_json::to_value(&state).expect("serialize trusted state");

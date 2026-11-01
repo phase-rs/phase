@@ -158,12 +158,15 @@ pub fn cast_paradigm_copy(
     use crate::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
     use crate::types::zones::Zone;
 
-    let (src_clone, card_id, origin_zone) = {
+    let (mut src_clone, card_id, origin_zone) = {
         let Some(src_obj) = state.objects.get(&source_id) else {
             return Err(format!("paradigm source {source_id:?} not found"));
         };
         (src_obj.clone(), src_obj.card_id, src_obj.zone)
     };
+    // CR 123.1 + CR 707.2 + CR 707.10: stickers on the exiled source and their
+    // changes aren't copiable values; stripped before the spell ability is derived.
+    crate::game::stickers::remove_stickers_from_copy(&mut src_clone);
     // Verify this is an exiled paradigm source owned by the acting player.
     let has_link = state.exile_links.iter().any(|link| {
         link.exiled_id == source_id
@@ -209,6 +212,8 @@ pub fn cast_paradigm_copy(
     // used by normal casting (see `ability_utils`).
     let mut resolved = build_resolved_from_def(&ability_def, copy_id, controller);
     resolved.context.cast_from_zone = Some(origin_zone);
+    // CR 707.12: a cast copy declares only the targets chosen for it.
+    resolved.start_target_record_recursive();
 
     // CR 707.10: the copy-onto-stack authority emits `StackPushed`.
     crate::game::stack::push_copy_to_stack(

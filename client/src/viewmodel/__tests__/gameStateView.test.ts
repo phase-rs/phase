@@ -20,6 +20,7 @@ import {
   buildPlayers,
   buildTargetSelectionProgress,
   buildTargetSelectionSlot,
+  chooseTokenHostWaitingForFactory,
   copyRetargetWaitingForFactory,
   retargetChoiceWaitingForFactory,
   returnAsAuraTargetWaitingForFactory,
@@ -339,6 +340,172 @@ describe("getBoardChoiceView", () => {
       sourceId: 99,
       cancelAction: { type: "CancelCast" },
     });
+  });
+
+  it("extracts sourceId for PayCost with CostResume::TurnFaceUp wire payload", () => {
+    const choice = getBoardChoiceView(
+      {
+        type: "PayCost",
+        data: {
+          player: 0,
+          kind: { type: "ReturnToHand" },
+          choices: [4, 5],
+          count: 2,
+          min_count: 0,
+          resume: {
+            type: "TurnFaceUp",
+            object_id: 88,
+            cost_source: "Morph",
+          },
+        },
+      },
+      buildObjectMap(
+        buildGameObject({ id: 4, zone: "Battlefield" }),
+        buildGameObject({ id: 5, zone: "Battlefield" }),
+      ),
+    );
+
+    expect(choice).toMatchObject({
+      player: 0,
+      objectIds: [4, 5],
+      intent: "return",
+      sourceId: 88,
+      cancelAction: { type: "CancelCast" },
+    });
+  });
+
+  it("extracts sourceId for PayCost with CostResume::TurnFaceUp containing source ObjectIncarnationRef", () => {
+    const choice = getBoardChoiceView(
+      {
+        type: "PayCost",
+        data: {
+          player: 0,
+          kind: { type: "ReturnToHand" },
+          choices: [4, 5],
+          count: 2,
+          min_count: 0,
+          resume: {
+            type: "TurnFaceUp",
+            source: { object_id: 88, incarnation: 1 },
+            cost_source: "Morph",
+          },
+        },
+      },
+      buildObjectMap(
+        buildGameObject({ id: 4, zone: "Battlefield" }),
+        buildGameObject({ id: 5, zone: "Battlefield" }),
+      ),
+    );
+
+    expect(choice).toMatchObject({
+      player: 0,
+      objectIds: [4, 5],
+      intent: "return",
+      sourceId: 88,
+      cancelAction: { type: "CancelCast" },
+    });
+  });
+
+  it("renders a CostResume::TeamTapPayment session step as a plain any-subset prompt", () => {
+    const choice = getBoardChoiceView(
+      {
+        type: "PayCost",
+        data: {
+          player: 1,
+          kind: { type: "TapCreatures", mode: "VariableX" },
+          choices: [4],
+          count: 1,
+          min_count: 0,
+          resume: {
+            type: "TeamTapPayment",
+            aggregate: { stat: "TotalPower", comparator: "GE", value: 8 },
+            eligible: [4, 5],
+            selected: [],
+            remaining: [2],
+            filter: {},
+            ability: {},
+          },
+        },
+      },
+      buildObjectMap(buildGameObject({ id: 4, zone: "Battlefield" })),
+    );
+
+    expect(choice).toMatchObject({
+      player: 1,
+      objectIds: [4],
+      intent: "tap",
+      selection: { type: "rangeCount", min: 0, max: 1 },
+      response: { type: "SelectCards" },
+    });
+    // A session step resumes a resolution, like CostResume::Resolution: no
+    // source card to highlight and no cast to cancel.
+    expect(choice?.sourceId).toBeUndefined();
+    expect(choice?.cancelAction).toBeUndefined();
+  });
+
+  it("extracts sourceId for PayCost with CostResume::SpellCost wire payload", () => {
+    const choice = getBoardChoiceView(
+      {
+        type: "PayCost",
+        data: {
+          player: 0,
+          kind: { type: "ReturnToHand" },
+          choices: [4, 5],
+          count: 1,
+          min_count: 1,
+          resume: {
+            type: "SpellCost",
+            Spell: {
+              object_id: 77,
+              card_id: 770,
+              ability: { targets: [] },
+              cost: { type: "NoCost" },
+            },
+            cost: {},
+            source: "Other",
+          },
+        },
+      },
+      buildObjectMap(
+        buildGameObject({ id: 4, zone: "Battlefield" }),
+        buildGameObject({ id: 5, zone: "Battlefield" }),
+      ),
+    );
+
+    expect(choice).toMatchObject({
+      player: 0,
+      objectIds: [4, 5],
+      intent: "return",
+      sourceId: 77,
+      cancelAction: { type: "CancelCast" },
+    });
+  });
+
+  it("honors allowsCancelCast authority override for PayCost prompts", () => {
+    const waitingFor: WaitingFor = {
+      type: "PayCost",
+      data: {
+        player: 0,
+        kind: { type: "ReturnToHand" },
+        choices: [4, 5],
+        count: 2,
+        min_count: 0,
+        resume: {
+          type: "TurnFaceUp",
+          object_id: 88,
+          cost_source: "Morph",
+        },
+      },
+    };
+    const objects = buildObjectMap(
+      buildGameObject({ id: 4, zone: "Battlefield" }),
+      buildGameObject({ id: 5, zone: "Battlefield" }),
+    );
+    const denied = getBoardChoiceView(waitingFor, objects, false);
+    expect(denied?.cancelAction).toBeUndefined();
+
+    const allowed = getBoardChoiceView(waitingFor, objects, true);
+    expect(allowed?.cancelAction).toEqual({ type: "CancelCast" });
   });
 
   it("maps battlefield untap effects to board card selection", () => {
@@ -711,7 +878,7 @@ describe("getBoardChoiceView", () => {
 
     expect(choice).not.toBeNull();
     if (!choice) return;
-    expect(choice.selection).toEqual({ type: "totalPowerAtLeast", power: 2 });
+    expect(choice.selection).toEqual({ type: "totalPowerAtLeast", power: 2, signed: true });
     // One 1-power creature (total power 1) does not satisfy "total power 2 or
     // greater" — this is the exact scenario the reviewer flagged: the old
     // `confirmedCountSelection(2, 0)` mapping would have rendered this as an
@@ -725,19 +892,17 @@ describe("getBoardChoiceView", () => {
     });
   });
 
-  // Reach guard for the engine's positive-power-only clamp over the CR 208.1
-  // power axis: a negative-power creature must not "cancel out" a positive one
-  // to help satisfy the threshold, and must not count negatively either —
-  // mirrors `tap_creature_power_contribution`'s `max(power, 0)`, NOT
-  // `totalPowerAtMost`'s signed-sum semantics.
-  it("clamps negative power to zero for an aggregate TapCreatures PayCost", () => {
+  // Reach guard for the engine's SIGNED tap-cost total (CR 107.1b): a
+  // negative-power creature genuinely lowers the total — mirrors
+  // `tap_creatures_signed_total_power`, NOT the clamped Crew summation.
+  it("sums signed power for an aggregate TapCreatures PayCost", () => {
     const waitingFor: WaitingFor = {
       type: "PayCost",
       data: {
         player: 0,
         kind: {
           type: "TapCreatures",
-          mode: { Aggregate: { stat: "TotalPower", comparator: "GE", value: 2 } },
+          mode: { Aggregate: { stat: "TotalPower", comparator: "GE", value: 1 } },
         },
         choices: [4, 5],
         count: 2,
@@ -754,10 +919,13 @@ describe("getBoardChoiceView", () => {
 
     expect(choice).not.toBeNull();
     if (!choice) return;
-    // 1 + max(-1, 0) = 1, not 0 — the negative creature contributes 0, it
-    // does not subtract.
-    expect(boardChoiceSelectedPower(choice, [4, 5], objects)).toBe(1);
+    expect(choice.selection).toEqual({ type: "totalPowerAtLeast", power: 1, signed: true });
+    // 1 + (-1) = 0 — the pair does NOT satisfy "total power 1 or greater".
+    // A clamped summation would total 1 and wrongly enable Confirm for a
+    // payment the engine rejects.
+    expect(boardChoiceSelectedPower(choice, [4, 5], objects)).toBe(0);
     expect(canConfirmBoardChoice(choice, [4, 5], objects)).toBe(false);
+    expect(canConfirmBoardChoice(choice, [4], objects)).toBe(true);
   });
 
   it("blocks confirmation for a TapCreatures aggregate comparator with no client representation", () => {
@@ -899,7 +1067,7 @@ const MIXED_LEGAL: TargetRef[] = [{ Object: 7 }, { Player: 1 }];
  *
  * The `NO_TARGET_REF_LEGAL_SET` entries are SKIPPED at runtime — they exist
  * only for the compile-time gate. The map's size is not a runtime coverage
- * number; the 11 `PartitionFixture` entries are.
+ * number; the 12 `PartitionFixture` entries are.
  */
 const NO_TARGET_REF_LEGAL_SET = "no-TargetRef-legal-set" as const;
 
@@ -913,7 +1081,7 @@ const PARTITION_FIXTURES: Record<
   WaitingFor["type"],
   PartitionFixture | typeof NO_TARGET_REF_LEGAL_SET
 > = {
-  // ── The 11 `TargetRef`-bearing variants ────────────────────────────────
+  // ── The 12 `TargetRef`-bearing variants ────────────────────────────────
   TargetSelection: {
     waitingFor: targetSelectionWaitingForFactory
       .withData({
@@ -956,6 +1124,13 @@ const PARTITION_FIXTURES: Record<
   },
   ReturnAsAuraTarget: {
     waitingFor: returnAsAuraTargetWaitingForFactory
+      .withData({ legal_targets: MIXED_LEGAL })
+      .forPlayer(0)
+      .build(),
+    legal: MIXED_LEGAL,
+  },
+  ChooseTokenHost: {
+    waitingFor: chooseTokenHostWaitingForFactory
       .withData({ legal_targets: MIXED_LEGAL })
       .forPlayer(0)
       .build(),
@@ -1144,6 +1319,7 @@ const PARTITION_FIXTURES: Record<
   ChooseAnnouncingOpponent: NO_TARGET_REF_LEGAL_SET,
   ChooseGiftRecipient: NO_TARGET_REF_LEGAL_SET,
   ClashCardPlacement: NO_TARGET_REF_LEGAL_SET,
+  PhysicalContest: NO_TARGET_REF_LEGAL_SET,
   VoteChoice: NO_TARGET_REF_LEGAL_SET,
   ChooseDungeon: NO_TARGET_REF_LEGAL_SET,
   ChooseDungeonRoom: NO_TARGET_REF_LEGAL_SET,
@@ -1223,6 +1399,18 @@ describe("getWaitingForPlayerChoiceIds", () => {
     expect(getWaitingForObjectChoiceIds(wf)).toEqual([7]);
   });
 
+  // Same cluster shape as ReturnAsAuraTarget: the host list mixes object
+  // entrants and players, and the two authorities must partition it.
+  it("projects ChooseTokenHost player refs", () => {
+    const wf = chooseTokenHostWaitingForFactory
+      .withData({ legal_targets: MIXED_LEGAL })
+      .forPlayer(0)
+      .build();
+
+    expect(getWaitingForPlayerChoiceIds(wf)).toEqual([1]);
+    expect(getWaitingForObjectChoiceIds(wf)).toEqual([7]);
+  });
+
   it("returns [] for a null or absent waiting state", () => {
     expect(getWaitingForPlayerChoiceIds(null)).toEqual([]);
     expect(getWaitingForPlayerChoiceIds(undefined)).toEqual([]);
@@ -1279,12 +1467,36 @@ describe("getWaitingForPlayerChoiceIds", () => {
     expect(getWaitingForPlayerChoiceIds(allScope)).toEqual([]);
     expect(getWaitingForPlayerChoiceIds(singleScope)).toEqual([1]);
   });
+
+  // CR 608.2d + CR 115.10a: a single-pick `ChooseObjectsSelection` (`max: 1`) is
+  // answered by one board/HUD click, so both authorities expose the engine's
+  // `eligible` verbatim — object 9 stands for a hexproof creature, which a choice
+  // never excludes. The IDENTICAL payload with `max: 2` or no `max` stays
+  // dialog-only, so the inclusion keys on the published `max`.
+  it("routes ChooseObjectsSelection(max 1) clicks and keeps the identical multi-pick payload dialog-only", () => {
+    const eligible: TargetRef[] = [{ Object: 7 }, { Object: 9 }, { Player: 0 }, { Player: 1 }];
+    const withMax = (max: number | undefined): WaitingFor => ({
+      type: "ChooseObjectsSelection",
+      data: { player: 0, eligible, min: 1, ...(max === undefined ? {} : { max }) },
+    });
+
+    const single = withMax(1);
+    expect(getWaitingForClickTargetRefs(single)).toEqual(eligible);
+    expect(getWaitingForObjectChoiceIds(single)).toEqual([7, 9]);
+    expect(getWaitingForPlayerChoiceIds(single)).toEqual([0, 1]);
+
+    for (const multi of [withMax(2), withMax(undefined)]) {
+      expect(getWaitingForClickTargetRefs(multi)).toBeNull();
+      expect(getWaitingForObjectChoiceIds(multi)).toEqual([]);
+      expect(getWaitingForPlayerChoiceIds(multi)).toEqual([]);
+    }
+  });
 });
 
-// V5 — the six dialog-only variants. Each carries `{Player: 1}` in its own
-// `TargetRef[]` field, and a `TargetSelection` built from the IDENTICAL list
-// returns `[1]`, so the exclusion is proven to key on the variant rather than on
-// the list contents.
+// V5 — the six dialog-only variants (multi-pick `ChooseObjectsSelection`). Each
+// carries `{Player: 1}` in its own `TargetRef[]` field, and a `TargetSelection`
+// built from the IDENTICAL list returns `[1]`, so the exclusion is proven to key
+// on the variant rather than on the list contents.
 describe("getWaitingForPlayerChoiceIds — dialog-only variants", () => {
   const DIALOG_ONLY = [
     "DistributeAmong",
@@ -1331,6 +1543,7 @@ describe("the two click-target authorities partition the engine's legal list", (
       [
         "ChooseObjectsSelection",
         "ChooseOneOfBranch",
+        "ChooseTokenHost",
         "CopyRetarget",
         "DistributeAmong",
         "EachPlayerCopyChosenSelection",

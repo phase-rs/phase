@@ -84,13 +84,19 @@ export function MoveCountersDistributionModal({
     () => Object.values(totalByType).reduce((sum, count) => sum + count, 0),
     [totalByType],
   );
+  // CR 608.2d: a capped "remove up to N counters" prompt carries its
+  // engine-computed total bound; otherwise every available counter may go.
+  const engineMaxTotal =
+    waitingFor.type === "RemoveCountersChoice" ? (waitingFor.data.max_total ?? null) : null;
   const max = useMemo(
-    () => availableCounters.reduce((sum, { count }) => sum + count, 0),
-    [availableCounters],
+    () => engineMaxTotal ?? availableCounters.reduce((sum, { count }) => sum + count, 0),
+    [availableCounters, engineMaxTotal],
   );
   const invalid = useMemo(
-    () => availableCounters.some(({ key, count }) => (totalByType[key] ?? 0) > count),
-    [availableCounters, totalByType],
+    () =>
+      total > max ||
+      availableCounters.some(({ key, count }) => (totalByType[key] ?? 0) > count),
+    [availableCounters, max, total, totalByType],
   );
   const remaining = max - total;
 
@@ -215,7 +221,7 @@ export function MoveCountersDistributionModal({
                       <button
                         className={gameButtonClass({ tone: "neutral", size: "xs" })}
                         onClick={() => setAmount(counterType, destinationId, amount + 1)}
-                        disabled={remainingForType <= 0}
+                        disabled={remainingForType <= 0 || remaining <= 0}
                       >
                         +
                       </button>

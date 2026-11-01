@@ -47,6 +47,7 @@ fn brigid_activated_ability_offers_color_choice_and_produces_x_mana() {
         .act(GameAction::ActivateAbility {
             source_id: brigid_id,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating Brigid's mana ability must succeed");
 
@@ -110,6 +111,7 @@ fn brigid_with_no_other_creatures_produces_zero_mana() {
         .act(GameAction::ActivateAbility {
             source_id: brigid_id,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating Brigid's mana ability must succeed");
 

@@ -119,6 +119,10 @@
   },
   "setSelector": {
     "botDifficulty": "Poziom trudności botów",
+    "pickEnhancements": {
+      "label": "Użyj wbudowanej SI z ulepszeniami wyborów w draftcie",
+      "hint": "Boty stosują pisemny przewodnik kolejności wyborów w formatach, które go mają (obecnie Mirrodin, Darksteel i Fifth Dawn). Działa od średniego poziomu trudności."
+    },
     "difficultyLevels": {
       "VeryEasy": "Bardzo łatwy",
       "Easy": "Łatwy",
@@ -132,6 +136,12 @@
     "packOrder": "Kolejność boosterów",
     "candidateSets": "Dodatki kandydujące",
     "clearPacks": "Wyczyść",
+    "randomSet": "Losowy dodatek",
+    "randomSetHint": "Wypełnij wszystkie boostery jednym losowo wybranym dodatkiem",
+    "randomPacks": "Losowe boostery",
+    "randomPacksHint": "Przydziel każdemu boosterowi osobny, losowo wybrany dodatek",
+    "randomCandidates": "Losowe dodatki",
+    "randomCandidatesHint": "Wybierz losowo różne dodatki kandydujące",
     "emptyPacks_one": "Wybierz dodatek dla każdego boostera. Draft domyślnie otwiera {{count}} booster — powtórz dodatek lub połącz kilka.",
     "emptyPacks_other": "Wybierz dodatek dla każdego boostera. Draft domyślnie otwiera {{count}} boostery — powtórz dodatek lub połącz kilka, aby draftować blok.",
     "emptyPacksFixed_one": "Sealed otwiera dokładnie {{count}} booster. Wybierz dla niego dodatek.",
@@ -156,6 +166,7 @@
     "startSealed": "Rozpocznij sealed"
   },
   "pack": {
+    "label": "Booster draftu",
     "confirmPick": "Potwierdź wybór",
     "selected": "Wybrano",
     "draftEffects": "Efekty draftu:",

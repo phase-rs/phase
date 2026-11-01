@@ -8,9 +8,11 @@
 //! cards (no printed card yet); each is paired with a control that the same
 //! route still reads a census it can bind.
 
-use engine::game::coverage::card_face_gaps;
+use engine::game::coverage::{card_face_gaps, card_face_has_unimplemented_parts};
 use engine::parser::parse_oracle_text;
-use engine::types::ability::{AbilityCost, QuantityRef, StaticDefinition, TargetFilter};
+use engine::types::ability::{
+    AbilityCost, QuantityRef, StaticCondition, StaticDefinition, TargetFilter,
+};
 use engine::types::card::CardFace;
 use engine::types::statics::StaticMode;
 
@@ -137,4 +139,36 @@ fn disguise_reduction_scaled_by_an_unbound_counter_kind_census_is_unsupported() 
         let face = face("Census Disguise", text, &["Disguise"]);
         assert!(!card_face_gaps(&face).is_empty(), "{text:?}");
     }
+}
+
+/// CR 122.1: a static whose condition is a counter-kind census over the source
+/// ("two or more kinds of counters on ~") has no census reading on the static
+/// condition route, so it keeps the whole condition as an unrecognized gap that
+/// coverage reports — never a supported static counting a counter named
+/// "kind of". The parser-side shape is pinned in `swallow_check`
+/// (`counter_kind_census_on_one_object_is_never_a_named_counter_count`).
+#[test]
+fn static_counter_kind_census_on_one_object_is_an_unsupported_condition() {
+    let census = face(
+        "Census Static",
+        "As long as there are two or more kinds of counters on Census Static, it has flying.",
+        &[],
+    );
+    assert!(
+        matches!(
+            census.static_abilities.as_slice(),
+            [StaticDefinition {
+                mode: StaticMode::Continuous,
+                condition: Some(StaticCondition::Unrecognized { .. }),
+                ..
+            }]
+        ),
+        "reach guard: {:?}",
+        census.static_abilities
+    );
+    assert!(card_face_has_unimplemented_parts(&census));
+    assert_eq!(
+        card_face_gaps(&census),
+        vec!["Static:Unrecognized(there are two or more kinds of counters on ~)".to_string()]
+    );
 }

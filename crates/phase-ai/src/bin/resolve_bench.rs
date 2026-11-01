@@ -152,9 +152,15 @@ fn bench_fast_forward(original: &GameState, it: usize, resolution_cap: u32) {
     let start_stack = state.stack.len();
     perf_counters::reset();
     let t_all = Instant::now();
-    let result = resolve_all_fast_forward(&mut state, PlayerId(0), resolution_cap, |_, _| {
+    let result = match resolve_all_fast_forward(&mut state, PlayerId(0), resolution_cap, |_, _| {
         ResolveAllCallbackDecision::Action(GameAction::PassPriority)
-    });
+    }) {
+        Ok(result) => result,
+        Err(error) => {
+            println!("fast  iter {it}: rejected: {error}");
+            return;
+        }
+    };
     let all = t_all.elapsed();
     let counters = perf_counters::snapshot();
     println!(

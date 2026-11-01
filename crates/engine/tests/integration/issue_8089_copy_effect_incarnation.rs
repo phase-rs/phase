@@ -1,5 +1,6 @@
 //! Regression coverage for journaled one-shot continuous-effect recipients.
 
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};

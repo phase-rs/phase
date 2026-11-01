@@ -1,3 +1,4 @@
+import { DRAFT_PROTOCOL_VERSION as GENERATED_VERSION } from "../../generated/protocol-versions";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -112,8 +113,8 @@ describe("draftProtocol", () => {
   });
 
   describe("DRAFT_PROTOCOL_VERSION", () => {
-    it("is version 30", () => {
-      expect(DRAFT_PROTOCOL_VERSION).toBe(30);
+    it("uses the generated draft protocol", () => {
+      expect(DRAFT_PROTOCOL_VERSION).toBe(GENERATED_VERSION);
     });
   });
 

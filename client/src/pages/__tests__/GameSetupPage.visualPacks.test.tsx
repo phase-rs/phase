@@ -31,9 +31,14 @@ vi.mock("../../services/aiDeckCatalog", async () => {
   const actual = await vi.importActual<typeof import("../../services/aiDeckCatalog")>(
     "../../services/aiDeckCatalog",
   );
+  // Stable identity like the real hook's state result: GameSetupPage derives
+  // its settled catalog from this in an effect, and a fresh literal every
+  // render would churn that effect. The factory runs once per file, so this
+  // single object is shared across renders.
+  const stubCatalogResult = { candidates: [], allCandidates: [], loading: false, error: null };
   return {
     ...actual,
-    useAiDeckCatalog: () => ({ candidates: [], loading: false, error: null }),
+    useAiDeckCatalog: () => stubCatalogResult,
   };
 });
 vi.mock("../../stores/cardDataStore", () => {

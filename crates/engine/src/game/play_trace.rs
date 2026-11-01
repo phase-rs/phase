@@ -19,8 +19,8 @@ use crate::types::ability::{
 use crate::types::actions::GameAction;
 use crate::types::card::PrintedCardRef;
 use crate::types::game_state::{
-    printed_trigger_origin, ActionDisposition, GameState, PayCostKind, ReplacementChoiceKind,
-    RetargetScope, StackEntry, StackEntryKind, WaitingFor,
+    printed_trigger_origin, ActionDisposition, GameState, PayCostKind, PriorityOut,
+    ReplacementChoiceKind, RetargetScope, StackEntry, StackEntryKind, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaType;
@@ -234,7 +234,8 @@ enum KeywordActivation {
     Ninjutsu,
 }
 
-/// The live object a play's legality read asks about (an `ObjectId` persists across zones).
+/// The object a play's legality read asks about: an `ObjectId` persists across zones, except
+/// that a token that left the battlefield has ceased to exist (CR 111.7).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlayLocus {
     Cast(ObjectId),
@@ -283,7 +284,7 @@ fn cost_destination(kind: &PayCostKind) -> Option<Zone> {
             action: crate::types::ability::BeholdCostAction::ExileChosen,
         } => Some(Zone::Exile),
         PayCostKind::ReturnToHand => Some(Zone::Hand),
-        PayCostKind::Reveal
+        PayCostKind::Reveal { shared_quality: _ }
         | PayCostKind::UnattachFrom { .. }
         | PayCostKind::RemoveCounter { .. }
         | PayCostKind::TapCreatures { .. }
@@ -348,6 +349,8 @@ pub enum EntryKind {
         asked_by: Option<usize>,
         /// Set when the answer chose the objects an object-moving cost moves.
         cost_move: Option<CostMove>,
+        /// The decision point the answered prompt is, which the every-option proof enumerates.
+        point: Option<crate::analysis::decision_template::ChoicePoint>,
     },
 }
 
@@ -374,6 +377,9 @@ pub enum NamingCause {
     Restored,
     /// No play was consumed and this one is legal now.
     LegalNow,
+    /// CR 104.4b + CR 732.4: a triggered node is about to resolve again with no optional answer
+    /// or play since its previous instance resolved. Read on demand, never named.
+    MandatoryRecurrence,
 }
 
 /// A candidate period: the entries `start..end` of its source as they stood when it was named.
@@ -403,6 +409,8 @@ struct PendingRead {
     node: usize,
     seat: PlayerId,
     locus: PlayLocus,
+    /// The play's index in the trace.
+    at: usize,
 }
 
 /// An action that reverses a play the trace holds.
@@ -451,6 +459,9 @@ pub(crate) struct PlayTrace {
     last_play: Option<usize>,
     optional_triggers: im::HashSet<usize>,
     consumed: im::HashSet<usize>,
+    /// Each node's first play, since the node last read legal, that its pending read found
+    /// consumed or made from a source that has ceased to exist and was not made again.
+    spent_from: im::HashMap<usize, usize>,
     pending_reads: im::Vector<PendingRead>,
     named: im::Vector<NamedSpan>,
     /// The first named span no window has read.
@@ -460,6 +471,8 @@ pub(crate) struct PlayTrace {
     undo: im::Vector<UndoPoint>,
     /// CR 733.1: the mana abilities the engine reversed inside the action in progress.
     reversed: Vec<(ObjectId, usize)>,
+    /// A reducer-discovered illegal casting procedure, rather than CancelCast.
+    process_reversed: bool,
     /// Each entry that activates a mana ability or answers one of its choices (CR 605.3b), with
     /// the ability it belongs to.
     mana_ability_entries: im::HashMap<usize, (ObjectId, usize)>,
@@ -469,6 +482,11 @@ pub(crate) struct PlayTrace {
     carried_named: im::Vector<CarriedSpan>,
     /// Each seat's carrying index, kept across windows.
     carrying: im::HashMap<PlayerId, CarryingIndex>,
+    /// The mandatory-recurrence verdict kept for the span starting at this entry, one slot per out
+    /// verdict.
+    witnessed: [Option<(usize, Witnessed)>; 2],
+    /// The every-option proof kept for the mandatory span starting at this entry.
+    ordered: Option<(usize, crate::game::period_confirm::OptionProof)>,
 }
 
 impl PlayTrace {
@@ -483,16 +501,20 @@ impl PlayTrace {
             last_play: None,
             optional_triggers: im::HashSet::new(),
             consumed: im::HashSet::new(),
+            spent_from: im::HashMap::new(),
             pending_reads: im::Vector::new(),
             named: im::Vector::new(),
             unread: 0,
             offered: None,
             undo: im::Vector::new(),
             reversed: Vec::new(),
+            process_reversed: false,
             mana_ability_entries: im::HashMap::new(),
             carried: im::Vector::new(),
             carried_named: im::Vector::new(),
             carrying: im::HashMap::new(),
+            witnessed: [None; 2],
+            ordered: None,
         }
     }
 
@@ -537,6 +559,7 @@ impl PlayTrace {
                     node,
                     seat: entry.seat,
                     locus,
+                    at,
                 });
             }
         }
@@ -758,7 +781,6 @@ fn refresh_carrying(
     let sources: Vec<AbilitySource<'_>> = objects
         .iter()
         .map(|object| AbilitySource {
-            name: &object.base_name,
             mana_cost: &object.base_mana_cost,
             card_type: &object.base_card_types,
             abilities: &object.base_abilities,
@@ -856,6 +878,7 @@ fn classify(action: &GameAction, prompt: &WaitingFor) -> Choice {
         GameAction::ActivateAbility {
             source_id,
             ability_index,
+            ..
         } => Choice::Play(Play::Activate(*source_id, *ability_index)),
         GameAction::TapLandForMana { selection } | GameAction::ActivateManaSource { selection } => {
             Choice::Play(Play::Mana(
@@ -900,6 +923,7 @@ fn classify(action: &GameAction, prompt: &WaitingFor) -> Choice {
         | GameAction::SetPriorityYield { .. }
         | GameAction::SetMayTriggerAutoChoice { .. }
         | GameAction::SetReplacementAutoChoice { .. }
+        | GameAction::UnAction { .. }
         | GameAction::SetTriggerOrderTemplate { .. }
         | GameAction::Debug(_)
         | GameAction::GrantDebugPermission { .. }
@@ -1124,6 +1148,7 @@ fn answer_optionality(prompt: &WaitingFor, answer: Answer) -> AnswerOptionality 
         WaitingFor::ExploreChoice { .. }
         // CR 701.30c: each clashing player puts their card on top or on the bottom.
         | WaitingFor::ClashCardPlacement { .. }
+        | WaitingFor::PhysicalContest { .. }
         | WaitingFor::MeldPairChoice { .. }
         | WaitingFor::MeldAttackTargetChoice { .. }
         | WaitingFor::EntryAttackTargetChoice { .. }
@@ -1196,7 +1221,28 @@ fn answer_optionality(prompt: &WaitingFor, answer: Answer) -> AnswerOptionality 
         | WaitingFor::AssignCombatDamage { .. }
         | WaitingFor::AssignBlockerDamage { .. }
         | WaitingFor::DistributeAmong { .. }
-        | WaitingFor::PhyrexianPayment { .. } => Mandatory,
+        | WaitingFor::PhyrexianPayment { .. }
+        // Digital-only Alchemy (no CR entry): the "one of them" token-host
+        // choice names no "may" — the controller picks one of the stamped
+        // entrants, or no prompt is raised at all.
+        | WaitingFor::ChooseTokenHost { .. } => Mandatory,
+    }
+}
+
+/// CR 104.4b: the loop decision `action` answers at `prompt`; `None` for a play, a pass, a
+/// setting, or a prompt with a single forced option (CR 732.4).
+pub(crate) fn answered_choice(
+    action: &GameAction,
+    prompt: &WaitingFor,
+) -> Option<AnswerOptionality> {
+    match classify(action, prompt) {
+        Choice::Answer(Answer::Take) if !prompt.is_forced_one_option_choice() => {
+            Some(answer_optionality(prompt, Answer::Take))
+        }
+        Choice::Answer(Answer::Take | Answer::Pass)
+        | Choice::Play(_)
+        | Choice::Reverse(_)
+        | Choice::Setting => None,
     }
 }
 
@@ -1348,6 +1394,7 @@ pub(crate) fn begin_action(
             }
             Choice::Answer(answer) => {
                 let optional = answer_optionality(&state.waiting_for, answer);
+                let point = state.waiting_for.option_point();
                 let asking = state
                     .resolving_stack_entry
                     .as_ref()
@@ -1362,6 +1409,7 @@ pub(crate) fn begin_action(
                         optional,
                         asked_by,
                         cost_move: None,
+                        point,
                     },
                     depth,
                     prompt,
@@ -1393,6 +1441,31 @@ pub(crate) fn mana_ability_reversed(state: &mut GameState, source: ObjectId, pla
     }
 }
 
+/// CR 733.1: the cast rollback also reversed mana activations made during it.
+/// Use the trace's exact undo identities, including nested choices.
+pub(crate) fn cast_mana_abilities_reversed(state: &mut GameState) {
+    if let Some(trace) = state.play_trace.as_deref_mut() {
+        let abilities: Vec<_> = trace
+            .undo
+            .iter()
+            .rev()
+            .take_while(|point| point.undoes != Reversal::Process)
+            .filter_map(|point| match point.undoes {
+                Reversal::ManaAbility(source, place) => Some((source, place)),
+                Reversal::Process | Reversal::ManaSource(_) => None,
+            })
+            .collect();
+        trace.reversed.extend(abilities);
+    }
+}
+
+/// CR 733.1: a failed casting procedure reverses the same play as CancelCast.
+pub(crate) fn casting_procedure_reversed(state: &mut GameState) {
+    if let Some(trace) = state.play_trace.as_deref_mut() {
+        trace.process_reversed = true;
+    }
+}
+
 /// Restores the trace when the action did not apply; applies the reversal when it did.
 pub(crate) fn end_action(
     state: &mut GameState,
@@ -1421,8 +1494,14 @@ pub(crate) fn end_action(
         .as_deref_mut()
         .map(|trace| std::mem::take(&mut trace.reversed))
         .unwrap_or_default();
+    let process_reversed = state
+        .play_trace
+        .as_deref_mut()
+        .is_some_and(|trace| std::mem::take(&mut trace.process_reversed));
     if let Some(reversal) = snapshot.reverses {
         reverse(state, reversal);
+    } else if process_reversed {
+        reverse(state, Reversal::Process);
     }
     let began_play = play_in_progress(state);
     let cost_move = snapshot
@@ -1554,6 +1633,86 @@ pub(crate) fn record_resolutions(state: &mut GameState, before: &BeforeResolutio
     });
 }
 
+/// Whether `locus` names a mana ability's source that no longer exists.
+fn source_ceased(state: &GameState, locus: PlayLocus) -> bool {
+    matches!(locus, PlayLocus::Mana(id, Some(_)) if !state.objects.contains_key(&id))
+}
+
+/// CR 111.7 + CR 111.1: where the play at `at` is made now that its token source has ceased to
+/// exist, in a span starting at `from`. The plays of one activated mana ability from `from` on
+/// whose sources ceased take, one each and in order, the battlefield objects made since the first
+/// of them that their seat controls and that bear the ability.
+fn remade_source(
+    state: &GameState,
+    trace: &PlayTrace,
+    from: usize,
+    at: usize,
+) -> Option<PlayLocus> {
+    let entry = trace.entries.get(at)?;
+    let EntryKind::Play { node, locus, .. } = entry.kind else {
+        return None;
+    };
+    let PlayLocus::Mana(_, Some(index)) = locus else {
+        return None;
+    };
+    if !source_ceased(state, locus) {
+        return None;
+    }
+    let NodeKey::Activated(definition) = trace.nodes.get(node)? else {
+        return None;
+    };
+    let earlier: Vec<&TraceEntry> = trace
+        .entries
+        .iter()
+        .skip(from)
+        .take(at.saturating_sub(from))
+        .filter(|play| {
+            play.seat == entry.seat
+                && matches!(
+                    play.kind,
+                    EntryKind::Play { node: other, locus: PlayLocus::Mana(source, Some(i)), .. }
+                        if other == node && i == index && !state.objects.contains_key(&source)
+                )
+        })
+        .collect();
+    let since = earlier
+        .first()
+        .map_or(entry.next_object_id, |first| first.next_object_id);
+    let mut remade: Vec<ObjectId> = state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| id.0 >= since)
+        .filter(|id| {
+            state.objects.get(id).is_some_and(|object| {
+                object.controller == entry.seat
+                    && object.abilities.get(index) == Some(&**definition)
+            })
+        })
+        .collect();
+    remade.sort_unstable();
+    remade
+        .get(earlier.len())
+        .map(|&id| PlayLocus::Mana(id, Some(index)))
+}
+
+/// The object [`remade_source`] finds for the entry at `at` of a span the current window named
+/// in its own trace; a carried span has none.
+pub(crate) fn remade_play_source(
+    state: &GameState,
+    span: NamedSpan,
+    at: usize,
+) -> Option<ObjectId> {
+    let remade = match span.source {
+        SpanSource::Window => remade_source(state, current(state)?, span.start, at),
+        SpanSource::Carried(_) => None,
+    };
+    match remade? {
+        PlayLocus::Mana(id, _) => Some(id),
+        PlayLocus::Cast(_) | PlayLocus::Activate(..) | PlayLocus::Unread => None,
+    }
+}
+
 /// One legality read of one play through the engine's own authority (mana abilities by CR
 /// 605.3a's); `None` when the locus has no single-play authority.
 fn read_legality(state: &GameState, holder: PlayerId, locus: &PlayLocus) -> Option<bool> {
@@ -1578,6 +1737,98 @@ fn read_legality(state: &GameState, holder: PlayerId, locus: &PlayLocus) -> Opti
             crate::game::perf_counters::take_cost_snapshot().state_copies - copies_before,
     );
     Some(legal)
+}
+
+/// CR 104.4b + CR 732.4: the span back to the last instance of the triggered node on top of the
+/// stack, when nothing optional was asked or played since; `None` outside a recording boundary.
+pub(crate) fn mandatory_recurrence(state: &GameState) -> Option<NamedSpan> {
+    if !recording(state) {
+        return None;
+    }
+    mandatory_recurrence_span(state)
+}
+
+/// [`mandatory_recurrence`] without its recording gate.
+pub(crate) fn mandatory_recurrence_span(state: &GameState) -> Option<NamedSpan> {
+    let trace = current(state)?;
+    let end = trace.entries.len();
+    let node = trigger_node(state, state.stack.back()?, end).and_then(|key| trace.find(&key))?;
+    let start = *trace.last.get(&node)?;
+    let mandatory = !trace.optional_triggers.contains(&node)
+        && !trace
+            .last_optional
+            .is_some_and(|optional| optional >= start)
+        && !trace.last_play.is_some_and(|play| play >= start);
+    mandatory.then(|| NamedSpan::in_window(start, end, NamingCause::MandatoryRecurrence))
+}
+
+/// CR 104.4b + CR 732.2a: what a mandatory-recurrence span was read as.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Witnessed {
+    Declared,
+    /// Offered, with the counted take the replay that read it minted.
+    Offered(crate::analysis::loop_check::CountedTake),
+    Refused,
+}
+
+fn out_slot(out: PriorityOut) -> usize {
+    match out {
+        PriorityOut::Absent => 0,
+        PriorityOut::Held => 1,
+    }
+}
+
+/// The verdict kept for the mandatory-recurrence span of the current window starting at `start`,
+/// computed under `out`.
+pub(crate) fn witnessed(state: &GameState, start: usize, out: PriorityOut) -> Option<Witnessed> {
+    current(state)?.witnessed[out_slot(out)]
+        .filter(|&(at, _)| at == start)
+        .map(|(_, verdict)| verdict)
+}
+
+/// Keeps `verdict` for the mandatory-recurrence span of the current window starting at `start`,
+/// computed under `out`.
+pub(crate) fn note_witnessed(
+    state: &mut GameState,
+    start: usize,
+    out: PriorityOut,
+    verdict: Witnessed,
+) {
+    let window = WindowKey::of(state);
+    if let Some(trace) = state
+        .play_trace
+        .as_deref_mut()
+        .filter(|trace| trace.window == window)
+    {
+        trace.witnessed[out_slot(out)] = Some((start, verdict));
+    }
+}
+
+/// The every-option proof kept for the mandatory span of the current window starting at `start`.
+pub(crate) fn order_proof(
+    state: &GameState,
+    start: usize,
+) -> Option<crate::game::period_confirm::OptionProof> {
+    current(state)?
+        .ordered
+        .filter(|&(at, _)| at == start)
+        .map(|(_, proof)| proof)
+}
+
+/// Keeps `proof` for the mandatory span of the current window starting at `start`.
+pub(crate) fn note_order_proof(
+    state: &mut GameState,
+    start: usize,
+    proof: crate::game::period_confirm::OptionProof,
+) {
+    let window = WindowKey::of(state);
+    if let Some(trace) = state
+        .play_trace
+        .as_deref_mut()
+        .filter(|trace| trace.window == window)
+    {
+        trace.ordered = Some((start, proof));
+    }
 }
 
 /// The window's naming, at the base's priority window: a play the period made is named once it
@@ -1607,11 +1858,21 @@ pub(crate) fn name_window(state: &mut GameState) -> Vec<NamedSpan> {
             match read_legality(state, holder, &read.locus) {
                 Some(true) => {
                     trace.consumed.remove(&read.node);
+                    trace.spent_from.remove(&read.node);
                 }
                 Some(false) => {
                     trace.consumed.insert(read.node);
+                    trace.spent_from.entry(read.node).or_insert(read.at);
                 }
-                None => {}
+                // A token spent and not made again is not a consumed play, which would turn the
+                // empty-stack retry to consumed plays only; it only starts its node's span.
+                None => {
+                    if source_ceased(state, read.locus)
+                        && remade_source(state, &trace, read.at, read.at).is_none()
+                    {
+                        trace.spent_from.entry(read.node).or_insert(read.at);
+                    }
+                }
             }
         }
         trace.pending_reads = kept;
@@ -1667,14 +1928,35 @@ pub(crate) fn name_window(state: &mut GameState) -> Vec<NamedSpan> {
             } else {
                 NamingCause::LegalNow
             };
+            let mut earlier_starts = Vec::new();
             for (start, node, locus) in played {
-                if any_consumed && !trace.consumed.contains(&node) {
+                // CR 111.7 + CR 111.1: a token source spent and made again is a consumed play
+                // that is available again, so its node is retried at the token made again.
+                let remade = remade_source(state, &trace, start, start);
+                if any_consumed && !trace.consumed.contains(&node) && remade.is_none() {
                     continue;
                 }
-                if read_legality(state, holder, &locus) == Some(true) {
+                if let Some(&first) = trace.spent_from.get(&node).filter(|&&first| first < start) {
+                    earlier_starts.push((first, node));
+                }
+                if read_legality(state, holder, &remade.unwrap_or(locus)) == Some(true) {
+                    trace.spent_from.remove(&node);
                     trace
                         .named
                         .push_back(NamedSpan::in_window(start, end, cause));
+                }
+            }
+            // A token node played more than once before it was available again is also named
+            // from the first of those plays, after every span the window names from a last play.
+            for (first, node) in earlier_starts {
+                let Some(locus) = remade_source(state, &trace, first, first) else {
+                    continue;
+                };
+                if read_legality(state, holder, &locus) == Some(true) {
+                    trace.spent_from.remove(&node);
+                    trace
+                        .named
+                        .push_back(NamedSpan::in_window(first, end, cause));
                 }
             }
         }
@@ -1847,6 +2129,7 @@ pub fn install_plays_for_tests(state: &mut GameState, plays: &[(PlayerId, PlayLo
             | PlayLocus::Mana(source_id, Some(ability_index)) => GameAction::ActivateAbility {
                 source_id,
                 ability_index,
+                payment_mode: Default::default(),
             },
             PlayLocus::Cast(object_id) => GameAction::CastSpell {
                 object_id,
@@ -1979,6 +2262,23 @@ mod tests {
     }
 
     #[test]
+    fn a_kept_witness_verdict_is_read_only_under_the_out_verdict_it_was_computed_under() {
+        use PriorityOut::{Absent, Held};
+        let mut state = GameState::new_two_player(1);
+        state.play_trace = Some(Box::new(PlayTrace::new(WindowKey::of(&state))));
+        note_witnessed(&mut state, 3, Absent, Witnessed::Refused);
+        assert_eq!(witnessed(&state, 3, Absent), Some(Witnessed::Refused));
+        assert_eq!(witnessed(&state, 3, Held), None);
+        let offered = Witnessed::Offered(crate::analysis::loop_check::CountedTake::Unperformable(
+            crate::analysis::loop_check::UnperformableCause::UndelimitedCover,
+        ));
+        note_witnessed(&mut state, 3, Held, offered);
+        assert_eq!(witnessed(&state, 3, Held), Some(offered));
+        assert_eq!(witnessed(&state, 3, Absent), Some(Witnessed::Refused));
+        assert_eq!(witnessed(&state, 4, Absent), None);
+    }
+
+    #[test]
     fn answer_optionality_is_whether_the_answer_could_be_declined() {
         use AnswerOptionality::{Mandatory, Optional};
         let (player, source) = (PlayerId(0), ObjectId(1));
@@ -2000,6 +2300,7 @@ mod tests {
                     player,
                     card: source,
                     remaining: vec![],
+                    bottom_cards: vec![],
                 },
                 Mandatory,
             ),
@@ -2010,6 +2311,7 @@ mod tests {
                     source_id: source,
                     counter_type: None,
                     available: vec![(CounterType::Plus1Plus1, 2)],
+                    max_total: None,
                     pending_effect: effect(source),
                 },
                 Optional,
@@ -2099,5 +2401,78 @@ mod tests {
             .map(|(label, ..)| label)
             .collect();
         assert_eq!(misclassified, Vec::<&str>::new());
+    }
+
+    /// CR 104.4b + CR 732.4: a loop decision is an answer with more than one option; a pass
+    /// and a single forced option are none.
+    #[test]
+    fn answered_choice_is_an_answer_with_more_than_one_option() {
+        use AnswerOptionality::{Mandatory, Optional};
+        let (player, source) = (PlayerId(0), ObjectId(1));
+        let reveal = |cards: Vec<ObjectId>| WaitingFor::RevealChoice {
+            player,
+            cards,
+            filter: TargetFilter::Any,
+            optional: false,
+            decline_runs_continuation: false,
+        };
+        let may = WaitingFor::OptionalEffectChoice {
+            player,
+            decision_subject_id: None,
+            source_id: source,
+            description: None,
+            may_trigger_key: None,
+            same_card_may_trigger_choice_available: false,
+        };
+        let order = WaitingFor::OrderTriggers {
+            player,
+            triggers: vec![],
+        };
+        let priority = WaitingFor::Priority { player };
+        let select = |cards: Vec<ObjectId>| GameAction::SelectCards { cards };
+        let rows = [
+            (
+                "declined may",
+                &may,
+                GameAction::DecideOptionalEffect { accept: false },
+                Some(Optional),
+            ),
+            (
+                "accepted may",
+                &may,
+                GameAction::DecideOptionalEffect { accept: true },
+                Some(Optional),
+            ),
+            (
+                "trigger order",
+                &order,
+                GameAction::OrderTriggers { order: vec![1, 0] },
+                Some(Mandatory),
+            ),
+            ("pass", &priority, GameAction::PassPriority, None),
+        ];
+        let one_card = reveal(vec![source]);
+        let two_cards = reveal(vec![source, ObjectId(2)]);
+        let reveals = [
+            (
+                "one-card forced reveal",
+                &one_card,
+                select(vec![source]),
+                None,
+            ),
+            (
+                "two-card reveal",
+                &two_cards,
+                select(vec![source]),
+                Some(Mandatory),
+            ),
+        ];
+        let misread: Vec<&str> = rows
+            .iter()
+            .chain(reveals.iter())
+            .filter(|(_, prompt, action, expected)| answered_choice(action, prompt) != *expected)
+            .map(|(label, ..)| *label)
+            .collect();
+        assert_eq!(misread, Vec::<&str>::new());
     }
 }

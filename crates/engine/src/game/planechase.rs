@@ -33,8 +33,7 @@ use crate::game::game_object::GameObject;
 use crate::game::turn_control;
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
-use crate::types::format::GameFormat;
-use crate::types::game_state::{GameState, StackEntryKind, WaitingFor};
+use crate::types::game_state::{GameState, ManaAbilityResume, StackEntryKind, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
@@ -329,7 +328,7 @@ pub fn planeswalk(state: &mut GameState, player_id: PlayerId, events: &mut Vec<G
 /// Planeswalked/Chaos/DieRolled events are emitted and no triggers are
 /// collected for this starting reveal.
 pub fn reveal_starting_plane(state: &mut GameState) {
-    if state.format_config.format != GameFormat::Planechase
+    if !state.format_config.format.is_planechase_family()
         || active_plane(state).is_some()
         || state.planar_deck.is_empty()
     {
@@ -377,7 +376,7 @@ pub fn planar_die_roll_cost(state: &GameState, player: PlayerId) -> ManaCost {
 /// CR 901.9 / CR 116.2i: Active player may roll during a main phase while they
 /// have priority and the stack is empty, if they can pay the escalating cost.
 pub fn can_roll_planar_die(state: &GameState, player: PlayerId) -> bool {
-    if state.format_config.format != GameFormat::Planechase
+    if !state.format_config.format.is_planechase_family()
         || state.active_player != player
         || !matches!(state.waiting_for, WaitingFor::Priority { .. })
         || turn_control::priority_seat(state) != player
@@ -396,12 +395,17 @@ pub fn can_roll_planar_die(state: &GameState, player: PlayerId) -> bool {
     if cost.is_without_paying_mana() {
         return true;
     }
+    // CR 116.2i + CR 605.3b + CR 605.4a + CR 608.2d: the live payment carries
+    // a `ManaAbilityResume::PlanarDieRoll` root, so it can suspend for a
+    // replacement-aware cost move or a pre-spend echo choice and finish the
+    // locked-cost roll afterwards. The preview may therefore count that bonus.
     crate::game::casting::can_pay_special_action_mana_cost_after_auto_tap(
         state,
         player,
         None,
         &cost,
         crate::types::mana::SpecialAction::RollPlanarDie,
+        crate::game::casting::PausedManaPayment::Resumable,
     )
 }
 
@@ -414,30 +418,91 @@ pub(in crate::game) fn priority_planar_die_announcement(
     can_roll_planar_die(state, principal.semantic_holder()).then(PriorityPlanarDieAnnouncement::new)
 }
 
+/// CR 116.2i + CR 605.3b + CR 616.1: Outcome of the paid planar-die special
+/// action. `Paused` means a mana source's own cost (or a pre-spend echo choice)
+/// suspended the payment; the typed `ManaAbilityResume::PlanarDieRoll` root
+/// finishes the roll once that continuation settles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaidPlanarDieAction {
+    Rolled(PlanarDieFace),
+    Paused,
+}
+
 pub fn take_paid_planar_die_action(
     state: &mut GameState,
     player: PlayerId,
     events: &mut Vec<GameEvent>,
-) -> Result<PlanarDieFace, EngineError> {
+) -> Result<PaidPlanarDieAction, EngineError> {
     if !can_roll_planar_die(state, player) {
         return Err(EngineError::ActionNotAllowed(
             "Cannot roll the planar die now".to_string(),
         ));
     }
+    // CR 116.2i: lock the escalating cost at announcement; the resume must not
+    // recompute it after the action counter changes.
     let cost = planar_die_roll_cost(state, player);
-    crate::game::casting::pay_special_action_mana_cost(
+    let resume = ManaAbilityResume::PlanarDieRoll {
+        player,
+        cost: cost.clone(),
+    };
+    resume_planar_die_payment(state, player, &cost, &resume, events)
+}
+
+/// CR 116.2i + CR 605.3b + CR 616.1: Retry or finish the locked-cost planar-die
+/// payment under its typed special-action root. The roll commits exactly once,
+/// after every paused cost move and pre-spend echo choice has settled.
+pub(crate) fn resume_paid_planar_die_roll(
+    state: &mut GameState,
+    player: PlayerId,
+    cost: ManaCost,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let resume = ManaAbilityResume::PlanarDieRoll {
+        player,
+        cost: cost.clone(),
+    };
+    match resume_planar_die_payment(state, player, &cost, &resume, events)? {
+        PaidPlanarDieAction::Rolled(_) => Ok(WaitingFor::Priority { player }),
+        PaidPlanarDieAction::Paused => Ok(state.waiting_for.clone()),
+    }
+}
+
+fn resume_planar_die_payment(
+    state: &mut GameState,
+    player: PlayerId,
+    cost: &ManaCost,
+    resume: &ManaAbilityResume,
+    events: &mut Vec<GameEvent>,
+) -> Result<PaidPlanarDieAction, EngineError> {
+    match crate::game::casting::pay_special_action_mana_cost_with_resume(
         state,
         player,
         None,
-        &cost,
+        cost,
         crate::types::mana::SpecialAction::RollPlanarDie,
+        Some(resume),
         events,
-    )?;
+    )? {
+        crate::game::casting::SpecialActionManaPayment::Paid => Ok(PaidPlanarDieAction::Rolled(
+            finish_paid_planar_die_roll(state, player, events),
+        )),
+        crate::game::casting::SpecialActionManaPayment::Paused => Ok(PaidPlanarDieAction::Paused),
+    }
+}
+
+/// CR 116.2i + CR 901.9: Commit the paid roll once: increment the per-turn
+/// action count, then roll. Emits the roll events into the caller's buffer so
+/// the ordinary post-action pipeline collects "whenever you roll" triggers.
+pub(crate) fn finish_paid_planar_die_roll(
+    state: &mut GameState,
+    player: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> PlanarDieFace {
     *state
         .planar_die_actions_this_turn
         .entry(player)
         .or_insert(0) += 1;
-    Ok(roll_planar_die(state, player, events))
+    roll_planar_die(state, player, events)
 }
 
 /// CR 311.7 / CR 901.9b: Chaos ensues — the active plane's chaos-triggered
@@ -475,19 +540,16 @@ pub fn check_phenomenon_planeswalk_sba(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     any_performed: &mut bool,
+    waiting: &[crate::game::triggers::PendingTriggerContext],
 ) -> Option<PlaneswalkResolution> {
     let controller = state.planar_controller?;
     if !active_is_phenomenon(state) {
         return None;
     }
     let phenomenon_id = active_plane(state)?;
-    // CR 704.6f: do not planeswalk while the phenomenon's own triggered ability
-    // is still on the stack.
-    let has_ability_on_stack = state
-        .stack
-        .iter()
-        .any(|entry| entry.source_id == phenomenon_id);
-    if has_ability_on_stack {
+    // CR 704.6f: do not planeswalk while a triggered ability of the phenomenon
+    // has triggered but not yet left the stack.
+    if crate::game::sba::is_source_of_ability_not_yet_left_stack(state, waiting, phenomenon_id) {
         return None;
     }
     let resolution = resolve_planeswalk_via_replacements(
@@ -645,7 +707,7 @@ pub fn prepare_player_left_game_handoff(
     leaving: PlayerId,
     leaving_set: &HashSet<PlayerId>,
 ) -> Option<PlanarHandoff> {
-    if state.format_config.format != GameFormat::Planechase
+    if !state.format_config.format.is_planechase_family()
         || state.planar_controller != Some(leaving)
     {
         return None;
@@ -758,6 +820,10 @@ pub fn finish_player_left_game_handoff(
     // CR 901.11: player-left-game handoff after the starting plane is a real
     // planeswalk, so collect normal planeswalk/encounter triggers.
     crate::game::triggers::collect_triggers_into_deferred(state, &[event]);
+    // CR 603.2c: claim the occurrence for the ordinary collectors, so a scan of
+    // the departure's events doesn't collect its triggers a second time.
+    let planeswalked = events.len() - 1;
+    crate::game::triggers::claim_events_for_ordinary_collection(state, events, planeswalked);
 }
 
 /// CR 311.5: helper so callers can confirm an object is a plane/phenomenon

@@ -378,10 +378,10 @@ fn war_games_registered_chapter_token_tracks_saga_presence() {
         "the full chapter I must create three Warriors per player"
     );
     assert!(warriors.iter().all(|id| state.objects[id].tapped));
-    let recipient = state
+    let registered: Vec<ObjectId> = state
         .transient_continuous_effects
         .iter()
-        .find_map(|effect| {
+        .filter_map(|effect| {
             if effect.source_id != saga
                 || effect.controller != P0
                 || effect.duration != Duration::WhileHostOnBattlefield
@@ -401,9 +401,26 @@ fn war_games_registered_chapter_token_tracks_saga_presence() {
                 _ => None,
             }
         })
+        .collect();
+    let goaded = TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Goaded]));
+    // CR 608.2c + CR 608.2f + CR 701.15b: "The tokens" is every Warrior the one
+    // "each player creates" action made, so all nine carry the Saga's goad.
+    for warrior in &warriors {
+        assert!(
+            registered.contains(warrior),
+            "every Warrior carries a Saga goad registration"
+        );
+        assert!(matches_target_filter(
+            state,
+            *warrior,
+            &goaded,
+            &FilterContext::neutral()
+        ));
+    }
+    let recipient = *registered
+        .first()
         .expect("chapter I must register at least one exact Warrior recipient");
     assert!(warriors.contains(&recipient));
-    let goaded = TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Goaded]));
     assert!(matches_target_filter(
         state,
         recipient,
@@ -514,6 +531,9 @@ fn registered_warrior_direct_regoad_uses_each_goader_original_lifetime() {
                 _ => None,
             })
             .flatten()
+            // Every seat's Warriors are registered; take P2's, so both goaders
+            // (P0, P1) are opponents of the recipient's controller.
+            .filter(|id| state.objects[id].controller == PlayerId(2))
         })
         .expect("chapter I must register an exact live Warrior recipient");
     let creature = &state.objects[&recipient];

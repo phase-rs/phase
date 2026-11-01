@@ -148,6 +148,45 @@ fn trigger_event_scoped_player(state: &GameState, ability: &ResolvedAbility) -> 
     })
 }
 
+/// CR 701.21a + CR 609.3: Whether `ability` is barred from causing `player` to
+/// sacrifice `object_id`. The Master, Multiplied class muzzles the controller's
+/// own triggered abilities for specific permanents; the Sigarda, Host of Herons /
+/// Tajuru Preserver class stops an opponent's spell or ability from making the
+/// protected player sacrifice ANY permanent, regardless of which one.
+fn sacrifice_cause_muzzled(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    object_id: ObjectId,
+    player: PlayerId,
+) -> bool {
+    crate::game::static_abilities::triggered_cause_sacrifice_or_exile_muzzled(
+        state, ability, object_id, player,
+    ) || crate::game::static_abilities::forced_action_muzzled(
+        state,
+        ability.controller,
+        player,
+        crate::types::ability::CostCategory::SacrificesPermanent,
+    )
+}
+
+/// CR 701.21a + CR 609.3: Whether `player` choosing `object_id` for `ability`'s
+/// sacrifice would actually sacrifice it. Reads every refusal between the
+/// resolver and `sacrifice_permanent`, so an offered option is one that can be
+/// taken (Sigarda's ruling: "you can't take that option").
+pub(crate) fn can_sacrifice_for_ability(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    object_id: ObjectId,
+    player: PlayerId,
+) -> bool {
+    !sacrifice_cause_muzzled(state, ability, object_id, player)
+        && !crate::game::static_abilities::object_has_static_other(
+            state,
+            object_id,
+            "CantBeSacrificed",
+        )
+}
+
 /// CR 701.21a: To sacrifice a permanent, its controller moves it to its owner's graveyard.
 pub fn resolve(
     state: &mut GameState,
@@ -466,22 +505,7 @@ pub fn resolve(
                         obj.controller == chooser
                             && !obj.is_emblem
                             && crate::game::filter::matches_target_filter(state, *id, filter, &ctx)
-                            && !crate::game::static_abilities::triggered_cause_sacrifice_or_exile_muzzled(
-                                state,
-                                ability,
-                                *id,
-                                chooser,
-                            )
-                            // CR 701.21a + CR 609.3: Sigarda, Host of Herons /
-                            // Tajuru Preserver class — an opponent's spell or
-                            // ability can't force the protected player to
-                            // sacrifice ANY permanent, regardless of which one.
-                            && !crate::game::static_abilities::forced_action_muzzled(
-                                state,
-                                ability.controller,
-                                chooser,
-                                crate::types::ability::CostCategory::SacrificesPermanent,
-                            )
+                            && !sacrifice_cause_muzzled(state, ability, *id, chooser)
                     })
             })
             .collect();
@@ -648,21 +672,7 @@ pub fn resolve(
 
         let player_id = obj.controller;
 
-        if crate::game::static_abilities::triggered_cause_sacrifice_or_exile_muzzled(
-            state, ability, obj_id, player_id,
-        ) {
-            continue;
-        }
-
-        // CR 701.21a + CR 609.3: Sigarda, Host of Herons / Tajuru Preserver
-        // class — an opponent's spell or ability can't force the protected
-        // player to sacrifice ANY permanent, regardless of which one.
-        if crate::game::static_abilities::forced_action_muzzled(
-            state,
-            ability.controller,
-            player_id,
-            crate::types::ability::CostCategory::SacrificesPermanent,
-        ) {
+        if sacrifice_cause_muzzled(state, ability, obj_id, player_id) {
             continue;
         }
 
@@ -2134,6 +2144,8 @@ mod tests {
                 owner: TargetFilter::Controller,
                 attach_to: None,
                 enters_attacking: false,
+                attack_destination:
+                    crate::types::ability::TokenAttackDestination::ControllerChooses,
                 supertypes: vec![],
                 static_abilities: vec![],
                 enter_with_counters: vec![],
@@ -2208,6 +2220,8 @@ mod tests {
                     owner: TargetFilter::Controller,
                     attach_to: None,
                     enters_attacking: false,
+                    attack_destination:
+                        crate::types::ability::TokenAttackDestination::ControllerChooses,
                     supertypes: vec![],
                     static_abilities: vec![],
                     enter_with_counters: vec![],
@@ -2270,7 +2284,9 @@ mod tests {
             counters: std::collections::HashMap::new(),
             tapped: false,
             is_suspected: false,
+            was_prepared: false,
             attachments: Vec::new(),
+            intensity: 0,
         }
     }
 

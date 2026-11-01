@@ -173,6 +173,12 @@ pub(super) fn collect_object_targets(
         return from_targets;
     }
 
+    // CR 400.7: a self-reference cannot phase out a later same-ID incarnation.
+    // Explicit targets retain precedence; other filters retain their mass lookup.
+    if matches!(target, TargetFilter::SelfRef) && !ability.self_ref_is_current(state) {
+        return Vec::new();
+    }
+
     // Mass filter — expand against the phased-in battlefield.
     let ctx = FilterContext::from_ability(ability);
     state
@@ -379,7 +385,8 @@ mod tests {
         use crate::game::turns::execute_cleanup;
         use crate::types::ability::{
             AbilityDefinition, AbilityKind, ContinuousModification, DelayedTriggerCondition,
-            DelayedTriggerLifetime, Duration, StaticCondition, TriggerDefinition,
+            DelayedTriggerKind, DelayedTriggerLifetime, Duration, StaticCondition,
+            TriggerDefinition,
         };
         use crate::types::game_state::DelayedTrigger;
         use crate::types::statics::StaticMode;
@@ -461,6 +468,7 @@ mod tests {
             controller: PlayerId(0),
             source_id: source,
             one_shot: true,
+            kind: DelayedTriggerKind::Ordinary,
             provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
         });
         assert_eq!(state.delayed_triggers.len(), 2);

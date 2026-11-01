@@ -91,7 +91,9 @@ fn load_dina_raw() -> GameState {
     flate2::read::GzDecoder::new(DINA_PHASE5_GZ)
         .read_to_string(&mut json)
         .expect("fixture .json.gz must inflate to UTF-8 JSON");
-    let envelope: serde_json::Value = serde_json::from_str(&json).expect("dina dump parses");
+    let mut envelope: serde_json::Value = serde_json::from_str(&json).expect("dina dump parses");
+    // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+    engine::types::game_state::record_captured_onsets(&mut envelope);
     let mut state = serde_json::from_value::<PersistedGameState>(envelope["gameState"].clone())
         .expect("dina gameState decodes through the production decoder")
         .into_game_state()

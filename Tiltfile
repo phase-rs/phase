@@ -21,6 +21,11 @@ enabled = config.parse().get('enable', [])
 # real file before renaming into place; without this, every such temp file
 # restarts the watching resources mid-build.
 TMP_IGNORE = ['**/*.tmp.*']
+PROTOCOL_INPUTS = ['protocol/', 'scripts/protocol-versions.mjs']
+CLIENT_PROTOCOL_INPUTS = PROTOCOL_INPUTS + ['client/protocol-generation.ts',
+    'client/vite.config.ts', 'client/vitest.config.ts', 'client/vitest.integration.config.ts',
+    'client/package.json', 'scripts/check-protocol-version.mjs']
+CLIENT_GENERATED_IGNORE = TMP_IGNORE + ['client/src/generated/protocol-versions.ts']
 
 # probe-pin isolates through `unshare --map-root-user --mount` (util-linux) and runs its target
 # under `timeout` (GNU coreutils). macOS ships neither, and there is no Darwin equivalent of an
@@ -59,9 +64,13 @@ PROBE_PIN_TRIGGER = TRIGGER_MODE_AUTO if IS_LINUX else TRIGGER_MODE_MANUAL
 # `deps` here silently re-opens the false green that tilt-wait.sh exists to close.
 ENGINE_SRC = [
     'crates/engine/src/',
-    'crates/engine/data/',
-    'crates/engine/build.rs',
     'crates/engine/Cargo.toml',
+    'crates/phase-ast/src/',
+    'crates/phase-ast/data/',
+    'crates/phase-ast/build.rs',
+    'crates/phase-ast/Cargo.toml',
+    'crates/phase-parser/src/',
+    'crates/phase-parser/Cargo.toml',
 ]
 ENGINE_TESTS = ['crates/engine/tests/']
 # `crates/engine/src/types/format.rs` `include_str!`s the first two files
@@ -90,6 +99,7 @@ CLIENT_ENGINE_INPUTS = [
 AI_SRC = ['crates/phase-ai/src/']
 AI_TESTS = ['crates/phase-ai/tests/']
 WASM_SRC = ['crates/engine-wasm/src/']
+CODEC_SRC = ['crates/state-codec/src/']
 DRAFT_CORE_SRC = ['crates/draft-core/src/']
 DRAFT_WASM_SRC = ['crates/draft-wasm/src/']
 
@@ -108,7 +118,7 @@ local_resource('wasm',
     # Tilt execs the argv array directly, so bash receives the script text as one
     # untouched element. On Mac/Linux this is equally valid and equally a no-op.
     cmd = ['bash', '-c', 'CARGO_TARGET_DIR=target/wasm ./scripts/build-wasm.sh'],
-    deps = ENGINE_SRC + AI_SRC + WASM_SRC + DRAFT_CORE_SRC + DRAFT_WASM_SRC,
+    deps = ENGINE_SRC + AI_SRC + WASM_SRC + CODEC_SRC + DRAFT_CORE_SRC + DRAFT_WASM_SRC,
     ignore = TMP_IGNORE,
     allow_parallel = True,
     labels = ['build'],
@@ -199,6 +209,10 @@ local_resource('tauri',
 SERVER_SRC = ENGINE_SRC + AI_SRC + [
     'crates/server-core/src/',
     'crates/phase-server/src/',
+    'crates/lobby-broker/src/',
+    'crates/lobby-broker/Cargo.toml',
+    'crates/lobby-broker/build.rs',
+    'protocol/',
 ]
 
 local_resource('server',
@@ -228,7 +242,7 @@ local_resource('server',
 # `cargo test-all`) do not enable engine/proptest; a feature mismatch here would
 # force a rebuild.
 local_resource('build-native',
-    cmd = 'cargo nextest run -p phase-engine -p phase-ai --no-run',
+    cmd = 'cargo nextest run -p phase-ast -p phase-parser -p phase-engine -p phase-ai --no-run',
     deps = ENGINE_SRC + ENGINE_TESTS + AI_SRC + AI_TESTS + CLIENT_ENGINE_INPUTS,
     ignore = TMP_IGNORE,
     allow_parallel = True,
@@ -237,7 +251,7 @@ local_resource('build-native',
 )
 
 local_resource('test-engine',
-    cmd = 'cargo nextest run -p phase-engine',
+    cmd = 'cargo nextest run -p phase-ast -p phase-parser -p phase-engine',
     deps = ENGINE_SRC + ENGINE_TESTS + CLIENT_ENGINE_INPUTS,
     ignore = TMP_IGNORE,
     resource_deps = ['build-native'],
@@ -259,8 +273,8 @@ local_resource('test-ai',
 local_resource('test-frontend',
     cmd = 'pnpm test -- --run',
     dir = 'client',
-    deps = ['client/src/'],
-    ignore = TMP_IGNORE,
+    deps = ['client/src/'] + CLIENT_PROTOCOL_INPUTS,
+    ignore = CLIENT_GENERATED_IGNORE,
     resource_deps = ['wasm'],
     allow_parallel = True,
     auto_init = 'test' in enabled,
@@ -288,7 +302,7 @@ local_resource('clippy',
     # List-form cmd: see the 'wasm' resource above for why (a STRING 'bash -c "..."'
     # gets its quotes mangled by cmd.exe on Windows; list-form bypasses that).
     cmd = ['bash', '-c', 'CARGO_TARGET_DIR=target/clippy cargo clippy --all-targets -- -D warnings && CARGO_TARGET_DIR=target/clippy ./scripts/check-interaction-bindings.sh --check'],
-    deps = ['crates/', 'scripts/check-interaction-bindings.sh'] + CLIENT_ENGINE_INPUTS,
+    deps = ['crates/', 'protocol/', 'scripts/check-interaction-bindings.sh'] + CLIENT_ENGINE_INPUTS,
     ignore = TMP_IGNORE,
     auto_init = 'lint' in enabled,
     allow_parallel = True,
@@ -298,8 +312,8 @@ local_resource('clippy',
 local_resource('check-frontend',
     cmd = 'pnpm run type-check && pnpm lint',
     dir = 'client',
-    deps = ['client/src/'],
-    ignore = TMP_IGNORE,
+    deps = ['client/src/'] + CLIENT_PROTOCOL_INPUTS,
+    ignore = CLIENT_GENERATED_IGNORE,
     allow_parallel = True,
     auto_init = 'lint' in enabled,
     labels = ['lint'],
@@ -346,13 +360,12 @@ local_resource('pnpm-preflight',
 local_resource('lobby-servers',
     cmd = 'bash scripts/lib/lobby_servers_tests.sh',
     # Every file the gate READS, not just the ones it tests: the delta
-    # computation greps protocol.rs and V-U8e greps the Helm chart, so editing
+    # computation reads the registry and V-U8e reads the Helm chart, so editing
     # the chart to drop "/info" must re-trigger this resource -- that reverse
     # direction is the whole point of the assertion.
     deps = ['scripts/lobby-servers.sh', 'scripts/lib/lobby_servers_tests.sh',
             'crates/lobby-broker/src/directory.rs',
-            'crates/lobby-broker/src/protocol.rs',
-            'deploy/helm/phase-server/templates/ingress.yaml'],
+            'deploy/helm/phase-server/templates/ingress.yaml'] + PROTOCOL_INPUTS,
     ignore = TMP_IGNORE,
     allow_parallel = True,
     auto_init = 'lint' in enabled,
@@ -387,6 +400,56 @@ local_resource('prelowered-ratchet',
     labels = ['lint'],
 )
 
+# Gate H's full shell seams are local Tilt checks, not a separate CI suite.
+# Fixtures use the real gate/detector and the shared scanner's import dependency.
+local_resource('residue-ratchet',
+    cmd = '/bin/bash scripts/lib/residue_ratchet_tests.sh',
+    deps = ['scripts/check-parser-combinators.sh',
+            'scripts/lib/added-lines.py',
+            'scripts/lib/added-lines.sh',
+            'scripts/lib/added_lines_tests.py',
+            'scripts/lib/detect-cross-product-alts.py',
+            'scripts/lib/detect-residue-discards.py',
+            'scripts/lib/detect_cross_product_alts_tests.py',
+            'scripts/lib/detect_residue_discards_tests.py',
+            'scripts/lib/residue_ratchet_tests.sh',
+            'scripts/zone_authority_census.py',
+            'crates/engine/src/game/mod.rs'],
+    ignore = TMP_IGNORE,
+    allow_parallel = True,
+    auto_init = 'lint' in enabled,
+    labels = ['lint'],
+)
+
+# The move-aware added-line helper (scripts/lib/added-lines.py) decides which
+# added lines the four diff-based gates check. A regression in it does not show
+# up as a helper error: it silently exempts real violations or re-flags moved
+# code. The helper's own suite pins the helper; diff_gates_tests.sh runs copies
+# of the real gates on fixture moves.
+#
+# Same venue and limits as prelowered-ratchet above: Tilt under the 'lint'
+# label, local-only. CI runs the helper suite only through the parser gate
+# (ci.yml), not these suites directly -- enrolling them needs a
+# .github/workflows/** edit, a hard stop for agent changes.
+#
+# No CARGO_TARGET_DIR and no cargo: bash, python and git against fixture repos
+# in a mktemp dir, so it cannot contend for a build lock.
+local_resource('diff-gates',
+    cmd = 'python3 scripts/lib/added_lines_tests.py && /bin/bash scripts/lib/diff_gates_tests.sh',
+    deps = ['scripts/lib/added-lines.py',
+            'scripts/lib/added-lines.sh',
+            'scripts/lib/added_lines_tests.py',
+            'scripts/lib/diff_gates_tests.sh',
+            'scripts/check-parser-combinators.sh',
+            'scripts/check-engine-authorities.sh',
+            'scripts/check-test-card-data-load.sh',
+            'scripts/check-legacy-quantity-callsites.sh'],
+    ignore = TMP_IGNORE,
+    allow_parallel = True,
+    auto_init = 'lint' in enabled,
+    labels = ['lint'],
+)
+
 # ---------------------------------------------------------------------------
 # Data (manual trigger — click in UI to run)
 # ---------------------------------------------------------------------------
@@ -396,17 +459,17 @@ local_resource('card-data',
     # gets its quotes mangled by cmd.exe on Windows; list-form bypasses that).
     cmd = ['bash', '-c', './scripts/gen-card-data.sh'],
     deps = ENGINE_SRC,
-    # gen-card-data.sh promotes these tracked files under crates/engine/data/, which is
+    # gen-card-data.sh promotes these tracked files under crates/phase-ast/data/, which is
     # in ENGINE_SRC (deps). Watching card-data's own generated outputs makes every
     # promote re-trigger card-data -> an infinite regen loop. The script already stages
     # via a `.tmp.` infix (covered by TMP_IGNORE), but the final promote writes the real
     # tracked file, which TMP_IGNORE can't mask. Ignoring the outputs here breaks the
     # self-trigger without touching the engine resources, which still watch
-    # crates/engine/data/ in full so a genuine data change still rebuilds the engine.
+    # crates/phase-ast/data/ in full so a genuine data change still rebuilds the engine.
     ignore = TMP_IGNORE + [
-        'crates/engine/data/known-tokens.toml',
-        'crates/engine/data/oracle-subtypes.json',
-        'crates/engine/data/mtgjson-vintage',
+        'crates/phase-ast/data/known-tokens.toml',
+        'crates/phase-ast/data/oracle-subtypes.json',
+        'crates/phase-ast/data/mtgjson-vintage',
     ],
     auto_init = True,
     labels = ['data'],
@@ -521,7 +584,7 @@ local_resource('probe-pin-e2e',
 #    "TWO PRICE HAZARDS" below; they are DISCLOSED, not measured.
 #
 # THE ENGINE BUILD *IS* ADDITIONAL -- 'probe-pin-check''s note was right to flag it, and measuring
-# it was not a formality. `build-native` runs `cargo nextest run -p phase-engine -p phase-ai --no-run`;
+# it was not a formality. `build-native` runs `cargo nextest run -p phase-ast -p phase-parser -p phase-engine -p phase-ai --no-run`;
 # probe-pin's inner resolve runs `cargo test -p phase-engine --test integration --no-run`. The
 # two keep SEPARATE artifact sets (different feature unification across the -p set), so after an
 # ENGINE_SRC touch the inner resolve costs 32.86s even with build-native already complete --
@@ -594,10 +657,11 @@ local_resource('probe-pin-e2e',
 # IS_LINUX note at the top of this file for the two coordinates). What the gate BUYS is only
 # that a Darwin host does not boot this resource into a red it can never clear; what it does NOT
 # buy is any enforcement of the pin off Linux. There is no CI venue to fall back to -- MEASURED:
-# `grep -rn probe-pin .github/workflows/` returns nothing, which is the state 'probe-pin-check''s
-# note calls a hard stop -- so off Linux this pin's verdict is carried entirely by whatever Linux
-# venue last ran it. That is the identical shape 'probe-pin-e2e' states for Tier 2, and it is
-# stated here rather than inferred from the flag.
+# `.github/workflows/ci.yml` names `probe-pin` only as a test launcher binary, and no workflow
+# runs `probe-pin check`, which is the state 'probe-pin-check''s note calls a hard stop -- so off
+# Linux this pin's verdict is carried entirely by whatever Linux venue last ran it. That is the
+# identical shape 'probe-pin-e2e' states for Tier 2, and it is stated here rather than inferred
+# from the flag.
 local_resource('probe-pin-census',
     cmd = ['bash', '-c',
            # Starlark has NO implicit adjacent-string-literal concatenation (a Python rule this
@@ -615,19 +679,19 @@ local_resource('probe-pin-census',
     # deliberately NOT ENGINE_SRC + AI_SRC.
     # ⚠ THE PREDICATE IS STATED BECAUSE THE EARLIER WORD WAS "EVERYTHING", AND THAT WAS FALSE.
     # Disclosed residual, not a gap that was missed: the target is resolved by building
-    # `--test integration`, so ANY sibling file under crates/engine/tests/integration/ can move the
-    # verdict -- by breaking that build, or by adding a test that FAILS under the manifest's
-    # control. Those are NOT watched, on purpose: watching them would re-trigger this pin on every
-    # unrelated integration-test edit, and there are over a thousand of them. Both failure classes
+    # `--test integration`, so ANY other module `tests/integration/main.rs` registers (the
+    # `integration` shard) can move the verdict -- by breaking that build, or by adding a test
+    # that FAILS under the manifest's control. Those are NOT watched, on purpose: watching them
+    # would re-trigger this pin on every unrelated edit to that shard. Both failure classes
     # surface as exit 2 with the cause named in the output. THE DEV-DEP AND LOCKFILE HALF OF THIS
-    # RESIDUAL IS NO LONGER RESIDUAL -- it was listed here alongside the thousand siblings and
-    # inherited their exemption, which was wrong by this file's own admission rule: a lockfile-only
-    # edit leaves a stale GREEN, and Cargo.lock is one file with a tiny edit surface. It, the two
+    # RESIDUAL IS NO LONGER RESIDUAL -- it was listed here alongside those siblings and inherited
+    # their exemption, which was wrong by this file's own admission rule: a lockfile-only edit
+    # leaves a stale GREEN, and Cargo.lock is one file with a tiny edit surface. It, the two
     # manifests that reach this target, and .cargo/config.toml are watched below.
     # The pin is over exactly what census() reads; ENGINE_SRC is a superset BY DESIGN (its own
     # comment requires it to stay a superset of the engine cache key: src + data + build.rs +
     # Cargo.toml), and census() reads none of the extras. The live cost of the wider set is not
-    # hypothetical: gen-card-data.sh PROMOTES tracked files under crates/engine/data/, and
+    # hypothetical: gen-card-data.sh PROMOTES tracked files under crates/phase-ast/data/, and
     # 'card-data' (auto_init = True, so under EVERY profile) documents that watching its own
     # outputs "makes every promote re-trigger card-data -> an infinite regen loop" and ignores
     # them for that reason. This resource's ignore list does not cover them, so with ENGINE_SRC
@@ -637,6 +701,8 @@ local_resource('probe-pin-census',
     # currently share a value, and a later path added to either symbol re-opens this silently.
     deps = [
         'crates/engine/src/',
+        'crates/phase-ast/src/',
+        'crates/phase-parser/src/',
         'crates/phase-ai/src/',
         # THE BUILD INPUTS OF THE TARGET THIS PIN RESOLVES BY BUILDING (`--test integration`).
         # A lockfile- or manifest-only edit changes what that target compiles while every watched
@@ -644,11 +710,12 @@ local_resource('probe-pin-census',
         # even when the rebuilt target would fail or move a number. Each is admitted by the rule
         # 'main.rs' below is admitted by -- ONE file with a tiny, stable edit surface -- not by the
         # "everything that can break the build" reading the comment above already rejects for the
-        # thousand-odd sibling test files.
+        # sibling test files of that shard.
         # WHICH manifests, MEASURED not shotgunned (`cargo tree -p phase-engine -e normal,dev`
-        # intersected with the workspace members): phase-engine is the ONLY workspace member in
-        # this target's graph, so its manifest plus the workspace root's -- [profile.test] and
-        # [workspace.dependencies], which this target resolves through -- are the whole set.
+        # intersected with the workspace members): phase-engine, phase-ast and phase-parser are the
+        # workspace members in this target's graph, so their manifests plus the workspace root's --
+        # [profile.test] and [workspace.dependencies], which this target resolves through -- are
+        # the whole set.
         # Sibling crate manifests are deliberately absent: they cannot reach this build.
         # probe-pin's own manifest already rides along inside the 'crates/probe-pin/' dep below.
         # Cargo may itself rewrite Cargo.lock when it is stale, which costs at most ONE extra
@@ -656,6 +723,8 @@ local_resource('probe-pin-census',
         'Cargo.lock',
         'Cargo.toml',
         'crates/engine/Cargo.toml',
+        'crates/phase-ast/Cargo.toml',
+        'crates/phase-parser/Cargo.toml',
         # NOT a manifest, watched on the same one-file rule: [env] here sets
         # RUST_MIN_STACK = 16777216, which that file records as load-bearing for test threads
         # (Debug-formatting the Effect <-> AbilityDefinition recursion overflows a default
@@ -675,7 +744,7 @@ local_resource('probe-pin-census',
         # aborts either way and every Abort maps to exit 2. It is watched not because its failure is
         # quieter than a sibling's (it is the same class) but because it is ONE file with a tiny,
         # stable edit surface: the cost of watching it rounds to zero, which is exactly what is not
-        # true of the thousand-odd siblings above.
+        # true of the siblings above.
         'crates/engine/tests/integration/main.rs',
         # The TOOLCHAIN, for the same reason and by the same rule. `used_instruments()` returns
         # [Instrument::Toolchain] UNCONDITIONALLY and the digest covers that list, so a rustc move
