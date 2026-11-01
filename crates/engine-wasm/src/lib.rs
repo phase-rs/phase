@@ -3353,6 +3353,7 @@ fn restore_game_state_inner(json_str: &str) -> Result<(), String> {
     // state's history no longer matches the recorded action sequence.
     REPLAY_LOG.with(|cell| cell.set(None));
     invalidate_ai_proposals();
+    LLM_DECISION_MEMORY.with(|cell| cell.borrow_mut().clear());
     Ok(())
 }
 
@@ -3494,6 +3495,7 @@ fn resume_multiplayer_host_state_inner(
 #[cfg(test)]
 mod restored_card_db_requirements_tests {
     use super::*;
+    use engine::types::phase::Phase;
 
     fn legacy_ready_gain_state_json(life_gained_this_turn: u32) -> String {
         let mut state = legacy_ready_state();
@@ -3723,6 +3725,41 @@ mod restored_card_db_requirements_tests {
 
         clear_game_state();
         set_multiplayer_mode(false);
+    }
+
+    #[test]
+    fn restore_game_state_clears_llm_decision_memory() {
+        clear_game_state();
+        set_multiplayer_mode(false);
+        load_minimal_test_card_database();
+
+        let player = PlayerId(0);
+        let mut state = GameState::new_two_player(17);
+        state.phase = Phase::PreCombatMain;
+        state.waiting_for = WaitingFor::Priority { player };
+        let contract = AiDecisionContract::issue(&state, player);
+        let json = serde_json::to_string(&state).unwrap();
+
+        LLM_DECISION_MEMORY.with(|cell| {
+            cell.borrow_mut()
+                .record_decision(player, &GameAction::PassPriority, &state, &contract);
+            assert!(cell
+                .borrow()
+                .standing_pass_available(player, &state, &contract));
+        });
+
+        restore_game_state_inner(&json).expect("restore must succeed");
+
+        LLM_DECISION_MEMORY.with(|cell| {
+            assert!(
+                !cell
+                    .borrow()
+                    .standing_pass_available(player, &state, &contract),
+                "restoring game state must clear standing pass decision memory"
+            );
+        });
+
+        clear_game_state();
     }
 }
 

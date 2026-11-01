@@ -116,8 +116,7 @@ pub fn decision_fingerprint(state: &GameState, contract: &AiDecisionContract) ->
 /// - The legal candidate options available to the viewer
 ///
 /// Deliberately excludes transient priority-pass artifacts:
-/// `state_revision`, `phase` (when no board/combat changes occur), `priority_player`,
-/// and `priority_pass_count`.
+/// `state_revision`, `priority_player`, and `priority_pass_count`.
 pub fn information_fingerprint(state: &GameState, contract: &AiDecisionContract) -> String {
     let viewer = contract.semantic_owner;
     let visible = filter_state_for_viewer(state, viewer);
@@ -126,6 +125,7 @@ pub fn information_fingerprint(state: &GameState, contract: &AiDecisionContract)
     parts.push(format!("viewer:{}", viewer.0));
     parts.push(format!("turn:{}", visible.turn_number));
     parts.push(format!("active:{}", visible.active_player.0));
+    parts.push(format!("phase:{:?}", visible.phase));
 
     for p in &visible.players {
         parts.push(format!(
@@ -452,6 +452,7 @@ mod tests {
     use engine::types::phase::Phase;
     use engine::types::player::PlayerId;
     use engine::types::zones::Zone;
+    use engine::types::WaitingFor;
 
     fn contract(actions: Vec<GameAction>) -> AiDecisionContract {
         AiDecisionContract {
@@ -1501,7 +1502,8 @@ mod tests {
     }
 
     #[test]
-    fn information_fingerprint_is_stable_across_transient_phase_and_revision_advances() {
+    fn information_fingerprint_is_stable_across_transient_revision_advances_but_changes_across_phases(
+    ) {
         let mut state = GameState::new(FormatConfig::modern(), 2, 1);
         state.phase = Phase::PreCombatMain;
         state.state_revision = 1;
@@ -1510,18 +1512,23 @@ mod tests {
         let fp1 = information_fingerprint(&state, &c);
         let dfp1 = decision_fingerprint(&state, &c);
 
-        // Advance phase and bump state revision without changing board, life, hand, or stack:
-        state.phase = Phase::BeginCombat;
+        // Bump state revision without changing phase, board, life, hand, or stack:
         state.state_revision = 2;
         let mut c2 = c.clone();
         c2.state_revision = 43;
         let fp2 = information_fingerprint(&state, &c2);
         let dfp2 = decision_fingerprint(&state, &c2);
 
-        // Information fingerprint is unchanged (no new information):
+        // Information fingerprint is unchanged within the same phase (no new information):
         assert_eq!(fp1, fp2);
         // While decision_fingerprint (the transport staleness guard) changed:
         assert_ne!(dfp1, dfp2);
+
+        // Advance phase without changing board, life, hand, or stack:
+        state.phase = Phase::BeginCombat;
+        let fp3 = information_fingerprint(&state, &c2);
+        // Information fingerprint changes when phase changes:
+        assert_ne!(fp1, fp3);
     }
 
     #[test]
@@ -1679,12 +1686,18 @@ mod tests {
         // In the same state, standing pass is available:
         assert!(memory.standing_pass_available(player, &state, &c));
 
-        // In a new phase with identical board/stack/hand (no new information):
-        state.phase = Phase::BeginCombat;
+        // When state_revision advances in the same phase (no new information):
         state.state_revision += 1;
-        assert!(memory.standing_pass_available(player, &state, &c));
+        let mut c_advanced = c.clone();
+        c_advanced.state_revision += 1;
+        assert!(memory.standing_pass_available(player, &state, &c_advanced));
+
+        // In a new phase with identical board/stack/hand, standing pass is NOT available:
+        state.phase = Phase::BeginCombat;
+        assert!(!memory.standing_pass_available(player, &state, &c));
 
         // New information arrives (e.g. stack entry):
+        state.phase = Phase::PreCombatMain;
         let mut new_info_state = state.clone();
         new_info_state
             .stack
@@ -1709,5 +1722,51 @@ mod tests {
             &c,
         );
         assert!(!memory.standing_pass_available(player, &state, &c));
+    }
+
+    #[test]
+    fn standing_pass_is_not_reused_across_turn_steps_even_with_unchanged_board() {
+        let mut memory = LlmDecisionMemory::new();
+        let opponent = PlayerId(0);
+        let llm_seat = PlayerId(1);
+        let mut state = GameState::new_two_player(17);
+        state.phase = Phase::PostCombatMain;
+        state.active_player = opponent;
+        state.priority_player = opponent;
+        state.waiting_for = WaitingFor::Priority { player: opponent };
+
+        // Opponent passes priority in PostCombatMain:
+        engine::game::engine::apply(&mut state, opponent, GameAction::PassPriority)
+            .expect("opponent pass in PostCombatMain");
+        assert_eq!(state.phase, Phase::PostCombatMain);
+        assert_eq!(state.waiting_for, WaitingFor::Priority { player: llm_seat });
+
+        // LLM seat receives priority and records a PassPriority decision:
+        let contract_pcm = AiDecisionContract::issue(&state, llm_seat);
+        memory.record_decision(llm_seat, &GameAction::PassPriority, &state, &contract_pcm);
+        assert!(memory.standing_pass_available(llm_seat, &state, &contract_pcm));
+
+        // Both players have now passed in PostCombatMain: LLM seat applies the pass:
+        engine::game::engine::apply(&mut state, llm_seat, GameAction::PassPriority)
+            .expect("llm seat pass in PostCombatMain");
+
+        // Engine advances from PostCombatMain to End step:
+        assert_eq!(state.phase, Phase::End);
+        assert_eq!(state.active_player, opponent);
+
+        // In End step, opponent passes priority first:
+        if state.waiting_for == (WaitingFor::Priority { player: opponent }) {
+            engine::game::engine::apply(&mut state, opponent, GameAction::PassPriority)
+                .expect("opponent pass in End step");
+        }
+        assert_eq!(state.phase, Phase::End);
+        assert_eq!(state.waiting_for, WaitingFor::Priority { player: llm_seat });
+
+        // LLM seat now has priority in End step with the same board, hands, and stack:
+        let contract_end = AiDecisionContract::issue(&state, llm_seat);
+        assert!(
+            !memory.standing_pass_available(llm_seat, &state, &contract_end),
+            "standing pass from PostCombatMain must not be reused in End step"
+        );
     }
 }
