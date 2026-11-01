@@ -76,7 +76,7 @@ Whenever you cast an instant or sorcery spell, remove an ice counter from this c
 /// TriggeringSource" would be weaker than the evidence available.
 ///
 ///   Decree of Silence / Charitable Levy : `self`         (the enchantment)
-///   Thing in the Ice                    : `parent target` (the creature)
+///   Thing in the Ice                    : `self`         (the creature)
 ///
 /// Each case carries a reach guard: a card that failed to parse at all would
 /// make `gated_targets` return an empty vec, and a bare negative assertion
@@ -90,11 +90,10 @@ fn a_source_counter_gate_binds_its_anaphor_to_the_source_not_the_cast_spell() {
             TargetFilter::SelfRef,
         ),
         ("Charitable Levy", CHARITABLE_LEVY, TargetFilter::SelfRef),
-        (
-            "Thing in the Ice",
-            THING_IN_THE_ICE,
-            TargetFilter::ParentTarget,
-        ),
+        // "transform it" after "remove an ice counter from this creature" names
+        // the creature the prior clause named via `~` (CR 608.2c), so it binds
+        // to the source directly rather than the chain's parent target.
+        ("Thing in the Ice", THING_IN_THE_ICE, TargetFilter::SelfRef),
     ] {
         let targets = gated_targets(oracle, name);
 

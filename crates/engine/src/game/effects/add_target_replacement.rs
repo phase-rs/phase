@@ -1,149 +1,22 @@
-use crate::game::targeting::{extract_source_from_event, resolve_event_context_target};
+use crate::game::game_object::ObjectIncarnationRefExt;
+use crate::game::quantity::{quantity_ref_object_scope, resolve_quantity_with_targets};
+use crate::game::replacement::EventModifiers;
+use crate::game::targeting::{
+    resolve_event_context_target, triggering_spell, triggering_spell_identity, TriggeringSpell,
+};
 use crate::types::ability::{
-    AbilityDefinition, DamageTargetFilter, DamageTargetPlayerScope, Duration, Effect, EffectError,
-    EffectKind, ReplacementCondition, ReplacementDefinition, ResolvedAbility, RestrictionExpiry,
-    SourceExclusion, TargetFilter, TargetRef,
+    expiry_from_duration, host_gate_enforceable, quantity_ref_recipient_read,
+    replacement_install_is_refused, AbilityDefinition, CastManaObjectScope, DamageTargetFilter,
+    DamageTargetPlayerScope, Effect, EffectError, EffectKind, ObjectScope, PlayerFilter,
+    QuantityExpr, QuantityRef, RecipientRead, ReplacementCondition, ReplacementDefinition,
+    ReplacementDurationExpiry, ResolvedAbility, RestrictionExpiry, SourceExclusion, TargetFilter,
+    TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::replacements::ReplacementEvent;
-
-/// Whether a duration supplies a replacement expiry at the installation seam.
-///
-/// `Unstated` is deliberately distinct from `Unsupported`: only a truly absent
-/// duration may use the engine's end-of-turn fallback. A stated duration that
-/// this replacement lifecycle cannot enforce must fail closed rather than be
-/// shortened to a different window (CR 611.2a).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ReplacementDurationExpiry {
-    Unstated,
-    Explicit(RestrictionExpiry),
-    /// CR 611.2a: the CONTROLLER's own next turn. The only class whose stamp
-    /// needs the resolving ability's controller, so it is left unresolved here
-    /// and named by each install seam. Keeping it out of `Explicit` is what
-    /// makes the classification controller-free, which in turn lets the
-    /// parse-time honesty net consult this same authority
-    /// (`parser::oracle::demote_unenforceable_replacement_lifetimes`) with no
-    /// second duration list.
-    ExplicitControllerNextTurn,
-    /// The duration is enforced by a separate applicability gate rather than
-    /// an expiry prune — the CONTROL gate on the bare untap-prevention rider
-    /// (`stamp_for_as_long_as_controlled_gate`). That gate is
-    /// `ReplacementCondition::ControllerControlsSource`, so this class carries
-    /// exactly one duration: `Duration::WhileControllingHost`. An install whose
-    /// replacement cannot carry the gate fails closed in
-    /// `replacement_with_ability_expiry`.
-    GateControlled,
-    Unsupported,
-}
-
-/// CR 611.2a: map a parser-side `Duration` onto the engine's replacement-side
-/// lifecycle without conflating an absent duration with an unrepresentable one.
-pub(crate) fn expiry_from_duration(duration: Option<&Duration>) -> ReplacementDurationExpiry {
-    match duration {
-        None => ReplacementDurationExpiry::Unstated,
-        Some(Duration::UntilEndOfTurn) => {
-            ReplacementDurationExpiry::Explicit(RestrictionExpiry::EndOfTurn)
-        }
-        Some(Duration::UntilEndOfCombat) => {
-            ReplacementDurationExpiry::Explicit(RestrictionExpiry::EndOfCombat)
-        }
-        Some(Duration::UntilNextTurnOf {
-            player: crate::types::ability::PlayerScope::Controller,
-        }) => ReplacementDurationExpiry::ExplicitControllerNextTurn,
-        // `UntilEndOfNextTurnOf` needs replacement-side arming, while non-controller
-        // turn/step scopes need a resolution-time player binding. Neither is present
-        // at this seam, so applying an `EndOfTurn` default would be rules-incorrect.
-        Some(Duration::UntilNextTurnOf { .. })
-        | Some(Duration::UntilEndOfNextTurnOf { .. })
-        | Some(Duration::UntilNextStepOf { .. }) => ReplacementDurationExpiry::Unsupported,
-        // CR 611.2b: the CONTROL reading, and only it. The gate this class
-        // promises is `ReplacementCondition::ControllerControlsSource`, which
-        // re-reads the source each layer pass, so it observes a control change
-        // and a battlefield exit alike — and both genuinely end "for as long as
-        // you control ~", the second because a permanent that has left the
-        // battlefield is no longer controlled. CR 611.2b's own example is this
-        // duration class (Master Thief, "gain control of target artifact for as
-        // long as you control this creature"); it illustrates the duration
-        // failing to START, not the two ways it ends, so the ends above are read
-        // off the wording, not quoted from the rule.
-        Some(Duration::WhileControllingHost) => ReplacementDurationExpiry::GateControlled,
-        // CR 611.2a: the two NON-control host readings have no enforceable
-        // lifetime at this seam, so they fail closed.
-        //
-        // They must not take the control gate: both survive a control change
-        // while their source stays on the battlefield, and
-        // `ControllerControlsSource` would end them there — a window SHORTER
-        // than the printed one, which CR 611.2a forbids just as much as a
-        // longer one.
-        //
-        // Nor is `RestrictionExpiry::UntilHostLeavesPlay` the answer for the
-        // event deadline, despite the shared name: the `Duration` means "when
-        // the SOURCE object leaves the battlefield", while the
-        // `RestrictionExpiry` is pruned when the object HOSTING the definition
-        // leaves (`layers.rs`, the host-left prune, which keys on the departed
-        // id). For a rider installed on a TARGET those are different objects —
-        // Old Fat Spider Can't See Me chapter II binds to the Saga while
-        // hosting its shield on the targeted creature, so the identity mapping
-        // would strand an immortal shield when the Saga leaves first. And
-        // `WhileHostOnBattlefield` additionally ends on a phase-out
-        // (CR 702.26f), which no `RestrictionExpiry` stamp expresses at all.
-        //
-        // Failing closed here is not a silent drop: the parse-time honesty net
-        // demotes the whole line to `Effect::Unimplemented` before it can be
-        // reported as supported, and the install seam returns a hard error if
-        // one ever reaches it anyway.
-        Some(Duration::UntilHostLeavesPlay) | Some(Duration::WhileHostOnBattlefield) => {
-            ReplacementDurationExpiry::Unsupported
-        }
-        // CR 611.2b conditional windows are gated by
-        // `stamp_for_as_long_as_controlled_gate` / `ReplacementCondition`, not by
-        // an expiry stamp.
-        Some(Duration::ForAsLongAs { .. })
-        | Some(Duration::UntilSourceExilesAnotherCard)
-        | Some(Duration::UntilOpponentBecomesMonarch)
-        | Some(Duration::Permanent) => ReplacementDurationExpiry::Unsupported,
-        // CR 611.2a: the event deadline is ended by the spell-cast expiry in
-        // `casting_costs`, which ends transient continuous effects only; no
-        // replacement expiry stamp carries it, so this fails closed.
-        Some(Duration::UntilEvent { .. }) => ReplacementDurationExpiry::Unsupported,
-    }
-}
-
-/// CR 611.2a: does the install seam REFUSE this replacement under this stated
-/// duration? The single authority for that question, and deliberately shared by
-/// its two consumers:
-///
-/// * `replacement_with_ability_expiry`, at resolution, which turns a refusal
-///   into a hard `EffectError` rather than a successful no-op; and
-/// * `parser::oracle::demote_unenforceable_replacement_lifetimes`, the
-///   post-lowering honesty net, which demotes a refused line to
-///   `Effect::Unimplemented` so no card ever REPORTS the shape as supported.
-///
-/// Both axes are read from their own single owner — the duration axis from
-/// `expiry_from_duration`, the form axis from `host_gate_enforceable` — so
-/// neither list exists twice and a newly routed duration reaches both consumers
-/// in the same breath.
-///
-/// The `expiry.is_some()` short-circuit mirrors the install seam exactly: a
-/// replacement that already carries a parser-stamped expiry does not take its
-/// lifetime from the ability's duration at all, so the duration cannot refuse it.
-pub(crate) fn replacement_install_is_refused(
-    replacement: &ReplacementDefinition,
-    duration: Option<&Duration>,
-) -> bool {
-    if replacement.expiry.is_some() {
-        return false;
-    }
-    match expiry_from_duration(duration) {
-        ReplacementDurationExpiry::Unsupported => true,
-        ReplacementDurationExpiry::GateControlled => !host_gate_enforceable(replacement),
-        ReplacementDurationExpiry::Unstated
-        | ReplacementDurationExpiry::Explicit(_)
-        | ReplacementDurationExpiry::ExplicitControllerNextTurn => false,
-    }
-}
+use crate::types::zones::Zone;
 
 fn replacement_with_ability_expiry(
     replacement: &ReplacementDefinition,
@@ -263,44 +136,33 @@ fn unenforceable_lifetime(ability: &ResolvedAbility) -> EffectError {
     ))
 }
 
-/// CR 603.2 + CR 603.3b + CR 117.3b: Concretize
-/// `TRIGGERING_SPELL_PLACEHOLDER` — the parse-time sentinel
-/// `parse_whenever_you_cast_enters_with_trigger` embeds inside a floating
-/// (`TargetFilter::None`) replacement's `valid_card` — to the SPECIFIC spell
-/// object referenced by the currently-resolving triggered ability's own
-/// originating event (Runadi, Behemoth Caller and the Wildgrowth Archaic
-/// cousin family — issue #6492 review).
+/// CR 400.7 + CR 614.1c: bind an entry rider to its recipient spell occurrence,
+/// not to the installer's source or controller. The resolving carrier's pin
+/// supplies both the concrete selector and the installed identity; a later cast
+/// with the same storage id cannot inherit it, even after a control change.
 ///
-/// Without this, a bare type/mana-value filter would let a DIFFERENT
-/// qualifying creature — cast by the active player during the CR 117.3b
-/// priority window between this trigger resolving and the originally-cast
-/// spell resolving — consume the one-shot install first, leaving the intended
-/// entrant uncountered. `state.current_trigger_event` is exactly this
-/// ability's own trigger event (set by `push_resolving_trigger_context` for
-/// the duration of its resolution — see `game/triggers.rs`), so
-/// `extract_source_from_event` yields the specific cast spell's `ObjectId`.
-///
-/// If the event carries no extractable source, this fails CLOSED — matching
-/// no object via the `ObjectId(0)` sentinel (never a real permanent) — rather
-/// than silently widening back to the bare filter, which would reopen the
-/// exact bug this binding exists to close.
-///
-/// No-op for every other floating-replacement install (Kaya's until-EOT token
-/// doubler, Rankle and Torbran's damage-modification shields): none of them
-/// ever embed the placeholder, so the walk finds nothing to replace.
-fn bind_replacement_to_trigger_source(replacement: &mut ReplacementDefinition, state: &GameState) {
+/// CR 400.7: installation needs the original spell still live on the stack; a
+/// departed occurrence is a new object the rider can never name.
+/// Missing, departed, or mismatched authority rejects the install rather than
+/// storing a raw-id fallback or a permanently stale rider. Definitions without
+/// the placeholder retain their unchanged installation path.
+fn bind_replacement_to_trigger_source(
+    mut replacement: ReplacementDefinition,
+    state: &GameState,
+) -> Option<ReplacementDefinition> {
     let Some(valid_card) = replacement.valid_card.as_mut() else {
-        return;
+        return Some(replacement);
     };
     if !target_filter_contains_placeholder(valid_card) {
-        return;
+        return Some(replacement);
     }
-    let bound = state
-        .current_trigger_event
-        .as_ref()
-        .and_then(extract_source_from_event)
-        .unwrap_or(ObjectId(0));
-    concretize_triggering_spell_placeholder(valid_card, bound);
+    let pin = triggering_spell_identity(state)?;
+    if !matches!(triggering_spell(state), Some(TriggeringSpell::OnStack(_))) {
+        return None;
+    }
+    concretize_triggering_spell_placeholder(valid_card, pin.object_id);
+    replacement.triggering_spell = Some(pin);
+    Some(replacement)
 }
 
 fn target_filter_contains_placeholder(filter: &TargetFilter) -> bool {
@@ -435,19 +297,6 @@ fn stamp_for_as_long_as_controlled_gate(
     }
 }
 
-/// Whether `stamp_for_as_long_as_controlled_gate` can enforce a host-bound
-/// duration on this replacement's FORM: the bare untap-prevention rider (event
-/// `Untap`, no `execute`, no pre-existing condition). Shared by the stamp and
-/// by `replacement_with_ability_expiry`'s `GateControlled` fail-closed arm, so
-/// a shape the stamp skips can never be installed as if it were gated. The
-/// duration axis is deliberately NOT part of this predicate — it lives in
-/// `expiry_from_duration`, which both consumers also share.
-fn host_gate_enforceable(replacement: &ReplacementDefinition) -> bool {
-    replacement.event == ReplacementEvent::Untap
-        && replacement.execute.is_none()
-        && replacement.condition.is_none()
-}
-
 /// CR 107.3a + CR 601.2b: Freeze the announced value of X into a "deals that
 /// much damage plus X" replacement at activation time. The parser emits the
 /// bare-"plus x" form (no "where X is" binding) as
@@ -477,6 +326,249 @@ fn freeze_damage_modification_x(
     }
 }
 
+/// CR 614.1c: preserve reference leaves that read the entering permanent.
+/// Entry extraction supplies `entering`, not a layer `recipient`: only object
+/// scopes and quantities that retain the enclosing context can use that fallback.
+/// CR 608.2h: event-scoped reads must be fixed before trigger context is cleared.
+fn entry_counter_reference_is_deferred(qty: &QuantityRef) -> bool {
+    match qty {
+        // Payment facts belong to the entering spell. Preserved limitations:
+        // CostXPaid still reads source/trigger context, not ctx.entering;
+        // SharedCardTypes needs ctx.spell, which entry extraction lacks.
+        QuantityRef::CostXPaid
+        | QuantityRef::KickerCount
+        | QuantityRef::AdditionalCostPaymentCount
+        | QuantityRef::AdditionalCostPaymentCountFor { .. }
+        | QuantityRef::ConvokedCreatureCount
+        | QuantityRef::SharedCardTypes { .. } => true,
+        QuantityRef::ManaSpentToCast { scope, .. } => match scope {
+            CastManaObjectScope::SelfObject => true,
+            CastManaObjectScope::TriggeringSpell | CastManaObjectScope::AbilityTarget => false,
+        },
+        QuantityRef::Power { .. }
+        | QuantityRef::BasePower { .. }
+        | QuantityRef::Intensity { .. }
+        | QuantityRef::Toughness { .. }
+        | QuantityRef::ObjectManaValue { .. }
+        | QuantityRef::ObjectColorCount { .. }
+        | QuantityRef::ObjectNameWordCount { .. }
+        | QuantityRef::ObjectTypelineComponentCount { .. }
+        | QuantityRef::ManaSymbolsInManaCost { .. }
+        | QuantityRef::CountersOn { .. }
+        | QuantityRef::NameStickerLetterCount { .. } => match quantity_ref_recipient_read(qty) {
+            RecipientRead::Characteristics => true,
+            RecipientRead::Unread | RecipientRead::PopulationIdentity => false,
+        },
+        QuantityRef::PlayerCount { filter } => match filter {
+            // The threshold preserves ctx.entering, unlike object filter thresholds.
+            // Keep the census live when its threshold needs the entrant. The
+            // freezer still snapshots non-Recipient ObjectScope leaves within
+            // that threshold; they are independent of its candidate binding.
+            // All other threshold leaves stay live conservatively, including
+            // ScopedPlayer reads and filters with ScopedPlayer controllers.
+            // Resolution-only reads without an ObjectScope remain unsupported
+            // inside a deferred threshold.
+            PlayerFilter::PlayerAttribute { value, .. } => {
+                value.any_ref(&mut entry_counter_reference_is_deferred)
+            }
+            PlayerFilter::Controller
+            | PlayerFilter::Opponent
+            | PlayerFilter::DefendingPlayer
+            | PlayerFilter::OpponentLostLife
+            | PlayerFilter::OpponentGainedLife
+            | PlayerFilter::HasLostTheGame
+            | PlayerFilter::OpponentAttacked { .. }
+            | PlayerFilter::OpponentAttackingEnchantedPlayer
+            | PlayerFilter::All
+            | PlayerFilter::AllExcept { .. }
+            | PlayerFilter::HighestSpeed
+            | PlayerFilter::ZoneChangedThisWay
+            | PlayerFilter::PerformedActionThisWay { .. }
+            | PlayerFilter::OwnersOfCardsExiledBySource
+            | PlayerFilter::TriggeringPlayer
+            | PlayerFilter::OpponentOtherThanTriggering
+            | PlayerFilter::OpponentOfTriggeringPlayer
+            | PlayerFilter::OpponentOfTriggeringPlayerNotAttacked
+            | PlayerFilter::VotedFor { .. }
+            | PlayerFilter::ParentObjectTargetController
+            | PlayerFilter::ChosenPlayer { .. }
+            | PlayerFilter::ParentObjectTargetOwner
+            | PlayerFilter::TargetPlayer
+            | PlayerFilter::GrantingObjectCaster
+            | PlayerFilter::OpponentDealtDamage { .. }
+            | PlayerFilter::ControlsCount { .. }
+            | PlayerFilter::TrackedSetPossessor { .. }
+            | PlayerFilter::AnyOf { .. } => false,
+        },
+        // CR 611.2d + CR 608.2h: these player/population reads are fixed now.
+        // FilterContext receives only ctx.recipient (absent at install AND entry);
+        // its nested thresholds start fresh contexts without ctx.entering.
+        // Even Characteristics-graded filter/player reads do not gain an entering
+        // binding; PopulationIdentity ("other", "attached to it") is source-relative.
+        QuantityRef::HandSize { .. }
+        | QuantityRef::LifeTotal { .. }
+        | QuantityRef::GraveyardSize { .. }
+        | QuantityRef::StartingLifeTotal { .. }
+        | QuantityRef::LifeLostThisTurn { .. }
+        | QuantityRef::PartySize { .. }
+        | QuantityRef::Speed { .. }
+        | QuantityRef::LifeGainedThisTurn { .. }
+        | QuantityRef::CardsDrawnThisTurn { .. }
+        | QuantityRef::CardsDrawnLastTurn { .. }
+        | QuantityRef::LandsPlayedThisTurn { .. }
+        | QuantityRef::PlayerChosenNumber { .. }
+        | QuantityRef::LoyaltyAbilitiesActivatedThisTurn { .. }
+        | QuantityRef::CardsDiscardedThisTurn { .. }
+        | QuantityRef::TokensCreatedThisTurn { .. }
+        | QuantityRef::PlayerActionsThisTurn { .. }
+        | QuantityRef::SacrificedThisTurn { .. }
+        | QuantityRef::BattlefieldEntriesThisTurn { .. }
+        | QuantityRef::ObjectCount { .. }
+        | QuantityRef::ObjectCountDistinct { .. }
+        | QuantityRef::ObjectCountBySharedQuality { .. }
+        | QuantityRef::CountersOnObjects { .. }
+        | QuantityRef::EnteredThisTurn { .. }
+        | QuantityRef::DistinctCounterKindsAmong { .. }
+        | QuantityRef::FilteredTrackedSetSize { .. }
+        | QuantityRef::ZoneCardCount { .. }
+        | QuantityRef::AttackedThisTurn { .. }
+        | QuantityRef::CounterAddedThisTurn { .. }
+        | QuantityRef::DamageDealtThisTurn { .. }
+        | QuantityRef::PropertyAggregate(..)
+        | QuantityRef::DistinctCardTypes { .. }
+        | QuantityRef::DistinctSubtypes { .. }
+        | QuantityRef::DistinctColorsAmong { .. } => false,
+        // CR 608.2h: remaining resolution-owned source/controller/event reads
+        // are fixed now, as are non-recipient object reads classified above.
+        QuantityRef::ControlledByEachPlayer { .. }
+        | QuantityRef::ZoneChangeCountThisTurn { .. }
+        | QuantityRef::ZoneChangeAggregateThisTurn { .. }
+        | QuantityRef::SpellsCastThisTurn { .. }
+        | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
+        | QuantityRef::SpellsCastThisGame { .. }
+        | QuantityRef::TargetObjectManaValue { .. }
+        | QuantityRef::EventContextPlayerCount { .. }
+        | QuantityRef::AttachmentsOnLeavingObject { .. }
+        | QuantityRef::LifeAboveStarting
+        | QuantityRef::TriggeringDiscoverValue
+        | QuantityRef::TriggeringScryLookCount
+        | QuantityRef::TriggeringScryBottomCount
+        | QuantityRef::PlayerCounter { .. }
+        | QuantityRef::TargetControllerCounter { .. }
+        | QuantityRef::Variable { .. }
+        | QuantityRef::SelfManaValue
+        | QuantityRef::TargetZoneCardCount { .. }
+        | QuantityRef::Devotion { .. }
+        | QuantityRef::CardsExiledBySource
+        | QuantityRef::ExiledCardPower { .. }
+        | QuantityRef::BasicLandTypeCount { .. }
+        | QuantityRef::TrackedSetSize
+        | QuantityRef::ExiledFromHandThisResolution
+        | QuantityRef::PreviousEffectAmount { .. }
+        | QuantityRef::PreviousEffectCount
+        | QuantityRef::UnspentMana { .. }
+        | QuantityRef::EventContextAmount
+        | QuantityRef::EventContextSourceCostX
+        | QuantityRef::EventContextSourceModesChosen
+        | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::BendTypesThisTurn
+        | QuantityRef::TurnsTaken
+        | QuantityRef::ChosenNumber
+        | QuantityRef::NotedNumber
+        | QuantityRef::DescendedThisTurn
+        | QuantityRef::SpellsCastLastTurn
+        | QuantityRef::OpponentSpellsCastSinceLastTurn { .. }
+        | QuantityRef::DungeonsCompleted
+        | QuantityRef::TimesCostPaidThisResolution
+        | QuantityRef::ColorsInCommandersColorIdentity
+        | QuantityRef::CommanderCastFromCommandZoneCount
+        | QuantityRef::CommanderManaValue { .. }
+        | QuantityRef::VoteCount { .. } => false,
+    }
+}
+
+/// CR 611.2d + CR 608.2h: snapshot each resolution-owned reference while its
+/// ability/source/event context is available; keep entry-time leaves live.
+/// Arithmetic remains the shared quantity resolver's responsibility.
+fn freeze_entry_counter_expression(
+    expr: &mut QuantityExpr,
+    state: &GameState,
+    ability: &ResolvedAbility,
+    freeze_reference: fn(&QuantityRef) -> bool,
+) {
+    match expr {
+        QuantityExpr::Fixed { .. } => {}
+        QuantityExpr::Ref { qty } => {
+            if freeze_reference(qty) {
+                *expr = QuantityExpr::Fixed {
+                    value: resolve_quantity_with_targets(state, expr, ability),
+                };
+            } else if let QuantityRef::PlayerCount {
+                filter: PlayerFilter::PlayerAttribute { value, .. },
+            } = qty
+            {
+                // CR 608.2h + CR 614.1c: preserve entry/candidate bindings while
+                // fixing ability-bound object reads before trigger context clears.
+                freeze_entry_counter_expression(value, state, ability, |reference| {
+                    quantity_ref_object_scope(reference)
+                        .is_some_and(|scope| scope != ObjectScope::Recipient)
+                });
+            }
+        }
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::ClampMin { inner, .. }
+        | QuantityExpr::Multiply { inner, .. } => {
+            freeze_entry_counter_expression(inner, state, ability, freeze_reference);
+        }
+        QuantityExpr::Sum { exprs } | QuantityExpr::Max { exprs } => {
+            for expr in exprs {
+                freeze_entry_counter_expression(expr, state, ability, freeze_reference);
+            }
+        }
+        QuantityExpr::UpTo { max } => {
+            freeze_entry_counter_expression(max, state, ability, freeze_reference);
+        }
+        QuantityExpr::Power { exponent, .. } => {
+            freeze_entry_counter_expression(exponent, state, ability, freeze_reference);
+        }
+        QuantityExpr::Difference { left, right } => {
+            freeze_entry_counter_expression(left, state, ability, freeze_reference);
+            freeze_entry_counter_expression(right, state, ability, freeze_reference);
+        }
+    }
+}
+
+/// CR 611.2d + CR 608.2h: a resolving ability determines the variable in its
+/// continuous effect once, on resolution, rather than when the creature enters.
+/// CR 109.5 + CR 113.7a: use the resolving ability's controller and source context,
+/// including its carried source information if the source has left.
+fn freeze_entry_counter_quantities(
+    replacement: &mut ReplacementDefinition,
+    state: &GameState,
+    ability: &ResolvedAbility,
+) {
+    if replacement.event != ReplacementEvent::ChangeZone
+        || replacement.destination_zone != Some(Zone::Battlefield)
+    {
+        return;
+    }
+    let mut current = replacement.execute.as_deref_mut();
+    while let Some(execute) = current {
+        // CR 614.1c: only the event-modifier prefix changes how the object enters.
+        // Choice branches and post-entry instructions retain their own timing.
+        if !EventModifiers::is_event_modifier_effect(&execute.effect) {
+            break;
+        }
+        if let Effect::PutCounter { count, .. } = execute.effect.as_mut() {
+            freeze_entry_counter_expression(count, state, ability, |qty| {
+                !entry_counter_reference_is_deferred(qty)
+            });
+        }
+        current = execute.sub_ability.as_deref_mut();
+    }
+}
+
 fn replacement_targets(
     state: &GameState,
     ability: &ResolvedAbility,
@@ -502,13 +594,13 @@ fn replacement_targets(
         return ability.targets.clone();
     }
 
-    // CR 201.5: SelfRef resolves to the ability's source object — text that
-    // refers to the object it's on by name (or "~") means that particular
-    // object. Used by self-installing replacements (Crafty Cutpurse: "When ~
-    // enters, [until end of turn] each token that would be created under an
-    // opponent's control is created under your control instead.") so the
-    // trigger anchors the replacement on its own source without needing to
-    // consult the target pipeline.
+    // CR 201.5 + CR 400.7: SelfRef names the ability's source as the object
+    // the carried replacement affects (Unearth's "If it would leave the
+    // battlefield, exile it instead", `valid_card: SelfRef`), so it installs on
+    // the source only while `self_ref_binding` can still find it. A replacement
+    // that affects no object (Crafty Cutpurse's token controller redirect) is
+    // not hosted on its source: it uses the floating `TargetFilter::None` arm
+    // in `resolve` (CR 113.7a).
     if matches!(target, TargetFilter::SelfRef) {
         return ability
             .self_ref_binding(state)
@@ -565,15 +657,39 @@ pub fn resolve(
     // CR 614.1a: `TargetFilter::None` is the "no per-target binding" signal —
     // the carried replacement is self-contained (its own source/target filters
     // already constrain when it fires) and is pushed directly to the global
-    // pending_damage_replacements. Used by triggered creation of turn-bound
-    // damage-modification replacements (Rankle and Torbran's "If a source
-    // would deal damage to a player or battle this turn..."; I Call for
-    // Slaughter's "If a source you control would deal damage this turn,
-    // it deals that much damage plus 1 instead.").
+    // pending_damage_replacements through `install_floating_damage_replacement`,
+    // the install authority for floating replacements. Used by triggered
+    // creation of turn-bound damage-modification replacements (Rankle and
+    // Torbran's "If a source would deal damage to a player or battle this
+    // turn..."; I Call for Slaughter's "If a source you control would deal
+    // damage this turn, it deals that much damage plus 1 instead."), of
+    // turn-bound token-creation replacements (Kaya, Geist Hunter's −2; Crafty
+    // Cutpurse's "each token that would be created under an opponent's control
+    // this turn is created under your control instead", whose "your" is the
+    // `ability.controller` latched below) and of floating entry-modifier riders
+    // (Communal Brewing's "that creature enters with X additional +1/+1
+    // counters on it").
     if matches!(target, TargetFilter::None) {
-        let mut replacement = replacement_with_ability_expiry(replacement, ability)?;
-        bind_replacement_to_trigger_source(&mut replacement, state);
-        state.pending_damage_replacements.push(replacement);
+        let replacement = replacement_with_ability_expiry(replacement, ability)?;
+        let Some(mut replacement) = bind_replacement_to_trigger_source(replacement, state) else {
+            return Ok(());
+        };
+        freeze_entry_counter_quantities(&mut replacement, state, ability);
+        // CR 113.7a + CR 608.2h: a floating rider may still refer to its source
+        // ("this enchantment"); a battlefield source anchors host-relative gates
+        // and deferred quantities (via `replacement_source_host`).
+        // Resolution-owned counts, including source reads, were frozen above
+        // with the resolving ability's source/LKI context (CR 611.2d). Deferred
+        // entering-object reads stay live. A source not on the battlefield at
+        // resolution still leaves the host as the sentinel for gates and any
+        // deferred source read.
+        super::install_floating_damage_replacement(
+            state,
+            replacement,
+            ability.controller,
+            ability.source_id,
+            &[Zone::Battlefield],
+        );
         attached += 1;
     } else {
         for resolved_target in replacement_targets(state, ability, target) {
@@ -1612,14 +1728,14 @@ mod tests {
         );
     }
 
-    // Crafty Cutpurse end-to-end: a self-installed CreateToken replacement
-    // with `token_owner_scope: Opponent` and `token_owner_redirect: You`
-    // redirects opponent-created tokens to the source's controller.
+    // Crafty Cutpurse end-to-end: a floating CreateToken replacement with
+    // `token_owner_scope: Opponent` and `token_owner_redirect: You` redirects
+    // opponent-created tokens to the installing ability's controller.
     // Covers CR 111.2 (token controller redirection — "the token enters the
     // battlefield under that player's control") + CR 614.1a (replacement
     // ordering: redirect applies before the token materializes).
     #[test]
-    fn crafty_cutpurse_self_install_redirects_opponent_tokens_to_controller() {
+    fn crafty_cutpurse_floating_redirect_redirects_opponent_tokens_to_controller() {
         use crate::types::ability::ControllerRef;
         use crate::types::proposed_event::TokenSpec;
         use std::collections::HashSet;
@@ -1642,7 +1758,7 @@ mod tests {
         let install_ability = ResolvedAbility::new(
             Effect::AddTargetReplacement {
                 replacement: Box::new(repl),
-                target: TargetFilter::SelfRef,
+                target: TargetFilter::None,
             },
             Vec::new(),
             cutpurse_id,
@@ -1651,14 +1767,21 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &install_ability, &mut events).unwrap();
 
-        // Sanity: replacement landed on Cutpurse, marked EOT-expiring.
-        let installed = &state.objects[&cutpurse_id].replacement_definitions;
-        assert_eq!(installed.iter_all().count(), 1);
+        // Sanity: CR 113.7a — the replacement floats (not on Cutpurse), latched
+        // to the installing controller, marked EOT-expiring.
+        assert!(state.objects[&cutpurse_id]
+            .replacement_definitions
+            .iter_all()
+            .next()
+            .is_none());
+        let installed = &state.pending_damage_replacements;
+        assert_eq!(installed.len(), 1);
         assert_eq!(
             installed[0].token_owner_scope,
             Some(ControllerRef::Opponent)
         );
         assert_eq!(installed[0].token_owner_redirect, Some(ControllerRef::You));
+        assert_eq!(installed[0].source_controller, Some(PlayerId(0)));
         assert_eq!(installed[0].expiry, Some(RestrictionExpiry::EndOfTurn));
 
         // Opponent (PlayerId(1)) proposes creating a Treasure token under their control.
@@ -1679,6 +1802,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             tapped: false,
             enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: ObjectId(50),
             controller: PlayerId(1),
@@ -1690,6 +1814,7 @@ mod tests {
             copy: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             count: 1,
+            appended: Vec::new(),
             applied: HashSet::new(),
         };
 
@@ -1746,7 +1871,7 @@ mod tests {
         let install_ability = ResolvedAbility::new(
             Effect::AddTargetReplacement {
                 replacement: Box::new(repl),
-                target: TargetFilter::SelfRef,
+                target: TargetFilter::None,
             },
             Vec::new(),
             cutpurse_id,
@@ -1774,6 +1899,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             tapped: true,
             enters_attacking: true,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: ObjectId(70),
             controller: PlayerId(1),
@@ -1785,6 +1911,7 @@ mod tests {
             copy: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             count: 1,
+            appended: Vec::new(),
             applied: HashSet::new(),
         };
 
@@ -1832,7 +1959,7 @@ mod tests {
         let install_ability = ResolvedAbility::new(
             Effect::AddTargetReplacement {
                 replacement: Box::new(repl),
-                target: TargetFilter::SelfRef,
+                target: TargetFilter::None,
             },
             Vec::new(),
             cutpurse_id,
@@ -1840,6 +1967,11 @@ mod tests {
         );
         let mut events = Vec::new();
         resolve(&mut state, &install_ability, &mut events).unwrap();
+        assert_eq!(
+            state.pending_damage_replacements.len(),
+            1,
+            "reach guard: the floating redirect is installed"
+        );
 
         // Our own token creation — must not be intercepted.
         let token_spec = TokenSpec {
@@ -1859,6 +1991,7 @@ mod tests {
             enter_with_counters: Vec::new(),
             tapped: false,
             enters_attacking: false,
+            attack_request: crate::types::proposed_event::TokenAttackRequest::Unspecified,
             sacrifice_at: None,
             source_id: ObjectId(60),
             controller: PlayerId(0),
@@ -1870,6 +2003,7 @@ mod tests {
             copy: None,
             enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             count: 1,
+            appended: Vec::new(),
             applied: HashSet::new(),
         };
 
@@ -1881,6 +2015,279 @@ mod tests {
             owner,
             PlayerId(0),
             "our own token creation must not be redirected by our own Crafty Cutpurse"
+        );
+    }
+
+    /// Fixture for the floating entry-counter rider tests (issue #9991): a source
+    /// `S` on the battlefield controlled by P1 that is neither a Dog nor a Wolf,
+    /// P1's Dog / Dog Wolf / Wolf, P0's Wolf, and P1's creature spell `E` on the
+    /// stack. Returns `(state, S, E)`.
+    fn floating_entry_counter_fixture() -> (GameState, ObjectId, ObjectId) {
+        use crate::types::card_type::CoreType;
+
+        fn creature(
+            state: &mut GameState,
+            card: u64,
+            owner: PlayerId,
+            name: &str,
+            zone: Zone,
+            subtypes: &[&str],
+        ) -> ObjectId {
+            let id = create_object(state, CardId(card), owner, name.to_string(), zone);
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types
+                .subtypes
+                .extend(subtypes.iter().map(|s| s.to_string()));
+            id
+        }
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Rider Source".to_string(),
+            Zone::Battlefield,
+        );
+        creature(
+            &mut state,
+            2,
+            PlayerId(1),
+            "P1 Dog",
+            Zone::Battlefield,
+            &["Dog"],
+        );
+        creature(
+            &mut state,
+            3,
+            PlayerId(1),
+            "P1 Dog Wolf",
+            Zone::Battlefield,
+            &["Dog", "Wolf"],
+        );
+        creature(
+            &mut state,
+            4,
+            PlayerId(1),
+            "P1 Wolf",
+            Zone::Battlefield,
+            &["Wolf"],
+        );
+        creature(
+            &mut state,
+            5,
+            PlayerId(0),
+            "P0 Wolf",
+            Zone::Battlefield,
+            &["Wolf"],
+        );
+        let entering = creature(
+            &mut state,
+            6,
+            PlayerId(1),
+            "Entering Human",
+            Zone::Stack,
+            &["Human"],
+        );
+        (state, source, entering)
+    }
+
+    /// Resolve a floating cast-enters-with rider shaped like Torgal, A Fine
+    /// Hound's payload ("that creature enters with an additional +1/+1 counter on
+    /// it for each Dog and/or Wolf you control"; the first-Human-each-turn trigger
+    /// gate is omitted) the way a resolving trigger installs it:
+    /// `AddTargetReplacement` with `TargetFilter::None`, a `PutCounter` whose count
+    /// reads the installing controller's board, and a `valid_card` bound to the
+    /// triggering spell.
+    fn install_dog_wolf_entry_rider(state: &mut GameState, source: ObjectId, entering: ObjectId) {
+        use crate::types::ability::{
+            AbilityKind, ControllerRef, QuantityExpr, QuantityRef, TypedFilter,
+        };
+        use crate::types::counter::CounterType;
+        use crate::types::game_state::{CastingVariant, StackEntry, StackEntryKind};
+        use crate::types::identifiers::ObjectIncarnationRef;
+
+        let subtype_you = |subtype: &str| {
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .subtype(subtype.to_string())
+                    .controller(ControllerRef::You),
+            )
+        };
+        let mut replacement = ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: TargetFilter::Or {
+                                filters: vec![subtype_you("Dog"), subtype_you("Wolf")],
+                            },
+                        },
+                    },
+                    target: TargetFilter::SelfRef,
+                },
+            ))
+            .valid_card(TargetFilter::SpecificObject {
+                id: crate::types::identifiers::TRIGGERING_SPELL_PLACEHOLDER,
+            })
+            .destination_zone(Zone::Battlefield);
+        replacement.consume_on_apply = true;
+
+        // Model the live recipient and the pin carried by its resolving cast trigger.
+        state.current_trigger_event = Some(GameEvent::SpellCast {
+            card_id: CardId(6),
+            controller: PlayerId(1),
+            object_id: entering,
+            cast_mana_value: None,
+        });
+        let mut ability = ResolvedAbility::new(
+            Effect::AddTargetReplacement {
+                replacement: Box::new(replacement),
+                target: TargetFilter::None,
+            },
+            Vec::new(),
+            source,
+            PlayerId(1),
+        );
+        ability.context.triggering_spell =
+            Some(ObjectIncarnationRef::from_object(&state.objects[&entering]));
+        state.stack.push_back(StackEntry {
+            id: entering,
+            source_id: entering,
+            controller: PlayerId(1),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(6),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        });
+        let trigger_id = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        state.resolving_stack_entry = Some(StackEntry {
+            id: trigger_id,
+            source_id: source,
+            controller: PlayerId(1),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: source,
+                ability: Box::new(ability.clone()),
+                condition: None,
+                trigger_event: state.current_trigger_event.clone(),
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
+        let mut events = Vec::new();
+        resolve(state, &ability, &mut events).unwrap();
+        state.resolving_stack_entry = None;
+        // Entry replacement runs after the resolving permanent spell is popped.
+        state.stack.pop_back();
+    }
+
+    /// Drive the entering spell's stack-to-battlefield event through the
+    /// replacement pipeline and return the counters it will enter with.
+    fn entry_counters(
+        state: &mut GameState,
+        entering: ObjectId,
+    ) -> Vec<(crate::types::counter::CounterType, u32)> {
+        let mut events = Vec::new();
+        let proposed = ProposedEvent::zone_change(entering, Zone::Stack, Zone::Battlefield, None);
+        let result = replace_event(state, proposed, &mut events);
+        let ReplacementResult::Execute(ProposedEvent::ZoneChange {
+            enter_with_counters,
+            ..
+        }) = result
+        else {
+            panic!("expected the entering ZoneChange to execute, got {result:?}");
+        };
+        enter_with_counters
+    }
+
+    /// CR 611.2d: the rider fixes its count at install from the trigger controller's
+    /// board: P1's Dog, Dog Wolf (counted once), and Wolf give 3, not P0's 1.
+    /// The provenance assertions separately check the source anchor and controller
+    /// latch. Entry-time controller threading matters only for deferred leaves
+    /// that need that controller; no current corpus cast rider has such a leaf.
+    #[test]
+    fn floating_entry_counter_rider_counts_installing_controllers_board() {
+        use crate::types::counter::CounterType;
+
+        let (mut state, source, entering) = floating_entry_counter_fixture();
+        install_dog_wolf_entry_rider(&mut state, source, entering);
+
+        // Reach guard: exactly one rider, anchored to its installer.
+        assert_eq!(state.pending_damage_replacements.len(), 1);
+        let rider = &state.pending_damage_replacements[0];
+        assert_eq!(rider.source_object, Some(source));
+        assert_eq!(rider.source_controller, Some(PlayerId(1)));
+        assert!(!rider.is_consumed);
+
+        assert_eq!(
+            entry_counters(&mut state, entering),
+            vec![(CounterType::Plus1Plus1, 3)],
+            "'you' is the installing controller (P1: Dog, Dog Wolf, Wolf), not PlayerId(0)"
+        );
+        assert!(
+            state.pending_damage_replacements[0].is_consumed,
+            "the one-shot rider must be consumed once it applies"
+        );
+    }
+
+    /// CR 611.2d: a source control change after install cannot change the count
+    /// already fixed from the trigger controller's board (P1's 3, not P0's 1).
+    /// This guards install-time freezing, not the entry-time controller latch;
+    /// only deferred leaves can exercise that latch, and no current corpus cast
+    /// rider has a controller-dependent deferred leaf.
+    #[test]
+    fn floating_entry_counter_rider_you_is_latched_when_source_changes_control() {
+        use crate::types::counter::CounterType;
+
+        let (mut state, source, entering) = floating_entry_counter_fixture();
+        install_dog_wolf_entry_rider(&mut state, source, entering);
+        assert_eq!(
+            state.pending_damage_replacements[0].source_object,
+            Some(source),
+            "reach guard: the rider is anchored, so the source is the live object below"
+        );
+        state.objects.get_mut(&source).unwrap().controller = PlayerId(0);
+
+        assert_eq!(
+            entry_counters(&mut state, entering),
+            vec![(CounterType::Plus1Plus1, 3)]
+        );
+    }
+
+    /// CR 611.2d: source departure after install cannot change the count already
+    /// fixed from the trigger controller's board. P0 owns the source, but the
+    /// trigger controller P1 supplied the frozen count of 3, not P0's 1.
+    /// This does not discriminate entry-time controller threading, which matters
+    /// only for deferred leaves; no current corpus cast rider has a deferred
+    /// leaf that needs that controller.
+    #[test]
+    fn floating_entry_counter_rider_survives_source_leaving_battlefield() {
+        use crate::types::counter::CounterType;
+
+        let (mut state, source, entering) = floating_entry_counter_fixture();
+        state.objects.get_mut(&source).unwrap().owner = PlayerId(0);
+        install_dog_wolf_entry_rider(&mut state, source, entering);
+        assert_eq!(
+            state.pending_damage_replacements[0].source_object,
+            Some(source),
+            "reach guard: the rider was anchored before its source left"
+        );
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, source, Zone::Graveyard, &mut events);
+        assert_eq!(state.objects.get(&source).unwrap().zone, Zone::Graveyard);
+
+        assert_eq!(
+            entry_counters(&mut state, entering),
+            vec![(CounterType::Plus1Plus1, 3)]
         );
     }
 }

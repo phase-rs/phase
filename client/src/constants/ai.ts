@@ -23,3 +23,7 @@ export type SelectableAiDifficulty = (typeof AI_DIFFICULTIES)[number]["id"];
 export type AIDifficulty = SelectableAiDifficulty | "CEDH";
 
 export const DEFAULT_AI_DIFFICULTY: AIDifficulty = "Medium";
+
+export function isAiDifficulty(value: string): value is AIDifficulty {
+  return value === "CEDH" || AI_DIFFICULTIES.some(({ id }) => id === value);
+}

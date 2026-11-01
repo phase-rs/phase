@@ -41,7 +41,7 @@ use crate::validation::{validate_required_label, validate_token, MAX_TOKEN_LEN};
 /// different value is refused outright rather than partially interpreted:
 /// the directory accepts writes from unauthenticated third-party servers, so a
 /// shape it does not recognise must never be stored on a best-effort reading.
-pub const DIRECTORY_VERSION: u32 = 1;
+pub const DIRECTORY_VERSION: u32 = crate::protocol_versions::DIRECTORY_VERSION;
 
 /// The single HTTP path every phase server kind answers with its
 /// [`ServerInfoDocument`]. Routers register this constant, never a literal, so

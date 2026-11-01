@@ -7,9 +7,8 @@ import { describe, expect, it } from "vitest";
  * `resources.test.ts` and `localeParity.test.ts` both read the catalog files
  * off disk — the latter builds its own `createInstance()` — so neither observes
  * whether `test-setup.ts` actually registered a namespace. `react-i18next.d.ts`
- * cannot cover the gap either: i18next v26 declares `CustomTypeOptions` in
- * module "i18next" while this repo augments module "react-i18next", so that
- * oracle is inert and `tsc` proves nothing about key resolution. Measured:
+ * cannot cover the gap either: it types keys at compile time and cannot see
+ * which namespaces are registered at runtime. Measured:
  * deregistering an already-shipped namespace from `test-setup.ts` leaves all
  * three of those green, and the failure it lets through is silent — an
  * unregistered lookup renders its bare key path with the `ns:` prefix stripped,
@@ -24,6 +23,7 @@ describe("test-harness i18n registration", () => {
   it("resolves_the_tournament_namespace_through_the_test_harness_instance", () => {
     // Reach-guard: prove the negative below is not vacuous. A namespace that is
     // registered nowhere resolves to its bare key path, `ns:` prefix stripped.
+    // @ts-expect-error unknown namespace: deliberately outside the typed key set
     expect(i18n.t("definitelyNotARealNamespace:someKey")).toBe("someKey");
 
     // The claim: `tournament` IS registered, so this is NOT the bare key path.

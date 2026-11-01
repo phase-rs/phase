@@ -15,8 +15,12 @@ pub enum LlmProvider {
     Anthropic,
     Gemini,
     DeepSeek,
+    /// OpenRouter's unified gateway. Speaks the OpenAI chat-completions
+    /// contract at a fixed root, with vendor-prefixed model ids
+    /// (`openai/gpt-5`, `anthropic/claude-sonnet-4.5`, ...).
+    OpenRouter,
     /// Any third-party endpoint implementing OpenAI's `/chat/completions`
-    /// contract (Ollama, LM Studio, vLLM, OpenRouter, Together, Groq, ...).
+    /// contract (Ollama, LM Studio, vLLM, Together, Groq, ...).
     OpenAiCompatible,
     /// TypeSafe's Jev, a System One model that answers typed questions rather
     /// than generating text. Reached through a phase-server relay
@@ -30,7 +34,7 @@ pub enum LlmProvider {
 /// so an OpenAI-compatible vendor needs no parser of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WireProtocol {
-    /// `POST {base}/chat/completions` — OpenAI, DeepSeek, and every
+    /// `POST {base}/chat/completions` — OpenAI, DeepSeek, OpenRouter, and every
     /// OpenAI-compatible endpoint.
     OpenAiChat,
     /// `POST {base}/messages` — Anthropic.
@@ -52,6 +56,7 @@ pub const ACCEPTED_PROVIDER_LABELS: &[&str] = &[
     "Anthropic",
     "Gemini",
     "DeepSeek",
+    "OpenRouter",
     "OpenAiCompatible",
     "Jev",
 ];
@@ -76,6 +81,7 @@ impl LlmProvider {
             "anthropic" | "claude" => LlmProvider::Anthropic,
             "gemini" | "google" | "googleai" => LlmProvider::Gemini,
             "deepseek" => LlmProvider::DeepSeek,
+            "openrouter" => LlmProvider::OpenRouter,
             "jev" | "typesafe" | "systemone" => LlmProvider::Jev,
             _ => LlmProvider::OpenAiCompatible,
         }
@@ -88,6 +94,7 @@ impl LlmProvider {
             LlmProvider::Anthropic => "Anthropic",
             LlmProvider::Gemini => "Gemini",
             LlmProvider::DeepSeek => "DeepSeek",
+            LlmProvider::OpenRouter => "OpenRouter",
             LlmProvider::OpenAiCompatible => "OpenAiCompatible",
             LlmProvider::Jev => "Jev",
         }
@@ -100,6 +107,7 @@ impl LlmProvider {
             LlmProvider::Anthropic => "Anthropic (Claude)",
             LlmProvider::Gemini => "Google Gemini",
             LlmProvider::DeepSeek => "DeepSeek",
+            LlmProvider::OpenRouter => "OpenRouter",
             LlmProvider::OpenAiCompatible => "OpenAI-compatible endpoint",
             LlmProvider::Jev => "Jev (TypeSafe)",
         }
@@ -107,9 +115,10 @@ impl LlmProvider {
 
     pub const fn wire(self) -> WireProtocol {
         match self {
-            LlmProvider::OpenAi | LlmProvider::DeepSeek | LlmProvider::OpenAiCompatible => {
-                WireProtocol::OpenAiChat
-            }
+            LlmProvider::OpenAi
+            | LlmProvider::DeepSeek
+            | LlmProvider::OpenRouter
+            | LlmProvider::OpenAiCompatible => WireProtocol::OpenAiChat,
             LlmProvider::Anthropic => WireProtocol::AnthropicMessages,
             LlmProvider::Gemini => WireProtocol::GeminiGenerateContent,
             LlmProvider::Jev => WireProtocol::SystemOneRelay,
@@ -124,6 +133,7 @@ impl LlmProvider {
             LlmProvider::Anthropic => Some("https://api.anthropic.com/v1"),
             LlmProvider::Gemini => Some("https://generativelanguage.googleapis.com/v1beta"),
             LlmProvider::DeepSeek => Some("https://api.deepseek.com/v1"),
+            LlmProvider::OpenRouter => Some("https://openrouter.ai/api/v1"),
             // The relay is a phase-server, which the display layer knows (the
             // multiplayer server the player is connected to), not a vendor.
             LlmProvider::OpenAiCompatible | LlmProvider::Jev => None,
@@ -423,6 +433,19 @@ mod tests {
     }
 
     #[test]
+    fn openrouter_resolves_to_its_own_provider_and_default_root() {
+        for label in ["OpenRouter", "openrouter", "open_router", "Open-Router"] {
+            assert_eq!(LlmProvider::from_label(label), LlmProvider::OpenRouter);
+        }
+        assert_eq!(LlmProvider::OpenRouter.wire(), WireProtocol::OpenAiChat);
+        assert_eq!(
+            LlmProvider::OpenRouter.default_base_url(),
+            Some("https://openrouter.ai/api/v1")
+        );
+        assert!(LlmProvider::OpenRouter.requires_api_key());
+    }
+
+    #[test]
     fn every_variant_appears_in_the_accepted_labels() {
         // Wildcard-free so a new variant fails to compile here rather than
         // silently escaping the accepted-label list.
@@ -431,6 +454,7 @@ mod tests {
             LlmProvider::Anthropic,
             LlmProvider::Gemini,
             LlmProvider::DeepSeek,
+            LlmProvider::OpenRouter,
             LlmProvider::OpenAiCompatible,
             LlmProvider::Jev,
         ] {
@@ -439,6 +463,7 @@ mod tests {
                 LlmProvider::Anthropic => "Anthropic",
                 LlmProvider::Gemini => "Gemini",
                 LlmProvider::DeepSeek => "DeepSeek",
+                LlmProvider::OpenRouter => "OpenRouter",
                 LlmProvider::OpenAiCompatible => "OpenAiCompatible",
                 LlmProvider::Jev => "Jev",
             };

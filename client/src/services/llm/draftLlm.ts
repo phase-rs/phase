@@ -13,7 +13,6 @@
 import { withDraftEngineOperation } from "../../adapter/draft-adapter";
 import type { LlmDraftResponsePayload } from "../../adapter/draft-adapter";
 import { ensureSetCatalog } from "../setCatalog";
-import { debugLog } from "../../game/debugLog";
 import { reportLlmFailure } from "./diagnostics";
 import { executeLlmRequest } from "./llmClient";
 import { resolvedEndpointOf } from "./endpoint";
@@ -32,23 +31,6 @@ import { type LlmDraftOutcome, type LlmDraftPickRequest, type LlmProfile } from 
  * consequence beyond that one card.
  */
 export const LLM_DRAFT_TIMEOUT_MS = 20_000;
-
-/**
- * Consecutive failed pick rounds a profile may take before the draft stops
- * calling it for the rest of the session.
- *
- * Mirrors the game-side per-seat breaker in `aiController`. Without one, a
- * provider that is down, rate-limited or simply hanging costs the full request
- * timeout on EVERY pick, turning one misconfiguration into a draft where each
- * click stalls for 20 seconds. The draft keeps going throughout — it just uses
- * the engine bots, which is what it was already falling back to.
- */
-const MAX_CONSECUTIVE_DRAFT_FAILURES = 3;
-
-/** Consecutive failed rounds per profile id; cleared by the first success. */
-const draftFailures = new Map<string, number>();
-/** Profiles given up on for this session. */
-const draftDisabled = new Set<string>();
 
 /**
  * The in-flight pick round, so a superseded one can be cut loose.
@@ -70,34 +52,6 @@ let activeRun: AbortController | null = null;
 export function cancelLlmDraftRun(): void {
   activeRun?.abort();
   activeRun = null;
-}
-
-/** Reset the session breaker. Exposed for tests and session teardown. */
-export function resetLlmDraftBreaker(): void {
-  draftFailures.clear();
-  draftDisabled.clear();
-}
-
-/** Whether this profile has been given up on for the session. */
-export function isLlmDraftDisabled(profileId: string): boolean {
-  return draftDisabled.has(profileId);
-}
-
-function recordRound(profileId: string, succeeded: boolean): void {
-  if (succeeded) {
-    draftFailures.delete(profileId);
-    return;
-  }
-  const failures = (draftFailures.get(profileId) ?? 0) + 1;
-  draftFailures.set(profileId, failures);
-  if (failures >= MAX_CONSECUTIVE_DRAFT_FAILURES) {
-    draftDisabled.add(profileId);
-    debugLog(
-      `LLM drafter failed ${failures} pick rounds in a row; the engine bots will `
-        + "draft for the rest of this session",
-      "warn",
-    );
-  }
 }
 
 /** Set code -> printed name, so the format brief reads "Triple Mirrodin". */
@@ -221,10 +175,6 @@ export async function collectLlmDraftResponses(
   stillCurrent: () => boolean,
   observer: LlmDraftRoundObserver = {},
 ): Promise<LlmDraftResponsePayload[]> {
-  // A profile the session has given up on skips the round entirely, so a dead
-  // provider costs no further latency.
-  if (draftDisabled.has(profile.id)) return [];
-
   // Supersede any round still running for an earlier pick: its replies are for
   // a pack that has moved on, and the engine would refuse them anyway.
   cancelLlmDraftRun();
@@ -245,11 +195,9 @@ export async function collectLlmDraftResponses(
     );
   } catch (error) {
     // A run the draft lifecycle cancelled (abandon, new draft, resume) will
-    // reject here too, and that is not the provider's fault. Charging it would
-    // let abandoning three drafts disable a healthy profile.
+    // reject here too, and that is not the provider's fault.
     if (run.signal.aborted || !stillCurrent()) return [];
     reportLlmFailure("LLM drafters unavailable; using the engine bots", error);
-    recordRound(profile.id, false);
     return [];
   }
   if (requests.length === 0) {
@@ -299,41 +247,15 @@ export async function collectLlmDraftResponses(
   cancelRun(run);
 
   // A pick superseded mid-flight contributes nothing, even if replies arrived:
-  // they describe a pack this seat no longer holds. It is also not the
-  // provider's fault, so it is recorded neither way -- charging a cancelled
-  // round to the breaker would disable a healthy profile for clicking fast.
+  // they describe a pack this seat no longer holds.
   if (!stillCurrent() || run.signal.aborted) return [];
 
-  if (responses.length === 0) {
-    // Every call failed at the transport. That is a real failure and the only
-    // one this function can judge on its own -- but only once the run is known
-    // to still be live, checked immediately above.
-    recordRound(profile.id, false);
-    return [];
-  }
-
-  // Bytes came back, which says nothing about whether they were USABLE: the
-  // transport returns HTTP error bodies so a vendor's diagnostic survives, so a
-  // round of 401s would otherwise look like a success and reset the breaker.
-  // The verdict belongs to the engine and arrives at submit time, via
-  // `recordLlmDraftSubmission`.
+  // Bytes coming back says nothing about whether they were USABLE (the transport
+  // returns HTTP error bodies so a vendor's diagnostic survives); the verdict
+  // belongs to the engine and arrives at submit time. A failed or refused seat
+  // is drafted by the engine bot for that pick only -- the next pick asks the
+  // provider again, so a configured LLM drafts every pick it can.
   return responses;
-}
-
-/**
- * Record a round's outcome from the ENGINE's verdict on each seat's reply.
- *
- * Called by the draft store once `submitPickWithLlmBotPicks` has ruled. A round
- * counts as a success only when the engine actually used at least one seat's
- * pick; a round where every reply was refused -- an error body, an undecodable
- * completion, a pack that moved on -- counts against the profile, which is what
- * lets the breaker trip on a provider that is answering but useless.
- */
-export function recordLlmDraftSubmission(profileId: string, outcomes: LlmDraftOutcome[]): void {
-  recordRound(
-    profileId,
-    outcomes.some((outcome) => outcome.used),
-  );
 }
 
 /** Clear `activeRun` only if it still refers to this round. */

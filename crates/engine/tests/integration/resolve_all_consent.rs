@@ -21,8 +21,8 @@ use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::visibility::filter_state_for_viewer;
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    ChoiceType, ControllerRef, CopyRetargetPermission, Effect, ResolvedAbility, TargetFilter,
-    TargetRef, TargetSelectionMode, TypedFilter,
+    ChoiceType, ControllerRef, CopyRetargetPermission, Effect, QuantityExpr, ResolvedAbility,
+    TargetFilter, TargetRef, TargetSelectionMode, TypedFilter,
 };
 use engine::types::actions::{GameAction, ResolveAllConsentDecision, ResolveAllScope};
 use engine::types::card_type::CoreType;
@@ -171,6 +171,69 @@ fn browser_partial_priority_equip_state() -> (GameState, ObjectId, ObjectId) {
         },
     });
     (state, equipment, creature)
+}
+
+/// A Resolve All batch whose first item resolves an unrepresentable life change
+/// rejects the public batch and restores the game exactly as the caller found it:
+/// the stack entry, the consent session, and the life total are all unchanged.
+#[test]
+fn resolve_all_rejects_unrepresentable_life_and_restores_the_batch_entry() {
+    let mut state = GameState::new_two_player(0x0A11_E0A2);
+    state.active_player = P0;
+    state.priority_player = P0;
+    state.waiting_for = WaitingFor::Priority { player: P0 };
+    state.players[P0.0 as usize].life = i32::MAX - 1;
+    state.stack = vec![ability_entry(
+        101,
+        P0,
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 2 },
+            player: TargetFilter::Controller,
+        },
+        vec![],
+    )]
+    .into();
+
+    apply(
+        &mut state,
+        P0,
+        GameAction::BeginResolveAll {
+            max_resolutions: 10,
+            scope: ResolveAllScope::Shared,
+        },
+    )
+    .expect("P0 begins Resolve All");
+    let epoch = match state.waiting_for {
+        WaitingFor::ResolveAllConsent { epoch, .. } => epoch,
+        ref waiting_for => panic!("expected queued consent, got {waiting_for:?}"),
+    };
+    let life_before = state.players[P0.0 as usize].life;
+    let stack_before = state.stack.clone();
+    let session_before = state.stack_resolution_session.clone();
+    let waiting_before = state.waiting_for.clone();
+
+    // The final grant is the public action that materializes the run, so the
+    // unrepresentable gain rejects the grant itself and restores its snapshot.
+    let error = apply(
+        &mut state,
+        P1,
+        GameAction::RespondResolveAllConsent {
+            epoch,
+            decision: ResolveAllConsentDecision::Grant,
+        },
+    )
+    .expect_err("the unrepresentable gain must reject the public grant");
+    assert!(
+        matches!(
+            error,
+            engine::game::engine::EngineError::LifeChangeUnrepresentable { player } if player == P0
+        ),
+        "expected the typed unrepresentable-life rejection, got {error:?}"
+    );
+    assert_eq!(state.players[P0.0 as usize].life, life_before);
+    assert_eq!(state.stack, stack_before, "the batch entry is restored");
+    assert_eq!(state.stack_resolution_session, session_before);
+    assert_eq!(state.waiting_for, waiting_before);
 }
 
 #[test]
@@ -744,6 +807,7 @@ fn final_grant_prompt_restores_the_preconsent_overlay_before_waiting_for_choice(
         1,
         P0,
         Effect::Choose {
+            chooser: engine::types::ability::ControllerRef::You,
             choice_type: ChoiceType::BasicLandType,
             persist: false,
             selection: TargetSelectionMode::Chosen,
@@ -1178,7 +1242,8 @@ fn serialized_legacy_pending_grant_removes_its_mode_before_entering_ready() {
         restored.waiting_for,
         WaitingFor::ResolveAllReady { .. }
     ));
-    let result = resolve_all_ready_prefix(&mut restored, P0);
+    let result = resolve_all_ready_prefix(&mut restored, P0)
+        .expect("the fixture's Resolve All prefix is representable");
     assert_eq!(result.items_resolved, 1);
     assert!(restored.stack.is_empty());
 }
@@ -1608,7 +1673,8 @@ fn ready_consent_collapses_the_safe_prefix_before_a_stack_growing_resolution() {
     .expect("second representative grants");
 
     let result =
-        resolve_all_ready_prefix_with(&mut state, P0, ResolveAllContinuation::StopAtPriority);
+        resolve_all_ready_prefix_with(&mut state, P0, ResolveAllContinuation::StopAtPriority)
+            .expect("the fixture's Resolve All prefix is representable");
 
     assert_eq!(
         result.items_resolved,
@@ -1761,7 +1827,8 @@ fn explicit_restore_resume_drives_a_coherent_session_through_the_ordinary_runner
         RestoredStackAutomation::ActiveSession
     );
 
-    let resumed = resume_restored_stack_automation(&mut state);
+    let resumed = resume_restored_stack_automation(&mut state)
+        .expect("the fixture's restore resume is representable");
     assert_eq!(
         resumed.presentation.outcome,
         RestoredStackAutomationOutcome::Progressed,
@@ -1820,7 +1887,8 @@ fn restored_rechecking_session_waits_for_a_fresh_ai_contract() {
     );
     let before_stack = state.stack.clone();
 
-    let resumed = resume_restored_stack_automation(&mut state);
+    let resumed = resume_restored_stack_automation(&mut state)
+        .expect("the fixture's restore resume is representable");
 
     assert_eq!(
         resumed.presentation.outcome,
@@ -1897,7 +1965,8 @@ fn explicit_restore_resume_publishes_revealed_cards_through_the_boundary_journal
         };
     }
 
-    let resumed = resume_restored_stack_automation(&mut state);
+    let resumed = resume_restored_stack_automation(&mut state)
+        .expect("the fixture's restore resume is representable");
     assert_eq!(
         resumed.presentation.outcome,
         RestoredStackAutomationOutcome::Progressed,
@@ -1928,7 +1997,8 @@ fn stale_restored_session_repairs_without_resolving_and_restores_its_baseline() 
         .expect("fixture has a top stack entry")
         .source_id = ObjectId(99);
 
-    let resumed = resume_restored_stack_automation(&mut state);
+    let resumed = resume_restored_stack_automation(&mut state)
+        .expect("the fixture's restore resume is representable");
     assert_eq!(
         resumed.presentation.outcome,
         RestoredStackAutomationOutcome::ZeroResolutionRepair,
@@ -1975,7 +2045,8 @@ fn restored_session_rejects_a_cached_nonrepresentative_without_resolving() {
         classify_restored_stack_automation(&state),
         RestoredStackAutomation::Repair
     );
-    let resumed = resume_restored_stack_automation(&mut state);
+    let resumed = resume_restored_stack_automation(&mut state)
+        .expect("the fixture's restore resume is representable");
 
     assert_eq!(
         resumed.presentation.outcome,
@@ -2003,7 +2074,8 @@ fn stale_restored_session_cursor_or_overlay_repairs_without_resolving() {
         .as_mut()
         .expect("fixture has a session")
         .cursor = entries_len;
-    let cursor_resumed = resume_restored_stack_automation(&mut stale_cursor);
+    let cursor_resumed = resume_restored_stack_automation(&mut stale_cursor)
+        .expect("the fixture's restore resume is representable");
     assert_eq!(
         cursor_resumed.presentation.outcome,
         RestoredStackAutomationOutcome::ZeroResolutionRepair,
@@ -2014,7 +2086,8 @@ fn stale_restored_session_cursor_or_overlay_repairs_without_resolving() {
 
     let mut bad_overlay = restored_session_state(0);
     bad_overlay.auto_pass.remove(&P1);
-    let overlay_resumed = resume_restored_stack_automation(&mut bad_overlay);
+    let overlay_resumed = resume_restored_stack_automation(&mut bad_overlay)
+        .expect("the fixture's restore resume is representable");
     assert_eq!(
         overlay_resumed.presentation.outcome,
         RestoredStackAutomationOutcome::ZeroResolutionRepair,
@@ -2098,7 +2171,8 @@ fn a_ready_latch_with_no_run_repairs_to_priority_without_resolving() {
         "no seat can prove ownership of a run-less latch, so none may be refused"
     );
 
-    let result = resolve_all_ready_prefix(&mut state, P0);
+    let result = resolve_all_ready_prefix(&mut state, P0)
+        .expect("the fixture's Resolve All prefix is representable");
 
     assert_eq!(result.items_resolved, 0, "a repair resolves nothing");
     assert_eq!(state.stack.len(), 1, "the stack entry survives the repair");
@@ -2204,7 +2278,8 @@ fn a_consent_prompt_with_no_run_repairs_to_priority_without_resolving() {
         "an unanswerable saved authorization is a repair, like a run-less Ready latch"
     );
 
-    let resumed = resume_restored_stack_automation(&mut state);
+    let resumed = resume_restored_stack_automation(&mut state)
+        .expect("the fixture's restore resume is representable");
 
     assert_eq!(
         resumed.presentation.outcome,
@@ -2254,7 +2329,8 @@ fn recovery_discharges_an_intact_latch() {
         RestoredStackAutomation::LegacyResolveAllReady,
         "generic decode recognizes but does not consume the legacy authorization"
     );
-    let resumed = resume_restored_stack_automation(&mut state);
+    let resumed = resume_restored_stack_automation(&mut state)
+        .expect("the fixture's restore resume is representable");
     assert_eq!(
         resumed.presentation.outcome,
         RestoredStackAutomationOutcome::Progressed,
@@ -2307,7 +2383,8 @@ fn recovery_of_an_incoherent_latch_re_derives_the_ready_era_slots() {
         "non-vacuity: the fixture must actually carry Ready-era slots"
     );
 
-    let resumed = resume_restored_stack_automation(&mut state);
+    let resumed = resume_restored_stack_automation(&mut state)
+        .expect("the fixture's restore resume is representable");
     assert_eq!(
         resumed.presentation.outcome,
         RestoredStackAutomationOutcome::ZeroResolutionRepair,
@@ -2410,7 +2487,8 @@ fn proof_stopping_ready_state() -> GameState {
 fn the_restore_continuation_installs_no_auto_pass_where_the_live_one_does() {
     let mut live = proof_stopping_ready_state();
     let live_batch =
-        resolve_all_ready_prefix_with(&mut live, P0, ResolveAllContinuation::AutoPassRemainder);
+        resolve_all_ready_prefix_with(&mut live, P0, ResolveAllContinuation::AutoPassRemainder)
+            .expect("the fixture's Resolve All prefix is representable");
     assert!(
         live.auto_pass.is_empty(),
         "the live continuation consumes its temporary fallback when CopySpell grows the stack"
@@ -2418,7 +2496,8 @@ fn the_restore_continuation_installs_no_auto_pass_where_the_live_one_does() {
 
     let mut restored = proof_stopping_ready_state();
     let restored_batch =
-        resolve_all_ready_prefix_with(&mut restored, P0, ResolveAllContinuation::StopAtPriority);
+        resolve_all_ready_prefix_with(&mut restored, P0, ResolveAllContinuation::StopAtPriority)
+            .expect("the fixture's Resolve All prefix is representable");
 
     assert!(
         restored.auto_pass.is_empty(),

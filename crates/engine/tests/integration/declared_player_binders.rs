@@ -480,6 +480,7 @@ fn curse_token(attach_to: TargetFilter) -> Effect {
         owner: TargetFilter::Controller,
         attach_to: Some(attach_to),
         enters_attacking: false,
+        attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
         supertypes: vec![],
         // CR 111.3 + CR 702.5a: "The token has enchant player", as the export
         // carries it — without an enchant restriction the Aura cannot legally
@@ -518,6 +519,7 @@ fn soldier_token(owner: TargetFilter) -> Effect {
         owner,
         attach_to: None,
         enters_attacking: false,
+        attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],

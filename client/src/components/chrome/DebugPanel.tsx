@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { PersistedGameState } from "../../adapter/types";
-import { persistedGameStateView, supportsServerRewind } from "../../adapter/types";
+import { persistedGameStateView, supportsTurnRewind } from "../../adapter/types";
 import { audioManager } from "../../audio/AudioManager";
 import { restoreGameState } from "../../game/dispatch";
 import { usePlayerId } from "../../hooks/usePlayerId";
@@ -76,7 +76,7 @@ export function DebugPanel({
     && adapter?.exportPersistenceState !== undefined;
   // The transport, not the mode, decides whether a rollback request can be
   // bound to an authenticated session — same idiom as `supportsMatchConcede`.
-  const rewindAdapter = supportsServerRewind(adapter) ? adapter : null;
+  const rewindAdapter = supportsTurnRewind(adapter) ? adapter : null;
   const localPlayerId = usePlayerId();
   const [importText, setImportText] = useState("");
   const [status, setStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
@@ -198,7 +198,7 @@ export function DebugPanel({
         if (err instanceof DOMException && err.name === "AbortError") return;
         console.error("Game state export failed:", err);
         const detail = err instanceof Error ? err.message : String(err);
-        setStatus({ type: "error", message: `${t("help.status.exportFailed")} ${detail}` });
+        setStatus({ type: "error", message: t("help.status.exportFailedDetail", { detail }) });
       });
   }, [adapter, gameState, t]);
 
@@ -329,7 +329,7 @@ export function DebugPanel({
     <div className="fixed right-0 top-0 z-[9999] flex h-full w-80 flex-col border-l border-gray-700 bg-gray-900/95 text-sm text-gray-300 shadow-xl backdrop-blur-sm">
       <div className="flex items-center justify-between border-b border-gray-700 px-3 py-2">
         <span className="font-mono text-xs font-bold uppercase tracking-wider text-gray-400">
-          Debug Panel
+          {t("game:sandboxTools.panelTitle")}
         </span>
         <button
           onClick={() => useUiStore.getState().toggleDebugPanel()}
@@ -351,7 +351,7 @@ export function DebugPanel({
                 : "text-gray-500 hover:text-gray-300")
             }
           >
-            {tab}
+            {t(`game:sandboxTools.${tab}`)}
           </button>
         ))}
       </div>

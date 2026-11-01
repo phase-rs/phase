@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "GameEvent gains the Attached { attachment_id, target } variant carried in state_update events when an Aura or Equipment becomes attached, StaticMode::CantBeTargeted becomes CantBeTargeted { who: ProhibitionScope }, and ProhibitionScope gains EnchantedCreatureController. Older full-game and P2P readers cannot decode these tags inside events and GameState static definitions."
+}

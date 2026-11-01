@@ -42,7 +42,7 @@ vi.mock("../../../services/engineRuntime", async () => ({
 
 vi.mock("../../../services/aiDeckCatalog", async () => ({
   ...(await vi.importActual<typeof import("../../../services/aiDeckCatalog")>("../../../services/aiDeckCatalog")),
-  useAiDeckCatalog: () => ({ candidates: [], loading: false, error: null }),
+  useAiDeckCatalog: () => ({ candidates: [], allCandidates: [], loading: false, error: null }),
 }));
 
 const compat = vi.hoisted(() => ({ evaluateDeckCompatibility: vi.fn() }));

@@ -217,6 +217,7 @@ fn thespians_stage_copies_dark_depths_then_state_trigger_creates_marit_lage() {
         .act(GameAction::ActivateAbility {
             source_id: stage,
             ability_index: activate_index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating Thespian's Stage's BecomeCopy must succeed");
 

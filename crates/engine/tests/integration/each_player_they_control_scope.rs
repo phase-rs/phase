@@ -23,9 +23,11 @@ use engine::parser::oracle_effect::parse_effect_chain;
 use engine::types::ability::{
     AbilityKind, ControllerRef, Effect, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter,
 };
+use engine::types::format::FormatConfig;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
 
 const ACIDIC_SOIL: &str =
     "Acidic Soil deals damage to each player equal to the number of lands they control.";
@@ -244,5 +246,44 @@ fn biorhythm_sets_each_player_life_to_their_own_creature_count() {
         runner.life(P1),
         1,
         "P1 life set to its own creature count (1)"
+    );
+}
+
+/// CR 904.13b + CR 810.9d + CR 119.5, runtime: Repay in Kind's parsed
+/// cross-player extremum resolves in Archenemy Commander with the archenemy
+/// in seat 1. The Min over team totals is the archenemy's 10, not the
+/// heroes' shared 60, so every side is set to 10. Reverting the seat-1
+/// dedup-key fix collapses the archenemy into the heroes' key and reads 60:
+/// the archenemy would rise to 60 and fail below.
+#[test]
+fn repay_in_kind_seat_one_archenemy_sets_all_sides_to_ten() {
+    let mut config = FormatConfig::archenemy_commander();
+    config.archenemy_player = Some(PlayerId(1));
+    let mut scenario = GameScenario::new_with_format(config, 4, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario.add_creature(P0, "Caster Bear", 1, 1).id();
+    let mut runner = scenario.build();
+
+    // Archenemy at 10; heroes splitting a shared 60.
+    runner.state_mut().players[1].life = 10;
+    runner.state_mut().players[0].life = 20;
+    runner.state_mut().players[2].life = 20;
+    runner.state_mut().players[3].life = 20;
+
+    let def = parse_effect_chain(REPAY_IN_KIND, AbilityKind::Spell);
+    let effect = (*def.effect).clone();
+    let ability = ResolvedAbility::new(effect, vec![], source, P0);
+    let mut events = Vec::new();
+    resolve_set_life_total(runner.state_mut(), &ability, &mut events).unwrap();
+
+    let state = runner.state();
+    assert_eq!(
+        state.players[1].life, 10,
+        "seat-1 archenemy stays at the minimum 10 (a collapsed key reads 60)"
+    );
+    let heroes_shared: i32 = [0, 2, 3].iter().map(|&i| state.players[i].life).sum();
+    assert_eq!(
+        heroes_shared, 10,
+        "the heroes' shared total is set to the minimum 10"
     );
 }

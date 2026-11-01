@@ -7,7 +7,7 @@ import {
   type RefObject,
 } from "react";
 import { Trans, useTranslation } from "react-i18next";
-import type { TFunction } from "i18next";
+import type { ParseKeys, TFunction } from "i18next";
 
 import { audioManager } from "../../audio/AudioManager.ts";
 import { cacheThemeManifest, clearThemeCache } from "../../audio/audioCache.ts";
@@ -19,6 +19,7 @@ import {
   CARD_PREVIEW_HOVER_DELAY_STEP,
   usePreferencesStore,
 } from "../../stores/preferencesStore.ts";
+import { ESCALATE_AFTER_MS } from "../../game/priorityAttention.ts";
 import { useMultiplayerStore } from "../../stores/multiplayerStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import {
@@ -123,8 +124,8 @@ export type SettingsTabId = (typeof SETTINGS_TABS)[number]["id"];
  *  for the frontend-authored group/option labels; battlefield and plain
  *  background labels come from engine/asset modules and stay raw. */
 type BoardBackgroundGroup = {
-  labelKey: string;
-  options: { value: string; labelKey?: string; label?: string }[];
+  labelKey: ParseKeys<"settings">;
+  options: { value: string; labelKey?: ParseKeys<"settings">; label?: string }[];
 };
 const BOARD_BACKGROUND_GROUPS: BoardBackgroundGroup[] = [
   {
@@ -161,7 +162,7 @@ export function PreferencesModal({
   highlight,
   returnFocusRef,
 }: PreferencesModalProps) {
-  const { t } = useTranslation("settings");
+  const { t } = useTranslation(["settings", "common"]);
   const [troubleshootingOpen, setTroubleshootingOpen] = useState(false);
   const troubleshootingButtonRef = useRef<HTMLButtonElement>(null);
   const setFlexEditMode = useUiStore((s) => s.setFlexEditMode);
@@ -191,6 +192,14 @@ export function PreferencesModal({
   const multiplayerBoardLayout = usePreferencesStore((s) => s.multiplayerBoardLayout);
   const spellPaymentMode = usePreferencesStore((s) => s.spellPaymentMode);
   const priorityPassingMode = usePreferencesStore((s) => s.priorityPassingMode);
+  const priorityAlertVisual = usePreferencesStore((s) => s.priorityAlertVisual);
+  const priorityAlertSound = usePreferencesStore((s) => s.priorityAlertSound);
+  const priorityAlertTitle = usePreferencesStore((s) => s.priorityAlertTitle);
+  const setPriorityAlertVisual = usePreferencesStore((s) => s.setPriorityAlertVisual);
+  const setPriorityAlertSound = usePreferencesStore((s) => s.setPriorityAlertSound);
+  const setPriorityAlertTitle = usePreferencesStore((s) => s.setPriorityAlertTitle);
+  const unCardActionsEnabled = usePreferencesStore((s) => s.unCardActionsEnabled);
+  const setUnCardActionsEnabled = usePreferencesStore((s) => s.setUnCardActionsEnabled);
   const experimentalTournamentsEnabled = usePreferencesStore((s) => s.experimentalTournamentsEnabled);
   const boardBackground = usePreferencesStore((s) => s.boardBackground);
   const vfxQuality = usePreferencesStore((s) => s.vfxQuality);
@@ -428,6 +437,46 @@ export function PreferencesModal({
                         </span>
                       </span>
                     </label>
+                  </SettingGroup>
+
+                  <SettingGroup label={t("gameplay.priorityAlerts")}>
+                    <div
+                      role="group"
+                      aria-label={t("gameplay.priorityAlerts")}
+                      className="flex flex-wrap gap-2"
+                    >
+                      <ToggleChip
+                        pressed={priorityAlertVisual}
+                        onToggle={setPriorityAlertVisual}
+                        label={t("gameplay.priorityAlertVisual")}
+                      />
+                      <ToggleChip
+                        pressed={priorityAlertSound}
+                        onToggle={setPriorityAlertSound}
+                        label={t("gameplay.priorityAlertSound")}
+                      />
+                      <ToggleChip
+                        pressed={priorityAlertTitle}
+                        onToggle={setPriorityAlertTitle}
+                        label={t("gameplay.priorityAlertTitle")}
+                      />
+                    </div>
+                    <p className="mt-2 text-xs leading-relaxed text-slate-400">
+                      {t("gameplay.priorityAlertsDescription", {
+                        seconds: ESCALATE_AFTER_MS / 1000,
+                      })}
+                    </p>
+                  </SettingGroup>
+
+                  <SettingGroup label={t("gameplay.unCardActions")}>
+                    <ToggleChip
+                      pressed={unCardActionsEnabled}
+                      onToggle={setUnCardActionsEnabled}
+                      label={t("gameplay.unCardActionsToggle")}
+                    />
+                    <p className="mt-2 text-xs leading-relaxed text-slate-400">
+                      {t("gameplay.unCardActionsDescription")}
+                    </p>
                   </SettingGroup>
 
                   <SettingGroup label={t("gameplay.commandZone")}>
@@ -1320,6 +1369,38 @@ function SettingGroup({ label, children }: { label: string; children: React.Reac
   );
 }
 
+/** On/off chip, styled like the language picker's selected state. */
+function ToggleChip({
+  pressed,
+  onToggle,
+  label,
+}: {
+  pressed: boolean;
+  onToggle: (next: boolean) => void;
+  label: string;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={pressed}
+      onClick={() => onToggle(!pressed)}
+      className={`flex min-h-11 items-center rounded-[14px] border px-3 py-2 text-sm transition-colors ${
+        pressed
+          ? "border-sky-400/60 bg-sky-400/15 text-white"
+          : "border-white/10 bg-black/18 text-slate-200 hover:border-white/25 hover:text-white"
+      }`}
+    >
+      {pressed && (
+        <span aria-hidden="true" className="mr-1.5">
+          ✓
+        </span>
+      )}
+      {label}
+    </button>
+  );
+}
+
 /** Single labelled multiplier slider with an inline reset affordance. The
  *  reset button is rendered always (so the layout doesn't shift), but is
  *  visually faded and disabled when the value already equals `defaultValue`.
@@ -1482,7 +1563,7 @@ function PacingSection({
   );
 }
 
-const ART_CHAIN_RULE_OPTIONS: { type: ArtChainEntry["type"]; labelKey: string }[] = [
+const ART_CHAIN_RULE_OPTIONS: { type: ArtChainEntry["type"]; labelKey: ParseKeys<"settings"> }[] = [
   { type: "source_printing", labelKey: "artChain.rules.sourcePrinting" },
   { type: "newest", labelKey: "artChain.rules.newest" },
   { type: "oldest", labelKey: "artChain.rules.oldest" },

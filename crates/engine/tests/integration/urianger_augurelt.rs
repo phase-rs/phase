@@ -343,7 +343,7 @@ fn selected_permission_modifier_does_not_leak_from_sibling_permission() {
         source_id: None,
         graveyard_replacement: None,
         enters_with_counter: None,
-        enters_with_modifications: Vec::new(),
+        enters_with_modifications: Default::default(),
         mana_spend_permission: None,
         cast_cost_modifier: Some(CastCostModifier::raise(ManaCost::generic(2))),
     };

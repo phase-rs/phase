@@ -10,6 +10,7 @@ use crate::types::card_type::CoreType;
 use crate::types::counter::CounterMatch;
 use crate::types::game_state::{GameState, LKISnapshot};
 use crate::types::identifiers::ObjectId;
+use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::triggers::AttackTargetFilter;
 use crate::types::zones::Zone;
@@ -25,6 +26,21 @@ pub(crate) fn counter_condition_matches(
     maximum: Option<u32>,
 ) -> bool {
     counter_count_within_bounds(counters.count_in(&obj.counters), minimum, maximum)
+}
+
+/// CR 500.8 + CR 506.1 + CR 506.2: True while the turn's FIRST combat phase is
+/// the phase currently in progress. The printed condition names the current
+/// phase ("it's the first combat phase of the turn"), so a combat phase that
+/// merely STARTED earlier this turn no longer satisfies it once that phase has
+/// ended (postcombat main, end step), and an added combat phase makes it false
+/// while the second one is in progress. `Phase::group` recovers the CR 506.1
+/// phase from the engine's flattened step variants, so every combat step
+/// (beginning of combat through end of combat) answers true. Shared by the
+/// static-condition, trigger, and ability evaluators so the three cannot drift
+/// apart.
+pub(crate) fn first_combat_phase_in_progress(state: &GameState) -> bool {
+    state.phase.group() == crate::types::phase::PhaseGroup::Combat
+        && state.steps_started_this_turn.count(Phase::BeginCombat) == 1
 }
 
 /// CR 122.1 + CR 608.2h: LKI counterpart to [`counter_condition_matches`]
@@ -179,6 +195,17 @@ pub(crate) fn eval_has_city_blessing(state: &GameState, controller: PlayerId) ->
 /// CR 702.195b: True when the given player has the enduring story designation.
 pub(crate) fn eval_has_enduring_story(state: &GameState, controller: PlayerId) -> bool {
     state.enduring_story.contains(&controller)
+}
+
+/// Digital-only Alchemy (no CR entry): True when the given player holds at
+/// least one unconsumed one-time boon. Boons live in `delayed_triggers` as
+/// `DelayedTriggerKind::Boon` entries and are removed the moment they fire,
+/// so mere presence is the whole check — no consumed shell can linger.
+pub(crate) fn eval_has_boon(state: &GameState, controller: PlayerId) -> bool {
+    state
+        .delayed_triggers
+        .iter()
+        .any(|trigger| trigger.kind.is_boon() && trigger.controller == controller)
 }
 
 /// CR 400.7: True when the source permanent entered the battlefield this turn.

@@ -303,6 +303,7 @@ fn role_token_effect(attach_to: TargetFilter) -> Effect {
         owner: TargetFilter::Controller,
         attach_to: Some(attach_to),
         enters_attacking: false,
+        attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
         supertypes: Vec::new(),
         static_abilities: Vec::new(),
         enter_with_counters: Vec::new(),
@@ -334,6 +335,7 @@ fn curse_token_effect(attach_to: TargetFilter) -> Effect {
         owner: TargetFilter::Controller,
         attach_to: Some(attach_to),
         enters_attacking: false,
+        attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
         supertypes: Vec::new(),
         static_abilities: vec![StaticDefinition::continuous()
             .affected(TargetFilter::SelfRef)
@@ -412,6 +414,7 @@ impl RoleChain {
             ..AbilityDefinition::new(
                 AbilityKind::Activated,
                 Effect::Choose {
+                    chooser: engine::types::ability::ControllerRef::You,
                     choice_type: ChoiceType::Opponent {
                         restriction: None,
                         distinctness: PlayerChoiceDistinctness::default(),

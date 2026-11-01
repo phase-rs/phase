@@ -135,7 +135,19 @@
       "precon": "预组"
     },
     "brain": "驱动",
-    "brainEngine": "引擎 AI"
+    "brainEngine": "引擎 AI",
+    "poolBracketConflict": "所选 {{selected}} 套牌在当前过滤器下均不可用，因此随机对手将从全部 {{total}} 套牌中选择。"
+  },
+  "randomPool": {
+    "titleHuman": "你的随机牌池",
+    "titleAi": "AI 随机牌池",
+    "hint": "取消勾选文件夹或套牌，将其从随机选择中移除。",
+    "count": "{{selected}} / {{total}}",
+    "emptyWarning": "已排除所有套牌，因此随机将从全部 {{total}} 套牌中选择。",
+    "reset": "重置",
+    "precons": "预组套牌",
+    "playable": "可用 {{playable}}",
+    "nonePlayable": "所选 {{selected}} 套牌在当前过滤器下均不可用，因此随机将从全部 {{total}} 套牌中选择。"
   },
   "feedManager": {
     "title": "管理订阅源",
@@ -298,7 +310,8 @@
     "sectionStarred": "已加星标",
     "sectionUnfiled": "未归档",
     "collapseAll": "全部折叠",
-    "expandAll": "全部展开"
+    "expandAll": "全部展开",
+    "poolBracketConflict": "所选 {{selected}} 套牌在当前过滤器下均不可用，因此你的随机套牌将从全部 {{total}} 套牌中选择。"
   },
   "subscriptions": {
     "emptyTitle": "没有订阅源",

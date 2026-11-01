@@ -1,3 +1,4 @@
+import type { ParseKeys } from "i18next";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
@@ -1071,14 +1072,14 @@ function BundleRow({
 
 // --- Parse detail components ---
 
-const CATEGORY_LABEL_KEYS: Record<ParseCategory, string> = {
+const CATEGORY_LABEL_KEYS = {
   keyword: "coverage.categoryKeyword",
   ability: "coverage.categoryAbility",
   trigger: "coverage.categoryTrigger",
   static: "coverage.categoryStatic",
   replacement: "coverage.categoryReplacement",
   cost: "coverage.categoryCost",
-};
+} as const satisfies Record<ParseCategory, ParseKeys<"game">>;
 
 const CATEGORY_COLORS: Record<ParseCategory, string> = {
   keyword: "text-violet-300",
