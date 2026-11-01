@@ -78274,7 +78274,12 @@ fn compound_choice_c3_declines_and_preserves_existing_choose_shapes() {
             target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
         }
     );
-    assert_eq!(legacy.target_choice_timing, TargetChoiceTiming::Stack);
+    // CR 115.10 + CR 115.10a + CR 608.2d: a bare choose is not a target.
+    assert_eq!(legacy.target_choice_timing, TargetChoiceTiming::Resolution);
+    // CR 601.2c: an explicit target is still announced while casting.
+    let targeted = parse_effect_chain("Choose target creature you control.", AbilityKind::Spell);
+    assert_eq!(targeted.effect, legacy.effect);
+    assert_eq!(targeted.target_choice_timing, TargetChoiceTiming::Stack);
     // A bare Effect cannot represent both instructions. The chain succeeds in
     // U-C4; this lower-level entry point must fail closed rather than lose one.
     let Effect::Unimplemented { name, description } =
@@ -78291,6 +78296,155 @@ fn compound_choice_c3_declines_and_preserves_existing_choose_shapes() {
         description.as_deref(),
         Some("a creature you control and an opponent"),
         "the marker carries the printed clause, not Debug-formatted AST"
+    );
+}
+
+/// SHAPE: printed single-creature choices happen at resolution; supported
+/// continuations retain the chosen-creature reference.
+#[test]
+fn bare_choose_printed_cards_use_resolution_timing() {
+    fn assert_choice(name: &str, head: &AbilityDefinition) {
+        assert_eq!(
+            head.effect.as_ref(),
+            &Effect::TargetOnly {
+                target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            },
+            "{name}: {head:#?}"
+        );
+        // CR 115.10 + CR 115.10a + CR 608.2d: no target is declared.
+        assert_eq!(
+            head.target_choice_timing,
+            TargetChoiceTiming::Resolution,
+            "{name}"
+        );
+    }
+
+    for (name, text) in [
+        ("Final Showdown", "Spree (Choose one or more additional costs.)\n+ {1} — All creatures lose all abilities until end of turn.\n+ {1} — Choose a creature you control. It gains indestructible until end of turn.\n+ {3}{W}{W} — Destroy all creatures."),
+        ("Sakashima's Will", "Choose one. If you control a commander as you cast this spell, you may choose both instead.\n• Target opponent chooses a creature they control. You gain control of it.\n• Choose a creature you control. Each other creature you control becomes a copy of that creature until end of turn."),
+    ] {
+        let parsed = parse_oracle_text(text, name, &[], &[], &[]);
+        let head = &parsed.abilities[1];
+        assert_choice(name, head);
+        let continuation = head
+            .sub_ability
+            .as_deref()
+            .expect("chosen-creature continuation");
+        assert!(
+            matches!(
+                continuation.effect.as_ref(),
+                Effect::GenericEffect {
+                    target: Some(TargetFilter::ParentTarget),
+                    ..
+                } | Effect::BecomeCopy {
+                    target: TargetFilter::ParentTarget,
+                    ..
+                }
+            ),
+            "{name}: chosen creature must remain ParentTarget: {continuation:#?}"
+        );
+    }
+
+    // Ascent's redirection and Hatchery's toxic-value quantity remain
+    // Unimplemented. These rows cover their choice heads, not full-card support.
+    let ascent = parse_oracle_text(
+        "(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)\nI, II — Choose a creature you control. Until your next turn, all damage that would be dealt to creatures you control is dealt to that creature instead.\nIII — Return target creature card from your graveyard to the battlefield with a flying counter on it. That creature is an Angel Warrior in addition to its other types.",
+        "Ascent of the Worthy", &[], &["Enchantment".to_string()], &["Saga".to_string()],
+    );
+    for chapter in &ascent.triggers[..2] {
+        assert_choice(
+            "Ascent of the Worthy I/II",
+            chapter.execute.as_deref().unwrap(),
+        );
+    }
+
+    let hatchery = parse_oracle_text(
+        "When this enchantment enters, create two 3/3 green Phyrexian Beast creature tokens with toxic 1. (Players dealt combat damage by them also get a poison counter.)\nCorrupted — At the beginning of your upkeep, if an opponent has three or more poison counters, choose a creature you control, then draw cards equal to its total toxic value.",
+        "Goliath Hatchery", &[], &["Enchantment".to_string()], &[],
+    );
+    assert_choice(
+        "Goliath Hatchery upkeep",
+        hatchery.triggers[1].execute.as_deref().unwrap(),
+    );
+
+    // The Avatar's second sentence declares its own target, not the chosen recipient.
+    let avatar = parse_effect_chain(
+        "Choose a creature you control. It becomes a copy of target creature except for its name.",
+        AbilityKind::Activated,
+    );
+    assert_eq!(avatar.target_choice_timing, TargetChoiceTiming::Resolution);
+    let copy = avatar
+        .sub_ability
+        .as_deref()
+        .expect("Avatar copy instruction");
+    assert!(
+        matches!(
+            copy.effect.as_ref(),
+            Effect::BecomeCopy {
+                target: TargetFilter::Typed(_),
+                ..
+            }
+        ),
+        "{copy:#?}"
+    );
+    // CR 601.2c: the explicit copy-source target stays stack-time.
+    assert_eq!(copy.target_choice_timing, TargetChoiceTiming::Stack);
+}
+
+/// SHAPE: only the existing mandatory single-object chooser may be retimed.
+#[test]
+fn bare_choose_classifier_preserves_selection_boundaries() {
+    let text = "Choose a creature you control.";
+    let parsed = parse_effect_clause(text, &mut ParseContext::default());
+    assert!(matches!(parsed.effect, Effect::TargetOnly { .. }));
+    let timing = |parsed: &ParsedEffectClause, fragment: &str, multi, selection| {
+        super::lower::target_choice_timing_for_parsed(parsed, fragment, None, multi, selection)
+    };
+    assert_eq!(
+        timing(&parsed, text, false, TargetSelectionMode::Chosen),
+        TargetChoiceTiming::Resolution
+    );
+    // The resolution prompt supports neither multiple objects nor random selection.
+    assert_eq!(
+        timing(&parsed, text, true, TargetSelectionMode::Chosen),
+        TargetChoiceTiming::Stack
+    );
+    let mut multi = parsed.clone();
+    multi.multi_target = Some(MultiTargetSpec::fixed(1, 2));
+    assert_eq!(
+        timing(&multi, text, false, TargetSelectionMode::Chosen),
+        TargetChoiceTiming::Stack
+    );
+    assert_eq!(
+        timing(&parsed, text, false, TargetSelectionMode::Random),
+        TargetChoiceTiming::Stack
+    );
+    let mut optional = parsed.clone();
+    optional.optional_targeting = true;
+    assert_eq!(
+        timing(&optional, text, false, TargetSelectionMode::Chosen),
+        TargetChoiceTiming::Stack
+    );
+    for target in [
+        TargetFilter::ParentTarget,
+        TargetFilter::SelfRef,
+        TargetFilter::Player,
+    ] {
+        let mut reference = parsed.clone();
+        reference.effect = Effect::TargetOnly { target };
+        assert_eq!(
+            timing(&reference, text, false, TargetSelectionMode::Chosen),
+            TargetChoiceTiming::Stack
+        );
+    }
+    assert_eq!(
+        timing(
+            &parsed,
+            "Each opponent chooses a creature they control.",
+            false,
+            TargetSelectionMode::Chosen
+        ),
+        TargetChoiceTiming::Stack
     );
 }
 

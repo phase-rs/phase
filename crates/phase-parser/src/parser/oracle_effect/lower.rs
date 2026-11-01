@@ -2730,6 +2730,26 @@ pub(super) fn target_choice_timing_for_parsed(
         }
     }
 
+    // CR 115.10 + CR 115.10a + CR 608.2d: a wholly consumed, untargeted
+    // single-object imperative choose clause declares no target; its object
+    // is chosen as the instruction resolves. Keep explicit targets and
+    // third-party choices on their existing timing/ownership paths.
+    if let Effect::TargetOnly { target } = &parsed.effect {
+        if tag::<_, _, OracleError<'_>>("choose ")
+            .parse(lower.trim_start())
+            .is_ok()
+            && selection == TargetSelectionMode::Chosen
+            && !clause_multi_target
+            && parsed.multi_target.is_none()
+            && !parsed.optional_targeting
+            && !nom_primitives::scan_contains(&lower, "target ")
+            && !target.is_context_ref()
+            && !target.denotes_player_target()
+        {
+            return TargetChoiceTiming::Resolution;
+        }
+    }
+
     // Mass `ChangeZoneAll` stays Stack here (pre-#6446). The TargetOnly wrap
     // may still stamp Resolution on ChangeZoneAll resolution-picks via the
     // shared helper; clause-IR timing must not silently reclassify every
