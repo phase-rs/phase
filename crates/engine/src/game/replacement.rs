@@ -17513,6 +17513,15 @@ mod tests {
     /// `u32::MAX` and records nothing (a player-counter or energy count still
     /// records: `add_counter_applier_player_and_energy_overflow_is_recorded_not_clamped`).
     /// Results within `u32` are exact.
+    ///
+    /// The replacements are built in code. `branch2` is the form the parser gives Boon Reflection
+    /// ("If you would gain life, you gain twice that much life instead."); `times` and `plus` are
+    /// that doubling and Angel of Vitality's plus 1 ("If you would gain life, you gain that much
+    /// life plus 1 instead.") in Branch 1's `Times` / `Plus` form, which no printed card parses to
+    /// (both cards parse to Branch 2), and the test needs that form to pin Branch 1's saturation.
+    /// The `Half` / `Minus` siblings and `not_static` are synthetic: no printed card halves a life
+    /// gain, subtracts from one, or gains an amount read from the board. The nearest printed cards
+    /// are Boon Reflection and Angel of Vitality.
     #[test]
     fn gain_life_applier_saturates_past_u32_and_records_nothing() {
         let times = || life_qmod_def(ReplacementEvent::GainLife, QuantityModification::DOUBLE);
@@ -17601,6 +17610,13 @@ mod tests {
     }
 
     /// Loss twin of the gain row, including Branch 3 (`LoseLife { Multiply }`).
+    ///
+    /// The replacements are built in code. `times` is the form the parser gives Bloodletter of
+    /// Aclazotz ("If an opponent would lose life during your turn, they lose twice that much life
+    /// instead."), here for any player at any time; `branch3` is the same doubling in Branch 3's
+    /// `LoseLife` execute form, which Bloodletter does not parse to, and the test needs it to pin
+    /// that branch's saturation. `plus` is synthetic: no printed card adds to a life loss. The
+    /// nearest printed card is Bloodletter of Aclazotz.
     #[test]
     fn lose_life_applier_saturates_past_u32_and_records_nothing() {
         let times = || life_qmod_def(ReplacementEvent::LoseLife, QuantityModification::DOUBLE);
@@ -17935,6 +17951,17 @@ mod tests {
     /// reads the replaced life amount from the `i32` `last_effect_count` stamp;
     /// an amount past `i32::MAX` stamps `i32::MAX`, never a wrapped value, on
     /// both the gain and the loss applier.
+    ///
+    /// The gain substitute is Nefarious Lich's, parsed from its verbatim line
+    /// "If you would gain life, draw that many cards instead." (Lich prints the
+    /// same line). The loss substitute is that draw built in code on a life
+    /// loss, and is synthetic: no printed card replaces every life loss with an
+    /// effect that reads the amount lost, and the test needs one so the loss
+    /// applier's stamp is checked as the gain applier's is. The nearest printed
+    /// card is Ashiok, Wicked Manipulator, whose "If you would pay life while
+    /// your library has at least that many cards in it, exile that many cards
+    /// from the top of your library instead." replaces a payment of life, which
+    /// is a loss (CR 119.4), and which the parser does not read yet.
     #[test]
     fn life_substitution_stamps_saturate_into_i32() {
         let draw_that_many = || {
@@ -17946,14 +17973,32 @@ mod tests {
                 },
             )
         };
+        let nefarious_lich = crate::parser::oracle_replacement::parse_replacement_line(
+            "If you would gain life, draw that many cards instead.",
+            "Nefarious Lich",
+        )
+        .expect("Nefarious Lich's life-gain replacement parses");
+        // Reach guard: the printed line parses to the draw substitute the loss
+        // half builds, with no quantity modification ahead of it.
+        assert!(
+            nefarious_lich.event == ReplacementEvent::GainLife
+                && nefarious_lich.quantity_modification.is_none()
+                && nefarious_lich
+                    .execute
+                    .as_deref()
+                    .is_some_and(|ability| *ability.effect == *draw_that_many().effect),
+            "Nefarious Lich parses to a draw substitute: {nefarious_lich:?}"
+        );
         let rid = ReplacementId {
             source: ObjectId(10),
             index: 0,
         };
         for (amount, stamp) in [(3_000_000_000u32, i32::MAX), (7, 7)] {
-            let gain_def =
-                ReplacementDefinition::new(ReplacementEvent::GainLife).execute(draw_that_many());
-            let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![gain_def]);
+            let mut state = test_state_with_object(
+                ObjectId(10),
+                Zone::Battlefield,
+                vec![nefarious_lich.clone()],
+            );
             let result =
                 gain_life_applier(life_gain_event(amount), rid, &mut state, &mut Vec::new());
             assert!(
@@ -18023,7 +18068,12 @@ mod tests {
     /// One source carries three `Times { 30000 }` loss multipliers (commuting,
     /// so no ordering prompt): 100,000 becomes 3,000,000,000, and the second
     /// application passes `u32` and lands on `u32::MAX`; every replacement
-    /// applies and nothing is recorded (CR 119.3 + CR 616.1f).
+    /// applies and nothing is recorded (CR 119.3 + CR 616.1f). The x30,000
+    /// multipliers are synthetic: no printed card multiplies a life loss by more
+    /// than two, and the test needs a factor that carries a 100,000 loss past
+    /// `u32` in two applications. The nearest printed card is Bloodletter of
+    /// Aclazotz ("If an opponent would lose life during your turn, they lose
+    /// twice that much life instead.").
     #[test]
     fn lose_life_times_saturates_and_applies_every_replacement() {
         let defs: Vec<_> = (0..3)
@@ -18056,6 +18106,13 @@ mod tests {
     /// last one applied (it is marked applied before its applier runs), and the
     /// third never applies. Its production twin is
     /// `r6_a_scaler_answer_past_u32_stops_before_the_remaining_replacements`.
+    /// The x30,000 count multipliers are synthetic: no printed card multiplies
+    /// counters put on a player by more than two, and the test needs a factor
+    /// that carries a 100,000 count past `u32` in two applications. The nearest
+    /// printed card is Vorinclex, Monstrous Raider, whose "If you would put one
+    /// or more counters on a permanent or player, put twice that many of each of
+    /// those kinds of counters on that permanent or player instead." doubles
+    /// them.
     #[test]
     fn player_and_energy_times_overflow_stops_the_loop_at_the_overflowing_replacement() {
         for event in [energy_counter_event(100_000), player_counter_event(100_000)] {

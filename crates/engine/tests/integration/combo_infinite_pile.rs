@@ -3343,6 +3343,18 @@ fn low3_activate_and_settle(runner: &mut GameRunner, source: ObjectId, ability_i
 /// `GainLife` replacement / life-total reader is on the board ⇒ `life_growth_is_observed == false`
 /// ⇒ the accept takes the Mark route and lands the batched life at once.
 ///
+/// REAL CARDS: the creature is the synthetic Lifedynamo ("{T}: Add {C}." / "{0}: You gain 1
+/// life." / "{0}: Untap Lifedynamo."), which [`low3_life_engine_offered`] builds. No printed card
+/// is, on its own, a free engine that gains life each cycle, and the LOW-3 rows need a loop that
+/// makes mana and gains life by activations alone, so the Mark route's ∞ mana mark shows the
+/// route and the board holds only what each arm grafts. The nearest printed board is Phyrexian
+/// Altar ("Sacrifice a creature: Add one mana of any color."), Gravecrawler ("This creature can't
+/// block." / "You may cast this card from your graveyard as long as you control a Zombie.") and
+/// Walking Corpse (a Zombie with no rules text) beside Soul Warden ("Whenever another creature
+/// enters, you gain 1 life."), which gains 1 per cycle; its loop nets no mana (the Altar's mana
+/// pays for Gravecrawler) and gains its life through a cast and Soul Warden's battlefield-entry
+/// trigger, the kind of trigger the `Present` arm grafts.
+///
 /// REVERT-FAILING assertions: register the `Life` item instead of applying it (the pre-change
 /// Mark arm) and the stash is non-empty and P0's life does not move at the accept; force the
 /// Replay route and the ∞ `Mana(C)` reach-guard fails (a performed take marks nothing).
@@ -3400,6 +3412,11 @@ fn low3_unobserved_life_growth_accept_applies_its_batched_life_at_the_take() {
 /// gain writes no `waiting_for`, so at the bound the arm's exit is the only thing that can produce
 /// an ending point (CR 732.2a). Both arms run: at the bound the life moves by exactly the bound
 /// AND a seat can act; at `0` no life moves and a seat can still act.
+///
+/// The Lifedynamo is synthetic: the doc of
+/// [`low3_unobserved_life_growth_accept_applies_its_batched_life_at_the_take`] says why no
+/// printed card fits and quotes the nearest printed board, Phyrexian Altar, Gravecrawler and
+/// Walking Corpse beside Soul Warden.
 ///
 /// Neither arm is green alone, and each refuses a different wrong repair. A repair keyed on
 /// `amount == 0` never fires at the bound, so the full-delivery arm reds. A repair conditioned on
@@ -3640,7 +3657,10 @@ fn low3_life_engine_offered(etb: Low3BoardEtbTrigger) -> GameRunner {
 }
 
 /// Accept the surfaced offer at `Fixed(n)` through the REAL APNAP pipeline; returns the accept's
-/// events.
+/// events. Every caller takes the offer on the synthetic Lifedynamo board of
+/// [`low3_life_engine_offered`]; the doc of
+/// [`low3_unobserved_life_growth_accept_applies_its_batched_life_at_the_take`] says why no
+/// printed card fits and quotes the nearest printed board.
 fn low3_accept(runner: &mut GameRunner, n: u32) -> Vec<engine::types::events::GameEvent> {
     runner
         .act(GameAction::DeclareShortcut {
@@ -3668,6 +3688,14 @@ fn low3_accept(runner: &mut GameRunner, n: u32) -> Vec<engine::types::events::Ga
 /// (`current_period_fodder` returns `None`) and no `Counters` item, so it stays on the MARK route
 /// and its life lands at the take, whatever ETB trigger the board holds. A mana engine mints
 /// nothing, so there is no double-pay and the O(N) replay would be pure cost.
+///
+/// REAL CARDS: the Lifedynamo is synthetic; the doc of
+/// [`low3_unobserved_life_growth_accept_applies_its_batched_life_at_the_take`] says why no
+/// printed card fits and quotes the nearest printed board. The grafted trigger,
+/// [`low3_board_etb_life_trigger`], is built in code in the shape of Prosperous Innkeeper's
+/// "Whenever another creature you control enters, you gain 1 life." without its "another
+/// creature you control" filter, on a 1/1 host with no rules text; nothing enters during the
+/// period, so it never fires.
 ///
 /// REVERT-PROBE: replace the axis condition with a board-shape one
 /// (`res::board_has_functioning_etb_trigger(state)`, the pre-change gate's) ⇒ this test's

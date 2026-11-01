@@ -23428,6 +23428,15 @@ mod stage2_injector_tests {
     /// The real two-drainer ring board's lethal take is the reach guard. The hostile public
     /// take has one less unit of loss-counter headroom than that cycle consumes; the counter
     /// saturates at `u32::MAX` and the take settles like the control.
+    ///
+    /// The board is [`two_drainer_rig`]'s, which other rows in this module share. Its "Drainer
+    /// A" and "Drainer B" carry Sanguine Bond's verbatim text ("Whenever you gain life, target
+    /// opponent loses that much life.") and its "Feedback" carries Exquisite Blood's ("Whenever
+    /// an opponent loses life, you gain that much life."), each on a test creature rather than
+    /// the printed enchantment. Its "Kickoff", "You gain 1 life.", is synthetic: no printed
+    /// spell's whole text is that. The nearest printed card is Blessed Wine ("You gain 1 life."
+    /// / "Draw a card at the beginning of the next turn's upkeep."), the same gain with a
+    /// delayed draw.
     #[test]
     fn public_ring_take_saturates_the_lost_counter_like_the_control() {
         let (mut control, control_template) = two_drainer_ring_offer();
@@ -23494,6 +23503,15 @@ mod stage2_injector_tests {
     /// headroom than that cycle consumes, probing whether a work-clone failure can be lost
     /// through an Abort/fallback. This is a single-cycle probe; later-cycle whole-action
     /// rollback is covered by the recorded Replay row.
+    ///
+    /// The board is [`two_drainer_rig_with`]`(FEEDBACK_ENERGY)`. Its "Drainer A" and "Drainer B"
+    /// carry Sanguine Bond's verbatim text ("Whenever you gain life, target opponent loses that
+    /// much life.") on test creatures rather than the printed enchantment. Its "Feedback"
+    /// carries the synthetic `FEEDBACK_ENERGY`, Exquisite Blood's text ("Whenever an opponent
+    /// loses life, you gain that much life.") with an energy gain added; its doc says why no
+    /// printed card fits. Its "Kickoff", "You gain 1 life.", is synthetic: no printed spell's
+    /// whole text is that. The nearest printed card is Blessed Wine ("You gain 1 life." / "Draw
+    /// a card at the beginning of the next turn's upkeep."), the same gain with a delayed draw.
     #[test]
     fn public_ring_take_rejects_unrepresentable_energy_before_fallback() {
         let energy = |state: &GameState| {
