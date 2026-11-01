@@ -99,6 +99,7 @@ mod elixir_of_immortality_whole_graveyard;
 mod elspeth_resplendent_conjoined_counter_choice;
 mod elusive_otter_repro;
 mod embiggen_typeline_pump;
+mod emblem_stack_owner_printing;
 mod empower_jace;
 mod emptiness_mana_spent_evoke_5943;
 mod emrakul_control_turn_crash;
