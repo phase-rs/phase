@@ -4283,9 +4283,16 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 d.push(("arranger".into(), fmt_target(arranger)));
             }
         }
-        Effect::PutOnTopOrBottom { target, chooser } => {
+        Effect::PutOnTopOrBottom {
+            target,
+            chooser,
+            top_position,
+        } => {
             d.push(("target".into(), fmt_target(target)));
             d.push(("chooser".into(), fmt_target(chooser)));
+            if !top_position.is_top() {
+                d.push(("top_position".into(), format!("{top_position:?}")));
+            }
         }
         Effect::Amass {
             subtype,

@@ -14714,8 +14714,8 @@ fn parse_conjure_card_name(lower: &str) -> Option<(&str, &str)> {
 
 /// Parse the destination zone from conjure text using nom combinators. Returns
 /// the zone, an optional in-library slot (`Some` only for the Alchemy "into the
-/// top N cards … at random" and "on top of your library" positional
-/// destinations), the player scope whose
+/// top N cards … at random", "on top of your library" and "<ordinal> from the
+/// top" positional destinations), the player scope whose
 /// libraries receive the cards (`Some(PlayerFilter::All)` only for the "each
 /// player's library" fan-out; `None` = the controller's library), and the
 /// unconsumed tail.
@@ -14763,6 +14763,24 @@ fn parse_conjure_zone(
     // non-load-bearing.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" on top of your library").parse(lower) {
         return Some((Zone::Library, Some(LibraryPosition::Top), None, rest));
+    }
+
+    // CR 401.7: "conjure … into your library <ordinal> from the top" (Calim,
+    // Djinn Emperor's "seventh from the top") names a specific in-library slot.
+    // The conjure resolver already honors `NthFromTop` (clamped to the bottom per
+    // CR 401.7); the zone-only arms below would drop the ordinal.
+    if let Ok((rest, n)) = preceded(
+        tag::<_, _, OracleError<'_>>(" into your library "),
+        nom_primitives::parse_nth_from_top,
+    )
+    .parse(lower)
+    {
+        return Some((
+            Zone::Library,
+            Some(LibraryPosition::NthFromTop { n }),
+            None,
+            rest,
+        ));
     }
 
     alt((
@@ -15800,6 +15818,7 @@ fn try_parse_put_on_top_or_bottom(
         return Some(parsed_clause(Effect::PutOnTopOrBottom {
             target: TargetFilter::ParentTarget,
             chooser: TargetFilter::ParentTargetOwner,
+            top_position: LibraryPosition::Top,
         }));
     }
 
@@ -15838,6 +15857,7 @@ fn try_parse_put_on_top_or_bottom(
         return Some(parsed_clause(Effect::PutOnTopOrBottom {
             target: filter,
             chooser: TargetFilter::ParentTargetOwner,
+            top_position: LibraryPosition::Top,
         }));
     }
 
@@ -15881,6 +15901,7 @@ fn try_parse_put_on_top_or_bottom(
         return Some(parsed_clause(Effect::PutOnTopOrBottom {
             target: filter,
             chooser: TargetFilter::ParentTargetOwner,
+            top_position: LibraryPosition::Top,
         }));
     }
 
@@ -15919,6 +15940,7 @@ fn try_parse_self_put_on_top_or_bottom(
     Some(parsed_clause(Effect::PutOnTopOrBottom {
         target,
         chooser: TargetFilter::Controller,
+        top_position: LibraryPosition::Top,
     }))
 }
 
@@ -16072,32 +16094,50 @@ fn try_parse_owner_of_target_shuffle(
     }))
 }
 
-/// CR 400.3: Parse "the owner of target [filter] puts it into their library
-/// second from the top or on the bottom".
+/// CR 400.3 + CR 401.7: Parse "the owner of target [filter] puts it into their
+/// library <ordinal> from the top or on the bottom".
 ///
 /// Handles:
 /// - "The owner of target nonland permanent puts it into their library second from the top or on the bottom"
 /// - "The owner of target creature or enchantment puts it into their library second from the top or on the bottom"
 ///
-/// The "second from the top or on the bottom" pattern is semantically PutOnTopOrBottom (the
-/// player chooses). We map it to the same `PutOnTopOrBottom` effect.
+/// The owner chooses between the named Nth-from-the-top slot and the bottom, so
+/// this is `PutOnTopOrBottom` carrying that slot as `top_position` (CR 608.2d).
+///
+/// Only the "their library" form is recognized. The possessive "its owner's
+/// library" form is deliberately not handled: no printed card uses it, and an
+/// unrecognized clause stays `Unimplemented` (the fail-honest direction).
 fn try_parse_owner_of_target_put_second(
     tp: TextPair,
     ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
     let tp = tp.trim_end_matches('.');
 
-    // Must contain the signature suffix
-    if !nom_primitives::scan_contains(tp.lower, "second from the top or on the bottom") {
-        return None;
-    }
+    // CR 401.7 + CR 608.2d: the signature tail names the non-bottom branch's
+    // library position; it parameterises the choice rather than being dropped.
+    let top_position = nom_primitives::scan_at_word_boundaries(
+        tp.lower,
+        parse_into_library_nth_from_top_or_bottom,
+    )?;
 
     let target = extract_owner_of_target(tp, ctx)?;
 
     Some(parsed_clause(Effect::PutOnTopOrBottom {
         target,
         chooser: TargetFilter::ParentTargetOwner,
+        top_position,
     }))
+}
+
+/// CR 401.7: "into their library <ordinal> from the top or on the bottom" —
+/// the owner chooses between a specific Nth-from-the-top position and the bottom
+/// (Deem Inferior, Trickster's Stratagem). Yields the `NthFromTop` branch; the
+/// bottom branch is implied by `Effect::PutOnTopOrBottom`.
+fn parse_into_library_nth_from_top_or_bottom(i: &str) -> OracleResult<'_, LibraryPosition> {
+    let (i, _) = tag("into their library ").parse(i)?;
+    let (i, n) = nom_primitives::parse_nth_from_top(i)?;
+    let (i, _) = tag(" or on the bottom").parse(i)?;
+    Ok((i, LibraryPosition::NthFromTop { n }))
 }
 
 /// Shared helper: extract the target filter from "the owner of target [filter] [verb]s it ..."

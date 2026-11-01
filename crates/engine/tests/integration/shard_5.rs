@@ -304,6 +304,7 @@ mod treasure_map_landmark_transform;
 mod treasured_find_regression;
 mod trench_behemoth_landfall_force_attack;
 mod trespassers_curse_enchanted_player_trigger;
+mod tricksters_stratagem_second_from_top;
 mod trigger_batch_after_sba;
 mod trigger_construction_cursor_release;
 mod trigger_index_readiness;
