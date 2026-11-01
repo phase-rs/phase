@@ -4,8 +4,9 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use engine::ai_support::{
-    build_decision_context, classify_payment_continuation, witness_payment_continuations,
-    AiDecisionContext, CandidateAction, PaymentContinuationBatchStatus, PaymentContinuationState,
+    activates_mana_ability, build_decision_context, classify_payment_continuation,
+    witness_payment_continuations, AiDecisionContext, CandidateAction,
+    PaymentContinuationBatchStatus, PaymentContinuationState, PaymentContinuationStep,
     TacticalClass,
 };
 use engine::game::engine::apply_as_current_for_simulation;
@@ -95,6 +96,8 @@ pub(crate) struct PreparedCandidate {
     pub source_index: usize,
     pub candidate: CandidateAction,
     pub payment_successor: Option<GameState>,
+    /// Whether the witnessed edge finalizes the payment root in its own step.
+    pub payment_step: Option<PaymentContinuationStep>,
 }
 
 /// Fail closed for affiliated payment states before ranking or width limits.
@@ -114,6 +117,7 @@ pub(crate) fn prepare_payment_candidates(
                 source_index,
                 candidate,
                 payment_successor: None,
+                payment_step: None,
             })
             .collect(),
         PaymentContinuationState::UnsupportedAffiliated(_) => Vec::new(),
@@ -133,6 +137,7 @@ pub(crate) fn prepare_payment_candidates(
                             source_index,
                             candidate,
                             payment_successor: Some(accepted.state),
+                            payment_step: Some(accepted.step),
                         })
                     })
                     .collect(),
@@ -147,6 +152,7 @@ pub(crate) fn prepare_payment_candidates(
                                     source_index,
                                     candidate,
                                     payment_successor: Some(accepted.state),
+                                    payment_step: Some(accepted.step),
                                 })
                             })
                             .collect()
@@ -160,6 +166,7 @@ pub(crate) fn prepare_payment_candidates(
                                         source_index,
                                         candidate,
                                         payment_successor: None,
+                                        payment_step: None,
                                     },
                                 )
                             })
@@ -171,6 +178,60 @@ pub(crate) fn prepare_payment_candidates(
             }
         }
     }
+}
+
+/// Whether a leaf `state` is not yet quiet: something is on the stack, or a
+/// spell or ability is being paid for. CR 602.2a creates an activated ability
+/// on the stack as its activation begins, but the engine adds it to
+/// `state.stack` only once its payment finalizes, so an activation paid at
+/// `ManaPayment` has an empty stack and still has to be finished
+/// (`finalizing_payment_action`; CR 602.2b applies CR 601.2b–i to it).
+fn needs_quiescence(state: &GameState) -> bool {
+    !state.stack.is_empty()
+        || matches!(
+            classify_payment_continuation(state),
+            PaymentContinuationState::Affiliated(_)
+        )
+}
+
+/// The action that finishes the payment in progress at `state` as it stands:
+/// an action that activates no mana ability (at `ManaPayment`, the pass that
+/// pays the total cost, CR 601.2h) and that the payment witness proves
+/// finalizes the root in its own step. `None` when `state` is not a payment
+/// the witness owns, or no such action is among `actions`.
+///
+/// CR 118.3c: activating mana abilities is never mandatory, so finishing the
+/// payment now is always one way to continue it. Quiescence and rollouts use it
+/// to value a position in the middle of a payment as that payment completed:
+/// nobody gets priority while a spell or ability is being paid for (CR 601.2,
+/// CR 602.2b), so such a position is not a quiet leaf. Further activations stay
+/// selectable as search edges (see `search_value_at` for their depth).
+fn finalizing_payment_action(state: &GameState, actions: &[GameAction]) -> Option<GameAction> {
+    if !matches!(
+        classify_payment_continuation(state),
+        PaymentContinuationState::Affiliated(_)
+    ) {
+        return None;
+    }
+    let finishers: Vec<_> = actions
+        .iter()
+        .filter(|action| {
+            !matches!(action, GameAction::CancelCast) && !activates_mana_ability(state, action)
+        })
+        .cloned()
+        .collect();
+    if finishers.is_empty() {
+        return None;
+    }
+    witness_payment_continuations(state, &finishers)
+        .successors
+        .into_iter()
+        .flatten()
+        .find(|accepted| match accepted.step {
+            PaymentContinuationStep::Finalizes => true,
+            PaymentContinuationStep::Continues => false,
+        })
+        .map(|accepted| accepted.action)
 }
 
 pub(crate) fn rank_prepared_candidates<F>(
@@ -1640,6 +1701,18 @@ impl<'a> PlannerServices<'a> {
                 }
             }
 
+            // Case 4: a payment in progress is not a quiet position; finish it
+            // as it stands (see `finalizing_payment_action`).
+            if let Some(action) = finalizing_payment_action(cursor.state(), &actions) {
+                match self.quiesce_step(node, &mut cursor, action) {
+                    QuiesceStep::Advanced(next) => {
+                        node = next;
+                        continue;
+                    }
+                    QuiesceStep::Failed => break,
+                }
+            }
+
             // Genuine decision point — stop quiescence
             break;
         }
@@ -1664,7 +1737,7 @@ impl<'a> PlannerServices<'a> {
         node: Option<SearchNodeId>,
         state: &GameState,
     ) -> f64 {
-        if state.stack.is_empty() || self.deadline.expired() {
+        if !needs_quiescence(state) || self.deadline.expired() {
             return self.evaluate_state_cached(state);
         }
         let quiesced = self.quiesce_at(node, state);
@@ -1679,7 +1752,7 @@ impl<'a> PlannerServices<'a> {
     /// [`PlannerServices::quiesced_leaf_eval`] for a position that may be
     /// tracked; `node`, when given, must identify `state`.
     fn quiesced_leaf_eval_at(&mut self, node: Option<SearchNodeId>, state: &GameState) -> f64 {
-        if state.stack.is_empty() || self.deadline.expired() {
+        if !needs_quiescence(state) || self.deadline.expired() {
             let value = self.evaluate_for_planner(state);
             return self.reduce_utility(state, &value);
         }
@@ -1851,6 +1924,27 @@ impl<'a> PlannerServices<'a> {
         }
         if depth == 0 || matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
             return self.quiesced_leaf_eval_at(node, state);
+        }
+
+        // CR 601.2: a payment in progress and the cast it completes are one
+        // move; the rollout finishes the payment as it stands rather than
+        // spending its depth on mana activations (see `finalizing_payment_action`).
+        if matches!(
+            classify_payment_continuation(state),
+            PaymentContinuationState::Affiliated(_)
+        ) {
+            let actions: Vec<_> = self
+                .build_decision_context_at(node, state)
+                .candidates
+                .iter()
+                .map(|candidate| candidate.action.clone())
+                .collect();
+            if let Some(action) = finalizing_payment_action(state, &actions) {
+                let mut finished = state.clone();
+                if apply_as_current_for_simulation(&mut finished, action).is_ok() {
+                    return self.rollout_estimate_at(None, &finished, depth);
+                }
+            }
         }
 
         let evaluation = self.planner_evaluation_at(node, state);
@@ -2075,6 +2169,30 @@ impl BeamContinuationPlanner {
         let node_player = state.waiting_for.acting_player();
         let is_maximizing = node_player.is_none_or(|player| player == services.ai_player);
         let scoring_player = node_player.unwrap_or(services.ai_player);
+        // CR 601.2: nobody receives priority while a spell or ability is being
+        // paid for, so a payment step and the cast it completes are one move.
+        // Charging a ply for continuing a payment that the pass could finish
+        // let another mana activation (and its life, card or permanent) push
+        // the opponent's reply to the cast past the horizon (#10488). So a step
+        // inside a payment costs no depth, with one exception: at the payment
+        // window itself, while no edge that activates no mana ability can
+        // finish it yet, every option continues the payment and is charged
+        // alike. Prompts nested in a mana ability's activation (its cost, its
+        // color) belong to that one activation (CR 605.3a). The node budget
+        // bounds the payment chain.
+        let payment_can_finish_now = candidates.iter().any(|prepared| {
+            prepared.payment_step == Some(PaymentContinuationStep::Finalizes)
+                && !activates_mana_ability(state, &prepared.candidate.action)
+        });
+        let free_payment_step = match classify_payment_continuation(state) {
+            PaymentContinuationState::Affiliated(_) => {
+                payment_can_finish_now
+                    || !matches!(state.waiting_for, WaitingFor::ManaPayment { .. })
+            }
+            PaymentContinuationState::NotAffiliated
+            | PaymentContinuationState::UnsupportedAffiliated(_) => false,
+        };
+        let child_depth = if free_payment_step { depth } else { depth - 1 };
         let mut ranked = rank_prepared_candidates(
             candidates,
             // Interior beam node: `search_value` is always entered ≥1 ply below
@@ -2121,7 +2239,7 @@ impl BeamContinuationPlanner {
             let value = self.search_value_at(
                 child,
                 &sim,
-                depth - 1,
+                child_depth,
                 ply + 1,
                 alpha,
                 beta,
@@ -2218,6 +2336,7 @@ where
                 source_index,
                 candidate,
                 payment_successor: None,
+                payment_step: None,
             }),
         |candidate| scorer(candidate),
         limit,
@@ -2966,6 +3085,117 @@ pub(crate) mod tests {
             unchanged.stack.len(),
             stack_before,
             "revert-failing: quiesce must break at loop top on an expired deadline"
+        );
+    }
+
+    /// Bonesplitter's equip, paid by Treasonous Ogre's "Pay 3 life: Add {R}."
+    /// at its `ManaPayment` window (a Manual activation reaches that window, as
+    /// in `activation_manual_mana_payment.rs`). Oracle text verbatim from
+    /// Scryfall `cards/named`.
+    fn equip_paid_by_ogre_mid_payment() -> GameState {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let ogre = scenario
+            .add_creature(P0, "Treasonous Ogre", 2, 3)
+            .from_oracle_text_with_keywords(
+                &["Dethrone"],
+                "Dethrone (Whenever this creature attacks the player with the most life or tied for most life, put a +1/+1 counter on it.)\nPay 3 life: Add {R}.",
+            )
+            .id();
+        let bonesplitter = scenario
+            .add_artifact_from_oracle(
+                P0,
+                "Bonesplitter",
+                "Equipped creature gets +2/+0.\nEquip {1}",
+            )
+            .with_subtypes(vec!["Equipment"])
+            .id();
+        let mut runner = scenario.build();
+        let equip_index = runner.state().objects[&bonesplitter]
+            .abilities
+            .iter()
+            .position(|ability| ability.kind == AbilityKind::Activated)
+            .expect("Bonesplitter has its equip ability");
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: bonesplitter,
+                ability_index: equip_index,
+                payment_mode: CastPaymentMode::Manual,
+            })
+            .expect("the equip activation begins");
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ) {
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(bears)),
+                })
+                .expect("Grizzly Bears is a legal equip target");
+        }
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+            "reach: the Manual equip waits for its payment, got {:?}",
+            runner.state().waiting_for
+        );
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: ogre,
+                ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("the Ogre pays 3 life for {R} while the equip is paid for");
+        runner.state().clone()
+    }
+
+    /// CR 602.2b + CR 601.2h: an activation paid at `ManaPayment` has nothing on
+    /// the stack yet, and a leaf there is valued as its payment finished, not
+    /// with the life paid and the ability missing (#10488).
+    #[test]
+    fn activation_payment_leaf_is_valued_as_its_finished_payment() {
+        let mid = equip_paid_by_ogre_mid_payment();
+        assert!(mid.stack.is_empty(), "reach: nothing is on the stack yet");
+        assert_eq!(mid.players[0].life, 17, "reach: the Ogre paid 3 life");
+        assert!(matches!(
+            classify_payment_continuation(&mid),
+            PaymentContinuationState::Affiliated(
+                engine::ai_support::PaymentContinuationRoot::Activation { .. }
+            )
+        ));
+        let mut finished = mid.clone();
+        apply_as_current_for_simulation(&mut finished, GameAction::PassPriority)
+            .expect("the floating {R} pays Equip {1}");
+        assert_eq!(
+            finished.stack.len(),
+            1,
+            "reach: the equip ability is on the stack"
+        );
+
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let policies = PolicyRegistry::default();
+        let mut services = PlannerServices::with_deadline(
+            PlayerId(0),
+            &config,
+            &policies,
+            crate::context::AiContext::empty(&config.weights),
+            Some(engine::util::Deadline::none()),
+        );
+        let finished_value = services.evaluate_state_quiesced(&finished);
+        assert_ne!(
+            services.evaluate_state_cached(&mid),
+            finished_value,
+            "reach: valuing the payment unfinished differs from finishing it"
+        );
+        assert_eq!(
+            services.evaluate_state_quiesced(&mid),
+            finished_value,
+            "the search leaf finishes the activation's payment"
+        );
+        assert_eq!(
+            services.quiesced_leaf_eval(&mid),
+            services.quiesced_leaf_eval(&finished),
+            "the rollout leaf finishes the activation's payment"
         );
     }
 

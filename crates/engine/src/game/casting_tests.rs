@@ -38029,7 +38029,7 @@ mod remove_counter_cost {
             selection: CounterCostSelection::SingleObject,
         };
         assert!(
-            !cost.is_payable(&state, PlayerId(0), source),
+            !cost.is_payable_for_spell(&state, PlayerId(0), source),
             "cost must be unpayable when the source has no +1/+1 counters"
         );
         assert!(
@@ -38056,7 +38056,7 @@ mod remove_counter_cost {
             selection: CounterCostSelection::SingleObject,
         };
         assert!(
-            !cost.is_payable(&state, PlayerId(0), source),
+            !cost.is_payable_for_spell(&state, PlayerId(0), source),
             "cost must be unpayable when the source has fewer than N counters"
         );
     }
@@ -39545,7 +39545,7 @@ mod unattach_cost {
         let (equipment, creature) = attached_equipment(&mut state);
         let cost = AbilityCost::Unattach;
 
-        assert!(cost.is_payable(&state, PlayerId(0), equipment));
+        assert!(cost.is_payable_for_spell(&state, PlayerId(0), equipment));
         pay_ability_cost_for_activation(
             &mut state,
             PlayerId(0),
@@ -39569,7 +39569,7 @@ mod unattach_cost {
         crate::game::effects::attach::unattach(&mut state, equipment);
 
         assert!(
-            !AbilityCost::Unattach.is_payable(&state, PlayerId(0), equipment),
+            !AbilityCost::Unattach.is_payable_for_spell(&state, PlayerId(0), equipment),
             "unattach cost requires an attached source permanent"
         );
     }
@@ -39589,7 +39589,7 @@ mod unattach_cost {
         assert!(state.objects[&equipment].attached_to.is_some());
         assert!(state.objects[&creature].attachments.contains(&equipment));
         assert!(
-            !AbilityCost::Unattach.is_payable(&state, PlayerId(0), equipment),
+            !AbilityCost::Unattach.is_payable_for_spell(&state, PlayerId(0), equipment),
             "unattach cost is Equipment-only"
         );
     }
@@ -45687,7 +45687,7 @@ const PIRANHA_MARSH_ORACLE_FULL: &str =
 ///      earlier event — NOT a simultaneous re-entry, so the 2022-12-08 WotC
 ///      "can't attach to a permanent entering at the same time" ruling does not
 ///      apply here). WGD leaving fires its LTB: "return the exiled cards to the
-///      battlefield" (CR 610.3).
+///      battlefield" (CR 607.2a).
 ///   5. The Aura, the plain land, and Piranha Marsh return as NEW objects
 ///      (CR 400.7). The Aura's Enchant reset to its printed "creature card in a
 ///      graveyard" and legally attaches to WGD-in-graveyard (CR 303.4f). The
@@ -45695,37 +45695,12 @@ const PIRANHA_MARSH_ORACLE_FULL: &str =
 ///      Piranha Marsh's ETB refires, costing P1 1 life (CR 119.3).
 ///   6. The re-attached Aura's ETB reanimates WGD once more, completing one cycle.
 ///
-/// ROOT CAUSE + FIX (2026-07): the failure was a single missing effect-variant
-/// arm in the parser's two-trigger exile-return synthesis, NOT a test-only or
-/// out-of-scope gap. The engine already models "exile X, return X when the source
-/// leaves" generally (Journey to Nowhere / Oblivion Ring, CR 607.1 + CR 607.2a +
-/// CR 406.6, via a CR 610.3 "until"-duration vehicle): the parser pass
-/// `detect_etb_exile_ltb_return` / `apply_etb_exile_ltb_return` stamps
-/// `Duration::UntilHostLeavesPlay` onto the ETB exile at parse time, which makes
-/// `zone_pipeline` create a persistent `ExileLinkKind::UntilSourceLeaves` link for
-/// every exiled object, and `check_exile_returns` (run every priority pass) then
-/// performs the automatic return when the source leaves the battlefield —
-/// independent of whether the card's own printed LTB trigger ever resolves.
-///
-/// The bug: `trigger_is_etb_exile_pending_duration` only matched the single-target
-/// `Effect::ChangeZone`→Exile, not the mass `Effect::ChangeZoneAll`→Exile that
-/// WGD's "exile all other permanents you control" parses to. So WGD's ETB never
-/// got the duration stamp and the entire downstream machinery stayed dormant.
-/// WGD's own printed LTB `ChangeZone{TrackedSet}` return is vestigial for this
-/// class (`TrackedSet(0)` resolves to an empty set — a no-op), exactly like the
-/// Fiend Hunter → Wall of Omens precedent (issue #3673) where the automatic
-/// `check_exile_returns` path, not the printed trigger, is what returns the
-/// cards. (Realm Razer shares WGD's mass-exile ETB shape but its LTB return
-/// carries a "tapped" entry modifier the automatic return path can't apply —
-/// `trigger_is_ltb_return` correctly excludes it from this synthesis rather
-/// than silently dropping that modifier; see `parser/oracle_tests.rs`'s
+/// CR 607.2a + CR 607.3: WGD's ETB exile and its LTB return are linked
+/// abilities. The exile records a `TrackedBySource` link for each exiled object,
+/// and the exiled cards return only when WGD's printed LTB trigger resolves.
+/// (Realm Razer shares WGD's mass-exile ETB shape but its LTB return carries a
+/// "tapped" entry modifier; see `parser/oracle_tests.rs`'s
 /// `mass_exile_ltb_return_with_entry_modifier_is_not_paired`.)
-///
-/// This test drives the real return path: it fires WGD's (now-vestigial) LTB
-/// trigger, then calls `check_exile_returns` over the SAME events vec that carries
-/// WGD's sacrifice `ZoneChanged` event (mirroring `engine_priority.rs:177-210`),
-/// then scans the appended return events so the returned non-Aura permanents' own
-/// ETBs (Piranha Marsh's life loss) fire.
 ///
 /// SCOPE: two independent fixes now compose to close a full cycle. (1) The
 /// mass-exile-return parser fix (this branch): the exiled permanents (the plain
@@ -45940,6 +45915,23 @@ fn worldgorger_dragon_animate_dead_self_loop_single_cycle() {
         Zone::Battlefield,
         "WGD is exempt from its own mass-exile ('all OTHER permanents')"
     );
+    // Measured before the sacrifice: battlefield exit prunes the live links.
+    let tracked_links = state
+        .exile_links
+        .iter()
+        .filter(|link| {
+            link.source_id == wgd_id
+                && matches!(
+                    link.kind,
+                    crate::types::game_state::ExileLinkKind::TrackedBySource
+                )
+        })
+        .count();
+    assert_eq!(
+        tracked_links, 3,
+        "WGD's mass-exile ETB must link each of the 3 exiled objects (Aura, plain \
+         land, Piranha Marsh) to WGD"
+    );
     // The exiled Aura's Enchant correctly RESET to its printed restriction on the
     // exile round-trip (CR 400.7) — refutes the keyword-reset-bug hypothesis.
     // Off-zone object (Exile), so the existence check must go through the
@@ -45986,73 +45978,42 @@ fn worldgorger_dragon_animate_dead_self_loop_single_cycle() {
         "WGD must be sacrificed to the graveyard"
     );
 
-    // Reach-guard (proves the fix's upstream fired): the widened parser predicate
-    // stamped `Duration::UntilHostLeavesPlay` on WGD's mass-exile ETB, so resolving
-    // it in step 3 created a persistent `UntilSourceLeaves` link for every exiled
-    // object. If the `matches!` widening is reverted, no links exist and the
-    // return below is a no-op — this guard flips to zero and the crux fails.
-    let until_source_leaves_links = state
-        .exile_links
-        .iter()
-        .filter(|link| {
-            link.source_id == wgd_id
-                && matches!(
-                    link.kind,
-                    crate::types::game_state::ExileLinkKind::UntilSourceLeaves { .. }
-                )
-        })
-        .count();
-    assert_eq!(
-        until_source_leaves_links, 3,
-        "WGD's mass-exile ETB must create an UntilSourceLeaves link for each of the \
-         3 exiled objects (Aura, plain land, Piranha Marsh) — this is the duration \
-         stamp from the widened parser predicate taking effect"
-    );
-
-    // (5) WGD left the battlefield. First fire + resolve WGD's own printed LTB
-    // trigger, which for this mass-exile class is vestigial: its return effect is
-    // `ChangeZone { target: TrackedSet }` and `TrackedSet` resolves to an empty set,
-    // so it no-ops (the Fiend Hunter → Wall of Omens precedent, issue #3673).
+    // (5) WGD left the battlefield → its LTB trigger goes on the stack. The
+    // exiled objects stay in exile until it resolves (CR 607.2a).
     crate::game::triggers::process_triggers(&mut state, &sac_ev);
     assert_eq!(
         state.stack.len(),
         1,
         "WGD LTB mass-return trigger must be on the stack"
     );
+    assert!(state
+        .stack
+        .back()
+        .is_some_and(|entry| entry.source_id == wgd_id));
+    for (id, name) in [
+        (aura_id, "the Aura"),
+        (plain_land, "the plain land"),
+        (piranha, "Piranha Marsh"),
+    ] {
+        assert_eq!(
+            state.objects[&id].zone,
+            Zone::Exile,
+            "{name} must stay exiled while WGD's LTB trigger is on the stack"
+        );
+    }
     let mut ltb_ev = Vec::new();
     stack::resolve_top(&mut state, &mut ltb_ev);
     crate::game::layers::evaluate_layers(&mut state);
-    // The vestigial LTB trigger returned nothing on its own — the exiled objects
-    // are still in exile at this point. This confirms the printed trigger is NOT
-    // the mechanism; `check_exile_returns` below is.
-    assert_eq!(
-        state.objects[&aura_id].zone,
-        Zone::Exile,
-        "WGD's own printed LTB trigger (empty TrackedSet) must NOT return the cards"
-    );
 
-    // THE FIX'S RUNTIME PATH: `check_exile_returns` reads WGD's sacrifice
-    // `ZoneChanged { from: Battlefield }` event out of `sac_ev` and appends the
-    // return events INTO THE SAME vec (mirroring `engine_priority.rs:177-210`). It
-    // must be passed the vec that actually contains WGD's leave event — a fresh vec
-    // would silently no-op. CR 610.3: the exiled cards return.
-    crate::game::engine::check_exile_returns(&mut state, &mut sac_ev);
-    crate::game::layers::evaluate_layers(&mut state);
-
-    // *** CRUX: the exiled non-Aura permanents must return via the automatic
-    // exile-link mechanism. Before the parser predicate was widened, WGD's ETB
-    // never carried `Duration::UntilHostLeavesPlay`, no `UntilSourceLeaves` links
-    // existed, and this returned NOTHING. Reverting the `matches!` widening drops
-    // the reach-guard above to zero links and flips both of these to `Exile`. ***
     assert_eq!(
         state.objects[&plain_land].zone,
         Zone::Battlefield,
-        "the plain land must return to the battlefield via check_exile_returns (CR 610.3)"
+        "the plain land must return to the battlefield when WGD's LTB resolves"
     );
     assert_eq!(
         state.objects[&piranha].zone,
         Zone::Battlefield,
-        "Piranha Marsh must return to the battlefield via check_exile_returns (CR 610.3)"
+        "Piranha Marsh must return to the battlefield when WGD's LTB resolves"
     );
 
     // THE AURA RE-ENTRY LEG — now CLOSED by PR #6072 (merged from origin/main).
@@ -46065,7 +46026,7 @@ fn worldgorger_dragon_animate_dead_self_loop_single_cycle() {
     // enumerate candidate hosts across whatever zone(s) the Aura's own enchant
     // filter implies, via `TargetFilter::extract_zones()` + `zone_object_ids`
     // (Animate Dead / Dance of the Dead / Necromancy class), so the graveyard host
-    // WGD is now found. The `check_exile_returns` group return above therefore
+    // WGD is now found. The LTB's group return above therefore
     // brought the Aura back onto the battlefield with a single legal host, and the
     // in-pipeline single-host branch auto-attached it (CR 303.4f — controller's
     // choice, resolved with no prompt when exactly one legal host exists).
@@ -59363,7 +59324,7 @@ fn resolve_discard_requirement_fixed_one_empty_hand_is_unpayable_err() {
         Err(EngineError::ActionNotAllowed(_))
     ));
     // CR 601.2h: the payability gate excludes it too.
-    assert!(!cost.is_payable(&state, PlayerId(0), source));
+    assert!(!cost.is_payable_for_spell(&state, PlayerId(0), source));
 
     // Positive reach-guard: with one eligible card the helper resolves the real
     // interactive requirement (not a vacuous early return).
@@ -59387,7 +59348,7 @@ fn resolve_discard_requirement_fixed_one_empty_hand_is_unpayable_err() {
         }
         other => panic!("expected Ok(Some((1, [card]))), got {other:?}"),
     }
-    assert!(cost.is_payable(&state, PlayerId(0), source));
+    assert!(cost.is_payable_for_spell(&state, PlayerId(0), source));
 }
 
 /// Issue #6494 (no over-fire, casting path): a `Discard { Fixed(2) }` with THREE

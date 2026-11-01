@@ -7824,7 +7824,10 @@ impl IllegalTargetsDisposition {
     }
 }
 
-/// CR 701.9a: How cards are selected from a zone during an effect or cost.
+/// How cards are selected from a zone during an effect or cost. Modeled on
+/// CR 701.9b (a discard is by default chosen by the affected player, but some
+/// effects require a random discard); other consumers of this enum are only
+/// analogous to that rule.
 ///
 /// Analogous to `TargetSelectionMode` but for cards from a player's hand (or
 /// other non-target zones) rather than spell/ability targets.
@@ -7833,7 +7836,8 @@ pub enum CardSelectionMode {
     /// CR 608.2d: The affected player or controller chooses the card(s).
     #[default]
     Chosen,
-    /// CR 701.9a: The game selects card(s) uniformly at random.
+    /// CR 701.9b: The game selects card(s) uniformly at random (random discard;
+    /// analogous for the other consumers of this enum).
     Random,
 }
 
@@ -18676,6 +18680,15 @@ pub enum AbilityCost {
     Loyalty {
         amount: i32,
     },
+    /// Un-card (no CR entry): the "cost" is saying `phrase` aloud — Rod of
+    /// Spanking's "unless that player says \"Thank you, sir. May I have
+    /// another?\"", Impounding Lot-Bot's "you may say \"INCARCERATE!\"". Costs
+    /// no resources; the payer pays by choosing to say it, and only a player who
+    /// opted in to Un-card actions is offered the choice
+    /// (`un_actions::player_can_say_phrases`).
+    SayPhrase {
+        phrase: String,
+    },
     Sacrifice(SacrificeCost),
     /// CR 119.4: Pay life as an activation or additional cost. `amount` is a
     /// `QuantityExpr` so dynamic references (e.g.
@@ -18942,6 +18955,8 @@ pub fn is_direct_resolution_optional_payment_branch(cost: &AbilityCost) -> bool 
     use crate::types::ability::{CardSelectionMode, DiscardSelfScope, QuantityExpr};
 
     match cost {
+        // Un-card: "you may say \"...\". If you do" is a direct optional payment.
+        AbilityCost::SayPhrase { .. } => true,
         AbilityCost::Mana { cost } => !cost.has_x(),
         AbilityCost::Discard {
             count: QuantityExpr::Fixed { value },
@@ -19014,6 +19029,7 @@ pub fn supported_at_resolution(cost: &AbilityCost) -> bool {
         | AbilityCost::ManaDynamic { .. }
         | AbilityCost::PayLife { .. }
         | AbilityCost::PayEnergy { .. }
+        | AbilityCost::SayPhrase { .. }
         | AbilityCost::PaySpeed { .. }
         | AbilityCost::TapCreatures { .. }
         | AbilityCost::Composite { .. }
@@ -19164,6 +19180,7 @@ macro_rules! define_ability_cost_quantity_walk {
             AbilityCost::Mana { .. }
             | AbilityCost::Tap
             | AbilityCost::Untap
+            | AbilityCost::SayPhrase { .. }
             | AbilityCost::Loyalty { .. }
             | AbilityCost::Sacrifice(_)
             | AbilityCost::Exile { .. }
@@ -19212,6 +19229,7 @@ impl AbilityCost {
             | AbilityCost::ManaDynamic { .. }
             | AbilityCost::Tap
             | AbilityCost::Untap
+            | AbilityCost::SayPhrase { .. }
             | AbilityCost::Loyalty { .. }
             | AbilityCost::Sacrifice(_)
             | AbilityCost::PayLife { .. }
@@ -19406,6 +19424,7 @@ impl AbilityCost {
             // CR 701.26a/b: tap/untap are status changes, not zone changes.
             | AbilityCost::Tap
             | AbilityCost::Untap
+            | AbilityCost::SayPhrase { .. }
             | AbilityCost::TapCreatures { .. }
             | AbilityCost::Exert
             // CR 701.3d: unattaching leaves the object on the battlefield.
@@ -19474,6 +19493,7 @@ impl AbilityCost {
             // cannot settle it — it must still simulate.
             | AbilityCost::ExileWithAggregate { .. }
             | AbilityCost::TapCreatures { .. }
+            | AbilityCost::SayPhrase { .. }
             | AbilityCost::RemoveCounter { .. }
             | AbilityCost::PayEnergy { .. }
             | AbilityCost::PaySpeed { .. }
@@ -19584,6 +19604,7 @@ impl AbilityCost {
             // `CostNotPayableNow` tells the player.
             AbilityCost::Tap
             | AbilityCost::Untap
+            | AbilityCost::SayPhrase { .. }
             | AbilityCost::Mana { .. }
             | AbilityCost::ManaDynamic { .. }
             | AbilityCost::Loyalty { .. }
@@ -19687,6 +19708,8 @@ impl AbilityCost {
             AbilityCost::ManaDynamic { .. } => vec![CostCategory::ManaOnly],
             AbilityCost::Tap => vec![CostCategory::TapsSelf],
             AbilityCost::Untap => vec![CostCategory::UntapsSelf],
+            // Un-card: saying a phrase pays no resource, so it has no cost category.
+            AbilityCost::SayPhrase { .. } => Vec::new(),
             AbilityCost::Loyalty { .. } => vec![CostCategory::PaysLoyalty],
             AbilityCost::Sacrifice(_) => {
                 vec![CostCategory::SacrificesPermanent]
@@ -19792,6 +19815,7 @@ impl AbilityCost {
             | AbilityCost::ManaDynamic { .. }
             | AbilityCost::Tap
             | AbilityCost::Untap
+            | AbilityCost::SayPhrase { .. }
             | AbilityCost::Loyalty { .. }
             | AbilityCost::Sacrifice(_)
             | AbilityCost::PayLife { .. }
@@ -19851,6 +19875,7 @@ impl AbilityCost {
             | AbilityCost::ManaDynamic { .. }
             | AbilityCost::Tap
             | AbilityCost::Untap
+            | AbilityCost::SayPhrase { .. }
             | AbilityCost::Loyalty { .. }
             | AbilityCost::Sacrifice(_)
 
@@ -19908,6 +19933,7 @@ impl AbilityCost {
             | AbilityCost::ManaDynamic { .. }
             | AbilityCost::Tap
             | AbilityCost::Untap
+            | AbilityCost::SayPhrase { .. }
             | AbilityCost::Loyalty { .. }
             | AbilityCost::PayLife { .. }
             | AbilityCost::Discard { .. }
@@ -20748,27 +20774,6 @@ pub enum SpeedDelta {
 pub enum StepSkipTarget {
     Step(Phase),
     CombatPhase,
-}
-
-impl StepSkipTarget {
-    pub fn constituent_steps(self) -> &'static [Phase] {
-        match self {
-            Self::Step(Phase::Untap) => &[Phase::Untap],
-            Self::Step(Phase::Upkeep) => &[Phase::Upkeep],
-            Self::Step(Phase::Draw) => &[Phase::Draw],
-            Self::Step(Phase::PreCombatMain) => &[Phase::PreCombatMain],
-            Self::Step(Phase::BeginCombat) => &[Phase::BeginCombat],
-            Self::Step(Phase::DeclareAttackers) => &[Phase::DeclareAttackers],
-            Self::Step(Phase::DeclareBlockers) => &[Phase::DeclareBlockers],
-            Self::Step(Phase::CombatDamage) => &[Phase::CombatDamage],
-            Self::Step(Phase::EndCombat) => &[Phase::EndCombat],
-            Self::Step(Phase::PostCombatMain) => &[Phase::PostCombatMain],
-            Self::Step(Phase::End) => &[Phase::End],
-            Self::Step(Phase::Cleanup) => &[Phase::Cleanup],
-            // CR 506.1: the combat phase's five steps.
-            Self::CombatPhase => PhaseGroup::Combat.steps(),
-        }
-    }
 }
 
 /// CR 500.8 + CR 500.9 + CR 500.10: where an added phase or step is inserted.
@@ -22855,15 +22860,15 @@ pub enum Effect {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         additional_modifications: Vec<ContinuousModification>,
     },
-    /// CR 707.2 + CR 111.1 + CR 701.9a (analogous): Create a token that's a copy
+    /// CR 707.2 + CR 111.1 + CR 701.9b (analogous): Create a token that's a copy
     /// of a creature card chosen from a format-defined pool whose mana value
     /// satisfies `mv <comparator> mv_bound`. The canonical card is the Momir
     /// Basic emblem ("Create a token that's a copy of a creature card with mana
     /// value X chosen at random"). The pool is the engine's creature corpus,
     /// drawn from `GameState::card_db` at resolution time. `selection` chooses how a
     /// candidate is picked from the matching set: `Random` (CR 701.9a is the
-    /// discard keyword action; the random *selection* here is analogous to the
-    /// random-choice idiom) or `Chosen`. Built as a reusable primitive so the
+    /// discard keyword action and CR 701.9b its random-discard rule; the random
+    /// *selection* here is only analogous to the latter) or `Chosen`. Built as a reusable primitive so the
     /// `mv` comparator also expresses "copy a creature card with mana value N or
     /// less" (Oko-style) via `Comparator::LE`.
     CreateTokenCopyFromPool {
@@ -22881,7 +22886,7 @@ pub enum Effect {
         /// CR 202.3: the mana-value bound. For Momir this is `Variable { "X" }`
         /// (the chosen X paid for the ability).
         mv_bound: QuantityExpr,
-        /// CR 701.9a (analogous) / CR 608.2d: how a candidate is selected from
+        /// CR 701.9b (analogous) / CR 608.2d: how a candidate is selected from
         /// the matching set — `Random` (Momir) or `Chosen`.
         selection: CardSelectionMode,
         /// CR 707.10: number of tokens to create. Defaults to one.
@@ -23352,7 +23357,7 @@ pub enum Effect {
         count: QuantityExpr,
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
-        /// CR 701.9a: Random discard (e.g., "discard a card at random").
+        /// CR 701.9b: Random discard (e.g., "discard a card at random").
         #[serde(
             default,
             with = "card_selection_bool_compat",
@@ -25538,7 +25543,7 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         player_b: TargetFilter,
     },
-    /// CR 730.1: Set the game's day/night designation.
+    /// CR 731.1: Set the game's day/night designation.
     /// Triggers daybound/nightbound transformations on all relevant permanents.
     SetDayNight {
         to: crate::types::game_state_kinds::DayNight,
@@ -37185,7 +37190,7 @@ pub enum AbilityCondition {
     /// `AdditionalCostNotPaid` and `SourceDidNotEnterThisTurn`. Used by
     /// "if you don't" / "unless you" / "if it isn't" sub-clause gates.
     Not { condition: Box<AbilityCondition> },
-    /// CR 730.2a: True when it's neither day nor night (day_night is None).
+    /// CR 731.1: True when it's neither day nor night (day_night is None).
     /// Used by Daybound/Nightbound ETB initialization: "If it's neither day nor night,
     /// it becomes day as this creature enters."
     DayNightIsNeither,
@@ -39345,6 +39350,10 @@ pub struct TriggerDefinition {
     /// "Whenever you roll a d20". `None` accepts any die.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub die_sides: Option<u8>,
+    /// Un-card Gotcha: the opponent behavior this ability watches for. `Some`
+    /// only with `TriggerMode::GotchaSaid`; read by `un_actions::open_gotcha_offers`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gotcha_condition: Option<crate::types::un_actions::GotchaCondition>,
     /// CR 700.14: Expend threshold — fires when cumulative mana spent on spells crosses N.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expend_threshold: Option<u32>,
@@ -39669,6 +39678,40 @@ pub struct TriggerDefinitionRef {
 }
 
 impl TriggerDefinitionRef {
+    /// Yields every object incarnation this reference names, an expanded grant's provider
+    /// included (CR 400.7).
+    pub fn for_each_incarnation_mut(&mut self, f: &mut impl FnMut(ObjectId, &mut u64)) {
+        f(self.source.object_id, &mut self.source.incarnation);
+        if let TriggerDefinitionOccurrenceRef::ExpandedGrant { provider, .. } = &mut self.occurrence
+        {
+            provider.for_each_incarnation_mut(f);
+        }
+    }
+
+    /// Yields every layer-6 grant generation this reference names, an expanded grant's provider
+    /// included, keyed by the object whose allocator minted it.
+    pub fn for_each_grant_generation_mut(&mut self, f: &mut impl FnMut(ObjectId, &mut u64)) {
+        let minted_by = self.source.object_id;
+        match &mut self.occurrence {
+            TriggerDefinitionOccurrenceRef::KeywordCompanion { grant_instance, .. }
+            | TriggerDefinitionOccurrenceRef::CopyRetained { grant_instance, .. }
+            | TriggerDefinitionOccurrenceRef::Granted { grant_instance } => {
+                f(minted_by, &mut grant_instance.0);
+            }
+            TriggerDefinitionOccurrenceRef::ExpandedGrant {
+                grant_instance,
+                provider,
+                provider_output_index: _,
+            } => {
+                f(minted_by, &mut grant_instance.0);
+                provider.for_each_grant_generation_mut(f);
+            }
+            TriggerDefinitionOccurrenceRef::Printed { .. }
+            | TriggerDefinitionOccurrenceRef::CopiedValue { .. }
+            | TriggerDefinitionOccurrenceRef::Unmaterialized => {}
+        }
+    }
+
     /// CR 113.2c + CR 603.2 + CR 603.2h: the key under which `def`'s per-definition
     /// limit ledgers (once each turn, once, the first N times each turn, and the
     /// indicated action) are read and written. Every lowered half of one printed
@@ -39978,6 +40021,12 @@ impl TriggerOccurrenceState {
             .iter()
             .map(|active| (&active.producer, active.instance))
     }
+
+    pub fn for_each_active_grant_generation_mut(&mut self, mut f: impl FnMut(&mut u64)) {
+        for active in &mut self.active_grants {
+            f(&mut active.instance.0);
+        }
+    }
 }
 
 /// Converts a payload-free producer key plus its recipient-local generation
@@ -40070,6 +40119,7 @@ impl TriggerDefinition {
             unless_pay: None,
             batched: false,
             die_sides: None,
+            gotcha_condition: None,
             expend_threshold: None,
             attack_target_filter: None,
             player_actions: None,
@@ -46214,6 +46264,7 @@ mod tests {
             unless_pay: None,
             batched: false,
             die_sides: None,
+            gotcha_condition: None,
             expend_threshold: None,
             attack_target_filter: None,
             player_actions: None,

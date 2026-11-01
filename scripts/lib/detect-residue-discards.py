@@ -59,10 +59,16 @@ from zone_authority_census import (
 
 SCOPE = "crates/engine/src/parser"
 LEDGER = "scripts/residue-ratchet.txt"
+# `fold_type_union` / `parse_filter_phrase_union` (issue #10364) are union-fold
+# wrappers over the readers below and return the same `(filter, remainder)`
+# shape, so a discard at one of their call sites loses text exactly as a discard
+# at a bare `parse_type_phrase_folding` does. They are counted for that reason:
+# routing a site through the wrapper must not remove it from this ledger.
 HELPERS = frozenset(("parse_target", "parse_target_with_ctx", "parse_target_with_syntax",
                      "parse_target_disjunction", "parse_target_with_disjunctive_restriction",
                      "parse_fight_target", "parse_type_phrase_folding",
-                     "parse_type_phrase_folding_with_ctx"))
+                     "parse_type_phrase_folding_with_ctx", "fold_type_union",
+                     "parse_filter_phrase_union"))
 # ParseContext methods verified to return `f(...)` unchanged (context.rs).
 # Values are total argument counts; only the last argument is the closure.
 RESULT_WRAPPERS = {"with_player_antecedents": 1, "with_player_scope": 2}

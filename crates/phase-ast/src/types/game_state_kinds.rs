@@ -7,7 +7,7 @@ use super::player::PlayerId;
 use super::zones::Zone;
 use crate::types::attack_target::AttackTarget;
 
-/// Tracks whether the game is in day or night state (CR 730).
+/// Tracks whether the game is in day or night state (CR 731.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DayNight {
     Day,

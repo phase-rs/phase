@@ -9049,16 +9049,27 @@ pub(crate) fn parse_oneshot_damage_replacement(
     }
 
     if is_complete_oneshot_prevention_result(result_clause) {
-        // CR 115.10a: this generic branch keeps a NARROWER projection of the
-        // shared recipient table — only "to you" (`Controller`) is carried; every
-        // other entry (including `Player`) and every unsupported scope stays
-        // `Any`, exactly as before. These shapes carry no source-slot `And`, so
-        // the source-scoped carve-out that keeps a `Player` recipient untargeted
-        // does not apply here, and emitting `TargetFilter::Player` would surface
-        // a spurious target-player slot for what is only a recipient scope.
-        let target = damage_target_filter_to_prevent_target(target_filter.as_ref())
-            .filter(|target| *target == TargetFilter::Controller)
-            .unwrap_or(TargetFilter::Any);
+        // CR 115.10a: for a SCOPED recipient this generic branch keeps a NARROWER
+        // projection of the shared recipient table — only "to you" (`Controller`)
+        // is carried; every other entry (including `Player`) and every
+        // unsupported scope stays `Any`. These shapes carry no source-slot `And`,
+        // so the source-scoped carve-out that keeps a `Player` recipient
+        // untargeted does not apply here, and emitting `TargetFilter::Player`
+        // would surface a spurious target-player slot for a mere scope.
+        //
+        // CR 615.1 + CR 115.1: a DECLARED recipient ("to target creature" —
+        // Charm Peddler, Samite Blessing) is different: the prevention effect
+        // applies only to damage dealt to the object chosen as the ability is
+        // activated. It is carried whole (type, controller and every property
+        // restriction) in `target`, which is the engine's single authority for a
+        // declared `Single` recipient slot; dropping it to `Any` would prevent
+        // the chosen source's damage to EVERY recipient.
+        let target = match recipient_object_filter {
+            Some(declared) => declared,
+            None => damage_target_filter_to_prevent_target(target_filter.as_ref())
+                .filter(|target| *target == TargetFilter::Controller)
+                .unwrap_or(TargetFilter::Any),
+        };
         return Some(Effect::PreventDamage {
             amount: PreventionAmount::All,
             amount_dynamic: None,
@@ -9067,8 +9078,7 @@ pub(crate) fn parse_oneshot_damage_replacement(
             // recipient scope was already recognized from the "would deal
             // damage to X" clause — carry it through instead of discarding it.
             // The `recipient_object_filter` object-slot path ("to target
-            // creature") is intentionally left as `Any` here (unchanged), since
-            // it takes `target_filter == None`.
+            // creature") is carried in `target` above as a declared recipient.
             target,
             recipient_scope: crate::types::ability::EffectScope::Single,
             scope: combat_scope
@@ -35597,6 +35607,73 @@ mod snapshot_tests {
                 !matches!(effect, Effect::PreventDamage { .. }),
                 "{text:?} must never become a PreventDamage shield, got {effect:?}"
             );
+        }
+    }
+
+    /// CR 615.1 + CR 115.1: a declared "to target <type>" recipient is carried
+    /// whole in `PreventDamage.target`, restriction included (Charm Peddler,
+    /// Samite Blessing). The bare "to you" scope and an unrestricted clause are the
+    /// reach guards proving the same branch still produces its previous shapes.
+    /// The "target creature you control" and "target permanent" rows are not printed
+    /// card shapes in this grammar; they assert that an existing filter (the peek's
+    /// "target permanent" arm, `parse_target_with_ctx`'s "you control") is carried
+    /// whole rather than rebuilt as a bare `Creature`.
+    #[test]
+    fn chosen_source_prevention_keeps_declared_recipient_restriction() {
+        let ctx = ParseContext::default();
+        let parse = |text: &str| match parse_oneshot_damage_replacement(text, &ctx) {
+            Some(Effect::PreventDamage {
+                target,
+                damage_source_filter,
+                ..
+            }) => {
+                assert!(
+                    matches!(
+                        damage_source_filter,
+                        Some(TargetFilter::ChosenDamageSource { filter: None })
+                    ),
+                    "{text:?}: chosen-source semantics must be retained, got {damage_source_filter:?}"
+                );
+                target
+            }
+            other => panic!("{text:?}: expected PreventDamage, got {other:?}"),
+        };
+
+        // Reach guards: scope-only recipients keep their prior projection.
+        assert_eq!(
+            parse("the next time a source of your choice would deal damage to you this turn, prevent that damage."),
+            TargetFilter::Controller
+        );
+        assert_eq!(
+            parse("the next time a source of your choice would deal damage this turn, prevent that damage."),
+            TargetFilter::Any
+        );
+
+        // The declared recipient, with each restriction axis intact.
+        for (text, type_filter, controller) in [
+            (
+                "the next time a source of your choice would deal damage to target creature this turn, prevent that damage.",
+                TypeFilter::Creature,
+                None,
+            ),
+            (
+                "the next time a source of your choice would deal damage to target creature you control this turn, prevent that damage.",
+                TypeFilter::Creature,
+                Some(ControllerRef::You),
+            ),
+            (
+                "the next time a source of your choice would deal damage to target permanent this turn, prevent that damage.",
+                TypeFilter::Permanent,
+                None,
+            ),
+        ] {
+            match parse(text) {
+                TargetFilter::Typed(tf) => {
+                    assert_eq!(tf.type_filters, vec![type_filter], "{text:?}");
+                    assert_eq!(tf.controller, controller, "{text:?}");
+                }
+                other => panic!("{text:?}: expected a Typed declared recipient, got {other:?}"),
+            }
         }
     }
 

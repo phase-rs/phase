@@ -12567,6 +12567,20 @@ fn parse_mana_and_life_payment(rest_orig: &str) -> Option<AbilityCost> {
     })
 }
 
+/// Un-card: the body of a spoken payment after `say ` — a quoted phrase with an
+/// optional delivery qualifier (`in a robot voice`) and optional final period.
+pub(crate) fn parse_say_phrase_payment(input: &str) -> OracleResult<'_, String> {
+    let (rest, phrase) = super::parse_quoted_phrase(input)?;
+    let (rest, _) = opt(preceded(
+        tag(" in a "),
+        terminated(take_until(" voice"), tag(" voice")),
+    ))
+    .parse(rest)?;
+    let (rest, _) = opt(tag(".")).parse(rest)?;
+    let (rest, _) = eof.parse(rest)?;
+    Ok((rest, phrase.trim().to_string()))
+}
+
 /// CR 118.1 + CR 119.4 + CR 107.1c: parse the residue after a `pay ` prefix
 /// into an `AbilityCost` — mana+life combos, `pay <amount> life`, any-amount
 /// energy/life/mana payments, `{E}` counts, and bare mana symbols. Single
@@ -12712,6 +12726,18 @@ pub(super) fn parse_cost_resource_ast(
         let rest = &lower[lower.len() - rest_orig.len()..];
         if let Some(cost) = parse_pay_residue_cost(rest, rest_orig) {
             return Some(CostResourceImperativeAst::Pay { cost });
+        }
+    }
+    // Un-card (no CR entry): `say "<phrase>" [in a <adjective> voice]` — a spoken
+    // payment ("you may say \"INCARCERATE!\" in a robot voice. If you do, …").
+    // The optional-payment framing around it is the ordinary CR 118.12 shape.
+    if let Some((_, rest_orig)) =
+        nom_on_lower(text, lower, |input| value((), tag("say ")).parse(input))
+    {
+        if let Ok((_, phrase)) = parse_say_phrase_payment(rest_orig) {
+            return Some(CostResourceImperativeAst::Pay {
+                cost: AbilityCost::SayPhrase { phrase },
+            });
         }
     }
     // CR 106.4 + CR 505.1: Dispatch to the mana detector for a bare "add …"

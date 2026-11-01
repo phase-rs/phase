@@ -16,7 +16,7 @@
 //!   loop from a *mandatory-draw* (CR 104.4b) loop.
 //!
 //! The strict comparison treats differing life/damage/counters as different
-//! states (correct for a mandatory loop → draw). The detector needs the inverse:
+//! states. The detector needs the inverse:
 //! "same board, resources may differ" → a beneficial loop that should be
 //! shortcut (CR 732.2a) rather than drawn (CR 104.4b / CR 732.4).
 //!
@@ -26,8 +26,7 @@
 //!   stream, which a single `GameState` snapshot cannot supply.
 //! - [`loop_check`] — Engine A: [`detect_loop`] turns a same-board-plus-net-progress
 //!   measurement into a [`LoopCertificate`] (the unbounded axes + a [`WinKind`]),
-//!   the offline classification the corpus harness asserts against. Still
-//!   **zero gameplay change** — never called from the reducer.
+//!   the offline classification the corpus harness asserts against.
 //! - [`ability_graph`] — Engine B: [`candidate_cycles`] emits over-approximate
 //!   `CandidateCycle`s; `game::play_trace` carries their members' plays and the
 //!   recorded-period confirmer decides.

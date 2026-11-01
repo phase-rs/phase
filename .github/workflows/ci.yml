@@ -65,8 +65,13 @@ jobs:
       # every later cargo invocation silently rewrites the file, and Nightly
       # Release dies on `cargo release`'s dirty-tree check -- which is exactly
       # what #7556 did. `--locked` is already used for the Tauri manifest below.
+      # The first invocation checks the integration test binaries on their own so
+      # they never overlap the engine lib-test target (together they exceed the
+      # hosted runner's memory); the second is the full command and reuses them.
       - name: Clippy
-        run: cargo clippy --locked --workspace --exclude phase-tauri --all-targets --features engine/proptest -- -D warnings
+        run: |
+          cargo clippy --locked --workspace --exclude phase-tauri --test integration --features engine/proptest -- -D warnings
+          cargo clippy --locked --workspace --exclude phase-tauri --all-targets --features engine/proptest -- -D warnings
 
       - name: Interaction bindings are current
         run: ./scripts/check-interaction-bindings.sh --check

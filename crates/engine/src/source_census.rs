@@ -223,8 +223,9 @@ mod tests {
             ),
             (
                 "tests/integration/loop_shortcut.rs",
-                "Parses with `syn` rather than by substring, so comments are excluded by \
-                 construction — the stronger instrument this module approximates.",
+                "Mixed: its `syn` readers exclude comments by construction, but its \
+                 `TriggerTargetSelection` arm census matches needles in raw `engine.rs` \
+                 lines, comments included.",
             ),
             (
                 "src/game/ability_scan.rs",

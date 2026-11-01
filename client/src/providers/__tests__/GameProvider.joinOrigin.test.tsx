@@ -68,6 +68,7 @@ const {
     setLatency: vi.fn(),
     setOpponentDisplayName: vi.fn(),
     setSpectators: vi.fn(),
+    setStateWithheld: vi.fn(),
     showToast: vi.fn(),
   };
   return {

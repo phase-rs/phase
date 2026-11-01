@@ -4,7 +4,7 @@
 //!   * The §5.2 **allowlist-parity sweep** — the corpus-wide proof that the new
 //!     `ability_rw` conflict gate reproduces the DELETED 12-string serde
 //!     allowlist's decision on every printed no-ordering-input trigger, modulo
-//!     the seven proven-order-dependent category-(1) rows (the CR 603.3b fix).
+//!     the proven-order-dependent category-(1) rows (the CR 603.3b fix).
 //!     A FROZEN in-test copy of the deleted walk is the reference oracle.
 //!   * The **discriminators** N-A/N-B/N-B2/N-C/N-D/N-F — hand-built groups run
 //!     through the production ordering-soundness authority
@@ -97,9 +97,8 @@ fn ast_bears_unimplemented(value: &serde_json::Value) -> bool {
 
 /// The canonical category-(1) rows (§5.2): provably order-dependent printed
 /// groups whose same-event auto→prompt flip IS the CR 603.3b fix. Each carries
-/// its in-plan order-dependence proof (see PR-6.75-C0FULL-C1-PLAN.md §5.2). A
-/// same-event diff on any OTHER card is an implementation finding, never a new
-/// row (STRICT PROOF-GATE).
+/// its one-line order-dependence proof. A same-event diff on any OTHER card is an
+/// implementation finding until such a proof lists it (STRICT PROOF-GATE).
 const CATEGORY_1_ROWS: &[&str] = &[
     // Ouroboroid: each copy's Power{Source} read is fed by the other's
     // PutCounterAll — token/counter totals differ by order.
@@ -115,6 +114,9 @@ const CATEGORY_1_ROWS: &[&str] = &[
     // Spawn of Mayhem: damage order across the 10-life threshold decides which
     // copy gets the counter.
     "spawn of mayhem",
+    // Marauding Raptor: the first copy's damage can destroy a small entering Dinosaur
+    // (CR 704.5g) before the second resolves — which copy gets +2/+0 depends on order.
+    "marauding raptor",
     // Your Inescapable Doom: PutCounter{Any} write × sibling CountersOn{Source}
     // read — same-kind counter feed (CR 904.3 two-copy scheme deck).
     "your inescapable doom",
@@ -203,6 +205,10 @@ const DOCUMENTED_OVER_PROMPT: &[&str] = &[
     // commutes ONLY because the phoenix's own power (2 < 4) — runtime P/T, invisible
     // to a context-free recognizer.
     "flamewake phoenix",
+    // Choose{CreatureType, persist} → ChangeZoneAll{gy → library}: the chosen type is
+    // bound earlier in the same resolution, but the AST has no scope distinguishing it
+    // from persistent per-source storage.
+    "elvish soultiller",
     // ---- parse-blocked commutes (underneath the mis-parse, the structure
     // commutes) ----
     // RemoveCounter{TriggeringSource} mis-parse (should be SelfRef): each removes
@@ -1047,13 +1053,14 @@ fn ordering_parity_sweep() {
                 .intersection(&se_event_object_class)
                 .collect::<Vec<_>>()
         );
-        // cat-1 exact-hit: the 6 measured same-event flips. Your Inescapable Doom is
+        // cat-1 exact-hit: the measured same-event flips. Your Inescapable Doom is
         // expected-UNHIT (its counter feed parses to Any so the sweep never forms its
         // group); if that parser gap is ever fixed it starts hitting and this assert
         // forces the bookkeeping update.
         let expected_cat1: BTreeSet<String> = [
             "complex automaton",
             "docent of perfection",
+            "marauding raptor",
             "ouroboroid",
             "promise of tomorrow",
             "sidequest: hunt the mark",

@@ -83,6 +83,7 @@ const {
   const multiplayerStore = {
     displayName: "Host",
     setActivePlayerId: vi.fn(),
+    setStateWithheld: vi.fn(),
     takeActiveP2PHost,
     openBroker: vi.fn(),
     closeBroker: vi.fn(),
@@ -356,6 +357,27 @@ describe("GameProvider P2P host lifecycle", () => {
     expect(firstAdapter.initialize).toHaveBeenCalledOnce();
     expect(art.hostPayloads).toEqual([retainedHost]);
     expect(art.face).not.toHaveBeenCalled();
+  });
+
+  it("maps the adapter's withheld-state notice to the banner and clears it on unmount", async () => {
+    const adapter = createAdapter();
+    takeActiveP2PHost.mockReturnValueOnce(adapter);
+    const mount = render(
+      <GameProvider gameId="p2p-game" mode="p2p-host">
+        <div />
+      </GameProvider>,
+    );
+    await waitFor(() => expect(adapter.onEvent).toHaveBeenCalled());
+    const listener = vi.mocked(adapter.onEvent).mock.calls[0][0] as (event: unknown) => void;
+    const notice = { revision: 4, reason: "State update exceeds the delivery bound" };
+
+    listener({ type: "stateDelivery", withheld: notice });
+    expect(multiplayerStore.setStateWithheld).toHaveBeenLastCalledWith(notice);
+    listener({ type: "stateDelivery", withheld: null });
+    expect(multiplayerStore.setStateWithheld).toHaveBeenLastCalledWith(null);
+    listener({ type: "stateDelivery", withheld: notice });
+    mount.unmount();
+    expect(multiplayerStore.setStateWithheld).toHaveBeenLastCalledWith(null);
   });
 
   it("claims seat zero before a pre-game host can replay an identity event", async () => {

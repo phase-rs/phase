@@ -4486,7 +4486,7 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
     ir.diagnostics.append(&mut swallow_diagnostics);
     // ---------------------------------------------------------------------------
 
-    // CR 607.1 + CR 610.3: Two-trigger exile-return synthesis (Journey to
+    // CR 607.1 + CR 607.2a: Two-trigger exile-return pairing (Journey to
     // Nowhere, Oblivion Ring — see `DocumentRelationIr::EtbExileLtbReturn`).
     // CR 102.1 + CR 608.2c: active-player punisher continuity fold (Siren's
     // Call — see `DocumentRelationIr::ActivePlayerPunisher`). Applied here, after
@@ -4738,16 +4738,9 @@ fn target_filter_has_not_attacked_this_turn(filter: &TargetFilter) -> bool {
     }
 }
 
-// --- CR 607.1 + CR 610.3: ETB exile → LTB return two-trigger pair --------------
+// --- CR 607.1 + CR 607.2a: ETB exile → LTB return two-trigger pair -------------
 
-/// CR 610.3: The automatic `check_exile_returns` path this synthesis activates
-/// performs a plain zone move with no entry modifiers — it can't carry a
-/// printed rider like "return the exiled cards to the battlefield TAPPED"
-/// (Realm Razer). Only pair the linked-ability synthesis with an unmodified
-/// return; a modified return needs its own modifier-carrying mechanism and
-/// stays unsupported by this synthesis until one exists (caught in review
-/// of #6055 — Realm Razer would otherwise return its lands untapped,
-/// contradicting its printed text).
+/// Only an unmodified return is rewritten.
 fn change_zone_return_has_no_entry_modifiers(effect: &Effect) -> bool {
     match effect {
         Effect::ChangeZone {
@@ -4769,8 +4762,8 @@ fn change_zone_return_has_no_entry_modifiers(effect: &Effect) -> bool {
 /// The LTB "return the exiled card(s) to the battlefield" trigger *shape*, with
 /// no entry-modifier gate: mode `LeavesBattlefield` whose execute is a
 /// `ChangeZone` of a `TrackedSet` back to the battlefield. This is the raw
-/// pairing signal; whether the automatic return path can actually carry the
-/// printed return is decided by `change_zone_return_has_no_entry_modifiers`
+/// pairing signal; whether the emitted linked return can carry the printed
+/// return is decided by `change_zone_return_has_no_entry_modifiers`
 /// (see `trigger_is_ltb_return` / `trigger_is_ltb_return_with_entry_modifier`).
 fn trigger_is_ltb_return_shape(def: &TriggerDefinition) -> bool {
     def.mode == TriggerMode::LeavesBattlefield
@@ -4787,9 +4780,9 @@ fn trigger_is_ltb_return_shape(def: &TriggerDefinition) -> bool {
 }
 
 /// Whether a trigger is the LTB "return the exiled card to the battlefield" side
-/// that the automatic `ExileLink::UntilSourceLeaves` return path can carry — the
-/// shape matches and the return has no entry modifiers. Journey to Nowhere,
-/// Oblivion Ring, and Worldgorger Dragon all pass here.
+/// that the emitted `ExiledBySource` return can carry — the shape matches and
+/// the return has no entry modifiers. Journey to Nowhere, Oblivion Ring, and
+/// Worldgorger Dragon all pass here.
 fn trigger_is_ltb_return(def: &TriggerDefinition) -> bool {
     trigger_is_ltb_return_shape(def)
         && def
@@ -4798,8 +4791,8 @@ fn trigger_is_ltb_return(def: &TriggerDefinition) -> bool {
             .is_some_and(|ex| change_zone_return_has_no_entry_modifiers(&ex.effect))
 }
 
-/// CR 610.3: Whether a trigger is the LTB return side whose shape matches but
-/// whose return carries an entry modifier the automatic return path can't apply
+/// CR 607.2a: Whether a trigger is the LTB return side whose shape matches but
+/// whose return carries an entry modifier the emitted return can't carry
 /// (Realm Razer's "return the exiled cards to the battlefield tapped"). This is
 /// exactly the class that shape-matched yet the modifier check rejected — the
 /// surviving signal that distinguishes "shape matched, modifier rejected it"
@@ -4813,17 +4806,12 @@ fn trigger_is_ltb_return_with_entry_modifier(def: &TriggerDefinition) -> bool {
             .is_some_and(|ex| !change_zone_return_has_no_entry_modifiers(&ex.effect))
 }
 
-/// CR 610.3: Whether a trigger is the ETB "exile ..." side with no printed
-/// duration (the side that must gain `Duration::UntilHostLeavesPlay`). Covers
-/// both the single-target exile (`Effect::ChangeZone`, Journey to Nowhere /
-/// Oblivion Ring) and the mass exile (`Effect::ChangeZoneAll`, "exile all
-/// other permanents you control" — Worldgorger Dragon). The two effect
-/// variants share the CR 610.3 "until"-duration vehicle, so the duration
-/// stamp applies identically to either — gated, in `trigger_is_ltb_return`,
-/// on the paired LTB return having no entry modifiers (a card like Realm
-/// Razer, "return the exiled cards to the battlefield TAPPED," is excluded
-/// from this synthesis rather than silently dropping its tapped rider).
-fn trigger_is_etb_exile_pending_duration(def: &TriggerDefinition) -> bool {
+/// CR 607.2a: Whether a trigger is the ETB "exile ..." side of the linked pair:
+/// a single-target exile (`Effect::ChangeZone`, Journey to Nowhere / Oblivion
+/// Ring) or a mass exile (`Effect::ChangeZoneAll`, "exile all other permanents
+/// you control" — Worldgorger Dragon). An exile with a printed duration
+/// ("until ...") is not this class.
+fn trigger_is_etb_linked_exile(def: &TriggerDefinition) -> bool {
     def.mode == TriggerMode::ChangesZone
         && def.destination == Some(Zone::Battlefield)
         && def.execute.as_deref().is_some_and(|ex| {
@@ -4841,25 +4829,24 @@ fn trigger_is_etb_exile_pending_duration(def: &TriggerDefinition) -> bool {
         })
 }
 
-/// CR 607.1 + CR 607.2a + CR 406.6 + CR 610.3: Pair each ETB "exile ..."
-/// trigger with the LTB "return the exiled card(s)" trigger. Covers both the
-/// single-target class (Journey to Nowhere, Oblivion Ring) and the mass-exile
-/// class ("exile all other permanents you control" — Worldgorger Dragon).
-/// CR 610.3: When an unmodified LTB-return side exists, emit `DurationStamped`
-/// relations so the ETB exiles gain `Duration::UntilHostLeavesPlay`. Otherwise,
-/// if a shape-matching LTB return exists whose entry modifier the automatic
-/// return path can't carry (Realm Razer), emit `ModifierUnsupported` relations
-/// so the unsupported return is marked visible to coverage. When neither side
-/// exists, no relation is emitted and ordinary cards are untouched. The
-/// diagnostic fragment is captured here, while `items` is in scope, because the
-/// relation applier has no access to the item list afterward.
+/// CR 607.1 + CR 607.2a + CR 406.6: Pair each ETB "exile ..." trigger with the
+/// LTB "return the exiled card(s)" trigger. Covers both the single-target class
+/// (Journey to Nowhere, Oblivion Ring) and the mass-exile class ("exile all
+/// other permanents you control" — Worldgorger Dragon). When an unmodified
+/// LTB-return side exists, emit `ReturnsExiledBySource` relations. Otherwise,
+/// if a shape-matching LTB return carries an entry modifier the emitted return
+/// can't carry (Realm Razer), emit `ModifierUnsupported` relations so the
+/// unsupported return is marked visible to coverage. When neither side exists,
+/// no relation is emitted and ordinary cards are untouched. The diagnostic
+/// fragment is captured here, while `items` is in scope, because the relation
+/// applier has no access to the item list afterward.
 fn detect_etb_exile_ltb_return(items: &[OracleItemIr], relations: &mut Vec<DocumentRelationIr>) {
     let ltb_return = items
         .iter()
         .find(|item| item_trigger(item).is_some_and(|trigger| trigger_is_ltb_return(&trigger)));
 
     let (ltb, outcome) = match ltb_return {
-        Some(ltb) => (ltb, LinkedReturnOutcome::DurationStamped),
+        Some(ltb) => (ltb, LinkedReturnOutcome::ReturnsExiledBySource),
         None => {
             let Some(ltb) = items.iter().find(|item| {
                 item_trigger(item)
@@ -4867,7 +4854,7 @@ fn detect_etb_exile_ltb_return(items: &[OracleItemIr], relations: &mut Vec<Docum
             }) else {
                 return;
             };
-            // CR 610.3: A low-precision span tier may report no fragment; fall
+            // A low-precision span tier may report no fragment; fall
             // back to a static description of the unsupported return so the
             // coverage diagnostic is never handed an empty clause.
             let fragment = ltb.source.fragment().map(str::to_owned).unwrap_or_else(|| {
@@ -4878,8 +4865,7 @@ fn detect_etb_exile_ltb_return(items: &[OracleItemIr], relations: &mut Vec<Docum
     };
 
     for item in items {
-        if item_trigger(item).is_some_and(|trigger| trigger_is_etb_exile_pending_duration(&trigger))
-        {
+        if item_trigger(item).is_some_and(|trigger| trigger_is_etb_linked_exile(&trigger)) {
             relations.push(DocumentRelationIr::EtbExileLtbReturn {
                 etb_exile: item.id,
                 ltb_return: ltb.id,
@@ -4889,11 +4875,11 @@ fn detect_etb_exile_ltb_return(items: &[OracleItemIr], relations: &mut Vec<Docum
     }
 }
 
-/// CR 610.3: Apply an ETB-exile / LTB-return pair. `DurationStamped` stamps
-/// `Duration::UntilHostLeavesPlay` on the ETB exile's execute so the existing
-/// `ExileLink::UntilSourceLeaves` mechanism returns the exiled card(s).
-/// `ModifierUnsupported` instead marks the LTB return trigger unsupported so the
-/// modifier-bearing return is visible to coverage rather than silently dropped.
+/// CR 607.2a + CR 607.3: Apply an ETB-exile / LTB-return pair.
+/// `ReturnsExiledBySource` rewrites the LTB into a return of every card exiled
+/// by this source and leaves the ETB unchanged. `ModifierUnsupported` instead
+/// marks the LTB return trigger unsupported so the modifier-bearing return is
+/// visible to coverage rather than silently dropped.
 fn apply_etb_exile_ltb_return(
     result: &mut ParsedAbilities,
     relations: &[DocumentRelationIr],
@@ -4901,7 +4887,7 @@ fn apply_etb_exile_ltb_return(
 ) {
     for relation in relations {
         let DocumentRelationIr::EtbExileLtbReturn {
-            etb_exile,
+            etb_exile: _,
             ltb_return,
             outcome,
         } = relation
@@ -4909,16 +4895,41 @@ fn apply_etb_exile_ltb_return(
             continue;
         };
         match outcome {
-            LinkedReturnOutcome::DurationStamped => {
-                let Some(pos) = position_of(trigger_ids, *etb_exile) else {
+            LinkedReturnOutcome::ReturnsExiledBySource => {
+                let Some(pos) = position_of(trigger_ids, *ltb_return) else {
                     continue;
                 };
-                if let Some(execute) = result.triggers[pos].execute.as_deref_mut() {
-                    if execute.duration.is_none() {
-                        execute.duration =
-                            Some(crate::types::ability::Duration::UntilHostLeavesPlay);
+                let Some(execute) = result.triggers[pos].execute.as_deref_mut() else {
+                    continue;
+                };
+                // Several ETB items can pair with one LTB; rewrite it only once.
+                if !matches!(
+                    execute.effect.as_ref(),
+                    Effect::ChangeZone {
+                        destination: Zone::Battlefield,
+                        target: TargetFilter::TrackedSet { .. },
+                        ..
                     }
+                ) {
+                    continue;
                 }
+                // CR 607.2a + CR 607.3: the LTB returns every card in exile that this
+                // object's linked exile put there.
+                // CR 110.2a: the printed "under its/their owner's control" overrides the
+                // instructing-player default; enters_under: None resolves to the owner.
+                *execute.effect = Effect::ChangeZoneAll {
+                    origin: Some(Zone::Exile),
+                    destination: Zone::Battlefield,
+                    target: TargetFilter::ExiledBySource,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    enter_with_counters: Vec::new(),
+                    face_down_profile: None,
+                    library_position: None,
+                    library_shuffle: Default::default(),
+                    random_order: false,
+                };
             }
             LinkedReturnOutcome::ModifierUnsupported { fragment } => {
                 let Some(pos) = position_of(trigger_ids, *ltb_return) else {
@@ -4932,7 +4943,7 @@ fn apply_etb_exile_ltb_return(
     }
 }
 
-/// CR 610.3: Append an `Effect::unimplemented` gap marker to the tail of a
+/// CR 607.2a: Append an `Effect::unimplemented` gap marker to the tail of a
 /// trigger execute's sub-ability chain, marking a modifier-bearing linked LTB
 /// return unsupported so coverage reports the gap. Appends to the chain tail
 /// rather than overwriting any existing sub-ability (defensive — for this card
@@ -5978,6 +5989,21 @@ fn parse_normalized_oracle_ir(
         }
 
         let lower = line.to_lowercase();
+
+        // Un-card Gotcha (no CR entry): `Gotcha — If an opponent <behavior>, you may
+        // say "Gotcha!" When you do, <effect>.` is one printed trigger — recognized
+        // before the generic classifiers so the quoted "Gotcha!" is never read as
+        // a clause of its own.
+        if let Some((condition, effect_text)) = super::oracle_un::split_gotcha_line(&line, &lower) {
+            ctx.subject = None;
+            ctx.actor = None;
+            let effect_def =
+                parse_effect_chain_with_context(effect_text.trim(), AbilityKind::Spell, &mut ctx);
+            let trigger = super::oracle_un::gotcha_trigger(condition, effect_def, &line);
+            emitter.trigger_ir_at(item_line, TriggerNodeIr::from_definition(&line, trigger));
+            i += 1;
+            continue;
+        }
 
         // Priority 8b (early): "As an additional cost to cast this spell" — must
         // precede static-pattern classifiers (Priority 7) that match embedded
@@ -8720,6 +8746,9 @@ fn activation_zone_from_self_cost(cost: &AbilityCost) -> Option<Zone> {
         AbilityCost::Sacrifice(sacrifice) if sacrifice.target == TargetFilter::SelfRef => {
             Some(Zone::Battlefield)
         }
+        // CR 113.6j: an ability whose cost reveals its own card from hand
+        // ("Reveal this card from your hand") functions from the hand.
+        AbilityCost::Reveal { filter: None, .. } => Some(Zone::Hand),
         AbilityCost::Composite { costs } => costs.iter().find_map(activation_zone_from_self_cost),
         _ => None,
     }
@@ -10286,6 +10315,7 @@ fn demote_lifetimes_in_cost(cost: &mut AbilityCost) {
         | AbilityCost::ManaDynamic { .. }
         | AbilityCost::Tap
         | AbilityCost::Untap
+        | AbilityCost::SayPhrase { .. }
         | AbilityCost::Loyalty { .. }
         | AbilityCost::Sacrifice(..)
         | AbilityCost::PayLife { .. }

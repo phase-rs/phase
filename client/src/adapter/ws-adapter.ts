@@ -20,9 +20,11 @@ import type {
   PersistedGameState,
   RewindOption,
   RewindTarget,
+  StateWithheldNotice,
   SubmitResult,
   FormatConfig,
   DeckPrinting,
+  WithheldFrame,
 } from "./types";
 import type {
   InteractionPreview,
@@ -1517,6 +1519,8 @@ export type WsAdapterEvent =
       /** Server-published turn boundaries. Always an array on this transport —
        *  `[]` means "the server published none", never "unknown". */
       rewindTargets?: RewindOption[] }
+  /** The server applied a state it could not send; `null` once a state arrives again. */
+  | { type: "stateDelivery"; withheld: StateWithheldNotice | null }
   | { type: "sessionAttached"; attachment: NativeSessionAttachment }
   | { type: "emoteReceived"; fromPlayer: PlayerId; emote: string }
   | { type: "contestProgress"; contest: number; clicks: [PlayerId, number][] }
@@ -1588,6 +1592,9 @@ export class WebSocketAdapter implements EngineAdapter {
    */
   private snapshot: EngineSnapshot | null = null;
   private cachedStateRevision: number | null = null;
+  private withheldState: StateWithheldNotice | null = null;
+  /** A withheld bootstrap failed this adapter's reconnect while its socket stayed attached. */
+  private withheldBootstrapFailed = false;
   private _playerId: PlayerId | null = null;
   private playerToken: string | null = null;
   private _gameCode: string | null = null;
@@ -2364,6 +2371,8 @@ export class WebSocketAdapter implements EngineAdapter {
       this.ws = null;
     }
     this.snapshot = null;
+    this.withheldState = null;
+    this.withheldBootstrapFailed = false;
     this._playerId = null;
     this.playerToken = null;
     this._gameCode = null;
@@ -2482,11 +2491,24 @@ export class WebSocketAdapter implements EngineAdapter {
   private completeReconnect(inGame: boolean): void {
     this.finishSocketDiagnostics("resumed");
     this.reconnectInFlight = false;
+    this.withheldBootstrapFailed = false;
     this.reconnectAttempt = 0;
     this.reconnectStartedAt = null;
     if (this.reconnectTimer !== null) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
     this.emit({ type: "reconnected", inGame });
+  }
+
+  /** A delivered state ends both withheld conditions. */
+  private settleWithheld(): void {
+    if (this.withheldState) {
+      this.withheldState = null;
+      this.emit({ type: "stateDelivery", withheld: null });
+    }
+    if (this.withheldBootstrapFailed) {
+      this.withheldBootstrapFailed = false;
+      this.emit({ type: "reconnected", inGame: true });
+    }
   }
 
   private recordSocketLoss(id: string): SocketReconnectOutcome {
@@ -2890,6 +2912,7 @@ export class WebSocketAdapter implements EngineAdapter {
           },
         );
         this.cachedStateRevision = data.state_revision ?? null;
+        this.settleWithheld();
         this._playerId = data.your_player;
         if (nativeReconnect) {
           const attachment: NativeSessionAttachment = {
@@ -3002,6 +3025,7 @@ export class WebSocketAdapter implements EngineAdapter {
           },
         );
         this.cachedStateRevision = data.state_revision ?? this.cachedStateRevision;
+        this.settleWithheld();
         const pending = this.submission.take(msg.command_id);
         const resolvedAction = pending !== null;
         if (pending) {
@@ -3049,11 +3073,49 @@ export class WebSocketAdapter implements EngineAdapter {
         const data = msg.data as { message: string };
         const pending = this.submission.take(msg.command_id);
         if (pending) {
-          pending.reject(new AdapterError("WS_ERROR", data.message, false));
+          pending.reject(new AdapterError(AdapterErrorCode.REQUEST_FAILED, data.message, true));
           this.emit({ type: "actionPendingChanged", pending: false });
         } else if (this.submission.unmatched(msg.command_id).surfaces) {
           this.emit({ type: "operationFailed", message: data.message });
         }
+        break;
+      }
+
+      case "StateWithheld": {
+        const data = msg.data as {
+          full_key?: FullSessionKey;
+          state_revision: number;
+          withheld: WithheldFrame;
+          reason: string;
+        };
+        // Without a delivered board the seat cannot reach the menu: fail the join recoverably.
+        if (data.withheld.type === "GameStarted" && this.snapshot === null) {
+          // The notice is this client's only seat assignment; GamePage resets the reconnect state on it, so it precedes the failure.
+          const seat = data.withheld.data.your_player;
+          this._playerId = seat;
+          this.emit({ type: "playerIdentity", playerId: seat, opponentName: null });
+          this.rejectInitialization(new AdapterError(AdapterErrorCode.REQUEST_FAILED, data.reason, true));
+          if (this.reconnectInFlight) {
+            this.failReconnect("failed");
+            this.withheldBootstrapFailed = true;
+          }
+          this.emit({ type: "operationFailed", message: data.reason });
+          break;
+        }
+        if (!this.acceptFollowUpFullSessionKey(data.full_key)) break;
+        if (data.withheld.type === "GameStarted") {
+          if (this.reconnectInFlight) this.completeReconnect(true);
+        } else {
+          const pending = this.submission.take(msg.command_id);
+          if (pending) {
+            pending.resolve({ events: [], log_entries: [] });
+            this.emit({ type: "actionPendingChanged", pending: false });
+          }
+        }
+        // A stale notice still answers its command but must not report a newer board as withheld.
+        if (this.cachedStateRevision !== null && data.state_revision < this.cachedStateRevision) break;
+        this.withheldState = { revision: data.state_revision, reason: data.reason };
+        this.emit({ type: "stateDelivery", withheld: this.withheldState });
         break;
       }
 
@@ -3098,7 +3160,7 @@ export class WebSocketAdapter implements EngineAdapter {
         const pending = this.pendingManaPaymentPreviews.get(data.request_id);
         if (pending) {
           this.pendingManaPaymentPreviews.delete(data.request_id);
-          pending.reject(new AdapterError("WS_ERROR", data.message, false));
+          pending.reject(new AdapterError(AdapterErrorCode.REQUEST_FAILED, data.message, true));
         }
         break;
       }
@@ -3143,14 +3205,14 @@ export class WebSocketAdapter implements EngineAdapter {
         const pending = this.pendingAuthoritativeStateExport;
         this.pendingAuthoritativeStateExport = null;
         pending?.reject(new AdapterError(
-          "WS_ERROR",
+          AdapterErrorCode.REQUEST_FAILED,
           typeof data === "object"
             && data !== null
             && "message" in data
             && typeof data.message === "string"
             ? data.message
             : "Authoritative-state export failed.",
-          false,
+          true,
         ));
         break;
       }
@@ -3160,7 +3222,7 @@ export class WebSocketAdapter implements EngineAdapter {
         const pending = this.pendingInteractionPreviews.get(data.request_id);
         if (pending) {
           this.pendingInteractionPreviews.delete(data.request_id);
-          pending.reject(new AdapterError("WS_ERROR", data.message, false));
+          pending.reject(new AdapterError(AdapterErrorCode.REQUEST_FAILED, data.message, true));
         }
         break;
       }

@@ -2839,10 +2839,10 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             source_id,
             subject: None,
         });
-        // CR 603.2 + CR 603.3b: the resume settled the iteration. When the move
-        // landed us back at Priority (no further replacement choice), B1-drain the
-        // deferred observer triggers parked during earlier pause segments plus the
-        // ones this resume produced; otherwise leave them parked for the next drain.
+        // CR 603.2 + CR 603.3b: the resume settled the iteration. Park the
+        // observer triggers this resume produced beside those parked during
+        // earlier pause segments; the post-action pipeline places them with
+        // the boundary's one batch.
         //
         // CR 601.2h + CR 603.3: a live announcement takes custody of the span it
         // owns; only the rest is collected here.
@@ -2861,12 +2861,7 @@ fn drain_pending_change_zone_iteration(state: &mut GameState, events: &mut Vec<G
             })
             .cloned()
             .collect();
-        if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
-            crate::game::triggers::collect_triggers_into_deferred(state, &trigger_events);
-            crate::game::triggers::drain_deferred_trigger_queue(state, events);
-        } else {
-            crate::game::triggers::collect_triggers_into_deferred(state, &trigger_events);
-        }
+        crate::game::triggers::collect_triggers_into_deferred(state, &trigger_events);
     }
 }
 
@@ -9479,6 +9474,7 @@ fn ability_cost_reads_filter_population(
             | AbilityCost::NinjutsuFamily { .. }
             | AbilityCost::KeywordCostOfCastSpell { .. }
             | AbilityCost::GetPlayerCounters { .. }
+            | AbilityCost::SayPhrase { .. }
             | AbilityCost::Unimplemented { .. } => false,
         }
 }
@@ -9754,6 +9750,7 @@ fn trigger_matchers_read_filter_population(
         // A limit-ledger key mapping between split halves; names no population.
         limit_leader_offset: _,
         attack_cost_condition,
+        gotcha_condition: _,
     } = trigger;
     [valid_card, valid_target, valid_subject_player, valid_source]
         .into_iter()
@@ -14991,7 +14988,7 @@ fn compound_run_unperformed(ability: &ResolvedAbility) -> bool {
         && !ability.context.optional_effect_performed
 }
 
-fn mandatory_parent_effect_performed(effect: &Effect, events: &[GameEvent]) -> bool {
+pub(crate) fn mandatory_parent_effect_performed(effect: &Effect, events: &[GameEvent]) -> bool {
     match effect {
         // CR 123.3: only an actual placement satisfies a placement rider.
         Effect::PutSticker { .. } | Effect::ApplySticker { .. } => events
@@ -16470,9 +16467,12 @@ fn optionality_is_per_iteration(state: &GameState, ability: &ResolvedAbility) ->
 /// `costs::can_pay` (resolution scope) decides before the "you may" is offered.
 /// `PayLife` excludes "pay any amount of life" (`is_pay_any_amount`): X is chosen at
 /// payment and 0 is always payable (CR 119.4b), so it is never impossible.
+/// A spoken Un-action payment is infeasible for a payer who has not opted in.
 fn optional_pay_cost_affordability_is_decidable(cost: &AbilityCost) -> bool {
-    matches!(cost, AbilityCost::TapCreatures { .. })
-        || matches!(cost, AbilityCost::PayLife { amount }
+    matches!(
+        cost,
+        AbilityCost::TapCreatures { .. } | AbilityCost::SayPhrase { .. }
+    ) || matches!(cost, AbilityCost::PayLife { amount }
             if !crate::types::ability::is_pay_any_amount(amount))
 }
 
@@ -22998,12 +22998,9 @@ fn resolve_chain_body(
              `optional_for` ability before the up-front gate"
         );
         if let Some((payer, costs)) = resolution_optional_payment_options(state, ability) {
-            if may_trigger_key.as_ref().is_some_and(|key| {
-                matches!(
-                    state.may_trigger_auto_choice_for_live_prompt(key),
-                    Some(AutoMayChoice::Decline)
-                )
-            }) {
+            if costs.is_empty() {
+                // CR 608.2d: an impossible optional payment is declined without
+                // opening a choice window.
                 progress = resolve_optional_effect_decision_step(
                     state,
                     ability.clone(),
@@ -23013,9 +23010,14 @@ fn resolve_chain_body(
                 )?;
                 return Ok(progress);
             }
-            if costs.is_empty() {
-                // CR 608.2d: an impossible optional payment is declined without
-                // opening a choice window.
+            if may_trigger_key.as_ref().is_some_and(|key| {
+                matches!(
+                    state.may_trigger_auto_choice_for_live_prompt(key),
+                    Some(AutoMayChoice::Decline)
+                )
+            }) {
+                // CR 603.5: the remembered decline is the controller's optional choice.
+                state.record_loop_decision(crate::game::play_trace::AnswerOptionality::Optional);
                 progress = resolve_optional_effect_decision_step(
                     state,
                     ability.clone(),
@@ -23044,7 +23046,11 @@ fn resolve_chain_body(
             return Ok(ResolutionProgress::Waiting);
         }
 
-        let description = ability.description.clone();
+        // Un-card: a "you may say ..." prompt names the phrase it asks for.
+        let description = ability
+            .description
+            .clone()
+            .or_else(|| crate::game::un_actions::say_phrase_prompt(&ability.effect));
         // Deliberately the DIRECT store read rather than `stored_may_answer`, and this is
         // not a duplicated authority: the KEY is what has to be built in one place, and it
         // was — by `upfront_optional_gate`, above. `stored_may_answer` would re-enter the
@@ -23056,6 +23062,8 @@ fn resolve_chain_body(
             .is_some_and(|key| state.may_trigger_same_card_choice_available(key));
         if let Some(ref key) = may_trigger_key {
             if let Some(choice) = state.may_trigger_auto_choice_for_live_prompt(key) {
+                // CR 603.5: the remembered answer is the controller's optional choice.
+                state.record_loop_decision(crate::game::play_trace::AnswerOptionality::Optional);
                 progress = resolve_optional_effect_decision_step(
                     state,
                     ability_with_event_context_targets(state, ability),
@@ -23159,69 +23167,16 @@ fn resolve_chain_body(
                         *p,
                         &resolved_cost,
                         ability,
+                    ) && !crate::game::un_actions::cost_requires_unavailable_speech(
+                        state,
+                        *p,
+                        &resolved_cost,
                     )
                 })
                 .and_then(|head| unless_payers[head..].split_first())
             {
-                let mut pending = ability.clone();
-                pending.unless_pay = None;
-                // CR 118.12a: A disjunctive unless-cost (`OneOf`) surfaces a
-                // sub-cost choice first; the chosen single cost re-enters
-                // `WaitingFor::UnlessPayment` via
-                // `handle_unless_payment_choose_cost`. This keeps the
-                // single-cost branch in `handle_unless_payment` unchanged.
-                state.waiting_for = match resolved_cost {
-                    AbilityCost::OneOf { costs } => WaitingFor::UnlessPaymentChooseCost {
-                        player: payer,
-                        costs,
-                        pending_effect: Box::new(pending),
-                        trigger_event: state.current_trigger_event.clone(),
-                        effect_description: ability.description.clone(),
-                        remaining_choices: vec![],
-                        chosen: vec![],
-                    },
-                    // CR 702.24a + CR 118.12: A `Composite` of `OneOf`s is
-                    // what `expand_per_counter` produces from a `OneOf` base
-                    // cost at N ≥ 2 (e.g., Jötun Owl Keeper's "{W} or {U}"
-                    // cumulative-upkeep cost with 2 age counters → 2
-                    // independent disjunctive choices). Drive each choice
-                    // sequentially via `UnlessPaymentChooseCost`, accumulate
-                    // picks, and re-enter `UnlessPayment` with the resulting
-                    // `Composite` of chosen sub-costs as a single payment.
-                    // "Each choice is made separately for each age counter,
-                    // then either the entire set of costs is paid, or none
-                    // of them is paid."
-                    AbilityCost::Composite { costs }
-                        if !costs.is_empty()
-                            && costs.iter().all(|c| matches!(c, AbilityCost::OneOf { .. })) =>
-                    {
-                        let mut queue: Vec<Vec<AbilityCost>> = costs
-                            .into_iter()
-                            .map(|c| match c {
-                                AbilityCost::OneOf { costs } => costs,
-                                _ => unreachable!("matched all-OneOf guard above"),
-                            })
-                            .collect();
-                        let first = queue.remove(0);
-                        WaitingFor::UnlessPaymentChooseCost {
-                            player: payer,
-                            costs: first,
-                            pending_effect: Box::new(pending),
-                            trigger_event: state.current_trigger_event.clone(),
-                            effect_description: ability.description.clone(),
-                            remaining_choices: queue,
-                            chosen: vec![],
-                        }
-                    }
-                    cost => WaitingFor::UnlessPayment {
-                        player: payer,
-                        cost,
-                        pending_effect: Box::new(pending),
-                        trigger_event: state.current_trigger_event.clone(),
-                        effect_description: ability.description.clone(),
-                        remaining: remaining_payers.to_vec(),
-                    },
-                };
+                state.waiting_for =
+                    unless_payment_prompt(state, ability, payer, remaining_payers, resolved_cost);
                 return Ok(ResolutionProgress::Waiting);
             }
         }
@@ -26551,6 +26506,103 @@ fn resolved_unless_cost(
     crate::game::keywords::resolve_self_mana_in_ability_cost(state, ability.source_id, &expanded)
 }
 
+/// The prompt an unless-cost puts to `payer`, with `remaining_payers` next in line.
+/// Kept out of `resolve_chain_body` so its `WaitingFor` temporaries stay out of
+/// that recursive frame.
+fn unless_payment_prompt(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    payer: PlayerId,
+    remaining_payers: &[PlayerId],
+    resolved_cost: AbilityCost,
+) -> WaitingFor {
+    let mut pending = ability.clone();
+    pending.unless_pay = None;
+    // CR 118.12a: A disjunctive unless-cost (`OneOf`) surfaces a
+    // sub-cost choice first; the chosen single cost re-enters
+    // `WaitingFor::UnlessPayment` via
+    // `handle_unless_payment_choose_cost`. This keeps the
+    // single-cost branch in `handle_unless_payment` unchanged.
+    match resolved_cost {
+        AbilityCost::OneOf { costs } => {
+            let available_costs: Vec<_> = costs
+                .into_iter()
+                .filter(|c| {
+                    !crate::game::un_actions::cost_requires_unavailable_speech(state, payer, c)
+                })
+                .collect();
+            if available_costs.len() == 1 {
+                WaitingFor::UnlessPayment {
+                    player: payer,
+                    cost: available_costs.into_iter().next().unwrap(),
+                    pending_effect: Box::new(pending),
+                    trigger_event: state.current_trigger_event.clone(),
+                    effect_description: ability.description.clone(),
+                    remaining: remaining_payers.to_vec(),
+                }
+            } else {
+                WaitingFor::UnlessPaymentChooseCost {
+                    player: payer,
+                    costs: available_costs,
+                    pending_effect: Box::new(pending),
+                    trigger_event: state.current_trigger_event.clone(),
+                    effect_description: ability.description.clone(),
+                    remaining_choices: vec![],
+                    chosen: vec![],
+                }
+            }
+        }
+        // CR 702.24a + CR 118.12: A `Composite` of `OneOf`s is
+        // what `expand_per_counter` produces from a `OneOf` base
+        // cost at N ≥ 2 (e.g., Jötun Owl Keeper's "{W} or {U}"
+        // cumulative-upkeep cost with 2 age counters → 2
+        // independent disjunctive choices). Drive each choice
+        // sequentially via `UnlessPaymentChooseCost`, accumulate
+        // picks, and re-enter `UnlessPayment` with the resulting
+        // `Composite` of chosen sub-costs as a single payment.
+        // "Each choice is made separately for each age counter,
+        // then either the entire set of costs is paid, or none
+        // of them is paid."
+        AbilityCost::Composite { costs }
+            if !costs.is_empty()
+                && costs.iter().all(|c| matches!(c, AbilityCost::OneOf { .. })) =>
+        {
+            let mut queue: Vec<Vec<AbilityCost>> = costs
+                .into_iter()
+                .map(|c| match c {
+                    AbilityCost::OneOf { costs } => costs
+                        .into_iter()
+                        .filter(|sub| {
+                            !crate::game::un_actions::cost_requires_unavailable_speech(
+                                state, payer, sub,
+                            )
+                        })
+                        .collect(),
+                    _ => unreachable!("matched all-OneOf guard above"),
+                })
+                .collect();
+            let first = queue.remove(0);
+            WaitingFor::UnlessPaymentChooseCost {
+                player: payer,
+                costs: first,
+                pending_effect: Box::new(pending),
+                trigger_event: state.current_trigger_event.clone(),
+                effect_description: ability.description.clone(),
+                remaining_choices: queue,
+                chosen: vec![],
+            }
+        }
+        cost => WaitingFor::UnlessPayment {
+            player: payer,
+            cost,
+            pending_effect: Box::new(pending),
+            trigger_event: state.current_trigger_event.clone(),
+            effect_description: ability.description.clone(),
+            remaining: remaining_payers.to_vec(),
+        },
+    }
+}
+
 /// CR 118.6: a cost that requires paying a nonexistent mana cost can't be paid.
 fn unless_cost_is_unpayable(cost: &AbilityCost) -> bool {
     match cost {
@@ -26564,7 +26616,9 @@ fn unless_cost_is_unpayable(cost: &AbilityCost) -> bool {
             mana_cost: cost, ..
         } => *cost == ManaCost::NoCost,
         AbilityCost::PerCounter { base, .. } => unless_cost_is_unpayable(base),
-        AbilityCost::ManaDynamic { .. }
+        // Un-card: a spoken phrase is always payable by an opted-in player.
+        AbilityCost::SayPhrase { .. }
+        | AbilityCost::ManaDynamic { .. }
         | AbilityCost::Tap
         | AbilityCost::Untap
         | AbilityCost::Loyalty { .. }
@@ -28058,7 +28112,7 @@ pub(crate) fn evaluate_condition(
             }
             !evaluate_condition(condition, state, ability)
         }
-        // CR 730.2a: True when it's neither day nor night (no designation set yet).
+        // CR 731.1: True when it's neither day nor night (the game starts with neither designation).
         AbilityCondition::DayNightIsNeither => state.day_night.is_none(),
         // CR 731.1: True when the game has the requested day/night designation.
         AbilityCondition::DayNightIs {
@@ -37960,6 +38014,7 @@ mod tests {
 
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
         assert_eq!(state.players[0].life, 23);
+        assert_eq!(state.loop_decision_tally.optional, 1);
     }
 
     #[test]
@@ -37980,6 +38035,88 @@ mod tests {
 
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
         assert_eq!(state.players[0].life, 20);
+        assert_eq!(state.loop_decision_tally.optional, 1);
+    }
+
+    /// CR 603.5 + CR 608.2d: a remembered decline of an optional payment is recorded where it
+    /// applies; the unremembered prompt and an impossible payment record nothing.
+    #[test]
+    fn saved_decline_of_an_optional_payment_is_recorded_where_it_applies() {
+        let resolve = |stored: Option<AutoMayChoice>, fodder: bool| {
+            let mut state = GameState::new_two_player(42);
+            let source_id = create_object(
+                &mut state,
+                CardId(100),
+                PlayerId(0),
+                "Payment Source".to_string(),
+                Zone::Battlefield,
+            );
+            if fodder {
+                create_object(
+                    &mut state,
+                    CardId(101),
+                    PlayerId(0),
+                    "Fodder".to_string(),
+                    Zone::Hand,
+                );
+            }
+            let origin = MayTriggerOrigin::Printed { trigger_index: 0 };
+            if let Some(choice) = stored {
+                state.set_may_trigger_auto_choice(
+                    MayTriggerAutoChoiceKey {
+                        player: PlayerId(0),
+                        source_id,
+                        origin: origin.clone(),
+                    },
+                    choice,
+                );
+            }
+            let mut ability = ResolvedAbility::new(
+                Effect::PayCost {
+                    cost: AbilityCost::OneOf {
+                        costs: vec![AbilityCost::Discard {
+                            count: QuantityExpr::Fixed { value: 1 },
+                            filter: None,
+                            selection: crate::types::ability::CardSelectionMode::Chosen,
+                            self_scope: crate::types::ability::DiscardSelfScope::FromHand,
+                        }],
+                    },
+                    scale: None,
+                    payer: TargetFilter::Controller,
+                },
+                vec![],
+                source_id,
+                PlayerId(0),
+            );
+            ability.optional = true;
+            ability.set_may_trigger_origin_recursive(origin);
+            resolve_ability_chain(&mut state, &ability, &mut Vec::new(), 0).unwrap();
+            state
+        };
+
+        let declined = resolve(Some(AutoMayChoice::Decline), true);
+        assert!(
+            matches!(declined.waiting_for, WaitingFor::Priority { .. }),
+            "reach: the remembered decline opens no prompt"
+        );
+        assert_eq!(declined.loop_decision_tally.optional, 1);
+
+        let prompted = resolve(None, true);
+        assert!(
+            matches!(
+                prompted.waiting_for,
+                WaitingFor::ResolutionOptionalPaymentChoice { .. }
+            ),
+            "reach: without a remembered answer the payment prompt opens"
+        );
+        assert_eq!(prompted.loop_decision_tally.optional, 0);
+
+        let impossible = resolve(Some(AutoMayChoice::Decline), false);
+        assert!(
+            matches!(impossible.waiting_for, WaitingFor::Priority { .. }),
+            "reach: the impossible payment opens no prompt"
+        );
+        assert_eq!(impossible.loop_decision_tally.optional, 0);
     }
 
     #[test]

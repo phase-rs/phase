@@ -13378,6 +13378,7 @@ fn apply_where_x_to_ability_cost(
         | AbilityCost::NinjutsuFamily { .. }
         | AbilityCost::Tap
         | AbilityCost::Untap
+        | AbilityCost::SayPhrase { .. }
         | AbilityCost::Loyalty { .. }
         | AbilityCost::Sacrifice(_)
         | AbilityCost::Exile { .. }

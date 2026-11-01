@@ -1322,7 +1322,7 @@ pub(crate) enum TargetedImperativeAst {
     },
     Discard {
         count: QuantityExpr,
-        /// CR 701.9a: When true, the discard is random.
+        /// CR 701.9b: When true, the discard is random.
         random: bool,
         /// CR 701.9b: When true, the player may discard 0..=count cards.
         up_to: bool,

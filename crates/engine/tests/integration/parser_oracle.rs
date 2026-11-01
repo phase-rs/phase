@@ -13,7 +13,6 @@ use engine::types::phase::Phase;
 use engine::types::replacements::ReplacementEvent;
 use engine::types::statics::StaticMode;
 use engine::types::triggers::TriggerMode;
-use engine::types::zones::Zone;
 
 /// Build a single-face `CardFace` from an oracle `text` through the real
 /// synthesis path (`build_oracle_face`), so coverage checks recurse into
@@ -535,14 +534,10 @@ fn vizier_of_remedies_parses_to_single_counter_replacement() {
     );
 }
 
-/// CR 610.3: Realm Razer's LTB return carries an entry modifier ("return the
-/// exiled cards to the battlefield TAPPED") that the automatic
-/// `ExileLink::UntilSourceLeaves` return path can't apply — it performs a
-/// plain, unmodified zone move. `trigger_is_ltb_return` must reject a return
-/// trigger with any entry modifier, so `detect_etb_exile_ltb_return` never
-/// stamps `Duration::UntilHostLeavesPlay` on the ETB — correctly excluded
-/// rather than silently dropping the tapped rider. Because that leaves Realm
-/// Razer with no working return path, the unsupported return must be VISIBLE to
+/// CR 607.2a: Realm Razer's LTB return carries an entry modifier ("return the
+/// exiled cards to the battlefield TAPPED") the emitted `ExiledBySource` return
+/// can't carry, so the pair is `ModifierUnsupported`: the LTB is not rewritten
+/// and the unsupported return must be VISIBLE to
 /// the coverage tooling (an `Effect::unimplemented("modifier_bearing_linked_return")`
 /// marker on the LTB trigger) rather than the card showing as falsely
 /// supported. Oracle text verbatim from Scryfall (2026-07). Caught in review of
@@ -558,20 +553,25 @@ fn mass_exile_ltb_return_with_entry_modifier_is_not_paired() {
     let name = "Realm Razer";
     let result = parse(oracle, name, &[], &["Creature"], &[]);
 
-    let etb = result
+    let ltb = result
         .triggers
         .iter()
-        .find(|t| t.mode == TriggerMode::ChangesZone && t.destination == Some(Zone::Battlefield))
-        .unwrap_or_else(|| panic!("{name} must have an ETB trigger"));
-
-    let execute = etb
+        .find(|t| t.mode == TriggerMode::LeavesBattlefield)
+        .unwrap_or_else(|| panic!("{name} must have an LTB trigger"));
+    let ltb_effect = &ltb
         .execute
         .as_deref()
-        .unwrap_or_else(|| panic!("{name} ETB must have execute"));
-    assert_eq!(
-        execute.duration, None,
-        "{name}: mass-exile ETB must NOT be stamped UntilHostLeavesPlay — its LTB return has a \
-         tapped modifier the automatic return path can't carry"
+        .unwrap_or_else(|| panic!("{name} LTB must have execute"))
+        .effect;
+    assert!(
+        matches!(
+            &**ltb_effect,
+            Effect::ChangeZone {
+                target: TargetFilter::TrackedSet { .. },
+                ..
+            }
+        ),
+        "{name}: the modifier-bearing LTB return must not be rewritten, got {ltb_effect:?}"
     );
 
     // Coverage-honesty gate (the maintainer's explicit ask, #6055): the

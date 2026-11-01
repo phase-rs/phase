@@ -198,7 +198,7 @@ export function DebugPanel({
         if (err instanceof DOMException && err.name === "AbortError") return;
         console.error("Game state export failed:", err);
         const detail = err instanceof Error ? err.message : String(err);
-        setStatus({ type: "error", message: `${t("help.status.exportFailed")} ${detail}` });
+        setStatus({ type: "error", message: t("help.status.exportFailedDetail", { detail }) });
       });
   }, [adapter, gameState, t]);
 

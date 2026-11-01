@@ -26791,7 +26791,6 @@ fn replace_target_with_parent(effect: &mut Effect) {
         | Effect::GainControl { target }
         | Effect::Fight { target, .. }
         | Effect::Bounce { target, .. }
-        | Effect::DealDamage { target, .. }
         | Effect::Pump { target, .. }
         | Effect::Counter { target, .. }
         | Effect::Transform { target, .. }
@@ -26807,6 +26806,17 @@ fn replace_target_with_parent(effect: &mut Effect) {
         | Effect::ForceBlock { target, .. }
         | Effect::ForceAttack { target, .. }
             if !matches!(target, TargetFilter::ParentTargetController) =>
+        {
+            *target = TargetFilter::ParentTarget;
+        }
+        // Damage is the only one of these whose subject can be a player
+        // (CR 120.1 — damage is dealt to a player, planeswalker, or
+        // creature). Spells and abilities can deal damage to players;
+        // a player-scope target must never be rebound to ParentTarget, so
+        // the object-effect guard does not apply here.
+        Effect::DealDamage { target, .. }
+            if !matches!(target, TargetFilter::ParentTargetController)
+                && !target.is_player_scope() =>
         {
             *target = TargetFilter::ParentTarget;
         }
@@ -51721,6 +51731,28 @@ fn extract_resolution_unless_pay_modifier(
     // clause after a malformed span is still found.
     let masked = nom_primitives::mask_double_quoted_spans_preserving_len(&lower);
 
+    // CR 118.12a + Un-card (no CR entry): "[Effect] unless that player says \"...\""
+    // (Rod of Spanking) — the unless-cost is saying a quoted phrase. The quoted
+    // span is masked, so the payer is recognized on the mask and the phrase is
+    // read from the ORIGINAL text at the same byte offset.
+    if let Some((before_unless, payer, after_says)) =
+        nom_primitives::scan_preceded(&masked, parse_unless_says_payer)
+    {
+        let phrase_start = masked.len() - after_says.len();
+        if let Ok((_, phrase)) = parse_quoted_phrase(&text[phrase_start..]) {
+            let cleaned = text[..before_unless.len()].trim().to_string();
+            return (
+                cleaned,
+                Some(UnlessPayModifier {
+                    cost: AbilityCost::SayPhrase {
+                        phrase: phrase.trim().to_string(),
+                    },
+                    payer,
+                }),
+            );
+        }
+    }
+
     // CR 118.12a: "[Effect] unless a player has [~] deal N to them" (Barbarian
     // Bully). Checked before the generic "unless " scan so the player-have-deal
     // shape is not misclassified as a mana-payment unless.
@@ -51892,6 +51924,41 @@ fn extract_resolution_unless_pay_modifier(
     (cleaned, Some(UnlessPayModifier { cost, payer }))
 }
 
+/// Un-card: the payer of an "unless <payer> says" clause, through the trailing
+/// "says " (the quoted phrase follows). "that player" / "its controller" name the
+/// player target or permanent controller of the preceding effect.
+fn parse_unless_says_payer(input: &str) -> OracleResult<'_, TargetFilter> {
+    preceded(
+        tag("unless "),
+        terminated(
+            alt((
+                value(
+                    TargetFilter::ParentTargetController,
+                    alt((
+                        tag("that player"),
+                        tag("that opponent"),
+                        tag("its controller"),
+                        tag("that permanent's controller"),
+                    )),
+                ),
+                value(TargetFilter::Controller, tag("you")),
+            )),
+            alt((tag(" says "), tag(" say "))),
+        ),
+    )
+    .parse(input)
+}
+
+/// Un-card: a double-quoted spoken phrase, returning its contents.
+pub(super) fn parse_quoted_phrase(input: &str) -> OracleResult<'_, &str> {
+    delimited(
+        nom::character::complete::char('"'),
+        take_until("\""),
+        nom::character::complete::char('"'),
+    )
+    .parse(input)
+}
+
 fn parse_resolution_unless_payer(input: &str) -> OracleResult<'_, TargetFilter> {
     preceded(
         tag("unless "),
@@ -52024,38 +52091,6 @@ pub(crate) fn parse_dynamic_energy_unless_cost(input: &str) -> Option<QuantityEx
     Some(QuantityExpr::Ref { qty })
 }
 
-/// CR 400.1: A for-each subject that lives in a zone OTHER than the
-/// battlefield (graveyard, library, exile, hand) cannot be faithfully counted
-/// by the shared `parse_for_each_clause` building block: its "named X in
-/// <zone>" / "<filter> in <zone>" handling swallows the zone phrase into the
-/// preceding name/filter and then defaults the count to the battlefield
-/// (e.g. Rune Snag's "card named Rune Snag in each graveyard" becomes
-/// `Named{name:"rune snag in each graveyard"}` counted on the battlefield).
-/// Rather than emit a silently-wrong dynamic cost, the unless mana-cost tail
-/// (`parse_unless_mana_cost_tail`) declines (returns `None`) when such an
-/// off-battlefield zone keyword is present, and the caller fails the clause
-/// closed (`unless_payment`) until the shared name/zone parser is fixed.
-///
-/// Scans at word boundaries (CLAUDE.md word-boundary idiom) so only complete
-/// zone tokens match — never "party"/"battlefield"/"control", which belong to
-/// faithfully-modeled battlefield subjects (Concerted Defense's "creature in
-/// your party", Spell Stutter's "Faerie you control") and must keep flipping
-/// to a correct dynamic cost.
-fn for_each_clause_references_offbattlefield_zone(clause: &str) -> bool {
-    nom_primitives::scan_at_word_boundaries(clause, |input| {
-        alt((
-            tag::<_, _, OracleError<'_>>("graveyards"),
-            tag("graveyard"),
-            tag("libraries"),
-            tag("library"),
-            tag("exile"),
-            tag("hand"),
-        ))
-        .parse(input)
-    })
-    .is_some()
-}
-
 /// The rider that may follow the mana symbols of an "unless … pays {cost}" clause.
 enum UnlessCostRider<'a> {
     /// "for each <clause>" — the clause text after "for each ".
@@ -52148,16 +52183,6 @@ fn unless_plus_additional_per_each(after: &str, cost: &ManaCost) -> Option<Abili
         .parse(after)
         .ok()?;
     let increment = unless_generic_only(&increment)?;
-    // CR 400.1: an off-battlefield-zone for-each subject (e.g. Rune Snag's
-    // "card named Rune Snag in each graveyard") is mis-modeled by the shared
-    // `parse_for_each_clause` — it folds the zone phrase into the name and
-    // counts on the battlefield. `parse_for_each_clause` returns a wrong
-    // `Some` here (not `None`), so the `?` below does NOT protect us. Decline
-    // explicitly so the caller fails the clause closed until the shared parser
-    // is fixed.
-    if for_each_clause_references_offbattlefield_zone(clause) {
-        return None;
-    }
     let qty = parse_for_each_clause(clause.trim())?;
     Some(AbilityCost::ManaDynamic {
         quantity: QuantityExpr::Sum {

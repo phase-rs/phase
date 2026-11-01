@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "GameEvent gains ShortcutRepetition, which marks each committed repetition of a taken CR 732.2a shortcut, and P2PMessage gains state_withheld, the host's notice that a native-engine state was applied for this seat but too large to send; an older peer cannot parse either tag"
+}

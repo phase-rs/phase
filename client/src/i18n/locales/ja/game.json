@@ -32,6 +32,7 @@
     "shorten": "短縮",
     "decline": "ショートカットを拒否",
     "untilLethal": "ゲームが終了するまで繰り返す。",
+    "withoutEnd": "終わりなく繰り返す。すべてのプレイヤーが受け入れた場合、ゲームは引き分けになる。",
     "fixedCount_one": "最大1回繰り返す。",
     "fixedCount_other": "最大{{count}}回繰り返す。",
     "convokeInfo_one": "各反復で召集のために最大1体のクリーチャーを自動タップします。",
@@ -2907,6 +2908,36 @@
       "winner": "{{name}}が対決に勝ちました。",
       "tie": "引き分け：何も起こりません。",
       "cancelled": "対決は中止されました：何も起こりません。"
+    }
+  },
+  "unActions": {
+    "menu": {
+      "title": "Un-Actions",
+      "open": "Open Un-actions menu",
+      "close": "Close Un-actions menu",
+      "TouchFace": "Touch your face",
+      "TouchTable": "Slap the table",
+      "Laugh": "Laugh out loud",
+      "FlickCards": "Flick your cards",
+      "saysWord": "Say a word…",
+      "saysNumber": "Say a number…",
+      "wordPlaceholder": "A word",
+      "numberPlaceholder": "A number",
+      "say": "Say it!"
+    },
+    "gotcha": {
+      "button": "Gotcha!"
+    },
+    "sayPhrase": {
+      "title": "Say it to stop the effect",
+      "say": "Say “{{phrase}}”",
+      "stayQuiet": "Stay quiet"
+    },
+    "fx": {
+      "touchFace": "*smack*",
+      "touchTable": "SLAP!",
+      "laugh": "HA HA HA!",
+      "flickCards": "thwip thwip!"
     }
   }
 }

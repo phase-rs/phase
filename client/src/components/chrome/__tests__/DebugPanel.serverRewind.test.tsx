@@ -73,7 +73,9 @@ vi.mock("../../../game/dispatch", () => ({ restoreGameState: vi.fn(async () => n
 vi.mock("../../../audio/AudioManager", () => ({
   audioManager: { play: vi.fn(), diagnostics: () => "" },
 }));
-vi.mock("react-i18next", () => ({ useTranslation: () => ({ t: (k: string) => k }) }));
+vi.mock("react-i18next", () => ({
+  useTranslation: () => ({ t: (k: string, o?: { detail?: string }) => (o?.detail ? `${k}|${o.detail}` : k) }),
+}));
 vi.mock("../../../services/cardNames", () => ({ getCardNames: async () => [] }));
 vi.mock("../../../services/gameStateExport", () => ({
   copyGameStateDebugSnapshot: vi.fn(),
@@ -105,7 +107,9 @@ describe("DebugPanel — server-published turn rewind", () => {
     render(<DebugPanel />);
     fireEvent.click(screen.getByRole("button", { name: "debug.exportAuthoritative" }));
 
-    expect(await screen.findByText(/key must be a string/)).toBeInTheDocument();
+    expect(await screen.findByText(
+      "help.status.exportFailedDetail|Failed to serialize authoritative game state: key must be a string",
+    )).toBeInTheDocument();
     expect(exportAuthoritativeGameStateZip).toHaveBeenCalledWith(storeState.adapter);
   });
 

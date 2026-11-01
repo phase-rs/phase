@@ -15,6 +15,7 @@ import type {
   PairingId,
   PlayerId,
   PodOutcome,
+  StateWithheldNotice,
   TournamentCreatedReply,
   TournamentCredentialRole,
   TournamentJoinedReply,
@@ -1659,6 +1660,8 @@ interface MultiplayerState {
   // Action round-trip tracking (ephemeral — not persisted)
   actionPending: boolean;
   latencyMs: number | null;
+  /** The server applied a state it could not send; shown until a state arrives. */
+  stateWithheld: StateWithheldNotice | null;
   playerLatencies: Record<number, number | null>;
   // Hosting session (ephemeral — not persisted)
   hostGameCode: string | null;
@@ -1729,6 +1732,7 @@ interface MultiplayerActions {
   setPlayerReconnected: (playerId: number) => void;
   setActionPending: (pending: boolean) => void;
   setLatency: (ms: number | null) => void;
+  setStateWithheld: (notice: StateWithheldNotice | null) => void;
   // Hosting session actions
   /** `serverUrl` is the server THIS game is hosted on, chosen at host-setup
    *  submit. It is deliberately not `hostingServer`: that field is the P2P /
@@ -2960,6 +2964,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       disconnectedPlayers: new Set(),
       actionPending: false,
       latencyMs: null,
+      stateWithheld: null,
       playerLatencies: {},
       hostGameCode: null,
       hostIsPublic: false,
@@ -3133,6 +3138,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         }),
       setActionPending: (pending) => set({ actionPending: pending }),
       setLatency: (ms) => set({ latencyMs: ms }),
+      setStateWithheld: (notice) => set({ stateWithheld: notice }),
 
       startHosting: (settings, deck, serverUrl) => {
         const aiSeats = effectiveAiSeats(settings);
