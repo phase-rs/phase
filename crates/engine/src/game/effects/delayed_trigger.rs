@@ -213,6 +213,14 @@ pub fn resolve(
             crate::game::targeting::resolve_live_parent_slot_from_root(state, ability, index)
         });
     }
+    // CR 608.2b: an unavailable announcement cannot become an unrestricted
+    // event condition. Check before contextual binding erases ParentTarget;
+    // genuinely unassigned empty bindings keep their existing behavior.
+    let references_unavailable_parent = ability.has_authoritative_empty_binding()
+        && filter_groups
+            .iter()
+            .flatten()
+            .any(|filter| reaches_bare_parent_target_bind(filter));
     let no_alternative_can_match = condition_cannot_match(&filter_groups);
     let over_fire_prone_triggers: Vec<&crate::types::ability::TriggerDefinition> = match &condition
     {
@@ -228,17 +236,9 @@ pub fn resolve(
         // `match` over fallback defaults"), so a future variant must make this
         // decision instead of inheriting a silent skip.
         //
-        // These return nothing because this guard reads `TriggerDefinition`
-        // filter slots and they carry none — NOT because they are safe. Said
-        // plainly, because an earlier version of this comment claimed they were:
-        // the four `filter: TargetFilter` variants below go through the SAME
-        // `bind_parent_target_filter` call and degrade a bare `ParentTarget` to
-        // `TargetFilter::Any` identically. MEASURED over the corpus, 79 such
-        // filters exist across 76 cards (29 `WhenDies`, 38 `WhenDiesOrExiled`,
-        // 10 `WhenLeavesPlayFiltered`, 2 `WhenEntersBattlefield`). Whether any of
-        // them can reach this call with an empty `ability.targets` is UNMEASURED.
-        // It is not a regression — these arms skip the guard on main too — and it
-        // is out of scope for #8721, which is why they stay `Vec::new()` here.
+        // These conditions carry no TriggerDefinition filter slots. Their
+        // authoritative-empty references are guarded above through the shared
+        // condition-filter enumeration; unassigned-empty behavior is unchanged.
         DelayedTriggerCondition::AtNextPhase { .. }
         | DelayedTriggerCondition::AtNextPhaseForPlayer { .. }
         | DelayedTriggerCondition::AtBeginningOfAddedPhase { .. }
@@ -259,7 +259,7 @@ pub fn resolve(
             .iter()
             .any(|filter| filter.as_ref().is_some_and(reaches_bare_parent_target_bind))
         });
-    if references_empty_parent || no_alternative_can_match {
+    if references_unavailable_parent || references_empty_parent || no_alternative_can_match {
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::CreateDelayedTrigger,
             source_id: ability.source_id,
@@ -683,12 +683,19 @@ pub fn resolve(
     };
     delayed_ability.set_target_incarnations_recursive(target_pins);
     delayed_ability.set_unpinned_targets(snapshot_targets);
+    // CR 608.2b + CR 603.7c: retain an unavailable creation-time announcement
+    // on reference-only payloads so firing cannot invent a new antecedent.
+    if ability.has_authoritative_empty_binding()
+        && ability.context.forwarded_result_context.is_none()
+    {
+        super::inherit_missing_parent_referent(&mut delayed_ability, ability);
+    }
     // CR 608.2k: Give each clause that names an event-subject anaphor its own
     // referent, so a chain naming both the event's subject and its object slot
     // does not hand one clause the other's object.
     //
-    // MUST run after `set_target_incarnations_recursive` (which overwrites every
-    // node's pins with the root's) and after the root `targets` assignment —
+    // MUST run after `set_target_incarnations_recursive` (which stamps the
+    // inherited-reference scope) and after the root `targets` assignment —
     // either would otherwise clobber the per-node bindings.
     //
     // Gated on the same creation-time-provenance test as the root snapshot:
@@ -907,11 +914,8 @@ fn bind_event_subject_nodes(
             ability.target_incarnations = pins;
         }
     }
-    if let Some(sub) = ability.sub_ability.as_deref_mut() {
-        bind_event_subject_nodes(sub, state, source_id);
-    }
-    if let Some(alt) = ability.else_ability.as_deref_mut() {
-        bind_event_subject_nodes(alt, state, source_id);
+    for (_, child) in ability.child_links_mut() {
+        bind_event_subject_nodes(child, state, source_id);
     }
 }
 
@@ -1081,11 +1085,8 @@ fn triggering_source_destination_zone(state: &GameState) -> Option<Zone> {
 /// enforce that creation-event binding at delayed-trigger resolution.
 fn stamp_triggering_source_origins_in_ability_chain(ability: &mut ResolvedAbility, expected: Zone) {
     stamp_triggering_source_origins(&mut ability.effect, expected);
-    if let Some(sub_ability) = ability.sub_ability.as_deref_mut() {
-        stamp_triggering_source_origins_in_ability_chain(sub_ability, expected);
-    }
-    if let Some(else_ability) = ability.else_ability.as_deref_mut() {
-        stamp_triggering_source_origins_in_ability_chain(else_ability, expected);
+    for (_, child) in ability.child_links_mut() {
+        stamp_triggering_source_origins_in_ability_chain(child, expected);
     }
 }
 
@@ -1579,20 +1580,14 @@ fn snapshot_parent_dependent_quantities_in_ability_chain(
         parent,
         first_instruction_amount,
     );
-    // CR 608.2c: "Otherwise" runs in place of this instruction — same position in the payload.
-    if let Some(else_ability) = ability.else_ability.as_mut() {
-        snapshot_parent_dependent_quantities_in_ability_chain(
-            else_ability,
-            state,
-            parent,
-            first_instruction_amount,
-        );
-    }
-    // CR 608.2c: a later instruction's "that many" stays live (pre-existing behavior); a
-    // later-instruction anaphor to the creation amount needs its own design. Parent-target-
-    // dependent leaves still freeze here (None only withholds EventContextAmount).
-    if let Some(sub_ability) = ability.sub_ability.as_mut() {
-        snapshot_parent_dependent_quantities_in_ability_chain(sub_ability, state, parent, None);
+    // CR 608.2c: Else replaces this instruction; sub and coin outcomes follow it.
+    for (edge, child) in ability.child_links_mut() {
+        let amount = match edge {
+            crate::types::game_state::ChainStep::ElseAbility => first_instruction_amount,
+            crate::types::game_state::ChainStep::SubAbility
+            | crate::types::game_state::ChainStep::CoinFlipBranch { .. } => None,
+        };
+        snapshot_parent_dependent_quantities_in_ability_chain(child, state, parent, amount);
     }
 }
 
@@ -1914,11 +1909,8 @@ fn bind_tracked_set_to_ability_chain(ability: &mut ResolvedAbility, real_id: Tra
     if let Effect::CreateDelayedTrigger { effect, .. } = &mut ability.effect {
         bind_tracked_set_to_ability_definition(effect, real_id);
     }
-    if let Some(sub_ability) = ability.sub_ability.as_mut() {
-        bind_tracked_set_to_ability_chain(sub_ability, real_id);
-    }
-    if let Some(else_ability) = ability.else_ability.as_mut() {
-        bind_tracked_set_to_ability_chain(else_ability, real_id);
+    for (_, child) in ability.child_links_mut() {
+        bind_tracked_set_to_ability_chain(child, real_id);
     }
     for mode in &mut ability.mode_abilities {
         bind_tracked_set_to_ability_definition(mode, real_id);
@@ -4412,6 +4404,87 @@ mod tests {
             Zone::Battlefield,
             "a later incarnation must not be matched through the tracked set"
         );
+    }
+
+    // Real cards: Devouring Tendrils ("Target creature you control deals damage equal to its power
+    // to target creature or planeswalker you don't control. When the permanent you don't control
+    // dies this turn, you gain 2 life.") exhibits part of this shape (Devouring Tendrils parses to
+    // exactly TargetOnly -> DealDamage -> CreateDelayedTrigger WhenDies{ParentTarget} -> GainLife;
+    // its second target can be illegal while the first keeps the spell resolving. It covers only
+    // the WhenDies arm; the test also sweeps leaves/enters/dies-or-exiled at unit level). Shape: A
+    // delayed 'when that creature dies/leaves/enters/dies-or-is-exiled, gain 3 life' keyed on the
+    // parent target is not created when that announcement is illegal, only when unassigned.
+    #[test]
+    fn zone_conditions_distinguish_unavailable_and_unassigned_parent_bindings() {
+        use crate::types::ability::{ParentTargetMissingReason, TargetReadOrigin};
+
+        for condition in [
+            DelayedTriggerCondition::WhenDies {
+                filter: TargetFilter::ParentTarget,
+            },
+            DelayedTriggerCondition::WhenLeavesPlayFiltered {
+                filter: TargetFilter::ParentTarget,
+            },
+            DelayedTriggerCondition::WhenEntersBattlefield {
+                filter: TargetFilter::ParentTarget,
+            },
+            DelayedTriggerCondition::WhenDiesOrExiled {
+                filter: TargetFilter::ParentTarget,
+            },
+        ] {
+            for reason in [
+                None,
+                Some(ParentTargetMissingReason::IllegalAnnouncement {
+                    origin: TargetReadOrigin::OwnAnnouncement,
+                }),
+                Some(ParentTargetMissingReason::IllegalAnnouncement {
+                    origin: TargetReadOrigin::ParentAnnouncement,
+                }),
+            ] {
+                let mut state = GameState::new_two_player(42);
+                let mut ability = ResolvedAbility::new(
+                    Effect::CreateDelayedTrigger {
+                        condition: condition.clone(),
+                        effect: Box::new(AbilityDefinition::new(
+                            AbilityKind::Spell,
+                            Effect::GainLife {
+                                amount: QuantityExpr::Fixed { value: 3 },
+                                player: TargetFilter::Controller,
+                            },
+                        )),
+                        uses_tracked_set: false,
+                    },
+                    vec![],
+                    ObjectId(5),
+                    PlayerId(0),
+                );
+                ability.parent_target_missing_reason = reason;
+                let mut events = Vec::new();
+                resolve(&mut state, &ability, &mut events).unwrap();
+                assert_eq!(
+                    state.delayed_triggers.len(),
+                    usize::from(reason.is_none()),
+                    "condition={condition:?}, provenance={reason:?}"
+                );
+                assert!(events.iter().any(|event| matches!(
+                    event,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::CreateDelayedTrigger,
+                        ..
+                    }
+                )));
+                if reason.is_none() {
+                    let groups = condition_filter_groups(&mut state.delayed_triggers[0].condition);
+                    assert!(
+                        groups
+                            .into_iter()
+                            .flatten()
+                            .all(|filter| *filter == TargetFilter::Any),
+                        "ordinary unassigned-empty binding keeps its existing wildcard"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

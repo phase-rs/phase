@@ -19612,6 +19612,7 @@ fn continue_with_prepared(
                 prepared.object_id,
                 player,
             );
+            super::ability_utils::materialize_coin_branches(&mut placeholder);
             stamp_prepared_cast_context(&prepared, &mut placeholder);
             if modal_requires_additional_cost_declaration(modal_choice) {
                 return casting_costs::begin_modal_additional_cost_declaration(
@@ -33147,9 +33148,14 @@ struct ActivationCostVisitor<'a> {
 
 impl super::ability_utils::CompletionVisitor for ActivationCostVisitor<'_> {
     fn accept(&mut self, selected_slots: &[Option<TargetRef>]) -> bool {
-        let targets: Vec<TargetRef> = selected_slots.iter().flatten().cloned().collect();
         let mut candidate = self.ability.clone();
-        if assign_targets_in_chain(self.state, &mut candidate, &targets).is_err() {
+        if super::ability_utils::assign_target_completion_in_chain(
+            self.state,
+            &mut candidate,
+            selected_slots,
+        )
+        .is_err()
+        {
             return false;
         }
         // The SAME collector target settlement uses, so the offer and the

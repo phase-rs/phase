@@ -1199,6 +1199,17 @@ pub fn resolved_targets(
     target_filter: &TargetFilter,
     state: &GameState,
 ) -> Vec<TargetRef> {
+    // CR 608.2b: an unavailable announcement is bound to the empty set,
+    // not an invitation to substitute an event, attached host, or source.
+    if matches!(
+        target_filter,
+        TargetFilter::ParentTarget
+            | TargetFilter::ParentTargetController
+            | TargetFilter::ParentTargetOwner
+    ) && ability.has_authoritative_empty_binding()
+    {
+        return Vec::new();
+    }
     // CR 201.5a + CR 400.7: the stamped granter incarnation, and nothing once it has left.
     if let TargetFilter::GrantingObject { bound } = target_filter {
         if let Some(granter) = bound.or(ability.context.granting_object) {
@@ -1378,11 +1389,11 @@ pub fn resolved_targets(
     // `effects::resolved_effect_object_ids` binds the slot through the live
     // slot authority instead.
     //
-    // CR 400.7 + CR 603.7c: a delayed ability's pinned referent that has since
-    // become a new object is dropped here — it "left that zone and then
-    // returned", so the ability won't affect it. Unpinned targets (every
-    // non-delayed ability, and every delayed trigger whose condition names a
-    // zone change of the referent) pass through unchanged.
+    // CR 400.7 + CR 603.7c: delayed-reference riders use their keyed creation
+    // pins. Announcement pins govern independent declarations, not inherited
+    // riders: CR 400.7j lets a later instruction find a card the same effect
+    // moved to a public zone. Such a rider must not be rejected merely because
+    // the original announcement pin names its pre-move incarnation.
     //
     // ORDERING IS LOAD-BEARING: at this line `ability.targets` is non-empty, so
     // the `is_empty()` fallbacks above have ALREADY been passed and returning an
@@ -1430,20 +1441,12 @@ pub fn resolved_targets(
 /// Tiers, in order:
 ///   1. `context.forwarded_result_context` — a forward-result producer is the most recent
 ///      antecedent. `Some([])` there is a real zero-result and must not fall through.
-///   2. `parent_chain_targets_from_root` — the flattened resolving-root chain, so a
-///      `ParentTargetSlot { index }` anaphor can index an earlier declared slot. NOTE the
-///      breadth this implies: the flatten is CHAIN-WIDE, concatenating every node's `targets`,
-///      because slot indexing needs the whole declared sequence. A caller that binds the result
-///      wholesale therefore hands a bare `ParentTarget` rider every sink in the chain, not just
-///      the prevention's own. Measured zero carriers today — all five in-class prevention riders
-///      sit in chains with exactly one target sink — but a future prevention printed as one
-///      clause of a multi-sink chain would inherit the sibling clause's referent. That breadth
-///      is inherited from the delayed-trigger authority this was extracted from; narrowing it
-///      would change that seam too, so it is recorded here rather than special-cased.
-///   3. the node's OWN propagated `targets` (phase#4767: a runtime-injected referent that was
-///      never a declared slot — Animate Dead / Dance of the Dead).
-///   4. `chain_declares_chooseable_target_slots` — a slot WAS declared and zero targets were
-///      chosen (CR 115.6 / CR 603.3d, issue #5901): the referent is the empty set.
+///   2. CR 608.2b: an illegally emptied announcement remains authoritative;
+///      otherwise this node's propagated binding at a coin boundary applies.
+///      Independently declared outcomes cannot publish into siblings.
+///   3. The ordinary resolving-root lexical chain, excluding coin outcomes.
+///   4. The node's OWN propagated `targets` when no declaration supplied a referent.
+///      Optional empty declarations remain `Some([])` (CR 115.6).
 ///
 /// Returns `None` when the chain names NO referent at all. That is a distinct fact from
 /// tier 4's `Some(vec![])`, and the two callers answer it differently:
@@ -1461,6 +1464,19 @@ pub(crate) fn parent_chain_referents(
     if let Some(context) = &ability.context.forwarded_result_context {
         return Some(context.targets.clone());
     }
+    // CR 608.2b: carried absence precedes lexical/root fallback. Forwarded
+    // results above remain the newer antecedent, including a completed empty one.
+    if ability.has_authoritative_empty_binding() {
+        return Some(Vec::new());
+    }
+    let root = resolving_root_ability(state, ability);
+    if super::triggers::any_reachable_link(root, &|node| node.coin_branches.is_some())
+        && (!ability.targets.is_empty()
+            || ability.multi_target.is_some()
+            || ability.optional_targeting)
+    {
+        return Some(ability.targets.clone());
+    }
     let root_chain = parent_chain_targets_from_root(state, ability);
     if !root_chain.is_empty() {
         return Some(root_chain);
@@ -1468,7 +1484,9 @@ pub(crate) fn parent_chain_referents(
     if !ability.targets.is_empty() {
         return Some(ability.targets.clone());
     }
-    if chain_declares_chooseable_target_slots(resolving_root_ability(state, ability)) {
+    if super::ability_utils::lexical_parent_chain_referents(root).is_some()
+        && chain_declares_chooseable_target_slots(root)
+    {
         return Some(Vec::new());
     }
     None
@@ -1484,13 +1502,8 @@ fn chain_declares_chooseable_target_slots(ability: &ResolvedAbility) -> bool {
     ability.multi_target.is_some()
         || ability.optional_targeting
         || ability
-            .sub_ability
-            .as_deref()
-            .is_some_and(chain_declares_chooseable_target_slots)
-        || ability
-            .else_ability
-            .as_deref()
-            .is_some_and(chain_declares_chooseable_target_slots)
+            .child_links()
+            .any(|(_, child)| chain_declares_chooseable_target_slots(child))
 }
 
 /// CR 608.2c: Every declared target of the resolving chain, in slot order, for chain-wide readers.
@@ -1498,7 +1511,8 @@ pub(crate) fn parent_chain_targets_from_root(
     state: &GameState,
     ability: &ResolvedAbility,
 ) -> Vec<TargetRef> {
-    super::ability_utils::declared_targets_in_chain(resolving_root_ability(state, ability))
+    super::ability_utils::lexical_parent_chain_referents(resolving_root_ability(state, ability))
+        .unwrap_or_default()
 }
 
 /// CR 608.2c: The root `ResolvedAbility` of the currently-resolving stack
@@ -1526,6 +1540,16 @@ pub(crate) fn resolving_root_ability<'a>(
 /// the mode now resolving (the parser numbers slots within one mode's text), else the chain root.
 fn parent_slot_base<'a>(state: &'a GameState, ability: &'a ResolvedAbility) -> &'a ResolvedAbility {
     let root = resolving_root_ability(state, ability);
+    // CR 608.2c: a selected outcome carries its lexical base explicitly.
+    // The carrier remains unpruned, preserving the outer CR 608.2b offset.
+    if let Some(base) = ability
+        .context
+        .coin_branch_slot_base
+        .as_deref()
+        .and_then(|path| super::ability_utils::node_at(root, path))
+    {
+        return base;
+    }
     // `resolving_modal_instruction` outlives its resolution, so it names a mode only of the carrier's chain.
     let Some(ordinal) = state
         .resolving_modal_instruction
@@ -2818,6 +2842,17 @@ pub fn resolve_effect_player_ref(
     ability: &ResolvedAbility,
     filter: &TargetFilter,
 ) -> Option<PlayerId> {
+    // CR 608.2b: an unavailable parent announcement names no player;
+    // event/attached-host resolution cannot supply a replacement controller.
+    if matches!(
+        filter,
+        TargetFilter::ParentTarget
+            | TargetFilter::ParentTargetController
+            | TargetFilter::ParentTargetOwner
+    ) && ability.has_authoritative_empty_binding()
+    {
+        return None;
+    }
     match filter {
         // CR 109.5: "you" in an ability is its controller, independent of any
         // resolution-scoped player. Player-scope iteration rebinds
@@ -8087,6 +8122,96 @@ mod tests {
         let result = resolved_targets(&ability, &TargetFilter::ParentTarget, &state);
 
         assert_eq!(result, vec![TargetRef::Object(attacker)]);
+    }
+
+    // Real cards: no printed card exhibits this shape (All oracle_text for 'whenever
+    // ...(blocks|becomes blocked)..., ...(that creature's|its) (controller|owner)' (34 hits): all
+    // name the event referent, none an announced target that can be unavailable while resolving).
+    // Shape: Player references to the parent target, its controller or its owner under a
+    // blockers-declared event resolve to no player when the announcement is unavailable, while the
+    // ability's controller and the triggering source's controller still resolve. Nearest printed
+    // card: Swords to Plowshares ("Exile target creature. Its controller gains life equal to its
+    // power."); Assembled Alphas ("Whenever this creature blocks or becomes blocked by a creature,
+    // this creature deals 3 damage to that creature and 3 damage to that creature's controller.")
+    // -- Swords to Plowshares names an announced target's controller (single target, fizzles
+    // whole); Assembled Alphas names the block-event creature's controller (the fallback case).
+    #[test]
+    fn unavailable_parent_player_does_not_fall_back_to_the_firing_event() {
+        use crate::types::ability::{ParentTargetMissingReason, TargetReadOrigin};
+
+        let (mut state, source, host) = setup_with_creatures();
+        state.current_trigger_event = Some(GameEvent::BlockersDeclared {
+            assignments: vec![(source, host)],
+        });
+        let mut untap_state = state.clone();
+        untap_state.current_trigger_event = Some(GameEvent::PermanentUntapped { object_id: host });
+        let mut ability = make_resolved_with_targets(vec![], source);
+        let resolve = |state: &GameState,
+                       ability: &crate::types::ability::ResolvedAbility,
+                       filter: &TargetFilter| {
+            (
+                resolve_effect_player_ref(state, ability, filter),
+                crate::game::effects::resolve_player_for_context_ref(state, ability, filter),
+            )
+        };
+        let host_controller = state.objects[&host].controller;
+        assert_eq!(
+            resolve(&state, &ability, &TargetFilter::ParentTarget),
+            (Some(host_controller), Some(host_controller))
+        );
+        // The block event's controller/owner projections name its source (the blocker).
+        for (filter, player) in [
+            (
+                TargetFilter::ParentTargetController,
+                state.objects[&source].controller,
+            ),
+            (
+                TargetFilter::ParentTargetOwner,
+                state.objects[&source].owner,
+            ),
+        ] {
+            assert_eq!(
+                resolve(&state, &ability, &filter),
+                (Some(player), Some(player)),
+                "unguarded event fallback: {filter:?}"
+            );
+        }
+        for origin in [
+            TargetReadOrigin::OwnAnnouncement,
+            TargetReadOrigin::ParentAnnouncement,
+        ] {
+            ability.parent_target_missing_reason =
+                Some(ParentTargetMissingReason::IllegalAnnouncement { origin });
+            for filter in [
+                TargetFilter::ParentTarget,
+                TargetFilter::ParentTargetController,
+                TargetFilter::ParentTargetOwner,
+            ] {
+                assert_eq!(
+                    resolve(&state, &ability, &filter),
+                    (None, None),
+                    "unavailable player reference: {origin:?}, {filter:?}"
+                );
+                assert!(
+                    resolved_targets(&ability, &filter, &state).is_empty(),
+                    "shared target resolution cannot refill an unavailable projection"
+                );
+            }
+            assert_eq!(
+                resolve(&untap_state, &ability, &TargetFilter::Controller),
+                (Some(ability.controller), Some(ability.controller)),
+                "ordinary controller is independent of the missing announcement"
+            );
+            assert_eq!(
+                resolve(
+                    &untap_state,
+                    &ability,
+                    &TargetFilter::TriggeringSourceController,
+                ),
+                (Some(host_controller), Some(host_controller)),
+                "a genuine event reference retains its own authority"
+            );
+        }
     }
 
     /// CR 509.3d + CR 608.2k: the disambiguated per-blocker event carries both

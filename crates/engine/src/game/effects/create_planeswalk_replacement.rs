@@ -42,12 +42,13 @@ pub fn resolve(
     // planeswalk. Captured as a `ResolvedAbility` so the post-replacement
     // continuation drain dispatches it with source/controller bound at install
     // time (CR 611.2a).
-    let substitute = ResolvedAbility::new(
+    let mut substitute = ResolvedAbility::new(
         (**replacement_effect).clone(),
         vec![],
         ability.source_id,
         ability.controller,
     );
+    crate::game::ability_utils::materialize_coin_branches(&mut substitute);
 
     let mut shield = ReplacementDefinition::new(ReplacementEvent::Planeswalk);
     shield.consume_on_apply = false; // CR 614.5: continuous within the window

@@ -71,14 +71,26 @@ pub fn mark_saddled(
 /// canonical `resolve_defined_or_targets` chokepoint in `counters.rs`:
 /// - `LastCreated` → the most recently created token ids
 /// - `SelfRef` → the source (a "~ becomes saddled" self-anaphor)
-/// - event-context refs (`TriggeringSource` — Kolodin's "it becomes saddled"
-///   Mount-enters trigger; `ParentTarget` from a parent slot) resolve from the
-///   trigger event via `resolve_event_context_targets`
+/// - `ParentTarget` → the bound parent referent, including authoritative emptiness,
+///   before any unassigned event/attached-host fallback
+/// - other event-context refs (`TriggeringSource` — Kolodin's "it becomes saddled"
+///   Mount-enters trigger) resolve via `resolve_event_context_targets`
 /// - otherwise → the announced object targets (Guidelight Matrix's chosen Mount)
 fn resolve_object_targets(state: &GameState, ability: &ResolvedAbility) -> Vec<ObjectId> {
     let Effect::BecomeSaddled { target } = &ability.effect else {
         return Vec::new();
     };
+    // CR 608.2b: preserve a bound ParentTarget before event/attached-host
+    // fallback; the shared authority also preserves an unavailable binding.
+    if matches!(target, TargetFilter::ParentTarget) {
+        return crate::game::targeting::resolved_targets(ability, target, state)
+            .into_iter()
+            .filter_map(|target| match target {
+                TargetRef::Object(id) => Some(id),
+                TargetRef::Player(_) => None,
+            })
+            .collect();
+    }
     if matches!(target, TargetFilter::LastCreated) {
         return state.last_created_token_ids.clone();
     }

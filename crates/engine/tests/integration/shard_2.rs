@@ -215,6 +215,7 @@ mod code_of_constraint_addendum;
 mod codie_prepared_spell_trigger;
 mod codie_turn14_effect_zone_wedge;
 mod coerced_attack_punisher;
+mod coin_flip_branch_targets;
 mod coin_flip_until_loss_loop;
 mod coin_of_fate;
 mod collect_evidence_self;
