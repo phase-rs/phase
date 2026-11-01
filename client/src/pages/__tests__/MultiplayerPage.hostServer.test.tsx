@@ -78,6 +78,7 @@ vi.mock("../../stores/gameStore", () => ({
 vi.mock("../../constants/storage", () => ({
   ACTIVE_DECK_KEY: "active-deck",
   loadActiveDeck: () => ({ main: ["Island"], sideboard: [] }),
+  loadActiveDeckBracket: () => null,
   touchDeckPlayed: vi.fn(),
 }));
 

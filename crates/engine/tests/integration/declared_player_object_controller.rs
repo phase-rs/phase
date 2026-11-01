@@ -330,6 +330,7 @@ fn keeper_row(invalidate: &[Invalidate]) -> (GameRunner, Board, Offers) {
     r.act(GameAction::ActivateAbility {
         source_id: keeper,
         ability_index: 0,
+        payment_mode: CastPaymentMode::Auto,
     })
     .expect("activate");
     let offers = drive(&mut r, P1, invalidate);

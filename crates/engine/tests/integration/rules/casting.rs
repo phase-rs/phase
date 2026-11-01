@@ -1284,6 +1284,9 @@ fn play_land_from_graveyard_with_permission() {
                 enters_with_counter: None,
                 required_cast_keyword: None,
                 pool: engine::types::statics::GraveyardPermissionPool::OwnGraveyard,
+                cast_limit: engine::types::statics::PermissionCastLimit::Unlimited,
+                mana_spend_permission: None,
+                enters_modifications: Default::default(),
             })
             .affected(TargetFilter::Typed(
                 engine::types::ability::TypedFilter::new(TypeFilter::Land),
@@ -1354,6 +1357,9 @@ fn play_land_from_graveyard_respects_land_drop_limit() {
                 enters_with_counter: None,
                 required_cast_keyword: None,
                 pool: engine::types::statics::GraveyardPermissionPool::OwnGraveyard,
+                cast_limit: engine::types::statics::PermissionCastLimit::Unlimited,
+                mana_spend_permission: None,
+                enters_modifications: Default::default(),
             })
             .affected(TargetFilter::Typed(
                 engine::types::ability::TypedFilter::new(TypeFilter::Land),
@@ -1415,7 +1421,7 @@ fn muldrotha_per_permanent_type_blocks_second_land_from_graveyard() {
 
     // Source has Muldrotha-class permission (per-permanent-type per turn).
     let _source_id = scenario
-        .add_creature(P0, "Muldrotha, the Gravetide", 0, 0)
+        .add_creature(P0, "Muldrotha, the Gravetide", 1, 1)
         .with_static_definition(
             StaticDefinition::new(StaticMode::GraveyardCastPermission {
                 frequency: CastFrequency::OncePerTurnPerPermanentType,
@@ -1425,6 +1431,9 @@ fn muldrotha_per_permanent_type_blocks_second_land_from_graveyard() {
                 enters_with_counter: None,
                 required_cast_keyword: None,
                 pool: engine::types::statics::GraveyardPermissionPool::OwnGraveyard,
+                cast_limit: engine::types::statics::PermissionCastLimit::Unlimited,
+                mana_spend_permission: None,
+                enters_modifications: Default::default(),
             })
             .affected(TargetFilter::Typed(
                 engine::types::ability::TypedFilter::new(TypeFilter::Permanent),
@@ -1435,7 +1444,7 @@ fn muldrotha_per_permanent_type_blocks_second_land_from_graveyard() {
     // Grant an additional land drop so the per-turn land cap doesn't mask
     // the per-permanent-type-slot enforcement.
     let _explore = scenario
-        .add_creature(P0, "Exploration", 0, 0)
+        .add_creature(P0, "Exploration", 1, 1)
         .with_static_definition(
             StaticDefinition::new(StaticMode::AdditionalLandDrop { count: 1 })
                 .affected(TargetFilter::Player),
@@ -1507,6 +1516,9 @@ fn muldrotha_per_permanent_type_resets_at_turn_start() {
                 enters_with_counter: None,
                 required_cast_keyword: None,
                 pool: engine::types::statics::GraveyardPermissionPool::OwnGraveyard,
+                cast_limit: engine::types::statics::PermissionCastLimit::Unlimited,
+                mana_spend_permission: None,
+                enters_modifications: Default::default(),
             })
             .affected(TargetFilter::Typed(
                 engine::types::ability::TypedFilter::new(TypeFilter::Permanent),
@@ -1625,32 +1637,32 @@ fn required_blight_with_no_creatures_rejects_cast() {
     let mut runner = scenario.build();
     let card_id = runner.state().objects[&spell_id].card_id;
 
-    let first = runner.act(GameAction::CastSpell {
-        object_id: spell_id,
-        card_id,
-        targets: vec![],
-
-        payment_mode: CastPaymentMode::Auto,
-    });
-
-    // CastSpell may enter TargetSelection first. The gate fires once the
-    // required cost is about to be paid — either at CastSpell time if no
-    // targets are required, or at SelectTargets time.
-    let final_result = match first {
-        Err(_) => first,
-        Ok(res) if matches!(res.waiting_for, WaitingFor::TargetSelection { .. }) => {
-            runner.act(GameAction::SelectTargets {
-                targets: vec![TargetRef::Player(P1)],
-            })
-        }
-        other => other,
-    };
-
-    assert!(
-        final_result.is_err(),
-        "cast must fail when required additional cost is unpayable, got {:?}",
-        final_result
-    );
+    let first = runner
+        .act(GameAction::CastSpell {
+            object_id: spell_id,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the spell reaches target declaration before checking the required cost");
+    assert!(matches!(
+        first.waiting_for,
+        WaitingFor::TargetSelection { .. }
+    ));
+    let result = runner
+        .act(GameAction::SelectTargets {
+            targets: vec![TargetRef::Player(P1)],
+        })
+        .expect("the unpayable required cost settles the entire casting procedure");
+    assert!(runner.state().cancelled_casts.contains(&spell_id));
+    assert_eq!(runner.state().objects[&spell_id].zone, Zone::Hand);
+    assert!(runner.state().pending_cast.is_none());
+    assert!(runner
+        .state()
+        .stack
+        .iter()
+        .all(|entry| entry.id != spell_id));
+    assert!(matches!(result.waiting_for, WaitingFor::Priority { player } if player == P0));
 }
 
 /// CR 601.2b: When an `AdditionalCost::Choice(A, B)` has an unpayable
@@ -1725,7 +1737,7 @@ fn zaffai_once_per_turn_hand_free_casts_with_no_mana() {
     // Zaffai-equivalent permission: "once during each of your turns, you may cast
     // an instant or sorcery spell from your hand without paying its mana cost".
     let source_id = scenario
-        .add_creature(P0, "Zaffai, Thunder Conductor", 0, 0)
+        .add_creature(P0, "Zaffai, Thunder Conductor", 1, 1)
         .with_static_definition(
             StaticDefinition::new(StaticMode::CastFromHandFree {
                 frequency: CastFrequency::OncePerTurn,
@@ -1856,7 +1868,7 @@ fn cast_spell_for_free_uses_the_named_permission_source() {
     scenario.at_phase(Phase::PreCombatMain);
 
     let first_source = scenario
-        .add_creature(P0, "First Zaffai Stand-In", 0, 0)
+        .add_creature(P0, "First Zaffai Stand-In", 1, 1)
         .with_static_definition(
             StaticDefinition::new(StaticMode::CastFromHandFree {
                 frequency: CastFrequency::OncePerTurn,
@@ -1866,7 +1878,7 @@ fn cast_spell_for_free_uses_the_named_permission_source() {
         )
         .id();
     let second_source = scenario
-        .add_creature(P0, "Second Zaffai Stand-In", 0, 0)
+        .add_creature(P0, "Second Zaffai Stand-In", 1, 1)
         .with_static_definition(
             StaticDefinition::new(StaticMode::CastFromHandFree {
                 frequency: CastFrequency::OncePerTurn,
@@ -2809,7 +2821,7 @@ fn as_foretold_dynamic_alt_cost_offered_and_consumed() {
     // As Foretold on the battlefield (only the alt-cost line matters here; time
     // counters are seeded directly). Hosted on a permanent via the full parser.
     let foretold_id = scenario
-        .add_creature(P0, "As Foretold", 0, 0)
+        .add_creature(P0, "As Foretold", 1, 1)
         .from_oracle_text(
             "Once each turn, you may pay {0} rather than pay the mana cost for a spell \
              you cast with mana value X or less, where X is the number of time counters on ~.",
@@ -2898,7 +2910,7 @@ fn as_foretold_decline_printed_cost_does_not_consume_slot() {
     scenario.at_phase(Phase::PreCombatMain);
 
     let foretold_id = scenario
-        .add_creature(P0, "As Foretold", 0, 0)
+        .add_creature(P0, "As Foretold", 1, 1)
         .from_oracle_text(
             "Once each turn, you may pay {0} rather than pay the mana cost for a spell \
              you cast with mana value X or less, where X is the number of time counters on ~.",

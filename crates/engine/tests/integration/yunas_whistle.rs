@@ -702,54 +702,6 @@ fn generic_when_you_do_after_a_reveal_until_whiff_still_triggers() {
     assert_eq!(after, before + 2);
 }
 
-const CAIT_SITH: &str = "Lucky Slots — At the beginning of combat on your turn, scry 1, then exile the top card of your library. You may play that card this turn. When you exile a card this way, target creature you control gets +X/+0 until end of turn, where X is that card's mana value.";
-
-/// CR 603.12 (Cait Sith's 2025-06-06 ruling): its reflexive's target timing is
-/// not modeled, so the clause is honestly unsupported. Production combat
-/// trigger: no target is announced with the trigger (no early prompt), and no
-/// pump lands, while the trigger itself still scries and exiles.
-#[test]
-fn cait_sith_announces_no_target_with_its_combat_trigger() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    scenario.add_creature_from_oracle(P0, "Cait Sith, Fortune Teller", 2, 2, CAIT_SITH);
-    let bear = scenario.add_creature(P0, "Bear", 2, 2).id();
-    let top = scenario
-        .add_spell_to_library_top(P0, "Three Drop", false)
-        .with_mana_cost(ManaCost::generic(3))
-        .id();
-    let mut runner = scenario.build();
-    let mut saw_scry = false;
-    for _ in 0..16 {
-        match runner.state().waiting_for.clone() {
-            WaitingFor::TriggerTargetSelection { .. } => {
-                panic!("no target may be announced with Cait Sith's trigger")
-            }
-            WaitingFor::ScryChoice { .. } => {
-                saw_scry = true;
-                runner
-                    .act(GameAction::SelectCards { cards: vec![] })
-                    .expect("keep the scried card on top");
-            }
-            WaitingFor::Priority { .. } => {
-                if runner.state().phase == Phase::DeclareAttackers {
-                    break;
-                }
-                runner.act(GameAction::PassPriority).expect("pass");
-            }
-            _ => break,
-        }
-    }
-    let st = runner.state();
-    assert!(saw_scry, "reach guard: the combat trigger resolved");
-    assert_eq!(
-        zone(st, top),
-        Zone::Exile,
-        "reach guard: the top card was exiled"
-    );
-    assert_eq!(st.objects[&bear].power, Some(2), "no pump");
-}
-
 // ---------------------------------------------------------------------------
 // CR 701.20a: "If revealing a card causes a triggered ability to trigger, the
 // card remains revealed until that triggered ability leaves the stack."
@@ -1964,4 +1916,105 @@ fn calibrated_blast_hit_stays_revealed_while_its_reflexive_pauses() {
     );
     assert!(!runner.state().holds_stack_bound_reveal(hit));
     assert!(runner.state().stack_bound_reveals.is_empty());
+}
+
+const FUNERAL_CHARM: &str = "Choose one —\n• Target player discards a card.\n• Target creature gets +2/-1 until end of turn.\n• Target creature gains swampwalk until end of turn.";
+
+/// Exact Yuna's Whistle reveals a 2-mana creature into an otherwise empty
+/// hand; with the reflexive on the stack targeting P0's battlefield Bear, P1
+/// casts Funeral Charm's discard mode on P0 (`respond`), or nobody responds.
+/// Returns the runner after the stack empties, the Bear and the hit.
+fn whistle_hit_then_discard(respond: bool) -> (GameRunner, ObjectId, ObjectId) {
+    let Fixture {
+        mut runner,
+        spell,
+        bear,
+        library,
+        extras,
+        ..
+    } = fixture_with(
+        "Yuna's Whistle",
+        YUNAS_WHISTLE,
+        true,
+        &[
+            LibCard::Land("Forest"),
+            LibCard::Creature("Library Bears", ManaCost::generic(2)),
+        ],
+        &[(P1, "Funeral Charm", FUNERAL_CHARM)],
+    );
+    let bear = bear.unwrap();
+    let hit = library[1];
+    runner.cast(spell).commit();
+    assert!(pass_until_prompt_or_empty(&mut runner), "reflexive prompt");
+    assert_eq!(
+        runner.state().players[0].hand.len(),
+        1,
+        "reach guard: the hit is P0's only card in hand"
+    );
+    assert_eq!(zone(runner.state(), hit), Zone::Hand, "reach guard");
+    choose(&mut runner, TargetRef::Object(bear));
+    assert_eq!(
+        reflexive_entries(runner.state()).len(),
+        1,
+        "reach guard: the reflexive is on the stack"
+    );
+    let reflexive = runner
+        .state()
+        .stack
+        .iter()
+        .find_map(|entry| match &entry.kind {
+            StackEntryKind::TriggeredAbility { ability, .. } => Some(ability.clone()),
+            _ => None,
+        })
+        .expect("the reflexive stack entry");
+    assert!(
+        format!("{:?}", reflexive.condition).contains("RevealUntilMatched"),
+        "reach guard: the reflexive carries the reveal-until-hit guard: {:?}",
+        reflexive.condition
+    );
+    assert_eq!(
+        reflexive
+            .effect_context_object
+            .as_ref()
+            .map(|snapshot| snapshot.object_id),
+        Some(hit),
+        "reach guard: the reflexive carries the hit's snapshot for X"
+    );
+    if respond {
+        runner.act(GameAction::PassPriority).unwrap();
+        runner
+            .cast(extras[0])
+            .modes(&[0])
+            .target_player(P0)
+            .commit();
+        pass_until_prompt_or_empty(&mut runner);
+        assert_eq!(
+            zone(runner.state(), hit),
+            Zone::Graveyard,
+            "reach guard: Funeral Charm discarded the hit before the reflexive resolved"
+        );
+    } else {
+        pass_until_prompt_or_empty(&mut runner);
+    }
+    assert!(runner.state().stack.is_empty());
+    (runner, bear, hit)
+}
+
+/// CR 603.12: the reveal already happened when the reflexive triggered, so
+/// discarding the revealed card in response neither undoes the trigger nor
+/// changes X.
+#[test]
+fn discarding_the_hit_in_response_keeps_the_reflexive_and_its_x() {
+    let (runner, bear, _) = whistle_hit_then_discard(true);
+    // CR 608.2h: the revealed card is no longer where the effect expected it,
+    // so X uses its last known information (mana value 2).
+    assert_eq!(p1p1(runner.state(), bear), 2);
+}
+
+/// Control: the same board with no response.
+#[test]
+fn the_unanswered_reflexive_puts_the_revealed_mana_value_on_the_bear() {
+    let (runner, bear, hit) = whistle_hit_then_discard(false);
+    assert_eq!(zone(runner.state(), hit), Zone::Hand);
+    assert_eq!(p1p1(runner.state(), bear), 2);
 }

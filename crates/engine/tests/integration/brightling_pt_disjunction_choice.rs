@@ -84,6 +84,7 @@ fn activate_and_read_branches(runner: &mut GameRunner, id: ObjectId) -> Vec<Stri
         .act(GameAction::ActivateAbility {
             source_id: id,
             ability_index: index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating the P/T disjunction must succeed");
     advance_to_choice(runner);
@@ -269,6 +270,7 @@ fn liliana_branch_outcome(branch_phrase: &str, seed: u64) -> (Option<i32>, Optio
         .act(GameAction::ActivateAbility {
             source_id: liliana,
             ability_index: index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("the [-3] is activatable at 3 loyalty");
     // CR 601.2c via CR 602.2b: the TARGET is announced as the ability goes on

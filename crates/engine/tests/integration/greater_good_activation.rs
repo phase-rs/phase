@@ -101,6 +101,7 @@ fn greater_good_draws_equal_to_sacrificed_power_then_discards_three() {
         .act(GameAction::ActivateAbility {
             source_id: gg_id,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating Greater Good must succeed");
     assert!(
@@ -172,6 +173,7 @@ fn greater_good_draw_count_tracks_modified_power() {
         .act(GameAction::ActivateAbility {
             source_id: gg_id,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating Greater Good must succeed");
     runner
@@ -250,6 +252,7 @@ fn discard_cost_populates_cost_paid_object() {
         .act(GameAction::ActivateAbility {
             source_id: host_id,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating the discard-cost ability must succeed");
     assert!(
@@ -303,6 +306,7 @@ fn greater_good_zero_power_creature_draws_zero_still_discards() {
         .act(GameAction::ActivateAbility {
             source_id: gg_id,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating Greater Good must succeed");
     runner
@@ -351,6 +355,7 @@ fn cost_paid_object_does_not_leak_between_activations() {
         .act(GameAction::ActivateAbility {
             source_id: gg_id,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("first activation must succeed");
     runner
@@ -371,6 +376,7 @@ fn cost_paid_object_does_not_leak_between_activations() {
         .act(GameAction::ActivateAbility {
             source_id: gg_id,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("second activation must succeed");
     runner
@@ -452,6 +458,7 @@ fn multi_sacrifice_cost_count_is_honored() {
         .act(GameAction::ActivateAbility {
             source_id: host_id,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating the count: 2 sacrifice ability must succeed");
 
@@ -532,6 +539,7 @@ fn multi_sacrifice_cost_resolves_through_pipeline() {
             .act(GameAction::ActivateAbility {
                 source_id: host_id,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             })
             .expect("activating the count: 2 sacrifice ability must succeed");
         assert!(
@@ -592,6 +600,7 @@ fn multi_sacrifice_cost_resolves_through_pipeline() {
             .act(GameAction::ActivateAbility {
                 source_id: host_id,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             })
             .expect("activating the count: 2 sacrifice ability must succeed");
 
@@ -647,6 +656,7 @@ fn sacrifice_cost_selects_target_before_cost_paid_object_exists() {
         .act(GameAction::ActivateAbility {
             source_id: host_id,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating the sacrifice-cost ability must succeed");
     assert!(

@@ -14,6 +14,7 @@
 //! CR 400.7: the Kaho that returns is a new object; cards its own enters
 //! trigger exiles are not linked to the old activation.
 
+use engine::types::game_state::CastPaymentMode;
 use std::collections::VecDeque;
 
 use engine::game::scenario::{GameRunner, GameScenario, P0};
@@ -151,6 +152,7 @@ fn activate_kaho(runner: &mut GameRunner, kaho: ObjectId) {
         .act(GameAction::ActivateAbility {
             source_id: kaho,
             ability_index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate Kaho");
     runner
@@ -237,6 +239,51 @@ fn flickered_kaho_activation_still_casts_from_its_own_exile() {
     assert!(
         has_free_cast(board.runner.state(), board.pile),
         "the old activation reads the pile of the Kaho that activated it"
+    );
+}
+
+/// CR 113.7a + CR 607.2a + CR 400.7: Kaho blinked once while its activation
+/// waits, and the returned Kaho's enters trigger exiles a new instant. That
+/// instant is exiled with the returned Kaho, a new object, so the activation
+/// still casts only from the activating Kaho's pile.
+#[test]
+fn kaho_activation_ignores_the_returned_kahos_new_exile() {
+    let mut board = kaho_board(1);
+    let kaho = board.kaho;
+    let new_exile = board.library_instants[0];
+    activate_kaho(&mut board.runner, kaho);
+    let flicker = board.flickers[0];
+    flicker_kaho(&mut board, flicker, vec![new_exile]);
+
+    let state = board.runner.state();
+    assert_eq!(
+        state.objects[&new_exile].zone,
+        Zone::Exile,
+        "the returned Kaho's enters trigger exiled the new instant"
+    );
+    assert!(
+        state
+            .exile_links
+            .iter()
+            .any(|link| link.exiled_id == new_exile
+                && link.source_id == kaho
+                && link.kind == ExileLinkKind::TrackedBySource),
+        "the new instant is a live link of the returned Kaho"
+    );
+
+    pass_until(
+        &mut board.runner,
+        &mut VecDeque::new(),
+        priority_with_stack(0),
+    );
+    let state = board.runner.state();
+    assert!(
+        has_free_cast(state, board.pile),
+        "the activation casts from the activating Kaho's pile"
+    );
+    assert!(
+        !has_free_cast(state, new_exile),
+        "the returned Kaho's exile is not exiled with the activating Kaho"
     );
 }
 

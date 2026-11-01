@@ -179,6 +179,7 @@
       "exportedTo": "已导出到 {{path}}。",
       "exportRequested": "已请求导出 — {{filename}}。",
       "exportFailed": "无法导出游戏状态。",
+      "exportFailedDetail": "无法导出游戏状态。{{detail}}",
       "replayExported": "回放已保存为 {{filename}}。",
       "replayExportUnavailable": "本局游戏没有可用的回放录像。",
       "replayExportFailed": "无法导出回放。"
@@ -285,7 +286,9 @@
     "loading": "加载中…"
   },
   "turnBanner": {
-    "turn": "第 {{number}} 回合"
+    "turn": "第 {{number}} 回合",
+    "yourTurn": "你的回合",
+    "opponentTurn": "{{name}}的回合"
   },
   "diceRoll": {
     "rollingForFirst": "掷骰决定先手",

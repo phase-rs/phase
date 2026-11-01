@@ -1,13 +1,26 @@
+use std::borrow::Cow;
+
 use crate::game::engine::EngineError;
+use crate::game::filter::{matches_target_filter, FilterContext};
+use crate::types::ability::{
+    battlefield_departure_slot, extract_target_filter_from_effect, ResolvedAbility,
+    TargetChoiceTiming, TargetFilter, TargetRef,
+};
+use crate::types::actions::GameAction;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     AutoPassMode, GameState, PriorityPassingMode, StackEntry, WaitingFor,
 };
+use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 
+use super::effects::stack_reach::resolution_board;
+use super::effects::{bind_scoped_seat, player_scope_members};
+use super::mana_sources;
 use super::players;
 use super::precast_copy_shortcut;
+use super::targeting::{object_targets, resolve_event_context_target_for_event_or_state};
 use super::turn_control;
 use super::turns;
 
@@ -148,7 +161,7 @@ pub(crate) fn handle_priority_pass_with_limit(
                     turns::AdvancePhaseOnce::Deferred => {
                         return deferred_transition_outcome(state);
                     }
-                    turns::AdvancePhaseOnce::Entry(_) | turns::AdvancePhaseOnce::Skipped => {}
+                    turns::AdvancePhaseOnce::Entry(_) => {}
                 }
                 let (waiting_for, transition_deferred) =
                     turns::auto_advance_reporting_deferral(state, events);
@@ -339,8 +352,17 @@ pub(crate) enum StandingPriorityPass {
     /// CR 117.1: Full Control refuses to have any window passed for this player.
     Withheld,
     /// CR 117.3d: the player stands committed to pass this window — a yield to
-    /// the top triggered ability, or the player's own object on top.
+    /// the top triggered ability, or the player's own object on top when it is
+    /// not `Held`.
     Granted,
+    /// CR 117.1d + CR 605.3a: the player's own object is on top, but resolving
+    /// it can move a permanent whose mana ability they can activate now off the
+    /// battlefield (CR 400.7), so the window is kept for that activation. Kept
+    /// unconditionally: the mana stays until the step ends (CR 106.4), and what
+    /// it can pay for once the object resolves (a sorcery-speed spell after a
+    /// karoo returns itself) is not castable now, so no castability test here
+    /// can tell. Opponent objects are not covered; they fall to the ladder.
+    Held,
     /// No standing answer; the window needs a fresh decision.
     Undecided,
 }
@@ -360,13 +382,246 @@ pub(crate) fn standing_priority_pass(
         return StandingPriorityPass::Withheld;
     }
     match window_top {
-        // CR 117.3d: a yield is a pre-committed pass; an own object on top is
-        // the ladder's MTGA-parity standing pass (it outranks castability, see
-        // `auto_pass_recommended`).
-        Some(top) if state.is_priority_yielded(player, top) || top.controller == player => {
-            StandingPriorityPass::Granted
+        // CR 117.3d: a yield is a pre-committed pass.
+        Some(top) if state.is_priority_yielded(player, top) => StandingPriorityPass::Granted,
+        // An own object on top is the ladder's MTGA-parity standing pass (it
+        // outranks castability, see `auto_pass_recommended`): whatever the
+        // player could do now, they can still do once it resolves — except
+        // activate a mana ability of a permanent it moves off the battlefield.
+        Some(top) if top.controller == player => {
+            if resolution_can_remove_activatable_mana_source(state, player, top) {
+                StandingPriorityPass::Held
+            } else {
+                StandingPriorityPass::Granted
+            }
         }
         Some(_) | None => StandingPriorityPass::Undecided,
+    }
+}
+
+/// CR 117.1d + CR 605.3a + CR 400.7: whether resolving `top` can move a
+/// permanent with a mana ability `player` can activate now off the battlefield.
+/// Once it moves, the permanent is a new object (CR 400.7) and that mana is out
+/// of reach, so this is the one window in which the activation is possible.
+///
+/// An instruction's battlefield departures are named by
+/// [`battlefield_departure_slot`]; [`DepartureReach::of`] decides which objects
+/// each one can move. The chain is read on the board `stack::resolve_top`
+/// prepares just before its first instruction runs
+/// (`stack_reach::resolution_board`), so trigger-event references, the event
+/// batch and the resolving entry read exactly what resolution will.
+fn resolution_can_remove_activatable_mana_source(
+    state: &GameState,
+    player: PlayerId,
+    top: &StackEntry,
+) -> bool {
+    let Some(root) = top.ability() else {
+        return false;
+    };
+    if !chain_has_battlefield_departure(root) {
+        return false;
+    }
+    let sources: Vec<ObjectId> = mana_sources::activatable_mana_actions_for_player(state, player)
+        .iter()
+        .filter_map(GameAction::source_object)
+        .collect();
+    if sources.is_empty() {
+        return false;
+    }
+    // `None`: `resolve_top` would not run the chain as it stands (a false
+    // intervening-if, a missing required target), or a declared target is no
+    // longer legal. A partly illegal target set still resolves for its legal
+    // targets (CR 608.2b), so that case keeps the standing pass: an accepted
+    // under-approximation.
+    let Some((board, prepared)) = resolution_board(state, top, root) else {
+        return false;
+    };
+    let mut departures = Vec::new();
+    collect_battlefield_departures(&prepared, &[], &mut departures);
+    let reaches: Vec<DepartureReach<'_>> = departures
+        .into_iter()
+        .filter_map(|departure| DepartureReach::of(&board, player, departure))
+        .collect();
+    sources
+        .iter()
+        .any(|&source| reaches.iter().any(|reach| reach.contains(&board, source)))
+}
+
+/// Whether any instruction in `ability`'s chain can move battlefield objects to
+/// another zone — the structural gate before any board is read.
+fn chain_has_battlefield_departure(ability: &ResolvedAbility) -> bool {
+    battlefield_departure_slot(&ability.effect).is_some()
+        || [&ability.sub_ability, &ability.else_ability]
+            .into_iter()
+            .flatten()
+            .any(|branch| chain_has_battlefield_departure(branch))
+}
+
+/// The objects one battlefield-departure instruction can move, as far as they
+/// are known before it resolves.
+enum DepartureReach<'a> {
+    /// Exactly these objects: the targets chosen for an announced slot, or the
+    /// object an event reference names.
+    Objects(Vec<ObjectId>),
+    /// Anything `filter` describes, read in `context`'s frame.
+    Described {
+        filter: &'a TargetFilter,
+        context: Box<Cow<'a, ResolvedAbility>>,
+    },
+}
+
+impl<'a> DepartureReach<'a> {
+    /// - An announced target slot (CR 115.1 + CR 601.2c / CR 602.2b /
+    ///   CR 603.3d) moves only the objects chosen for it, which are fixed on the
+    ///   stack; with none chosen it moves nothing.
+    /// - A reference to a target an earlier instruction declared ("destroy
+    ///   it", CR 608.2c) moves that target: the instruction's own targets when
+    ///   it already holds some (an event referent seeded as the trigger was put
+    ///   on the stack), else the targets its ancestors declared, which the
+    ///   resolver hands down only as the chain resolves (a slot reference reads
+    ///   them all). With none declared, "it" names an object the chain
+    ///   produces as it resolves, so it reaches nothing foreseeable (an
+    ///   accepted under-approximation).
+    /// - A reference to the triggering event's object ("sacrifice that
+    ///   creature", CR 608.2k) moves that object.
+    /// - Otherwise the instruction's objects are chosen or determined as it
+    ///   resolves (CR 608.2d), so anything its filter describes can be moved. A
+    ///   `player_scope` instruction applies once per scoped player with that
+    ///   player as its controller (CR 109.5), so it reaches `player`'s
+    ///   permanents only when `player` is in scope, read from `player`'s own
+    ///   iteration. Membership is read from the instruction's own targets, so a
+    ///   scope anchored on a target declared above it reads none (an accepted
+    ///   under-approximation).
+    ///
+    /// `None` when the instruction can move none of `player`'s permanents.
+    fn of(state: &GameState, player: PlayerId, departure: Departure<'a>) -> Option<Self> {
+        let Departure {
+            ability,
+            filter,
+            ancestor_targets,
+        } = departure;
+        let announced_targets = ability.target_choice_timing == TargetChoiceTiming::Stack
+            && extract_target_filter_from_effect(&ability.effect)
+                .is_some_and(|slot| !slot.is_context_ref());
+        if announced_targets {
+            return Some(Self::Objects(object_targets(&ability.targets).collect()));
+        }
+        let parent_target = matches!(
+            filter,
+            TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
+        );
+        if parent_target {
+            let own: Vec<ObjectId> = object_targets(&ability.targets).collect();
+            if !own.is_empty() {
+                return Some(Self::Objects(own));
+            }
+            if !ancestor_targets.is_empty() {
+                return Some(Self::Objects(ancestor_targets));
+            }
+            // With nothing declared, "it" is an object the chain produces as it
+            // resolves (the card it looked at or revealed) or one the resolver
+            // falls back to; neither is foreseeable here.
+            return None;
+        }
+        if filter.is_context_ref() {
+            if let Some(TargetRef::Object(id)) = resolve_event_context_target_for_event_or_state(
+                state,
+                filter,
+                ability.source_id,
+                state.current_trigger_event.as_ref(),
+            ) {
+                return Some(Self::Objects(vec![id]));
+            }
+        }
+        // `Any` is the operand of an instruction that names no population of its
+        // own (the card a search found, put into a hand); it describes no
+        // permanent this instruction moves off the battlefield. Likewise a
+        // referent the chain itself produces as it resolves ("those cards" its
+        // reveal publishes, "that token" it creates, CR 608.2c) names nothing
+        // yet: read now, it would name an earlier resolution's objects.
+        if is_chain_produced_referent(filter) {
+            return None;
+        }
+        let Some(scope) = &ability.player_scope else {
+            return Some(Self::Described {
+                filter,
+                context: Box::new(Cow::Borrowed(ability)),
+            });
+        };
+        let apnap =
+            players::apnap_order_from(state, ability.starting_with.clone(), ability.controller);
+        if !player_scope_members(state, scope, ability, apnap).contains(&player) {
+            return None;
+        }
+        Some(Self::Described {
+            filter,
+            context: Box::new(Cow::Owned(bind_scoped_seat(
+                ability,
+                ability.controller,
+                player,
+            ))),
+        })
+    }
+
+    fn contains(&self, state: &GameState, object: ObjectId) -> bool {
+        match self {
+            Self::Objects(objects) => objects.contains(&object),
+            Self::Described { filter, context } => {
+                matches_target_filter(state, object, filter, &FilterContext::from_ability(context))
+            }
+        }
+    }
+}
+
+/// CR 608.2c: an operand naming no population of its own (`Any`) or one the
+/// resolving chain publishes as it goes: the chain's tracked-set sentinel and
+/// the last created / revealed / zone-changed objects. A concrete tracked set,
+/// published before this object was put on the stack, is not one of them.
+fn is_chain_produced_referent(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Any
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged => true,
+        TargetFilter::TrackedSet { id } | TargetFilter::TrackedSetFiltered { id, .. } => {
+            *id == TrackedSetId(0)
+        }
+        _ => false,
+    }
+}
+
+/// One instruction that can move battlefield objects to another zone.
+struct Departure<'a> {
+    ability: &'a ResolvedAbility,
+    /// The slot naming the objects it can move.
+    filter: &'a TargetFilter,
+    /// Object targets declared by the instructions above it in its chain — what
+    /// a parent-target reference ("it") inherits as the chain resolves.
+    ancestor_targets: Vec<ObjectId>,
+}
+
+/// Every instruction in `ability`'s chain (its sub-abilities and else branches)
+/// that can move battlefield objects to another zone. `ancestor_targets` are the
+/// object targets declared above `ability`.
+fn collect_battlefield_departures<'a>(
+    ability: &'a ResolvedAbility,
+    ancestor_targets: &[ObjectId],
+    departures: &mut Vec<Departure<'a>>,
+) {
+    if let Some(filter) = battlefield_departure_slot(&ability.effect) {
+        departures.push(Departure {
+            ability,
+            filter,
+            ancestor_targets: ancestor_targets.to_vec(),
+        });
+    }
+    let mut inherited = ancestor_targets.to_vec();
+    inherited.extend(object_targets(&ability.targets));
+    for branch in [&ability.sub_ability, &ability.else_ability]
+        .into_iter()
+        .flatten()
+    {
+        collect_battlefield_departures(branch, &inherited, departures);
     }
 }
 
@@ -1055,5 +1310,525 @@ mod tests {
             standing_priority_pass(&state, PlayerId(0), Some(&opponent_spell)),
             StandingPriorityPass::Undecided
         );
+    }
+
+    mod removable_mana_source {
+        use super::*;
+        use crate::game::scenario::GameScenario;
+        use crate::types::ability::{
+            BounceSelection, ControllerRef, Effect, PlayerFilter, TypedFilter,
+        };
+        use crate::types::game_state::StackEntryKind;
+        use crate::types::mana::ManaColor;
+        use crate::types::zones::{EtbTapState, Zone};
+
+        const TRIGGER_SOURCE: ObjectId = ObjectId(900);
+
+        /// P0 controls an untapped Forest (a mana source P0 can activate now)
+        /// and P1 controls a Forest of its own.
+        fn board() -> (GameState, ObjectId, ObjectId) {
+            let mut scenario = GameScenario::new();
+            let forest = scenario.add_basic_land(PlayerId(0), ManaColor::Green);
+            let opponent_forest = scenario.add_basic_land(PlayerId(1), ManaColor::Green);
+            (scenario.build().state().clone(), forest, opponent_forest)
+        }
+
+        fn your_lands() -> TargetFilter {
+            TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You))
+        }
+
+        fn top(controller: PlayerId, source: ObjectId, ability: ResolvedAbility) -> StackEntry {
+            StackEntry {
+                id: ObjectId(901),
+                source_id: source,
+                controller,
+                kind: StackEntryKind::TriggeredAbility {
+                    source_id: source,
+                    ability: Box::new(ability),
+                    condition: None,
+                    trigger_event: None,
+                    description: None,
+                    source_name: String::new(),
+                    subject_match_count: None,
+                    die_result: None,
+                    provenance: None,
+                },
+            }
+        }
+
+        fn with_trigger_event(mut entry: StackEntry, event: GameEvent) -> StackEntry {
+            if let StackEntryKind::TriggeredAbility { trigger_event, .. } = &mut entry.kind {
+                *trigger_event = Some(event);
+            }
+            entry
+        }
+
+        fn own_top(effect: Effect, targets: Vec<TargetRef>) -> StackEntry {
+            top(
+                PlayerId(0),
+                TRIGGER_SOURCE,
+                ResolvedAbility::new(effect, targets, TRIGGER_SOURCE, PlayerId(0)),
+            )
+        }
+
+        fn verdict(state: &GameState, top: &StackEntry) -> StandingPriorityPass {
+            standing_priority_pass(state, PlayerId(0), Some(top))
+        }
+
+        /// Guildless Commons / karoo class: "return a land you control to its
+        /// owner's hand", chosen as the trigger resolves.
+        fn return_a_land_you_control() -> Effect {
+            Effect::Bounce {
+                target: your_lands(),
+                destination: None,
+                selection: BounceSelection::AtResolution,
+            }
+        }
+
+        #[test]
+        fn own_resolution_time_bounce_of_your_land_holds_while_the_land_can_tap() {
+            let (mut state, forest, _) = board();
+            let bounce = own_top(return_a_land_you_control(), vec![]);
+            assert_eq!(verdict(&state, &bounce), StandingPriorityPass::Held);
+
+            // Reach guard: the predicate consults activatability — with the
+            // Forest tapped there is no mana left to lose, so the pass stands.
+            state.objects.get_mut(&forest).unwrap().tapped = true;
+            assert_eq!(verdict(&state, &bounce), StandingPriorityPass::Granted);
+        }
+
+        #[test]
+        fn opponent_resolution_time_bounce_stays_undecided() {
+            let (state, _, _) = board();
+            let bounce = top(
+                PlayerId(1),
+                TRIGGER_SOURCE,
+                ResolvedAbility::new(
+                    return_a_land_you_control(),
+                    vec![],
+                    TRIGGER_SOURCE,
+                    PlayerId(1),
+                ),
+            );
+            assert_eq!(verdict(&state, &bounce), StandingPriorityPass::Undecided);
+        }
+
+        /// The classifier keeps the own-object pass for instructions that move
+        /// nothing off the battlefield, even with an activatable land in play.
+        #[test]
+        fn own_non_departure_instructions_keep_the_pass() {
+            let (state, _, _) = board();
+            // Reach guard: this board does hold for a departure instruction.
+            assert_eq!(
+                verdict(&state, &own_top(return_a_land_you_control(), vec![])),
+                StandingPriorityPass::Held
+            );
+            // Amulet of Vigor: "untap it".
+            let untap = own_top(
+                Effect::SetTapState {
+                    target: TargetFilter::TriggeringSource,
+                    scope: crate::types::ability::EffectScope::Single,
+                    state: crate::types::ability::TapStateChange::Untap,
+                },
+                vec![],
+            );
+            assert_eq!(verdict(&state, &untap), StandingPriorityPass::Granted);
+
+            // Patron of the Moon: lands from hand onto the battlefield.
+            let put_lands = own_top(
+                Effect::ChangeZone {
+                    origin: Some(Zone::Hand),
+                    destination: Zone::Battlefield,
+                    target: TargetFilter::Typed(TypedFilter::land()),
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: EtbTapState::Tapped,
+                    enters_attacking: false,
+                    up_to: true,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+                vec![],
+            );
+            assert_eq!(verdict(&state, &put_lands), StandingPriorityPass::Granted);
+
+            // A search's "put that card into your hand": no origin, an `Any`
+            // operand naming the found card.
+            let found_card_to_hand = own_top(
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Hand,
+                    target: TargetFilter::Any,
+                    owner_library: false,
+                    enter_transformed: false,
+                    enters_under: None,
+                    enter_tapped: EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                    conditional_enter_with_counters: vec![],
+                    face_down_profile: None,
+                    enters_modified_if: None,
+                },
+                vec![],
+            );
+            assert_eq!(
+                verdict(&state, &found_card_to_hand),
+                StandingPriorityPass::Granted
+            );
+        }
+
+        /// Coral Atoll class: the land's own trigger sacrifices it.
+        #[test]
+        fn own_self_sacrifice_of_the_mana_land_holds() {
+            let (state, forest, _) = board();
+            let sacrifice_self = top(
+                PlayerId(0),
+                forest,
+                ResolvedAbility::new(
+                    Effect::Sacrifice {
+                        target: TargetFilter::SelfRef,
+                        count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                        min_count: 0,
+                    },
+                    vec![],
+                    forest,
+                    PlayerId(0),
+                ),
+            );
+            assert_eq!(verdict(&state, &sacrifice_self), StandingPriorityPass::Held);
+        }
+
+        /// CR 608.2k: "sacrifice that permanent" names the triggering event's
+        /// object, which the trigger's stack entry carries.
+        #[test]
+        fn own_event_reference_departure_holds_only_for_the_named_mana_source() {
+            let (mut state, forest, opponent_forest) = board();
+            let sacrifice_that = |object_id| {
+                with_trigger_event(
+                    own_top(
+                        Effect::Sacrifice {
+                            target: TargetFilter::TriggeringSource,
+                            count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                            min_count: 0,
+                        },
+                        vec![],
+                    ),
+                    GameEvent::PermanentUntapped { object_id },
+                )
+            };
+            assert_eq!(
+                verdict(&state, &sacrifice_that(forest)),
+                StandingPriorityPass::Held
+            );
+            assert_eq!(
+                verdict(&state, &sacrifice_that(opponent_forest)),
+                StandingPriorityPass::Granted
+            );
+            state.objects.get_mut(&forest).unwrap().tapped = true;
+            assert_eq!(
+                verdict(&state, &sacrifice_that(forest)),
+                StandingPriorityPass::Granted
+            );
+        }
+
+        /// CR 608.2k: a filter axis relative to the triggering event ("lands
+        /// that player controls") is read in the resolver's frame.
+        #[test]
+        fn own_event_relative_mass_destruction_holds_only_for_that_player() {
+            let (state, _, _) = board();
+            let destroy_that_players_lands = |player_id| {
+                with_trigger_event(
+                    own_top(
+                        Effect::DestroyAll {
+                            target: TargetFilter::Typed(
+                                TypedFilter::land().controller(ControllerRef::TriggeringPlayer),
+                            ),
+                            cant_regenerate: false,
+                        },
+                        vec![],
+                    ),
+                    GameEvent::CardsDrawn {
+                        player_id,
+                        count: 1,
+                    },
+                )
+            };
+            assert_eq!(
+                verdict(&state, &destroy_that_players_lands(PlayerId(0))),
+                StandingPriorityPass::Held
+            );
+            assert_eq!(
+                verdict(&state, &destroy_that_players_lands(PlayerId(1))),
+                StandingPriorityPass::Granted
+            );
+        }
+
+        /// CR 608.2c: "target land's controller sacrifices it" names the target
+        /// the first instruction declared; on the stack only the chain root
+        /// carries it.
+        #[test]
+        fn own_parent_target_departure_holds_only_for_the_declared_land() {
+            let (state, forest, opponent_forest) = board();
+            let sacrifice_it = |target| {
+                let mut ability = ResolvedAbility::new(
+                    Effect::TargetOnly {
+                        target: TargetFilter::Typed(TypedFilter::land()),
+                    },
+                    vec![TargetRef::Object(target)],
+                    TRIGGER_SOURCE,
+                    PlayerId(0),
+                );
+                ability.sub_ability = Some(Box::new(ResolvedAbility::new(
+                    Effect::Sacrifice {
+                        target: TargetFilter::ParentTarget,
+                        count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                        min_count: 0,
+                    },
+                    vec![],
+                    TRIGGER_SOURCE,
+                    PlayerId(0),
+                )));
+                top(PlayerId(0), TRIGGER_SOURCE, ability)
+            };
+            assert_eq!(
+                verdict(&state, &sacrifice_it(forest)),
+                StandingPriorityPass::Held
+            );
+            assert_eq!(
+                verdict(&state, &sacrifice_it(opponent_forest)),
+                StandingPriorityPass::Granted
+            );
+        }
+
+        /// "Tap target land. Return it to its owner's hand." — a `Bounce` of the
+        /// parent target reads the declared land, not its filter.
+        #[test]
+        fn own_parent_target_bounce_holds_only_for_the_declared_land() {
+            let (state, forest, opponent_forest) = board();
+            let tap_then_return_it = |target| {
+                let mut ability = ResolvedAbility::new(
+                    Effect::TargetOnly {
+                        target: TargetFilter::Typed(TypedFilter::land()),
+                    },
+                    vec![TargetRef::Object(target)],
+                    TRIGGER_SOURCE,
+                    PlayerId(0),
+                );
+                ability.sub_ability = Some(Box::new(ResolvedAbility::new(
+                    Effect::Bounce {
+                        target: TargetFilter::ParentTarget,
+                        destination: None,
+                        selection: BounceSelection::Targeted,
+                    },
+                    vec![],
+                    TRIGGER_SOURCE,
+                    PlayerId(0),
+                )));
+                top(PlayerId(0), TRIGGER_SOURCE, ability)
+            };
+            assert_eq!(
+                verdict(&state, &tap_then_return_it(forest)),
+                StandingPriorityPass::Held
+            );
+            assert_eq!(
+                verdict(&state, &tap_then_return_it(opponent_forest)),
+                StandingPriorityPass::Granted
+            );
+        }
+
+        /// A target declared after the departing instruction is not what its
+        /// "it" names, and with nothing declared above it "it" is an object the
+        /// chain produces as it resolves ("look at the top card ... put it into
+        /// your hand"), so it falls back to neither the event nor the source.
+        #[test]
+        fn undeclared_parent_target_reaches_nothing() {
+            let (state, forest, _) = board();
+            let sacrifice_it_otherwise_destroy = |source, later_target| {
+                let mut ability = ResolvedAbility::new(
+                    Effect::Sacrifice {
+                        target: TargetFilter::ParentTarget,
+                        count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                        min_count: 0,
+                    },
+                    vec![],
+                    source,
+                    PlayerId(0),
+                );
+                ability.else_ability = Some(Box::new(ResolvedAbility::new(
+                    Effect::TargetOnly {
+                        target: TargetFilter::Typed(TypedFilter::land()),
+                    },
+                    vec![TargetRef::Object(later_target)],
+                    source,
+                    PlayerId(0),
+                )));
+                top(PlayerId(0), source, ability)
+            };
+            // The else branch targets P0's Forest; the root "it" does not read it.
+            assert_eq!(
+                verdict(
+                    &state,
+                    &sacrifice_it_otherwise_destroy(TRIGGER_SOURCE, forest)
+                ),
+                StandingPriorityPass::Granted
+            );
+            // The Forest's own trigger, nothing declared: no source fallback.
+            let found_it_to_hand = with_trigger_event(
+                top(
+                    PlayerId(0),
+                    forest,
+                    ResolvedAbility::new(
+                        Effect::Bounce {
+                            target: TargetFilter::ParentTarget,
+                            destination: None,
+                            selection: BounceSelection::Targeted,
+                        },
+                        vec![],
+                        forest,
+                        PlayerId(0),
+                    ),
+                ),
+                GameEvent::PermanentUntapped { object_id: forest },
+            );
+            assert_eq!(
+                verdict(&state, &found_it_to_hand),
+                StandingPriorityPass::Granted
+            );
+            // Reach guard: the same board holds once a target is declared above.
+            assert_eq!(
+                verdict(&state, &own_top(return_a_land_you_control(), vec![])),
+                StandingPriorityPass::Held
+            );
+        }
+
+        /// CR 608.2c: "put the rest on the bottom" moves the cards this chain
+        /// reveals, not whatever an earlier resolution last published.
+        #[test]
+        fn chain_published_referents_do_not_read_an_earlier_resolution() {
+            let (mut state, forest, _) = board();
+            let rest_on_bottom = own_top(
+                Effect::ChangeZoneAll {
+                    origin: None,
+                    destination: Zone::Library,
+                    target: TargetFilter::TrackedSet {
+                        id: TrackedSetId(0),
+                    },
+                    enters_under: None,
+                    enter_tapped: EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    enter_with_counters: vec![],
+                    face_down_profile: None,
+                    library_position: None,
+                    library_shuffle: crate::types::ability::MassLibraryShuffleMode::default(),
+                    random_order: false,
+                },
+                vec![],
+            );
+            assert_eq!(
+                verdict(&state, &rest_on_bottom),
+                StandingPriorityPass::Granted
+            );
+            // An earlier resolution published a set holding the Forest.
+            crate::game::effects::publish_tracked_set(&mut state, vec![forest]);
+            state.chain_tracked_set_id = None;
+            assert_eq!(
+                verdict(&state, &rest_on_bottom),
+                StandingPriorityPass::Granted
+            );
+            // Reach guard: a concrete set published before this object holds.
+            let concrete = crate::game::targeting::latest_tracked_set_id(&state)
+                .expect("the set was published");
+            let sacrifice_those = own_top(
+                Effect::Sacrifice {
+                    target: TargetFilter::TrackedSet { id: concrete },
+                    count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                    min_count: 0,
+                },
+                vec![],
+            );
+            assert_eq!(
+                verdict(&state, &sacrifice_those),
+                StandingPriorityPass::Held
+            );
+        }
+
+        /// Armageddon class: an own mass destruction of lands.
+        #[test]
+        fn own_mass_destruction_of_lands_holds() {
+            let (state, _, _) = board();
+            let armageddon = own_top(
+                Effect::DestroyAll {
+                    target: TargetFilter::Typed(TypedFilter::land()),
+                    cant_regenerate: false,
+                },
+                vec![],
+            );
+            assert_eq!(verdict(&state, &armageddon), StandingPriorityPass::Held);
+        }
+
+        /// An announced target slot moves only what was chosen for it.
+        #[test]
+        fn own_targeted_destruction_holds_only_for_the_chosen_land() {
+            let (state, forest, opponent_forest) = board();
+            let destroy = |targets| {
+                own_top(
+                    Effect::Destroy {
+                        target: TargetFilter::Typed(TypedFilter::land()),
+                        cant_regenerate: false,
+                    },
+                    targets,
+                )
+            };
+            assert_eq!(
+                verdict(&state, &destroy(vec![TargetRef::Object(forest)])),
+                StandingPriorityPass::Held
+            );
+            assert_eq!(
+                verdict(&state, &destroy(vec![TargetRef::Object(opponent_forest)])),
+                StandingPriorityPass::Granted
+            );
+            // "Up to one target land" with no target chosen moves nothing.
+            let mut up_to_one = destroy(vec![]);
+            up_to_one.ability_mut().unwrap().optional_targeting = true;
+            // Reach guard: the board is prepared, so the verdict comes from
+            // the empty announced slot, not from a refused resolution.
+            assert!(resolution_board(&state, &up_to_one, up_to_one.ability().unwrap()).is_some());
+            assert_eq!(verdict(&state, &up_to_one), StandingPriorityPass::Granted);
+        }
+
+        /// CR 109.5: a `player_scope` sacrifice applies with each scoped player as
+        /// its controller, so "you control" names the scoped player's lands.
+        #[test]
+        fn player_scoped_sacrifice_holds_only_when_you_are_in_scope() {
+            let (state, _, _) = board();
+            let scoped_sacrifice = |scope| {
+                let mut ability = ResolvedAbility::new(
+                    Effect::Sacrifice {
+                        target: your_lands(),
+                        count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                        min_count: 0,
+                    },
+                    vec![],
+                    TRIGGER_SOURCE,
+                    PlayerId(0),
+                );
+                ability.player_scope = Some(scope);
+                top(PlayerId(0), TRIGGER_SOURCE, ability)
+            };
+            // Liliana's Triumph shape: "each opponent sacrifices".
+            assert_eq!(
+                verdict(&state, &scoped_sacrifice(PlayerFilter::Opponent)),
+                StandingPriorityPass::Granted
+            );
+            // "Each player sacrifices".
+            assert_eq!(
+                verdict(&state, &scoped_sacrifice(PlayerFilter::All)),
+                StandingPriorityPass::Held
+            );
+        }
     }
 }

@@ -50,6 +50,7 @@ life from the loam	Draw	Optional	none	Mill	-	IndividualDraw
 living conundrum	Draw	Mandatory	Prevent	none	-	IndividualDraw
 magus of the chains	Draw	Mandatory	none	Discard	nested-draw	IndividualDraw
 moldervine cloak	Draw	Optional	none	Mill	-	IndividualDraw
+mr. spock, science officer	Draw	Mandatory	none	Draw	nested-draw	IndividualDraw
 necroplasm	Draw	Optional	none	Mill	-	IndividualDraw
 nightmare void	Draw	Optional	none	Mill	-	IndividualDraw
 notion thief	Draw	Mandatory	none	Draw	nested-draw	IndividualDraw

@@ -149,6 +149,7 @@ fn activate(runner: &mut GameRunner, source: ObjectId, index: usize) -> Vec<Game
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activation accepted")
         .events
@@ -1294,6 +1295,7 @@ fn mana_activation_allowed(
         .act(GameAction::ActivateAbility {
             source_id: dork,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .is_ok()
 }

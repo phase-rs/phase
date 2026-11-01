@@ -1,3 +1,4 @@
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
     CastingPermission, Effect, EffectError, EffectKind, EffectScope, ResolvedAbility, TargetFilter,
     TargetRef,
@@ -105,11 +106,27 @@ fn resolve_single_object_targets(
     // CR 722.3a: a self-referential "this creature becomes prepared" (e.g.
     // Stensian Sanguinist's combat-damage delayed trigger) carries no explicit
     // object target — the subject is the ability's own source.
+    //
+    // CR 400.7 + CR 110.1 + CR 722.3a: the SelfRef binding resolves only while
+    // the source is still its exact captured incarnation on the battlefield.
+    // A source that changed zones is a new object, so a pending trigger must
+    // not prepare the graveyard card, and a same-id blink return must not
+    // prepare the new permanent. `self_ref_is_current` is the shared
+    // incarnation authority; the battlefield gate enforces the
+    // permanent boundary on top.
+    if matches!(filter, TargetFilter::SelfRef) {
+        if !ability.self_ref_is_current(state) {
+            return Vec::new();
+        }
+        return ability
+            .self_ref_binding(state)
+            .into_iter()
+            .filter(|id| crate::game::targeting::is_phased_in_battlefield_permanent(state, *id))
+            .collect();
+    }
     // CR 608.2c: a triggered BecomePrepared bound to the source via ParentTarget
     // with no explicit target (e.g. Tam landfall) likewise resolves to source_id.
-    if matches!(filter, TargetFilter::SelfRef)
-        || (ability.targets.is_empty() && matches!(filter, TargetFilter::ParentTarget))
-    {
+    if ability.targets.is_empty() && matches!(filter, TargetFilter::ParentTarget) {
         return ability.self_ref_binding(state).into_iter().collect();
     }
     // CR 608.2k + CR 603.2: "that creature" / "it" in a triggered ability's effect
@@ -120,12 +137,11 @@ fn resolve_single_object_targets(
     // attached-host rule of the `TriggeringSource` arm (CR 301.5a + CR 303.4b),
     // which applies only when a published event names no object.
     if crate::game::targeting::is_pure_event_context_filter(filter) {
-        let ids = match filter {
+        return match filter {
             // CR 400.7: only the incarnation the event recorded for the role
-            // the filter names — a referent that blinked since the trigger was
-            // put on the stack is a new object.
+            // the filter names, and only while it is a phased-in permanent.
             TargetFilter::TriggeringSource | TargetFilter::EventTarget => {
-                crate::game::targeting::resolve_event_referent_objects(
+                crate::game::targeting::resolve_event_referent_permanents(
                     state,
                     filter,
                     ability.source_id,
@@ -135,12 +151,11 @@ fn resolve_single_object_targets(
             // granter stamp) names its object independent of the published
             // event batch; the shared authority resolves it with the ability's
             // context.
-            _ => crate::game::targeting::resolved_object_ids_for_filter(state, ability, filter),
+            _ => crate::game::targeting::resolved_object_ids_for_filter(state, ability, filter)
+                .into_iter()
+                .filter(|&id| crate::game::targeting::is_phased_in_battlefield_permanent(state, id))
+                .collect(),
         };
-        return ids
-            .into_iter()
-            .filter(|&id| is_phased_in_battlefield_permanent(state, id))
-            .collect();
     }
     ability
         .targets
@@ -150,18 +165,6 @@ fn resolve_single_object_targets(
             _ => None,
         })
         .collect()
-}
-
-/// CR 722.3a + CR 110.1 + CR 702.26b: only a phased-in permanent on the
-/// battlefield can gain or lose the prepared designation. An event referent
-/// (CR 608.2k) can have left the battlefield (CR 400.7: it is then a new
-/// object) or phased out before the trigger resolves; neither is a permanent
-/// that can be affected.
-fn is_phased_in_battlefield_permanent(state: &GameState, id: ObjectId) -> bool {
-    state
-        .objects
-        .get(&id)
-        .is_some_and(|obj| obj.zone == Zone::Battlefield && obj.is_phased_in())
 }
 
 /// Returns true if the given permanent has a printed `CardLayout::Prepare(_, _)`
@@ -503,7 +506,7 @@ fn strip_non_copiable_state(copy: &mut GameObject) {
     copy.face_down_cause = None;
     copy.phase_status = PhaseStatus::PhasedIn;
     copy.counters.clear();
-    copy.stickers.clear();
+    crate::game::stickers::remove_stickers_from_copy(copy);
 
     // CR 722.3c: only the prepare spell's characteristics — none of the
     // permanent's battlefield state (marked damage, attachment and pairing
@@ -520,6 +523,9 @@ fn strip_non_copiable_state(copy: &mut GameObject) {
     copy.summoning_sick = false;
     copy.echo_due = false;
     copy.loyalty_activations_this_turn = 0;
+    // CR 707.2: a per-permanent extra loyalty-activation grant is a "this turn"
+    // effect on the permanent, not a copiable value, so the copy does not inherit it.
+    copy.extra_loyalty_activations_this_turn = 0;
     copy.assigns_damage_from_toughness = false;
     copy.assigns_damage_as_though_unblocked = false;
     copy.assigns_no_combat_damage = false;
@@ -627,7 +633,7 @@ fn synthesize_prepared_copy_object(
             source_id: None,
             graveyard_replacement: None,
             enters_with_counter: None,
-            enters_with_modifications: Vec::new(),
+            enters_with_modifications: Default::default(),
             mana_spend_permission: None,
             cast_cost_modifier: None,
         });
@@ -1436,6 +1442,8 @@ mod tests {
         obj.signature_spell = Some(SignatureSpellState {});
         obj.prepared = Some(PreparedState);
         obj.prepared_copy_source = Some(ObjectId(80));
+        obj.loyalty_activations_this_turn = 1;
+        obj.extra_loyalty_activations_this_turn = 2;
 
         strip_non_copiable_state(&mut obj);
 
@@ -1474,6 +1482,8 @@ mod tests {
         assert!(!obj.uses_command_zone_rules());
         assert_eq!(obj.prepared, None);
         assert_eq!(obj.prepared_copy_source, None);
+        assert_eq!(obj.loyalty_activations_this_turn, 0);
+        assert_eq!(obj.extra_loyalty_activations_this_turn, 0);
     }
 
     #[test]
@@ -1797,7 +1807,7 @@ mod tests {
                     duration: None,
                     graveyard_replacement: None,
                     enters_with_counter: None,
-                    enters_with_modifications: Vec::new(),
+                    enters_with_modifications: Default::default(),
                     mana_spend_permission: None,
                     cast_cost_modifier: None,
                 });
@@ -2879,7 +2889,7 @@ mod tests {
                 effect.target_filter(),
                 Some(&TargetFilter::TriggeringSource)
             );
-            assert!(crate::game::triggers::extract_target_filter_from_effect(&effect).is_none());
+            assert!(crate::types::ability::extract_target_filter_from_effect(&effect).is_none());
             let slots = build_target_slots(
                 &state,
                 &ResolvedAbility::new(effect.clone(), vec![], source, PlayerId(0)),
@@ -2890,7 +2900,7 @@ mod tests {
 
         let typed = mass_prepare(EffectScope::Single);
         assert_eq!(
-            crate::game::triggers::extract_target_filter_from_effect(&typed),
+            crate::types::ability::extract_target_filter_from_effect(&typed),
             Some(&creatures_you_control())
         );
     }

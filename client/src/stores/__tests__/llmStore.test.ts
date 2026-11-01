@@ -123,6 +123,20 @@ describe("llmStore", () => {
     expect(draftProfile(useLlmStore.getState(), CATALOG)?.id).toBe(id);
   });
 
+  it("requires a key for OpenRouter like the other hosted providers", () => {
+    const catalog: LlmProviderCatalogEntry[] = [
+      ...CATALOG,
+      { provider: "OpenRouter", value: "OpenRouter", displayName: "OpenRouter", defaultBaseUrl: "https://openrouter.ai/api/v1", defaultModel: "openrouter/auto", requiresApiKey: true, apiKeyUrl: "", models: [] },
+    ];
+    const id = useLlmStore.getState().addProfile({ provider: "OpenRouter", model: "openrouter/auto", enabled: true });
+    const profile = () => useLlmStore.getState().profiles.find((p) => p.id === id);
+    expect(profile()?.provider).toBe("OpenRouter");
+    expect(isProfileUsable(profile(), catalog)).toBe(false);
+
+    useLlmStore.getState().updateProfile(id, { apiKey: "sk-or-test" });
+    expect(isProfileUsable(profile(), catalog)).toBe(true);
+  });
+
   it("lets a keyless provider such as a local server be used without a key", () => {
     const id = useLlmStore.getState().addProfile({
       model: "llama3",
@@ -170,11 +184,35 @@ describe("llmStore", () => {
       expect(profileForSeat(useLlmStore.getState(), 0, CATALOG)).toBeUndefined();
     });
 
-    it("is cleared when its profile is removed", () => {
+    it("is cleared when its profile is removed while preserving surviving seat bindings", () => {
       const id = addUsable("Claude");
+      const other = addUsable("Other");
       useLlmStore.getState().setDefaultOpponentProfileId(id);
+      useLlmStore.getState().bindSeat(0, other);
+      useLlmStore.getState().bindSeat(1, null);
+      useLlmStore.getState().bindSeat(2, id);
+
       useLlmStore.getState().removeProfile(id);
       expect(useLlmStore.getState().defaultOpponentProfileId).toBeNull();
+      expect(useLlmStore.getState().seatBindings).toEqual({ 0: other, 1: null });
+      expect(profileForSeat(useLlmStore.getState(), 0, CATALOG)?.id).toBe(other);
+      expect(profileForSeat(useLlmStore.getState(), 1, CATALOG)).toBeUndefined();
+      expect(profileForSeat(useLlmStore.getState(), 2, CATALOG)).toBeUndefined();
+    });
+
+    it("preserves seat bindings when default opponent is reset to null", () => {
+      const id = addUsable("Claude");
+      const other = addUsable("Other");
+      useLlmStore.getState().setDefaultOpponentProfileId(id);
+      useLlmStore.getState().bindSeat(0, other);
+      useLlmStore.getState().bindSeat(1, null);
+
+      useLlmStore.getState().setDefaultOpponentProfileId(null);
+
+      expect(useLlmStore.getState().defaultOpponentProfileId).toBeNull();
+      expect(useLlmStore.getState().seatBindings).toEqual({ 0: other, 1: null });
+      expect(profileForSeat(useLlmStore.getState(), 0, CATALOG)?.id).toBe(other);
+      expect(profileForSeat(useLlmStore.getState(), 1, CATALOG)).toBeUndefined();
     });
 
     it("persists the default and an explicit engine choice", () => {
@@ -210,6 +248,20 @@ describe("llmStore", () => {
     expect(state.seatBindings).toEqual({});
     expect(state.draftProfileId).toBeNull();
     expect(profileForSeat(state, 0, CATALOG)).toBeUndefined();
+  });
+
+  it("preserves unrelated seat bindings when removing a non-default profile with null default opponent", () => {
+    const id = addUsable("Claude");
+    const other = addUsable("Other");
+    useLlmStore.getState().bindSeat(0, id);
+    useLlmStore.getState().bindSeat(1, other);
+    useLlmStore.getState().bindSeat(2, null);
+
+    useLlmStore.getState().removeProfile(id);
+
+    const state = useLlmStore.getState();
+    expect(state.seatBindings).toEqual({ 1: other, 2: null });
+    expect(profileForSeat(state, 1, CATALOG)?.id).toBe(other);
   });
 
   it("keeps drafting heuristic until it is explicitly enabled", () => {

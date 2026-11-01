@@ -81,6 +81,7 @@ fn throne_mana_casts_only_monocolored_spells_of_its_chosen_color() {
             .act(GameAction::ActivateAbility {
                 source_id: throne,
                 ability_index: mana,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("Throne mana ability must resolve")
             .waiting_for;
@@ -143,6 +144,7 @@ fn throne_draw_activation_uses_only_its_chosen_color_in_auto_and_manual_payment(
         .act(GameAction::ActivateAbility {
             source_id: red_throne,
             ability_index: draw,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("three red mana must pay the red-chosen Throne draw ability")
         .waiting_for;
@@ -164,6 +166,7 @@ fn throne_draw_activation_uses_only_its_chosen_color_in_auto_and_manual_payment(
                 .act(GameAction::ActivateAbility {
                     source_id: throne,
                     ability_index: draw,
+                    payment_mode: CastPaymentMode::Auto
                 })
                 .is_err(),
             "a {label} pool must not pay a red-chosen Throne draw activation"
@@ -282,6 +285,7 @@ fn throne_draw_auto_tap_uses_only_chosen_color_sources() {
         .act(GameAction::ActivateAbility {
             source_id: throne,
             ability_index: draw,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("three red sources must pay the red-chosen activation");
     runner
@@ -326,6 +330,7 @@ fn throne_draw_auto_tap_uses_only_chosen_color_sources() {
         .act(GameAction::ActivateAbility {
             source_id: mixed_throne,
             ability_index: mixed_draw,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("a red unit from a blue-red source plus two Mountains must pay the activation");
     mixed_runner
@@ -360,6 +365,7 @@ fn throne_draw_auto_tap_uses_only_chosen_color_sources() {
             .act(GameAction::ActivateAbility {
                 source_id: blue_throne,
                 ability_index: blue_draw,
+                payment_mode: CastPaymentMode::Auto
             })
             .is_err(),
         "off-color sources must not make the red-chosen activation payable"

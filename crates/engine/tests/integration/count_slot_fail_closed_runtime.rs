@@ -34,8 +34,9 @@ const TASTER_OF_WARES: &str = "When this creature enters, target opponent reveal
      for as long as you control this creature, and mana of any type can be spent to cast that \
      spell.";
 
-const STABWHISKER: &str = "At the beginning of each opponent's upkeep, that player loses 1 life \
-     for each card fewer than three in their hand.";
+/// Synthetic sorcery (labelled): the lose-life verb's for-each binder over a
+/// quantity no parser reads.
+const LOSE_LIFE_FOR_EACH_UNREAD: &str = "Each opponent loses 1 life for each gorbleflux.";
 
 /// Synthetic sorcery (labelled): the token verb's for-each binder over a
 /// quantity no parser reads.
@@ -274,38 +275,22 @@ fn taster_of_wares_reveals_exactly_x_and_exiles_one_of_them() {
     assert_eq!(*cards, p1_cards);
 }
 
-/// CR 119.3: Stabwhisker's "1 life for each card fewer than three in their
-/// hand" is a count the parser cannot read, so the upkeep trigger resolves as a
-/// gap instead of a literal one-life loss.
+/// CR 119.3: a life loss whose for-each quantity no parser reads loses no life
+/// (synthetic sorcery; base lost the leading 1).
 #[test]
-fn stabwhisker_unparsed_per_card_loss_fails_closed() {
+fn lose_life_for_each_unparsed_loses_nothing() {
     let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::Untap);
-    let stabwhisker = scenario
-        .add_creature_from_oracle(P0, "Stabwhisker the Odious", 3, 3, STABWHISKER)
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Gorbleflux Drain", false, LOSE_LIFE_FOR_EACH_UNREAD)
+        .with_mana_cost(ManaCost::zero())
         .id();
-    scenario.add_card_to_hand(P1, "Only Card");
-    for _ in 0..10 {
-        scenario.add_card_to_library_top(P0, "Plains");
-        scenario.add_card_to_library_top(P1, "Plains");
-    }
     let mut runner = scenario.build();
-    runner.state_mut().active_player = P1;
-    runner.state_mut().priority_player = P1;
-    runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
-    runner.advance_to_upkeep();
-
-    // Reach guard: the opponent's-upkeep trigger is on the stack.
-    let stack = &runner.state().stack;
-    assert_eq!(stack.len(), 1, "{stack:?}");
-    assert_eq!(stack[0].source_id, stabwhisker);
-    for _ in 0..10 {
-        if runner.state().stack.is_empty() || runner.act(GameAction::PassPriority).is_err() {
-            break;
-        }
-    }
-    assert!(runner.state().stack.is_empty(), "the trigger resolved");
+    let _ = runner.cast(spell).resolve();
+    // Reach guard: the spell resolved.
+    assert_eq!(zone(&runner, spell), Zone::Graveyard);
     assert_eq!(runner.life(P1), 20);
+    assert_eq!(runner.life(P0), 20);
 }
 
 /// CR 111.1: a token count whose for-each quantity no parser reads creates no

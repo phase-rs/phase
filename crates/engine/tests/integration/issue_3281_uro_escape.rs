@@ -188,3 +188,69 @@ fn uro_escape_full_cast_pauses_for_graveyard_exile_payment() {
         });
     assert_eq!(stack_variant, Some(CastingVariant::Escape));
 }
+
+/// CR 118.3 + CR 601.2h: one card can't be exiled five times to pay escape's
+/// "exile five other cards"; the refused selection exiles nothing.
+#[test]
+fn uro_escape_refuses_one_card_selected_five_times() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        mana(ManaType::Green, 2)
+            .into_iter()
+            .chain(mana(ManaType::Blue, 2))
+            .collect(),
+    );
+    let filler: Vec<_> = (0..5)
+        .map(|idx| {
+            scenario
+                .add_creature_to_graveyard(P0, &format!("Filler {idx}"), 1, 1)
+                .id()
+        })
+        .collect();
+    let mut runner = scenario.build();
+    let uro_id = add_exported_uro_to_graveyard(&mut runner);
+    let card_id = runner.state().objects[&uro_id].card_id;
+    let prompt = runner
+        .act(GameAction::CastSpell {
+            object_id: uro_id,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Uro escape cast should enter the pipeline")
+        .waiting_for;
+    assert!(
+        matches!(
+            prompt,
+            WaitingFor::PayCost {
+                kind: PayCostKind::ExileFromZone {
+                    zone: ExileCostSourceZone::Graveyard
+                },
+                count: 5,
+                ..
+            }
+        ),
+        "reach guard: the escape exile prompt, got {prompt:?}"
+    );
+
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![filler[0]; 5],
+        })
+        .expect_err("one card can't pay for five");
+    assert_eq!(runner.state().waiting_for, prompt);
+    for id in &filler {
+        assert_eq!(runner.state().objects[id].zone, Zone::Graveyard);
+    }
+
+    runner
+        .act(GameAction::SelectCards {
+            cards: filler.clone(),
+        })
+        .expect("five different cards pay the escape cost");
+    for id in &filler {
+        assert_eq!(runner.state().objects[id].zone, Zone::Exile);
+    }
+}

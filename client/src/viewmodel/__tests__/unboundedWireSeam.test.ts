@@ -3,6 +3,8 @@
  * `combo_infinite_pile::real_4p_object_growth_accept_writes_infinite_pile`, driving a REAL
  * 4-player dump through the REAL APNAP accept. Regenerate with
  * `UPDATE_WIRE_GOLDEN=1 cargo test -p phase-engine --test integration <fn>`. Never hand-edit them.
+ * The life golden is emitted by `life_magnitude_display::own_life_growth_reads_unbounded_until_the_collapse_lands`
+ * at its take frame and regenerates with the same command.
  * Every existing client test that touches these channels hand-writes its own `derived` block, so
  * this file is the only place the engine's wire shape and the client's readers meet.
  * The token golden is captured AFTER the accept, while a finite collapse is merely SCHEDULED — the
@@ -28,10 +30,12 @@ import type {
 } from "../../adapter/types";
 import { familyOf, UNBOUNDED_FAMILY_FOR_TEST } from "../../components/hud/HudBadges";
 import { pillsOf, useCounterDisplay } from "../../hooks/useCounterDisplay";
+import { lifeReadout } from "../../hooks/useDisplayedLife";
 import { buildGameObject } from "../../test/factories/gameObjectFactory";
 import { buildGameState } from "../../test/factories/gameStateFactory";
 import declinedWire from "../../test/fixtures/unbounded-declined-wire.json";
 import familyTags from "../../test/fixtures/unbounded-family-tags.json";
+import lifeWire from "../../test/fixtures/unbounded-life-wire.json";
 import tokenWire from "../../test/fixtures/unbounded-token-wire.json";
 import { setGameStoreForTest } from "../../test/helpers/gameStoreHelpers";
 import { groupByName } from "../battlefieldProps";
@@ -190,5 +194,12 @@ describe("unbounded ∞ wire seam (engine-emitted goldens)", () => {
     bare.rerender();
     expect(bare.result.current).toBe(firstBare);
     expect(pillsOf(bare.result.current)).toBe(pillsOf(firstBare));
+  });
+
+  it("reads the engine-emitted life magnitude through lifeReadout", () => {
+    expect(lifeWire).toEqual({ life_magnitude: { "0": "Unbounded" } });
+    const gameState = buildGameState({ derived: lifeWire as unknown as DerivedViews });
+    expect(lifeReadout(gameState, 0)).toEqual({ magnitude: "Unbounded" });
+    expect(lifeReadout(gameState, 1)).toEqual({ magnitude: "Finite", life: 20 });
   });
 });

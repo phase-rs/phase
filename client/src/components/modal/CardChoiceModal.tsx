@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { CSSProperties } from "react";
 import { motion } from "framer-motion";
 import { useTranslation } from "react-i18next";
-import type { TFunction } from "i18next";
+import type { ParseKeys, TFunction } from "i18next";
 
 import { CardImage } from "../card/CardImage.tsx";
 import { objectImageProps } from "../../services/cardImageLookup.ts";
@@ -464,6 +464,9 @@ export function CardChoiceModal() {
       );
     case "ChooseObjectsSelection":
       if (!canActForWaitingState) return null;
+      // CR 608.2d: a single pick is answered on the board via TargetingOverlay;
+      // only multi-pick selections need the list.
+      if (waitingFor.data.max === 1) return null;
       return (
         <ProliferateModal data={waitingFor.data} variant="chooseObjects" />
       );
@@ -1011,13 +1014,24 @@ function ChooseFromZoneModal({ data }: { data: ChooseFromZoneChoice["data"] }) {
   const selectionRule = data.constraint;
   const selectionValid =
     !!objects &&
-    (!selectionRule ||
-      (selectionRule.type === "DistinctCardTypes" &&
-        canAssignDistinctCardTypes(
-          objects,
-          selectedIds,
-          selectionRule.categories,
-        )));
+    (() => {
+      if (!selectionRule) return true;
+      switch (selectionRule.type) {
+        case "DistinctCardTypes":
+          return canAssignDistinctCardTypes(
+            objects,
+            selectedIds,
+            selectionRule.categories,
+          );
+        case "TotalManaValue":
+          // The engine validates the selected set's total mana value on submission.
+          return true;
+        default: {
+          const exhaustive: never = selectionRule;
+          return exhaustive;
+        }
+      }
+    })();
   const countValid = data.up_to
     ? selectedSet.size <= data.count
     : selectedSet.size === data.count;
@@ -1306,11 +1320,15 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
   const isTapUntapChoice =
     data.effect_kind === "Untap" || data.effect_kind === "Tap";
   const isAttachChoice = data.effect_kind === "Attach";
+  // The engine's `effect_kind` names a resolution-time cast pick (a linked
+  // exile pool, a hand or a looked-at library); it casts, it moves nothing.
+  const isCastChoice = data.effect_kind === "CastFromZone";
   const isSacrifice =
     data.zone === "Battlefield" &&
     data.destination == null &&
     !isAttachChoice &&
-    !isTapUntapChoice;
+    !isTapUntapChoice &&
+    !isCastChoice;
   const isUpTo = data.up_to === true;
   const minCount = data.min_count ?? 0;
 
@@ -1338,31 +1356,41 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
 
   if (!objects) return null;
 
-  const isTopdeck = data.effect_kind === "PutAtLibraryPosition";
+  const isLibraryPosition = data.effect_kind === "PutAtLibraryPosition";
+  const isBottomdeck =
+    isLibraryPosition && data.library_position?.type === "Bottom";
+  const isTopdeck = isLibraryPosition && !isBottomdeck;
+  const isLibraryOrder = isTopdeck || isBottomdeck;
   const mode: EffectZoneMode = isTapUntapChoice
     ? data.effect_kind === "Untap"
       ? "Untap"
       : "Tap"
     : isAttachChoice
       ? "Attach"
+    : isCastChoice
+      ? "Cast"
     : isSacrifice
       ? "Sacrifice"
-      : isTopdeck
-        ? "Topdeck"
-        : data.destination === "Hand"
-          ? "Hand"
-          : data.destination === "Exile"
-            ? "Exile"
-            : "Battlefield";
+      : isBottomdeck
+        ? "Bottomdeck"
+        : isTopdeck
+          ? "Topdeck"
+          : data.destination === "Hand"
+            ? "Hand"
+            : data.destination === "Exile"
+              ? "Exile"
+              : "Battlefield";
   const visualClasses = EFFECT_ZONE_VISUAL_CLASSES[mode];
-  const selectedOrder = isTopdeck ? Array.from(selected) : [];
+  const selectedOrder = isLibraryOrder ? Array.from(selected) : [];
   const selectedOrderLabels = selectedOrder.map((_, index) =>
-    formatTopdeckOrderLabel(index, t),
+    isBottomdeck
+      ? formatBottomdeckOrderLabel(index, selectedOrder.length, t)
+      : formatTopdeckOrderLabel(index, t),
   );
   const isReady = isUpTo
     ? selected.size >= minCount && selected.size <= data.count
     : selected.size === data.count;
-  const subtitleKey = isUpTo
+  const subtitleKey: ParseKeys<"game"> = isUpTo
     ? minCount > 0
       ? `cardChoice.effectZone.subtitle${mode}Range`
       : `cardChoice.effectZone.subtitle${mode}UpTo`
@@ -1378,10 +1406,14 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
         ? t("cardChoice.effectZone.labelPutOnTop", {
             order: selectedOrderLabels.join(" -> "),
           })
-        : t(EFFECT_ZONE_ACTION_LABEL_KEYS[mode], {
-            selected: selected.size,
-            count: data.count,
-          });
+        : isBottomdeck && selectedOrderLabels.length > 0
+          ? t("cardChoice.effectZone.labelPutOnBottom", {
+              order: selectedOrderLabels.join(" -> "),
+            })
+          : t(EFFECT_ZONE_ACTION_LABEL_KEYS[mode], {
+              selected: selected.size,
+              count: data.count,
+            });
 
   return (
     <ChoiceOverlay
@@ -1402,8 +1434,10 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
           const isSelected = selected.has(id);
           const selectedIndex = selectedOrder.indexOf(id);
           const badgeLabel =
-            isTopdeck && selectedIndex >= 0
-              ? formatTopdeckOrderLabel(selectedIndex, t)
+            isLibraryOrder && selectedIndex >= 0
+              ? isBottomdeck
+                ? formatBottomdeckOrderLabel(selectedIndex, selectedOrder.length, t)
+                : formatTopdeckOrderLabel(selectedIndex, t)
               : t(EFFECT_ZONE_BADGE_KEYS[mode]);
           return (
             <motion.button
@@ -1458,6 +1492,30 @@ function formatTopdeckOrderLabel(index: number, t: TFunction<"game">): string {
       return t("cardChoice.effectZone.orderFifth");
     default:
       return t("cardChoice.effectZone.orderPosition", { position: index + 1 });
+  }
+}
+
+function formatBottomdeckOrderLabel(
+  index: number,
+  total: number,
+  t: TFunction<"game">,
+): string {
+  const positionFromBottom = Math.max(0, total - 1 - index);
+  switch (positionFromBottom) {
+    case 0:
+      return t("cardChoice.effectZone.orderBottom");
+    case 1:
+      return t("cardChoice.effectZone.orderSecond");
+    case 2:
+      return t("cardChoice.effectZone.orderThird");
+    case 3:
+      return t("cardChoice.effectZone.orderFourth");
+    case 4:
+      return t("cardChoice.effectZone.orderFifth");
+    default:
+      return t("cardChoice.effectZone.orderPosition", {
+        position: positionFromBottom + 1,
+      });
   }
 }
 

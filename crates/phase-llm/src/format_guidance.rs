@@ -209,6 +209,9 @@ fn format_strategy(format: GameFormat) -> Option<&'static [&'static str]> {
         GameFormat::TwoHeadedGiant => &[TWO_HEADED_GIANT],
         GameFormat::Archenemy => &[ARCHENEMY],
         GameFormat::Planechase => &[PLANECHASE],
+        GameFormat::TwoHeadedGiantCommander => &[TWO_HEADED_GIANT, COMMANDER],
+        GameFormat::ArchenemyCommander => &[ARCHENEMY, COMMANDER],
+        GameFormat::PlanechaseCommander => &[PLANECHASE, COMMANDER],
         GameFormat::Momir => &[MOMIR],
         // No format-specific approach to teach; configured facts still apply.
         GameFormat::Freeform
@@ -237,7 +240,7 @@ fn format_facts(state: &GameState, viewer: PlayerId) -> String {
     };
     // CR 103.4 / CR 810.4 / CR 904.5: Starting life is individual except
     // for a shared team total; the archenemy and heroes have different totals.
-    let life = config.starting_life_total_for_player(viewer);
+    let life = config.starting_life_total_for_player(viewer, state.players.len());
     let starting_life = match config.topology() {
         FormatTopology::IndividualSeats => format!("{life} individual starting life"),
         FormatTopology::FixedTeams { .. } => format!("{life} shared team starting life"),

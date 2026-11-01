@@ -380,6 +380,7 @@ fn overlapping_exile_grant_pays_the_selected_permissions_cost_not_a_sibling_gran
                 single_use: false,
                 cast_cost_modifier: None,
                 alt_ability_cost: None,
+                without_paying_mana_cost: false,
                 land_enter_tapped: EtbTapState::Unspecified,
             },
         );

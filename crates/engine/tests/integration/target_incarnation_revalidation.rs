@@ -44,6 +44,7 @@ fn selected_target_does_not_follow_object_id_after_zone_change_and_return() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activation announcement must be accepted");
     runner
@@ -66,6 +67,7 @@ fn selected_target_does_not_follow_object_id_after_zone_change_and_return() {
         .act(GameAction::ActivateAbility {
             source_id: blink,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("the intervening blink activation must be accepted");
     runner

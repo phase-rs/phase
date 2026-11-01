@@ -1,4 +1,5 @@
 use super::resolve_player_for_context_ref;
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::targeting::{
     resolve_live_declared_player, resolve_live_parent_slot_from_root,
     resolved_object_ids_for_filter,
@@ -229,6 +230,62 @@ pub fn resolve(
     else {
         return Ok(());
     };
+
+    // CR 108.3 + CR 508.1d + CR 608.2c: owner-relative defender — "Each of
+    // them attacks its owner" / "Each of those creatures attacks its owner".
+    // `AffectedObjectOwner` names no one player: every affected member can
+    // have a different owner, so snapshot the members NOW and graft one
+    // per-object requirement pinned to that member's owner, mirroring the
+    // `ChosenTarget` path below.
+    //
+    // Members are the inherited parent targets ("those creatures" over
+    // declared targets), falling back to tracked set 0 ("them" over an
+    // unnamed moved set — the same set the sibling "those permanents" clause
+    // reads). An empty member set grafts nothing rather than a requirement
+    // aimed at nobody.
+    //
+    // CR 611.2c note: unlike Gideon Jura's open-ended "creatures that player
+    // controls" (whose set grows and must stay dynamic), the anaphor here
+    // binds the resolution-time set — later arrivals are not "them" — so
+    // per-object grafts are exact, not frozen.
+    if matches!(required_defender, TargetFilter::AffectedObjectOwner) {
+        let mut members = resolved_object_ids_for_filter(state, ability, target);
+        if members.is_empty() {
+            members = resolved_object_ids_for_filter(
+                state,
+                ability,
+                &TargetFilter::TrackedSet {
+                    id: crate::types::identifiers::TrackedSetId(0),
+                },
+            );
+        }
+        let duration = ability.duration.clone().unwrap_or_else(|| duration.clone());
+        let duration = lower_target_scoped_duration(ability, duration);
+        for obj_id in members {
+            let Some(obj) = state.objects.get(&obj_id) else {
+                continue;
+            };
+            let owner = obj.owner;
+            state.add_transient_continuous_effect(
+                ability.source_id,
+                ability.controller,
+                duration.clone(),
+                TargetFilter::SpecificObject { id: obj_id },
+                vec![ContinuousModification::AddStaticMode {
+                    mode: StaticMode::MustAttackDefender {
+                        defender: RequiredDefender::Fixed { player: owner },
+                    },
+                }],
+                None,
+            );
+        }
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::ForceAttack,
+            source_id: ability.source_id,
+            subject: None,
+        });
+        return Ok(());
+    }
 
     // CR 611.2a: "lasts as long as stated by the spell or ability creating it."
     // A stated duration written as a leading CLAUSE rather than inside the
@@ -714,5 +771,196 @@ mod tests {
             panic!("root slot 1 is a planeswalker, a PERMANENT defender; got {defender:?}");
         };
         assert_eq!(permanent.object_id, walker);
+    }
+
+    /// CR 108.3 + CR 508.1d: `AffectedObjectOwner` grafts one requirement per
+    /// affected member, pinned to THAT member's owner — DISCRIMINATING: a
+    /// single-defender snapshot would pin both grafts to one player and fail
+    /// the second member's assertion ("Each of those creatures attacks its
+    /// owner", The Dead Shall Serve).
+    #[test]
+    fn affected_object_owner_grafts_per_member_owner() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Scheme".to_string(),
+            Zone::Battlefield,
+        );
+        let ours = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Relic".to_string(),
+            Zone::Battlefield,
+        );
+        let theirs = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Spoils".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&theirs).unwrap().owner = PlayerId(1);
+
+        let ability = ResolvedAbility::new(
+            Effect::ForceAttack {
+                target: TargetFilter::ParentTarget,
+                required_defender: TargetFilter::AffectedObjectOwner,
+                duration: Duration::Permanent,
+                scope: EffectScope::All,
+            },
+            vec![TargetRef::Object(ours), TargetRef::Object(theirs)],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // Reach-guard: both members grafted (a snapshot-to-one-player
+        // implementation grafts at most one requirement here).
+        let grafts: Vec<_> = state
+            .transient_continuous_effects
+            .iter()
+            .filter(|ce| matches!(ce.affected, TargetFilter::SpecificObject { .. }))
+            .collect();
+        assert_eq!(
+            grafts.len(),
+            2,
+            "one graft per affected member, got {:?}",
+            state.transient_continuous_effects
+        );
+        for (member, owner) in [(ours, PlayerId(0)), (theirs, PlayerId(1))] {
+            let effect = state
+                .transient_continuous_effects
+                .iter()
+                .find(|ce| ce.affected == TargetFilter::SpecificObject { id: member })
+                .unwrap_or_else(|| panic!("member {member:?} gets its own graft"));
+            assert_eq!(effect.duration, Duration::Permanent);
+            assert!(
+                effect.modifications.iter().any(|m| {
+                    matches!(
+                        m,
+                        ContinuousModification::AddStaticMode {
+                            mode: StaticMode::MustAttackDefender {
+                                defender: RequiredDefender::Fixed { player },
+                            },
+                        } if *player == owner
+                    )
+                }),
+                "member {member:?} must attack its owner {owner:?}, got {:?}",
+                effect.modifications
+            );
+        }
+    }
+
+    /// CR 608.2c: with no declared parent targets ("Each of them" over an
+    /// unnamed moved set — My Crushing Masterstroke), the graft falls back to
+    /// tracked set 0, the same set the sibling "those permanents" clause
+    /// reads. Simulates the upstream gain-control having published the set.
+    #[test]
+    fn affected_object_owner_falls_back_to_tracked_set() {
+        use crate::types::identifiers::TrackedSetId;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Scheme".to_string(),
+            Zone::Battlefield,
+        );
+        let gained = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Seized Relic".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&gained).unwrap().owner = PlayerId(1);
+        // Simulate the upstream gain-control having published tracked set 0.
+        let set_id = TrackedSetId(state.next_tracked_set_id);
+        state.next_tracked_set_id += 1;
+        state.tracked_object_sets.insert(set_id, vec![gained]);
+        state.chain_tracked_set_id = Some(set_id);
+
+        let ability = ResolvedAbility::new(
+            Effect::ForceAttack {
+                target: TargetFilter::ParentTarget,
+                required_defender: TargetFilter::AffectedObjectOwner,
+                duration: Duration::UntilEndOfTurn,
+                scope: EffectScope::All,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let effect = state
+            .transient_continuous_effects
+            .iter()
+            .find(|ce| ce.affected == TargetFilter::SpecificObject { id: gained })
+            .expect("tracked-set member gets a graft");
+        assert!(effect.modifications.iter().any(|m| {
+            matches!(
+                m,
+                ContinuousModification::AddStaticMode {
+                    mode: StaticMode::MustAttackDefender {
+                        defender: RequiredDefender::Fixed { player },
+                    },
+                } if *player == PlayerId(1)
+            )
+        }));
+    }
+
+    /// CR 611.2a: a leading-clause duration stamped on `ability.duration`
+    /// wins over the effect's own field — pins Silver Surfer's "until the end
+    /// of your next turn … attacks that player each combat" effective span
+    /// after the defender-bound "each combat" window moved to `Permanent`.
+    #[test]
+    fn enclosing_duration_wins_over_effect_field() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Surfer".to_string(),
+            Zone::Battlefield,
+        );
+        let target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let mut ability = ResolvedAbility::new(
+            Effect::ForceAttack {
+                target: TargetFilter::Any,
+                required_defender: TargetFilter::Controller,
+                duration: Duration::Permanent,
+                scope: EffectScope::Single,
+            },
+            vec![TargetRef::Object(target)],
+            source,
+            PlayerId(0),
+        );
+        ability.duration = Some(Duration::UntilEndOfTurn);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let effect = state
+            .transient_continuous_effects
+            .iter()
+            .find(|ce| ce.affected == TargetFilter::SpecificObject { id: target })
+            .expect("force attack should create a transient effect for the target");
+        assert_eq!(
+            effect.duration,
+            Duration::UntilEndOfTurn,
+            "enclosing duration wins over the Permanent field"
+        );
     }
 }

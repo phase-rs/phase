@@ -3,9 +3,13 @@ import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { lifeChangeImpactDelayMs } from "../../animation/types.ts";
-import { useDisplayedLife } from "../../hooks/useDisplayedLife.ts";
+import {
+  formatLifeReadout,
+  lifeReadoutTitle,
+  lifeTierClass,
+  useDisplayedLife,
+} from "../../hooks/useDisplayedLife.ts";
 import { useAnimationStore } from "../../stores/animationStore.ts";
-import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { damageCauseState } from "../animation/cardVfx/cardVfxSpecs.ts";
 
@@ -17,10 +21,8 @@ interface LifeTotalProps {
 
 export function LifeTotal({ playerId, size = "default", hideLabel = false }: LifeTotalProps) {
   const { t } = useTranslation("game");
-  const snapshotLife = useGameStore(
-    (s) => s.gameState?.players[playerId]?.life ?? 20,
-  );
-  const life = useDisplayedLife(playerId, snapshotLife);
+  const readout = useDisplayedLife(playerId);
+  const life = formatLifeReadout(readout);
   const activeStep = useAnimationStore((s) => s.activeStep);
   const [flashColor, setFlashColor] = useState<"red" | "green" | null>(null);
   const flashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -67,12 +69,8 @@ export function LifeTotal({ playerId, size = "default", hideLabel = false }: Lif
     };
   }, [activeStep, playerId, speedMultiplier]);
 
-  const colorClass =
-    life >= 10
-      ? "text-green-400"
-      : life >= 5
-        ? "text-yellow-400"
-        : "text-red-400";
+  const colorClass = lifeTierClass(readout);
+  const title = lifeReadoutTitle(t, readout);
 
   const flashBg =
     flashColor === "red"
@@ -94,6 +92,8 @@ export function LifeTotal({ playerId, size = "default", hideLabel = false }: Lif
         initial={{ scale: 1.3 }}
         animate={{ scale: 1 }}
         transition={{ duration: 0.2 }}
+        title={title}
+        aria-label={title}
         className={`rounded-md px-1 py-0.5 font-bold tabular-nums transition-colors duration-400 ${size === "sm" ? "" : "lg:px-1.5"} ${sizeClass} ${colorClass} ${flashBg}`}
       >
         {life}

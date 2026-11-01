@@ -54,6 +54,7 @@ fn thranduil_activates_graveyard_elf_ability_as_its_own() {
             GameAction::ActivateAbility {
                 source_id,
                 ability_index,
+                ..
             } if *source_id == thranduil => Some(*ability_index),
             _ => None,
         })

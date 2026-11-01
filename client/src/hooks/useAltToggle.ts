@@ -18,7 +18,7 @@ export function useAltToggle(): void {
         store.setAltHeld(!store.altHeld);
       }
     }
-    window.addEventListener("keydown", onAltToggle);
-    return () => window.removeEventListener("keydown", onAltToggle);
+    window.addEventListener("keydown", onAltToggle, true);
+    return () => window.removeEventListener("keydown", onAltToggle, true);
   }, []);
 }

@@ -1,11 +1,16 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 
 import { HostControlTile } from "../HostControlTile";
 import { FORMAT_DEFAULTS, useMultiplayerStore } from "../../../stores/multiplayerStore";
 import type { DeckChoice, PlayerSlot } from "../../../stores/multiplayerStore";
 import { emptySeatDeck } from "../../../services/pileSource";
+import { expandParsedDeck } from "../../../services/deckParser";
+import type { SeatKind } from "../../../multiplayer/seatTypes";
+import echoWire from "../../../test/fixtures/seat-deck-echo-wire.json";
+import { usePreferencesStore } from "../../../stores/preferencesStore";
+import { UNFILED_POOL_GROUP, emptyPoolSelection } from "../../../services/randomPoolSelection";
 
 const catalogMocks = vi.hoisted(() => ({
   candidates: [] as unknown[],
@@ -14,6 +19,7 @@ const catalogMocks = vi.hoisted(() => ({
 vi.mock("../../../services/aiDeckCatalog", () => ({
   useAiDeckCatalog: () => ({
     candidates: catalogMocks.candidates,
+    allCandidates: catalogMocks.candidates,
     loading: false,
     error: null,
   }),
@@ -133,6 +139,70 @@ describe("HostControlTile", () => {
         data: { main_deck: ["Forest"], sideboard: [], commander: [] },
       });
       expect(onDeckList).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("AI pool fallback warning", () => {
+    const EXCLUDED_DECK = {
+      id: "saved:Excluded Deck",
+      name: "Excluded Deck",
+      source: { type: "saved" },
+      deck: { main: [{ count: 1, name: "Forest" }], sideboard: [] },
+      coveragePct: null,
+      archetype: null,
+      bracket: null,
+    };
+
+    it("warns and still assigns a deck when the AI pool selection matches nothing", async () => {
+      catalogMocks.candidates = [EXCLUDED_DECK];
+      const seatMutateAsync = vi.fn().mockResolvedValue(undefined);
+      const restoreSelection = usePreferencesStore.getState().aiPoolSelection;
+      act(() => {
+        usePreferencesStore.setState({
+          // The only legal deck is excluded: live assignments fall back to
+          // the full catalog.
+          aiPoolSelection: { ...emptyPoolSelection(), excludedGroups: [UNFILED_POOL_GROUP] },
+        });
+      });
+      try {
+        useMultiplayerStore.setState({
+          hostGameCode: "ABCD1",
+          hostingStatus: "waiting",
+          hostSession: {
+            formatConfig: FORMAT_DEFAULTS.Standard,
+            timerSeconds: null,
+            matchType: "Bo1",
+          },
+          playerSlots: [
+            { playerId: 0, name: "Host", kind: { type: "HostHuman" } },
+            { playerId: 1, name: "", kind: { type: "WaitingHuman" } },
+          ] as PlayerSlot[],
+          serverInfo: null,
+          seatMutate: vi.fn(),
+          seatMutateAsync,
+        });
+        render(
+          <MemoryRouter initialEntries={["/multiplayer"]}>
+            <HostControlTile />
+          </MemoryRouter>,
+        );
+
+        // The tile warns that Fill with AI draws from the full catalog …
+        expect(screen.getByRole("status")).toHaveTextContent(/Everything is excluded/);
+
+        // … and the fallback assignment still succeeds with the excluded deck.
+        fireEvent.click(screen.getByRole("button", { name: /fill with ai/i }));
+        await vi.waitFor(() => expect(seatMutateAsync).toHaveBeenCalled());
+        const assignment = seatMutateAsync.mock.calls[0][0];
+        expect(assignment.type).toBe("SetKind");
+        expect(assignment.data.kind.type).toBe("Ai");
+        expect(assignment.data.kind.data.deck.type).toBe("DeckList");
+        expect(assignment.data.kind.data.deck.data.main_deck).toContain("Forest");
+      } finally {
+        act(() => {
+          usePreferencesStore.setState({ aiPoolSelection: restoreSelection });
+        });
+      }
     });
   });
 
@@ -256,7 +326,10 @@ describe("HostControlTile", () => {
     it("Add AI seats an empty deck for Dandan with an empty catalog", () => {
       const { seatMutate } = renderSeats("Dandan", waiting);
       fireEvent.click(screen.getByRole("button", { name: "Add AI" }));
-      expect(seatMutate).toHaveBeenCalledWith(setAi(EMPTY));
+      expect(seatMutate).toHaveBeenCalledWith({
+        ...setAi(EMPTY),
+        data: { ...setAi(EMPTY).data, expectedKind: { type: "WaitingHuman" } },
+      });
     });
 
     it("Replace AI seats an empty deck for Dandan with an empty catalog", () => {
@@ -270,7 +343,10 @@ describe("HostControlTile", () => {
       const { seatMutateAsync } = renderSeats("Dandan", waiting);
       fireEvent.click(screen.getByRole("button", { name: "Fill With AI" }));
       await vi.waitFor(() => expect(seatMutateAsync).toHaveBeenCalledWith({ type: "Start" }));
-      expect(seatMutateAsync).toHaveBeenNthCalledWith(1, setAi(EMPTY));
+      expect(seatMutateAsync).toHaveBeenNthCalledWith(1, {
+        ...setAi(EMPTY),
+        data: { ...setAi(EMPTY).data, expectedKind: { type: "WaitingHuman" } },
+      });
     });
 
     it("an AI seat holding Random is promoted to the empty deck for Dandan", () => {
@@ -304,6 +380,161 @@ describe("HostControlTile", () => {
       expect(seatMutate).toHaveBeenCalledWith(
         setAi({ type: "DeckList", data: expect.objectContaining({ main_deck: ["Forest"] }) }),
       );
+    });
+  });
+
+  describe("AI deck dropdown selection after the echo", () => {
+    // The engine's own echo of each deck, written by the seat-reducer golden
+    // test: every list present, engine field order, `bracket_tier` serialized.
+    function echoedDeck(seat: SeatKind): DeckChoice {
+      if (seat.type !== "Ai" || seat.data.deck.type !== "DeckList") {
+        throw new Error("the golden entry is not an AI seat holding a DeckList");
+      }
+      return seat.data.deck;
+    }
+    const echo = {
+      plain: echoedDeck(echoWire.plain as SeatKind),
+      companion: echoedDeck(echoWire.companion as SeatKind),
+      declaredTier: echoedDeck(echoWire.declaredTier as SeatKind),
+      forestIsland: echoedDeck(echoWire.forestIsland as SeatKind),
+      islandForest: echoedDeck(echoWire.islandForest as SeatKind),
+    };
+
+    const catalogEntry = (name: string, deck: { main: { count: number; name: string }[]; companion?: string }) => ({
+      id: `cat-${name}`,
+      name,
+      source: "bundled",
+      deck: { ...deck, sideboard: [] },
+      coveragePct: null,
+      archetype: null,
+      bracket: null,
+    });
+    const DECK_A = catalogEntry("A", { main: [{ count: 1, name: "Forest" }] });
+    const DECK_B = catalogEntry("B", { main: [{ count: 1, name: "Island" }] });
+    const DECK_C = catalogEntry("C", {
+      main: [{ count: 1, name: "Island" }],
+      companion: "Lurrus of the Dream-Den",
+    });
+    const DECK_FI = catalogEntry("FI", {
+      main: [{ count: 1, name: "Forest" }, { count: 1, name: "Island" }],
+    });
+    const DECK_IF = catalogEntry("IF", {
+      main: [{ count: 1, name: "Island" }, { count: 1, name: "Forest" }],
+    });
+
+    const host: PlayerSlot = { playerId: 0, name: "Host", kind: { type: "HostHuman" } };
+    const aiWith = (deck: DeckChoice): PlayerSlot => ({
+      playerId: 1, name: "AI", kind: { type: "Ai", data: { difficulty: "Medium", deck } },
+    });
+
+    function renderSeat(candidates: unknown[], deck: DeckChoice) {
+      const seatMutate = vi.fn();
+      catalogMocks.candidates = candidates;
+      useMultiplayerStore.setState({
+        hostGameCode: "ABCD1",
+        hostingStatus: "waiting",
+        hostSession: { formatConfig: FORMAT_DEFAULTS.Standard, timerSeconds: null, matchType: "Bo1" },
+        playerSlots: [host, aiWith(deck)],
+        serverInfo: null,
+        seatMutate,
+      });
+      render(
+        <MemoryRouter initialEntries={["/multiplayer"]}>
+          <HostControlTile />
+        </MemoryRouter>,
+      );
+      return seatMutate;
+    }
+
+    /** The AI seat's deck dropdown: the combobox that offers the catalog decks. */
+    function deckSelect(firstLabel: string): HTMLSelectElement {
+      const select = screen
+        .getAllByRole("combobox")
+        .find((element) => within(element).queryByRole("option", { name: firstLabel }));
+      if (!select) throw new Error(`no dropdown offers a deck labelled ${firstLabel}`);
+      return select as HTMLSelectElement;
+    }
+    // `selectedIndex`, not `selectedOptions`: jsdom's live collection goes stale
+    // across a controlled re-render.
+    const selectedLabel = (select: HTMLSelectElement) =>
+      select.options[select.selectedIndex]?.textContent;
+    const echoSeat = (deck: DeckChoice) => {
+      act(() => useMultiplayerStore.setState({ playerSlots: [host, aiWith(deck)] }));
+    };
+
+    it("selects the seat's deck from the engine echo, not the first option", () => {
+      renderSeat([DECK_A, DECK_B, DECK_C], echo.plain);
+
+      const select = deckSelect("A");
+      // Reach guard: all three decks are offered, and the first is "A".
+      expect(Array.from(select.options, (option) => option.textContent)).toEqual(["A", "B", "C"]);
+      expect(selectedLabel(select)).toBe("B");
+    });
+
+    it("keeps the picked deck selected once the engine echoes it", () => {
+      const seatMutate = renderSeat([DECK_A, DECK_B, DECK_C], echo.plain);
+      expect(seatMutate).not.toHaveBeenCalled();
+
+      const select = deckSelect("A");
+      const optionC = Array.from(select.options).find((option) => option.textContent === "C")!;
+      fireEvent.change(select, { target: { value: optionC.value } });
+
+      // Positive control: the pick reaches the catalog deck, companion and all.
+      expect(seatMutate).toHaveBeenCalledTimes(1);
+      expect(seatMutate).toHaveBeenCalledWith({
+        type: "SetKind",
+        data: {
+          seatIndex: 1,
+          kind: {
+            type: "Ai",
+            data: {
+              difficulty: "Medium",
+              deck: { type: "DeckList", data: expandParsedDeck(DECK_C.deck) },
+            },
+          },
+        },
+      });
+
+      echoSeat(echo.companion);
+      expect(selectedLabel(deckSelect("A"))).toBe("C");
+    });
+
+    it("tells apart decks that differ only in an optional list, and ignores the declared tier", () => {
+      renderSeat([DECK_A, DECK_B, DECK_C], echo.companion);
+      expect(selectedLabel(deckSelect("A"))).toBe("C");
+
+      echoSeat(echo.declaredTier);
+      expect(selectedLabel(deckSelect("A"))).toBe("B");
+    });
+
+    it("keeps decks that differ only in card order apart through pick and echo", () => {
+      const seatMutate = renderSeat([DECK_FI, DECK_IF], echo.forestIsland);
+
+      const select = deckSelect("FI");
+      // Reach guard: both ordered decks are offered, and the seat holds the first.
+      expect(Array.from(select.options, (option) => option.textContent)).toEqual(["FI", "IF"]);
+      expect(selectedLabel(select)).toBe("FI");
+      expect(select.options[0].value).not.toBe(select.options[1].value);
+
+      fireEvent.change(select, { target: { value: select.options[1].value } });
+      expect(seatMutate).toHaveBeenCalledTimes(1);
+      expect(seatMutate).toHaveBeenCalledWith({
+        type: "SetKind",
+        data: {
+          seatIndex: 1,
+          kind: {
+            type: "Ai",
+            data: {
+              difficulty: "Medium",
+              deck: { type: "DeckList", data: expandParsedDeck(DECK_IF.deck) },
+            },
+          },
+        },
+      });
+      expect(expandParsedDeck(DECK_IF.deck).main_deck).toEqual(["Island", "Forest"]);
+
+      echoSeat(echo.islandForest);
+      expect(selectedLabel(deckSelect("FI"))).toBe("IF");
     });
   });
 });

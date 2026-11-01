@@ -167,6 +167,7 @@ fn the_notary_hobbits_mana_ability_scales_with_halflings_controlled() {
         .act(GameAction::ActivateAbility {
             source_id: notary_id,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating the mana ability must succeed");
 

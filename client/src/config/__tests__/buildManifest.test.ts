@@ -49,4 +49,26 @@ describe("build manifest", () => {
       build: JSON.parse(define.__BUILD_HASH__ as string),
     });
   });
+
+  it("enables __IS_PREVIEW_BUILD__ when ENGINE_FINGERPRINT or PREVIEW_BUILD is set", async () => {
+    const prevFingerprint = process.env.ENGINE_FINGERPRINT;
+    const prevPreview = process.env.PREVIEW_BUILD;
+    try {
+      delete process.env.ENGINE_FINGERPRINT;
+      delete process.env.PREVIEW_BUILD;
+      expect((await buildConfig()).define.__IS_PREVIEW_BUILD__).toBe("false");
+
+      process.env.ENGINE_FINGERPRINT = "0123456789abcdef";
+      expect((await buildConfig()).define.__IS_PREVIEW_BUILD__).toBe("true");
+
+      delete process.env.ENGINE_FINGERPRINT;
+      process.env.PREVIEW_BUILD = "true";
+      expect((await buildConfig()).define.__IS_PREVIEW_BUILD__).toBe("true");
+    } finally {
+      if (prevFingerprint === undefined) delete process.env.ENGINE_FINGERPRINT;
+      else process.env.ENGINE_FINGERPRINT = prevFingerprint;
+      if (prevPreview === undefined) delete process.env.PREVIEW_BUILD;
+      else process.env.PREVIEW_BUILD = prevPreview;
+    }
+  });
 });
