@@ -190,12 +190,16 @@ impl<'a> PolicyContext<'a> {
     pub(crate) fn ability_walks(&self) -> Vec<AbilityWalk<'a>> {
         // If we're casting/activating, get effects from the source object
         match &self.candidate.action {
-            GameAction::CastSpell { .. } => {
+            // CR 113.3a + CR 608.3a: A permanent spell cast puts the card onto the
+            // battlefield; its activated, static, and triggered abilities are not
+            // spell abilities and do not execute on cast. Only spell-kind abilities
+            // (`modal_spell_mode_ability_refs`) represent spell effects for the cast.
+            action if crate::cast_facts::is_cast_family_action(action) => {
                 return self
                     .source_object()
                     .into_iter()
                     .flat_map(|object| {
-                        object.abilities.iter().map(|ability| {
+                        modal_spell_mode_ability_refs(object).map(|ability| {
                             AbilityWalk::of(ability, collect_definition_effects(ability))
                         })
                     })
