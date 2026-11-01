@@ -3878,6 +3878,7 @@ export class P2PHostAdapter implements EngineAdapter {
       }
     }
     await Promise.all(sends);
+    const takeback = transition.result.takeback;
     // This read decides whether the game closes AT ALL, and the guest-path
     // `try` around this call would swallow a rejection: `terminalResult` would
     // stay null with nothing to retry it, because a finished game produces no
@@ -3892,9 +3893,10 @@ export class P2PHostAdapter implements EngineAdapter {
         type: "terminalUnavailable",
         message: "Failed to read the authoritative state; a game that just ended stays open until something drives another close",
       });
+      // Guests already hold the rewound state; only the seat restore needs the snapshot.
+      if (takeback?.resolution === "approved") this.announceTakeback(resolvedTakebackEvent(takeback));
       return;
     }
-    const takeback = transition.result.takeback;
     if (takeback?.resolution === "approved") {
       this.restoreRewoundSeats(closingSnapshot);
       this.announceTakeback(resolvedTakebackEvent(takeback));

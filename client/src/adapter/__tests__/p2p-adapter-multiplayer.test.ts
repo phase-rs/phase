@@ -11401,6 +11401,28 @@ describe("P2P takeback transport", () => {
     t.adapter.dispose();
   });
 
+  it("B2b: an approval still reaches the guests when the terminal close cannot read the final state", async () => {
+    const t = await browserTable();
+    const mark = t.p1.sent.length;
+    const hostMark = t.events.length;
+    // The host publication reads first; the terminal close's read is the second.
+    const original = mocks.getSnapshot.getMockImplementation()!;
+    let closeReadFailed = false;
+    mocks.getSnapshot.mockImplementationOnce(original).mockImplementationOnce(async () => {
+      closeReadFailed = true;
+      throw new Error("terminal close read failed");
+    });
+    mocks.respondTakeback.mockResolvedValueOnce({ status: "resolved", resolution: "approved", resolvedBy: 1 });
+    await t.p1.simulateData({ type: "respond_takeback", approve: true });
+    await vi.waitFor(() => expect(t.events.slice(hostMark)).toContainEqual(expect.objectContaining({ type: "terminalUnavailable" })));
+    await flushPromises(20);
+    expect(closeReadFailed).toBe(true);
+    const frames = await framesAfter(t.p1, mark);
+    expect(ordered(frames, ["state_update", "takeback_resolved"])).toEqual(["state_update", "takeback_resolved"]);
+    expect(frames).toContainEqual(expect.objectContaining({ type: "takeback_resolved", resolution: "approved", resolvedBy: 1 }));
+    t.adapter.dispose();
+  });
+
   async function aiTable() {
     const { adapter, emitConnection } = makeHost(3);
     const events: P2PAdapterEvent[] = [];
