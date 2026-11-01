@@ -156,7 +156,9 @@ pub fn flash_timing_cost(
         match &option.cost {
             None => Some(ManaCost::NoCost),
             Some(AbilityCost::Mana { cost }) => Some(cost.clone()),
-            Some(cost) if cost.is_payable(state, player, obj.id) => Some(ManaCost::NoCost),
+            Some(cost) if cost.is_payable_for_spell(state, player, obj.id) => {
+                Some(ManaCost::NoCost)
+            }
             Some(_) => None,
         }
     })

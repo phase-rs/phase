@@ -14,7 +14,7 @@ use web_time::Instant;
 /// A [`Deadline::none`] deadline never expires and short-circuits all checks,
 /// which is the correct behavior for deterministic tests bounded by
 /// `max_nodes` / `max_depth` rather than wall time.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Deadline {
     limit: Option<Instant>,
 }

@@ -417,7 +417,11 @@ export type BoardChoiceSelection =
   // "as though its power were N greater" / "using its toughness" make the
   // contribution differ from printed power; when absent (Ward-sacrifice total
   // power), the summation falls back to raw power.
-  | { type: "totalPowerAtLeast"; power: number; contributions?: Record<ObjectId, number> }
+  // `signed` selects the summation the engine validates: absent/false clamps
+  // each creature at zero (Crew/Saddle contributions, Ward-sacrifice total
+  // power); true sums raw signed power (TapCreatures aggregate costs, CR
+  // 107.1b — a -1-power creature genuinely lowers the total).
+  | { type: "totalPowerAtLeast"; power: number; contributions?: Record<ObjectId, number>; signed?: boolean }
   // CR 107.1c + CR 701.21a (Slaughter the Strong): keep any subset whose
   // combined power is at most `power`; selecting beyond it blocks confirm.
   | { type: "totalPowerAtMost"; power: number };
@@ -469,7 +473,7 @@ function payCostSourceId(data: Extract<WaitingFor, { type: "PayCost" }>["data"])
   if (data.resume.type === "ManaAbility") {
     return (data.resume.ManaAbility as { source_id?: ObjectId } | undefined)?.source_id;
   }
-  if (data.resume.type === "Resolution") {
+  if (data.resume.type === "Resolution" || data.resume.type === "TeamTapPayment") {
     return undefined;
   }
   if (data.resume.type === "TurnFaceUp") {
@@ -499,27 +503,24 @@ function confirmedCountSelection(count: number, minCount: number): BoardChoiceSe
 }
 
 /**
- * CR 208.1 + CR 601.2f (Crew CR 702.122a / Saddle CR 702.171a / Teamwork
- * CR 702.194a): map a TapCreatures Aggregate cost's advertised comparator to
- * the board-choice selection that gates confirmation on summed power — the
- * same `totalPowerAtLeast` mechanism CrewVehicle/SaddleMount already use.
- * Only `GE` ("total power N or greater") is constructible by any current
- * engine registration site (`TapCreaturesRequirement::total_power_at_least`
- * is the sole non-test constructor of the `Aggregate` requirement shape, and
- * it hardcodes `GE`). `totalPowerAtMost` is deliberately NOT reused for a
- * hypothetical `LE`: its Slaughter-the-Strong keep-set (CR 107.1c's "any
- * number") sums SIGNED power, so a negative-power creature genuinely lowers
- * the total, whereas the engine's tap-cost total over the same CR 208.1 power
- * axis sums POSITIVE power only (`tap_creature_power_contribution` clamps to
- * `max(power, 0)`) — reusing it would silently diverge from the engine the
- * instant a non-GE aggregate cost existed. Any comparator other than `GE`
- * therefore has no correct client representation yet; fail loud and block
- * confirmation rather than guess.
+ * CR 208.1 + CR 601.2f + CR 107.1b (Teamwork CR 702.194a / Bow to My
+ * Command): map a TapCreatures Aggregate cost's advertised comparator to the
+ * board-choice selection that gates confirmation on summed SIGNED power — the
+ * same `totalPowerAtLeast` mechanism CrewVehicle/SaddleMount use, with the
+ * `signed` flag set so a -1-power creature genuinely lowers the total,
+ * matching the engine validator (`tap_creatures_signed_total_power`).
+ * Crew/Saddle keep the default clamped summation (their engine contributions
+ * clamp per `object_crew_power_contribution`). Only `GE` ("total power N or
+ * greater") is constructible by any current engine registration site
+ * (`TapCreaturesRequirement::total_power_at_least` is the sole non-test
+ * constructor of the `Aggregate` requirement shape, and it hardcodes `GE`).
+ * Any comparator other than `GE` has no correct client representation yet;
+ * fail loud and block confirmation rather than guess.
  */
 function tapCreaturesAggregateSelection(aggregate: TapCreaturesAggregate): BoardChoiceSelection {
   switch (aggregate.comparator) {
     case "GE":
-      return { type: "totalPowerAtLeast", power: aggregate.value };
+      return { type: "totalPowerAtLeast", power: aggregate.value, signed: true };
     case "GT":
     case "LT":
     case "LE":
@@ -842,8 +843,11 @@ export function boardChoiceSelectedPower(
   // `totalPowerAtMost` (Slaughter the Strong's keep set) mirrors the engine's
   // CR 208.3 total, which sums raw power — a -1-power creature genuinely lowers
   // the total, so a 5/-1 pair fits a cap of 4. Crew/Saddle-style
-  // `totalPowerAtLeast` contributes positive power only.
-  const clampNegative = choice.selection.type === "totalPowerAtLeast";
+  // `totalPowerAtLeast` contributes positive power only, while the
+  // TapCreatures-aggregate `signed` form sums raw power (CR 107.1b), matching
+  // the engine validator.
+  const clampNegative =
+    choice.selection.type === "totalPowerAtLeast" && choice.selection.signed !== true;
   // CR 702.122a / 702.171a: for Crew/Saddle the engine supplies each creature's
   // adjusted contribution (Pilot tokens' "+2 greater", Giant Ox's toughness).
   // Prefer it over printed power so the UI gates on the same value the engine

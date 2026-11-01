@@ -180,6 +180,7 @@ mod tests {
             chooser: Chooser::Controller.into(),
             candidate_source: ZoneChoiceCandidateSource::Legacy,
             reciprocal_role: None,
+            gather_role: None,
             up_to: false,
             selection: engine::types::ability::CardSelectionMode::Chosen,
             constraint: None,

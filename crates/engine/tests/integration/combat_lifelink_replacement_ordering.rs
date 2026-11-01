@@ -1684,6 +1684,8 @@ fn seed_loop_detect_ring(runner: &mut GameRunner) {
         .push_back(std::sync::Arc::new(LoopDetectSample {
             normalized: snapshot.clone(),
             live: snapshot,
+            tally: Default::default(),
+            trace_at: None,
         }));
 }
 

@@ -58,6 +58,7 @@ fn zenith_chronicler_parses_multicolored_first_spell_and_other_player_draw() {
         execute.player_scope,
         Some(PlayerFilter::AllExcept {
             exclude: Box::new(PlayerFilter::TriggeringPlayer),
+            relation: engine::types::ability::PlayerRelation::All,
         })
     );
     assert!(matches!(execute.effect.as_ref(), Effect::Draw { .. }));

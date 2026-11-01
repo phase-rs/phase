@@ -24,6 +24,7 @@ import type {
 import { dispatchInteraction, previewInteractionResponse } from "../../../game/dispatch.ts";
 import { useAppNotificationStore } from "../../../stores/appToastStore.ts";
 import { useGameStore } from "../../../stores/gameStore.ts";
+import { useMultiplayerStore } from "../../../stores/multiplayerStore.ts";
 import {
   buildGameState,
   buildLoopShortcutWaitingFor,
@@ -2829,5 +2830,137 @@ describe("DeclareShortcutModal — authored-split preview", () => {
         },
       });
     }
+  });
+});
+
+// The engine's serialized "repeat without end" offer and reply on the Worldgorger Dragon + Animate
+// Dead board against Mountain + Lightning Bolt, restricted to the fields the mirror declares.
+const WITHOUT_END_OFFER: WaitingFor = {
+  type: "LoopShortcut",
+  data: {
+    proposer: 0,
+    predicted_winner: null,
+    certificate: { unbounded: [], mandatory: false, residual_board_delta: { added: [], removed: [] } },
+    schema: { iteration_count: "WithoutEnd", points: [], convoke_tappable_count: 0 },
+    road: "Ring",
+  },
+};
+const WITHOUT_END_OFFER_VIEW: ViewerInteraction = {
+  waitingForKind: { simultaneous: null, terminal: false, code: "shortcut" },
+  authorizedSubmitters: [0],
+  canSubmit: true,
+  autoPassRecommended: false,
+  opportunities: [
+    {
+      interactionId: "p.0.1" as InteractionId,
+      response: {
+        type: "schema",
+        data: {
+          spec: {
+            type: "shortcut",
+            data: { count: { type: "withoutEnd" }, points: [], allowDecline: true, confirm: "explicit" },
+          },
+          candidates: [],
+        },
+      },
+      surfaces: [{ type: "summary", data: { code: "decision" } }],
+      progress: { selected: 0, minimum: 1, maximum: 1, aggregate: null, confirmable: false },
+    },
+  ],
+  attachmentFans: {},
+  attachmentViews: {},
+  availability: { type: "inputRequired" },
+};
+const WITHOUT_END_REPLY: WaitingFor = {
+  type: "RespondToShortcut",
+  data: {
+    player: 1,
+    proposal: { proposer: 0, predicted_winner: null, count: "WithoutEnd", unbounded: [], road: "Ring" },
+  },
+};
+const WITHOUT_END_REPLY_VIEW: ViewerInteraction = {
+  waitingForKind: { simultaneous: null, terminal: false, code: "shortcut" },
+  authorizedSubmitters: [1],
+  canSubmit: true,
+  autoPassRecommended: false,
+  opportunities: [
+    {
+      interactionId: "q.0.1" as InteractionId,
+      response: {
+        type: "schema",
+        data: {
+          spec: {
+            type: "shortcutReply",
+            data: { minIteration: 0, maxIteration: 4294967295, confirm: "explicit" },
+          },
+          candidates: [],
+        },
+      },
+      surfaces: [
+        { type: "shortcutResponse", data: { response: "accept" } },
+        { type: "shortcutResponse", data: { response: "shorten" } },
+        { type: "amount", data: { min: 0, max: 4294967295, total: null } },
+      ],
+      progress: { selected: 0, minimum: 1, maximum: 1, aggregate: null, confirmable: false },
+    },
+  ],
+  attachmentFans: {},
+  attachmentViews: {},
+  availability: { type: "inputRequired" },
+};
+const WITHOUT_END_TEXT = "Repeat without end. If every player accepts, the game is a draw.";
+
+describe("LoopShortcutModal — a proposal without end", () => {
+  beforeEach(() => {
+    dispatchMock.mockReset();
+    vi.mocked(dispatchInteraction).mockReset();
+  });
+  afterEach(() => {
+    cleanup();
+    useMultiplayerStore.setState({ activePlayerId: null });
+    useGameStore.setState({ gameMode: null });
+  });
+
+  it("the proposer reads it and declares or declines it", () => {
+    seed(WITHOUT_END_OFFER, {}, WITHOUT_END_OFFER_VIEW);
+    render(<DeclareShortcutModal />);
+
+    expect(screen.getByText(WITHOUT_END_TEXT)).toBeInTheDocument();
+    expect(screen.queryByRole("spinbutton")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Take the shortcut" }));
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "DeclareShortcut",
+      data: { count: "WithoutEnd", template: null },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Decline the shortcut" }));
+    expect(dispatchMock).toHaveBeenLastCalledWith({ type: "DeclineShortcut" });
+    expect(dispatchInteraction).not.toHaveBeenCalled();
+  });
+
+  it("a responder reads it and accepts or shortens it", () => {
+    seed(WITHOUT_END_REPLY, {}, WITHOUT_END_REPLY_VIEW);
+    useGameStore.setState({ gameMode: "online" });
+    useMultiplayerStore.setState({ activePlayerId: 1 });
+    render(<RespondToShortcutModal />);
+
+    expect(screen.getByText(WITHOUT_END_TEXT)).toBeInTheDocument();
+    const place = screen.getByRole("spinbutton", { name: "Number of iterations" });
+    expect(place).toHaveValue("0");
+    fireEvent.click(screen.getByRole("button", { name: "Shorten it" }));
+    expect(dispatchMock).toHaveBeenLastCalledWith({
+      type: "RespondToShortcut",
+      data: { response: { Shorten: { at_iteration: 0 } } },
+    });
+    fireEvent.change(place, { target: { value: "3" } });
+    fireEvent.click(screen.getByRole("button", { name: "Shorten it" }));
+    expect(dispatchMock).toHaveBeenLastCalledWith({
+      type: "RespondToShortcut",
+      data: { response: { Shorten: { at_iteration: 3 } } },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Accept" }));
+    expect(dispatchMock).toHaveBeenLastCalledWith({
+      type: "RespondToShortcut",
+      data: { response: "Accept" },
+    });
   });
 });

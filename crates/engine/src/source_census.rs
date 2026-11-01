@@ -223,8 +223,9 @@ mod tests {
             ),
             (
                 "tests/integration/loop_shortcut.rs",
-                "Parses with `syn` rather than by substring, so comments are excluded by \
-                 construction — the stronger instrument this module approximates.",
+                "Mixed: its `syn` readers exclude comments by construction, but its \
+                 `TriggerTargetSelection` arm census matches needles in raw `engine.rs` \
+                 lines, comments included.",
             ),
             (
                 "src/game/ability_scan.rs",
@@ -235,10 +236,6 @@ mod tests {
             (
                 "src/game/turns.rs",
                 "SECOND WAVE, disclosed not routed: region slices of a source string.",
-            ),
-            (
-                "src/parser/oracle_condition.rs",
-                "SECOND WAVE, disclosed not routed: whole-file `body.contains(..)` family probe.",
             ),
             (
                 "tests/integration/interaction_contract.rs",

@@ -789,7 +789,15 @@ pub(crate) fn handle_turn_face_up_cost_selection(
         crate::types::game_state::PayCostKind::ReturnToHand => TurnFaceUpMoveKind::ReturnToHand,
         crate::types::game_state::PayCostKind::Discard => TurnFaceUpMoveKind::Discard,
         crate::types::game_state::PayCostKind::Sacrifice => TurnFaceUpMoveKind::Sacrifice,
-        crate::types::game_state::PayCostKind::Reveal => {
+        crate::types::game_state::PayCostKind::Reveal { shared_quality } => {
+            // CR 701.20a: Enforce the reveal leg's shared-quality constraint.
+            if let Some(quality) = shared_quality {
+                if !super::cost_payability::cards_share_quality(state, chosen, quality) {
+                    return Err(EngineError::InvalidAction(format!(
+                        "Revealed cards must share a {quality:?}"
+                    )));
+                }
+            }
             let revealed_names = chosen
                 .iter()
                 .filter_map(|id| state.objects.get(id).map(|o| o.name.clone()))

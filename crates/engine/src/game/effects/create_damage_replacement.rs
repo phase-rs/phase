@@ -1,14 +1,12 @@
-use crate::game::ability_utils::{
-    damage_replacement_target_role_legality, damage_replacement_target_roles,
-    DamageReplacementTargetRole,
-};
+use crate::game::ability_utils::damage_replacement_target_role_legality;
 use crate::game::effects::choose_damage_source;
 use crate::game::effects::prevent_damage::resolve_source_filter;
 use crate::game::game_object::AttachTarget;
 use crate::game::targeting;
 use crate::types::ability::{
-    DamageRedirectTarget, Effect, EffectError, EffectKind, PreventionAmount, RedirectionLifetime,
-    ReplacementDefinition, ResolvedAbility, TargetFilter, TargetRef,
+    damage_replacement_target_roles, DamageRedirectTarget, DamageReplacementTargetRole, Effect,
+    EffectError, EffectKind, PreventionAmount, RedirectionLifetime, ReplacementDefinition,
+    ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;

@@ -9,6 +9,7 @@
 use engine::game::ability_utils::build_resolved_from_def;
 use engine::game::effects::resolve_ability_chain;
 use engine::game::scenario::{GameScenario, P0};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::parser::oracle_effect::parse_effect_chain;
 use engine::types::ability::{
     AbilityKind, ControllerRef, DelayedTriggerCondition, Effect, FilterProp, TargetFilter,
@@ -16,6 +17,9 @@ use engine::types::ability::{
 };
 use engine::types::phase::Phase;
 use engine::types::triggers::TriggerMode;
+use engine::types::zones::Zone;
+
+use crate::support::shared_card_db;
 
 const CHAPTER_II: &str = "Whenever you cast a noncreature spell this turn, create a token that's a copy of a non-Saga token you control.";
 
@@ -85,10 +89,12 @@ fn chapter_ii_delayed_trigger_fires_when_spell_commits_to_stack() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
-    let mog = scenario
-        .add_creature_from_oracle(P0, "Summon: Good King Mog XII", 4, 4, MOG_ORACLE)
-        .with_subtypes(vec!["Moogle", "Saga"])
-        .id();
+    let mog = scenario.add_real_card(
+        P0,
+        "Summon: Good King Mog XII",
+        Zone::Battlefield,
+        shared_card_db().expect("card db"),
+    );
 
     let moogle_id = scenario.add_creature(P0, "Moogle Token", 1, 2).id();
     let draw = scenario
@@ -131,10 +137,12 @@ fn chapter_ii_delayed_trigger_fires_on_noncreature_spell_cast() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
-    let mog = scenario
-        .add_creature_from_oracle(P0, "Summon: Good King Mog XII", 4, 4, MOG_ORACLE)
-        .with_subtypes(vec!["Moogle", "Saga"])
-        .id();
+    let mog = scenario.add_real_card(
+        P0,
+        "Summon: Good King Mog XII",
+        Zone::Battlefield,
+        shared_card_db().expect("card db"),
+    );
 
     let moogle_id = scenario.add_creature(P0, "Moogle Token", 1, 2).id();
 

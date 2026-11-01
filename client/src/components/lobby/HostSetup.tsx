@@ -10,8 +10,8 @@ import type {
   LoopDetectionMode,
   MatchType,
 } from "../../adapter/types";
-import { AI_DIFFICULTIES } from "../../constants/ai";
-import { FORMAT_REGISTRY, formatSuppliesDeck } from "../../data/formatRegistry";
+import { AI_DIFFICULTIES, isAiDifficulty } from "../../constants/ai";
+import { FORMAT_REGISTRY, formatSuppliesDeck, isPlanechaseFamilyFormat } from "../../data/formatRegistry";
 import {
   directoryLobbySources,
   FORMAT_DEFAULTS,
@@ -355,7 +355,7 @@ export function HostSetup({
   hostDisabledReason,
   seed,
 }: HostSetupProps) {
-  const { t } = useTranslation(["multiplayer", "menu"]);
+  const { t } = useTranslation(["multiplayer", "menu", "common"]);
   // Player name is edited in `PlayerIdentityBanner` above this form (see
   // MultiplayerPage). We read it here only to submit it and to seed the
   // room-name placeholder — this form itself intentionally has no
@@ -555,7 +555,7 @@ export function HostSetup({
   // No AI seats in a Discord game: its seats are promised to the Discord
   // players, and an all-AI table would never register the requested code.
   const aiSeatsSupported =
-    seed === undefined && !formatConfig.team_based && formatConfig.format !== "Planechase";
+    seed === undefined && !formatConfig.team_based && !isPlanechaseFamilyFormat(formatConfig.format);
   const effectiveAiSeats = aiSeatsSupported ? aiSeats : [];
   // A remembered config can carry a CEDH seat; the table is then cEDH and its
   // Random pool is restricted to bracket 5 (Commander formats only).
@@ -1502,7 +1502,9 @@ export function HostSetup({
                             ariaLabel={t("menu:aiDifficulty.label")}
                             label={
                               difficultyMenuItems.find((item) => item.value === aiSeat.difficulty)?.label ??
-                              t(`menu:aiDifficulty.levels.${aiSeat.difficulty}`)
+                              (isAiDifficulty(aiSeat.difficulty)
+                                ? t(`menu:aiDifficulty.levels.${aiSeat.difficulty}`)
+                                : t("menu:aiDifficulty.label"))
                             }
                             selectedValue={aiSeat.difficulty}
                             items={difficultyMenuItems}

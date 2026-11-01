@@ -3399,7 +3399,7 @@ mod tests {
         // card pipeline uses.
         let source = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/src/types/triggers.rs"
+            "/../phase-ast/src/types/triggers.rs"
         ))
         .expect("the enum's own source file is readable");
         let body = source

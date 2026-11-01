@@ -94,7 +94,7 @@ export function ReportResultDialog({
   submitting = false,
   returnFocusRef,
 }: ReportResultDialogProps) {
-  const { t } = useTranslation("tournament");
+  const { t } = useTranslation(["tournament", "common"]);
   const titleId = useId();
   const radioName = useId();
   const overlayRef = useRef<HTMLDivElement>(null);

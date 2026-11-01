@@ -367,7 +367,7 @@ function buildPlayerOnlyDeckList(player: ExpandedDeckWithTier): DeckListPayload 
 }
 
 async function buildLocalAiDeckList(
-  t: TFunction,
+  t: TFunction<["game", "multiplayer"]>,
   deck: ParsedDeck | null,
   playerCount: number,
   formatConfig: FormatConfig | undefined,
@@ -520,7 +520,7 @@ let pendingStoreReset: ReturnType<typeof setTimeout> | null = null;
  * `new Notification()` outside a ServiceWorker (Safari, some mobile).
  * Shared by the WS and P2P host-side join paths.
  */
-function notifyOpponentJoined(t: TFunction, opponentName?: string): void {
+function notifyOpponentJoined(t: TFunction<"game">, opponentName?: string): void {
   if (
     typeof Notification === "undefined"
     || Notification.permission !== "granted"
@@ -623,7 +623,7 @@ export function GameProvider({
   onResumeReset,
   children,
 }: GameProviderProps) {
-  const { t } = useTranslation("game");
+  const { t } = useTranslation(["game", "common", "draft", "multiplayer"]);
 
   // Sync persistent gameplay preferences into engine-owned state so the
   // engine remains the single authority for priority recommendations.
@@ -849,6 +849,9 @@ export function GameProvider({
               debugLog(`p2p remote update failed: ${err instanceof Error ? err.message : String(err)}`);
               resyncFromAdapterSafely("delivery rejected");
             });
+          }
+          if (event.type === "stateDelivery") {
+            useMultiplayerStore.getState().setStateWithheld(event.withheld);
           }
           if (event.type === "guestConnected") {
             notifyOpponentJoined(tRef.current);
@@ -1258,6 +1261,7 @@ export function GameProvider({
         if (controller) controller.dispose();
         if (p2pUnsubscribe) p2pUnsubscribe();
         useMultiplayerStore.setState({ playerLatencies: {} });
+        useMultiplayerStore.getState().setStateWithheld(null);
         // `adapter.dispose()` is the SOLE tear-down path for the host/guest
         // Peer (see plan §4 "Peer ownership"). It also closes per-guest
         // sessions, clears timers, and disposes the WASM engine.
@@ -1472,6 +1476,9 @@ export function GameProvider({
           if (event.type === "actionPendingChanged") {
             useMultiplayerStore.getState().setActionPending(event.pending);
           }
+          if (event.type === "stateDelivery") {
+            useMultiplayerStore.getState().setStateWithheld(event.withheld);
+          }
           if (event.type === "latencyChanged") {
             useMultiplayerStore.getState().setLatency(event.latencyMs);
           }
@@ -1606,6 +1613,7 @@ export function GameProvider({
         if (wsAdapter) wsAdapter.dispose();
         useMultiplayerStore.getState().setConnectionStatus("disconnected");
         useMultiplayerStore.getState().setActionPending(false);
+        useMultiplayerStore.getState().setStateWithheld(null);
         useMultiplayerStore.getState().setLatency(null);
         useMultiplayerStore.getState().setIsSpectator(false);
         useMultiplayerStore.getState().setSpectators([]);
@@ -2030,6 +2038,9 @@ export function GameProvider({
           );
 
           const handleNativeEvent = (event: WsAdapterEvent) => {
+            if (event.type === "stateDelivery") {
+              useMultiplayerStore.getState().setStateWithheld(event.withheld);
+            }
             if (event.type === "stateChanged") {
               const adapter = nativeAdapter;
               if (!useGameStore.getState().adapter && adapter) {
@@ -2059,6 +2070,7 @@ export function GameProvider({
             if (event.type === "reconnectFailed" || event.type === "error") {
               const adapter = nativeAdapter;
               nativeAdapter = null;
+              useMultiplayerStore.getState().setStateWithheld(null);
               controller?.dispose();
               controller = null;
               adapter?.dispose();
@@ -2181,6 +2193,7 @@ export function GameProvider({
         // explicit Concede (useConcedeHandler) ends the game. `dispose()` still
         // tears down the socket/loop; it just omits the concede frame.
         nativeAdapter?.dispose();
+        useMultiplayerStore.getState().setStateWithheld(null);
         audioManager.setContext("menu");
         clearPromptOverlayState();
         scheduleStoreReset(reset);
