@@ -171,6 +171,7 @@ mod fathom_seer_morph;
 mod fathom_trawl_revealed_population;
 mod faunsbane_troll_sacrifice_attached_aura;
 mod favor_of_the_mighty_greatest_mana_value_protection;
+mod fblthp_impossibly_lost;
 mod feed_the_machine_self_branch;
 mod felisa_fang_of_silverquill;
 mod feral_ghoul_dies_rad_counters;

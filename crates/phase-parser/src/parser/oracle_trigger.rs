@@ -14462,8 +14462,14 @@ fn parse_single_subject<'a>(text: &'a str, ctx: &mut ParseContext) -> (TargetFil
         if let Ok((rest, filter)) = alt((
             value(
                 TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                // CR 102.3 + CR 603.2c: "of your opponents" is the printed form of
+                // the same opponent-scoped player subject ("one or more of your
+                // opponents are dealt damage"); the "one or more" quantifier is what
+                // the caller turns into `batched`. The three alternatives are
+                // distinct at this position; order is immaterial.
                 alt((
-                    tag::<_, _, OracleError<'_>>("your opponents"),
+                    tag::<_, _, OracleError<'_>>("of your opponents"),
+                    tag("your opponents"),
                     tag("opponents"),
                 )),
             ),
@@ -16957,6 +16963,19 @@ fn try_parse_event(
                 kind,
                 amount,
             } => {
+                // CR 603.2 + CR 102.1: a trailing "during <window>" qualifier on a
+                // received-damage head ("… are dealt combat damage during your
+                // turn") is part of the trigger event, exactly as in the Enters and
+                // Dies arms above. Peel it BEFORE the unconsumed-tail checks below:
+                // the window is a modeled restriction, not an unmodeled tail, and
+                // emitting `DamageReceived` without it would fire on every turn
+                // (Fblthp, Impossibly Lost). A window this combinator cannot type
+                // ("during your upkeep") declines the head so the line stays
+                // coverage-red rather than firing ungated.
+                let (remaining, window) = peel_trailing_event_window(remaining);
+                if has_untyped_event_window(remaining) {
+                    return None;
+                }
                 // CR 603.2: an ability triggers when a game event matches ITS trigger
                 // event. The four triples below are exactly the cells the former eight
                 // `tag()` arms already reached; on those, a trailing restriction has
@@ -16990,6 +17009,7 @@ fn try_parse_event(
                 def.damage_kind = kind;
                 def.damage_amount = amount;
                 set_trigger_subject(&mut def, subject);
+                attach_event_window(&mut def, window);
             }
             SimpleEvent::BecomesTapped => {
                 def.mode = TriggerMode::Taps;
