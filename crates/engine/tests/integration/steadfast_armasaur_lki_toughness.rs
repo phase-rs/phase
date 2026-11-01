@@ -50,6 +50,7 @@ fn activate_to_stack(runner: &mut GameRunner, source: ObjectId, target: ObjectId
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating Steadfast Armasaur's ability must succeed");
 

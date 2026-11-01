@@ -15,12 +15,14 @@ import { audioManager } from "../audio/AudioManager";
 import { MAX_UNDO_HISTORY, UNDOABLE_ACTIONS } from "../constants/game";
 import { debugLog } from "./debugLog";
 import { flashCompletedScry, flashInGameRolls } from "./diceContest";
+import { flashUnActionEvents } from "./unActions";
 import i18n from "../i18n";
 import { useAnimationStore } from "../stores/animationStore";
 import { useAppNotificationStore } from "../stores/appToastStore";
 import {
   captureTrustedCheckpoint,
   isAuthorityRemote,
+  nextGameSessionGeneration,
   useGameStore,
   saveAuthoritativeGame,
   saveCheckpoints,
@@ -136,14 +138,14 @@ function sharedRemoteSettlement(waiters: RemoteWaiter[]): Pick<PendingRemoteUpda
 
 type PendingWork = PendingLocalAction | PendingRemoteUpdate;
 
-type BoundGameSession = {
+export type BoundGameSession = {
   adapter: EngineAdapter;
   generation: number;
 };
 
 type GameSessionPreferenceAction = Extract<
   GameAction,
-  { type: "SetPhaseStops" } | { type: "SetPriorityPassingMode" }
+  { type: "SetPhaseStops" } | { type: "SetPriorityPassingMode" } | { type: "UnAction" }
 >;
 
 /** Module-level mutex — replaces useRef from the hook version. */
@@ -237,7 +239,7 @@ function isCurrentDispatchGeneration(generation: number): boolean {
   return generation === dispatchGeneration;
 }
 
-function isBoundGameSessionCurrent(session: BoundGameSession | null): boolean {
+export function isBoundGameSessionCurrent(session: BoundGameSession | null): boolean {
   if (!session) return true;
   const game = useGameStore.getState();
   return (
@@ -358,6 +360,7 @@ function queuedLocalActionStillApplies(next: PendingLocalAction): boolean {
     || next.action.type === "CancelAutoPass"
     || next.action.type === "SetMayTriggerAutoChoice"
     || next.action.type === "SetReplacementAutoChoice"
+    || next.action.type === "UnAction"
   ) {
     return true;
   }
@@ -680,6 +683,7 @@ async function processAction(
   if (!skipPresentation) {
     flashInGameRolls(events);
     flashCompletedScry(events);
+    flashUnActionEvents(events);
   }
 
   // 6. Normalize events into animation steps
@@ -1076,6 +1080,7 @@ async function processRemoteUpdateInner(
   if (!skipAnimation) {
     flashInGameRolls(events);
     flashCompletedScry(events);
+    flashUnActionEvents(events);
   }
 
   // 3. Normalize events into animation steps
@@ -1245,6 +1250,12 @@ export async function restoreGameState(
     : [];
   useGameStore.getState().commitEngineSnapshot(snapshot, {
     extraState: {
+      // A restore that keeps this game's checkpoints rewinds the same game; any
+      // other restore (an import) replaces it, so it starts a new game session
+      // and session-bound work (e.g. the Show AI Hand request) re-binds to it.
+      ...(options.preserveCheckpoints
+        ? {}
+        : { gameSessionGeneration: nextGameSessionGeneration() }),
       events: [],
       eventHistory: [],
       logHistory: [],

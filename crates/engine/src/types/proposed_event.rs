@@ -2,24 +2,24 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::game::game_object::{AttachTarget, DisplaySource};
+use crate::game::game_object::{AttachTarget, DisplayIdentity};
 
 use super::counter::CounterType;
 
 use super::ability::{
-    ContinuousModification, CopiableValues, DieRollIgnoreRule, Duration, FaceDownProfile,
-    StaticDefinition, TargetRef,
+    ContinuousModification, CopiableValues, DieRollIgnoreRule, Duration, FaceDownProfile, TargetRef,
 };
-use super::card::{PrintedCardRef, TokenArtDescriptor, TokenImageRef};
-use super::card_type::{CoreType, Supertype};
 use super::events::EventObjectSnapshot;
 use super::identifiers::{ObjectId, ObjectIncarnationRef};
 use super::keywords::Keyword;
-use super::mana::{ManaColor, ManaType, UnitDecision};
+use super::mana::{ManaType, UnitDecision};
 use super::phase::Phase;
 use super::player::{PlayerCounterKind, PlayerId};
 use super::zones::Zone;
 
+pub use super::token_spec::{
+    TokenAttackRequest, TokenCharacteristics, TokenHostRequest, TokenSpec,
+};
 pub use super::zones::{ChainReferentIntent, EtbTapState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -323,144 +323,6 @@ impl CounterPlacement {
     }
 }
 
-/// CR 111.1 + CR 111.4 + CR 111.10: The body characteristics of a token —
-/// the fields that constitute its identity as a permanent, independent of
-/// the runtime context in which it's created.
-///
-/// Shared by `TokenSpec` (runtime/resolved token creation), `TokenPreset`
-/// (debug catalog entries), and `DebugAction::CreateToken` (debug-create
-/// payload). Single source of truth for the token body shape — no parallel
-/// field lists.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TokenCharacteristics {
-    /// CR 111.4: The token's display name (same as its subtype(s) + "Token"
-    /// unless the creating effect specifies otherwise).
-    pub display_name: String,
-    /// CR 208.2: Fixed power, or `None` for non-creature tokens.
-    pub power: Option<i32>,
-    /// CR 208.2: Fixed toughness, or `None` for non-creature tokens.
-    pub toughness: Option<i32>,
-    /// CR 306.5b: Printed loyalty, or `None` for non-planeswalker tokens.
-    ///
-    /// The token's *printed* loyalty, as `CardFace::loyalty` is for a card-backed
-    /// planeswalker. Battlefield loyalty itself remains counter-derived (CR 306.5c).
-    /// Seeding a token's entry loyalty counters from this value (CR 306.5b) is not
-    /// yet done.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub loyalty: Option<u32>,
-    pub core_types: Vec<CoreType>,
-    pub subtypes: Vec<String>,
-    pub supertypes: Vec<Supertype>,
-    pub colors: Vec<ManaColor>,
-    pub keywords: Vec<Keyword>,
-}
-
-/// CR 111.1 + CR 111.4 + CR 111.10: Fully-resolved token creation specification.
-///
-/// `Effect::Token` carries authoring-time fields (`PtValue`, `QuantityExpr`,
-/// `TargetFilter owner`) that must be resolved against game state before the
-/// token hits the replacement pipeline. `TokenSpec` captures the resolved,
-/// self-describing form used by `ProposedEvent::CreateToken` and the
-/// post-accept apply path, so replacement matchers and modifiers see the full
-/// characteristics of the token that's about to be created.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TokenSpec {
-    pub characteristics: TokenCharacteristics,
-    /// Original Forge-style script name (or custom name) used by the token
-    /// parser on the apply path to re-derive attributes. Preserved so the
-    /// existing `parse_token_script` dispatch still fires after widening.
-    pub script_name: String,
-    /// CR 113.3d: Static abilities granted to the token (e.g., "This token
-    /// can't block.").
-    pub static_abilities: Vec<StaticDefinition>,
-    /// CR 122.6a: Counters placed on the token as it enters the battlefield
-    /// (resolved from `QuantityExpr` at propose time).
-    pub enter_with_counters: Vec<(CounterType, u32)>,
-    /// CR 614.1: Token enters tapped.
-    pub tapped: bool,
-    /// CR 508.4: Token enters the battlefield attacking (not declared as
-    /// attacker).
-    pub enters_attacking: bool,
-    /// CR 603.7: When set, the token is sacrificed at the end of the given
-    /// duration (e.g., Mobilize tokens sacrificed at end of combat).
-    pub sacrifice_at: Option<Duration>,
-    /// CR 107.3a: Ability source — the object that created the token. Needed
-    /// on the apply path for defending-player resolution (`enters_attacking`)
-    /// and for the delayed-trigger source.
-    pub source_id: ObjectId,
-    /// CR 107.3a: Ability controller — the player who controls the effect
-    /// creating the token (distinct from `owner`, the player to whom the
-    /// token belongs).
-    pub controller: PlayerId,
-    /// CR 303.4 + CR 303.4i: The token instruction's "attached to …" clause and
-    /// its binding outcome, resolved once at propose time so the
-    /// replacement-safe apply path attaches each created token without
-    /// re-reading `ability.targets`.
-    #[serde(default, skip_serializing_if = "TokenHostRequest::is_not_requested")]
-    pub attach_to: TokenHostRequest,
-}
-
-/// CR 303.4i: what the token instruction asked for as a host, and whether
-/// anything bound it.
-///
-/// The distinction is load-bearing, which is why it is a type rather than an
-/// `Option<AttachTarget>`: CR 303.4i denies the entry of an Aura token whose
-/// named host is *undefined*, while an ordinary token that never named a host
-/// is created normally. Both were `None` before, so the seam that had to tell
-/// them apart could not. [`TokenHostRequest::Unbound`] is the state that
-/// `None` could not express.
-///
-/// Carried through the CR 614 replacement pipeline rather than consumed before
-/// it: a replacement effect may change the entering token's characteristics,
-/// so whether CR 303.4i applies is a question about the ACTUAL entrant and can
-/// only be answered per token, after replacements.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub enum TokenHostRequest {
-    /// The instruction named no host. An ordinary token.
-    #[default]
-    NotRequested,
-    /// The instruction named a host and it resolved to this object or player.
-    /// Whether that host can legally be enchanted is a separate question,
-    /// owned by `effects::attach`.
-    Bound(AttachTarget),
-    /// CR 303.4i: the instruction named a host and nothing bound it — the host
-    /// is undefined.
-    Unbound,
-}
-
-impl TokenHostRequest {
-    /// Whether the instruction named no host. Keeping this default omitted
-    /// preserves the existing wire shape for ordinary token creation events.
-    pub fn is_not_requested(&self) -> bool {
-        matches!(self, Self::NotRequested)
-    }
-
-    /// The resolved host, if one bound. `None` for both of the other states —
-    /// use the variant itself when the difference matters.
-    pub fn bound(self) -> Option<AttachTarget> {
-        match self {
-            Self::Bound(target) => Some(target),
-            Self::NotRequested | Self::Unbound => None,
-        }
-    }
-
-    /// Did the instruction name a host at all?
-    pub fn is_requested(self) -> bool {
-        !matches!(self, Self::NotRequested)
-    }
-
-    /// Build the request from a named-host flag and its binding outcome. The
-    /// single place the three states are derived, so no caller re-encodes the
-    /// mapping.
-    pub fn from_binding(named: bool, bound: Option<AttachTarget>) -> Self {
-        match (named, bound) {
-            (_, Some(target)) => Self::Bound(target),
-            (true, None) => Self::Unbound,
-            (false, None) => Self::NotRequested,
-        }
-    }
-}
-
 /// CR 707.2 + CR 707.5: Copy-token creation payload carried by the same
 /// `CreateToken` proposed event that ordinary token creation uses for
 /// replacement effects. `TokenSpec` remains the replacement-visible probe
@@ -469,35 +331,78 @@ impl TokenHostRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CopyTokenSpec {
     pub values: Box<CopiableValues>,
-    pub display_source: DisplaySource,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub printed_ref: Option<PrintedCardRef>,
-    /// CR 111.1 + CR 707.2: exact token-art pointer of the copy source when it
-    /// is itself a true token (`display_source == Token`). Carried so a
-    /// token-copy of a token resolves the source token's art instead of falling
-    /// back to a name+filter Scryfall search. `None` for printed-card sources.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub token_image_ref: Option<TokenImageRef>,
-    /// Intrinsic token-art body of the copy source, captured alongside
-    /// `token_image_ref` by the enter-as-copy replacement selection. Carried
-    /// so an enter-as-copy recipient (which keeps its own base and never
-    /// runs the token creation injectors) renders from the source's printed
-    /// shape even when no exact ref matched. `None` for printed-card
-    /// sources, departed (LKI) sources, and created copy-tokens — the
-    /// latter derive their descriptor from their own base at injection,
-    /// which also reflects copy exceptions the source never had.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub token_art: Option<TokenArtDescriptor>,
+    /// Display routing of the copy source (see [`DisplayIdentity`]). CR 111.1 +
+    /// CR 707.2: carries the exact token-art pointer when the source is itself a
+    /// true token, so a token-copy of a token resolves the source token's art
+    /// instead of falling back to a name+filter Scryfall search. `token_art` is
+    /// captured by the enter-as-copy replacement selection so an enter-as-copy
+    /// recipient (which keeps its own base and never runs the token creation
+    /// injectors) renders from the source's printed shape even when no exact ref
+    /// matched; it is `None` for printed-card sources, departed (LKI) sources,
+    /// and created copy-tokens — the latter derive their descriptor from their
+    /// own base at injection, which also reflects copy exceptions the source
+    /// never had.
+    #[serde(flatten)]
+    pub display: DisplayIdentity,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_keywords: Vec<Keyword>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub additional_modifications: Vec<ContinuousModification>,
     pub tapped: bool,
     pub enters_attacking: bool,
+    /// CR 508.4: the batch's resolved destination.
+    #[serde(default, skip_serializing_if = "TokenAttackRequest::is_unspecified")]
+    pub attack_request: TokenAttackRequest,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sacrifice_at: Option<Duration>,
     pub source_id: ObjectId,
     pub controller: PlayerId,
+    /// CR 608.2h + CR 707.9b: the copy donor whose live (or last-known)
+    /// characteristics donor-referential copy exceptions read. Dynamic P/T
+    /// exceptions ("half that creature's power", Saw in Half) resolve their
+    /// `Source`-scoped quantity against this incarnation at the stamp, so a
+    /// departed donor reads LKI rather than the token's own copied base.
+    /// `None` where no donor is in scope; consumers fall back to the token id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub donor: Option<ObjectIncarnationRef>,
+}
+
+/// CR 614.1a + CR 111.1 + CR 616.1f: one batch of a CreateToken event — the
+/// event's own batch, or one a replacement added ("those tokens plus …",
+/// "instead create one of each"). An added batch is part of the same modified
+/// event, so every replacement applied afterwards applies to it too (to each
+/// batch it matches) under the affected player's single CR 616.1 ordering.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenBatch {
+    pub owner: PlayerId,
+    pub spec: Box<TokenSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy: Option<Box<CopyTokenSpec>>,
+    #[serde(default)]
+    pub enter_tapped: EtbTapState,
+    pub count: u32,
+}
+
+impl TokenBatch {
+    /// This batch as a single-batch `CreateToken` event carrying `applied`.
+    pub fn into_event(self, applied: HashSet<AppliedReplacementKey>) -> ProposedEvent {
+        let TokenBatch {
+            owner,
+            spec,
+            copy,
+            enter_tapped,
+            count,
+        } = self;
+        ProposedEvent::CreateToken {
+            owner,
+            spec,
+            copy,
+            enter_tapped,
+            count,
+            appended: Vec::new(),
+            applied,
+        }
+    }
 }
 
 /// CR 701.31 + CR 901.9c + CR 701.31c: Which rules path is proposing a
@@ -799,6 +704,15 @@ pub enum ProposedEvent {
         enter_tapped: EtbTapState,
         /// CR 614.1a: Number of tokens to create. May be modified by replacement effects.
         count: u32,
+        /// CR 614.1a + CR 616.1f + CR 614.5: batches this event's own
+        /// replacements added ("those tokens plus that many 1/1 green Squirrel
+        /// creature tokens", "instead create one of each"), in event order.
+        /// "Instead" yields one modified event, so they are not separate events:
+        /// they share this event's `applied` set, every replacement the affected
+        /// player applies afterwards applies to each batch it matches, and the
+        /// whole event is delivered (and its created referent published) as one.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        appended: Vec<TokenBatch>,
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
@@ -808,6 +722,13 @@ pub enum ProposedEvent {
         enter_tapped: EtbTapState,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         enter_with_counters: Vec<(CounterType, u32)>,
+        /// CR 614.12a + CR 707.2: the answers to the token entrant's own "As ~
+        /// enters, choose …" replacements plus its paid as-enters amount latch,
+        /// mirroring the ZoneChange field. Direct token copies (Rite of
+        /// Replication copying Minion of the Wastes) ride the entry-payment
+        /// continuation through this field.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enter_with_choices: Option<Box<EntryChoices>>,
         #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
         applied: HashSet<AppliedReplacementKey>,
     },
@@ -965,8 +886,8 @@ fn default_produce_mana_count() -> u32 {
 }
 
 /// CR 614.12a: the answers to an entrant's own as-enters choices, carried by
-/// its battlefield entry (`ProposedEvent::ZoneChange::enter_with_choices`).
-/// Boxed there because it is rarely populated.
+/// its battlefield entry (`ZoneChange::enter_with_choices` or
+/// `TokenEntry::enter_with_choices`). Boxed there because it is rarely populated.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct EntryChoices(pub Vec<crate::types::ability::ChosenAttribute>);
@@ -1175,6 +1096,204 @@ impl ProposedEvent {
         self.applied_set_mut().insert(key);
     }
 
+    /// CR 614.1a: whether this is a CreateToken event a replacement has
+    /// already added batches to (a compound token event).
+    pub fn has_appended_token_batches(&self) -> bool {
+        matches!(self, ProposedEvent::CreateToken { appended, .. } if !appended.is_empty())
+    }
+
+    /// The number of tokens a `CreateToken` event (or one batch view of a
+    /// compound one) creates; `None` for any other event.
+    pub fn create_token_count(&self) -> Option<u32> {
+        match self {
+            ProposedEvent::CreateToken { count, .. } => Some(*count),
+            ProposedEvent::ZoneChange { .. }
+            | ProposedEvent::Damage { .. }
+            | ProposedEvent::Draw { .. }
+            | ProposedEvent::SearchFound { .. }
+            | ProposedEvent::Scry { .. }
+            | ProposedEvent::Mill { .. }
+            | ProposedEvent::CoinFlip { .. }
+            | ProposedEvent::RollDice { .. }
+            | ProposedEvent::Explore { .. }
+            | ProposedEvent::Connive { .. }
+            | ProposedEvent::Proliferate { .. }
+            | ProposedEvent::LifeGain { .. }
+            | ProposedEvent::LifeLoss { .. }
+            | ProposedEvent::AddCounter { .. }
+            | ProposedEvent::RemoveCounter { .. }
+            | ProposedEvent::MoveCounter { .. }
+            | ProposedEvent::TokenEntry { .. }
+            | ProposedEvent::Discard { .. }
+            | ProposedEvent::Tap { .. }
+            | ProposedEvent::Untap { .. }
+            | ProposedEvent::TurnFaceUp { .. }
+            | ProposedEvent::Destroy { .. }
+            | ProposedEvent::Sacrifice { .. }
+            | ProposedEvent::BeginTurn { .. }
+            | ProposedEvent::BeginPhase { .. }
+            | ProposedEvent::ProduceMana { .. }
+            | ProposedEvent::EmptyManaPool { .. }
+            | ProposedEvent::Planeswalk { .. }
+            | ProposedEvent::Attach { .. } => None,
+        }
+    }
+
+    /// CR 616.1f + CR 616.2: one single-batch `CreateToken` view per batch of a
+    /// compound token event — the event's own batch first, then each appended
+    /// batch in event order — each carrying the event's `applied` set (CR 614.5:
+    /// the batches are one event). `None` for anything that is not a compound
+    /// token event.
+    pub fn token_batch_views(&self) -> Option<Vec<ProposedEvent>> {
+        if !self.has_appended_token_batches() {
+            return None;
+        }
+        Some(self.clone().into_token_batch_views())
+    }
+
+    /// The consuming form of [`Self::token_batch_views`]. Any other event —
+    /// including a CreateToken with no appended batch — is its own only view.
+    pub fn into_token_batch_views(self) -> Vec<ProposedEvent> {
+        match self {
+            ProposedEvent::CreateToken {
+                owner,
+                spec,
+                copy,
+                enter_tapped,
+                count,
+                appended,
+                applied,
+            } => {
+                let mut views = Vec::with_capacity(appended.len() + 1);
+                views.push(ProposedEvent::CreateToken {
+                    owner,
+                    spec,
+                    copy,
+                    enter_tapped,
+                    count,
+                    appended: Vec::new(),
+                    applied: applied.clone(),
+                });
+                views.extend(
+                    appended
+                        .into_iter()
+                        .map(|batch| batch.into_event(applied.clone())),
+                );
+                views
+            }
+            event @ (ProposedEvent::ZoneChange { .. }
+            | ProposedEvent::Damage { .. }
+            | ProposedEvent::Draw { .. }
+            | ProposedEvent::SearchFound { .. }
+            | ProposedEvent::Scry { .. }
+            | ProposedEvent::Mill { .. }
+            | ProposedEvent::CoinFlip { .. }
+            | ProposedEvent::RollDice { .. }
+            | ProposedEvent::Explore { .. }
+            | ProposedEvent::Connive { .. }
+            | ProposedEvent::Proliferate { .. }
+            | ProposedEvent::LifeGain { .. }
+            | ProposedEvent::LifeLoss { .. }
+            | ProposedEvent::AddCounter { .. }
+            | ProposedEvent::RemoveCounter { .. }
+            | ProposedEvent::MoveCounter { .. }
+            | ProposedEvent::TokenEntry { .. }
+            | ProposedEvent::Discard { .. }
+            | ProposedEvent::Tap { .. }
+            | ProposedEvent::Untap { .. }
+            | ProposedEvent::TurnFaceUp { .. }
+            | ProposedEvent::Destroy { .. }
+            | ProposedEvent::Sacrifice { .. }
+            | ProposedEvent::BeginTurn { .. }
+            | ProposedEvent::BeginPhase { .. }
+            | ProposedEvent::ProduceMana { .. }
+            | ProposedEvent::EmptyManaPool { .. }
+            | ProposedEvent::Planeswalk { .. }
+            | ProposedEvent::Attach { .. }) => vec![event],
+        }
+    }
+
+    /// CR 614.1a + CR 614.5: reassemble one compound token event from its batch
+    /// views. The first view is the event's own batch; the rest become its
+    /// appended batches in order, each immediately followed by any batches its
+    /// own replacement application appended. The `applied` set is the union of
+    /// the views' sets. `None` for an empty list or a non-CreateToken view.
+    pub fn from_token_batch_views(views: Vec<ProposedEvent>) -> Option<ProposedEvent> {
+        let mut views = views.into_iter();
+        let ProposedEvent::CreateToken {
+            owner,
+            spec,
+            copy,
+            enter_tapped,
+            count,
+            mut appended,
+            mut applied,
+        } = views.next()?
+        else {
+            return None;
+        };
+        for view in views {
+            let ProposedEvent::CreateToken {
+                owner,
+                spec,
+                copy,
+                enter_tapped,
+                count,
+                appended: view_appended,
+                applied: view_applied,
+            } = view
+            else {
+                return None;
+            };
+            appended.push(TokenBatch {
+                owner,
+                spec,
+                copy,
+                enter_tapped,
+                count,
+            });
+            appended.extend(view_appended);
+            applied.extend(view_applied);
+        }
+        Some(ProposedEvent::CreateToken {
+            owner,
+            spec,
+            copy,
+            enter_tapped,
+            count,
+            appended,
+            applied,
+        })
+    }
+
+    /// CR 614.1a + CR 111.1: every batch of a CreateToken event in event order
+    /// (position 0 is the event's own batch, then its appended batches). `None`
+    /// for any other event.
+    pub fn into_token_batches(self) -> Option<Vec<TokenBatch>> {
+        let ProposedEvent::CreateToken {
+            owner,
+            spec,
+            copy,
+            enter_tapped,
+            count,
+            appended,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        let mut batches = Vec::with_capacity(appended.len() + 1);
+        batches.push(TokenBatch {
+            owner,
+            spec,
+            copy,
+            enter_tapped,
+            count,
+        });
+        batches.extend(appended);
+        Some(batches)
+    }
+
     pub fn affected_player(&self, state: &crate::types::game_state::GameState) -> PlayerId {
         match self {
             // CR 614.12 + CR 109.4: A permanent entering under another player's
@@ -1340,6 +1459,10 @@ impl ProposedEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::EntryAttackDestination;
+    use crate::types::attack_target::AttackTarget;
+    use crate::types::card_type::CoreType;
+    use crate::types::mana::ManaColor;
 
     #[test]
     fn replacement_id_equality_and_hash() {
@@ -1543,6 +1666,281 @@ mod tests {
         };
         assert!(applied.contains(&AppliedReplacementKey::step_end_mana(2)));
         assert!(!applied.contains(&AppliedReplacementKey::floating(2)));
+    }
+
+    fn batch_spec(name: &str) -> Box<TokenSpec> {
+        Box::new(TokenSpec {
+            characteristics: TokenCharacteristics {
+                display_name: name.to_string(),
+                power: Some(1),
+                toughness: Some(1),
+                loyalty: None,
+                core_types: vec![CoreType::Creature],
+                subtypes: vec![name.to_string()],
+                supertypes: Vec::new(),
+                colors: Vec::new(),
+                keywords: Vec::new(),
+            },
+            script_name: name.to_string(),
+            static_abilities: Vec::new(),
+            enter_with_counters: Vec::new(),
+            tapped: false,
+            enters_attacking: false,
+            attack_request: TokenAttackRequest::Unspecified,
+            sacrifice_at: None,
+            source_id: ObjectId(1),
+            controller: PlayerId(0),
+            attach_to: TokenHostRequest::NotRequested,
+        })
+    }
+
+    fn batch(name: &str, count: u32) -> TokenBatch {
+        TokenBatch {
+            owner: PlayerId(0),
+            spec: batch_spec(name),
+            copy: None,
+            enter_tapped: EtbTapState::Unspecified,
+            count,
+        }
+    }
+
+    fn applied_with(index: usize) -> HashSet<AppliedReplacementKey> {
+        HashSet::from([AppliedReplacementKey::object(ObjectId(9), index)])
+    }
+
+    fn compound(primary: &str, appended: Vec<TokenBatch>) -> ProposedEvent {
+        ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: batch_spec(primary),
+            copy: None,
+            enter_tapped: EtbTapState::Unspecified,
+            count: 2,
+            appended,
+            applied: applied_with(0),
+        }
+    }
+
+    /// SHAPE (serialized compatibility): a compound CreateToken round-trips with
+    /// its appended batches, and a plain one omits the key entirely.
+    #[test]
+    fn create_token_appended_serde_roundtrip() {
+        let event = compound("Plant", vec![batch("Squirrel", 2)]);
+        let json = serde_json::to_value(&event).unwrap();
+        assert!(json["CreateToken"].get("appended").is_some());
+        let back: ProposedEvent = serde_json::from_value(json).unwrap();
+        assert_eq!(event, back);
+
+        let plain = compound("Plant", Vec::new());
+        let json = serde_json::to_value(&plain).unwrap();
+        assert!(json["CreateToken"].get("appended").is_none());
+        let back: ProposedEvent = serde_json::from_value(json).unwrap();
+        assert_eq!(plain, back);
+    }
+
+    /// A CreateToken persisted before `appended` existed deserializes with no
+    /// appended batch.
+    #[test]
+    fn create_token_without_appended_key_deserializes_empty() {
+        let mut json = serde_json::to_value(compound("Plant", Vec::new())).unwrap();
+        json["CreateToken"]
+            .as_object_mut()
+            .expect("CreateToken payload object")
+            .remove("appended");
+        let back: ProposedEvent = serde_json::from_value(json).unwrap();
+        let ProposedEvent::CreateToken { appended, .. } = &back else {
+            panic!("expected CreateToken");
+        };
+        assert!(appended.is_empty());
+        assert!(!back.has_appended_token_batches());
+        assert!(back.token_batch_views().is_none());
+    }
+
+    /// CR 614.1a + CR 614.5: splitting a compound event into batch views and
+    /// joining them back is the identity; every view carries the event's
+    /// applied set and no view is itself compound.
+    #[test]
+    fn token_batch_views_split_then_join_is_identity() {
+        let event = compound("Plant", vec![batch("Squirrel", 2), batch("Food", 1)]);
+        let views = event.token_batch_views().expect("compound event has views");
+        assert_eq!(views.len(), 3);
+        for view in &views {
+            assert!(!view.has_appended_token_batches());
+            assert_eq!(view.applied_set(), event.applied_set());
+        }
+        assert_eq!(
+            ProposedEvent::from_token_batch_views(views),
+            Some(event.clone())
+        );
+        assert_eq!(event.clone().into_token_batch_views().len(), 3);
+        assert_eq!(ProposedEvent::from_token_batch_views(Vec::new()), None);
+    }
+
+    /// CR 614.1a: a batch a view's own application appended is placed right
+    /// after that view, and the applied sets are unioned.
+    #[test]
+    fn from_token_batch_views_flattens_view_appended_after_its_view() {
+        let primary = compound("Treasure", vec![batch("Clue", 1)]);
+        let mut second = batch("Squirrel", 1).into_event(applied_with(1));
+        if let ProposedEvent::CreateToken { appended, .. } = &mut second {
+            appended.push(batch("Food", 1));
+        }
+        let joined = ProposedEvent::from_token_batch_views(vec![primary, second])
+            .expect("CreateToken views join");
+        let ProposedEvent::CreateToken {
+            appended, applied, ..
+        } = &joined
+        else {
+            panic!("expected CreateToken");
+        };
+        let names: Vec<_> = appended
+            .iter()
+            .map(|b| b.spec.characteristics.display_name.as_str())
+            .collect();
+        assert_eq!(names, ["Clue", "Squirrel", "Food"]);
+        assert_eq!(applied.len(), 2);
+    }
+
+    /// CR 614.1a + CR 111.1: the event's batches come out primary first, then
+    /// the appended batches in event order.
+    #[test]
+    fn into_token_batches_is_event_ordered() {
+        let event = compound("Plant", vec![batch("Squirrel", 3), batch("Food", 1)]);
+        let batches = event.into_token_batches().expect("CreateToken has batches");
+        let shape: Vec<_> = batches
+            .iter()
+            .map(|b| (b.spec.characteristics.display_name.as_str(), b.count))
+            .collect();
+        assert_eq!(shape, [("Plant", 2), ("Squirrel", 3), ("Food", 1)]);
+        assert!(ProposedEvent::begin_turn(PlayerId(0), false)
+            .into_token_batches()
+            .is_none());
+    }
+
+    #[test]
+    fn token_attack_request_selects_the_destination_by_creation_ordinal() {
+        assert_eq!(TokenAttackRequest::named(Vec::new()), None);
+
+        let request = TokenAttackRequest::named([PlayerId(1), PlayerId(2)])
+            .expect("a non-empty player list names a request");
+        let at = |player: u8| EntryAttackDestination::Exact {
+            target: AttackTarget::Player(PlayerId(player)),
+        };
+        assert_eq!(request.for_entrant(0), at(1));
+        assert_eq!(request.for_entrant(1), at(2));
+        assert_eq!(request.for_entrant(2), at(1));
+
+        for ordinal in 0..3 {
+            assert_eq!(
+                TokenAttackRequest::Unspecified.for_entrant(ordinal),
+                EntryAttackDestination::AnyDefender
+            );
+        }
+    }
+
+    #[test]
+    fn token_attack_request_after_entrants_continues_the_ordinal_sequence() {
+        let request = TokenAttackRequest::named([PlayerId(1), PlayerId(2), PlayerId(3)])
+            .expect("a non-empty player list names a request");
+        for consumed in 0..7 {
+            let resumed = request.after_entrants(consumed);
+            for ordinal in 0..7 {
+                assert_eq!(
+                    resumed.for_entrant(ordinal),
+                    request.for_entrant(consumed + ordinal),
+                    "consumed {consumed}, ordinal {ordinal}"
+                );
+            }
+        }
+        assert_eq!(
+            TokenAttackRequest::Unspecified.after_entrants(3),
+            TokenAttackRequest::Unspecified
+        );
+    }
+
+    fn token_spec_with(attack_request: TokenAttackRequest) -> TokenSpec {
+        TokenSpec {
+            characteristics: TokenCharacteristics {
+                display_name: "Goblin".to_string(),
+                power: Some(1),
+                toughness: Some(1),
+                loyalty: None,
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Goblin".to_string()],
+                supertypes: vec![],
+                colors: vec![ManaColor::Red],
+                keywords: vec![],
+            },
+            script_name: "Goblin".to_string(),
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+            tapped: true,
+            enters_attacking: true,
+            attack_request,
+            sacrifice_at: None,
+            source_id: ObjectId(1),
+            controller: PlayerId(0),
+            attach_to: TokenHostRequest::NotRequested,
+        }
+    }
+
+    fn copy_token_spec_with(attack_request: TokenAttackRequest) -> CopyTokenSpec {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let id = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(1),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        CopyTokenSpec {
+            values: Box::new(crate::game::printed_cards::intrinsic_copiable_values(
+                &state.objects[&id],
+            )),
+            display: crate::game::game_object::DisplayIdentity {
+                display_source: crate::game::game_object::DisplaySource::Token,
+                ..Default::default()
+            },
+            extra_keywords: vec![],
+            additional_modifications: vec![],
+            tapped: true,
+            enters_attacking: true,
+            attack_request,
+            sacrifice_at: None,
+            source_id: ObjectId(1),
+            controller: PlayerId(0),
+            donor: None,
+        }
+    }
+
+    /// An unspecified request is omitted from the wire, a payload without the
+    /// key reads as unspecified, and a named request round-trips.
+    #[test]
+    fn token_attack_request_wire_shape_is_additive() {
+        let named = TokenAttackRequest::Named {
+            first: PlayerId(1),
+            rest: vec![PlayerId(2)],
+        };
+
+        let plain = serde_json::to_value(token_spec_with(TokenAttackRequest::Unspecified))
+            .expect("serializes");
+        assert!(plain.get("attack_request").is_none(), "{plain}");
+        let back: TokenSpec = serde_json::from_value(plain).expect("reads without the key");
+        assert_eq!(back.attack_request, TokenAttackRequest::Unspecified);
+        let with_named = serde_json::to_value(token_spec_with(named.clone())).expect("serializes");
+        assert!(with_named.get("attack_request").is_some(), "{with_named}");
+        let back: TokenSpec = serde_json::from_value(with_named).expect("round-trips");
+        assert_eq!(back.attack_request, named);
+
+        let plain = serde_json::to_value(copy_token_spec_with(TokenAttackRequest::Unspecified))
+            .expect("serializes");
+        assert!(plain.get("attack_request").is_none(), "{plain}");
+        let back: CopyTokenSpec = serde_json::from_value(plain).expect("reads without the key");
+        assert_eq!(back.attack_request, TokenAttackRequest::Unspecified);
+        let with_named =
+            serde_json::to_value(copy_token_spec_with(named.clone())).expect("serializes");
+        assert!(with_named.get("attack_request").is_some(), "{with_named}");
+        let back: CopyTokenSpec = serde_json::from_value(with_named).expect("round-trips");
+        assert_eq!(back.attack_request, named);
     }
 
     #[test]

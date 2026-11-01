@@ -671,6 +671,7 @@ fn mana_color_prompt_offers_no_cancel() {
         .act(GameAction::ActivateAbility {
             source_id: brigid_id,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activating the mana ability must succeed");
     match &runner.state().waiting_for {

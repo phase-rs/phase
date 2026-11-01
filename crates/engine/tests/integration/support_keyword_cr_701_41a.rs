@@ -275,6 +275,7 @@ fn activated_support_on_a_creature_does_not_offer_its_own_source() {
         .act(GameAction::ActivateAbility {
             source_id: auxiliary,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating the support ability must be accepted");
     let mut slots = None;

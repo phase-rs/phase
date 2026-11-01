@@ -31,6 +31,7 @@ use engine::types::ability::{EffectKind, TargetRef};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::{TargetSelectionSlot, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -1185,6 +1186,7 @@ fn drillworks_mole_declared_commander_gets_its_counter() {
         .act(GameAction::ActivateAbility {
             source_id: mole,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating the Mole must be legal");
     // CR 601.2c + CR 115.6: the conjunct's own announced set makes the slot a
@@ -2900,6 +2902,7 @@ fn equip_bear(flicker: bool) -> Option<engine::game::game_object::AttachTarget> 
         .act(GameAction::ActivateAbility {
             source_id: sword,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("equip");
     while matches!(
@@ -2966,6 +2969,7 @@ fn self_returning_activated_ability_attaches_equipment_to_returned_source() {
         .act(GameAction::ActivateAbility {
             source_id: soldier,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate");
     let mut accepted_attach = false;

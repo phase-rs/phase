@@ -136,7 +136,7 @@ pub struct CardDatabase {
 }
 ```
 
-### Card Face — `crates/engine/src/types/card.rs`
+### Card Face — `crates/phase-ast/src/types/card.rs`
 
 The serialized unit in card-data.json:
 
@@ -203,7 +203,7 @@ Checks a game object at runtime for unsupported mechanics. Used by the frontend 
 
 When a new feature needs data that isn't currently exported:
 
-- [ ] **`crates/engine/src/types/card.rs` — `CardFace` struct**
+- [ ] **`crates/phase-ast/src/types/card.rs` — `CardFace` struct**
   Add the field. Use `#[serde(default)]` for backward compatibility — existing card-data.json files must still deserialize.
 
 - [ ] **`crates/engine/src/database/synthesis.rs` — `build_oracle_face()`**
@@ -301,8 +301,8 @@ rg -q "fn synthesize_all" crates/engine/src/database/synthesis.rs && \
 rg -q "fn from_export" crates/engine/src/database/card_db.rs && \
 rg -q "fn from_json_str" crates/engine/src/database/card_db.rs && \
 rg -q "fn from_mtgjson" crates/engine/src/database/card_db.rs && \
-rg -q "struct CardFace" crates/engine/src/types/card.rs && \
-rg -q "fn parse_oracle_text" crates/engine/src/parser/oracle.rs && \
+rg -q "struct CardFace" crates/phase-ast/src/types/card.rs && \
+rg -q "fn parse_oracle_text" crates/phase-parser/src/parser/oracle.rs && \
 rg -q "fn unimplemented_mechanics" crates/engine/src/game/coverage.rs && \
 test -f crates/engine/src/bin/oracle_gen.rs && \
 test -f crates/engine/src/bin/coverage_report.rs && \

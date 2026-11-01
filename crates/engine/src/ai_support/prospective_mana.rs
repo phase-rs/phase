@@ -15,6 +15,7 @@ use crate::game::engine::{
     apply_actionless_priority_pass_for_prospective, apply_interaction_for_prospective_simulation,
     apply_interaction_for_simulation, ProspectiveSimulationOutcome,
 };
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::turn_control::authorized_submitter_for_player;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, DelayedTriggerCondition, Effect,
@@ -989,6 +990,7 @@ fn is_exact_fetchland_candidate(state: &GameState, candidate: &CandidateAction) 
     let GameAction::ActivateAbility {
         source_id,
         ability_index,
+        ..
     } = candidate.action
     else {
         return false;
@@ -1565,6 +1567,7 @@ mod tests {
             action: GameAction::ActivateAbility {
                 source_id: *source_id,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             },
             metadata: ActionMetadata {
                 actor: Some(player),

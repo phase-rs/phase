@@ -255,6 +255,7 @@ fn score_candidates_boosts_heliod_combo_activation_for_cedh_ai() {
     let heliod_activation = GameAction::ActivateAbility {
         source_id: heliod_id,
         ability_index: 0,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     };
     assert!(
         actions.contains(&heliod_activation),
@@ -331,7 +332,7 @@ fn score_candidates_boosts_heliod_combo_activation_for_cedh_ai() {
                 action,
                 GameAction::ActivateAbility {
                     source_id,
-                    ability_index: 1,
+                    ability_index: 1, ..
                 } if *source_id == ballista_id
             )
         })
@@ -405,7 +406,7 @@ fn choose_action_picks_combo_activation_for_cedh_ai() {
             action,
             Some(GameAction::ActivateAbility {
                 source_id,
-                ability_index,
+                ability_index, ..
             }) if (source_id == heliod_id && ability_index == 0)
                 || (source_id == ballista_id && ability_index == 1)
         ) {
@@ -460,7 +461,7 @@ fn choose_action_does_not_boost_combo_without_is_cedh() {
             action,
             Some(GameAction::ActivateAbility {
                 source_id,
-                ability_index,
+                ability_index, ..
             }) if (source_id == heliod_id && ability_index == 0)
                 || (source_id == ballista_id && ability_index == 1)
         ) {

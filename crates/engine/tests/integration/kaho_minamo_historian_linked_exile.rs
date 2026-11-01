@@ -14,6 +14,7 @@
 //! CR 400.7: the Kaho that returns is a new object; cards its own enters
 //! trigger exiles are not linked to the old activation.
 
+use engine::types::game_state::CastPaymentMode;
 use std::collections::VecDeque;
 
 use engine::game::scenario::{GameRunner, GameScenario, P0};
@@ -151,6 +152,7 @@ fn activate_kaho(runner: &mut GameRunner, kaho: ObjectId) {
         .act(GameAction::ActivateAbility {
             source_id: kaho,
             ability_index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate Kaho");
     runner

@@ -5,8 +5,8 @@ import {
   detectAndParseDeck,
   exportDeck,
   parsedDeckHasCards,
-  resolveCommander,
 } from "../../services/deckParser";
+import { resolveCommander } from "../../services/commanderResolution";
 import type { ExportFormat } from "../../services/deckParser";
 import { canonicalizeDeckNames } from "../../services/canonicalCardNames";
 import type { DeckCompatibilityResult, UnsupportedCard } from "../../services/deckCompatibility";
@@ -15,7 +15,7 @@ import type { ScryfallCard } from "../../services/scryfall";
 import { MoveList } from "./MoveList";
 import { mouseHoverPreview } from "./hoverPreview";
 import type { CardHoverHandler } from "./hoverPreview";
-import { groupAccent, groupKey, groupOrder, groupTitleKey, type GroupMode } from "./deckGrouping";
+import { groupAccent, groupKey, groupOrder, type GroupMode } from "./deckGrouping";
 import { isMaybeboardPolicy, useSideboardPolicy } from "./useSideboardPolicy";
 import { copyText } from "../../services/copyText";
 
@@ -80,7 +80,7 @@ export function DeckList({
   cardDataCache,
   groupMode,
 }: DeckListProps) {
-  const { t } = useTranslation("deck-builder");
+  const { t } = useTranslation(["deck-builder", "common"]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [showPasteModal, setShowPasteModal] = useState(false);
   const [pasteText, setPasteText] = useState("");
@@ -325,7 +325,7 @@ export function DeckList({
           ? groupOrder(groupMode).map((key) => (
               <MoveList
                 key={key}
-                title={t(`deckList.${groupTitleKey(groupMode, key)}`)}
+                title={t(`deckList.${key}`)}
                 accent={groupAccent(key)}
                 entries={mainGroups.get(key) ?? []}
                 section="main"

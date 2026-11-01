@@ -3377,6 +3377,7 @@ fn choose_one_of_controller_token_branch_ignores_faced_opponent() {
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
@@ -3505,6 +3506,7 @@ fn post_replacement_choose_sets_named_choice_waiting_for() {
     let effect_def = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Choose {
+            chooser: crate::types::ability::ControllerRef::You,
             choice_type: crate::types::ability::ChoiceType::BasicLandType,
             persist: false,
             selection: crate::types::ability::TargetSelectionMode::Chosen,

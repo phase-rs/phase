@@ -310,6 +310,7 @@ pub fn effective_activated_ability(
     let GameAction::ActivateAbility {
         source_id,
         ability_index,
+        ..
     } = action
     else {
         return None;
@@ -687,6 +688,7 @@ mod tests {
         let action = GameAction::ActivateAbility {
             source_id,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         };
 
         let ability = effective_activated_ability(&state, &action)
@@ -1130,6 +1132,7 @@ mod tests {
         let action = GameAction::ActivateAbility {
             source_id,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         };
         assert_eq!(action.source_object(), Some(source_id));
         assert!(!is_cast_family_action(&action));

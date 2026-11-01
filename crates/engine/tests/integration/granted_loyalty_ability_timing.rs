@@ -89,6 +89,7 @@ fn activation(id: ObjectId, ability_index: usize) -> GameAction {
     GameAction::ActivateAbility {
         source_id: id,
         ability_index,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     }
 }
 

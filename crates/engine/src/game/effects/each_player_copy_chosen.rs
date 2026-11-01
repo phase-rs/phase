@@ -27,6 +27,7 @@ use crate::game::quantity::aggregate_property_over;
 use crate::types::ability::{
     AggregateFunction, ContinuousModification, CopyChooseScope, CopyScale, Effect, EffectError,
     EffectKind, PlayerFilter, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
+    TokenAttackDestination,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -253,6 +254,7 @@ pub(crate) fn drive_from_copy(
             owner: TargetFilter::Controller,
             source_filter: Some(TargetFilter::SpecificObject { id: copy_source }),
             enters_attacking: false,
+            attack_destination: TokenAttackDestination::ControllerChooses,
             tapped: false,
             count: QuantityExpr::Fixed { value: 1 },
             extra_keywords: vec![],

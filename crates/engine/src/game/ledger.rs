@@ -1,5 +1,6 @@
 //! Final authority for composable per-event ledger facts.
 
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::TriggerDefinitionRef;
 use crate::types::game_state::{
     AbilityActivationRecord, CastOccurrence, GameState, SpellCastRecord,
@@ -336,6 +337,25 @@ pub fn apply_resolved_ledger_edit(
                 .ok_or(ResolvedLedgerEditReplayInvariantError::CounterOverflow)?;
             state.spells_cast_this_turn = next_turn_count;
             state.spells_cast_this_game.insert(*player, next_game_count);
+            // CR 601.2i + CR 603.4: every finalized cast opens the
+            // since-window of each player for whom the caster is an opponent
+            // ("since your last turn ended" readers). The caster's own window
+            // and teammates' windows are untouched. Team-aware via
+            // `players::is_opponent`, mirroring the scope filters.
+            let caster = *player;
+            let windowed: Vec<PlayerId> = state
+                .players
+                .iter()
+                .map(|candidate| candidate.id)
+                .filter(|id| *id != caster && crate::game::players::is_opponent(state, *id, caster))
+                .collect();
+            for candidate in &mut state.players {
+                if windowed.contains(&candidate.id) {
+                    candidate.opponent_spells_cast_since_own_last_turn = candidate
+                        .opponent_spells_cast_since_own_last_turn
+                        .saturating_add(1);
+                }
+            }
             state
                 .spells_cast_this_turn_by_player
                 .entry(*player)
@@ -551,6 +571,15 @@ pub fn apply_resolved_ledger_edit(
                     return Err(ResolvedLedgerEditReplayInvariantError::TriggerAlreadyRecorded);
                 }
             }
+            // CR 603.2h: the source's controller took this ability's indicated action.
+            ResolvedTriggerLedgerEdit::IndicatedActionTaken { player } => {
+                if !state
+                    .trigger_indicated_actions_this_turn
+                    .insert((trigger.clone(), *player))
+                {
+                    return Err(ResolvedLedgerEditReplayInvariantError::TriggerAlreadyRecorded);
+                }
+            }
             ResolvedTriggerLedgerEdit::MaxTimesPerTurn { expected_old } => {
                 let found = state
                     .trigger_fire_counts_this_turn
@@ -693,6 +722,49 @@ mod tests {
         assert_eq!(state.resolved_rules_journal.entries().len(), before_journal);
     }
 
+    /// CR 601.2i + CR 603.4: every finalized cast opens the since-window of
+    /// each player for whom the caster is an opponent ("since your last turn
+    /// ended" readers). The caster's own window is untouched by their own
+    /// cast.
+    #[test]
+    fn record_spell_cast_opens_opponents_since_windows_only() {
+        let mut state = GameState::new_two_player(7);
+        let object = GameObject::new(
+            ObjectId(71),
+            CardId(71),
+            PlayerId(1),
+            "Window Test".to_string(),
+            Zone::Stack,
+        );
+        let record = crate::game::restrictions::spell_cast_record_for(
+            &object,
+            Zone::Hand,
+            crate::types::game_state::CastingVariant::Normal,
+            false,
+        );
+
+        record_spell_cast(&mut state, PlayerId(1), record.clone())
+            .expect("opponent cast is recorded");
+        assert_eq!(
+            state.players[0].opponent_spells_cast_since_own_last_turn, 1,
+            "opponent's cast must open the controller's window"
+        );
+        assert_eq!(
+            state.players[1].opponent_spells_cast_since_own_last_turn, 0,
+            "caster's own window must be untouched by their own cast"
+        );
+
+        record_spell_cast(&mut state, PlayerId(0), record).expect("controller cast is recorded");
+        assert_eq!(
+            state.players[1].opponent_spells_cast_since_own_last_turn, 1,
+            "controller's cast must open the opponent's window"
+        );
+        assert_eq!(
+            state.players[0].opponent_spells_cast_since_own_last_turn, 1,
+            "controller's window must be unchanged by their own cast"
+        );
+    }
+
     #[test]
     fn max_times_replay_resolves_recipient_key() {
         let object_id = ObjectId(1);
@@ -732,6 +804,50 @@ mod tests {
             Some(3)
         );
         assert_eq!(state.trigger_fire_counts_this_turn.len(), 1);
+    }
+
+    /// CR 603.2h: the indicated-action fact is one (definition, player) pair per turn; a
+    /// second record of the same pair is a replay invariant violation, not a silent no-op.
+    #[test]
+    fn indicated_action_taken_records_once_per_definition_and_player() {
+        let mut state = GameState::new_two_player(42);
+        let mut object = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "Indicated action source".to_string(),
+            Zone::Battlefield,
+        );
+        let entry = TriggerEntry::new(
+            TriggerDefinitionOccurrenceRef::Printed {
+                base_set: object.trigger_base_set_instance,
+                printed_index: 0,
+            },
+            TriggerDefinition::new(TriggerMode::ChangesZone),
+        );
+        let trigger = object.trigger_definition_ref(&entry);
+        object.trigger_definitions.push(entry);
+        state.objects.insert(ObjectId(1), object);
+        let edit = ResolvedTriggerLedgerEdit::IndicatedActionTaken {
+            player: PlayerId(0),
+        };
+
+        assert!(state.trigger_indicated_actions_this_turn.is_empty());
+        record_trigger_fired(&mut state, trigger.clone(), edit.clone())
+            .expect("first indicated action records");
+        assert_eq!(
+            *state.trigger_indicated_actions_this_turn,
+            std::collections::HashSet::from([(trigger.clone(), PlayerId(0))])
+        );
+        assert!(
+            state.triggers_fired_this_turn.is_empty(),
+            "the indicated-action fact is not a firing"
+        );
+        assert_eq!(
+            record_trigger_fired(&mut state, trigger, edit),
+            Err(ResolvedLedgerEditReplayInvariantError::TriggerAlreadyRecorded)
+        );
+        assert_eq!(state.trigger_indicated_actions_this_turn.len(), 1);
     }
 
     fn activation_source(state: &mut GameState) -> ObjectId {

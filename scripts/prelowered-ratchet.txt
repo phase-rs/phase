@@ -13,20 +13,20 @@
 # in the same commit, which is what makes the burn-down visible in `git log`
 # on this one file.
 # Includes two read-only trace visibility match arms; no new producers.
-crates/engine/src/parser/oracle.rs          7
-crates/engine/src/parser/oracle_class.rs    3
+crates/phase-parser/src/parser/oracle.rs          7
+crates/phase-parser/src/parser/oracle_class.rs    3
 
 # --- infrastructure: NOT burn-down targets ----------------------------------
 # The variant declarations and their consumers. These legitimately survive
 # until the last producer is gone and the variants themselves are deleted, so
 # they are ceilings only — they are not expected to reach 0 before then.
 # 12 includes spell_payload's exhaustive consumer arms, not producers.
-crates/engine/src/parser/oracle_ir/doc.rs      12
-crates/engine/src/parser/oracle_ir/feature.rs   7
+crates/phase-parser/src/parser/oracle_ir/doc.rs      12
+crates/phase-parser/src/parser/oracle_ir/feature.rs   7
 
 # Prose references in the T1 witness-corpus comment.
-crates/engine/src/parser/oracle_ir/snapshot_tests.rs   2
+crates/phase-parser/src/parser/oracle_ir/snapshot_tests.rs   2
 
 # Test-only fixture for relation synthesis: the later ability proves the
 # source item's historical printed slot remains occupied after synthesis.
-crates/engine/src/parser/oracle_tests.rs               1
+crates/phase-parser/src/parser/oracle_tests.rs               1

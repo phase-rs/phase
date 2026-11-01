@@ -60,6 +60,76 @@
       }
     }
   },
+  "parsed_ward_discard": {
+    "Ward—Discard a card at random.": {
+      "Ward": {
+        "data": {
+          "count": 1,
+          "filter": null,
+          "selection": "Random"
+        },
+        "type": "Discard"
+      }
+    },
+    "Ward—Discard a card.": {
+      "Ward": {
+        "data": {
+          "count": 1,
+          "filter": null,
+          "selection": "Chosen"
+        },
+        "type": "Discard"
+      }
+    },
+    "Ward—Discard an enchantment, instant, or sorcery card.": {
+      "Ward": {
+        "data": {
+          "count": 1,
+          "filter": {
+            "filters": [
+              {
+                "controller": null,
+                "properties": [],
+                "type": "Typed",
+                "type_filters": [
+                  "Enchantment"
+                ]
+              },
+              {
+                "controller": null,
+                "properties": [],
+                "type": "Typed",
+                "type_filters": [
+                  "Instant"
+                ]
+              },
+              {
+                "controller": null,
+                "properties": [],
+                "type": "Typed",
+                "type_filters": [
+                  "Sorcery"
+                ]
+              }
+            ],
+            "type": "Or"
+          },
+          "selection": "Chosen"
+        },
+        "type": "Discard"
+      }
+    },
+    "Ward—Discard two cards.": {
+      "Ward": {
+        "data": {
+          "count": 2,
+          "filter": null,
+          "selection": "Chosen"
+        },
+        "type": "Discard"
+      }
+    }
+  },
   "samples": [
     {
       "HexproofFrom": {
@@ -280,11 +350,14 @@
     },
     {
       "Morph": {
-        "generic": 2,
-        "shards": [
-          "Red"
-        ],
-        "type": "Cost"
+        "data": {
+          "amount": {
+            "type": "Fixed",
+            "value": 3
+          },
+          "type": "PayLife"
+        },
+        "type": "NonMana"
       }
     },
     {
@@ -506,11 +579,14 @@
     },
     {
       "Entwine": {
-        "generic": 2,
-        "shards": [
-          "Red"
-        ],
-        "type": "Cost"
+        "data": {
+          "amount": {
+            "type": "Fixed",
+            "value": 3
+          },
+          "type": "PayLife"
+        },
+        "type": "NonMana"
       }
     },
     {
@@ -1013,12 +1089,36 @@
       }
     },
     {
+      "Entwine": {
+        "data": {
+          "generic": 2,
+          "shards": [
+            "Red"
+          ],
+          "type": "Cost"
+        },
+        "type": "Mana"
+      }
+    },
+    {
       "Disguise": {
         "generic": 1,
         "shards": [
           "WhiteBlue"
         ],
         "type": "Cost"
+      }
+    },
+    {
+      "Morph": {
+        "data": {
+          "generic": 2,
+          "shards": [
+            "Red"
+          ],
+          "type": "Cost"
+        },
+        "type": "Mana"
       }
     },
     {

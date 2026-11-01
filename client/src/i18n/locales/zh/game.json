@@ -236,6 +236,10 @@
     "boundedLoopTooltip": "来自已检出循环的{{resource}}，以{{bound}}次重复为上限",
     "cityBlessing": "城市祝福",
     "cityBlessingTooltip": "城市祝福 —— 操控十个或更多永久物（扬升）",
+    "day": "白天",
+    "dayTooltip": "现在是白天 —— 永久物于白天状态下进入战场；若某牌手在其回合中未施放任何咒语，则下一回合将变为黑夜",
+    "night": "黑夜",
+    "nightTooltip": "现在是黑夜 —— 永久物于黑夜状态下进入战场；若某牌手在其回合中施放了两个或更多咒语，则下一回合将变为白天",
     "companion": "行侣",
     "condCantActivate": "不能起动异能",
     "condCantCast": "不能施放咒语",
@@ -448,6 +452,7 @@
   "cardChoice": {
     "badges": {
       "attach": "贴附",
+      "cast": "施放",
       "battlefield": "战场",
       "bottom": "牌库底",
       "choose": "选择",
@@ -610,14 +615,18 @@
     },
     "effectZone": {
       "labelAttach": "贴附（{{selected}}/{{count}}）",
+      "labelBottom": "牌库底（{{selected}}/{{count}}）",
+      "labelCast": "施放（{{selected}}/{{count}}）",
       "labelConfirm": "确认（{{selected}}/{{count}}）",
       "labelDecline": "拒绝",
       "labelExile": "放逐（{{selected}}/{{count}}）",
       "labelPut": "放置（{{selected}}/{{count}}）",
+      "labelPutOnBottom": "置于牌库底（{{order}}）",
       "labelPutOnTop": "置于牌库顶（{{order}}）",
       "labelReturn": "移回（{{selected}}/{{count}}）",
       "labelSkip": "跳过",
       "labelTop": "牌库顶（{{selected}}/{{count}}）",
+      "orderBottom": "底部",
       "orderFifth": "第5张",
       "orderFourth": "第4张",
       "orderPosition": "第{{position}}位",
@@ -628,6 +637,18 @@
       "subtitleAttachExact_other": "选择{{count}}件要贴附的武具",
       "subtitleAttachRange_one": "选择{{min}}-{{count}}件要贴附的武具",
       "subtitleAttachRange_other": "选择{{min}}-{{count}}件要贴附的武具",
+      "subtitleBottomdeckExact_one": "选择{{count}}张要置于你牌库底的牌",
+      "subtitleBottomdeckExact_other": "选择{{count}}张要置于你牌库底的牌",
+      "subtitleBottomdeckRange_one": "选择{{min}}-{{count}}张要置于你牌库底的牌",
+      "subtitleBottomdeckRange_other": "选择{{min}}-{{count}}张要置于你牌库底的牌",
+      "subtitleBottomdeckUpTo_one": "至多选择{{count}}张要置于你牌库底的牌",
+      "subtitleBottomdeckUpTo_other": "至多选择{{count}}张要置于你牌库底的牌",
+      "subtitleCastExact_one": "选择{{count}}张要施放的牌",
+      "subtitleCastExact_other": "选择{{count}}张要施放的牌",
+      "subtitleCastUpTo_one": "至多选择{{count}}张要施放的牌",
+      "subtitleCastUpTo_other": "至多选择{{count}}张要施放的牌",
+      "subtitleCastRange_one": "选择{{min}}-{{count}}张要施放的牌",
+      "subtitleCastRange_other": "选择{{min}}-{{count}}张要施放的牌",
       "subtitleAttachUpTo_one": "至多选择{{count}}件要贴附的武具",
       "subtitleAttachUpTo_other": "至多选择{{count}}件要贴附的武具",
       "subtitleBattlefieldExact_one": "选择{{count}}张要放进战场的牌",
@@ -674,6 +695,8 @@
       "subtitleUntapUpTo_other": "至多选择{{count}}个要竖置的永久物",
       "titleAttach": "贴附",
       "titleBattlefield": "放进战场",
+      "titleBottomdeck": "置于牌库底",
+      "titleCast": "施放",
       "titleExile": "放逐",
       "titleHand": "移回",
       "titleSacrifice": "牺牲",
@@ -1139,6 +1162,7 @@
     "respondTitle": "有人提议循环捷径",
     "shorten": "缩短循环",
     "untilLethal": "重复直到游戏结束。",
+    "withoutEnd": "无限重复。若所有玩家都接受，本局游戏为平局。",
     "winKind": {
       "Advantage": "此循环能产生无限的优势。",
       "Decking": "此循环让一名对手抓空牌库。",
@@ -1149,6 +1173,7 @@
     }
   },
   "costReductionOrder": {
+    "announcedHybrids": "已宣告的混血法术力支付",
     "appliedFirst": "最先应用",
     "appliedLast": "最后应用",
     "cancel": "取消",
@@ -1610,7 +1635,8 @@
     },
     "toasts": {
       "connectionFailed": "连接失败。请在设置中重试或更改服务器。",
-      "eliminatedSpectating": "你已被淘汰。现在进入观战。"
+      "eliminatedSpectating": "你已被淘汰。现在进入观战。",
+      "retainedTerminalUnreadable": "无法读取已保留的终局投递"
     }
   },
   "gameSetup": {
@@ -1684,7 +1710,31 @@
     "manaCostReduced": "其法术力费用减少{{reduction}}",
     "selfManaCost": "其法术力费用",
     "selfManaValue": "其总法术力费用",
-    "spliceOnto": "通联于{{subtype}}{{cost}}"
+    "spliceOnto": "通联于{{subtype}}{{cost}}",
+    "sacrificeArtifact_few": "牺牲{{count}}个神器",
+    "sacrificeArtifact_many": "牺牲{{count}}个神器",
+    "sacrificeArtifact_one": "牺牲一个神器",
+    "sacrificeArtifact_other": "牺牲{{count}}个神器",
+    "sacrificeCreature_few": "牺牲{{count}}个生物",
+    "sacrificeCreature_many": "牺牲{{count}}个生物",
+    "sacrificeCreature_one": "牺牲一个生物",
+    "sacrificeCreature_other": "牺牲{{count}}个生物",
+    "sacrificeLand_few": "牺牲{{count}}个地",
+    "sacrificeLand_many": "牺牲{{count}}个地",
+    "sacrificeLand_one": "牺牲一个地",
+    "sacrificeLand_other": "牺牲{{count}}个地",
+    "sacrificePermanent_few": "牺牲{{count}}个永久物",
+    "sacrificePermanent_many": "牺牲{{count}}个永久物",
+    "sacrificePermanent_one": "牺牲一个永久物",
+    "sacrificePermanent_other": "牺牲{{count}}个永久物",
+    "wardDiscardAtRandom_few": "随机弃{{count}}张牌",
+    "wardDiscardAtRandom_many": "随机弃{{count}}张牌",
+    "wardDiscardAtRandom_one": "随机弃一张牌",
+    "wardDiscardAtRandom_other": "随机弃{{count}}张牌",
+    "wardDiscard_few": "弃{{count}}张牌",
+    "wardDiscard_many": "弃{{count}}张牌",
+    "wardDiscard_one": "弃一张牌",
+    "wardDiscard_other": "弃{{count}}张牌"
   },
   "kickDialog": {
     "body": "他们将放弃此盘游戏，且无法重新加入。",
@@ -2470,7 +2520,7 @@
     "selectedModes": "已选模式",
     "targetingLabel": "正在指定目标：{{label}}",
     "title": "堆叠",
-    "titleContext": "上下文：{{context}}",
+    "titleContext": "上下文：{{items}}",
     "titlePaid": "已支付：{{paid}}",
     "titleTargets": "目标：{{targets}}",
     "triggered": "触发式",
@@ -2543,6 +2593,8 @@
     "chooseTargetForCopySlot": "为复制品选择目标：第 {{current}} 个，共 {{total}} 个",
     "chooseTargetOf": "选择目标：第 {{current}} 个，共 {{total}} 个",
     "chooseTokenHost": "选择一个衍生物的宿主",
+    "chooseOneHighlighted": "从高亮选项中选择一个",
+    "chooseUpToOneHighlighted": "从高亮选项中最多选择一个",
     "collapseDescription": "收起",
     "confirmSacrifice": "牺牲（{{selected}}/{{count}}）",
     "confirmTap": "确认横置（{{selected}}/{{count}}）",
@@ -2589,6 +2641,7 @@
   "topOrBottom": {
     "bottom": "牌库底",
     "cardFallback": "牌",
+    "nthFromTop": "Position {{n}} from the top of library",
     "title": "将{{name}}置于牌库顶或牌库底",
     "top": "牌库顶"
   },
@@ -2694,6 +2747,9 @@
     "player": "Player",
     "life": "Life",
     "setLife": "Set Life",
+    "gainLife": "Gain Life",
+    "loseLife": "Lose Life",
+    "amount": "Amount",
     "count": "Count",
     "drawCards": "Draw Cards",
     "mill": "Mill",
@@ -2709,6 +2765,8 @@
     "delta": "Delta",
     "modifyCounters": "Modify Counters",
     "modifyEnergy": "Modify Energy",
+    "givePlayerCounters": "Give Counters",
+    "giveEnergy": "Give Energy",
     "browseDescription": "Opens a modal of your library in randomized order. Click a card to move it to any zone, or use the quick Battlefield / Hand buttons.",
     "browseLibrary": "Browse Library",
     "infiniteMana": "Infinite Mana",
@@ -2861,6 +2919,36 @@
       "winner": "{{name}} 赢得了比赛。",
       "tie": "平局：什么也不会发生。",
       "cancelled": "比赛已取消：什么也不会发生。"
+    }
+  },
+  "unActions": {
+    "menu": {
+      "title": "Un-Actions",
+      "open": "Open Un-actions menu",
+      "close": "Close Un-actions menu",
+      "TouchFace": "Touch your face",
+      "TouchTable": "Slap the table",
+      "Laugh": "Laugh out loud",
+      "FlickCards": "Flick your cards",
+      "saysWord": "Say a word…",
+      "saysNumber": "Say a number…",
+      "wordPlaceholder": "A word",
+      "numberPlaceholder": "A number",
+      "say": "Say it!"
+    },
+    "gotcha": {
+      "button": "Gotcha!"
+    },
+    "sayPhrase": {
+      "title": "Say it to stop the effect",
+      "say": "Say “{{phrase}}”",
+      "stayQuiet": "Stay quiet"
+    },
+    "fx": {
+      "touchFace": "*smack*",
+      "touchTable": "SLAP!",
+      "laugh": "HA HA HA!",
+      "flickCards": "thwip thwip!"
     }
   }
 }

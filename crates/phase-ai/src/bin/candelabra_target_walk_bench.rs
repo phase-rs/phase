@@ -46,6 +46,7 @@ fn candelabra_target_selection() -> GameRunner {
         .act(GameAction::ActivateAbility {
             source_id: candelabra,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("Candelabra activation must begin");
     runner

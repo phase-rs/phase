@@ -63,6 +63,7 @@ fn sacrifice_for_colorless(runner: &mut GameRunner, token: ObjectId) {
         .act(GameAction::ActivateAbility {
             source_id: token,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("the token's mana ability");
     let state = runner.state();

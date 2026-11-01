@@ -31,6 +31,7 @@ use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
+use engine::types::zones::Zone;
 
 const NAMING_SCREEN: &str = "As a creature token you control enters, name it using up to four letters. (It keeps its types. It just has a new name. Remember this is a family event.)\nWhen this enchantment enters, create four 1/1 colorless Hero tokens.\nEach creature you control that doesn't share a name with any other creature you control gets +1/+1.";
 
@@ -299,4 +300,97 @@ fn p2_pattern_matcher_finds_a_copy_of_an_earlier_pattern_matcher() {
         offered,
         vec![("Pattern Matcher", true), ("Grizzly Bears", false)]
     );
+}
+
+/// The object id of the unique card named `name` in P0's hand.
+fn p0_hand_card_named(runner: &GameRunner, name: &str) -> ObjectId {
+    let state = runner.state();
+    state.players[P0.0 as usize]
+        .hand
+        .iter()
+        .copied()
+        .find(|id| state.objects[id].name == name)
+        .unwrap_or_else(|| panic!("P0's hand has no card named {name}"))
+}
+
+/// The face-down permanents currently on the battlefield.
+fn face_down_permanents(runner: &GameRunner) -> Vec<ObjectId> {
+    runner
+        .state()
+        .objects
+        .values()
+        .filter(|object| object.zone == Zone::Battlefield && object.face_down)
+        .map(|object| object.id)
+        .collect()
+}
+
+/// CR 201.2a + CR 708.2a + CR 701.40a: two manifested (face-down) permanents have
+/// no name, so neither shares a name with any other creature you control —
+/// including with each other — and both get +1/+1 (2/2 -> 3/3).
+///
+/// Fails on revert: the pre-fix `DoesNotShare` arm also required the compared
+/// object's name set to be non-empty, which a face-down permanent can never
+/// satisfy, so a nameless creature stayed 2/2.
+#[test]
+fn n6_face_down_creatures_share_no_name() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let screen = scenario
+        .add_enchantment_from_oracle(P0, "Naming Screen", NAMING_SCREEN)
+        .id();
+    let bears_a = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let bears_b = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let ogre = scenario.add_creature(P0, "Gray Ogre", 2, 2).id();
+    for name in ["Face-Down Maker One", "Face-Down Maker Two"] {
+        scenario
+            .add_spell_to_hand(P0, name, false)
+            .from_oracle_text("Manifest the top card of your library.")
+            .with_mana_cost(ManaCost::generic(0));
+    }
+    // CR 701.40a: manifest takes the top card of the library. Both are named
+    // "Grizzly Bears" as hidden-name insurance — a regression that compares the
+    // underlying card name instead of the (empty) face-down name would make the
+    // manifested permanents share with the battlefield Grizzly Bears and drop
+    // the bonus.
+    scenario.add_card_to_library_top(P0, "Grizzly Bears");
+    scenario.add_card_to_library_top(P0, "Grizzly Bears");
+    let mut runner = scenario.build();
+    assert_naming_screen_static(&runner, screen);
+
+    let first = p0_hand_card_named(&runner, "Face-Down Maker One");
+    let second = p0_hand_card_named(&runner, "Face-Down Maker Two");
+    runner.cast(first).resolve();
+    runner.advance_until_stack_empty();
+    runner.cast(second).resolve();
+    runner.advance_until_stack_empty();
+
+    let face_down = face_down_permanents(&runner);
+    assert_eq!(
+        face_down.len(),
+        2,
+        "reach guard: two manifested permanents, got {face_down:?}"
+    );
+
+    // Reach guard: the static still applies to a uniquely named creature.
+    assert_eq!(
+        effective_pt(&mut runner, ogre),
+        (3, 3),
+        "the uniquely named Gray Ogre gets the bonus"
+    );
+    for &id in &face_down {
+        assert_eq!(
+            runner.state().objects[&id].name,
+            "",
+            "CR 708.2a: a manifested permanent has no name"
+        );
+        assert_eq!(
+            effective_pt(&mut runner, id),
+            (3, 3),
+            "CR 201.2a: a nameless creature shares a name with nothing, so it \
+             gets +1/+1"
+        );
+    }
+    // Negative sibling: two Grizzly Bears share a name, so neither is buffed.
+    assert_eq!(effective_pt(&mut runner, bears_a), (2, 2));
+    assert_eq!(effective_pt(&mut runner, bears_b), (2, 2));
 }

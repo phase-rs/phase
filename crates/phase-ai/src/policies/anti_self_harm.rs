@@ -4,6 +4,7 @@ use engine::ai_support::{
     certify_pact_plan, current_target_selection_targets, find_copy_targets, is_pact_payment_cast,
 };
 use engine::game::combat;
+use engine::game::cost_payability::AbilityCostPayability;
 use engine::game::effects::draw::can_draw_at_least_one;
 use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::keywords;
@@ -232,10 +233,13 @@ fn cast_has_unpayable_self_etb_may_cost(ctx: &PolicyContext<'_>) -> bool {
             let ReplacementMode::MayCost { cost, decline } = &replacement.mode else {
                 return false;
             };
+            // CR 601.2a: the cost is paid as the cast spell enters from the
+            // stack, so it is priced as a spell being cast: a graveyard spell
+            // can't pay it from the graveyard it was cast from.
             decline
                 .as_deref()
                 .is_some_and(decline_moves_self_to_graveyard)
-                && !cost.is_payable(ctx.state, ctx.ai_player, source.id)
+                && !cost.is_payable_for_spell(ctx.state, ctx.ai_player, source.id)
         })
 }
 
@@ -270,6 +274,7 @@ fn action_ability_definitions<'a>(ctx: &'a PolicyContext<'_>) -> Vec<&'a Ability
         GameAction::ActivateAbility {
             source_id,
             ability_index,
+            ..
         } => ctx
             .state
             .objects
@@ -1524,7 +1529,7 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
                     WardCost::PayLifeEqualToPower => {
                         (object.power.unwrap_or(0).max(0) as f64 / 3.0).min(2.0)
                     }
-                    WardCost::DiscardCard => 1.5,
+                    WardCost::Discard { count, .. } => *count as f64 * 1.5,
                     WardCost::Sacrifice { count, .. } => *count as f64 * 2.0,
                     WardCost::Waterbend(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
                     // CR 702.21a + CR 122.1 + CR 728.1: giving yourself
@@ -1573,7 +1578,7 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
                             WardCost::PayLifeEqualToPower => {
                                 (object.power.unwrap_or(0).max(0) as f64 / 3.0).min(2.0)
                             }
-                            WardCost::DiscardCard => 1.5,
+                            WardCost::Discard { count, .. } => *count as f64 * 1.5,
                             WardCost::Sacrifice { count, .. } => *count as f64 * 2.0,
                             WardCost::Waterbend(cost) => (cost.mana_value() as f64 / 2.0).min(2.0),
                             WardCost::GetPlayerCounters {
@@ -6269,8 +6274,13 @@ mod tests {
         ));
         let session = AiSession::arc_from_game(&state);
         let mut rng = SmallRng::seed_from_u64(42);
-        let selection =
-            choose_action_with_session_diagnostic(&state, PlayerId(0), &config, &mut rng, &session);
+        let selection = choose_action_with_session_diagnostic(
+            &state,
+            &config,
+            &mut rng,
+            &session,
+            &AiDecisionContract::issue(&state, PlayerId(0)),
+        );
         let receipt = selection
             .receipt
             .expect("the public chooser must retain its ranked target receipt");
@@ -7561,6 +7571,89 @@ mod tests {
         ));
     }
 
+    /// SYNTHETIC fixture, derived from Mox Diamond ("If this artifact would
+    /// enter, you may discard a land card instead. If you do, put this
+    /// artifact onto the battlefield. If you don't, put it into its owner's
+    /// graveyard."). It keeps that replacement shape but substitutes "collect
+    /// evidence `amount`" for the discard and gives the spell mana value 3 in
+    /// P0's graveyard, plus `others` more mana value 3 graveyard cards. The
+    /// substitution exists only to discriminate the payability role this
+    /// caller uses (a spell being cast can't be its own evidence); it is not a
+    /// printed-card support claim.
+    fn graveyard_evidence_may_cost_spell(
+        state: &mut GameState,
+        amount: u32,
+        others: usize,
+    ) -> ObjectId {
+        let template = mox_diamond_like_spell(state);
+        let mut replacements = state.objects[&template].replacement_definitions.clone();
+        let ReplacementMode::MayCost { cost, .. } = &mut replacements[0].mode else {
+            unreachable!("mox_diamond_like_spell carries a MayCost replacement");
+        };
+        *cost = AbilityCost::CollectEvidence { amount };
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            PlayerId(0),
+            "Graveyard Evidence Spell".to_string(),
+            Zone::Graveyard,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.mana_cost = engine::types::mana::ManaCost::generic(3);
+        obj.replacement_definitions = replacements;
+        for i in 0..others {
+            let card = create_object(
+                state,
+                CardId(state.next_object_id),
+                PlayerId(0),
+                format!("Evidence {i}"),
+                Zone::Graveyard,
+            );
+            state.objects.get_mut(&card).unwrap().mana_cost =
+                engine::types::mana::ManaCost::generic(3);
+        }
+        id
+    }
+
+    /// CR 601.2a + CR 701.59b: the cost is paid as the cast spell enters from
+    /// the stack, so it can't count its own mana value toward the evidence;
+    /// one other mana value 3 card isn't enough.
+    #[test]
+    fn rejects_graveyard_cast_whose_etb_evidence_counts_only_itself() {
+        let mut state = make_state();
+        let spell_id = graveyard_evidence_may_cost_spell(&mut state, 6, 1);
+        assert_eq!(state.objects[&spell_id].zone, Zone::Graveyard);
+
+        assert!(matches!(
+            pre_cast_verdict_for_spell(&state, spell_id),
+            PolicyVerdict::Reject { reason }
+                if reason.kind == "anti_self_harm_unpayable_etb_may_cost"
+        ));
+    }
+
+    /// Positive control: two other mana value 3 cards pay evidence 6. Reach
+    /// guard on the same board: evidence 10 exceeds every mana value there
+    /// (9, the spell included), and is rejected for this exact reason, so the
+    /// Score verdict comes from the may-cost being evaluated and paid.
+    #[test]
+    fn allows_graveyard_cast_whose_etb_evidence_is_payable_without_itself() {
+        let mut payable = make_state();
+        let spell_id = graveyard_evidence_may_cost_spell(&mut payable, 6, 2);
+        let mut unpayable = make_state();
+        let unpayable_id = graveyard_evidence_may_cost_spell(&mut unpayable, 10, 2);
+
+        assert!(matches!(
+            pre_cast_verdict_for_spell(&unpayable, unpayable_id),
+            PolicyVerdict::Reject { reason }
+                if reason.kind == "anti_self_harm_unpayable_etb_may_cost"
+        ));
+        assert!(matches!(
+            pre_cast_verdict_for_spell(&payable, spell_id),
+            PolicyVerdict::Score { .. }
+        ));
+    }
+
     #[test]
     fn rejects_extra_turn_spell_with_delayed_self_loss() {
         let mut state = make_state();
@@ -8735,9 +8828,16 @@ mod tests {
     /// A `controller: You` filter can never match an opponent's permanent, so
     /// "no opponent matched" is vacuously true and the mode would be penalised
     /// unconditionally. Orzhov Charm's self-bounce mode IS aimed at our own
-    /// board by design (re-buy an ETB, dodge removal). REVERT-FAILING: without
-    /// the `filter_can_reach_an_opponent` guard this scores the wasted-cast
-    /// penalty even with an opposing creature sitting on the battlefield.
+    /// board by design (re-buy an ETB, dodge removal).
+    ///
+    /// The attached-set parse shape means this row now covers the shape (the
+    /// head announces the self-scoped filter) rather than the
+    /// `filter_can_reach_an_opponent` guard: `TargetOnly` is Contextual for the
+    /// mode scan, so the guard's pre-existing `Effect::Bounce` coverage is
+    /// pinned by `pre_cast_allows_explicit_self_bounce_patterns`. Teaching the
+    /// policy the attached-set shape is a follow-up, deliberately not part of
+    /// this PR after the review found that recognizing it here regressed
+    /// self-bounce activations.
     #[test]
     fn self_scoped_harmful_mode_is_not_penalised() {
         let mut state = make_state();
@@ -8746,8 +8846,15 @@ mod tests {
 
         let modes = parsed_abilities("Orzhov Charm", ORZHOV_CHARM_ORACLE, &[], &["Instant"]);
         assert_eq!(modes.len(), 3, "three printed modes: {modes:?}");
-        let Effect::Bounce { target, .. } = &*modes[0].effect else {
-            panic!("mode 1 must still parse as a Bounce: {:?}", modes[0].effect);
+        // The attached-set bounce family lowers as a `TargetOnly` head (the
+        // announced creature) plus a mass child returning the host and its
+        // attachments together. The head still carries the self-scoped filter
+        // this fixture is about.
+        let Effect::TargetOnly { target } = &*modes[0].effect else {
+            panic!(
+                "mode 1 must still announce its self-scoped target: {:?}",
+                modes[0].effect
+            );
         };
         assert!(
             matches!(

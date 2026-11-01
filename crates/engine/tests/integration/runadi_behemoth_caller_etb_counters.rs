@@ -375,4 +375,13 @@ fn runadi_binds_floating_replacement_to_the_specific_triggering_spell() {
          (0, 8) or (8, 0) means B's earlier entry consumed the replacement \
          meant for A"
     );
+    assert!(
+        state.stack.is_empty(),
+        "both entrants must finish resolving"
+    );
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { .. }),
+        "entry resolution must finish at Priority, got {:?}",
+        state.waiting_for
+    );
 }

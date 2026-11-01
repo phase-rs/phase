@@ -521,7 +521,11 @@ mod tests {
     #[test]
     fn only_a_bearer_authorization_credential_may_follow_a_redirect() {
         // `Authorization` is the one credential header fetch strips cross-origin.
-        for provider in [LlmProvider::OpenAi, LlmProvider::DeepSeek] {
+        for provider in [
+            LlmProvider::OpenAi,
+            LlmProvider::DeepSeek,
+            LlmProvider::OpenRouter,
+        ] {
             let spec = build_chat_request(&config(provider), &prompt()).unwrap();
             assert_eq!(spec.redirect, RedirectPolicy::Follow, "{provider:?}");
             assert_eq!(

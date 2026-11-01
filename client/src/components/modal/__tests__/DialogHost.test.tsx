@@ -326,6 +326,45 @@ describe("DialogHost", () => {
     expect(wrapper?.style.pointerEvents).not.toBe("none");
   });
 
+  it("leaves single-pick object selection click-through and keeps multi-pick selection interactive", () => {
+    // CR 608.2d: a single-pick resolution choice (`max: 1`) is a board pick, so the
+    // host must let board and HUD clicks through. A multi-pick selection renders
+    // ProliferateModal, whose toggles and Confirm need the host's pointer events.
+    const selection = (max: number | undefined): WaitingFor => ({
+      type: "ChooseObjectsSelection",
+      data: {
+        player: 0,
+        eligible: [{ Object: 7 }, { Player: 1 }],
+        min: 1,
+        ...(max === undefined ? {} : { max }),
+      },
+    });
+
+    expect(isClickThroughWaitingFor(selection(1))).toBe(true);
+    setWaitingFor(selection(1));
+    const single = render(
+      <DialogHost>
+        <div data-testid="object-selection" />
+      </DialogHost>,
+    );
+    const singleWrapper = single.container.firstElementChild as HTMLElement | null;
+    expect(singleWrapper?.style.pointerEvents).toBe("none");
+    single.unmount();
+
+    for (const max of [2, undefined]) {
+      expect(isClickThroughWaitingFor(selection(max)), `max ${max}`).toBe(false);
+      setWaitingFor(selection(max));
+      const multi = render(
+        <DialogHost>
+          <div data-testid="object-selection" />
+        </DialogHost>,
+      );
+      const multiWrapper = multi.container.firstElementChild as HTMLElement | null;
+      expect(multiWrapper?.style.pointerEvents, `max ${max}`).not.toBe("none");
+      multi.unmount();
+    }
+  });
+
   it("resets peek to false when WaitingFor changes (regression)", () => {
     setWaitingFor({ type: "ModeChoice", data: { player: 0 } } as never);
     render(

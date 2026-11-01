@@ -1,4 +1,4 @@
-// Typed translation keys: augment react-i18next with the English catalogs as the
+// Typed translation keys: augment i18next with the English catalogs as the
 // type oracle so `t("bad.key")` is a compile error. Only English is imported for
 // types — other locales are runtime-only and may lag without breaking the build.
 // `import type` (not plain import) is required under `verbatimModuleSyntax` so the
@@ -13,7 +13,7 @@ import type replay from "./locales/en/replay.json";
 import type settings from "./locales/en/settings.json";
 import type tournament from "./locales/en/tournament.json";
 
-declare module "react-i18next" {
+declare module "i18next" {
   interface CustomTypeOptions {
     defaultNS: "common";
     resources: {

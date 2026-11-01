@@ -1,5 +1,10 @@
 {
-  "playerLatency": {"host":"Host","waiting":"In attesa","value":"{{ms}} ms","description":"Latenza di andata e ritorno verso l’host. Una risposta mancante non disconnette la partita."},
+  "playerLatency": {
+    "host": "Host",
+    "waiting": "In attesa",
+    "value": "{{ms}} ms",
+    "description": "Latenza di andata e ritorno verso l’host. Una risposta mancante non disconnette la partita."
+  },
   "abilityBlock": {
     "badge": "Bloccata",
     "cantBeActivated": "Questa abilità non può essere attivata",
@@ -27,6 +32,7 @@
     "shorten": "Shorten it",
     "decline": "Decline the shortcut",
     "untilLethal": "Repeat until the game ends.",
+    "withoutEnd": "Repeat without end. If every player accepts, the game is a draw.",
     "fixedCount_one": "Repeat at most once.",
     "fixedCount_other": "Repeat at most {{count}} times.",
     "convokeInfo_one": "Auto-taps up to 1 creature for convoke each iteration.",
@@ -540,6 +546,10 @@
     "initiativeTooltip": "Ha l'Iniziativa — si avventura nella Città Bassa all'inizio del mantenimento",
     "cityBlessing": "Benedizione della Città",
     "cityBlessingTooltip": "Benedizione della Città — controlla dieci o più permanenti (Ascendere)",
+    "day": "Giorno",
+    "dayTooltip": "È giorno — i permanenti entrano vincolati al giorno; se un giocatore non lancia magie durante il proprio turno, al turno successivo diventa notte",
+    "night": "Notte",
+    "nightTooltip": "È notte — i permanenti entrano vincolati alla notte; se un giocatore lancia due o più magie durante il proprio turno, al turno successivo diventa giorno",
     "enduringStory": "Storia duratura",
     "enduringStoryTooltip": "Storia duratura — ottenuta controllando un permanente con Storied e tre o più artefatti, permanenti leggendari e/o saghe; dura per il resto della partita",
     "dungeonAriaLabel": "Avventura in {{name}}, {{roomName}}, stanza {{room}} di {{total}}",
@@ -836,7 +846,7 @@
     "targetingLabel": "Bersaglia {{label}}",
     "titleTargets": "Bersagli: {{targets}}",
     "titlePaid": "Pagato: {{paid}}",
-    "titleContext": "Contesto: {{context}}",
+    "titleContext": "Contesto: {{items}}",
     "revealedCards": "Rivelata: {{cards}}",
     "paidXValue": "X={{value}}",
     "paidManaSpent": "{{amount}} mana",
@@ -873,6 +883,8 @@
     "chooseCreatureTokenToPopulate": "Scegli una pedina creatura da popolare",
     "chooseReturnAsAuraTarget": "Scegli un permanente da incantare",
     "chooseTokenHost": "Scegli un ospite per la pedina",
+    "chooseOneHighlighted": "Scegli una delle opzioni evidenziate",
+    "chooseUpToOneHighlighted": "Scegli fino a una delle opzioni evidenziate",
     "tapUntappedCreatures_one": "TAPpa {{count}} creatura STAPpata",
     "tapUntappedCreatures_other": "TAPpa {{count}} creature STAPpate",
     "chooseTargetOf": "Scegli il bersaglio {{current}} di {{total}}",
@@ -1329,7 +1341,8 @@
     "passwordPrompt": "Questa stanza richiede una password:",
     "toasts": {
       "connectionFailed": "Connessione fallita. Riprova o cambia server nelle Impostazioni.",
-      "eliminatedSpectating": "Sei stato eliminato. Ora sei in modalità spettatore."
+      "eliminatedSpectating": "Sei stato eliminato. Ora sei in modalità spettatore.",
+      "retainedTerminalUnreadable": "Impossibile leggere la consegna conservata del risultato finale"
     },
     "resumeReset": {
       "appUpdated": "L'app è stata aggiornata e la tua partita salvata è incompatibile con la nuova versione.",
@@ -1423,6 +1436,7 @@
       "untap": "Stappa",
       "tap": "Tappa",
       "attach": "Attach",
+      "cast": "Lancia",
       "crew": "Equipaggio ({{power}})",
       "saddle": "Sella ({{power}})",
       "station": "Stazione (+{{power}})"
@@ -1544,12 +1558,14 @@
     "effectZone": {
       "titleSacrifice": "Sacrifica",
       "titleTopdeck": "Metti nel grimorio",
+      "titleBottomdeck": "Metti nel grimorio",
       "titleBattlefield": "Metti sul campo di battaglia",
       "titleHand": "Restituisci",
       "titleExile": "Esilia",
       "titleUntap": "Stappa",
       "titleTap": "Tappa",
       "titleAttach": "Attach",
+      "titleCast": "Lancia",
       "subtitleSacrificeExact_one": "Scegli {{count}} permanente da sacrificare",
       "subtitleSacrificeExact_other": "Scegli {{count}} permanenti da sacrificare",
       "subtitleSacrificeUpTo_one": "Scegli fino a {{count}} permanente da sacrificare",
@@ -1562,6 +1578,12 @@
       "subtitleTopdeckUpTo_other": "Scegli fino a {{count}} carte da mettere in cima al tuo grimorio",
       "subtitleTopdeckRange_one": "Scegli {{min}}-{{count}} carta da mettere in cima al tuo grimorio",
       "subtitleTopdeckRange_other": "Scegli {{min}}-{{count}} carte da mettere in cima al tuo grimorio",
+      "subtitleBottomdeckExact_one": "Scegli {{count}} carta da mettere in fondo al tuo grimorio",
+      "subtitleBottomdeckExact_other": "Scegli {{count}} carte da mettere in fondo al tuo grimorio",
+      "subtitleBottomdeckUpTo_one": "Scegli fino a {{count}} carta da mettere in fondo al tuo grimorio",
+      "subtitleBottomdeckUpTo_other": "Scegli fino a {{count}} carte da mettere in fondo al tuo grimorio",
+      "subtitleBottomdeckRange_one": "Scegli {{min}}-{{count}} carta da mettere in fondo al tuo grimorio",
+      "subtitleBottomdeckRange_other": "Scegli {{min}}-{{count}} carte da mettere in fondo al tuo grimorio",
       "subtitleBattlefieldExact_one": "Scegli {{count}} carta da mettere sul campo di battaglia",
       "subtitleBattlefieldExact_other": "Scegli {{count}} carte da mettere sul campo di battaglia",
       "subtitleBattlefieldUpTo_one": "Scegli fino a {{count}} carta da mettere sul campo di battaglia",
@@ -1598,16 +1620,26 @@
       "subtitleAttachUpTo_other": "Choose up to {{count}} Equipment to attach",
       "subtitleAttachRange_one": "Choose {{min}}-{{count}} Equipment to attach",
       "subtitleAttachRange_other": "Choose {{min}}-{{count}} Equipment to attach",
+      "subtitleCastExact_one": "Scegli {{count}} carta da lanciare",
+      "subtitleCastExact_other": "Scegli {{count}} carte da lanciare",
+      "subtitleCastUpTo_one": "Scegli fino a {{count}} carta da lanciare",
+      "subtitleCastUpTo_other": "Scegli fino a {{count}} carte da lanciare",
+      "subtitleCastRange_one": "Scegli {{min}}-{{count}} carta da lanciare",
+      "subtitleCastRange_other": "Scegli {{min}}-{{count}} carte da lanciare",
       "labelSkip": "Salta",
       "labelDecline": "Rifiuta",
       "labelPutOnTop": "Metti in cima ({{order}})",
+      "labelPutOnBottom": "Metti in fondo ({{order}})",
       "labelConfirm": "Conferma ({{selected}}/{{count}})",
       "labelTop": "Cima ({{selected}}/{{count}})",
+      "labelBottom": "In fondo ({{selected}}/{{count}})",
       "labelPut": "Metti ({{selected}}/{{count}})",
       "labelReturn": "Restituisci ({{selected}}/{{count}})",
       "labelExile": "Esilia ({{selected}}/{{count}})",
       "labelAttach": "Attach ({{selected}}/{{count}})",
+      "labelCast": "Lancia ({{selected}}/{{count}})",
       "orderTop": "Cima",
+      "orderBottom": "In fondo",
       "orderSecond": "2º",
       "orderThird": "3º",
       "orderFourth": "4º",
@@ -2322,7 +2354,31 @@
     "selfManaCost": "il suo costo di mana",
     "selfManaValue": "il suo valore di mana",
     "manaCostReduced": "il suo costo di mana ridotto di {{reduction}}",
-    "spliceOnto": "su {{subtype}} {{cost}}"
+    "spliceOnto": "su {{subtype}} {{cost}}",
+    "sacrificeArtifact_few": "Sacrifica {{count}} artefatti",
+    "sacrificeArtifact_many": "Sacrifica {{count}} artefatti",
+    "sacrificeArtifact_one": "Sacrifica un artefatto",
+    "sacrificeArtifact_other": "Sacrifica {{count}} artefatti",
+    "sacrificeCreature_few": "Sacrifica {{count}} creature",
+    "sacrificeCreature_many": "Sacrifica {{count}} creature",
+    "sacrificeCreature_one": "Sacrifica una creatura",
+    "sacrificeCreature_other": "Sacrifica {{count}} creature",
+    "sacrificeLand_few": "Sacrifica {{count}} terre",
+    "sacrificeLand_many": "Sacrifica {{count}} terre",
+    "sacrificeLand_one": "Sacrifica una terra",
+    "sacrificeLand_other": "Sacrifica {{count}} terre",
+    "sacrificePermanent_few": "Sacrifica {{count}} permanenti",
+    "sacrificePermanent_many": "Sacrifica {{count}} permanenti",
+    "sacrificePermanent_one": "Sacrifica un permanente",
+    "sacrificePermanent_other": "Sacrifica {{count}} permanenti",
+    "wardDiscardAtRandom_few": "scarta {{count}} carte a caso",
+    "wardDiscardAtRandom_many": "scarta {{count}} carte a caso",
+    "wardDiscardAtRandom_one": "scarta una carta a caso",
+    "wardDiscardAtRandom_other": "scarta {{count}} carte a caso",
+    "wardDiscard_few": "scarta {{count}} carte",
+    "wardDiscard_many": "scarta {{count}} carte",
+    "wardDiscard_one": "scarta una carta",
+    "wardDiscard_other": "scarta {{count}} carte"
   },
   "resolutionOptionalPayment": {
     "title": "Scegli un pagamento opzionale",
@@ -2349,6 +2405,7 @@
     "cardFallback": "Card",
     "title": "Put {{name}} on top or bottom of library",
     "top": "Top of library",
+    "nthFromTop": "Position {{n}} from the top of library",
     "bottom": "Bottom of library"
   },
   "mutateMerge": {
@@ -2461,6 +2518,7 @@
     "triggerFallback": "Innesco {{number}}"
   },
   "costReductionOrder": {
+    "announcedHybrids": "Pagamenti ibridi annunciati",
     "eyebrow": "Ordine delle riduzioni di costo",
     "title": "Ordina le tue riduzioni di costo",
     "subtitle": "Queste riduzioni fissano un costo totale diverso a seconda dell'ordine in cui le applichi (CR 601.2f). La cima di questo elenco viene applicata per prima.",
@@ -2689,6 +2747,9 @@
     "player": "Player",
     "life": "Life",
     "setLife": "Set Life",
+    "gainLife": "Gain Life",
+    "loseLife": "Lose Life",
+    "amount": "Amount",
     "count": "Count",
     "drawCards": "Draw Cards",
     "mill": "Mill",
@@ -2704,6 +2765,8 @@
     "delta": "Delta",
     "modifyCounters": "Modify Counters",
     "modifyEnergy": "Modify Energy",
+    "givePlayerCounters": "Give Counters",
+    "giveEnergy": "Give Energy",
     "browseDescription": "Opens a modal of your library in randomized order. Click a card to move it to any zone, or use the quick Battlefield / Hand buttons.",
     "browseLibrary": "Browse Library",
     "infiniteMana": "Infinite Mana",
@@ -2856,6 +2919,36 @@
       "winner": "{{name}} ha vinto la gara.",
       "tie": "Pareggio: non succede nulla.",
       "cancelled": "La gara è stata annullata: non succede nulla."
+    }
+  },
+  "unActions": {
+    "menu": {
+      "title": "Un-Actions",
+      "open": "Open Un-actions menu",
+      "close": "Close Un-actions menu",
+      "TouchFace": "Touch your face",
+      "TouchTable": "Slap the table",
+      "Laugh": "Laugh out loud",
+      "FlickCards": "Flick your cards",
+      "saysWord": "Say a word…",
+      "saysNumber": "Say a number…",
+      "wordPlaceholder": "A word",
+      "numberPlaceholder": "A number",
+      "say": "Say it!"
+    },
+    "gotcha": {
+      "button": "Gotcha!"
+    },
+    "sayPhrase": {
+      "title": "Say it to stop the effect",
+      "say": "Say “{{phrase}}”",
+      "stayQuiet": "Stay quiet"
+    },
+    "fx": {
+      "touchFace": "*smack*",
+      "touchTable": "SLAP!",
+      "laugh": "HA HA HA!",
+      "flickCards": "thwip thwip!"
     }
   }
 }

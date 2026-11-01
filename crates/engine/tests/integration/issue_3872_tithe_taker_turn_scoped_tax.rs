@@ -164,6 +164,7 @@ fn mana_consumed_activating_opponent_ability(active: PlayerId) -> usize {
         .act(GameAction::ActivateAbility {
             source_id: pinger,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("P1 announces its {1} activated ability");
     // Finalize the mana payment from the funded pool (mirrors AbilityActivation:

@@ -482,6 +482,14 @@ fn seed_library(scenario: &mut GameScenario, player: PlayerId, count: usize) {
     }
 }
 
+/// Seed land cards, so a Hideaway card hidden from them is a real land a
+/// "play the exiled card" instruction can play (CR 305.1).
+fn seed_library_lands(scenario: &mut GameScenario, player: PlayerId, count: usize) {
+    for i in 0..count {
+        scenario.add_land_to_library_top(player, &format!("Library Land {i}"));
+    }
+}
+
 /// Pass priority on an empty stack until `player` holds it.
 fn give_priority(runner: &mut GameRunner, player: PlayerId) {
     for _ in 0..8 {
@@ -710,7 +718,7 @@ fn returned_bridge_board() -> (GameRunner, ObjectId, ObjectId, ObjectId, ObjectI
         .add_land_to_hand(P0, "Mosswort Bridge")
         .from_oracle_text(MOSSWORT_BRIDGE)
         .id();
-    seed_library(&mut scenario, P0, 8);
+    seed_library_lands(&mut scenario, P0, 8);
     seed_library(&mut scenario, P1, 4);
     seed_library(&mut scenario, P2, 4);
     scenario.add_creature(P0, "Big Creature", 10, 1);
@@ -792,10 +800,11 @@ fn returned_hideaway_source_links_only_its_own_exiled_card() {
     }
 }
 
-/// CR 400.7 + CR 607.2a: the returned Mosswort Bridge's "play the exiled card"
-/// offer grants only the card it hid.
+/// CR 400.7 + CR 607.2a + CR 701.18b: the returned Mosswort Bridge's "play the
+/// exiled card" instruction plays only the card it hid — as the ability
+/// resolves (CR 305.2a), leaving the departed incarnation's card untouched.
 #[test]
-fn returned_hideaway_source_offers_only_its_own_exiled_card() {
+fn returned_hideaway_source_plays_only_its_own_exiled_card() {
     let (mut runner, bridge, x, y, _) = returned_bridge_board();
     assert_first_card_still_linked_to_the_departed_bridge(runner.state(), bridge, x);
     let hid_turn = runner.state().turn_number;
@@ -837,6 +846,7 @@ fn returned_hideaway_source_offers_only_its_own_exiled_card() {
         .act(GameAction::ActivateAbility {
             source_id: bridge,
             ability_index: 1,
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating the play ability");
     let mut offered = false;
@@ -858,22 +868,24 @@ fn returned_hideaway_source_offers_only_its_own_exiled_card() {
         }
     }
     assert!(offered, "total power 10 surfaces the offer");
-    let may_play = |card: ObjectId| {
-        runner.state().objects[&card]
+    let state = runner.state();
+    assert_eq!(
+        state.objects[&y].zone,
+        Zone::Battlefield,
+        "the returned Bridge's own hidden land was played during the resolution"
+    );
+    assert_first_card_still_linked_to_the_departed_bridge(state, bridge, x);
+    assert!(
+        state.objects[&x].casting_permissions.is_empty(),
+        "the departed incarnation's card receives nothing"
+    );
+    assert!(
+        !state.objects.values().any(|obj| obj
             .casting_permissions
             .iter()
-            .any(|p| {
-                matches!(
-                    p,
-                    CastingPermission::PlayFromExile {
-                        source_id: Some(src),
-                        ..
-                    } if *src == bridge
-                )
-            })
-    };
-    assert!(may_play(y));
-    assert!(!may_play(x));
+            .any(|p| matches!(p, CastingPermission::PlayFromExile { .. }))),
+        "no play permission lingers"
+    );
 }
 
 /// CR 406.3 + CR 701.24a: shuffling the card into a pile ends every latched and

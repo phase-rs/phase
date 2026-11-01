@@ -170,6 +170,7 @@ fn bolas_activates_donated_loyalty_ability_through_public_api() {
         .act(GameAction::ActivateAbility {
             source_id: bolas,
             ability_index: printed_plus,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("printed +1 must activate in the same harness");
     assert_eq!(

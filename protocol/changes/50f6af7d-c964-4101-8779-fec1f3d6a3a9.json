@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "CR 701.3a + CR 303.4 + CR 608.2c: AttachmentReferent gains Host { filter }, the filter-matched object-host axis for \"all <filter> attached to <referent>\". It serializes inside every ability definition carried by GameState, so a v159 or older full-game or P2P peer cannot decode it."
+}

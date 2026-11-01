@@ -10,6 +10,7 @@ import type {
   AiProposalSubmission,
   ContestClickInput,
   ContestDriveResult,
+  DebugHandRevealCapability,
   EngineAdapter,
   EngineSnapshot,
   FormatConfig,
@@ -25,6 +26,9 @@ import type {
   RestoredGameStateResult,
   RestoredStackAutomationPresentation,
   SubmitResult,
+  TakebackNotice,
+  TakebackReply,
+  TakebackVote,
   ViewerSnapshot,
   ViewerTransitionSnapshot,
 } from "./types";
@@ -37,6 +41,7 @@ import {
   actionRejectionError,
   AdapterError,
   AdapterErrorCode,
+  appliedSubmitResult,
   isActionOutcome,
   isStateLostMessage,
   nextSnapshotSeq,
@@ -44,6 +49,15 @@ import {
 import type { BracketDeckRequest, BracketEstimate } from "../types/bracketEstimate";
 import { isBracketEstimate } from "../types/bracketEstimate";
 import { EngineWorkerClient } from "./engine-worker-client";
+import {
+  ENGINE_QUERIES,
+  runEngineQuery,
+  type EngineModule,
+  type EngineQueryArgs,
+  type EngineQueryName,
+  type EngineQueryResult,
+} from "./engine-queries";
+import { isMemoryConstrainedDevice } from "../utils/device";
 import { classifyInitFailure } from "./init-envelope";
 import { AiWorkerPool } from "./ai-worker-pool";
 import type { AiCardDataMode, AiPoolCardDbPlan } from "./card-db-subset";
@@ -52,13 +66,6 @@ import {
   DEFAULT_AI_CARD_DATA_MODE,
   resolveAiPoolCardDbPlan,
 } from "./card-db-subset";
-
-function isMemoryConstrainedDevice(): boolean {
-  if (typeof navigator === "undefined") return false;
-  const isIOS = /iP(hone|od|ad)/.test(navigator.userAgent)
-    || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
-  return isIOS || (/Android/.test(navigator.userAgent) && /Mobile/.test(navigator.userAgent));
-}
 
 const INITIALIZATION_CANCELED_MESSAGE = "Adapter initialization was canceled. Please try again.";
 
@@ -76,6 +83,12 @@ function isDebugCreateCardDbMissing(error: unknown): boolean {
 }
 
 function unwrapActionOutcome<T>(value: unknown): T {
+  return unwrapAppliedOutcome(value).result as T;
+}
+
+function unwrapAppliedOutcome(
+  value: unknown,
+): { status: "applied"; result: unknown; takeback?: TakebackNotice } {
   if (typeof value === "string") throw new Error(value);
   if (!isActionOutcome(value)) {
     throw new AdapterError(
@@ -87,7 +100,7 @@ function unwrapActionOutcome<T>(value: unknown): T {
   if (value.status === "rejected") {
     throw actionRejectionError(value.rejection);
   }
-  return value.result as T;
+  return value;
 }
 
 class AiPoolScoreTimeoutError extends Error {
@@ -173,8 +186,8 @@ export function createHostSessionOwner(): HostSessionOwner {
 }
 
 type MainThreadRuntime = {
-  wasm: typeof import("@wasm/engine");
-  cardData: typeof import("../services/cardData");
+  wasm: EngineModule;
+  mainThread: typeof import("./main-thread-engine");
   queue: Promise<void>;
   nextHostGeneration: number;
   hostGeneration: number | null;
@@ -190,12 +203,12 @@ let mainThreadRuntimePromise: Promise<MainThreadRuntime> | null = null;
 function getMainThreadRuntime(): Promise<MainThreadRuntime> {
   if (!mainThreadRuntimePromise) {
     mainThreadRuntimePromise = (async () => {
-      const wasm = await import("@wasm/engine");
-      const cardData = await import("../services/cardData");
-      await cardData.ensureWasmInit();
+      const mainThread = await import("./main-thread-engine");
+      await mainThread.ensureWasmInit();
+      const wasm = await mainThread.loadEngineModule();
       return {
         wasm,
-        cardData,
+        mainThread,
         queue: Promise.resolve(),
         nextHostGeneration: 0,
         hostGeneration: null,
@@ -249,7 +262,9 @@ function describeCardDbError(err: unknown): string {
   return `: ${trimmed}`;
 }
 
-export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapability {
+export class WasmAdapter
+  implements EngineAdapter, AiDecisionDiagnosticsCapability, DebugHandRevealCapability
+{
   private initialized = false;
   private disposed = false;
   private unregisterDiagnostics: (() => void) | null = null;
@@ -504,6 +519,62 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
     }
   }
 
+  /** Open a takeback vote for `actor` on the hosted ledger (`request_takeback_js`). */
+  async requestTakeback(actor: PlayerId, aiPlayers: PlayerId[]): Promise<TakebackReply> {
+    this.assertInitialized("requestTakeback");
+    try {
+      const reply = this.engine
+        ? await this.engine.requestTakeback(actor, aiPlayers)
+        : await this.fallback!.requestTakeback(actor, aiPlayers);
+      this.invalidateAiDecisionDiagnostics();
+      return reply;
+    } catch (err) {
+      throw await classifyEngineErrorAsync(err, this.takePanic);
+    }
+  }
+
+  /** Record `actor`'s vote on the open takeback (`respond_takeback_js`). */
+  async respondTakeback(
+    actor: PlayerId,
+    approve: boolean,
+    aiPlayers: PlayerId[],
+  ): Promise<TakebackReply> {
+    this.assertInitialized("respondTakeback");
+    try {
+      const reply = this.engine
+        ? await this.engine.respondTakeback(actor, approve, aiPlayers)
+        : await this.fallback!.respondTakeback(actor, approve, aiPlayers);
+      this.invalidateAiDecisionDiagnostics();
+      return reply;
+    } catch (err) {
+      throw await classifyEngineErrorAsync(err, this.takePanic);
+    }
+  }
+
+  /** Withdraw `actor`'s own open takeback request (`cancel_takeback_js`). */
+  async cancelTakeback(actor: PlayerId): Promise<TakebackReply> {
+    this.assertInitialized("cancelTakeback");
+    try {
+      return this.engine
+        ? await this.engine.cancelTakeback(actor)
+        : await this.fallback!.cancelTakeback(actor);
+    } catch (err) {
+      throw await classifyEngineErrorAsync(err, this.takePanic);
+    }
+  }
+
+  /** The open takeback vote, if any (`pending_takeback_js`). */
+  async pendingTakeback(): Promise<TakebackVote | null> {
+    this.assertInitialized("pendingTakeback");
+    try {
+      return this.engine
+        ? await this.engine.pendingTakeback()
+        : await this.fallback!.pendingTakeback();
+    } catch (err) {
+      throw await classifyEngineErrorAsync(err, this.takePanic);
+    }
+  }
+
   async submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult> {
     this.assertInitialized("submitAction");
     try {
@@ -573,6 +644,25 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
         ? await this.engine.getState()
         : await this.fallback!.getState();
       return unwrapClientGameState(wrapped);
+    } catch (err) {
+      throw await classifyEngineErrorAsync(err, this.takePanic);
+    }
+  }
+
+  /**
+   * Ask the engine to disclose every hand in this seat's projection (the
+   * "Show AI Hand" toggle). The engine honors it only for a seat with debug
+   * identity access; the next snapshot carries the result.
+   */
+  async setDebugHandReveal(enabled: boolean): Promise<void> {
+    // Every engine game install starts with hands hidden, so withdrawing the
+    // request from an engine that is not (or no longer) running is a no-op —
+    // e.g. the game page's cleanup racing adapter disposal.
+    if (!enabled && !this.initialized) return;
+    this.assertInitialized("setDebugHandReveal");
+    try {
+      if (this.engine) await this.engine.setDebugHandReveal(enabled);
+      else await this.fallback!.setDebugHandReveal(enabled);
     } catch (err) {
       throw await classifyEngineErrorAsync(err, this.takePanic);
     }
@@ -1231,6 +1321,22 @@ export class WasmAdapter implements EngineAdapter, AiDecisionDiagnosticsCapabili
   }
 
   /**
+   * Run a stateless engine query (see `engine-queries.ts`) on this adapter's
+   * engine, loading the card database first when the query reads it. This is
+   * the only way UI code reaches the engine outside a game, so the tab keeps a
+   * single engine instance.
+   */
+  async query<K extends EngineQueryName>(
+    name: K,
+    ...args: EngineQueryArgs<K>
+  ): Promise<EngineQueryResult<K>> {
+    await this.initialize();
+    if (ENGINE_QUERIES[name].needsCardDb) await this.requireCardDb();
+    if (this.engine) return this.engine.query(name, args);
+    return this.fallback!.query(name, args);
+  }
+
+  /**
    * Display-only card queries share the authoritative engine worker and its
    * resident card database. Keeping these off the main-thread runtime avoids a
    * second WASM module + corpus allocation when card UI mounts during gameplay.
@@ -1453,6 +1559,10 @@ interface MainThreadFallback {
     awayPlayers: PlayerId[],
     clicks: ContestClickInput[],
   ): Promise<ContestDriveResult>;
+  requestTakeback(actor: PlayerId, aiPlayers: PlayerId[]): Promise<TakebackReply>;
+  respondTakeback(actor: PlayerId, approve: boolean, aiPlayers: PlayerId[]): Promise<TakebackReply>;
+  cancelTakeback(actor: PlayerId): Promise<TakebackReply>;
+  pendingTakeback(): Promise<TakebackVote | null>;
   submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult>;
   submitInteraction(submission: InteractionSubmission, actor: PlayerId): Promise<SubmitResult>;
   previewManaPayment(action: GameAction, actor: PlayerId): Promise<ObjectId[]>;
@@ -1461,6 +1571,7 @@ interface MainThreadFallback {
     actor: PlayerId,
   ): Promise<InteractionPreview>;
   getState(): Promise<GameState>;
+  setDebugHandReveal(enabled: boolean): Promise<void>;
   getFilteredState(viewerId: number): Promise<GameState>;
   getLegalActions(viewerId: number): Promise<LegalActionsResult>;
   getSnapshot(viewerId: number): Promise<{ state: GameState; legalResult: LegalActionsResult }>;
@@ -1531,6 +1642,7 @@ interface MainThreadFallback {
   getCardParseDetails(cardName: string): Promise<unknown>;
   getCardRulings(cardName: string): Promise<unknown>;
   canonicalCardNames(names: string[]): Promise<unknown>;
+  query<K extends EngineQueryName>(name: K, args: EngineQueryArgs<K>): Promise<EngineQueryResult<K>>;
 }
 
 type RestoredFallbackResult = {
@@ -1564,7 +1676,7 @@ function throwInitFailure(result: unknown): void {
 
 async function createMainThreadFallback(): Promise<MainThreadFallback> {
   const runtime = await getMainThreadRuntime();
-  const { wasm, cardData } = runtime;
+  const { wasm, mainThread } = runtime;
 
   function enqueue<T>(operation: () => T): Promise<T> {
     const p = runtime.queue.then(() => operation());
@@ -1576,7 +1688,7 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
   }
 
   return {
-    ensureCardDatabase: () => cardData.ensureCardDatabase(),
+    ensureCardDatabase: () => mainThread.ensureCardDatabase(),
 
     driveContest: (
       nowMs: number,
@@ -1595,13 +1707,22 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
         return outcome as ContestDriveResult;
       }),
 
+    requestTakeback: (actor: PlayerId, aiPlayers: PlayerId[]) =>
+      enqueue(() => wasm.request_takeback_js(actor, Uint8Array.from(aiPlayers)) as TakebackReply),
+
+    respondTakeback: (actor: PlayerId, approve: boolean, aiPlayers: PlayerId[]) =>
+      enqueue(() => (
+        wasm.respond_takeback_js(actor, approve, Uint8Array.from(aiPlayers)) as TakebackReply
+      )),
+
+    cancelTakeback: (actor: PlayerId) =>
+      enqueue(() => wasm.cancel_takeback_js(actor) as TakebackReply),
+
+    pendingTakeback: () =>
+      enqueue(() => (wasm.pending_takeback_js() as TakebackVote | null) ?? null),
+
     submitAction: (action: GameAction, actor: PlayerId) =>
-      enqueue(() => {
-        const r = unwrapActionOutcome<{ events?: SubmitResult["events"]; log_entries?: SubmitResult["log_entries"] }>(
-          wasm.submit_action(actor, action),
-        );
-        return { events: r.events ?? [], log_entries: r.log_entries ?? [] };
-      }),
+      enqueue(() => appliedSubmitResult(unwrapAppliedOutcome(wasm.submit_action(actor, action)))),
 
     submitInteraction: (submission: InteractionSubmission, actor: PlayerId) =>
       enqueue(() => {
@@ -1633,6 +1754,11 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
         const s = wasm.get_game_state();
         if (s === null) throw new Error("NOT_INITIALIZED: get_game_state returned null");
         return s as GameState;
+      }),
+
+    setDebugHandReveal: (enabled: boolean) =>
+      enqueue(() => {
+        wasm.set_debug_hand_reveal(enabled);
       }),
 
     getFilteredState: (viewerId: number) =>
@@ -1857,7 +1983,7 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
       }),
 
     // Card DB is loaded into this same `@wasm/engine` module singleton by
-    // `ensureCardDatabase` (engineRuntime), so the query reads it directly.
+    // `ensureCardDatabase` (main-thread-engine), so the query reads it directly.
     evaluateDeckCompatibility: (request: unknown) =>
       enqueue(() => wasm.evaluate_deck_compatibility_js(request)),
 
@@ -1883,5 +2009,8 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
 
     canonicalCardNames: (names: string[]) =>
       enqueue(() => wasm.canonicalCardNames(names)),
+
+    query: <K extends EngineQueryName>(name: K, args: EngineQueryArgs<K>) =>
+      enqueue(() => runEngineQuery(wasm, name, args)),
   };
 }

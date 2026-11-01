@@ -145,6 +145,7 @@ fn run(route: Route, victim: Victim, sacrifice_other_artifact: bool) -> Outcome 
         .act(GameAction::ActivateAbility {
             source_id,
             ability_index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("reach-guard: the sacrifice ability must be activatable");
 

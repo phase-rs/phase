@@ -85,6 +85,7 @@ fn lazav_multifarious_copies_by_mana_value_x() {
         .act(GameAction::ActivateAbility {
             source_id: lazav,
             ability_index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating Lazav's {X} ability must be accepted");
 

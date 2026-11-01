@@ -102,6 +102,54 @@ reviews:
         `Basic` supertype for singleton rules), not brittle card-name allowlists, and
         banlists must reflect the actual format (Commander vs Duel Commander vs Pauper
         Commander differ).
+    - path: "crates/phase-ast/**"
+      instructions: >-
+        The engine owns ALL game logic; adapters (WASM, WebSocket, Tauri, P2P) are
+        thin serialization boundaries with zero rules. Findings: rules-touching code
+        with no verified `CR <number>: <description>` annotation, or a CR citation
+        whose rule body does not describe the code (CR 119 starting-life / 120 damage
+        / 121 draw are adjacent and confused; 701.x keyword actions and 702.x keyword
+        abilities are arbitrary numbers and hallucination-prone). Do NOT flag compound
+        CR forms `CR X + CR Y` (interacting rules), `CR X / CR Y` (alternatives), or
+        range/subpart `CR 702.45a/b` — these are the documented convention, not
+        format violations. Player-scoped queries on NON-battlefield zones
+        (graveyard/library/hand/exile) must filter by `obj.owner`, not `controller`
+        (CR 108.4a). Zone changes must route through the replacement-aware pipeline
+        (`ProposedEvent::ZoneChange`), not a direct `zones::move_to_zone`, so
+        replacements can apply. Ability costs resolve through one authoritative
+        resolver — flag any call site that destructures or branches on an ability's
+        cost shape. New player-visible `GameState` must be threaded into
+        `filter_state_for_player` or opponents will see hidden information. Hot
+        `im::Vector` zones must use `im` methods (`push_back`/`pop_back`/`iter_mut`),
+        not materialize a std `Vec`; `truncate(n)` must be length-guarded (it panics
+        when n > len). Format/legality checks must use semantic identity (e.g. the
+        `Basic` supertype for singleton rules), not brittle card-name allowlists, and
+        banlists must reflect the actual format (Commander vs Duel Commander vs Pauper
+        Commander differ).
+    - path: "crates/phase-parser/**"
+      instructions: >-
+        The engine owns ALL game logic; adapters (WASM, WebSocket, Tauri, P2P) are
+        thin serialization boundaries with zero rules. Findings: rules-touching code
+        with no verified `CR <number>: <description>` annotation, or a CR citation
+        whose rule body does not describe the code (CR 119 starting-life / 120 damage
+        / 121 draw are adjacent and confused; 701.x keyword actions and 702.x keyword
+        abilities are arbitrary numbers and hallucination-prone). Do NOT flag compound
+        CR forms `CR X + CR Y` (interacting rules), `CR X / CR Y` (alternatives), or
+        range/subpart `CR 702.45a/b` — these are the documented convention, not
+        format violations. Player-scoped queries on NON-battlefield zones
+        (graveyard/library/hand/exile) must filter by `obj.owner`, not `controller`
+        (CR 108.4a). Zone changes must route through the replacement-aware pipeline
+        (`ProposedEvent::ZoneChange`), not a direct `zones::move_to_zone`, so
+        replacements can apply. Ability costs resolve through one authoritative
+        resolver — flag any call site that destructures or branches on an ability's
+        cost shape. New player-visible `GameState` must be threaded into
+        `filter_state_for_player` or opponents will see hidden information. Hot
+        `im::Vector` zones must use `im` methods (`push_back`/`pop_back`/`iter_mut`),
+        not materialize a std `Vec`; `truncate(n)` must be length-guarded (it panics
+        when n > len). Format/legality checks must use semantic identity (e.g. the
+        `Basic` supertype for singleton rules), not brittle card-name allowlists, and
+        banlists must reflect the actual format (Commander vs Duel Commander vs Pauper
+        Commander differ).
     - path: "crates/engine/src/types/**"
       instructions: >-
         Parameterize, don't proliferate. Before accepting a new sibling enum variant,
@@ -114,7 +162,19 @@ reviews:
         leaf-reference layer (life is CR 119, player-only; power/toughness are
         CR 208/209). A *reference* enum (HandSize, LifeTotal) must not carry a
         Fixed/constant payload — that belongs one level up in an expression wrapper.
-    - path: "crates/engine/src/parser/**"
+    - path: "crates/phase-ast/src/types/**"
+      instructions: >-
+        Parameterize, don't proliferate. Before accepting a new sibling enum variant,
+        check it is not a leaf-level parameterization of an existing variant's axis
+        (scope, target, comparator, aggregator, condition shape). Sibling-cluster
+        smell: three or more variants sharing a name root (X / OpponentX / TargetX /
+        AllX) or differing only by a comparator/aggregator/scope label — flag it and
+        recommend one parameterized variant. BUT the parameterization axis must stay
+        within a single CR rule section: do not unify across sections at the
+        leaf-reference layer (life is CR 119, player-only; power/toughness are
+        CR 208/209). A *reference* enum (HandSize, LifeTotal) must not carry a
+        Fixed/constant payload — that belongs one level up in an expression wrapper.
+    - path: "crates/phase-parser/src/parser/**"
       instructions: >-
         Nom 8.0 combinators on the first pass — no exceptions. Findings: any new
         `.contains`/`.starts_with`/`.ends_with`/`.find`/`.split_once` used for parsing

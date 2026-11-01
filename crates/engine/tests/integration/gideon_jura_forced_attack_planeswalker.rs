@@ -203,6 +203,7 @@ fn plus_two_targets_only_the_opponent() {
         .act(GameAction::ActivateAbility {
             source_id: gideon,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activation is legal");
     let stacked = runner

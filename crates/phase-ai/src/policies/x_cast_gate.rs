@@ -498,6 +498,7 @@ fn gate_rejects(ctx: &PolicyContext<'_>) -> Option<PolicyReason> {
         GameAction::ActivateAbility {
             source_id,
             ability_index,
+            ..
         } => {
             let object = state.objects.get(source_id)?;
             let ability = object.abilities.get(*ability_index)?;
@@ -904,6 +905,7 @@ mod tests {
             action: GameAction::ActivateAbility {
                 source_id,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
             metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
         };
@@ -974,6 +976,7 @@ mod tests {
             action: GameAction::ActivateAbility {
                 source_id,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
             metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
         };

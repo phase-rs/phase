@@ -1,6 +1,6 @@
 [package]
 name = "phase-tauri"
-version = "0.115.0"
+version = "0.119.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 
@@ -24,6 +24,9 @@ tauri-plugin-process = "2"
 tauri-plugin-dialog = "2"
 # tauri-utils 2.9.2 has blanket From impls that overlap with time 0.3.48.
 time = { version = "=0.3.47", features = ["parsing"] }
+# reqwest 0.13's `rustls` uses OS trust through rustls-platform-verifier on native
+# targets. Its webpki-root-certs dependency is wasm-only upstream; the downloaded
+# phase-server sidecar uses the separate root workspace's bundled webpki-roots.
 reqwest = { version = "0.13", default-features = false, features = ["brotli", "rustls"] }
 minisign-verify = "0.2.5"
 mdns-sd = "0.21.3"

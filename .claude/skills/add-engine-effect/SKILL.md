@@ -61,17 +61,17 @@ When you build a helper like this, you're not adding complexity — you're **red
 
 **Goal:** The effect exists as a typed variant in the data model.
 
-- [ ] **`crates/engine/src/types/ability.rs` — `Effect` enum**
+- [ ] **`crates/phase-ast/src/types/ability.rs` — `Effect` enum**
   Add the new variant with typed fields. Follow these rules:
   - Use enum fields for semantically distinct data (e.g., `DamageAmount::Fixed(i32)` vs `DamageAmount::TargetPower`). **Never use boolean flags** as substitutes for proper enum variants.
   - Mark optional/new fields `#[serde(default)]` so existing `card-data.json` stays deserializable.
   - If the effect targets something, include a `target: TargetFilter` field.
   - If the effect has a duration, include a `duration: Option<Duration>` field.
 
-- [ ] **`crates/engine/src/types/ability.rs` — `effect_variant_name()`**
+- [ ] **`crates/phase-ast/src/types/ability.rs` — `effect_variant_name()`**
   Add a match arm returning the variant's string name (e.g., `"RevealHand"`). Used in `GameEvent::EffectResolved` and logging.
 
-- [ ] **`crates/engine/src/types/ability.rs` — `EffectKind` enum + `From<&Effect>`**
+- [ ] **`crates/phase-ast/src/types/ability.rs` — `EffectKind` enum + `From<&Effect>`**
   Add an `EffectKind` variant and the corresponding `From<&Effect>` match arm. `EffectKind` is used for effect categorization and coverage tracking.
 
 - [ ] **Does the effect carry an amount that can be X?** Use a `QuantityExpr` field — never a bare `i32` you resolve yourself.
@@ -98,7 +98,7 @@ When you build a helper like this, you're not adding complexity — you're **red
 
 Only needed if the effect has a `target: TargetFilter` field that isn't `None`/`SelfRef`/`Controller`.
 
-- [ ] **`crates/engine/src/game/triggers.rs` — `extract_target_filter_from_effect()`**
+- [ ] **`crates/phase-ast/src/types/ability.rs` — `extract_target_filter_from_effect()`**
   Add the variant to the match arm that extracts `&TargetFilter` from effects. **If you skip this, triggered abilities with this effect will go on the stack without requesting targets — they'll silently fail at resolution.**
 
 - [ ] **`crates/engine/src/game/targeting.rs` — verify `find_legal_targets()`**
@@ -111,7 +111,7 @@ Only needed if the effect has a `target: TargetFilter` field that isn't `None`/`
 
 **Goal:** Oracle text for this effect produces the correct typed `Effect` variant.
 
-- [ ] **`crates/engine/src/parser/oracle_effect/` — the right `parse_*_ast()` helper**
+- [ ] **`crates/phase-parser/src/parser/oracle_effect/` — the right `parse_*_ast()` helper**
   Most new effect parser work now belongs in a typed imperative-family helper, not directly in a flat verb list. Register the pattern in the smallest matching parser:
   - `parse_numeric_imperative_ast()`
   - `parse_zone_counter_ast()`
@@ -124,15 +124,15 @@ Only needed if the effect has a `target: TargetFilter` field that isn't `None`/`
   - `parse_shuffle_ast()`
   - `parse_utility_imperative_ast()`
 
-- [ ] **`crates/engine/src/parser/oracle_effect/` — subject-preserving helpers (if needed)**
+- [ ] **`crates/phase-parser/src/parser/oracle_effect/` — subject-preserving helpers (if needed)**
   If the subject of the sentence carries game-relevant information (who does it, who it targets), preserve it before fallback subject stripping. The current pattern is `try_parse_targeted_controller_gain_life()` in `lower_imperative_clause()`. See the `/oracle-parser` skill § "Subject Stripping" for the full rationale.
 
-- [ ] **`crates/engine/src/parser/oracle_effect/` — `parse_effect_chain()` integration**
+- [ ] **`crates/phase-parser/src/parser/oracle_effect/` — `parse_effect_chain()` integration**
   If the effect commonly appears as part of a multi-sentence ability (e.g., "Look at target opponent's hand. You may choose a nonland card from it. Exile that card."), ensure the sentence splitting and `sub_ability` chaining produces the right structure. The engine composes effects via `sub_ability` chains — don't create mega-effects that do multiple things.
 
   **Absorption pattern:** Some sentences modify a preceding effect rather than creating a new sub_ability. Examples: RevealHand absorbs card filters, SearchLibrary absorbs destinations, `Effect::Mana` absorbs "Spend this mana only to cast..." clauses as `ManaSpendRestriction`, and `Effect::Counter` can absorb follow-up `source_static`. If your new effect has modifier sentences, add absorption logic in `parse_effect_chain()` — don't emit them as separate sub_abilities.
 
-- [ ] **`crates/engine/src/parser/oracle_effect/` — parser tests**
+- [ ] **`crates/phase-parser/src/parser/oracle_effect/` — parser tests**
   Every new pattern **must** have a `#[test]` in the inline test module:
   ```rust
   #[test]
@@ -218,7 +218,7 @@ Only needed if the effect pauses for player input.
 - [ ] **`crates/engine/src/game/engine_resolution_choices.rs` — `handles()` and `handle_resolution_choice()`**
   Register a new prompt in `handles()`, then handle its response in `handle_resolution_choice()`. Validate and deliver the choice through that authority and finish through the shared continuation path, preserving source/target bindings, parent events, and empty or declined results. `engine.rs::apply()` dispatches handled prompts to this module.
 
-- [ ] **`crates/engine/src/types/game_state.rs` — `GameAction` enum**
+- [ ] **`crates/engine/src/types/actions.rs` — `GameAction` enum**
   Add a variant for the player's response if no existing action fits.
 
 - [ ] **`client/src/adapter/types.ts` — `WaitingFor` type**
@@ -283,8 +283,8 @@ Tilt-preferred / direct-cargo fallback (see CLAUDE.md § "Canonical verification
 
 | Mistake | Consequence | Fix |
 |---------|-------------|-----|
-| Missing `extract_target_filter_from_effect` arm | Triggered abilities skip targeting — resolve with no targets, hit `MissingParam` error | Add the variant to the match in `extract_target_filter_from_effect()` in `game/triggers.rs` |
-| Missing `extract_target_filter_from_effect` arm in `stack.rs` | Spells don't fizzle when targets become illegal | Ensure the effect's `TargetFilter` is returned by `extract_target_filter_from_effect` |
+| Missing `extract_target_filter_from_effect` arm | Triggered abilities skip targeting — resolve with no targets, hit `MissingParam` error | Add the variant to the match in `extract_target_filter_from_effect()` in `types/ability.rs` |
+| Missing `extract_target_filter_from_effect` arm | Spells don't fizzle when targets become illegal | Add the variant to the match in `types/ability.rs`; `stack.rs` consumes the helper's result |
 | Creating a mega-effect instead of composing | One-off solution that handles one card pattern | Decompose into building blocks with `sub_ability` chains |
 | Boolean flags on `Effect` variants | Undefined combinations, unclear intent | Use enum variants (see `DamageAmount`, `LifeAmount`) |
 | Added parser logic in the wrong AST helper | Pattern parses inconsistently or bypasses continuation absorption | Register it in the smallest matching `parse_*_ast()` helper |
@@ -321,7 +321,7 @@ AbilityDefinition ──────► card-data.json (exported)
                     Card is cast/triggered → goes on stack
                               │
                               ▼
-                    Stack resolves → extract_target_filter (triggers.rs / stack.rs)
+                    Stack resolves → extract_target_filter (types/ability.rs; called from stack.rs)
                               │
                               ▼
                     resolve_effect (effects/mod.rs) → your handler

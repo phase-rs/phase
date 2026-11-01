@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Named token attack destinations: Effect::Token and Effect::CopyTokenOf gain attack_destination (TokenAttackDestination, NamedDefenderScope), TokenSpec and CopyTokenSpec gain attack_request (TokenAttackRequest), and CopyTokenEntryTail, LiminalEntry and the PendingCounterPostAction copy/liminal token finalizers gain attack_destination (EntryAttackDestination). The fields are serde-defaulted, so an older full-game or P2P peer silently drops a named destination and seats the token as attacking a controller-chosen defender; first contact must refuse the skew."
+}

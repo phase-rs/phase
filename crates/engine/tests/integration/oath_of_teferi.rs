@@ -82,6 +82,7 @@ fn activate(
     runner.act(GameAction::ActivateAbility {
         source_id: pw,
         ability_index,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     })
 }
 

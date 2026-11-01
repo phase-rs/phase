@@ -1,15 +1,17 @@
 //! CR 707.10 + CR 113.7a + CR 608.2k: "copy that ability" names the activated
 //! ability on the stack, so it survives its source leaving and never binds the
-//! permanent the copier is attached to. Countered originals copy nothing
-//! unrelated.
+//! permanent the copier is attached to. A countered original is still copied
+//! as it last existed, and nothing else on the stack ever stands in for it.
 //!
 //! CR 707.10: to copy an activated ability means to put a copy of it onto the
 //! stack. CR 113.7a: once activated, an ability exists on the stack
 //! independently of its source. CR 608.2k: an effect that refers to an
 //! untargeted object named by the trigger condition still affects that object.
-//! CR 701.6a: a countered ability is removed from the stack, so nothing left on
-//! the stack is "that ability".
+//! CR 701.6a + CR 608.2h: a countered ability is removed from the stack, so
+//! nothing left on the stack is "that ability"; the copy is made from its
+//! last-known state (Rings of Brighthearth ruling).
 
+use engine::types::game_state::CastPaymentMode;
 use std::collections::VecDeque;
 
 use engine::game::effects::attach::attach_to;
@@ -250,6 +252,7 @@ impl EquippedBoard {
             .act(GameAction::ActivateAbility {
                 source_id: self.host,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("Host's ability activates");
         drive(&mut self.runner, priority_with_stack(2), VecDeque::new());
@@ -274,6 +277,7 @@ impl EquippedBoard {
             .act(GameAction::ActivateAbility {
                 source_id: self.squire,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("Brass Squire's ability activates");
         drive(
@@ -426,6 +430,7 @@ impl RowanBoard {
             .act(GameAction::ActivateAbility {
                 source_id: self.pw,
                 ability_index,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("the loyalty ability activates");
         drive(&mut self.runner, priority_with_stack(2), VecDeque::new());
@@ -493,26 +498,29 @@ fn rowans_talent_copies_a_loyalty_ability_that_took_the_planeswalker_to_zero() {
 }
 
 /// P0 casts Lightning Bolt at P1 and holds priority, activates Host, then
-/// Stifles the activated ability while the copier's trigger waits. Returns the
-/// events of the trigger's resolution and P1's life delta once the stack is
-/// empty.
+/// Stifles the activated ability while the copier's trigger waits. Asserts that
+/// the trigger's resolution puts a copy of Host's countered ability on the
+/// stack, then empties the stack. Returns the events of the trigger's
+/// resolution, P1's life delta and P0's draws once the stack is empty.
 fn run_with_the_original_countered(
-    mut runner: GameRunner,
+    runner: &mut GameRunner,
     host: ObjectId,
     copier: ObjectId,
     bolt: ObjectId,
     stifle: ObjectId,
-) -> (Vec<GameEvent>, i32) {
+) -> (Vec<GameEvent>, i32, usize) {
     let life_before = runner.state().players[1].life;
+    let library_before = library_size(runner);
     runner.cast(bolt).target_player(P1).commit();
-    drive(&mut runner, priority_with_stack(1), VecDeque::new());
+    drive(runner, priority_with_stack(1), VecDeque::new());
     runner
         .act(GameAction::ActivateAbility {
             source_id: host,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Host's ability activates");
-    drive(&mut runner, priority_with_stack(3), VecDeque::new());
+    drive(runner, priority_with_stack(3), VecDeque::new());
     let activated = runner
         .state()
         .stack
@@ -521,7 +529,7 @@ fn run_with_the_original_countered(
         .map(|entry| entry.id)
         .expect("reach: the activated ability is on the stack");
     runner.cast(stifle).target_object(activated).commit();
-    drive(&mut runner, priority_with_stack(2), VecDeque::new());
+    drive(runner, priority_with_stack(2), VecDeque::new());
     let stack = &runner.state().stack;
     assert!(
         !stack
@@ -532,15 +540,20 @@ fn run_with_the_original_countered(
                 && matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })),
         "reach: the ability was countered while Bolt and the copy trigger remain"
     );
-    let trigger_events = drive(&mut runner, priority_with_stack(1), VecDeque::new());
-    drive(&mut runner, priority_with_empty_stack, VecDeque::new());
-    (trigger_events, runner.state().players[1].life - life_before)
+    let trigger_events = drive(runner, copier_trigger_resolved(copier), VecDeque::new());
+    assert_copy_put_on_stack(runner, &trigger_events, host);
+    drive(runner, priority_with_empty_stack, VecDeque::new());
+    (
+        trigger_events,
+        runner.state().players[1].life - life_before,
+        library_before - library_size(runner),
+    )
 }
 
-/// T6: Rings of Brighthearth must not copy Lightning Bolt when the ability it
-/// names was countered.
+/// T6: Rings of Brighthearth copy the countered ability it names (ruling:
+/// "They resolve even if that ability is countered"), never Lightning Bolt.
 #[test]
-fn rings_do_not_copy_an_unrelated_spell_when_the_ability_was_countered() {
+fn rings_copy_the_countered_ability_and_never_an_unrelated_spell() {
     let mut scenario = main_phase();
     let rings = scenario
         .add_artifact_from_oracle(P0, "Rings of Brighthearth", RINGS_OF_BRIGHTHEARTH)
@@ -552,20 +565,27 @@ fn rings_do_not_copy_an_unrelated_spell_when_the_ability_was_countered() {
     let bolt = add_zero_cost_instant(&mut scenario, "Lightning Bolt", LIGHTNING_BOLT);
     let stifle = add_zero_cost_instant(&mut scenario, "Stifle", STIFLE);
     add_colorless(&mut scenario, 2);
-    let runner = scenario.build();
+    let mut runner = scenario.build();
 
-    let (events, life_delta) = run_with_the_original_countered(runner, host, rings, bolt, stifle);
-    assert_eq!(life_delta, -3, "Lightning Bolt was not copied");
+    let (events, life_delta, draws) =
+        run_with_the_original_countered(&mut runner, host, rings, bolt, stifle);
     assert!(
         copy_effect_resolved(&events, rings),
         "reach: the Rings' copy effect resolved"
     );
+    assert_eq!(
+        runner.state().players[0].mana_pool.total(),
+        0,
+        "reach: the optional {{2}} was paid"
+    );
+    assert_eq!(draws, 1, "only the copy draws: the original was countered");
+    assert_eq!(life_delta, -3, "Lightning Bolt was not copied");
 }
 
-/// T7: Illusionist's Bracers must not copy Lightning Bolt when the ability
-/// they name was countered, and the copy effect still resolves.
+/// T7: Illusionist's Bracers copy the countered ability they name, never
+/// Lightning Bolt, and the copy effect still resolves.
 #[test]
-fn bracers_do_not_copy_an_unrelated_spell_when_the_ability_was_countered() {
+fn bracers_copy_the_countered_ability_and_never_an_unrelated_spell() {
     let mut scenario = main_phase();
     let bracers = scenario
         .add_creature(P0, "Illusionist's Bracers", 0, 0)
@@ -582,12 +602,14 @@ fn bracers_do_not_copy_an_unrelated_spell_when_the_ability_was_countered() {
     let mut runner = scenario.build();
     attach_to(runner.state_mut(), bracers, host);
 
-    let (events, life_delta) = run_with_the_original_countered(runner, host, bracers, bolt, stifle);
-    assert_eq!(life_delta, -3, "Lightning Bolt was not copied");
+    let (events, life_delta, draws) =
+        run_with_the_original_countered(&mut runner, host, bracers, bolt, stifle);
     assert!(
         copy_effect_resolved(&events, bracers),
         "the Bracers' copy effect resolves"
     );
+    assert_eq!(draws, 1, "only the copy draws: the original was countered");
+    assert_eq!(life_delta, -3, "Lightning Bolt was not copied");
 }
 
 const CHROME_COMPANION: &str = "Whenever this creature becomes tapped, you gain 1 life.\n{2}, {T}: Put target card from a graveyard on the bottom of its owner's library.";
@@ -678,6 +700,7 @@ impl TapTriggerBoard {
             .act(GameAction::ActivateAbility {
                 source_id: self.chrome,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("Chrome Companion's ability activates")
             .events;
@@ -778,11 +801,10 @@ fn an_activation_copy_it_trigger_copies_the_activation_not_a_trigger_it_caused()
 }
 
 /// J4: with the activated ability countered (CR 701.6a), the Bracers do not
-/// copy the tap trigger it caused. Whether the countered ability is still
-/// copied is not asserted (Rings of Brighthearth ruling; no departed-ability
-/// record).
+/// copy the tap trigger it caused. The countered activation itself is copied
+/// (CR 113.7a + 608.2h), never its tap trigger.
 #[test]
-fn bracers_do_not_copy_a_trigger_the_countered_activation_caused() {
+fn bracers_copy_the_countered_activation_not_a_trigger_it_caused() {
     let mut board = TapTriggerBoard::new("Illusionist's Bracers", ILLUSIONISTS_BRACERS, true, 2);
     let activated = board.activate_with_copier_on_top();
     board
@@ -805,20 +827,23 @@ fn bracers_do_not_copy_a_trigger_the_countered_activation_caused() {
         "reach: the activation was countered while its tap trigger and the copy trigger remain"
     );
     let events = board.resolve_copier_trigger();
-    assert!(
-        copy_effect_resolved(&events, board.copier),
-        "reach: the Bracers' copy effect resolved"
-    );
+    assert_copy_put_on_stack(&board.runner, &events, board.chrome);
     assert_eq!(
         board.life_delta_after_stack_empties(),
         1,
         "the tap trigger resolves once and is never copied"
     );
+    assert_eq!(
+        board.runner.state().objects[&board.card].zone,
+        Zone::Library,
+        "the copy put the card on the bottom of its owner's library"
+    );
 }
 
 /// J5: two activations of one source (CR 117.1b). Each Bracers trigger names
 /// its own activation; with the second countered, its trigger never copies the
-/// first one still waiting below.
+/// first one still waiting below. With the second countered, its trigger copies
+/// that second activation from its last-known state.
 #[test]
 fn bracers_copy_each_activation_not_an_earlier_one_of_the_same_source() {
     let mut scenario = main_phase();
@@ -868,6 +893,7 @@ fn bracers_copy_each_activation_not_an_earlier_one_of_the_same_source() {
                 .act(GameAction::ActivateAbility {
                     source_id: kavu,
                     ability_index,
+                    payment_mode: CastPaymentMode::Auto,
                 })
                 .expect("Stone Kavu's ability activates")
                 .events,
@@ -923,5 +949,10 @@ fn bracers_copy_each_activation_not_an_earlier_one_of_the_same_source() {
         runner.state().objects[&kavu].power,
         Some(5),
         "the first activation resolves twice (original + its own copy); the second trigger copies nothing of it"
+    );
+    assert_eq!(
+        runner.state().objects[&kavu].toughness,
+        Some(4),
+        "the countered white activation is copied once, by its own trigger"
     );
 }

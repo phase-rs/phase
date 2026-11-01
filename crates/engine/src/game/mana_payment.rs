@@ -6,7 +6,7 @@ use crate::game::quantity::{
 };
 use crate::types::ability::ManaSpendPermission;
 use crate::types::events::{GameEvent, ManaTapState};
-use crate::types::game_state::{GameState, ShardChoice};
+use crate::types::game_state::{ActivationShardChoice, GameState, ShardChoice};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::{
     ExactManaRemovalError, ManaCost, ManaCostShard, ManaExpiry, ManaPipId, ManaPool,
@@ -717,6 +717,302 @@ pub(super) fn mana_cost_for_phyrexian_choices(
         shards,
         generic: *generic,
     }
+}
+
+/// CR 107.4f + CR 118.13a: whether `shard` is a printed Phyrexian or hybrid
+/// Phyrexian symbol. Read from the raw symbol, never through a payment-only
+/// promotion (`effective_shard_requirement`), so a K'rrik-style permission to pay
+/// life for colored mana never makes an ordinary colored symbol part of an
+/// activation's announcement (CR 601.2b).
+pub(crate) fn is_native_phyrexian_shard(shard: ManaCostShard) -> bool {
+    matches!(
+        shard_to_mana_type(shard),
+        ShardRequirement::Phyrexian(..) | ShardRequirement::HybridPhyrexian(..)
+    )
+}
+
+/// CR 107.4f + CR 119.4: whether some symbol of `cost` can be paid with life —
+/// a printed Phyrexian symbol, or a symbol a payment permission (K'rrik, Son of
+/// Yawgmoth: "For each {B} in a cost, you may pay 2 life rather than pay that
+/// mana.") promotes under `life_colors`, read through the same
+/// `effective_shard_requirement` the payer uses.
+pub(crate) fn cost_has_life_payable_shard(
+    cost: &ManaCost,
+    life_colors: crate::types::mana::LifePaymentColors,
+) -> bool {
+    let ManaCost::Cost { shards, .. } = cost else {
+        return false;
+    };
+    shards.iter().any(|shard| {
+        is_phyrexian_requirement(&effective_shard_requirement(
+            shard_to_mana_type(*shard),
+            life_colors,
+        ))
+    })
+}
+
+/// CR 107.4f + CR 118.13a + CR 601.2b: the canonical identities — index and raw
+/// symbol — of the printed Phyrexian symbols in `cost`, in printed order. These
+/// are exactly the symbols whose payment is announced as an ability is proposed.
+pub(crate) fn native_phyrexian_shards(cost: &ManaCost) -> Vec<(usize, ManaCostShard)> {
+    match cost {
+        ManaCost::Cost { shards, .. } => shards
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, shard)| is_native_phyrexian_shard(*shard))
+            .collect(),
+        ManaCost::NoCost
+        | ManaCost::SelfManaCost
+        | ManaCost::SelfManaValue
+        | ManaCost::SelfManaCostReduced { .. } => Vec::new(),
+    }
+}
+
+/// CR 601.2b + CR 118.13a + CR 107.4f: the announcement that pays every printed
+/// Phyrexian symbol of `cost` with 2 life, keyed by its index in `cost`.
+pub(crate) fn all_life_announcement(cost: &ManaCost) -> Vec<ActivationShardChoice> {
+    native_phyrexian_shards(cost)
+        .into_iter()
+        .map(|(shard_index, shard)| ActivationShardChoice {
+            shard_index,
+            shard,
+            choice: ShardChoice::PayLife,
+        })
+        .collect()
+}
+
+/// CR 107.4f: the mana a Phyrexian symbol stands for when it is paid with mana —
+/// one mana of its color, or of either color for a hybrid Phyrexian symbol.
+/// `None` for every symbol that is not Phyrexian.
+pub(crate) fn phyrexian_mana_equivalent(shard: ManaCostShard) -> Option<ManaCostShard> {
+    use ManaCostShard as S;
+    match shard {
+        S::PhyrexianWhite => Some(S::White),
+        S::PhyrexianBlue => Some(S::Blue),
+        S::PhyrexianBlack => Some(S::Black),
+        S::PhyrexianRed => Some(S::Red),
+        S::PhyrexianGreen => Some(S::Green),
+        S::PhyrexianWhiteBlue => Some(S::WhiteBlue),
+        S::PhyrexianWhiteBlack => Some(S::WhiteBlack),
+        S::PhyrexianBlueBlack => Some(S::BlueBlack),
+        S::PhyrexianBlueRed => Some(S::BlueRed),
+        S::PhyrexianBlackRed => Some(S::BlackRed),
+        S::PhyrexianBlackGreen => Some(S::BlackGreen),
+        S::PhyrexianRedWhite => Some(S::RedWhite),
+        S::PhyrexianRedGreen => Some(S::RedGreen),
+        S::PhyrexianGreenWhite => Some(S::GreenWhite),
+        S::PhyrexianGreenBlue => Some(S::GreenBlue),
+        S::White
+        | S::Blue
+        | S::Black
+        | S::Red
+        | S::Green
+        | S::Colorless
+        | S::Snow
+        | S::X
+        | S::TwoOrMoreColorSource
+        | S::WhiteBlue
+        | S::WhiteBlack
+        | S::BlueBlack
+        | S::BlueRed
+        | S::BlackRed
+        | S::BlackGreen
+        | S::RedWhite
+        | S::RedGreen
+        | S::GreenWhite
+        | S::GreenBlue
+        | S::TwoWhite
+        | S::TwoBlue
+        | S::TwoBlack
+        | S::TwoRed
+        | S::TwoGreen
+        | S::ColorlessWhite
+        | S::ColorlessBlue
+        | S::ColorlessBlack
+        | S::ColorlessRed
+        | S::ColorlessGreen => None,
+    }
+}
+
+/// CR 118.13a + CR 601.2b + CR 601.2h: the announcement options for an
+/// activation's printed Phyrexian symbols. STRUCTURAL: each symbol may be
+/// announced as either payment. Nothing is paid by announcing, and the resources
+/// are checked when the total is paid (CR 601.2h; CR 118.3 + CR 119.4), after the
+/// CR 601.2g mana-ability opportunity — whose mana abilities can add the mana or,
+/// as a side effect, the life (Pristine Talisman). So neither the current pool
+/// nor the current life total narrows an option here.
+pub(crate) fn native_phyrexian_announcement_options(
+    cost: &ManaCost,
+) -> Vec<crate::types::game_state::PhyrexianShard> {
+    let ManaCost::Cost { shards, .. } = cost else {
+        return Vec::new();
+    };
+    shards
+        .iter()
+        .enumerate()
+        .filter_map(|(shard_index, shard)| {
+            let color = match shard_to_mana_type(*shard) {
+                ShardRequirement::Phyrexian(color)
+                | ShardRequirement::HybridPhyrexian(color, _) => mana_type_to_color_fallback(color),
+                ShardRequirement::Single(_)
+                | ShardRequirement::Hybrid(..)
+                | ShardRequirement::TwoGenericHybrid(_)
+                | ShardRequirement::Snow
+                | ShardRequirement::TwoOrMoreColorSource
+                | ShardRequirement::X
+                | ShardRequirement::ColorlessHybrid(_)
+                | ShardRequirement::TwoGenericHybridPhyrexian(_) => return None,
+            };
+            Some(crate::types::game_state::PhyrexianShard {
+                shard_index,
+                color,
+                options: crate::types::game_state::ShardOptions::ManaOrLife,
+            })
+        })
+        .collect()
+}
+
+/// CR 118.13a + CR 601.2b: whether `records` is a complete, well-formed
+/// announcement for `cost`: exactly one record per printed Phyrexian symbol, each
+/// keyed by that symbol's index and carrying that same raw symbol. A duplicate,
+/// out-of-range, symbol-mismatched or missing key fails.
+pub(crate) fn native_announcement_matches(
+    cost: &ManaCost,
+    records: &[ActivationShardChoice],
+) -> bool {
+    let domain = native_phyrexian_shards(cost);
+    // With as many records as symbols, one matching record per symbol leaves no
+    // room for a duplicate or a stray key.
+    domain.len() == records.len()
+        && domain.iter().all(|&(index, shard)| {
+            let mut keyed = records.iter().filter(|record| record.shard_index == index);
+            matches!(keyed.next(), Some(record) if record.shard == shard) && keyed.next().is_none()
+        })
+}
+
+/// CR 107.4f + CR 601.2b + CR 601.2h: the cost a manually paid activation
+/// actually pays once its announcement is bound. A Phyrexian symbol announced as
+/// mana becomes the colored (or hybrid) mana it stands for, so only a live
+/// payment-only permission can offer life for it; a symbol announced as life
+/// keeps its Phyrexian shape and is paid with 2 life. Generic mana and symbol
+/// order are unchanged, so every index still names the same printed symbol.
+pub(crate) fn native_phyrexian_payment_view(
+    cost: &ManaCost,
+    native: &[ActivationShardChoice],
+) -> ManaCost {
+    let ManaCost::Cost { shards, generic } = cost else {
+        return cost.clone();
+    };
+    let shards = shards
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, shard)| {
+            match native
+                .iter()
+                .find(|record| record.shard_index == index && record.shard == shard)
+                .map(|record| record.choice)
+            {
+                Some(ShardChoice::PayMana) => phyrexian_mana_equivalent(shard).unwrap_or(shard),
+                Some(ShardChoice::PayLife) | None => shard,
+            }
+        })
+        .collect();
+    ManaCost::Cost {
+        shards,
+        generic: *generic,
+    }
+}
+
+/// CR 601.2f + CR 601.2g + CR 118.13a: the mana component of an activation's
+/// SELECTED total — its payment view without the Phyrexian symbols announced as
+/// 2 life. Whether this is nonzero is what decides the CR 601.2g mana-ability
+/// opportunity; it is read with no payment-only permission, so a K'rrik-style
+/// grant never erases the opportunity for colored mana it could later pay.
+pub(crate) fn native_selected_mana(cost: &ManaCost, native: &[ActivationShardChoice]) -> ManaCost {
+    let view = native_phyrexian_payment_view(cost, native);
+    let ManaCost::Cost { shards, generic } = view else {
+        return view;
+    };
+    let shards = shards
+        .into_iter()
+        .enumerate()
+        .filter(|(index, _)| {
+            !native
+                .iter()
+                .any(|record| record.shard_index == *index && record.choice == ShardChoice::PayLife)
+        })
+        .map(|(_, shard)| shard)
+        .collect();
+    ManaCost::Cost { shards, generic }
+}
+
+/// CR 107.4f + CR 601.2h: the per-symbol choice vector the existing payer
+/// consumes for `view` — one entry per Phyrexian-shaped symbol under the LIVE
+/// `life_colors`, in printed order — rebuilt from raw-index-keyed records, so a
+/// permission gained or lost since a selection never shifts another symbol's
+/// choice.
+///
+/// * a symbol announced as life (`native`) is paid with life;
+/// * otherwise the actual selection for that index applies;
+/// * a symbol with no selection (newly promoted by a permission gained after the
+///   selection) is paid with mana — a new optional grant never spends life
+///   silently.
+///
+/// `None` when a selection is no longer honorable: a record keyed to a symbol
+/// the locked cost does not hold, or a life selection for a symbol that is no
+/// longer Phyrexian-shaped (its permission was lost) — never converted silently.
+pub(crate) fn phyrexian_choice_vector(
+    raw: &ManaCost,
+    view: &ManaCost,
+    life_colors: crate::types::mana::LifePaymentColors,
+    native: &[ActivationShardChoice],
+    selected: &[ActivationShardChoice],
+) -> Option<Vec<ShardChoice>> {
+    let (
+        ManaCost::Cost {
+            shards: raw_shards, ..
+        },
+        ManaCost::Cost { shards, .. },
+    ) = (raw, view)
+    else {
+        return Some(Vec::new());
+    };
+    let names_locked_symbol =
+        |record: &ActivationShardChoice| raw_shards.get(record.shard_index) == Some(&record.shard);
+    if !native.iter().all(names_locked_symbol) || !selected.iter().all(names_locked_symbol) {
+        return None;
+    }
+    let phyrexian_shaped = |index: usize| {
+        is_phyrexian_requirement(&effective_shard_requirement(
+            shard_to_mana_type(shards[index]),
+            life_colors,
+        ))
+    };
+    if selected.iter().any(|record| {
+        record.choice == ShardChoice::PayLife && !phyrexian_shaped(record.shard_index)
+    }) {
+        return None;
+    }
+    Some(
+        (0..shards.len())
+            .filter(|&index| phyrexian_shaped(index))
+            .map(|index| {
+                let announced = native
+                    .iter()
+                    .find(|record| record.shard_index == index)
+                    .map(|record| record.choice);
+                if announced == Some(ShardChoice::PayLife) {
+                    return ShardChoice::PayLife;
+                }
+                selected
+                    .iter()
+                    .find(|record| record.shard_index == index)
+                    .map_or(ShardChoice::PayMana, |record| record.choice)
+            })
+            .collect(),
+    )
 }
 
 /// CR 107.4f + CR 118.3: Order shard indices so every non-Phyrexian shard is
@@ -4806,7 +5102,11 @@ mod tests {
         assert!(state.players[0].mana_pool.is_empty());
 
         // Flag P0 → seeded to the cap for each of the six types; P1 untouched.
-        state.mark_unbounded_loop(state.players[0].id, &INFINITE_MANA_AXES);
+        state.mark_unbounded_loop(
+            state.players[0].id,
+            &INFINITE_MANA_AXES,
+            &INFINITE_MANA_AXES,
+        );
         refill_infinite_mana(&mut state);
         for color in INFINITE_MANA_TYPES {
             let n = state.players[0]
@@ -4915,9 +5215,13 @@ mod tests {
         let p1 = state.players[1].id;
 
         // P0 marked with the six Mana axes → all six colors seeded to the cap.
-        state.mark_unbounded_loop(p0, &INFINITE_MANA_AXES);
+        state.mark_unbounded_loop(p0, &INFINITE_MANA_AXES, &INFINITE_MANA_AXES);
         // P1 marked with ONLY a non-mana axis → must never receive mana.
-        state.mark_unbounded_loop(p1, &[ResourceAxis::TokensCreated]);
+        state.mark_unbounded_loop(
+            p1,
+            &[ResourceAxis::TokensCreated],
+            &[ResourceAxis::TokensCreated],
+        );
 
         refill_infinite_mana(&mut state);
 
@@ -4950,7 +5254,11 @@ mod tests {
         let p0 = state.players[0].id;
 
         // Record ONLY the colorless mana axis (the combo detector's real certificate).
-        state.mark_unbounded_loop(p0, &[ResourceAxis::Mana(ManaType::Colorless)]);
+        state.mark_unbounded_loop(
+            p0,
+            &[ResourceAxis::Mana(ManaType::Colorless)],
+            &[ResourceAxis::Mana(ManaType::Colorless)],
+        );
         refill_infinite_mana(&mut state);
 
         let count_of = |color: ManaType| {
@@ -4992,7 +5300,7 @@ mod tests {
         let mut state = GameState::new_two_player(0);
         let p0 = state.players[0].id;
 
-        state.mark_unbounded_loop(p0, &INFINITE_MANA_AXES);
+        state.mark_unbounded_loop(p0, &INFINITE_MANA_AXES, &INFINITE_MANA_AXES);
         refill_infinite_mana(&mut state);
 
         for color in INFINITE_MANA_TYPES {

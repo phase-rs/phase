@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "CR 800.4a + CR 603.6c: ZoneChangeRecord gains departure (Moved / LeftGame / LeftGamePhasedOut), stamped on the zone changes of objects that leave the game with their owner; an older full-game/P2P peer drops it, reads those departures as exiles, and fires exile observers (Soulherder) and leave-the-battlefield observers of phased-out permanents that the newer peer does not"
+}

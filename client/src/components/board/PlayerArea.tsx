@@ -1,3 +1,4 @@
+import type { ParseKeys } from "i18next";
 import { useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { Reorder, useDragControls } from "framer-motion";
 import { useTranslation } from "react-i18next";
@@ -69,7 +70,7 @@ interface MiddleCellDescriptor {
   debugLabel: string;
   flexZone?: string;
   /** i18n key (game namespace) for the edit-mode cell label. */
-  labelKey: string;
+  labelKey: ParseKeys<"game">;
   /** Edit-mode ring + fill that bounds the cell in a distinct hue. */
   editClass: string;
   /** Edit-mode label-badge background (matches `editClass`'s hue). */

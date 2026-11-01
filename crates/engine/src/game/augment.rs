@@ -9,7 +9,6 @@ use crate::types::ability::{
     AbilityDefinition, AbilityKind, CombineSource, CopiableValues, Effect, EffectError, EffectKind,
     ResolvedAbility, TargetFilter, TargetRef, TriggerDefinition,
 };
-use crate::types::card::{PrintedCardRef, TokenImageRef};
 use crate::types::card_type::{CardType, Supertype};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingContinuation, WaitingFor};
@@ -19,7 +18,7 @@ use crate::types::mana::ManaColor;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
-use super::game_object::{DisplaySource, MergeKind};
+use super::game_object::{DisplayIdentity, MergeKind};
 use super::printed_cards;
 use super::sba::move_to_graveyard_via_pipeline;
 use super::zones;
@@ -299,9 +298,7 @@ fn combine_card_with_host(
         zones::absorb_component(state, augment_id, Some(zone));
     }
 
-    let Some((values, display_source, printed_ref, token_image_ref, token_art)) =
-        merged_copiable_values(state, augment_id, host_id)
-    else {
+    let Some((values, display)) = merged_copiable_values(state, augment_id, host_id) else {
         return;
     };
     remove_merge_layer_effect(state, host_id);
@@ -323,16 +320,7 @@ fn combine_card_with_host(
         }
     }
 
-    install_merge_layer_effect(
-        state,
-        host_id,
-        controller,
-        values,
-        display_source,
-        printed_ref,
-        token_image_ref,
-        token_art,
-    );
+    install_merge_layer_effect(state, host_id, controller, values, display);
     events.push(GameEvent::Augmented {
         merged_id: host_id,
         augmenting_id: augment_id,
@@ -340,18 +328,11 @@ fn combine_card_with_host(
     });
 }
 
-#[allow(clippy::type_complexity)]
 fn merged_copiable_values(
     state: &GameState,
     augment_id: ObjectId,
     host_id: ObjectId,
-) -> Option<(
-    CopiableValues,
-    DisplaySource,
-    Option<PrintedCardRef>,
-    Option<TokenImageRef>,
-    Option<crate::types::card::TokenArtDescriptor>,
-)> {
+) -> Option<(CopiableValues, DisplayIdentity)> {
     let augment = state.objects.get(&augment_id)?;
     let host = state.objects.get(&host_id)?;
     let host_values = crate::game::layers::compute_current_copiable_values(state, host_id)
@@ -403,13 +384,7 @@ fn merged_copiable_values(
         name_origin: Default::default(),
     };
 
-    Some((
-        values,
-        host.display_source,
-        host.printed_ref.clone(),
-        host.token_image_ref.clone(),
-        host.token_art.clone(),
-    ))
+    Some((values, host.display_identity()))
 }
 
 type MergedAbilitySets = (

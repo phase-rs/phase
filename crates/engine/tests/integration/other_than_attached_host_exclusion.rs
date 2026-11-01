@@ -308,6 +308,7 @@ fn kjeldoran_pride_reattach_targets_every_creature_but_host() {
         .act(GameAction::ActivateAbility {
             source_id: aura,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("the attach ability can be activated");
     match &runner.state().waiting_for {

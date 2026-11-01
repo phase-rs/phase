@@ -384,6 +384,7 @@ fn activate(runner: &mut GameRunner, source_id: ObjectId, ability_index: usize) 
         .act(GameAction::ActivateAbility {
             source_id,
             ability_index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .unwrap_or_else(|err| panic!("the ability activates: {err:?}"));
 }
@@ -4973,6 +4974,7 @@ fn removing_zero_counters_adds_no_mana_against_a_stale_amount() {
         .act(GameAction::ActivateAbility {
             source_id: font,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .unwrap_or_else(|err| panic!("the ability activates: {err:?}"));
 

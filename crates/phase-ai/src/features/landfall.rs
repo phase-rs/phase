@@ -2,11 +2,11 @@
 //!
 //! Parser AST verification (Phase A task 1) — VERIFIED:
 //! - `TriggerMode::ChangesZone` captures land-ETB events
-//!   (see `crates/engine/src/types/triggers.rs:24-27`, CR 603.6a).
+//!   (see `crates/phase-ast/src/types/triggers.rs`, CR 603.6a).
 //! - `ControllerRef::You` vs `ControllerRef::Opponent` distinguish controller
-//!   in trigger filters (see `crates/engine/src/types/ability.rs:813-818`).
+//!   in trigger filters (see `crates/phase-ast/src/types/ability.rs`).
 //! - `Zone::Battlefield` is recoverable from `TriggerDefinition.destination`
-//!   (see `crates/engine/src/types/ability.rs:4443`).
+//!   (see `crates/phase-ast/src/types/ability.rs`).
 //!
 //! No parser remediation required — landfall-shaped triggers can be
 //! structurally classified using existing typed AST.
