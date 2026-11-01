@@ -117,3 +117,4 @@ A staring contest plays under a large eye (`StaringStage`). None of this reaches
 * P2P guests see opponent click counters only at state transitions (no live `ContestProgress` over the P2P wire).
 * The WASM batch decoder (`decode_contest_clicks`) takes `JsValue` and cannot run in a native unit test; its guarantees are covered at the P2P boundary (`contestClickBuffer`, host adapter tests) and by the engine's own sequence/identity rejection.
 * Server restarts cancel a running contest.
+* The staring-contest animation is frontend-only (`client/src/components/contest/*`); its behaviour is covered by `__tests__/staring.test.ts` and `__tests__/ContestOverlay.test.tsx`.
