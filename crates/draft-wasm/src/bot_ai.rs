@@ -65,6 +65,7 @@ use engine::database::CardDatabase;
 use phase_ai::config::AiDifficulty;
 use phase_ai::draft_eval;
 use phase_ai::draft_guide::{self, PoolProfile};
+use phase_ai::draft_profile::{DraftProfile, PackPosition, ProfileCard};
 use phase_ai::winston_eval::{
     draft_progress, valuate_turn, CardContext, ColorPassTally, DraftCardFacts, OpponentRead,
     WinstonStrategy, WinstonTurn,
@@ -88,6 +89,26 @@ pub enum PickEnhancement {
     DraftGuides,
 }
 
+/// Which booster a pick is from and how many cards it held when opened, as
+/// recorded by the draft session (`DraftSession::cards_in_pack`). Packs shrink
+/// by one card per pick, so the pick-in-pack position is `cards_in_pack` minus
+/// the cards still in the pack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PackShape {
+    pub pack_number: u8,
+    pub cards_in_pack: u8,
+}
+
+impl PackShape {
+    fn position(self, cards_remaining: usize) -> PackPosition {
+        let taken = usize::from(self.cards_in_pack).saturating_sub(cards_remaining);
+        PackPosition {
+            pack_number: usize::from(self.pack_number),
+            pick_in_pack: taken + 1,
+        }
+    }
+}
+
 /// Select a card index from the pack for a bot to pick.
 ///
 /// Strategy scales with difficulty per D-02:
@@ -106,6 +127,7 @@ pub fn bot_pick(
     prior_picks: &[DraftCardInstance],
     card_db: Option<&CardDatabase>,
     enhancement: PickEnhancement,
+    shape: PackShape,
     rng: &mut impl Rng,
 ) -> usize {
     if pack.is_empty() {
@@ -116,10 +138,10 @@ pub fn bot_pick(
         AiDifficulty::VeryEasy => rng.random_range(0..pack.len()),
         AiDifficulty::Easy => pick_by_rarity(pack),
         AiDifficulty::Medium | AiDifficulty::Hard => {
-            pick_by_evaluation(pack, prior_picks, card_db, enhancement, false)
+            pick_by_evaluation(pack, prior_picks, card_db, enhancement, shape, false)
         }
         AiDifficulty::VeryHard | AiDifficulty::CEDH => {
-            pick_by_evaluation(pack, prior_picks, card_db, enhancement, true)
+            pick_by_evaluation(pack, prior_picks, card_db, enhancement, shape, true)
         }
     }
 }
@@ -133,6 +155,7 @@ pub fn bot_pick(
 /// takes for a multi-card step is deliberately untuned (out of scope).
 ///
 /// Returns indices into the original `pack` slice, in selection order.
+#[allow(clippy::too_many_arguments)] // every argument is an independent pick-context input
 pub fn bot_picks(
     pack: &[DraftCardInstance],
     count: usize,
@@ -140,6 +163,7 @@ pub fn bot_picks(
     prior_picks: &[DraftCardInstance],
     card_db: Option<&CardDatabase>,
     enhancement: PickEnhancement,
+    shape: PackShape,
     rng: &mut impl Rng,
 ) -> Vec<usize> {
     // Candidates carry their original index so the caller can map back to
@@ -160,6 +184,7 @@ pub fn bot_picks(
             prior_picks,
             card_db,
             enhancement,
+            shape,
             rng,
         );
         candidates.swap_remove(position);
@@ -218,6 +243,7 @@ fn pick_by_evaluation(
     prior_picks: &[DraftCardInstance],
     card_db: Option<&CardDatabase>,
     enhancement: PickEnhancement,
+    shape: PackShape,
     strict: bool,
 ) -> usize {
     let card_db = match card_db {
@@ -232,38 +258,80 @@ fn pick_by_evaluation(
     let on_color_bonus: f64 = if strict { 6.0 } else { 4.0 };
     let off_color_penalty: f64 = if strict { -2.0 } else { 0.0 };
 
-    let guide_pool = match enhancement {
+    // A set-family profile (see `phase_ai::draft_profile`) supersedes the draft
+    // guide for the sets it covers, and is chosen for the whole pack: scores from
+    // different formulas are never compared. It is a `PickEnhancement` like the
+    // guides, so with it off the base heuristic scores every set.
+    let pack_profile = match enhancement {
         PickEnhancement::Off => None,
-        PickEnhancement::DraftGuides => Some(pool_profile(prior_picks, card_db)),
+        PickEnhancement::DraftGuides => pack
+            .first()
+            .and_then(|c| DraftProfile::for_set(&c.set_code))
+            .filter(|p| pack.iter().all(|c| p.covers_set(&c.set_code))),
+    };
+
+    let score: Box<dyn Fn(&DraftCardInstance) -> f64 + '_> = match pack_profile {
+        Some(profile) => {
+            // The pool is re-read on every pick, so the profile's adaptive policy
+            // tracks the draft with no stored state.
+            let pool: Vec<ProfileCard<'_>> = prior_picks
+                .iter()
+                .map(|c| profile_card(c, Some(card_db)))
+                .collect();
+            let position = shape.position(pack.len());
+            Box::new(move |card| {
+                profile
+                    .score_pick(
+                        &profile_card(card, Some(card_db)),
+                        &pool,
+                        position,
+                        card_quality(card, Some(card_db)),
+                        curve_bonus(card.cmc, pick_number) as f64,
+                    )
+                    .map_or(0.0, |s| s.total)
+            })
+        }
+        None => {
+            let guide_pool = match enhancement {
+                PickEnhancement::Off => None,
+                PickEnhancement::DraftGuides => Some(pool_profile(prior_picks, card_db)),
+            };
+            Box::new(move |card| {
+                eval_score(
+                    card,
+                    card_db,
+                    &preferred_colors,
+                    pick_number,
+                    on_color_bonus,
+                    off_color_penalty,
+                    guide_pool.as_ref(),
+                )
+            })
+        }
     };
 
     pack.iter()
         .enumerate()
         .max_by(|(_, a), (_, b)| {
-            let score_a = eval_score(
-                a,
-                card_db,
-                &preferred_colors,
-                pick_number,
-                on_color_bonus,
-                off_color_penalty,
-                guide_pool.as_ref(),
-            );
-            let score_b = eval_score(
-                b,
-                card_db,
-                &preferred_colors,
-                pick_number,
-                on_color_bonus,
-                off_color_penalty,
-                guide_pool.as_ref(),
-            );
-            score_a
-                .partial_cmp(&score_b)
+            score(a)
+                .partial_cmp(&score(b))
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
         .map(|(i, _)| i)
         .unwrap_or(0)
+}
+
+/// Project a published card and its database face into the profile scorer's input.
+fn profile_card<'a>(
+    card: &'a DraftCardInstance,
+    card_db: Option<&'a CardDatabase>,
+) -> ProfileCard<'a> {
+    ProfileCard {
+        name: &card.name,
+        set_code: &card.set_code,
+        colors: &card.colors,
+        face: card_db.and_then(|db| db.get_face_by_name(&card.name)),
+    }
 }
 
 /// Pick-context score for a card: intrinsic card quality (`phase_ai::draft_eval`)
@@ -686,6 +754,31 @@ pub fn winston_decision(
 mod tests {
     use super::*;
     use rand::SeedableRng;
+
+    /// First pick of a 15-card first pack.
+    const TEST_SHAPE: PackShape = PackShape {
+        pack_number: 0,
+        cards_in_pack: 15,
+    };
+
+    #[test]
+    fn pack_shape_position_uses_the_recorded_pack_size() {
+        // 2-card packs: pick 1 of pack 2 is a later pack, not pool-size-derived.
+        let shape = PackShape {
+            pack_number: 1,
+            cards_in_pack: 2,
+        };
+        assert_eq!(
+            shape.position(2),
+            PackPosition {
+                pack_number: 1,
+                pick_in_pack: 1
+            }
+        );
+        assert_eq!(shape.position(1).pick_in_pack, 2);
+        // 15-card pack, 5 cards left: the 11th pick.
+        assert_eq!(TEST_SHAPE.position(5).pick_in_pack, 11);
+    }
     use rand_chacha::ChaCha20Rng;
 
     fn pack(size: usize) -> Vec<DraftCardInstance> {
@@ -750,6 +843,7 @@ mod tests {
                     &prior,
                     None,
                     PickEnhancement::Off,
+                    TEST_SHAPE,
                     &mut rng
                 ),
                 0,
@@ -769,6 +863,7 @@ mod tests {
                 &short,
                 None,
                 PickEnhancement::Off,
+                TEST_SHAPE,
                 &mut rng
             ),
             1
@@ -1000,6 +1095,11 @@ mod tests {
             &[],
             Some(db),
             enhancement,
+            // The contest pack is untouched: this is the first pick of pack one.
+            PackShape {
+                pack_number: 0,
+                cards_in_pack: pack.len() as u8,
+            },
             &mut rng,
         );
         pack[index].name.clone()
@@ -1889,6 +1989,7 @@ mod tests {
             &[],
             None,
             PickEnhancement::Off,
+            TEST_SHAPE,
             &mut rng,
         );
         assert_eq!(picked.len(), 2);
@@ -1904,6 +2005,7 @@ mod tests {
             &[],
             None,
             PickEnhancement::Off,
+            TEST_SHAPE,
             &mut rng,
         );
         assert_eq!(clamped, vec![0]);
@@ -1916,6 +2018,7 @@ mod tests {
             &[],
             None,
             PickEnhancement::Off,
+            TEST_SHAPE,
             &mut rng
         )
         .is_empty());
@@ -1926,6 +2029,7 @@ mod tests {
             &[],
             None,
             PickEnhancement::Off,
+            TEST_SHAPE,
             &mut rng
         )
         .is_empty());
@@ -1942,6 +2046,7 @@ mod tests {
                 &[],
                 None,
                 PickEnhancement::Off,
+                TEST_SHAPE,
                 &mut rng_a
             ),
             vec![bot_pick(
@@ -1950,6 +2055,7 @@ mod tests {
                 &[],
                 None,
                 PickEnhancement::Off,
+                TEST_SHAPE,
                 &mut rng_b
             )]
         );
