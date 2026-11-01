@@ -836,6 +836,104 @@ fn magus_of_the_minds_dated_grant_lets_the_exiled_land_be_played_this_turn() {
     assert_eq!(lands_played(runner.state(), P0), 1);
 }
 
+/// The Omenkeel: "Whenever a Vehicle you control deals combat damage to a
+/// player, that player exiles that many cards from the top of their library.
+/// You may play lands from among those cards for as long as they remain
+/// exiled." CR 601.3 + CR 712.11c: a lingering land-only grant authorizes no
+/// spell, so Bala Ged Recovery's sorcery front exiled this way is not castable.
+/// A lingering grant does not carry the frozen face policy, so a modal card's
+/// land back is not admitted through it either (the boundary: no modal
+/// land-back play via lingering grants). Reach guard: a plain land from the
+/// same exile stays playable.
+#[test]
+fn omenkeels_land_grant_does_not_let_an_exiled_modal_cards_spell_face_be_cast() {
+    let Some(db) = load_db() else { return };
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let omenkeel = s.add_real_card(P0, "The Omenkeel", Zone::Battlefield, db);
+    let elves = s.add_real_card(P0, "Llanowar Elves", Zone::Battlefield, db);
+    for _ in 0..3 {
+        s.add_real_card(P0, "Forest", Zone::Battlefield, db);
+    }
+    let opt = s.add_real_card(P0, "Opt", Zone::Graveyard, db);
+    s.add_card_to_library_top(P1, "Bottom Filler");
+    let forest_a = s.add_real_card(P1, "Forest", Zone::Library, db);
+    let forest_b = s.add_real_card(P1, "Forest", Zone::Library, db);
+    let recovery = s.add_real_card(P1, "Bala Ged Recovery", Zone::Library, db);
+    let mut runner = s.build();
+    for id in [forest_b, forest_a, recovery] {
+        put_on_top(&mut runner, P1, id);
+    }
+    for id in [omenkeel, elves] {
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .summoning_sick = false;
+    }
+
+    runner
+        .act(GameAction::CrewVehicle {
+            vehicle_id: omenkeel,
+            creature_ids: vec![],
+        })
+        .expect("enter crew mode");
+    runner
+        .act(GameAction::CrewVehicle {
+            vehicle_id: omenkeel,
+            creature_ids: vec![elves],
+        })
+        .expect("crew The Omenkeel with Llanowar Elves");
+    runner.advance_until_stack_empty();
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[(omenkeel, AttackTarget::Player(P1))])
+        .expect("The Omenkeel attacks P1");
+    runner.combat_damage();
+    runner.advance_to_phase(Phase::PostCombatMain);
+
+    let state = runner.state();
+    assert_eq!(state.phase, Phase::PostCombatMain);
+    for id in [recovery, forest_a, forest_b] {
+        assert_eq!(
+            state.objects[&id].zone,
+            Zone::Exile,
+            "reach-guard: the trigger exiled the top three"
+        );
+    }
+    assert_eq!(state.objects[&opt].zone, Zone::Graveyard);
+    let offered = legal_actions(state);
+    let forest_card = state.objects[&forest_a].card_id;
+    assert!(
+        offered.contains(&GameAction::PlayLand {
+            object_id: forest_a,
+            card_id: forest_card
+        }),
+        "reach-guard: the lingering grant was recorded — an exiled Forest is playable"
+    );
+    assert!(
+        !offered.iter().any(|action| matches!(
+            action,
+            GameAction::CastSpell { object_id, .. } if *object_id == recovery
+        )),
+        "the land-only grant offers no cast of Bala Ged Recovery"
+    );
+    let recovery_card = state.objects[&recovery].card_id;
+    let mut attempt = GameRunner::from_state(state.clone());
+    assert!(
+        attempt
+            .act(GameAction::CastSpell {
+                object_id: recovery,
+                card_id: recovery_card,
+                targets: vec![opt],
+                payment_mode: Default::default(),
+            })
+            .is_err(),
+        "casting Bala Ged Recovery's sorcery front from Omenkeel exile is refused"
+    );
+}
+
 /// Kayla's Music Box: "{W}, {T}: Look at the top card of your library, then
 /// exile it face down." / "{T}: Until end of turn, you may play cards you own
 /// exiled with Kayla's Music Box." CR 701.18b: the Play grant's residual filter

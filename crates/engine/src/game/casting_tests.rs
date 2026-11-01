@@ -57137,6 +57137,10 @@ fn resolution_land_back_face_admission_reads_the_policy_filter_on_the_played_fac
         "a Land filter admits the Sanctuary face"
     );
     assert!(resolution_land_card_admission(&state, card, &land));
+    assert!(
+        !resolution_land_front_card_admission(&state, card, &land),
+        "a route without the frozen face policy admits only a land card as it is"
+    );
     assert_eq!(back_legality(&land), Some(ResolutionFaceAction::PlayLand));
 
     let sorcery = policy(TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)));

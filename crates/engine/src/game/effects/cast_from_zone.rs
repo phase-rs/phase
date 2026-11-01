@@ -916,7 +916,14 @@ pub fn resolve(
             // observable to the gate. CR 701.18b: a Play grant also admits a
             // member it may play as a land (Kayla's Music Box: "play cards you
             // own exiled with ~"), so the policy carries the instruction's mode
-            // and the land leg keeps an exiled land the residual accepts.
+            // and the land leg keeps an exiled land the residual accepts. A
+            // modal card's land back is admitted only where the downstream
+            // grant keeps this frozen face policy (the resolution window, which
+            // re-judges every face at election). A lingering permission cannot
+            // confine itself to the land back, so admitting it there would
+            // authorize the card's spell front too (CR 601.3: The Omenkeel's
+            // land-only grant and Bala Ged Recovery); such routes admit only a
+            // land card as it is.
             let face_policy = crate::types::ability::ResolutionCastFacePolicy::new(
                 freeze_resolution_cast_filter(state, ability, own_filter, None),
                 ability.source_id,
@@ -924,15 +931,20 @@ pub fn resolve(
                 freeze_cast_permission_constraint(state, ability, constraint.clone()),
             )
             .with_play_mode(mode);
+            let land_admission = match driver {
+                crate::types::ability::CastFromZoneDriver::ResolutionWindow { .. } => {
+                    crate::game::casting::resolution_land_card_admission
+                }
+                crate::types::ability::CastFromZoneDriver::LingeringPermission
+                | crate::types::ability::CastFromZoneDriver::DuringResolution => {
+                    crate::game::casting::resolution_land_front_card_admission
+                }
+            };
             target_ids.retain(|id| {
                 crate::game::casting::resolution_spell_face_admission(state, *id, &face_policy)
                     .count()
                     != 0
-                    || crate::game::casting::resolution_land_card_admission(
-                        state,
-                        *id,
-                        &face_policy,
-                    )
+                    || land_admission(state, *id, &face_policy)
             });
         }
     }

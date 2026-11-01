@@ -14814,17 +14814,31 @@ pub(crate) fn resolution_land_card_admission(
     if !policy.play_mode.is_play() {
         return false;
     }
-    let Some(obj) = state.objects.get(&object_id) else {
-        return false;
-    };
-    let front_land = obj
-        .card_types
-        .core_types
-        .contains(&crate::types::card_type::CoreType::Land);
-    (front_land && resolution_land_policy_admits_face(state, object_id, policy))
+    resolution_land_front_card_admission(state, object_id, policy)
         || super::engine::project_modal_land_back_face(state, object_id).is_some_and(|projected| {
             resolution_land_policy_admits_face(&projected, object_id, policy)
         })
+}
+
+/// CR 701.18b + CR 305.1: the front-face half of
+/// [`resolution_land_card_admission`] — a Play policy whose filter admits
+/// `object_id` as a land card (or a land//land card's front) as it is. The
+/// whole structural land leg for a route whose downstream grant does not keep
+/// the frozen face policy: a lingering permission cannot confine itself to a
+/// modal card's land back, so admitting that back there would authorize the
+/// card's spell front (CR 601.3).
+pub(crate) fn resolution_land_front_card_admission(
+    state: &GameState,
+    object_id: ObjectId,
+    policy: &crate::types::ability::ResolutionCastFacePolicy,
+) -> bool {
+    policy.play_mode.is_play()
+        && state.objects.get(&object_id).is_some_and(|obj| {
+            obj.card_types
+                .core_types
+                .contains(&crate::types::card_type::CoreType::Land)
+        })
+        && resolution_land_policy_admits_face(state, object_id, policy)
 }
 
 /// CR 701.18b + CR 305.1 + CR 305.9 + CR 712.12: whether a resolution-owned
