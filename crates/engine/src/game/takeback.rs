@@ -586,6 +586,7 @@ impl TakebackLedger {
     }
 
     /// The seats that have approved the open vote, requester included, in seat order.
+    #[cfg(feature = "test-support")]
     pub fn approvals(&self) -> Option<Vec<PlayerId>> {
         self.pending.as_ref().map(|pending| {
             let mut approvals: Vec<_> = pending.approvals.iter().copied().collect();
