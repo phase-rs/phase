@@ -20,6 +20,7 @@ use engine::types::ability::{
     QuantityModification, ReplacementDefinition, TargetFilter, TargetRef,
 };
 use engine::types::actions::{AlternativeCastDecision, GameAction};
+use engine::types::card_type::CoreType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{CastPaymentMode, CastingVariant, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
@@ -532,6 +533,14 @@ fn required_cost_cast_under_a_permission_whose_source_is_sacrificed_completes() 
         "the cast keeps Muldrotha's permission"
     );
     assert_eq!(zone(&runner, muldrotha), Zone::Graveyard);
+    assert!(
+        runner
+            .state()
+            .graveyard_cast_permissions_used_per_type
+            .contains(&(muldrotha, CoreType::Creature)),
+        "the cast spends Muldrotha's creature slot, used: {:?}",
+        runner.state().graveyard_cast_permissions_used_per_type
+    );
     assert_eq!(trail.count("DefilerPayment"), 1);
     assert_eq!(life(&runner), 18);
     assert_eq!(pool(&runner), 1);
@@ -548,7 +557,7 @@ fn two_graveyard_authorities_each_pay_their_own_terms_with_the_defiler() {
         scenario.at_phase(Phase::PreCombatMain).with_life(P0, 20);
         add_defiler_of_flesh(&mut scenario);
         add_breach(&mut scenario);
-        add_permission_source(
+        let muldrotha = add_permission_source(
             &mut scenario,
             "Muldrotha, the Gravetide",
             MULDROTHA,
@@ -584,6 +593,14 @@ fn two_graveyard_authorities_each_pay_their_own_terms_with_the_defiler() {
             trail.exiles(&fodder),
             if escape { 3 } else { 0 },
             "escape={escape}: only escape exiles"
+        );
+        assert_eq!(
+            runner
+                .state()
+                .graveyard_cast_permissions_used_per_type
+                .contains(&(muldrotha, CoreType::Creature)),
+            !escape,
+            "escape={escape}: only Muldrotha's cast spends its creature slot"
         );
         assert_eq!(life(&runner), 18, "escape={escape}");
         assert_eq!(pool(&runner), 1, "escape={escape}");
@@ -718,7 +735,7 @@ fn aura_replicate_is_declared_with_the_defiler() {
         .with_color(vec![ManaColor::Black])
         .from_oracle_text_with_keywords(&["Flash", "Replicate", "Enchant"], CHANGING_LOYALTY)
         .id();
-    scenario.with_mana_pool(P0, mana(&[(ManaType::Black, 1), (ManaType::Colorless, 1)]));
+    scenario.with_mana_pool(P0, mana(&[(ManaType::Black, 1), (ManaType::Colorless, 3)]));
     let mut runner = scenario.build();
 
     let trail = cast(
@@ -726,16 +743,25 @@ fn aura_replicate_is_declared_with_the_defiler() {
         loyalty,
         &Answers {
             defiler: true,
-            repeat: 0,
+            repeat: 1,
             targets: vec![bear],
             ..Answers::default()
         },
     );
 
     assert_cast_completes(&runner, loyalty, &trail);
-    assert_eq!(trail.count("DefilerPayment"), 1, "{:?}", trail.prompts);
+    assert_eq!(
+        trail.prompts,
+        [
+            "TargetSelection",
+            "DefilerPayment",
+            "OptionalCostChoice",
+            "OptionalCostChoice"
+        ],
+        "the Aura's target, then the Defiler, then replicate (paid once, then declined)"
+    );
     assert_eq!(life(&runner), 18);
-    assert_eq!(pool(&runner), 1, "{{1}}{{B}} less {{B}}");
+    assert_eq!(pool(&runner), 1, "{{1}}{{B}} + replicate {{2}} less {{B}}");
 }
 
 /// CR 702.138a + CR 702.33a: an escaped kicker spell still exiles its three
@@ -769,7 +795,28 @@ fn escaped_kicker_spell_exiles_three_kicked_or_not() {
         assert_eq!(trail.count("OptionalCostChoice"), 1, "kick={kick}");
         assert_eq!(trail.exiles(&fodder), 3, "kick={kick}");
         assert_eq!(pool(&runner), if kick { 0 } else { 2 }, "kick={kick}");
+        assert_eq!(
+            kickers_paid_on_stack(&runner),
+            usize::from(kick),
+            "kick={kick}"
+        );
     }
+}
+
+/// CR 702.33a: how many kicker costs the spell on the stack was cast with.
+fn kickers_paid_on_stack(runner: &GameRunner) -> usize {
+    runner
+        .state()
+        .stack
+        .iter()
+        .find_map(|entry| match &entry.kind {
+            StackEntryKind::Spell {
+                ability: Some(ability),
+                ..
+            } => Some(ability.context.kickers_paid.len()),
+            _ => None,
+        })
+        .expect("a spell with an ability is on the stack")
 }
 
 fn morkrut_with_defiler() -> (GameRunner, ObjectId, ObjectId) {
@@ -1269,34 +1316,46 @@ fn replicate_declared_before_targets_still_exiles_three() {
 /// its modes; the escape residual is still paid once the targets settle.
 #[test]
 fn kicker_modal_spell_declared_before_modes_still_exiles_three() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    add_breach(&mut scenario);
-    let friend = scenario.add_creature(P0, "Big Friend", 3, 3).id();
-    let inscription = scenario
-        .add_spell_to_graveyard(P0, "Inscription of Abundance", true)
-        .with_mana_cost(cost(1, &[ManaCostShard::Green]))
-        .from_oracle_text_with_keywords(&["Kicker"], INSCRIPTION_OF_ABUNDANCE)
-        .id();
-    let fodder = add_fodder(&mut scenario);
-    scenario.with_mana_pool(P0, mana(&[(ManaType::Green, 2)]));
-    let mut runner = scenario.build();
+    for kick in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        add_breach(&mut scenario);
+        let friend = scenario.add_creature(P0, "Big Friend", 3, 3).id();
+        let inscription = scenario
+            .add_spell_to_graveyard(P0, "Inscription of Abundance", true)
+            .with_mana_cost(cost(1, &[ManaCostShard::Green]))
+            .from_oracle_text_with_keywords(&["Kicker"], INSCRIPTION_OF_ABUNDANCE)
+            .id();
+        let fodder = add_fodder(&mut scenario);
+        scenario.with_mana_pool(P0, mana(&[(ManaType::Green, 5)]));
+        let mut runner = scenario.build();
 
-    let trail = cast(
-        &mut runner,
-        inscription,
-        &Answers {
-            escape: true,
-            modes: vec![0],
-            targets: vec![friend],
-            ..Answers::default()
-        },
-    );
+        let trail = cast(
+            &mut runner,
+            inscription,
+            &Answers {
+                escape: true,
+                optional: kick,
+                modes: vec![0],
+                targets: vec![friend],
+                ..Answers::default()
+            },
+        );
 
-    assert_cast_completes(&runner, inscription, &trail);
-    assert_eq!(trail.count("ModeChoice"), 1, "{:?}", trail.prompts);
-    assert_eq!(trail.exiles(&fodder), 3);
-    assert_eq!(pool(&runner), 0);
+        assert_cast_completes(&runner, inscription, &trail);
+        assert_eq!(
+            trail.prompts,
+            ["OptionalCostChoice", "ModeChoice", "PayCost"],
+            "kick={kick}: kicker before modes, the lone target chosen for us, then escape's exile"
+        );
+        assert_eq!(trail.exiles(&fodder), 3, "kick={kick}");
+        assert_eq!(
+            kickers_paid_on_stack(&runner),
+            usize::from(kick),
+            "kick={kick}"
+        );
+        assert_eq!(pool(&runner), if kick { 0 } else { 3 }, "kick={kick}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1452,10 +1511,10 @@ fn defiler_payment_paused_for_replacement_ordering_still_offers_the_kicker() {
         })
         .count();
     assert_eq!(life_payments, 1, "the Defiler's life is paid once");
-    assert!(
-        life(&runner) < 18,
-        "both modifiers applied: {}",
-        life(&runner)
+    assert_eq!(
+        life(&runner),
+        15,
+        "ordered double first, then +1: the Defiler's 2 becomes 5"
     );
     assert_eq!(pool(&runner), 1, "kicked, less the Defiler's {{B}}");
 }
