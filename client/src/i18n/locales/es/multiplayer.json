@@ -37,7 +37,9 @@
     "approve": "Aprobar",
     "decline": "Rechazar",
     "cancel": "Cancelar solicitud",
-    "declinedToast": "Solicitud de repetición rechazada"
+    "declinedToast": "Solicitud de repetición rechazada",
+    "cancelledToast": "Solicitud de repetición cancelada",
+    "withdrawnToast": "Solicitud de repetición retirada: un jugador abandonó la partida"
   },
   "connectionDot": {
     "connected": "Conectado",
@@ -353,7 +355,7 @@
     "gameInProgressTitle": "Partida en curso",
     "gameInProgressBody": "Termina o abandona tu partida actual y vuelve a abrir el enlace."
   },
-  "p2pStateWithheld": "El estado de la partida tras esta acción es demasiado grande para enviarlo, así que este tablero está desactualizado. Las partidas entre pares no tienen repetición; el tablero se actualizará cuando un estado posterior sea lo bastante pequeño para enviarse.",
+  "p2pStateWithheld": "El estado de la partida tras esta acción es demasiado grande para enviarlo, así que este tablero está desactualizado. Un jugador puede solicitar una repetición de la última acción desde el menú de la partida para continuar (en un bucle, ejecútalo con un número menor).",
   "terminalRecovery": {
     "finalViewsUnpublished": "La concesión alcanzó un estado final Full, pero no se pudieron publicar las vistas finales nativas.",
     "concedeUnreconciled": "No se pudo conciliar el resultado de la concesión; el asiento sigue bloqueado.",

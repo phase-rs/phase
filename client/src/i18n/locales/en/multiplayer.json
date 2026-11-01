@@ -37,7 +37,9 @@
     "approve": "Approve",
     "decline": "Decline",
     "cancel": "Cancel request",
-    "declinedToast": "Takeback request declined"
+    "declinedToast": "Takeback request declined",
+    "cancelledToast": "Takeback request cancelled",
+    "withdrawnToast": "Takeback request withdrawn: a player left the game"
   },
   "connectionDot": {
     "connected": "Connected",
@@ -353,7 +355,7 @@
     "gameInProgressTitle": "Game in progress",
     "gameInProgressBody": "Finish or leave your current game, then open the link again."
   },
-  "p2pStateWithheld": "The game state after this action is too large to send, so this board is out of date. Peer-to-peer games have no takeback; the board updates when a later state is small enough to send.",
+  "p2pStateWithheld": "The game state after this action is too large to send, so this board is out of date. A player can request a takeback of the last action from the game menu to continue (for a loop, take it with a smaller count).",
   "terminalRecovery": {
     "finalViewsUnpublished": "Concede reached a Full terminal state, but the native final views could not be published.",
     "concedeUnreconciled": "Could not reconcile the Concede outcome; the seat remains fenced.",

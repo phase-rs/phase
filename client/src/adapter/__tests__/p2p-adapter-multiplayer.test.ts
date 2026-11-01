@@ -1091,7 +1091,7 @@ const NATIVE_HOST_ATTACHMENT = {
   fullKey: "native-full-key",
 };
 
-const P2P_WITHHELD_REASON = "The game state after this action is too large to send, so this board is out of date. Peer-to-peer games have no takeback; the board updates when a later state is small enough to send.";
+const P2P_WITHHELD_REASON = "The game state after this action is too large to send, so this board is out of date. A player can request a takeback of the last action from the game menu to continue (for a loop, take it with a smaller count).";
 
 const NATIVE_GUEST_ATTACHMENT = {
   playerId: 1,

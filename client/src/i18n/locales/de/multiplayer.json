@@ -37,7 +37,9 @@
     "approve": "Zustimmen",
     "decline": "Ablehnen",
     "cancel": "Anfrage abbrechen",
-    "declinedToast": "Rücknahmeanfrage abgelehnt"
+    "declinedToast": "Rücknahmeanfrage abgelehnt",
+    "cancelledToast": "Rücknahmeanfrage abgebrochen",
+    "withdrawnToast": "Rücknahmeanfrage zurückgezogen: Ein Spieler hat das Spiel verlassen"
   },
   "connectionDot": {
     "connected": "Verbunden",
@@ -353,7 +355,7 @@
     "gameInProgressTitle": "Spiel läuft",
     "gameInProgressBody": "Beende oder verlasse dein aktuelles Spiel und öffne den Link dann erneut."
   },
-  "p2pStateWithheld": "Der Spielzustand nach dieser Aktion ist zu groß zum Senden, daher ist dieses Spielfeld nicht aktuell. Peer-to-Peer-Spiele haben keine Rücknahme; das Spielfeld wird aktualisiert, sobald ein späterer Zustand klein genug zum Senden ist.",
+  "p2pStateWithheld": "Der Spielzustand nach dieser Aktion ist zu groß zum Senden, daher ist dieses Spielfeld nicht aktuell. Ein Spieler kann im Spielmenü eine Rücknahme der letzten Aktion beantragen, um fortzufahren (bei einer Schleife: mit einer kleineren Anzahl ausführen).",
   "terminalRecovery": {
     "finalViewsUnpublished": "Die Aufgabe hat einen Full-Endzustand erreicht, aber die nativen Endansichten konnten nicht veröffentlicht werden.",
     "concedeUnreconciled": "Das Ergebnis der Aufgabe konnte nicht abgeglichen werden; der Platz bleibt gesperrt.",
