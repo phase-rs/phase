@@ -5919,6 +5919,11 @@ fn collect_pending_triggers_with_collection(
                         TriggerSourceVisit::Observer,
                     );
                     for m in matched {
+                        // Mirror session eligibility without recording firing limits
+                        // or replay witnesses for the deferred batched candidate.
+                        if session.skip_batched && m.batched {
+                            continue;
+                        }
                         shadow_matched.insert((obj_id, m.trig_idx));
                     }
                 }
