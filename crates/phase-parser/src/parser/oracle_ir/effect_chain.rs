@@ -1470,8 +1470,19 @@ impl ClauseDraft<'_> {
     /// text-scan ladder, which would otherwise read "support 2", find no
     /// "target", and classify a targeted announcement as a described
     /// resolution-time pick — suppressing its target slots entirely.
+    ///
+    /// A bare `TargetOnly` choice may declare `Resolution` only at the chain
+    /// head. A deferred mid-chain node would also suppress the stack-time
+    /// targets of its following instructions; retain their existing timing.
     pub(crate) fn declared_target_choice_timing(mut self, v: Option<TargetChoiceTiming>) -> Self {
-        self.declared_target_choice_timing = v;
+        self.declared_target_choice_timing = if v == Some(TargetChoiceTiming::Resolution)
+            && matches!(self.parsed.effect, Effect::TargetOnly { .. })
+            && !self.builder.is_empty()
+        {
+            None
+        } else {
+            v
+        };
         self
     }
     /// CR 105.4 + CR 608.2c: declare that THIS clause's text printed its own

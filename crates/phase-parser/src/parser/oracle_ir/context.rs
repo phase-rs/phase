@@ -467,6 +467,10 @@ pub struct ParseContext {
     /// parse; the coordinated writer declines to the unbound gap on a different
     /// value. Set and consumed within a single chunk parse; never serialized.
     pub pending_player_scope: Option<PlayerFilter>,
+    /// Player scope already peeled from this chunk's subject or optional prefix.
+    /// The chain loop supplies its composed scope before parsing the body so a
+    /// bare choose cannot mistake another player's choice for the controller's.
+    pub clause_player_scope: Option<PlayerFilter>,
     /// CR 608.2c + CR 701.16a: Transient per-chunk `repeat_for` lifted from a
     /// fieldless-effect subject-predicate that carries a "for each <filter> …
     /// this way" SUFFIX count (Declaration in Stone's "investigate for each
@@ -610,11 +614,13 @@ pub struct ParseContext {
     ///
     /// The legacy bare-choose producer declares `Resolution` only for a singular
     /// "a/an <object> you control" phrase fully consumed by the target parser,
-    /// with chosen selection and no leading quantifier, printed target, context
-    /// reference, or player target. The chunk loop strips optional quantifiers,
-    /// which leaves no article for the a/an gate; exact counts already lack an
-    /// article. Partial phrases and quantified choices leave this unset;
-    /// `TargetOnly` then defaults to `Stack`, without a filter-shape inference.
+    /// with chosen selection and no peeled player scope, printed target, context
+    /// reference, or player target. Optional quantifiers are stripped by the
+    /// chunk loop; those chunks and exact counts reach the gate but fail its
+    /// a/an conjunct. The chain builder retains this declaration only for a
+    /// `TargetOnly` head; later bare choices keep the pre-existing `Stack` timing
+    /// so they cannot defer subsequent printed targets. Partial and quantified
+    /// choices also leave this unset, without a filter-shape inference.
     ///
     /// Set and consumed within a single chunk parse; never serialized. A
     /// speculative sub-parse that discards its cloned context discards this too.

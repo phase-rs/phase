@@ -78408,6 +78408,65 @@ fn bare_choose_printed_cards_use_resolution_timing() {
     assert_eq!(copy.target_choice_timing, TargetChoiceTiming::Stack);
 }
 
+/// SHAPE: only a chain-head bare choice may defer its object selection.
+#[test]
+fn bare_choose_mid_chain_keeps_stack_timing_and_later_printed_target() {
+    for (text, choice_index, timing) in [
+        (
+            "Choose a creature you control. It deals damage equal to its power to target creature you don't control.",
+            0,
+            TargetChoiceTiming::Resolution,
+        ),
+        (
+            "Draw a card. Choose a creature you control. It deals damage equal to its power to target creature you don't control.",
+            1,
+            TargetChoiceTiming::Stack,
+        ),
+    ] {
+        let ir = parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default());
+        let choice = &ir.clauses[choice_index];
+        assert!(
+            matches!(choice.parsed.effect, Effect::TargetOnly { .. }),
+            "{text}: must reach the bare-choice producer: {choice:#?}"
+        );
+        assert_eq!(
+            choice.declared_target_choice_timing,
+            (timing == TargetChoiceTiming::Resolution).then_some(timing),
+            "{text}"
+        );
+
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let choice = std::iter::successors(Some(&def), |node| node.sub_ability.as_deref())
+            .nth(choice_index)
+            .expect("bare-choice instruction must survive lowering");
+        assert!(
+            matches!(choice.effect.as_ref(), Effect::TargetOnly { .. }),
+            "{text}: {choice:#?}"
+        );
+        assert_eq!(choice.target_choice_timing, timing, "{text}");
+        let damage = choice
+            .sub_ability
+            .as_deref()
+            .expect("printed damage instruction");
+        assert!(
+            matches!(
+                damage.effect.as_ref(),
+                Effect::DealDamage {
+                    target: TargetFilter::Typed(_),
+                    damage_source: Some(DamageSource::Target),
+                    ..
+                }
+            ),
+            "{text}: the damage must retain its independent recipient: {damage:#?}"
+        );
+        assert_eq!(
+            damage.target_choice_timing,
+            TargetChoiceTiming::Stack,
+            "{text}"
+        );
+    }
+}
+
 /// SHAPE: stripping a targeted opponent subject must not retime its player slot.
 #[test]
 fn bare_choose_third_party_printed_choices_keep_stack_timing() {
@@ -78517,6 +78576,8 @@ fn bare_choose_non_controller_subject_keeps_stack_timing() {
     for text in [
         "An opponent chooses a permanent you control other than this creature.",
         "Target opponent chooses a permanent you control other than this creature.",
+        "Each opponent chooses a permanent you control.",
+        "Each opponent may choose a permanent you control.",
     ] {
         let def = parse_effect_chain(text, AbilityKind::Spell);
         assert!(
@@ -78597,7 +78658,7 @@ fn bare_choose_stripped_quantifier_does_not_declare_resolution_timing() {
     );
     assert_eq!(ir.clauses[0].declared_target_choice_timing, None);
 
-    // A quantified chunk must not suppress a later single-creature choice.
+    // A later singular choice remains mid-chain even after a quantified head.
     let chain = format!("{log_flume} {final_showdown}");
     let ir = parse_effect_chain_ir(&chain, AbilityKind::Spell, &mut ParseContext::default());
     assert_eq!(ir.clauses.len(), 2);
@@ -78608,10 +78669,7 @@ fn bare_choose_stripped_quantifier_does_not_declare_resolution_timing() {
     );
     assert_eq!(ir.clauses[0].declared_target_choice_timing, None);
     assert_eq!(ir.clauses[1].parsed.effect, Effect::TargetOnly { target });
-    assert_eq!(
-        ir.clauses[1].declared_target_choice_timing,
-        Some(TargetChoiceTiming::Resolution)
-    );
+    assert_eq!(ir.clauses[1].declared_target_choice_timing, None);
 }
 
 /// SHAPE: an exact-count choice cannot enter the single-object chooser.

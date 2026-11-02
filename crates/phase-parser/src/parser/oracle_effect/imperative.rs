@@ -5115,16 +5115,17 @@ pub(super) fn parse_choose_ast(
             let (target, remainder) = parse_target_with_ctx(rest, ctx);
             ctx.diagnostics.truncate(diagnostic_count);
             // CR 115.10a + CR 608.2d: only a fully parsed, untargeted singular
-            // "a/an <object> you control" choice establishes resolution timing.
-            // The chunk loop strips optional counts before this point, leaving
-            // no article; exact counts already lack one, so neither reaches this
-            // gate. A third-party choice may have had its targeted subject stripped.
-            // Random selections must not become controller-choice prompts.
+            // "a/an <object> you control" choice can establish resolution timing.
+            // Optional quantifiers are stripped by the chunk loop; those chunks
+            // and exact counts reach this gate but fail its a/an conjunct.
+            // Peeled player scopes and random selections are not controller
+            // choices. The chain builder retains this declaration only at the head.
             if remainder.trim().is_empty()
                 && alt((tag::<_, _, OracleError<'_>>("a "), tag("an ")))
                     .parse(rest_lower.trim_start())
                     .is_ok()
                 && ctx.target_selection_mode == TargetSelectionMode::Chosen
+                && ctx.clause_player_scope.is_none()
                 && !nom_primitives::scan_contains(rest_lower, "target ")
                 && is_you_controlled_target(&target)
                 && !target.is_context_ref()
