@@ -43215,6 +43215,15 @@ fn attach_die_result_branches_to_roll_before_finalization(
                 effect: Box::new(lower_ability_ir(effect)),
             })
             .collect();
+        // CR 706.3b + CR 608.2c: the roll and its table are one ability, so "those tokens" in a
+        // row names the tokens the row above creates, read in order.
+        for row in 1..results.len() {
+            let (above, rest) = results.split_at_mut(row);
+            lower::rewrite_those_tokens_from_antecedent(
+                &mut rest[0].effect.effect,
+                &above[row - 1].effect.effect,
+            );
+        }
     }
 }
 
@@ -56639,6 +56648,112 @@ mod iteration_destination_rebinding_tests {
         assert_eq!(
             destination_of(&folded(TokenAttackDestination::ControllerChooses, &qty)),
             &TokenAttackDestination::ControllerChooses
+        );
+    }
+}
+
+#[cfg(test)]
+mod die_result_anaphor_tests {
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::{
+        AbilityDefinition, DieResultBranch, Effect, PtValue, QuantityExpr,
+    };
+
+    fn roll_rows(mut def: &AbilityDefinition) -> &[DieResultBranch] {
+        loop {
+            if let Effect::RollDie { results, .. } = &*def.effect {
+                return results;
+            }
+            def = def.sub_ability.as_deref().expect("the chain rolls a die");
+        }
+    }
+
+    fn with_count(effect: &Effect, value: i32) -> Effect {
+        let mut effect = effect.clone();
+        match &mut effect {
+            Effect::Token { count, .. } | Effect::CopyTokenOf { count, .. } => {
+                *count = QuantityExpr::Fixed { value };
+            }
+            other => panic!("not a token creation: {other:?}"),
+        }
+        effect
+    }
+
+    /// CR 706.3b + CR 608.2c: a results row's "create N of those tokens" creates N of the tokens
+    /// the row above creates; a row's other instructions stay as parsed.
+    #[test]
+    fn a_results_row_creates_n_of_the_tokens_the_row_above_creates() {
+        let goblins = parse_oracle_text(
+            "When this creature enters, roll a d20.\n1—9 | Create a 1/1 red Goblin creature token.\n10—19 | Create two of those tokens.\n20 | Create three of those tokens.",
+            "Swarming Goblins",
+            &[],
+            &["Creature".to_string()],
+            &["Goblin".to_string()],
+        );
+        let rows = roll_rows(goblins.triggers[0].execute.as_deref().expect("an effect"));
+        assert_eq!(rows.len(), 3);
+        let Effect::Token {
+            name,
+            count,
+            power,
+            toughness,
+            ..
+        } = &*rows[0].effect.effect
+        else {
+            panic!("row 1 creates a token: {:?}", rows[0].effect.effect);
+        };
+        assert_eq!(
+            (name.as_str(), count, power, toughness),
+            (
+                "Goblin",
+                &QuantityExpr::Fixed { value: 1 },
+                &PtValue::Fixed(1),
+                &PtValue::Fixed(1)
+            )
+        );
+        assert_eq!(
+            *rows[1].effect.effect,
+            with_count(&rows[0].effect.effect, 2)
+        );
+        assert_eq!(
+            *rows[2].effect.effect,
+            with_count(&rows[0].effect.effect, 3)
+        );
+
+        let delina = parse_oracle_text(
+            "Whenever Delina attacks, choose target creature you control, then roll a d20.\n1—14 | Create a tapped and attacking token that's a copy of that creature, except it's not legendary and it has \"At end of combat, exile this token.\"\n15—20 | Create one of those tokens. You may roll again.",
+            "Delina, Wild Mage",
+            &[],
+            &["Creature".to_string()],
+            &["Elf".to_string(), "Shaman".to_string()],
+        );
+        let rows = roll_rows(delina.triggers[0].execute.as_deref().expect("an effect"));
+        assert_eq!(rows.len(), 2);
+        let Effect::CopyTokenOf {
+            tapped,
+            enters_attacking,
+            additional_modifications,
+            count,
+            ..
+        } = &*rows[0].effect.effect
+        else {
+            panic!("row 1 creates a copy token: {:?}", rows[0].effect.effect);
+        };
+        assert!(*tapped && *enters_attacking && !additional_modifications.is_empty());
+        assert_eq!(count, &QuantityExpr::Fixed { value: 1 });
+        assert_eq!(
+            *rows[1].effect.effect,
+            with_count(&rows[0].effect.effect, 1)
+        );
+        let again = rows[1]
+            .effect
+            .sub_ability
+            .as_deref()
+            .expect("\"You may roll again.\" stays a sub-ability");
+        assert!(
+            matches!(&*again.effect, Effect::Unimplemented { .. }),
+            "{:?}",
+            again.effect
         );
     }
 }

@@ -491,8 +491,9 @@ pub(crate) struct PlayTrace {
     /// The mandatory-recurrence verdict kept for the span starting at this entry, one slot per out
     /// verdict.
     witnessed: [Option<(usize, Witnessed)>; 2],
-    /// The every-option proof kept for the mandatory span starting at this entry.
-    ordered: Option<(usize, crate::game::period_confirm::OptionProof)>,
+    /// The every-option proof kept for the mandatory span starting at this entry, one slot per
+    /// outcome admission.
+    ordered: [Option<(usize, crate::game::period_confirm::OptionProof)>; 2],
     /// While a priority pass resolves the stack: the remembered answers made so far, each with the
     /// stack entry resolving when it was made, held until that entry's resolution is recorded.
     held: Option<Vec<(Option<ObjectId>, TraceEntry)>>,
@@ -523,7 +524,7 @@ impl PlayTrace {
             carried_named: im::Vector::new(),
             carrying: im::HashMap::new(),
             witnessed: [None, None],
-            ordered: None,
+            ordered: [None, None],
             held: None,
         }
     }
@@ -1867,7 +1868,8 @@ fn trigger_top_cause(trace: &PlayTrace, node: usize) -> Option<(usize, NamingCau
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Witnessed {
     Declared,
-    /// Offered, with the counted take and the board residual the replay that read it minted.
+    /// Offered, with the counted take and the board residual the replay that read it minted;
+    /// the residual is empty when that replay kept a random outcome.
     Offered {
         counted_take: crate::analysis::loop_check::CountedTake,
         residual: crate::analysis::resource::BoardDelta,
@@ -1909,21 +1911,32 @@ pub(crate) fn note_witnessed(
     }
 }
 
-/// The every-option proof kept for the mandatory span of the current window starting at `start`.
+fn outcomes_slot(outcomes: crate::game::period_confirm::Outcomes) -> usize {
+    use crate::game::period_confirm::Outcomes;
+    match outcomes {
+        Outcomes::Refused => 0,
+        Outcomes::Admitted => 1,
+    }
+}
+
+/// The every-option proof kept for the mandatory span of the current window starting at `start`,
+/// computed under `outcomes`.
 pub(crate) fn order_proof(
     state: &GameState,
     start: usize,
+    outcomes: crate::game::period_confirm::Outcomes,
 ) -> Option<crate::game::period_confirm::OptionProof> {
-    current(state)?
-        .ordered
+    current(state)?.ordered[outcomes_slot(outcomes)]
         .filter(|&(at, _)| at == start)
         .map(|(_, proof)| proof)
 }
 
-/// Keeps `proof` for the mandatory span of the current window starting at `start`.
+/// Keeps `proof` for the mandatory span of the current window starting at `start`, computed
+/// under `outcomes`.
 pub(crate) fn note_order_proof(
     state: &mut GameState,
     start: usize,
+    outcomes: crate::game::period_confirm::Outcomes,
     proof: crate::game::period_confirm::OptionProof,
 ) {
     let window = WindowKey::of(state);
@@ -1932,7 +1945,7 @@ pub(crate) fn note_order_proof(
         .as_deref_mut()
         .filter(|trace| trace.window == window)
     {
-        trace.ordered = Some((start, proof));
+        trace.ordered[outcomes_slot(outcomes)] = Some((start, proof));
     }
 }
 
@@ -2368,6 +2381,22 @@ mod tests {
         assert_eq!(witnessed(&state, 3, Held), Some(offered));
         assert_eq!(witnessed(&state, 3, Absent), Some(Witnessed::Refused));
         assert_eq!(witnessed(&state, 4, Absent), None);
+    }
+
+    #[test]
+    fn a_kept_order_proof_is_read_only_under_the_outcome_admission_it_was_computed_under() {
+        use crate::game::period_confirm::OptionProof::{Continues, Undecided};
+        use crate::game::period_confirm::Outcomes::{Admitted, Refused};
+        let mut state = GameState::new_two_player(1);
+        state.play_trace = Some(Box::new(PlayTrace::new(WindowKey::of(&state))));
+        note_order_proof(&mut state, 3, Admitted, Continues);
+        assert_eq!(order_proof(&state, 3, Admitted), Some(Continues));
+        assert_eq!(order_proof(&state, 3, Refused), None);
+        note_order_proof(&mut state, 3, Refused, Undecided);
+        assert_eq!(order_proof(&state, 3, Refused), Some(Undecided));
+        assert_eq!(order_proof(&state, 3, Admitted), Some(Continues));
+        assert_eq!(order_proof(&state, 4, Admitted), None);
+        assert_eq!(order_proof(&state, 4, Refused), None);
     }
 
     #[test]

@@ -989,8 +989,13 @@ fn play_trace_names_the_mandatory_recurrence_for_worldgorger_animate_dead() {
         "reach: a resolved trigger node stood on top at a priority window"
     );
     assert!(
-        occurrences.iter().filter(|&&n| n >= 3).count() >= 2,
-        "reach: the enters triggers recur over three cycles: {occurrences:?}"
+        occurrences.iter().filter(|&&n| n >= 2).count() >= 2,
+        "reach: the enters triggers recur: {occurrences:?}"
+    );
+    // CR 104.4b: once named, the recurrence is drawn with no third live cycle.
+    assert_eq!(
+        runner.state().waiting_for,
+        WaitingFor::GameOver { winner: None }
     );
     assert!(
         !view.named.is_empty(),
@@ -1381,6 +1386,10 @@ fn play_trace_keys_a_delayed_trigger_by_its_creator_across_cycles() {
     for _ in 0..2 {
         scenario.add_real_card(P0, "Swamp", Zone::Battlefield, db);
     }
+    // CR 603.5 + CR 104.4b: Soul's Attendant ("Whenever another creature enters, you may gain 1
+    // life.") returns with the Dragon each cycle, and its "may" is an optional action, so the loop
+    // is no draw and runs on past one cycle.
+    scenario.add_real_card(P0, "Soul's Attendant", Zone::Battlefield, db);
     for seat in [P0, P1] {
         for _ in 0..10 {
             scenario.add_real_card(seat, "Swamp", Zone::Library, db);
@@ -1435,6 +1444,92 @@ fn play_trace_keys_a_delayed_trigger_by_its_creator_across_cycles() {
         !animate_printed.contains(&delayed[0]),
         "the delayed ability is not its creator's printed trigger: {delayed:?} {animate_printed:?}"
     );
+}
+
+/// CR 603.5 + CR 707.10: P0's stored decline of Soul's Attendant's "may" leaves its trigger on the
+/// stack, where Strionic Resonator ("{2}, {T}: Copy target triggered ability you control. ...")
+/// copies it; the decline answers the trigger and its copy as each resolves. A stored accept gains
+/// 1 life from each.
+#[test]
+fn a_remembered_decline_leaves_the_may_trigger_on_the_stack_to_be_copied() {
+    let Some(db) = shared_card_db() else { return };
+    for (choice, gained) in [(AutoMayChoice::Decline, 0), (AutoMayChoice::Accept, 2)] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        for _ in 0..6 {
+            scenario.add_real_card(P0, "Forest", Zone::Battlefield, db);
+        }
+        let bears = [
+            scenario.add_real_card(P0, "Grizzly Bears", Zone::Hand, db),
+            scenario.add_real_card(P0, "Grizzly Bears", Zone::Hand, db),
+        ];
+        let mut runner = scenario.build();
+        let state = runner.state_mut();
+        state.loop_detection = LoopDetectionMode::Interactive;
+        let attendant = place(state, P0, "Soul's Attendant", db);
+        let resonator = place(state, P0, "Strionic Resonator", db);
+        cast(&mut runner, bears[0], vec![], CastPaymentMode::Auto);
+        for _ in 0..BEAT_CAP {
+            match runner.state().waiting_for {
+                WaitingFor::OptionalEffectChoice { .. } => break,
+                WaitingFor::Priority { .. } => act(&mut runner, GameAction::PassPriority),
+                _ => answer(&mut runner, &|_| 0),
+            }
+        }
+        act(
+            &mut runner,
+            GameAction::DecideOptionalEffectAndRemember {
+                choice,
+                scope: MayTriggerAutoChoiceScope::SameCard,
+            },
+        );
+        settle(&mut runner, &|_| 0);
+        let life = runner.state().players[0].life;
+        cast(&mut runner, bears[1], vec![], CastPaymentMode::Auto);
+        let on_stack = |state: &GameState, source: ObjectId| {
+            state.stack.iter().filter(|e| e.source_id == source).count()
+        };
+        for _ in 0..BEAT_CAP {
+            match runner.state().waiting_for {
+                WaitingFor::Priority { .. } if on_stack(runner.state(), bears[1]) > 0 => {
+                    act(&mut runner, GameAction::PassPriority)
+                }
+                WaitingFor::Priority { .. } => break,
+                _ => answer(&mut runner, &|_| 0),
+            }
+        }
+        assert_eq!(on_stack(runner.state(), attendant), 1, "{choice:?}");
+        let start = trace_of(runner.state()).entries.len();
+        let index = ability(runner.state(), resonator, false);
+        activate(&mut runner, resonator, index);
+        for _ in 0..BEAT_CAP {
+            match runner.state().waiting_for {
+                WaitingFor::Priority { .. } if on_stack(runner.state(), resonator) > 0 => {
+                    act(&mut runner, GameAction::PassPriority)
+                }
+                WaitingFor::Priority { .. } => break,
+                _ => answer(&mut runner, &names(&[attendant])),
+            }
+        }
+        assert_eq!(
+            on_stack(runner.state(), attendant),
+            2,
+            "{choice:?}: the copy"
+        );
+        settle(&mut runner, &|_| 0);
+        assert_eq!(runner.state().players[0].life - life, gained, "{choice:?}");
+        let view = trace_of(runner.state());
+        let steps = entry_steps(&view, start..view.entries.len());
+        let answered: Vec<&Step> = steps
+            .windows(2)
+            .filter(|pair| pair[1] == Step::Remembered(P0))
+            .map(|pair| &pair[0])
+            .collect();
+        assert!(
+            matches!(answered.as_slice(), [Step::Resolve(a), Step::Resolve(b)] if a == b),
+            "{choice:?}: each stored answer follows a resolution of the Attendant's node: {steps:?}"
+        );
+    }
 }
 
 #[test]

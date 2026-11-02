@@ -2793,10 +2793,11 @@ fn interactive_loop_bridge(state: &mut GameState, result: &mut ActionResult) {
     // CR 603.3b: a decision point inside a period that holds an out is proved as in a
     // mandatory one, on the mandatory span at the top of the stack.
     let resolve = |state: &GameState, profile: crate::types::game_state::LoopDecisionProfile| {
+        let proved = profile.clone();
         profile.with_option_proof(|| {
             super::play_trace::mandatory_recurrence(state)
                 .map_or(super::period_confirm::OptionProof::Undecided, |span| {
-                    super::period_confirm::span_option_proof(state, span)
+                    super::period_confirm::span_option_proof(state, span, &proved).1
                 })
         })
     };
@@ -2999,8 +3000,8 @@ fn mandatory_outcome(
         None => {
             let proof = std::cell::OnceCell::new();
             let decision = decide_mandatory_span(state, span, &proof);
-            if let Some(&proof) = proof.get() {
-                super::play_trace::note_order_proof(state, span.start, proof);
+            if let Some(&(outcomes, proof)) = proof.get() {
+                super::play_trace::note_order_proof(state, span.start, outcomes, proof);
             }
             match decision {
                 MandatoryDecision::Won { winner, delta } => {
@@ -3041,14 +3042,22 @@ fn mandatory_outcome(
 fn decide_mandatory_span(
     state: &GameState,
     span: super::play_trace::NamedSpan,
-    proof: &std::cell::OnceCell<super::period_confirm::OptionProof>,
+    proof: &std::cell::OnceCell<(
+        super::period_confirm::Outcomes,
+        super::period_confirm::OptionProof,
+    )>,
 ) -> MandatoryDecision {
     use super::play_trace::Witnessed;
     use crate::analysis::loop_check::CountedTake;
     let Some(reading) = super::period_confirm::mandatory_reading(state, span) else {
         return MandatoryDecision::Keep(Witnessed::Refused);
     };
-    let prove = || *proof.get_or_init(|| super::period_confirm::span_option_proof(state, span));
+    let proved = reading.profile.clone();
+    let prove = || {
+        proof
+            .get_or_init(|| super::period_confirm::span_option_proof(state, span, &proved))
+            .1
+    };
     if !has_no_loss_axis(&reading.delta) {
         // A choice named before the every-option proof stays named after it, so the proof is
         // asked only when none is.
@@ -6303,10 +6312,13 @@ pub(crate) fn take_boundary(state: &GameState) -> GameState {
     seed.normalize_for_loop()
 }
 
-/// Whether a settle frame recurs against `boundary` on the take's board predicates.
+/// Whether a settle frame recurs against `boundary` on the take's board predicates: equal, covered
+/// by growth, or covered by the history arm, which admits the unread last-known records of objects
+/// that ceased to exist (CR 732.2a + CR 608.2h).
 pub(crate) fn settle_recurs(boundary: &GameState, settled: &GameState) -> bool {
     crate::analysis::resource::loop_states_equal_modulo_resources(boundary, settled)
         || crate::analysis::resource::loop_states_cover_modulo_growth(boundary, settled)
+        || crate::analysis::resource::history_covers(boundary, settled)
 }
 
 /// Drive ONE whole cycle of a confirmed loop shortcut on a fresh clone
@@ -31050,9 +31062,9 @@ At the beginning of combat on your turn, you may choose two. Each mode must targ
         );
     }
 
-    /// CR 603.5: a remembered decline is recorded where it drops the trigger.
+    /// CR 603.5: a remembered decline is recorded where it answers the trigger as it resolves.
     #[test]
-    fn a_remembered_decline_is_recorded_where_it_drops_the_trigger() {
+    fn a_remembered_decline_is_recorded_where_it_applies() {
         let key = prompted_may(&mut shadrix());
         let mut remembered = shadrix();
         remembered

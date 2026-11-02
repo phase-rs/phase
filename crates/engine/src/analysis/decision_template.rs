@@ -151,11 +151,11 @@ impl DecisionTemplate {
 }
 
 /// CR 732.2a: WHICH CHOICE a [`DecisionSlot`] names, typed rather than numbered. One
-/// variant per choice point a producer constructs a slot for, and the set is closed by
-/// [`pin_answers_point`]'s exhaustive, wildcard-free ([`PinnedDecision`] x
-/// [`DecisionPointKind`]) product: this enum is that product's point half, so a variant
-/// added to either paired enum build-breaks there, where the decision about this enum is
-/// then taken explicitly.
+/// variant per choice point a CR 732.2a proposal can name; `ReplacementOrder` is the one no
+/// slot producer mints, read only by the every-option proof. The set is closed by the
+/// exhaustive, wildcard-free matches in `GameState::record_point_answer` and
+/// `period_confirm::decision_prompt`, so a new variant build-breaks there, where the
+/// decision about it is then taken explicitly.
 ///
 /// The four variants sharing the [`PinnedDecision::Targets`] pin are why the type exists:
 /// one object can be a mana ability's cost source AND a resolving trigger's source, so a
@@ -199,6 +199,8 @@ pub enum ChoicePoint {
     Mode,
     /// CR 732.6: the pay-or-decline choice an "[A] unless [B]" effect offers inside a loop.
     UnlessBreak,
+    /// CR 616.1: which applicable replacement or prevention effect the affected player applies next.
+    ReplacementOrder,
 }
 
 /// Identifies one free choice within a group, on three axes answering three different

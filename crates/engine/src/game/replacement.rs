@@ -12972,8 +12972,16 @@ fn replay_pending_replacement(
     if optional {
         state.replacement_auto_choice_tail = None;
     }
+    // CR 616.1: the every-order replay asks each order instead of applying a saved one.
+    if !optional && crate::game::triggers::saved_orders_bypassed() {
+        state.replacement_auto_choice_tail = None;
+        return ReplacementResult::NeedsChoice(player);
+    }
     let had_tail = state.replacement_auto_choice_tail.is_some();
     let key = replacement_auto_choice_key(state);
+    let point = key.as_ref().and_then(|key| {
+        crate::types::game_state::replacement_option_point(key.kind, key.candidates.len())
+    });
     let index = if let Some(tail) = state.replacement_auto_choice_tail.take() {
         match key.as_ref() {
             Some(key)
@@ -13043,14 +13051,12 @@ fn replay_pending_replacement(
     };
     // CR 616.1e + CR 616.1: a replayed answer is still the affected player's choice —
     // whether to apply an optional effect, or which effect applies next.
-    state.record_remembered_answer(
-        player,
-        if optional {
-            crate::game::play_trace::AnswerOptionality::Optional
-        } else {
-            crate::game::play_trace::AnswerOptionality::Mandatory
-        },
-    );
+    if optional {
+        state
+            .record_remembered_answer(player, crate::game::play_trace::AnswerOptionality::Optional);
+    } else {
+        state.record_point_answer(crate::game::play_trace::AnswerOptionality::Mandatory, point);
+    }
     let result = continue_replacement_impl(state, index, events);
     if !matches!(result, ReplacementResult::Execute(_)) {
         state.replacement_auto_choice_tail = None;

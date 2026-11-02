@@ -491,11 +491,45 @@ impl FrameEnd {
     }
 }
 
+thread_local! {
+    /// While a reading admits outcomes: how many outcome draws its replays kept.
+    static OUTCOMES_KEPT: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+/// CR 705.1 + CR 706.1 + CR 104.4b: while held, a replayed coin flip or die roll is kept as the
+/// period's randomness instead of refused.
+#[must_use]
+struct OutcomesAdmitted(Option<u64>);
+
+impl OutcomesAdmitted {
+    fn enter() -> Self {
+        OutcomesAdmitted(OUTCOMES_KEPT.with(|kept| kept.replace(Some(0))))
+    }
+
+    /// Whether a replay kept an outcome since this guard was entered.
+    fn kept(&self) -> bool {
+        OUTCOMES_KEPT
+            .with(std::cell::Cell::get)
+            .is_some_and(|kept| kept > 0)
+    }
+}
+
+impl Drop for OutcomesAdmitted {
+    fn drop(&mut self) {
+        let inner = OUTCOMES_KEPT.with(std::cell::Cell::get).unwrap_or(0);
+        OUTCOMES_KEPT.with(|kept| kept.set(self.0.map(|outer| outer + inner)));
+    }
+}
+
+fn outcomes_admitted() -> bool {
+    OUTCOMES_KEPT.with(std::cell::Cell::get).is_some()
+}
+
 /// Upper bound on the actions one replayed cycle may take.
 const CYCLE_BEATS: usize = 512;
 
-/// Applies one action, refusing a random outcome drawn by it (CR 732.2a); its events are appended
-/// to `events`.
+/// Applies one action, refusing a random outcome drawn by it (CR 732.2a) unless outcomes are
+/// admitted; its events are appended to `events`.
 fn step(
     replay: &mut GameState,
     seat: PlayerId,
@@ -514,8 +548,12 @@ fn step(
             })?
             .events,
     );
-    if replay.rng.outcome_draws() != outcomes {
-        return Err(OfferRefusal::Randomness);
+    let drawn = replay.rng.outcome_draws() - outcomes;
+    if drawn > 0 {
+        if !outcomes_admitted() {
+            return Err(OfferRefusal::Randomness);
+        }
+        OUTCOMES_KEPT.with(|kept| kept.set(kept.get().map(|kept| kept + drawn)));
     }
     Ok(())
 }
@@ -676,18 +714,23 @@ impl PointStop<'_> {
     }
 }
 
-/// One answer at a decision prompt: an order of its triggers, or one of its options.
+/// One answer at a decision prompt: an order of its triggers, one of its options, or the
+/// replacement effect applied next (CR 616.1f re-prompts for the rest).
 #[derive(Debug, Clone, PartialEq)]
 enum PointAnswer {
     Order(Vec<Label>),
     Option(GameAction),
+    Replacement(Label),
 }
 
 /// What makes two decision prompts the same point: an ordering point's occurrences, or the
 /// choice, the triggered ability asking it, and how many options it offers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PromptKey {
-    Order(Vec<Label>),
+    Order {
+        point: ChoicePoint,
+        labels: Vec<Label>,
+    },
     Choice {
         point: ChoicePoint,
         asker: Occurrence,
@@ -754,7 +797,11 @@ fn decision_prompt(replay: &GameState, limit: usize) -> Option<(PromptKey, Vec<P
                 .into_iter()
                 .map(PointAnswer::Order)
                 .collect();
-            Some((PromptKey::Order(point_key(&labels)), answers))
+            let key = PromptKey::Order {
+                point,
+                labels: point_key(&labels),
+            };
+            Some((key, answers))
         }
         ChoicePoint::AnnouncedTarget | ChoicePoint::ResolutionSet => {
             let options = choice_options(replay);
@@ -768,6 +815,22 @@ fn decision_prompt(replay: &GameState, limit: usize) -> Option<(PromptKey, Vec<P
             };
             Some((key, options.into_iter().map(PointAnswer::Option).collect()))
         }
+        ChoicePoint::ReplacementOrder => {
+            let labels = replacement_labels(replay)?;
+            if labels.len() > limit {
+                return None;
+            }
+            let answers = labels
+                .iter()
+                .cloned()
+                .map(PointAnswer::Replacement)
+                .collect();
+            let key = PromptKey::Order {
+                point,
+                labels: point_key(&labels),
+            };
+            Some((key, answers))
+        }
         ChoicePoint::MayGate
         | ChoicePoint::TapCost
         | ChoicePoint::ProliferateSet
@@ -778,8 +841,22 @@ fn decision_prompt(replay: &GameState, limit: usize) -> Option<(PromptKey, Vec<P
     }
 }
 
-/// The action that gives `answer` at the prompt at `replay`; an option is answered only by the
-/// same action among the prompt's options, never by its position.
+/// CR 616.1 + CR 400.7: the effects the replacement prompt at `replay` asks to choose among, by
+/// source and description, in prompt order.
+fn replacement_labels(replay: &GameState) -> Option<Vec<Label>> {
+    let WaitingFor::ReplacementChoice { candidates, .. } = &replay.waiting_for else {
+        return None;
+    };
+    Some(ranked(
+        candidates
+            .iter()
+            .map(|candidate| Occurrence::of(&candidate.source_name, Some(&candidate.description)))
+            .collect(),
+    ))
+}
+
+/// The action that gives `answer` at the prompt at `replay`; an option or a replacement effect is
+/// answered only by the same option or effect among the prompt's, never by its position.
 fn answer_action(replay: &GameState, answer: &PointAnswer) -> Option<GameAction> {
     match answer {
         PointAnswer::Order(order) => Some(GameAction::OrderTriggers {
@@ -788,6 +865,11 @@ fn answer_action(replay: &GameState, answer: &PointAnswer) -> Option<GameAction>
         PointAnswer::Option(chosen) => choice_options(replay)
             .contains(chosen)
             .then(|| chosen.clone()),
+        PointAnswer::Replacement(label) => Some(GameAction::ChooseReplacement {
+            index: replacement_labels(replay)?
+                .iter()
+                .position(|candidate| candidate == label)?,
+        }),
     }
 }
 
@@ -1248,6 +1330,8 @@ struct ReplayedPeriod {
     /// The frame the second cycle reached, or where it was refused.
     replay: GameState,
     second: Result<Vec<String>, OfferRefusal>,
+    /// The outcome position each compared cycle starts from, when the replay drew an outcome.
+    pinned: Option<u128>,
     /// Every frame above is read inside the probe.
     _probe: SimulationProbeGuard,
 }
@@ -1299,6 +1383,9 @@ impl ReplayedPeriod {
     /// Each replayed frame's floor; the closing frame's needs a third cycle.
     fn floors(&self) -> [usize; 3] {
         let mut next = self.replay.clone();
+        if let Some(at) = self.pinned {
+            next.rng.set_word_pos(at);
+        }
         let third = replay_cycle(
             &mut next,
             &self.items,
@@ -1343,12 +1430,11 @@ fn replay_period(
     #[cfg(feature = "test-support")]
     crate::game::perf_counters::record_play_trace(|counters| counters.confirm_drives += 1);
     let probe = SimulationProbeGuard::enter();
-    let s_n = replay_base(frame, holder);
+    let mut s_n = replay_base(frame, holder);
     let end = FrameEnd::of(&s_n, holder, span.reach);
     let mut replay = s_n.clone();
     let mut choices = Vec::new();
-    #[cfg_attr(not(any(test, feature = "test-support")), allow(unused_variables))]
-    let performed = replay_cycle_ordered(
+    let lead_in = replay_cycle_ordered(
         &mut replay,
         &items,
         &end,
@@ -1358,7 +1444,37 @@ fn replay_period(
         &mut Vec::new(),
         None,
     )?;
+    // CR 705.1 + CR 706.1 + CR 400.7: cycles that drew different outcomes differ in what those
+    // outcomes made, so the compared cycles start after a lead-in, under one outcome sequence.
+    let pinned = (outcomes_admitted() && replay.rng.outcome_draws() != s_n.rng.outcome_draws())
+        .then(|| s_n.rng.get_word_pos());
+    #[cfg_attr(not(any(test, feature = "test-support")), allow(unused_variables))]
+    let performed = match pinned {
+        None => lead_in,
+        Some(at) => {
+            if let Some(settles) = settles.as_deref_mut() {
+                settles.clear();
+            }
+            s_n = replay;
+            s_n.rng.set_word_pos(at);
+            replay = s_n.clone();
+            choices.clear();
+            replay_cycle_ordered(
+                &mut replay,
+                &items,
+                &end,
+                &mut choices,
+                None,
+                settles.as_deref_mut(),
+                &mut Vec::new(),
+                None,
+            )?
+        }
+    };
     let s_n1 = replay.clone();
+    if let Some(at) = pinned {
+        replay.rng.set_word_pos(at);
+    }
     let second = replay_cycle_ordered(
         &mut replay,
         &items,
@@ -1381,6 +1497,7 @@ fn replay_period(
         s_n1,
         replay,
         second,
+        pinned,
         _probe: probe,
     })
 }
@@ -1400,6 +1517,7 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
         s_n1,
         mut replay,
         second,
+        pinned: _,
         _probe,
     } = replay_period(frame, span, None)?;
     // A period whose second cycle is refused has one pair of frames, read as any pair is.
@@ -1550,6 +1668,7 @@ pub(crate) struct HeldPeriod {
 /// (CR 704.5f). A player counter nothing in the loop reads is no way to stop it (CR 122.1), so
 /// no unmeasured axis bars the period.
 pub(crate) fn mandatory_period_holds(frame: &GameState, span: NamedSpan) -> Option<HeldPeriod> {
+    let _outcomes = OutcomesAdmitted::enter();
     #[cfg(feature = "test-support")]
     crate::game::perf_counters::record_play_trace(|counters| counters.mandatory_replays += 1);
     let mut settles = Vec::new();
@@ -1620,6 +1739,7 @@ pub(crate) fn mandatory_period_holds(frame: &GameState, span: NamedSpan) -> Opti
 pub(crate) struct MandatoryReading {
     pub(crate) profile: crate::types::game_state::LoopDecisionProfile,
     pub(crate) delta: ResourceVector,
+    /// The board one cycle moves; empty when the replay kept a random outcome (CR 705.1, CR 706.1).
     pub(crate) residual: crate::analysis::resource::BoardDelta,
     pub(crate) winner: Option<PlayerId>,
 }
@@ -1637,6 +1757,7 @@ pub(crate) fn mandatory_reading(frame: &GameState, span: NamedSpan) -> Option<Ma
     #[cfg(feature = "test-support")]
     crate::game::perf_counters::record_play_trace(|counters| counters.confirm_drives += 1);
     let _probe = SimulationProbeGuard::enter();
+    let outcomes = OutcomesAdmitted::enter();
     let mut replay = without_standing_passes(frame.clone());
     let end = FrameEnd::of(&replay, holder, span.reach);
     replay_cycle(
@@ -1672,6 +1793,12 @@ pub(crate) fn mandatory_reading(frame: &GameState, span: NamedSpan) -> Option<Ma
     {
         profile.members.insert(LoopDecision::Outs);
     }
+    // CR 705.1 + CR 706.1: a replay that kept an outcome saw one outcome of many, so nothing it
+    // read is forced or published.
+    let kept = outcomes.kept();
+    if kept {
+        profile.members.insert(LoopDecision::Random);
+    }
     let delta = period_delta(&s1, &s2);
     let fallers: Vec<PlayerId> = seats(&s2)
         .into_iter()
@@ -1686,17 +1813,47 @@ pub(crate) fn mandatory_reading(frame: &GameState, span: NamedSpan) -> Option<Ma
                     || crate::analysis::loop_check::fallers_lives_pairwise_equal(&read, &fallers))
         },
     );
+    let residual = if kept {
+        crate::analysis::resource::BoardDelta::default()
+    } else {
+        crate::analysis::resource::board_delta(&s1, &s2)
+    };
     Some(MandatoryReading {
         profile,
-        residual: crate::analysis::resource::board_delta(&s1, &s2),
+        residual,
         delta,
         winner,
     })
 }
 
-/// CR 603.3b: the every-option proof of the mandatory span `span`, read from the trace when kept.
-pub(crate) fn span_option_proof(state: &GameState, span: NamedSpan) -> OptionProof {
-    play_trace::order_proof(state, span.start).unwrap_or_else(|| decision_points(state, span))
+/// Whether an every-option proof admitted random outcomes, which keys the proof's memo slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Outcomes {
+    Refused,
+    Admitted,
+}
+
+/// CR 603.3b + CR 732.2a: the every-option proof of the mandatory span `span` for the period read
+/// as `profile`, read from the trace when kept. A random profile is never forced, so only its
+/// proof may keep an outcome a replay draws.
+pub(crate) fn span_option_proof(
+    state: &GameState,
+    span: NamedSpan,
+    profile: &crate::types::game_state::LoopDecisionProfile,
+) -> (Outcomes, OptionProof) {
+    let outcomes = if profile
+        .members
+        .contains(&crate::types::game_state::LoopDecision::Random)
+    {
+        Outcomes::Admitted
+    } else {
+        Outcomes::Refused
+    };
+    let proof = play_trace::order_proof(state, span.start, outcomes).unwrap_or_else(|| {
+        let _admitted = (outcomes == Outcomes::Admitted).then(OutcomesAdmitted::enter);
+        decision_points(state, span)
+    });
+    (outcomes, proof)
 }
 
 /// The resources a period from `before` to `after` moved, counting each token it mints.
@@ -2481,14 +2638,14 @@ mod tests {
         let prompt = exiler_order_prompt(2);
         let (key, paths) = decision_paths(&prompt, ORDER_EDGES)
             .expect("two orders and two targets fit the budget");
-        assert!(matches!(key, PromptKey::Order(_)), "{key:?}");
+        assert!(matches!(key, PromptKey::Order { .. }), "{key:?}");
         assert_eq!(paths.len(), 4, "{paths:?}");
         for path in &paths {
             assert!(
                 matches!(
                     path.as_slice(),
                     [
-                        (PromptKey::Order(_), PointAnswer::Order(_)),
+                        (PromptKey::Order { .. }, PointAnswer::Order(_)),
                         (
                             PromptKey::Choice {
                                 point: ChoicePoint::AnnouncedTarget,

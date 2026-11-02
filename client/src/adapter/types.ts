@@ -4090,7 +4090,8 @@ export type ChoicePoint =
   | "ManaColor"
   | "ConvokeTaps"
   | "Mode"
-  | "UnlessBreak";
+  | "UnlessBreak"
+  | "ReplacementOrder";
 
 /**
  * Mirrors `engine::analysis::decision_template::DecisionSlot` (`index` is Rust `u8`).

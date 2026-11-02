@@ -7463,6 +7463,8 @@ fn filter_auto_inert_noop_triggers(
         .collect()
 }
 
+/// CR 603.5: a "may" trigger goes on the stack whatever its stored answer; only a stored accept
+/// with no legal target is dropped (CR 603.3d).
 fn drop_auto_inert_noop_trigger(state: &mut GameState, ctx: &PendingTriggerContext) -> bool {
     let pending = &ctx.pending;
     if !pending.ability.optional {
@@ -7480,17 +7482,9 @@ fn drop_auto_inert_noop_trigger(state: &mut GameState, ctx: &PendingTriggerConte
         origin,
     };
     match state.may_trigger_auto_choice_for_live_prompt(&key) {
-        Some(AutoMayChoice::Decline) => {
-            // CR 603.5: the remembered decline is the controller's optional choice.
-            state.record_remembered_answer(
-                key.player,
-                crate::game::play_trace::AnswerOptionality::Optional,
-            );
-            true
-        }
+        Some(AutoMayChoice::Decline) | None => false,
         // CR 603.3d: no legal target means no choice was offered, so nothing is recorded.
         Some(AutoMayChoice::Accept) => pending_trigger_has_no_legal_resolution_targets(state, ctx),
-        None => false,
     }
 }
 
@@ -8616,11 +8610,12 @@ thread_local! {
 }
 
 /// Whether an every-order replay is running, so no saved order applies or is saved.
-fn saved_orders_bypassed() -> bool {
+pub(crate) fn saved_orders_bypassed() -> bool {
     SAVED_ORDERS_BYPASSED.with(std::cell::Cell::get)
 }
 
-/// CR 603.3b: while held, every ordering point is asked rather than answered by a saved order.
+/// CR 603.3b + CR 616.1: while held, every trigger or replacement ordering point is asked rather
+/// than answered by a saved order.
 #[must_use]
 pub(crate) struct SavedOrdersBypass(bool);
 

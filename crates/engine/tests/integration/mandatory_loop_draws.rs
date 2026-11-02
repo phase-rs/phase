@@ -149,6 +149,8 @@ struct Board {
     wood_elves: Option<usize>,
     /// Impact Tremors on P0's battlefield.
     tremors: bool,
+    /// The affected player remembers the first replacement order asked, in prompt order.
+    remember_order: bool,
 }
 
 #[derive(Debug, PartialEq)]
@@ -169,6 +171,8 @@ struct Run {
     target: ObjectId,
     /// Times the watched card entered the battlefield, at the end and at half time.
     entries: usize,
+    /// Times a token entered the battlefield.
+    token_entries: usize,
     entries_at_half: usize,
     /// The most entries one action produced.
     max_entries_per_action: usize,
@@ -454,6 +458,7 @@ fn run_observed(
 
     let (mut entries, mut entries_at_half, mut reveals, mut reveals_at_half, mut max_ring) =
         (0, 0, 0, 0, 0);
+    let mut token_entries = 0;
     let (mut max_entries_per_action, mut out_beats, mut remembered) = (0, 0, false);
     let mut picks = 0;
     let mut prompts = BTreeMap::new();
@@ -565,6 +570,16 @@ fn run_observed(
                 }
                 None => GameAction::DecideOptionalEffect { accept: false },
             },
+            WaitingFor::ReplacementChoice {
+                candidate_count, ..
+            } if board.remember_order && !remembered => {
+                remembered = true;
+                GameAction::ChooseReplacementAndRemember {
+                    choice: ReplacementAutoChoice::Order {
+                        order: (0..*candidate_count).collect(),
+                    },
+                }
+            }
             WaitingFor::ReplacementChoice { .. } if board.fiend && !remembered => {
                 remembered = true;
                 GameAction::ChooseReplacementAndRemember {
@@ -628,12 +643,23 @@ fn run_observed(
             .count();
         entries += entered;
         max_entries_per_action = max_entries_per_action.max(entered);
+        token_entries += result
+            .events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    GameEvent::ZoneChanged { to: Zone::Battlefield, record, .. } if record.is_token
+                )
+            })
+            .count();
     }
     Some(Run {
         terminal,
         runner,
         target,
         entries,
+        token_entries,
         entries_at_half,
         max_entries_per_action,
         reveals,
@@ -687,6 +713,7 @@ const PLAIN: Board = Board {
     first: None,
     wood_elves: None,
     tremors: false,
+    remember_order: false,
 };
 
 const ANCHOR: Board = Board {
@@ -3532,6 +3559,247 @@ fn a_shuffle_of_a_one_card_library_is_a_draw() {
     assert!(run.entries >= 2, "reach: the Dragon entered at least twice");
     assert_eq!(run.state().rng.get_word_pos(), 0, "reach: no shuffle drew");
     run_off(board, Drive::Pass, 40);
+}
+
+/// The published residual of the offer at `state`.
+fn offered_residual(state: &GameState) -> &engine::analysis::resource::BoardDelta {
+    match &state.waiting_for {
+        WaitingFor::LoopShortcut { certificate, .. } => &certificate.residual_board_delta,
+        other => panic!("no offer: {other:?}"),
+    }
+}
+
+/// Asserts every drive at `board`, whose loop flips a coin or rolls a die each cycle, stops at
+/// P0's offer of a draw without end with counted take `take`, publishing no residual, after at
+/// least `tokens` tokens entered; that every player accepting it draws the game; and that Off runs
+/// on.
+fn a_random_outcome_is_offered(board: Board, take: CountedTake, tokens: usize) {
+    let Some(offered) = offered_on_every_drive(board, &[Pick::First], "OrderTriggers", 1, take)
+    else {
+        return;
+    };
+    let state = offered.state();
+    assert!(
+        state.rng.outcome_draws() > 0,
+        "reach: the trigger drew an outcome"
+    );
+    assert!(offered.entries >= 1, "reach: the Dragon entered");
+    assert!(
+        offered.token_entries >= tokens,
+        "reach: {tokens} tokens entered, got {}",
+        offered.token_entries
+    );
+    assert_eq!(
+        offered_residual(state),
+        &engine::analysis::resource::BoardDelta::default()
+    );
+    offer_accepted_is_a_draw(offered);
+    for drive in EVERY_DRIVE {
+        if run_off(board, drive, 40).is_none() {
+            return;
+        }
+    }
+}
+
+const FIRECAT: Board = Board {
+    p0_cards: &["Crazed Firecat"],
+    ..PLAIN
+};
+
+const GOBLINS: Board = Board {
+    p0_cards: &["Swarming Goblins"],
+    ..PLAIN
+};
+
+/// CR 705.1 + CR 732.2a: Crazed Firecat ("When this creature enters, flip a coin until you lose a
+/// flip. ...") returns with Worldgorger Dragon each cycle. With no out the cards make the loop a
+/// draw, but a replay samples one sequence of flips and cannot show that none stops it, so P0 is
+/// offered a draw without end, and its counted take performs, since no next action depends on a
+/// flip.
+#[test]
+fn a_coin_flip_no_player_can_stop_is_offered() {
+    a_random_outcome_is_offered(FIRECAT, CountedTake::Performs, 0);
+}
+
+/// CR 705.1 + CR 732.5: beside P1's Lightning Bolt and untapped Mountain, an out, the coin-flip
+/// loop is offered.
+#[test]
+fn a_coin_flip_beside_an_out_is_offered() {
+    a_random_outcome_is_offered(
+        Board {
+            optional: true,
+            ..FIRECAT
+        },
+        CountedTake::Performs,
+        0,
+    );
+}
+
+/// CR 706.1 + CR 111.7 + CR 732.2a: Swarming Goblins rolls a d20 each cycle and makes one to three
+/// Goblin tokens, which Worldgorger Dragon exiles in the next cycle, where they cease to exist.
+/// With no out the cards make the loop a draw; it is offered without end, as the coin flip is.
+#[test]
+fn a_die_roll_each_cycle_is_offered() {
+    a_random_outcome_is_offered(GOBLINS, CountedTake::Performs, 1);
+}
+
+/// CR 706.1 + CR 732.5: beside P1's Lightning Bolt and untapped Mountain the die-roll loop is
+/// offered; its offer frame holds live Goblin tokens, and each cycle's tokens are new objects no
+/// settle of the take matches, so no counted take performs.
+#[test]
+fn a_die_roll_beside_an_out_is_offered() {
+    a_random_outcome_is_offered(
+        Board {
+            optional: true,
+            ..GOBLINS
+        },
+        CountedTake::Unperformable(UnperformableCause::UndelimitedCover),
+        1,
+    );
+}
+
+/// CR 732.2a + CR 706.1: at the die-roll loop's offer on every drive, P0's accepted `Fixed(3)`
+/// performs three cycles by play, each rolling its own d20 and making Goblin tokens, and returns
+/// priority to P0.
+#[test]
+fn a_counted_take_of_a_die_roll_loop_performs_its_count() {
+    for drive in EVERY_DRIVE {
+        let leg = format!("{drive:?}");
+        let Some(offered) = run(GOBLINS, LoopDetectionMode::Interactive, drive, 60) else {
+            return;
+        };
+        assert_out_offer(&offered, &leg);
+        assert_eq!(
+            counted_take(offered.state()),
+            CountedTake::Performs,
+            "{leg}"
+        );
+        let rolled = offered.state().rng.outcome_draws();
+        let (proposed, _) = admitted(offered.state(), P0, declare(IterationCount::Fixed(3)), &leg);
+        let (taken, events) = admitted(
+            &proposed,
+            P1,
+            GameAction::RespondToShortcut {
+                response: ShortcutResponse::Accept,
+            },
+            &leg,
+        );
+        assert!(priority_to(&taken, P0), "{leg}: {:?}", taken.waiting_for);
+        assert_eq!(taken.rng.outcome_draws(), rolled + 3, "{leg}");
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                GameEvent::ZoneChanged { to: Zone::Battlefield, record, .. }
+                    if record.is_token && record.name == "Goblin"
+            )),
+            "{leg}: reach: a Goblin token entered during the take"
+        );
+    }
+}
+
+const INSTIGATOR: Board = Board {
+    p0_cards: &["Goblin Instigator"],
+    ..PLAIN
+};
+
+/// CR 104.4b + CR 732.4 + CR 111.7: Goblin Instigator ("When this creature enters, create a 1/1
+/// red Goblin creature token.") returns with Worldgorger Dragon each cycle, and the Dragon exiles
+/// the token in the next cycle, where it ceases to exist, so with no out nothing grows and the
+/// loop is a draw on every drive, through no random outcome.
+#[test]
+fn a_token_made_and_exiled_every_cycle_is_a_draw() {
+    for drive in EVERY_DRIVE {
+        let Some(run) = run(INSTIGATOR, LoopDetectionMode::Interactive, drive, 60) else {
+            return;
+        };
+        assert_eq!(run.terminal, Terminal::GameOver(None), "{drive:?}");
+        assert!(
+            run.token_entries >= 1,
+            "{drive:?}: reach: a Goblin token entered"
+        );
+        assert_eq!(run.state().rng.outcome_draws(), 0, "{drive:?}");
+    }
+}
+
+/// CR 732.5: beside P1's Lightning Bolt and untapped Mountain, an out, the token loop is offered
+/// with no predicted winner; its offer frame holds a live Goblin token no settle of the take
+/// matches, so no counted take performs.
+#[test]
+fn a_token_made_and_exiled_every_cycle_beside_an_out_is_offered() {
+    offered_on_every_drive(
+        Board {
+            optional: true,
+            ..INSTIGATOR
+        },
+        &[Pick::First],
+        "OrderTriggers",
+        1,
+        CountedTake::Unperformable(UnperformableCause::UndelimitedCover),
+    );
+}
+
+const LIFE_REPLACEMENTS: &[&str] = &["Boon Reflection", "Angel of Vitality"];
+
+/// Asserts that with `seat`'s Soul Warden, Boon Reflection and Angel of Vitality beside the loop,
+/// and the first replacement order remembered, every drive is a draw with `seat` above 20 life,
+/// and returns how many replacement orders each drive asked.
+fn every_replacement_order_gains_life_is_drawn(seat: PlayerId) -> Option<Vec<usize>> {
+    let board = Board {
+        soul_warden: Some(seat),
+        remember_order: true,
+        ..PLAIN
+    };
+    let board = if seat == P0 {
+        Board {
+            p0_cards: LIFE_REPLACEMENTS,
+            ..board
+        }
+    } else {
+        Board {
+            p1_cards: LIFE_REPLACEMENTS,
+            ..board
+        }
+    };
+    let mut asked = Vec::new();
+    for drive in EVERY_DRIVE {
+        let run = run(board, LoopDetectionMode::Interactive, drive, 80)?;
+        assert_eq!(run.terminal, Terminal::GameOver(None), "{drive:?}");
+        assert!(
+            run.life(seat) > 20,
+            "{drive:?}: reach: {seat:?} gained life"
+        );
+        asked.push(run.prompted("ReplacementChoice"));
+    }
+    Some(asked)
+}
+
+/// CR 616.1 + CR 104.4b: P1 remembers the order of Boon Reflection ("If you would gain life, you
+/// gain twice that much life instead.") and Angel of Vitality ("... that much life plus 1
+/// instead.") beside Soul Warden's life gain; every order gains life and none stops the loop, so
+/// the remembered order is no decision and the loop is a draw on every drive.
+#[test]
+fn a_remembered_replacement_order_every_order_of_which_gains_life_is_a_draw() {
+    let Some(asked) = every_replacement_order_gains_life_is_drawn(P1) else {
+        return;
+    };
+    assert_eq!(
+        asked,
+        vec![1; EVERY_DRIVE.len()],
+        "reach: the order is asked once"
+    );
+}
+
+/// CR 616.1 + CR 400.7: on P0's side the Dragon exiles and returns both replacements as new
+/// objects each cycle, so the order is asked again; every order gains life, so the loop is a draw.
+#[test]
+fn a_replacement_order_asked_every_cycle_whose_every_order_gains_life_is_a_draw() {
+    let Some(asked) = every_replacement_order_gains_life_is_drawn(P0) else {
+        return;
+    };
+    assert!(
+        asked.iter().all(|&asked| asked >= 2),
+        "reach: the order is asked again: {asked:?}"
+    );
 }
 
 /// CR 732.2b + CR 701.24a: beside Wood Elves' shuffle, Poison-Tip Archer's drain is offered with

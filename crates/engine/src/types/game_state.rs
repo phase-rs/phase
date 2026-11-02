@@ -20738,6 +20738,9 @@ impl WaitingFor {
                 cards,
                 ..
             } if cards.len() >= 2 => Some(ChoicePoint::ResolutionSet),
+            WaitingFor::ReplacementChoice {
+                kind, candidates, ..
+            } => replacement_option_point(*kind, candidates.len()),
             _ => None,
         }
     }
@@ -22327,6 +22330,22 @@ pub struct HeldLoopWindow {
     pub samples: std::collections::VecDeque<std::sync::Arc<LoopDetectSample>>,
 }
 
+/// CR 616.1: a replacement prompt is a decision point only as an order among two or more
+/// effects; an optional branch is an optional answer (CR 616.1e).
+pub(crate) fn replacement_option_point(
+    kind: ReplacementChoiceKind,
+    candidates: usize,
+) -> Option<crate::analysis::decision_template::ChoicePoint> {
+    match kind {
+        ReplacementChoiceKind::Order if candidates >= 2 => {
+            Some(crate::analysis::decision_template::ChoicePoint::ReplacementOrder)
+        }
+        ReplacementChoiceKind::Order
+        | ReplacementChoiceKind::OptionalBranch
+        | ReplacementChoiceKind::SearchFoundDestination => None,
+    }
+}
+
 /// CR 104.4b: something a loop period holds that keeps it from being declared a draw.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LoopDecision {
@@ -22353,6 +22372,7 @@ pub struct LoopDecisionTally {
     pub trigger_order: u64,
     pub announced_target: u64,
     pub resolution_set: u64,
+    pub replacement_order: u64,
 }
 
 /// CR 732.5: whether some living player held a meaningful priority action at a sampled beat.
@@ -22464,6 +22484,11 @@ impl LoopDecisionProfile {
                 current.tally.resolution_set,
                 first.resolution_set,
             ),
+            (
+                ChoicePoint::ReplacementOrder,
+                current.tally.replacement_order,
+                first.replacement_order,
+            ),
         ] {
             if now != then {
                 members.insert(LoopDecision::Unproven(point));
@@ -22531,10 +22556,13 @@ impl LoopDecisionProfile {
             .retain(|member| !matches!(member, LoopDecision::Unproven(_)));
         match proof() {
             OptionProof::Continues => {
-                if unproven
-                    .iter()
-                    .any(|&point| point != ChoicePoint::TriggerOrder)
-                {
+                // CR 603.3b + CR 616.1: an order every option of which continues is no choice.
+                if unproven.iter().any(|&point| {
+                    !matches!(
+                        point,
+                        ChoicePoint::TriggerOrder | ChoicePoint::ReplacementOrder
+                    )
+                }) {
                     self.members.insert(LoopDecision::Continuing);
                 }
             }
@@ -34067,6 +34095,22 @@ impl GameState {
         // from loop-equivalence snapshots so a completed action cannot suppress a
         // genuine shortcut on the next recurrence.
         clone.completed_hidden_search_audiences.clear();
+        // CR 704.5d + CR 704.5e + CR 607.2a: an id no object holds names an object that ceased
+        // to exist.
+        let live: HashSet<ObjectId> = clone.objects.keys().copied().collect();
+        clone.last_created_token_ids.retain(|id| live.contains(id));
+        clone.for_each_trigger_event_carrier_mut(&mut |event| {
+            if let GameEvent::ZoneChanged { record, .. } = event {
+                if let Some(cards) = record
+                    .trigger_source_context()
+                    .map(|context| context.cards_exiled_this_turn.clone())
+                {
+                    record.sync_trigger_source_exiled_cards(
+                        cards.into_iter().filter(|id| live.contains(id)).collect(),
+                    );
+                }
+            }
+        });
         clone
             .product_knowledge_state
             .action_library_knowledge_generations
@@ -35587,6 +35631,7 @@ impl GameState {
             ChoicePoint::TriggerOrder => return self.record_trigger_order(),
             ChoicePoint::AnnouncedTarget => &mut self.loop_decision_tally.announced_target,
             ChoicePoint::ResolutionSet => &mut self.loop_decision_tally.resolution_set,
+            ChoicePoint::ReplacementOrder => &mut self.loop_decision_tally.replacement_order,
             ChoicePoint::MayGate
             | ChoicePoint::TapCost
             | ChoicePoint::ProliferateSet
@@ -37408,6 +37453,36 @@ mod forced_cascade_window_tests {
             reveal_choice(vec![ObjectId(13), ObjectId(14)], true).option_point(),
             None
         );
+        let replacement = |kind: ReplacementChoiceKind, count: u64| WaitingFor::ReplacementChoice {
+            player: PlayerId(0),
+            candidate_count: count as usize,
+            candidates: (0..count)
+                .map(|id| ReplacementCandidateSummary {
+                    source_id: ObjectId(30 + id),
+                    source_name: format!("Source {id}"),
+                    description: format!("Replacement {id}"),
+                })
+                .collect(),
+            kind,
+            last_applied_decides: false,
+            remember_identity: None,
+        };
+        assert_eq!(
+            replacement(ReplacementChoiceKind::Order, 2).option_point(),
+            Some(ChoicePoint::ReplacementOrder)
+        );
+        assert_eq!(
+            replacement(ReplacementChoiceKind::Order, 1).option_point(),
+            None
+        );
+        assert_eq!(
+            replacement(ReplacementChoiceKind::OptionalBranch, 2).option_point(),
+            None
+        );
+        assert_eq!(
+            replacement(ReplacementChoiceKind::SearchFoundDestination, 2).option_point(),
+            None
+        );
     }
 
     fn certificate() -> crate::analysis::loop_check::LoopCertificate {
@@ -38005,6 +38080,42 @@ mod loop_decision_profile_tests {
         assert_eq!(
             unasked.members.into_iter().collect::<Vec<_>>(),
             vec![Decision]
+        );
+    }
+
+    /// CR 616.1 + CR 104.4b: a replacement order proven to continue leaves no member, one that
+    /// can end the loop is optional, and an unproven one stays a decision; a target is Continuing.
+    #[test]
+    fn a_replacement_order_is_read_by_its_every_order_proof() {
+        use crate::analysis::decision_template::ChoicePoint::ReplacementOrder;
+        use crate::game::period_confirm::OptionProof;
+        let at = |replacement_order, announced_target| LoopDecisionMarks {
+            tally: LoopDecisionTally {
+                replacement_order,
+                announced_target,
+                ..Default::default()
+            },
+            out: Absent,
+            rng_position: 0,
+        };
+        let none = at(0, 0);
+        assert_eq!(
+            members(&[none], at(1, 0)),
+            vec![LoopDecision::Unproven(ReplacementOrder)]
+        );
+        let read = |current: LoopDecisionMarks, proof: OptionProof| -> Vec<LoopDecision> {
+            LoopDecisionProfile::of_window(&[none], &current)
+                .with_option_proof(|| proof)
+                .members
+                .into_iter()
+                .collect()
+        };
+        assert_eq!(read(at(1, 0), OptionProof::Continues), vec![]);
+        assert_eq!(read(at(1, 0), OptionProof::Ends), vec![Optional]);
+        assert_eq!(read(at(1, 0), OptionProof::Undecided), vec![Decision]);
+        assert_eq!(
+            read(at(0, 1), OptionProof::Continues),
+            vec![LoopDecision::Continuing]
         );
     }
 
