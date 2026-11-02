@@ -2244,22 +2244,11 @@ fn lower_trigger_effect_chain(
         ability.optional = true;
     }
     // CR 118.12: a "they may pay ..." trigger head names the triggering player
-    // as both chooser and payer. The head detector (`optional_player_from_effect_body`)
-    // can only ever say `TriggeringPlayer`, and the plain-chain lowering leaves the
-    // head clause's default `payer: Controller` untouched (the clause
-    // subject→payer rebind does not cover this "they"-in-trigger-body shape),
-    // so re-stamp the root `PayCost` here. Root-only: deeper `PayCost`s belong
-    // to later sentences with their own subjects. Shapes the rebind already
-    // routes (Horn of Plenty, Wandering Archaic) no-op on the second conjunct.
-    if let Some(optional_player) = &modifiers.optional_player {
-        if !matches!(optional_player, TargetFilter::Controller) {
-            if let Effect::PayCost { payer, .. } = ability.effect.as_mut() {
-                if matches!(payer, TargetFilter::Controller) {
-                    *payer = optional_player.clone();
-                }
-            }
-        }
-    }
+    // as both chooser and payer — but that rebind lives ONLY in the
+    // `optional_player` stamp in `lower_trigger_ir`, which rewrites a
+    // still-default `PayCost` payer alongside the phase-head collective
+    // initialization (Bow to My Command). A second rewrite here would run
+    // ahead of that stamp and defeat its `Controller`-payer guard.
     ability
 }
 

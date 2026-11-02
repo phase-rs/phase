@@ -283,11 +283,11 @@ fn has_attack_ban(runner: &GameRunner) -> bool {
 /// restriction leaf, zero `Unimplemented`.
 ///
 /// Payer assertion (CR 118.12): the root `{2}` payment is offered to (and
-/// paid by) the triggering opponent. Fixed in round 2 via the
-/// `lower_trigger_effect_chain` post-pass re-stamp (the r5
-/// `ReflexiveParent::MayPay`-arm seam was proven unreachable for "they may"
-/// shapes and reverted); revert-failing — disabling the post-pass flips the
-/// payer back to `Controller` (observed).
+/// paid by) the triggering opponent, bound by the single `optional_player`
+/// stamp in `lower_trigger_ir` (an earlier round's chain-level re-stamp was
+/// proven redundant once that stamp carried the payer rewrite, and removed —
+/// it ran ahead of the stamp and defeated its `Controller`-payer guard);
+/// revert-failing — disabling the stamp flips the payer back to `Controller`.
 #[test]
 fn jace_trigger_clause_parses_to_subtype_defended_restriction() {
     let parsed = parse_oracle_text(
@@ -827,11 +827,12 @@ fn jace_choice_addresses_the_triggering_opponent() {
 /// (`unless` taxes) are untouched.
 ///
 /// Horn/Wandering Archaic already stamp `TriggeringPlayer` via the clause
-/// subject→payer rebind, so those pins are behavior-preserving (the post-pass
-/// no-ops on them by its second conjunct). Jace and the Meathook opponent
-/// trigger ("they" subject outside the rebind list) are fixed by the
-/// post-pass re-stamp per CR 118.12; Meathook-you keeps the `Controller`
-/// default (reflexive "you may" head never sets `modifiers.optional_player`).
+/// subject→payer rebind. Jace and the Meathook opponent trigger ("they"
+/// subject outside the rebind list) are bound by the single
+/// `optional_player` stamp in `lower_trigger_ir` per CR 118.12, which also
+/// carries the phase-head collective initialization (Bow to My Command);
+/// Meathook-you keeps the `Controller` default (reflexive "you may" head
+/// never sets `modifiers.optional_player`).
 #[test]
 fn jace_may_pay_family_keeps_triggering_player_payer() {
     let pay_parent_payer = |text: &str, name: &str| {
@@ -935,8 +936,7 @@ fn jace_may_pay_family_keeps_triggering_player_payer() {
     );
 
     // Meathook opponent trigger ("they may pay 3 life"): same "they"-in-body
-    // shape as Jace, fixed by the same post-pass re-stamp (runs last so the
-    // behavior-preserving pins above all execute first).
+    // shape as Jace, bound by the same `lower_trigger_ir` stamp.
     let opponent_trigger = meathook
         .triggers
         .iter()
@@ -1374,9 +1374,14 @@ fn jace_subtype_defended_tax_shape_and_runtime() {
 /// pre-combat main with priority, advance into beginning of combat via the
 /// runner (production `turns::auto_advance` + priority passes — no injected
 /// `PhaseChanged`, no teleported phase) and prove Jace's trigger fires: the
-/// {2} choice reaches P1, declining installs the ban, and P1's Bear cannot
-/// attack the Jace. Guards the registration + delivery path the
-/// injected-event rows bypass (review R3 note).
+/// {2} choice reaches P1 and declining installs the ban. The ban is then
+/// proven through the production `DeclareAttackers` action — the Jace attack
+/// fails with the restriction marker specifically and commits nothing, while
+/// the same Bear can attack P0. The declaration traverses the real
+/// BeginCombat window via `declare_attackers`' pass-through shorthand (see
+/// the inline note on why `advance_to_combat` cannot be used here). Guards
+/// the registration + delivery path the injected-event rows bypass (review
+/// R3 note; R4 action shape).
 #[test]
 fn jace_trigger_fires_through_real_begin_combat_transition() {
     let mut scenario = GameScenario::new();
@@ -1398,7 +1403,6 @@ fn jace_trigger_fires_through_real_begin_combat_transition() {
         "reach-guard: the runner must reach beginning of combat, else the \
          trigger below never fires"
     );
-
     drive_to_optional_prompt(&mut runner);
     answer_optional(&mut runner, P1, false);
 
@@ -1406,10 +1410,52 @@ fn jace_trigger_fires_through_real_begin_combat_transition() {
         has_attack_ban(&runner),
         "declining installs the attack prohibition"
     );
+
+    // Submit the declaration through the production action, not the direct
+    // legality query: the Jace attack must fail with the restriction marker
+    // specifically and commit nothing, while the same Bear can attack P0.
     // REVERT-FAIL: without event delivery the trigger never fires, no ban
-    // exists, and this attack stays legal.
+    // exists, and the Jace declaration below succeeds.
+    // NO advance_to_combat() here: advance_to_phase re-runs auto_advance's
+    // BeginCombat arm with a fresh events buffer while still mid-step, and
+    // process_phase_triggers FABRICATES a PhaseChanged{BeginCombat}
+    // (turns.rs) that refires the already-resolved trigger — the declare
+    // below would stall on a duplicate {2} prompt. declare_attackers'
+    // BeginCombat shorthand instead passes the real priority window via
+    // production PassPriority (both-pass → advance_phase_once →
+    // enter_phase), which never re-runs the current step's arm
+    // (priority.rs advances BEFORE auto-advancing).
+    let error = runner
+        .declare_attackers(&[(attacker, AttackTarget::Planeswalker(jace))])
+        .expect_err("CR 508.1c: attacking a Jace under the ban must fail");
     assert!(
-        !attack_is_legal(&runner, P1, attacker, AttackTarget::Planeswalker(jace)),
-        "CR 508.1c: P1 can't attack a Jace P0 controls"
+        format!("{error:?}").contains("(CR 508.1c/d attack restriction)"),
+        "CR 508.1c: unexpected rejection (want the attack-restriction marker): {error:?}"
+    );
+    assert_eq!(
+        runner.state().phase,
+        Phase::DeclareAttackers,
+        "reach-guard: the declaration must traverse the real BeginCombat \
+         window into declare-attackers, else the rejection proves nothing \
+         about delivery"
+    );
+    assert!(
+        runner
+            .state()
+            .combat
+            .as_ref()
+            .is_none_or(|combat| combat.attackers.is_empty()),
+        "a rejected Jace declaration must not commit any attackers"
+    );
+    runner
+        .declare_attackers(&[(attacker, AttackTarget::Player(P0))])
+        .expect("the same Bear must be able to attack P0");
+    assert!(
+        runner
+            .state()
+            .combat
+            .as_ref()
+            .is_some_and(|combat| combat.attackers.iter().any(|a| a.object_id == attacker)),
+        "the Bear is recorded as attacking P0"
     );
 }
