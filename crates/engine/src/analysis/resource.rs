@@ -30,7 +30,8 @@ use crate::types::ability::{
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterType;
 use crate::types::game_state::{
-    loop_states_equal, GameState, LKISnapshot, StackEntry, StackEntryKind, TrackedMemberOrigin,
+    loop_states_equal, object_content_eq, GameState, LKISnapshot, StackEntry, StackEntryKind,
+    TrackedMemberOrigin,
 };
 use crate::types::identifiers::{CardId, ObjectId, TriggerFiring};
 use crate::types::mana::ManaType;
@@ -4656,7 +4657,7 @@ fn board_covers_modulo_fodder(
     current_total > prior_total
 }
 
-/// CR 701.17a + CR 400.1: what one period's INSTRUCTED, choiceless, non-caster
+/// CR 701.17a + CR 400.1: what one period's INSTRUCTED, choiceless
 /// top-of-library departures amount to — which objects left, and by how much each
 /// VICTIM's library declined.
 ///
@@ -4677,7 +4678,7 @@ pub(crate) struct CertifiedInstructedDeparture {
 
 /// CR 701.17b: "If instructed to do so, they mill as many as possible." The certificate
 /// this returns establishes membership in the class *a period in which one or more
-/// non-caster libraries decline by an instructed, choiceless top-of-library departure*, by
+/// libraries decline by an instructed, choiceless top-of-library departure*, by
 /// EXCLUDING the actions it can tell apart — so what it publishes is the magnitude and the
 /// direction of advantage the whole class shares, never the word *mill*.
 ///
@@ -4697,11 +4698,6 @@ pub(crate) struct CertifiedInstructedDeparture {
 /// actions only by accident.
 ///
 /// WHAT IS EXCLUDED, and by what:
-/// * The CASTER's own decline — by the `owner != caster` filter, which is the SOLE authority
-///   for that asymmetry. CR 121.4 / CR 104.3c / CR 704.5b make a caster whose own library
-///   declines a real loss axis, and the producer's sign check keeps seeing it unreduced.
-///   There is deliberately no second caster clause: two clauses guarding one property leave
-///   neither able to discriminate.
 /// * A DRAW (CR 121.1) — by C1a's action conjunct, positively, against the engine's own
 ///   per-card record of the action. The polarity matters: the engine writes a per-card record
 ///   for the DRAW into `GameState` and writes nothing into `GameState` naming an action
@@ -4710,15 +4706,15 @@ pub(crate) struct CertifiedInstructedDeparture {
 /// * A CHOSEN mill (CR 701.17b) and a library SEARCH — structurally, one layer up: a choice
 ///   window opened during a driven period reaches the drive's terminal abort arm and there is
 ///   no period to certify.
-/// * A COST mill (CR 701.17b) — NOT excluded: nothing here tells it from an instructed one,
-///   and the confirmer does not require a period's plays to be the proposer's.
+/// * A COST mill (CR 701.17b) — NOT excluded: nothing here tells it from an instructed one;
+///   the sign check makes a period whose play pays one a spend.
 ///
 /// RESIDUAL, stated rather than left to be discovered. The engine records the DRAW action per
 /// card. It records no ACTION for the mill anywhere in `GameState`: what a mill leaves behind
 /// is the movement's endpoints in `zone_changes_this_turn`, which name a `from_zone` and a
 /// `to_zone` and not what performed the move — the endpoint inference this conjunct exists to
 /// avoid, and one the cover's own projection clears anyway. So what survives every exclusion
-/// above is an instructed, choiceless, non-caster top-of-library departure that is not a
+/// above is an instructed, choiceless top-of-library departure that is not a
 /// mill. It publishes the same magnitude and the same direction of advantage as a mill, and
 /// this certificate publishes nothing else, which is why this function never names a mill.
 /// RETIREMENT CONDITION: the drive's
@@ -4738,11 +4734,10 @@ pub(crate) struct CertifiedInstructedDeparture {
 /// cycle. The failure mode is an UNDER-stated bonus, not an over-stated promise.
 ///
 /// CR 701.17a: `libraries` are the frames before projection; a departure leaves from the top, so C1b compares their order.
-pub(crate) fn certify_instructed_opponent_library_departure(
+pub(crate) fn certify_instructed_library_departure(
     prior: &GameState,
     current: &GameState,
     libraries: [&GameState; 2],
-    caster: PlayerId,
 ) -> Option<CertifiedInstructedDeparture> {
     // C1a, action conjunct. `record_drawn_card` PUSHES, so within one turn each player's
     // vector is append-only and the period's slice is exactly the suffix appended between
@@ -4775,14 +4770,16 @@ pub(crate) fn certify_instructed_opponent_library_departure(
 
     // C1a, candidate set. Present in BOTH frames (CR 400.7 makes the departed card a new
     // object at the rules level; it does not make it a new `ObjectId` here, and nothing
-    // below latches one across pairs), left a non-caster library, and otherwise unchanged.
+    // below latches one across pairs), left a library, and otherwise unchanged.
+    // CR 701.17b + CR 704.5b: milling never loses the game, whoever's library it is; a draw
+    // does, so C1a keeps drawn cards out.
     // The content compare survives the caller's redaction because the drive mutates the
     // REDACTED clone, so a card that departs inside the drive is blank in BOTH frames and
     // differs only in `zone`.
     let mut departed: HashSet<ObjectId> = HashSet::new();
     let mut per_victim: BTreeMap<PlayerId, i64> = BTreeMap::new();
     for (id, prior_obj) in prior.objects.iter() {
-        if prior_obj.zone != Zone::Library || prior_obj.owner == caster {
+        if prior_obj.zone != Zone::Library {
             continue;
         }
         let Some(current_obj) = current.objects.get(id) else {
@@ -4807,9 +4804,9 @@ pub(crate) fn certify_instructed_opponent_library_departure(
     }
 
     // C1b, residual. With the candidate set removed, every player's `library` and
-    // `graveyard` id vectors compare equal pairwise across the frames. A caster-side mill
-    // fails HERE — its card is not a candidate, so its movement is unaccounted — and
-    // deleting C1a is what flips it. Scoped to those two vectors even though a candidate may
+    // `graveyard` id vectors compare equal pairwise across the frames. A draw fails HERE —
+    // its card is not a candidate, so its movement is unaccounted — and deleting C1a is what
+    // flips it. Scoped to those two vectors even though a candidate may
     // now land elsewhere: what this guards is the certificate's own promise, a library
     // decline with no unaccounted library or graveyard movement beside it. Where a candidate
     // LANDED is the cover's question, and it asks that about every zone.
@@ -5007,18 +5004,24 @@ pub(crate) fn fodder_growth_cover_refusals(
     bump_loop_detect_cost(|cost| cost.compares_cover_modulo_fodder_growth += 1);
     let mut refusals = Vec::new();
     let pf = flush_clone(prior);
-    let cf = flush_clone(current);
+    let mut cf = flush_clone(current);
+    let reads = frame_history_reads(&pf, &cf);
+    let restored = draws_restored(&pf, &cf, caster, reads);
+    let drew = restored.is_some();
+    if let Some(restored) = restored {
+        cf = restored;
+    }
     let mut pa = project_out_resources(&pf);
     let mut pb = project_out_resources(&cf);
     pa.stack.clear();
     pb.stack.clear();
 
-    // CR 701.17b: an instructed, choiceless, non-caster top-of-library departure this period
+    // CR 701.17b: an instructed, choiceless top-of-library departure this period
     // performed, certified once and consumed by every growth obligation below. Without one
     // authority each obligation would re-derive the set from its own frames and the four could
     // drift, which is the same reason `project_out_player_consumables` and
     // `projected_player_axes` exist as a pair.
-    let certified = certify_instructed_opponent_library_departure(&pa, &pb, [&pf, &cf], caster);
+    let certified = certify_instructed_library_departure(&pa, &pb, [&pf, &cf]);
 
     // The GROWING set = ALL fodder ids in BOTH projected frames (the drifting/growing pile)
     // UNIONED with every id the certificate accounts. Unlike the object-growth
@@ -5050,7 +5053,7 @@ pub(crate) fn fodder_growth_cover_refusals(
     // FLUSHED current so layer-derived P/T / abilities / keywords are realized). An accounted
     // id inherits this obligation rather than being waved past it, which is what keeps the
     // accounting from being a blanket accept: an ability-bearing arrival is still refused here.
-    if !grown_objects_are_inert(&cf, &growing) {
+    if !grown_objects_are_inert_unless_unused(&pf, &cf, &growing) {
         refusals.push(FodderCoverRefusal::GrownNotInert);
     }
 
@@ -5062,12 +5065,18 @@ pub(crate) fn fodder_growth_cover_refusals(
     // The growth-invariant non-object remainder, grown pile stripped. NOTE:
     // `GameState::PartialEq` compares only `objects.len()`, so stable-engine object CONTENT is
     // covered by `board_covers_modulo_fodder`'s `objects_content_eq` above, not here.
-    // CR 608.2h + CR 111.7: last-known records the history authority reads as unread are no
-    // part of the remainder; this comparison drops the stack, so it asks only when none was held.
-    let equalized_history = pf.stack.is_empty()
-        && cf.stack.is_empty()
-        && last_known_records_grow_unread(&pa, &pb)
-        && HistoryMember::LastKnownRecords.equalize(&mut pb, &pa);
+    // CR 732.2a: history the period grew and no live surface reads is no part of the remainder.
+    // CR 608.2h + CR 111.7: this comparison drops the stack, so last-known records are judged
+    // only when neither frame held one.
+    let mut equalized = pb.clone();
+    let equalizes = equalize_history(&mut equalized, &pa, reads);
+    let records_grew = pb.lki_cache != equalized.lki_cache
+        || pb.lki_copiable_values != equalized.lki_copiable_values;
+    let equalized_history =
+        equalizes && (!records_grew || (pf.stack.is_empty() && cf.stack.is_empty()));
+    if equalized_history {
+        pb = equalized;
+    }
     if !eq_except_growable(&pa, &pb, &growing) {
         refusals.push(FodderCoverRefusal::NonObjectRemainder);
     }
@@ -5101,7 +5110,7 @@ pub(crate) fn fodder_growth_cover_refusals(
     let growth =
         if keyword || delayed_trigger || other_controller || triggered || certified.is_some() {
             CoveredGrowth::PerformedOnly
-        } else if equalized_history {
+        } else if equalized_history || drew {
             CoveredGrowth::EQUALIZED_HISTORY
         } else {
             CoveredGrowth::Mintable
@@ -5137,11 +5146,16 @@ pub enum RecurrenceCover {
     Departure,
     /// Covered once per-turn and per-game history no live surface reads is equalized.
     History,
+    /// CR 121.1: covered within one turn once the caster's draws are put back in its library.
+    LibraryDepartures,
     /// Covered once the caster's own turns and their draws are equalized.
     TurnCycle,
     /// CR 405.5 + CR 608.1: covered once the entries below each frame's floor, which never
     /// resolve while the period repeats, are set aside.
     StackGrowth,
+    /// CR 732.2a + CR 613.4c: covered once history a static reads, which grew, is equalized; each
+    /// repetition then changes what the static does.
+    GrowthRead,
 }
 
 /// CR 732.2a: what the no-mint cover answers of one frame pair.
@@ -5331,11 +5345,10 @@ fn certifying_cover(
     let cf = flush_clone(current);
     let projected_prior = project_out_resources(&flush_clone(prior));
     let projected_current = project_out_resources(&cf);
-    let departure = certify_instructed_opponent_library_departure(
+    let departure = certify_instructed_library_departure(
         &projected_prior,
         &projected_current,
         [prior, current],
-        caster,
     )
     .is_some_and(|certified| {
         grown_objects_are_inert(&cf, &certified.departed)
@@ -5352,6 +5365,18 @@ fn certifying_cover(
     }
     if turn_cycle_covers(prior, current, caster) {
         return Some((CoveredGrowth::EQUALIZED_HISTORY, RecurrenceCover::TurnCycle));
+    }
+    if library_departures_cover(prior, current, caster) {
+        return Some((
+            CoveredGrowth::EQUALIZED_HISTORY,
+            RecurrenceCover::LibraryDepartures,
+        ));
+    }
+    if growth_read_covers(prior, current) {
+        return Some((
+            CoveredGrowth::EQUALIZED_HISTORY,
+            RecurrenceCover::GrowthRead,
+        ));
     }
     buried
         .filter(|buried| buried_growth_covers(prior, current, buried))
@@ -5417,9 +5442,29 @@ macro_rules! history_members {
                 }
             }
 
+            /// How much this member grew from `prior` to `current`.
+            fn rise(self, prior: &GameState, current: &GameState) -> i64 {
+                let rise = |prior: &dyn HistoryTally, current: &dyn HistoryTally| {
+                    current.size() as i64 - prior.size() as i64
+                };
+                match self {
+                    $(HistoryMember::$sv => rise(&prior.$sf, &current.$sf),)*
+                    $(HistoryMember::$pv => prior
+                        .players
+                        .iter()
+                        .zip(&current.players)
+                        .map(|(prior, current)| rise(&prior.$pf, &current.$pf))
+                        .sum(),)*
+                    HistoryMember::TrackedObjectSets => {
+                        rise(&prior.tracked_object_sets, &current.tracked_object_sets)
+                    }
+                    HistoryMember::LastKnownRecords => rise(&prior.lki_cache, &current.lki_cache),
+                }
+            }
+
             /// Whether every read of this member is reached through an AST arm or legality gate the
             /// scanner attributes to it; an unattributed member's growth refuses, unless
-            /// `history_covers_reading` judges the member by its own predicate.
+            /// `equalize_history` judges the member by its own predicate.
             fn is_attributed(self) -> bool {
                 match self {
                     $(HistoryMember::$sv => $sa,)*
@@ -5439,7 +5484,7 @@ history_members! {
         AttackedDefendersThisTurn => attacked_defenders_this_turn: false,
         AttackerDeclarationsThisTurn => attacker_declarations_this_turn: true,
         AttackingCreaturesThisTurn => attacking_creatures_this_turn: true,
-        BatchedZoneChangeTriggerFired => batched_zone_change_trigger_fired: false,
+        BatchedZoneChangeTriggerFired => batched_zone_change_trigger_fired: true,
         CardsDiscardedThisTurnByPlayer => cards_discarded_this_turn_by_player: true,
         CardsExiledWithSourceThisTurn => cards_exiled_with_source_this_turn: false,
         CreatureAttackedDefendersThisTurn => creature_attacked_defenders_this_turn: false,
@@ -5507,6 +5552,89 @@ impl HistoryMember {
 
 const _: () = assert!(<HistoryMember as strum::EnumCount>::COUNT <= u64::BITS as usize);
 
+/// How many records a history member holds, so its growth across a period can be measured.
+trait HistoryTally {
+    fn size(&self) -> u64;
+}
+
+impl<T, S> HistoryTally for HashSet<T, S> {
+    fn size(&self) -> u64 {
+        self.len() as u64
+    }
+}
+
+impl<T, S> HistoryTally for im::HashSet<T, S> {
+    fn size(&self) -> u64 {
+        self.len() as u64
+    }
+}
+
+impl<T> HistoryTally for Vec<T> {
+    fn size(&self) -> u64 {
+        self.len() as u64
+    }
+}
+
+impl<T: Clone> HistoryTally for im::Vector<T> {
+    fn size(&self) -> u64 {
+        self.len() as u64
+    }
+}
+
+impl<T: HistoryTally> HistoryTally for Box<T> {
+    fn size(&self) -> u64 {
+        (**self).size()
+    }
+}
+
+impl<K, V: HistoryTally, S> HistoryTally for HashMap<K, V, S> {
+    fn size(&self) -> u64 {
+        self.values().map(HistoryTally::size).sum()
+    }
+}
+
+impl<K, V: HistoryTally, S> HistoryTally for im::HashMap<K, V, S> {
+    fn size(&self) -> u64 {
+        self.values().map(HistoryTally::size).sum()
+    }
+}
+
+impl HistoryTally for u32 {
+    fn size(&self) -> u64 {
+        u64::from(*self)
+    }
+}
+
+impl HistoryTally for u8 {
+    fn size(&self) -> u64 {
+        u64::from(*self)
+    }
+}
+
+impl HistoryTally for bool {
+    fn size(&self) -> u64 {
+        u64::from(*self)
+    }
+}
+
+impl HistoryTally for ObjectId {
+    fn size(&self) -> u64 {
+        1
+    }
+}
+
+impl HistoryTally for PlayerId {
+    fn size(&self) -> u64 {
+        1
+    }
+}
+
+impl HistoryTally for LKISnapshot {
+    fn size(&self) -> u64 {
+        1
+    }
+}
+
 fn equalize_field<T: Clone + PartialEq>(into: &mut T, from: &T) -> bool {
     let grew = into != from;
     if grew {
@@ -5550,12 +5678,21 @@ fn frame_history_reads(prior: &GameState, current: &GameState) -> HistoryReads {
 
 /// [`history_covers`] under the live reads `reads`.
 fn history_covers_reading(prior: &GameState, current: &GameState, reads: HistoryReads) -> bool {
-    use strum::IntoEnumIterator;
     let mut copy = current.clone();
+    equalize_history(&mut copy, prior, reads) && covers_modulo_resources(prior, &copy)
+}
+
+/// CR 732.2a + CR 732.1b: equalizes in `copy` the history members other than the turn cycle's
+/// that it grew from `prior`, and collapses its inserted unit run; whether something grew, each
+/// grown member is attributed and unread under `reads`, and each member judged by its own
+/// predicate passes it.
+fn equalize_history(copy: &mut GameState, prior: &GameState, reads: HistoryReads) -> bool {
+    use strum::IntoEnumIterator;
+    let current = copy.clone();
     let grown: Vec<HistoryMember> = HistoryMember::iter()
-        .filter(|member| !member.turn_cycle() && member.equalize(&mut copy, prior))
+        .filter(|member| !member.turn_cycle() && member.equalize(copy, prior))
         .collect();
-    let collapsed = collapse_inserted_unit_run(&mut copy, prior);
+    let collapsed = collapse_inserted_unit_run(copy, prior);
     if grown.is_empty() && !collapsed {
         return false;
     }
@@ -5567,17 +5704,33 @@ fn history_covers_reading(prior: &GameState, current: &GameState, reads: History
     }) {
         return false;
     }
-    if grown.contains(&HistoryMember::TrackedObjectSets)
-        && !tracked_sets_grow_unread(prior, current)
-    {
-        return false;
-    }
-    if grown.contains(&HistoryMember::LastKnownRecords)
-        && !last_known_records_grow_unread(prior, current)
-    {
-        return false;
-    }
-    covers_modulo_resources(prior, &copy)
+    let judged = |member: HistoryMember, holds: fn(&GameState, &GameState) -> bool| {
+        !grown.contains(&member) || holds(prior, &current)
+    };
+    judged(HistoryMember::TrackedObjectSets, tracked_sets_grow_unread)
+        && judged(
+            HistoryMember::LastKnownRecords,
+            last_known_records_grow_unread,
+        )
+        && judged(
+            HistoryMember::BatchedZoneChangeTriggerFired,
+            batched_records_grow_stale,
+        )
+}
+
+/// CR 603.2c: the period only added batched zone-change records, each naming a move this turn
+/// already made, so no later event can match one and none changes what triggers.
+fn batched_records_grow_stale(prior: &GameState, current: &GameState) -> bool {
+    let moves = current.zone_changes_this_turn.len();
+    prior
+        .batched_zone_change_trigger_fired
+        .iter()
+        .all(|record| current.batched_zone_change_trigger_fired.contains(record))
+        && current
+            .batched_zone_change_trigger_fired
+            .iter()
+            .filter(|record| !prior.batched_zone_change_trigger_fired.contains(record))
+            .all(|(_, turn, index)| *turn == current.turn_number && *index < moves)
 }
 
 /// CR 608.2h + CR 111.7: the period only added last-known records, each of an object that exists
@@ -5738,29 +5891,21 @@ pub(crate) fn turn_cycle_covers(prior: &GameState, current: &GameState, caster: 
         || after.turns_taken.checked_sub(before.turns_taken) != Some(turns)
         || !others_still
         || drawn.len() > turns as usize
-        || !before_library
-            .iter()
-            .take(drawn.len())
-            .all(|id| drawn.contains(id))
         || !turn_stamps_keep_their_relation(prior, current)
     {
         return false;
     }
-    let mut copy = current.clone();
-    // allow-raw-zone: equalizes the caster's draws in a discarded comparison clone, not a gameplay zone event.
-    copy.players[after_at].hand.retain(|id| !drawn.contains(id));
-    let mut library: im::Vector<ObjectId> = drawn.iter().copied().collect();
-    library.append(copy.library_of(caster).clone());
-    *copy.library_of_mut(caster) = library;
-    // CR 121.1: the caster's draws read its library from the top, so the cycle keeps its order.
+    let mut copy = if drawn.is_empty() {
+        current.clone()
+    } else {
+        let Some(restored) = library_departures_restored(prior, current, caster) else {
+            return false;
+        };
+        restored
+    };
+    // CR 121.1: draws are the caster's only library departures across a turn cycle.
     if copy.library_of(caster) != before_library {
         return false;
-    }
-    for id in &drawn {
-        if let Some(object) = copy.objects.get_mut(id) {
-            // allow-raw-zone: equalizes the caster's draws in a discarded comparison clone, not a gameplay zone event.
-            object.zone = Zone::Library;
-        }
     }
     let grown: Vec<HistoryMember> = HistoryMember::iter()
         .filter(|member| member.turn_cycle() && member.equalize(&mut copy, prior))
@@ -5770,6 +5915,191 @@ pub(crate) fn turn_cycle_covers(prior: &GameState, current: &GameState, caster: 
         return false;
     }
     covers_modulo_resources(prior, &copy) || history_covers_reading(prior, &copy, reads)
+}
+
+/// CR 121.1 + CR 401.2: `current` with the cards the caster drew since `prior` put back where
+/// `prior`'s library held them. `None` unless it drew, the drawn cards match the top of `prior`'s
+/// library by content (all its proposer's view knows of a library), and `current`'s library is
+/// `prior`'s less every card that left it.
+fn library_departures_restored(
+    prior: &GameState,
+    current: &GameState,
+    caster: PlayerId,
+) -> Option<GameState> {
+    let before = prior.library_of(caster);
+    let after = current.library_of(caster);
+    let hand = &current.players.iter().find(|p| p.id == caster)?.hand;
+    let departed: Vec<ObjectId> = before
+        .iter()
+        .filter(|id| !after.contains(id))
+        .copied()
+        .collect();
+    let drawn: Vec<ObjectId> = departed
+        .iter()
+        .filter(|id| hand.contains(id))
+        .copied()
+        .collect();
+    if drawn.is_empty() {
+        return None;
+    }
+    let mut top: Vec<&GameObject> = before
+        .iter()
+        .take(drawn.len())
+        .filter_map(|id| prior.objects.get(id))
+        .collect();
+    for id in &drawn {
+        let card = prior.objects.get(id)?;
+        let at = top.iter().position(|top| object_content_eq(top, card))?;
+        top.swap_remove(at);
+    }
+    let kept = |id: &&ObjectId| !departed.contains(id);
+    if !before.iter().filter(kept).eq(after.iter()) {
+        return None;
+    }
+    let mut copy = current.clone();
+    let seat = copy.players.iter().position(|p| p.id == caster)?;
+    // allow-raw-zone: equalizes the caster's draws in a discarded comparison clone, not a gameplay zone event.
+    copy.players[seat].hand.retain(|id| !drawn.contains(id));
+    *copy.library_of_mut(caster) = before
+        .iter()
+        .filter(|id| kept(id) || drawn.contains(id))
+        .copied()
+        .collect();
+    for id in &drawn {
+        // allow-raw-zone: equalizes the caster's draws in a discarded comparison clone, not a gameplay zone event.
+        copy.objects.get_mut(id)?.zone = Zone::Library;
+    }
+    Some(copy)
+}
+
+/// CR 121.1: [`library_departures_restored`] within one turn, with the draw count equalized, when no
+/// live surface reads it.
+fn draws_restored(
+    prior: &GameState,
+    current: &GameState,
+    caster: PlayerId,
+    reads: HistoryReads,
+) -> Option<GameState> {
+    const DRAWS: [HistoryMember; 2] = [
+        HistoryMember::CardsDrawnThisTurn,
+        HistoryMember::FirstCardDrawnThisTurn,
+    ];
+    if prior.turn_number != current.turn_number || DRAWS.iter().any(|member| reads.reads(*member)) {
+        return None;
+    }
+    let mut copy = library_departures_restored(prior, current, caster)?;
+    for member in DRAWS {
+        member.equalize(&mut copy, prior);
+    }
+    Some(copy)
+}
+
+/// CR 121.1 + CR 732.2a: `current` covers `prior` within one turn once the caster's draws are put
+/// back and no live surface reads its draw count, the triggers those draws put on the stack
+/// judged as in [`set_aside_unread_trigger_events`]: the restored copy passes the equality or
+/// counter-growth disjunct or the history cover, alone or with a certified instructed library
+/// departure stripped from both frames.
+fn library_departures_cover(prior: &GameState, current: &GameState, caster: PlayerId) -> bool {
+    let reads = frame_history_reads(prior, current);
+    let Some(mut copy) = draws_restored(prior, current, caster, reads) else {
+        return false;
+    };
+    set_aside_unread_trigger_events(&mut copy, prior);
+    let covers = |prior: &GameState, current: &GameState| {
+        covers_modulo_resources(prior, current) || history_covers_reading(prior, current, reads)
+    };
+    if covers(prior, &copy) {
+        return true;
+    }
+    let restored = flush_clone(&copy);
+    certify_instructed_library_departure(
+        &project_out_resources(&flush_clone(prior)),
+        &project_out_resources(&restored),
+        [prior, &copy],
+    )
+    .is_some_and(|certified| {
+        grown_objects_are_inert(&restored, &certified.departed)
+            && covers(
+                &frame_without(prior, &certified.departed),
+                &frame_without(&copy, &certified.departed),
+            )
+    })
+}
+
+/// CR 732.2a + CR 613.4c: the history members other than the turn cycle's that `current` grew
+/// from `prior` and that only a functioning static reads, which changes the static's effect each
+/// repetition.
+fn growth_read_members(prior: &GameState, current: &GameState) -> Vec<HistoryMember> {
+    use strum::IntoEnumIterator;
+    let reads = live_history_reads_by_kind(&flush_clone(prior));
+    let later = live_history_reads_by_kind(&flush_clone(current));
+    let (statics, others) = (
+        reads.statics.or(later.statics),
+        reads.others.or(later.others),
+    );
+    let mut copy = current.clone();
+    HistoryMember::iter()
+        .filter(|member| {
+            !member.turn_cycle()
+                && member.is_attributed()
+                && member.equalize(&mut copy, prior)
+                && statics.reads(*member)
+                && !others.reads(*member)
+        })
+        .collect()
+}
+
+/// CR 732.2a + CR 613.4c: `current` covers `prior` once the history members only a functioning
+/// static reads are equalized, each having grown, beside the history the history cover equalizes,
+/// and the stack triggers whose resolution reads no event have their events set aside.
+fn growth_read_covers(prior: &GameState, current: &GameState) -> bool {
+    let read = growth_read_members(prior, current);
+    if read.is_empty() || read.iter().any(|member| member.rise(prior, current) <= 0) {
+        return false;
+    }
+    let others = live_history_reads_by_kind(&flush_clone(prior))
+        .others
+        .or(live_history_reads_by_kind(&flush_clone(current)).others);
+    let mut copy = current.clone();
+    if !equalize_history(&mut copy, prior, others) || prior.stack.len() != copy.stack.len() {
+        return false;
+    }
+    set_aside_unread_trigger_events(&mut copy, prior);
+    covers_modulo_resources(prior, &copy)
+}
+
+/// CR 603.2 + CR 603.4: a stack trigger with no intervening "if" clause whose resolution reads no
+/// event context resolves the same whichever event triggered it, so `copy` takes `prior`'s event.
+fn set_aside_unread_trigger_events(copy: &mut GameState, prior: &GameState) {
+    for (before, after) in prior.stack.iter().zip(copy.stack.iter_mut()) {
+        if let (
+            StackEntryKind::TriggeredAbility {
+                trigger_event: event,
+                ..
+            },
+            StackEntryKind::TriggeredAbility {
+                ability,
+                condition: None,
+                trigger_event,
+                ..
+            },
+        ) = (&before.kind, &mut after.kind)
+        {
+            if !crate::game::ability_scan::ability_uses_event_context(ability) {
+                trigger_event.clone_from(event);
+            }
+        }
+    }
+}
+
+/// CR 732.2a: each history member only a static reads grows by as much in the second pair of
+/// `frames` as in the first, so the period repeats at a constant rise.
+pub(crate) fn growth_read_rises_match(frames: [&GameState; 3]) -> bool {
+    let [s_n, s_n1, s_n2] = frames;
+    growth_read_members(s_n, s_n1)
+        .into_iter()
+        .chain(growth_read_members(s_n1, s_n2))
+        .all(|member| member.rise(s_n, s_n1) == member.rise(s_n1, s_n2))
 }
 
 /// CR 302.6: each object in both frames keeps whether each turn stamp the comparand omits names
@@ -5946,8 +6276,22 @@ fn collapse_inserted_unit_run(copy: &mut GameState, prior: &GameState) -> bool {
 /// CR 732.2a: every history member a live surface of `state` reads — each stack entry, and off
 /// the stack every functioning definition, scanned whole.
 fn live_history_reads(state: &GameState) -> HistoryReads {
+    let reads = live_history_reads_by_kind(state);
+    reads.statics.or(reads.others)
+}
+
+/// The history members live surfaces read, split by whether a static ability reads them.
+#[derive(Debug, Clone, Copy)]
+struct LiveHistoryReads {
+    statics: HistoryReads,
+    others: HistoryReads,
+}
+
+/// [`live_history_reads`], with the functioning static abilities' reads apart.
+fn live_history_reads_by_kind(state: &GameState) -> LiveHistoryReads {
     use crate::game::ability_scan as scan;
     let mut reads = HistoryReads::NONE;
+    let mut statics = HistoryReads::NONE;
     for entry in state.stack.iter() {
         if let StackEntryKind::TriggeredAbility {
             condition: Some(condition),
@@ -5980,7 +6324,7 @@ fn live_history_reads(state: &GameState) -> HistoryReads {
         }
         for def in obj.static_definitions.iter_all() {
             if crate::game::functioning_abilities::static_functions_in_zone(obj, def) {
-                reads = reads.or(scan::static_definition_history(def));
+                statics = statics.or(scan::static_definition_history(def));
             }
         }
         if obj.zone == Zone::Battlefield {
@@ -6001,7 +6345,10 @@ fn live_history_reads(state: &GameState) -> HistoryReads {
     for trigger in &state.delayed_triggers {
         reads = reads.or(scan::delayed_trigger_history(trigger));
     }
-    reads
+    LiveHistoryReads {
+        statics,
+        others: reads,
+    }
 }
 
 // ===========================================================================
@@ -6364,12 +6711,39 @@ fn grown_token_triggers_only_on_itself(o: &GameObject) -> bool {
 
 /// CR 732.2a: every grown object is churn-inert.
 fn grown_objects_are_inert(current: &GameState, grown: &HashSet<ObjectId>) -> bool {
+    grown
+        .iter()
+        .all(|id| current.objects.get(id).is_some_and(grown_object_is_inert))
+}
+
+fn grown_object_is_inert(o: &GameObject) -> bool {
+    object_is_inert(o)
+        || grown_token_is_inert_after_its_entry(o)
+        || grown_token_triggers_only_on_itself(o)
+}
+
+/// CR 602.2: [`grown_objects_are_inert`], except that a grown token untapped in `current`, and in
+/// `prior` when `prior` holds it, is judged without its activated abilities: none was activated
+/// across the period, and an ability not activated does nothing.
+fn grown_objects_are_inert_unless_unused(
+    prior: &GameState,
+    current: &GameState,
+    grown: &HashSet<ObjectId>,
+) -> bool {
     grown.iter().all(|id| {
-        current.objects.get(id).is_some_and(|o| {
-            object_is_inert(o)
-                || grown_token_is_inert_after_its_entry(o)
-                || grown_token_triggers_only_on_itself(o)
-        })
+        let Some(object) = current.objects.get(id) else {
+            return false;
+        };
+        let unused = object.is_token
+            && !object.tapped
+            && prior.objects.get(id).is_none_or(|before| !before.tapped);
+        grown_object_is_inert(object)
+            || unused && {
+                let mut unactivated = object.clone();
+                std::sync::Arc::make_mut(&mut unactivated.abilities)
+                    .retain(|a| a.kind != crate::types::ability::AbilityKind::Activated);
+                grown_object_is_inert(&unactivated)
+            }
     })
 }
 
@@ -25395,7 +25769,7 @@ mod tests {
     // CR 701.17b — the public-information instructed-departure certificate.
     //
     // Every row below asserts the RETURN VALUE of
-    // `certify_instructed_opponent_library_departure`, never a downstream offer verdict: a
+    // `certify_instructed_library_departure`, never a downstream offer verdict: a
     // conjunct whose deletion flips nothing at predicate level does not ship, and an
     // end-to-end row cannot say which conjunct spoke.
     // ─────────────────────────────────────────────────────────────────────────────────────
@@ -25460,7 +25834,7 @@ mod tests {
     }
 
     fn certify(prior: &GameState, current: &GameState) -> Option<CertifiedInstructedDeparture> {
-        certify_instructed_opponent_library_departure(prior, current, [prior, current], CERT_CASTER)
+        certify_instructed_library_departure(prior, current, [prior, current])
     }
 
     /// Put one battlefield permanent carrying exactly `def` on `current`, so the C2 walk has
@@ -25518,44 +25892,48 @@ mod tests {
         }
     }
 
-    /// **C1's `owner != caster` filter is the SOLE authority for the caster-side asymmetry.**
+    /// **The caster's own instructed departure is certified like an opponent's, and a card the
+    /// caster drew is not.**
     ///
-    /// CR 121.4 / CR 104.3c / CR 704.5b put the loss on the caster's own decline, and the
-    /// producer's sign check must keep seeing it. The caster's card is not a candidate, so its
-    /// movement is unaccounted and C1b refuses the whole period — including the opponent half
-    /// that would otherwise certify. There is deliberately no second caster clause: two clauses
-    /// guarding one property leave neither able to discriminate.
+    /// CR 701.17b + CR 704.5b: milling never loses the game, whoever's library it is; only a
+    /// draw from an empty library does (CR 121.4), and C1a keeps drawn cards out.
     #[test]
-    fn a_caster_side_decline_is_never_certified() {
+    fn a_casters_own_departure_is_certified_with_its_count() {
         let mut prior = GameState::new_two_player(7);
         let caster_card = cert_library_card(&mut prior, 901, CERT_CASTER);
         let mut current = prior.clone();
         cert_depart(&mut current, caster_card, Zone::Graveyard);
-        assert!(
-            certify(&prior, &current).is_none(),
-            "a caster-side library decline is not certifiable"
+        assert_eq!(
+            certify(&prior, &current).map(|c| c.per_victim),
+            Some(BTreeMap::from([(CERT_CASTER, 1)]))
         );
 
-        // The same period with an opponent departure BESIDE it: still None, and the opponent
-        // half alone is the paired positive proving the refusal is the caster's card.
         let mut prior_both = GameState::new_two_player(7);
         let caster_card = cert_library_card(&mut prior_both, 901, CERT_CASTER);
         let victim_card = cert_library_card(&mut prior_both, 902, CERT_VICTIM);
         let mut both = prior_both.clone();
         cert_depart(&mut both, caster_card, Zone::Graveyard);
         cert_depart(&mut both, victim_card, Zone::Graveyard);
-        assert!(
-            certify(&prior_both, &both).is_none(),
-            "an 'each player mills' period is refused: the caster's card is not a candidate, so \
-             its movement is unaccounted and C1b refuses"
+        assert_eq!(
+            certify(&prior_both, &both).map(|c| c.per_victim),
+            Some(BTreeMap::from([(CERT_CASTER, 1), (CERT_VICTIM, 1)]))
         );
         let mut opponent_only = prior_both.clone();
         cert_depart(&mut opponent_only, victim_card, Zone::Graveyard);
         assert_eq!(
             certify(&prior_both, &opponent_only).map(|c| c.per_victim),
-            Some(BTreeMap::from([(CERT_VICTIM, 1)])),
-            "PAIRED POSITIVE: the opponent-side half of the same board certifies on its own"
+            Some(BTreeMap::from([(CERT_VICTIM, 1)]))
         );
+
+        // C1a: the caster's draw is refused.
+        let mut drawn = prior.clone();
+        cert_depart(&mut drawn, caster_card, Zone::Hand);
+        drawn
+            .cards_drawn_this_turn
+            .entry(CERT_CASTER)
+            .or_default()
+            .push(caster_card);
+        assert!(certify(&prior, &drawn).is_none());
     }
 
     /// **C1b refuses an unaccounted library or graveyard movement beside the departure.**
@@ -26037,13 +26415,23 @@ mod tests {
         (prior, current)
     }
 
+    /// The departure's card recorded as drawn, which the certificate refuses (CR 121.1).
+    fn recorded_as_drawn(current: &mut GameState, owner: PlayerId) {
+        current
+            .cards_drawn_this_turn
+            .entry(owner)
+            .or_default()
+            .push(ObjectId(900));
+    }
+
     /// **The cover admits a certified departure and ONLY a certified one.**
     ///
     /// The departed card is keyed in BOTH frames and differs only in `zone`, so without the
     /// certificate it sits in `board_covers_modulo_fodder`'s stable partition and
-    /// `objects_content_eq` refuses on the `zone` conjunct. The caster-owned control moves
-    /// the SAME card the SAME way and is refused — which is what makes the positive a
-    /// decision about ownership rather than a blanket accept of library movement.
+    /// `objects_content_eq` refuses on the `zone` conjunct. A departure of either player's
+    /// card certifies (CR 701.17b); the control moves the SAME card the SAME way recorded as
+    /// a draw and is refused, so the positive is a decision about the action rather than a
+    /// blanket accept of library movement.
     #[test]
     fn the_cover_admits_a_certified_departure_and_only_a_certified_one() {
         let (base_prior, base_current) = fodder_cover_base();
@@ -26059,12 +26447,17 @@ mod tests {
             "a non-caster library departure is certified and the cover admits it"
         );
 
-        // The certificate names the OPPONENT's library; the caster's own is a decline the
-        // proposer must not sell as advantage.
         let (prior, current) = fodder_cover_with_departure(PlayerId(0), Zone::Graveyard);
         assert!(
+            fodder_cover(&prior, &current),
+            "the caster's own library departure is certified and the cover admits it"
+        );
+
+        let (prior, mut current) = fodder_cover_with_departure(PlayerId(0), Zone::Graveyard);
+        recorded_as_drawn(&mut current, PlayerId(0));
+        assert!(
             !fodder_cover(&prior, &current),
-            "the identical movement of a CASTER-owned card certifies nothing and is refused"
+            "the identical movement recorded as a draw certifies nothing and is refused"
         );
     }
 
@@ -26073,20 +26466,22 @@ mod tests {
     ///
     /// The arrival is the shape the object-growth add-set cannot see: `zones::move_to_zone`
     /// carries the existing `ObjectId`, so the id is keyed in BOTH frames' `objects` and is
-    /// never a MINTED member. Both arms move the same card to the same zone; only ownership
-    /// differs.
+    /// never a MINTED member. Every arm moves the same card to the same zone.
     #[test]
     fn an_id_preserving_library_to_battlefield_arrival_is_admitted_only_when_accounted() {
-        let (prior, current) = fodder_cover_with_departure(PlayerId(1), Zone::Battlefield);
-        assert!(
-            fodder_cover(&prior, &current),
-            "an accounted id-preserving arrival covers"
-        );
+        for owner in [PlayerId(1), PlayerId(0)] {
+            let (prior, current) = fodder_cover_with_departure(owner, Zone::Battlefield);
+            assert!(
+                fodder_cover(&prior, &current),
+                "an accounted id-preserving arrival of {owner:?}'s card covers"
+            );
+        }
 
-        let (prior, current) = fodder_cover_with_departure(PlayerId(0), Zone::Battlefield);
+        let (prior, mut current) = fodder_cover_with_departure(PlayerId(0), Zone::Battlefield);
+        recorded_as_drawn(&mut current, PlayerId(0));
         assert!(
             !fodder_cover(&prior, &current),
-            "the same arrival owned by the caster is unaccounted and refused"
+            "the same arrival recorded as a draw is unaccounted and refused"
         );
     }
 
@@ -26207,8 +26602,9 @@ mod tests {
         (prior, current)
     }
 
-    /// CR 701.17b: the no-mint arm admits an opponent's certified departure as growth only
-    /// performing makes, and refuses the caster's, a non-inert one, and an unnamed card's drift.
+    /// CR 701.17b: the no-mint arm admits a certified departure of either player's card as
+    /// growth only performing makes, and refuses a drawn card, a non-inert one, and an unnamed
+    /// card's drift.
     #[test]
     fn the_no_mint_cover_admits_only_a_certified_inert_departure_and_only_its_ids() {
         let mut prior = GameState::new_two_player(42);
@@ -26232,6 +26628,16 @@ mod tests {
         );
 
         let (prior, current) = no_mint_pair_with_departure(PlayerId(0), Zone::Graveyard);
+        assert_eq!(
+            resource_recurrence_covers(&prior, &current, PlayerId(0), None),
+            Some(PairCover::Certified(
+                CoveredGrowth::PerformedOnly,
+                RecurrenceCover::Departure
+            ))
+        );
+
+        let (prior, mut current) = no_mint_pair_with_departure(PlayerId(0), Zone::Graveyard);
+        recorded_as_drawn(&mut current, PlayerId(0));
         assert_eq!(
             resource_recurrence_covers(&prior, &current, PlayerId(0), None),
             None
@@ -26467,12 +26873,13 @@ mod tests {
         use crate::game::zones::{add_to_zone, create_object, remove_from_zone};
         let mut prior = GameState::new(format, 2, 7);
         prior.active_player = caster;
-        for n in 0..3 {
+        // CR 401.2: a draw is put back by its content, so the card below the top differs from it.
+        for (n, name) in ["Island", "Swamp", "Island"].into_iter().enumerate() {
             create_object(
                 &mut prior,
-                CardId(5 + n),
+                CardId(5 + n as u64),
                 caster,
-                "Island".into(),
+                name.into(),
                 Zone::Library,
             );
         }
@@ -26524,6 +26931,141 @@ mod tests {
                 "shared={shared}: a draw from below the top is refused"
             );
         }
+    }
+
+    /// The caster's three-card library, two Islands over a Swamp, and the frame after it drew the
+    /// card at `drawn` within the turn.
+    fn in_step_draw(drawn: usize) -> (GameState, GameState) {
+        use crate::game::zones::{add_to_zone, create_object, remove_from_zone};
+        let caster = PlayerId(0);
+        let mut prior = GameState::new_two_player(42);
+        prior.active_player = caster;
+        for (card, name) in [(5, "Island"), (5, "Island"), (6, "Swamp")] {
+            create_object(&mut prior, CardId(card), caster, name.into(), Zone::Library);
+        }
+        let mut current = prior.clone();
+        let card = current.library_of(caster)[drawn];
+        remove_from_zone(&mut current, card, Zone::Library, caster);
+        add_to_zone(&mut current, card, Zone::Hand, caster);
+        current.objects.get_mut(&card).expect("drawn card").zone = Zone::Hand;
+        (prior, current)
+    }
+
+    /// CR 121.1 + CR 401.2: a draw within the turn is put back when the drawn card is the top
+    /// card's content, whichever Island's id it is; a Swamp from below the Islands is refused.
+    #[test]
+    fn an_in_step_draw_is_put_back_by_its_content() {
+        let caster = PlayerId(0);
+        for drawn in [0, 1] {
+            let (prior, current) = in_step_draw(drawn);
+            assert!(
+                library_departures_restored(&prior, &current, caster).is_some(),
+                "Island {drawn}"
+            );
+            assert!(
+                library_departures_cover(&prior, &current, caster),
+                "Island {drawn}"
+            );
+        }
+        let (prior, current) = in_step_draw(2);
+        assert!(library_departures_restored(&prior, &current, caster).is_none());
+        assert!(!library_departures_cover(&prior, &current, caster));
+    }
+
+    /// A frame whose battlefield creature gets +X/+0, X the cards its controller discarded this
+    /// turn, which `discarded` of them.
+    fn discard_read_frame(discarded: u32) -> GameState {
+        use crate::game::zones::create_object;
+        use crate::types::ability::{ContinuousModification, PlayerScope};
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(0),
+            "Reader".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .expect("reader")
+            .static_definitions = vec![StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddDynamicPower {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::CardsDiscardedThisTurn {
+                        player: PlayerScope::Controller,
+                    },
+                },
+            }])]
+        .into();
+        if discarded > 0 {
+            state
+                .cards_discarded_this_turn_by_player
+                .insert(PlayerId(0), discarded);
+        }
+        state
+    }
+
+    /// CR 732.2a + CR 613.4c: history a static reads is covered by the growth-read arm only when
+    /// it grew, and repeats only when it grows alike in both pairs.
+    #[test]
+    fn a_growth_read_repeats_only_at_a_constant_rise() {
+        let frames = [0, 1, 2, 4].map(discard_read_frame);
+        assert!(
+            !history_covers(&frames[0], &frames[1]),
+            "reach: the static reads it"
+        );
+        assert!(growth_read_covers(&frames[0], &frames[1]));
+        assert!(!growth_read_covers(&frames[1], &frames[1]), "nothing grew");
+        assert!(growth_read_rises_match([
+            &frames[0], &frames[1], &frames[2]
+        ]));
+        assert!(!growth_read_rises_match([
+            &frames[0], &frames[1], &frames[3]
+        ]));
+    }
+
+    /// CR 603.2c: a batched record of a move this turn already made is stale; one naming a move
+    /// not yet made, or another turn's, is not.
+    #[test]
+    fn batched_zone_change_records_grow_stale_only_for_moves_already_made() {
+        use crate::game::zones::create_object;
+        use crate::types::game_state::ZoneChangeRecord;
+        use crate::types::triggers::TriggerMode;
+        let mut prior = GameState::new_two_player(42);
+        prior.turn_number = 3;
+        let observer = create_object(
+            &mut prior,
+            CardId(1),
+            PlayerId(0),
+            "Observer".into(),
+            Zone::Battlefield,
+        );
+        let object = prior.objects.get_mut(&observer).expect("observer");
+        object
+            .trigger_definitions
+            .push(crate::types::ability::TriggerDefinition::new(
+                TriggerMode::ChangesZone,
+            ));
+        let definition = object.trigger_definition_ref(&object.trigger_definitions[0]);
+        prior
+            .zone_changes_this_turn
+            .push_back(ZoneChangeRecord::test_minimal(
+                observer,
+                Some(Zone::Battlefield),
+                Zone::Graveyard,
+            ));
+        let with = |index: usize, turn: u32| {
+            let mut current = prior.clone();
+            current
+                .batched_zone_change_trigger_fired
+                .insert((definition.clone(), turn, index));
+            current
+        };
+        assert!(batched_records_grow_stale(&prior, &with(0, 3)));
+        assert!(!batched_records_grow_stale(&prior, &with(1, 3)));
+        assert!(!batched_records_grow_stale(&prior, &with(0, 2)));
     }
 
     /// CR 400.7: stripping a cast card from the confirmer's frame removes its id from the pile

@@ -32,12 +32,12 @@ use engine::types::ability::{
     AbilityKind, CastingPermission, ChosenAttribute, ContinuousModification,
     DelayedTriggerCondition, Effect, ResolvedAbility, TargetRef,
 };
-use engine::types::actions::GameAction;
+use engine::types::actions::{GameAction, ResolveAllConsentDecision, ResolveAllScope};
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{
-    CastPaymentMode, GameEnd, GameState, LoopDetectionMode, ManaChoice, PersistedGameState,
-    StackEntryKind, WaitingFor,
+    AutoMayChoice, CastPaymentMode, GameEnd, GameState, LoopDetectionMode, ManaChoice,
+    MayTriggerAutoChoiceSelector, PersistedGameState, StackEntryKind, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::interaction::{
@@ -301,33 +301,23 @@ fn kiki_jiki_confirms_with_deceiver_exarch_and_not_with_pestermite() {
     assert!(grown_not_inert(&verdict), "{verdict:?}");
 }
 
-/// Phyrexian Altar recurring Gravecrawler beside Samwise Gamgee ("Whenever another nontoken
-/// creature you control enters, create a Food token.") grows Foods, whose "{2}, {T}, Sacrifice
-/// this token: You gain 3 life." keeps them from being inert.
+/// CR 602.2 + CR 732.2a: Phyrexian Altar recurring Gravecrawler beside Samwise Gamgee ("Whenever
+/// another nontoken creature you control enters, create a Food token.") grows Foods whose "{2},
+/// {T}, Sacrifice this token: You gain 3 life." the period never activates, so it is offered.
 #[test]
-fn an_altar_loop_growing_foods_is_refused_at_the_cover() {
+fn an_altar_loop_growing_foods_is_offered() {
     let Some(db) = shared_card_db() else { return };
     let (mut runner, altar, gravecrawler) = altar_board(Some("Samwise Gamgee"), db);
-    let score = |action: &GameAction| {
-        2 * names(&[gravecrawler])(action) + chooses_color(ManaType::Black)(action)
-    };
-    for cycle in 0..3 {
-        cast(&mut runner, gravecrawler, vec![], CastPaymentMode::Auto);
-        settle(&mut runner, &score);
-        let index = ability(runner.state(), altar, true);
-        activate(&mut runner, altar, index);
-        settle(&mut runner, &score);
-        assert!(!is_offer(runner.state()), "cycle {cycle}");
-    }
-    let foods = runner
-        .state()
+    let offers = drive_altar_offers(&mut runner, (altar, gravecrawler), 3, |_| false);
+    assert_eq!(offers.len(), 1);
+    let state = runner.state();
+    let foods = state
         .battlefield
         .iter()
-        .filter(|id| runner.state().objects[id].name == "Food")
+        .filter(|id| state.objects[id].name == "Food")
         .count();
-    assert_eq!(foods, 3, "reach: one Food per entry");
-    let verdict = latest_verdict(runner.state());
-    assert!(grown_not_inert(&verdict), "{verdict:?}");
+    assert_eq!(foods, 1, "reach: Gravecrawler's entry made a Food");
+    assert_eq!(road(state), Some(OfferRoad::RecordedPeriod));
 }
 
 /// Kiki-Jiki copying Deceiver Exarch, three cycles after the first: three priority frames.
@@ -1288,76 +1278,73 @@ fn griffin_board_is_refused_at_its_first_window_and_offered_at_the_next() {
     );
 }
 
-/// CR 732.1b + CR 121.4 + CR 704.5a: Phyrexian Altar recurring Gravecrawler is refused by name:
-/// with no payoff nothing grows; Moldervine Reclamation ("Whenever a creature you control dies,
-/// you gain 1 life and draw a card.") and Liliana the Repentant ("Whenever another creature or
-/// planeswalker you control enters, mill two cards.") deplete the caster's own library, beside
-/// Altar of the Brood's mill or alone.
+/// CR 732.1b: Phyrexian Altar recurring Gravecrawler with no payoff moves nothing toward anyone,
+/// so the period has no axis.
 #[test]
-fn an_altar_gravecrawler_period_is_refused_at_its_payoffs_stage() {
+fn an_altar_gravecrawler_period_without_a_payoff_has_no_axis() {
     let Some(db) = shared_card_db() else { return };
-    let Some(board) = board_c_offered(BoardCMember::C2SqueeTheImmortal) else {
-        return;
+    let (mut runner, altar, gravecrawler) = altar_board(None, db);
+    let score = |action: &GameAction| {
+        2 * names(&[gravecrawler])(action) + chooses_color(ManaType::Black)(action)
     };
-    assert!(is_offer(board.runner.state()), "reach: Board C is offered");
-    type Expected = fn(&Result<Vec<String>, OfferRefusal>) -> bool;
-    fn at_cover(v: &Result<Vec<String>, OfferRefusal>) -> bool {
-        matches!(
-            v,
-            Err(OfferRefusal::Cover(
-                ObjectGrowthVerdict::ResourceRecurrence(None)
-            ))
-        )
+    for cycle in 0..3 {
+        cast(&mut runner, gravecrawler, vec![], CastPaymentMode::Auto);
+        settle(&mut runner, &score);
+        let index = ability(runner.state(), altar, true);
+        activate(&mut runner, altar, index);
+        settle(&mut runner, &score);
+        assert!(!is_offer(runner.state()), "cycle {cycle}");
     }
-    // Per cycle: P0's hand, P0's library, P1's library.
-    let refused: [(&[&str], [i64; 3], Expected); 4] = [
-        (&[], [0, 0, 0], |v| *v == Err(OfferRefusal::NoAxis)),
-        (
-            &["Altar of the Brood", "Moldervine Reclamation"],
-            [1, -1, -1],
-            at_cover,
-        ),
-        (&["Liliana the Repentant"], [0, -2, 0], at_cover),
-        (
-            &["Altar of the Brood", "Liliana the Repentant"],
-            [0, -2, -1],
-            at_cover,
-        ),
-    ];
-    let sizes = |state: &GameState| {
-        [
-            state.players[0].hand.len(),
-            state.players[0].library.len(),
-            state.players[1].library.len(),
-        ]
-        .map(|n| n as i64)
+    assert_eq!(latest_verdict(runner.state()), Err(OfferRefusal::NoAxis));
+}
+
+/// The Altar + Gravecrawler period's next cycle, its offers declined.
+fn altar_cycle(runner: &mut GameRunner, altar: ObjectId, gravecrawler: ObjectId) {
+    let score = |action: &GameAction| {
+        2 * names(&[gravecrawler])(action) + chooses_color(ManaType::Black)(action)
     };
-    for (payoffs, per_cycle, expected) in refused {
-        let (mut runner, altar, gravecrawler) = altar_board(payoffs.first().copied(), db);
-        for payoff in payoffs.iter().skip(1) {
-            place(runner.state_mut(), P0, payoff, db);
-        }
-        let score = |action: &GameAction| {
-            2 * names(&[gravecrawler])(action) + chooses_color(ManaType::Black)(action)
-        };
-        for cycle in 0..3 {
-            let before = sizes(runner.state());
-            cast(&mut runner, gravecrawler, vec![], CastPaymentMode::Auto);
-            settle(&mut runner, &score);
+    for activates in [false, true] {
+        if activates {
             let index = ability(runner.state(), altar, true);
-            activate(&mut runner, altar, index);
-            settle(&mut runner, &score);
-            assert!(!is_offer(runner.state()), "{payoffs:?} cycle {cycle}");
-            let after = sizes(runner.state());
-            assert_eq!(
-                [0, 1, 2].map(|i| after[i] - before[i]),
-                per_cycle,
-                "reach: {payoffs:?} cycle {cycle}"
-            );
+            activate(runner, altar, index);
+        } else {
+            cast(runner, gravecrawler, vec![], CastPaymentMode::Auto);
         }
-        let verdict = latest_verdict(runner.state());
-        assert!(expected(&verdict), "{payoffs:?}: {verdict:?}");
+        settle(runner, &score);
+        while is_offer(runner.state()) {
+            act(runner, GameAction::DeclineShortcut);
+            settle(runner, &score);
+        }
     }
+}
+
+/// CR 121.4 + CR 701.17b + CR 732.2a: beside Altar of the Brood ("Whenever another permanent you
+/// control enters, each opponent mills a card."), Moldervine Reclamation ("Whenever a creature you
+/// control dies, you gain 1 life and draw a card.") draws P0 a card a cycle while P1 mills one.
+/// P0's draws count the period; P1's shorter library caps nothing, since milling loses no game.
+#[test]
+fn a_moldervine_altar_of_the_brood_period_is_counted_to_the_casters_library() {
+    let Some(db) = shared_card_db() else { return };
+    let (mut runner, altar, gravecrawler) = altar_board(Some("Altar of the Brood"), db);
+    let state = runner.state_mut();
+    place(state, P0, "Moldervine Reclamation", db);
+    let cut: Vec<ObjectId> = state.players[1].library.iter().skip(3).copied().collect();
+    for id in cut {
+        remove_from_zone(state, id, Zone::Library, P1);
+        state.objects.remove(&id);
+    }
+    drive_altar_offers(&mut runner, (altar, gravecrawler), 1, |_| false);
+    let state = runner.state();
+    assert_eq!(
+        [0, 1].map(|seat| state.players[seat].library.len()),
+        [9, 2],
+        "reach: the offer's libraries"
+    );
+    let WaitingFor::LoopShortcut { schema, .. } = &state.waiting_for else {
+        panic!("an offer");
+    };
+    assert_eq!(schema.iteration_count, IterationCount::Fixed(9));
+    assert_eq!(schema.deliverable_capacity, 10);
 }
 
 /// CR 732.1b: once both rotations of the Altar + Gravecrawler period are named, each later cycle
@@ -4208,50 +4195,40 @@ fn a_hellkite_charger_period_paid_by_remade_treasures_is_offered_and_taken() {
     }
 }
 
-/// CR 732.2a: without Bear Umbra and with Old Gnawbone attacking beside it, each combat makes
-/// twelve Treasures for the seven it spends, and the cover refuses a period that nets a mint
-/// beside the tokens it makes again.
+/// CR 602.2 + CR 732.2a: without Bear Umbra and with Old Gnawbone attacking beside it, each combat
+/// makes more Treasures than it spends. Set apart from the Treasures it makes again, the ones it
+/// nets are never activated in the period and the combat history it grows is read by no live
+/// surface, so the carried combat span is offered.
 #[test]
-fn the_cover_refuses_a_carried_period_that_nets_treasures() {
+fn a_carried_period_that_nets_treasures_is_offered() {
     let db = shared_card_db().expect("card db");
-    for mode in BOTH_MODES {
-        let (mut runner, charger, gnawbone) = charger_gnawbone_board(false, mode, db);
-        let mut verdicts = Vec::new();
-        for combat in 2..=5 {
-            for _ in 0..4000 {
-                let state = runner.state();
-                if is_offer(state) || (combats_begun(state) == combat && charger_trigger_top(state))
-                {
-                    break;
-                }
-                match &state.waiting_for {
-                    WaitingFor::DeclareAttackers { player, .. } if *player == P0 => act(
-                        &mut runner,
-                        GameAction::DeclareAttackers {
-                            attacks: [charger, gnawbone]
-                                .map(|attacker| (attacker, AttackTarget::Player(P1)))
-                                .to_vec(),
-                            bands: vec![],
-                        },
-                    ),
-                    _ => charger_step(&mut runner, charger, true),
-                }
-            }
-            let state = runner.state();
-            assert!(!is_offer(state), "{mode:?}, combat {combat}");
-            assert_eq!(combats_begun(state), combat, "{mode:?}");
-            assert_eq!(treasures(state), 7 + 5 * (combat as usize - 1), "{mode:?}");
-            verdicts.extend(carried_verdicts(state));
+    let (mut runner, charger, gnawbone) =
+        charger_gnawbone_board(false, LoopDetectionMode::Interactive, db);
+    for _ in 0..4000 {
+        let state = runner.state();
+        if is_offer(state) || combats_begun(state) > 5 {
+            break;
         }
-        assert!(!verdicts.is_empty(), "{mode:?}: the span is carried");
-        assert!(
-            verdicts.iter().all(|verdict| matches!(
-                verdict,
-                Err(OfferRefusal::Cover(ObjectGrowthVerdict::FodderGrowth(_)))
-            )),
-            "{mode:?}: {verdicts:?}"
-        );
+        match &state.waiting_for {
+            WaitingFor::DeclareAttackers { player, .. } if *player == P0 => act(
+                &mut runner,
+                GameAction::DeclareAttackers {
+                    attacks: [charger, gnawbone]
+                        .map(|attacker| (attacker, AttackTarget::Player(P1)))
+                        .to_vec(),
+                    bands: vec![],
+                },
+            ),
+            _ => charger_step(&mut runner, charger, true),
+        }
     }
+    let state = runner.state();
+    assert!(is_offer(state), "{:?}", carried_verdicts(state));
+    assert_eq!(
+        (combats_begun(state), treasures(state)),
+        (2, 12),
+        "reach: offered in the second combat"
+    );
 }
 
 /// The mana Aggravated Assault's {3}{R}{R} costs.
@@ -6352,8 +6329,8 @@ fn assert_refused(
 /// until end of turn." mints a token class, so the reproduced-token arm answers its pairs and
 /// refuses both on the board; Shivan Dragon's "{R}: This creature gets +1/+0 until end of turn."
 /// spends Mountains toward no axis; Hellkite Charger beside Moraug, Fury of Akoum ("Each
-/// creature you control gets +1/+0 for each time it has attacked this turn.") changes a source
-/// no spend explains.
+/// creature you control gets +1/+0 for each time it has attacked this turn.") deals more damage
+/// each combat, so no constant per-cycle loss counts it.
 #[test]
 fn periods_the_counted_road_does_not_take_stay_refused() {
     assert_refused(
@@ -6389,6 +6366,7 @@ fn periods_the_counted_road_does_not_take_stay_refused() {
         &charger_hand(7, true, &["Moraug, Fury of Akoum"]),
         &[
             OfferRefusal::Cover(ObjectGrowthVerdict::ResourceRecurrence(None)),
+            OfferRefusal::GrowingLoss,
             OfferRefusal::NoRecurrence,
         ],
     );
@@ -6442,6 +6420,8 @@ fn a_period_costing_life_is_counted_until_a_floor_holds_the_life_total() {
                         assert_eq!(runner.state().players[0].life, 1);
                     } else {
                         act(&mut runner, GameAction::DeclineShortcut);
+                        // An offer can stand at a window with the untap still on the stack.
+                        settle(&mut runner, &|_| 0);
                     }
                 }
             }
@@ -6807,5 +6787,431 @@ fn a_counted_offer_states_no_outcome_its_take_does_not_produce() {
             };
             assert_eq!((proposal.win_kind, proposal.win_kind_at), named, "{case}");
         }
+    }
+}
+
+/// Cycles the Altar + Gravecrawler period like [`drive_altar_offers`], noting P0's library at each
+/// offer.
+fn drive_altar_offers_noting_p0(
+    runner: &mut GameRunner,
+    pair: (ObjectId, ObjectId),
+    cycles: usize,
+    declines: impl Fn(&GameState) -> bool,
+) -> Vec<(usize, LoopCertificate)> {
+    let libraries = std::cell::RefCell::new(Vec::new());
+    let offers = drive_altar_offers(runner, pair, cycles, |state| {
+        libraries.borrow_mut().push(state.players[0].library.len());
+        declines(state)
+    });
+    libraries
+        .into_inner()
+        .into_iter()
+        .zip(offers.into_iter().map(|(_, certificate)| certificate))
+        .collect()
+}
+
+/// CR 701.17a + CR 701.17b + CR 704.5b + CR 732.2a: Liliana the Repentant ("Whenever another
+/// creature or planeswalker you control enters, mill two cards.") mills P0 two cards each time
+/// Gravecrawler enters. Milling never loses the game, so the period is offered without end while
+/// the library holds a card, its last two included, and has no axis once it is empty.
+#[test]
+fn a_liliana_self_mill_period_is_offered_without_end() {
+    let Some(db) = shared_card_db() else { return };
+    let (mut runner, altar, gravecrawler) = altar_board(Some("Liliana the Repentant"), db);
+    let offers = drive_altar_offers_noting_p0(&mut runner, (altar, gravecrawler), 8, |state| {
+        state.players[0].library.len() > 2
+    });
+    let libraries: Vec<usize> = offers.iter().map(|(library, _)| *library).collect();
+    assert_eq!(libraries, [8, 6, 4, 2], "reach: two cards a cycle");
+    for (library, certificate) in &offers {
+        assert_eq!(
+            certificate.unbounded,
+            [ResourceAxis::LibraryDelta(P0)],
+            "library {library}"
+        );
+    }
+    assert_eq!(road(runner.state()), Some(OfferRoad::RecordedPeriod));
+    act(&mut runner, GameAction::DeclineShortcut);
+    settle(&mut runner, &|action| 2 * names(&[gravecrawler])(action));
+    for cycle in 0..2 {
+        altar_cycle(&mut runner, altar, gravecrawler);
+        assert!(!is_offer(runner.state()), "cycle {cycle}");
+    }
+    assert_eq!(runner.state().players[0].library.len(), 0);
+    assert_eq!(latest_verdict(runner.state()), Err(OfferRefusal::NoAxis));
+}
+
+/// CR 701.17b: a take of more repetitions than the library lasts mills what it holds and stops at
+/// P0's priority.
+#[test]
+fn a_take_of_a_liliana_self_mill_period_mills_what_the_library_holds() {
+    let Some(db) = shared_card_db() else { return };
+    let (mut runner, altar, gravecrawler) = altar_board(Some("Liliana the Repentant"), db);
+    drive_altar_offers(&mut runner, (altar, gravecrawler), 8, |_| false);
+    let state = runner.state();
+    let (library, graveyard) = (
+        state.players[0].library.len(),
+        state.players[0].graveyard.len(),
+    );
+    assert!(library > 0, "reach: the offer's library holds cards");
+    take(&mut runner, (library / 2 + 2) as u32);
+    let state = runner.state();
+    assert_eq!(state.players[0].library.len(), 0);
+    assert_eq!(state.players[0].graveyard.len(), graveyard + library);
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { player: P0 }),
+        "{}",
+        state.waiting_for.variant_name()
+    );
+}
+
+/// CR 701.17b: Altar of the Brood's period is offered at P1's last card, whose first repetition
+/// mills it and whose later ones mill none; at an empty library it has no axis.
+#[test]
+fn an_altar_of_the_brood_period_is_offered_at_the_last_card() {
+    let Some(db) = shared_card_db() else { return };
+    let (mut runner, altar, gravecrawler) = altar_board(Some("Altar of the Brood"), db);
+    let offers = drive_altar_offers(&mut runner, (altar, gravecrawler), 12, |state| {
+        state.players[1].library.len() > 1
+    });
+    let (library, certificate) = offers.last().expect("an offer");
+    assert_eq!(*library, 1);
+    assert_eq!(certificate.unbounded, [ResourceAxis::LibraryDelta(P1)]);
+    act(&mut runner, GameAction::DeclineShortcut);
+    settle(&mut runner, &|action| 2 * names(&[gravecrawler])(action));
+    altar_cycle(&mut runner, altar, gravecrawler);
+    assert!(!is_offer(runner.state()));
+    assert_eq!(runner.state().players[1].library.len(), 0);
+    assert_eq!(latest_verdict(runner.state()), Err(OfferRefusal::NoAxis));
+}
+
+/// CR 701.17b + CR 732.2a: beside Altar of the Brood, Liliana the Repentant's period mills both
+/// libraries; it is offered on both while P0's holds a card, and on P1's once P0's is empty.
+#[test]
+fn a_liliana_beside_altar_of_the_brood_is_offered_before_and_after_the_casters_library_empties() {
+    let Some(db) = shared_card_db() else { return };
+    let (mut runner, altar, gravecrawler) = altar_board(Some("Liliana the Repentant"), db);
+    place(runner.state_mut(), P0, "Altar of the Brood", db);
+    let offers = drive_altar_offers_noting_p0(&mut runner, (altar, gravecrawler), 12, |state| {
+        !state.players[0].library.is_empty()
+    });
+    let (first_library, first) = &offers[0];
+    assert!(*first_library > 0, "{offers:?}");
+    assert_eq!(
+        first.unbounded,
+        [
+            ResourceAxis::LibraryDelta(P0),
+            ResourceAxis::LibraryDelta(P1)
+        ]
+    );
+    let (library, last) = offers.last().expect("an offer");
+    assert_eq!(*library, 0);
+    assert_eq!(last.unbounded, [ResourceAxis::LibraryDelta(P1)]);
+    assert_eq!(last.win_kind, Some(WinKind::Advantage));
+}
+
+/// CR 118.3 + CR 701.17b: Millikin ("{T}, Mill a card: Add {C}.") untapped by Intruder Alarm
+/// ("Whenever a creature enters, untap all creatures.") pays a mill each cycle, which can't be
+/// paid from an empty library, so the period is counted to P0's library.
+#[test]
+fn a_period_whose_cost_mills_is_counted_to_the_library() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let altar = scenario.add_real_card(P0, "Phyrexian Altar", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Walking Corpse", Zone::Battlefield, db);
+    let gravecrawler = scenario.add_real_card(P0, "Gravecrawler", Zone::Graveyard, db);
+    let millikin = scenario.add_real_card(P0, "Millikin", Zone::Battlefield, db);
+    for card in ["Intruder Alarm", "Swamp"] {
+        scenario.add_real_card(P0, card, Zone::Battlefield, db);
+    }
+    for seat in [P0, P1] {
+        for _ in 0..8 {
+            scenario.add_real_card(seat, "Swamp", Zone::Library, db);
+        }
+    }
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+    let score = |action: &GameAction| {
+        2 * names(&[gravecrawler])(action) + chooses_color(ManaType::Black)(action)
+    };
+    'cycles: for _ in 0..6 {
+        for play in 0..3 {
+            match play {
+                0 => {
+                    // CR 605.1a: a cost that mills makes Millikin's ability not a mana ability.
+                    let index = ability(runner.state(), millikin, false);
+                    activate(&mut runner, millikin, index);
+                }
+                1 => cast(&mut runner, gravecrawler, vec![], CastPaymentMode::Auto),
+                _ => {
+                    let index = ability(runner.state(), altar, true);
+                    activate(&mut runner, altar, index);
+                }
+            }
+            settle(&mut runner, &score);
+            if is_offer(runner.state()) {
+                break 'cycles;
+            }
+        }
+    }
+    let state = runner.state();
+    let library = state.players[0].library.len();
+    let WaitingFor::LoopShortcut {
+        schema,
+        certificate,
+        ..
+    } = &state.waiting_for
+    else {
+        panic!("an offer: {:?}", latest_verdict(state));
+    };
+    assert!(library > 0, "reach: the offer's library holds cards");
+    assert_eq!(
+        schema.iteration_count,
+        IterationCount::Fixed(library as u32)
+    );
+    assert_eq!(schema.deliverable_capacity, library as u32);
+    assert!(
+        certificate.unbounded.is_empty(),
+        "{:?}",
+        certificate.unbounded
+    );
+    take(&mut runner, library as u32);
+    let state = runner.state();
+    assert_eq!(state.players[0].library.len(), 0);
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { player: P0 }),
+        "{}",
+        state.waiting_for.variant_name()
+    );
+}
+
+/// CR 111.10a + CR 602.2: Temur Sabertooth ("{1}{G}: You may return another creature you control
+/// to its owner's hand. If you do, this creature gains indestructible until end of turn.") returns
+/// Dockside Extortionist ("When this creature enters, create X Treasure tokens, where X is the
+/// number of artifacts and enchantments your opponents control.") to be cast again; against six
+/// Ornithopters each cycle makes six Treasures, more than the period spends, and the ones it nets
+/// go unused, so it is offered.
+#[test]
+fn dockside_and_sabertooth_are_offered() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let sabertooth = scenario.add_real_card(P0, "Temur Sabertooth", Zone::Battlefield, db);
+    let dockside = scenario.add_real_card(P0, "Dockside Extortionist", Zone::Battlefield, db);
+    for land in ["Forest", "Forest", "Mountain", "Mountain"] {
+        scenario.add_real_card(P0, land, Zone::Battlefield, db);
+    }
+    for _ in 0..6 {
+        scenario.add_real_card(P1, "Ornithopter", Zone::Battlefield, db);
+    }
+    for seat in [P0, P1] {
+        for _ in 0..10 {
+            scenario.add_real_card(seat, "Forest", Zone::Library, db);
+        }
+    }
+    let mut runner = scenario.build();
+    runner.state_mut().loop_detection = LoopDetectionMode::Interactive;
+    let score = |action: &GameAction| {
+        2 * names(&[dockside])(action)
+            + i32::from(matches!(
+                action,
+                GameAction::DecideOptionalEffect { accept: true }
+            ))
+    };
+    'cycles: for _ in 0..4 {
+        for recast in [false, true] {
+            if recast {
+                cast(&mut runner, dockside, vec![], CastPaymentMode::Auto);
+            } else {
+                let index = ability(runner.state(), sabertooth, false);
+                activate(&mut runner, sabertooth, index);
+            }
+            settle(&mut runner, &score);
+            if is_offer(runner.state()) {
+                break 'cycles;
+            }
+        }
+    }
+    let state = runner.state();
+    assert!(is_offer(state), "{:?}", latest_verdict(state));
+    assert_eq!(
+        treasures(state),
+        6,
+        "reach: Dockside's entry made a Treasure per Ornithopter"
+    );
+    assert_eq!(road(state), Some(OfferRoad::RecordedPeriod));
+}
+
+/// Magda, Brazen Outlaw ("Other Dwarves you control get +1/+0. / Whenever a Dwarf you control
+/// becomes tapped, create a Treasure token. ...") beside Universal Automaton (Changeling), Clock of
+/// Omens ("Tap two untapped artifacts you control: Untap target artifact.") and Battered Golem
+/// ("This creature doesn't untap during your untap step. / Whenever an artifact enters, you may
+/// untap this creature."), whose "may" P0 has answered `golem` for the card; the board, the
+/// Automaton, the Clock and the Golem.
+fn magda_board(
+    golem: AutoMayChoice,
+    db: &CardDatabase,
+) -> (GameRunner, ObjectId, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_real_card(P0, "Magda, Brazen Outlaw", Zone::Battlefield, db);
+    let automaton = scenario.add_real_card(P0, "Universal Automaton", Zone::Battlefield, db);
+    let clock = scenario.add_real_card(P0, "Clock of Omens", Zone::Battlefield, db);
+    let battered = scenario.add_real_card(P0, "Battered Golem", Zone::Battlefield, db);
+    for seat in [P0, P1] {
+        for _ in 0..10 {
+            scenario.add_real_card(seat, "Island", Zone::Library, db);
+        }
+    }
+    let mut runner = scenario.build();
+    let state = runner.state_mut();
+    state.loop_detection = LoopDetectionMode::Interactive;
+    // CR 205.3m: the creature types the card pool holds, which Changeling makes the Automaton.
+    state.all_creature_types = ["Berserker", "Dwarf", "Golem", "Shapeshifter"]
+        .map(String::from)
+        .to_vec();
+    let printed_ref = state.objects[&battered]
+        .printed_ref
+        .clone()
+        .expect("a printed card");
+    state.set_may_trigger_auto_choice_selector(
+        MayTriggerAutoChoiceSelector::SameCard {
+            player: P0,
+            printed_ref,
+            printed_occurrence: 0,
+        },
+        golem,
+    );
+    (runner, automaton, clock, battered)
+}
+
+/// One activation of Clock of Omens tapping the Automaton and `other`, untapping the Automaton.
+fn magda_cycle(runner: &mut GameRunner, (automaton, clock): (ObjectId, ObjectId), other: ObjectId) {
+    let score = |action: &GameAction| 3 * names(&[automaton])(action) + names(&[other])(action);
+    let index = activated_index(runner.state(), clock);
+    activate(runner, clock, index);
+    settle(runner, &score);
+}
+
+/// CR 602.2 + CR 732.2a: each activation of Clock of Omens taps Universal Automaton, the board's
+/// only Dwarf, so Magda makes a Treasure, whose entry untaps Battered Golem; the period never
+/// activates its Treasures, so it is offered.
+#[test]
+fn a_magda_period_growing_unused_treasures_is_offered() {
+    let Some(db) = shared_card_db() else { return };
+    let (mut runner, automaton, clock, battered) = magda_board(AutoMayChoice::Accept, db);
+    let mut treasures_at = Vec::new();
+    for _ in 0..2 {
+        magda_cycle(&mut runner, (automaton, clock), battered);
+        assert!(
+            is_offer(runner.state()),
+            "{:?}",
+            latest_verdict(runner.state())
+        );
+        treasures_at.push(treasures(runner.state()));
+        act(&mut runner, GameAction::DeclineShortcut);
+        settle(&mut runner, &|_| 0);
+    }
+    assert_eq!(treasures_at, [1, 2], "reach: one Treasure a cycle");
+}
+
+/// CR 602.2: tapping a Treasure the period made to pay Clock of Omens uses it, so the grown
+/// Treasures are not inert.
+#[test]
+fn a_magda_period_tapping_its_treasures_is_refused_at_the_cover() {
+    let Some(db) = shared_card_db() else { return };
+    let (mut runner, automaton, clock, battered) = magda_board(AutoMayChoice::Accept, db);
+    magda_cycle(&mut runner, (automaton, clock), battered);
+    assert!(
+        is_offer(runner.state()),
+        "reach: the untapped period is offered"
+    );
+    act(&mut runner, GameAction::DeclineShortcut);
+    settle(&mut runner, &|_| 0);
+    for cycle in 0..3 {
+        let state = runner.state();
+        let untapped = tokens(state, P0)
+            .into_iter()
+            .find(|id| !state.objects[id].tapped)
+            .expect("an untapped Treasure");
+        magda_cycle(&mut runner, (automaton, clock), untapped);
+        assert!(
+            runner.state().objects[&untapped].tapped,
+            "reach: cycle {cycle} tapped a Treasure"
+        );
+        assert!(!is_offer(runner.state()), "cycle {cycle}");
+    }
+    let verdict = latest_verdict(runner.state());
+    assert!(grown_not_inert(&verdict), "{verdict:?}");
+}
+
+/// CR 603.5 + CR 118.3: with Battered Golem's "may" declined it stays tapped, so the next
+/// activation of Clock of Omens cannot tap the same two artifacts and the period's own cost answer
+/// cannot be given again.
+#[test]
+fn a_magda_period_declining_the_golem_does_not_recur() {
+    let Some(db) = shared_card_db() else { return };
+    let (mut runner, automaton, clock, battered) = magda_board(AutoMayChoice::Decline, db);
+    magda_cycle(&mut runner, (automaton, clock), battered);
+    let state = runner.state();
+    assert!(
+        state.objects[&battered].tapped,
+        "reach: the Golem stays tapped"
+    );
+    assert!(!is_offer(state));
+    assert_eq!(latest_verdict(state), Err(OfferRefusal::UnanswerablePrompt));
+}
+
+/// CR 732.2a: Resolve All proposes a shortcut over priority passes, not a game choice, so Altar of
+/// the Brood's period resolved through it is the same period, and is offered alike for either
+/// scope.
+#[test]
+fn an_altar_of_the_brood_period_resolved_all_is_offered() {
+    let Some(db) = shared_card_db() else { return };
+    for scope in [ResolveAllScope::Own, ResolveAllScope::Shared] {
+        let (mut runner, altar, gravecrawler) = altar_board(Some("Altar of the Brood"), db);
+        let score = |action: &GameAction| {
+            2 * names(&[gravecrawler])(action) + chooses_color(ManaType::Black)(action)
+        };
+        let library = runner.state().players[1].library.len();
+        cast(&mut runner, gravecrawler, vec![], CastPaymentMode::Auto);
+        act(
+            &mut runner,
+            GameAction::BeginResolveAll {
+                max_resolutions: 10,
+                scope,
+            },
+        );
+        if let WaitingFor::ResolveAllConsent { epoch, .. } = runner.state().waiting_for {
+            act(
+                &mut runner,
+                GameAction::RespondResolveAllConsent {
+                    epoch,
+                    decision: ResolveAllConsentDecision::Grant,
+                },
+            );
+        }
+        settle(&mut runner, &score);
+        if !is_offer(runner.state()) {
+            let index = ability(runner.state(), altar, true);
+            activate(&mut runner, altar, index);
+            settle(&mut runner, &score);
+        }
+        let state = runner.state();
+        let WaitingFor::LoopShortcut { certificate, .. } = &state.waiting_for else {
+            panic!("{scope:?}: {:?}", latest_verdict(state));
+        };
+        assert_eq!(
+            state.players[1].library.len(),
+            library - 1,
+            "{scope:?}: reach"
+        );
+        assert_eq!(
+            certificate.unbounded,
+            [ResourceAxis::LibraryDelta(P1)],
+            "{scope:?}"
+        );
+        assert_eq!(road(state), Some(OfferRoad::RecordedPeriod), "{scope:?}");
     }
 }

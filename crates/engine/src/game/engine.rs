@@ -3214,7 +3214,7 @@ fn build_cert(
     departure: Option<&crate::analysis::resource::CertifiedInstructedDeparture>,
 ) -> crate::analysis::loop_check::LoopCertificate {
     // CR 732.2a: the two fields are derived from DIFFERENT deltas, deliberately. `unbounded`
-    // reads the FULL delta, because an instructed non-caster library departure is genuine
+    // reads the FULL delta, because an instructed library departure is genuine
     // unbounded progress and rides the certificate as its own `LibraryDelta` advantage axis.
     // `win_kind` reads the REDUCED one, because CR 121.4 / CR 104.3c put the loss on a DRAW
     // from an empty library rather than on the departure, so classifying `Decking` here would
@@ -7848,6 +7848,15 @@ pub(crate) fn certify_object_growth_frames(
     // CR 400.7: normalize each frame BEFORE the cover fork so both arms share the normalized
     // frames.
     let (cs_n, cs_n1, cs_n2) = (normalize(s_n), normalize(s_n1), normalize(s_n2));
+    // CR 732.2a: a growth-read period repeats only if each repetition grows the read history alike.
+    let rises_held = |verdict: ObjectGrowthVerdict| match verdict {
+        ObjectGrowthVerdict::ResourceRecurrence(Some(
+            crate::analysis::resource::RecurrenceCover::GrowthRead,
+        )) if !crate::analysis::resource::growth_read_rises_match([&cs_n, &cs_n1, &cs_n2]) => {
+            ObjectGrowthVerdict::ResourceRecurrence(None)
+        }
+        verdict => verdict,
+    };
     // CR 732.2a: a token the period spent and made again is the same permanent to the board's
     // recurrence, so each pair is compared without it; a period that mints nothing else is
     // covered as one that mints nothing.
@@ -7861,8 +7870,8 @@ pub(crate) fn certify_object_growth_frames(
             )
         };
         let first = without(&cs_n, &cs_n1, &first_remade);
-        if derived_fodder_class(&first.0, &first.1).is_none() {
-            let second = without(&cs_n1, &cs_n2, &second_remade);
+        let second = without(&cs_n1, &cs_n2, &second_remade);
+        let Some((mut fodder, _k)) = derived_fodder_class(&first.0, &first.1) else {
             let covers = |(prior, current): &(GameState, GameState), floors| {
                 crate::analysis::resource::resource_recurrence_covers(
                     prior, current, caster, floors,
@@ -7870,8 +7879,21 @@ pub(crate) fn certify_object_growth_frames(
             };
             let (verdict, _) =
                 PairCover::of_pairs(covers(&first, first_floors), covers(&second, second_floors));
-            return (verdict, CoveredGrowth::PerformedOnly);
-        }
+            return (rises_held(verdict), CoveredGrowth::PerformedOnly);
+        };
+        // CR 111.1: what the period minted beside its remade tokens is judged on the same frames.
+        crate::analysis::resource::project_object_for_loop(&mut fodder);
+        let refusals = |(prior, current): &(GameState, GameState)| {
+            crate::analysis::resource::fodder_growth_cover_refusals(prior, current, &fodder, caster)
+        };
+        let ((first, first_growth), (second, second_growth)) =
+            (refusals(&first), refusals(&second));
+        return (
+            ObjectGrowthVerdict::FodderGrowth([first, second]),
+            first_growth
+                .max(second_growth)
+                .max(CoveredGrowth::PerformedOnly),
+        );
     }
     // CR 732.2a board recurrence on BOTH pairs — two disjoint recurrence shapes:
     //  - fodder-growth (one HOMOGENEOUS class of k >= 1 members was reproduced each period,
@@ -7907,7 +7929,8 @@ pub(crate) fn certify_object_growth_frames(
                 caster,
                 second_floors,
             );
-            PairCover::of_pairs(first, second)
+            let (verdict, growth) = PairCover::of_pairs(first, second);
+            (rises_held(verdict), growth)
         }
     }
 }
@@ -8021,7 +8044,7 @@ fn remade_tokens(before: &GameState, after: &GameState) -> Vec<(ObjectId, Object
 /// values reproduced), so an object that merely MOVED onto the battlefield is not a member of a
 /// class that mint can reproduce, and publishing it as one is a promise the collapse cannot keep
 /// (CR 732.2a). What such an object is instead is the board cover's question, answered by
-/// `analysis::resource::certify_instructed_opponent_library_departure`.
+/// `analysis::resource::certify_instructed_library_departure`.
 fn derived_fodder_class(
     before: &GameState,
     after: &GameState,
@@ -8301,12 +8324,14 @@ pub(crate) enum PeriodSign {
     Spend,
 }
 
-/// The sign check on a period's last frame pair: progress for the caster, or no axis; then whether
+/// The sign check on a period's frame pair: progress for the caster, or no axis; then whether
 /// something of the caster's own falls, whether anyone has a loss axis, or neither.
+/// `library_cost` is a play of the period whose cost moves a library card.
 pub(crate) fn period_sign_check(
     s_n1: &GameState,
     s_n2: &GameState,
     caster: PlayerId,
+    library_cost: Option<super::play_trace::PlayLocus>,
 ) -> Result<PeriodSign, OfferRefusal> {
     // CR 119 / CR 122.1 / CR 704.5g sign-check on the last pair (RAW un-projected frames):
     // progress for the caster, then its own life and every driving consumable (energy / poison /
@@ -8326,27 +8351,31 @@ pub(crate) fn period_sign_check(
     if minted_growth > 0 {
         delta.tokens_created += minted_growth;
     }
-    // CR 701.17b: an instructed, choiceless, non-caster top-of-library departure is an
-    // ADVANTAGE axis, not a loss one — CR 121.4 / CR 104.3c / CR 704.5b lose a player for
-    // DRAWING from an empty library, never for milling one. `has_no_loss_axis` is therefore
+    // CR 701.17b: an instructed, choiceless top-of-library departure is an ADVANTAGE axis, not a
+    // loss one — CR 121.4 / CR 104.3c / CR 704.5b lose a player for DRAWING from an empty
+    // library, never for milling one. `has_no_loss_axis` is therefore
     // asked about the delta with the certified departure added back, and ONLY it:
     // `progress_for`, `life_falls_for` and `driving_resources_non_decreasing` keep the full delta, and
     // `has_no_loss_axis` itself is not edited — its other call sites are the CR 732.4
     // mandatory-draw arms, where relieving this would turn an unbreakable mandatory mill loop
     // into a draw (CR 104.4b needs the game state to REPEAT, and a shrinking library does not).
     let certified_departure =
-        crate::analysis::resource::certify_instructed_opponent_library_departure(
-            s_n1,
-            s_n2,
-            [s_n1, s_n2],
-            caster,
-        );
+        crate::analysis::resource::certify_instructed_library_departure(s_n1, s_n2, [s_n1, s_n2]);
     let sign_check_delta = match &certified_departure {
         Some(certified) => delta.without_certified_departure(&certified.per_victim),
         None => delta.clone(),
     };
     if !delta.progress_for(caster) {
         return Err(OfferRefusal::NoAxis);
+    }
+    // CR 118.3 + CR 701.17b: a cost that mills can't be paid from an empty library, so the
+    // period is performed only while the library lasts.
+    if library_cost.is_some()
+        && certified_departure
+            .as_ref()
+            .is_some_and(|certified| certified.per_victim.contains_key(&caster))
+    {
+        return Ok(PeriodSign::Spend);
     }
     if delta.life_falls_for(caster)
         || !crate::analysis::resource::driving_resources_non_decreasing(s_n1, s_n2, caster)
@@ -8770,11 +8799,17 @@ struct LoopShortcutOffer<'a> {
 
 /// CR 732.2a: reject a
 /// shortcut declaration and hand priority back to the next living seat — the manual-play
-/// handback every reject path in `handle_declare_shortcut` lands on. Single
+/// handback every reject path in `handle_declare_shortcut` lands on. The rejected offer is
+/// declined: the proposer's plays leave the trace, as at a decline. Single
 /// authority: a reject path added later cannot forget to sync `result.waiting_for`.
 /// Cited by CR number, not by `MagicCompRules.txt` line: that file is gitignored and
 /// re-fetched, so its line coordinates rot on every rules release.
-fn reject_shortcut_declaration(state: &mut GameState, result: &mut ActionResult) {
+fn reject_shortcut_declaration(
+    state: &mut GameState,
+    proposer: PlayerId,
+    result: &mut ActionResult,
+) {
+    super::play_trace::discard_seat(state, proposer);
     priority::reset_priority(state);
     state.waiting_for = WaitingFor::Priority {
         player: living_priority_seat(state),
@@ -8836,7 +8871,7 @@ fn handle_declare_shortcut(
         crate::analysis::decision_template::IterationCount::Fixed(n)
             if *n > MAX_SHORTCUT_CYCLES =>
         {
-            reject_shortcut_declaration(state, &mut result);
+            reject_shortcut_declaration(state, offer.proposer, &mut result);
             return Ok(result);
         }
         // CR 732.2a: the per-offer ceiling, enforced at the same single authority as the
@@ -8848,7 +8883,7 @@ fn handle_declare_shortcut(
         crate::analysis::decision_template::IterationCount::Fixed(n)
             if *n > offer.schema.deliverable_capacity =>
         {
-            reject_shortcut_declaration(state, &mut result);
+            reject_shortcut_declaration(state, offer.proposer, &mut result);
             return Ok(result);
         }
         // CR 732.2a: `UntilLethal` names no count at all, so it can only be legal when the
@@ -8858,7 +8893,7 @@ fn handle_declare_shortcut(
         crate::analysis::decision_template::IterationCount::UntilLethal
             if offer.schema.is_bounded() =>
         {
-            reject_shortcut_declaration(state, &mut result);
+            reject_shortcut_declaration(state, offer.proposer, &mut result);
             return Ok(result);
         }
         // CR 732.2a: a proposal without end is legal only on an offer that published one.
@@ -8866,7 +8901,7 @@ fn handle_declare_shortcut(
             if offer.schema.iteration_count
                 != crate::analysis::decision_template::IterationCount::WithoutEnd =>
         {
-            reject_shortcut_declaration(state, &mut result);
+            reject_shortcut_declaration(state, offer.proposer, &mut result);
             return Ok(result);
         }
         // Under-cap `Fixed` and `UntilLethal` (period-bounded by `shortcut_drive_period`)
@@ -8928,7 +8963,7 @@ fn handle_declare_shortcut(
     // `WaitingFor::RespondToShortcut` never runs this handler) lives on
     // `apply_confirmed_shortcut`'s consumption guard.
     if template.as_ref().is_some_and(|t| t.owner != offer.proposer) {
-        reject_shortcut_declaration(state, &mut result);
+        reject_shortcut_declaration(state, offer.proposer, &mut result);
         return Ok(result);
     }
     // CR 732.2a: a declaration cannot pin choices the offer published none of. Every
@@ -8980,7 +9015,7 @@ fn handle_declare_shortcut(
                 offer.period.recorded_answers(),
                 state,
             ) {
-                reject_shortcut_declaration(state, &mut result);
+                reject_shortcut_declaration(state, offer.proposer, &mut result);
                 return Ok(result);
             }
         }
@@ -8989,7 +9024,7 @@ fn handle_declare_shortcut(
         // replays; without one a pin-consuming drive would run with no pins, so it fails closed
         // into the manual-play handback.
         None if !offer.schema.points.is_empty() && offer.period.is_empty() => {
-            reject_shortcut_declaration(state, &mut result);
+            reject_shortcut_declaration(state, offer.proposer, &mut result);
             return Ok(result);
         }
         None => {}

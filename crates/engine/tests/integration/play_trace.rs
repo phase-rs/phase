@@ -1090,7 +1090,12 @@ struct NivWindows {
 }
 
 fn drive_niv(choice: AutoMayChoice, db: &CardDatabase) -> NivWindows {
-    let (mut runner, firemind) = niv_curiosity_board(choice, db);
+    let (runner, firemind) = niv_curiosity_board(choice, db);
+    drive_niv_board(runner, firemind)
+}
+
+/// [`drive_niv`] on a board already built.
+fn drive_niv_board(mut runner: GameRunner, firemind: ObjectId) -> NivWindows {
     let index = ability(runner.state(), firemind, false);
     activate(&mut runner, firemind, index);
     let mut seen = NivWindows {
@@ -1100,58 +1105,19 @@ fn drive_niv(choice: AutoMayChoice, db: &CardDatabase) -> NivWindows {
     for _ in 0..BEAT_CAP {
         let state = runner.state();
         match state.waiting_for {
-            WaitingFor::GameOver { .. } | WaitingFor::LoopShortcut { .. } => break,
-            WaitingFor::Priority { player } => {
-                let view = trace_of(state);
-                seen.remembered = seen.remembered.max(
-                    view.entries
-                        .iter()
-                        .filter(|entry| remembered_by(entry, P0))
-                        .count(),
-                );
-                seen.asked = seen.asked.max(
-                    view.entries
-                        .iter()
-                        .filter(|entry| {
-                            matches!(entry.kind, EntryKind::Remembered { asked_by: Some(_) })
-                        })
-                        .count(),
-                );
-                seen.named = seen.named.max(view.named.len());
-                seen.mandatory += view
-                    .named
-                    .iter()
-                    .filter(|span| span.cause == NamingCause::MandatoryRecurrence)
-                    .count();
-                seen.ordered &= view.entries.iter().enumerate().all(|(at, entry)| {
-                    let EntryKind::Remembered {
-                        asked_by: Some(node),
-                    } = entry.kind
-                    else {
-                        return true;
-                    };
-                    at > 0 && view.entries[at - 1].kind == EntryKind::Resolution { node }
-                });
-                let top = view.named.iter().copied().find(|span| {
-                    let body = &view.entries[span.start..span.end];
-                    span.cause == NamingCause::TriggerTop
-                        && body.iter().any(|entry| remembered_by(entry, P0))
-                        && !body.iter().any(optional_answer)
-                });
-                if let Some(span) = top {
-                    let verdict = || {
-                        confirm_for_tests(state)
-                            .into_iter()
-                            .find_map(|(named, verdict)| (named == span).then_some(verdict))
-                    };
-                    seen.remembered_top |= player == P0;
-                    if player == P1 && seen.foreign.is_none() {
-                        seen.foreign = verdict();
-                    }
-                    if player == P0 && seen.own.is_none() {
-                        seen.own = verdict();
-                    }
+            WaitingFor::GameOver { .. } => break,
+            // CR 732.2a: the offer replaced the proposer's priority window, so each seat's verdict
+            // is read on that window's frame.
+            WaitingFor::LoopShortcut { .. } => {
+                for seat in [P0, P1] {
+                    let mut frame = state.clone();
+                    frame.waiting_for = WaitingFor::Priority { player: seat };
+                    observe_niv_window(&mut seen, &frame, seat);
                 }
+                break;
+            }
+            WaitingFor::Priority { player } => {
+                observe_niv_window(&mut seen, state, player);
                 if state.stack.is_empty() {
                     break;
                 }
@@ -1161,6 +1127,58 @@ fn drive_niv(choice: AutoMayChoice, db: &CardDatabase) -> NivWindows {
         }
     }
     seen
+}
+
+/// Records what `player`'s priority window over `state` names and confirms.
+fn observe_niv_window(seen: &mut NivWindows, state: &GameState, player: PlayerId) {
+    let view = trace_of(state);
+    seen.remembered = seen.remembered.max(
+        view.entries
+            .iter()
+            .filter(|entry| remembered_by(entry, P0))
+            .count(),
+    );
+    seen.asked = seen.asked.max(
+        view.entries
+            .iter()
+            .filter(|entry| matches!(entry.kind, EntryKind::Remembered { asked_by: Some(_) }))
+            .count(),
+    );
+    seen.named = seen.named.max(view.named.len());
+    seen.mandatory += view
+        .named
+        .iter()
+        .filter(|span| span.cause == NamingCause::MandatoryRecurrence)
+        .count();
+    seen.ordered &= view.entries.iter().enumerate().all(|(at, entry)| {
+        let EntryKind::Remembered {
+            asked_by: Some(node),
+        } = entry.kind
+        else {
+            return true;
+        };
+        at > 0 && view.entries[at - 1].kind == EntryKind::Resolution { node }
+    });
+    let top = view.named.iter().copied().find(|span| {
+        let body = &view.entries[span.start..span.end];
+        span.cause == NamingCause::TriggerTop
+            && body.iter().any(|entry| remembered_by(entry, P0))
+            && !body.iter().any(optional_answer)
+    });
+    if let Some(span) = top {
+        let verdict = || {
+            confirm_for_tests(state)
+                .into_iter()
+                .find_map(|(named, verdict)| (named == span).then_some(verdict))
+        };
+        seen.remembered_top |= player == P0;
+        if player == P1 && seen.foreign.is_none() {
+            seen.foreign = verdict();
+        }
+        if player == P0 && seen.own.is_none() {
+            seen.own = verdict();
+        }
+    }
 }
 
 /// CR 603.5 + CR 104.4b: Curiosity's draw is optional each time, whether a person or a stored
@@ -1189,14 +1207,25 @@ fn play_trace_names_a_stored_accept_period_trigger_top_not_mandatory() {
         Some(Err(OfferRefusal::ForeignSeat { seat: P0 }))
     );
     let own = seen.own.expect("a P0 window's verdict");
-    assert!(
-        !matches!(
-            own,
-            Err(OfferRefusal::ForeignSeat { .. } | OfferRefusal::Fragmented { .. })
-        ),
-        "{own:?}"
-    );
+    // CR 121.1 + CR 113.6g: the draws are put back, and "This spell can't be countered" functions
+    // only on the stack.
+    assert!(own.is_ok(), "{own:?}");
     assert!(seen.remembered > 0, "reach: the stored accept answered");
+}
+
+/// CR 401.2: P0 sees its library's cards, not their order, so a draw is put back by what it is:
+/// the period confirms with an Island moved from the top of P0's library to its bottom.
+#[test]
+fn play_trace_confirms_a_draw_period_whatever_order_the_library_holds() {
+    let Some(db) = shared_card_db() else { return };
+    let (mut runner, firemind) = niv_curiosity_board(AutoMayChoice::Accept, db);
+    let library = &mut runner.state_mut().players[0].library;
+    let top = library.pop_front().expect("a library card");
+    library.push_back(top);
+    let seen = drive_niv_board(runner, firemind);
+    assert!(seen.remembered_top, "reach: a P0 window names the period");
+    let own = seen.own.expect("a P0 window's verdict");
+    assert!(own.is_ok(), "{own:?}");
 }
 
 /// CR 603.5: a stored decline is recorded and the loop stops, so nothing recurs to be named.
@@ -1283,13 +1312,12 @@ fn play_trace_places_each_remembered_answer_after_its_resolution_in_a_batch() {
     );
     let view = trace_of(runner.state());
     let resolved = entry_steps(&view, start..view.entries.len());
-    let Some(&Step::Resolve(node)) = resolved.get(1) else {
+    let Some(&Step::Resolve(node)) = resolved.first() else {
         panic!("a resolution follows the consent: {resolved:?}");
     };
     assert_eq!(
         resolved,
         vec![
-            Step::Answer(P1, "RespondResolveAllConsent"),
             Step::Resolve(node),
             Step::Remembered(P0),
             Step::Resolve(node),
@@ -1656,8 +1684,10 @@ fn play_trace_records_only_the_outermost_apply() {
         run.nested_applies > 0,
         "reach: the finish re-enters the action boundary: {run:?}"
     );
+    // CR 732.2a: the drive's one shortcut decline is a negotiation, which the trace never records.
     assert_eq!(
-        run.actions_recorded, run.boundary_entries,
+        run.actions_recorded + 1,
+        run.boundary_entries,
         "only outermost applies record: {run:?}"
     );
     assert!(

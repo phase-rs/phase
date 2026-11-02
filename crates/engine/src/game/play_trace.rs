@@ -859,14 +859,13 @@ enum Choice {
     Play(Play),
     Answer(Answer),
     Reverse(Reversal),
-    /// A preference or permission, not a game choice.
+    /// A preference, a permission, or a shortcut or Resolve All negotiation (CR 732.2a): not a game choice.
     Setting,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Answer {
-    /// Passing priority, the shortcut and Resolve All negotiations (CR 732.2a), or a concession:
-    /// never a choice that stops a loop of mandatory actions (CR 104.4b).
+    /// Passing priority or a concession: never a choice that stops a loop of mandatory actions (CR 104.4b).
     Pass,
     /// Any other answer.
     Take,
@@ -945,7 +944,14 @@ fn classify(action: &GameAction, prompt: &WaitingFor) -> Choice {
         | GameAction::GrantDebugPermission { .. }
         | GameAction::RevokeDebugPermission { .. }
         // CR 402.3: arranging one's hand has no game significance.
-        | GameAction::ReorderHand { .. } => Choice::Setting,
+        | GameAction::ReorderHand { .. }
+        | GameAction::DeclareShortcut { .. }
+        | GameAction::RespondToShortcut { .. }
+        | GameAction::DeclineShortcut
+        | GameAction::PrecastCopyShortcut { .. }
+        | GameAction::BeginResolveAll { .. }
+        | GameAction::RespondResolveAllConsent { .. }
+        | GameAction::RevokeResolveAllConsent { .. } => Choice::Setting,
         GameAction::Equip { .. }
         | GameAction::CrewVehicle { .. }
         | GameAction::ActivateStation { .. }
@@ -1049,15 +1055,7 @@ fn classify(action: &GameAction, prompt: &WaitingFor) -> Choice {
         | GameAction::ChooseSpecializeColor { .. }
         | GameAction::PassParadigmOffer
         | GameAction::EndContinuousEffect { .. } => Choice::Answer(Answer::Take),
-        GameAction::PassPriority
-        | GameAction::Concede { .. }
-        | GameAction::DeclareShortcut { .. }
-        | GameAction::RespondToShortcut { .. }
-        | GameAction::DeclineShortcut
-        | GameAction::PrecastCopyShortcut { .. }
-        | GameAction::BeginResolveAll { .. }
-        | GameAction::RespondResolveAllConsent { .. }
-        | GameAction::RevokeResolveAllConsent { .. } => Choice::Answer(Answer::Pass),
+        GameAction::PassPriority | GameAction::Concede { .. } => Choice::Answer(Answer::Pass),
     }
 }
 
@@ -2637,5 +2635,62 @@ mod tests {
         off.record_remembered_answer(PlayerId(1), AnswerOptionality::Optional);
         assert!(off.play_trace.is_none());
         assert_eq!(off.loop_decision_tally.optional, tally.optional + 1);
+    }
+
+    /// CR 732.2a: proposing, answering or declining a shortcut or a Resolve All is not a game
+    /// choice, so the trace records none of them; a pass and a concession stay passes.
+    #[test]
+    fn negotiation_actions_are_settings() {
+        use crate::analysis::decision_template::IterationCount;
+        use crate::analysis::loop_check::ShortcutResponse;
+        use crate::types::actions::{
+            PrecastCopyShortcutResponse, ResolveAllConsentDecision, ResolveAllScope,
+        };
+        let prompt = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let negotiations = [
+            GameAction::DeclareShortcut {
+                count: IterationCount::Fixed(1),
+                template: None,
+            },
+            GameAction::RespondToShortcut {
+                response: ShortcutResponse::Accept,
+            },
+            GameAction::DeclineShortcut,
+            GameAction::PrecastCopyShortcut {
+                epoch: 0,
+                response: PrecastCopyShortcutResponse::Decline,
+            },
+            GameAction::BeginResolveAll {
+                max_resolutions: 1,
+                scope: ResolveAllScope::Shared,
+            },
+            GameAction::RespondResolveAllConsent {
+                epoch: 0,
+                decision: ResolveAllConsentDecision::Grant,
+            },
+            GameAction::RevokeResolveAllConsent {
+                epoch: 0,
+                representative: PlayerId(1),
+            },
+        ];
+        for action in &negotiations {
+            assert!(
+                matches!(classify(action, &prompt), Choice::Setting),
+                "{action:?}"
+            );
+        }
+        for action in [
+            GameAction::PassPriority,
+            GameAction::Concede {
+                player_id: PlayerId(0),
+            },
+        ] {
+            assert!(
+                matches!(classify(&action, &prompt), Choice::Answer(Answer::Pass)),
+                "{action:?}"
+            );
+        }
     }
 }

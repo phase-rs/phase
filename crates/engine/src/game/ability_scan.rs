@@ -942,7 +942,33 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
                 acc
             }
         },
-        Effect::ChangeZoneAll { .. } => Axes::CONSERVATIVE,
+        // CR 732.2a: a mass move reads what its own fields read, as `ChangeZone` does.
+        Effect::ChangeZoneAll {
+            target,
+            enters_under,
+            enter_with_counters,
+            face_down_profile,
+            origin: _,
+            destination: _,
+            enter_tapped: _,
+            enters_attacking: _,
+            library_position: _,
+            library_shuffle: _,
+            random_order: _,
+        } => match mode {
+            ScanMode::Conservative => Axes::CONSERVATIVE,
+            ScanMode::LoopFirewall if face_down_profile.is_some() => Axes::CONSERVATIVE,
+            ScanMode::LoopFirewall => {
+                let mut acc = scan_target_filter(target, target_ctx, mode);
+                if let Some(controller) = enters_under {
+                    acc = acc.or(scan_controller_ref(controller));
+                }
+                for (_counter_type, qty) in enter_with_counters {
+                    acc = acc.or(scan_quantity_expr(qty, mode));
+                }
+                acc
+            }
+        },
         Effect::Dig {
             player,
             count,
@@ -1666,7 +1692,7 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
         Effect::AddPendingEntersModifications { .. } => Axes::CONSERVATIVE,
         Effect::CreateEmblem { .. } => Axes::CONSERVATIVE,
         // CR 118.12: paying a resolution-time cost reads the cost's own payload, not the turn's
-        // history; the other axes stay fail-closed.
+        // history.
         Effect::PayCost { cost, scale, payer } => {
             let mut payload = scan_ability_cost(cost, mode).or(scan_target_filter(
                 payer,
@@ -1676,9 +1702,16 @@ fn scan_effect(x: &Effect, mode: ScanMode) -> Axes {
             if let Some(scale) = scale {
                 payload = payload.or(scan_quantity_expr(scale, mode));
             }
-            Axes {
-                history: payload.history,
-                ..Axes::CONSERVATIVE
+            match (mode, cost, scale) {
+                // A fixed mana payment reads no object; it spends projected mana.
+                (ScanMode::LoopFirewall, AbilityCost::Mana { .. }, None) => Axes {
+                    projected: true,
+                    ..payload
+                },
+                _ => Axes {
+                    history: payload.history,
+                    ..Axes::CONSERVATIVE
+                },
             }
         }
         Effect::CastFromZone { .. } => Axes::CONSERVATIVE,
@@ -5837,10 +5870,24 @@ fn ability_definition_axes(def: &AbilityDefinition, mode: ScanMode) -> Axes {
         acc = acc.or(scan_repeat_continuation(ru, mode));
     }
     // Conservative fail-closed for present-but-undescended cost/filter payloads:
-    // an `unless pay {1} for each artifact`, a divide/distribute filter, or a
-    // per-condition cost reduction can each express a board-scoped read.
-    if unless_pay.is_some() || distribute.is_some() || cost_reduction.is_some() {
+    // an `unless pay {1} for each artifact` or a divide/distribute filter can each
+    // express a board-scoped read.
+    if unless_pay.is_some() || distribute.is_some() {
         acc = acc.or(Axes::CONSERVATIVE);
+    }
+    // CR 601.2f + CR 602.2b: a cost reduction reads its count and its gate when the cost is
+    // determined; no walker descends a parsed gate, so a gated reduction stays fail-closed.
+    if let Some(crate::types::ability::CostReduction {
+        count,
+        condition,
+        mode: _,
+        amount_per: _,
+    }) = cost_reduction
+    {
+        acc = acc.or(scan_quantity_expr(count, mode));
+        if condition.is_some() {
+            acc = acc.or(Axes::CONSERVATIVE);
+        }
     }
     acc
 }
@@ -6661,8 +6708,8 @@ fn particular_object_ctx(filter: &TargetFilter) -> FilterReadContext {
     }
 }
 
-/// CR 611.2c: a static ability a resolving `GenericEffect` installs. Only a continuous mode is
-/// described here; any other mode, and the two fields no card sets, stay unscanned: prover
+/// CR 611.2c: a static ability a resolving `GenericEffect` installs. Only a continuous or a
+/// cost-modifying mode is described here; any other mode, and the two fields no card sets, stay unscanned: prover
 /// incomplete here. Destructured with no `..`, so a new field is classified before it compiles.
 fn scan_resolved_continuous_static(
     sd: &crate::types::ability::StaticDefinition,
@@ -6690,13 +6737,35 @@ fn scan_resolved_continuous_static(
         room_door: _,
         granting_object: _,
     } = sd;
-    if *static_mode != crate::types::statics::StaticMode::Continuous
-        || per_player_condition.is_some()
-        || attack_defended.is_some()
-    {
+    if per_player_condition.is_some() || attack_defended.is_some() {
         return Axes::CONSERVATIVE;
     }
-    let mut acc = Axes::NONE;
+    let mut acc = match static_mode {
+        crate::types::statics::StaticMode::Continuous => Axes::NONE,
+        // CR 601.2f: a cost modification reads the spells it applies to and its count; a
+        // fixed amount reads nothing.
+        crate::types::statics::StaticMode::ModifyCost {
+            spell_filter,
+            dynamic_count,
+            mode: _,
+            amount: _,
+            reach: _,
+        } => {
+            let mut acc = Axes::NONE;
+            if let Some(filter) = spell_filter {
+                acc = acc.or(scan_target_filter(
+                    filter,
+                    FilterReadContext::SnapshotOrEvent,
+                    mode,
+                ));
+            }
+            if let Some(count) = dynamic_count {
+                acc = acc.or(scan_quantity_ref(count, mode));
+            }
+            acc
+        }
+        _ => return Axes::CONSERVATIVE,
+    };
     if let Some(affected) = affected {
         acc = acc.or(scan_target_filter(
             affected,
@@ -7055,7 +7124,7 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         // these: a loop growing INERT tokens a DamageAll reads has all-inert grown objects
         // (grown_objects_are_inert==true) yet the census read still escalates ⇒ only the
         // sibling veto catches it. Pinned EXACTLY by `census_tag_set_is_exactly_enumerated`.
-        // Defense-in-depth: PumpAll/DamageEachPlayer/ChangeZoneAll are census-
+        // Defense-in-depth: PumpAll/DamageEachPlayer are census-
         // tagged even though their scan_effect arm is CONSERVATIVE/non-scanning today, so a
         // future descent into their mass filter cannot silently relax.
         Effect::EachSourceDealsDamage { .. }
@@ -7115,7 +7184,7 @@ fn effect_target_ctx(e: &Effect, mode: ScanMode) -> FilterReadContext {
         // censuses: over-vetoing the bounded mode is the SAFE direction. Each
         // `scan_effect` arm routes its filter through this `target_ctx` (BecomeCopy is
         // `Axes::CONSERVATIVE` today, so its tag is defense-in-depth parity with
-        // PumpAll/ChangeZoneAll). Pinned by `census_tag_set_is_exactly_enumerated`.
+        // PumpAll). Pinned by `census_tag_set_is_exactly_enumerated`.
         //   CR 702.26 (Phasing): `phase_out.rs` mass "phase out/in each permanent you
         //     control" iterates `battlefield_phased_in_ids()` / `state.battlefield`.
         | Effect::PhaseOut { .. }
@@ -7825,6 +7894,129 @@ mod tests {
     use crate::types::statics::StaticMode;
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
+
+    /// CR 118.12: under the loop firewall a fixed mana payment reads no object and spends
+    /// projected mana; a sacrifice payment still chooses among the board, and the CR 603.3b scan
+    /// stays fail-closed.
+    #[test]
+    fn a_fixed_mana_payment_alone_is_relieved_under_the_loop_firewall() {
+        let pay = |cost, mode| {
+            scan_effect(
+                &Effect::PayCost {
+                    cost,
+                    scale: None,
+                    payer: TargetFilter::Controller,
+                },
+                mode,
+            )
+        };
+        let mana = || AbilityCost::Mana {
+            cost: ManaCost::generic(7),
+        };
+        let relieved = pay(mana(), ScanMode::LoopFirewall);
+        assert!(!relieved.sibling && !relieved.event && relieved.projected);
+        assert!(pay(mana(), ScanMode::Conservative).sibling);
+        use crate::types::ability::{SacrificeCost, SacrificeRequirement};
+        let sacrifice = AbilityCost::Sacrifice(SacrificeCost::new(
+            TargetFilter::Typed(TypedFilter::creature()),
+            SacrificeRequirement::Count { count: 1 },
+        ));
+        assert!(pay(sacrifice, ScanMode::LoopFirewall).sibling);
+    }
+
+    /// CR 732.2a: Worldgorger Dragon's "exile all other permanents you control" reads what its
+    /// filter reads under the loop firewall; a face-down mass move stays fail-closed.
+    #[test]
+    fn a_mass_move_reads_its_own_fields_under_the_loop_firewall() {
+        let worldgorger = || -> serde_json::Value {
+            serde_json::json!({
+                "type": "ChangeZoneAll",
+                "origin": null,
+                "destination": "Exile",
+                "target": {
+                    "type": "Typed",
+                    "type_filters": ["Permanent"],
+                    "controller": "You",
+                    "properties": [{"type": "Another"}]
+                }
+            })
+        };
+        let effect = |json| -> Effect { serde_json::from_value(json).expect("a mass move") };
+        let fail_closed =
+            |a: Axes| a.event && a.sibling && a.projected && a.history == HistoryReads::ALL;
+        let axes = scan_effect(&effect(worldgorger()), ScanMode::LoopFirewall);
+        assert!(!fail_closed(axes));
+        assert_eq!(axes.history, HistoryReads::NONE);
+        assert!(fail_closed(scan_effect(
+            &effect(worldgorger()),
+            ScanMode::Conservative
+        )));
+        let mut face_down = worldgorger();
+        face_down["face_down_profile"] = serde_json::json!({});
+        let face_down = effect(face_down);
+        assert!(fail_closed(scan_effect(&face_down, ScanMode::LoopFirewall)));
+    }
+
+    /// CR 601.2f + CR 602.2b: a cost reduction reads what its count reads; one gated by a
+    /// condition no walker descends reads everything, and an ability with none reads nothing.
+    #[test]
+    fn a_cost_reduction_reads_its_count_and_a_gated_one_reads_everything() {
+        use crate::types::ability::{CostReduction, ParsedCondition, PlayerScope};
+        use crate::types::statics::CostModifyMode;
+        let ability = |cost_reduction| {
+            let mut def = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 1 },
+                    player: TargetFilter::Controller,
+                },
+            );
+            def.cost_reduction = cost_reduction;
+            ability_definition_history(&def)
+        };
+        let reduction = |condition| CostReduction {
+            mode: CostModifyMode::Reduce,
+            amount_per: 1,
+            count: QuantityExpr::Ref {
+                qty: QuantityRef::CardsDiscardedThisTurn {
+                    player: PlayerScope::Controller,
+                },
+            },
+            condition,
+        };
+        assert_eq!(ability(None), HistoryReads::NONE);
+        assert_eq!(
+            ability(Some(reduction(None))),
+            HistoryReads::of(HistoryMember::CardsDiscardedThisTurnByPlayer)
+        );
+        assert_eq!(
+            ability(Some(reduction(Some(
+                ParsedCondition::SourceEnteredThisTurn
+            )))),
+            HistoryReads::ALL
+        );
+    }
+
+    /// CR 601.2f: a cost-modifying static reads its spell filter and dynamic count, as a
+    /// continuous one reads its own fields; a fixed reduction reads nothing.
+    #[test]
+    fn a_cost_modifying_static_reads_its_count() {
+        use crate::types::statics::CostModifyMode;
+        let modify = |dynamic_count| {
+            static_definition_history(&StaticDefinition::new(StaticMode::ModifyCost {
+                mode: CostModifyMode::Reduce,
+                amount: ManaCost::generic(2),
+                spell_filter: None,
+                dynamic_count,
+                reach: Default::default(),
+            }))
+        };
+        assert_eq!(modify(None), HistoryReads::NONE);
+        assert_eq!(
+            modify(Some(QuantityRef::TurnsTaken)),
+            HistoryReads::of(HistoryMember::PlayerTurnsTaken)
+        );
+    }
 
     /// U-a. CR 603.2: `OpponentAttacked { EventAttackers }` reads the trigger event,
     /// like `TriggeringPlayer`; the controller's own attacks read no event.

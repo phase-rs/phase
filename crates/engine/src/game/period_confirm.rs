@@ -17,9 +17,9 @@ use crate::analysis::decision_template::{
 };
 use crate::analysis::loop_check::{classify_win_kind, LoopCertificate, WinKind};
 use crate::analysis::resource::{
-    driving_resources_non_decreasing_carried, frame_without, CertifiedInstructedDeparture,
-    CleanupPair, CounterClass, CoveredGrowth, ObjectClass, ObjectGrowthVerdict, PredictedDeparture,
-    RecurrenceCover, ResourceVector,
+    certify_instructed_library_departure, driving_resources_non_decreasing_carried, frame_without,
+    CertifiedInstructedDeparture, CleanupPair, CounterClass, CoveredGrowth, ObjectClass,
+    ObjectGrowthVerdict, PredictedDeparture, RecurrenceCover, ResourceVector,
 };
 use crate::game::engine::{
     announced_target_pins, apply, certify_object_growth_frames, clear_frame_bookkeeping,
@@ -68,6 +68,9 @@ pub enum OfferRefusal {
     /// CR 704.5a: the period moves some player toward losing the game, and the threshold
     /// authority refused its replayed frames.
     LossAxis,
+    /// CR 732.2a + CR 613.4c: the period grows history a static reads, so each repetition's delta
+    /// grows and neither a threshold count nor a constant per-repetition delta is true of it.
+    GrowingLoss,
     /// The replayed play or answer settled a life change the engine cannot represent. This is
     /// an engine limit, not a rules outcome: the replay propagates it so the public shortcut
     /// entry can reject the take instead of silently stopping the repetition.
@@ -142,6 +145,28 @@ impl PeriodPerformance {
             Self::ManaAbilitiesOnly
         }
     }
+}
+
+/// CR 118.3 + CR 701.17a: the first play of `body` whose activation cost, read on `frame`, moves
+/// a card to or from a library; a spell has no such cost.
+fn library_cost_play(body: &[TraceEntry], frame: &GameState) -> Option<PlayLocus> {
+    body.iter().find_map(|entry| {
+        let EntryKind::Play { locus, .. } = &entry.kind else {
+            return None;
+        };
+        let (PlayLocus::Activate(id, index) | PlayLocus::Mana(id, Some(index))) = *locus else {
+            return None;
+        };
+        frame
+            .objects
+            .get(&id)?
+            .abilities
+            .get(index)?
+            .cost
+            .as_ref()
+            .is_some_and(|cost| cost.moves_card_to_or_from_library())
+            .then_some(*locus)
+    })
 }
 
 /// CR 732.2a: which authority states the count of a confirmed period's offer; its take answers to
@@ -1321,6 +1346,7 @@ struct ReplayedPeriod {
     holder: PlayerId,
     items: Vec<PeriodItem>,
     performance: Option<PeriodPerformance>,
+    library_cost: Option<PlayLocus>,
     end: FrameEnd,
     choices: Vec<PinnedDecision>,
     #[cfg(any(test, feature = "test-support"))]
@@ -1427,6 +1453,7 @@ fn replay_period(
     }
     let items = period_items(entries, span, frame);
     let performance = Some(PeriodPerformance::of(&body));
+    let library_cost = library_cost_play(&body, frame);
     #[cfg(feature = "test-support")]
     crate::game::perf_counters::record_play_trace(|counters| counters.confirm_drives += 1);
     let probe = SimulationProbeGuard::enter();
@@ -1489,6 +1516,7 @@ fn replay_period(
         holder,
         items,
         performance,
+        library_cost,
         end,
         choices,
         #[cfg(any(test, feature = "test-support"))]
@@ -1509,6 +1537,7 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
         holder,
         items,
         performance,
+        library_cost,
         end,
         choices,
         #[cfg(any(test, feature = "test-support"))]
@@ -1536,16 +1565,34 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
     // A spend verdict asks the sign check only for its refusals.
     let sign = match (&verdict, verdict.certifies()) {
         (ObjectGrowthVerdict::Spend, _) => {
-            period_sign_check(prior, current, holder).map(|_| PeriodSign::Spend)
+            period_sign_check(prior, current, holder, library_cost).map(|_| PeriodSign::Spend)
         }
         (
             ObjectGrowthVerdict::FodderGrowth(_) | ObjectGrowthVerdict::ResourceRecurrence(_),
             true,
-        ) => period_sign_check(prior, current, holder),
+        ) => period_sign_check(prior, current, holder, library_cost),
         (
             ObjectGrowthVerdict::FodderGrowth(_) | ObjectGrowthVerdict::ResourceRecurrence(_),
             false,
         ) => Err(OfferRefusal::Cover(verdict.clone())),
+    };
+    let sign = match sign {
+        // CR 701.17b: the first cycle milled what the library held; the second cycle's empty mill
+        // is the library running out, not the period.
+        Err(OfferRefusal::NoAxis)
+            if second.is_ok()
+                && certify_instructed_library_departure(&s_n, &s_n1, [&s_n, &s_n1])
+                    .is_some_and(|certified| {
+                        certified.per_victim.keys().any(|&seat| {
+                            s_n1.players
+                                .iter()
+                                .any(|player| player.id == seat && player.library.is_empty())
+                        })
+                    }) =>
+        {
+            period_sign_check(&s_n, &s_n1, holder, library_cost)
+        }
+        sign => sign,
     };
     let (delta, departure, bounded, growth, counted_by) = match (sign, second) {
         // Only a spend says why a period stopped after one repetition.
@@ -1553,6 +1600,12 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
             return Err(stopped);
         }
         (Err(refusal), Ok(_)) => return Err(refusal),
+        (Ok(PeriodSign::Unbounded(_) | PeriodSign::LossAxis), Ok(_))
+            if verdict
+                == ObjectGrowthVerdict::ResourceRecurrence(Some(RecurrenceCover::GrowthRead)) =>
+        {
+            return Err(OfferRefusal::GrowingLoss);
+        }
         (Ok(PeriodSign::Unbounded(unbounded)), Ok(_)) => {
             let (delta, departure) = *unbounded;
             (delta, departure, None, growth, CountedBy::Threshold)

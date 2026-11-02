@@ -739,6 +739,23 @@ fn worldgorger_animate_dead_is_a_draw_on_every_drive() {
     }
 }
 
+/// CR 104.4b + CR 732.4: Thundermaw Hellkite ("When this creature enters, it deals 1 damage to
+/// each creature with flying your opponents control. Tap those creatures.") leaves and returns
+/// with everything Worldgorger Dragon ("When this creature enters, exile all other permanents you
+/// control.") exiles, and with no opposing flyer it changes nothing, so the loop is still a draw.
+#[test]
+fn thundermaw_worldgorger_loop_is_drawn() {
+    let board = Board {
+        p0_cards: &["Thundermaw Hellkite"],
+        ..PLAIN
+    };
+    let Some(run) = run(board, LoopDetectionMode::Interactive, Drive::Pass, 300) else {
+        return;
+    };
+    assert_eq!(run.terminal, Terminal::GameOver(None));
+    assert!(run.entries >= 1, "reach: the Dragon re-entered");
+}
+
 /// CR 603.3b + CR 732.4: Brain Maggot's forced reveal of P1's only nonland card repeats each
 /// cycle with one legal option, and the saved order of Brain Maggot's and Animate Dead's
 /// triggers is no decision, since the loop continues under either order; so the loop is a draw.
