@@ -175,6 +175,8 @@ fn explicit_target_spell_prompts_at_cast_and_excludes_shroud() {
     assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
 }
 
+/// Synthetic Oracle: no printed card pairs a mid-chain bare choose with a distinct
+/// later printed target through this path; there is no printed analogue.
 #[test]
 fn mid_chain_bare_choose_does_not_hide_later_cast_time_target() {
     let mut scenario = GameScenario::new();
@@ -390,6 +392,8 @@ fn sakashima_avatar_announces_copy_source_then_prompts_recipient_at_resolution()
     ));
 }
 
+/// Synthetic Oracle: no printed card pairs a bare-choice mode with a later targeted
+/// mode through this path; nearest analogue is Final Showdown's spree modes.
 #[test]
 fn modal_bare_choose_mode_does_not_hide_later_mode_target() {
     const ORACLE: &str = "Spree (Choose one or more additional costs.)\n+ {1} — Draw a card.\n+ {1} — Choose a creature you control. It gains indestructible until end of turn.\n+ {1} — Deal 2 damage to target creature you don't control.";
@@ -545,6 +549,8 @@ fn modal_bare_choose_mode_does_not_hide_later_mode_target() {
     }
 }
 
+/// Synthetic Oracle: no printed card covers this distinct later-target path;
+/// nearest analogue is Crush Underfoot, whose target is mis-lowered on main.
 #[test]
 fn head_bare_choose_does_not_hide_later_printed_target() {
     let mut scenario = GameScenario::new();

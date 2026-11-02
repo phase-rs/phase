@@ -31,6 +31,7 @@ use super::{
     resolve_it_pronoun, ParseContext, PriorZoneChoicePartition,
 };
 use crate::parser::oracle_ir::ast::*;
+use crate::parser::oracle_ir::context::ClauseChainPosition;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::effect_chain::ChosenReturnSpec;
 use crate::parser::oracle_nom::bridge::{nom_on_lower, nom_parse_lower, split_once_on_lower};
@@ -5114,12 +5115,12 @@ pub(super) fn parse_choose_ast(
             let diagnostic_count = ctx.diagnostics.len();
             let (target, remainder) = parse_target_with_ctx(rest, ctx);
             ctx.diagnostics.truncate(diagnostic_count);
-            // CR 115.10a + CR 608.2d: only a fully parsed, untargeted singular
-            // "a/an <object> you control" choice can establish resolution timing.
-            // Optional quantifiers are stripped by the chunk loop; those chunks
-            // and exact counts reach this gate but fail its a/an conjunct.
-            // Peeled actor scopes and random selections are not controller
-            // choices. The chain builder retains this declaration only at the head.
+            // CR 115.10a + CR 608.2d: a fully parsed, untargeted singular
+            // "a/an <object> you control" may declare Resolution only at a chain head.
+            // Stripped optional quantifiers and exact counts fail the a/an gate.
+            // Peeled actor scopes and random selections are not controller choices.
+            // Later bare choices keep Stack; the engine supports other mid-chain
+            // Resolution TargetOnly nodes, including modal composition.
             if ctx.clause_opponent_may_scope.is_some() {
                 // The accepting-player timing fallback also retimes described
                 // objects. TargetOnly cannot prompt that chooser, so override
@@ -5131,6 +5132,7 @@ pub(super) fn parse_choose_ast(
                     .is_ok()
                 && ctx.target_selection_mode == TargetSelectionMode::Chosen
                 && ctx.clause_player_scope.is_none()
+                && ctx.clause_chain_position == ClauseChainPosition::Head
                 && !nom_primitives::scan_contains(rest_lower, "target ")
                 && is_you_controlled_target(&target)
                 && !target.is_context_ref()

@@ -78300,8 +78300,51 @@ fn compound_choice_c3_declines_and_preserves_existing_choose_shapes() {
     );
 }
 
-/// SHAPE: printed single-creature choices happen at resolution; supported
-/// continuations retain the chosen-creature reference.
+/// SHAPE: a prior instruction cannot erase the compound object/player producer's
+/// resolution-time object choice.
+#[test]
+fn compound_choice_prefixed_object_and_player_keeps_resolution_timing() {
+    let head = parse_effect_chain(
+        "Choose a creature you control and an opponent.",
+        AbilityKind::Spell,
+    );
+    let prefixed = parse_effect_chain(
+        "Draw a card. Choose a creature you control and an opponent.",
+        AbilityKind::Spell,
+    );
+    let later = prefixed
+        .sub_ability
+        .as_deref()
+        .expect("the compound choice must follow the draw");
+    for (name, choice) in [("head", &head), ("after draw", later)] {
+        assert_eq!(
+            choice.effect.as_ref(),
+            &Effect::TargetOnly {
+                target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            },
+            "{name}: the compound object choice must remain reachable"
+        );
+        let player = choice
+            .sub_ability
+            .as_deref()
+            .expect("the compound choice must retain its player instruction");
+        assert!(
+            matches!(
+                player.effect.as_ref(),
+                Effect::Choose {
+                    choice_type: ChoiceType::Opponent { .. },
+                    ..
+                }
+            ),
+            "{name}: must reach the compound producer: {player:#?}"
+        );
+    }
+    assert_eq!(head.target_choice_timing, TargetChoiceTiming::Resolution);
+    assert_eq!(later.target_choice_timing, head.target_choice_timing);
+}
+
+/// SHAPE: printed single-creature choices and a synthetic modal analogue use
+/// resolution timing; supported continuations retain the chosen-creature reference.
 #[test]
 fn bare_choose_printed_cards_use_resolution_timing() {
     fn assert_choice(name: &str, head: &AbilityDefinition) {
@@ -78323,7 +78366,7 @@ fn bare_choose_printed_cards_use_resolution_timing() {
     for (name, text) in [
         ("Final Showdown", "Spree (Choose one or more additional costs.)\n+ {1} — All creatures lose all abilities until end of turn.\n+ {1} — Choose a creature you control. It gains indestructible until end of turn.\n+ {3}{W}{W} — Destroy all creatures."),
         ("Sakashima's Will", "Choose one. If you control a commander as you cast this spell, you may choose both instead.\n• Target opponent chooses a creature they control. You gain control of it.\n• Choose a creature you control. Each other creature you control becomes a copy of that creature until end of turn."),
-        ("Modal choice timing probe", "Spree (Choose one or more additional costs.)\n+ {1} — Draw a card.\n+ {1} — Choose a creature you control. It gains indestructible until end of turn.\n+ {1} — Deal 2 damage to target creature you don't control."),
+        ("Synthetic modal choice timing probe (Final Showdown analogue)", "Spree (Choose one or more additional costs.)\n+ {1} — Draw a card.\n+ {1} — Choose a creature you control. It gains indestructible until end of turn.\n+ {1} — Deal 2 damage to target creature you don't control."),
     ] {
         let parsed = parse_oracle_text(text, name, &[], &[], &[]);
         let head = &parsed.abilities[1];

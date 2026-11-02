@@ -300,6 +300,14 @@ pub enum BodyScope {
     ModalMode,
 }
 
+/// Whether an earlier clause has already been emitted in this effect chain.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ClauseChainPosition {
+    #[default]
+    Head,
+    Later,
+}
+
 /// CR 608.2k: the object a trigger condition introduces for its body's bare
 /// object pronouns, where the pinned `TargetFilter` is ambiguous on its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -467,6 +475,9 @@ pub struct ParseContext {
     /// parse; the coordinated writer declines to the unbound gap on a different
     /// value. Set and consumed within a single chunk parse; never serialized.
     pub pending_player_scope: Option<PlayerFilter>,
+    /// Current chunk's position before parsing its body; standalone contexts
+    /// default to `Head`, and the chain loop derives it from emitted clauses.
+    pub clause_chain_position: ClauseChainPosition,
     /// Player scope already peeled from this chunk's subject or optional prefix.
     /// The chain loop supplies its composed scope before parsing the body so a
     /// bare choose cannot mistake another player's choice for the controller's.
@@ -615,15 +626,14 @@ pub struct ParseContext {
     /// outranks the scan. `None` (the default) leaves the ladder in charge, so
     /// every incumbent clause is unaffected.
     ///
-    /// The legacy bare-choose producer declares `Resolution` only for a singular
-    /// "a/an <object> you control" phrase fully consumed by the target parser,
-    /// with chosen selection and no peeled player/opponent-may scope, printed
-    /// target, context reference, or player target. The chunk loop strips optional
-    /// quantifiers; those chunks and exact counts reach the gate but fail its
-    /// a/an conjunct. The chain builder retains this declaration only for a
-    /// `TargetOnly` head; later bare choices keep the pre-existing `Stack` timing
-    /// so they cannot defer subsequent printed targets. Partial and quantified
-    /// choices also leave this unset, without a filter-shape inference.
+    /// The legacy bare-choose producer declares `Resolution` only at a chain
+    /// head for a singular "a/an <object> you control" phrase fully consumed by
+    /// the target parser, with chosen selection and no peeled actor scope,
+    /// printed target, context reference, or player target. The chunk loop strips
+    /// optional quantifiers; those chunks and exact counts fail the a/an gate.
+    /// Later bare choices keep pre-existing `Stack` timing, although the engine
+    /// supports mid-chain `Resolution` `TargetOnly` nodes from other producers
+    /// and modal composition. Partial and quantified choices leave this unset.
     /// Peeled opponent-may choices explicitly declare `Stack` so the
     /// accepting-player timing fallback cannot reintroduce `Resolution`.
     ///

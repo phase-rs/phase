@@ -196,11 +196,11 @@ use self::subject::{
     try_parse_subject_predicate_ast, try_parse_targeted_controller_gain_life,
 };
 use crate::parser::oracle_ir::ast::*;
-use crate::parser::oracle_ir::context::BodyScope;
 pub(crate) use crate::parser::oracle_ir::context::{
     BareCardAggregateBinding, ChosenColorQualifierScope, DeclaredSlotEntry, DeclaredSlotRegistry,
     ParseContext, PriorZoneChoicePartition, TokenPtFollowup, TriggerConditionScope,
 };
+use crate::parser::oracle_ir::context::{BodyScope, ClauseChainPosition};
 use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityRootTransform, AbilityShellIr, AbsorbKind, ClauseDisposition, ClauseId,
     ClauseIr, ClauseIrBuilder, ClausePlacement, DieResultBranchIr, EffectChainIr,
@@ -47964,6 +47964,11 @@ fn parse_effect_chain_ir_body(
             current_trigger_index: ctx.current_trigger_index,
             current_ability_index: ctx.current_ability_index,
             actor: chunk_actor,
+            clause_chain_position: if builder.is_empty() {
+                ClauseChainPosition::Head
+            } else {
+                ClauseChainPosition::Later
+            },
             clause_player_scope: player_scope.clone(),
             clause_opponent_may_scope: opponent_may_scope,
             // CR 109.4 + CR 115.1 + CR 506.2: propagate relative-player scope

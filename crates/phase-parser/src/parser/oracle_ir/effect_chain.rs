@@ -1470,18 +1470,8 @@ impl ClauseDraft<'_> {
     /// text-scan ladder, which would otherwise read "support 2", find no
     /// "target", and classify a targeted announcement as a described
     /// resolution-time pick — suppressing its target slots entirely.
-    ///
-    /// The engine tolerates mid-chain `Resolution` `TargetOnly` nodes from modal
-    /// composition, but the parser leaves non-head choices at pre-existing `Stack` timing.
     pub(crate) fn declared_target_choice_timing(mut self, v: Option<TargetChoiceTiming>) -> Self {
-        self.declared_target_choice_timing = if v == Some(TargetChoiceTiming::Resolution)
-            && matches!(self.parsed.effect, Effect::TargetOnly { .. })
-            && !self.builder.is_empty()
-        {
-            None
-        } else {
-            v
-        };
+        self.declared_target_choice_timing = v;
         self
     }
     /// CR 105.4 + CR 608.2c: declare that THIS clause's text printed its own
