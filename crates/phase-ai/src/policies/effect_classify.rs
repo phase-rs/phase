@@ -510,8 +510,13 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
 /// Extract the target filter from an effect, if present.
 pub(crate) fn extract_target_filter(effect: &Effect) -> Option<&TargetFilter> {
     match effect {
+        // CR 115.1c: a draw replacement's substitute names a target only when
+        // its head surfaces the creating ability's slot (Words of War). The
+        // engine's slot authority decides; an untargeted "each player returns a
+        // permanent they control" substitute (Words of
+        // Wind) declares none.
         Effect::CreateDrawReplacement { replacement_effect } => {
-            extract_target_filter(&replacement_effect.effect)
+            engine::types::ability::extract_target_filter_from_effect(&replacement_effect.effect)
         }
         // Beneficial effects
         Effect::Pump { target, .. }
@@ -2333,6 +2338,18 @@ mod grant_trigger_polarity_tests {
         assert_eq!(effect_polarity(&pump), EffectPolarity::Beneficial);
         assert_eq!(extract_target_filter(&pump), Some(&TargetFilter::Any));
         assert_eq!(extract_target_filter(&wrap(Effect::NoOp)), None);
+        // Words of Wind: an untargeted per-player return names no target, even
+        // though the bounce carries a resolution-time filter.
+        let wind = wrap(Effect::Bounce {
+            target: TargetFilter::Typed(engine::types::ability::TypedFilter {
+                type_filters: vec![TypeFilter::Permanent],
+                controller: Some(ControllerRef::ScopedPlayer),
+                properties: vec![],
+            }),
+            destination: None,
+            selection: engine::types::ability::BounceSelection::AtResolution,
+        });
+        assert_eq!(extract_target_filter(&wind), None);
     }
 
     #[test]
