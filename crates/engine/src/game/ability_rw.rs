@@ -857,6 +857,18 @@ impl RwProfile {
         self.reads_player_fused = self.reads_player_fused.union(o.reads_player_fused);
     }
 
+    /// CR 405: whether the resolution reads the stack's shape, or anything it cannot classify.
+    pub(crate) fn reads_stack(&self) -> bool {
+        [
+            self.reads_src,
+            self.reads_board,
+            self.reads_player,
+            self.reads_frozen,
+        ]
+        .iter()
+        .any(|kinds| kinds.stack_shape || kinds.other)
+    }
+
     /// CR 603.3b T1 (§1.2): the resolution function never consults the source
     /// binding — no source read, no self write, no source-referential frozen
     /// read. Fail-closed (the walk routes source predicates into `reads_src` /
@@ -1491,7 +1503,7 @@ fn scope_of(target: &TargetFilter, chain_root: Option<WriteScope>) -> WriteScope
         TargetFilter::SelfRef | TargetFilter::SourceOrPaired | TargetFilter::OriginalSource => {
             WriteScope::SelfSource
         }
-        TargetFilter::TriggeringSource => WriteScope::EventObject,
+        TargetFilter::TriggeringSource | TargetFilter::CastingSpell => WriteScope::EventObject,
         TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::DeclaredPlayer { .. } => {
@@ -2516,6 +2528,7 @@ fn legacy_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner
@@ -2832,6 +2845,7 @@ fn member_bound_target_filter(f: &TargetFilter) -> bool {
         | TargetFilter::OriginalSource
         | TargetFilter::SourceOrPaired
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::ParentTarget
         | TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
@@ -3284,7 +3298,11 @@ fn legacy_effect(x: &Effect) -> bool {
         // the per-kind magnitude is a plain enum with no batch-prompt semantics.
         | Effect::ReproduceEventCounters { target, .. } => legacy_target_filter(target),
 
-        Effect::PutOnTopOrBottom { target, chooser } => {
+        Effect::PutOnTopOrBottom {
+            target,
+            chooser,
+            top_position: _,
+        } => {
             legacy_target_filter(target) || legacy_target_filter(chooser)
         }
 
@@ -7566,6 +7584,7 @@ fn rw_target_filter(x: &TargetFilter) -> RwProfile {
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetController
         | TargetFilter::ParentTargetOwner

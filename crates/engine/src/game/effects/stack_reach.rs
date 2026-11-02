@@ -55,6 +55,8 @@ pub fn stack_entry_node_reach<'a>(state: &GameState, entry: &'a StackEntry) -> V
     let Some(root) = entry.ability() else {
         return Vec::new();
     };
+    #[cfg(feature = "test-support")]
+    crate::game::perf_counters::record_stack_entry_reach();
     let resolves_first: Vec<ObjectId> = state
         .stack
         .iter()

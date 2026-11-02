@@ -226,17 +226,20 @@ fn resolve_scheme_as_choices(
 /// CR 904.10 / CR 314.6: True if any scheme's triggered ability is on the stack
 /// or waiting to be put on the stack (i.e. deferred but not yet on the stack).
 /// While any such ability exists, the abandon state-based action does nothing.
-pub fn scheme_trigger_on_stack_or_pending(state: &GameState) -> bool {
+pub fn scheme_trigger_on_stack_or_pending(
+    state: &GameState,
+    waiting: &[crate::game::triggers::PendingTriggerContext],
+) -> bool {
     // CR 904.10: "on the stack" — any stack entry sourced from a scheme.
     let on_stack = state
         .stack
         .iter()
         .any(|entry| is_scheme_object(state, entry.source_id));
-    // CR 904.10: "waiting to be put on the stack" — any deferred trigger whose
-    // pending source is a scheme.
-    let pending = state
-        .deferred_triggers
+    // CR 904.10: "waiting to be put on the stack" — any trigger in the caller's
+    // waiting batch or the deferred queue whose pending source is a scheme.
+    let pending = waiting
         .iter()
+        .chain(state.deferred_triggers.iter())
         .any(|d| is_scheme_object(state, d.pending.source_id));
     on_stack || pending
 }
@@ -314,6 +317,7 @@ pub fn check_scheme_abandon_sba(
     state: &mut GameState,
     _events: &mut Vec<GameEvent>,
     any_performed: &mut bool,
+    waiting: &[crate::game::triggers::PendingTriggerContext],
 ) {
     if crate::game::topology::archenemy(state)
         .or(state.archenemy)
@@ -323,7 +327,7 @@ pub fn check_scheme_abandon_sba(
     }
     // CR 904.10: do nothing while any scheme's triggered ability is on the stack
     // or waiting to be put on the stack.
-    if scheme_trigger_on_stack_or_pending(state) {
+    if scheme_trigger_on_stack_or_pending(state, waiting) {
         return;
     }
     // CR 904.10 / CR 904.11: turn every face-up non-ongoing scheme face down

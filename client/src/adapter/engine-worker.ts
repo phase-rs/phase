@@ -11,6 +11,10 @@ import init, {
   initialize_multiplayer_host_game,
   submit_action,
   drive_contest_js,
+  request_takeback_js,
+  respond_takeback_js,
+  cancel_takeback_js,
+  pending_takeback_js,
   submit_interaction_js,
   get_game_state,
   get_filtered_game_state,
@@ -36,6 +40,7 @@ import init, {
   build_ai_card_subset,
   evaluate_deck_compatibility_js,
   evaluateDeckFormatGate,
+  checkDeckPrintingsBounds,
   customFormatFromLobbyConfig,
   formatConfigForCustomRules,
   apply_seat_mutation,
@@ -61,6 +66,7 @@ import init, {
 import * as engineWasm from "@wasm/engine";
 
 import {
+  appliedSubmitResult,
   isActionOutcome,
   type ActionRejection,
   type AiActionProposal,
@@ -109,6 +115,10 @@ type EngineRequest =
       awayPlayers: number[];
       clicks: unknown[];
     }
+  | { type: "requestTakeback"; id: number; actor: number; aiPlayers: number[] }
+  | { type: "respondTakeback"; id: number; actor: number; approve: boolean; aiPlayers: number[] }
+  | { type: "cancelTakeback"; id: number; actor: number }
+  | { type: "pendingTakeback"; id: number }
   | { type: "submitInteraction"; id: number; actor: number; submission: InteractionSubmission }
   | { type: "previewManaPayment"; id: number; actor: number; action: GameAction }
   | { type: "previewInteraction"; id: number; actor: number; request: InteractionPreviewRequest }
@@ -154,6 +164,7 @@ type EngineRequest =
   | { type: "buildAiCardSubset"; id: number }
   | { type: "evaluateDeckCompatibility"; id: number; request: unknown }
   | { type: "evaluateDeckFormatGate"; id: number; request: unknown }
+  | { type: "checkDeckPrintingsBounds"; id: number; printings: unknown }
   | { type: "customFormatFromLobbyConfig"; id: number; name: string; formatConfig: unknown }
   | { type: "formatConfigForCustomRules"; id: number; customRules: unknown }
   | { type: "getCardFaceData"; id: number; cardName: string }
@@ -311,6 +322,16 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
         break;
       }
 
+      // Resource bounds on one guest deck's printings sidecar, for the P2P host's
+      // admission. The engine throws its reason on abuse; the outer try/catch
+      // returns that throw as an `error` response. Reads no card database, so it
+      // does not gate on one.
+      case "checkDeckPrintingsBounds": {
+        checkDeckPrintingsBounds(msg.printings);
+        result(msg.id, null);
+        break;
+      }
+
       // Custom-format save/select. Neither call touches the card database —
       // they are pure format-schema conversions — so neither gates on it.
       case "customFormatFromLobbyConfig": {
@@ -429,11 +450,7 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           rejectionError(msg.id, outcome.rejection);
           break;
         }
-        const actionResult = outcome.result as { events?: unknown[]; log_entries?: unknown[] };
-        result(msg.id, {
-          events: actionResult.events ?? [],
-          log_entries: actionResult.log_entries ?? [],
-        });
+        result(msg.id, appliedSubmitResult(outcome));
         break;
       }
 
@@ -449,6 +466,29 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           break;
         }
         result(msg.id, outcome);
+        break;
+      }
+
+      case "requestTakeback": {
+        result(msg.id, request_takeback_js(msg.actor, Uint8Array.from(msg.aiPlayers)));
+        break;
+      }
+
+      case "respondTakeback": {
+        result(
+          msg.id,
+          respond_takeback_js(msg.actor, msg.approve, Uint8Array.from(msg.aiPlayers)),
+        );
+        break;
+      }
+
+      case "cancelTakeback": {
+        result(msg.id, cancel_takeback_js(msg.actor));
+        break;
+      }
+
+      case "pendingTakeback": {
+        result(msg.id, pending_takeback_js() ?? null);
         break;
       }
 

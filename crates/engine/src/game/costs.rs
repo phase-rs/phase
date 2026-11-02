@@ -69,6 +69,7 @@ use super::filter::FilterContext;
 use super::life_costs::can_pay_life_cost;
 use super::quantity::{resolve_quantity, resolve_quantity_with_targets};
 use super::speed::{effective_speed, set_speed};
+use super::un_actions::cost_requires_unavailable_speech;
 use super::zone_pipeline::{self, ZoneMoveRequest, ZoneMoveResult};
 use crate::types::ability::ResolvedAbility;
 
@@ -1049,6 +1050,7 @@ fn pay_ability_cost_for_activation_with_cost_move_replacement(
         },
         Some(cost_removed_counters),
         None,
+        false,
     )?;
     // CR 601.2h: "Unpayable costs can't be paid." Activation scope maps a
     // payment failure to an illegal action — the authority's `Failed` is the
@@ -1070,6 +1072,14 @@ pub(crate) fn pay_ability_cost_for_resolution(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<PaymentOutcome, EngineError> {
+    // Un-card: fail payment if the payer has disabled Un-card spoken actions.
+    if matches!(cost, AbilityCost::SayPhrase { .. })
+        && !super::un_actions::player_can_say_phrases(state, payer)
+    {
+        return Ok(payment_failed(
+            "Player has not opted in to Un-card spoken actions".to_string(),
+        ));
+    }
     let outcome = pay_ability_cost_for_resolution_with_cost_move_root(
         state,
         payer,
@@ -1133,6 +1143,7 @@ pub(crate) fn pay_ability_cost_for_turn_face_up(
         },
         None,
         Some(cost),
+        false,
     )?;
     match outcome {
         PaymentOutcome::Paid => {
@@ -1170,6 +1181,7 @@ fn pay_ability_cost_for_resolution_with_cost_move_root(
         // CR 118.12: a resolution-time PayCost has no activation to own a count.
         None,
         Some(cost),
+        false,
     )
 }
 
@@ -1247,6 +1259,10 @@ pub(crate) fn pay_counter_cost_removals(
 /// `cost_removed_counters` is the paying activation's ledger (CR 602.2b). `None`
 /// is resolution scope (CR 118.12) and the `can_pay` dry run: no activation
 /// reads the count.
+///
+/// `dry_run`: when true, the function validates payability without emitting
+/// events or mutating observable state (e.g., Gotcha offers). Used by the
+/// `can_pay` activation dry-run (CR 601.2h).
 #[allow(clippy::too_many_arguments)]
 fn pay_ability_cost_inner(
     state: &mut GameState,
@@ -1257,6 +1273,7 @@ fn pay_ability_cost_inner(
     scope: &PaymentScope,
     mut cost_removed_counters: Option<&mut Option<u32>>,
     resume_cost: Option<&AbilityCost>,
+    dry_run: bool,
 ) -> Result<PaymentOutcome, EngineError> {
     // CR 118.3 / CR 601.2h: at resolution there is no interactive interceptor or
     // activation-window mana detour, so any shape outside the resolution-payable
@@ -1276,6 +1293,27 @@ fn pay_ability_cost_inner(
         ));
     }
     match cost {
+        // Un-card (no CR entry): saying the phrase is the whole payment.
+        AbilityCost::SayPhrase { phrase } => {
+            if !super::un_actions::player_can_say_phrases(state, player) {
+                return Ok(payment_failed(
+                    "Player has not opted in to Un-card spoken actions".to_string(),
+                ));
+            }
+            if !dry_run {
+                events.push(GameEvent::PhraseSaid {
+                    player,
+                    phrase: phrase.clone(),
+                });
+                super::un_actions::record_tell(
+                    state,
+                    player,
+                    &crate::types::un_actions::UnTell::Said {
+                        text: phrase.clone(),
+                    },
+                );
+            }
+        }
         AbilityCost::Tap => {
             let obj = state
                 .objects
@@ -1526,6 +1564,7 @@ fn pay_ability_cost_inner(
                     scope,
                     cost_removed_counters.as_deref_mut(),
                     matches!(scope, PaymentScope::Resolution { .. }).then_some(&sub_resume_cost),
+                    false,
                 )?;
                 match outcome {
                     PaymentOutcome::Paid => {
@@ -2859,6 +2898,10 @@ pub(crate) fn can_pay(
 ) -> bool {
     match scope {
         PaymentScope::Activation { ability_index, .. } => {
+            // Un-card: fail payability if the payer has disabled Un-card spoken actions.
+            if cost_requires_unavailable_speech(state, payer, cost) {
+                return false;
+            }
             // CR 601.2f + CR 602.2b: Judge an offer using the cost that would
             // lock before mana abilities, without committing that lock here.
             let locked = lock_half_life_activation_cost(state, payer, source_id, cost);
@@ -2917,6 +2960,7 @@ pub(crate) fn can_pay(
                     scope,
                     None,
                     None,
+                    true,
                 ),
                 Ok(PaymentOutcome::Paid | PaymentOutcome::Paused { .. })
             );
@@ -3085,6 +3129,136 @@ pub(crate) fn is_resolution_optional_payment_prompt_branch(cost: &AbilityCost) -
         )
 }
 
+/// CR 702.21a + CR 118.3: Supported shape for a compound *unless* cost. The
+/// unless-payment adapter hands a paused payment back to the resume channel the
+/// paying source owns, so it settles only a shape whose single mana leg comes
+/// before the life legs: the mana leg is then the first component, which means
+/// an accepted pause happens before anything else is paid, and a resumed
+/// continuation cannot replay a paid prefix. Every printed compound Ward is
+/// "{N}, Pay M life."; every other leg (discard, sacrifice, energy) has no
+/// resume channel on this path.
+fn unless_composite_cost_shape(costs: &[AbilityCost]) -> bool {
+    // Fail closed: an empty composite is not a cost the adapter invents a
+    // payment for.
+    if costs.is_empty() {
+        return false;
+    }
+    let mut mana_seen = false;
+    let mut life_seen = false;
+    costs.iter().all(|cost| match cost {
+        AbilityCost::Mana { .. } if !mana_seen && !life_seen => {
+            mana_seen = true;
+            true
+        }
+        AbilityCost::PayLife { .. } => {
+            life_seen = true;
+            true
+        }
+        _ => false,
+    })
+}
+
+/// Whether a leg spends or produces one of the shared resources (mana, life)
+/// whose answer can change between legs of the same payment.
+fn composite_resource_leg(cost: &AbilityCost) -> bool {
+    matches!(
+        cost,
+        AbilityCost::Mana { .. } | AbilityCost::ManaDynamic { .. } | AbilityCost::PayLife { .. }
+    )
+}
+
+/// CR 118.3 + CR 118.12: Does this composite's payment need a whole-payment
+/// proof instead of per-leg resource answers? Another leg can change the
+/// resource a later leg reads: two life legs can each be below the life total
+/// while their sum is not, a mana source's own cost can spend life (Mana
+/// Confluence), and a mana source can supply life the life leg needs (Pristine
+/// Talisman's "{T}: Add {C}. You gain 1 life."). Per-leg answers computed from
+/// the original state would then veto a payment the payment authority can
+/// complete.
+fn composite_needs_joint_proof(costs: &[AbilityCost]) -> bool {
+    costs.len() > 1 && costs.iter().any(composite_resource_leg)
+}
+
+/// CR 118.3 + CR 118.12: Witness the whole composite on a shadow of the game. The
+/// authority pays the legs in sequence, so replaying the identical payment is
+/// the only witness that covers an earlier leg spending a later leg's resource.
+///
+/// `Paid` is a completed proof. `Paused` is a *staged* attempt: the payment can
+/// start and a live choice (`WaitingFor`) owns the rest, so a later suffix can
+/// still fail. That is sound for ordinary resolution `PayCost`, whose composite
+/// transaction restores the pre-payment base on failure, and for the compound
+/// Ward caller, which additionally requires a completed proof or a pause that
+/// carries the paying source's own resume. A caller without either boundary
+/// must not read a paused witness as "affordable".
+fn composite_legs_jointly_affordable(
+    state: &GameState,
+    payer: PlayerId,
+    ability: &ResolvedAbility,
+    costs: &[AbilityCost],
+) -> bool {
+    let mut shadow = state.clone();
+    let mut events = Vec::new();
+    match pay_ability_cost_for_resolution(
+        &mut shadow,
+        payer,
+        &AbilityCost::Composite {
+            costs: costs.to_vec(),
+        },
+        ability,
+        &mut events,
+    ) {
+        Ok(PaymentOutcome::Paid | PaymentOutcome::Paused { .. }) => true,
+        Ok(PaymentOutcome::Failed { .. }) | Err(_) => false,
+    }
+}
+
+/// CR 702.21a + CR 118.3 + CR 118.12: Can `payer` settle this compound unless-cost
+/// through the resolution payment authority? This is the unless adapter's single
+/// eligibility entry point: shape, affordability (via [`can_pay`], including the
+/// authority's joint composite proof), and pause ownership all live here, never
+/// at the call site.
+///
+/// A paused payment is accepted only when the paying source owns the resume
+/// (CR 605.3b + CR 616.1). The adapter hands the live prompt back in that case,
+/// exactly like the all-mana arm. Any other pause has no resume span on this
+/// path, so the cost stays unpaid before any component is spent.
+pub(crate) fn can_pay_unless_composite(
+    state: &GameState,
+    payer: PlayerId,
+    ability: &ResolvedAbility,
+    cost: &AbilityCost,
+) -> bool {
+    let AbilityCost::Composite { costs } = cost else {
+        return false;
+    };
+    if !unless_composite_cost_shape(costs) {
+        return false;
+    }
+    if !can_pay(
+        state,
+        payer,
+        ability.source_id,
+        cost,
+        &PaymentScope::Resolution {
+            ability,
+            cost_move_root: ResolutionCostMoveRoot::EffectPayCost,
+        },
+    ) {
+        return false;
+    }
+    let mut shadow = state.clone();
+    let mut events = Vec::new();
+    match pay_ability_cost_for_resolution(&mut shadow, payer, cost, ability, &mut events) {
+        Ok(PaymentOutcome::Paid) => true,
+        Ok(PaymentOutcome::Paused { .. }) => {
+            shadow.pending_cost_move_resume.is_some()
+                || shadow.pending_deferred_life_cost_resume.is_some()
+                || shadow.pending_triggered_mana_resume.is_some()
+        }
+        Ok(PaymentOutcome::Failed { .. }) | Err(_) => false,
+    }
+}
+
 /// CR 614.17b: would a mandatory can't-effect stop this player-counter gain?
 fn player_counter_gain_is_prohibited(
     state: &GameState,
@@ -3236,6 +3410,7 @@ pub(crate) fn resolution_cost_includes_impossible_event(
         | AbilityCost::ManaDynamic { .. }
         | AbilityCost::Tap
         | AbilityCost::Untap
+        | AbilityCost::SayPhrase { .. }
         | AbilityCost::Loyalty { .. }
         | AbilityCost::Sacrifice(_)
         | AbilityCost::PayLife { .. }
@@ -3280,6 +3455,8 @@ fn can_pay_resolution(
 ) -> bool {
     use crate::types::ability::{CardSelectionMode, DiscardSelfScope};
     match cost {
+        // Un-card: saying a phrase needs no resources, only a player who opted in.
+        AbilityCost::SayPhrase { .. } => state.un_actions.is_enabled(payer),
         AbilityCost::Mana { cost: mana_cost } => {
             can_pay_effect_mana_cost_after_auto_tap(
                 state,
@@ -3444,9 +3621,17 @@ fn can_pay_resolution(
         // physical card cannot satisfy two legs, so a per-leg check alone would
         // let the first leg pay and the second fail — a partial payment).
         AbilityCost::Composite { costs } => {
-            costs
-                .iter()
-                .all(|cost| can_pay_resolution(state, payer, cost, ability))
+            let jointly_proven = composite_needs_joint_proof(costs);
+            // CR 118.3: when legs share a resource, their original-state answers
+            // cannot veto the whole payment — an earlier leg can supply what a
+            // later one needs (life gained while funding mana, mana produced by
+            // an earlier leg). The whole-payment witness answers those leaves;
+            // every leg that uses up a chosen object is still checked per leg.
+            let leaves_payable = costs.iter().all(|cost| {
+                (jointly_proven && composite_resource_leg(cost))
+                    || can_pay_resolution(state, payer, cost, ability)
+            });
+            leaves_payable
                 && super::cost_payability::discard_legs_jointly_payable(
                     state,
                     payer,
@@ -3454,6 +3639,8 @@ fn can_pay_resolution(
                     ability.context.granting_object,
                     costs,
                 )
+                && (!jointly_proven
+                    || composite_legs_jointly_affordable(state, payer, ability, costs))
         }
         // CR 118.12a: Disjunctive — payable iff any sub-cost is payable. The
         // choice is made interactively via `UnlessPaymentChooseCost`; the
@@ -3539,6 +3726,197 @@ mod tests {
     use crate::types::mana::{ManaCost, ManaCostShard};
 
     const P0: PlayerId = PlayerId(0);
+
+    /// Un-card: an activation whose cost is a spoken phrase is unpayable for a
+    /// player who has not opted in, and the dry run emits no event.
+    #[test]
+    fn say_phrase_activation_requires_un_actions_opt_in() {
+        let mut scenario = GameScenario::new();
+        let source = scenario
+            .add_enchantment_from_oracle(P0, "Phrase Source", "Flying")
+            .id();
+        let mut runner = scenario.build();
+        let cost = AbilityCost::SayPhrase {
+            phrase: "Gotcha!".to_string(),
+        };
+        let excluded = HashSet::new();
+        let scope = PaymentScope::Activation {
+            excluded_sources: &excluded,
+            ability_index: None,
+        };
+        assert!(
+            !can_pay(runner.state(), P0, source, &cost, &scope),
+            "opted-out player cannot pay a say-it activation cost"
+        );
+        runner.state_mut().un_actions.set_enabled(P0, true);
+        assert!(
+            can_pay(runner.state(), P0, source, &cost, &scope),
+            "reach guard: opted-in player can pay"
+        );
+    }
+
+    fn unless_test_ability() -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 7 },
+                player: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            P0,
+        )
+    }
+
+    /// CR 702.21a + CR 118.3: the compound unless-cost shape is one mana leg
+    /// followed by life legs. These test the shape predicate directly, with a
+    /// zero-mana leg so an authority payment would otherwise succeed — removing
+    /// the guard is observable.
+    #[test]
+    fn unless_composite_cost_shape_accepts_the_printed_ward_shape() {
+        let costs = vec![
+            AbilityCost::Mana {
+                cost: ManaCost::generic(2),
+            },
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+            },
+        ];
+        assert!(unless_composite_cost_shape(&costs));
+    }
+
+    /// A life leg ahead of a mana leg is refused even though it would be
+    /// payable. No printed card orders a compound Ward that way; the nearest
+    /// printed shape is Captain Howler, Sea Scourge's "Ward—{2}, Pay 2 life."
+    /// (covered end to end in
+    /// `tests/integration/compound_ward_cost_pays_every_part.rs`).
+    #[test]
+    fn unless_composite_cost_shape_refuses_life_before_mana() {
+        let costs = vec![
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+            },
+            AbilityCost::Mana {
+                cost: ManaCost::zero(),
+            },
+        ];
+        assert!(!unless_composite_cost_shape(&costs));
+    }
+
+    /// A second mana leg is refused: a paused mana source resumes from the whole
+    /// unless cost, which would replay an already-paid prefix. Synthetic shape:
+    /// no printed compound Ward carries two mana legs.
+    #[test]
+    fn unless_composite_cost_shape_refuses_a_second_mana_leg() {
+        let costs = vec![
+            AbilityCost::Mana {
+                cost: ManaCost::generic(1),
+            },
+            AbilityCost::Mana {
+                cost: ManaCost::generic(1),
+            },
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 1 },
+            },
+        ];
+        assert!(!unless_composite_cost_shape(&costs));
+    }
+
+    /// A leg this adapter cannot finish (a discard) refuses the whole cost.
+    /// Synthetic shape: no printed compound Ward mixes a discard with another
+    /// leg; the nearest printed discard ward is Arna Kennerüd, Skycaptain's
+    /// "Ward—Discard a card."
+    #[test]
+    fn unless_composite_cost_shape_refuses_an_unsupported_leg() {
+        let costs = vec![
+            AbilityCost::Mana {
+                cost: ManaCost::zero(),
+            },
+            AbilityCost::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                filter: None,
+                selection: CardSelectionMode::Chosen,
+                self_scope: DiscardSelfScope::FromHand,
+            },
+        ];
+        assert!(!unless_composite_cost_shape(&costs));
+        assert!(!unless_composite_cost_shape(&[]));
+    }
+
+    /// CR 702.21a + CR 118.3: a payable mana-then-life composite is admitted,
+    /// and the eligibility witness spends nothing live.
+    #[test]
+    fn can_pay_unless_composite_accepts_a_payable_shape() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 20;
+        let ability = unless_test_ability();
+        let cost = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::zero(),
+                },
+                AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                },
+            ],
+        };
+        assert!(can_pay_unless_composite(&state, P0, &ability, &cost));
+        assert_eq!(
+            state.players[0].life, 20,
+            "the eligibility witness must not spend the live life total"
+        );
+    }
+
+    /// CR 118.3: an unaffordable life leg refuses the whole cost.
+    #[test]
+    fn can_pay_unless_composite_refuses_an_unaffordable_life_leg() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 1;
+        let ability = unless_test_ability();
+        let cost = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::Mana {
+                    cost: ManaCost::zero(),
+                },
+                AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 2 },
+                },
+            ],
+        };
+        assert!(!can_pay_unless_composite(&state, P0, &ability, &cost));
+        assert_eq!(state.players[0].life, 1, "the live life total is untouched");
+    }
+
+    /// CR 118.3: per-leg life checks understate a composite — two life legs each
+    /// below the life total can still exceed it together.
+    #[test]
+    fn can_pay_resolution_composite_requires_life_legs_to_be_jointly_affordable() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life = 6;
+        let ability = unless_test_ability();
+        let cost = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                },
+                AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 5 },
+                },
+            ],
+        };
+        let scope = PaymentScope::Resolution {
+            ability: &ability,
+            cost_move_root: ResolutionCostMoveRoot::EffectPayCost,
+        };
+        assert!(
+            !can_pay(&state, P0, ObjectId(100), &cost, &scope),
+            "6 life cannot pay 3 and 5 life legs"
+        );
+        state.players[0].life = 10;
+        assert!(
+            can_pay(&state, P0, ObjectId(100), &cost, &scope),
+            "reach guard: 10 life pays the same composite"
+        );
+    }
 
     #[test]
     fn half_life_activation_lock_fixes_only_explicit_typed_leaf() {
@@ -3663,6 +4041,9 @@ mod tests {
             },
             AbilityCost::Tap => AbilityCost::Tap,
             AbilityCost::Untap => AbilityCost::Untap,
+            AbilityCost::SayPhrase { .. } => AbilityCost::SayPhrase {
+                phrase: "Gotcha!".to_string(),
+            },
             AbilityCost::Loyalty { .. } => AbilityCost::Loyalty { amount: 1 },
             AbilityCost::Sacrifice(_) => {
                 AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1))
@@ -4028,6 +4409,7 @@ mod tests {
                 &scope,
                 None,
                 None,
+                true,
             )
             .unwrap();
             assert!(
@@ -4059,6 +4441,7 @@ mod tests {
             &scope,
             None,
             None,
+            false,
         )
         .unwrap();
         assert!(matches!(outcome, PaymentOutcome::Paid));
@@ -4078,6 +4461,7 @@ mod tests {
             &scope,
             None,
             None,
+            false,
         );
         assert!(
             result.is_err(),
@@ -4819,6 +5203,7 @@ mod tests {
             &scope,
             None,
             None,
+            false,
         )
         .unwrap();
         assert!(
@@ -4837,6 +5222,7 @@ mod tests {
             &scope,
             None,
             None,
+            false,
         )
         .unwrap();
         assert!(
@@ -5134,6 +5520,7 @@ mod tests {
             },
             None,
             None,
+            false,
         )
         .expect("resolution-time tap-creatures payment must not error")
     }
