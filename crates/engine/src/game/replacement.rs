@@ -4473,10 +4473,10 @@ impl QuantityRange {
 /// Lenient entry for the non-life count replacements (draw, scry, coin flip,
 /// dice, proliferate, mill): an overflow there falls back to the unchanged
 /// count, which is exactly what each caller already does for a
-/// not-statically-resolvable expression. There is no action-ingress rejection
-/// contract for a non-life count, and a count that large cannot arise from the
-/// ingress cap. The life appliers use `life_replacement_amount`, which
-/// saturates instead.
+/// not-statically-resolvable expression. These counts have no action-ingress
+/// rejection contract (only a player-counter or energy quantity does), and a
+/// count that large cannot arise from the ingress cap. The life appliers use
+/// `life_replacement_amount`, which saturates instead.
 fn resolve_event_replacement_quantity(expr: &QuantityExpr, event_count: u32) -> Option<i32> {
     try_resolve_event_replacement_quantity(expr, event_count).ok()
 }
@@ -18023,7 +18023,7 @@ mod tests {
     }
 
     /// Non-life count replacements keep the lenient fallback: an overflowing
-    /// mill count stays unchanged (no ingress contract for a non-life count).
+    /// mill count stays unchanged (a mill count has no ingress contract).
     #[test]
     fn mill_applier_overflow_falls_back_to_the_unchanged_count() {
         let repl =

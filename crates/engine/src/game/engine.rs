@@ -6518,9 +6518,10 @@ fn drive_one_shortcut_cycle(
         // already-consumed triggers.
         let mut beat_events: Vec<GameEvent> = Vec::new();
         let pipeline = pass_priority_once_with_pipeline(&mut work, &mut beat_events, None);
-        // CR 732.2a: the driven beat runs on a private work clone, but its life-ingress marker
-        // belongs to the enclosing public Accept action. A low-level life settle may record the
-        // failure while returning `Ok`; do not let a later `Abort`/fallback discard that marker.
+        // CR 732.2a: the driven beat runs on a private work clone, but a failure in its
+        // player-resource window belongs to the enclosing public Accept action. A low-level
+        // player-counter or energy settle (a life change saturates instead) may record it while
+        // returning `Ok`; do not let a later `Abort`/fallback discard it.
         if let Some(player) = boundary_player_resource_failure(&work) {
             return Err(EngineError::PlayerResourceChangeUnrepresentable { player });
         }
@@ -11001,9 +11002,10 @@ pub(crate) fn resume_stack_resolution_session_runner(
 ) -> Result<ActionResult, EngineError> {
     let boundary_snapshot = state.clone();
     let journal_start = state.resolved_rules_journal.entries().len();
-    // This seam bypasses `finish_action_boundary`, so it owns its own life
-    // window. A representability failure rejects the whole restore-resume and
-    // restores its entry state; it is never reported as unchanged progress.
+    // This seam bypasses `finish_action_boundary`, so it owns its own
+    // player-resource window. A representability failure rejects the whole
+    // restore-resume and restores its entry state; it is never reported as
+    // unchanged progress.
     let prior_window = state.ingress_player_resource_window.take();
     state.ingress_player_resource_window =
         Some(crate::types::game_state::IngressPlayerResourceWindow::default());
@@ -11467,7 +11469,7 @@ fn run_auto_pass_loop(
                 };
                 match pass_priority_once_with_pipeline(state, &mut events, stack_resolution_limit) {
                     Ok(outcome) => {
-                        // Check the life failure BEFORE aggregating this
+                        // Check the player-resource failure BEFORE aggregating this
                         // iteration's events or starting the next one: the
                         // action boundary restores its snapshot, so none of
                         // these events may escape into the result.
@@ -11675,10 +11677,10 @@ pub(crate) fn resume_auto_pass_after_resolve_all(
 ) -> Result<(), EngineError> {
     let before = state.clone();
     let batch_before = batch.clone();
-    // This seam bypasses `finish_action_boundary`, so it owns its own life
-    // window: an unrepresentable player-counter or energy change settled by its
-    // drive (a life change saturates instead) must reject the resume rather
-    // than be reported as a successful (or unchanged) outcome.
+    // This seam bypasses `finish_action_boundary`, so it owns its own
+    // player-resource window: an unrepresentable player-counter or energy change
+    // settled by its drive (a life change saturates instead) must reject the
+    // resume rather than be reported as a successful (or unchanged) outcome.
     let prior_window = state.ingress_player_resource_window.take();
     state.ingress_player_resource_window =
         Some(crate::types::game_state::IngressPlayerResourceWindow::default());

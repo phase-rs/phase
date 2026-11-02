@@ -28617,7 +28617,8 @@ pub struct PendingReplacement {
     /// rejects the public action and restores its entry state (`Reject`), or
     /// uses the compatibility skip when no ingress window owns it
     /// (`IgnoreImpossible`). Older payloads omit this field and retain that
-    /// compatibility policy.
+    /// compatibility policy. No life change is ever unrepresentable, so the name
+    /// misdescribes the field; it stays because saved games and peers carry it.
     #[serde(
         default,
         skip_serializing_if = "UnrepresentablePolicy::is_ignore_impossible"
@@ -28641,7 +28642,7 @@ pub enum UnrepresentablePolicy {
     /// Compatibility fallback for ordinary resolution outside a public action
     /// boundary and for older serialized payloads. This is an engine numeric
     /// capacity limit, not a rules outcome: the change cannot be recorded, so it
-    /// is logged once and skipped without a life mutation. An open ingress
+    /// is logged once and skipped without a mutation. An open ingress
     /// window instead records failure so the public boundary rejects the action
     /// and restores its entry state.
     #[default]
@@ -55733,7 +55734,7 @@ mod tests {
         );
     }
 
-    /// The ingress life window lives only inside one synchronous action: it is
+    /// The ingress player-resource window lives only inside one synchronous action: it is
     /// never serialized, and the per-action reset closes it.
     #[test]
     fn ingress_player_resource_window_is_skipped_by_serde_and_cleared_per_action() {
