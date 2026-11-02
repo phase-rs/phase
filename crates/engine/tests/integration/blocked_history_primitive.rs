@@ -1234,7 +1234,7 @@ fn block_pairing_every_direction_and_scope_reads_live_board() {
     }
 }
 
-/// CR 511.3 + CR 500.8: once combat ends, the three stores part. Both creatures
+/// CR 511.3 + CR 608.2i: once combat ends, the three stores part. Both creatures
 /// are alive, so nothing but the end of combat separates them: the current
 /// pairing and the combat window match nothing in any direction, and the turn
 /// window still follows direction.
