@@ -14,10 +14,14 @@ use engine::types::zones::Zone;
 
 const SUNSPRING_ORACLE: &str = "Landfall — Whenever a land you control enters, you may put a quest counter on this enchantment.\nRemove three quest counters from this enchantment and sacrifice it: You gain 8 life.";
 
-/// CR 608.2c + CR 701.21a: "it" in a cost names the source permanent, so the
-/// only payable cost is three quest counters from Sunspring Expedition plus
-/// Sunspring Expedition itself. A bystander permanent must never be a legal
-/// payment, even when the driver offers it.
+/// CR 118.1 + CR 602.1a: a cost is the instructions the payer carries out, and
+/// an activated ability's activation cost is everything before the colon, so
+/// "it" in this cost names the object its immediately preceding leg names —
+/// the source permanent. The only payable cost is three quest counters from
+/// Sunspring Expedition plus Sunspring Expedition itself; a bystander permanent
+/// must never be a legal payment, even when the driver offers it. (CR 701.21a
+/// only fixes who may sacrifice — it would permit the bystander. CR 608.2c's
+/// whole-text reading is the analogy, not the governing cost rule.)
 #[test]
 fn quest_counter_cost_sacrifices_only_its_own_source() {
     let mut scenario = GameScenario::new();

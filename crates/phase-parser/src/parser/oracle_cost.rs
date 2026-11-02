@@ -43,11 +43,11 @@ use crate::types::zones::Zone;
 ///
 /// A compound cost's trailing leg may be the bare pronoun ("Remove three quest
 /// counters from this enchantment and sacrifice it"); see
-/// [`bind_bare_it_sacrifice_leg`] for why that leg can only be bound once the
+/// [`bind_trailing_bare_it_sacrifice`] for why that leg can only be bound once the
 /// whole cost is known.
 pub fn parse_oracle_cost(text: &str) -> AbilityCost {
     let cost = parse_oracle_cost_unbound_pronoun(text);
-    bind_bare_it_sacrifice_leg(text, cost)
+    bind_trailing_bare_it_sacrifice(&text.trim().to_lowercase(), cost)
 }
 
 /// The cost grammar proper. Legs are parsed in isolation, so a pronoun that
@@ -66,24 +66,35 @@ fn parse_oracle_cost_unbound_pronoun(text: &str) -> AbilityCost {
     parse_oracle_cost_no_or(text)
 }
 
-/// CR 608.2c + CR 701.21a: in a compound printed cost, a trailing bare pronoun
-/// leg names the object the cost's earlier leg already names — the ability's
-/// source (CR 608.2c requires reading the printed text as a whole rather than
-/// one leg at a time; CR 701.21a fixes that the sacrificing player must control
-/// the permanent, so a bystander is not a legal payment). The Quest cycle, Grimoire of the Dead, Hellion Crucible and Goblin
-/// Bomb print "Remove <N> <type> counters from this <permanent> and sacrifice
-/// it" (13 cards). Parsed leg-by-leg, "sacrifice it" reaches `parse_target` and
-/// lowers to an empty typed filter, which names no permanent in particular: the
-/// payer can satisfy that leg with a bystander permanent while the source — the
-/// only object the printed cost names — stays on the battlefield.
+/// CR 118.1 + CR 602.1a: a cost is the set of instructions the payer carries out
+/// ("To pay a cost, a player carries out the instructions specified by the
+/// spell, ability, or effect that contains that cost"), and an activated
+/// ability's activation cost is everything before the colon. Read as written —
+/// the whole-text reading CR 608.2c prescribes for a resolving object applies
+/// here by analogy — a compound cost's trailing bare pronoun leg names the
+/// object its immediately preceding leg names, so "… from this enchantment and
+/// sacrifice it" names that enchantment. CR 701.21a is NOT the authority: it
+/// constrains who may sacrifice a permanent, which is why a bystander permanent
+/// the payer controls is a legal sacrifice under that rule alone. The Quest
+/// cycle, Grimoire of the Dead, Hellion Crucible and Goblin Bomb print "Remove
+/// <N> <type> counters from this <permanent> and sacrifice it" (13 cards).
+/// Parsed leg-by-leg, "sacrifice it" reaches `parse_target` and lowers to an
+/// empty typed filter, which names no permanent in particular: the payer can
+/// satisfy that leg with a bystander permanent while the source — the only
+/// object the printed cost names — stays on the battlefield.
 ///
-/// The gate is the printed compound shape ("… and sacrifice it"), not the leg
-/// alone. A bare "sacrifice it" also reaches this parser from effect-side
-/// optional payments ("you may sacrifice it. When you do, …" — Gorbag of Minas
-/// Morgul), where the pronoun's antecedent is the trigger's subject, not the
-/// source; those stay untouched.
-fn bind_bare_it_sacrifice_leg(text: &str, cost: AbilityCost) -> AbilityCost {
-    if !compound_cost_ends_with_bare_it(&text.trim().to_lowercase()) {
+/// Both gates are required. The printed compound shape ("… and sacrifice it")
+/// refuses a bare "sacrifice it": several OTHER legs lower to the same vacuous
+/// filter ("Sacrifice one or more artifacts" — Radiant Lotus; "Sacrifice up to
+/// three permanents" — Baba Lysaga), and a cost that is only the pronoun has no
+/// preceding leg to name. `earlier_leg_names_the_source` then requires the
+/// IMMEDIATELY preceding leg to be the source: an earlier source reference
+/// cannot stand in for a nearer third-party antecedent ("Remove a counter from
+/// this enchantment, remove a counter from a permanent you control and
+/// sacrifice it" names the permanent, not the enchantment), and such a cost is
+/// left as parsed rather than rewritten to the wrong permanent.
+fn bind_trailing_bare_it_sacrifice(lower: &str, cost: AbilityCost) -> AbilityCost {
+    if !compound_cost_ends_with_bare_it(lower) || !earlier_leg_names_the_source(&cost) {
         return cost;
     }
     let mut cost = cost;
@@ -91,10 +102,14 @@ fn bind_bare_it_sacrifice_leg(text: &str, cost: AbilityCost) -> AbilityCost {
     cost
 }
 
-/// CR 608.2c: the gate for [`bind_bare_it_sacrifice_leg`] — a compound printed
-/// cost whose LAST leg is the bare pronoun. The non-empty earlier leg is the
-/// antecedent the pronoun names; a cost that is only the pronoun (the
-/// effect-side "you may sacrifice it" shape) has none and is refused.
+/// CR 608.2c (analogy for a cost's printed instructions, see
+/// [`bind_trailing_bare_it_sacrifice`]): the text gate — a compound printed cost
+/// whose LAST leg is the bare pronoun. The printed phrase is load-bearing on its
+/// own: several OTHER legs lower to the same `TypedFilter::default()`
+/// placeholder ("Sacrifice one or more artifacts" — Radiant Lotus; "Sacrifice
+/// up to three permanents" — Baba Lysaga), so without this gate a compound cost
+/// ending in one of those would be rewritten to the source. A cost that is only
+/// the pronoun has no preceding leg, so it is refused too.
 fn compound_cost_ends_with_bare_it(lower: &str) -> bool {
     type E<'a> = super::oracle_nom::error::OracleError<'a>;
     all_consuming((
@@ -106,30 +121,64 @@ fn compound_cost_ends_with_bare_it(lower: &str) -> bool {
     .is_ok_and(|(_, (earlier, _, _))| !earlier.trim().is_empty())
 }
 
+/// CR 118.1: the structural gate — the leg printed IMMEDIATELY before the
+/// pronoun must name the source, because that is the antecedent the pronoun
+/// takes. `AbilityCost::RemoveCounter` with `target: None` is the cost
+/// authority's source form (it pays from the ability's source in `game::costs`)
+/// and is the leg every printing of this cost uses ("Remove <N> <type>
+/// counters from this <permanent>"). A nearer third-party leg wins on its own
+/// printing even when an earlier leg named the source, and such a cost leaves
+/// the pronoun leg as parsed.
+fn earlier_leg_names_the_source(cost: &AbilityCost) -> bool {
+    let (AbilityCost::Composite { costs } | AbilityCost::OneOf { costs }) = cost else {
+        return false;
+    };
+    let Some((trailing, earlier)) = costs.split_last() else {
+        return false;
+    };
+    if is_unbound_sacrifice_leg(trailing) {
+        earlier.last().is_some_and(leg_names_the_source)
+    } else {
+        earlier_leg_names_the_source(trailing)
+    }
+}
+
+/// True for the source-naming counter removal ("from this <permanent>"): the
+/// cost authority pays `RemoveCounter`'s `target: None` from the source.
+fn leg_names_the_source(cost: &AbilityCost) -> bool {
+    matches!(cost, AbilityCost::RemoveCounter { target: None, .. })
+}
+
+/// The placeholder the pronoun lowers to: a representative-object filter with
+/// nothing filled in, i.e. `TypedFilter::default()` (its own doc names "empty in
+/// all three fields" as the shape).
+fn is_unbound_any_permanent(filter: &TargetFilter) -> bool {
+    matches!(filter, TargetFilter::Typed(tf) if *tf == TypedFilter::default())
+}
+
+fn is_unbound_sacrifice_leg(cost: &AbilityCost) -> bool {
+    matches!(
+        cost,
+        AbilityCost::Sacrifice(sacrifice) if is_unbound_any_permanent(&sacrifice.target)
+    )
+}
+
 /// Rewrite the placeholder empty-typed sacrifice leg a bare "it" lowered to.
-/// Only the TRAILING leg is visited — the gate established that the printed
-/// cost ends with the pronoun, so no other leg can be the one it names — and
+/// Only the TRAILING leg is visited — the gates established that the printed
+/// cost ends with the pronoun and that the earlier leg names the source — and
 /// only the exact unconstrained shape is rewritten, so a described leg
 /// ("Sacrifice a Wall", "Sacrifice a creature") keeps its filter.
 fn rebind_bare_it_sacrifice(cost: &mut AbilityCost) {
-    match cost {
-        AbilityCost::Sacrifice(sacrifice)
-            if matches!(
-                &sacrifice.target,
-                TargetFilter::Typed(tf)
-                    if tf.type_filters.is_empty()
-                        && tf.controller.is_none()
-                        && tf.properties.is_empty()
-            ) =>
-        {
+    if let AbilityCost::Sacrifice(sacrifice) = cost {
+        if is_unbound_any_permanent(&sacrifice.target) {
             sacrifice.target = TargetFilter::SelfRef;
         }
-        AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
-            if let Some(trailing) = costs.last_mut() {
-                rebind_bare_it_sacrifice(trailing);
-            }
+        return;
+    }
+    if let AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } = cost {
+        if let Some(trailing) = costs.last_mut() {
+            rebind_bare_it_sacrifice(trailing);
         }
-        _ => {}
     }
 }
 
@@ -152,10 +201,17 @@ fn parse_binary_cost_alternatives_nom(text: &str) -> Option<AbilityCost> {
 pub(crate) fn parse_binary_cost_conjunction_nom(text: &str) -> Option<AbilityCost> {
     let (left, right) = split_binary_cost_legs(text, " and ")?;
     let costs = vec![parse_single_cost(left), parse_single_cost(right)];
-    costs
-        .iter()
-        .all(is_concrete_cost_leg)
-        .then_some(AbilityCost::Composite { costs })
+    costs.iter().all(is_concrete_cost_leg).then(|| {
+        // The second whole-cost authority: an additional cost ("As an additional
+        // cost to cast this spell, …") composes its legs here without passing
+        // through `parse_oracle_cost`, so the compound pronoun binding is applied
+        // at both composers. Idempotent — a leg already bound to `SelfRef` is not
+        // an unbound sacrifice leg on a second pass.
+        bind_trailing_bare_it_sacrifice(
+            &text.trim().to_lowercase(),
+            AbilityCost::Composite { costs },
+        )
+    })
 }
 
 /// Splits `text` into exactly two non-empty legs at the first `delimiter`; a
@@ -4564,11 +4620,12 @@ mod tests {
         }
     }
 
-    /// CR 608.2c + CR 701.21a: "… and sacrifice it" pays with the ability's own
+    /// CR 118.1 + CR 602.1a: "… and sacrifice it" pays with the ability's own
     /// source. The Quest cycle, Grimoire of the Dead, Hellion Crucible and
     /// Goblin Bomb print this counter-removal-and-sacrifice cost; before this
-    /// arm the pronoun lowered to an empty typed filter, which the payer could
-    /// satisfy with a bystander permanent and never bound to the source.
+    /// pass the
+    /// pronoun lowered to an empty typed filter, which the payer could satisfy
+    /// with a bystander permanent and never bound to the source.
     #[test]
     fn cost_composite_counter_removal_and_sacrifice_it_binds_the_source() {
         match parse_oracle_cost(
@@ -4590,28 +4647,88 @@ mod tests {
         }
     }
 
-    /// The compound-shape gate: a bare "sacrifice it" reaches this parser from
-    /// effect-side optional payments ("you may sacrifice it. When you do, …"),
-    /// where the pronoun's antecedent is the trigger's subject, not the source.
-    /// Pinning the gate, not the placeholder shape below it.
+    /// CR 118.1: "it" names the leg printed immediately before it, so an earlier
+    /// source reference cannot stand in for a nearer third-party antecedent.
+    /// Reach guard included: the trailing pronoun leg must still parse as the
+    /// vacuous filter, or the negative below would be vacuous itself.
     #[test]
-    fn cost_bare_sacrifice_it_is_left_unbound_without_a_compound_antecedent() {
-        let AbilityCost::Sacrifice(sacrifice) = parse_oracle_cost("sacrifice it") else {
-            panic!("expected a sacrifice leg");
-        };
+    fn cost_mixed_antecedent_leg_before_the_pronoun_is_not_bound() {
+        fn any_sacrifice(cost: &AbilityCost, want_self_ref: bool) -> bool {
+            match cost {
+                AbilityCost::Sacrifice(sacrifice) => {
+                    matches!(sacrifice.target, TargetFilter::SelfRef) == want_self_ref
+                }
+                AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
+                    costs.iter().any(|leg| any_sacrifice(leg, want_self_ref))
+                }
+                _ => false,
+            }
+        }
+
+        let cost = parse_oracle_cost(
+            "Remove a counter from this enchantment, remove a counter from a permanent you control and sacrifice it",
+        );
         assert!(
-            !matches!(sacrifice.target, TargetFilter::SelfRef),
-            "a standalone pronoun leg has no compound antecedent to bind to"
+            any_sacrifice(&cost, false),
+            "reach guard: the trailing pronoun leg must parse as the vacuous filter, got {cost:?}"
+        );
+        assert!(
+            !any_sacrifice(&cost, true),
+            "a nearer third-party antecedent must not be rewritten to the source, got {cost:?}"
         );
     }
 
-    /// The same leg inside a comma-separated cost list ("{T}, Remove three
-    /// study counters from Grimoire of the Dead and sacrifice it") reaches the
-    /// binder through a nested composite; only the trailing leg is bound.
+    /// CR 608.2c: the printed phrase gate is what separates the pronoun from
+    /// other legs that lower to the SAME vacuous filter. "Sacrifice one or more
+    /// artifacts" (Radiant Lotus) and "Sacrifice up to three permanents" (Baba
+    /// Lysaga) both parse to `TypedFilter::default()`, so a compound cost ending
+    /// in one of them must NOT be rewritten to the source. Deleting the phrase
+    /// gate turns this assertion red.
+    #[test]
+    fn cost_compound_ending_in_a_described_vacuous_leg_is_not_bound() {
+        let cost = parse_oracle_cost(
+            "Remove a counter from this enchantment and sacrifice one or more artifacts",
+        );
+        fn any_unbound_sacrifice(cost: &AbilityCost) -> bool {
+            match cost {
+                AbilityCost::Sacrifice(sacrifice) => {
+                    matches!(&sacrifice.target, TargetFilter::Typed(tf) if *tf == TypedFilter::default())
+                }
+                AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
+                    costs.iter().any(any_unbound_sacrifice)
+                }
+                _ => false,
+            }
+        }
+        fn any_self_ref(cost: &AbilityCost) -> bool {
+            match cost {
+                AbilityCost::Sacrifice(sacrifice) => {
+                    matches!(sacrifice.target, TargetFilter::SelfRef)
+                }
+                AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
+                    costs.iter().any(any_self_ref)
+                }
+                _ => false,
+            }
+        }
+        assert!(
+            any_unbound_sacrifice(&cost),
+            "reach guard: the described leg must still parse as the vacuous filter, got {cost:?}"
+        );
+        assert!(
+            !any_self_ref(&cost),
+            "only the bare pronoun leg may be bound, got {cost:?}"
+        );
+    }
+
+    /// The same leg inside a comma-separated cost list ("{T}, Remove three study
+    /// counters from Grimoire of the Dead and sacrifice it") composes as a FLAT
+    /// composite (the comma splitter flattens); only its trailing leg is bound.
     #[test]
     fn cost_tap_and_counter_removal_and_sacrifice_it_binds_the_source() {
-        match parse_oracle_cost("{T}, Remove three study counters from Grimoire of the Dead and sacrifice it")
-        {
+        match parse_oracle_cost(
+            "{T}, Remove three study counters from Grimoire of the Dead and sacrifice it",
+        ) {
             AbilityCost::Composite { costs } => {
                 let AbilityCost::Sacrifice(sacrifice) = &costs[costs.len() - 1] else {
                     panic!("expected the trailing sacrifice leg, got {costs:?}");
@@ -4622,22 +4739,98 @@ mod tests {
         }
     }
 
-    /// Negative control for the pronoun arm: a described sacrifice cost keeps
-    /// its own filter, so the new "it" arm cannot widen or narrow it.
+    /// The recursive arms, driven through the production entry point: an
+    /// alternative cost whose right leg is the compound pronoun shape parses to
+    /// `OneOf[.., Composite[RemoveCounter{None}, Sacrifice(vacuous)]]`, so both
+    /// the gate's trailing-composite descent and the rebind's must run for the
+    /// inner leg to bind. Deleting either recursion turns this red. No printed
+    /// card wraps the compound leg in an `or` alternative; the nearest printings
+    /// are Hellion Crucible (a flat composite) and Trenzalore Clocktower (the
+    /// `exile` sibling of this cost).
     #[test]
-    fn cost_sacrifice_described_permanent_keeps_its_filter() {
-        let AbilityCost::Sacrifice(sacrifice) = parse_oracle_cost("Sacrifice a Wall") else {
+    fn nested_trailing_composite_binds_its_inner_pronoun_leg() {
+        fn walk(cost: &AbilityCost, nested_source_leg: &mut bool, self_refs: &mut usize) {
+            match cost {
+                AbilityCost::Sacrifice(sacrifice) => {
+                    if matches!(sacrifice.target, TargetFilter::SelfRef) {
+                        *self_refs += 1;
+                    }
+                }
+                AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
+                    if matches!(cost, AbilityCost::Composite { .. })
+                        && costs.iter().any(|leg| {
+                            matches!(leg, AbilityCost::RemoveCounter { target: None, .. })
+                        })
+                    {
+                        *nested_source_leg = true;
+                    }
+                    for leg in costs {
+                        walk(leg, nested_source_leg, self_refs);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let cost = parse_oracle_cost(
+            "Sacrifice a creature or remove a counter from this enchantment and sacrifice it",
+        );
+        let mut nested_source_leg = false;
+        let mut self_refs = 0;
+        walk(&cost, &mut nested_source_leg, &mut self_refs);
+        assert!(
+            nested_source_leg,
+            "reach guard: the right leg must be the compound counter-removal composite, got {cost:?}"
+        );
+        assert_eq!(
+            self_refs, 1,
+            "only the nested trailing pronoun leg binds, got {cost:?}"
+        );
+    }
+
+    /// Guard test for the rewrite itself. The two gates above make a DESCRIBED
+    /// trailing sacrifice leg unreachable through `parse_oracle_cost`, so the
+    /// guard is driven directly: a subtyped leg must survive, and the vacuous
+    /// any-permanent leg next to it must flip. Deleting the guard turns the
+    /// first half red.
+    #[test]
+    fn rebind_bare_it_sacrifice_leaves_a_described_trailing_leg_alone() {
+        let described = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Subtype("Wall".to_string())],
+            ..TypedFilter::default()
+        });
+        let mut described_cost = AbilityCost::Composite {
+            costs: vec![AbilityCost::Sacrifice(SacrificeCost::count(
+                described.clone(),
+                1,
+            ))],
+        };
+        super::rebind_bare_it_sacrifice(&mut described_cost);
+        let AbilityCost::Composite { costs } = &described_cost else {
+            panic!("expected a composite cost");
+        };
+        let AbilityCost::Sacrifice(sacrifice) = &costs[0] else {
             panic!("expected a sacrifice leg");
         };
-        assert!(
-            matches!(
-                &sacrifice.target,
-                TargetFilter::Typed(tf)
-                    if tf.type_filters == [TypeFilter::Subtype("Wall".to_string())]
-            ),
-            "described sacrifice cost keeps its subtype, got {:?}",
-            sacrifice.target
+        assert_eq!(
+            sacrifice.target, described,
+            "a described trailing leg keeps its filter"
         );
+
+        let mut unbound_cost = AbilityCost::Composite {
+            costs: vec![AbilityCost::Sacrifice(SacrificeCost::count(
+                TargetFilter::Typed(TypedFilter::default()),
+                1,
+            ))],
+        };
+        super::rebind_bare_it_sacrifice(&mut unbound_cost);
+        let AbilityCost::Composite { costs } = &unbound_cost else {
+            panic!("expected a composite cost");
+        };
+        let AbilityCost::Sacrifice(sacrifice) = &costs[0] else {
+            panic!("expected a sacrifice leg");
+        };
+        assert_eq!(sacrifice.target, TargetFilter::SelfRef);
     }
 
     #[test]
