@@ -5918,9 +5918,11 @@ pub(crate) fn turn_cycle_covers(prior: &GameState, current: &GameState, caster: 
 }
 
 /// CR 121.1 + CR 401.2: `current` with the cards the caster drew since `prior` put back where
-/// `prior`'s library held them. `None` unless it drew, the drawn cards are the top of `prior`'s
-/// library, a card `prior` shows standing in for a shown top card of equal content, and
-/// `current`'s library is `prior`'s less every card that left it.
+/// `prior`'s library held them. CR 701.17a: a drawn card lay within the leading run of cards that
+/// left the library, since it was the top card only once the cards above it had left. `None`
+/// unless it drew, the drawn cards lie in that run, a card `prior` shows standing in for a shown
+/// card of that run of equal content, and `current`'s library is `prior`'s less every card that
+/// left it.
 fn library_departures_restored(
     prior: &GameState,
     current: &GameState,
@@ -5942,7 +5944,12 @@ fn library_departures_restored(
     if drawn.is_empty() {
         return None;
     }
-    let top: Vec<ObjectId> = before.iter().take(drawn.len()).copied().collect();
+    let reach = before
+        .iter()
+        .take_while(|id| departed.contains(id))
+        .count()
+        .max(drawn.len());
+    let top: Vec<ObjectId> = before.iter().take(reach).copied().collect();
     // CR 401.2: a hidden card is known only by where it lies, so only a shown card is matched by
     // content.
     let shown = |id: &ObjectId| {
@@ -27008,6 +27015,41 @@ mod tests {
                 "card {drawn}"
             );
         }
+    }
+
+    /// CR 121.1 + CR 701.17a: in the caster's hidden view a card is put back as drawn from the top
+    /// once every card above it had left the library, and refused below a card that stayed.
+    #[test]
+    fn a_hidden_draw_after_a_mill_is_put_back_only_from_the_milled_run() {
+        use crate::game::visibility::proposer_hidden_view;
+        use crate::game::zones::{add_to_zone, create_object, remove_from_zone};
+        let caster = PlayerId(0);
+        // A four-card library whose cards at `milled` went to the graveyard and at `drawn` to hand.
+        let departures = |milled: &[usize], drawn: usize| {
+            let (mut prior, _) = in_step_draw(0);
+            create_object(&mut prior, CardId(6), caster, "Swamp".into(), Zone::Library);
+            let mut current = prior.clone();
+            let library = prior.library_of(caster).clone();
+            let moves = milled.iter().map(|at| (*at, Zone::Graveyard));
+            for (at, zone) in moves.chain([(drawn, Zone::Hand)]) {
+                let card = library[at];
+                remove_from_zone(&mut current, card, Zone::Library, caster);
+                add_to_zone(&mut current, card, zone, caster);
+                current.objects.get_mut(&card).expect("departed card").zone = zone;
+            }
+            let (prior, current) = (
+                proposer_hidden_view(&prior, caster),
+                proposer_hidden_view(&current, caster),
+            );
+            library_departures_restored(&prior, &current, caster).is_some()
+        };
+        assert!(departures(&[0], 1), "the card under the milled top");
+        assert!(departures(&[0, 1], 2), "the card under two milled cards");
+        assert!(!departures(&[0], 2), "below a card that stayed");
+        assert!(
+            !departures(&[0, 3], 2),
+            "below a card that stayed, with a card below the draw gone too"
+        );
     }
 
     /// Moraug, Fury of Akoum ("Each creature you control gets +1/+0 for each time it has attacked

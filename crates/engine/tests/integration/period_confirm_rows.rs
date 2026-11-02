@@ -355,6 +355,40 @@ fn an_altar_loop_growing_foods_and_drawing_passes_the_cover() {
     );
 }
 
+/// CR 121.1 + CR 701.17a: beside Liliana the Repentant ("Whenever another creature or
+/// planeswalker you control enters, mill two cards.") and Moldervine Reclamation ("Whenever a
+/// creature you control dies, you gain 1 life and draw a card."), each cycle mills P0 two cards
+/// and then draws the card under them, which the cover puts back as the top once they had left.
+#[test]
+fn a_draw_after_a_mill_passes_the_cover() {
+    let Some(db) = shared_card_db() else { return };
+    let (mut runner, altar, gravecrawler) = altar_board(Some("Liliana the Repentant"), db);
+    let state = runner.state_mut();
+    place(state, P0, "Moldervine Reclamation", db);
+    let swamp = db.get_face_by_name("Swamp").expect("card in fixture");
+    for _ in 0..30 {
+        engine::game::deck_loading::create_object_from_card_face(state, swamp, P0);
+    }
+    let counts = |state: &GameState| {
+        let p0 = &state.players[0];
+        (p0.library.len(), p0.graveyard.len(), p0.hand.len())
+    };
+    for cycle in 0..3 {
+        let (library, graveyard, hand) = counts(runner.state());
+        altar_cycle(&mut runner, altar, gravecrawler);
+        assert_eq!(
+            counts(runner.state()),
+            (library - 3, graveyard + 2, hand + 1),
+            "reach: cycle {cycle} mills two and draws one"
+        );
+    }
+    let verdict = latest_verdict(runner.state());
+    assert!(
+        !matches!(verdict, Err(OfferRefusal::Cover(_))),
+        "{verdict:?}"
+    );
+}
+
 /// Kiki-Jiki copying Deceiver Exarch, three cycles after the first: three priority frames.
 fn kiki_exarch_frames() -> Option<(ObjectId, [GameState; 3])> {
     let (mut runner, kiki, exarch) = kiki_copy_board("Deceiver Exarch")?;

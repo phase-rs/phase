@@ -1213,8 +1213,8 @@ fn play_trace_names_a_stored_accept_period_trigger_top_not_mandatory() {
     assert!(seen.remembered > 0, "reach: the stored accept answered");
 }
 
-/// CR 401.2: P0 can't look at its library, so a draw is put back by what the hidden view shows:
-/// the period confirms with an Island moved from the top of P0's library to its bottom.
+/// CR 121.1 + CR 401.2: P0 can't look at its library, so a draw is put back by where it lay, the
+/// top: the period confirms with an Island moved from the top of P0's library to its bottom.
 #[test]
 fn play_trace_confirms_a_draw_period_whatever_order_the_library_holds() {
     let Some(db) = shared_card_db() else { return };
