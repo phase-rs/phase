@@ -17260,6 +17260,7 @@ fn collect_wrapped_unit_library_moves<'a>(
                 matches!(
                     &*sub.effect,
                     Effect::ChangeZone {
+                        origin: Some(Zone::Graveyard),
                         destination: Zone::Library,
                         target: TargetFilter::Typed(_),
                         ..
@@ -17418,7 +17419,7 @@ fn real_targeted_up_to_graveyard_shuffle_cards_bind_terminal_shuffle_to_player_t
         assert_eq!(
             multi_target.min,
             QuantityExpr::Fixed { value: 0 },
-            "{card_name} allows zero cards (CR 701.24c)"
+            "{card_name} allows zero cards (CR 601.2c: a variable number of targets is announced)"
         );
         if card_name == "Loaming Shaman" {
             assert!(

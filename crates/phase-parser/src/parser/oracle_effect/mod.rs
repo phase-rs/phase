@@ -30865,9 +30865,16 @@ fn extract_player_anchor_in_chain(
                     target: TargetFilter::ParentTarget,
                     ..
                 } => return Some(TargetFilter::ParentTarget),
+                // The class's own shape: that player's GRAVEYARD card(s) into
+                // that player's library. `origin`/`owner_library` keep the arm
+                // off a hand→library move (Credit Voucher, See Beyond) and an
+                // owner-into-library move (Oblation, Chaos Warp), for which the
+                // wrapper's player is not the actor of the shuffle.
                 Effect::ChangeZone {
+                    origin: Some(Zone::Graveyard),
                     destination: Zone::Library,
                     target: TargetFilter::Typed(_),
+                    owner_library: false,
                     ..
                 } => return Some(TargetFilter::ParentTarget),
                 _ => {}
@@ -32302,9 +32309,10 @@ fn lower_subject_exile_objects(
 /// A singular/multi-target library move ("Target player shuffles up to N target
 /// cards from their graveyard into their library") is deliberately out of scope
 /// here: its terminal shuffle is bound by the chain anchor
-/// (`extract_player_anchor_in_chain` + `apply_anchor_subject`), which owns every
-/// `Shuffle { target: Controller }` rebind. Widening this helper would create a
-/// second authority for the same write.
+/// (`extract_player_anchor_in_chain` + `apply_anchor_subject`), which owns this
+/// class's `Shuffle { target: Controller }` rebind; other shuffle rebinds live at
+/// their own call sites. Widening this helper would create a second authority
+/// for the same write.
 fn sync_player_into_nested_shuffle_sub(
     clause: &mut ParsedEffectClause,
     subject_filter: &TargetFilter,
