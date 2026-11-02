@@ -5328,17 +5328,14 @@ impl ResolutionStateWire {
             // Only active resolution carriers are inspected: an idle card
             // definition containing a coin instruction is not a paused coin.
             // CR 608.2b: a post-coin continuation also needs absence provenance.
-            let active_carriers = [
-                "resolution_frames",
-                "resolving_stack_entry",
-                "pending_continuation",
-                "pending_spell_resolution",
-            ];
-            if active_carriers.iter().any(|key| {
-                value
-                    .get(*key)
-                    .is_some_and(carries_coin_announcement_binding)
-            }) {
+            if ["resolution_frames", "resolving_stack_entry"]
+                .into_iter()
+                .any(|key| {
+                    value
+                        .get(key)
+                        .is_some_and(carries_coin_announcement_binding)
+                })
+            {
                 return Err(LEGACY_COIN_BRANCH_BINDINGS_RESTORE_ERROR.to_string());
             }
         }
@@ -5366,6 +5363,18 @@ impl ResolutionStateWire {
                 if value
                     .get("pending_coin_flip")
                     .is_some_and(|frame| !frame.is_null())
+                {
+                    return Err(LEGACY_COIN_BRANCH_BINDINGS_RESTORE_ERROR.to_string());
+                }
+                // CR 608.2b: a post-coin continuation needs absence provenance;
+                // v1 is the only wire that carries these legacy keys.
+                if ["pending_continuation", "pending_spell_resolution"]
+                    .into_iter()
+                    .any(|key| {
+                        value
+                            .get(key)
+                            .is_some_and(carries_coin_announcement_binding)
+                    })
                 {
                     return Err(LEGACY_COIN_BRANCH_BINDINGS_RESTORE_ERROR.to_string());
                 }
@@ -7976,6 +7985,42 @@ mod tests {
             restored.into_game_state().active_coin_flip_frame(),
             Some(&pending)
         );
+    }
+
+    #[test]
+    fn resolution_state_wire_refuses_v1_coin_bound_legacy_carriers() {
+        let state = GameState::new_two_player(42);
+        let mut chain = resolved_draw(5);
+        chain.context.coin_branch_slot_base = Some(Vec::new());
+        let bound_carrier = serde_json::to_value(PendingContinuation::new(Box::new(chain), &state))
+            .expect("the bound continuation serializes");
+        let mut v1 = serde_json::to_value(&state).expect("legacy state serializes");
+        v1["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
+
+        for key in ["pending_continuation", "pending_spell_resolution"] {
+            // Inspect raw bindings before attempting either legacy carrier decode.
+            let mut bound = v1.clone();
+            bound[key] = bound_carrier.clone();
+            let error = serde_json::from_value::<ResolutionStateWire>(bound)
+                .expect_err("a legacy carrier cannot recover announcement provenance")
+                .to_string();
+            assert!(
+                error.contains(LEGACY_COIN_BRANCH_BINDINGS_RESTORE_ERROR),
+                "{key}: {error}"
+            );
+        }
+
+        for null_carriers in [false, true] {
+            let mut idle = v1.clone();
+            if null_carriers {
+                idle["pending_continuation"] = Value::Null;
+                idle["pending_spell_resolution"] = Value::Null;
+            }
+            let restored = serde_json::from_value::<ResolutionStateWire>(idle)
+                .expect("absent or null legacy carriers do not imply coin bindings")
+                .into_game_state();
+            assert_eq!(restored, state);
+        }
     }
 
     /// Legacy kind syntax is recognized independently of frame restorability.
