@@ -439,8 +439,21 @@ export interface FormatMetadata {
   group: FormatGroup;
   /** Engine-published key of this format's legality table; null when the card data records none. */
   legality_key: string | null;
+  /** Engine-derived: where this format keeps a designated companion (CR 702.139a). */
+  companion_slot: CompanionSlot;
   default_config: FormatConfig;
 }
+
+/**
+ * CR 702.139a: where a format keeps a companion designated before the game,
+ * mirroring the engine's `CompanionSlot`. `LimitedPool` designates one pool
+ * card that stays a sideboard card (CR 100.4b); `CommanderFamily` is a slot
+ * outside the deck; `SideboardOnly` has no slot.
+ */
+export type CompanionSlot =
+  | { type: "SideboardOnly" }
+  | { type: "CommanderFamily" }
+  | { type: "LimitedPool" };
 
 // ── Lobby ────────────────────────────────────────────────────────────────
 

@@ -916,8 +916,12 @@ function ControlledDeckBuilder({
     handleRemoveCompanion,
   } = useLimitedCompanion({
     pool,
+    // CR 100.4b: the designation is a pool card outside the main deck. Take a
+    // main-deck copy only when no copy is already outside it.
     onCompanionSelect: (cardName) => {
-      if (mainDeck.includes(cardName)) {
+      const poolCopies = pool.filter((card) => card.name === cardName).length;
+      const mainCopies = mainDeck.filter((name) => name === cardName).length;
+      if (mainCopies > 0 && poolCopies <= mainCopies) {
         removeFromDeck(cardName);
       }
     },
@@ -1346,6 +1350,12 @@ function WorkspaceDeckBuilder({
     draftSetCodes,
   });
   const handleCompanionSelectInWorkspace = useCallback((cardName: string) => {
+    // CR 100.4b: the designation is a pool card outside the main deck. Move a
+    // deck copy to the sideboard only when no copy is already outside the deck.
+    const copyOutsideDeck = pool.some(
+      (card) => card.name === cardName && workspace.placements[card.instance_id]?.zone !== "deck",
+    );
+    if (copyOutsideDeck) return;
     const deckInstance = pool.find(
       (card) => card.name === cardName && workspace.placements[card.instance_id]?.zone === "deck",
     );

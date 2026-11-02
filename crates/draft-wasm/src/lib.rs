@@ -1109,21 +1109,13 @@ pub fn pool_filter_options(pool_json: &str) -> Result<JsValue, JsValue> {
     Ok(to_js(&draft_core::view::pool_filter_options(&pool)))
 }
 
-fn parse_companion_param(companion_json: Option<&str>) -> Result<Option<String>, String> {
-    match companion_json {
-        None => Ok(None),
-        Some(s) => {
-            let trimmed = s.trim();
-            if trimmed.is_empty() || trimmed == "null" {
-                Ok(None)
-            } else if trimmed.starts_with('"') {
-                serde_json::from_str::<Option<String>>(trimmed)
-                    .map_err(|e| format!("Failed to parse companion: {e}"))
-            } else {
-                Ok(Some(trimmed.to_string()))
-            }
-        }
-    }
+/// CR 702.139a: the optional companion designation arrives as the bare card
+/// name (not JSON). An absent or blank value designates no companion.
+fn companion_designation(companion: Option<&str>) -> Option<String> {
+    companion
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
 }
 
 /// Submit the human player's deck for limited play.
@@ -1133,16 +1125,16 @@ fn parse_companion_param(companion_json: Option<&str>) -> Result<Option<String>,
 /// commander(s) (CR 903.3 / CR 702.124h). CR 903.1 puts the designation inside
 /// the Commander variant, so `[]` is the correct and meaningful value for every
 /// non-Commander kind.
-/// `companion_json`: Optional card name (or JSON string/null) this seat designates
-/// as its companion (CR 702.139a).
+/// `companion`: the optional bare card name (not JSON) this seat designates as
+/// its companion (CR 702.139a).
 /// The deck is validated against the pool via LimitedDeckValidator.
 #[wasm_bindgen]
 pub fn submit_deck(
     main_deck_json: &str,
     commanders_json: &str,
-    companion_json: Option<String>,
+    companion: Option<String>,
 ) -> Result<JsValue, JsValue> {
-    let view = submit_deck_inner(main_deck_json, commanders_json, companion_json.as_deref())
+    let view = submit_deck_inner(main_deck_json, commanders_json, companion.as_deref())
         .map_err(|e| JsValue::from_str(&e))?;
     Ok(to_js(&view))
 }
@@ -1157,13 +1149,13 @@ pub fn submit_deck(
 fn submit_deck_inner(
     main_deck_json: &str,
     commanders_json: &str,
-    companion_json: Option<&str>,
+    companion: Option<&str>,
 ) -> Result<draft_core::view::DraftPlayerView, String> {
     let main_deck: Vec<String> =
         serde_json::from_str(main_deck_json).map_err(|e| format!("Failed to parse deck: {e}"))?;
     let commanders: Vec<String> = serde_json::from_str(commanders_json)
         .map_err(|e| format!("Failed to parse commanders: {e}"))?;
-    let companion = parse_companion_param(companion_json)?;
+    let companion = companion_designation(companion);
 
     with_draft_mut_inner(|session| {
         session::apply(
@@ -1382,15 +1374,11 @@ pub fn submit_deck_for_seat(
     seat: u8,
     main_deck_json: &str,
     commanders_json: &str,
-    companion_json: Option<String>,
+    companion: Option<String>,
 ) -> Result<JsValue, JsValue> {
-    let view = submit_deck_for_seat_inner(
-        seat,
-        main_deck_json,
-        commanders_json,
-        companion_json.as_deref(),
-    )
-    .map_err(|e| JsValue::from_str(&e))?;
+    let view =
+        submit_deck_for_seat_inner(seat, main_deck_json, commanders_json, companion.as_deref())
+            .map_err(|e| JsValue::from_str(&e))?;
     Ok(to_js(&view))
 }
 
@@ -1401,13 +1389,13 @@ fn submit_deck_for_seat_inner(
     seat: u8,
     main_deck_json: &str,
     commanders_json: &str,
-    companion_json: Option<&str>,
+    companion: Option<&str>,
 ) -> Result<draft_core::view::DraftPlayerView, String> {
     let main_deck: Vec<String> =
         serde_json::from_str(main_deck_json).map_err(|e| format!("Failed to parse deck: {e}"))?;
     let commanders: Vec<String> = serde_json::from_str(commanders_json)
         .map_err(|e| format!("Failed to parse commanders: {e}"))?;
-    let companion = parse_companion_param(companion_json)?;
+    let companion = companion_designation(companion);
 
     with_draft_mut_inner(|session| {
         session::apply(

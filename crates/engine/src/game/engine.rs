@@ -20917,6 +20917,7 @@ pub fn start_game_with_starting_player(
         if let Some(companion_wf) = super::companion::check_all_companion_reveals(state) {
             companion_wf
         } else {
+            super::companion::close_companion_reveals(state);
             mulligan::start_mulligan(state, &mut events)
         }
     } else {

@@ -14,8 +14,8 @@ use crate::types::custom_format::{
     passes_legacy_axis_gate, AntePolicy, CommandZoneMode, LegalityRules, SetCode,
 };
 use crate::types::format::{
-    CardPool, DeckCopyLimit, DeckSizeSubject, DeckSupply, FormatConfig, GameFormat, SelectedFormat,
-    SideboardPolicy,
+    CardPool, CompanionSlot, DeckCopyLimit, DeckSizeSubject, DeckSupply, FormatConfig, GameFormat,
+    SelectedFormat, SideboardPolicy,
 };
 use crate::types::keywords::{Keyword, PartnerType};
 use crate::types::mana::{ManaColor, ManaCost};
@@ -131,20 +131,19 @@ pub fn companion_candidates(db: &CardDatabase, request: &DeckCompatibilityReques
         .selected_format
         .as_ref()
         .and_then(|selected| selected.rules().ok());
-    let uses_commander = format_rules
-        .as_ref()
-        .is_some_and(|rules| rules.uses_commander);
-    let is_limited =
-        request.selected_format.as_ref().map(SelectedFormat::tag) == Some(GameFormat::Limited);
-
-    if !uses_commander && !is_limited {
+    // An unresolvable (Custom) format has no candidate resolution: answering
+    // empty is the honest result.
+    let Some(format_rules) = format_rules else {
         return Vec::new();
+    };
+    // CR 702.139a: only a format with a designated companion slot offers
+    // candidates for it.
+    match format_rules.companion_slot() {
+        CompanionSlot::SideboardOnly => return Vec::new(),
+        CompanionSlot::CommanderFamily | CompanionSlot::LimitedPool => {}
     }
-
-    let min_deck_size = format_rules
-        .as_ref()
-        .map(|rules| rules.deck_size.min_cards())
-        .unwrap_or(if is_limited { 40 } else { 60 });
+    let uses_commander = format_rules.uses_commander;
+    let min_deck_size = format_rules.deck_size.min_cards();
 
     let mut candidate_names = BTreeSet::new();
     candidate_names.extend(request.main_deck.iter().cloned());
@@ -806,6 +805,7 @@ fn printed_in_any_set(db: &CardDatabase, name: &str, sets: &[SetCode]) -> bool {
 fn evaluate_limited(
     db: &CardDatabase,
     request: &DeckCompatibilityRequest,
+    format_rules: &FormatConfig,
     unknown_cards: &BTreeSet<String>,
 ) -> CompatibilityCheck {
     let mut reasons = Vec::new();
@@ -822,7 +822,16 @@ fn evaluate_limited(
             let companion = DeckEntry::from_resolved_face(db, face, 1);
             let main = deck_entries_for_names(db, &request.main_deck);
             let starting = companion_starting_deck(&main, &[], false);
-            if !is_eligible_companion_with_min_deck_size(&companion, &starting, &[], false, 40) {
+            // CR 702.139b: Yorion-class conditions measure the starting deck
+            // against this format's own minimum.
+            let min_deck_size = usize::from(format_rules.deck_size.min_cards());
+            if !is_eligible_companion_with_min_deck_size(
+                &companion,
+                &starting,
+                &[],
+                false,
+                min_deck_size,
+            ) {
                 reasons.push(format!(
                     "{companion_name}: not a legal companion for this starting deck"
                 ));
@@ -2872,7 +2881,9 @@ fn evaluate_selected_format_summary(
     };
     let uses_commander = format_rules.uses_commander;
 
-    if !uses_commander && format != GameFormat::Limited && !request.companion.is_empty() {
+    if format_rules.companion_slot() == CompanionSlot::SideboardOnly
+        && !request.companion.is_empty()
+    {
         return (
             Some(false),
             vec![format!(
@@ -2981,7 +2992,7 @@ fn evaluate_selected_format_summary(
         GameFormat::FreeForAll | GameFormat::TwoHeadedGiant => QuickCheckResult::compatible(),
         GameFormat::Limited => {
             let unknown_cards = collect_unknown_cards(db, request);
-            let check = evaluate_limited(db, request, &unknown_cards);
+            let check = evaluate_limited(db, request, &format_rules, &unknown_cards);
             QuickCheckResult {
                 reason: check.reasons.into_iter().next(),
                 unknown_cards,
@@ -3338,7 +3349,9 @@ fn evaluate_selected_format(
     };
     let uses_commander = format_rules.uses_commander;
 
-    if !uses_commander && format != GameFormat::Limited && !request.companion.is_empty() {
+    if format_rules.companion_slot() == CompanionSlot::SideboardOnly
+        && !request.companion.is_empty()
+    {
         return (
             Some(false),
             vec![format!(
@@ -3542,7 +3555,7 @@ fn evaluate_selected_format(
         }
         GameFormat::FreeForAll | GameFormat::TwoHeadedGiant => true,
         GameFormat::Limited => {
-            let check = evaluate_limited(db, request, unknown_cards);
+            let check = evaluate_limited(db, request, &format_rules, unknown_cards);
             if !check.compatible {
                 reasons.extend(check.reasons);
             }

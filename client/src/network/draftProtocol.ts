@@ -1011,16 +1011,16 @@ function validateSubmitDeck(raw: Record<string, unknown>): DraftP2PMessage {
   // raising a size refusal here would convert an engine-loud refusal (which
   // reaches the guest as `draft_error`) into a wire-silent one.
   //
-  // CR 702.139a: the optional companion designation is a bounded card name or
-  // null; its legality against the pool stays with the engine reducer.
-  let companion: string | null | undefined = undefined;
-  if (raw.companion !== undefined && raw.companion !== null) {
-    if (typeof raw.companion !== "string" || !raw.companion.trim()) {
-      throw new Error("Invalid draft deck submission: companion must be a non-empty string or null");
-    }
-    companion = requireDraftCardInstanceId(raw.companion, "companion", "deck submission");
-  } else if (raw.companion === null) {
-    companion = null;
+  // CR 702.139a: the optional companion designation is a card NAME (absent,
+  // null, or a non-empty string). Like `mainDeck`, this is a type guard only:
+  // whether the name is in the pool is the engine reducer's refusal to make.
+  const companion = raw.companion;
+  if (
+    companion !== undefined
+    && companion !== null
+    && (typeof companion !== "string" || companion.trim().length === 0)
+  ) {
+    throw new Error("Invalid draft deck submission: companion must be a non-empty string or null");
   }
 
   return { ...raw, type: "draft_submit_deck", commanders, ...(companion !== undefined ? { companion } : {}) } as DraftP2PMessage;

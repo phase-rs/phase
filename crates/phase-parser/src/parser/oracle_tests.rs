@@ -35184,8 +35184,9 @@ fn companion_deck_size_condition_parses_to_min_deck_size_over() {
         );
     }
 
-    // Paired control: another companion's condition still takes its own arm.
-    const GYRUDA_LINE: &str = "Companion — Each nonland card in your starting deck has an even mana value. (If this card is your chosen companion, you may put it into your hand from outside the game for {3} as a sorcery.)";
+    // Paired control: another companion's condition (Gyruda's printed Oracle
+    // text, verified against Scryfall) still takes its own arm.
+    const GYRUDA_LINE: &str = "Companion — Your starting deck contains only cards with even mana values. (If this card is your chosen companion, you may put it into your hand from outside the game for {3} as a sorcery.)";
     let gyruda = parse_oracle_text(
         GYRUDA_LINE,
         "Gyruda, Doom of Depths",

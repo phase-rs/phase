@@ -3531,6 +3531,11 @@ describe("Limited companion support", () => {
       />,
     );
 
+    // Reach guard: the engine lookup ran, so the absence below is its answer
+    // rather than a render before the candidates resolved.
+    await waitFor(() => {
+      expect(engineIsCardCompanion).toHaveBeenCalled();
+    });
     await waitFor(() => {
       expect(screen.queryByText(/companion/i)).not.toBeInTheDocument();
     });
@@ -3674,7 +3679,7 @@ describe("Limited companion support", () => {
     expect(onSubmitDeck).toHaveBeenCalledWith([]);
   });
 
-  it("workspace mode: designates companion, updates workspace placement from deck to sideboard, and submits with companion", async () => {
+  it("workspace mode: designating the only copy moves it from the deck to the sideboard", async () => {
     engineIsCardCompanion.mockImplementation(async (name) => name === "Lurrus of the Dream-Den");
     compatibilityHarness.evaluate.mockResolvedValue(compatibleResult());
     const onWorkspaceChange = vi.fn();
@@ -3727,5 +3732,68 @@ describe("Limited companion support", () => {
         }),
       }),
     );
+  });
+
+  it("workspace mode: a sideboard copy is designated without pulling the deck copy, and submit carries the companion", async () => {
+    engineIsCardCompanion.mockImplementation(async (name) => name === "Lurrus of the Dream-Den");
+    compatibilityHarness.evaluate.mockResolvedValue(compatibleResult());
+    const onWorkspaceChange = vi.fn();
+    const onSubmitDeck = vi.fn();
+    const secondLurrus = { ...lurrusPoolCard, instance_id: "lurrus-2" };
+
+    const workspace: DraftWorkspaceState = {
+      schemaVersion: 1,
+      placements: {
+        "lurrus-1": { zone: "sideboard", row: 0, column: 0, order: 0 },
+        "lurrus-2": { zone: "deck", row: 0, column: 0, order: 0 },
+      },
+      virtualBasics: Array.from({ length: 39 }, (_, i) => ({
+        instanceId: `plains-virtual-${i}`,
+        name: "Plains",
+      })),
+    };
+    for (let i = 0; i < 39; i++) {
+      workspace.placements[`plains-virtual-${i}`] = { zone: "deck", row: 0, column: 0, order: i + 1 };
+    }
+
+    render(
+      <LimitedDeckBuilder
+        local={{
+          view: { ...TEST_VIEW, pool: [...poolWithLurrus, secondLurrus] },
+          workspace,
+          preferences: createDefaultDraftWorkspacePreferences(),
+          interactionLocked: false,
+          capabilities: { kind: "editable-pool", suggestions: false },
+          onWorkspaceChange,
+          onPreferencesChange: () => {},
+          onSubmitDeck,
+          onAddBasicLand: () => {},
+          onRemoveBasicLand: () => {},
+        }}
+        responsiveLayout="desktop"
+        showSuggestions={false}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("Companion")).toBeInTheDocument();
+    });
+    const section = screen.getByText("Companion").closest("section")!;
+    fireEvent.click(within(section).getByRole("button", { name: "Lurrus of the Dream-Den" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Companion requirement met")).toBeInTheDocument();
+    });
+    // The deck copy stays in the deck: no workspace update moves it.
+    for (const [next] of onWorkspaceChange.mock.calls as [DraftWorkspaceState][]) {
+      expect(next.placements["lurrus-2"]?.zone).toBe("deck");
+    }
+
+    const submitBtn = screen.getByRole("button", { name: /submit deck/i });
+    expect(submitBtn).toBeEnabled();
+    fireEvent.click(submitBtn);
+    await waitFor(() => {
+      expect(onSubmitDeck).toHaveBeenCalledWith([], "Lurrus of the Dream-Den");
+    });
   });
 });

@@ -116,6 +116,56 @@ describe("autosaveDraftDeck", () => {
     expectSurvives();
   });
 
+  // The commander-family netting removes the stale double-listed copy once. A record the
+  // migration already netted must keep a second, legitimate copy across later boots.
+  it("nets a legacy Commander Draft companion copy once, idempotently across boots", () => {
+    localStorage.setItem(
+      STORAGE_KEY_PREFIX + "Legacy Commander Draft",
+      JSON.stringify({
+        main: [{ count: 1, name: "Bolt" }],
+        sideboard: [{ count: 2, name: "Lurrus of the Dream-Den" }],
+        commander: ["Kenrith, the Returned King"],
+        companion: "Lurrus of the Dream-Den",
+        format: "CommanderDraft",
+      }),
+    );
+    const lurrusCopies = () =>
+      loadSavedDeck("Legacy Commander Draft")?.sideboard
+        .filter((entry) => entry.name === "Lurrus of the Dream-Den")
+        .reduce((total, entry) => total + entry.count, 0);
+
+    expect(lurrusCopies()).toBe(1);
+    migrateSavedDecks();
+    expect(lurrusCopies()).toBe(1);
+    const afterFirstBoot = localStorage.getItem(STORAGE_KEY_PREFIX + "Legacy Commander Draft");
+    migrateSavedDecks();
+    migrateSavedDecks();
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + "Legacy Commander Draft")).toBe(afterFirstBoot);
+    expect(lurrusCopies()).toBe(1);
+    expect(loadSavedDeck("Legacy Commander Draft")?.companion).toBe("Lurrus of the Dream-Den");
+  });
+
+  it("autosaves a Commander Draft companion without double-listing it, so a reload keeps both pool copies", async () => {
+    installFifoWebLocks();
+    await resetSavedDeckLibraryForTests();
+    await autosaveDraftDeck({
+      view: { kind: "CommanderDraft" as const, commanders_required: 1 },
+      setCode: null,
+      partition: {
+        mainDeck: ["Kenrith, the Returned King", "Bolt"],
+        sideboard: ["Lurrus of the Dream-Den", "Lurrus of the Dream-Den"],
+      },
+      commanders: ["Kenrith, the Returned King"],
+      companion: "Lurrus of the Dream-Den",
+    });
+    const [name] = listSavedDeckNames();
+    migrateSavedDecks();
+    migrateSavedDecks();
+    const loaded = loadSavedDeck(name);
+    expect(loaded?.companion).toBe("Lurrus of the Dream-Den");
+    expect(loaded?.sideboard).toEqual([{ name: "Lurrus of the Dream-Den", count: 1 }]);
+  });
+
   it("paired control: a non-Limited traditional format still clears the dedicated slot", () => {
     localStorage.setItem(
       STORAGE_KEY_PREFIX + "Modern Companion",

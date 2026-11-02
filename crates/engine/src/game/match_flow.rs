@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 
 use crate::game::deck_loading::{
-    hydrate_loaded_game_from_card_db, load_next_game_decks, rebind_retained_printings, DeckEntry,
-    DeckPayload, PlayerDeckPayload,
+    add_deck_copies, hydrate_loaded_game_from_card_db, load_next_game_decks,
+    rebind_retained_printings, DeckEntry, DeckPayload, PlayerDeckPayload,
 };
 use crate::types::events::GameEvent;
-use crate::types::format::SideboardPolicy;
+use crate::types::format::{CompanionSlot, SideboardPolicy};
 use crate::types::game_state::{GameState, PlayerDeckPool, WaitingFor};
 use crate::types::match_config::{
     DeckCardCount, MatchForfeitCause, MatchForfeitResult, MatchPhase, MatchType,
@@ -58,55 +58,29 @@ fn entries_to_count_map(entries: &[DeckEntry]) -> HashMap<String, u32> {
     map
 }
 
-/// Adds `copies` of `card` to an editable partition, merging into an existing
-/// entry of the same name.
-fn add_partition_copies(partition: &mut Vec<DeckEntry>, card: &DeckEntry, copies: u32) {
-    if let Some(entry) = partition
-        .iter_mut()
-        .find(|entry| entry.card.name == card.card.name)
-    {
-        entry.count += copies;
-    } else {
-        partition.push(DeckEntry {
-            card: card.card.clone(),
-            count: copies,
-        });
-    }
-}
-
 /// Projects every companion copy held outside the editable partitions back into
 /// `current_sideboard` before a BetweenGames sideboard submission, so the
 /// published `current_main` + `current_sideboard` is exactly the registered pool
 /// that `handle_submit_sideboard` checks against. Registered sideboards remain
 /// immutable: legal post-board swaps are kept in `current_main`/`current_sideboard`.
 ///
-/// Two sources, both outside the commander family (whose dedicated companion is
-/// an external slot that never joins a sideboard):
-/// - a dedicated Limited companion (`registered_companion`), revealed or declined;
-/// - a companion revealed from a normal-format sideboard (CR 400.11a).
+/// The commander family is untouched: its dedicated companion is an external
+/// slot that never joins a sideboard (CR 903.5e).
 fn restore_revealed_sideboard_companions(state: &mut GameState) {
-    if state.format_config.uses_commander {
-        return;
+    match state.format_config.companion_slot() {
+        CompanionSlot::CommanderFamily => return,
+        CompanionSlot::SideboardOnly | CompanionSlot::LimitedPool => {}
     }
 
-    for pool in &mut state.deck_pools {
-        // CR 100.4b: "In limited play involving individual players, all cards in a
-        // player's card pool not included in their deck are in that player's
-        // sideboard." The dedicated Limited companion is one such pool card, held in
-        // its own slot only for the game it was set aside for (CR 702.139a). Between
-        // games it rejoins the sideboard whether it was revealed or declined; the next
-        // game's payload re-derives the designation from the copy left outside the
-        // main deck (`companion_for_rebuild`). Outside the commander family only the
-        // Limited loader fills this slot, so a non-empty slot is that case.
-        if !pool.registered_companion.is_empty() {
-            let sideboard = std::sync::Arc::make_mut(&mut pool.current_sideboard);
-            for entry in pool.registered_companion.iter() {
-                add_partition_copies(sideboard, entry, entry.count);
-            }
-            std::sync::Arc::make_mut(&mut pool.current_companion).clear();
-            continue;
-        }
+    // CR 100.4b: a Limited designation that was never revealed is a sideboard
+    // card. The reveal window normally released it already; a game conceded
+    // during the window did not get that far.
+    crate::game::companion::close_companion_reveals(state);
 
+    for pool in &mut state.deck_pools {
+        // CR 400.11a + CR 100.4b: the revealed companion was one card from
+        // outside the game, either a sideboard card or a Limited designation,
+        // and both are sideboard cards between games.
         let Some(companion) = state
             .players
             .iter()
@@ -115,15 +89,7 @@ fn restore_revealed_sideboard_companions(state: &mut GameState) {
         else {
             continue;
         };
-        let name = &companion.card.card.name;
-        if !pool
-            .registered_sideboard
-            .iter()
-            .any(|entry| entry.card.name == *name)
-        {
-            continue;
-        }
-        add_partition_copies(
+        add_deck_copies(
             std::sync::Arc::make_mut(&mut pool.current_sideboard),
             &companion.card,
             1,
@@ -167,11 +133,8 @@ fn build_card_face_map(pool: &PlayerDeckPool) -> HashMap<String, crate::types::c
     faces
 }
 
-fn companion_for_rebuild(
-    pool: &PlayerDeckPool,
-    format: crate::types::format::GameFormat,
-) -> Vec<DeckEntry> {
-    if format != crate::types::format::GameFormat::Limited {
+fn companion_for_rebuild(pool: &PlayerDeckPool, companion_slot: CompanionSlot) -> Vec<DeckEntry> {
+    if companion_slot != CompanionSlot::LimitedPool {
         return (*pool.registered_companion).clone();
     }
     // CR 100.4b + CR 702.139a/b: In Limited, the dedicated companion represents a physical
@@ -186,13 +149,13 @@ fn companion_for_rebuild(
             .iter()
             .chain(pool.registered_sideboard.iter())
             .chain(pool.registered_companion.iter())
-            .filter(|e| e.card.name.eq_ignore_ascii_case(&comp.card.name))
+            .filter(|e| e.card.name == comp.card.name)
             .map(|e| e.count)
             .sum();
         let in_current_main: u32 = pool
             .current_main
             .iter()
-            .filter(|e| e.card.name.eq_ignore_ascii_case(&comp.card.name))
+            .filter(|e| e.card.name == comp.card.name)
             .map(|e| e.count)
             .sum();
         if total_registered > in_current_main {
@@ -227,7 +190,7 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
     // CR 100.4 + CR 203.1 + CR 206.1: each seat's retained printing rows are rebound to
     // the lists it plays next (`rebind_retained_printings`); the record itself is carried
     // by `load_next_game_decks`.
-    let format = state.format_config.format;
+    let companion_slot = state.format_config.companion_slot();
     let ai_decks = state
         .deck_pools
         .iter()
@@ -239,7 +202,7 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
                     main_deck: (*p.current_main).clone(),
                     sideboard: (*p.current_sideboard).clone(),
                     commander: (*p.current_commander).clone(),
-                    companion: companion_for_rebuild(p, format),
+                    companion: companion_for_rebuild(p, companion_slot),
                     attraction_deck: Vec::new(),
                     planar_deck: Vec::new(),
                     scheme_deck: (*p.registered_scheme_deck).clone(),
@@ -266,7 +229,7 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
                 main_deck: (*p0.current_main).clone(),
                 sideboard: (*p0.current_sideboard).clone(),
                 commander: (*p0.current_commander).clone(),
-                companion: companion_for_rebuild(p0, format),
+                companion: companion_for_rebuild(p0, companion_slot),
                 attraction_deck: Vec::new(),
                 planar_deck: (*p0.registered_planar_deck).clone(),
                 scheme_deck: (*p0.registered_scheme_deck).clone(),
@@ -284,7 +247,7 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
                 main_deck: (*p1.current_main).clone(),
                 sideboard: (*p1.current_sideboard).clone(),
                 commander: (*p1.current_commander).clone(),
-                companion: companion_for_rebuild(p1, format),
+                companion: companion_for_rebuild(p1, companion_slot),
                 attraction_deck: Vec::new(),
                 planar_deck: Vec::new(),
                 scheme_deck: (*p1.registered_scheme_deck).clone(),

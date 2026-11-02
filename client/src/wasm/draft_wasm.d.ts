@@ -279,7 +279,7 @@ export function submitPickWithLlmBotPicks(card_instance_id: string, responses_js
  * non-Commander kind.
  * The deck is validated against the pool via LimitedDeckValidator.
  */
-export function submit_deck(main_deck_json: string, commanders_json: string, companion_json?: string | null): any;
+export function submit_deck(main_deck_json: string, commanders_json: string, companion?: string | null): any;
 
 /**
  * Submit a deck for any seat.
@@ -292,7 +292,7 @@ export function submit_deck(main_deck_json: string, commanders_json: string, com
  * `companion_json`: Optional card name or JSON string/null designated as companion.
  * Returns the DraftPlayerView for the specified seat.
  */
-export function submit_deck_for_seat(seat: number, main_deck_json: string, commanders_json: string, companion_json?: string | null): any;
+export function submit_deck_for_seat(seat: number, main_deck_json: string, commanders_json: string, companion?: string | null): any;
 
 /**
  * Submit the human player's pick and resolve all bot picks synchronously.

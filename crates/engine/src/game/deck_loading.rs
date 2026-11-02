@@ -16,6 +16,7 @@ use crate::types::card_printing::{
 };
 use crate::types::card_type::CoreType;
 use crate::types::display_only::DisplayOnly;
+use crate::types::format::CompanionSlot;
 use crate::types::game_state::{GameState, OutsideGameCardUse, PlayerDeckPool};
 use crate::types::identifiers::CardId;
 use crate::types::player::PlayerId;
@@ -83,8 +84,9 @@ pub struct PlayerDeckPayload {
     pub sideboard: Vec<DeckEntry>,
     #[serde(default)]
     pub commander: Vec<DeckEntry>,
-    /// Commander-family companion held outside the game's 100-card deck.
-    /// The loader accepts this slot only for `GameFormat::uses_commander()`;
+    /// CR 702.139a: a companion designated outside the deck. The loader keeps
+    /// it only where `FormatConfig::companion_slot` provides a slot (the
+    /// commander family, and Limited, where it is netted from the sideboard);
     /// Oathbreaker keeps its separate signature-spell slot.
     #[serde(default)]
     pub companion: Vec<DeckEntry>,
@@ -1176,6 +1178,22 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
 /// CR 100.4 + CR 203.1 + CR 206.1: load the next game of a match. Each seat's pool
 /// keeps the previous game's printing record (the same allocation), and the payload's
 /// rebound rows stamp the new objects.
+/// Adds `copies` of `card` to a deck partition, merging into an existing entry
+/// of the same name.
+pub(crate) fn add_deck_copies(partition: &mut Vec<DeckEntry>, card: &DeckEntry, copies: u32) {
+    if let Some(entry) = partition
+        .iter_mut()
+        .find(|entry| entry.card.name == card.card.name)
+    {
+        entry.count += copies;
+    } else {
+        partition.push(DeckEntry {
+            card: card.card.clone(),
+            count: copies,
+        });
+    }
+}
+
 pub(crate) fn load_next_game_decks(
     state: &mut GameState,
     payload: &DeckPayload,
@@ -1307,17 +1325,13 @@ fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRec
         entries.retain(|entry| entry.count > 0);
         entries
     };
-    // CR 702.139a: The Commander-family external companion slot represents one
-    // card, even when a transport bypasses name-list validation and supplies a
-    // resolved entry with an aggregated count. Keep one normalized copy in the
-    // game pool; construction validation remains responsible for rejecting an
-    // oversized submitted list.
-    let dedicated_companion_for = |submitted: &[DeckEntry]| -> Vec<DeckEntry> {
-        if !state.format_config.uses_commander
-            && state.format_config.format != crate::types::format::GameFormat::Limited
-        {
-            return Vec::new();
-        }
+    // CR 702.139a: a designated companion slot represents one card, even when a
+    // transport bypasses name-list validation and supplies a resolved entry with
+    // an aggregated count. Keep one normalized copy in the game pool;
+    // construction validation remains responsible for rejecting an oversized
+    // submitted list.
+    let companion_slot = state.format_config.companion_slot();
+    let designated_companion = |submitted: &[DeckEntry]| -> Vec<DeckEntry> {
         submitted
             .first()
             .cloned()
@@ -1330,36 +1344,39 @@ fn load_decks(state: &mut GameState, payload: &DeckPayload, records: PrintingRec
     let allocate_companion_and_sideboard = |submitted_side: &[DeckEntry],
                                             submitted_companion: &[DeckEntry]|
      -> (Vec<DeckEntry>, Vec<DeckEntry>) {
-        let companion = dedicated_companion_for(submitted_companion);
-        if drop_sideboard {
-            return (Vec::new(), companion);
-        }
-        let mut side = submitted_side.to_vec();
-        if state.format_config.format == crate::types::format::GameFormat::Limited {
-            // CR 100.4b + CR 702.139a/b: In Limited, all cards owned outside the main deck
-            // are in the sideboard. A dedicated companion must be allocated from an
-            // available physical copy in the sideboard pool. If a copy is available,
-            // net it from the sideboard; if no copy is available (e.g. all copies were
-            // submitted in the main deck), it cannot be designated outside the game.
-            if !submitted_side.is_empty() {
-                let mut allocated_companion = Vec::new();
-                for mut comp in companion {
-                    if let Some(target) = side
+        let side = if drop_sideboard {
+            Vec::new()
+        } else {
+            submitted_side.to_vec()
+        };
+        match companion_slot {
+            CompanionSlot::SideboardOnly => (side, Vec::new()),
+            CompanionSlot::CommanderFamily => (side, designated_companion(submitted_companion)),
+            // CR 100.4b + CR 702.139a: in Limited every pool card outside the main
+            // deck is a sideboard card, so the designation is one of them. A
+            // payload that lists the sideboard nets the designated copy out of it;
+            // if no copy is there (all of them were put in the main deck) nothing
+            // is designated. The server payload carries no sideboard at all and
+            // sends the designated card only in its own slot.
+            CompanionSlot::LimitedPool if side.is_empty() => {
+                (side, designated_companion(submitted_companion))
+            }
+            CompanionSlot::LimitedPool => {
+                let mut side = side;
+                let mut allocated = Vec::new();
+                for companion in designated_companion(submitted_companion) {
+                    if let Some(copy) = side
                         .iter_mut()
-                        .find(|s| s.card.name.eq_ignore_ascii_case(&comp.card.name) && s.count > 0)
+                        .find(|entry| entry.card.name == companion.card.name)
+                        .filter(|entry| entry.count > 0)
                     {
-                        target.count = target.count.saturating_sub(1);
-                        comp.count = 1;
-                        allocated_companion.push(comp);
+                        copy.count -= 1;
+                        allocated.push(companion);
                     }
                 }
                 side.retain(|entry| entry.count > 0);
-                (side, allocated_companion)
-            } else {
-                (side, companion)
+                (side, allocated)
             }
-        } else {
-            (side, companion)
         }
     };
     let signature_spell_for = |submitted: &[DeckEntry]| -> Vec<DeckEntry> {

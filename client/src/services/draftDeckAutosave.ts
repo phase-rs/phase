@@ -10,7 +10,7 @@ import { CUSTOM_CUBE_SET_CODE } from "../adapter/draftKinds";
 import { countProjectedNames, type DraftWorkspacePartition } from "../components/draft/workspace/workspaceProjection";
 import { writeDraftAutosaveDeck, type DraftAutosaveSlot } from "../constants/storage";
 import type { ParsedDeck } from "./deckParser";
-import { serializeSavedDeck } from "./savedDeckProjection";
+import { netCompanionFromPoolSideboard, serializeSavedDeck } from "./savedDeckProjection";
 import { notifyDraftAutosaveSkipped } from "./savedDeckWriteFailure";
 
 /** A solo cube draft runs as kind `Quick`; only its set code tells it apart. */
@@ -77,7 +77,10 @@ export async function autosaveDraftDeck(submission: DraftDeckAutosave): Promise<
     const slot = draftAutosaveSlot(submission.view.kind, submission.setCode);
     const label = i18n.t("draft:deckAutosave.deckName", { format: autosaveSlotLabels()[slot] });
     const format = submission.view.commanders_required > 0 ? "CommanderDraft" : "Limited";
-    const deck = draftSubmissionToParsedDeck(submission.partition, submission.commanders, submission.companion);
+    const deck = netCompanionFromPoolSideboard(
+      draftSubmissionToParsedDeck(submission.partition, submission.commanders, submission.companion),
+      format,
+    );
     const result = await writeDraftAutosaveDeck(slot, label, serializeSavedDeck(deck, format, null));
     if (result.status === "skipped") {
       console.warn("[draftDeckAutosave] autosave skipped:", result.reason);

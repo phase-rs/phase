@@ -4,7 +4,7 @@ use engine::ai_support::legal_actions;
 use engine::game::companion::can_activate_companion;
 use engine::game::deck_loading::{load_deck_into_state, DeckEntry, DeckPayload, PlayerDeckPayload};
 use engine::game::match_flow::{handle_choose_play_draw, handle_submit_sideboard};
-use engine::game::scenario::GameRunner;
+use engine::game::scenario::{GameRunner, GameScenario};
 use engine::game::{apply, start_game_with_starting_player};
 use engine::types::actions::GameAction;
 use engine::types::card::CardFace;
@@ -12,7 +12,8 @@ use engine::types::card_type::{CardType, CoreType};
 use engine::types::events::GameEvent;
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{
-    CompanionChoiceSource, CompanionDeclaration, CompanionRevealChoice, GameState, WaitingFor,
+    CastPaymentMode, CompanionChoiceSource, CompanionDeclaration, CompanionRevealChoice, GameState,
+    WaitingFor,
 };
 use engine::types::keywords::{CompanionCondition, Keyword};
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
@@ -1258,5 +1259,381 @@ fn limited_yorion_from_oracle_compatibility_requires_twenty_over_the_limited_min
             "{deck_size}-card deck: {:?}",
             result.selected_format_reasons
         );
+    }
+}
+
+fn move_one(from: &mut Vec<DeckCardCount>, to: &mut Vec<DeckCardCount>, name: &str) {
+    let source = from
+        .iter_mut()
+        .find(|entry| entry.name == name)
+        .unwrap_or_else(|| panic!("{name} is in the partition"));
+    source.count -= 1;
+    from.retain(|entry| entry.count > 0);
+    match to.iter_mut().find(|entry| entry.name == name) {
+        Some(entry) => entry.count += 1,
+        None => to.push(DeckCardCount {
+            name: name.to_string(),
+            count: 1,
+        }),
+    }
+}
+
+/// CR 702.139a + CR 100.4b: a Limited designation is one card from outside the game, not
+/// the only one. Game 1 reveals the designated Lurrus; between games P0 boards in a four-drop,
+/// so in game 2 Lurrus (still designated, since a copy stays outside the main deck) no longer
+/// qualifies, while the sideboard Gyruda does. Game 2 must offer Gyruda from the sideboard,
+/// and once the window closes the unrevealed Lurrus is a sideboard card again.
+#[test]
+fn limited_game_two_offers_an_eligible_sideboard_companion_when_the_designation_fails() {
+    let mut main_deck: Vec<DeckEntry> = (0..23)
+        .map(|i| creature(&format!("Small Creature {i}"), 2))
+        .collect();
+    main_deck.push(land("Plains", 17));
+    let payload = DeckPayload {
+        player: PlayerDeckPayload {
+            main_deck: main_deck.clone(),
+            sideboard: vec![
+                lurrus_companion(),
+                gyruda_companion(),
+                creature("Big Creature", 4),
+            ],
+            companion: vec![lurrus_companion()],
+            ..Default::default()
+        },
+        opponent: PlayerDeckPayload {
+            main_deck,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut state = GameState::new(FormatConfig::limited(), 2, 42);
+    load_deck_into_state(&mut state, &payload);
+    let registered_total = pool_total(&state, P0);
+
+    let start = start_game_with_starting_player(&mut state, P0);
+    state.waiting_for = start.waiting_for;
+    match &state.waiting_for {
+        WaitingFor::CompanionReveal {
+            player,
+            eligible_companions,
+        } => {
+            assert_eq!(*player, P0);
+            let offered: Vec<(&str, bool)> = eligible_companions
+                .iter()
+                .map(|c| {
+                    (
+                        c.name.as_str(),
+                        c.source == CompanionChoiceSource::Dedicated,
+                    )
+                })
+                .collect();
+            assert_eq!(
+                offered,
+                vec![
+                    ("Lurrus of the Dream-Den", true),
+                    ("Gyruda, Doom of Depths", false)
+                ],
+                "game 1 offers the designation and the eligible sideboard companion"
+            );
+        }
+        other => panic!("game 1 must offer companions, got {other:?}"),
+    }
+    apply(
+        &mut state,
+        P0,
+        GameAction::DeclareCompanion {
+            choice: reveal_lurrus(),
+        },
+    )
+    .expect("Lurrus reveal");
+
+    concede_game_one(&mut state);
+
+    let GameAction::SubmitSideboard {
+        mut main,
+        mut sideboard,
+    } = published_submission(&state, P0)
+    else {
+        unreachable!("published_submission builds a sideboard submission");
+    };
+    move_one(&mut sideboard, &mut main, "Big Creature");
+    move_one(&mut main, &mut sideboard, "Small Creature 0");
+    apply(
+        &mut state,
+        P0,
+        GameAction::SubmitSideboard { main, sideboard },
+    )
+    .expect("boarding in the four-drop keeps the pool");
+    let p1_submission = published_submission(&state, P1);
+    apply(&mut state, P1, p1_submission).expect("P1 keeps its deck");
+    apply(
+        &mut state,
+        P0,
+        GameAction::ChoosePlayDraw { play_first: true },
+    )
+    .expect("game 2 starts");
+
+    assert_eq!(state.game_number, 2);
+    let game2 = state.deck_pools.iter().find(|p| p.player == P0).unwrap();
+    assert_eq!(
+        game2
+            .current_companion
+            .iter()
+            .map(|e| e.card.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Lurrus of the Dream-Den"],
+        "reach guard: Lurrus is still the designation in game 2"
+    );
+    let gyruda_choice = match &state.waiting_for {
+        WaitingFor::CompanionReveal {
+            player,
+            eligible_companions,
+        } => {
+            assert_eq!(*player, P0);
+            assert_eq!(eligible_companions.len(), 1, "{eligible_companions:?}");
+            assert_eq!(eligible_companions[0].name, "Gyruda, Doom of Depths");
+            assert!(matches!(
+                eligible_companions[0].source,
+                CompanionChoiceSource::Sideboard { .. }
+            ));
+            eligible_companions[0].clone()
+        }
+        other => panic!("game 2 must offer the sideboard Gyruda, got {other:?}"),
+    };
+    apply(
+        &mut state,
+        P0,
+        GameAction::DeclareCompanion {
+            choice: CompanionDeclaration::Reveal(gyruda_choice),
+        },
+    )
+    .expect("sideboard Gyruda reveal");
+
+    assert!(state.players[0]
+        .companion
+        .as_ref()
+        .is_some_and(|c| c.card.card.name == "Gyruda, Doom of Depths"));
+    let after = state.deck_pools.iter().find(|p| p.player == P0).unwrap();
+    assert!(
+        after.current_companion.is_empty(),
+        "the window closed and released the unrevealed designation"
+    );
+    let sideboard_count = |name: &str| -> u32 {
+        after
+            .current_sideboard
+            .iter()
+            .filter(|e| e.card.name == name)
+            .map(|e| e.count)
+            .sum()
+    };
+    assert_eq!(sideboard_count("Lurrus of the Dream-Den"), 1);
+    assert_eq!(sideboard_count("Gyruda, Doom of Depths"), 0);
+    assert_eq!(pool_total(&state, P0), registered_total, "pool conserved");
+}
+
+/// Living Wish's printed Oracle text (verified against Scryfall).
+const LIVING_WISH: &str = "You may reveal a creature or land card you own from outside the game and put it into your hand. Exile Living Wish.";
+
+/// Casts Living Wish for P0 against `pools` and returns the names it offers from outside
+/// the game.
+fn living_wish_offers(pools: Vec<engine::types::game_state::PlayerDeckPool>) -> Vec<String> {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let wish = scenario
+        .add_spell_to_hand_from_oracle(P0, "Living Wish", false, LIVING_WISH)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    runner.state_mut().deck_pools = pools;
+    let card_id = runner.state().objects[&wish].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: wish,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Living Wish is castable");
+    for _ in 0..8 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass");
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("reveal from outside the game");
+            }
+            _ => break,
+        }
+    }
+    match &runner.state().waiting_for {
+        WaitingFor::OutsideGameChoice { choices, .. } => {
+            choices.iter().map(|choice| choice.name.clone()).collect()
+        }
+        other => panic!("Living Wish must reach its outside-the-game choice, got {other:?}"),
+    }
+}
+
+/// Plays a Limited game 1 to the end of the companion reveal window and returns the pools.
+fn limited_pools_after_reveal_window(
+    main_deck: Vec<DeckEntry>,
+    declaration: Option<CompanionDeclaration>,
+) -> Vec<engine::types::game_state::PlayerDeckPool> {
+    let payload = DeckPayload {
+        player: PlayerDeckPayload {
+            main_deck: main_deck.clone(),
+            sideboard: vec![land("Plains", 3)],
+            companion: vec![lurrus_companion()],
+            ..Default::default()
+        },
+        opponent: PlayerDeckPayload {
+            main_deck,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut state = GameState::new(FormatConfig::limited(), 2, 42);
+    load_deck_into_state(&mut state, &payload);
+    let start = start_game_with_starting_player(&mut state, P0);
+    state.waiting_for = start.waiting_for;
+    if let Some(choice) = declaration {
+        apply(&mut state, P0, GameAction::DeclareCompanion { choice })
+            .expect("companion declaration");
+    }
+    assert!(
+        matches!(state.waiting_for, WaitingFor::MulliganDecision { .. }),
+        "the reveal window is closed, got {:?}",
+        state.waiting_for
+    );
+    state.deck_pools.clone()
+}
+
+/// CR 100.4b + CR 400.11a: once the reveal window closes, a Limited designation that was
+/// not revealed is a sideboard card, so an outside-the-game effect can find it, whether the
+/// player declined it or it was never offered. A revealed one is the companion instead and
+/// is not in the sideboard.
+#[test]
+fn limited_unrevealed_designation_is_a_sideboard_card_for_outside_the_game_effects() {
+    let mut eligible: Vec<DeckEntry> = (0..23)
+        .map(|i| creature(&format!("Small Creature {i}"), 2))
+        .collect();
+    eligible.push(land("Plains", 17));
+    let mut ineligible: Vec<DeckEntry> = (0..22)
+        .map(|i| creature(&format!("Small Creature {i}"), 2))
+        .collect();
+    ineligible.push(creature("Expensive Creature", 3));
+    ineligible.push(land("Plains", 17));
+
+    let lurrus = "Lurrus of the Dream-Den".to_string();
+    let declined = living_wish_offers(limited_pools_after_reveal_window(
+        eligible.clone(),
+        Some(CompanionDeclaration::Decline),
+    ));
+    assert!(declined.contains(&lurrus), "declined: {declined:?}");
+
+    let never_offered = living_wish_offers(limited_pools_after_reveal_window(ineligible, None));
+    assert!(
+        never_offered.contains(&lurrus),
+        "never offered: {never_offered:?}"
+    );
+
+    let revealed = living_wish_offers(limited_pools_after_reveal_window(
+        eligible,
+        Some(reveal_lurrus()),
+    ));
+    assert!(
+        !revealed.contains(&lurrus),
+        "the revealed companion is not a sideboard card: {revealed:?}"
+    );
+    assert!(
+        revealed.contains(&"Plains".to_string()),
+        "reach guard: the wish saw the sideboard: {revealed:?}"
+    );
+}
+
+/// CR 702.139a + CR 702.139b: in 60-card Constructed, Yorion (parsed from its Oracle text)
+/// needs an 80-card starting deck. It is offered from the sideboard at 80 and not at 79.
+#[test]
+fn constructed_yorion_from_oracle_is_offered_only_at_eighty_cards() {
+    for (deck_size, offered) in [(80, true), (79, false)] {
+        let payload = DeckPayload {
+            player: PlayerDeckPayload {
+                main_deck: vec![land("Plains", deck_size)],
+                sideboard: vec![yorion_from_oracle()],
+                ..Default::default()
+            },
+            opponent: PlayerDeckPayload {
+                main_deck: vec![land("Plains", 60)],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        load_deck_into_state(&mut state, &payload);
+        let start = start_game_with_starting_player(&mut state, P0);
+        let yorion_offered = matches!(
+            &start.waiting_for,
+            WaitingFor::CompanionReveal { player, eligible_companions }
+                if *player == P0
+                    && eligible_companions.iter().any(|c| c.name == "Yorion, Sky Nomad"
+                        && matches!(c.source, CompanionChoiceSource::Sideboard { .. }))
+        );
+        assert_eq!(
+            yorion_offered, offered,
+            "{deck_size}-card deck: {:?}",
+            start.waiting_for
+        );
+    }
+}
+
+/// CR 702.139a + CR 702.139b + CR 903.5a: a Commander deck is exactly 100 cards, so Yorion's
+/// "twenty cards more than the minimum deck size" can never hold there. The same fixture
+/// with Gyruda in the slot is offered, so the slot itself was reached.
+#[test]
+fn commander_family_never_offers_yorion() {
+    let commander = DeckEntry {
+        card: CardFace {
+            name: "Plain Commander".to_string(),
+            mana_cost: ManaCost::Cost {
+                shards: vec![],
+                generic: 2,
+            },
+            card_type: CardType {
+                supertypes: vec![engine::types::card_type::Supertype::Legendary],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Human".to_string()],
+            },
+            ..Default::default()
+        },
+        count: 1,
+    };
+    for (companion, offered) in [(yorion_from_oracle(), false), (gyruda_companion(), true)] {
+        let name = companion.card.name.clone();
+        let payload = DeckPayload {
+            player: PlayerDeckPayload {
+                main_deck: vec![land("Plains", 99)],
+                commander: vec![commander.clone()],
+                companion: vec![companion],
+                ..Default::default()
+            },
+            opponent: PlayerDeckPayload {
+                main_deck: vec![land("Plains", 99)],
+                commander: vec![commander.clone()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut state = GameState::new(FormatConfig::commander(), 2, 42);
+        load_deck_into_state(&mut state, &payload);
+        let start = start_game_with_starting_player(&mut state, P0);
+        let was_offered = matches!(
+            &start.waiting_for,
+            WaitingFor::CompanionReveal { player, eligible_companions }
+                if *player == P0
+                    && eligible_companions.iter().any(|c| c.name == name
+                        && c.source == CompanionChoiceSource::Dedicated)
+        );
+        assert_eq!(was_offered, offered, "{name}: {:?}", start.waiting_for);
     }
 }
