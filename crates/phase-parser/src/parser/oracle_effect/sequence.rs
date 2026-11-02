@@ -585,9 +585,16 @@ fn parse_reveal_until_matched_set_to_zone<'a>(
 /// - "put all cards revealed this way into exile"
 /// - "put the revealed cards on the bottom of your library in any order"
 fn parse_reveal_until_all_to_zone_continuation(input: &str) -> OracleResult<'_, ContinuationAst> {
+    alt((
+        parse_reveal_until_all_to_zone_standard,
+        parse_reveal_until_all_to_zone_that_player,
+    ))
+    .parse(input)
+}
+
+fn parse_reveal_until_all_to_zone_standard(input: &str) -> OracleResult<'_, ContinuationAst> {
     type E<'a> = OracleError<'a>;
     let (input, _) = opt(alt((tag::<_, _, E>("then "), tag("and ")))).parse(input)?;
-    let (input, _) = opt(tag::<_, _, E>("that player ")).parse(input)?;
     let (input, _) = alt((tag::<_, _, E>("puts "), tag("put "))).parse(input)?;
     let (input, _) = alt((
         tag::<_, _, E>("those cards"),
@@ -653,6 +660,42 @@ fn parse_reveal_until_all_to_zone_continuation(input: &str) -> OracleResult<'_, 
         ContinuationAst::RevealUntilAllToZone {
             destination,
             rest_order,
+        },
+    ))
+}
+
+/// CR 701.20a: Parse third-person "that player puts [whole pile] into their graveyard"
+/// continuation (Mind Funeral). Scoped to graveyard destination and whole-pile cards,
+/// excluding cards with intervening instructions like Trepanation Blade ("that player
+/// puts the revealed cards...") and Nascent Metamorph ("...on the bottom of their library...")
+/// so their pile placement does not fold ahead of intervening instructions (CR 608.2c).
+fn parse_reveal_until_all_to_zone_that_player(input: &str) -> OracleResult<'_, ContinuationAst> {
+    type E<'a> = OracleError<'a>;
+    let (input, _) = tag::<_, _, E>("that player ").parse(input)?;
+    let (input, _) = alt((tag::<_, _, E>("puts "), tag("put "))).parse(input)?;
+    let (input, _) = alt((
+        tag::<_, _, E>("all cards revealed this way"),
+        tag("all cards revealed in this way"),
+        tag("those cards"),
+    ))
+    .parse(input)?;
+    let (input, destination) = value(
+        Zone::Graveyard,
+        alt((
+            tag::<_, _, E>(" into their graveyard"),
+            tag(" into their owners' graveyards"),
+            tag(" into its owner's graveyard"),
+            tag(" into your graveyard"),
+        )),
+    )
+    .parse(input)?;
+    let (input, _) = opt(tag(".")).parse(input)?;
+    let (input, _) = eof(input)?;
+    Ok((
+        input,
+        ContinuationAst::RevealUntilAllToZone {
+            destination,
+            rest_order: DigRestOrder::Preserve,
         },
     ))
 }

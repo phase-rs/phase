@@ -45414,6 +45414,68 @@ fn reveal_until_passive_count_mind_funeral() {
     assert_eq!(*rest_destination, Zone::Graveyard);
 }
 
+/// CR 608.2c / CR 701.20a: Trepanation Blade — "Whenever equipped creature attacks,
+/// defending player reveals cards from the top of their library until they reveal a
+/// land card. The creature gets +1/+0 until end of turn for each card revealed this way.
+/// That player puts the revealed cards into their graveyard.\nEquip {2}"
+///
+/// Because an intervening instruction ("The creature gets +1/+0...") sits between the
+/// reveal and the pile placement, "That player puts the revealed cards..." must NOT fold
+/// into RevealUntil's destination (which would move the cards before the intermediate
+/// instruction executes, violating CR 608.2c order of instructions).
+#[test]
+fn reveal_until_trepanation_blade_does_not_fold_across_intervening_instruction() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "Whenever equipped creature attacks, defending player reveals cards from the top of their library until they reveal a land card. The creature gets +1/+0 until end of turn for each card revealed this way. That player puts the revealed cards into their graveyard.\nEquip {2}",
+        "Trepanation Blade",
+        &[],
+        &["Artifact".to_string()],
+        &["Equipment".to_string()],
+    );
+    assert_eq!(parsed.triggers.len(), 1);
+    let trigger = &parsed.triggers[0];
+    let exec = trigger.execute.as_ref().expect("trigger execute");
+    let Effect::RevealUntil {
+        kept_destination,
+        rest_destination,
+        ..
+    } = &*exec.effect
+    else {
+        panic!("expected RevealUntil, got {:?}", exec.effect);
+    };
+    assert_eq!(*kept_destination, Zone::Hand);
+    assert_eq!(*rest_destination, Zone::Library);
+}
+
+/// CR 608.2c / CR 701.20a: Nascent Metamorph — "Whenever this creature attacks or
+/// blocks, target opponent reveals cards from the top of their library until they
+/// reveal a creature card. This creature becomes a copy of that card until end of turn.
+/// Then that player puts all cards revealed this way on the bottom of their library in a random order."
+///
+/// Because an intervening instruction ("This creature becomes a copy...") sits between
+/// the reveal and the pile placement, "Then that player puts..." must NOT fold into
+/// RevealUntil's destination (CR 608.2c).
+#[test]
+fn reveal_until_nascent_metamorph_does_not_fold_across_intervening_instruction() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "Whenever this creature attacks or blocks, target opponent reveals cards from the top of their library until they reveal a creature card. This creature becomes a copy of that card until end of turn. Then that player puts all cards revealed this way on the bottom of their library in a random order.",
+        "Nascent Metamorph",
+        &[],
+        &["Creature".to_string()],
+        &["Shapeshifter".to_string()],
+    );
+    assert_eq!(parsed.triggers.len(), 1);
+    let trigger = &parsed.triggers[0];
+    let exec = trigger.execute.as_ref().expect("trigger execute");
+    let Effect::RevealUntil {
+        kept_destination, ..
+    } = &*exec.effect
+    else {
+        panic!("expected RevealUntil, got {:?}", exec.effect);
+    };
+    assert_eq!(*kept_destination, Zone::Hand);
+}
+
 /// CR 608.2c / CR 701.20a: Thought Dissector — "{X}, {T}: Target opponent reveals
 /// cards from the top of their library until an artifact card or X cards are revealed,
 /// whichever comes first. If an artifact card is revealed this way, put it onto the
