@@ -284,6 +284,7 @@ mod zenos_yae_galvus_chosen_object;
 
 mod base_pt_designation_filter;
 mod controller_anaphor_binds_through_context;
+mod through_the_forest_gate;
 
 mod resolution_progress_contract;
 

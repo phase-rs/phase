@@ -95757,3 +95757,141 @@ fn return_arm_routes_through_the_shared_this_way_policy() {
         );
     }
 }
+
+/// CR 701.20e + CR 608.2c — issue #7754 (Through the Forest Gate):
+/// "Look at the top twenty cards of your library, put any number of land cards
+/// from among them onto the battlefield tapped, then shuffle. You gain 8 life."
+///
+/// Looking at cards never moves them, and the instruction names a destination
+/// only for the chosen cards, so the rest of the looked-at pile REMAINS IN THE
+/// LIBRARY. A silent remainder used to stay `rest_destination: None`, which the
+/// `DigChoice` handler's graveyard default read as "mill them".
+#[test]
+fn dig_from_among_without_a_rest_clause_keeps_the_remainder_in_the_library() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "Look at the top twenty cards of your library, put any number of land cards from \
+         among them onto the battlefield tapped, then shuffle. You gain 8 life.",
+        "Through the Forest Gate",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let ability = parsed
+        .abilities
+        .first()
+        .expect("Through the Forest Gate must parse to one spell ability");
+
+    match &*ability.effect {
+        Effect::Dig {
+            count,
+            destination,
+            keep_count,
+            up_to,
+            filter,
+            rest_destination,
+            enter_tapped,
+            ..
+        } => {
+            assert_eq!(*count, QuantityExpr::Fixed { value: 20 }, "look at twenty");
+            assert_eq!(
+                *destination,
+                Some(Zone::Battlefield),
+                "\"put any number of land cards from among them onto the battlefield\""
+            );
+            assert_eq!(
+                *keep_count,
+                Some(u32::MAX),
+                "\"any number\" lowers to the unbounded keep sentinel"
+            );
+            assert!(*up_to, "\"any number\" is an up-to choice");
+            assert!(
+                matches!(filter, TargetFilter::Typed(_)),
+                "the puttable cards are filtered to land cards"
+            );
+            assert!(*enter_tapped, "they enter the battlefield tapped");
+            // THE REGRESSION ASSERTION.
+            assert_eq!(
+                *rest_destination,
+                Some(Zone::Library),
+                "CR 701.20e: cards that were only looked at stay in the library — \
+                 `None` would mill them into the graveyard"
+            );
+        }
+        other => panic!("expected Effect::Dig, got {other:?}"),
+    }
+
+    let shuffle = ability
+        .sub_ability
+        .as_ref()
+        .expect("the printed \"then shuffle\" chains behind the Dig");
+    assert!(matches!(*shuffle.effect, Effect::Shuffle { .. }));
+    let gain = shuffle
+        .sub_ability
+        .as_ref()
+        .expect("\"You gain 8 life\" chains behind the shuffle");
+    assert!(matches!(*gain.effect, Effect::GainLife { .. }));
+}
+
+/// PAIRED NEGATIVES: the library default only fills a SILENT remainder. Both
+/// printed remainder instructions still own the rest pile — an explicit
+/// bottom-of-library rider keeps its zone and its random order, and an explicit
+/// graveyard rider keeps the graveyard.
+#[test]
+fn dig_from_among_explicit_rest_clauses_still_override_the_library_default() {
+    fn first_dig(oracle: &str, name: &str) -> Effect {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            oracle,
+            name,
+            &[],
+            &["Sorcery".to_string()],
+            &[],
+        );
+        parsed
+            .abilities
+            .first()
+            .map(|ability| (*ability.effect).clone())
+            .unwrap_or_else(|| panic!("{name} must parse to one spell ability"))
+    }
+
+    // Expand the Sphere (verbatim Scryfall text): "… and the rest on the bottom
+    // of your library in a random order."
+    let expand = first_dig(
+        "Look at the top six cards of your library. Put up to two land cards from among them \
+         onto the battlefield tapped and the rest on the bottom of your library in a random \
+         order.",
+        "Expand the Sphere",
+    );
+    match &expand {
+        Effect::Dig {
+            rest_destination,
+            rest_order,
+            ..
+        } => {
+            assert_eq!(*rest_destination, Some(Zone::Library));
+            assert_eq!(
+                *rest_order,
+                DigRestOrder::Random,
+                "the printed \"in a random order\" must survive the silent-remainder default"
+            );
+        }
+        other => panic!("expected Effect::Dig, got {other:?}"),
+    }
+
+    // Forbidden Alchemy (verbatim Scryfall text): "… and the rest into your
+    // graveyard."
+    let alchemy = first_dig(
+        "Look at the top four cards of your library. Put one of them into your hand and the rest \
+         into your graveyard.",
+        "Forbidden Alchemy",
+    );
+    match &alchemy {
+        Effect::Dig {
+            rest_destination, ..
+        } => assert_eq!(
+            *rest_destination,
+            Some(Zone::Graveyard),
+            "an explicit \"into your graveyard\" rider must not be replaced by the library default"
+        ),
+        other => panic!("expected Effect::Dig, got {other:?}"),
+    }
+}

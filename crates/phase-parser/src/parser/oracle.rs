@@ -9098,6 +9098,49 @@ pub fn parse_oracle_text(
     .0
 }
 
+/// CR 701.20e + CR 608.2c — issue #7754 (Through the Forest Gate):
+/// "Look at the top twenty cards of your library, put any number of land cards
+/// from among them onto the battlefield tapped, then shuffle. You gain 8 life."
+///
+/// Looking at cards does not move them (CR 701.20e), so a "from among them"
+/// instruction that moves its chosen cards OUT of the library and never says
+/// where the rest goes leaves those other looked-at cards IN THE LIBRARY. The
+/// `Effect::Dig` AST records a remainder destination only when the text names
+/// one (`rest_destination: Some(..)`); a silent remainder stays `None`, which the
+/// `DigChoice` handler's graveyard default would otherwise read as "mill them" —
+/// the reported bug, where seventeen looked-at cards went to the graveyard and
+/// never came back to the shuffled library.
+///
+/// The same shape prints on Through the Forest Gate, Famished Worldsire and
+/// Ajani, Outland Chaperone's −8, so this is a class rule, not a card special
+/// case.
+fn default_silent_dig_rest_to_library(def: &mut AbilityDefinition) {
+    if let Effect::Dig {
+        destination: Some(kept_destination),
+        rest_destination,
+        keep_count,
+        ..
+    } = &mut *def.effect
+    {
+        // `Some(0)` is a pure peek: nothing is ever moved, so the remainder
+        // routing is never reached. A kept destination of `Library` is the
+        // reorder form, which owns both piles through `rest_split_top_count` and
+        // `rest_order` instead.
+        if *kept_destination != Zone::Library
+            && !matches!(*keep_count, Some(0))
+            && rest_destination.is_none()
+        {
+            *rest_destination = Some(Zone::Library);
+        }
+    }
+    if let Some(sub) = def.sub_ability.as_deref_mut() {
+        default_silent_dig_rest_to_library(sub);
+    }
+    if let Some(else_def) = def.else_ability.as_deref_mut() {
+        default_silent_dig_rest_to_library(else_def);
+    }
+}
+
 /// CR-neutral hygiene: `unlowered_guard` is parser scratch, so a finished parse must hold
 /// none. Asked of the SERIALIZED tree rather than by re-walking it, because a re-walk would
 /// use the same recursion set it is meant to police: a mark left under an unrecursed key is
@@ -9944,6 +9987,27 @@ fn parse_oracle_pipeline(
     // hands out carries a live mark.
     if let Some(raw) = raw_lowered.as_mut() {
         resolve_unlowered_guards(raw);
+    }
+    // CR 701.20e + CR 608.2c — issue #7754 (Through the Forest Gate): a Dig that
+    // moves its chosen cards OUT of the library and was never told where the
+    // rest goes leaves the unchosen looked-at cards IN THE LIBRARY, because
+    // looking at cards never moves them. Runs on the FINISHED card, after every
+    // unit is lowered, so a remainder instruction printed anywhere on it owns
+    // the rest pile (Follow the Lumarets' "Put the rest on the bottom of your
+    // library in a random order" patches both of its Dig branches from a later
+    // unit than the one that built them).
+    for ability in parsed.abilities.iter_mut() {
+        default_silent_dig_rest_to_library(ability);
+    }
+    for trigger in parsed.triggers.iter_mut() {
+        if let Some(execute) = trigger.execute.as_deref_mut() {
+            default_silent_dig_rest_to_library(execute);
+        }
+    }
+    for replacement in parsed.replacements.iter_mut() {
+        if let Some(execute) = replacement.execute.as_deref_mut() {
+            default_silent_dig_rest_to_library(execute);
+        }
     }
     let stages = document_ir
         .zip(raw_lowered)
