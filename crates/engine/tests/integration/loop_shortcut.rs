@@ -1443,9 +1443,9 @@ const PRIMED_LOOP_BEATS: usize = 24;
 /// `live_mandatory_loop_winner` (loop_check.rs) partitions living into fallers/non-fallers and
 /// requires `nonfallers.len() == 1` (CR 104.2a — determinate only when EVERY other living
 /// player falls); here nonfallers = {P0, P2} (len 2) ⇒ `find_live_loop_winner` returns None,
-/// so `interactive_loop_bridge` takes neither Path A (no determinate winner) nor Path B (a
-/// life-loss axis is present, so not a CR 732.4 no-loss draw) and falls through to the
-/// pre-feature grind.
+/// so neither the recorded road's mandatory consumer (a life-loss axis with no single winner)
+/// nor `interactive_loop_bridge`'s Path A (no determinate winner) decides it, and it falls
+/// through to the pre-feature grind.
 ///
 /// REVERT-FAIL: weaken the `nonfallers.len() != 1` gate to an "any-faller wins" rewrite and
 /// this MANDATORY loop is wrongly crowned `GameOver{winner: Some(P0)}` — flipping the `wf`
@@ -9417,8 +9417,9 @@ fn the_collapse_candidate_is_clamped_to_a_bound_restored_from_an_older_save() {
 // ===========================================================================
 // PR-7 Phase 5b — CR 732.2a BOUNDED cycle fast-forward, on a REAL 4p dump.
 //
-// The class Path A and Path B both refuse: a drain lethal to SOME opponents leaves a
-// second non-faller, so CR 104.2a determinacy (`loop_check`'s crown gate) will not crown,
+// The class Path A and the recorded road's mandatory consumer both refuse: a drain lethal
+// to SOME opponents leaves a second non-faller, so CR 104.2a determinacy (`loop_check`'s
+// crown gate) will not crown,
 // and a life-loss axis is not a CR 732.4 no-loss draw. Every row below LOADS
 // `dina_conqueror_4p.json.gz` through the production restore chokepoint and DRIVES real
 // beats through `apply()` — the offer is an accumulation across dozens of them, which no
@@ -17282,11 +17283,8 @@ fn the_detector_separates_into_sized_parts_against_a_detector_off_leg() {
         "projected_clones",
         "compares_equal_modulo_resources",
     ];
-    // Which ring-walk arm the `mandatory` verdict makes live on this drive, as a literal
-    // rather than as a value read back out of the meter. No remedy may move it: which arm is
-    // live is the `mandatory` verdict, and a remedy that moved a verdict has already failed.
+    // The ring walk's meter row, named as a literal rather than read back out of the meter.
     const LIVE_RECURRENCE_ARM: &str = "recurrence_scan_optional";
-    const DEAD_RECURRENCE_ARM: &str = "recurrence_scan_mandatory";
 
     let (interactive, off) = detector_cost_legs(BEATS);
 
@@ -17318,10 +17316,7 @@ fn the_detector_separates_into_sized_parts_against_a_detector_off_leg() {
         .iter()
         .map(|(name, _, _)| *name)
         .collect();
-    for want in ASSERTED_PARTS
-        .iter()
-        .chain([&LIVE_RECURRENCE_ARM, &DEAD_RECURRENCE_ARM])
-    {
+    for want in ASSERTED_PARTS.iter().chain([&LIVE_RECURRENCE_ARM]) {
         assert!(
             part_names.contains(want),
             "reach-guard: `{want}` is not a tick site in `parts()` — a renamed or deleted \
@@ -17340,40 +17335,6 @@ fn the_detector_separates_into_sized_parts_against_a_detector_off_leg() {
              tick that is not installed, not reached, or not recording"
         );
     }
-
-    let arm_calls = |want: &str| -> u32 {
-        interactive
-            .cost
-            .parts()
-            .into_iter()
-            .find(|(name, _, _)| *name == want)
-            .map(|(_, _, calls)| calls)
-            .expect("the arm names above are reach-guarded")
-    };
-    let mandatory_arm = arm_calls(DEAD_RECURRENCE_ARM);
-    let optional_arm = arm_calls(LIVE_RECURRENCE_ARM);
-    assert!(
-        mandatory_arm == 0 || optional_arm == 0,
-        "one `mandatory` value computed at the bridge's head gates both ring walks, \
-         so exactly one arm is reachable per ENTRY — but that alone does not stop both \
-         accumulating ACROSS entries. This assertion is what buys \"one arm is dead over the \
-         whole drive\", and so is the licence for PRINTING that arm instead of asserting it. \
-         Both live here ({mandatory_arm} mandatory, {optional_arm} optional) means the licence \
-         is gone: assert each arm individually and drop the printed-arm licence rather than \
-         weakening this to a sum"
-    );
-    let live_arm = if mandatory_arm > 0 {
-        DEAD_RECURRENCE_ARM
-    } else {
-        LIVE_RECURRENCE_ARM
-    };
-    assert_eq!(
-        live_arm, LIVE_RECURRENCE_ARM,
-        "the live ring-walk arm on this drive is fixed as a literal in this row: \
-         `{LIVE_RECURRENCE_ARM}`. It reads `{live_arm}` instead ({mandatory_arm} mandatory \
-         calls, {optional_arm} optional), which is the `mandatory` verdict having moved — a \
-         verdict move is this instrument's failure, not its measurement"
-    );
 
     let clone_names: Vec<&str> = interactive
         .cost
@@ -17436,11 +17397,6 @@ fn the_detector_separates_into_sized_parts_against_a_detector_off_leg() {
         interactive.cost.object_growth_ns, interactive.cost.object_growth_calls
     );
     println!(
-        "    {DEAD_RECURRENCE_ARM}  calls={mandatory_arm}  — GROUND (asserted): the \
-         exclusivity above, which is what makes this arm dead across the whole drive rather \
-         than merely one-per-entry"
-    );
-    println!(
         "    compares_cover_modulo_fodder_growth  count={}  — GROUND (asserted per beat; \
          discriminating on the Interactive leg, same as `object_growth` above): the drive \
          helper reads this counter itself after every beat too",
@@ -17473,17 +17429,15 @@ fn the_detector_separates_into_sized_parts_against_a_detector_off_leg() {
 /// is compiler-closed, and each of those callers projects both sides between its own entry
 /// tick and its second projection — the two read EQUAL at base.
 ///
-/// REVERT-FAILING over the one walk this drive runs. `SharedCurrentFrames::new` has exactly two
-/// call sites — the `mandatory` and `!mandatory` ring walks of `interactive_loop_bridge` — and
-/// every other production call of the four compare entries derives both sides, so a second hoist
-/// anywhere would hold this whole-detector inequality up on its own. This fixture takes the
+/// REVERT-FAILING over the one walk this drive runs. `SharedCurrentFrames::new` has one call
+/// site — the `!mandatory` ring walk of `interactive_loop_bridge` — and every other production
+/// call of the four compare entries derives both sides, so a second hoist anywhere would hold
+/// this whole-detector inequality up on its own. This fixture takes the
 /// `!mandatory` walk alone, the live arm
 /// `the_detector_separates_into_sized_parts_against_a_detector_off_leg` pins on the same drive:
 /// hand THAT walk `state` again instead of the shared frames and the current side is re-derived
 /// per prior, returning `projected_clones` to `2 x resource_compares` and failing the strict
-/// inequality — while every verdict row stays green. The `mandatory` walk's hoist never runs
-/// here, so reverting it alone leaves this row green; the sibling row on the mandatory drain
-/// board is where that hoist is guarded.
+/// inequality — while every verdict row stays green.
 #[test]
 fn the_bridge_shares_one_current_side_projection_across_its_ring_walk() {
     const BEATS: usize = 12;
@@ -17497,7 +17451,7 @@ fn the_bridge_shares_one_current_side_projection_across_its_ring_walk() {
         compares > 0,
         "reach-guard: no comparison ran, so there is nothing for the clone count to be below"
     );
-    let (_, walk_calls) = interactive.cost.recurrence_scan();
+    let walk_calls = interactive.cost.recurrence_scan_optional_calls;
     assert!(
         walk_calls > 0,
         "reach-guard: neither ring walk ran, so no comparison took the shared path"
@@ -17582,13 +17536,6 @@ fn the_detector_cost_attributes_to_its_named_parts() {
             share(*nanos)
         );
     }
-    let (recurrence_ns, recurrence_calls) = interactive.cost.recurrence_scan();
-    println!(
-        "  DERIVED recurrence_scan {:.2} ms  calls={recurrence_calls}  share={:.2}%  (both \
-         arms summed; a derived accessor, never a field)",
-        ms(u128::from(recurrence_ns)),
-        share(recurrence_ns)
-    );
     println!(
         "  DERIVED resource_compares {}  vs projected_clones {}",
         interactive.cost.resource_compares(),

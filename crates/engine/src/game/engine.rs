@@ -2915,8 +2915,7 @@ fn interactive_loop_bridge(state: &mut GameState, result: &mut ActionResult) {
                     &cur,
                 );
                 // `has_no_loss_axis` rejects nothing here that recurrence, `is_net_progress`
-                // or the `Advantage` conjunct has not already rejected; Path B's ring scan has
-                // no `Advantage` conjunct, so there it is the only veto on a rising poison axis.
+                // or the `Advantage` conjunct has not already rejected.
                 // CR 122.1 + CR 104.4b: the third disjunct is a pure preserved-`Generic`
                 // counter-growth cover (proliferate/charge Pentad Prism, burden The One
                 // Ring). It reaches only an offer, which ends the game only when every player
@@ -3265,7 +3264,8 @@ pub enum BoundedOfferRefusal {
 /// fast-forward for a loop that is lethal to SOME opponents but crowns nobody.
 ///
 /// Path A ([`find_live_loop_winner`]) needs a determinate single winner, which CR 104.2a
-/// makes impossible while two non-fallers live; Path B needs an all-mandatory no-loss draw.
+/// makes impossible while two non-fallers live; the recorded road draws only a no-loss
+/// mandatory period.
 /// A 4-player drain that kills two seats and leaves two is neither, so both fall through
 /// and the loop grinds by hand. CR 732.2a still licenses a shortcut for it, PROVIDED the
 /// proposal names a repetition count whose results are *predictable*, and this predicate
@@ -3415,8 +3415,8 @@ fn bounded_cycle_offer(
 
     // (4) CERTIFICATION — two bases, first match wins, NEVER combined.
     //
-    // Basis A is a fifth copy of the ring `find_map` scan. The other four are NAMED, not
-    // numbered — the `On` reconcile, Path B, Path C, `find_live_loop_winner` — because the
+    // Basis A is a fourth copy of the ring `find_map` scan. The other three are NAMED, not
+    // numbered — the `On` reconcile, Path C, `find_live_loop_winner` — because the
     // coordinates that stood here had ROTTED onto unrelated code. Grep the symbols. Newest
     // prior first: the most recent recurrence is the least extrapolation.
     //

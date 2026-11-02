@@ -391,10 +391,7 @@ pub struct LoopDetectCost {
     /// Path D — the bounded-cycle offer mint.
     pub bounded_offer_ns: u64,
     pub bounded_offer_calls: u32,
-    /// Path B's ring walk under a mandatory verdict.
-    pub recurrence_scan_mandatory_ns: u64,
-    pub recurrence_scan_mandatory_calls: u32,
-    /// Path B and Path C's ring walks under an out verdict.
+    /// Path C's ring walk under an out verdict.
     pub recurrence_scan_optional_ns: u64,
     pub recurrence_scan_optional_calls: u32,
     /// The recorded road, below the reconcile block.
@@ -415,7 +412,7 @@ pub struct LoopDetectCost {
 }
 
 /// [`LoopDetectCost::parts`]' rows: site name, nanoseconds, calls.
-type TimedSites = [(&'static str, u64, u32); 9];
+type TimedSites = [(&'static str, u64, u32); 8];
 /// [`LoopDetectCost::clones`]' rows: site name, count.
 type CloneSites = [(&'static str, u32); 7];
 
@@ -444,8 +441,6 @@ impl LoopDetectCost {
             winner_scan_calls,
             bounded_offer_ns,
             bounded_offer_calls,
-            recurrence_scan_mandatory_ns,
-            recurrence_scan_mandatory_calls,
             recurrence_scan_optional_ns,
             recurrence_scan_optional_calls,
             object_growth_ns,
@@ -470,11 +465,6 @@ impl LoopDetectCost {
                 ("mandatory", mandatory_ns, mandatory_calls),
                 ("winner_scan", winner_scan_ns, winner_scan_calls),
                 ("bounded_offer", bounded_offer_ns, bounded_offer_calls),
-                (
-                    "recurrence_scan_mandatory",
-                    recurrence_scan_mandatory_ns,
-                    recurrence_scan_mandatory_calls,
-                ),
                 (
                     "recurrence_scan_optional",
                     recurrence_scan_optional_ns,
@@ -507,7 +497,7 @@ impl LoopDetectCost {
     }
 
     /// The timed sites, one entry per site: name, nanoseconds, calls.
-    pub fn parts(&self) -> [(&'static str, u64, u32); 9] {
+    pub fn parts(&self) -> [(&'static str, u64, u32); 8] {
         self.classify().0
     }
 
@@ -516,15 +506,6 @@ impl LoopDetectCost {
     /// two-axis contract unanswerable for half its entries.
     pub fn clones(&self) -> [(&'static str, u32); 7] {
         self.classify().1
-    }
-
-    /// The recurrence scan as one part: both ring-walk arms summed. Derived, never a field
-    /// — a summed field would be the multi-site counter this type refuses.
-    pub fn recurrence_scan(&self) -> (u64, u32) {
-        (
-            self.recurrence_scan_mandatory_ns + self.recurrence_scan_optional_ns,
-            self.recurrence_scan_mandatory_calls + self.recurrence_scan_optional_calls,
-        )
     }
 
     /// Every comparison the four production callers of `project_out_resources` performed.
