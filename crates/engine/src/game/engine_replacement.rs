@@ -418,6 +418,11 @@ fn handle_replacement_choice_inner(
     // pre-move incarnation and the exact proposed event. Capture this before
     // `continue_replacement` consumes the pending record.
     let parked_zone_change_delivery = state.pending_zone_change_delivery_from_replacement();
+    // CR 616.1f: the paused frameless single-card discard this answer owns, if any.
+    // Captured with the other `parked_*` reads; a carrier installed while this
+    // answer resolves (a nested connive) belongs to the next answer and is left
+    // in place.
+    let parked_single_discard = state.pending_single_discard.as_deref().copied();
     let parked_phase_begin = state
         .pending_replacement
         .as_ref()
@@ -1152,6 +1157,17 @@ fn handle_replacement_choice_inner(
             };
             state.waiting_for = waiting_for.clone();
 
+            // CR 701.9a + CR 614.6: the replaced discard still happened; record it
+            // now that its move has been delivered, before post-replacement and
+            // `waiting_for`-gated drains run. Gated on the carrier latched before
+            // `continue_replacement` so a carrier installed during this answer
+            // (CR 616.1f: the next answer's) is not consumed here.
+            if parked_single_discard.is_some()
+                && state.pending_single_discard.as_deref().copied() == parked_single_discard
+            {
+                effects::settle_paused_single_discard(state, events);
+            }
+
             let mut replacement_ctx = None;
             if zone_change_object_id.is_some_and(|object_id| {
                 state
@@ -1632,6 +1648,14 @@ fn handle_replacement_choice_inner(
             ))
         }
         super::replacement::ReplacementResult::Prevented => {
+            // CR 614.6: a prevented move never happened, so the paused discard
+            // owned by this answer is never recorded. A carrier installed by a
+            // substitute during this answer is a different value and survives.
+            if parked_single_discard.is_some()
+                && state.pending_single_discard.as_deref().copied() == parked_single_discard
+            {
+                state.pending_single_discard = None;
+            }
             if let Some(paused) = parked_zone_change_delivery.as_ref() {
                 state.capture_paused_zone_change_delivery(
                     paused.member,
