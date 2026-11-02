@@ -2443,6 +2443,7 @@
     "cardFallback": "カード",
     "title": "{{name}}をライブラリーの一番上か一番下に置く",
     "top": "ライブラリーの一番上",
+    "nthFromTop": "Position {{n}} from the top of library",
     "bottom": "ライブラリーの一番下"
   },
   "mutateMerge": {

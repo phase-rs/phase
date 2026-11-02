@@ -40,7 +40,7 @@ pub fn has_legal_target(
     has_legal_target_with_context(state, filter, source_controller, source_id, &target_ctx)
 }
 
-pub(crate) fn find_legal_targets_for_ability(
+pub fn find_legal_targets_for_ability(
     state: &GameState,
     filter: &TargetFilter,
     ability: &ResolvedAbility,
@@ -161,12 +161,61 @@ pub fn player_is_legal_target(
     source_id: ObjectId,
     source_controller: PlayerId,
 ) -> bool {
+    player_is_legal_target_with_source_name(state, player, source_id, source_controller, None)
+}
+
+/// CR 608.2h + CR 702.16: The name protection checks compare a target source against.
+/// A captured trigger source contributes its live name only while `ExactLive`;
+/// otherwise its last-known name. Without one, the live source object's name.
+fn source_projection_name<'a>(
+    state: &'a GameState,
+    target_ctx: &'a super::filter::FilterContext,
+    source_id: ObjectId,
+) -> Option<&'a str> {
+    target_ctx
+        .trigger_source
+        .map(|source| match source.source_read(state) {
+            crate::types::game_state::TriggerSourceRead::ExactLive(obj) => obj.name.as_str(),
+            crate::types::game_state::TriggerSourceRead::Latched(latched) => {
+                crate::game::filter::exit_lki_for_incarnation(
+                    state,
+                    latched.identity.reference.object_id,
+                    latched.identity.reference.incarnation,
+                )
+                .map(|exit| exit.name.as_str())
+                .unwrap_or(latched.lki.name.as_str())
+            }
+        })
+        .or_else(|| state.objects.get(&source_id).map(|obj| obj.name.as_str()))
+        .or_else(|| {
+            state
+                .lki_by_incarnation
+                .get(&source_id)
+                .and_then(|history| {
+                    history
+                        .iter()
+                        .max_by_key(|(&inc, _)| inc)
+                        .map(|(_, exit)| exit.name.as_str())
+                })
+        })
+}
+
+/// CR 702.16b + CR 608.2h: Player target legality with an optional source name
+/// projection (from captured LKI for departed sources, or live object).
+pub fn player_is_legal_target_with_source_name(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    source_controller: PlayerId,
+    source_name: Option<&str>,
+) -> bool {
     crate::game::players::player_exists_for_choice(state, player)
-        && !super::static_abilities::player_cannot_be_targeted_by(
+        && !super::static_abilities::player_cannot_be_targeted_by_with_source_name(
             state,
             player,
             source_id,
             source_controller,
+            source_name,
         )
 }
 
@@ -209,6 +258,11 @@ fn find_legal_targets_with_context(
     target_ctx: &super::filter::FilterContext,
 ) -> Vec<TargetRef> {
     let mut targets = Vec::new();
+
+    // CR 608.2h + CR 702.16: Determine the effective source name for protection checks.
+    // When the ability carries a captured trigger source, use the live object only if
+    // `ExactLive`; otherwise use the captured LKI name.
+    let source_projection_name = source_projection_name(state, target_ctx, source_id);
 
     // SpecificObject is runtime-bound (not used for target selection)
     if matches!(filter, TargetFilter::SpecificObject { .. }) {
@@ -269,7 +323,13 @@ fn find_legal_targets_with_context(
     // targeting exclusions), exactly as the `Typed` player branch below.
     if denotes_player_predicate_target(filter) {
         for player in &state.players {
-            if !player_is_legal_target(state, player.id, source_id, source_controller) {
+            if !player_is_legal_target_with_source_name(
+                state,
+                player.id,
+                source_id,
+                source_controller,
+                source_projection_name,
+            ) {
                 continue;
             }
             if super::filter::player_matches_target_filter_in_state(
@@ -305,11 +365,24 @@ fn find_legal_targets_with_context(
 
     // Check if filter could match players
     if matches!(filter, TargetFilter::Any | TargetFilter::Player) || is_any_other_target {
-        add_players(state, &mut targets, source_id, source_controller);
+        add_players(
+            state,
+            &mut targets,
+            source_id,
+            source_controller,
+            source_projection_name,
+        );
     }
 
     if let TargetFilter::SpecificPlayer { id } = filter {
-        add_specific_player(state, &mut targets, *id, source_id, source_controller);
+        add_specific_player(
+            state,
+            &mut targets,
+            *id,
+            source_id,
+            source_controller,
+            source_projection_name,
+        );
         return targets;
     }
 
@@ -335,7 +408,13 @@ fn find_legal_targets_with_context(
                 // CR 115.1: one authority for player-target legality — existence
                 // (CR 800.4 + CR 102.1, phasing per the CR 702.26b MIRROR) plus the
                 // targeting-only exclusions (CR 702.11c / CR 702.18a / CR 702.16b).
-                if !player_is_legal_target(state, player.id, source_id, source_controller) {
+                if !player_is_legal_target_with_source_name(
+                    state,
+                    player.id,
+                    source_id,
+                    source_controller,
+                    source_projection_name,
+                ) {
                     continue;
                 }
                 let include = match controller {
@@ -407,11 +486,12 @@ fn find_legal_targets_with_context(
                                 Some(o) => o,
                                 None => continue,
                             };
-                            if can_target(
+                            if can_target_with_source_name(
                                 obj,
                                 source_controller,
                                 source_id,
                                 source_ignores_hexproof,
+                                source_projection_name,
                                 state,
                             ) {
                                 targets.push(TargetRef::Object(obj_id));
@@ -501,11 +581,12 @@ fn find_legal_targets_with_context(
                     Some(o) => o,
                     None => continue,
                 };
-                if can_target(
+                if can_target_with_source_name(
                     obj,
                     source_controller,
                     source_id,
                     source_ignores_hexproof,
+                    source_projection_name,
                     state,
                 ) {
                     targets.push(TargetRef::Object(obj_id));
@@ -543,6 +624,8 @@ fn has_legal_target_with_context(
     let source_ignores_hexproof =
         crate::game::static_abilities::player_ignores_hexproof(state, source_controller);
 
+    let source_projection_name = source_projection_name(state, target_ctx, source_id);
+
     let explicit_zones = extract_explicit_zones(filter);
     if !explicit_zones.is_empty() {
         if explicit_zones.contains(&Zone::Battlefield) {
@@ -551,11 +634,12 @@ fn has_legal_target_with_context(
                     let Some(obj) = state.objects.get(&obj_id) else {
                         continue;
                     };
-                    if can_target(
+                    if can_target_with_source_name(
                         obj,
                         source_controller,
                         source_id,
                         source_ignores_hexproof,
+                        source_projection_name,
                         state,
                     ) {
                         return true;
@@ -578,11 +662,12 @@ fn has_legal_target_with_context(
             let Some(obj) = state.objects.get(&obj_id) else {
                 continue;
             };
-            if can_target(
+            if can_target_with_source_name(
                 obj,
                 source_controller,
                 source_id,
                 source_ignores_hexproof,
+                source_projection_name,
                 state,
             ) {
                 return true;
@@ -3853,6 +3938,7 @@ fn add_players(
     targets: &mut Vec<TargetRef>,
     source_id: ObjectId,
     source_controller: PlayerId,
+    source_name: Option<&str>,
 ) {
     // CR 115.1: one authority for player-target legality — existence (CR 800.4:
     // multiplayer games continue after players leave, + CR 102.1: a player is one of the
@@ -3861,7 +3947,13 @@ fn add_players(
     // CR 702.16b protection). CR 608.2b's illegal-target fizzle still applies on
     // resolution; this is the announcement-time legal set.
     for player in &state.players {
-        if !player_is_legal_target(state, player.id, source_id, source_controller) {
+        if !player_is_legal_target_with_source_name(
+            state,
+            player.id,
+            source_id,
+            source_controller,
+            source_name,
+        ) {
             continue;
         }
         targets.push(TargetRef::Player(player.id));
@@ -3874,35 +3966,35 @@ fn add_specific_player(
     player_id: PlayerId,
     source_id: ObjectId,
     source_controller: PlayerId,
+    source_name: Option<&str>,
 ) {
     // CR 115.1: same single authority as `add_players`. The former `find` membership
     // guard is subsumed — `player_exists_for_choice` begins with `is_alive`, which is
     // itself a membership test, so a nonexistent id is rejected identically.
-    if !player_is_legal_target(state, player_id, source_id, source_controller) {
+    if !player_is_legal_target_with_source_name(
+        state,
+        player_id,
+        source_id,
+        source_controller,
+        source_name,
+    ) {
         return;
     }
     targets.push(TargetRef::Player(player_id));
 }
 
-/// CR 702.16b: Protection prevents targeting from sources with the relevant quality.
+/// CR 702.16b + CR 608.2h: Protection prevents targeting from sources with the relevant quality.
 fn is_protected_from(
     obj: &crate::game::game_object::GameObject,
     source_id: ObjectId,
+    source_name: Option<&str>,
     state: &GameState,
 ) -> bool {
-    let Some(source_obj) = state.objects.get(&source_id) else {
-        return false;
-    };
-
-    for kw in &obj.keywords {
-        if let Keyword::Protection(protection) = kw {
-            if crate::game::keywords::source_matches_protection_target(protection, obj, source_obj)
-            {
-                return true;
-            }
-        }
-    }
-    false
+    crate::game::keywords::protection_prevents_from_with_source_name(
+        obj,
+        state.objects.get(&source_id),
+        source_name,
+    )
 }
 
 /// CR 702.11d: Check if a source matches a HexproofFilter.
@@ -3942,11 +4034,32 @@ fn hexproof_filter_matches(
 }
 
 /// Full battlefield targeting check: shroud + hexproof + protection (CR 702.16b).
+#[cfg(test)]
 fn can_target(
     obj: &crate::game::game_object::GameObject,
     source_controller: PlayerId,
     source_id: ObjectId,
     source_ignores_hexproof: bool,
+    state: &GameState,
+) -> bool {
+    can_target_with_source_name(
+        obj,
+        source_controller,
+        source_id,
+        source_ignores_hexproof,
+        None,
+        state,
+    )
+}
+
+/// CR 702.16b + CR 608.2h: Full battlefield targeting check taking an optional source name
+/// into account for `ProtectionTarget::ChosenCardName`.
+fn can_target_with_source_name(
+    obj: &crate::game::game_object::GameObject,
+    source_controller: PlayerId,
+    source_id: ObjectId,
+    source_ignores_hexproof: bool,
+    source_name: Option<&str>,
     state: &GameState,
 ) -> bool {
     // CR 702.18a: Shroud prevents targeting by any player.
@@ -3987,7 +4100,7 @@ fn can_target(
         }
     }
     // Per-object (depends on `obj`) — correctly NOT hoisted out of the enumeration loop.
-    if is_protected_from(obj, source_id, state) {
+    if is_protected_from(obj, source_id, source_name, state) {
         return false;
     }
     // CR 702.18a: A static "can't be the target of spells or abilities" is the

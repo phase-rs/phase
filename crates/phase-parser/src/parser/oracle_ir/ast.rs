@@ -731,17 +731,23 @@ pub(crate) enum ContinuationAst {
         count: QuantityExpr,
         face_down: bool,
     },
-    /// CR 702.75a + CR 406.3: "exile one of them face down" after a private
+    /// CR 702.75a + CR 406.3: "exile <N> of them face down" after a private
     /// `Dig` (the "look at the top N cards of <player>'s library" look step) —
-    /// the Gonti, Lord of Luxury class. Unlike `ExileLookedAtCard` (which exiles
-    /// the looked-at card(s) wholesale via `ExileTop`), this is a player choice
-    /// of ONE card from among the N looked at. It patches the preceding `Dig`
-    /// into the Hideaway shape (`keep_count: Some(1)`, `destination: Exile`) so
-    /// the dug card is player-selected and routed to exile by the `DigChoice`
-    /// flow, then chains a `HideawayConceal` sub-ability to turn the chosen card
-    /// face down and link it to the source. Gated on the exile-the-dug-card
-    /// continuation, so genuine pure-peek Digs (Delver of Secrets) are untouched.
-    ExileOneOfThemFaceDown {
+    /// the Gonti, Lord of Luxury class (`count: 1`) and the Black Cat, Cunning
+    /// Thief class (`count: 2`). Unlike `ExileLookedAtCard` (which exiles the
+    /// looked-at card(s) wholesale via `ExileTop`), this is a player choice of
+    /// exactly `count` cards from among those looked at. It patches the
+    /// preceding `Dig` into the Hideaway shape (`keep_count: Some(count)`,
+    /// `destination: Exile`) so the dug cards are player-selected and routed to
+    /// exile by the `DigChoice` flow, then chains a `HideawayConceal`
+    /// sub-ability to turn the chosen cards face down and link them to the
+    /// source. A following "put the rest ..." clause is absorbed into the same
+    /// `Dig`'s `rest_destination`, so "the rest" is the remainder of the looked-at
+    /// set whatever `count` is. Gated on the exile-the-dug-cards continuation, so
+    /// genuine pure-peek Digs (Delver of Secrets) are untouched.
+    ExileLookedAtCardsFaceDown {
+        /// How many of the looked-at cards the controller exiles ("one", "two", ...).
+        count: u32,
         /// CR 122.1: A "... face down with <count> <type> counter(s) on it"
         /// rider (The Dragon-Kami Reborn: "Exile one of them face down with a
         /// hatching counter on it"). Threaded into the fused exile as a
@@ -2206,6 +2212,8 @@ pub(crate) enum ZoneCounterImperativeAst {
     /// `Effect::ChooseCounterAdjustment` (which has no target slot of its own).
     ChooseCounterAdjustment {
         adjustment: CounterAdjustment,
+        counter_type: Option<CounterType>,
+        target: TargetFilter,
     },
     /// CR 122.5 / CR 122.8: Transfer counters from source to target.
     MoveCounters {
@@ -3522,6 +3530,11 @@ pub(crate) fn normalize_play_from_exile_duration(duration: Duration) -> Duration
 /// decide whether a reflexive exists.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum ReflexiveModalParent {
+    /// `"…, <instruction>. When <event> this way, choose …"` — a mandatory
+    /// instruction whose reflexive modal triggers on the named event having
+    /// occurred during its resolution (Immard, the Stormcleaver: "When you
+    /// remove a counter this way"). Carries the parsed event.
+    EventThisWay(Box<crate::types::ability::TriggerDefinition>),
     /// `"…, you may <instruction>. When you do, choose …"` — a declinable
     /// resolution-time instruction (Caesar, Legion's Emperor). Carries the
     /// printed instruction text with the `"you may "` marker and connector stripped;
