@@ -24,6 +24,7 @@ use engine::game::deck_loading::{
 };
 use engine::game::derived_views::ClientGameStateRef;
 use engine::game::engine::{apply, start_game_with_starting_player};
+use engine::game::interaction::{derive_viewer_interaction, submit_interaction};
 use engine::game::scenario::{GameRunner, P0, P1};
 use engine::game::visibility::{filter_state_for_viewer, HIDDEN_CARD_NAME};
 use engine::types::ability::{
@@ -37,6 +38,11 @@ use engine::types::format::{DeckSizeRule, FormatConfig, GameFormat};
 use engine::types::game_state::GameState;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
+use engine::types::interaction::{
+    InteractionOpportunity, InteractionOpportunityResponse, InteractionPresentationSurface,
+    InteractionReasonCode, InteractionResponse, InteractionResponseSpec, InteractionRoleCode,
+    InteractionSubmission,
+};
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -662,6 +668,141 @@ fn pregame_agenda_prompt_collects_secret_names_for_every_player() {
         assert!(!wire.contains("Summoner's Bond"), "viewer {viewer:?}");
         assert!(!wire.contains("Runeclaw Bear"), "viewer {viewer:?}");
     }
+}
+
+fn agenda_opportunity(state: &GameState, viewer: PlayerId) -> Option<InteractionOpportunity> {
+    derive_viewer_interaction(state, &filter_state_for_viewer(state, viewer), viewer)
+        .opportunities
+        .into_iter()
+        .next()
+}
+
+fn text_submission(opportunity: &InteractionOpportunity, values: &[&str]) -> InteractionSubmission {
+    InteractionSubmission {
+        interaction_id: opportunity.interaction_id.clone(),
+        response: InteractionResponse::Text {
+            values: values.iter().map(|value| value.to_string()).collect(),
+        },
+    }
+}
+
+fn assert_agenda_text_schema(opportunity: &InteractionOpportunity, source: &str, count: u32) {
+    let InteractionOpportunityResponse::Schema { spec, candidates } = &opportunity.response else {
+        panic!(
+            "an exact list limits the agenda to its entries: {:?}",
+            opportunity.response
+        );
+    };
+    assert!(
+        matches!(
+            spec,
+            InteractionResponseSpec::Text {
+                allow_arbitrary: true,
+                count: spec_count,
+                ..
+            } if *spec_count == count
+        ),
+        "{spec:?}"
+    );
+    assert!(candidates.is_empty(), "{candidates:?}");
+    assert_eq!(opportunity.progress.minimum, count);
+    assert_eq!(opportunity.progress.maximum, Some(count));
+    assert!(opportunity.surfaces.iter().any(|surface| matches!(
+        surface,
+        InteractionPresentationSurface::Value {
+            role: InteractionRoleCode::Source,
+            value,
+            ..
+        } if value == source
+    )));
+}
+
+// CR 702.106a / CR 702.106f: a player answering through the interaction schema
+// names cards of their own choosing, not the one set generated for the AI.
+#[test]
+fn pregame_agenda_interaction_accepts_player_supplied_names() {
+    let mut state = GameState::new_two_player(7);
+    load_limited_decks(
+        &mut state,
+        vec![conspiracy_card_face("Brago's Favor", true)],
+        vec![summoners_bond_face()],
+    );
+    let brago_id = state.command_zone[0];
+    let bond_id = state.command_zone[1];
+    start_game_with_starting_player(&mut state, P0);
+    state.all_card_names = known_card_names();
+
+    assert!(
+        agenda_opportunity(&state, P1).is_none(),
+        "the other seat is offered nothing to answer"
+    );
+
+    // Reach guard: the AI's single answer is not the name submitted below.
+    let player_name = "Runeclaw Bear";
+    assert!(matches!(
+        legal_actions(&state).as_slice(),
+        [GameAction::ChooseSecretAgendaNames { names }]
+            if names.len() == 1 && names[0] != player_name
+    ));
+
+    let hidden_agenda = agenda_opportunity(&state, P0).expect("P0 owes an agenda name");
+    assert_agenda_text_schema(&hidden_agenda, "Brago's Favor", 1);
+
+    for (values, code) in [
+        (vec![], Some(InteractionReasonCode::ConstraintUnsatisfied)),
+        (
+            vec!["Grizzly Bears", player_name],
+            Some(InteractionReasonCode::ConstraintUnsatisfied),
+        ),
+        (vec!["Not A Real Card"], None),
+    ] {
+        let rejection =
+            submit_interaction(&mut state, P0, text_submission(&hidden_agenda, &values))
+                .expect_err("not a legal agenda answer");
+        if let Some(code) = code {
+            assert_eq!(rejection.code, code);
+        }
+        assert!(state.objects[&brago_id].secret_chosen_names.is_empty());
+    }
+    submit_interaction(
+        &mut state,
+        P0,
+        text_submission(&hidden_agenda, &[player_name]),
+    )
+    .expect("any real card name answers a hidden agenda");
+    assert_eq!(
+        state.objects[&brago_id].secret_chosen_names,
+        vec![player_name.to_string()]
+    );
+
+    let double_agenda = agenda_opportunity(&state, P1).expect("P1 owes two agenda names");
+    assert_agenda_text_schema(&double_agenda, "Summoner's Bond", 2);
+    assert!(
+        agenda_opportunity(&state, P0).is_none(),
+        "CR 702.106f: P0 learns nothing about how many names P1 owes"
+    );
+    submit_interaction(
+        &mut state,
+        P1,
+        text_submission(&double_agenda, &["Runeclaw Bear", "runeclaw bear"]),
+    )
+    .expect_err("double agenda requires two different cards");
+    assert!(state.objects[&bond_id].secret_chosen_names.is_empty());
+    submit_interaction(
+        &mut state,
+        P1,
+        text_submission(&double_agenda, &["Runeclaw Bear", "Plains 0"]),
+    )
+    .expect("two different real card names answer a double agenda");
+
+    assert_eq!(
+        state.objects[&bond_id].secret_chosen_names,
+        vec!["Runeclaw Bear".to_string(), "Plains 0".to_string()]
+    );
+    assert!(matches!(
+        state.waiting_for,
+        WaitingFor::MulliganDecision { .. }
+    ));
 }
 
 // CR 702.106a: another player can't answer for the seat being asked.

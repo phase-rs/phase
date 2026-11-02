@@ -277,7 +277,9 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
             HumanResponseModel::ModeSequence
         }
         WaitingFor::OutsideGameChoice { .. } => HumanResponseModel::OutsideSelection,
-        WaitingFor::NamedChoice { .. } => HumanResponseModel::TextChoice,
+        WaitingFor::NamedChoice { .. } | WaitingFor::SecretAgendaChoice { .. } => {
+            HumanResponseModel::TextChoice
+        }
         WaitingFor::RespondToShortcut { .. } => HumanResponseModel::ShortcutReply,
         // Resolve All consent has a finite, engine-authored Grant/Decline or
         // Revoke domain. It is not a CR 732 shortcut-reply protocol.
@@ -368,7 +370,6 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::VoteChoice { .. }
         | WaitingFor::SeparatePilesChooseOpponent { .. }
         | WaitingFor::SeparatePilesChoice { .. }
-        | WaitingFor::SecretAgendaChoice { .. }
         | WaitingFor::CompanionReveal { .. }
         | WaitingFor::ChooseLegend { .. }
         | WaitingFor::BattleProtectorChoice { .. }
@@ -450,7 +451,7 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
             None,
             Some(InteractionSlotKind::Single),
         ),
-        WaitingFor::NamedChoice { .. } => (
+        WaitingFor::NamedChoice { .. } | WaitingFor::SecretAgendaChoice { .. } => (
             InteractionWaitingForCode::Text,
             None,
             Some(InteractionSlotKind::Single),
@@ -624,7 +625,6 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         | WaitingFor::VoteChoice { .. }
         | WaitingFor::SeparatePilesChooseOpponent { .. }
         | WaitingFor::SeparatePilesChoice { .. }
-        | WaitingFor::SecretAgendaChoice { .. }
         | WaitingFor::CompanionReveal { .. }
         | WaitingFor::ChooseLegend { .. }
         | WaitingFor::CommanderZoneChoice { .. }
@@ -1306,7 +1306,16 @@ struct OutsideSelectionProjection {
 struct TextChoiceProjection {
     options: Vec<String>,
     allow_arbitrary: bool,
+    count: u32,
+    action: TextChoiceAction,
     source_name: Option<String>,
+}
+
+/// Which `GameAction` a complete text answer becomes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TextChoiceAction {
+    ChooseOption,
+    ChooseSecretAgendaNames,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2086,7 +2095,35 @@ fn outside_selection_projection(
 
 fn text_choice_projection(
     waiting_for: &WaitingFor,
+    filtered_state: &GameState,
 ) -> Result<Option<TextChoiceProjection>, InteractionReasonCode> {
+    // CR 702.106a / CR 702.106f: an agenda may name any card, so its names are
+    // typed and arrive as one answer. Publishing a finite list would limit the
+    // chooser to it; the reducer validates what they submit.
+    if let WaitingFor::SecretAgendaChoice {
+        object_id,
+        name_count,
+        ..
+    } = waiting_for
+    {
+        let source_name = filtered_state
+            .objects
+            .get(object_id)
+            .map(|object| object.name.clone());
+        if source_name
+            .as_ref()
+            .is_some_and(|name| name.len() > MAX_INTERACTION_STRING_LEN)
+        {
+            return Err(InteractionReasonCode::PayloadTooLarge);
+        }
+        return Ok(Some(TextChoiceProjection {
+            options: Vec::new(),
+            allow_arbitrary: true,
+            count: u32::from(*name_count),
+            action: TextChoiceAction::ChooseSecretAgendaNames,
+            source_name,
+        }));
+    }
     let WaitingFor::NamedChoice {
         choice_type,
         options,
@@ -2109,6 +2146,8 @@ fn text_choice_projection(
     Ok(Some(TextChoiceProjection {
         options: options.clone(),
         allow_arbitrary: matches!(choice_type, ChoiceType::CardName),
+        count: 1,
+        action: TextChoiceAction::ChooseOption,
         source_name: source
             .as_ref()
             .map(|source| source.prompt.display_name.clone()),
@@ -8525,17 +8564,19 @@ fn opportunity_for_slot(
             )
         }
         HumanResponseModel::TextChoice => {
-            let projection = match text_choice_projection(&filtered_state.waiting_for) {
-                Ok(Some(projection)) => projection,
-                Ok(None) => unreachable!("text model requires text projection"),
-                Err(_) => return payload_too_large_opportunity(&slot.interaction_id),
-            };
+            let projection =
+                match text_choice_projection(&filtered_state.waiting_for, filtered_state) {
+                    Ok(Some(projection)) => projection,
+                    Ok(None) => unreachable!("text model requires text projection"),
+                    Err(_) => return payload_too_large_opportunity(&slot.interaction_id),
+                };
             (
                 InteractionOpportunity {
                     interaction_id: slot.interaction_id.clone(),
                     response: InteractionOpportunityResponse::Schema {
                         spec: InteractionResponseSpec::Text {
                             allow_arbitrary: projection.allow_arbitrary,
+                            count: projection.count,
                             max_len: MAX_INTERACTION_STRING_LEN as u32,
                             confirm: ConfirmSemantics::Explicit,
                         },
@@ -8554,8 +8595,8 @@ fn opportunity_for_slot(
                     .collect(),
                     progress: InteractionProgress {
                         selected: 0,
-                        minimum: 1,
-                        maximum: Some(1),
+                        minimum: projection.count,
+                        maximum: Some(projection.count),
                         aggregate: None,
                         confirmable: false,
                     },
@@ -9902,7 +9943,12 @@ fn bound_outbound_response(
                 }
             }
         }
-        InteractionResponse::Text { value } => budget.string(value)?,
+        InteractionResponse::Text { values } => {
+            budget.list(values.len())?;
+            for value in values {
+                budget.string(value)?;
+            }
+        }
         InteractionResponse::Number { .. } | InteractionResponse::ShortcutReply { .. } => {}
     }
     Ok(())
@@ -10006,7 +10052,12 @@ fn validate_response_bounds(response: &InteractionResponse) -> Result<(), Intera
             }
             Ok(())
         }
-        InteractionResponse::Text { value } => bound_string(value),
+        InteractionResponse::Text { values } => {
+            if values.len() > MAX_INTERACTION_LIST_LEN {
+                return Err(InteractionReasonCode::PayloadTooLarge);
+            }
+            values.iter().try_for_each(|value| bound_string(value))
+        }
         InteractionResponse::Shortcut { pins, .. } => {
             let mut budget = OutboundBudget::default();
             budget.list(pins.len())?;
@@ -10621,20 +10672,34 @@ fn materialize_text_choice_response(
     projection: &TextChoiceProjection,
     response: &InteractionResponse,
 ) -> Result<(GameAction, InteractionProgress), InteractionReasonCode> {
-    let InteractionResponse::Text { value } = response else {
+    let InteractionResponse::Text { values } = response else {
         return Err(InteractionReasonCode::MalformedResponse);
     };
-    if !projection.allow_arbitrary && !projection.options.contains(value) {
+    if values.len() != projection.count as usize
+        || !projection.allow_arbitrary
+            && values
+                .iter()
+                .any(|value| !projection.options.contains(value))
+    {
         return Err(InteractionReasonCode::ConstraintUnsatisfied);
     }
-    Ok((
-        GameAction::ChooseOption {
+    let action = match (projection.action, values.as_slice()) {
+        (TextChoiceAction::ChooseOption, [value]) => GameAction::ChooseOption {
             choice: value.clone(),
         },
+        (TextChoiceAction::ChooseOption, _) => {
+            return Err(InteractionReasonCode::ConstraintUnsatisfied)
+        }
+        (TextChoiceAction::ChooseSecretAgendaNames, names) => GameAction::ChooseSecretAgendaNames {
+            names: names.to_vec(),
+        },
+    };
+    Ok((
+        action,
         InteractionProgress {
-            selected: 1,
-            minimum: 1,
-            maximum: Some(1),
+            selected: projection.count,
+            minimum: projection.count,
+            maximum: Some(projection.count),
             aggregate: None,
             confirmable: true,
         },
@@ -11479,7 +11544,7 @@ fn materialize_response(
             return materialize_outside_selection_response(interaction_id, &projection, response);
         }
         HumanResponseModel::TextChoice => {
-            let projection = text_choice_projection(&filtered_state.waiting_for)?
+            let projection = text_choice_projection(&filtered_state.waiting_for, filtered_state)?
                 .ok_or(InteractionReasonCode::UnsupportedResponse)?;
             return materialize_text_choice_response(&projection, response);
         }
