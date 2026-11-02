@@ -23237,7 +23237,10 @@ one on the bottom of your library.";
             .into_iter()
             .map(|candidate| candidate.action)
             .find(|action| {
-                matches!(action, GameAction::CastSpell { object_id: id, .. } if *id == object_id)
+                matches!(
+                    action,
+                    GameAction::CastSpell { .. } | GameAction::CastPreparedCopy { .. }
+                ) && action.source_object() == Some(object_id)
             })
             .unwrap_or_else(|| panic!("reach: {object_id:?} is on offer at the root"))
     }
@@ -23323,6 +23326,193 @@ one on the bottom of your library.";
             beam_lines(&control_state, &cfg),
             [(donor.clone(), HeldLine::Reproducible)],
             "with no spell on offer, the hold lends"
+        );
+    }
+
+    /// [`strand_board`] in the Upkeep with Strand tapped, a ready Wellwisher, and Woodland Acolyte
+    /// in hand, a creature whose only instant is its Adventure, Mend the Wilds. `graveyard` is put
+    /// in the graveyard: with nothing there Mend the Wilds has no target and isn't on offer.
+    /// Oracle text verbatim. Returns the state, Wellwisher and Woodland Acolyte.
+    fn woodland_acolyte_board(graveyard: &[&str]) -> (GameState, ObjectId, ObjectId) {
+        use crate::policies::tests::activation_patience_repro::add_instant_face;
+        use engine::types::card::LayoutKind;
+
+        let db = shared_integration_card_db();
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::Upkeep);
+        let wellwisher = add_wellwisher(&mut scenario);
+        let acolyte = {
+            let mut acolyte = scenario.add_creature_to_hand_from_oracle(
+                P0,
+                "Woodland Acolyte",
+                2,
+                2,
+                "When this creature enters, draw a card.",
+            );
+            acolyte.with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 2,
+            });
+            acolyte.id()
+        };
+        for name in graveyard {
+            scenario.add_real_card(P0, name, Zone::Graveyard, db);
+        }
+        for _ in 0..6 {
+            scenario.add_real_card(P0, "Grizzly Bears", Zone::Library, db);
+        }
+        let (runner, strand, _, _) = strand_board_on(scenario);
+        let mut state = runner.state().clone();
+        state.objects.get_mut(&strand).unwrap().tapped = true;
+        add_instant_face(
+            &mut state,
+            acolyte,
+            "Mend the Wilds",
+            "Put target permanent card from your graveyard on top of your library. (Then exile this card. You may cast the creature later from exile.)",
+            LayoutKind::Adventure,
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 0,
+            },
+        );
+        (state, wellwisher, acolyte)
+    }
+
+    /// [`strand_board`] in the Upkeep with Strand tapped, a ready Wellwisher, three more Forests,
+    /// and a Vastlands Scavenger with Bind to Life, its prepare spell, castable if `prepared`.
+    /// Oracle text verbatim. Returns the state, Wellwisher and the Scavenger.
+    fn vastlands_scavenger_board(prepared: bool) -> (GameState, ObjectId, ObjectId) {
+        use crate::policies::tests::activation_patience_repro::add_instant_face;
+        use engine::game::game_object::PreparedState;
+        use engine::types::card::LayoutKind;
+
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::Upkeep);
+        let wellwisher = add_wellwisher(&mut scenario);
+        let scavenger = scenario
+            .add_creature_from_oracle(
+                P0,
+                "Vastlands Scavenger",
+                4,
+                4,
+                "Deathtouch\nThis creature enters prepared. (While it's prepared, you may cast a copy of its spell. Doing so unprepares it.)",
+            )
+            .id();
+        for _ in 0..3 {
+            scenario.add_basic_land(P0, ManaColor::Green);
+        }
+        let db = shared_integration_card_db();
+        for _ in 0..6 {
+            scenario.add_real_card(P0, "Grizzly Bears", Zone::Library, db);
+        }
+        let (runner, strand, _, _) = strand_board_on(scenario);
+        let mut state = runner.state().clone();
+        state.objects.get_mut(&strand).unwrap().tapped = true;
+        add_instant_face(
+            &mut state,
+            scavenger,
+            "Bind to Life",
+            "Mill seven cards. Then put a creature card from among them onto the battlefield.",
+            LayoutKind::Prepare,
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 4,
+            },
+        );
+        state.objects.get_mut(&scavenger).unwrap().prepared = prepared.then_some(PreparedState);
+        (state, wellwisher, scavenger)
+    }
+
+    /// `activation_patience::held_line` reads the face a cast can take, not only the front. The
+    /// front here has no spell ability, and a Wellwisher's line goes on through the instant: Mend
+    /// the Wilds in the upkeep draws Serra Angel, where passing draws the Island (CR 121.1). So
+    /// the hold on Wellwisher lends nothing beside it.
+    ///
+    /// The control has an empty graveyard, so Mend the Wilds has no target and isn't on offer,
+    /// and it lends. Every observable is printed before the first assertion.
+    #[test]
+    fn own_upkeep_root_lends_nothing_beside_a_second_face_over_the_draw() {
+        use crate::policies::registry::NUDGE_MAX;
+
+        let cfg = medium_searched_config();
+        let pass = GameAction::PassPriority;
+        let (state, wellwisher, acolyte) = woodland_acolyte_board(&["Serra Angel"]);
+        let (control_state, _, _) = woodland_acolyte_board(&[]);
+        let (donor, cast) = (activate(wellwisher, 0), offered_cast(&state, acolyte));
+        let roots = PatienceRoots::score(&state, &cfg);
+        print_sibling_row("Wellwisher beside Mend the Wilds", &roots, &donor);
+        eprintln!("  holds = {:?}", beam_lines(&state, &cfg));
+        let control = PatienceRoots::score(&control_state, &cfg);
+        print_sibling_row("Same, empty graveyard", &control, &donor);
+        eprintln!("  holds = {:?}", beam_lines(&control_state, &cfg));
+
+        roots.assert_scored("beside the spell", &[&donor, &cast, &pass]);
+        assert!(
+            roots.ap(&donor) < -NUDGE_MAX,
+            "reach: patience holds Wellwisher, got {}",
+            roots.ap(&donor)
+        );
+        assert!(
+            roots.cont(&donor) > control.cont(&donor) + 1.0,
+            "reach: Wellwisher's line {} carries the spell, above {} with none",
+            roots.cont(&donor),
+            control.cont(&donor)
+        );
+        assert!(
+            roots.cont(&donor) > roots.cont(&pass) + 1.0,
+            "reach: the donor's line {} is above Pass's {}, so a lend would move Pass",
+            roots.cont(&donor),
+            roots.cont(&pass)
+        );
+        let lift = score_of(&roots.s1, &pass) - score_of(&roots.s0, &pass);
+        assert!(
+            lift.abs() < DEEPER_RUNG_DRIFT,
+            "Pass is not lent the line through the spell: lift {lift}"
+        );
+        assert_eq!(
+            beam_lines(&control_state, &cfg),
+            [(donor.clone(), HeldLine::Reproducible)],
+            "with the spell not on offer, the hold lends"
+        );
+    }
+
+    /// A prepared copy is read by the source's second face, through the engine-issued list, and
+    /// Bind to Life changes the draw (CR 722.3c). Wellwisher's line doesn't need the copy here:
+    /// its continuation is level with the control's. The bar reads what's on offer, not what a
+    /// line took (`activation_patience::root_held_line`), so it holds all the same.
+    ///
+    /// The control isn't prepared, so the copy isn't on offer, and the lend moves Pass.
+    #[test]
+    fn own_upkeep_root_lends_nothing_beside_a_prepared_copy_over_the_draw() {
+        use crate::policies::registry::NUDGE_MAX;
+
+        let cfg = medium_searched_config();
+        let pass = GameAction::PassPriority;
+        let (state, wellwisher, scavenger) = vastlands_scavenger_board(true);
+        let (control_state, _, _) = vastlands_scavenger_board(false);
+        let (donor, cast) = (activate(wellwisher, 0), offered_cast(&state, scavenger));
+        let roots = PatienceRoots::score(&state, &cfg);
+        print_sibling_row("Wellwisher beside Bind to Life", &roots, &donor);
+        eprintln!("  holds = {:?}", beam_lines(&state, &cfg));
+        let control = PatienceRoots::score(&control_state, &cfg);
+        print_sibling_row("Same, not prepared", &control, &donor);
+        eprintln!("  holds = {:?}", beam_lines(&control_state, &cfg));
+
+        roots.assert_scored("beside the copy", &[&donor, &cast, &pass]);
+        assert!(
+            roots.ap(&donor) < -NUDGE_MAX,
+            "reach: patience holds Wellwisher, got {}",
+            roots.ap(&donor)
+        );
+        let control_lift = score_of(&control.s1, &pass) - score_of(&control.s0, &pass);
+        assert!(
+            control_lift > 1.0,
+            "reach: with the copy not on offer the lend moves Pass, got {control_lift}"
+        );
+        let lift = score_of(&roots.s1, &pass) - score_of(&roots.s0, &pass);
+        assert!(
+            lift.abs() < DEEPER_RUNG_DRIFT,
+            "Pass is not lent beside the copy: lift {lift}"
         );
     }
 

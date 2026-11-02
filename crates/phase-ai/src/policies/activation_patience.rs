@@ -163,7 +163,7 @@
 use engine::ai_support::CandidateAction;
 use engine::game::{attractions, mana_abilities};
 use engine::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityTag, ActivationRestriction, Comparator,
+    AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, ActivationRestriction, Comparator,
     DelayedTriggerCondition, Effect, ParsedCondition, PlayerScope, QuantityExpr, QuantityRef,
     TargetFilter, ZoneRef,
 };
@@ -180,7 +180,7 @@ use super::context::PolicyContext;
 use super::effect_classify::ability_is_temporary_combat_modifier;
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
 use crate::ability_chain::{collect_scoped_nodes, AbilityScope};
-use crate::cast_facts::cast_facts_for_action;
+use crate::cast_facts::cast_object_for_action;
 use crate::features::lifegain::filter_is_opponent_scoped;
 use crate::features::DeckFeatures;
 use engine::game::players;
@@ -355,9 +355,8 @@ fn upkeep_draw_setup(
     ability_draw_setup(state, ai_player, source_id, ability)
 }
 
-/// [`upkeep_draw_setup`] for a cast: what the spell's own resolution does to that draw, read
-/// from its spell abilities as `spell_resolution_effects` reads them (CR 113.3a + CR 608.2).
-/// Nothing but a cast has one.
+/// [`upkeep_draw_setup`] for a cast: what each face the cast can put on the stack does to that
+/// draw, read from its spell abilities (CR 113.3a + CR 608.2). Nothing but a cast has one.
 fn upkeep_spell_draw_setup(
     state: &GameState,
     ai_player: PlayerId,
@@ -366,11 +365,21 @@ fn upkeep_spell_draw_setup(
     if state.phase != Phase::Upkeep {
         return None;
     }
-    let facts = cast_facts_for_action(state, action, ai_player)?;
-    facts
-        .primary_effects
+    // CR 722.3c: a prepared copy casts the source's second face.
+    let object = match action {
+        GameAction::CastPreparedCopy { source } => state.objects.get(source)?,
+        action => cast_object_for_action(state, action, ai_player)?,
+    };
+    let back = object.back_face.as_ref();
+    // CR 720.3d: an Omen shuffles into its owner's library as it resolves.
+    let omen = back.is_some_and(|face| face.card_types.subtypes.iter().any(|s| s == "Omen"));
+    object
+        .abilities
         .iter()
-        .filter_map(|ability| ability_draw_setup(state, ai_player, facts.object.id, ability))
+        .chain(back.into_iter().flat_map(|face| face.abilities.iter()))
+        .filter(|ability| ability.kind == AbilityKind::Spell)
+        .filter_map(|ability| ability_draw_setup(state, ai_player, object.id, ability))
+        .chain(omen.then_some(DrawSetup::LibraryTop))
         .min()
 }
 
@@ -406,31 +415,35 @@ fn ability_draw_setup(
 ///   `max_branching`. An interior node ranks the engine's list on its own, with no gate, so a
 ///   sibling the root's beam dropped can be in a donor's line.
 ///
-/// The rule: an action on offer bars when its own definition shows the main phase can't repeat
-/// it. Three things end before then: the priority it's legal in, the mana in the pool, and the
-/// draw being ahead. So [`held_line`] reads every candidate that way:
+/// The rule: an action on offer bars when its own definition, read against the pool and the hand
+/// as they stand, shows the main phase can't repeat it. Three things end before then: the priority
+/// it's legal in, the mana in the pool, and the draw being ahead. So [`held_line`] reads every
+/// candidate that way:
 ///
 /// - An activation: a restriction that leaves the main phase out (CR 602.5), mana it may spend
 ///   that empties first (CR 500.5), and its every branch against the draw (`draw_setup`).
-/// - A cast: its spell's every branch against the draw, by the same reading. This is any spell
-///   the engine offers here, so an instant or a flash spell (CR 117.1a, CR 702.8a), and a scry
-///   cantrip bars like an arrangement: passing draws what it would have set aside. A spell that
-///   leaves the draw alone doesn't (Shock, Giant Growth).
-/// - Anything else: no bar. A special action leaves all three alone.
+/// - A cast: every branch of each face it can put on the stack, against the draw, by the same
+///   reading, and a prepared copy's face. This is any spell the engine offers here, so an instant
+///   or a flash spell (CR 117.1a, CR 702.8a), and a scry cantrip bars like an arrangement:
+///   passing draws what it would have set aside. A spell that leaves the draw alone doesn't
+///   (Shock, Giant Growth).
+/// - Anything else: no bar. Crewing keeps past the draw, and a special action leaves all three
+///   alone, though not what it triggers (below).
 ///
 /// Any other stand-down bars only by showing one of these: passing reaches a mana ability, a
 /// combat modifier or a cycling ability, and no lethal line is lent (`open_continuation`).
 ///
-/// The rule reads definitions at the root, so these stay out of it, and a line can go through
+/// The rule reads only that, at the root, so these stay out of it, and a line can go through
 /// them:
 ///
 /// - What isn't on offer at the root: an activation only the donor's line puts there (one that
 ///   untaps the sibling's source).
-/// - What the board decides, not the definition: an activation whose own `condition` is met now
-///   and not after the draw (escape hatch 4).
+/// - An activation's own `condition`, unread here: one met now and not after the draw (escape
+///   hatch 4).
 /// - What a cast does beyond its spell's resolution: its additional cost, the floating mana that
 ///   pays it, and a flash permanent's enters trigger, which is the permanent's and not the
-///   spell's (CR 608.3a + CR 603.6a).
+///   spell's (CR 608.3a + CR 603.6a). So too what turning a permanent face up triggers (Nervous
+///   Gardener's search).
 ///
 /// It also bars what doesn't need barring: at rung 0 a donor's continuation is its quiesced
 /// resolution, which takes no sibling, and a deeper line may not take it either. Pass then keeps

@@ -43,18 +43,22 @@
 //! the corrected reading of what was previously (incorrectly) one of the three
 //! gated phases.
 
+use engine::game::game_object::PreparedState;
+use engine::game::printed_cards::{derive_colors_from_mana_cost, snapshot_object_face};
 use engine::game::zones::create_object;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, Comparator,
-    ControllerRef, DelayedTriggerCondition, Effect, LibraryPosition, ParsedCondition, PlayerFilter,
-    QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TriggerConstraint, TriggerDefinition,
-    ZoneRef,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
+    Comparator, ControllerRef, DelayedTriggerCondition, Effect, LibraryPosition, ParsedCondition,
+    PlayerFilter, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TriggerConstraint,
+    TriggerDefinition, ZoneRef,
 };
 use engine::types::actions::GameAction;
-use engine::types::card_type::CoreType;
+use engine::types::card::LayoutKind;
+use engine::types::card_type::{CardType, CoreType};
 use engine::types::game_state::{DelayedTrigger, GameState, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
+use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -2884,6 +2888,110 @@ fn held_line_reads_a_spells_resolution_against_the_draw() {
         held_line(&board.state, AI, &GameAction::PassPriority),
         Reproducible
     );
+}
+
+/// Gives `object_id` a second face, an instant parsed from `text`, as a card with an Adventure,
+/// Omen or prepare face carries one. The front stays what it was.
+pub(crate) fn add_instant_face(
+    state: &mut GameState,
+    object_id: ObjectId,
+    name: &str,
+    text: &str,
+    layout: LayoutKind,
+    mana_cost: ManaCost,
+) {
+    let subtypes: Vec<String> = match layout {
+        LayoutKind::Adventure => vec!["Adventure".to_string()],
+        LayoutKind::Omen => vec!["Omen".to_string()],
+        _ => vec![],
+    };
+    let abilities =
+        parse_oracle_text(text, name, &[], &["Instant".to_string()], &subtypes).abilities;
+    let object = state.objects.get_mut(&object_id).unwrap();
+    let mut face = snapshot_object_face(object);
+    face.name = name.to_string();
+    face.power = None;
+    face.toughness = None;
+    face.card_types = CardType {
+        supertypes: vec![],
+        core_types: vec![CoreType::Instant],
+        subtypes,
+    };
+    face.color = derive_colors_from_mana_cost(&mana_cost);
+    face.mana_cost = mana_cost;
+    face.keywords = vec![];
+    face.abilities = abilities;
+    face.trigger_definitions = Default::default();
+    face.layout_kind = Some(layout);
+    object.back_face = Some(face);
+}
+
+/// A cast is read by every face it can put on the stack, and a prepared copy by the source's second
+/// face (CR 722.3c). The fronts have no spell ability, so a row's reading can only come from that
+/// face. Each face's Oracle text is verbatim.
+#[test]
+fn held_line_reads_every_face_a_cast_can_put_on_the_stack() {
+    use HeldLine::{Irreproducible, Reproducible};
+    use LayoutKind::{Adventure, Omen, Prepare};
+    const MEND_THE_WILDS: &str = "Put target permanent card from your graveyard on top of your library. (Then exile this card. You may cast the creature later from exile.)";
+    #[rustfmt::skip]
+    let rows = [
+        // An Adventure that puts a card on top, and one that mills: passing can't reach either.
+        ("Mend the Wilds", MEND_THE_WILDS, Adventure, Phase::Upkeep, Irreproducible),
+        ("Free the Fae", "Mill four cards. Then put an instant, sorcery, or Faerie card from among the milled cards into your hand.", Adventure, Phase::Upkeep, Irreproducible),
+        // CR 722.3c: a prepared copy's face, off a permanent, and through its own action.
+        ("Bind to Life", "Mill seven cards. Then put a creature card from among them onto the battlefield.", Prepare, Phase::Upkeep, Irreproducible),
+        // CR 720.3d: the shuffle alone: this resolution leaves the library alone.
+        ("Absorb Essence", "Target creature gets +2/+2 and gains lifelink and hexproof until end of turn. (Then shuffle this card into its owner's library.)", Omen, Phase::Upkeep, Irreproducible),
+        // A second face that leaves the draw alone doesn't bar.
+        ("Stomp", "Damage can't be prevented this turn. Stomp deals 2 damage to any target.", Adventure, Phase::Upkeep, Reproducible),
+        // CR 504.2: from the draw step the draw is behind.
+        ("Mend the Wilds", MEND_THE_WILDS, Adventure, Phase::Draw, Reproducible),
+    ];
+    for (name, text, layout, phase, expected) in rows {
+        let mut board = build_board(phase, 20, 20);
+        let zone = if layout == Prepare {
+            Zone::Battlefield
+        } else {
+            Zone::Hand
+        };
+        let card_id = CardId(9_800);
+        let object_id = create_object(&mut board.state, card_id, AI, "Front".to_string(), zone);
+        board
+            .state
+            .objects
+            .get_mut(&object_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let cost = ManaCost::generic(1);
+        add_instant_face(&mut board.state, object_id, name, text, layout, cost);
+        let object = board.state.objects.get_mut(&object_id).unwrap();
+        assert!(
+            object.back_face.as_ref().is_some_and(|face| face
+                .abilities
+                .iter()
+                .any(|ability| ability.kind == AbilityKind::Spell)),
+            "{name}: reach: the face has a resolution to read"
+        );
+        let cast = if layout == Prepare {
+            object.prepared = Some(PreparedState);
+            GameAction::CastPreparedCopy { source: object_id }
+        } else {
+            GameAction::CastSpell {
+                object_id,
+                card_id,
+                targets: vec![],
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+            }
+        };
+        assert_eq!(
+            held_line(&board.state, AI, &cast),
+            expected,
+            "{name}, {phase:?}"
+        );
+    }
 }
 
 /// `root_held_line` reads what the main phase loses from an activation that isn't held, whatever
