@@ -998,6 +998,7 @@ pub enum GameEvent {
     PhaseChanged {
         phase: Phase,
     },
+    /// `player_id` is the player who now receives priority, not the passer.
     PriorityPassed {
         player_id: PlayerId,
     },
