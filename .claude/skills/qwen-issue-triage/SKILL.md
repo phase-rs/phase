@@ -87,7 +87,13 @@ jq -c --arg n "Card Name" 'first(.cards[] | select(.card_name == $n)) | {oracle_
 
 The name is case-sensitive. If nothing comes back, try without apostrophes, the front face of a double-faced card, or the obvious typo fix. If you still can't find it, say so in `notes`; a card missing from the data is worth knowing about in itself.
 
-Quote card text from this file, not from the issue or from memory. Reports regularly paraphrase or misremember the card, and an issue filed against the wrong text sends the fixer after the wrong behavior.
+Quote card text from card data, not from the issue or from memory. Reports regularly paraphrase or misremember the card, and an issue filed against the wrong text sends the fixer after the wrong behavior. If you have a locally generated `client/public/card-data.json` (developer setups do; it's gitignored and built by the card-data pipeline), quote from that, since it's the repo's authoritative copy:
+
+```bash
+jq -r --arg n "card name in lowercase" '.[$n].oracle_text' client/public/card-data.json
+```
+
+Otherwise quote `oracle_text` from the coverage file. The two agree for almost every card; they differ only when one was built before an Oracle text update. Record which one you used in `oracle_source`.
 
 Then work out which clause the report is about. `parse_details` lists each ability with its `source_text`, a `supported` flag, a `label`, and `details` and `children` describing what the parser built. Pick the one clause the complaint matches and set the classifier verdict:
 
@@ -113,10 +119,11 @@ For issues without a card, search two or three distinctive words from the defect
 One JSON object per line in `triage/qwen/proposals.jsonl`:
 
 ```json
-{"number": 10529, "title": "Game log names the wrong player on \"passes priority\"", "kind": "engine-bug", "cards": [], "labels_add": ["status:confirmed", "area:engine", "priority:p4-ui-polish", "bug"], "labels_remove": [], "classifier": null, "duplicate_of": [], "needs_info": null, "summary": "PriorityPassed carries the player receiving priority, so the log credits each pass to the wrong player.", "root_cause": "PriorityPassed event payload holds the next player, and log.rs renders it as the passer.", "confidence": "high", "notes": ""}
+{"number": 10529, "title": "Game log names the wrong player on \"passes priority\"", "kind": "engine-bug", "cards": [], "oracle_source": null, "labels_add": ["status:confirmed", "area:engine", "priority:p4-ui-polish", "bug"], "labels_remove": [], "classifier": null, "duplicate_of": [], "needs_info": null, "summary": "PriorityPassed carries the player receiving priority, so the log credits each pass to the wrong player.", "root_cause": "PriorityPassed event payload holds the next player, and log.rs renders it as the passer.", "confidence": "high", "notes": ""}
 ```
 
 - `kind`: one of `card-bug`, `engine-bug`, `ui-bug`, `ai-bug`, `multiplayer-bug`, `deckbuilder-bug`, `tooling`, `docs`, `feature-request`, `proposal`, `not-a-bug`.
+- `oracle_source`: `"card-data.json"` or `"coverage-data.json"` when you quoted card text, otherwise `null`.
 - `classifier`: `null`, or `{"verdict": "...", "matched_clause": "<source_text from coverage data>", "supported": true, "reasoning": "..."}`.
 - `duplicate_of`: `[{"number": 123, "confidence": "high|medium|low", "why": "..."}]`.
 - `summary`: the defect in one line, not a restatement of the title.
@@ -127,11 +134,12 @@ One JSON object per line in `triage/qwen/proposals.jsonl`:
 
 Clustering runs over everything in `triage/qwen/proposals.jsonl`, not just this batch, so clusters improve as more issues are triaged. Run it at the end of every batch, or on its own with `cluster`.
 
-Start by loading the clusters that already exist. They're open issues labeled `collector`, titled `Cluster: <theme> (<scope>)`:
+Start by loading the clusters that already exist. They're open issues labeled `collector`, titled `Cluster: <theme> (<scope>)`, with their member issues attached as GitHub sub-issues. This fetches each tracker with the issue numbers already attached to it:
 
 ```bash
-gh issue list --repo phase-rs/phase --state open --label collector --limit 50 --json number,title,body \
-  | jq -c '.[] | .body |= .[0:800]' > triage/qwen/trackers.jsonl
+gh api graphql -f query='{ repository(owner: "phase-rs", name: "phase") { issues(first: 50, states: OPEN, labels: ["collector"]) { nodes { number title body subIssues(first: 100) { nodes { number } } } } } }' \
+  --jq '.data.repository.issues.nodes[] | {number, title, body: .body[0:800], attached: [.subIssues.nodes[].number]}' \
+  > triage/qwen/trackers.jsonl
 ```
 
 Then group the proposals:
@@ -148,12 +156,12 @@ Write two files, replacing the previous versions:
 `triage/qwen/clusters.json`, an array of objects like this one (the issue numbers are made up):
 
 ```json
-{"title": "Cluster: copy effects drop cast-time choices (Nov 2026 triage)", "existing_tracker": null, "members": [101, 102, 103], "rationale": "All three copy a spell whose modes or X were chosen on cast, and the copy resolves with defaults. One fix in how copies inherit the original's choices covers them.", "order": "103 first; it has the simplest reproduction.", "confidence": "medium", "confirm_by": "Check whether copies read the original stack object's chosen modes."}
+{"title": "Cluster: copy effects drop cast-time choices (Nov 2026 triage)", "existing_tracker": null, "members": [101, 102, 103], "new_members": [101, 102, 103], "rationale": "All three copy a spell whose modes or X were chosen on cast, and the copy resolves with defaults. One fix in how copies inherit the original's choices covers them.", "order": "103 first; it has the simplest reproduction.", "confidence": "medium", "confirm_by": "Check whether copies read the original stack object's chosen modes."}
 ```
 
-Set `existing_tracker` to the tracker's issue number when you're proposing to attach members to it, and `null` for a new cluster.
+Set `existing_tracker` to the tracker's issue number when you're proposing to attach members to it, and `null` for a new cluster. `members` is every issue in the cluster. `new_members` is the ones that still need attaching: for an existing tracker, leave out anything already in its `attached` list; for a new cluster, it's the same as `members`.
 
-`triage/qwen/clusters.md`, the same clusters for a person to read: one `##` heading per cluster, the rationale, the member issues with their one-line summaries, and the existing tracker if there is one. End with a short `## Related pairs` list and a `## Unclustered` count.
+`triage/qwen/clusters.md`, the same clusters for a person to read: one `##` heading per cluster, the rationale, the member issues with their one-line summaries (mark the ones in `new_members`), and the existing tracker if there is one. End with a short `## Related pairs` list and a `## Unclustered` count.
 
 ## Step 4: Finish the run
 
@@ -215,8 +223,11 @@ jq -r 'select(.confidence != "low")
     + ([.labels_remove[] | " --remove-label \(@sh)"] | add // "")' triage/qwen/proposals.jsonl
 ```
 
-Attaching a member to a tracker uses the sub-issues API, which takes the issue's REST id rather than its number:
+Attaching members to a tracker uses the sub-issues API, which takes the issue's REST id rather than its number. This prints the commands for every `new_members` entry of clusters that target an existing tracker:
 
 ```bash
-gh api -X POST repos/phase-rs/phase/issues/<tracker>/sub_issues -F sub_issue_id="$(gh api repos/phase-rs/phase/issues/<member> --jq .id)"
+jq -r '.[] | select(.existing_tracker != null) | .existing_tracker as $t | .new_members[]
+  | "gh api -X POST repos/phase-rs/phase/issues/\($t)/sub_issues -F sub_issue_id=\"$(gh api repos/phase-rs/phase/issues/\(.) --jq .id)\""' triage/qwen/clusters.json
 ```
+
+New clusters need their tracker issue created first (`gh issue create --label collector`), then the same command with the new tracker's number.
