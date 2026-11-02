@@ -77,19 +77,21 @@ pub fn has_keyword_kind(obj: &GameObject, kind: KeywordKind) -> bool {
     obj.keywords.iter().any(|keyword| keyword.kind() == kind)
 }
 
-/// CR 702.5a: the object's own enchant restriction — the filter of its
-/// `Enchant [object or player]` keyword — or `None` when it has none.
+/// CR 702.5a + CR 702.5c: the object's own enchant restrictions — the filter of
+/// each `Enchant [object or player]` keyword it has. CR 702.5c: with multiple
+/// instances, all of them apply, so a host is legal only when it matches every
+/// filter this yields (empty when the object has no enchant ability).
 ///
 /// Object-scoped, with the same battlefield caveat as [`has_keyword`]: it reads
 /// the keywords of the object the caller holds. Attachment legality holds either
 /// a battlefield permanent or a CR 614.12 entry projection whose characteristics
 /// (including a token's intrinsic Enchant, CR 111.3) are already materialized;
 /// both answer from their own keyword list.
-pub(crate) fn enchant_restriction(
+pub(crate) fn enchant_restrictions(
     obj: &GameObject,
-) -> Option<&crate::types::ability::TargetFilter> {
+) -> impl Iterator<Item = &crate::types::ability::TargetFilter> {
     // allow-raw-authority: this IS the object-scoped Enchant-payload authority
-    obj.keywords.iter().find_map(|keyword| match keyword {
+    obj.keywords.iter().filter_map(|keyword| match keyword {
         Keyword::Enchant(filter) => Some(filter),
         _ => None,
     })

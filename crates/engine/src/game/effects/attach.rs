@@ -1933,8 +1933,9 @@ pub(crate) fn can_attach_to_player_with_authority(
 /// CR 702.5a + CR 303.4: does the attachment's own enchant restriction admit
 /// `target_player`, per the supplied authority?
 ///
-/// An Aura that enchants a player must carry an `Enchant` restriction whose
-/// filter the player satisfies; one that carries none has no stated player
+/// An Aura that enchants a player must carry an `Enchant` restriction, and the
+/// player must satisfy every one it carries (CR 702.5c); one that carries none
+/// has no stated player
 /// restriction and so cannot be attached to a player at all. The restriction is
 /// read from the authority's keywords, so a token's intrinsic `Enchant` has to
 /// be part of its materialized characteristics (see
@@ -1952,16 +1953,21 @@ fn enchant_restriction_admits_player(
     let Some(attachment) = attachment else {
         return true;
     };
-    let Some(enchant_filter) = crate::game::keywords::enchant_restriction(attachment) else {
+    // CR 702.5c: every enchant instance applies; with none, the Aura states no
+    // player restriction and cannot enchant a player at all.
+    let mut restrictions = crate::game::keywords::enchant_restrictions(attachment).peekable();
+    if restrictions.peek().is_none() {
         return false;
-    };
-    crate::game::filter::player_matches_target_filter_in_state(
-        state,
-        enchant_filter,
-        target_player,
-        Some(attachment.controller),
-        Some(attachment_id),
-    )
+    }
+    restrictions.all(|enchant_filter| {
+        crate::game::filter::player_matches_target_filter_in_state(
+            state,
+            enchant_filter,
+            target_player,
+            Some(attachment.controller),
+            Some(attachment_id),
+        )
+    })
 }
 
 /// CR 303.4 + CR 303.4i + CR 702.5a + CR 702.16c: may the attachment, per the
@@ -2022,14 +2028,13 @@ pub(crate) fn attach_to_with_authority_and_events(
             }
         }
         AttachmentAuthority::Projected(projection) => {
-            if let Some(enchant_filter) = crate::game::keywords::enchant_restriction(projection) {
-                let ctx = FilterContext::from_source_with_controller(
-                    attachment_id,
-                    projection.controller,
-                );
-                if !matches_target_filter(state, target_id, enchant_filter, &ctx) {
-                    return false;
-                }
+            // CR 702.5c: the host must match every enchant instance.
+            let ctx =
+                FilterContext::from_source_with_controller(attachment_id, projection.controller);
+            if !crate::game::keywords::enchant_restrictions(projection)
+                .all(|enchant_filter| matches_target_filter(state, target_id, enchant_filter, &ctx))
+            {
+                return false;
             }
         }
     }

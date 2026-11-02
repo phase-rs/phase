@@ -1133,6 +1133,11 @@ pub enum StaticMode {
     /// - `AllPlayers`: blanket Shroud (CR 702.18a).
     /// - `Opponents`: opponents of the static ability source's controller (CR 109.5).
     CantBeTargeted {
+        // The default only fills a missing `who` inside the struct form
+        // (`{"CantBeTargeted": {}}`). `StaticMode` is externally tagged, so the
+        // former unit form (bare `"CantBeTargeted"`) does NOT deserialize into
+        // this variant; that break is carried by the protocol bump and the
+        // regenerated card data, not by this default.
         #[serde(default = "default_prohibition_all_players")]
         who: ProhibitionScope,
     },

@@ -27,6 +27,13 @@ const BRAMBLE_ELEMENTAL: &str =
 
 const SHIELDING_PLAX: &str = "Enchant creature\nWhen this Aura enters, draw a card.\nEnchanted creature can't be the target of spells or abilities your opponents control.";
 
+/// Synthetic grammar fixture, not a printed card. No printed Aura has the
+/// compound "gets +N/+N and can't be the target of spells or abilities your
+/// opponents control" shape: per Scryfall the only Auras with this restriction
+/// are Shielding Plax and Canopy Cover, each stating it as its own sentence (so
+/// they parse to the direct `CantBeTargeted` static, not this compound
+/// continuous grant). The nearest printed compound is the kicked Vines of
+/// Vastwood, a spell (see `vines_of_vastwood_scopes_opponents_from_its_caster`).
 const COMPOUND_AURA: &str = "Enchant creature\nEnchanted creature gets +1/+1 and can't be the target of spells or abilities your opponents control.";
 
 const ENORMOUS_ENERGY_BLADE: &str = "Equipped creature gets +4/+0.\nWhenever this Equipment becomes attached to a creature, tap that creature.\nEquip {0}";
@@ -1085,8 +1092,11 @@ fn copy_enchantment_aura_no_legal_host_does_not_attach() {
 }
 
 /// CR 611.3a + CR 109.5: synthetic accepted-grammar discriminator, not a
-/// printed-card claim. An attached targeting prohibition follows the Aura
-/// controller's live Island condition through production targeting and bounce.
+/// printed-card claim. No printed card has a conditional ("as long as ...")
+/// opponent-scoped targeting restriction; the nearest printed cards are the
+/// unconditional Shielding Plax and Canopy Cover. An attached targeting
+/// prohibition follows the Aura controller's live Island condition through
+/// production targeting and bounce.
 #[test]
 fn gated_attached_targeting_allows_after_the_condition_ceases() {
     let mut scenario = GameScenario::new();
@@ -1173,5 +1183,99 @@ fn gated_attached_targeting_allows_after_the_condition_ceases() {
     assert!(
         runner.state().objects[&protected].tapped,
         "the same opponent spell must resolve on the host after the gate ceases"
+    );
+}
+
+/// Vines of Vastwood (verified Scryfall Oracle): "Target creature can't be the
+/// target of spells or abilities your opponents control this turn."
+///
+/// CR 109.5: "your" refers to the controller of the spell that created the
+/// effect. When P0 casts Vines on P1's creature, the restriction is granted onto
+/// that creature, but it still prohibits P0's opponents (P1), not the creature
+/// controller's opponents (P0): P1 can't target its own creature, while P0 can.
+#[test]
+fn vines_of_vastwood_scopes_opponents_from_its_caster() {
+    const VINES_OF_VASTWOOD: &str = "Kicker {G}
+Target creature can't be the target of spells or abilities your opponents control this turn. If this spell was kicked, that creature gets +4/+4 until end of turn.";
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let p1_creature = scenario.add_creature(P1, "Opposing Bear", 2, 2).id();
+    // Two untouched bystanders keep P1's target prompt interactive (a lone legal
+    // assignment is auto-selected before the prompt).
+    let bystander = scenario.add_creature(P1, "Bystander Bear", 2, 2).id();
+    let second_bystander = scenario.add_creature(P1, "Second Bystander", 2, 2).id();
+    let vines = scenario
+        .add_spell_to_hand(P0, "Vines of Vastwood", true)
+        .with_mana_cost(ManaCost::generic(0))
+        .from_oracle_text(VINES_OF_VASTWOOD)
+        .id();
+    let p0_tap = scenario
+        .add_spell_to_hand(P0, "Caster Tap Probe", true)
+        .with_mana_cost(ManaCost::generic(0))
+        .from_oracle_text("Tap target creature.")
+        .id();
+    let p1_tap = scenario
+        .add_spell_to_hand(P1, "Controller Tap Probe", true)
+        .with_mana_cost(ManaCost::generic(0))
+        .from_oracle_text("Tap target creature.")
+        .id();
+    let mut runner = scenario.build();
+
+    runner.cast(vines).target_object(p1_creature).resolve();
+
+    // The grant reached the creature anchored to the casting player.
+    assert!(
+        runner.state().objects[&p1_creature]
+            .static_definitions
+            .iter_unchecked()
+            .any(|def| matches!(
+                def.mode,
+                StaticMode::CantBeTargeted {
+                    who: ProhibitionScope::Opponents
+                }
+            ) && def.source_controller == Some(P0)),
+        "Vines must graft an opponent-scoped CantBeTargeted anchored to its caster"
+    );
+
+    // P1, the creature's controller and Vines' caster's opponent, can't target it.
+    runner.state_mut().active_player = P1;
+    runner.state_mut().priority_player = P1;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+    runner
+        .act(GameAction::CastSpell {
+            object_id: p1_tap,
+            card_id: runner.state().objects[&p1_tap].card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .unwrap();
+    let WaitingFor::TargetSelection { target_slots, .. } = &runner.state().waiting_for else {
+        panic!("P1's spell must reach production target selection")
+    };
+    for sibling in [bystander, second_bystander] {
+        assert!(
+            target_slots[0]
+                .legal_targets
+                .contains(&TargetRef::Object(sibling)),
+            "nonempty sibling targets guard the negative"
+        );
+    }
+    assert!(
+        !target_slots[0]
+            .legal_targets
+            .contains(&TargetRef::Object(p1_creature)),
+        "P1 is an opponent of Vines' caster and must not be able to target the creature"
+    );
+    runner.act(GameAction::CancelCast).unwrap();
+
+    // P0, Vines' caster, is not prohibited and can target the opposing creature.
+    runner.state_mut().active_player = P0;
+    runner.state_mut().priority_player = P0;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
+    runner.cast(p0_tap).target_object(p1_creature).resolve();
+    assert!(
+        runner.state().objects[&p1_creature].tapped,
+        "Vines' caster must be able to target the creature it protected"
     );
 }

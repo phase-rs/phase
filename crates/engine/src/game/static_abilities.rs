@@ -427,6 +427,29 @@ pub(crate) fn prohibition_scope_matches_player(
     let Some(source_obj) = state.objects.get(&source_id) else {
         return false;
     };
+    prohibition_scope_matches_player_anchored(
+        scope,
+        player,
+        source_obj,
+        source_obj.controller,
+        state,
+    )
+}
+
+/// CR 109.5: [`prohibition_scope_matches_player`] with the static's controller
+/// supplied explicitly. "You"/"your" in a static ability refers to that
+/// ability's controller, which for a static granted onto another permanent
+/// (`AddStaticMode`, anchored via `StaticDefinition::source_controller`) is the
+/// granting source's controller, not the carrier's. `source_obj` is the object
+/// that carries the static; it still answers the attachment-relative
+/// `EnchantedCreatureController` scope.
+pub(crate) fn prohibition_scope_matches_player_anchored(
+    scope: &ProhibitionScope,
+    player: PlayerId,
+    source_obj: &crate::game::game_object::GameObject,
+    static_controller: PlayerId,
+    state: &GameState,
+) -> bool {
     match scope {
         // CR 102.2 / CR 102.3: "each opponent" is team-aware. In a multiplayer team
         // game (e.g. Two-Headed Giant) a player's opponents are only players NOT on
@@ -436,10 +459,10 @@ pub(crate) fn prohibition_scope_matches_player(
         // `is_opponent` reduces to `!=`, so 2-player and free-for-all behavior is
         // byte-identical. Mirrors the affected-filter fix in `static_filter_matches`.
         ProhibitionScope::Opponents => {
-            crate::game::players::is_opponent(state, source_obj.controller, player)
+            crate::game::players::is_opponent(state, static_controller, player)
         }
         ProhibitionScope::AllPlayers => true,
-        ProhibitionScope::Controller => player == source_obj.controller,
+        ProhibitionScope::Controller => player == static_controller,
         // CR 303.4e: For an Aura attached to an object ("enchanted creature's
         // controller"), the prohibition scopes to that object's current
         // controller. For an Aura attached directly to a player (CR 303.4 +

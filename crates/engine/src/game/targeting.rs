@@ -3834,8 +3834,9 @@ fn can_target_off_battlefield(
 /// A static whose `affected` filter names some other object (Shielding Plax's
 /// "enchanted creature") does not protect its own source; it applies to `obj`
 /// only when `obj` matches that filter and the static's condition holds. `who`
-/// is scoped from the static's controller, which for an ability of `obj` is
-/// `obj`'s controller (CR 109.5). The one read of `obj`'s own targeting
+/// is scoped from the static's controller (CR 109.5): `obj`'s controller for a
+/// printed ability of `obj`, or the granting source's controller for one
+/// grafted onto it (`StaticDefinition::source_controller`). The one read of `obj`'s own targeting
 /// prohibition for both the permanent check ([`can_target_with_source_name`])
 /// and the off-battlefield check ([`can_target_off_battlefield`]).
 fn own_cant_be_targeted_prohibits(
@@ -3867,7 +3868,17 @@ fn own_cant_be_targeted_prohibits(
                 )
             }
         };
-        applies && is_prohibited_from_targeting(state, who, obj.controller, source_controller)
+        // CR 109.5: "your" is scoped from the static's controller — for a
+        // static granted onto `obj` (Vines of Vastwood) the granting source's
+        // controller, anchored at graft time, not `obj`'s.
+        applies
+            && super::static_abilities::prohibition_scope_matches_player_anchored(
+                who,
+                source_controller,
+                obj,
+                def.source_controller.unwrap_or(obj.controller),
+                state,
+            )
     })
 }
 
@@ -4110,28 +4121,6 @@ fn hexproof_filter_matches(
     }
 }
 
-/// CR 109.5 + CR 702.18a / CR 702.11b / CR 102.3: Determine whether `source_controller` is
-/// prohibited from targeting by a `ProhibitionScope` defined on a static ability.
-fn is_prohibited_from_targeting(
-    state: &GameState,
-    who: &crate::types::statics::ProhibitionScope,
-    static_controller: PlayerId,
-    source_controller: PlayerId,
-) -> bool {
-    match who {
-        crate::types::statics::ProhibitionScope::AllPlayers => true,
-        crate::types::statics::ProhibitionScope::Opponents => {
-            super::players::is_opponent(state, static_controller, source_controller)
-        }
-        crate::types::statics::ProhibitionScope::Controller => {
-            source_controller == static_controller
-        }
-        crate::types::statics::ProhibitionScope::EnchantedCreatureController => {
-            super::players::is_opponent(state, static_controller, source_controller)
-        }
-    }
-}
-
 /// Full battlefield targeting check: shroud + hexproof + protection (CR 702.16b).
 #[cfg(test)]
 fn can_target(
@@ -4232,11 +4221,12 @@ fn can_target_with_source_name(
                             target_id: Some(obj.id),
                             ..Default::default()
                         },
-                    ) && is_prohibited_from_targeting(
-                        state,
+                    ) && super::static_abilities::prohibition_scope_matches_player_anchored(
                         who,
-                        source_obj.controller,
                         source_controller,
+                        source_obj,
+                        def.source_controller.unwrap_or(source_obj.controller),
+                        state,
                     ) {
                         return false;
                     }
