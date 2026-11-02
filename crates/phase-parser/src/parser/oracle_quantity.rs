@@ -5368,10 +5368,37 @@ mod tests {
         }
     }
 
+    /// CR 205.4a + CR 604.3: the supertype qualifier stays in the CDA's
+    /// per-card filter, while the unqualified count keeps its existing shape.
+    #[test]
+    fn parse_cda_quantity_opponents_graveyards_nonbasic_land_qualifier() {
+        assert_eq!(
+            parse_cda_quantity("the number of nonbasic land cards in your opponents' graveyards"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::ZoneCardCount {
+                    zone: ZoneRef::Graveyard,
+                    card_types: vec![],
+                    scope: CountScope::Opponents,
+                    filter: Some(TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Land],
+                        controller: None,
+                        properties: vec![FilterProp::NotSupertype {
+                            value: crate::types::card_type::Supertype::Basic,
+                        }],
+                    })),
+                },
+            })
+        );
+        assert_eq!(
+            parse_cda_quantity("the number of cards in your opponents' graveyards"),
+            Some(opponents_graveyard_zone_count())
+        );
+    }
+
     /// CR 614.1c + CR 122.6: an enters-with amount the parser cannot read must
     /// fail closed. The shared nom grammar requires full consumption, so an
-    /// extremum head, a supertype qualifier, or a trailing relative clause must
-    /// decline the whole phrase rather than leave a truncated zone count.
+    /// extremum head or a trailing relative clause must decline the whole
+    /// phrase rather than leave a truncated zone count.
     #[test]
     fn parse_cda_quantity_opponents_graveyards_extended_text_fails_closed() {
         // Positive reach guard: the unextended phrase is still read.
@@ -5382,7 +5409,6 @@ mod tests {
         for phrase in [
             "the greatest number of cards an opponent has drawn this turn among cards in your opponents' graveyards",
             "the greatest number of cards an opponent has drawn this turn among cards in opponents' graveyards",
-            "the number of nonbasic land cards in your opponents' graveyards",
             "the number of cards in your opponents' graveyards that were put there from the battlefield this turn",
         ] {
             assert_eq!(parse_cda_quantity(phrase), None, "{phrase}");

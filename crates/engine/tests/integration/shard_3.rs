@@ -343,6 +343,7 @@ mod issue_10088_opponents_graveyard_whole_phrase;
 mod issue_1008_korvold_sacrifice_triggers;
 mod issue_1010_magus_lucea_kane;
 mod issue_1011_vexing_puzzlebox_roll;
+mod issue_10130_detritivore_nonbasic_graveyard_count;
 mod issue_1016_peregrin_took_food_token;
 mod issue_1017_ring_tempts_you;
 mod issue_1018_manifest_dread_choice;
