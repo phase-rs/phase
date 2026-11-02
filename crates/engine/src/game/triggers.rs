@@ -649,6 +649,15 @@ enum TriggerCollectionOperation {
     },
 }
 
+/// CR 603.2c: whether a collection session admits "one or more" (batched)
+/// candidates. A parked partial entry batch must not admit them: they are left
+/// to the settled scan so one batch never fires across successive answers.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BatchedCandidatePolicy {
+    Admit,
+    DeferUntilSettled,
+}
+
 /// Applies trigger-collection mutations in their collection order.
 ///
 /// This session intentionally owns no game-state borrow. Ordinary collection
@@ -658,7 +667,7 @@ enum TriggerCollectionOperation {
 struct TriggerCollectionSession {
     overlay: TriggerCollectionOverlay,
     operation_journal: Option<Vec<TriggerCollectionOperation>>,
-    skip_batched: bool,
+    batched_candidates: BatchedCandidatePolicy,
     /// How many matched triggers this session admitted (`record_match`),
     /// counted before any context is pruned as an auto-inert no-op.
     admitted_matches: usize,
@@ -673,7 +682,7 @@ impl TriggerCollectionSession {
         Self {
             overlay,
             operation_journal: None,
-            skip_batched: false,
+            batched_candidates: BatchedCandidatePolicy::Admit,
             admitted_matches: 0,
             bulk_member_sources: None,
         }
@@ -687,7 +696,7 @@ impl TriggerCollectionSession {
         Self {
             overlay,
             operation_journal: Some(operation_journal),
-            skip_batched: false,
+            batched_candidates: BatchedCandidatePolicy::Admit,
             admitted_matches: 0,
             bulk_member_sources: None,
         }
@@ -722,7 +731,7 @@ impl TriggerCollectionSession {
     ) -> bool {
         // CR 603.2c: a parked partial entry batch must not spend firing limits
         // or record replay witnesses for triggers left to the settled scan.
-        if self.skip_batched && matched.batched {
+        if self.batched_candidates == BatchedCandidatePolicy::DeferUntilSettled && matched.batched {
             return false;
         }
         if !matched_trigger_constraint_allows_admission(state, matched, event) {
@@ -5921,7 +5930,10 @@ fn collect_pending_triggers_with_collection(
                     for m in matched {
                         // Mirror session eligibility without recording firing limits
                         // or replay witnesses for the deferred batched candidate.
-                        if session.skip_batched && m.batched {
+                        if session.batched_candidates
+                            == BatchedCandidatePolicy::DeferUntilSettled
+                            && m.batched
+                        {
                             continue;
                         }
                         shadow_matched.insert((obj_id, m.trig_idx));
@@ -9456,7 +9468,13 @@ pub(crate) fn park_observer_triggers_if_paused(
     events: &mut Vec<GameEvent>,
     slice_start: usize,
 ) {
-    park_observer_triggers_if_paused_matching(state, events, slice_start, false, |_| true);
+    park_observer_triggers_if_paused_matching(
+        state,
+        events,
+        slice_start,
+        BatchedCandidatePolicy::Admit,
+        |_| true,
+    );
 }
 
 /// CR 603.2 + CR 603.6a + CR 616.1f: Preserve observers of completed battlefield
@@ -9473,22 +9491,28 @@ pub(crate) fn park_entry_observer_triggers_if_paused(
     events: &mut Vec<GameEvent>,
     slice_start: usize,
 ) {
-    park_observer_triggers_if_paused_matching(state, events, slice_start, true, |event| {
-        matches!(
-            event,
-            GameEvent::ZoneChanged {
-                to: Zone::Battlefield,
-                ..
-            }
-        )
-    });
+    park_observer_triggers_if_paused_matching(
+        state,
+        events,
+        slice_start,
+        BatchedCandidatePolicy::DeferUntilSettled,
+        |event| {
+            matches!(
+                event,
+                GameEvent::ZoneChanged {
+                    to: Zone::Battlefield,
+                    ..
+                }
+            )
+        },
+    );
 }
 
 fn park_observer_triggers_if_paused_matching(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     slice_start: usize,
-    skip_batched: bool,
+    batched_candidates: BatchedCandidatePolicy,
     keep: impl Fn(&GameEvent) -> bool,
 ) {
     if triggered_mana_sidecar_owns_local_collection(state) {
@@ -9518,7 +9542,7 @@ fn park_observer_triggers_if_paused_matching(
     let trigger_events = paused_observer_trigger_events(state, candidates);
     if !trigger_events.is_empty() {
         let mut session = TriggerCollectionSession {
-            skip_batched,
+            batched_candidates,
             ..TriggerCollectionSession::new(TriggerCollectionOverlay::default())
         };
         let mut contexts = collect_pending_triggers_with_collection(
@@ -9527,7 +9551,7 @@ fn park_observer_triggers_if_paused_matching(
             LogicalZoneTriggerCollection::Ordinary,
             &mut session,
         );
-        if skip_batched {
+        if batched_candidates == BatchedCandidatePolicy::DeferUntilSettled {
             contexts.retain(|ctx| {
                 !ctx.pending
                     .ability
