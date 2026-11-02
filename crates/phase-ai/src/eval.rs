@@ -827,7 +827,8 @@ pub fn board_stats(state: &GameState, player: PlayerId) -> BoardStats {
 /// `policies::landfall_timing` live. Those policies hold that regime; this offset
 /// does not reach it.
 ///
-/// - **REACHED — ward-cost sacrifice, and only that.**
+/// - **REACHED — ward-cost sacrifice, and the damage-recipient choice recorded
+///   under `ChooseObjectsSelection` below.**
 ///   `WaitingFor::WardSacrificeChoice` (CR 702.21a, "choose a permanent to
 ///   sacrifice as ward cost payment") emits one candidate per permanent in its
 ///   single-permanent form (`engine::ai_support::candidates`).
@@ -853,18 +854,26 @@ pub fn board_stats(state: &GameState, player: PlayerId) -> BoardStats {
 ///   by `sacrifice_key`, not by this offset, and changing this coefficient
 ///   cannot move it. Only the residue that the arm's guard excludes —
 ///   `up_to` (optional) sacrifices and `count == 0` — falls through to scoring.
-/// - **NOT REACHED — `WaitingFor::ChooseObjectsSelection`.** Recorded explicitly
-///   because an earlier revision of this very block cited it as the primary
-///   reached class, and it is not one. Per its own variant doc in
-///   `types::game_state`, it is the `ChooseObjectsIntoTrackedSet` selection: it
-///   *references* battlefield permanents into a tracked set for a downstream
-///   `PayCost { ScaledMana }` / `IfYouDo` / `Untap`.
-///   **The permanents are not given up.** Its candidates do reach
+/// - **`WaitingFor::ChooseObjectsSelection` — NOT REACHED for the tracked-set
+///   selection, REACHED for the damage-recipient choice.** Two kinds of selection share the
+///   prompt (its variant doc in `types::game_state`). Recorded explicitly because
+///   an earlier revision of this very block cited it as the primary reached
+///   class, and the first kind is not one: the `ChooseObjectsIntoTrackedSet`
+///   selection *references* battlefield permanents into a tracked set for a
+///   downstream `PayCost { ScaledMana }` / `IfYouDo` / `Untap`.
+///   **Those permanents are not given up.** Its candidates do reach
 ///   scoring, but every one of them leaves the board population identical, so
 ///   `BoardStats::mana_sources` is equal across them and this offset cannot
 ///   discriminate. (`Untap` downstream does not change that: the count is a
 ///   development measure that ignores tapped state — see
 ///   `zone_eval::is_intrinsic_mana_source`.)
+///   The other kind is an untargeted damage recipient ("deals N damage to a
+///   creature or player", CR 115.10a + CR 608.2d): its candidates are the
+///   creatures and players the damage may hit, they likewise reach scoring, and
+///   the damage is applied inside each scored candidate. So a pair of them
+///   differs by one `BoardStats::mana_sources` whenever the damage kills a mana
+///   source on one side — a creature of either player — which is where this
+///   offset discriminates.
 /// - **NOT REACHED — block assignment.** `score_candidates_core` intercepts
 ///   `WaitingFor::DeclareAttackers | DeclareBlockers` *after* `build_decision_context`
 ///   has already generated candidates, but *before* validation, gating, and
@@ -895,8 +904,8 @@ pub fn board_stats(state: &GameState, player: PlayerId) -> BoardStats {
 /// is a property of the **evaluation function**: of two states differing by
 /// which permanent left, the one that kept the dork scores higher. It becomes an
 /// observable *decision* only where a scored candidate pair actually differs by
-/// one source — per the routing, the ward-cost sacrifice and the optional
-/// (`up_to`) residue — **plus, now that the term is a differential, any pair
+/// one source — per the routing, the ward-cost sacrifice, the optional
+/// (`up_to`) residue and the damage-recipient choice — **plus, now that the term is a differential, any pair
 /// that differs in an *opponent's* source count (removal of an opponent's mana
 /// source, a countered ramp spell, an opponent's simulated land drop), and — in
 /// the `opponents.len() >= 2` branch only — any pair that differs merely in an

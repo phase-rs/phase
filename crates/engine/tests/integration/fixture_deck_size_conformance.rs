@@ -346,6 +346,9 @@ fn every_migrated_slot_in_a_committed_gz_carries_the_point_its_neighbour_names()
                 .flatten()
                 .filter(|tag| tag.parse::<usize>().is_err());
             let is_victim_slot = path.len() >= 3 && path[path.len() - 3] == "victim_slot";
+            let is_leading_aim = path.len() >= 3
+                && path[path.len() - 3] == "leading_aims"
+                && path.last() == Some(&"0");
 
             if is_published_point {
                 // A published point: its sibling `kind` names the choice.
@@ -404,6 +407,14 @@ fn every_migrated_slot_in_a_committed_gz_carries_the_point_its_neighbour_names()
                     ));
                 }
                 governing_kinds.push("victim_slot".to_owned());
+            } else if is_leading_aim {
+                match leading_aim_governing_kind(&at_named, &value, &slot) {
+                    Ok(kind) => {
+                        governing_kinds.push(format!("{:?}", std::mem::discriminant(&kind)));
+                        failures.extend(kind_governed_disagreement(&at_named, &slot, &kind));
+                    }
+                    Err(failure) => failures.push(failure),
+                }
             } else {
                 failures.push(format!(
                     "{at_named}: no governing neighbour — the carrier set is closed at the readback exactly as it is at the migration"
@@ -467,11 +478,50 @@ fn every_migrated_slot_in_a_committed_gz_carries_the_point_its_neighbour_names()
     assert!(
         order_slot_disagreement(
             "hostile",
-            &DecisionSlot::first(source, ChoicePoint::AnnouncedTarget),
+            &DecisionSlot::first(source.clone(), ChoicePoint::AnnouncedTarget),
         )
         .is_some(),
         "hostile/refused: an Order slot at a published point's choice must be reported"
     );
+
+    let aimed = DecisionSlot::first(source, ChoicePoint::AnnouncedTarget);
+    let point = serde_json::to_value(DecisionPoint {
+        slot: aimed.clone(),
+        kind: DecisionPointKind::MayChoice,
+    })
+    .expect("a DecisionPoint serializes");
+    let mut moved = aimed.clone();
+    moved.index = 1;
+    assert!(
+        leading_aim_governing_kind("hostile", &serde_json::json!([point]), &aimed).is_ok(),
+        "hostile/admitted: a leading aim at its one published slot is governed"
+    );
+    assert!(
+        leading_aim_governing_kind("hostile", &serde_json::json!([point]), &moved).is_err(),
+        "hostile/refused: a leading aim at no published slot must be reported"
+    );
+    assert!(
+        leading_aim_governing_kind("hostile", &serde_json::json!([point, point]), &aimed).is_err(),
+        "hostile/refused: a leading aim at a doubly published slot must be reported"
+    );
+}
+
+/// CR 603.3d + CR 601.2c: a `leading_aims` entry names a PUBLISHED target slot, so the one
+/// schema point at that slot is its governing neighbour.
+fn leading_aim_governing_kind(
+    at: &str,
+    document: &serde_json::Value,
+    slot: &DecisionSlot,
+) -> Result<engine::analysis::decision_template::DecisionPointKind, String> {
+    let mut answered = Vec::new();
+    collect_published_points(document, slot, &mut answered);
+    match <[_; 1]>::try_from(answered) {
+        Ok([kind]) => Ok(kind),
+        Err(other) => Err(format!(
+            "{at}: a leading_aims entry names {} published points at its slot, so no point governs it",
+            other.len()
+        )),
+    }
 }
 
 /// The `DecisionPointKind` `pin_answers_point` pairs each `PinnedDecision` variant with.

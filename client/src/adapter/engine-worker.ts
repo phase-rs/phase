@@ -10,9 +10,15 @@ import init, {
   initialize_game,
   initialize_multiplayer_host_game,
   submit_action,
+  drive_contest_js,
+  request_takeback_js,
+  respond_takeback_js,
+  cancel_takeback_js,
+  pending_takeback_js,
   submit_interaction_js,
   get_game_state,
   get_filtered_game_state,
+  set_debug_hand_reveal,
   get_ai_action_proposal,
   get_ai_action_proposal_with_diagnostics,
   get_ai_tactical_action_proposal,
@@ -56,8 +62,10 @@ import init, {
   get_card_rulings,
   canonicalCardNames,
 } from "@wasm/engine";
+import * as engineWasm from "@wasm/engine";
 
 import {
+  appliedSubmitResult,
   isActionOutcome,
   type ActionRejection,
   type AiActionProposal,
@@ -70,6 +78,7 @@ import type {
 } from "./generated/interaction";
 import type { BracketDeckRequest } from "../types/bracketEstimate";
 import { classifyInitFailure, type InitFailure } from "./init-envelope";
+import { ENGINE_QUERIES, runEngineQuery, type EngineQueryName } from "./engine-queries";
 
 // ── Message Protocol ─────────────────────────────────────────────────────
 
@@ -97,11 +106,24 @@ type EngineRequest =
       firstPlayer?: number;
     }
   | { type: "submitAction"; id: number; actor: number; action: GameAction }
+  | {
+      type: "driveContest";
+      id: number;
+      nowMs: number;
+      aiPlayers: number[];
+      awayPlayers: number[];
+      clicks: unknown[];
+    }
+  | { type: "requestTakeback"; id: number; actor: number; aiPlayers: number[] }
+  | { type: "respondTakeback"; id: number; actor: number; approve: boolean; aiPlayers: number[] }
+  | { type: "cancelTakeback"; id: number; actor: number }
+  | { type: "pendingTakeback"; id: number }
   | { type: "submitInteraction"; id: number; actor: number; submission: InteractionSubmission }
   | { type: "previewManaPayment"; id: number; actor: number; action: GameAction }
   | { type: "previewInteraction"; id: number; actor: number; request: InteractionPreviewRequest }
   | { type: "getState"; id: number }
   | { type: "getFilteredState"; id: number; viewerId: number }
+  | { type: "setDebugHandReveal"; id: number; enabled: boolean }
   | { type: "getLegalActions"; id: number; viewerId: number }
   | { type: "getSnapshot"; id: number; viewerId: number }
   | { type: "getLegalActionsForViewer"; id: number; viewerId: number }
@@ -147,6 +169,7 @@ type EngineRequest =
   | { type: "getCardParseDetails"; id: number; cardName: string }
   | { type: "getCardRulings"; id: number; cardName: string }
   | { type: "canonicalCardNames"; id: number; names: string[] }
+  | { type: "query"; id: number; name: EngineQueryName; args: unknown[] }
   | { type: "resetGame"; id: number }
   | { type: "setMultiplayerMode"; id: number; enabled: boolean }
   | { type: "ping"; id: number }
@@ -253,6 +276,7 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           );
         const text = await resp.text();
         const count = load_card_database(text);
+        if (count <= 0) throw new Error("Failed to load card-data.json (no cards loaded)");
         cardDbLoaded = true;
         result(msg.id, count);
         break;
@@ -325,6 +349,16 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
 
       case "canonicalCardNames": {
         result(msg.id, canonicalCardNames(msg.names));
+        break;
+      }
+
+      case "query": {
+        if (ENGINE_QUERIES[msg.name].needsCardDb && !cardDbLoaded) {
+          error(msg.id, "Card database not loaded. Call loadCardDb or loadCardDbFromUrl first.");
+          break;
+        }
+        // The client types `args` against `name`; the worker boundary carries them untyped.
+        result(msg.id, runEngineQuery(engineWasm, msg.name, msg.args as never));
         break;
       }
 
@@ -404,11 +438,45 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           rejectionError(msg.id, outcome.rejection);
           break;
         }
-        const actionResult = outcome.result as { events?: unknown[]; log_entries?: unknown[] };
-        result(msg.id, {
-          events: actionResult.events ?? [],
-          log_entries: actionResult.log_entries ?? [],
-        });
+        result(msg.id, appliedSubmitResult(outcome));
+        break;
+      }
+
+      case "driveContest": {
+        const outcome = drive_contest_js(
+          msg.nowMs,
+          Uint8Array.from(msg.aiPlayers),
+          Uint8Array.from(msg.awayPlayers),
+          msg.clicks,
+        );
+        if (typeof outcome === "string") {
+          error(msg.id, outcome);
+          break;
+        }
+        result(msg.id, outcome);
+        break;
+      }
+
+      case "requestTakeback": {
+        result(msg.id, request_takeback_js(msg.actor, Uint8Array.from(msg.aiPlayers)));
+        break;
+      }
+
+      case "respondTakeback": {
+        result(
+          msg.id,
+          respond_takeback_js(msg.actor, msg.approve, Uint8Array.from(msg.aiPlayers)),
+        );
+        break;
+      }
+
+      case "cancelTakeback": {
+        result(msg.id, cancel_takeback_js(msg.actor));
+        break;
+      }
+
+      case "pendingTakeback": {
+        result(msg.id, pending_takeback_js() ?? null);
         break;
       }
 
@@ -492,6 +560,12 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           break;
         }
         result(msg.id, state);
+        break;
+      }
+
+      case "setDebugHandReveal": {
+        set_debug_hand_reveal(msg.enabled);
+        result(msg.id, null);
         break;
       }
 

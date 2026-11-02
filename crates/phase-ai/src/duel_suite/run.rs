@@ -25,7 +25,7 @@ use rand::SeedableRng;
 use serde::{Deserialize, Serialize};
 use tracing_subscriber::layer::SubscriberExt;
 
-use crate::auto_play::run_ai_actions;
+use crate::auto_play::run_ai_actions_headless;
 use crate::config::{create_config_for_players, AiConfig, AiDifficulty, Platform};
 
 use super::attribution::{aggregate_events, CaptureLayer, MatchupAttribution};
@@ -973,7 +973,7 @@ pub(crate) fn drive_game_observed(
     let mut ai_rng = StdRng::seed_from_u64(seed);
     let ai_session = crate::session::AiSession::arc_from_game(&state);
     loop {
-        let results = run_ai_actions(
+        let results = run_ai_actions_headless(
             &mut state,
             &ai_players,
             &ai_configs,

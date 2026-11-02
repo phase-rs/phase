@@ -5,6 +5,8 @@ import type { ActionRejection, EngineAdapter, GameEvent, PersistedGameState } fr
 import { actionRejectionError, persistedGameStateView } from "../../adapter/types";
 import { saveAuthoritativeGame, saveAuthoritativeGameStrict } from "../../services/gamePersistence";
 import { useAppNotificationStore } from "../../stores/appToastStore";
+import { usePreferencesStore } from "../../stores/preferencesStore";
+import { useUiStore } from "../../stores/uiStore";
 import { buildEngineAdapterMock } from "../../test/factories/engineAdapterFactory";
 import {
   buildGameState,
@@ -198,6 +200,64 @@ describe("gameStore", () => {
     expect(store.gameState).toEqual(state2);
     expect(store.events).toEqual(events);
     expect(adapter.submitAction).toHaveBeenCalledWith({ type: "PassPriority" }, 0);
+  });
+
+  describe("activation payment preference", () => {
+    const activation = {
+      type: "ActivateAbility",
+      data: { source_id: 12, ability_index: 1 },
+    } as const;
+
+    beforeEach(() => {
+      act(() => {
+        usePreferencesStore.setState({ spellPaymentMode: "auto" });
+        useUiStore.setState({ manualManaOverride: false });
+      });
+    });
+
+    it("submits an activation under a saved manual preference as Manual", async () => {
+      const adapter = buildEngineAdapterMock(buildGameState());
+      await act(() => useGameStore.getState().initGame("test-id", adapter));
+      adapter.submitAction.mockResolvedValue({ events: [] });
+      act(() => usePreferencesStore.setState({ spellPaymentMode: "manual" }));
+
+      await act(() => useGameStore.getState().dispatch(activation));
+
+      expect(adapter.submitAction).toHaveBeenCalledWith(
+        {
+          type: "ActivateAbility",
+          data: { source_id: 12, ability_index: 1, payment_mode: { type: "Manual" } },
+        },
+        0,
+      );
+    });
+
+    it("submits an activation as Manual when only the per-game override is on", async () => {
+      const adapter = buildEngineAdapterMock(buildGameState());
+      await act(() => useGameStore.getState().initGame("test-id", adapter));
+      adapter.submitAction.mockResolvedValue({ events: [] });
+      act(() => useUiStore.setState({ manualManaOverride: true }));
+
+      await act(() => useGameStore.getState().dispatch(activation));
+
+      expect(adapter.submitAction).toHaveBeenCalledWith(
+        {
+          type: "ActivateAbility",
+          data: { source_id: 12, ability_index: 1, payment_mode: { type: "Manual" } },
+        },
+        0,
+      );
+    });
+
+    it("submits the offered activation unchanged under a saved auto preference", async () => {
+      const adapter = buildEngineAdapterMock(buildGameState());
+      await act(() => useGameStore.getState().initGame("test-id", adapter));
+      adapter.submitAction.mockResolvedValue({ events: [] });
+
+      await act(() => useGameStore.getState().dispatch(activation));
+
+      expect(adapter.submitAction).toHaveBeenCalledWith(activation, 0);
+    });
   });
 
   it("surfaces a direct structured rejection at the first rendered related object", async () => {

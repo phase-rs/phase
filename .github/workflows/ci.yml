@@ -8,6 +8,7 @@ on:
       - 'client/**'
       - 'lobby-worker/**'
       - 'scripts/**'
+      - 'protocol/**'
       - 'Cargo.*'
       - '.cargo/**'
       - 'Dockerfile'
@@ -35,7 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     # Clippy can consume the former 15-minute ceiling on a cold hosted cache;
     # retain a bounded job while leaving room for the remaining lint gates.
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
@@ -64,15 +65,20 @@ jobs:
       # every later cargo invocation silently rewrites the file, and Nightly
       # Release dies on `cargo release`'s dirty-tree check -- which is exactly
       # what #7556 did. `--locked` is already used for the Tauri manifest below.
+      # The first invocation checks the integration test binaries on their own so
+      # they never overlap the engine lib-test target (together they exceed the
+      # hosted runner's memory); the second is the full command and reuses them.
       - name: Clippy
-        run: cargo clippy --locked --workspace --exclude phase-tauri --all-targets --features engine/proptest -- -D warnings
+        run: |
+          cargo clippy --locked --workspace --exclude phase-tauri --test 'integration*' --features engine/proptest -- -D warnings
+          cargo clippy --locked --workspace --exclude phase-tauri --all-targets --features engine/proptest -- -D warnings
 
       - name: Interaction bindings are current
         run: ./scripts/check-interaction-bindings.sh --check
 
       - name: Parser combinator gate
         # Diff-based gate: new parser code must use nom combinators, not
-        # string-matching methods. See crates/engine/src/parser/oracle_nom/PATTERNS.md.
+        # string-matching methods. See crates/phase-parser/src/parser/oracle_nom/PATTERNS.md.
         run: |
           BASE="${{ github.event.pull_request.base.sha || github.event.before }}"
           if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
@@ -214,7 +220,7 @@ jobs:
   rust-test-build:
     name: Rust tests (build archive)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -299,7 +305,9 @@ jobs:
     name: Rust tests (shard ${{ matrix.shard }}/4)
     needs: rust-test-build
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Archive downloads can consume over 10 minutes before tests begin.
+    # Keep a bounded job with time for each shard to finish its tests.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -350,7 +358,11 @@ jobs:
   card-data-gate:
     name: Card data (generate, validate, coverage)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 30m overran on slow runners. A passing cardgen-cache miss takes 13–18.5m
+    # with the `tool` engine build at ~7m, but some runners take ~21m for that
+    # same build, which puts the whole job at ~31–32m. The ceiling only bills
+    # the failure case.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
@@ -405,6 +417,13 @@ jobs:
             mtgjson_download AtomicCards.json data/mtgjson/AtomicCards.json
           fi
 
+      - name: Derive card-data cache key
+        # Single authority for the `cardgen-` / `cardgen-gates-v1-` key hash,
+        # shared with the AI gate's card-data-cache action. Replaces hashFiles,
+        # which intermittently hung to its 120 s limit and failed this job.
+        id: cardgen-key
+        uses: ./.github/actions/cardgen-cache-key
+
       - name: Cache generated card data
         # Output of `oracle-gen` is deterministic given (MTGJSON input + engine
         # source). Hash both into the key; on hit, skip the ~30k-card pass.
@@ -412,27 +431,28 @@ jobs:
         # card-data into the validate/coverage gates downstream. Cargo.lock is
         # included so dep bumps that affect parsing (e.g. nom) invalidate.
         #
-        # `crates/engine/data/**` and `build.rs` are hashed because the engine
-        # lib compiles those files IN: oracle-subtypes.json via `include_str!`,
+        # `crates/phase-ast/data/**` and `build.rs` are hashed because the
+        # phase-ast lib (linked into the engine) compiles those files IN: oracle-subtypes.json via `include_str!`,
         # known-tokens.toml via build.rs → OUT_DIR embed. A PR touching only
         # those changes parser behaviour, so omitting them would serve stale
         # card-data from this cache and (via gates-cache below) skip the
-        # validate/coverage gates that would have caught it. hashFiles evaluates
-        # at step start against the clean checkout, so oracle-gen's later
+        # validate/coverage gates that would have caught it. The key hashes the
+        # git index (see cardgen-cache-key), so oracle-gen's later
         # write-if-changed rewrite of oracle-subtypes.json cannot feed back in.
         #
         # The AI gate's shared card-data-cache action intentionally uses the
-        # same `cardgen-` key expression, so main pushes can seed generated
+        # same `cardgen-` key (from the same cardgen-cache-key action), so main
+        # pushes can seed generated
         # entries that AI PR gates reuse. Both paths download AtomicCards.json
-        # before evaluating the key so the gitignored MTGJSON input participates
-        # in `hashFiles`.
+        # before deriving the key so the gitignored MTGJSON input participates
+        # in it.
         id: cardgen-cache
         uses: actions/cache@v4
         with:
           path: |
             data/card-data.json
             data/card-names.json
-          key: cardgen-${{ hashFiles('data/mtgjson/AtomicCards.json', 'crates/engine/src/**/*.rs', 'crates/engine/data/**', 'crates/engine/build.rs', 'crates/engine/Cargo.toml', 'Cargo.lock') }}
+          key: cardgen-${{ steps.cardgen-key.outputs.hash }}
 
       - name: Cache card-data gate results
         # Proof-of-passage cache for the two expensive steps that are pure
@@ -441,7 +461,7 @@ jobs:
         # succeeds (`post-if: success()` on the action's post step), so an entry
         # under this key is evidence that validate AND coverage passed for this
         # exact input set — which is what licenses skipping them on a hit.
-        # Key expression must stay identical to `cardgen-cache`'s above.
+        # Key hash must stay identical to `cardgen-cache`'s above.
         #
         # Deliberately a SEPARATE key from `cardgen-cache`, not a reuse of it.
         # A cardgen entry proves only that generation succeeded; it is not
@@ -457,7 +477,7 @@ jobs:
           path: |
             data/coverage-data.json
             data/coverage-summary.json
-          key: cardgen-gates-v1-${{ hashFiles('data/mtgjson/AtomicCards.json', 'crates/engine/src/**/*.rs', 'crates/engine/data/**', 'crates/engine/build.rs', 'crates/engine/Cargo.toml', 'Cargo.lock') }}
+          key: cardgen-gates-v1-${{ steps.cardgen-key.outputs.hash }}
 
       - name: Generate card data
         # All engine-backed tools in this job use the SAME (profile, features)
@@ -473,13 +493,13 @@ jobs:
         run: |
           test -s data/card-data.json
           test_name='gemstone_caverns_begin_game::gemstone_caverns_full_export_retains_luck_counter_mana_contract'
-          cargo test -p phase-engine --test integration "$test_name" -- --exact 2>&1 | tee /tmp/gemstone-export-guard.log
+          cargo test -p phase-engine --test integration_3 "$test_name" -- --exact 2>&1 | tee /tmp/gemstone-export-guard.log
           grep -F 'test result: ok. 1 passed' /tmp/gemstone-export-guard.log
 
       - name: Card export must not mutate the tracked parser vocabulary
         # Regression guard: the export is a PURE READ of the tracked tree.
         #
-        # It used to rewrite crates/engine/data/oracle-subtypes.json on every run,
+        # It used to rewrite crates/phase-ast/data/oracle-subtypes.json on every run,
         # from CardTypes.json ∪ the AtomicCards harvest — but this job downloads
         # only AtomicCards.json (see the mtgjson cache above), so CardTypes.json
         # was always absent and the regeneration silently fell back to the harvest
@@ -496,7 +516,7 @@ jobs:
         # Scoped to the same condition as the generate step so it is never
         # vacuous: it runs exactly when an export ran.
         if: steps.cardgen-cache.outputs.cache-hit != 'true'
-        run: git diff --exit-code -- crates/engine/data/oracle-subtypes.json
+        run: git diff --exit-code -- crates/phase-ast/data/oracle-subtypes.json
 
       - name: Validate card-data against engine schema
         # PR-time gate — the same parse the WASM does at runtime, run against
@@ -507,7 +527,7 @@ jobs:
         # passed. card-data.json is byte-identical either way, restored from
         # cardgen or regenerated above.
         # Same [tool, cli] fingerprint as card-gen above → engine cache hit. That
-        # hit is real because the export never writes to crates/engine/data: the
+        # hit is real because the export never writes to crates/phase-ast/data: the
         # engine lib pulls oracle-subtypes.json in via `include_str!`, so any
         # write would bump its mtime, dirty the crate's dep-info fingerprint, and
         # force a full engine recompile right here — against a vocabulary this job
@@ -1048,7 +1068,9 @@ jobs:
       # read the pinned client/Tauri/workflow/crate files, none of which need
       # client/node_modules.
       - name: Test
-        run: bun test scripts/card-bot
+        run: |
+          bun scripts/protocol-versions.mjs generate
+          bun test scripts/card-bot
 
   frontend:
     name: Frontend (lint, type-check, test)
@@ -1056,6 +1078,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: pnpm/action-setup@v4
         with:
@@ -1066,6 +1090,39 @@ jobs:
           node-version: 22
           cache: pnpm
           cache-dependency-path: client/pnpm-lock.yaml
+
+      - name: Protocol product tests
+        run: node --test scripts/protocol-versions.test.mjs scripts/engine-fingerprint.test.mjs
+
+      - name: Protocol integration history
+        env:
+          PROTOCOL_EVENT: ${{ github.event_name }}
+          PROTOCOL_PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PROTOCOL_MERGE_BASE: ${{ github.event.merge_group.base_sha }}
+          PROTOCOL_PUSH_BASE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          node scripts/protocol-versions.mjs generate
+          case "$PROTOCOL_EVENT" in
+            pull_request) base="$PROTOCOL_PR_BASE" ;;
+            merge_group) base="$PROTOCOL_MERGE_BASE" ;;
+            push) base="$PROTOCOL_PUSH_BASE" ;;
+            *) echo "Unsupported protocol event: $PROTOCOL_EVENT" >&2; exit 1 ;;
+          esac
+          if [[ "$PROTOCOL_EVENT" == push && "$base" == 0000000000000000000000000000000000000000 ]]; then
+            echo "Branch creation has no predecessor; checking protocol ownership without history"
+            node scripts/check-protocol-version.mjs
+          else
+            if [[ ! "$base" =~ ^[0-9a-fA-F]{40}$ || "$base" == 0000000000000000000000000000000000000000 ]]; then
+              echo "Invalid protocol base for $PROTOCOL_EVENT: $base" >&2
+              exit 1
+            fi
+            if ! git rev-parse --verify --end-of-options "$base^{commit}" >/dev/null 2>&1; then
+              git fetch --no-tags origin "$base"
+            fi
+            git rev-parse --verify --end-of-options "$base^{commit}" >/dev/null
+            node scripts/check-protocol-version.mjs --base "$base"
+          fi
 
       - name: Install dependencies
         run: cd client && pnpm install --frozen-lockfile
@@ -1082,7 +1139,7 @@ jobs:
   draft-match-wasm-proof:
     name: Draft match proof (real WASM)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:

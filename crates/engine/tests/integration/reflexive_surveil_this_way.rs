@@ -135,6 +135,7 @@ fn activate_plus_one_and_surveil(runner: &mut GameRunner, chandra: ObjectId, kee
         .act(GameAction::ActivateAbility {
             source_id: chandra,
             ability_index: surveil_ability_index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating Chandra's [+1] Surveil ability must succeed");
 

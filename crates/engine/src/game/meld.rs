@@ -14,8 +14,8 @@ use crate::game::printed_cards::{
 };
 use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest, ZoneMoveResult};
 use crate::types::ability::{
-    ControllerRef, Effect, EffectError, FilterProp, PermanentEntryMode, ResolvedAbility,
-    TargetFilter, TypedFilter,
+    ControllerRef, Effect, EffectError, EntryAttackDestination, FilterProp, PermanentEntryMode,
+    ResolvedAbility, TargetFilter, TypedFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -253,6 +253,7 @@ pub(crate) fn finish_meld_entry(
             source_id: context.source_id,
             controller: context.controller,
             enters_attacking: attack_target.is_some(),
+            attack_destination: EntryAttackDestination::AnyDefender,
             attach_to: None,
             sacrifice_at: None,
             remaining_count: 0,
@@ -383,11 +384,13 @@ pub(crate) fn commit_meld_battlefield(state: &mut GameState, context: &MeldSelec
         context.source_id,
         entry_controller,
         values,
-        crate::game::game_object::DisplaySource::Card,
-        printed_ref,
-        None,
         // Meld results are nontoken cards rendering through `printed_ref`.
-        None,
+        crate::game::game_object::DisplayIdentity {
+            display_source: crate::game::game_object::DisplaySource::Card,
+            printed_ref,
+            token_image_ref: None,
+            token_art: None,
+        },
     );
     // CR 701.42a / CR 730.2: absorb the partner into the single melded permanent
     // — it is no longer an independent object; remove it from the zone list the
@@ -507,6 +510,10 @@ fn commit_final_attack_status(
     attack_target: Option<AttackTarget>,
 ) {
     if let Some(combat_state) = state.combat.as_mut() {
+        combat_state.attacked_permanents.remove(&context.source_id);
+        combat_state
+            .attacked_permanent_kinds
+            .remove(&context.source_id);
         combat_state
             .attackers
             .retain(|attacker| attacker.object_id != context.source_id);
@@ -519,7 +526,13 @@ fn commit_final_attack_status(
     else {
         return;
     };
+    let pin = combat::bind_attack_target(state, target);
     if let Some(combat_state) = state.combat.as_mut() {
+        if let Some(pin) = pin {
+            combat_state
+                .attacked_permanents
+                .insert(context.source_id, pin);
+        }
         combat_state.attackers.push(AttackerInfo::new(
             context.source_id,
             target,
@@ -527,6 +540,8 @@ fn commit_final_attack_status(
         ));
         state.layers_dirty.mark_full();
     }
+    // CR 506.4: the new pin's kinds are the baseline for later type changes.
+    combat::record_attacked_kinds(state, context.source_id);
 }
 
 fn park_meld_entry_event(state: &mut GameState, source_id: ObjectId, events: &mut Vec<GameEvent>) {
@@ -551,16 +566,8 @@ fn finalize_meld_entry_snapshot(
     events: &mut Vec<GameEvent>,
 ) {
     let source_id = context.source_id;
-    let defending_player = attack_target.and_then(|target| {
-        state.objects.get(&source_id).and_then(|object| {
-            combat::entry_attack_target_defender(state, object.controller, target)
-        })
-    });
-    let combat_status = crate::types::game_state::ZoneChangeCombatStatus {
-        attacking: defending_player.is_some(),
-        defending_player,
-        ..Default::default()
-    };
+    let _ = attack_target;
+    let combat_status = crate::game::zones::capture_combat_status(state, source_id);
     refresh_meld_entry_records(state, source_id, combat_status, events);
 
     let replay_deferred_entry = !state.deferred_entry_events.is_empty();
@@ -600,6 +607,7 @@ fn refresh_meld_entry_records(
         realized.played_from_zone = old.played_from_zone;
         realized.attachments = old.attachments;
         realized.linked_exile_snapshot = old.linked_exile_snapshot;
+        realized.block_pairs = old.block_pairs;
         realized.co_departed = old.co_departed;
         realized.entered_incarnation = old.entered_incarnation;
         realized.attached_to = old.attached_to;

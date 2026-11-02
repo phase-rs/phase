@@ -1,4 +1,4 @@
-import { DIAGNOSTIC_HISTORY_LIMIT, isRetainedDiagnosticEntry, loadDiagnosticHistory, saveDiagnosticHistory } from "./diagnosticHistory";
+import { DIAGNOSTIC_HISTORY_LIMIT, isRetainedDiagnosticEntry, loadDiagnosticHistory, saveDiagnosticHistory, type WEBSOCKET_CLOSE_REASONS } from "./diagnosticHistory";
 
 /** Local, identity-free observations. Sources are local instances, not gameplay ownership. */
 export interface EngineDiagnosticSnapshot {
@@ -48,6 +48,7 @@ export interface ConnectionFailureSnapshot {
   iceState: RTCIceConnectionState | null;
   channelState: RTCDataChannelState | null;
 }
+export type SocketReconnectOutcome = "pending" | "resumed" | "failed" | "gave-up" | "not-attempted";
 export type DiagnosticHistoryEntry = ({ diagnosticId?: string; peerDiagnosticId?: string } & (
   | { kind: "signaling"; observedAt: number; side: "Host" | "Guest"; event: "created" | "open" | "disconnected" | "close" | "timeout" | "error" | "constructor-error"; error?: PeerDiagnosticError }
   | { kind: "credentials"; observedAt: number; outcome: "fresh" | "cache" | "stun-fallback"; failure?: TurnCredentialFailure; httpStatus?: number }
@@ -55,6 +56,8 @@ export type DiagnosticHistoryEntry = ({ diagnosticId?: string; peerDiagnosticId?
   | { kind: "ice-candidate-error"; observedAt: number; code: number }
   | { kind: "candidate-route"; observedAt: number; candidates: CandidateDiagnosticSnapshot }
   | { kind: "disconnect"; observedAt: number; cause: DisconnectCause; error?: ConnectionDiagnosticError; transport: TransportDiagnosticSnapshot; preClose: TransportDiagnosticSnapshot | null; candidates?: CandidateDiagnosticSnapshot | null }
+  | { kind: "transport-transition"; observedAt: number; event: "connectionstatechange" | "iceconnectionstatechange" | "open" | "closing" | "close" | "error"; transport: TransportDiagnosticSnapshot }
+  | { kind: "websocket-loss"; observedAt: number; code: number | null; reason: typeof WEBSOCKET_CLOSE_REASONS[number]; reasonLength: number; wasClean: boolean; receiveAgeMs: number | null; sendAgeMs: number | null; visibility: DocumentVisibilityState; online: boolean; silenceExceeded: boolean; reconnectAttempt: number; outcome: SocketReconnectOutcome }
   | { kind: "engine-not-initialized"; observedAt: number; operation: string; engine: EngineDiagnosticSnapshot }));
 
 const engines = new Set<EngineDiagnosticSource>();
@@ -62,9 +65,19 @@ const peers = new Set<PeerDiagnosticSource>();
 const history: DiagnosticHistoryEntry[] = loadDiagnosticHistory();
 const diagnosticIds = new WeakMap<object, string>();
 /** Random diagnostic identity is unrelated to PeerJS IDs, room codes or players. */
+/** `randomUUID` exists only in secure contexts; plain-HTTP self-hosts still get an opaque ID. */
+function newDiagnosticId(): string {
+  if (typeof globalThis.crypto?.randomUUID === "function") return globalThis.crypto.randomUUID();
+  // RFC 9562 section 5.4: version 4 in the high nibble of byte 6, variant 10 in byte 8.
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
 export function diagnosticIdFor(source: object): string {
   let id = diagnosticIds.get(source);
-  if (!id) { id = crypto.randomUUID(); diagnosticIds.set(source, id); }
+  if (!id) { id = newDiagnosticId(); diagnosticIds.set(source, id); }
   return id;
 }
 const SOURCE_LIMIT = 16;
@@ -85,6 +98,13 @@ export function recordDiagnostic(entry: DiagnosticHistoryEntry): void {
   if (!isRetainedDiagnosticEntry(entry)) return;
   history.push(structuredClone(entry));
   if (history.length > DIAGNOSTIC_HISTORY_LIMIT) history.shift();
+  saveDiagnosticHistory(history);
+}
+/** Update the original loss, rather than adding another record for each retry. */
+export function completeSocketDiagnostics(ids: ReadonlySet<string>, outcome: Exclude<SocketReconnectOutcome, "pending">): void {
+  for (const entry of history) {
+    if (entry.kind === "websocket-loss" && entry.diagnosticId && ids.has(entry.diagnosticId)) entry.outcome = outcome;
+  }
   saveDiagnosticHistory(history);
 }
 export function getDiagnosticHistory(): DiagnosticHistoryEntry[] {

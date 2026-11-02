@@ -131,6 +131,33 @@ describe("ZoneOpponentChooserModalContent", () => {
     });
   });
 
+  it("asks who arranges the cards when electing a substitute arranger", () => {
+    useMultiplayerStore.setState({
+      playerNames: new Map([[2, "Bob"]]),
+    });
+    const dispatch = renderModal({
+      type: "ChooseFromZoneOpponentChooser",
+      data: {
+        player: 1,
+        candidates: [1, 2],
+        ability: {},
+        purpose: "SubstituteArranger",
+      },
+    });
+
+    expect(
+      screen.getByRole("heading", { name: "Choose Player" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getAllByRole("button").map((button) => button.textContent),
+    ).toEqual(["You", "Bob"]);
+    fireEvent.click(screen.getByRole("button", { name: "Bob" }));
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "ChooseZoneOpponentChooser",
+      data: { opponent: 2 },
+    });
+  });
+
   it("labels the chooser with the translated self label", async () => {
     i18n.addResourceBundle("de", "game", { player: { you: "Du" } }, true, true);
     await i18n.changeLanguage("de");

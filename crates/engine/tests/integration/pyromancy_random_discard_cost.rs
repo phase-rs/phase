@@ -132,6 +132,7 @@ fn pyromancy_snapshot_survives_a_discard_zone_replacement_pause() {
         .act(GameAction::ActivateAbility {
             source_id: pyromancy,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate Pyromancy");
     runner

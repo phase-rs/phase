@@ -82,12 +82,13 @@ function FlagIT({ className }: { className?: string }) {
 }
 
 function FlagPT({ className }: { className?: string }) {
-  // Simplified: green/red vertical 2:3 split with a small yellow disc at the seam.
+  // Simplified Brazil flag: green field, yellow diamond, and blue globe.
   return (
     <svg viewBox={VIEW_BOX} className={className} aria-hidden="true">
-      <rect width="60" height="40" fill="#FF0000" />
-      <rect width="24" height="40" fill="#046A38" />
-      <circle cx="24" cy="20" r="6" fill="#FFE900" stroke="#fff" strokeWidth="1" />
+      <rect width="60" height="40" fill="#009739" />
+      <polygon points="30,4 56,20 30,36 4,20" fill="#FFDF00" />
+      <circle cx="30" cy="20" r="10" fill="#012169" />
+      <path d="M21,16 Q30,14 39,22" fill="none" stroke="#fff" strokeWidth="2" />
     </svg>
   );
 }

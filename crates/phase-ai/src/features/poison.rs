@@ -1,20 +1,20 @@
 //! Poison feature — structural detection of the alternate-win poison clock.
 //!
 //! Parser AST verification — VERIFIED against engine source:
-//! - `Keyword::Toxic(u32)` at `crates/engine/src/types/keywords.rs:912`
+//! - `Keyword::Toxic(u32)` at `crates/phase-ast/src/types/keywords.rs`
 //!   (CR 702.164: "Toxic N — when this creature deals combat damage to a
 //!   player, that player gets N poison counters").
-//! - `Keyword::Infect` at `crates/engine/src/types/keywords.rs:612`
+//! - `Keyword::Infect` at `crates/phase-ast/src/types/keywords.rs`
 //!   (CR 702.90: damage to players is dealt as poison counters).
-//! - `Keyword::Poisonous(u32)` at `crates/engine/src/types/keywords.rs:898`
+//! - `Keyword::Poisonous(u32)` at `crates/phase-ast/src/types/keywords.rs`
 //!   (CR 702.70).
 //! - `Effect::GivePlayerCounter { counter_kind, count, target }` at
-//!   `crates/engine/src/types/ability.rs:12230`; `PlayerCounterKind::Poison` at
-//!   `crates/engine/src/types/player.rs:56` (CR 122.1f). Note this effect scopes
+//!   `crates/phase-ast/src/types/ability.rs`; `PlayerCounterKind::Poison` at
+//!   `crates/phase-ast/src/types/player.rs` (CR 122.1f). Note this effect scopes
 //!   by `TargetFilter`, NOT by `CountScope` — the sibling `QuantityRef` arm at
 //!   `ability.rs:5443` is a counter *reader*, not a granter.
 //! - `Effect::Proliferate` / `Effect::ProliferateTarget { target }` at
-//!   `crates/engine/src/types/ability.rs:10450` and `:10457` (CR 701.34a).
+//!   `crates/phase-ast/src/types/ability.rs` (CR 701.34a).
 //!
 //! No parser remediation required — every axis is expressible over existing
 //! typed AST.

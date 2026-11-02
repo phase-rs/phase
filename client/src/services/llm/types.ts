@@ -13,6 +13,7 @@ export type LlmProviderId =
   | "Anthropic"
   | "Gemini"
   | "DeepSeek"
+  | "OpenRouter"
   | "OpenAiCompatible"
   | "Jev";
 

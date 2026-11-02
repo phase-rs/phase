@@ -388,6 +388,7 @@ fn master_division_prompt(
         .act(GameAction::ActivateAbility {
             source_id: master,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate Master of the Wild Hunt");
     runner

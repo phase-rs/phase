@@ -54,6 +54,7 @@ impl TacticalPolicy for PlusOneCountersPolicy {
             GameAction::ActivateAbility {
                 source_id,
                 ability_index,
+                ..
             } => (*source_id, *ability_index),
             GameAction::CastSpell { object_id, .. } => (*object_id, 0),
             _ => {
@@ -333,6 +334,7 @@ mod tests {
             action: GameAction::ActivateAbility {
                 source_id,
                 ability_index,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
             metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
         }
@@ -677,5 +679,196 @@ mod tests {
             }
             PolicyVerdict::Reject { .. } => panic!("unexpected Reject"),
         }
+    }
+
+    // ─── Created-token placement (CR 122.6 + CR 122.6a) ─────────────────────
+
+    use crate::policies::tests::created_token_placement_parity::{
+        effect_chain, imperative_token_then_placement, token_effect, x_quantity,
+    };
+    use engine::game::ability_utils::build_resolved_from_def;
+    use engine::types::ability::{
+        QuantityModification, ReplacementDefinition, SubAbilityLink, TypedFilter,
+    };
+    use engine::types::game_state::{StackEntry, StackEntryKind};
+    use engine::types::replacements::ReplacementEvent;
+
+    fn activation_verdict(state: &GameState, source_id: ObjectId) -> PolicyVerdict {
+        let candidate = activate_candidate(source_id, 0);
+        let decision = decision();
+        let (context, config) = context_with_commitment(0.9, vec![]);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: AI,
+            config: &config,
+            context: &context,
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        PlusOneCountersPolicy.verdict(&ctx)
+    }
+
+    fn assert_score(verdict: PolicyVerdict, kind: &str, expected: f64) {
+        match verdict {
+            PolicyVerdict::Score { delta, reason } => {
+                assert_eq!(reason.kind, kind);
+                assert_eq!(delta, expected);
+            }
+            PolicyVerdict::Reject { .. } => panic!("unexpected Reject"),
+        }
+    }
+
+    fn source_with(state: &mut GameState, ability: AbilityDefinition) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(50),
+            AI,
+            "Fractal Maker".to_string(),
+            Zone::Battlefield,
+        );
+        Arc::make_mut(&mut state.objects.get_mut(&id).unwrap().abilities).push(ability);
+        id
+    }
+
+    /// CR 608.2c + CR 111.1: the counters go on the token the ability creates,
+    /// so the generator branch (which prices a creature already on the board as
+    /// the recipient) does not apply, with or without a creature of ours. Both
+    /// the moved-class link and the route cards' `SequentialSibling` link.
+    #[test]
+    fn created_token_placement_is_not_a_counter_generator() {
+        for link in [
+            SubAbilityLink::ContinuationStep,
+            SubAbilityLink::SequentialSibling,
+        ] {
+            let ability = imperative_token_then_placement(
+                AbilityKind::Activated,
+                link,
+                (0, 0),
+                CounterType::Plus1Plus1,
+                x_quantity(),
+            );
+            let mut state = GameState::new_two_player(42);
+            let source = source_with(&mut state, ability.clone());
+            assert_score(
+                activation_verdict(&state, source),
+                "plus_one_counters_na",
+                0.0,
+            );
+
+            let mut state = GameState::new_two_player(42);
+            let source = source_with(&mut state, ability);
+            add_creature(&mut state, 2, Zone::Battlefield);
+            assert_score(
+                activation_verdict(&state, source),
+                "plus_one_counters_na",
+                0.0,
+            );
+        }
+    }
+
+    /// Reach guard: a placement on an existing creature after the same `Token`
+    /// is still a generator and keeps its no-target penalty.
+    #[test]
+    fn token_then_placement_on_a_typed_creature_stays_a_generator() {
+        let ability = effect_chain(
+            AbilityKind::Activated,
+            SubAbilityLink::ContinuationStep,
+            vec![
+                token_effect(0, 0, vec![]),
+                Effect::PutCounter {
+                    counter_type: CounterType::Plus1Plus1,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Typed(TypedFilter::creature()),
+                },
+            ],
+        );
+        let mut state = GameState::new_two_player(42);
+        let source = source_with(&mut state, ability);
+        match activation_verdict(&state, source) {
+            PolicyVerdict::Score { delta, reason } => {
+                assert_eq!(reason.kind, "counter_generator_no_targets");
+                assert!(delta < 0.0, "expected the no-target penalty, got {delta}");
+            }
+            PolicyVerdict::Reject { .. } => panic!("unexpected Reject"),
+        }
+    }
+
+    /// CR 122.6 + CR 614.1a: a stacked created-token placement is a +1/+1
+    /// counter placement a doubler on our battlefield modifies, so the doubler
+    /// branch reads it as pending. Pins the unchanged reading.
+    #[test]
+    fn stacked_created_token_placement_is_a_pending_counter_for_the_doubler() {
+        let stacked = imperative_token_then_placement(
+            AbilityKind::Spell,
+            SubAbilityLink::ContinuationStep,
+            (0, 0),
+            CounterType::Plus1Plus1,
+            QuantityExpr::Fixed { value: 2 },
+        );
+        let build = |with_doubler: bool| {
+            let mut state = GameState::new_two_player(42);
+            let candidate_source = create_object(
+                &mut state,
+                CardId(1),
+                AI,
+                "Brainstorm".to_string(),
+                Zone::Battlefield,
+            );
+            Arc::make_mut(&mut state.objects.get_mut(&candidate_source).unwrap().abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                ),
+            );
+            if with_doubler {
+                let scales = create_object(
+                    &mut state,
+                    CardId(99),
+                    AI,
+                    "Hardened Scales".to_string(),
+                    Zone::Battlefield,
+                );
+                let mut rep = ReplacementDefinition::new(ReplacementEvent::AddCounter);
+                rep.quantity_modification = Some(QuantityModification::Plus { value: 1 });
+                state
+                    .objects
+                    .get_mut(&scales)
+                    .unwrap()
+                    .replacement_definitions
+                    .push(rep);
+            }
+            let stack_id = ObjectId(state.next_object_id);
+            state.next_object_id += 1;
+            state.stack.push_back(StackEntry {
+                id: stack_id,
+                source_id: stack_id,
+                controller: AI,
+                kind: StackEntryKind::Spell {
+                    ability: Some(Box::new(build_resolved_from_def(&stacked, stack_id, AI))),
+                    card_id: CardId(stack_id.0),
+                    casting_variant: Default::default(),
+                    actual_mana_spent: 0,
+                },
+            });
+            (state, candidate_source)
+        };
+
+        let (state, source) = build(true);
+        assert_score(
+            activation_verdict(&state, source),
+            "doubler_active_with_pending_counter",
+            1.2,
+        );
+        let (state, source) = build(false);
+        assert_score(
+            activation_verdict(&state, source),
+            "plus_one_counters_na",
+            0.0,
+        );
     }
 }

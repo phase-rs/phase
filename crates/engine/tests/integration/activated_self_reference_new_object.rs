@@ -40,6 +40,7 @@ use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::{StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
@@ -107,6 +108,7 @@ fn activate_onto_stack(
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activation is accepted");
     for _ in 0..8 {
@@ -907,6 +909,7 @@ fn activate_krumar_onto_stack(
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .unwrap();
     assert!(matches!(

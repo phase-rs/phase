@@ -312,6 +312,39 @@ describe("Discard cost modal", () => {
     });
   });
 
+  it("names a resolution-time cast pick as a cast, not a battlefield move", () => {
+    setWaitingFor(
+      buildEffectZoneChoiceWaitingFor({
+        player: 0,
+        cards: [10, 11],
+        count: 1,
+        min_count: 0,
+        up_to: true,
+        source_id: 19,
+        effect_kind: "CastFromZone",
+        zone: "Exile",
+      }),
+      {
+        10: { ...makeObject(10, "Opt"), zone: "Exile" },
+        11: { ...makeObject(11, "Lightning Bolt"), zone: "Exile" },
+      },
+    );
+
+    render(<CardChoiceModal />);
+
+    expect(screen.getByText("Cast")).toBeInTheDocument();
+    expect(screen.getByText("Choose up to 1 card to cast")).toBeInTheDocument();
+    expect(screen.queryByText(/battlefield/i)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Loading Lightning Bolt" }));
+    fireEvent.click(screen.getByRole("button", { name: "Cast (1/1)" }));
+
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "SelectCards",
+      data: { cards: [11] },
+    });
+  });
+
   it("describes library placement without saying battlefield", () => {
     setWaitingFor(
       buildEffectZoneChoiceWaitingFor({
@@ -331,6 +364,30 @@ describe("Discard cost modal", () => {
     expect(screen.getByText("Put on Library")).toBeInTheDocument();
     expect(screen.getByText("Choose 2 cards to put on top of your library")).toBeInTheDocument();
     expect(screen.queryByText(/battlefield/i)).not.toBeInTheDocument();
+  });
+
+  it("describes library bottom placement without saying top of your library", () => {
+    setWaitingFor(
+      buildEffectZoneChoiceWaitingFor({
+        player: 0,
+        cards: [],
+        count: 1,
+        min_count: 0,
+        up_to: false,
+        source_id: 1,
+        effect_kind: "PutAtLibraryPosition",
+        zone: "Hand",
+        library_position: { type: "Bottom" },
+      }),
+    );
+
+    render(<CardChoiceModal />);
+
+    expect(screen.getByText("Put on Library")).toBeInTheDocument();
+    expect(
+      screen.getByText("Choose 1 card to put on the bottom of your library"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/top of your library/i)).not.toBeInTheDocument();
   });
 
   it("describes exile selection without falling back to battlefield", () => {
@@ -642,6 +699,76 @@ describe("Discard cost modal", () => {
     expect(dispatchMock).toHaveBeenCalledWith({
       type: "SelectCards",
       data: { cards: [11, 10] },
+    });
+  });
+
+  it("shows bottomdeck order and dispatches selected cards for bottom placement", () => {
+    setWaitingFor(
+      buildEffectZoneChoiceWaitingFor({
+        player: 0,
+        cards: [10],
+        count: 1,
+        min_count: 0,
+        up_to: false,
+        source_id: 1,
+        effect_kind: "PutAtLibraryPosition",
+        zone: "Hand",
+        library_position: { type: "Bottom" },
+      }),
+      {
+        10: makeObject(10, "Component Card"),
+      },
+    );
+
+    render(<CardChoiceModal />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Component Card/i }));
+
+    expect(screen.getByText("Bottom")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Put on bottom (Bottom)" }));
+
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "SelectCards",
+      data: { cards: [10] },
+    });
+  });
+
+  it("shows bottomdeck order for multi-card choices and dispatches in click order", () => {
+    setWaitingFor(
+      buildEffectZoneChoiceWaitingFor({
+        player: 0,
+        cards: [10, 11],
+        count: 2,
+        min_count: 0,
+        up_to: false,
+        source_id: 1,
+        effect_kind: "PutAtLibraryPosition",
+        zone: "Hand",
+        library_position: { type: "Bottom" },
+      }),
+      {
+        10: makeObject(10, "First Card"),
+        11: makeObject(11, "Second Card"),
+      },
+    );
+
+    render(<CardChoiceModal />);
+
+    // Click Card A (10) first, then Card B (11)
+    fireEvent.click(screen.getByRole("button", { name: /First Card/i }));
+    expect(screen.getByText("Bottom")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Second Card/i }));
+    // In engine submission order [10, 11], 10 is placed first and 11 is placed last,
+    // so 11 ends at the very bottom and 10 is 2nd from the bottom.
+    expect(screen.getByText("2nd")).toBeInTheDocument();
+    expect(screen.getByText("Bottom")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Put on bottom (2nd -> Bottom)" }));
+
+    expect(dispatchMock).toHaveBeenCalledWith({
+      type: "SelectCards",
+      data: { cards: [10, 11] },
     });
   });
 

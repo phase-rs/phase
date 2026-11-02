@@ -1,3 +1,4 @@
+import type { ParseKeys } from "i18next";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
@@ -31,11 +32,11 @@ const ALL_PHASES: Phase[] = [
   "Cleanup",
 ];
 
-const SCOPE_SHORT_KEY: Record<PhaseStopScope, string> = {
+const SCOPE_SHORT_KEY = {
   AllTurns: "phaseStop.scopeShortAllTurns",
   OwnTurn: "phaseStop.scopeShortOwnTurn",
   OpponentsTurns: "phaseStop.scopeShortOpponentsTurns",
-};
+} as const satisfies Record<PhaseStopScope, ParseKeys<"game">>;
 
 // Same hue axis as SCOPE_DOT_CLASS in PhaseStopBar.tsx (keep in sync): amber =
 // all turns, emerald = own turns, rose = opponents' turns. Full class strings

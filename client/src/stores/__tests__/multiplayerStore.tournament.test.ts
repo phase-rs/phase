@@ -38,6 +38,7 @@ import { SERVER_PRESETS } from "../../services/serverDetection";
 import {
   LOBBY_PROTOCOL_VERSION,
   MIN_LOBBY_PROTOCOL_FOR_MATCH_TYPE,
+  type ServerInfo,
 } from "../../adapter/ws-adapter";
 import type {
   TournamentSummary,
@@ -95,21 +96,22 @@ function makeFakeSocket() {
       listeners.get(type)?.delete(fn);
     }),
   };
+  const serverInfo: ServerInfo = {
+    version: "test",
+    buildCommit: "test",
+    mode: "LobbyOnly",
+    protocolVersion: 14,
+    // Models a current-generation broker, so it tracks the client's own
+    // export rather than a literal. Load-bearing: `tournamentClient`'s
+    // capability gate treats an absent lobby version as unsupported, so
+    // omitting this would make every gated store action in this file settle
+    // `{ok:false, reason:"unsupported"}` the instant it sent — quietly
+    // gutting the round-trip assertions instead of failing them.
+    lobbyProtocolVersion: LOBBY_PROTOCOL_VERSION,
+  };
   return {
     socket: {
-      serverInfo: {
-        version: "test",
-        buildCommit: "test",
-        mode: "LobbyOnly" as const,
-        protocolVersion: 14,
-        // Models a current-generation broker, so it tracks the client's own
-        // export rather than a literal. Load-bearing: `tournamentClient`'s
-        // capability gate treats an absent lobby version as unsupported, so
-        // omitting this would make every gated store action in this file settle
-        // `{ok:false, reason:"unsupported"}` the instant it sent — quietly
-        // gutting the round-trip assertions instead of failing them.
-        lobbyProtocolVersion: LOBBY_PROTOCOL_VERSION,
-      },
+      serverInfo,
       ws,
       close: socketClose,
     },

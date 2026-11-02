@@ -20,6 +20,7 @@ use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::game::zones::move_to_zone;
 use engine::types::actions::GameAction;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
@@ -57,6 +58,7 @@ fn counter_ability_of(build_source: SourceBuilder) -> Armed {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activating the source's untargeted ability must be accepted");
     assert_eq!(
@@ -235,6 +237,7 @@ fn source_that_left_the_battlefield_is_not_given_the_rider() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activation accepted");
     let ability_on_stack = runner.state().stack.back().unwrap().id;

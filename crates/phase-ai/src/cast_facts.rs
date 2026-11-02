@@ -17,6 +17,8 @@ use engine::types::replacements::ReplacementEvent;
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
+use crate::ability_chain::AbilityWalk;
+
 /// Effect-level classification flags shared across spells and activated abilities.
 /// Built from any ability's effect chain — no card-level assumptions.
 #[derive(Debug, Clone, Default)]
@@ -308,6 +310,7 @@ pub fn effective_activated_ability(
     let GameAction::ActivateAbility {
         source_id,
         ability_index,
+        ..
     } = action
     else {
         return None;
@@ -366,17 +369,19 @@ pub fn cast_facts_for_object(object: &GameObject) -> CastFacts<'_> {
     .flat_map(collect_definition_effects)
     .collect();
 
-    let requires_targets_in_spell_text = primary_effects.iter().any(|ability| {
-        collect_definition_effects(ability)
-            .into_iter()
-            .any(effect_requires_targets)
-    });
+    // CR 115.10a: being affected is not being targeted. A created-token
+    // placement (`PutCounter { LastCreated }` whose nearest preceding publisher in the
+    // same branch chain is a `Token`) puts counters on the token its own ability created, so it
+    // declares no target; both flags read the walk without those placements.
+    let requires_targets_in_spell_text = primary_effects
+        .iter()
+        .copied()
+        .any(definition_requires_targets);
     let requires_targets_in_immediate_etb = immediate_etb_triggers.iter().any(|trigger| {
-        trigger.execute.as_ref().is_some_and(|ability| {
-            collect_definition_effects(ability)
-                .into_iter()
-                .any(effect_requires_targets)
-        })
+        trigger
+            .execute
+            .as_deref()
+            .is_some_and(definition_requires_targets)
     });
 
     // Enter-as-copy replacements (Clone / Phantasmal Image class). Read the
@@ -516,6 +521,15 @@ fn is_permanent_spell(object: &GameObject) -> bool {
                 | CoreType::Planeswalker
         )
     })
+}
+
+/// True when some effect of `ability`'s definition walk declares a target,
+/// excluding created-token placements (CR 115.10a).
+fn definition_requires_targets(ability: &AbilityDefinition) -> bool {
+    AbilityWalk::of(ability, collect_definition_effects(ability))
+        .without_created_token_placements()
+        .into_iter()
+        .any(effect_requires_targets)
 }
 
 fn effect_requires_targets(effect: &Effect) -> bool {
@@ -674,6 +688,7 @@ mod tests {
         let action = GameAction::ActivateAbility {
             source_id,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         };
 
         let ability = effective_activated_ability(&state, &action)
@@ -1117,10 +1132,198 @@ mod tests {
         let action = GameAction::ActivateAbility {
             source_id,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         };
         assert_eq!(action.source_object(), Some(source_id));
         assert!(!is_cast_family_action(&action));
         assert!(cast_object_for_action(&state, &action, PlayerId(0)).is_none());
         assert!(cast_facts_for_action(&state, &action, PlayerId(0)).is_none());
+    }
+
+    // ─── created-token placements (CR 115.10a) ───────────────────────────────
+
+    use crate::policies::tests::created_token_placement_parity::{
+        effect_chain, last_created_placement, self_etb_trigger, token_effect,
+    };
+    use engine::types::ability::{
+        AbilityCondition, ConjureCard, ConjureSource, PlayerScope, QuantityRef, SubAbilityLink,
+    };
+    use engine::types::counter::CounterType;
+
+    fn p1p1_placement(count: QuantityExpr) -> Effect {
+        last_created_placement(CounterType::Plus1Plus1, count)
+    }
+
+    fn one() -> QuantityExpr {
+        QuantityExpr::Fixed { value: 1 }
+    }
+
+    fn sorcery_with(ability: AbilityDefinition) -> GameObject {
+        let mut object = GameObject::new(
+            ObjectId(1),
+            CardId(1),
+            PlayerId(0),
+            "Test Sorcery".to_string(),
+            Zone::Hand,
+        );
+        object.card_types.core_types.push(CoreType::Sorcery);
+        object.abilities = Arc::new(vec![ability]);
+        object
+    }
+
+    fn creature_with_etb(execute: AbilityDefinition) -> GameObject {
+        let mut object = make_object();
+        object.trigger_definitions.push(self_etb_trigger(execute));
+        object
+    }
+
+    /// A placement on the token the spell itself creates declares no target.
+    /// Reach guard: the same placement under an `else_ability` (CR 608.2c) or
+    /// in another mode (CR 700.2) does not pair with the `Token`, so it keeps
+    /// today's target-requiring reading.
+    #[test]
+    fn created_token_placement_declares_no_spell_target() {
+        let chained = effect_chain(
+            AbilityKind::Spell,
+            SubAbilityLink::ContinuationStep,
+            vec![token_effect(0, 0, vec![]), p1p1_placement(one())],
+        );
+        assert!(!cast_facts_for_object(&sorcery_with(chained)).requires_targets_in_spell_text);
+
+        let mut otherwise = AbilityDefinition::new(AbilityKind::Spell, token_effect(0, 0, vec![]));
+        otherwise.condition = Some(AbilityCondition::IsYourTurn);
+        otherwise.else_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            p1p1_placement(one()),
+        )));
+        assert!(cast_facts_for_object(&sorcery_with(otherwise)).requires_targets_in_spell_text);
+
+        let mut modal = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp);
+        modal.mode_abilities = vec![
+            AbilityDefinition::new(AbilityKind::Spell, token_effect(0, 0, vec![])),
+            AbilityDefinition::new(AbilityKind::Spell, p1p1_placement(one())),
+        ];
+        assert!(cast_facts_for_object(&sorcery_with(modal)).requires_targets_in_spell_text);
+    }
+
+    /// N3 (CR 700.2 + CR 115.10a): a mode whose own chain creates a token and
+    /// puts counters on it declares no target at cast commitment. Control: a
+    /// mode that does declare a target still makes the spell target-requiring.
+    #[test]
+    fn branch_created_token_placement_is_not_a_target_requirement() {
+        let gain = || Effect::GainLife {
+            amount: one(),
+            player: TargetFilter::Controller,
+        };
+        let pair = || {
+            effect_chain(
+                AbilityKind::Spell,
+                SubAbilityLink::ContinuationStep,
+                vec![token_effect(0, 0, vec![]), p1p1_placement(one())],
+            )
+        };
+        let mut modal = AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp);
+        modal.mode_abilities = vec![pair(), AbilityDefinition::new(AbilityKind::Spell, gain())];
+        assert!(
+            !cast_facts_for_object(&sorcery_with(modal.clone())).requires_targets_in_spell_text
+        );
+
+        modal.mode_abilities.push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Destroy {
+                target: TargetFilter::Typed(engine::types::ability::TypedFilter::creature()),
+                cant_regenerate: false,
+            },
+        ));
+        assert!(cast_facts_for_object(&sorcery_with(modal)).requires_targets_in_spell_text);
+    }
+
+    /// Manifestation Sage / The Bus Runner shapes: the ETB creates the token and
+    /// puts counters on it, so it targets nothing (CR 115.1, CR 115.10a).
+    #[test]
+    fn created_token_placement_declares_no_etb_target() {
+        let sage = effect_chain(
+            AbilityKind::Spell,
+            SubAbilityLink::ContinuationStep,
+            vec![
+                token_effect(0, 0, vec![]),
+                p1p1_placement(QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::Controller,
+                    },
+                }),
+            ],
+        );
+        assert!(!cast_facts_for_object(&creature_with_etb(sage)).requires_targets_in_immediate_etb);
+
+        let bus_runner = effect_chain(
+            AbilityKind::Spell,
+            SubAbilityLink::SequentialSibling,
+            vec![
+                token_effect(4, 4, vec![]),
+                last_created_placement(
+                    CounterType::Generic("hour".to_string()),
+                    QuantityExpr::Fixed { value: 8 },
+                ),
+                Effect::GenericEffect {
+                    static_abilities: vec![],
+                    duration: None,
+                    target: Some(TargetFilter::LastCreated),
+                    end_cost: None,
+                },
+            ],
+        );
+        assert!(
+            !cast_facts_for_object(&creature_with_etb(bus_runner))
+                .requires_targets_in_immediate_etb
+        );
+    }
+
+    /// Conservative default and the out-of-scope residual: a placement after a
+    /// Conjure (Hangarback Assembler) keeps the flag, and so does Fractal
+    /// Harness's `Attach { LastCreated }` (not a placement).
+    #[test]
+    fn non_token_publishers_and_attach_keep_the_etb_target_flag() {
+        let conjure = effect_chain(
+            AbilityKind::Spell,
+            SubAbilityLink::ContinuationStep,
+            vec![
+                Effect::Conjure {
+                    cards: vec![ConjureCard {
+                        source: ConjureSource::Named {
+                            name: "Hangarback Walker".to_string(),
+                        },
+                        count: one(),
+                    }],
+                    destination: Zone::Battlefield,
+                    tapped: false,
+                    library_position: None,
+                    library_players: None,
+                },
+                p1p1_placement(one()),
+            ],
+        );
+        assert!(
+            cast_facts_for_object(&creature_with_etb(conjure)).requires_targets_in_immediate_etb
+        );
+
+        let harness = effect_chain(
+            AbilityKind::Spell,
+            SubAbilityLink::ContinuationStep,
+            vec![
+                token_effect(0, 0, vec![]),
+                p1p1_placement(QuantityExpr::Ref {
+                    qty: QuantityRef::CostXPaid,
+                }),
+                Effect::Attach {
+                    attachment: TargetFilter::SelfRef,
+                    target: TargetFilter::LastCreated,
+                    selection: Default::default(),
+                },
+            ],
+        );
+        assert!(
+            cast_facts_for_object(&creature_with_etb(harness)).requires_targets_in_immediate_etb
+        );
     }
 }

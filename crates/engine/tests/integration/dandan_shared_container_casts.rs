@@ -15,6 +15,7 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::format::FormatConfig;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::{CastingVariant, GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
@@ -1031,6 +1032,7 @@ fn impulse_grant(to: PlayerId) -> CastingPermission {
         single_use: false,
         cast_cost_modifier: None,
         alt_ability_cost: None,
+        without_paying_mana_cost: false,
         land_enter_tapped: EtbTapState::Unspecified,
     }
 }
@@ -1147,6 +1149,7 @@ fn graveyard_activation_stays_owner() {
         let activation = runner.act(GameAction::ActivateAbility {
             source_id: zombie,
             ability_index,
+            payment_mode: CastPaymentMode::Auto,
         });
         assert_eq!(activation.is_ok(), actor == P0, "{actor:?}");
     }

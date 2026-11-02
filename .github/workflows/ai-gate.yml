@@ -9,6 +9,7 @@ on:
       - 'scripts/lib/mtgjson-fetch.sh'
       - '.cargo/config.toml'
       - '.github/actions/ai-card-data-cache/**'
+      - '.github/actions/cardgen-cache-key/**'
       - '.github/workflows/ai-gate.yml'
   schedule:
     - cron: "0 9 * * *"

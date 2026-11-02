@@ -356,6 +356,7 @@ fn cycle_announce(runner: &mut engine::game::scenario::GameRunner, card: ObjectI
         .act(GameAction::ActivateAbility {
             source_id: card,
             ability_index: idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate cycling");
 
