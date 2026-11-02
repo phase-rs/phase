@@ -2212,6 +2212,8 @@ pub(crate) enum ZoneCounterImperativeAst {
     /// `Effect::ChooseCounterAdjustment` (which has no target slot of its own).
     ChooseCounterAdjustment {
         adjustment: CounterAdjustment,
+        counter_type: Option<CounterType>,
+        target: TargetFilter,
     },
     /// CR 122.5 / CR 122.8: Transfer counters from source to target.
     MoveCounters {
@@ -3528,6 +3530,11 @@ pub(crate) fn normalize_play_from_exile_duration(duration: Duration) -> Duration
 /// decide whether a reflexive exists.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum ReflexiveModalParent {
+    /// `"…, <instruction>. When <event> this way, choose …"` — a mandatory
+    /// instruction whose reflexive modal triggers on the named event having
+    /// occurred during its resolution (Immard, the Stormcleaver: "When you
+    /// remove a counter this way"). Carries the parsed event.
+    EventThisWay(Box<crate::types::ability::TriggerDefinition>),
     /// `"…, you may <instruction>. When you do, choose …"` — a declinable
     /// resolution-time instruction (Caesar, Legion's Emperor). Carries the
     /// printed instruction text with the `"you may "` marker and connector stripped;
