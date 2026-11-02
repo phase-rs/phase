@@ -786,7 +786,7 @@ fn conceding_under_a_cipher_offer_ends_the_game() {
 }
 
 /// CR 104.3a: P1 concedes while an enters trigger's "you may" is pending; the
-/// carrier is a triggered ability with a firing. Synthetic text (see
+/// carrier is a triggered ability with a firing. Mer Man's verbatim Oracle text (see
 /// `ENTERS_MAY_DRAW`).
 #[test]
 fn conceding_under_an_enters_triggers_may_prompt_ends_the_game() {
@@ -1145,7 +1145,7 @@ fn a_continuing_game_keeps_a_replacement_paused_sacrifice() {
 
 /// CR 104.2a + CR 117.3b: with a third player still in the game, P1's
 /// concession does not end it, so P0's "you may" stays and is answered normally,
-/// and the active player then receives priority. Synthetic text (see
+/// and the active player then receives priority. Mer Man's verbatim Oracle text (see
 /// `ENTERS_MAY_DRAW`).
 #[test]
 fn a_three_player_game_keeps_the_survivors_may_prompt() {
