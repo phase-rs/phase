@@ -26,7 +26,7 @@ use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{ReplacementChoiceKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::mana::ManaColor;
@@ -417,6 +417,91 @@ fn auntie_with_doublers_makes_two_tokens_of_the_creature_with_four_counters() {
     for token in created {
         assert_eq!(runner.state().objects[&token].name, "Big");
     }
+}
+
+/// Blights the Bear with Vizier of Remedies and Doubling Season out, whose counter
+/// clauses don't commute, and applies `first` at the CR 616.1 pause. The blight
+/// choice is answered before that pause, so the rider resumes on its binding.
+fn blight_bear_applying_first(first: &str) -> Option<(GameRunner, ObjectId)> {
+    let (mut runner, grub, (vizier, bear)) = grub_board(Phase::BeginCombat, |scenario, db| {
+        scenario.add_real_card(P0, "Doubling Season", Zone::Battlefield, db);
+        (
+            scenario.add_real_card(P0, "Vizier of Remedies", Zone::Battlefield, db),
+            scenario.add_creature(P0, "Bear", 2, 2).id(),
+        )
+    })?;
+    flip(&mut runner, grub);
+
+    attack_with(&mut runner, &[grub]);
+    both_pass(&mut runner);
+    blight(&mut runner, &[grub, vizier, bear], bear);
+
+    let WaitingFor::ReplacementChoice {
+        player,
+        candidates,
+        kind,
+        ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "CR 616.1: the order of these replacements matters; got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, P0, "CR 616.1: the creature's controller chooses");
+    assert_eq!(kind, ReplacementChoiceKind::Order);
+    let mut offered: Vec<_> = candidates.iter().map(|c| c.source_name.as_str()).collect();
+    offered.sort();
+    assert_eq!(offered, ["Doubling Season", "Vizier of Remedies"]);
+    let index = candidates
+        .iter()
+        .position(|c| c.source_name == first)
+        .expect("the chosen replacement is offered");
+    runner
+        .act(GameAction::ChooseReplacement { index })
+        .expect("choosing a replacement must succeed");
+    Some((runner, bear))
+}
+
+/// CR 701.68c: the rider copies the chosen creature whatever the counters came to.
+/// Doubling Season's token clause doubles it in either order.
+fn assert_two_attacking_bear_tokens(runner: &GameRunner) {
+    assert_settled(runner);
+    let created = tokens(runner);
+    assert_eq!(created.len(), 2, "Doubling Season doubles the token");
+    for id in created {
+        let token = &runner.state().objects[&id];
+        assert_eq!(token.name, "Bear", "the token copies the blighted creature");
+        assert!(token.tapped, "the token enters tapped");
+        assert!(
+            is_attacking(runner, id),
+            "CR 508.4: the token enters attacking"
+        );
+    }
+}
+
+/// CR 616.1 + CR 118.12: Vizier first leaves 1 minus 1, so no counter is put on the
+/// Bear and there is nothing to double. "If you do" checks the choice to blight,
+/// not what happened to the counter, so the tokens still come in.
+#[test]
+fn auntie_ordering_vizier_first_places_no_counter_and_still_makes_tokens() {
+    let Some((runner, bear)) = blight_bear_applying_first("Vizier of Remedies") else {
+        return;
+    };
+
+    assert_two_attacking_bear_tokens(&runner);
+    assert_eq!(minus_counters(&runner, bear), 0, "1 minus 1, doubled");
+}
+
+/// CR 616.1: Doubling Season first makes 1 into 2, and Vizier takes one away.
+#[test]
+fn auntie_ordering_doubling_season_first_places_one_counter_and_makes_tokens() {
+    let Some((runner, bear)) = blight_bear_applying_first("Doubling Season") else {
+        return;
+    };
+
+    assert_two_attacking_bear_tokens(&runner);
+    assert_eq!(minus_counters(&runner, bear), 1, "1 doubled, minus 1");
 }
 
 /// CR 701.68b + CR 608.2d: Grub dies with her trigger on the stack and she was
