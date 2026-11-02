@@ -594,8 +594,8 @@ jobs:
           jq '{total_cards, supported_cards, coverage_pct, coverage_by_format}' data/coverage-data.json > data/coverage-summary.json
 
       - name: Coverage regression check self-test
-        # jq-only fixture matrix for the corpus-identity fence below: matching,
-        # mismatched, malformed and legacy (unstamped) baselines. Unconditional:
+        # jq-only fixture matrix for the corpus-identity handling below:
+        # matching, mismatched, malformed and legacy (unstamped) baselines. Unconditional:
         # gates-cache does not hash scripts/**, so a cache hit must not skip it.
         run: ./scripts/coverage-regression-check.test.sh
 
@@ -608,6 +608,17 @@ jobs:
         # happened, and failing here blocks the R2 baseline republish below,
         # wedging main red until a manual baseline upload (the PR #2339 /
         # PR #2802 ratchet deadlock). PR and merge_group runs remain blocking.
+        #
+        # Corpus identity (`source_corpus_hash`, the provenance-verified
+        # AtomicCards SHA-256 that coverage-report emits):
+        #   same corpus               -> normal comparison
+        #   baseline unstamped        -> ::warning:: CORPUS_IDENTITY_UNVERIFIED,
+        #                                then the normal comparison (bootstrap
+        #                                until main publishes a stamped baseline)
+        #   stamped, different corpus -> ::warning:: CORPUS_MISMATCH, comparison
+        #                                skipped, exit 0 (weekly MTGJSON rollover
+        #                                must not wedge the merge queue)
+        #   missing/malformed current, or malformed baseline -> exit 2
         continue-on-error: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         run: |
           ./scripts/coverage-regression-check.sh \

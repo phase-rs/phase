@@ -86,8 +86,10 @@ fi
 # A support/diagnostic comparison is only meaningful when both files were
 # generated from the same raw card-data corpus. `coverage-report` emits this
 # identity from the exact MTGJSON bytes it consumes, keeping every caller on
-# one authority. Refuse to compare mixed epochs rather than treating Oracle
-# churn as a parser regression or silently skipping the gate.
+# one authority. Never compare mixed epochs (Oracle churn would read as parser
+# regressions), and never skip silently: a corpus mismatch warns and skips, an
+# unstamped legacy baseline warns and compares, and a missing or malformed
+# identity fails closed.
 #
 # `source_corpus_hash` is read as: absent/null -> "" (no identity recorded);
 # a non-empty string -> itself; anything else (including "") -> a
@@ -132,10 +134,16 @@ elif ! is_sha256_hex "$BASELINE_SOURCE_CORPUS_HASH"; then
     echo "CARD DATA DRIFT: refusing comparison against a malformed baseline corpus identity." >&2
     exit 2
 elif [[ "$BASELINE_SOURCE_CORPUS_HASH" != "$CURRENT_SOURCE_CORPUS_HASH" ]]; then
-    echo "CORPUS_MISMATCH: baseline corpus $BASELINE_SOURCE_CORPUS_HASH != current corpus $CURRENT_SOURCE_CORPUS_HASH." >&2
-    echo "CARD DATA DRIFT: refusing cross-corpus comparison." >&2
-    echo "Refresh the published baseline for the current MTGJSON/card-data corpus before comparing coverage." >&2
-    exit 2
+    # Different corpora: a support/diagnostic delta would mix Oracle churn
+    # with parser changes, so the comparison is not meaningful and is skipped.
+    # This is deliberately non-blocking. Corpus drift is routine (weekly
+    # MTGJSON rollover, per-branch caches, local inputs), and failing here
+    # would wedge the merge queue: nothing merges, so main never republishes
+    # a baseline for the new corpus. Only producer/publisher defects
+    # (missing or malformed identities above) fail closed.
+    echo "::warning title=Coverage corpus mismatch::CORPUS_MISMATCH: baseline corpus $BASELINE_SOURCE_CORPUS_HASH != current corpus $CURRENT_SOURCE_CORPUS_HASH; coverage comparison skipped (not meaningful across corpora). It resumes once main publishes a baseline for this corpus."
+    echo "CARD DATA DRIFT: baseline and current were generated from different corpora; skipping coverage comparison." >&2
+    exit 0
 fi
 
 # Emit one JSON object per card that flipped, with categorized new gaps.

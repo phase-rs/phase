@@ -66,18 +66,17 @@ if run_check diagnostic; then
 fi
 grep -Fq 'DIAGNOSTIC REGRESSION' "$TMPDIR_TEST/diagnostic.err"
 
-# D. Different corpus: reject before semantic classification, even when the
-# payload itself contains a regression-shaped delta.
+# D. Different corpus: warn and skip semantic classification, even when the
+# payload itself contains a regression-shaped delta. Non-blocking (exit 0):
+# corpus drift is routine and a hard failure would wedge the merge queue.
 write_pair "different" \
     '{"source_corpus_hash":"@CORPUS_A@","supported_cards":1,"total_cards":1,"diagnostics":{"swallowed-clause":1},"cards":[{"card_name":"Engine","supported":true,"gap_details":[],"parse_details":[{"category":"ability","label":"Tap","supported":true}]}]}' \
     '{"source_corpus_hash":"@CORPUS_B@","supported_cards":0,"total_cards":1,"diagnostics":{"swallowed-clause":2},"cards":[{"card_name":"Engine","supported":false,"gap_details":[{"handler":"Effect:Tap"}],"parse_details":[{"category":"ability","label":"Tap","supported":false}]}]}'
-if run_check different; then
-    echo "expected different-corpus comparison to fail closed" >&2
-    exit 1
-fi
-grep -Fq 'CORPUS_MISMATCH' "$TMPDIR_TEST/different.err"
+run_check different
+grep -Fq "::warning title=Coverage corpus mismatch::CORPUS_MISMATCH: baseline corpus $CORPUS_A != current corpus $CORPUS_B" \
+    "$TMPDIR_TEST/different.out"
 grep -Fq 'CARD DATA DRIFT' "$TMPDIR_TEST/different.err"
-if grep -Fq 'DIAGNOSTIC REGRESSION' "$TMPDIR_TEST/different.err"; then
+if grep -Eq 'DIAGNOSTIC REGRESSION|FAIL:' "$TMPDIR_TEST/different.err"; then
     echo "different corpus was classified as a semantic regression" >&2
     exit 1
 fi
