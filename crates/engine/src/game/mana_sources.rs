@@ -451,7 +451,7 @@ pub fn activatable_mana_actions_for_player(state: &GameState, player: PlayerId) 
 /// from [`activatable_mana_actions_for_player`]. An untap gives such a
 /// permanent its mana a second time only if it is tapped first. A mana ability
 /// with no {T} in its cost can't be repeated by untapping, and a source its own
-/// cost sacrifices isn't there to untap.
+/// cost removes isn't there to untap.
 pub(crate) fn ready_tap_mana_sources(state: &GameState, player: PlayerId) -> Vec<ObjectId> {
     let repeatable_by_untap = |source: ObjectId, ability_index: usize| {
         state
@@ -460,13 +460,7 @@ pub(crate) fn ready_tap_mana_sources(state: &GameState, player: PlayerId) -> Vec
             .and_then(|object| object.abilities.get(ability_index))
             .is_some_and(|ability| {
                 has_tap_component(&ability.cost)
-                    && !cost_has_component(&ability.cost, |component| {
-                        matches!(
-                            component,
-                            AbilityCost::Sacrifice(cost)
-                                if matches!(cost.target, TargetFilter::SelfRef)
-                        )
-                    })
+                    && mana_abilities::is_renewable_mana_ability(ability)
             })
     };
     activatable_mana_actions_for_player(state, player)

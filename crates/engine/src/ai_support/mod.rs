@@ -2141,9 +2141,9 @@ pub fn auto_pass_recommended(state: &GameState, actions: &[GameAction]) -> bool 
     // meaningful-action hold below, including the issue #4388 opponent-turn
     // mana-window hold (MTGA parity). CR 117.1d + CR 605.3a: an own object
     // that can move one of the player's activatable mana sources off the
-    // battlefield, or waste an untap on one, holds instead — the rungs below
-    // never count a mana activation as meaningful, so falling through would
-    // still pass that window.
+    // battlefield holds instead, and so does an own spell or activated ability
+    // that would waste an untap on one — the rungs below never count a mana
+    // activation as meaningful, so falling through would still pass that window.
     match standing_priority_pass(state, player, state.stack.back()) {
         StandingPriorityPass::Withheld | StandingPriorityPass::Held => return false,
         StandingPriorityPass::Granted => return true,

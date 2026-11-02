@@ -2711,7 +2711,7 @@ fn until_end_of_turn_breaks_on_an_own_top_held_for_a_removable_mana_source() {
     }
 }
 
-/// P0's own "untap all lands you control" spell alone on the stack, with P0's
+/// P0's own Reset ("Untap all lands you control.") alone on the stack, with P0's
 /// Forest, a permanent P0 can tap for mana now, untapped or tapped.
 fn own_untap_of_your_lands(forest_tapped: bool) -> GameState {
     let mut scenario = crate::game::scenario::GameScenario::new();

@@ -42,13 +42,16 @@
 //!   you control." is a trigger, which goes on the stack with no player act.
 
 use super::support::shared_card_db;
-use engine::ai_support::{auto_pass_recommended, legal_actions, legal_actions_full};
+use engine::ai_support::{
+    auto_pass_recommended, legal_actions, legal_actions_full, AiDecisionContract,
+};
 use engine::analysis::decision_template::IterationCount;
 use engine::analysis::loop_check::{ShortcutResponse, WinKind};
 use engine::analysis::resource::ResourceAxis;
 use engine::database::card_db::CardDatabase;
 use engine::game::effects::attach::attach_to;
 use engine::game::effects::stack_reach::stack_entry_node_reach;
+use engine::game::engine::apply_verified_ai_priority_pass;
 use engine::game::layers::flush_layers;
 use engine::game::mana_abilities::is_mana_ability;
 use engine::game::period_confirm::performed_for_tests;
@@ -72,6 +75,9 @@ const SNAP: &str = "Return target creature to its owner's hand. Untap up to two 
 const ACROBATIC_LEAP: &str =
     "Target creature gets +1/+3 and gains flying until end of turn. Untap it.";
 const FOOD: &str = "{2}, {T}, Sacrifice this artifact: You gain 3 life.";
+const MIRRORED_LOTUS: &str = "Reflect {0} (As this enters, each opponent may pay {0}. When they \
+     do, they create a token copy of this except it lacks this ability.)\n{T}, Exile Mirrored \
+     Lotus: Add three mana of any one color.";
 
 fn recommends_pass(runner: &GameRunner) -> bool {
     let state = runner.state();
@@ -500,15 +506,24 @@ fn only_the_declared_target_of_an_untap_counts() {
 /// Dramatic Reversal, its {1}{U} floated first so that automatic payment leaves
 /// `permanents` untapped.
 fn dramatic_reversal_on_the_stack(permanents: &[&str], db: &CardDatabase) -> GameRunner {
+    dramatic_reversal_over(db, |scenario| {
+        for permanent in permanents {
+            scenario.add_real_card(P0, permanent, Zone::Battlefield, db);
+        }
+    })
+}
+
+fn dramatic_reversal_over(
+    db: &CardDatabase,
+    add_board: impl FnOnce(&mut GameScenario),
+) -> GameRunner {
     let mut scenario = main_phase_scenario();
     let reversal = scenario.add_real_card(P0, "Dramatic Reversal", Zone::Hand, db);
     let islands = [
         scenario.add_real_card(P0, "Island", Zone::Battlefield, db),
         scenario.add_real_card(P0, "Island", Zone::Battlefield, db),
     ];
-    for permanent in permanents {
-        scenario.add_real_card(P0, permanent, Zone::Battlefield, db);
-    }
+    add_board(&mut scenario);
     let mut runner = scenario.build();
     for island in islands {
         tap_for_mana(&mut runner, island);
@@ -566,6 +581,17 @@ fn a_source_that_sacrifices_itself_keeps_the_pass() {
     let runner = dramatic_reversal_on_the_stack(&["Lotus Petal"], db);
     let petal = permanent_named(&runner, "Lotus Petal");
     assert!(mana_action(&runner, petal).is_some());
+    assert!(recommends_pass(&runner));
+}
+
+#[test]
+fn a_source_that_exiles_itself_keeps_the_pass() {
+    let Some(db) = shared_card_db() else { return };
+    let runner = dramatic_reversal_over(db, |scenario| {
+        scenario.add_artifact_from_oracle(P0, "Mirrored Lotus", MIRRORED_LOTUS);
+    });
+    let lotus = permanent_named(&runner, "Mirrored Lotus");
+    assert!(mana_action(&runner, lotus).is_some());
     assert!(recommends_pass(&runner));
 }
 
@@ -716,6 +742,34 @@ fn the_copy_shows_as_its_own_stack_row() {
     let groups = stack_display_groups(rig.runner.state());
     assert_eq!(groups.len(), 2, "{groups:?}");
     assert!(groups.iter().all(|group| group.count == 1), "{groups:?}");
+}
+
+/// The path a game against the AI takes: the AI's verified pass installs a
+/// rechecking session, whose look-ahead authorizes both entries with Monolith
+/// tapped. An activated entry resolves alone, so the original still reaches a
+/// window of its own with Monolith untapped.
+#[test]
+fn an_ai_opponents_pass_leaves_the_original_its_window() {
+    let Some(db) = shared_card_db() else { return };
+    let mut rig = basalt_rings(2, db);
+    rig.tap_and_activate_untap();
+    client_drive(&mut rig.runner, Rings::Pay, original_and_copy);
+    assert!(rig.monolith_tapped());
+    assert!(recommends_pass(&rig.runner));
+
+    rig.runner.act(GameAction::PassPriority).expect("P0 passes");
+    let state = rig.runner.state_mut();
+    assert_eq!(state.waiting_for, WaitingFor::Priority { player: P1 });
+    assert_eq!(state.stack.len(), 2);
+    let contract = AiDecisionContract::issue(state, P1);
+    apply_verified_ai_priority_pass(state, P1, &contract, GameAction::PassPriority)
+        .expect("a verified AI priority pass is legal");
+
+    assert!(p0_has_priority(&rig.runner));
+    assert_eq!(rig.runner.state().stack.len(), 1);
+    assert!(rig.runner.state().stack_resolution_session.is_some());
+    assert!(!rig.monolith_tapped(), "the copy untapped Monolith");
+    assert!(!recommends_pass(&rig.runner));
 }
 
 /// CR 603.2 + CR 603.3: a trigger goes on the stack with no player act, so

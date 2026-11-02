@@ -394,8 +394,9 @@ pub(crate) fn standing_priority_pass(
         // outranks castability, see `auto_pass_recommended`): whatever the
         // player could do now, they can still do once it resolves — except
         // activate a mana ability of a permanent it moves off the battlefield,
-        // or tap for mana a permanent it untaps while the untap can still give
-        // that mana a second time.
+        // or, when it is their spell or activated ability, tap for mana a
+        // permanent it untaps while the untap can still give that mana a second
+        // time.
         Some(top) if top.controller == player => {
             if resolution_forecloses_mana_activation(state, player, top) {
                 StandingPriorityPass::Held
@@ -480,10 +481,12 @@ fn resolution_untaps_ready_mana_source(
     player: PlayerId,
     top: &StackEntry,
 ) -> bool {
-    // A spell or activated ability is on the stack because its controller just cast
-    // or activated it (CR 601.2, CR 602.2), so this stop follows their own act. A
-    // triggered ability goes on the stack by itself (CR 603.2 + CR 603.3); holding
-    // for it would stop Wilderness Reclamation every end step.
+    // A spell or activated ability is on the stack because a player cast or
+    // activated it (CR 601.2, CR 602.2), or as a copy of one (CR 707.10: Rings of
+    // Brighthearth's copy isn't activated), so this stop is one per object of a
+    // line the player started. A triggered ability goes on the stack by itself
+    // (CR 603.2 + CR 603.3); holding for it would stop Wilderness Reclamation
+    // every end step.
     match top.kind {
         StackEntryKind::Spell { .. } | StackEntryKind::ActivatedAbility { .. } => {}
         StackEntryKind::TriggeredAbility { .. }
@@ -1499,7 +1502,9 @@ mod tests {
             assert_eq!(verdict(&state, &bounce), StandingPriorityPass::Undecided);
         }
 
-        /// Basalt Monolith class: "Untap this permanent."
+        /// Basalt Monolith: "{3}: Untap this artifact." The fixture's Forest stands in for Monolith:
+        /// the rung reads the entry's kind, its binding and the object's {T} mana ability, not the
+        /// object's type.
         fn untap_itself(source: ObjectId, controller: PlayerId) -> ResolvedAbility {
             ResolvedAbility::new(
                 Effect::SetTapState {
