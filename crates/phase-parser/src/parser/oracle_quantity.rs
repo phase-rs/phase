@@ -5395,6 +5395,7 @@ mod tests {
         );
     }
 
+    /// SHAPE: singular and plural qualified counts preserve their zone and scope.
     #[test]
     fn parse_supertype_qualified_zone_card_counts() {
         let zone_count = |zone, scope, type_filter, property| {
@@ -5456,7 +5457,7 @@ mod tests {
                     ZoneRef::Graveyard,
                     CountScope::Controller,
                     TypeFilter::Creature,
-                    legendary,
+                    legendary.clone(),
                 ),
             ),
             (
@@ -5471,8 +5472,48 @@ mod tests {
                     ZoneRef::Graveyard,
                     CountScope::Opponents,
                     TypeFilter::Land,
+                    nonbasic.clone(),
+                ),
+            ),
+            (
+                "the number of legendary creature card in your graveyard",
+                parse_cda_quantity,
+                zone_count(
+                    ZoneRef::Graveyard,
+                    CountScope::Controller,
+                    TypeFilter::Creature,
+                    legendary.clone(),
+                ),
+            ),
+            (
+                "legendary creature card in your graveyard",
+                parse_for_each_clause_expr,
+                zone_count(
+                    ZoneRef::Graveyard,
+                    CountScope::Controller,
+                    TypeFilter::Creature,
+                    legendary,
+                ),
+            ),
+            (
+                "the number of nonbasic land card in your opponents' graveyards",
+                parse_cda_quantity,
+                zone_count(
+                    ZoneRef::Graveyard,
+                    CountScope::Opponents,
+                    TypeFilter::Land,
                     nonbasic,
                 ),
+            ),
+            (
+                "the number of nonbasic tapped land card in your opponents' graveyards",
+                parse_cda_quantity,
+                None,
+            ),
+            (
+                "the number of legendary creature cardboard in your graveyard",
+                parse_cda_quantity,
+                None,
             ),
         ] {
             assert_eq!(parse(phrase), expected, "{phrase}");
