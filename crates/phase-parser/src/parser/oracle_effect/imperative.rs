@@ -8228,33 +8228,51 @@ pub(super) fn lower_utility_imperative_ast(ast: UtilityImperativeAst) -> Effect 
     }
 }
 
-/// CR 615.1a: decompose the prevention amount from the LOCAL parser stream
-/// (`rest`, positioned just past "prevent ") with nom combinators. "all but "
-/// must be tried before the bare "all " arm because it shares that prefix.
+/// CR 615.1a + CR 615.7 + CR 107.3a: decompose the prevention amount from the
+/// LOCAL parser stream (`rest`, positioned just past "prevent ") with nom
+/// combinators. Returns the static `amount` plus the dynamic quantity that
+/// overrides it at effect resolution (CR 615.7), so callers carry both into
+/// `Effect::PreventDamage` and never silently drop the counted form.
+///
+/// "all but " is tried before bare "all " (shared prefix). The counted forms
+/// ("prevent [the] next <qty> damage", "prevent <qty> damage") strip the
+/// optional quantifier and delegate to `parse_count_expr`, the shared
+/// effect-quantity grammar: a literal yields `Next(n)` (CR 107.1b); the
+/// announced `X` (CR 107.3a) or any composed dynamic count is carried in the
+/// dynamic slot with `Next(1)` as the static placeholder.
+///
+/// `amount_dynamic` is later overwritten when the clause also prints a
+/// trailing "where X is <quantity>" binder (CR 107.3c), which DEFINES X.
+///
 /// Shared by `parse_prevent_effect` and `try_parse_bidirectional_prevent`
 /// (issue #1094) so amount detection lives in one authority.
-pub(super) fn parse_prevention_amount(rest: &str) -> PreventionAmount {
+pub(super) fn parse_prevention_amount(rest: &str) -> (PreventionAmount, Option<QuantityExpr>) {
     if let Ok((after_all_but, _)) = tag::<_, _, OracleError<'_>>("all but ").parse(rest) {
         let n = nom_primitives::parse_number
             .parse(after_all_but)
             .map(|(_, n)| n)
             .unwrap_or(1);
-        PreventionAmount::AllBut(n)
-    } else if tag::<_, _, OracleError<'_>>("all ").parse(rest).is_ok() {
-        PreventionAmount::All
-    } else if let Ok((after_next, _)) = tag::<_, _, OracleError<'_>>("the next ").parse(rest) {
-        let n = nom_primitives::parse_number
-            .parse(after_next)
-            .map(|(_, n)| n)
-            .unwrap_or(1);
-        PreventionAmount::Next(n)
-    } else {
-        // Fallback: try to extract a number.
-        let n = nom_primitives::parse_number
-            .parse(rest)
-            .map(|(_, n)| n)
-            .unwrap_or(1);
-        PreventionAmount::Next(n)
+        return (PreventionAmount::AllBut(n), None);
+    }
+    if tag::<_, _, OracleError<'_>>("all ").parse(rest).is_ok() {
+        return (PreventionAmount::All, None);
+    }
+    // CR 615.7: counted shield. One quantifier axis for "the next" and the
+    // determiner-less "next" (the form `try_parse_prevent_distribute` accepts);
+    // a bare "prevent <qty> damage" is left untouched.
+    let after_quantifier = opt(alt((
+        tag::<_, _, OracleError<'_>>("the next "),
+        tag("next "),
+    )))
+    .parse(rest)
+    .map_or(rest, |(after, _)| after);
+    match parse_count_expr(after_quantifier) {
+        Some((QuantityExpr::Fixed { value }, _)) => (
+            PreventionAmount::Next(u32::try_from(value).unwrap_or(0)),
+            None,
+        ),
+        Some((quantity, _)) => (PreventionAmount::Next(1), Some(quantity)),
+        None => (PreventionAmount::Next(1), None),
     }
 }
 
@@ -8447,7 +8465,7 @@ fn parse_prevent_effect_with_context(
             .map(|(_, d, _)| d);
 
     // Determine amount: "all damage" vs "all but N" vs "the next N damage".
-    let amount = parse_prevention_amount(rest);
+    let (amount, amount_dynamic) = parse_prevention_amount(rest);
 
     // CR 609.7 + CR 615.2: prevention scoped to a chosen source (a targeted
     // spell). "Prevent all damage target instant or sorcery spell would deal
@@ -8462,7 +8480,7 @@ fn parse_prevent_effect_with_context(
         // shield captures it via `ParentTargetSlot { index: 0 }`.
         return Effect::PreventDamage {
             amount,
-            amount_dynamic: None,
+            amount_dynamic: amount_dynamic.clone(),
             target: TargetFilter::Any,
             recipient_scope: EffectScope::Single,
             scope,
@@ -8482,7 +8500,7 @@ fn parse_prevent_effect_with_context(
         return match dealt_by {
             Ok(source_filter) => Effect::PreventDamage {
                 amount,
-                amount_dynamic: None,
+                amount_dynamic: amount_dynamic.clone(),
                 target: TargetFilter::Any,
                 recipient_scope: EffectScope::Single,
                 scope,
@@ -8602,15 +8620,15 @@ fn parse_prevent_effect_with_context(
         recipient_scope = EffectScope::All;
     }
 
-    // CR 615.11 + CR 107.3i: `amount_dynamic` (the "prevent X … where X is
-    // <quantity>" override) is populated at chunk level by
-    // `apply_where_x_effect_expression`, not here — the chunk machinery
-    // strips the trailing "where x is …" binding before this parser ever
-    // sees it. `amount` is the Next(1) fallback used when no dynamic clause
-    // is present (or when the binding fails to resolve to a known quantity).
+    // CR 615.7 + CR 107.3a + CR 107.3c: `amount_dynamic` is populated here from
+    // the announced `{X}` of a counted prevention clause (CR 107.3a), and is
+    // later overwritten at chunk level by `apply_where_x_effect_expression`
+    // when the clause also prints a trailing "where x is …" binder (CR 107.3c).
+    // `amount` is the Next(1) fallback used when no dynamic clause is present
+    // (or when the binding fails to resolve to a known quantity).
     Effect::PreventDamage {
         amount,
-        amount_dynamic: None,
+        amount_dynamic,
         target,
         recipient_scope,
         scope,
@@ -29007,6 +29025,7 @@ mod tests {
         );
         let Effect::PreventDamage {
             amount,
+            amount_dynamic,
             target,
             damage_source_filter,
             ..
@@ -29015,6 +29034,10 @@ mod tests {
             panic!("expected PreventDamage, got {effect:?}");
         };
         assert_eq!(amount, PreventionAmount::Next(3));
+        assert_eq!(
+            amount_dynamic, None,
+            "the fixed counted form carries no dynamic amount"
+        );
         assert!(
             typed_leg(&target).is_some_and(|tf| has_type(tf, TypeFilter::Creature)),
             "recipient target must stay Typed(creature), got {target:?}"
@@ -29023,6 +29046,75 @@ mod tests {
             damage_source_filter, None,
             "recipient prevent must not carry a source filter"
         );
+    }
+
+    /// CR 615.7 + CR 107.3a + CR 107.1b: the shared prevention-amount authority
+    /// decomposes every form of the amount axis from the stream just past
+    /// "prevent ". The blanket forms carry no dynamic quantity; a literal counted
+    /// form yields `Next(n)` (the `2` row proves the literal path still fires);
+    /// the announced `X` is carried in the dynamic slot with `Next(1)` as the
+    /// static placeholder instead of being silently dropped.
+    #[test]
+    fn prevention_amount_covers_counted_and_blanket_forms() {
+        let variable_x = Some(QuantityExpr::Ref {
+            qty: QuantityRef::Variable {
+                name: "X".to_string(),
+            },
+        });
+        let cases: &[(&str, PreventionAmount, Option<QuantityExpr>)] = &[
+            (
+                "all damage that would be dealt this turn",
+                PreventionAmount::All,
+                None,
+            ),
+            (
+                "all but 2 damage that would be dealt this turn",
+                PreventionAmount::AllBut(2),
+                None,
+            ),
+            (
+                "the next 3 damage that would be dealt this turn",
+                PreventionAmount::Next(3),
+                None,
+            ),
+            (
+                "next 3 damage that would be dealt this turn",
+                PreventionAmount::Next(3),
+                None,
+            ),
+            (
+                "the next x damage that would be dealt this turn",
+                PreventionAmount::Next(1),
+                variable_x.clone(),
+            ),
+            (
+                "next x damage that would be dealt this turn",
+                PreventionAmount::Next(1),
+                variable_x.clone(),
+            ),
+            (
+                "x damage that would be dealt this turn",
+                PreventionAmount::Next(1),
+                variable_x.clone(),
+            ),
+            (
+                "2 damage that would be dealt this turn",
+                PreventionAmount::Next(2),
+                None,
+            ),
+            (
+                "damage that would be dealt this turn",
+                PreventionAmount::Next(1),
+                None,
+            ),
+        ];
+        for (rest, expected_amount, expected_dynamic) in cases {
+            assert_eq!(
+                parse_prevention_amount(rest),
+                (*expected_amount, expected_dynamic.clone()),
+                "amount decomposition for {rest:?}"
+            );
+        }
     }
 
     /// CR 615.2 + CR 109.4: Haze Frog — "prevent all combat damage that other

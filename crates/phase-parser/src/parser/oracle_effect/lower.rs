@@ -10263,7 +10263,7 @@ pub(super) fn try_parse_bidirectional_prevent(
 
     // CR 615.1a: shared amount detection (issue #1094 factored this out of
     // `parse_prevent_effect` so both paths agree).
-    let amount = super::imperative::parse_prevention_amount(rest);
+    let (amount, amount_dynamic) = super::imperative::parse_prevention_amount(rest);
 
     // CR 511.2 + CR 615: trailing duration window ("this turn" -> end of turn).
     let prevention_duration =
@@ -10285,7 +10285,7 @@ pub(super) fn try_parse_bidirectional_prevent(
     // the damage RECIPIENT (target: ParentTarget, no source restriction).
     let to_effect = Effect::PreventDamage {
         amount,
-        amount_dynamic: None,
+        amount_dynamic: amount_dynamic.clone(),
         target: anaphor_filter.clone(),
         recipient_scope: anaphor_scope,
         scope,
@@ -10314,7 +10314,7 @@ pub(super) fn try_parse_bidirectional_prevent(
         AbilityKind::Spell,
         Effect::PreventDamage {
             amount,
-            amount_dynamic: None,
+            amount_dynamic,
             target: TargetFilter::Any,
             recipient_scope: EffectScope::Single,
             scope,

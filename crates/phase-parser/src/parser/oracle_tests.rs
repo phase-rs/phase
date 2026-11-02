@@ -25637,6 +25637,333 @@ fn prevention_followup_if_this_way_does_not_emit_condition_warning() {
     );
 }
 
+/// CR 615.7 + CR 107.3a + CR 107.3c: every printed counted prevention clause in
+/// the "prevent the next X damage" class must carry the announced `{X}` in
+/// `amount_dynamic` (`Next(1)` stays as the static placeholder), while a trailing
+/// "where X is <quantity>" binder still DEFINES X and replaces it with the
+/// card's own count. The negative siblings are Guardian Angel's fixed second
+/// shield and the three binder cards.
+#[derive(Clone, Copy)]
+enum ExpectedDynamic {
+    /// The announced `{X}`: `Next(1)` placeholder plus `Variable X`.
+    AnnouncedX,
+    /// A fixed counted shield with no dynamic override.
+    Fixed,
+    DevotionWhite,
+    ClericCount,
+    BasicLandTypeCount,
+    VerseCounters,
+}
+
+#[derive(Clone, Copy)]
+enum ExpectedTarget {
+    Any,
+    Controller,
+    Creature,
+    /// Pre-existing recipient defect, deliberately not asserted (Divine
+    /// Deflection's "you and/or permanents you control").
+    Unasserted,
+}
+
+/// Collects every `Effect::PreventDamage` node reachable through the
+/// `sub_ability` chain and the modal branches.
+fn collect_prevention_nodes(
+    ability: &AbilityDefinition,
+    out: &mut Vec<(PreventionAmount, Option<QuantityExpr>, TargetFilter)>,
+) {
+    if let Effect::PreventDamage {
+        amount,
+        amount_dynamic,
+        target,
+        ..
+    } = &*ability.effect
+    {
+        out.push((*amount, amount_dynamic.clone(), target.clone()));
+    }
+    if let Some(sub) = &ability.sub_ability {
+        collect_prevention_nodes(sub, out);
+    }
+    for mode in &ability.mode_abilities {
+        collect_prevention_nodes(mode, out);
+    }
+}
+
+#[test]
+fn x_prevention_class_parses_announced_x_as_dynamic_amount() {
+    use crate::types::ability::{ControllerRef, DevotionColors, ObjectScope};
+    use crate::types::mana::ManaColor;
+
+    const ALABASTER_POTION: &str = "Choose one —\n• Target player gains X life.\n• Prevent the next X damage that would be dealt to any target this turn.";
+    const ATALYA: &str = "{X}, {T}: Choose one —\n• Prevent the next X damage that would be dealt to target creature this turn. Spend only white mana on X.\n• You gain X life. Spend only white mana on X.";
+    const PANACEA: &str =
+        "{X}{X}, {T}: Prevent the next X damage that would be dealt to any target this turn.";
+    const VENGEFUL_ARCHON: &str = "Flying\n{X}: Prevent the next X damage that would be dealt to you this turn. If damage is prevented this way, this creature deals that much damage to target player or planeswalker.";
+    const DIVINE_DEFLECTION: &str = "Prevent the next X damage that would be dealt to you and/or permanents you control this turn. If damage is prevented this way, Divine Deflection deals that much damage to any target.";
+    const FESTIVAL_OF_THE_GUILDPACT: &str =
+        "Prevent the next X damage that would be dealt to you this turn.\nDraw a card.";
+    const GUARDIAN_ANGEL: &str = "Prevent the next X damage that would be dealt to any target this turn. Until end of turn, you may pay {1} any time you could cast an instant. If you do, prevent the next 1 damage that would be dealt to that permanent or player this turn.";
+    const TEMPER: &str = "Prevent the next X damage that would be dealt to target creature this turn. For each 1 damage prevented this way, put a +1/+1 counter on that creature.";
+    const ACOLYTES_REWARD: &str = "Prevent the next X damage that would be dealt to target creature this turn, where X is your devotion to white. If damage is prevented this way, Acolyte's Reward deals that much damage to any target. (Each {W} in the mana costs of permanents you control counts toward your devotion to white.)";
+    const BATTLEFIELD_MEDIC: &str = "{T}: Prevent the next X damage that would be dealt to target creature this turn, where X is the number of Clerics on the battlefield.";
+    const SAMITE_PILGRIM: &str = "Domain — {T}: Prevent the next X damage that would be dealt to target creature this turn, where X is the number of basic land types among lands you control.";
+    const SERRAS_HYMN: &str = "At the beginning of your upkeep, you may put a verse counter on this enchantment.\nSacrifice this enchantment: Prevent the next X damage that would be dealt this turn to any number of targets, divided as you choose, where X is the number of verse counters on this enchantment.";
+
+    type Expected = (ExpectedDynamic, ExpectedTarget);
+    type Case<'a> = (
+        &'a str,
+        &'a str,
+        &'a [&'a str],
+        &'a [&'a str],
+        &'a [Expected],
+    );
+    let cases: &[Case<'_>] = &[
+        (
+            "Alabaster Potion",
+            ALABASTER_POTION,
+            &["Instant"],
+            &[],
+            &[(ExpectedDynamic::AnnouncedX, ExpectedTarget::Any)],
+        ),
+        (
+            "Atalya, Samite Master",
+            ATALYA,
+            &["Creature"],
+            &["Human", "Cleric"],
+            &[(ExpectedDynamic::AnnouncedX, ExpectedTarget::Creature)],
+        ),
+        (
+            "Panacea",
+            PANACEA,
+            &["Artifact"],
+            &[],
+            &[(ExpectedDynamic::AnnouncedX, ExpectedTarget::Any)],
+        ),
+        (
+            "Vengeful Archon",
+            VENGEFUL_ARCHON,
+            &["Creature"],
+            &["Archon"],
+            &[(ExpectedDynamic::AnnouncedX, ExpectedTarget::Controller)],
+        ),
+        (
+            "Divine Deflection",
+            DIVINE_DEFLECTION,
+            &["Instant"],
+            &[],
+            &[(ExpectedDynamic::AnnouncedX, ExpectedTarget::Unasserted)],
+        ),
+        (
+            "Festival of the Guildpact",
+            FESTIVAL_OF_THE_GUILDPACT,
+            &["Instant"],
+            &[],
+            &[(ExpectedDynamic::AnnouncedX, ExpectedTarget::Controller)],
+        ),
+        (
+            "Guardian Angel",
+            GUARDIAN_ANGEL,
+            &["Instant"],
+            &[],
+            &[
+                (ExpectedDynamic::AnnouncedX, ExpectedTarget::Any),
+                (ExpectedDynamic::Fixed, ExpectedTarget::Any),
+            ],
+        ),
+        (
+            "Temper",
+            TEMPER,
+            &["Instant"],
+            &[],
+            &[(ExpectedDynamic::AnnouncedX, ExpectedTarget::Creature)],
+        ),
+        (
+            "Acolyte's Reward",
+            ACOLYTES_REWARD,
+            &["Instant"],
+            &[],
+            &[(ExpectedDynamic::DevotionWhite, ExpectedTarget::Creature)],
+        ),
+        (
+            "Battlefield Medic",
+            BATTLEFIELD_MEDIC,
+            &["Creature"],
+            &["Human", "Cleric"],
+            &[(ExpectedDynamic::ClericCount, ExpectedTarget::Creature)],
+        ),
+        (
+            "Samite Pilgrim",
+            SAMITE_PILGRIM,
+            &["Creature"],
+            &["Human", "Cleric"],
+            &[(
+                ExpectedDynamic::BasicLandTypeCount,
+                ExpectedTarget::Creature,
+            )],
+        ),
+        (
+            "Serra's Hymn",
+            SERRAS_HYMN,
+            &["Enchantment"],
+            &[],
+            &[(ExpectedDynamic::VerseCounters, ExpectedTarget::Any)],
+        ),
+    ];
+
+    for (name, oracle, core_types, subtypes, expected) in cases {
+        let parsed = parse(oracle, name, &[], core_types, subtypes);
+
+        // Reach guard: the prevention clause was represented, not discarded by an
+        // upstream guard, and no warning quotes it as unrepresented text.
+        let mut nodes = Vec::new();
+        for ability in &parsed.abilities {
+            collect_prevention_nodes(ability, &mut nodes);
+        }
+        assert_eq!(
+            nodes.len(),
+            expected.len(),
+            "{name}: prevention nodes {nodes:?}"
+        );
+        let clause_warnings: Vec<String> = parsed
+            .parse_warnings
+            .iter()
+            .map(|warning| format!("{warning:?}").to_lowercase())
+            .filter(|warning| warning.contains("prevent the next"))
+            .collect();
+        assert!(
+            clause_warnings.is_empty(),
+            "{name}: prevention clause left warnings {clause_warnings:?}"
+        );
+
+        for ((amount, amount_dynamic, target), (want_dynamic, want_target)) in
+            nodes.iter().zip(expected.iter())
+        {
+            match want_dynamic {
+                ExpectedDynamic::AnnouncedX => {
+                    assert_eq!(
+                        *amount,
+                        PreventionAmount::Next(1),
+                        "{name}: static placeholder amount"
+                    );
+                    assert_eq!(
+                        amount_dynamic,
+                        &Some(QuantityExpr::Ref {
+                            qty: QuantityRef::Variable {
+                                name: "X".to_string(),
+                            },
+                        }),
+                        "{name}: announced X must be carried in amount_dynamic"
+                    );
+                }
+                ExpectedDynamic::Fixed => {
+                    assert_eq!(
+                        *amount,
+                        PreventionAmount::Next(1),
+                        "{name}: fixed counted amount"
+                    );
+                    assert_eq!(
+                        *amount_dynamic, None,
+                        "{name}: fixed counted shield carries no dynamic amount"
+                    );
+                }
+                ExpectedDynamic::DevotionWhite => {
+                    assert_eq!(
+                        *amount,
+                        PreventionAmount::Next(1),
+                        "{name}: static placeholder amount"
+                    );
+                    assert_eq!(
+                        amount_dynamic,
+                        &Some(QuantityExpr::Ref {
+                            qty: QuantityRef::Devotion {
+                                colors: DevotionColors::Fixed(vec![ManaColor::White]),
+                            },
+                        }),
+                        "{name}: the trailing binder defines X"
+                    );
+                }
+                ExpectedDynamic::ClericCount => {
+                    assert_eq!(
+                        *amount,
+                        PreventionAmount::Next(1),
+                        "{name}: static placeholder amount"
+                    );
+                    let Some(QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter },
+                    }) = amount_dynamic
+                    else {
+                        panic!("{name}: expected the Cleric-count binder, got {amount_dynamic:?}");
+                    };
+                    let TargetFilter::Typed(typed) = filter else {
+                        panic!("{name}: expected a Typed Cleric filter, got {filter:?}");
+                    };
+                    assert!(
+                        typed
+                            .type_filters
+                            .contains(&TypeFilter::Subtype("Cleric".to_string())),
+                        "{name}: expected the Cleric-count binder, got {typed:?}"
+                    );
+                }
+                ExpectedDynamic::BasicLandTypeCount => {
+                    assert_eq!(
+                        *amount,
+                        PreventionAmount::Next(1),
+                        "{name}: static placeholder amount"
+                    );
+                    assert_eq!(
+                        amount_dynamic,
+                        &Some(QuantityExpr::Ref {
+                            qty: QuantityRef::BasicLandTypeCount {
+                                controller: ControllerRef::You,
+                            },
+                        }),
+                        "{name}: the trailing binder defines X"
+                    );
+                }
+                ExpectedDynamic::VerseCounters => {
+                    assert_eq!(
+                        *amount,
+                        PreventionAmount::Next(1),
+                        "{name}: static placeholder amount"
+                    );
+                    assert_eq!(
+                        amount_dynamic,
+                        &Some(QuantityExpr::Ref {
+                            qty: QuantityRef::CountersOn {
+                                scope: ObjectScope::Source,
+                                counter_type: Some(CounterType::Generic("verse".to_string())),
+                            },
+                        }),
+                        "{name}: the trailing binder defines X"
+                    );
+                }
+            }
+
+            match want_target {
+                ExpectedTarget::Any => {
+                    assert_eq!(*target, TargetFilter::Any, "{name}: recipient target");
+                }
+                ExpectedTarget::Controller => {
+                    assert_eq!(
+                        *target,
+                        TargetFilter::Controller,
+                        "{name}: recipient target"
+                    );
+                }
+                ExpectedTarget::Creature => {
+                    let TargetFilter::Typed(typed) = target else {
+                        panic!("{name}: expected Typed(creature) recipient, got {target:?}");
+                    };
+                    assert!(
+                        typed.type_filters.contains(&TypeFilter::Creature),
+                        "{name}: expected Typed(creature) recipient, got {typed:?}"
+                    );
+                }
+                ExpectedTarget::Unasserted => {}
+            }
+        }
+    }
+}
+
 #[test]
 fn may_cost_decline_if_you_dont_does_not_emit_condition_or_optional_warning() {
     let oracle = "({T}: Add {B} or {R}.)\nAs this land enters, you may pay 2 life. If you don't, it enters tapped.";
