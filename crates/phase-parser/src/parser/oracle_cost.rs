@@ -875,7 +875,9 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         // self-ref combinator distinguishes the host (`~`/"cardname"/"this X" →
         // SelfRef) from a granted body's by-name reference to its granting object
         // (GRANTING_SELF_PLACEHOLDER → GrantingObject, e.g. Deconstruction
-        // Hammer's "Sacrifice Deconstruction Hammer").
+        // Hammer's "Sacrifice Deconstruction Hammer"). CR 113.7: a bare "it" in
+        // this leg also names the source — `parse_cost_self_reference` lowers it
+        // to SelfRef upstream, so this arm's own `alt` needs no further change.
         let self_filter = nom_on_lower(rest, &rest_lower, |i| {
             alt((
                 parse_cost_self_reference,
@@ -2114,7 +2116,10 @@ fn parse_sacrifice_cost_filter(filter_text: &str) -> Option<TargetFilter> {
 /// all ("one or more artifacts" — Radiant Lotus; "up to three permanents" —
 /// Baba Lysaga, Night Witch; "two +1/+1 counters" — Shichifukujin Dragon; "half
 /// the lands you control, rounded up" — Tectonic Split) — and closing it needs a
-/// count model this change does not add.
+/// count model this change does not add. A bare cost-position "it" no longer
+/// reaches this seam either: `parse_cost_self_reference` lowers it to
+/// `SelfRef` upstream, so the count-expression phrases above are the remaining
+/// occupants.
 ///
 /// EXEMPTION 2 — a tail that opens a NEW CLAUSE (`,` `.` `;` or a leading
 /// conjunction) rather than modifying the noun. "sacrifice a creature, discard a
@@ -2580,6 +2585,7 @@ fn parse_mana_cost_nom(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::oracle_util::GRANTING_SELF_PLACEHOLDER;
     use crate::types::ability::{
         ControllerRef, DiscardSelfScope, FilterProp, ObjectScope, QuantityExpr,
         SacrificeRequirement, SharedQuality, TypeFilter, TypedFilter,
@@ -3861,6 +3867,75 @@ mod tests {
         );
     }
 
+    /// CR 201.5: a printed cost leg whose object phrase is the bare pronoun
+    /// "it" names the ability's own source, exactly as "~" does. Base encodes
+    /// "sacrifice it" as an unrestricted `Typed { type_filters: [] }` — a
+    /// different, wider cost that lets the payer pick any permanent.
+    #[test]
+    fn cost_sacrifice_it_is_self_ref() {
+        assert_eq!(
+            parse_single_cost("sacrifice it"),
+            AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1))
+        );
+        assert_eq!(
+            parse_oracle_cost("Sacrifice it"),
+            AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1))
+        );
+    }
+
+    /// CR 201.5a: the granter arm still wins — a granted body naming its
+    /// granting object is `GrantingObject`, never `SelfRef` (Deconstruction
+    /// Hammer class). The host token must keep working beside it (reach-guard).
+    #[test]
+    fn cost_sacrifice_it_does_not_displace_the_granting_object_arm() {
+        assert_eq!(
+            parse_single_cost(&format!("Sacrifice {GRANTING_SELF_PLACEHOLDER}")),
+            AbilityCost::Sacrifice(SacrificeCost::new(
+                TargetFilter::GrantingObject { bound: None },
+                SacrificeRequirement::count(1),
+            ))
+        );
+        assert_eq!(
+            parse_single_cost("sacrifice ~"),
+            AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1))
+        );
+    }
+
+    /// Hostile fixtures, each with a positive reach-guard in the same test: the
+    /// pronoun needs a word boundary (`item`, `itself`) and the head position
+    /// (Trap Digger's relative-clause "it" keeps its Land+Counters filter).
+    #[test]
+    fn cost_bare_it_requires_a_word_boundary_and_a_head_position() {
+        assert_eq!(
+            parse_single_cost("sacrifice it"),
+            AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1))
+        );
+        assert!(!matches!(
+            parse_single_cost("sacrifice item"),
+            AbilityCost::Sacrifice(SacrificeCost {
+                target: TargetFilter::SelfRef,
+                ..
+            })
+        ));
+        assert!(!matches!(
+            parse_single_cost("sacrifice itself"),
+            AbilityCost::Sacrifice(SacrificeCost {
+                target: TargetFilter::SelfRef,
+                ..
+            })
+        ));
+        let digger = parse_single_cost("sacrifice a land with a trap counter on it");
+        assert!(
+            matches!(&digger, AbilityCost::Sacrifice(SacrificeCost {
+                target: TargetFilter::Typed(tf),
+                requirement,
+            }) if requirement.fixed_count() == Some(1)
+                && tf.type_filters == vec![TypeFilter::Land]
+                && !tf.properties.is_empty()),
+            "Trap Digger's filter must keep Land+trap-counter, got {digger:?}"
+        );
+    }
+
     #[test]
     fn cost_return_self_to_hand() {
         assert_eq!(
@@ -3869,6 +3944,54 @@ mod tests {
                 count: 1,
                 filter: Some(TargetFilter::SelfRef),
                 from_zone: None,
+            }
+        );
+    }
+
+    /// CR 201.5: the same class's second printed verb — "… and exile it:"
+    /// (Hourglass of the Lost, Trenzalore Clocktower). Base encodes it as an
+    /// `EffectCost { ChangeZone { target: ParentTarget } }`, which
+    /// `supports_effect_cost_payment` refuses, so the ability cannot be
+    /// activated at all. This is the only row of the three preserved/changed
+    /// rows in this neighbourhood that is RED at base: `Return it to its owner's
+    /// hand` below and the granter row above are green at base and must stay so.
+    #[test]
+    fn cost_exile_it_is_self_ref() {
+        assert_eq!(
+            parse_single_cost("exile it"),
+            AbilityCost::Exile {
+                count: 1,
+                zone: None,
+                filter: Some(TargetFilter::SelfRef),
+            }
+        );
+    }
+
+    /// PRESERVATION (Magosi, the Waterveil): this card's cost already lowers to
+    /// `SelfRef` through `try_parse_return_to_hand_cost`'s counted-object
+    /// fallback at base, so the fix is a no-op here — the value must not move.
+    #[test]
+    fn cost_return_it_to_hand_stays_self_ref() {
+        assert_eq!(
+            parse_oracle_cost(
+                "Remove an eon counter from this land and return it to its owner's hand"
+            ),
+            AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::RemoveCounter {
+                        count: 1,
+                        counter_type: CounterMatch::OfType(
+                            crate::types::counter::CounterType::Generic("eon".to_string()),
+                        ),
+                        target: None,
+                        selection: CounterCostSelection::SingleObject,
+                    },
+                    AbilityCost::ReturnToHand {
+                        count: 1,
+                        filter: Some(TargetFilter::SelfRef),
+                        from_zone: None,
+                    },
+                ],
             }
         );
     }
@@ -5377,6 +5500,39 @@ mod tests {
                 target: None,
                 selection: CounterCostSelection::SingleObject,
             }
+        );
+    }
+
+    /// CR 201.5 + CR 113.7 + CR 701.21a: the class's canonical printed line
+    /// (Ior Ruin Expedition, verbatim Scryfall text). The predicate naming the
+    /// class is a cost leg whose object phrase is the bare pronoun `it`
+    /// (`\b(sacrifice|exile)\s+it\b` in the pre-colon cost clause). The
+    /// `RemoveCounter::target` leg stays the canonical `None`; only the
+    /// sacrifice leg moves, from the unrestricted `Typed { type_filters: [] }`
+    /// to the source.
+    #[test]
+    fn cost_remove_quest_counters_and_sacrifice_it() {
+        let expected = AbilityCost::Composite {
+            costs: vec![
+                AbilityCost::RemoveCounter {
+                    count: 3,
+                    counter_type: CounterMatch::OfType(
+                        crate::types::counter::CounterType::Generic("quest".to_string()),
+                    ),
+                    target: None,
+                    selection: CounterCostSelection::SingleObject,
+                },
+                AbilityCost::Sacrifice(SacrificeCost::count(TargetFilter::SelfRef, 1)),
+            ],
+        };
+        // The printed text and the `~`-normalized pipeline text lower identically.
+        assert_eq!(
+            parse_oracle_cost("Remove three quest counters from this enchantment and sacrifice it"),
+            expected
+        );
+        assert_eq!(
+            parse_oracle_cost("Remove three quest counters from ~ and sacrifice it"),
+            expected
         );
     }
 

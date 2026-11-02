@@ -604,16 +604,39 @@ pub fn parse_granting_object_ref(input: &str) -> OracleResult<'_, TargetFilter> 
     .parse(input)
 }
 
-/// CR 201.5 / CR 201.5a: Shared self-reference combinator for *cost* positions
-/// ("Sacrifice <self>", "Exile <self>", "Return <self> to its owner's hand").
-/// Recognizes the granter placeholder → `GrantingObject` and the host tokens
-/// (`~`, "cardname") → `SelfRef`, in one authority so every cost site routes
-/// through the same logic instead of an ad-hoc per-site `tag("~")` copy.
+/// CR 201.5 / CR 201.5a / CR 113.7: Shared self-reference combinator for *cost*
+/// positions ("Sacrifice <self>", "Exile <self>", "Return <self> to its owner's
+/// hand", "Unattach a[n] <type> from <self>").
+///
+/// Recognizes, in this order, the granter placeholder → `GrantingObject` (so a
+/// granted body's by-name reference to its granting object still wins), the host
+/// tokens (`~`, "cardname") → `SelfRef`, and the bare object pronoun "it" →
+/// `SelfRef`: CR 113.7 makes the object whose activated ability is being
+/// activated ("the source") the referent a printed cost's "it" names, and a
+/// cost phrase is announced before any target exists, so it carries no
+/// chosen-target antecedent.
+///
+/// The class this serves is named by predicate, not by count: a printed cost
+/// leg whose object phrase is the bare pronoun `it` — `\b(sacrifice|exile)\s+it\b`
+/// in the pre-colon cost clause ("Remove three quest counters from this
+/// enchantment and sacrifice it:", Ior Ruin Expedition; "Remove X time counters
+/// from this artifact and exile it", Hourglass of the Lost). The effect
+/// channel's `it` is bound elsewhere (`oracle_effect::resolve_it_pronoun`, and
+/// the `parent_target_available` gate on
+/// `oracle_target::parse_anaphoric_target_ref`) and is untouched by this arm.
+///
+/// Out of scope — `behold <quality> and exile it` (Champion of the Clachan,
+/// Champion of the Path, Champion of the Weird, Champions of the Perfect,
+/// Champions of the Shoal): the pronoun there is the BEHELD card, and
+/// `oracle_cost::parse_behold_cost` consumes the whole clause as
+/// `BeholdCostAction::ExileChosen` before any cost-leg split, so this arm never
+/// sees it.
 pub fn parse_cost_self_reference(input: &str) -> OracleResult<'_, TargetFilter> {
     alt((
         parse_granting_object_ref,
         value(TargetFilter::SelfRef, tag("~")),
         value(TargetFilter::SelfRef, tag("cardname")),
+        parse_it_self_reference,
     ))
     .parse(input)
 }
@@ -713,6 +736,13 @@ fn parse_non_count_quantity(input: &str) -> OracleResult<'_, &str> {
 
 /// Parse "it" as a self-reference, requiring a word boundary after "it"
 /// to prevent false matches on words like "item", "iterate".
+///
+/// CR 201.5 / CR 113.7: this is the single "it" authority for BOTH channels —
+/// [`parse_self_reference`] (effect-target channel) and
+/// [`parse_cost_self_reference`] (cost channel, where the referent is strictly
+/// the ability's own source). The boundary set below is what keeps `item`,
+/// `iterate` and `itself` out; `test_parse_self_reference_it_word_boundary`
+/// pins it.
 fn parse_it_self_reference(input: &str) -> OracleResult<'_, TargetFilter> {
     let (rest, _) = tag("it").parse(input)?;
     match rest.chars().next() {
@@ -1979,6 +2009,28 @@ mod tests {
         let (rest5, f5) = parse_self_reference("this source this turn").unwrap();
         assert_eq!(rest5, " this turn");
         assert_eq!(f5, TargetFilter::SelfRef);
+    }
+
+    #[test]
+    fn test_parse_cost_self_reference_it_is_self_ref() {
+        // CR 201.5: a printed cost leg's bare object pronoun "it" names the
+        // ability's own source ("… and sacrifice it:" / "… and exile it:").
+        let (rest, f) = parse_cost_self_reference("it").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(f, TargetFilter::SelfRef);
+
+        // CR 201.5a: the granter placeholder still wins (reach-guard).
+        assert_eq!(
+            parse_cost_self_reference(GRANTING_SELF_PLACEHOLDER)
+                .unwrap()
+                .1,
+            TargetFilter::GrantingObject { bound: None }
+        );
+
+        // The word boundary inherited from `parse_it_self_reference` keeps
+        // "item"/"itself" out of the cost channel too.
+        assert!(parse_cost_self_reference("item").is_err());
+        assert!(parse_cost_self_reference("itself").is_err());
     }
 
     #[test]

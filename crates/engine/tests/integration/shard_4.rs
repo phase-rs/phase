@@ -541,6 +541,7 @@ mod put_target_count_entry_counters;
 mod pyromancy_random_discard_cost;
 mod queen_velocity_skip_turns;
 mod queen_velocity_upkeep;
+mod quest_counter_sacrifice_it_cost;
 mod quick_draw_target_opponent;
 mod quirion_ranger_activation;
 mod rage_reflection_double_strike_grant;
