@@ -30829,7 +30829,11 @@ fn is_declared_player_filter(filter: &TargetFilter) -> bool {
 /// owner `Shuffle(ParentTargetOwner)` as a sub-ability, so the anchor lives one
 /// level down — `extract_player_anchor` alone (top-effect only) would miss it.
 /// Used so a following "then faces a villainous choice — …" continuation can
-/// inherit the named owner as its chooser (This Is How It Ends).
+/// inherit the named owner as its chooser (This Is How It Ends). A player-only
+/// `TargetOnly` wrapper contributes its own target through two library-move
+/// shapes: the whole-graveyard mass move (CR 115.1a + CR 608.2c) and the
+/// singular/multi-target card move (CR 115.1 + CR 701.24a + CR 608.2c), so the
+/// terminal shuffle of either binds to the announced player.
 fn extract_player_anchor_in_chain(
     clause: &ParsedEffectClause,
     declared: &mut impl FnMut() -> TargetFilter,
@@ -30842,24 +30846,32 @@ fn extract_player_anchor_in_chain(
     // This is deliberately local: `ParentTarget` can also name an object, and
     // must not become a general player-capable filter. Head Games and Jester's
     // Mask then bind their following "Search that player's library" clause to
-    // this declared player target.
+    // this declared player target. The same wrapper also anchors a singular or
+    // multi-target card move into that player's library (CR 115.1 + CR 701.24a
+    // + CR 608.2c): "Target player shuffles up to N target cards from their
+    // graveyard into their library" (Dwell on the Past, Memory's Journey,
+    // Loaming Shaman, …) — the moved cards are targets of their own, so only
+    // the wrapper's player can be the instruction's actor.
     let parent_target_is_player = matches!(
         &clause.effect,
         Effect::TargetOnly { target } if target_filter_can_target_player(target)
     );
     let mut sub = clause.sub_ability.as_deref();
     while let Some(def) = sub {
-        if parent_target_is_player
-            && matches!(
-                def.effect.as_ref(),
+        if parent_target_is_player {
+            match def.effect.as_ref() {
                 Effect::ChangeZoneAll {
                     destination: Zone::Library,
                     target: TargetFilter::ParentTarget,
                     ..
-                }
-            )
-        {
-            return Some(TargetFilter::ParentTarget);
+                } => return Some(TargetFilter::ParentTarget),
+                Effect::ChangeZone {
+                    destination: Zone::Library,
+                    target: TargetFilter::Typed(_),
+                    ..
+                } => return Some(TargetFilter::ParentTarget),
+                _ => {}
+            }
         }
         if let Some(anchor) = extract_player_anchor(&def.effect, declared) {
             return Some(anchor);
@@ -32286,6 +32298,13 @@ fn lower_subject_exile_objects(
 /// this chain-local seam: it is the back-reference to the outer player
 /// `TargetOnly`, not a standalone player filter accepted by the general target
 /// validator.
+///
+/// A singular/multi-target library move ("Target player shuffles up to N target
+/// cards from their graveyard into their library") is deliberately out of scope
+/// here: its terminal shuffle is bound by the chain anchor
+/// (`extract_player_anchor_in_chain` + `apply_anchor_subject`), which owns every
+/// `Shuffle { target: Controller }` rebind. Widening this helper would create a
+/// second authority for the same write.
 fn sync_player_into_nested_shuffle_sub(
     clause: &mut ParsedEffectClause,
     subject_filter: &TargetFilter,
