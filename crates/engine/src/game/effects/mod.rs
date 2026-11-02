@@ -15411,8 +15411,17 @@ fn stamp_member_causes(state: &mut GameState, affected: Vec<(ObjectId, Option<Th
             .or_default();
         for (id, cause, origin) in derived {
             causes.insert(id, cause);
-            if let Some(origin) = origin {
-                origins.insert(id, origin);
+            // The origin follows the member's latest cause: a cause with no
+            // verifiable producing transition (a tap, CR 701.26a, or an
+            // unverifiable record) clears any origin an earlier cause stamped,
+            // so a stale departure never outlives the cause that produced it.
+            match origin {
+                Some(origin) => {
+                    origins.insert(id, origin);
+                }
+                None => {
+                    origins.remove(&id);
+                }
             }
         }
     }
@@ -32724,6 +32733,30 @@ mod tests {
                 .get(&tapped)
                 .is_none_or(|origins| !origins.contains_key(&wolf)),
             "a tap is not a zone transition and stamps no origin"
+        );
+
+        // Same chain set: a later tap of a member an earlier zone-moving
+        // producer stamped clears that origin along with replacing the cause.
+        let merged = publish_fresh_tracked_set_with_causes(
+            &mut state,
+            vec![wolf],
+            Some(ThisWayCause::Returned),
+        );
+        assert!(
+            state
+                .tracked_set_member_origins
+                .get(&merged)
+                .is_some_and(|origins| origins.contains_key(&wolf)),
+            "reach guard: the Returned cause stamps an origin in the merged set"
+        );
+        publish_tracked_set_with_causes(&mut state, vec![(wolf, Some(ThisWayCause::Tapped))]);
+        assert_eq!(state.chain_tracked_set_id, Some(merged), "same chain set");
+        assert!(
+            state
+                .tracked_set_member_origins
+                .get(&merged)
+                .is_none_or(|origins| !origins.contains_key(&wolf)),
+            "the Tapped cause leaves no stale Returned origin behind"
         );
     }
 

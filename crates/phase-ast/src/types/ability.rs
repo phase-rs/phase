@@ -8091,7 +8091,9 @@ impl ThisWayCause {
     /// The origin zone the producing transition must have departed, when the
     /// action determines one. `None` for destination-named actions (Exiled,
     /// Returned, Bounced, PutIntoGraveyard, OwnerLibraryShuffleSubject),
-    /// which arrive from anywhere. The origin-stamp site requires the
+    /// which arrive from anywhere, and for `Tapped`, which names no transition
+    /// at all (callers gate on [`Self::is_zone_transition`] first). The
+    /// origin-stamp site requires the
     /// member's latest zone-change record to agree; a mismatch means the
     /// record is not the producing transition and no origin is stamped.
     pub fn expected_origin_zone(self) -> Option<crate::types::zones::Zone> {
@@ -8102,10 +8104,9 @@ impl ThisWayCause {
             ThisWayCause::Milled => Some(Zone::Library),
             // CR 701.9a: discard moves hand cards to the graveyard.
             ThisWayCause::Discarded => Some(Zone::Hand),
-            // CR 701.26a: only a permanent can be tapped. Tapping is not a zone
-            // transition at all (see `is_zone_transition`), so no zone-change
-            // record is ever its producing transition.
-            ThisWayCause::Tapped => Some(Zone::Battlefield),
+            // CR 701.26a: tapping is not a zone transition (see
+            // `is_zone_transition`), so it determines no departed zone.
+            ThisWayCause::Tapped => None,
             ThisWayCause::Exiled
             | ThisWayCause::Returned
             | ThisWayCause::Bounced
