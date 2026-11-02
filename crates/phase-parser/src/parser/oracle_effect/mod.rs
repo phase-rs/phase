@@ -16608,6 +16608,33 @@ fn split_reveal_filter_disjuncts(filter_text: &str) -> Option<Vec<&str>> {
     (disjuncts.len() >= 2 && has_or_connective).then_some(disjuncts)
 }
 
+/// CR 608.2c / CR 701.20a: Check whether a disjunct in a reveal-until filter list
+/// represents a separate counted stopping condition (e.g. Thought Dissector: "until an
+/// artifact card or X cards are revealed", where the second disjunct is "X" / "X cards")
+/// rather than a card filter (e.g. "until a creature or a land card is revealed",
+/// where "a land" is an article-prefixed filter for a land card).
+fn is_reveal_until_count_disjunct(disjunct: &str) -> bool {
+    let trimmed = disjunct.trim();
+    let base = trimmed
+        .strip_suffix(" cards")
+        .or_else(|| trimmed.strip_suffix(" card"))
+        .unwrap_or(trimmed)
+        .trim();
+    if base.is_empty() || base == "a" || base == "an" {
+        return false;
+    }
+    // A genuine counted condition consists entirely of a quantity expression
+    // (a number literal, variable "x", or demonstrative "that many") with no
+    // remaining card filter noun. Article words ("a", "an") prefix card
+    // filters ("a land") and never appear as standalone counts.
+    all_consuming(nom_primitives::parse_number_or_x)
+        .parse(base)
+        .is_ok()
+        || all_consuming(nom_quantity::parse_that_much_or_many)
+            .parse(base)
+            .is_ok()
+}
+
 /// Build a [`TargetFilter`] from a single disjunct fragment of a reveal-until
 /// filter list. Strips the optional leading article and the optional trailing
 /// `" card"` head-noun suffix (each disjunct carries its own), then delegates
@@ -16849,15 +16876,10 @@ fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEf
 
     // CR 608.2c / CR 701.20a: Reject compound stopping conditions where a second
     // stopping condition is joined by "or" (e.g. Thought Dissector: "until an artifact
-    // card or X cards are revealed, whichever comes first"). If any disjunct is a count
-    // expression or number, this is a compound stopping condition rather than a simple card filter.
+    // card or X cards are revealed, whichever comes first"). If any disjunct is a standalone
+    // count expression or number, this is a compound stopping condition rather than a simple card filter.
     if let Some(disjuncts) = split_reveal_filter_disjuncts(filter_text) {
-        if disjuncts.iter().any(|d| {
-            let trimmed = d.trim();
-            trimmed == "x"
-                || nom_primitives::parse_number_or_x.parse(trimmed).is_ok()
-                || parse_reveal_until_count(trimmed).is_ok()
-        }) {
+        if disjuncts.iter().any(|d| is_reveal_until_count_disjunct(d)) {
             return Some(parsed_clause(Effect::unimplemented(
                 "compound_reveal_until",
                 count_tp.original,

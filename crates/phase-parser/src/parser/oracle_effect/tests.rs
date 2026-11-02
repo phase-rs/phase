@@ -45524,6 +45524,73 @@ fn reveal_until_passive_compound_stopping_rejected_thought_dissector() {
     );
 }
 
+/// CR 701.20a: Passive-voice reveal-until with article-prefixed disjuncts
+/// ("until a creature or a land card is revealed") must build the supported
+/// TargetFilter::Or rather than mis-classifying "a land" as a compound count.
+#[test]
+fn reveal_until_passive_disjunctive_filter_with_articles() {
+    let def = parse_effect_chain(
+        "Target opponent reveals cards from the top of their library until a creature or a land card is revealed, then puts those cards into their graveyard.",
+        AbilityKind::Spell,
+    );
+    let Effect::RevealUntil {
+        count,
+        filter,
+        kept_destination,
+        rest_destination,
+        ..
+    } = &*def.effect
+    else {
+        panic!("expected RevealUntil, got {:?}", def.effect);
+    };
+    assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+    assert_eq!(*kept_destination, Zone::Graveyard);
+    assert_eq!(*rest_destination, Zone::Graveyard);
+
+    let TargetFilter::Or { filters } = filter else {
+        panic!("expected TargetFilter::Or, got {:?}", filter);
+    };
+    assert_eq!(filters.len(), 2);
+    assert!(
+        matches!(
+            &filters[0],
+            TargetFilter::Typed(TypedFilter { type_filters, .. })
+                if type_filters.contains(&TypeFilter::Creature)
+        ),
+        "expected creature filter in disjunct 0, got {:?}",
+        filters[0]
+    );
+    assert!(
+        matches!(
+            &filters[1],
+            TargetFilter::Typed(TypedFilter { type_filters, .. })
+                if type_filters.contains(&TypeFilter::Land)
+        ),
+        "expected land filter in disjunct 1, got {:?}",
+        filters[1]
+    );
+}
+
+/// CR 608.2c / CR 701.20a: Compound stopping conditions with spelled or numeric counts
+/// ("until a creature card or two cards are revealed") must fail closed as Effect::Unimplemented.
+#[test]
+fn reveal_until_passive_compound_stopping_rejected_counted_variants() {
+    for text in [
+        "Target opponent reveals cards from the top of their library until a creature card or two cards are revealed.",
+        "Target opponent reveals cards from the top of their library until a creature card or 5 cards are revealed.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::Unimplemented { name, .. } if name == "compound_reveal_until"
+            ),
+            "expected Effect::Unimplemented(compound_reveal_until) for {text}, got {:?}",
+            def.effect
+        );
+    }
+}
+
 /// CR 608.2c / CR 701.20a: An intervening instruction (such as Draw) between RevealUntil
 /// and whole-pile placement must preserve the placement as a separate SequentialSibling
 /// instruction rather than folding it into RevealUntil.
