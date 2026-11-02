@@ -6693,33 +6693,76 @@ pub enum AttackerBlockStatus {
     Unblocked,
 }
 
+/// CR 509.1g: which creature of a block pair a [`CombatRelation::BlockPairing`]
+/// requires to be the blocker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum BlockPairDirection {
+    /// The subject is the blocker: "creatures blocked by this creature" (Wall of Nets).
+    SubjectIsBlocker,
+    /// The candidate is the blocker: "creatures that blocked this creature".
+    CandidateIsBlocker,
+    /// Either creature: "creatures blocking or blocked by it" (Abu Ja'far).
+    Either,
+}
+
 /// Combat relationship required by `FilterProp::CombatRelation`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(from = "CombatRelationWire")]
 pub enum CombatRelation {
-    /// CR 509.1g/509.1h: Candidate is blocking the subject or is blocked by it —
-    /// the current block pairing, in either orientation. A subject that has left
-    /// the battlefield answers from the pairings it had immediately before it
-    /// left (CR 608.2h last known information), and only for a candidate still
-    /// in that combat role (CR 506.4).
-    BlockingOrBlockedBy,
-    /// CR 509.1g + CR 400.7: Candidate is an attacking creature blocked by the
-    /// subject.
+    /// CR 509.1g + CR 400.7: the candidate and the subject form a block pair in
+    /// `direction`.
     ///
-    /// * `scope: None` — the current block pairing ("creatures blocked by this
-    ///   creature"): the same pairing authority as `BlockingOrBlockedBy`, in the
-    ///   one orientation where the subject is the blocker.
-    /// * `scope: Some(window)` — the subject was recorded as blocking the
-    ///   candidate within `window` ("creatures it blocked this turn"). This
-    ///   reads the block-history ledgers
+    /// * `scope: None` — the current block pairing (CR 509.1h). A subject that
+    ///   has left the battlefield answers from the pairings it had immediately
+    ///   before it left (CR 608.2h last known information), and only for a
+    ///   candidate still in that combat role (CR 506.4).
+    /// * `scope: Some(window)` — the pair was recorded within `window`
+    ///   (CR 608.2i). This reads the block-history ledgers
     ///   (`CombatState::creature_blocked_attackers_this_combat` /
     ///   `GameState::creature_blocked_attackers_this_turn`), which CR 506.4 does
     ///   not prune. Each record pins both creatures' exact incarnations, so a
     ///   creature that left and returned matches none of its predecessor's
     ///   records.
-    BlockedBySubject {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+    BlockPairing {
+        direction: BlockPairDirection,
+        #[serde(skip_serializing_if = "Option::is_none")]
         scope: Option<CombatHistoryScope>,
     },
+}
+
+/// Deserialization shape of [`CombatRelation`]. Writers emit only `BlockPairing`;
+/// the two retired variants stay readable so committed dumps, saved games and
+/// older card data keep loading.
+#[derive(Deserialize)]
+enum CombatRelationWire {
+    BlockPairing {
+        direction: BlockPairDirection,
+        #[serde(default)]
+        scope: Option<CombatHistoryScope>,
+    },
+    BlockingOrBlockedBy,
+    BlockedBySubject {
+        #[serde(default)]
+        scope: Option<CombatHistoryScope>,
+    },
+}
+
+impl From<CombatRelationWire> for CombatRelation {
+    fn from(wire: CombatRelationWire) -> Self {
+        match wire {
+            CombatRelationWire::BlockPairing { direction, scope } => {
+                Self::BlockPairing { direction, scope }
+            }
+            CombatRelationWire::BlockingOrBlockedBy => Self::BlockPairing {
+                direction: BlockPairDirection::Either,
+                scope: None,
+            },
+            CombatRelationWire::BlockedBySubject { scope } => Self::BlockPairing {
+                direction: BlockPairDirection::SubjectIsBlocker,
+                scope,
+            },
+        }
+    }
 }
 
 /// CR 702.122b + CR 702.122c: which side of a crew payment the candidate of a
@@ -44189,7 +44232,10 @@ mod tests {
                 "combat relation against the selected target",
                 typed(vec![FilterProp::CombatRelation {
                     subject: CombatRelationSubject::ParentTarget,
-                    relation: CombatRelation::BlockingOrBlockedBy,
+                    relation: CombatRelation::BlockPairing {
+                        direction: BlockPairDirection::Either,
+                        scope: None,
+                    },
                 }]),
             ),
             (
@@ -47442,15 +47488,22 @@ mod tests {
             FilterProp::Blocking,
             FilterProp::BlockingSource,
             FilterProp::CombatRelation {
-                relation: CombatRelation::BlockingOrBlockedBy,
+                relation: CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::Either,
+                    scope: None,
+                },
                 subject: CombatRelationSubject::ParentTarget,
             },
             FilterProp::CombatRelation {
-                relation: CombatRelation::BlockedBySubject { scope: None },
+                relation: CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::SubjectIsBlocker,
+                    scope: None,
+                },
                 subject: CombatRelationSubject::Source,
             },
             FilterProp::CombatRelation {
-                relation: CombatRelation::BlockedBySubject {
+                relation: CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::SubjectIsBlocker,
                     scope: Some(CombatHistoryScope::ThisTurn),
                 },
                 subject: CombatRelationSubject::Source,
@@ -48717,6 +48770,117 @@ mod tests {
             }),
         }
         .contains_unimplemented());
+    }
+
+    fn combat_relation_prop(relation: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "type": "CombatRelation",
+            "relation": relation,
+            "subject": "Source",
+        })
+    }
+
+    fn block_pairing_prop(
+        direction: BlockPairDirection,
+        scope: Option<CombatHistoryScope>,
+    ) -> FilterProp {
+        FilterProp::CombatRelation {
+            relation: CombatRelation::BlockPairing { direction, scope },
+            subject: CombatRelationSubject::Source,
+        }
+    }
+
+    /// Each retired `CombatRelation` shape reads as its `BlockPairing`, through
+    /// the internally tagged `FilterProp` path that committed data takes.
+    /// `{"BlockedBySubject":{}}` is what writers produced for `scope: None`.
+    #[test]
+    fn legacy_combat_relation_shapes_read_as_block_pairing() {
+        for (legacy, direction, scope) in [
+            (
+                serde_json::json!("BlockingOrBlockedBy"),
+                BlockPairDirection::Either,
+                None,
+            ),
+            (
+                serde_json::json!({"BlockedBySubject": {}}),
+                BlockPairDirection::SubjectIsBlocker,
+                None,
+            ),
+            (
+                serde_json::json!({"BlockedBySubject": {"scope": "ThisCombat"}}),
+                BlockPairDirection::SubjectIsBlocker,
+                Some(CombatHistoryScope::ThisCombat),
+            ),
+            (
+                serde_json::json!({"BlockedBySubject": {"scope": "ThisTurn"}}),
+                BlockPairDirection::SubjectIsBlocker,
+                Some(CombatHistoryScope::ThisTurn),
+            ),
+        ] {
+            let read: FilterProp = serde_json::from_value(combat_relation_prop(legacy.clone()))
+                .unwrap_or_else(|error| panic!("{legacy} must read: {error}"));
+            assert_eq!(read, block_pairing_prop(direction, scope), "{legacy}");
+        }
+    }
+
+    /// Writers emit only `BlockPairing`, with `direction` always present and
+    /// `scope` absent exactly when `None`, for every combination, including the
+    /// ones no parser path produces yet.
+    #[test]
+    fn combat_relation_writes_only_block_pairing_and_round_trips() {
+        for direction in [
+            BlockPairDirection::SubjectIsBlocker,
+            BlockPairDirection::CandidateIsBlocker,
+            BlockPairDirection::Either,
+        ] {
+            for scope in [
+                None,
+                Some(CombatHistoryScope::ThisCombat),
+                Some(CombatHistoryScope::ThisTurn),
+            ] {
+                let prop = block_pairing_prop(direction, scope);
+                let written = serde_json::to_value(&prop).expect("a FilterProp serializes");
+                let relation = written["relation"]
+                    .as_object()
+                    .expect("the relation is written as a struct variant");
+                assert_eq!(relation.len(), 1, "{written}");
+                let pairing = relation["BlockPairing"]
+                    .as_object()
+                    .expect("the only key is BlockPairing");
+                assert_eq!(
+                    pairing.get("direction"),
+                    Some(&serde_json::to_value(direction).expect("a direction serializes")),
+                    "{written}"
+                );
+                assert_eq!(pairing.contains_key("scope"), scope.is_some(), "{written}");
+                let read: FilterProp =
+                    serde_json::from_value(written.clone()).expect("the written shape reads back");
+                assert_eq!(read, prop, "{written}");
+            }
+        }
+    }
+
+    /// The wire shim reads what was once written and invents nothing: no default
+    /// direction, no catch-all, and no shape that never existed. The first read
+    /// is the reach guard: the same envelope with a real relation parses.
+    #[test]
+    fn combat_relation_wire_refuses_what_never_was_written() {
+        serde_json::from_value::<FilterProp>(combat_relation_prop(
+            serde_json::json!({"BlockPairing": {"direction": "Either"}}),
+        ))
+        .expect("reach guard: a written relation reads in this envelope");
+        for invented in [
+            serde_json::json!("BlockedBySubject"),
+            serde_json::json!({"BlockingOrBlockedBy": {"scope": "ThisTurn"}}),
+            serde_json::json!("BlockedBy"),
+            serde_json::json!({"BlockPairing": {"scope": "ThisTurn"}}),
+        ] {
+            assert!(
+                serde_json::from_value::<FilterProp>(combat_relation_prop(invented.clone()))
+                    .is_err(),
+                "{invented} was never written and must not read"
+            );
+        }
     }
 }
 

@@ -7,13 +7,13 @@ use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
 
 use crate::types::ability::{
-    AggregateFunction, AttachmentKind, AttachmentReferent, CardTypeSetSource, ChoiceType,
-    CombatHistoryScope, CombatRelation, CombatRelationSubject, Comparator, ControllerRef,
-    CostCategory, CountScope, CrewRelation, DamageKindFilter, FilterProp, NameStickerSet,
-    ObjectProperty, ObjectScope, ParitySource, PlayerFilter, PlayerRelation, PropertyAggregate,
-    PtStat, PtValueScope, QuantityExpr, QuantityRef, SeatDirection, SharedQuality,
-    SharedQualityRelation, TargetFilter, TargetSelectionMode, ThisWayCause, TypeFilter,
-    TypedFilter,
+    AggregateFunction, AttachmentKind, AttachmentReferent, BlockPairDirection, CardTypeSetSource,
+    ChoiceType, CombatHistoryScope, CombatRelation, CombatRelationSubject, Comparator,
+    ControllerRef, CostCategory, CountScope, CrewRelation, DamageKindFilter, FilterProp,
+    NameStickerSet, ObjectProperty, ObjectScope, ParitySource, PlayerFilter, PlayerRelation,
+    PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef, SeatDirection,
+    SharedQuality, SharedQualityRelation, TargetFilter, TargetSelectionMode, ThisWayCause,
+    TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{noncreature_subtype_set, SubtypeSet, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
@@ -6869,11 +6869,25 @@ pub(crate) enum CombatRelationSubjectWord {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BlockPairingForm {
     /// CR 509.1g + CR 509.1h: "blocking or blocked by <subject>" — either
-    /// orientation (`CombatRelation::BlockingOrBlockedBy`).
+    /// orientation (`BlockPairDirection::Either`).
     BlockingOrBlockedBy,
     /// CR 509.1g: passive "blocked by <subject>" with no time window — the
-    /// subject is the blocker (`CombatRelation::BlockedBySubject { scope: None }`).
+    /// subject is the blocker (`BlockPairDirection::SubjectIsBlocker`).
     BlockedBy,
+}
+
+impl BlockPairingForm {
+    /// CR 509.1g + CR 509.1h: the current-pairing relation this form denotes.
+    pub(crate) fn relation(self) -> CombatRelation {
+        let direction = match self {
+            BlockPairingForm::BlockingOrBlockedBy => BlockPairDirection::Either,
+            BlockPairingForm::BlockedBy => BlockPairDirection::SubjectIsBlocker,
+        };
+        CombatRelation::BlockPairing {
+            direction,
+            scope: None,
+        }
+    }
 }
 
 /// The subject word naming the ability's own source: the pronoun "it", the
@@ -7001,11 +7015,11 @@ fn resolve_relation_subject(
 /// * CR 509.1g + CR 608.2i: "<it|~|this creature> blocked this <combat|turn>"
 ///   (`parse_source_blocked_history_clause`) — the candidate is a creature the
 ///   ability's source blocked within the window, read from the block-history
-///   ledgers (`CombatRelation::BlockedBySubject { scope: Some(_) }`).
+///   ledgers (`CombatRelation::BlockPairing` with
+///   `BlockPairDirection::SubjectIsBlocker` and `scope: Some(_)`).
 /// * CR 509.1g + CR 509.1h: "blocking or blocked by <subject>" / "blocked by
 ///   <subject>" (`parse_block_pairing_clause`) — the current block pairing
-///   (`CombatRelation::BlockingOrBlockedBy` /
-///   `CombatRelation::BlockedBySubject { scope: None }`). The subject is either
+///   (`BlockPairingForm::relation`, `scope: None`). The subject is either
 ///   another target ("... by target creature", resolved against the parent
 ///   target) or the ability's own source ("... by ~" / "... by this creature" /
 ///   "... by it" — Cromat, Abu Ja'far, Wall of Nets). The source form mirrors
@@ -7021,7 +7035,10 @@ fn parse_combat_relation_suffix(text: &str, ctx: &ParseContext) -> Option<(Filte
     {
         return Some((
             FilterProp::CombatRelation {
-                relation: CombatRelation::BlockedBySubject { scope: Some(scope) },
+                relation: CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::SubjectIsBlocker,
+                    scope: Some(scope),
+                },
                 subject: resolve_relation_subject(word, ctx)?,
             },
             text.len() - rest.len(),
@@ -7047,13 +7064,9 @@ fn parse_combat_relation_suffix(text: &str, ctx: &ParseContext) -> Option<(Filte
     let (rest, (form, word)) = preceded(tag(" "), parse_block_pairing_clause)
         .parse(text)
         .ok()?;
-    let relation = match form {
-        BlockPairingForm::BlockingOrBlockedBy => CombatRelation::BlockingOrBlockedBy,
-        BlockPairingForm::BlockedBy => CombatRelation::BlockedBySubject { scope: None },
-    };
     Some((
         FilterProp::CombatRelation {
-            relation,
+            relation: form.relation(),
             subject: resolve_relation_subject(word, ctx)?,
         },
         text.len() - rest.len(),
@@ -12523,7 +12536,10 @@ mod tests {
             filter,
             TargetFilter::Typed(TypedFilter::creature().properties(vec![
                 FilterProp::CombatRelation {
-                    relation: CombatRelation::BlockingOrBlockedBy,
+                    relation: CombatRelation::BlockPairing {
+                        direction: BlockPairDirection::Either,
+                        scope: None
+                    },
                     subject: CombatRelationSubject::ParentTarget,
                 }
             ]))
@@ -12545,7 +12561,10 @@ mod tests {
                 filter,
                 TargetFilter::Typed(TypedFilter::creature().properties(vec![
                     FilterProp::CombatRelation {
-                        relation: CombatRelation::BlockingOrBlockedBy,
+                        relation: CombatRelation::BlockPairing {
+                            direction: BlockPairDirection::Either,
+                            scope: None
+                        },
                         subject: CombatRelationSubject::Source,
                     }
                 ])),
@@ -12602,14 +12621,17 @@ mod tests {
     fn blocked_by_source_creatures(scope: CombatHistoryScope) -> TargetFilter {
         TargetFilter::Typed(
             TypedFilter::creature().properties(vec![FilterProp::CombatRelation {
-                relation: CombatRelation::BlockedBySubject { scope: Some(scope) },
+                relation: CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::SubjectIsBlocker,
+                    scope: Some(scope),
+                },
                 subject: CombatRelationSubject::Source,
             }]),
         )
     }
 
     /// CR 509.1g + CR 608.2i: a mass target phrase carrying the clause folds it
-    /// into a `BlockedBySubject` filter anchored on the source, in both windows.
+    /// into a windowed `SubjectIsBlocker` filter anchored on the source, in both windows.
     /// The bare "it" binds with a `SelfRef` subject; the self-name spelling binds
     /// with no context at all.
     #[test]
@@ -12806,7 +12828,10 @@ mod tests {
         assert_eq!(
             filter,
             pairing_creatures(
-                CombatRelation::BlockingOrBlockedBy,
+                CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::Either,
+                    scope: None
+                },
                 CombatRelationSubject::Source
             )
         );
@@ -12820,7 +12845,10 @@ mod tests {
             assert_eq!(
                 filter,
                 pairing_creatures(
-                    CombatRelation::BlockedBySubject { scope: None },
+                    CombatRelation::BlockPairing {
+                        direction: BlockPairDirection::SubjectIsBlocker,
+                        scope: None
+                    },
                     CombatRelationSubject::Source
                 ),
                 "{text}"
@@ -12836,7 +12864,10 @@ mod tests {
                     value: Keyword::Flying
                 },
                 FilterProp::CombatRelation {
-                    relation: CombatRelation::BlockedBySubject { scope: None },
+                    relation: CombatRelation::BlockPairing {
+                        direction: BlockPairDirection::SubjectIsBlocker,
+                        scope: None
+                    },
                     subject: CombatRelationSubject::Source,
                 },
             ]))
@@ -12879,11 +12910,17 @@ mod tests {
         for (text, relation) in [
             (
                 "creatures blocking or blocked by it",
-                CombatRelation::BlockingOrBlockedBy,
+                CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::Either,
+                    scope: None,
+                },
             ),
             (
                 "creatures blocked by it",
-                CombatRelation::BlockedBySubject { scope: None },
+                CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::SubjectIsBlocker,
+                    scope: None,
+                },
             ),
         ] {
             let mut pinned = ParseContext {

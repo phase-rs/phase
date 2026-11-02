@@ -12134,7 +12134,7 @@ mod tests {
         AttachCardinality, AttachmentReferent, CopyRecipient, ManaProduction, ManaTargetRole,
         PreventionAmount, PreventionScope,
     };
-    use crate::types::ability::{CombatRelation, CombatRelationSubject};
+    use crate::types::ability::{BlockPairDirection, CombatRelation, CombatRelationSubject};
 
     #[test]
     fn inherit_result_branch_source_identity_follows_the_carrier_policy() {
@@ -12838,7 +12838,10 @@ mod tests {
                     target: TargetFilter::Typed(TypedFilter::creature().properties(vec![
                         FilterProp::CombatRelation {
                             subject,
-                            relation: CombatRelation::BlockingOrBlockedBy,
+                            relation: CombatRelation::BlockPairing {
+                                direction: BlockPairDirection::Either,
+                                scope: None,
+                            },
                         },
                     ])),
                 }),
@@ -13242,7 +13245,10 @@ mod tests {
                 target: TargetFilter::Typed(TypedFilter::creature().properties(vec![
                     FilterProp::CombatRelation {
                         subject: CombatRelationSubject::ParentTarget,
-                        relation: CombatRelation::BlockingOrBlockedBy,
+                        relation: CombatRelation::BlockPairing {
+                            direction: BlockPairDirection::Either,
+                            scope: None,
+                        },
                     },
                 ])),
             },
@@ -13529,7 +13535,10 @@ mod tests {
                 defender: Some(ControllerRef::You),
             },
             FilterProp::CombatRelation {
-                relation: CombatRelation::BlockingOrBlockedBy,
+                relation: CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::Either,
+                    scope: None,
+                },
                 subject: CombatRelationSubject::Source,
             },
         ] {

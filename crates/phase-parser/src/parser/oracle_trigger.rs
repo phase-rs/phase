@@ -79,13 +79,13 @@ use crate::types::ability::{
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag,
     AdditionalCostOrigin, AdditionalCostPaymentSource, AggregateFunction, AttachmentKind,
-    AttachmentReferent, AttackersDeclaredCountSubject, CardSelectionMode, CardTypeSetSource,
-    CastManaObjectScope, CastManaSpentMetric, CastVariantPaid, CoinFlipResult, CombatRelation,
-    CombatRelationSubject, Comparator, ControllerRef, CountScope, CounterTriggerFilter,
-    DamageAmountScope, DamageAmountThreshold, DamageChannel, DamageKindFilter,
-    DelayedTriggerCondition, DestinationConstraint, DieResultFilter, Effect, EffectScope,
-    FilterProp, IllegalTargetsDisposition, ManaAbilityProducedFilter, NameStickerSet, ObjectScope,
-    OriginConstraint, ParsedCondition, PlayerFilter, PlayerRelation, PlayerScope,
+    AttachmentReferent, AttackersDeclaredCountSubject, BlockPairDirection, CardSelectionMode,
+    CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid, CoinFlipResult,
+    CombatRelation, CombatRelationSubject, Comparator, ControllerRef, CountScope,
+    CounterTriggerFilter, DamageAmountScope, DamageAmountThreshold, DamageChannel,
+    DamageKindFilter, DelayedTriggerCondition, DestinationConstraint, DieResultFilter, Effect,
+    EffectScope, FilterProp, IllegalTargetsDisposition, ManaAbilityProducedFilter, NameStickerSet,
+    ObjectScope, OriginConstraint, ParsedCondition, PlayerFilter, PlayerRelation, PlayerScope,
     PropertyAggregate, PtStat, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
     SacrificeAggregateStat, SacrificeCost, SacrificeRequirement, SharedQuality, SpentColor,
     StaticCondition, TapCreaturesRequirement, TapStateChange, TargetFilter, TriggerCondition,
@@ -18814,7 +18814,10 @@ fn source_block_count_condition(filter: TargetFilter, minimum: i32) -> TriggerCo
     let filter = add_property(
         filter,
         FilterProp::CombatRelation {
-            relation: CombatRelation::BlockingOrBlockedBy,
+            relation: CombatRelation::BlockPairing {
+                direction: BlockPairDirection::Either,
+                scope: None,
+            },
             subject: CombatRelationSubject::Source,
         },
     );

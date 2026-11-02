@@ -38,8 +38,8 @@ use super::oracle_target::{
 use super::oracle_trigger::parse_distributed_x_cost_condition;
 use super::swallow_evidence::UnitEvidence;
 use crate::types::ability::{
-    AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, CastingPermission,
-    ChooseFromZoneConstraint, CoinFlipRun, CombatHistoryScope, CombatRelation,
+    AbilityCondition, AbilityCost, AbilityDefinition, ActivationRestriction, BlockPairDirection,
+    CastingPermission, ChooseFromZoneConstraint, CoinFlipRun, CombatHistoryScope, CombatRelation,
     CombatRelationSubject, Comparator, ContinuousModification, CopyRetargetPermission,
     DamageModification, DelayedTriggerCondition, Duration, Effect, FilterProp, ManaProduction,
     ModalSelectionConstraint, OpponentMayScope, ParsedCondition, PerPlayerScope, PlayerFilter,
@@ -6286,8 +6286,8 @@ fn detect_damage_subject_conjunction(
 /// blocked this turn" (Cathedral Membrane, Defiant Vanguard) is a look-back
 /// restriction on the affected object set. Every clause the shared recognizer
 /// `parse_source_blocked_history_clause` finds must surface as a
-/// `CombatRelation::BlockedBySubject` filter with the same window; otherwise the
-/// relative clause was dropped and the mass effect silently widened to every
+/// `CombatRelation::BlockPairing` filter with `SubjectIsBlocker` and the same
+/// window; otherwise the relative clause was dropped and the mass effect silently widened to every
 /// creature (#9179). The duration-ownership guard in `strip_trailing_duration`
 /// keeps the window from reappearing as a spurious effect duration, so without
 /// this detector a declined clause would leave no trace at all.
@@ -6302,7 +6302,10 @@ fn detect_combat_history_relation(
             matches!(
                 prop,
                 FilterProp::CombatRelation {
-                    relation: CombatRelation::BlockedBySubject { scope: found },
+                    relation: CombatRelation::BlockPairing {
+                        direction: BlockPairDirection::SubjectIsBlocker,
+                        scope: found,
+                    },
                     ..
                 } if *found == Some(scope)
             )
@@ -6347,22 +6350,12 @@ fn detect_combat_pairing_relation(
     diagnostics: &mut Vec<OracleDiagnostic>,
 ) {
     let represented = |form: BlockPairingForm, subject: CombatRelationSubject| {
-        evidence.count::<FilterProp>(|prop| match (form, prop) {
-            (
-                BlockPairingForm::BlockingOrBlockedBy,
-                FilterProp::CombatRelation {
-                    relation: CombatRelation::BlockingOrBlockedBy,
-                    subject: found,
-                },
+        evidence.count::<FilterProp>(|prop| {
+            matches!(
+                prop,
+                FilterProp::CombatRelation { relation, subject: found }
+                    if *relation == form.relation() && *found == subject
             )
-            | (
-                BlockPairingForm::BlockedBy,
-                FilterProp::CombatRelation {
-                    relation: CombatRelation::BlockedBySubject { scope: None },
-                    subject: found,
-                },
-            ) => *found == subject,
-            _ => false,
         })
     };
     let mut clauses: Vec<(BlockPairingForm, CombatRelationSubject)> = Vec::new();
@@ -6580,13 +6573,13 @@ mod tests {
     use crate::parser::oracle_ir::diagnostic::ClauseGap; // `pub enum` in oracle_ir::diagnostic
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::ability::{
-        AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, CardPlayMode,
-        CardSelectionMode, CastFromZoneDriver, ChooseFromZoneConstraint, ChooseOneOfKind, Chooser,
-        Comparator, ContinuousModification, CopyRetargetPermission, DamageModification, Effect,
-        EffectOutcomeSignal, FilterProp, ManaProduction, OutsideGameSourcePool, ParsedCondition,
-        PlayerFilter, QuantityExpr, QuantityRef, SpellStackToGraveyardReplacement, StaticCondition,
-        StaticDefinition, TargetFilter, TriggerCondition, TypedFilter, UnlessPayModifier,
-        ZoneChoiceCandidateSource, ZoneOwner,
+        AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, BlockPairDirection,
+        CardPlayMode, CardSelectionMode, CastFromZoneDriver, ChooseFromZoneConstraint,
+        ChooseOneOfKind, Chooser, Comparator, ContinuousModification, CopyRetargetPermission,
+        DamageModification, Effect, EffectOutcomeSignal, FilterProp, ManaProduction,
+        OutsideGameSourcePool, ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef,
+        SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, TargetFilter,
+        TriggerCondition, TypedFilter, UnlessPayModifier, ZoneChoiceCandidateSource, ZoneOwner,
     };
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
@@ -15025,14 +15018,18 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
 
     // ── Detector Q: CombatHistoryRelation ───────────────────────────────
 
-    /// Does the parse carry a `CombatRelation::BlockedBySubject` filter anywhere?
+    /// Does the parse carry a windowed `SubjectIsBlocker` `CombatRelation` filter
+    /// anywhere?
     fn parse_has_blocked_history_filter(parsed: &crate::parser::oracle::ParsedAbilities) -> bool {
         use crate::types::ability::CombatRelation;
         UnitEvidence::of(parsed).any::<FilterProp>(|prop| {
             matches!(
                 prop,
                 FilterProp::CombatRelation {
-                    relation: CombatRelation::BlockedBySubject { scope: Some(_) },
+                    relation: CombatRelation::BlockPairing {
+                        direction: BlockPairDirection::SubjectIsBlocker,
+                        scope: Some(_),
+                    },
                     ..
                 }
             )
@@ -15069,7 +15066,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
     /// both windows: a typed trigger subject in an anaphoric compound (a), a
     /// spell's chosen target (b), a chain-pinned target (c), a typed subject in a
     /// delayed body (d), and a typed dies-trigger subject (e). Each row pairs the
-    /// negative (no `BlockedBySubject` in the parse) with its reach guard — the
+    /// negative (no windowed `BlockPairing` in the parse) with its reach guard — the
     /// mass effect parsed with its unrestricted creature filter — and with the
     /// detector firing, which itself proves the unit was not skipped as
     /// unimplemented.
@@ -15261,8 +15258,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
             matches!(
                 prop,
                 FilterProp::CombatRelation {
-                    relation: CombatRelation::BlockingOrBlockedBy
-                        | CombatRelation::BlockedBySubject { scope: None },
+                    relation: CombatRelation::BlockPairing { scope: None, .. },
                     ..
                 }
             )
@@ -15427,7 +15423,10 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
         use crate::types::ability::{CombatRelation, CombatRelationSubject};
         let pairing = |subject| {
             serde_json::to_string(&FilterProp::CombatRelation {
-                relation: CombatRelation::BlockingOrBlockedBy,
+                relation: CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::Either,
+                    scope: None,
+                },
                 subject,
             })
             .expect("a FilterProp serializes")
@@ -15453,6 +15452,99 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
             reports(&[&source, &target]),
             "a parent-target filter does not represent a source clause"
         );
+    }
+
+    /// CR 509.1g + CR 608.2i: Detectors Q and R carry the retired variants over
+    /// one for one. A clause is represented only by the exact relation it denoted
+    /// before the reshape: any other direction, a wrong window, or a current
+    /// pairing standing in for a recorded one (or the reverse) leaves it reported.
+    /// Each silent row is the positive for the reported rows beside it.
+    #[test]
+    fn combat_relation_detectors_carry_their_shapes_over_one_for_one() {
+        use crate::types::ability::{CombatHistoryScope, CombatRelation, CombatRelationSubject};
+        let evidence = |direction, scope| {
+            let prop = serde_json::to_string(&FilterProp::CombatRelation {
+                relation: CombatRelation::BlockPairing { direction, scope },
+                subject: CombatRelationSubject::Source,
+            })
+            .expect("a FilterProp serializes");
+            UnitEvidence::from_json_for_test(&format!("[{prop}]"))
+        };
+        let this_turn = Some(CombatHistoryScope::ThisTurn);
+        let this_combat = Some(CombatHistoryScope::ThisCombat);
+
+        let history = "destroy all creatures it blocked this turn.";
+        let history_reported = |direction, scope| {
+            let mut diagnostics = Vec::new();
+            super::detect_combat_history_relation(
+                history,
+                history,
+                &evidence(direction, scope),
+                &mut diagnostics,
+            );
+            !diagnostics.is_empty()
+        };
+        assert!(
+            !history_reported(BlockPairDirection::SubjectIsBlocker, this_turn),
+            "the carried-over shape represents the clause"
+        );
+        for (direction, scope, why) in [
+            (
+                BlockPairDirection::SubjectIsBlocker,
+                this_combat,
+                "a wrong window",
+            ),
+            (BlockPairDirection::Either, this_turn, "another direction"),
+            (
+                BlockPairDirection::CandidateIsBlocker,
+                this_turn,
+                "the inverse direction",
+            ),
+            (
+                BlockPairDirection::SubjectIsBlocker,
+                None,
+                "a current pairing",
+            ),
+        ] {
+            assert!(
+                history_reported(direction, scope),
+                "{why} does not represent a recorded block"
+            );
+        }
+
+        let pairing = "exile all creatures blocked by this creature.";
+        let pairing_reported = |direction, scope| {
+            let mut diagnostics = Vec::new();
+            super::detect_combat_pairing_relation(
+                pairing,
+                pairing,
+                &evidence(direction, scope),
+                &mut diagnostics,
+            );
+            !diagnostics.is_empty()
+        };
+        assert!(
+            !pairing_reported(BlockPairDirection::SubjectIsBlocker, None),
+            "the carried-over shape represents the clause"
+        );
+        for (direction, scope, why) in [
+            (BlockPairDirection::Either, None, "another direction"),
+            (
+                BlockPairDirection::CandidateIsBlocker,
+                None,
+                "the inverse direction",
+            ),
+            (
+                BlockPairDirection::SubjectIsBlocker,
+                this_turn,
+                "a recorded block",
+            ),
+        ] {
+            assert!(
+                pairing_reported(direction, scope),
+                "{why} does not represent a current pairing"
+            );
+        }
     }
 }
 

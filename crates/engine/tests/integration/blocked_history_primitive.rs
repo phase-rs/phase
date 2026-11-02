@@ -1,7 +1,7 @@
-//! `CombatRelation::BlockedBySubject` — the persistent pairwise "creatures it
-//! blocked this combat / this turn" primitive (issue #9179, PR 2).
+//! `CombatRelation::BlockPairing` with a window — the persistent pairwise
+//! "creatures it blocked this combat / this turn" primitive (issue #9179, PR 2).
 //!
-//! `CombatRelation::BlockingOrBlockedBy` reads live `combat.blocker_to_attacker`,
+//! `BlockPairing` with `scope: None` reads live `combat.blocker_to_attacker`,
 //! which `prune_object_from_combat` empties per CR 506.4 the moment either
 //! creature leaves combat — exactly when a dies-trigger needs the answer. These
 //! tests drive the real engine (`GameScenario`, real `declare_blockers_for_player`
@@ -15,11 +15,11 @@ use engine::game::filter::{
 use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
-    CombatHistoryScope, CombatRelation, CombatRelationSubject, FilterProp, TargetFilter,
-    TypedFilter,
+    BlockPairDirection, CombatHistoryScope, CombatRelation, CombatRelationSubject, FilterProp,
+    TargetFilter, TypedFilter,
 };
 use engine::types::actions::GameAction;
-use engine::types::game_state::{StackEntryKind, WaitingFor};
+use engine::types::game_state::{GameState, StackEntryKind, WaitingFor};
 use engine::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use engine::types::keywords::Keyword;
 use engine::types::mana::ManaCost;
@@ -30,6 +30,7 @@ use engine::types::zones::Zone;
 const MURDER: &str = "Destroy target creature.";
 const EPHEMERATE: &str =
     "Exile target creature you control, then return it to the battlefield under its owner's control.";
+const MIRROR_MATCH: &str = "Cast this spell only during the declare blockers step.\nFor each creature attacking you or a planeswalker you control, create a token that's a copy of that creature and that's blocking that creature. Exile those tokens at end of combat.";
 const FULL_THROTTLE: &str = "After this main phase, there are two additional combat phases.
 At the beginning of each combat this turn, untap all creatures that attacked this turn.";
 
@@ -150,7 +151,7 @@ fn combat_relation_filter(relation: CombatRelation) -> TargetFilter {
 }
 
 /// T1: after a real declare-blockers step, the block-history ledgers hold the
-/// exact `(blocker, attacker)` incarnation pair, `BlockedBySubject` matches
+/// exact `(blocker, attacker)` incarnation pair, a windowed `BlockPairing` matches
 /// the blocked attacker with the blocker as source, and — the whole reason
 /// this primitive is pairwise rather than the unary `creatures_blocked_this_turn`
 /// — a second attacker the blocker never blocked matches on NEITHER window.
@@ -220,8 +221,10 @@ fn declare_blockers_records_each_blocker_to_attacker_pair() {
     // Evaluator reads (E10).
     let ctx = FilterContext::from_source_with_controller(blocker, P1);
     for scope in [CombatHistoryScope::ThisCombat, CombatHistoryScope::ThisTurn] {
-        let filter =
-            combat_relation_filter(CombatRelation::BlockedBySubject { scope: Some(scope) });
+        let filter = combat_relation_filter(CombatRelation::BlockPairing {
+            direction: BlockPairDirection::SubjectIsBlocker,
+            scope: Some(scope),
+        });
         assert!(
             matches_target_filter(state, blocked, &filter, &ctx),
             "{scope:?}: the blocked attacker must match"
@@ -293,7 +296,7 @@ fn banding_block_records_the_whole_band_not_just_the_chosen_attacker() {
 /// because the resolving trigger's captured identity (`ability.trigger_source`)
 /// names the exact incarnation that blocked — not the live graveyard
 /// incarnation the blocker becomes once SBAs move it (CR 400.7). The current
-/// `BlockingOrBlockedBy` relation also finds the attacker: the live map was
+/// `Either` pairing also finds the attacker: the live map was
 /// pruned the moment the blocker left combat (CR 506.4), but the departed
 /// blocker's trigger reads its last known pairing (CR 608.2h + CR 113.7a), and
 /// the attacker is still attacking.
@@ -366,14 +369,19 @@ fn a_dying_blocker_still_finds_what_it_blocked_through_its_trigger_source() {
 
     let ctx = FilterContext::from_ability(ability);
     for scope in [CombatHistoryScope::ThisCombat, CombatHistoryScope::ThisTurn] {
-        let history_filter =
-            combat_relation_filter(CombatRelation::BlockedBySubject { scope: Some(scope) });
+        let history_filter = combat_relation_filter(CombatRelation::BlockPairing {
+            direction: BlockPairDirection::SubjectIsBlocker,
+            scope: Some(scope),
+        });
         assert!(
             matches_target_filter(state, attacker, &history_filter, &ctx),
             "{scope:?}: CR 509.1g + CR 400.7: the dying blocker's own trigger must still find what it blocked"
         );
     }
-    let live_filter = combat_relation_filter(CombatRelation::BlockingOrBlockedBy);
+    let live_filter = combat_relation_filter(CombatRelation::BlockPairing {
+        direction: BlockPairDirection::Either,
+        scope: None,
+    });
     assert!(
         matches_target_filter(state, attacker, &live_filter, &ctx),
         "CR 608.2h: the dying blocker's trigger reads its last known pairing; the attacker is still attacking"
@@ -381,7 +389,7 @@ fn a_dying_blocker_still_finds_what_it_blocked_through_its_trigger_source() {
 }
 
 /// T4: the look-back evaluator (`zone_change_record_matches_property`) answers
-/// `BlockedBySubject` for a departed candidate, while `BlockingOrBlockedBy`
+/// a windowed `BlockPairing` for a departed candidate, while `scope: None`
 /// correctly fails closed there (E11).
 #[test]
 fn look_back_evaluator_answers_the_history_relation_for_a_departed_candidate() {
@@ -415,10 +423,14 @@ fn look_back_evaluator_answers_the_history_relation_for_a_departed_candidate() {
         .expect("reach guard: the attacker's death must be recorded as a zone change");
 
     let ctx = FilterContext::from_source_with_controller(blocker, P1);
-    let history_filter = combat_relation_filter(CombatRelation::BlockedBySubject {
+    let history_filter = combat_relation_filter(CombatRelation::BlockPairing {
+        direction: BlockPairDirection::SubjectIsBlocker,
         scope: Some(CombatHistoryScope::ThisCombat),
     });
-    let live_filter = combat_relation_filter(CombatRelation::BlockingOrBlockedBy);
+    let live_filter = combat_relation_filter(CombatRelation::BlockPairing {
+        direction: BlockPairDirection::Either,
+        scope: None,
+    });
 
     assert!(
         matches_target_filter_on_zone_change_record(state, record, &history_filter, &ctx),
@@ -495,7 +507,8 @@ fn look_back_answers_with_a_departed_subject_named_by_its_trigger_identity() {
     );
 
     let ctx = FilterContext::from_trigger_source(blocker_trigger_source);
-    let history_filter = combat_relation_filter(CombatRelation::BlockedBySubject {
+    let history_filter = combat_relation_filter(CombatRelation::BlockPairing {
+        direction: BlockPairDirection::SubjectIsBlocker,
         scope: Some(CombatHistoryScope::ThisTurn),
     });
     assert!(
@@ -569,10 +582,12 @@ fn this_combat_and_this_turn_disagree_across_two_combat_phases() {
                     );
 
                     let ctx = FilterContext::from_source_with_controller(blocker, P1);
-                    let this_combat = combat_relation_filter(CombatRelation::BlockedBySubject {
+                    let this_combat = combat_relation_filter(CombatRelation::BlockPairing {
+                        direction: BlockPairDirection::SubjectIsBlocker,
                         scope: Some(CombatHistoryScope::ThisCombat),
                     });
-                    let this_turn = combat_relation_filter(CombatRelation::BlockedBySubject {
+                    let this_turn = combat_relation_filter(CombatRelation::BlockPairing {
+                        direction: BlockPairDirection::SubjectIsBlocker,
                         scope: Some(CombatHistoryScope::ThisTurn),
                     });
                     assert!(
@@ -711,10 +726,12 @@ fn combat_scoped_history_is_gone_after_the_end_of_combat_step() {
     );
 
     let ctx = FilterContext::from_source_with_controller(blocker, P1);
-    let this_combat = combat_relation_filter(CombatRelation::BlockedBySubject {
+    let this_combat = combat_relation_filter(CombatRelation::BlockPairing {
+        direction: BlockPairDirection::SubjectIsBlocker,
         scope: Some(CombatHistoryScope::ThisCombat),
     });
-    let this_turn = combat_relation_filter(CombatRelation::BlockedBySubject {
+    let this_turn = combat_relation_filter(CombatRelation::BlockPairing {
+        direction: BlockPairDirection::SubjectIsBlocker,
         scope: Some(CombatHistoryScope::ThisTurn),
     });
     assert!(
@@ -750,7 +767,8 @@ fn an_attacker_that_left_and_returned_is_a_new_object_and_does_not_match() {
     );
 
     let ctx = FilterContext::from_source_with_controller(blocker, P1);
-    let filter = combat_relation_filter(CombatRelation::BlockedBySubject {
+    let filter = combat_relation_filter(CombatRelation::BlockPairing {
+        direction: BlockPairDirection::SubjectIsBlocker,
         scope: Some(CombatHistoryScope::ThisCombat),
     });
 
@@ -833,10 +851,12 @@ fn a_blocker_that_left_and_returned_does_not_inherit_its_predecessors_blocks() {
     let post =
         engine::game::triggers::trigger_source_context_for_latch(state, &state.objects[&blocker]);
 
-    let filter_combat = combat_relation_filter(CombatRelation::BlockedBySubject {
+    let filter_combat = combat_relation_filter(CombatRelation::BlockPairing {
+        direction: BlockPairDirection::SubjectIsBlocker,
         scope: Some(CombatHistoryScope::ThisCombat),
     });
-    let filter_turn = combat_relation_filter(CombatRelation::BlockedBySubject {
+    let filter_turn = combat_relation_filter(CombatRelation::BlockPairing {
+        direction: BlockPairDirection::SubjectIsBlocker,
         scope: Some(CombatHistoryScope::ThisTurn),
     });
 
@@ -986,8 +1006,10 @@ fn an_activated_ability_finds_its_stamped_incarnation_not_the_live_object() {
 
     let ctx = FilterContext::from_ability(ability);
     for scope in [CombatHistoryScope::ThisCombat, CombatHistoryScope::ThisTurn] {
-        let history_filter =
-            combat_relation_filter(CombatRelation::BlockedBySubject { scope: Some(scope) });
+        let history_filter = combat_relation_filter(CombatRelation::BlockPairing {
+            direction: BlockPairDirection::SubjectIsBlocker,
+            scope: Some(scope),
+        });
         assert!(
             matches_target_filter(state, attacker, &history_filter, &ctx),
             "{scope:?}: CR 608.2h: the activated ability's stamped incarnation must still find what it blocked"
@@ -998,8 +1020,10 @@ fn an_activated_ability_finds_its_stamped_incarnation_not_the_live_object() {
     // incarnation, must not inherit its predecessor's blocks.
     let live_ctx = FilterContext::from_source_with_controller(blocker, P1);
     for scope in [CombatHistoryScope::ThisCombat, CombatHistoryScope::ThisTurn] {
-        let history_filter =
-            combat_relation_filter(CombatRelation::BlockedBySubject { scope: Some(scope) });
+        let history_filter = combat_relation_filter(CombatRelation::BlockPairing {
+            direction: BlockPairDirection::SubjectIsBlocker,
+            scope: Some(scope),
+        });
         assert!(
             !matches_target_filter(state, attacker, &history_filter, &live_ctx),
             "{scope:?}: CR 400.7: the returned blocker's live incarnation must not inherit its predecessor's blocks"
@@ -1082,4 +1106,321 @@ fn turn_scoped_block_history_participates_in_state_equality() {
         state != clone,
         "E4's PartialEq registration must make a cleared turn-scoped ledger visible"
     );
+}
+
+const ALL_DIRECTIONS: [BlockPairDirection; 3] = [
+    BlockPairDirection::SubjectIsBlocker,
+    BlockPairDirection::CandidateIsBlocker,
+    BlockPairDirection::Either,
+];
+const ALL_WINDOWS: [CombatHistoryScope; 2] =
+    [CombatHistoryScope::ThisCombat, CombatHistoryScope::ThisTurn];
+
+fn pairing_filter(
+    direction: BlockPairDirection,
+    scope: Option<CombatHistoryScope>,
+) -> TargetFilter {
+    combat_relation_filter(CombatRelation::BlockPairing { direction, scope })
+}
+
+/// Does `direction` name the pair, given whether the candidate is the blocker?
+fn direction_holds(direction: BlockPairDirection, candidate_blocks: bool) -> bool {
+    match direction {
+        BlockPairDirection::SubjectIsBlocker => !candidate_blocks,
+        BlockPairDirection::CandidateIsBlocker => candidate_blocks,
+        BlockPairDirection::Either => true,
+    }
+}
+
+fn pairing_matches(
+    state: &GameState,
+    subject: ObjectId,
+    controller: PlayerId,
+    candidate: ObjectId,
+    direction: BlockPairDirection,
+    scope: Option<CombatHistoryScope>,
+) -> bool {
+    matches_target_filter(
+        state,
+        candidate,
+        &pairing_filter(direction, scope),
+        &FilterContext::from_source_with_controller(subject, controller),
+    )
+}
+
+/// CR 509.1g: committed card data still holds the retired relation shapes, and
+/// it reads through the real `CardDatabase` as `BlockPairing`. The four cards
+/// are the four shapes the parser emits. Reverting the wire shim stops the
+/// fixture loading at all.
+#[test]
+fn committed_card_fixture_reads_legacy_relations_as_block_pairing() {
+    let db = crate::support::shared_card_db().expect("fixture");
+    for (name, relation) in [
+        ("Abu Ja'far", r#"{"BlockPairing":{"direction":"Either"}}"#),
+        (
+            "Wall of Nets",
+            r#"{"BlockPairing":{"direction":"SubjectIsBlocker"}}"#,
+        ),
+        (
+            "Cathedral Membrane",
+            r#"{"BlockPairing":{"direction":"SubjectIsBlocker","scope":"ThisCombat"}}"#,
+        ),
+        (
+            "Defiant Vanguard",
+            r#"{"BlockPairing":{"direction":"SubjectIsBlocker","scope":"ThisTurn"}}"#,
+        ),
+    ] {
+        let face = db
+            .get_face_by_name(name)
+            .unwrap_or_else(|| panic!("the fixture must hold {name}"));
+        let written = serde_json::to_string(face).expect("a face serializes");
+        assert!(
+            written.contains(relation),
+            "{name}: expected {relation} in {written}"
+        );
+        assert!(
+            !written.contains("BlockingOrBlockedBy") && !written.contains("BlockedBySubject"),
+            "{name}: a retired name survived the read"
+        );
+    }
+}
+
+/// CR 509.1g: after a real declaration, every direction and scope reads the live
+/// board from both sides of the pair. `SubjectIsBlocker` holds only with the
+/// blocker as subject, `CandidateIsBlocker` only with the attacker as subject,
+/// and `Either` with both. An attacker that was never paired matches none of the
+/// nine combinations, and the pair's own assertions are its reach guard.
+#[test]
+fn block_pairing_every_direction_and_scope_reads_live_board() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker = scenario.add_creature(P0, "Attacker", 2, 2).id();
+    let unpaired = scenario.add_creature(P0, "Unpaired Attacker", 2, 2).id();
+    let blocker = scenario.add_creature(P1, "Blocker", 2, 2).id();
+    let mut runner = scenario.build();
+
+    drive_declare_blockers(
+        &mut runner,
+        vec![
+            (attacker, AttackTarget::Player(P1)),
+            (unpaired, AttackTarget::Player(P1)),
+        ],
+        vec![],
+        vec![(blocker, attacker)],
+    );
+
+    let state = runner.state();
+    for direction in ALL_DIRECTIONS {
+        for scope in [None, Some(ALL_WINDOWS[0]), Some(ALL_WINDOWS[1])] {
+            assert_eq!(
+                pairing_matches(state, blocker, P1, attacker, direction, scope),
+                direction_holds(direction, false),
+                "subject blocker, {direction:?}, {scope:?}"
+            );
+            assert_eq!(
+                pairing_matches(state, attacker, P0, blocker, direction, scope),
+                direction_holds(direction, true),
+                "subject attacker, {direction:?}, {scope:?}"
+            );
+            assert!(
+                !pairing_matches(state, blocker, P1, unpaired, direction, scope),
+                "an attacker the subject never blocked, {direction:?}, {scope:?}"
+            );
+            assert!(
+                !pairing_matches(state, unpaired, P0, blocker, direction, scope),
+                "a blocker of another attacker, {direction:?}, {scope:?}"
+            );
+        }
+    }
+}
+
+/// CR 511.3 + CR 500.8: once combat ends, the three stores part. Both creatures
+/// are alive, so nothing but the end of combat separates them: the current
+/// pairing and the combat window match nothing in any direction, and the turn
+/// window still follows direction.
+#[test]
+fn block_pairing_scopes_part_after_combat_ends() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker = scenario.add_creature(P0, "Attacker", 1, 4).id();
+    let blocker = scenario.add_creature(P1, "Blocker", 1, 4).id();
+    let mut runner = scenario.build();
+
+    drive_declare_blockers(
+        &mut runner,
+        vec![(attacker, AttackTarget::Player(P1))],
+        vec![],
+        vec![(blocker, attacker)],
+    );
+    advance_until_combat_ends(&mut runner);
+
+    let state = runner.state();
+    assert!(
+        state.objects[&attacker].zone == Zone::Battlefield
+            && state.objects[&blocker].zone == Zone::Battlefield,
+        "reach guard: both creatures must survive combat"
+    );
+    for direction in ALL_DIRECTIONS {
+        for scope in [None, Some(CombatHistoryScope::ThisCombat)] {
+            assert!(
+                !pairing_matches(state, blocker, P1, attacker, direction, scope),
+                "subject blocker, {direction:?}, {scope:?}"
+            );
+            assert!(
+                !pairing_matches(state, attacker, P0, blocker, direction, scope),
+                "subject attacker, {direction:?}, {scope:?}"
+            );
+        }
+        let this_turn = Some(CombatHistoryScope::ThisTurn);
+        assert_eq!(
+            pairing_matches(state, blocker, P1, attacker, direction, this_turn),
+            direction_holds(direction, false),
+            "subject blocker, {direction:?}"
+        );
+        assert_eq!(
+            pairing_matches(state, attacker, P0, blocker, direction, this_turn),
+            direction_holds(direction, true),
+            "subject attacker, {direction:?}"
+        );
+    }
+}
+
+/// CR 506.4 + CR 608.2i: the zone-change record path privileges no direction. A
+/// departed candidate is in no current pairing, so `scope: None` is false for all
+/// three directions, and both windows follow direction. Run with the dead
+/// attacker as candidate, then with the dead blocker as candidate.
+#[test]
+fn block_pairing_every_direction_and_scope_reads_a_departed_candidate() {
+    for candidate_blocks in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let attacker = scenario.add_creature(P0, "Attacker", 2, 2).id();
+        let blocker = scenario.add_creature(P1, "Blocker", 2, 2).id();
+        let murder = scenario
+            .add_spell_to_hand_from_oracle(P1, "Murder", true, MURDER)
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let mut runner = scenario.build();
+
+        drive_declare_blockers(
+            &mut runner,
+            vec![(attacker, AttackTarget::Player(P1))],
+            vec![],
+            vec![(blocker, attacker)],
+        );
+
+        let (candidate, subject, controller) = if candidate_blocks {
+            (blocker, attacker, P0)
+        } else {
+            (attacker, blocker, P1)
+        };
+        give_priority(&mut runner, P1);
+        runner.cast(murder).target_object(candidate).resolve();
+        runner.advance_until_stack_empty();
+
+        let state = runner.state();
+        let record = state
+            .zone_changes_this_turn
+            .iter()
+            .rev()
+            .find(|r| r.object_id == candidate && r.to_zone == Zone::Graveyard)
+            .expect("reach guard: the candidate's death must be recorded as a zone change");
+        let ctx = FilterContext::from_source_with_controller(subject, controller);
+        for direction in ALL_DIRECTIONS {
+            assert!(
+                !matches_target_filter_on_zone_change_record(
+                    state,
+                    record,
+                    &pairing_filter(direction, None),
+                    &ctx,
+                ),
+                "CR 506.4: candidate blocks = {candidate_blocks}, {direction:?}"
+            );
+            for window in ALL_WINDOWS {
+                assert_eq!(
+                    matches_target_filter_on_zone_change_record(
+                        state,
+                        record,
+                        &pairing_filter(direction, Some(window)),
+                        &ctx,
+                    ),
+                    direction_holds(direction, candidate_blocks),
+                    "candidate blocks = {candidate_blocks}, {direction:?}, {window:?}"
+                );
+            }
+        }
+    }
+}
+
+/// CR 509.4: a token that enters blocking is in a live pair, and its entry record
+/// names that same current incarnation. A zone-change record still answers no
+/// current pairing: the live filter matches the token, and its record does not.
+/// The attacker is the subject, so `CandidateIsBlocker` and `Either` are the two
+/// directions that would otherwise read the pair.
+#[test]
+fn block_pairing_current_read_refuses_a_blocking_tokens_entry_record() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker = scenario.add_creature(P0, "Attacker", 2, 2).id();
+    // Without a creature able to block, the block prompt never opens.
+    scenario.add_creature(P1, "Idle Creature", 2, 2);
+    let mirror_match = scenario
+        .add_spell_to_hand_from_oracle(P1, "Mirror Match", true, MIRROR_MATCH)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+
+    drive_declare_blockers(
+        &mut runner,
+        vec![(attacker, AttackTarget::Player(P1))],
+        vec![],
+        vec![],
+    );
+    give_priority(&mut runner, P1);
+    runner.cast(mirror_match).resolve();
+    runner.advance_until_stack_empty();
+
+    let state = runner.state();
+    let token = *state
+        .combat
+        .as_ref()
+        .expect("combat is live")
+        .blocker_assignments
+        .get(&attacker)
+        .and_then(|blockers| blockers.last())
+        .expect("CR 509.4: Mirror Match must put a copy token in as a blocker");
+    let record = state
+        .zone_changes_this_turn
+        .iter()
+        .rev()
+        .find(|r| r.object_id == token && r.to_zone == Zone::Battlefield)
+        .expect("reach guard: the token's entry must be recorded as a zone change");
+    let ctx = FilterContext::from_source_with_controller(attacker, P0);
+    assert!(
+        matches_target_filter_on_zone_change_record(
+            state,
+            record,
+            &TargetFilter::Typed(TypedFilter::creature()),
+            &ctx,
+        ),
+        "reach guard: the entry record answers the filter's type leg"
+    );
+    for direction in [
+        BlockPairDirection::CandidateIsBlocker,
+        BlockPairDirection::Either,
+    ] {
+        assert!(
+            pairing_matches(state, attacker, P0, token, direction, None),
+            "reach guard: the live filter finds the blocking token, {direction:?}"
+        );
+        assert!(
+            !matches_target_filter_on_zone_change_record(
+                state,
+                record,
+                &pairing_filter(direction, None),
+                &ctx,
+            ),
+            "an entry record answers no current pairing, {direction:?}"
+        );
+    }
 }
