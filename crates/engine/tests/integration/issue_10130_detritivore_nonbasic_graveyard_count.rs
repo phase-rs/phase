@@ -90,6 +90,5 @@ fn issue_10130_detritivore_keeps_exactly_suspend_x_unknown_gap() {
         ..Default::default()
     };
     let gaps = card_face_gaps(&face);
-    println!("Detritivore gap handlers: {gaps:?}");
     assert_eq!(gaps, ["Effect:unknown"]);
 }
