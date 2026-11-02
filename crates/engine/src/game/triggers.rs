@@ -12166,8 +12166,10 @@ pub(crate) fn stack_object_announcement_drain_allowed(state: &GameState) -> bool
 
 /// CR 601.2h + CR 603.3b + CR 608.2g: whether the carriers that own a
 /// post-announcement boundary have let go of it. The external pending-cast
-/// carrier and terminal Ripple settlement each keep the queue intact, and an
-/// entry's release waits with it.
+/// carrier and terminal Ripple settlement each keep the queue out of this
+/// boundary's drain, and that drain's own entry release waits with it. The
+/// post-action pipeline's releases read only the take's gate; its placement
+/// reads this one.
 fn stack_object_announcement_is_settled(state: &GameState) -> bool {
     // CR 603.3b + CR 608.2g: terminal Ripple settlement owns this exact
     // post-announcement boundary. It must first collect the current final
