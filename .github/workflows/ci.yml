@@ -593,6 +593,12 @@ jobs:
           cargo run --profile tool --features cli --bin coverage-report -- data/ --all > data/coverage-data.json
           jq '{total_cards, supported_cards, coverage_pct, coverage_by_format}' data/coverage-data.json > data/coverage-summary.json
 
+      - name: Coverage regression check self-test
+        # jq-only fixture matrix for the corpus-identity fence below: matching,
+        # mismatched, malformed and legacy (unstamped) baselines. Unconditional:
+        # gates-cache does not hash scripts/**, so a cache hit must not skip it.
+        run: ./scripts/coverage-regression-check.test.sh
+
       - name: Coverage regression check (engine vs parser-honesty)
         # Fails the build if a previously-supported card loses support because
         # the engine now lacks a handler (non-ParseWarning gap). Parser-honesty

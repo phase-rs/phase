@@ -65,3 +65,77 @@ impl CardDataProvenance {
         result
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn provenance(source: &str, card_data: &str) -> CardDataProvenance {
+        CardDataProvenance {
+            source_corpus_sha256: source.to_string(),
+            card_data_sha256: card_data.to_string(),
+        }
+    }
+
+    #[test]
+    fn well_formed_requires_two_lowercase_sha256_hashes() {
+        let a = "a".repeat(64);
+        let digits = "0123456789abcdef".repeat(4);
+        assert!(provenance(&a, &digits).hashes_are_well_formed());
+
+        // Each identity is validated independently.
+        assert!(!provenance(&"A".repeat(64), &digits).hashes_are_well_formed());
+        assert!(!provenance(&a, &"a".repeat(63)).hashes_are_well_formed());
+        assert!(!provenance(&a, &"a".repeat(65)).hashes_are_well_formed());
+        assert!(!provenance(&"g".repeat(64), &a).hashes_are_well_formed());
+        assert!(!provenance("", &a).hashes_are_well_formed());
+    }
+
+    #[test]
+    fn write_atomic_round_trips_and_leaves_no_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("card-data.provenance.json");
+        let written = provenance(&"a".repeat(64), &"b".repeat(64));
+
+        written.write_atomic(&path).unwrap();
+        assert_eq!(CardDataProvenance::read(&path).unwrap(), written);
+
+        // Rewriting replaces the sidecar in place.
+        let rewritten = provenance(&"c".repeat(64), &"d".repeat(64));
+        rewritten.write_atomic(&path).unwrap();
+        assert_eq!(CardDataProvenance::read(&path).unwrap(), rewritten);
+
+        let entries: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            entries,
+            vec![std::ffi::OsString::from("card-data.provenance.json")]
+        );
+    }
+
+    #[test]
+    fn read_rejects_unknown_and_missing_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("card-data.provenance.json");
+        let hash = "a".repeat(64);
+
+        fs::write(
+            &path,
+            format!(r#"{{"source_corpus_sha256":"{hash}","card_data_sha256":"{hash}","extra":1}}"#),
+        )
+        .unwrap();
+        assert!(CardDataProvenance::read(&path).is_err());
+
+        fs::write(&path, format!(r#"{{"source_corpus_sha256":"{hash}"}}"#)).unwrap();
+        assert!(CardDataProvenance::read(&path).is_err());
+    }
+
+    #[test]
+    fn read_reports_missing_sidecar_as_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = CardDataProvenance::read(&dir.path().join("absent.json")).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    }
+}

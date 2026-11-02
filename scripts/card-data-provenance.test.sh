@@ -84,7 +84,9 @@ grep -Fq -- '--output and --provenance-out must be different paths' \
   "$tmpdir/collision/relative.err"
 [[ ! -e "$tmpdir/collision/relative/card-data.json" ]]
 
-if ln -s relative "$tmpdir/collision/alias" 2>/dev/null; then
+# Only meaningful when a real symlink exists: MSYS `ln -s` may silently copy.
+if ln -s relative "$tmpdir/collision/alias" 2>/dev/null \
+  && [[ -L "$tmpdir/collision/alias" ]]; then
   if "$ORACLE_GEN_BIN" "$tmpdir/default/data" \
     --mtgjson "$tmpdir/corpus-b.json" \
     --output "$tmpdir/collision/relative/card-data-symlink.json" \
