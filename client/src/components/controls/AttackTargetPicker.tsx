@@ -11,6 +11,7 @@ import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../stores/multiplayerStore.ts";
+import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { formatCounterType } from "../../viewmodel/cardProps.ts";
 import {
   type AttackerStack,
@@ -91,6 +92,7 @@ export function AttackTargetPicker({
 
   const gameState = useGameStore((s) => s.gameState);
   const playerNames = useMultiplayerStore((s) => s.playerNames);
+  const showOwnerPrintings = usePreferencesStore((s) => s.showOwnerPrintings);
   const myId = usePlayerId();
   const hoverProps = useInspectHoverProps();
   const seatOrder = gameState?.seat_order;
@@ -133,8 +135,8 @@ export function AttackTargetPicker({
   // split so identically-named attackers with different legal-target sets are
   // not treated as one interchangeable stack.
   const stacks = useMemo(
-    () => groupAttackers(selectedAttackers, gameState, targetsFor),
-    [selectedAttackers, gameState, targetsFor],
+    () => groupAttackers(selectedAttackers, gameState, showOwnerPrintings, targetsFor),
+    [selectedAttackers, gameState, showOwnerPrintings, targetsFor],
   );
 
   // Distribute-mode columns: the union of legal targets across the selected

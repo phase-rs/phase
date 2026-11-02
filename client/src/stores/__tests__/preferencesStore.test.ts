@@ -101,11 +101,14 @@ describe("preferencesStore", () => {
     it("keeps a phone's webgl choice made after the migration", () => {
       useUserAgent(IPHONE_UA);
       localStorage.setItem("phase-preferences", JSON.stringify({
-        state: { cardAnimationStyle: "webgl" },
+        state: { cardAnimationStyle: "webgl", showOwnerPrintings: false },
         version: 40,
       }));
       usePreferencesStore.persist.rehydrate();
-      expect(usePreferencesStore.getState().cardAnimationStyle).toBe("webgl");
+      expect(usePreferencesStore.getState()).toMatchObject({
+        cardAnimationStyle: "webgl",
+        showOwnerPrintings: false,
+      });
     });
 
     it.each([
@@ -123,6 +126,7 @@ describe("preferencesStore", () => {
     // Reset store state between tests
     act(() => {
       usePreferencesStore.setState({
+        ...usePreferencesStore.getInitialState(),
         cardSize: "medium",
         hudLayout: "inline",
         followActiveOpponent: false,
@@ -353,6 +357,77 @@ describe("preferencesStore", () => {
     expect(usePreferencesStore.getState().showCardPreviewFooter).toBe(false);
     const stored = JSON.parse(localStorage.getItem("phase-preferences")!);
     expect(stored.state.showCardPreviewFooter).toBe(false);
+  });
+
+  describe("owner printing preference", () => {
+    beforeEach(() => {
+      act(() => usePreferencesStore.setState(usePreferencesStore.getInitialState()));
+      localStorage.removeItem("phase-preferences");
+    });
+
+    afterEach(() => {
+      act(() => usePreferencesStore.setState(usePreferencesStore.getInitialState()));
+      localStorage.removeItem("phase-preferences");
+    });
+
+    it.each([false, true])("round-trips explicit %s through storage", async (show) => {
+      act(() => usePreferencesStore.getState().setShowOwnerPrintings(show));
+      expect(usePreferencesStore.getState().showOwnerPrintings).toBe(show);
+      const saved = localStorage.getItem("phase-preferences")!;
+      expect(JSON.parse(saved)).toMatchObject({
+        state: { showOwnerPrintings: show },
+      });
+
+      act(() => usePreferencesStore.getState().setShowOwnerPrintings(!show));
+      expect(usePreferencesStore.getState().showOwnerPrintings).toBe(!show);
+      localStorage.setItem("phase-preferences", saved);
+      await act(async () => { await usePreferencesStore.persist.rehydrate(); });
+      expect(usePreferencesStore.getState().showOwnerPrintings).toBe(show);
+    });
+
+    it.each([
+      { version: 39, savedChoice: {}, expected: true },
+      { version: 39, savedChoice: { showOwnerPrintings: false }, expected: false },
+      { version: 40, savedChoice: {}, expected: true },
+      { version: 40, savedChoice: { showOwnerPrintings: false }, expected: false },
+    ])("migrates v$version $savedChoice without losing sibling choices", async ({ version, savedChoice, expected }) => {
+      localStorage.setItem("phase-preferences", JSON.stringify({
+        state: { cardSize: "large", showCardPreviewFooter: false, ...savedChoice },
+        version,
+      }));
+
+      await act(async () => { await usePreferencesStore.persist.rehydrate(); });
+
+      expect(usePreferencesStore.getState()).toMatchObject({
+        showOwnerPrintings: expected,
+        cardSize: "large",
+        showCardPreviewFooter: false,
+      });
+      expect(JSON.parse(localStorage.getItem("phase-preferences")!)).toMatchObject({
+        state: {
+          showOwnerPrintings: expected,
+          cardSize: "large",
+          showCardPreviewFooter: false,
+        },
+      });
+    });
+
+    it("resets an explicit off to on and rehydrates the reset value", async () => {
+      act(() => usePreferencesStore.getState().setShowOwnerPrintings(false));
+      expect(usePreferencesStore.getState().showOwnerPrintings).toBe(false);
+      expect(JSON.parse(localStorage.getItem("phase-preferences")!).state.showOwnerPrintings).toBe(false);
+
+      act(() => usePreferencesStore.getState().resetAllPreferences());
+      expect(usePreferencesStore.getState().showOwnerPrintings).toBe(true);
+      const reset = localStorage.getItem("phase-preferences")!;
+      expect(JSON.parse(reset).state.showOwnerPrintings).toBe(true);
+
+      act(() => usePreferencesStore.getState().setShowOwnerPrintings(false));
+      expect(usePreferencesStore.getState().showOwnerPrintings).toBe(false);
+      localStorage.setItem("phase-preferences", reset);
+      await act(async () => { await usePreferencesStore.persist.rehydrate(); });
+      expect(usePreferencesStore.getState().showOwnerPrintings).toBe(true);
+    });
   });
 
   it("setAnimationSpeedMultiplier updates the value", () => {

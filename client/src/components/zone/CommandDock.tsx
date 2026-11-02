@@ -156,6 +156,7 @@ function CompactCommandDock({
       tokenImageRef: imageProps?.tokenImageRef,
       oracleId: imageProps?.oracleId,
       faceName: imageProps?.faceName,
+      ownerPrinting: imageProps?.ownerPrinting,
     },
   );
   const totalDamage = damageEntries.reduce(
