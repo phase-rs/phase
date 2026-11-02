@@ -16415,6 +16415,78 @@ mod tests {
             &conditioned,
         ));
     }
+
+    /// CR 701.20e: only a private peek ("look at") records `private_look_ids`,
+    /// so only a private peek may bind a following "put those cards on the
+    /// bottom" to a `DigSource::PriorLook` placement. A revealed dig (CR 701.20a)
+    /// keeps its imperative placement; a PriorLook rewrite there would read an
+    /// empty ledger and move nothing.
+    #[test]
+    fn prior_look_bottom_rewrite_requires_private_peek() {
+        use super::resolve_prior_look_library_bottom_anaphors;
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, DigRestOrder, DigSource, Effect, LibraryPosition,
+            QuantityExpr, TargetFilter,
+        };
+        use crate::types::identifiers::TrackedSetId;
+        use crate::types::zones::Zone;
+
+        fn chain(reveal: bool) -> Vec<AbilityDefinition> {
+            let peek = Effect::Dig {
+                player: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 3 },
+                keep_count: Some(0),
+                keep_count_expr: None,
+                up_to: false,
+                filter: TargetFilter::Any,
+                destination: None,
+                rest_destination: None,
+                rest_split_top_count: None,
+                rest_order: DigRestOrder::Preserve,
+                reveal,
+                enter_tapped: false,
+                enters_attacking: false,
+                source: DigSource::Library,
+            };
+            let bottom = Effect::PutAtLibraryPosition {
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0),
+                },
+                count: QuantityExpr::Fixed { value: 3 },
+                position: LibraryPosition::Bottom,
+                arranger: Some(TargetFilter::Controller),
+            };
+            vec![
+                AbilityDefinition::new(AbilityKind::Spell, peek),
+                AbilityDefinition::new(AbilityKind::Spell, bottom),
+            ]
+        }
+
+        let mut looked = chain(false);
+        resolve_prior_look_library_bottom_anaphors(&mut looked);
+        assert!(
+            matches!(
+                looked[1].effect.as_ref(),
+                Effect::Dig {
+                    source: DigSource::PriorLook,
+                    keep_count: Some(0),
+                    rest_destination: Some(Zone::Library),
+                    rest_order: DigRestOrder::PlayerChoice,
+                    ..
+                }
+            ),
+            "a private peek binds the bottom placement, got {:?}",
+            looked[1].effect
+        );
+
+        let mut revealed = chain(true);
+        let before = revealed[1].effect.clone();
+        resolve_prior_look_library_bottom_anaphors(&mut revealed);
+        assert_eq!(
+            revealed[1].effect, before,
+            "a revealed dig must not be rewritten to a PriorLook placement"
+        );
+    }
 }
 #[cfg(test)]
 mod where_x_tests {
