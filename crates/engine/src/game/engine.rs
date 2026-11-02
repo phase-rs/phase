@@ -10387,10 +10387,11 @@ fn priority_auto_pass_decision(state: &GameState, player: PlayerId) -> AutoPassD
             // to yield priority for that exact triggered ability, in which case
             // the session keeps auto-passing through it. CR 117.1d + CR 605.3a:
             // the player's own object that can move one of their activatable
-            // mana sources off the battlefield (`Held`) ends it too, since that
-            // activation is lost once the object resolves. (`UntilStackEmpty` is
-            // consent to resolve the stack itself, so it passes through.) The standing rungs
-            // are `priority::standing_priority_pass`'s; Full Control already
+            // mana sources off the battlefield or waste an untap on one (`Held`)
+            // ends it too, since that activation is lost once the object
+            // resolves. (`UntilStackEmpty` is consent to resolve the stack
+            // itself, so it passes through.) The standing rungs are
+            // `priority::standing_priority_pass`'s; Full Control already
             // returned above, so `Withheld` cannot reach this arm.
             let top_needs_response = state.stack.last().is_some_and(|top| {
                 matches!(
@@ -10963,7 +10964,8 @@ fn stack_resolution_session_participant_authorizes_pass(
         priority::StandingPriorityPass::Withheld => return false,
         priority::StandingPriorityPass::Granted => true,
         // CR 117.1d + CR 605.3a: an own object that can remove an activatable
-        // mana source is no standing pass; only explicit consent skips it.
+        // mana source or waste an untap on one is no standing pass; only
+        // explicit consent skips it.
         priority::StandingPriorityPass::Held | priority::StandingPriorityPass::Undecided => false,
     };
     match session.policy {
@@ -11037,10 +11039,12 @@ pub(crate) fn stack_resolution_session_authorized_limit(state: &GameState) -> Op
     // (CR 732.2b), so K = 1 + the authorized prefix of those windows. Each
     // window is judged against the board before anything resolves, so it cannot
     // see a mana source an earlier member untaps. That is sound for the `Held`
-    // rung because a batch consumes only windows this look-ahead authorized, and
-    // its members are either the resolver's fixed inert kinds or one repeated
-    // untargeted triggered ability. A member that untaps a mana source which a
-    // later identical member then removes, without pausing, is an accepted
+    // rung, both its removal reason and its untap reason, because a batch
+    // consumes only windows this look-ahead authorized, and its members are
+    // either the resolver's fixed inert kinds or one repeated untargeted
+    // triggered ability, so an activated entry resolves alone and this rung is
+    // read again at its window. A member that untaps a mana source which a later
+    // identical member then removes, without pausing, is an accepted
     // under-approximation.
     let authorized_skipped_windows = fenced_prefix
         .take_while(|window_top| {

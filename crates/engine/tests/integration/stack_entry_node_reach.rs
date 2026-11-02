@@ -1,18 +1,25 @@
 //! `effects::stack_reach::stack_entry_node_reach`: each node of a pending
 //! stack entry is answered with the objects and players its resolver acts on.
 
+use super::support::shared_card_db;
+use engine::database::card_db::CardDatabase;
 use engine::game::combat::AttackTarget;
+use engine::game::effects::attach::attach_to;
 use engine::game::effects::stack_reach::stack_entry_node_reach;
+use engine::game::layers::flush_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    AbilityCost, Effect, QuantityExpr, ResolvedAbility, TargetChoiceTiming, TargetFilter,
-    TargetRef, TriggerCondition,
+    AbilityCost, Effect, EffectScope, QuantityExpr, ResolvedAbility, TapStateChange,
+    TargetChoiceTiming, TargetFilter, TargetRef, TriggerCondition,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{GameState, StackEntry, StackEntryKind, WaitingFor};
+use engine::types::game_state::{
+    CastPaymentMode, GameState, StackEntry, StackEntryKind, WaitingFor,
+};
 use engine::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
@@ -4034,4 +4041,172 @@ fn compel_brutality_planeswalker_mode_acts_on_a_recipient_that_prevents_its_dama
     let (recipient, acted_on, damage) = compel_brutality_planeswalker_mode(true);
     assert_eq!(acted_on, vec![TargetRef::Object(recipient)]);
     assert_eq!(damage, 0, "the engine's current result");
+}
+
+const SLEEP: &str = "Tap all creatures target player controls. Those creatures don't untap during that player's next untap step.";
+
+/// CR 608.2h: a mass untap acts on the population its resolver reads.
+#[test]
+fn dramatic_reversal_acts_on_the_population_its_filter_reads() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = GameScenario::new();
+    let reversal = scenario.add_real_card(P0, "Dramatic Reversal", Zone::Hand, db);
+    let stone = scenario.add_real_card(P0, "Mind Stone", Zone::Battlefield, db);
+    let lands = [
+        scenario.add_real_card(P0, "Island", Zone::Battlefield, db),
+        scenario.add_real_card(P0, "Island", Zone::Battlefield, db),
+    ];
+    scenario.add_real_card(P1, "Mind Stone", Zone::Battlefield, db);
+    let mut runner = main_phase(scenario);
+    runner.cast(reversal).commit();
+
+    let entry = runner.state().stack.back().expect("the spell").id;
+    let nodes = reach(runner.state(), entry);
+    assert_eq!(nodes.len(), 1);
+    assert!(matches!(
+        nodes[0].0,
+        Effect::SetTapState {
+            scope: EffectScope::All,
+            state: TapStateChange::Untap,
+            ..
+        }
+    ));
+    assert!(
+        lands
+            .iter()
+            .all(|land| runner.state().battlefield.contains(land)),
+        "the Islands are in play and outside the filter"
+    );
+    assert_eq!(nodes[0].2, vec![TargetRef::Object(stone)]);
+}
+
+/// Mass tap has no reader, so it stays on the `_` arm.
+#[test]
+fn sleep_mass_tap_acts_on_nothing() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = GameScenario::new();
+    let sleep = scenario
+        .add_spell_to_hand_from_oracle(P0, "Sleep", false, SLEEP)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    scenario.add_real_card(P1, "Grizzly Bears", Zone::Battlefield, db);
+    let mut runner = main_phase(scenario);
+    runner.cast(sleep).target_player(P1).commit();
+
+    let entry = runner.state().stack.back().expect("the spell").id;
+    let nodes = reach(runner.state(), entry);
+    assert!(matches!(
+        nodes[0].0,
+        Effect::SetTapState {
+            scope: EffectScope::All,
+            state: TapStateChange::Tap,
+            ..
+        }
+    ));
+    assert!(nodes[0].2.is_empty(), "{:?}", nodes[0].2);
+}
+
+/// Freed from the Real on Llanowar Elves, with its `change` ability on the stack.
+fn freed_from_the_real_activated(
+    change: TapStateChange,
+    db: &CardDatabase,
+) -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    let elves = scenario.add_real_card(P0, "Llanowar Elves", Zone::Battlefield, db);
+    let freed = scenario.add_real_card(P0, "Freed from the Real", Zone::Battlefield, db);
+    scenario.add_real_card(P0, "Island", Zone::Battlefield, db);
+    let mut runner = main_phase(scenario);
+    attach_to(runner.state_mut(), freed, elves);
+    flush_layers(runner.state_mut());
+    let ability_index = runner.state().objects[&freed]
+        .abilities
+        .iter()
+        .position(|ability| {
+            matches!(&*ability.effect, Effect::SetTapState { state, .. } if *state == change)
+        })
+        .expect("Freed has the ability");
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: freed,
+            ability_index,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activate");
+    if matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }) {
+        runner.act(GameAction::PassPriority).expect("pay");
+    }
+    let entry = runner.state().stack.back().expect("the ability").id;
+    (runner, entry, elves)
+}
+
+/// CR 303.4b + CR 301.5a: the chain resolver binds the host before the untap
+/// reads `targets`.
+#[test]
+fn freed_from_the_real_untap_acts_on_its_host() {
+    let Some(db) = shared_card_db() else { return };
+    let (runner, entry, elves) = freed_from_the_real_activated(TapStateChange::Untap, db);
+    let nodes = reach(runner.state(), entry);
+    assert_eq!(nodes[0].2, vec![TargetRef::Object(elves)]);
+}
+
+/// The host answer is scoped to `Untap`: AI scoring reads a single `Tap` as
+/// harmful, so answering one would count an Aura's tap as pending removal.
+#[test]
+fn freed_from_the_real_tap_acts_on_nothing() {
+    let Some(db) = shared_card_db() else { return };
+    let (runner, entry, _) = freed_from_the_real_activated(TapStateChange::Tap, db);
+    let nodes = reach(runner.state(), entry);
+    assert!(matches!(
+        nodes[0].0,
+        Effect::SetTapState {
+            scope: EffectScope::Single,
+            state: TapStateChange::Tap,
+            ..
+        }
+    ));
+    assert!(nodes[0].2.is_empty(), "{:?}", nodes[0].2);
+}
+
+/// CR 608.2d: "untap up to five lands" is chosen as it resolves, so the node
+/// names none of the untapped lands on the battlefield.
+#[test]
+fn peregrine_drake_untap_chosen_as_it_resolves_acts_on_nothing() {
+    let Some(db) = shared_card_db() else { return };
+    let mut scenario = GameScenario::new();
+    let drake = scenario.add_real_card(P0, "Peregrine Drake", Zone::Hand, db);
+    let lands: Vec<ObjectId> = (0..6)
+        .map(|_| scenario.add_real_card(P0, "Island", Zone::Battlefield, db))
+        .collect();
+    let mut runner = main_phase(scenario);
+    runner.cast(drake).commit();
+    for _ in 0..2 {
+        runner.act(GameAction::PassPriority).expect("pass");
+    }
+
+    let top = runner.state().stack.back().expect("the Drake's trigger");
+    assert!(matches!(top.kind, StackEntryKind::TriggeredAbility { .. }));
+    assert_eq!(top.source_id, drake);
+    assert!(
+        lands
+            .iter()
+            .any(|land| !runner.state().objects[land].tapped),
+        "an untapped land is on the battlefield"
+    );
+    let nodes = reach(runner.state(), top.id);
+    assert!(matches!(
+        nodes[0].0,
+        Effect::SetTapState {
+            state: TapStateChange::Untap,
+            ..
+        }
+    ));
+    assert!(nodes[0].2.is_empty(), "{:?}", nodes[0].2);
+
+    for _ in 0..2 {
+        runner.act(GameAction::PassPriority).expect("pass");
+    }
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::EffectZoneChoice { .. }
+    ));
 }

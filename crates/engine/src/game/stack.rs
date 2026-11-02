@@ -6088,9 +6088,9 @@ pub struct StackDisplayGroup {
     pub member_ids: Vec<ObjectId>,
 }
 
-/// Produce a display-grouped view of the stack. Adjacent entries with the
-/// same (source card name, kind discriminant, trigger description) are
-/// coalesced. Non-adjacent look-alikes stay separate — coalescing only
+/// Produce a display-grouped view of the stack. Adjacent triggers or spells
+/// with the same (source card name, kind discriminant, trigger description)
+/// are coalesced. Non-adjacent look-alikes stay separate — coalescing only
 /// adjacent entries preserves the actual resolution order for cases like
 /// stacked triggers from different sources interleaving.
 pub fn stack_display_groups(state: &GameState) -> Vec<StackDisplayGroup> {
@@ -6144,9 +6144,14 @@ pub fn stack_display_groups_revealing(
         // Combat-damage entries opt out for the same reason keyword actions do,
         // plus one of their own: each combat damage step puts its own distinct
         // object on the stack, so two of them are never "the same thing twice".
+        // An activated ability opts out too: each is a separate player act or a
+        // copy of one (CR 707.10), and the ×N row stands for mass triggers and
+        // spell copies.
         if matches!(
             entry.kind,
-            StackEntryKind::KeywordAction { .. } | StackEntryKind::CombatDamage { .. }
+            StackEntryKind::ActivatedAbility { .. }
+                | StackEntryKind::KeywordAction { .. }
+                | StackEntryKind::CombatDamage { .. }
         ) {
             out.push(StackDisplayGroup {
                 representative: entry.id,
@@ -10033,6 +10038,53 @@ mod tests {
             "two Equip activations on different targets must not coalesce; got {:?}",
             groups
         );
+    }
+
+    /// `stack_display_groups_revealing` opts activated abilities out of
+    /// coalescing, so a copy (CR 707.10) shows as its own row beside the
+    /// original it is otherwise identical to.
+    #[test]
+    fn stack_display_groups_never_coalesce_activated_abilities() {
+        use crate::types::ability::{EffectScope, TapStateChange};
+        use crate::types::identifiers::{CardId, ObjectId};
+
+        let mut state = GameState::new_two_player(42);
+        let monolith = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Basalt Monolith".to_string(),
+            Zone::Battlefield,
+        );
+        let mk_entry = |id: u64| StackEntry {
+            id: ObjectId(id),
+            source_id: monolith,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: monolith,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::SetTapState {
+                        target: TargetFilter::SelfRef,
+                        scope: EffectScope::Single,
+                        state: TapStateChange::Untap,
+                    },
+                    vec![],
+                    monolith,
+                    PlayerId(0),
+                )),
+            },
+        };
+        state.stack.push_back(mk_entry(10_001));
+        state.stack.push_back(mk_entry(10_002));
+
+        let groups = stack_display_groups(&state);
+        assert_eq!(
+            groups.len(),
+            2,
+            "an activated ability and its copy must not coalesce; got {:?}",
+            groups
+        );
+        assert!(groups.iter().all(|group| group.count == 1));
     }
 
     /// CR 702.27a: Build an instant spell on the stack with a draw effect and

@@ -447,6 +447,48 @@ pub fn activatable_mana_actions_for_player(state: &GameState, player: PlayerId) 
     actions
 }
 
+/// CR 605.3a + CR 701.26b: the permanents `player` can tap for mana now, read
+/// from [`activatable_mana_actions_for_player`]. An untap gives such a
+/// permanent its mana a second time only if it is tapped first. A mana ability
+/// with no {T} in its cost can't be repeated by untapping, and a source its own
+/// cost sacrifices isn't there to untap.
+pub(crate) fn ready_tap_mana_sources(state: &GameState, player: PlayerId) -> Vec<ObjectId> {
+    let repeatable_by_untap = |source: ObjectId, ability_index: usize| {
+        state
+            .objects
+            .get(&source)
+            .and_then(|object| object.abilities.get(ability_index))
+            .is_some_and(|ability| {
+                has_tap_component(&ability.cost)
+                    && !cost_has_component(&ability.cost, |component| {
+                        matches!(
+                            component,
+                            AbilityCost::Sacrifice(cost)
+                                if matches!(cost.target, TargetFilter::SelfRef)
+                        )
+                    })
+            })
+    };
+    activatable_mana_actions_for_player(state, player)
+        .iter()
+        .filter(|action| match action {
+            GameAction::TapLandForMana { selection } => {
+                selection.ability_index.is_none_or(|ability_index| {
+                    repeatable_by_untap(selection.source.object_id, ability_index)
+                })
+            }
+            GameAction::ActivateAbility {
+                source_id,
+                ability_index,
+                ..
+            } => repeatable_by_untap(*source_id, *ability_index),
+            // The sweep emits only the two arms above.
+            _ => false,
+        })
+        .filter_map(GameAction::source_object)
+        .collect()
+}
+
 /// The `TapLandForMana` rows [`activatable_mana_actions_for_player`] emits for
 /// one land, without sweeping the rest of the battlefield.
 ///

@@ -3,19 +3,19 @@ use std::borrow::Cow;
 use crate::game::engine::EngineError;
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::types::ability::{
-    battlefield_departure_slot, extract_target_filter_from_effect, ResolvedAbility,
-    TargetChoiceTiming, TargetFilter, TargetRef,
+    battlefield_departure_slot, extract_target_filter_from_effect, Effect, ResolvedAbility,
+    TapStateChange, TargetChoiceTiming, TargetFilter, TargetRef,
 };
 use crate::types::actions::GameAction;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    AutoPassMode, GameState, PriorityPassingMode, StackEntry, WaitingFor,
+    AutoPassMode, GameState, PriorityPassingMode, StackEntry, StackEntryKind, WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 
-use super::effects::stack_reach::resolution_board;
+use super::effects::stack_reach::{resolution_board, stack_entry_node_reach};
 use super::effects::{bind_scoped_seat, player_scope_members};
 use super::mana_sources;
 use super::players;
@@ -355,13 +355,19 @@ pub(crate) enum StandingPriorityPass {
     /// the top triggered ability, or the player's own object on top when it is
     /// not `Held`.
     Granted,
-    /// CR 117.1d + CR 605.3a: the player's own object is on top, but resolving
-    /// it can move a permanent whose mana ability they can activate now off the
-    /// battlefield (CR 400.7), so the window is kept for that activation. Kept
-    /// unconditionally: the mana stays until the step ends (CR 106.4), and what
-    /// it can pay for once the object resolves (a sorcery-speed spell after a
-    /// karoo returns itself) is not castable now, so no castability test here
-    /// can tell. Opponent objects are not covered; they fall to the ladder.
+    /// CR 117.1d + CR 605.3a: the window is kept for a mana activation. Either
+    /// the player's own object is on top, and resolving it moves a permanent
+    /// whose mana ability they can activate now off the battlefield (CR 400.7),
+    /// so that activation is lost; or the object is their own spell or
+    /// activated ability, and resolving it untaps a permanent they can tap for
+    /// mana now, so the untap is wasted unless they tap it first (CR 701.26b).
+    ///
+    /// The departure reason is kept unconditionally: the mana stays until the
+    /// step ends (CR 106.4), and what it can pay for once the object resolves
+    /// (a sorcery-speed spell after a karoo returns itself) is not castable now,
+    /// so no castability test here can tell.
+    ///
+    /// Opponent objects are not covered; they fall to the ladder.
     Held,
     /// No standing answer; the window needs a fresh decision.
     Undecided,
@@ -387,9 +393,11 @@ pub(crate) fn standing_priority_pass(
         // An own object on top is the ladder's MTGA-parity standing pass (it
         // outranks castability, see `auto_pass_recommended`): whatever the
         // player could do now, they can still do once it resolves — except
-        // activate a mana ability of a permanent it moves off the battlefield.
+        // activate a mana ability of a permanent it moves off the battlefield,
+        // or tap for mana a permanent it untaps while the untap can still give
+        // that mana a second time.
         Some(top) if top.controller == player => {
-            if resolution_can_remove_activatable_mana_source(state, player, top) {
+            if resolution_forecloses_mana_activation(state, player, top) {
                 StandingPriorityPass::Held
             } else {
                 StandingPriorityPass::Granted
@@ -397,6 +405,17 @@ pub(crate) fn standing_priority_pass(
         }
         Some(_) | None => StandingPriorityPass::Undecided,
     }
+}
+
+/// CR 117.1d + CR 605.3a: whether resolving `top` closes off a mana activation
+/// `player` can make now, the two reasons [`StandingPriorityPass::Held`] names.
+fn resolution_forecloses_mana_activation(
+    state: &GameState,
+    player: PlayerId,
+    top: &StackEntry,
+) -> bool {
+    resolution_can_remove_activatable_mana_source(state, player, top)
+        || resolution_untaps_ready_mana_source(state, player, top)
 }
 
 /// CR 117.1d + CR 605.3a + CR 400.7: whether resolving `top` can move a
@@ -418,7 +437,7 @@ fn resolution_can_remove_activatable_mana_source(
     let Some(root) = top.ability() else {
         return false;
     };
-    if !chain_has_battlefield_departure(root) {
+    if !chain_has_effect(root, |effect| battlefield_departure_slot(effect).is_some()) {
         return false;
     }
     let sources: Vec<ObjectId> = mana_sources::activatable_mana_actions_for_player(state, player)
@@ -447,14 +466,65 @@ fn resolution_can_remove_activatable_mana_source(
         .any(|&source| reaches.iter().any(|reach| reach.contains(&board, source)))
 }
 
-/// Whether any instruction in `ability`'s chain can move battlefield objects to
-/// another zone — the structural gate before any board is read.
-fn chain_has_battlefield_departure(ability: &ResolvedAbility) -> bool {
-    battlefield_departure_slot(&ability.effect).is_some()
+/// CR 701.26b + CR 605.3a: whether resolving `top` untaps a permanent `player`
+/// can tap for mana now. Only tapped permanents can be untapped, so the
+/// instruction does nothing to that permanent unless they tap it first, and
+/// this is the window to do it. Basalt Monolith: "{3}: Untap this artifact."
+/// under Rings of Brighthearth, with the copy resolved and the original still
+/// on the stack. Objects are the resolver's own (`stack_entry_node_reach`), so
+/// an untap the player chooses as it resolves ("untap up to two lands") names
+/// none and keeps the pass, because the lands tapped for its cost are usually
+/// the ones chosen.
+fn resolution_untaps_ready_mana_source(
+    state: &GameState,
+    player: PlayerId,
+    top: &StackEntry,
+) -> bool {
+    // A spell or activated ability is on the stack because its controller just cast
+    // or activated it (CR 601.2, CR 602.2), so this stop follows their own act. A
+    // triggered ability goes on the stack by itself (CR 603.2 + CR 603.3); holding
+    // for it would stop Wilderness Reclamation every end step.
+    match top.kind {
+        StackEntryKind::Spell { .. } | StackEntryKind::ActivatedAbility { .. } => {}
+        StackEntryKind::TriggeredAbility { .. }
+        | StackEntryKind::KeywordAction { .. }
+        | StackEntryKind::CombatDamage { .. } => return false,
+    }
+    let Some(root) = top.ability() else {
+        return false;
+    };
+    if !chain_has_effect(root, is_untap) {
+        return false;
+    }
+    let sources = mana_sources::ready_tap_mana_sources(state, player);
+    if sources.is_empty() {
+        return false;
+    }
+    stack_entry_node_reach(state, top)
+        .iter()
+        .filter(|reach| is_untap(&reach.node.effect))
+        .flat_map(|reach| &reach.acted_on)
+        .any(|acted_on| matches!(acted_on, TargetRef::Object(id) if sources.contains(id)))
+}
+
+fn is_untap(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::SetTapState {
+            state: TapStateChange::Untap,
+            ..
+        }
+    )
+}
+
+/// Whether any instruction in `ability`'s chain is `judged` — the structural
+/// gate before any board is read.
+fn chain_has_effect(ability: &ResolvedAbility, judged: fn(&Effect) -> bool) -> bool {
+    judged(&ability.effect)
         || [&ability.sub_ability, &ability.else_ability]
             .into_iter()
             .flatten()
-            .any(|branch| chain_has_battlefield_departure(branch))
+            .any(|branch| chain_has_effect(branch, judged))
 }
 
 /// The objects one battlefield-departure instruction can move, as far as they
@@ -1316,7 +1386,7 @@ mod tests {
         use super::*;
         use crate::game::scenario::GameScenario;
         use crate::types::ability::{
-            BounceSelection, ControllerRef, Effect, PlayerFilter, TypedFilter,
+            BounceSelection, ControllerRef, Effect, EffectScope, PlayerFilter, TypedFilter,
         };
         use crate::types::game_state::StackEntryKind;
         use crate::types::mana::ManaColor;
@@ -1352,6 +1422,22 @@ mod tests {
                     subject_match_count: None,
                     die_result: None,
                     provenance: None,
+                },
+            }
+        }
+
+        fn activated_top(
+            controller: PlayerId,
+            source: ObjectId,
+            ability: ResolvedAbility,
+        ) -> StackEntry {
+            StackEntry {
+                id: ObjectId(901),
+                source_id: source,
+                controller,
+                kind: StackEntryKind::ActivatedAbility {
+                    source_id: source,
+                    ability: Box::new(ability),
                 },
             }
         }
@@ -1411,6 +1497,65 @@ mod tests {
                 ),
             );
             assert_eq!(verdict(&state, &bounce), StandingPriorityPass::Undecided);
+        }
+
+        /// Basalt Monolith class: "Untap this permanent."
+        fn untap_itself(source: ObjectId, controller: PlayerId) -> ResolvedAbility {
+            ResolvedAbility::new(
+                Effect::SetTapState {
+                    target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
+                    state: TapStateChange::Untap,
+                },
+                vec![],
+                source,
+                controller,
+            )
+        }
+
+        /// CR 701.26b: the untap does nothing to a permanent that is already
+        /// untapped, so the window is held until it has been tapped.
+        #[test]
+        fn own_activated_untap_holds_only_while_its_object_can_tap_for_mana() {
+            let (mut state, forest, _) = board();
+            let untap = activated_top(PlayerId(0), forest, untap_itself(forest, PlayerId(0)));
+            assert_eq!(verdict(&state, &untap), StandingPriorityPass::Held);
+
+            state.objects.get_mut(&forest).unwrap().tapped = true;
+            assert_eq!(verdict(&state, &untap), StandingPriorityPass::Granted);
+        }
+
+        #[test]
+        fn opponent_activated_untap_stays_undecided() {
+            let (state, _, opponent_forest) = board();
+            let untap = activated_top(
+                PlayerId(1),
+                opponent_forest,
+                untap_itself(opponent_forest, PlayerId(1)),
+            );
+            assert_eq!(verdict(&state, &untap), StandingPriorityPass::Undecided);
+        }
+
+        #[test]
+        fn full_control_outranks_the_untap_hold() {
+            let (mut state, forest, _) = board();
+            state
+                .priority_passing_modes
+                .insert(PlayerId(0), PriorityPassingMode::FullControl);
+            let untap = activated_top(PlayerId(0), forest, untap_itself(forest, PlayerId(0)));
+            assert_eq!(verdict(&state, &untap), StandingPriorityPass::Withheld);
+        }
+
+        /// CR 603.2 + CR 603.3: a triggered ability goes on the stack with no
+        /// player act, so the same untap keeps the pass.
+        #[test]
+        fn own_triggered_untap_keeps_the_pass_while_its_object_can_tap_for_mana() {
+            let (state, forest, _) = board();
+            let activated = activated_top(PlayerId(0), forest, untap_itself(forest, PlayerId(0)));
+            assert_eq!(verdict(&state, &activated), StandingPriorityPass::Held);
+
+            let triggered = top(PlayerId(0), forest, untap_itself(forest, PlayerId(0)));
+            assert_eq!(verdict(&state, &triggered), StandingPriorityPass::Granted);
         }
 
         /// The classifier keeps the own-object pass for instructions that move
