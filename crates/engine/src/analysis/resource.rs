@@ -7911,29 +7911,16 @@ fn board_has_functioning_trigger(state: &GameState, class: BoardTriggerClass) ->
 
 /// CR 603.6a: does ANY functioning board trigger fire on a battlefield entry?
 ///
-/// The route firewall for a batched collapse that MINTS TOKENS: each minted token is a real
-/// CR 603.6a entry, so every board ETB trigger fires for real on top of whatever the batched
-/// arithmetic already applied — the batched life pair and the drained real token-ETB triggers
-/// would each pay the same life. Routing to the concrete replay makes the real ETB triggers
-/// the ONLY source, which is what the board does.
+/// The battlefield-entry half of [`token_growth_is_observed`], the one route firewall that asks
+/// this: each token a batched mint makes is a real CR 603.6a entry, so an entry trigger fires once
+/// per token, and a per-cycle observer that itself creates objects compounds against a batched mint
+/// that does not re-derive its own count. A batched life lump beside a minted token is not decided
+/// here: `game::engine`'s `PeriodGrowth::collapse_is_replay` performs any take that batches life
+/// beside a `Tokens` item (`life_beside_deferred_growth`), whatever triggers the board holds.
 ///
-/// SHAPE-AGNOSTIC by construction. Asking whether the trigger's effect chain is an
-/// `Effect::GainLife` is under-approximate: life reaches `apply_life_gain` from four resolvers
-/// (`game::effects::life`, `::double`, `::exchange_life`, and `::deal_damage`'s
-/// CR 702.15b lifelink leg), so a Terror-of-the-Peaks-shaped board —
-/// an ETB damage trigger on a permanent with lifelink — grows a genuinely ETB-sourced life axis
-/// that no `Effect`-shape test can see. Asking only "is there a functioning ETB trigger" cannot
-/// miss a life source. The two tests are INCOMPARABLE, not nested: this is strictly LOOSER on
-/// effect shape, and what narrows the CALLER is a different axis — it pairs this with
-/// `token_profile.is_some()`, so only a collapse that MINTS the entries can route here.
-///
-/// Distinct from [`life_growth_is_observed`], which asks whether a LUMP gain would miscount an
-/// observer; here the batched arithmetic is right and the double-apply comes from the collapse
-/// itself. Deliberately NOT folded into it (that predicate also gates the offer firewall, where
-/// this shape is not an observation) and deliberately NOT a registration-cancelling suppressor
-/// (the axis can be MIXED-cause, and the batched `Life` registration is per-player, so dropping
-/// it would under-apply the non-ETB half). An OVER-approximation in the same idiom as its
-/// siblings: a true result routes to the discrete N-cycle driver, which performs each period.
+/// SHAPE-AGNOSTIC by construction: the trigger's effect is never read, so an entry trigger counts
+/// whatever it does. An OVER-approximation in the same idiom as its siblings: a true result routes
+/// to the discrete N-cycle driver, which performs each period.
 pub(crate) fn board_has_functioning_etb_trigger(state: &GameState) -> bool {
     board_has_functioning_trigger(state, BoardTriggerClass::EnterBattlefield)
 }
@@ -7953,11 +7940,12 @@ pub(crate) fn board_has_functioning_etb_trigger(state: &GameState) -> bool {
 /// matcher's verdict is invariant across cycles; a false negative there re-opens the fidelity
 /// gap this predicate closes.
 ///
-/// NOT paired with `token_profile.is_some()` the way its sibling is. That conjunct is sound for
-/// ETB sourcing because the batched arm MINTS the entries that re-fire those triggers — no
-/// mint, nothing re-fires. It is UNSOUND here: a counter-growth loop driven by a buyback recast
-/// has a `SpellCast` trigger and NO token profile, registers batched `Counters`, and re-performs
-/// the cast trigger 0x.
+/// NOT paired with a token profile the way its sibling is ([`token_growth_is_observed`], under
+/// `token_profile.is_some_and(..)` in `game::engine`'s `PeriodGrowth::collapse_is_replay`). That
+/// conjunct is sound for ETB sourcing because the batched arm MINTS the entries that re-fire those
+/// triggers — no mint, nothing re-fires. It is UNSOUND here: a counter-growth loop driven by a
+/// buyback recast has a `SpellCast` trigger and NO token profile, registers batched `Counters`, and
+/// re-performs the cast trigger 0x.
 ///
 /// CR 113.6 + CR 113.6b: the zone gate lives in [`functioning_board_trigger_defs`], so a cast
 /// trigger on a card in a library or hand does not count. CR 113.6 covers the DEFAULT branch
@@ -25871,7 +25859,7 @@ mod tests {
         for (axis, why) in [
             (
                 ResourceAxis::Life(p0),
-                "CR 119.3 life gain is deferred until the boundary applies it",
+                "a restored save's `Life` mark stands for a CR 119.3 gain its stash has not applied; a take marks no `Life` axis",
             ),
             (
                 ResourceAxis::DamageDealt(p0),

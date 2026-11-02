@@ -330,16 +330,14 @@ fn run_ingress_life_change(
 /// the replacement pipeline and settle the result. The policy is chosen by the
 /// entry that calls this, never decided here.
 ///
-/// Under `Reject` an unrepresentable final edit returns `Err` BEFORE the
-/// stashed post-replacement continuation drains (nothing settles; the action
-/// boundary discards the stash with everything else). Under `IgnoreImpossible`
-/// the settle step skips only the change the engine's numeric capacity cannot
-/// represent and the continuation drains exactly as it does for an applied
-/// change. That skip is an engine limit and a compatibility fallback for
-/// ordinary resolution outside a public action boundary (and for legacy
-/// serialized `PendingReplacement` policy payloads), NOT a CR 101.3
-/// impossibility: public boundaries reject the action and restore their entry
-/// state instead.
+/// The settle step never refuses a life change (its total and per-turn counters
+/// saturate), so no life event takes the `Err` return below, which would come
+/// BEFORE the stashed post-replacement continuation drains. A player-counter or
+/// energy settlement the continuation reaches takes the failure branch
+/// (`settle_unrepresentable`): an open ingress window records it and the public
+/// boundary rejects the action and restores its entry state; outside a public
+/// action boundary it is logged and skipped. That skip is an engine limit and a
+/// compatibility fallback, NOT a CR 101.3 impossibility.
 fn apply_life_change_core(
     state: &mut GameState,
     proposed: ProposedEvent,
@@ -501,11 +499,10 @@ fn drain_substitution_continuation(
 /// Giant the team's shared total, CR 810.9) at `i32::MAX` and the
 /// gained-this-turn counter at `u32::MAX`; the `LifeChanged` amount
 /// (`arithmetic::life_changed_amount`) and the returned amount are the rules amount,
-/// even when the total moved less. An unrepresentable result is handled per
-/// `policy`: `Reject` returns the typed error; `IgnoreImpossible` reports
-/// `Ok(0)` without a `LifeChanged`. An open ingress window records the failure
-/// for the owning public boundary to reject and restore; without one, ordinary
-/// resolution and legacy parked records use the logged compatibility skip.
+/// even when the total moved less. No life applier records an overflow and the
+/// edit cannot fail, so a life event does not reach the shared failure branch
+/// (`settle_unrepresentable`, per `policy`) in play; the unit tests reach it by
+/// seeding the record.
 fn settle_life_gain(
     state: &mut GameState,
     event: ProposedEvent,
@@ -667,9 +664,8 @@ pub(crate) fn settle_quantity_overflow(
 }
 
 /// Applies a post-replacement `ProposedEvent::LifeGain` under the compatibility
-/// policy. An open ingress window records an engine-unrepresentable result for
-/// the public boundary to reject and restore; without one, ordinary resolution
-/// and legacy parked records log and skip it for compatibility.
+/// policy. The gain itself is never unrepresentable (its total and per-turn
+/// counter saturate), so the policy reaches only the shared settle routing.
 ///
 /// Extracted from `apply_life_gain`'s Execute arm so the same mutation can be
 /// invoked by `resolve_gain`. Caller is responsible for emitting `EffectResolved`.
@@ -688,10 +684,10 @@ pub fn apply_life_gain_after_replacement(
 
 /// Resume-path settle for a parked life gain: applies the event the player's
 /// `ChooseReplacement` answer delivered under the policy the parked record was
-/// stamped with. `Reject` returns the typed error so the boundary restores the
-/// record and prompt. `IgnoreImpossible` reports `Ok(0)`; an open ingress
-/// window still makes its public action reject and restore, while a legacy
-/// payload resumed without one retains the logged compatibility skip.
+/// stamped with. The settle never refuses the gain (its total and per-turn
+/// counter saturate), so the policy reaches only the shared settle routing; a
+/// nested player-counter or energy settlement the answer reaches is held to
+/// `handle_replacement_choice`'s ingress window.
 pub(crate) fn settle_life_gain_after_choice(
     state: &mut GameState,
     event: ProposedEvent,
@@ -842,9 +838,8 @@ fn settle_life_loss(
 }
 
 /// CR 119.3: Apply a post-replacement `ProposedEvent::LifeLoss` under the
-/// compatibility policy. An open ingress window records an engine-unrepresentable
-/// result for the public boundary to reject and restore; without one, ordinary
-/// resolution and legacy parked records log and skip it for compatibility.
+/// compatibility policy. The loss itself is never unrepresentable (its total and
+/// per-turn counter saturate), so the policy reaches only the shared settle routing.
 ///
 /// Extracted from `apply_life_loss`'s Execute arm. Caller is responsible for
 /// emitting `EffectResolved`.
@@ -2533,8 +2528,9 @@ mod tests {
         assert_eq!(state.players[0].life, 20, "controller (p0) is unaffected");
     }
 
-    /// Representability of the final life edit: one fallible core, an explicit
-    /// policy per entry (ordinary skip vs. action-ingress rejection).
+    /// Through both entries a final life edit saturates; a nested player-counter
+    /// or energy settlement keeps one fallible core and an explicit policy per
+    /// entry (ordinary skip vs. action-ingress rejection).
     mod representability {
         use super::*;
         use crate::game::effects::energy::{
@@ -3200,9 +3196,8 @@ mod tests {
             assert_eq!(life_changed_count(&events), 0);
         }
 
-        /// CR 119.3: an ordinary change that is representable still applies in
-        /// full when it is lethal (effect and damage paths), so the shared edit's
-        /// fallibility never turns a legal lethal loss into a skip.
+        /// CR 119.3: an ordinary life loss applies in full when it is lethal (effect
+        /// and damage paths), since the edit authority never refuses a life change.
         #[test]
         fn lethal_life_loss_still_applies_through_effect_and_damage_paths() {
             // Sign in Blood: "Target player draws two cards and loses 2 life."

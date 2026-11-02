@@ -1942,8 +1942,9 @@ fn build_fresh_convoke_none_untapped_growth_does_not_seed_tapped_pile() {
 /// PR-7 v4 (CR 732.2a / CR 122.1 / CR 119.3): the boundary collapse batches N×δ for the beneficial
 /// COUNTER axis and — in the SAME submit — DECLINES the LIFE axis because the real 4p board carries
 /// a functioning life observer. Real 4p offer dump → real accept → graft a +1/+1 counter axis +
-/// a life axis onto the accepted token loop (`mark_unbounded_loop` + `register_pending_materialization`
-/// are the standard Part-2 accept writers) → real boundary → `apply(SubmitPayAmount{5})`.
+/// a life axis onto the accepted token loop (`mark_unbounded_loop` +
+/// `register_pending_materialization`, as a save written before life landed at the take carries
+/// them) → real boundary → `apply(SubmitPayAmount{5})`.
 ///
 /// MEASURED on this fixture (throwaway probe, then removed): post-accept `counter_growth_is_observed
 /// == false`, `life_growth_is_observed == true` — the board has NO counter observer but a REAL life
@@ -2354,7 +2355,8 @@ fn loop_collapse_prompt_labels_counter_axis_counters() {
     );
 }
 
-/// T3 (LIFE): a pure life-gain loop labels its collapse prompt `Life`.
+/// T3 (LIFE): a stash holding only a `Life` item, as a save written before life landed at the take
+/// carries one, labels its collapse prompt `Life`.
 ///
 /// REVERT-PROBE: `from_materializations` → `return LoopCollapseAxis::Tokens;` ⇒ FLIPS.
 #[test]
@@ -3840,8 +3842,9 @@ fn create_life_gainer(state: &mut GameState, owner: PlayerId, name: &str) -> Obj
     id
 }
 
-/// A coarse label per registered materialization — the ROUTE oracle. `Tokens`/`Counters`/`Life`
-/// are the batched N×δ collapse; none means the take performed the period.
+/// A coarse label per registered materialization — the ROUTE oracle on these token boards. `Tokens`
+/// and `Counters` are the batched N×δ collapse (a take lands a `Life` item at once, so a `Life`
+/// label is a graft); none means the take performed the period.
 fn route_labels(state: &GameState, player: PlayerId) -> Vec<String> {
     state
         .pending_unbounded_materialization
@@ -3902,9 +3905,9 @@ fn take_at(state: &mut GameState, n: u32) -> usize {
 /// R6b-converge (CR 732.2a + CR 603.6a): the two collapse ROUTES must land on the SAME life total.
 ///
 /// ARM 1 (ETB-observer board): a real parsed "whenever another creature you control enters, you
-/// gain 1 life" trigger on a P0 permanent. The take must perform the period — NOT register the
-/// batched pair — and taking N=5 must pay the life exactly ONCE, measured ACROSS the take *and*
-/// the stack drain (the drain is where the double-count surfaced: 596 → 646).
+/// gain 1 life" trigger on a P0 permanent. The take must perform the period — NOT batch its
+/// `Tokens` and `Life` — and taking N=5 must pay the life exactly ONCE, measured ACROSS the take
+/// *and* the stack drain (the drain is where the double-count surfaced: 596 → 646).
 ///
 /// REVERT-PROBE (discriminating): drop the `life_beside_deferred_growth` conjunct from
 /// `PeriodGrowth::collapse_is_replay` ⇒ the take registers `["Tokens"]` and applies the batched
@@ -3941,21 +3944,21 @@ fn batched_and_replay_routes_converge_on_the_same_life_total() {
         minted, N as usize,
         "the take mints exactly N real Saprolings"
     );
-    // (2) DISCRIMINATOR: one Saproling ETB per driven cycle × 1 life each = exactly N. The
-    //     batched route pays N at the collapse AND N again when the real ETBs drain ⇒ 2N.
+    // (2) DISCRIMINATOR: one Saproling ETB per driven cycle × 1 life each = exactly N. A batched
+    //     take pays N at the take AND N again when the real ETBs drain ⇒ 2N.
     let life_per_cycle = 1i32; // the single grafted ETB gainer on P0's battlefield
     assert_eq!(
         life_of(&state, P0) - life_before,
         N as i32 * life_per_cycle,
-        "the ETB life is paid ONCE across collapse+drain (batched route ⇒ over-counts by N)"
+        "the ETB life is paid ONCE across take+drain (batched route ⇒ over-counts by N)"
     );
 }
 
 /// MIXED-CAUSE (CR 732.2a): TWO ETB life gainers on P0's board ⇒ a batched route would carry
 /// `per_cycle_delta == 2`. The take must perform the period for the WHOLE axis.
 ///
-/// This is why the fix is a ROUTE decision and not a registration-cancelling suppressor: a
-/// suppressor keyed on "an ETB source exists" would drop the whole `Life` registration and
+/// This is why the fix is a ROUTE decision and not an item-cancelling suppressor: a
+/// suppressor keyed on "an ETB source exists" would drop the whole batched `Life` item and
 /// under-apply. Here it would pay N instead of 2N.
 ///
 /// REVERT-PROBE (discriminating): drop the `life_beside_deferred_growth` conjunct ⇒ the take
@@ -3993,7 +3996,7 @@ fn mixed_cause_life_axis_routes_to_replay() {
 /// beneficiary and silently zero P0's gain.
 ///
 /// REVERT-PROBE (discriminating, RUN): replace the route flip with a board-level suppressor of
-/// the `Life` registration ⇒ P0's Δlife collapses to 0 while P1's stays N.
+/// the batched `Life` item ⇒ P0's Δlife collapses to 0 while P1's stays N.
 #[test]
 fn opponents_etb_life_gainer_does_not_suppress_your_axis() {
     const N: u32 = 5;
@@ -4042,8 +4045,8 @@ fn opponents_etb_life_gainer_does_not_suppress_your_axis() {
 /// shape (CR 603.2c). Collapsing at N now produces N SEPARATE same-turn token batches (one per
 /// replayed cycle), so the total is right only if BOTH fixes hold:
 ///
-/// * 4a (route): the ETB-sourced axis must be performed at the take. Reverting it registers the
-///   batched `Life` instead.
+/// * 4a (route): the ETB-sourced axis must be performed at the take. Reverting it lands the
+///   batched life at the take and registers only `Tokens`.
 /// * 4b (index): each replayed cycle's entry must carry its OWN zone-change index. Reverting it
 ///   leaves every entry on the `0` placeholder, so `batched_zone_change_already_collected` keys
 ///   all N batches to `(def, 0)` and only the FIRST fires ⇒ the trigger-count assertion fails.
@@ -4084,12 +4087,13 @@ fn combined_batched_etb_gainer_fires_once_per_replayed_cycle() {
 /// `double.rs`, `exchange_life.rs`, `deal_damage.rs`), so that test answers NO here, the loop
 /// keeps the batched `[Tokens, Life]` pair, and the 596-vs-646 double-apply reproduces.
 ///
-/// REVERT-PROBE (discriminating): drop the `life_beside_deferred_growth` conjunct from
-/// `PeriodGrowth::collapse_is_replay` ⇒ the take registers `["Tokens"]` and applies the
-/// `Life(PlayerId(0), 3)` lump at the take, so the drained ETBs pay it again. The earlier probe,
-/// re-adding the `Effect::GainLife` chain test as a conjunct of
-/// `board_has_functioning_etb_trigger`, no longer discriminates: the route conjunct reads the
-/// take's `Tokens` item, not that predicate.
+/// REVERT-PROBE: this cycle's ping makes each opponent lose life, so two conjuncts of
+/// `PeriodGrowth::collapse_is_replay` perform the take: the `life_not_stored_as_gains` gate and
+/// `life_beside_deferred_growth`. Dropping either alone leaves this test green; dropping both ⇒
+/// the take registers `["Tokens"]` and applies the `Life(PlayerId(0), 3)` lump at the take, so
+/// the drained ETBs pay it again. The earlier probe, re-adding the `Effect::GainLife` chain test
+/// as a conjunct of `board_has_functioning_etb_trigger`, no longer discriminates: neither
+/// conjunct reads that predicate.
 #[test]
 fn lifelink_etb_damage_life_axis_routes_to_replay() {
     const N: u32 = 5;
@@ -4137,9 +4141,9 @@ fn lifelink_etb_damage_life_axis_routes_to_replay() {
         -(N as i32),
         "each replayed cycle pings every opponent once"
     );
-    // DISCRIMINATOR: the lifelink life is paid ONCE across collapse+drain. The batched route pays
-    // the `Life { per_cycle_delta: 3 }` at the collapse AND the N real token ETBs pay it again on
-    // the drain ⇒ 2 × 3N.
+    // DISCRIMINATOR: the lifelink life is paid ONCE across the take and the drain. A batched take
+    // pays the `Life { per_cycle_delta: 3 }` lump at the take AND the N real token ETBs pay it
+    // again on the drain ⇒ 2 × 3N.
     assert_eq!(
         life_of(&state, P0) - p0_before,
         N as i32 * LIFELINK_PER_CYCLE,

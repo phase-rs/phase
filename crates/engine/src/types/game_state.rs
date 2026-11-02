@@ -22955,11 +22955,11 @@ declare_game_state! {
     /// inside that synchronous window; it is never serialized.
     #[serde(skip)]
     pub active_spend_only_on_x_count: Option<(ObjectId, u32)>,
-    /// Open while an action-ingress player-resource change (life, player
-    /// counter, energy) settles synchronously (a `try_*` entry's whole call, or
-    /// the replacement-choice handler resuming a `Reject` record). Any such
-    /// settlement inside it that is unrepresentable is recorded here and the
-    /// ingress caller rejects. Transient — never serialized.
+    /// Open while an action-ingress player-resource change settles synchronously (a public action
+    /// boundary, a `try_*` entry's whole call, or the replacement-choice handler resuming a
+    /// `Reject` record). A player-counter or energy settlement inside it that is unrepresentable is
+    /// recorded here and the ingress owner rejects; a life change saturates instead. Transient —
+    /// never serialized.
     #[serde(skip)]
     pub(crate) ingress_player_resource_window: Option<IngressPlayerResourceWindow>,
     /// A replacement's computed player-counter or energy quantity overflowed
@@ -36059,8 +36059,10 @@ impl GameState {
     ///   at every place up to N, i.e. consenting to every prefix. The collapse prompt's `[0, N]`
     ///   range therefore only ever lands on a consented, manually-reachable prefix.
     /// * **L5 THIRD-PARTY INVARIANCE** — the batch route is reachable only when unobserved, so no
-    ///   non-controller state depends on the count; under-delivery moves only the controller's own
-    ///   gain (and tapped tokens carry no lethal driver, per `game::turns`).
+    ///   observer depends on the count. A seat other than the controller can still gain by it (P1's
+    ///   Soul Warden on P0's loop): that `Life` item lands at the take at the count the seat
+    ///   accepted (route (f)), so the boundary's under-delivery moves only the `Tokens` and
+    ///   `Counters` items (and tapped tokens carry no lethal driver, per `game::turns`).
     ///
     /// THE HONEST BOUNDARY, STATED BECAUSE IT IS THE ARGUMENT AND NOT A CONCESSION: this engine does
     /// not follow the CR 732.2 procedure verbatim. It is a CR 732.1a-licensed VARIANT — "as long as
