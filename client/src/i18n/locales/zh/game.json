@@ -1392,11 +1392,16 @@
     "castSuffix": "（不支付其法术力费用）",
     "done": "完成",
     "doneSuffix": "（停止以此方式施放咒语）",
+    "doneSuffixPlay": "（停止以此方式使用牌）",
     "eyebrow": "免费施放",
+    "playNamed": "使用{{name}}",
     "remainingAny": "任意数量",
     "subtitle": "选择要施放的咒语，无需支付其法术力费用（剩余{{remaining}}）。剩余总法术力费用：{{budget}}。",
     "subtitleNoBudget": "选择要施放的咒语，无需支付其法术力费用（剩余{{remaining}}）。",
-    "title": "免费施放一个咒语"
+    "subtitleNoBudgetPlay": "选择要使用的地，或要施放的咒语，无需支付其法术力费用（剩余{{remaining}}）。",
+    "subtitlePlay": "选择要使用的地，或要施放的咒语，无需支付其法术力费用（剩余{{remaining}}）。剩余总法术力费用：{{budget}}。",
+    "title": "免费施放一个咒语",
+    "titlePlay": "免费使用牌"
   },
   "fullControl": {
     "label": "控制",

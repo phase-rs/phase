@@ -2132,13 +2132,18 @@
   "freeCastWindow": {
     "eyebrow": "Kostenlos wirken",
     "title": "Wirke einen Zauberspruch kostenlos",
+    "titlePlay": "Karten kostenlos spielen",
     "subtitle": "Wähle einen Zauberspruch, den du ohne Bezahlung seiner Manakosten wirken möchtest ({{remaining}} übrig). Verbleibender Gesamtmanawert: {{budget}}.",
     "subtitleNoBudget": "Wähle einen Zauberspruch, den du ohne Bezahlung seiner Manakosten wirken möchtest ({{remaining}} übrig).",
+    "subtitlePlay": "Wähle ein Land zum Spielen oder einen Zauberspruch, den du ohne Bezahlung seiner Manakosten wirken möchtest ({{remaining}} übrig). Verbleibender Gesamtmanawert: {{budget}}.",
+    "subtitleNoBudgetPlay": "Wähle ein Land zum Spielen oder einen Zauberspruch, den du ohne Bezahlung seiner Manakosten wirken möchtest ({{remaining}} übrig).",
     "remainingAny": "beliebig viele",
     "castNamed": "{{name}} wirken",
+    "playNamed": "{{name}} spielen",
     "castSuffix": "(ohne seine Manakosten zu bezahlen)",
     "done": "Fertig",
-    "doneSuffix": "(keine weiteren Zaubersprüche auf diese Weise wirken)"
+    "doneSuffix": "(keine weiteren Zaubersprüche auf diese Weise wirken)",
+    "doneSuffixPlay": "(keine weiteren Karten auf diese Weise spielen)"
   },
   "castingVariant": {
     "eyebrow": "Wirken",

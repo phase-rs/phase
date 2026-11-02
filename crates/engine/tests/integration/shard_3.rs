@@ -245,6 +245,7 @@ mod gift_delivery_draw_sequence_migration;
 mod gift_recipient_phased_out_opponent;
 mod gifts_given_opponent_partition;
 mod gifts_ungiven_duplicate_candidates_8135;
+mod gix_yawgmoth_praetor_play_cast_6963;
 mod glen_elendras_answer_counter_all_conjunction;
 mod gluntch_choose_player_chain;
 mod goad_badge_defender_gated_anchor;

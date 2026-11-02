@@ -2132,13 +2132,18 @@
   "freeCastWindow": {
     "eyebrow": "Conjuração grátis",
     "title": "Conjure uma mágica de graça",
+    "titlePlay": "Jogue cards de graça",
     "subtitle": "Escolha uma mágica para conjurar sem pagar seu custo de mana ({{remaining}} restante(s)). Valor de mana total restante: {{budget}}.",
     "subtitleNoBudget": "Escolha uma mágica para conjurar sem pagar seu custo de mana ({{remaining}} restante(s)).",
+    "subtitlePlay": "Escolha um terreno para jogar ou uma mágica para conjurar sem pagar seu custo de mana ({{remaining}} restante(s)). Valor de mana total restante: {{budget}}.",
+    "subtitleNoBudgetPlay": "Escolha um terreno para jogar ou uma mágica para conjurar sem pagar seu custo de mana ({{remaining}} restante(s)).",
     "remainingAny": "qualquer quantidade",
     "castNamed": "Conjurar {{name}}",
+    "playNamed": "Jogar {{name}}",
     "castSuffix": "(sem pagar seu custo de mana)",
     "done": "Concluído",
-    "doneSuffix": "(pare de conjurar mágicas desta forma)"
+    "doneSuffix": "(pare de conjurar mágicas desta forma)",
+    "doneSuffixPlay": "(pare de jogar cards desta forma)"
   },
   "castingVariant": {
     "eyebrow": "Conjurar",

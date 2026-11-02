@@ -209,6 +209,9 @@ pub(crate) fn resolve_with_face_policy(
             face_policy.controller,
             face_policy.constraint,
         )
+        // CR 701.18b: residualizing the filter must not narrow a Play
+        // instruction back to Cast.
+        .with_play_mode(face_policy.play_mode)
     };
 
     let cast_request = free_cast_window_resolution_request(
@@ -330,10 +333,25 @@ pub(in crate::game) fn eligible_candidates(
         // spell face through the exact request that will be announced. A
         // policy-only front check would admit a spell with no legal targets or
         // erase a legal back-only spell before it could be elected.
-        if projection
-            .spell_face_legality(face_policy.controller, id, request)
-            .count()
-            == 0
+        //
+        // CR 701.18b: under a Play policy the window also offers a land — a
+        // spell//land modal card's land face (`face_legality`, which equals the
+        // spell-face legality under a Cast policy) or a land card played as a
+        // land now (`resolution_land_front_admission`). A Cast policy admits
+        // neither.
+        let playable_land = projection.with_flushed_baseline(|baseline| {
+            crate::game::casting::resolution_land_front_admission(
+                baseline,
+                face_policy.controller,
+                id,
+                face_policy,
+            )
+        });
+        if !playable_land
+            && projection
+                .face_legality(face_policy.controller, id, request)
+                .count()
+                == 0
         {
             continue;
         }

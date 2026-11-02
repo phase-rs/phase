@@ -14722,12 +14722,22 @@ impl ResolutionFaceLegality {
         }
     }
 
-    fn from_faces(spell: ResolutionSpellFaceLegality, land_back: bool) -> Self {
+    /// CR 712.12: a land//land modal card has a land face on each side; a
+    /// spell//land card's front is a spell face. A front face is never both.
+    fn from_faces(spell: ResolutionSpellFaceLegality, land_front: bool, land_back: bool) -> Self {
         // A spell//land back face is never a spell face:
-        // `resolution_spell_face_choice_available` excludes land faces.
+        // `resolution_spell_face_choice_available` excludes land faces, and a
+        // land front face is never castable (CR 305.9).
         debug_assert!(!(spell.back && land_back));
+        debug_assert!(!(spell.front && land_front));
         Self {
-            front: spell.front.then_some(ResolutionFaceAction::Cast),
+            front: if spell.front {
+                Some(ResolutionFaceAction::Cast)
+            } else if land_front {
+                Some(ResolutionFaceAction::PlayLand)
+            } else {
+                None
+            },
             back: if spell.back {
                 Some(ResolutionFaceAction::Cast)
             } else if land_back {
@@ -14740,14 +14750,18 @@ impl ResolutionFaceLegality {
 }
 
 /// CR 701.18b + CR 712.12: whether a resolution-owned election under `policy`
-/// may elect `object_id`'s land back face. To *play* a card is to cast it or
+/// may elect `object_id`'s land back face — the back face of a spell//land or
+/// a land//land modal card. To *play* a card is to cast it or
 /// play it as a land, so only a Play instruction admits a land face (a Cast
 /// instruction never does, CR 601.2). The face choice must still be open, and
-/// the land face must be legal to play now
-/// ([`super::engine::resolution_back_land_face_play_is_legal`]: modal land back
-/// face, the player's turn, no prohibition, allowance open). The single
-/// land-face authority read by initiation, legal actions, and the
-/// `ChooseModalFace` reducer.
+/// on the projection that presents the elected land face
+/// ([`super::engine::project_modal_land_back_face`]) the policy's filter must
+/// match — the played face's characteristics, the card's ownership and zone
+/// membership (CR 712.12: only the face being played is considered) — and the
+/// land face must be legal to play now
+/// ([`super::engine::resolution_land_play_is_legal`]: the player's turn, no
+/// prohibition, allowance open). The single land-face authority read by
+/// initiation, legal actions, and the `ChooseModalFace` reducer.
 pub(crate) fn resolution_land_face_admission(
     state: &GameState,
     player: PlayerId,
@@ -14759,7 +14773,125 @@ pub(crate) fn resolution_land_face_admission(
             .objects
             .get(&object_id)
             .is_some_and(|obj| !obj.cast_face_committed)
-        && super::engine::resolution_back_land_face_play_is_legal(state, player, object_id)
+        && super::engine::project_modal_land_back_face(state, object_id).is_some_and(|projected| {
+            resolution_land_policy_admits_face(&projected, object_id, policy)
+                && super::engine::resolution_land_play_is_legal(&projected, player, object_id)
+        })
+}
+
+/// CR 712.12: whether the face `state` presents for `object_id` — the card as
+/// it is, or a projection electing its land back face — matches a Play
+/// election's frozen filter, read in the zone the card is in. Only the face
+/// being played is considered; ownership and zone membership are the card's
+/// own on either face.
+fn resolution_land_policy_admits_face(
+    state: &GameState,
+    object_id: ObjectId,
+    policy: &crate::types::ability::ResolutionCastFacePolicy,
+) -> bool {
+    let Some(zone) = state.objects.get(&object_id).map(|obj| obj.zone) else {
+        return false;
+    };
+    let context = super::filter::FilterContext::from_source_with_controller(
+        policy.source_id,
+        policy.controller,
+    );
+    super::filter::matches_target_filter_for_zone(state, object_id, zone, &policy.filter, &context)
+}
+
+/// CR 701.18b + CR 305.1 + CR 712.12: the structural land leg of a Play policy
+/// — `object_id` has a land face the policy's filter admits: a land card (or a
+/// land//land card's front) as it is, or a modal card's land back face on its
+/// projection. It does not ask whether a land may be played *now* (turn,
+/// allowance): that is [`resolution_land_front_admission`] /
+/// [`resolution_land_face_admission`] at election time. The land counterpart of
+/// [`resolution_spell_face_admission`] for prefilters that shape a Play grant's
+/// member set before any play.
+pub(crate) fn resolution_land_card_admission(
+    state: &GameState,
+    object_id: ObjectId,
+    policy: &crate::types::ability::ResolutionCastFacePolicy,
+) -> bool {
+    if !policy.play_mode.is_play() {
+        return false;
+    }
+    resolution_land_front_card_admission(state, object_id, policy)
+        || super::engine::project_modal_land_back_face(state, object_id).is_some_and(|projected| {
+            resolution_land_policy_admits_face(&projected, object_id, policy)
+        })
+}
+
+/// CR 701.18b + CR 305.1: the front-face half of
+/// [`resolution_land_card_admission`] — a Play policy whose filter admits
+/// `object_id` as a land card (or a land//land card's front) as it is. The
+/// whole structural land leg for a route whose downstream grant does not keep
+/// the frozen face policy: a lingering permission cannot confine itself to a
+/// modal card's land back, so admitting that back there would authorize the
+/// card's spell front (CR 601.3).
+pub(crate) fn resolution_land_front_card_admission(
+    state: &GameState,
+    object_id: ObjectId,
+    policy: &crate::types::ability::ResolutionCastFacePolicy,
+) -> bool {
+    policy.play_mode.is_play()
+        && state.objects.get(&object_id).is_some_and(|obj| {
+            obj.card_types
+                .core_types
+                .contains(&crate::types::card_type::CoreType::Land)
+        })
+        && resolution_land_policy_admits_face(state, object_id, policy)
+}
+
+/// CR 701.18b + CR 305.1 + CR 305.9 + CR 712.12: whether a resolution-owned
+/// Play election under `policy` may play `object_id` by its front face — a land
+/// card, or the front land face of a land//land modal card — as a land right
+/// now. Only a Play instruction admits it (CR 601.2: a Cast instruction never
+/// plays a land), the face choice must still be open, the card must match the
+/// policy's filter in the zone it is in, and the play itself must be legal now
+/// ([`super::engine::resolution_land_play_is_legal`]: the player's turn,
+/// CR 305.3; the land allowance, CR 305.2a/2b). The front-face sibling of
+/// [`resolution_land_face_admission`]; together they are the land legs of
+/// [`ResolutionFaceLegality`].
+pub(crate) fn resolution_land_front_admission(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    policy: &crate::types::ability::ResolutionCastFacePolicy,
+) -> bool {
+    if !policy.play_mode.is_play() {
+        return false;
+    }
+    let Some(object) = state.objects.get(&object_id) else {
+        return false;
+    };
+    if object.cast_face_committed
+        || !object
+            .card_types
+            .core_types
+            .contains(&crate::types::card_type::CoreType::Land)
+    {
+        return false;
+    }
+    resolution_land_policy_admits_face(state, object_id, policy)
+        && super::engine::resolution_land_play_is_legal(state, player, object_id)
+}
+
+/// CR 701.18b + CR 712.12: whether the face a `ChooseModalFace` names is a land
+/// face this Play election may play now — the back face through
+/// [`resolution_land_face_admission`], the front face through
+/// [`resolution_land_front_admission`]. The one reducer-side reading of the two
+/// land legs of [`ResolutionFaceLegality`].
+pub(crate) fn resolution_land_face_choice_admission(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    policy: &crate::types::ability::ResolutionCastFacePolicy,
+    face: ModalCardFace,
+) -> bool {
+    match face {
+        ModalCardFace::Back => resolution_land_face_admission(state, player, object_id, policy),
+        ModalCardFace::Front => resolution_land_front_admission(state, player, object_id, policy),
+    }
 }
 
 /// Immutable starting point for prospective resolution casts.  A resolution
@@ -14805,6 +14937,12 @@ impl ResolutionCastProjection {
     ) -> ResolutionFaceLegality {
         ResolutionFaceLegality::from_faces(
             self.spell_face_legality(player, object_id, request),
+            resolution_land_front_admission(
+                &self.baseline,
+                player,
+                object_id,
+                &request.face_policy,
+            ),
             resolution_land_face_admission(&self.baseline, player, object_id, &request.face_policy),
         )
     }
@@ -15139,6 +15277,7 @@ fn resolution_face_legality_for_permission(
             policy,
             permission_index,
         ),
+        resolution_land_front_admission(state, player, object_id, policy),
         resolution_land_face_admission(state, player, object_id, policy),
     )
 }
@@ -17525,14 +17664,39 @@ pub(super) enum ResolutionCastInitiation {
     Rejected(Box<crate::types::ability::ResolutionCastCleanup>),
 }
 
+/// CR 712.12: which face of a modal double-faced card an internal election
+/// step names. Engine-internal only: the wire keeps `ChooseModalFace {
+/// back_face: bool }`, converted once at the reducer boundary
+/// ([`ModalCardFace::from_back_face`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ModalCardFace {
+    Front,
+    Back,
+}
+
+impl ModalCardFace {
+    /// The face named by the wire bool on `GameAction::ChooseModalFace`.
+    pub(crate) const fn from_back_face(back_face: bool) -> Self {
+        if back_face {
+            Self::Back
+        } else {
+            Self::Front
+        }
+    }
+}
+
 /// The outcomes of beginning a resolution-owned face election.  `Cast` is a
-/// spell-face election (or its rejection); `PlayLandFace` is the CR 712.12
-/// land face as the only legal face under a Play policy (CR 701.18b).  The
-/// temporary permission has already been removed in that case: the caller
-/// plays the land face with the returned cleanup as its authority.
+/// spell-face election (or its rejection); `PlayLandFace` is a CR 712.12 land
+/// face — front (a land card's, or a land//land card's front) or back — as the
+/// only legal face under a Play policy (CR 701.18b).  The temporary permission
+/// has already been removed in that case: the caller plays that land face with
+/// the returned cleanup as its authority.
 pub(super) enum ResolutionElectionInitiation {
     Cast(ResolutionCastInitiation),
-    PlayLandFace(Box<crate::types::ability::ResolutionCastCleanup>),
+    PlayLandFace {
+        cleanup: Box<crate::types::ability::ResolutionCastCleanup>,
+        face: ModalCardFace,
+    },
 }
 
 /// The one temporary permission that owns an in-flight resolution cast.  Both
@@ -17699,7 +17863,7 @@ pub(super) fn initiate_cast_during_resolution(
         // Cast instruction never does.
         // `resolution_land_face_admission` requires a Play policy, so this is
         // a typed refusal for a mis-built request rather than a reachable arm.
-        ResolutionElectionInitiation::PlayLandFace(_) => Err(EngineError::InvalidAction(
+        ResolutionElectionInitiation::PlayLandFace { .. } => Err(EngineError::InvalidAction(
             "a Cast resolution policy cannot elect a land face".to_string(),
         )),
     }
@@ -17759,20 +17923,26 @@ pub(super) fn initiate_resolution_election(
         ));
     }
 
-    // CR 712.12: the land face is the only legal face. Electing it is no
+    // CR 712.12: a land face is the only legal face. Electing it is no
     // player decision; the temporary cast permission is not the authority for
     // a land play, so remove it and hand its cleanup to the caller, which
-    // plays the land face during resolution (CR 305.2a).
-    if legality.front.is_none() && legality.back == Some(ResolutionFaceAction::PlayLand) {
+    // plays that land face during resolution (CR 305.2a).
+    let only_land_face = match (legality.front, legality.back) {
+        (Some(ResolutionFaceAction::PlayLand), None) => Some(ModalCardFace::Front),
+        (None, Some(ResolutionFaceAction::PlayLand)) => Some(ModalCardFace::Back),
+        _ => None,
+    };
+    if let Some(face) = only_land_face {
         state
             .objects
             .get_mut(&hit_card)
             .expect("resolution election card remains present")
             .casting_permissions
             .remove(casting_permission_index.0);
-        return Ok(ResolutionElectionInitiation::PlayLandFace(Box::new(
-            cleanup_for_rejection,
-        )));
+        return Ok(ResolutionElectionInitiation::PlayLandFace {
+            cleanup: Box::new(cleanup_for_rejection),
+            face,
+        });
     }
 
     // One legal face is not a player decision.  Commit that exact projected

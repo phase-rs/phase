@@ -34205,9 +34205,29 @@ fn parse_from_among_exiled_this_way(rest: &str) -> Option<TargetFilter> {
     //
     // Then the post-article probe ("instant or sorcery cards"), then
     // `parse_type_phrase_folding` ("nonland cards", "creature cards").
-    let mut typed_filter = parse_cast_type_list(before_anchor)
-        .or_else(|| parse_cast_type_list(after_article))
+    //
+    // CR 601.3 + CR 608.2c: when BOTH positions carry a type ("cast artifact
+    // spells from among the instant and sorcery cards exiled this way"), each
+    // restricts what may be cast, so the gate is their intersection — never
+    // whichever probe matched first, which would silently authorize a card
+    // only one side admits.
+    //
+    // CR 601.3: a single pre-anchor type ("cast creature spells from among
+    // cards exiled this way") is the same restriction as a list; without it
+    // the gate was dropped and every exiled card was castable.
+    let prefix_gate =
+        parse_cast_type_list(before_anchor).or_else(|| parse_cast_type_gate(before_anchor));
+    let suffix_filter = parse_cast_type_list(after_article)
         .unwrap_or_else(|| super::oracle_target::parse_type_phrase_folding(after_article).0);
+    let mut typed_filter = match prefix_gate {
+        Some(prefix) if cast_filter_has_meaningful_typed_leaf(&suffix_filter) => {
+            TargetFilter::And {
+                filters: vec![prefix, suffix_filter],
+            }
+        }
+        Some(prefix) => prefix,
+        None => suffix_filter,
+    };
 
     // "the cards exiled this way" lifts a bare `Typed(Card)` leaf with no
     // further constraint — that's the structural "cards" anchor, not a
