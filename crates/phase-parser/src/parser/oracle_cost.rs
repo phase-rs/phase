@@ -875,9 +875,10 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         // self-ref combinator distinguishes the host (`~`/"cardname"/"this X" →
         // SelfRef) from a granted body's by-name reference to its granting object
         // (GRANTING_SELF_PLACEHOLDER → GrantingObject, e.g. Deconstruction
-        // Hammer's "Sacrifice Deconstruction Hammer"). CR 113.7: a bare "it" in
-        // this leg also names the source — `parse_cost_self_reference` lowers it
-        // to SelfRef upstream, so this arm's own `alt` needs no further change.
+        // Hammer's "Sacrifice Deconstruction Hammer"). A bare "it" in this leg
+        // names the source the same clause named first — `parse_cost_self_reference`
+        // lowers it to SelfRef upstream, so this arm's own `alt` needs no further
+        // change.
         let self_filter = nom_on_lower(rest, &rest_lower, |i| {
             alt((
                 parse_cost_self_reference,
@@ -3867,10 +3868,10 @@ mod tests {
         );
     }
 
-    /// CR 201.5: a printed cost leg whose object phrase is the bare pronoun
-    /// "it" names the ability's own source, exactly as "~" does. Base encodes
-    /// "sacrifice it" as an unrestricted `Typed { type_filters: [] }` — a
-    /// different, wider cost that lets the payer pick any permanent.
+    /// A printed cost leg whose object phrase is the bare pronoun "it" names
+    /// the source the same clause named first, exactly as "~" does. Base
+    /// encodes "sacrifice it" as an unrestricted `Typed { type_filters: [] }` —
+    /// a different, wider cost that lets the payer pick any permanent.
     #[test]
     fn cost_sacrifice_it_is_self_ref() {
         assert_eq!(
@@ -3948,7 +3949,7 @@ mod tests {
         );
     }
 
-    /// CR 201.5: the same class's second printed verb — "… and exile it:"
+    /// The same class's second printed verb — "… and exile it:"
     /// (Hourglass of the Lost, Trenzalore Clocktower). Base encodes it as an
     /// `EffectCost { ChangeZone { target: ParentTarget } }`, which
     /// `supports_effect_cost_payment` refuses, so the ability cannot be
@@ -5503,11 +5504,12 @@ mod tests {
         );
     }
 
-    /// CR 201.5 + CR 113.7 + CR 701.21a: the class's canonical printed line
-    /// (Ior Ruin Expedition, verbatim Scryfall text). The predicate naming the
-    /// class is a cost leg whose object phrase is the bare pronoun `it`
-    /// (`\b(sacrifice|exile)\s+it\b` in the pre-colon cost clause). The
-    /// `RemoveCounter::target` leg stays the canonical `None`; only the
+    /// CR 701.21a: the class's canonical printed line (Ior Ruin Expedition,
+    /// verbatim Scryfall text). The predicate naming the class is a cost leg
+    /// whose object phrase is the bare pronoun `it`
+    /// (`\b(sacrifice|exile)\s+it\b` in the pre-colon cost clause), and the
+    /// clause names its own source first ("… from this enchantment and sacrifice
+    /// it"). The `RemoveCounter::target` leg stays the canonical `None`; only the
     /// sacrifice leg moves, from the unrestricted `Typed { type_filters: [] }`
     /// to the source.
     #[test]

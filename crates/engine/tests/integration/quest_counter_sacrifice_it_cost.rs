@@ -1,7 +1,7 @@
-//! CR 201.5 + CR 113.7 + CR 701.21a + CR 601.2h + CR 602.2b: Ior Ruin
-//! Expedition — the cost's bare "it" names the ability's own source, so the
-//! sacrifice leg is paid with the enchantment itself and no other permanent is
-//! ever offered.
+//! CR 701.21a + CR 601.2h + CR 602.2b + CR 122.2 + CR 113.7a: Ior Ruin
+//! Expedition — the cost clause names the enchantment and then says "it", so
+//! the sacrifice leg is paid with the enchantment itself and no other permanent
+//! is ever offered.
 //!
 //! The class this pins is named by predicate, not by count: printed cost legs
 //! whose object phrase is the bare pronoun `it` (`\b(sacrifice|exile)\s+it\b`
@@ -13,11 +13,12 @@
 
 use engine::game::casting::activated_ability_definitions;
 use engine::game::scenario::{GameRunner, GameScenario, P0};
-use engine::types::ability::Effect;
+use engine::types::ability::{AbilityCost, Effect};
 use engine::types::actions::GameAction;
-use engine::types::counter::CounterType;
+use engine::types::counter::{parse_counter_type, CounterType};
 use engine::types::game_state::{PayCostKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
+use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -25,7 +26,7 @@ use engine::types::zones::Zone;
 const IOR_RUIN: &str = "Landfall — Whenever a land you control enters, you may put a quest counter on this enchantment.\nRemove three quest counters from this enchantment and sacrifice it: Draw two cards.";
 
 fn quest() -> CounterType {
-    CounterType::Generic("quest".to_string())
+    parse_counter_type("quest")
 }
 
 /// Stage the enchantment with `counters` quest counters plus one unrelated
@@ -130,4 +131,75 @@ fn ior_ruin_expedition_counter_cost_still_binds_the_source() {
         accepted.is_ok(),
         "three quest counters pay the counter leg: {accepted:?}"
     );
+}
+
+/// Verbatim Scryfall Oracle text (WHO).
+const TRENZALORE: &str = "{T}: Add {U}. Put a time counter on this artifact.\n{1}{U}, {T}, Remove twelve time counters from Trenzalore Clocktower and exile it: Shuffle your graveyard and hand into your library, then draw seven cards. Activate only if you control a Time Lord.";
+
+/// The printed ability whose cost exiles the source (the artifact also has a
+/// mana ability at index 0).
+fn exile_cost_index(runner: &GameRunner, source: ObjectId) -> usize {
+    fn has_self_exile(cost: Option<&AbilityCost>) -> bool {
+        match cost {
+            Some(AbilityCost::Exile { .. }) => true,
+            Some(AbilityCost::Composite { costs }) => {
+                costs.iter().any(|c| matches!(c, AbilityCost::Exile { .. }))
+            }
+            _ => false,
+        }
+    }
+    activated_ability_definitions(runner.state(), source)
+        .into_iter()
+        .find(|(_, ability)| has_self_exile(ability.cost.as_ref()))
+        .map(|(index, _)| index)
+        .expect("Trenzalore Clocktower must carry an exile-cost activated ability")
+}
+
+/// The class's second printed verb at runtime: "… and exile it" is a
+/// self-exile cost, not a lost cost. At base the leg lowers to
+/// `EffectCost { ChangeZone { target: ParentTarget } }`, which
+/// `supports_effect_cost_payment` refuses, so the activation is rejected
+/// outright — the reach-guard below is the discriminator.
+#[test]
+fn activating_trenzalore_clocktower_exiles_itself_not_another_permanent() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        ],
+    );
+    let tower = scenario
+        .add_artifact_from_oracle(P0, "Trenzalore Clocktower", TRENZALORE)
+        .id();
+    scenario.with_counter(tower, parse_counter_type("time"), 12);
+    // The activation restriction needs a Time Lord; a synthetic one keeps the
+    // card under test verbatim and the battlefield otherwise inert.
+    let witness = scenario
+        .add_creature(P0, "Time Lord Witness", 2, 2)
+        .with_subtypes(vec!["Time Lord"])
+        .id();
+    let mut runner = scenario.build();
+    let index = exile_cost_index(&runner, tower);
+
+    let submitted = runner.act(GameAction::ActivateAbility {
+        source_id: tower,
+        ability_index: index,
+        payment_mode: Default::default(),
+    });
+    // Reach-guard: the printed cost is payable at all (base rejects it).
+    assert!(
+        submitted.is_ok(),
+        "the self-exile cost must be payable: {submitted:?}"
+    );
+    assert!(
+        !matches!(runner.state().waiting_for, WaitingFor::PayCost { .. }),
+        "a self-exile cost must not surface a PayCost prompt: {:?}",
+        runner.state().waiting_for
+    );
+    // CR 701.13a + CR 601.2h: the cost exiled the SOURCE, and only it.
+    assert_eq!(runner.state().objects[&tower].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&witness].zone, Zone::Battlefield);
 }

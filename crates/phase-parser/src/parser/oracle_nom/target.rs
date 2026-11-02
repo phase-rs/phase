@@ -604,26 +604,30 @@ pub fn parse_granting_object_ref(input: &str) -> OracleResult<'_, TargetFilter> 
     .parse(input)
 }
 
-/// CR 201.5 / CR 201.5a / CR 113.7: Shared self-reference combinator for *cost*
-/// positions ("Sacrifice <self>", "Exile <self>", "Return <self> to its owner's
-/// hand", "Unattach a[n] <type> from <self>").
+/// CR 201.5 / CR 201.5a: Shared self-reference combinator for *cost* positions
+/// ("Sacrifice <self>", "Exile <self>", "Return <self> to its owner's hand",
+/// "Unattach a[n] <type> from <self>").
 ///
 /// Recognizes, in this order, the granter placeholder → `GrantingObject` (so a
 /// granted body's by-name reference to its granting object still wins), the host
 /// tokens (`~`, "cardname") → `SelfRef`, and the bare object pronoun "it" →
-/// `SelfRef`: CR 113.7 makes the object whose activated ability is being
-/// activated ("the source") the referent a printed cost's "it" names, and a
-/// cost phrase is announced before any target exists, so it carries no
-/// chosen-target antecedent.
+/// `SelfRef`.
+///
+/// The pronoun's antecedent is the source named EARLIER IN THE SAME cost clause:
+/// "Remove three quest counters from this enchantment and sacrifice **it**"
+/// (Ior Ruin Expedition) names the enchantment, then says "it"; "Remove X time
+/// counters from this artifact and exile **it**" (Hourglass of the Lost) does
+/// the same. CR 113.7 identifies that object as the ability's source, which is
+/// the object its cost is paid with — the rule does not itself resolve the
+/// pronoun, and no rule needs to: the clause carries its own antecedent.
 ///
 /// The class this serves is named by predicate, not by count: a printed cost
 /// leg whose object phrase is the bare pronoun `it` — `\b(sacrifice|exile)\s+it\b`
-/// in the pre-colon cost clause ("Remove three quest counters from this
-/// enchantment and sacrifice it:", Ior Ruin Expedition; "Remove X time counters
-/// from this artifact and exile it", Hourglass of the Lost). The effect
-/// channel's `it` is bound elsewhere (`oracle_effect::resolve_it_pronoun`, and
-/// the `parent_target_available` gate on
-/// `oracle_target::parse_anaphoric_target_ref`) and is untouched by this arm.
+/// in the pre-colon cost clause. The effect channel's `it` is bound elsewhere
+/// (`oracle_effect::resolve_it_pronoun`, and the `parent_target_available` gate
+/// on `oracle_target::parse_anaphoric_target_ref`) and is untouched by this
+/// arm; a cost clause that names something else first keeps that referent,
+/// which is why the `behold` shape below is carved out.
 ///
 /// Out of scope — `behold <quality> and exile it` (Champion of the Clachan,
 /// Champion of the Path, Champion of the Weird, Champions of the Perfect,
@@ -737,12 +741,12 @@ fn parse_non_count_quantity(input: &str) -> OracleResult<'_, &str> {
 /// Parse "it" as a self-reference, requiring a word boundary after "it"
 /// to prevent false matches on words like "item", "iterate".
 ///
-/// CR 201.5 / CR 113.7: this is the single "it" authority for BOTH channels —
-/// [`parse_self_reference`] (effect-target channel) and
-/// [`parse_cost_self_reference`] (cost channel, where the referent is strictly
-/// the ability's own source). The boundary set below is what keeps `item`,
-/// `iterate` and `itself` out; `test_parse_self_reference_it_word_boundary`
-/// pins it.
+/// This is the single "it" recognition authority for BOTH channels —
+/// [`parse_self_reference`] (effect-target channel, where the caller gates it on
+/// a prior chosen-target referent) and [`parse_cost_self_reference`] (cost
+/// channel, where the clause names its own source before the pronoun). The
+/// boundary set below is what keeps `item`, `iterate` and `itself` out;
+/// `test_parse_self_reference_it_word_boundary` pins it.
 fn parse_it_self_reference(input: &str) -> OracleResult<'_, TargetFilter> {
     let (rest, _) = tag("it").parse(input)?;
     match rest.chars().next() {
@@ -2013,8 +2017,9 @@ mod tests {
 
     #[test]
     fn test_parse_cost_self_reference_it_is_self_ref() {
-        // CR 201.5: a printed cost leg's bare object pronoun "it" names the
-        // ability's own source ("… and sacrifice it:" / "… and exile it:").
+        // A printed cost leg's bare object pronoun "it" names the source the
+        // same clause named first ("… from this enchantment and sacrifice it:"
+        // / "… from this artifact and exile it:").
         let (rest, f) = parse_cost_self_reference("it").unwrap();
         assert_eq!(rest, "");
         assert_eq!(f, TargetFilter::SelfRef);
