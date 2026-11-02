@@ -36,13 +36,14 @@ use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
-use engine::types::ability::{AbilityKind, Effect, PtValue};
+use engine::types::ability::{AbilityKind, PtValue};
 use engine::types::card::CardFace;
 use engine::types::card_type::CoreType;
 use engine::types::keywords::Keyword;
 
 use crate::cast_facts::EffectProfile;
 use crate::draft_eval::{dominant_colors, produced_color_count};
+use crate::features::mana_ramp::chain_has_mana_effect;
 
 /// Where in the draft a pick happens: which booster, and which pick within it.
 ///
@@ -77,16 +78,29 @@ const ROLE_TARGETS: [(DeckRole, f64); 6] = [
     (DeckRole::Acceleration, 3.0),
 ];
 
-/// Role a card plays for its set's class bonuses.
+/// Role a card plays for its set's class bonuses, derived from parsed card data
+/// (never from a name), so it covers every card in the class.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CardClass {
+    /// A land that is also an artifact (CR 205.2b: an object with more than one
+    /// card type satisfies any effect that applies to any of them).
     ArtifactLand,
+    /// A creature with an activated mana ability (CR 605.1a), anywhere in the
+    /// ability's chain: Myr and other mana dorks.
     ManaCreature,
+    /// A non-creature, non-land artifact with an activated mana ability
+    /// (CR 605.1a): Talismans and other mana rocks.
     ManaArtifact,
+    /// A permanent with the Equipment subtype (CR 301.5).
     Equipment,
+    /// Removal as `EffectProfile` classifies it. That predicate also matches
+    /// mass removal, `Counter` and `DiscardCard`, so this is "removal-shaped
+    /// effect", not strictly single-target removal.
     Removal,
+    /// Has the Modular keyword (CR 702.43).
     Modular,
+    /// Has the Sunburst keyword (CR 702.44).
     Sunburst,
 }
 
@@ -522,11 +536,16 @@ impl DraftProfile {
         need.bonus * ((target - have) / target).max(0.0)
     }
 
-    /// Premium finisher or evasive threat, not merely a creature.
+    /// Premium finisher or evasive threat, not merely a creature. A mana
+    /// creature is never a finisher, however highly its pick quality is rated:
+    /// the card bonus measures acceleration and fixing, not closing a game.
     fn is_threat(&self, card: &ProfileCard<'_>) -> bool {
         let Some(face) = card.face.filter(|f| is_creature(f)) else {
             return false;
         };
+        if classify(face).contains(&CardClass::ManaCreature) {
+            return false;
+        }
         let power = match &face.power {
             Some(PtValue::Fixed(p)) => *p,
             _ => 0,
@@ -561,10 +580,13 @@ fn is_evasive(face: &CardFace) -> bool {
     })
 }
 
+/// Whether the face has an activated mana ability (CR 605.1a). The whole chain
+/// is searched, not just the top-level effect: a mana ability can sit behind a
+/// leading step whose sub-ability adds the mana.
 fn has_mana_ability(face: &CardFace) -> bool {
     face.abilities
         .iter()
-        .any(|a| a.kind == AbilityKind::Activated && matches!(&*a.effect, Effect::Mana { .. }))
+        .any(|a| a.kind == AbilityKind::Activated && chain_has_mana_effect(a))
 }
 
 /// Classify a face into the roles the profile's class bonuses key on.
@@ -683,7 +705,7 @@ fn off_color_penalty(card: &ProfileCard<'_>, pool: &[ProfileCard<'_>]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engine::types::ability::{AbilityDefinition, ManaContribution, ManaProduction};
+    use engine::types::ability::{AbilityDefinition, Effect, ManaContribution, ManaProduction};
     use engine::types::card_type::CardType;
     use engine::types::mana::ManaColor;
 
@@ -929,6 +951,78 @@ mod tests {
         let pool = vec![card("Flyer", "5DN", &[], &flyer); 4];
         let met = score15(p, &card("Flyer", "5DN", &[], &flyer), &pool, 0.0, 0.0).unwrap();
         assert_eq!(met.threat_need, 0.0);
+    }
+
+    #[test]
+    fn mana_myr_do_not_satisfy_5dn_finisher_threat_target() {
+        let p = DraftProfile::mirrodin_block();
+        // The MRD mana Myr are 1/1 Artifact Creature — Myr with "{T}: Add {C}."
+        // for one color each, and the profile rates every one of them at or above
+        // the premium-threat card bonus for acceleration and fixing.
+        let myr = [
+            ("Iron Myr", ManaColor::Red),
+            ("Silver Myr", ManaColor::Blue),
+            ("Leaden Myr", ManaColor::Black),
+            ("Copper Myr", ManaColor::Green),
+        ];
+        let myr_faces: Vec<CardFace> = myr
+            .iter()
+            .map(|&(_, color)| {
+                let mut f = face(vec![CoreType::Artifact, CoreType::Creature], &["Myr"]);
+                f.power = Some(PtValue::Fixed(1));
+                f.toughness = Some(PtValue::Fixed(1));
+                f.mana_cost = engine::types::mana::ManaCost::generic(2);
+                f.abilities = vec![tap_for(vec![color])];
+                f
+            })
+            .collect();
+        let pool: Vec<ProfileCard<'_>> = myr
+            .iter()
+            .zip(&myr_faces)
+            .map(|(&(name, _), f)| card(name, "MRD", &[], f))
+            .collect();
+        for myr in &pool {
+            assert!(p.bonus_for_name(myr.name) >= PREMIUM_THREAT_THRESHOLD);
+            assert!(!p.is_threat(myr), "{} is not a finisher", myr.name);
+        }
+
+        // Hoverguard Sweepers: 5/6 flying, a real 5DN finisher.
+        let mut sweepers = face(vec![CoreType::Creature], &["Drone"]);
+        sweepers.power = Some(PtValue::Fixed(5));
+        sweepers.toughness = Some(PtValue::Fixed(6));
+        sweepers.mana_cost = engine::types::mana::parse_mtgjson_mana_cost("{6}{U}{U}");
+        sweepers.keywords = vec![Keyword::Flying];
+        let finisher = card("Hoverguard Sweepers", "5DN", &[], &sweepers);
+        assert!(p.is_threat(&finisher));
+
+        // Positive control: four real threats do satisfy the target.
+        let threats = vec![finisher; 4];
+        let sated = score15(p, &finisher, &threats, 0.0, 0.0).unwrap();
+        assert_eq!(sated.threat_need, 0.0);
+
+        let scored = score15(p, &finisher, &pool, 0.0, 0.0).unwrap();
+        assert_eq!(
+            scored.threat_need, 1.5,
+            "a pool of four mana Myr still leaves the full threat bonus on an actual finisher"
+        );
+    }
+
+    #[test]
+    fn chained_mana_ability_classifies_as_mana_creature() {
+        // The activated ability opens with a non-mana step and the mana arrives
+        // in its sub-ability.
+        let chained = AbilityDefinition::new(AbilityKind::Activated, Effect::NoOp)
+            .sub_ability(tap_for(vec![ManaColor::Red]));
+        let mut dork = face(vec![CoreType::Creature], &[]);
+        dork.power = Some(PtValue::Fixed(4));
+        dork.abilities = vec![chained];
+
+        assert_eq!(classify(&dork), BTreeSet::from([CardClass::ManaCreature]));
+        // However big, a mana creature is not a finisher.
+        let p = DraftProfile::mirrodin_block();
+        let mut flying_dork = dork.clone();
+        flying_dork.keywords = vec![Keyword::Flying];
+        assert!(!p.is_threat(&card("Chained Dork", "5DN", &[], &flying_dork)));
     }
 
     #[test]

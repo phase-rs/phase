@@ -59,12 +59,11 @@
 //!   two-sided test -- not on an information limit. The design is
 //!   `phase_ai::winston_eval::ColorPassTally` with a type key.
 
-use draft_core::types::{DraftCardInstance, SharedStackPileDecision};
+use draft_core::types::{DraftCardInstance, DraftSession, SharedStackPileDecision};
 use draft_core::view::{DraftPlayerView, SharedStackPileView, SharedStackView};
 use engine::database::CardDatabase;
 use phase_ai::config::AiDifficulty;
 use phase_ai::draft_eval;
-use phase_ai::draft_guide::{self, PoolProfile};
 use phase_ai::draft_profile::{DraftProfile, PackPosition, ProfileCard};
 use phase_ai::winston_eval::{
     draft_progress, valuate_turn, CardContext, ColorPassTally, DraftCardFacts, OpponentRead,
@@ -78,10 +77,11 @@ use rand::Rng;
 /// in", one convention for when it has seen enough to answer.
 const MIN_POOL_COLOR_SAMPLE: usize = 3;
 
-/// Whether a bot's pick is adjusted by the built-in draft guides
-/// ([`phase_ai::draft_guide`]). A guide only changes picks of cards from the sets
-/// it covers, and only for the difficulties that run the evaluation scorer
-/// (Medium and above); VeryEasy and Easy keep their random / rarity pick.
+/// Whether a bot's pick is adjusted by the built-in set-family draft profiles
+/// ([`phase_ai::draft_profile`]). A profile only changes picks from packs whose
+/// cards all come from the sets it covers, and only for the difficulties that run
+/// the evaluation scorer (Medium and above); VeryEasy and Easy keep their random /
+/// rarity pick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PickEnhancement {
     #[default]
@@ -100,7 +100,16 @@ pub struct PackShape {
 }
 
 impl PackShape {
-    fn position(self, cards_remaining: usize) -> PackPosition {
+    /// The shape of the booster `session` is currently drafting, from the
+    /// session's recorded per-pack sizes.
+    pub fn current(session: &DraftSession) -> Self {
+        Self {
+            pack_number: session.current_pack_number,
+            cards_in_pack: session.cards_in_pack(session.current_pack_number),
+        }
+    }
+
+    pub(crate) fn position(self, cards_remaining: usize) -> PackPosition {
         let taken = usize::from(self.cards_in_pack).saturating_sub(cards_remaining);
         PackPosition {
             pack_number: usize::from(self.pack_number),
@@ -258,10 +267,10 @@ fn pick_by_evaluation(
     let on_color_bonus: f64 = if strict { 6.0 } else { 4.0 };
     let off_color_penalty: f64 = if strict { -2.0 } else { 0.0 };
 
-    // A set-family profile (see `phase_ai::draft_profile`) supersedes the draft
-    // guide for the sets it covers, and is chosen for the whole pack: scores from
-    // different formulas are never compared. It is a `PickEnhancement` like the
-    // guides, so with it off the base heuristic scores every set.
+    // A set-family profile (see `phase_ai::draft_profile`) is the single scoring
+    // authority for the sets it covers, and is chosen for the whole pack: scores
+    // from different formulas are never compared. With the enhancement off, or a
+    // pack the profile does not fully cover, the base heuristic scores every card.
     let pack_profile = match enhancement {
         PickEnhancement::Off => None,
         PickEnhancement::DraftGuides => pack
@@ -291,23 +300,16 @@ fn pick_by_evaluation(
                     .map_or(0.0, |s| s.total)
             })
         }
-        None => {
-            let guide_pool = match enhancement {
-                PickEnhancement::Off => None,
-                PickEnhancement::DraftGuides => Some(pool_profile(prior_picks, card_db)),
-            };
-            Box::new(move |card| {
-                eval_score(
-                    card,
-                    card_db,
-                    &preferred_colors,
-                    pick_number,
-                    on_color_bonus,
-                    off_color_penalty,
-                    guide_pool.as_ref(),
-                )
-            })
-        }
+        None => Box::new(move |card| {
+            eval_score(
+                card,
+                card_db,
+                &preferred_colors,
+                pick_number,
+                on_color_bonus,
+                off_color_penalty,
+            )
+        }),
     };
 
     pack.iter()
@@ -343,7 +345,6 @@ fn eval_score(
     pick_number: u8,
     on_color_bonus: f64,
     off_color_penalty: f64,
-    guide_pool: Option<&PoolProfile>,
 ) -> f64 {
     let base = card_quality(card, Some(card_db));
 
@@ -359,35 +360,7 @@ fn eval_score(
 
     let curve = curve_bonus(card.cmc, pick_number) as f64;
 
-    base + color_bonus + curve + guide_bonus(card, card_db, guide_pool)
-}
-
-/// The built-in draft guide's adjustment for `card`, or zero when enhancements
-/// are off, no guide covers the card's set, or the card face is unknown.
-fn guide_bonus(
-    card: &DraftCardInstance,
-    card_db: &CardDatabase,
-    guide_pool: Option<&PoolProfile>,
-) -> f64 {
-    let Some(pool) = guide_pool else {
-        return 0.0;
-    };
-    let (Some(guide), Some(face)) = (
-        draft_guide::guide_for_set(&card.set_code),
-        card_db.get_face_by_name(&card.name),
-    ) else {
-        return 0.0;
-    };
-    guide.bonus(&card.set_code, &card.colors, face, pool)
-}
-
-/// What the bot's pool already holds, for the guide's pool-aware terms.
-fn pool_profile(prior_picks: &[DraftCardInstance], card_db: &CardDatabase) -> PoolProfile {
-    let mut pool = PoolProfile::default();
-    for pick in prior_picks {
-        pool.add(card_db.get_face_by_name(&pick.name));
-    }
-    pool
+    base + color_bonus + curve
 }
 
 /// Intrinsic card quality: the engine-data evaluator ([`draft_eval::evaluate_draft_card`])
@@ -753,6 +726,7 @@ pub fn winston_decision(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine::types::Keyword;
     use rand::SeedableRng;
 
     /// First pick of a 15-card first pack.
@@ -1031,11 +1005,11 @@ mod tests {
         }
     }
 
-    // ── The draft-guide enhancement, joined to the production pick ───────────
+    // ── The set-family profile enhancement, joined to the production pick ────
 
-    /// Skullclamp (a name the Mirrodin-block guide rates highest) beside an
+    /// Skullclamp (the Mirrodin-block profile's highest-rated card) beside an
     /// unlisted removal spell, printed in `set_code`. Removal outranks a
-    /// colourless one-mana equipment on the base heuristic; the guide flips it.
+    /// colourless one-mana equipment on the base heuristic; the profile flips it.
     fn guide_contest(set_code: &str) -> (CardDatabase, Vec<DraftCardInstance>) {
         let skullclamp = CardFace {
             mana_cost: ManaCost::generic(1),
@@ -1117,18 +1091,154 @@ mod tests {
             assert_eq!(
                 pick_name(&pack, &db, PickEnhancement::DraftGuides),
                 "Skullclamp",
-                "{set_code}: the guide's top-rated card wins when enabled",
+                "{set_code}: the profile's top-rated card wins when enabled",
             );
         }
     }
 
     #[test]
     fn draft_guides_do_nothing_outside_the_sets_they_cover() {
-        // Cube cards are all printed as set "CUBE", which no guide covers.
+        // Cube cards are all printed as set "CUBE", which no profile covers.
         let (db, pack) = guide_contest("CUBE");
         assert_eq!(
             pick_name(&pack, &db, PickEnhancement::DraftGuides),
             pick_name(&pack, &db, PickEnhancement::Off),
+        );
+    }
+
+    #[test]
+    fn adaptive_profile_shifts_pick_from_raw_power_to_color_and_need() {
+        let terror = CardFace {
+            mana_cost: engine::types::mana::parse_mtgjson_mana_cost("{1}{B}"),
+            abilities: vec![destroy_ability()],
+            ..named_face("Terror", vec![CoreType::Instant])
+        };
+        let skyhunter = CardFace {
+            mana_cost: engine::types::mana::parse_mtgjson_mana_cost("{W}{W}"),
+            power: Some(PtValue::Fixed(2)),
+            toughness: Some(PtValue::Fixed(2)),
+            keywords: vec![Keyword::Flying],
+            ..named_face("Leonin Skyhunter", vec![CoreType::Creature])
+        };
+        let filler = CardFace {
+            mana_cost: ManaCost::generic(3),
+            ..named_face("Filler Artifact", vec![CoreType::Artifact])
+        };
+        let entries: serde_json::Map<String, serde_json::Value> = [terror, skyhunter, filler]
+            .into_iter()
+            .map(|face| {
+                (
+                    face.name.to_lowercase(),
+                    serde_json::to_value(&face).expect("a face serializes"),
+                )
+            })
+            .collect();
+        let db = CardDatabase::from_json_str(&serde_json::Value::Object(entries).to_string())
+            .expect("the fixture export loads");
+
+        let terror_card = DraftCardInstance {
+            instance_id: "terror".to_string(),
+            name: "Terror".to_string(),
+            set_code: "MRD".to_string(),
+            collector_number: "1".to_string(),
+            rarity: "common".to_string(),
+            colors: vec!["B".to_string()],
+            cmc: 2,
+            type_line: "Instant".to_string(),
+            draft_effect: None,
+        };
+        let skyhunter_card = DraftCardInstance {
+            instance_id: "skyhunter".to_string(),
+            name: "Leonin Skyhunter".to_string(),
+            set_code: "MRD".to_string(),
+            collector_number: "2".to_string(),
+            rarity: "common".to_string(),
+            colors: vec!["W".to_string()],
+            cmc: 2,
+            type_line: "Creature".to_string(),
+            draft_effect: None,
+        };
+        let filler_card = |i: usize| DraftCardInstance {
+            instance_id: format!("filler-{i}"),
+            name: "Filler Artifact".to_string(),
+            set_code: "MRD".to_string(),
+            collector_number: format!("{}", i + 10),
+            rarity: "common".to_string(),
+            colors: Vec::new(),
+            cmc: 3,
+            type_line: "Artifact".to_string(),
+            draft_effect: None,
+        };
+
+        let mut rng = ChaCha20Rng::seed_from_u64(42);
+        let shape = PackShape {
+            pack_number: 0,
+            cards_in_pack: 15,
+        };
+
+        // Pick 1 of 15 (early stage, empty pool):
+        // Raw power weight is 1.0, color commitment is 0.0 (no off-color penalty).
+        // Terror is picked over Leonin Skyhunter for its higher rating and removal class bonus.
+        let mut early_pack = vec![terror_card.clone(), skyhunter_card.clone()];
+        for i in 0..13 {
+            early_pack.push(filler_card(i));
+        }
+        let early_pick_idx = bot_pick(
+            &early_pack,
+            AiDifficulty::Medium,
+            &[],
+            Some(&db),
+            PickEnhancement::DraftGuides,
+            shape,
+            &mut rng,
+        );
+        assert_eq!(
+            early_pack[early_pick_idx].name, "Terror",
+            "early pick must prioritise raw card strength and flexibility"
+        );
+
+        // Pick 11 of 15 (late stage, 10 White cards already in pool):
+        // 5 cards remain in the pack. Color commitment is 1.0, penalizing off-color Terror,
+        // and deck_fit_weight is 1.0. Leonin Skyhunter wins the pick.
+        let white_pool: Vec<DraftCardInstance> = vec![skyhunter_card.clone(); 10];
+        let mut late_pack = vec![terror_card.clone(), skyhunter_card.clone()];
+        for i in 0..3 {
+            late_pack.push(filler_card(i));
+        }
+        let late_pick_idx = bot_pick(
+            &late_pack,
+            AiDifficulty::Medium,
+            &white_pool,
+            Some(&db),
+            PickEnhancement::DraftGuides,
+            shape,
+            &mut rng,
+        );
+        assert_eq!(
+            late_pack[late_pick_idx].name, "Leonin Skyhunter",
+            "late pick must prioritise deck need and penalise off-color cards under commitment"
+        );
+
+        // Control: the identical pack and pool, but as the first pick of the first
+        // pack (a booster opened with these five cards). Only the stage differs, so
+        // a scorer without the adaptive policy's stage weights could not tell the
+        // two picks apart. Early, color commitment is zero and Terror wins again.
+        let first_pick_shape = PackShape {
+            pack_number: 0,
+            cards_in_pack: late_pack.len() as u8,
+        };
+        let control_idx = bot_pick(
+            &late_pack,
+            AiDifficulty::Medium,
+            &white_pool,
+            Some(&db),
+            PickEnhancement::DraftGuides,
+            first_pick_shape,
+            &mut rng,
+        );
+        assert_eq!(
+            late_pack[control_idx].name, "Terror",
+            "the same pool and pack at an early pick stays flexible and takes the removal"
         );
     }
 
