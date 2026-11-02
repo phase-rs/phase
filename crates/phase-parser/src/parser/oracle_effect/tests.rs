@@ -45580,6 +45580,7 @@ fn reveal_until_passive_compound_stopping_rejected_counted_variants() {
         "Target opponent reveals cards from the top of their library until a creature card or 5 cards are revealed.",
         // A counted disjunct that also carries a card filter has its own threshold.
         "Target opponent reveals cards from the top of their library until a land card or two creature cards are revealed.",
+        "Target opponent reveals cards from the top of their library until four cards or a land card are revealed.",
     ] {
         let def = parse_effect_chain(text, AbilityKind::Spell);
         assert!(

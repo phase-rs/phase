@@ -16874,7 +16874,15 @@ fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEf
     // card or X cards are revealed, whichever comes first"). If any disjunct is a standalone
     // count expression or number, this is a compound stopping condition rather than a simple card filter.
     if let Some(disjuncts) = split_reveal_filter_disjuncts(filter_text) {
-        if disjuncts.iter().any(|d| is_reveal_until_count_disjunct(d)) {
+        // An article-prefixed disjunct ("a land") carries an implicit threshold of one,
+        // so it cannot share a leading count other than one ("four cards or a land card").
+        let leading_count_is_one = matches!(raw_count, QuantityExpr::Fixed { value: 1 });
+        let has_article_disjunct = disjuncts
+            .iter()
+            .any(|d| nom_primitives::parse_article(d.trim()).is_ok());
+        if disjuncts.iter().any(|d| is_reveal_until_count_disjunct(d))
+            || (!leading_count_is_one && has_article_disjunct)
+        {
             return Some(parsed_clause(Effect::unimplemented(
                 "compound_reveal_until",
                 count_tp.original,
