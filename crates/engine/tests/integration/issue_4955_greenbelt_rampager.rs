@@ -15,7 +15,7 @@
 //! firing the bounce rider every time regardless of affordability.
 //!
 //! Fix: `rewrite_cant_rider_for_non_zone_change_parent`
-//! (`crates/engine/src/parser/oracle_effect/mod.rs`) — already carved out for
+//! (`crates/phase-parser/src/parser/oracle_effect/mod.rs`) — already carved out for
 //! the analogous `Effect::TurnFaceUp` class (Etrata, Deadly Fugitive: "Turn
 //! this creature face up. If you can't, exile it …") — now also recognizes
 //! `Effect::PayCost` as a zone-change-ledger-invisible parent and rewrites the
