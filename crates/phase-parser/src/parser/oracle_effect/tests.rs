@@ -21,10 +21,10 @@ use crate::types::ability::CastFromZoneDriver::{DuringResolution, LingeringPermi
 use crate::types::ability::{
     AbilityUseTally, ActivationRestriction, AttachSelection, AttachmentKind, AttachmentReferent,
     CardSelectionMode, CastCostModifier, CastManaObjectScope, CastManaSpentMetric, ChooseOneOfKind,
-    CommanderOwnership, CountBinding, CounterTransferMode, DigRestOrder, ExcessRecipient,
-    ForEachCategoryAction, MassLibraryShuffleMode, ModalChoice, PerpetualModification, PileSource,
-    PossessionAxis, RepeatContinuation, RuntimeHandler, SeatDirection, TurnJournalKind, VoteTally,
-    VoteVisibility, VoterScope,
+    CommanderOwnership, CopyRecipient, CountBinding, CounterTransferMode, DigRestOrder,
+    ExcessRecipient, ForEachCategoryAction, MassLibraryShuffleMode, ModalChoice,
+    PerpetualModification, PileSource, PossessionAxis, RepeatContinuation, RuntimeHandler,
+    SeatDirection, TurnJournalKind, VoteTally, VoteVisibility, VoterScope,
 };
 use crate::types::card_type::CoreType;
 use crate::types::mana::{ManaCost, ManaCostShard};
@@ -78368,11 +78368,17 @@ fn bare_choose_printed_cards_use_resolution_timing() {
         hatchery.triggers[1].execute.as_deref().unwrap(),
     );
 
-    // The Avatar's second sentence declares its own target, not the chosen recipient.
-    let avatar = parse_effect_chain(
-        "Choose a creature you control. It becomes a copy of target creature except for its name.",
-        AbilityKind::Activated,
+    // Sakashima the Impostor Avatar's second sentence declares its own target,
+    // not the chosen recipient.
+    let parsed = parse_oracle_text(
+        "{2}: Choose a creature you control. It becomes a copy of target creature except for its name.",
+        "Sakashima the Impostor Avatar",
+        &[],
+        &["Creature".to_string()],
+        &["Avatar".to_string()],
     );
+    let avatar = &parsed.abilities[0];
+    assert!(matches!(avatar.effect.as_ref(), Effect::TargetOnly { .. }));
     assert_eq!(avatar.target_choice_timing, TargetChoiceTiming::Resolution);
     let copy = avatar
         .sub_ability
@@ -78387,6 +78393,16 @@ fn bare_choose_printed_cards_use_resolution_timing() {
             }
         ),
         "{copy:#?}"
+    );
+    assert!(
+        matches!(
+            copy.effect.as_ref(),
+            Effect::BecomeCopy {
+                recipient: CopyRecipient::Untargeted(TargetFilter::ParentTarget),
+                ..
+            }
+        ),
+        "the chosen creature must remain the untargeted copy recipient: {copy:#?}"
     );
     // CR 601.2c: the explicit copy-source target stays stack-time.
     assert_eq!(copy.target_choice_timing, TargetChoiceTiming::Stack);
@@ -78442,41 +78458,154 @@ fn bare_choose_third_party_printed_choices_keep_stack_timing() {
 #[test]
 fn bare_choose_partial_object_phrase_keeps_stack_timing() {
     let rest = "a creature you control that hasn't attacked this turn";
-    let (target, remainder) = parse_target_with_ctx(rest, &mut ParseContext::default());
-    assert_eq!(remainder, " that hasn't attacked this turn");
+    let (_, remainder) = parse_target_with_ctx(rest, &mut ParseContext::default());
+    assert!(
+        !remainder.is_empty(),
+        "the target parser must leave the unsupported restriction unconsumed"
+    );
+
+    let text = "Choose a creature you control";
+    let lower = text.to_ascii_lowercase();
+    let mut ctx = ParseContext::default();
+    assert!(
+        matches!(
+            super::imperative::parse_choose_ast(text, &lower, &mut ctx),
+            Some(ChooseImperativeAst::TargetOnly { .. })
+        ),
+        "the fully consumed control must reach the TargetOnly producer"
+    );
     assert_eq!(
-        target,
-        TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
+        ctx.declared_target_choice_timing,
+        Some(TargetChoiceTiming::Resolution),
+        "the fully consumed control must declare resolution timing"
     );
 
     let text = "Choose a creature you control that hasn't attacked this turn";
+    let lower = text.to_ascii_lowercase();
     let mut ctx = ParseContext::default();
-    assert_eq!(
-        super::imperative::parse_choose_ast(text, &text.to_ascii_lowercase(), &mut ctx),
-        Some(ChooseImperativeAst::TargetOnly {
-            target: target.clone(),
-        })
+    assert!(
+        matches!(
+            super::imperative::parse_choose_ast(text, &lower, &mut ctx),
+            Some(ChooseImperativeAst::TargetOnly { .. })
+        ),
+        "the partial phrase must reach the same TargetOnly producer"
     );
-    assert_eq!(ctx.declared_target_choice_timing, None);
+    assert_eq!(
+        ctx.declared_target_choice_timing, None,
+        "an unconsumed restriction must prevent resolution timing"
+    );
 
     let def = parse_effect_chain(text, AbilityKind::Spell);
     assert_eq!(def.target_choice_timing, TargetChoiceTiming::Stack);
 }
 
+/// SHAPE: a non-controller subject cannot use the controller-only resolution chooser.
+#[test]
+fn bare_choose_non_controller_subject_keeps_stack_timing() {
+    let text = "Choose a permanent you control other than this creature.";
+    let def = parse_effect_chain(text, AbilityKind::Spell);
+    assert!(
+        matches!(def.effect.as_ref(), Effect::TargetOnly { .. }),
+        "the controller-choice control must reach TargetOnly: {def:#?}"
+    );
+    assert_eq!(
+        def.target_choice_timing,
+        TargetChoiceTiming::Resolution,
+        "the controller-choice control must use resolution timing"
+    );
+
+    for text in [
+        "An opponent chooses a permanent you control other than this creature.",
+        "Target opponent chooses a permanent you control other than this creature.",
+    ] {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert!(
+            matches!(def.effect.as_ref(), Effect::TargetOnly { .. }),
+            "{text}: the subject-led choice must reach TargetOnly: {def:#?}"
+        );
+        assert_eq!(
+            def.target_choice_timing,
+            TargetChoiceTiming::Stack,
+            "{text}: the controller must not choose for the opponent"
+        );
+    }
+
+    let parsed = parse_oracle_text(
+        "This creature can't be blocked.\nWhen this creature enters, an opponent chooses a permanent you control other than this creature and exiles it.\nWhen this creature leaves the battlefield, return the exiled card to the battlefield under its owner's control.",
+        "Wormfang Crab",
+        &[],
+        &["Creature".to_string()],
+        &["Crab".to_string()],
+    );
+    let head = parsed
+        .triggers
+        .iter()
+        .filter_map(|trigger| trigger.execute.as_deref())
+        .find(|head| matches!(head.effect.as_ref(), Effect::TargetOnly { .. }))
+        .expect("Wormfang Crab must retain its subject-led TargetOnly trigger head");
+    assert_eq!(
+        head.target_choice_timing,
+        TargetChoiceTiming::Stack,
+        "Wormfang Crab's controller must not choose for the opponent: {head:#?}"
+    );
+
+    // "They control" is not a controller-You filter, so the producer never
+    // declares Resolution for Divine Reckoning's distributive choice.
+    let parsed = parse_oracle_text(
+        "Each player chooses a creature they control. Destroy the rest.\nFlashback {5}{W}{W} (You may cast this card from your graveyard for its flashback cost. Then exile it.)",
+        "Divine Reckoning",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let head = &parsed.abilities[0];
+    assert!(
+        matches!(head.effect.as_ref(), Effect::TargetOnly { .. }),
+        "Divine Reckoning must retain its distributive TargetOnly head: {head:#?}"
+    );
+    assert_eq!(head.target_choice_timing, TargetChoiceTiming::Stack);
+    assert_eq!(head.player_scope, Some(PlayerFilter::All));
+}
+
 /// SHAPE: Log Flume's printed Visit choice cannot enter the single-object chooser.
 #[test]
 fn bare_choose_stripped_quantifier_does_not_declare_resolution_timing() {
+    let text = "choose a creature you control";
+    let mut ctx = ParseContext::default();
+    assert!(
+        matches!(
+            super::imperative::parse_choose_ast(text, text, &mut ctx),
+            Some(ChooseImperativeAst::TargetOnly { .. })
+        ),
+        "the default-context control must reach the TargetOnly producer"
+    );
+    assert_eq!(
+        ctx.declared_target_choice_timing,
+        Some(TargetChoiceTiming::Resolution),
+        "an unstripped singular choice must declare resolution timing"
+    );
+
     let target = TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
     let log_flume = "Choose up to four creatures you control.";
     let final_showdown = "Choose a creature you control.";
-    // Count-preserving resolution-time selection is a separate unsupported slice.
+    // Reach guard only; count-preserving resolution-time selection remains unsupported.
     let ir = parse_effect_chain_ir(log_flume, AbilityKind::Spell, &mut ParseContext::default());
+    assert!(
+        matches!(ir.clauses[0].parsed.effect, Effect::TargetOnly { .. }),
+        "Log Flume's quantified head must reach TargetOnly: {:#?}",
+        ir.clauses[0].parsed.effect
+    );
     assert_eq!(ir.clauses[0].declared_target_choice_timing, None);
 
     // A quantified chunk must not suppress a later single-creature choice.
     let chain = format!("{log_flume} {final_showdown}");
     let ir = parse_effect_chain_ir(&chain, AbilityKind::Spell, &mut ParseContext::default());
     assert_eq!(ir.clauses.len(), 2);
+    assert!(
+        matches!(ir.clauses[0].parsed.effect, Effect::TargetOnly { .. }),
+        "Log Flume's chained quantified head must reach TargetOnly: {:#?}",
+        ir.clauses[0].parsed.effect
+    );
     assert_eq!(ir.clauses[0].declared_target_choice_timing, None);
     assert_eq!(ir.clauses[1].parsed.effect, Effect::TargetOnly { target });
     assert_eq!(
@@ -78488,9 +78617,30 @@ fn bare_choose_stripped_quantifier_does_not_declare_resolution_timing() {
 /// SHAPE: an exact-count choice cannot enter the single-object chooser.
 #[test]
 fn bare_choose_exact_count_does_not_declare_resolution_timing() {
+    let ir = parse_effect_chain_ir(
+        "Choose a permanent you control.",
+        AbilityKind::Spell,
+        &mut ParseContext::default(),
+    );
+    assert!(
+        matches!(ir.clauses[0].parsed.effect, Effect::TargetOnly { .. }),
+        "the singular permanent control must reach TargetOnly: {:#?}",
+        ir.clauses[0].parsed.effect
+    );
+    assert_eq!(
+        ir.clauses[0].declared_target_choice_timing,
+        Some(TargetChoiceTiming::Resolution),
+        "the singular permanent control must declare resolution timing"
+    );
+
     let clarion = "Choose five permanents you control. For each of those permanents, you may search your library for a card with the same name as that permanent. Put those cards onto the battlefield tapped, then shuffle.";
-    // Count-preserving resolution-time selection is a separate unsupported slice.
+    // Reach guard only; count-preserving resolution-time selection remains unsupported.
     let ir = parse_effect_chain_ir(clarion, AbilityKind::Spell, &mut ParseContext::default());
+    assert!(
+        matches!(ir.clauses[0].parsed.effect, Effect::TargetOnly { .. }),
+        "Clarion Ultimatum's quantified head must reach TargetOnly: {:#?}",
+        ir.clauses[0].parsed.effect
+    );
     assert_eq!(ir.clauses[0].declared_target_choice_timing, None);
 }
 

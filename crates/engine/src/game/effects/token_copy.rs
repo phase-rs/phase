@@ -5159,8 +5159,10 @@ mod tests {
         }
 
         let oracle = "create a token that's a copy of target noncreature artifact you control, except its name is ~'s Warform and it's a 4/4 Construct artifact creature in addition to its other types";
-        let mut ctx = crate::parser::oracle_ir::context::ParseContext::default();
-        ctx.card_name = Some("Mishra, Eminent One".to_string());
+        let mut ctx = crate::parser::oracle_ir::context::ParseContext {
+            card_name: Some("Mishra, Eminent One".to_string()),
+            ..Default::default()
+        };
         let effect =
             crate::parser::oracle_effect::try_parse_token(&oracle.to_lowercase(), oracle, &mut ctx)
                 .expect("Mishra token-copy text should parse");
@@ -5286,8 +5288,10 @@ mod tests {
         }
 
         let oracle = "create a token that's a copy of target noncreature artifact you control, except its name is ~'s Warform and it's a 4/4 Construct artifact creature in addition to its other types";
-        let mut ctx = crate::parser::oracle_ir::context::ParseContext::default();
-        ctx.card_name = Some("Mishra, Eminent One".to_string());
+        let mut ctx = crate::parser::oracle_ir::context::ParseContext {
+            card_name: Some("Mishra, Eminent One".to_string()),
+            ..Default::default()
+        };
         let effect =
             crate::parser::oracle_effect::try_parse_token(&oracle.to_lowercase(), oracle, &mut ctx)
                 .expect("Mishra token-copy text should parse");

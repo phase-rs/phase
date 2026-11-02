@@ -196,11 +196,11 @@ use self::subject::{
     try_parse_subject_predicate_ast, try_parse_targeted_controller_gain_life,
 };
 use crate::parser::oracle_ir::ast::*;
+use crate::parser::oracle_ir::context::BodyScope;
 pub(crate) use crate::parser::oracle_ir::context::{
     BareCardAggregateBinding, ChosenColorQualifierScope, DeclaredSlotEntry, DeclaredSlotRegistry,
     ParseContext, PriorZoneChoicePartition, TokenPtFollowup, TriggerConditionScope,
 };
-use crate::parser::oracle_ir::context::{BodyScope, ChoiceQuantifierState};
 use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityRootTransform, AbilityShellIr, AbsorbKind, ClauseDisposition, ClauseId,
     ClauseIr, ClauseIrBuilder, ClausePlacement, DieResultBranchIr, EffectChainIr,
@@ -30263,6 +30263,16 @@ fn lower_subject_predicate_ast_body(
             // CR 608.2c: both an enclosing source target and an inherited damage
             // tail remain ineligible when the general splitter retries.
             let mut clause = lower_imperative_clause(&text, ctx, damage_context);
+            // CR 608.2d + CR 115.10a: this untargeted choice belongs to the
+            // printed subject, but TargetOnly's resolution chooser only prompts
+            // the controller. Keep stack timing until it can represent that chooser.
+            if matches!(clause.effect, Effect::TargetOnly { .. })
+                && !matches!(affected, TargetFilter::Controller | TargetFilter::SelfRef)
+                && ctx.declared_target_choice_timing
+                    == Some(crate::types::ability::TargetChoiceTiming::Resolution)
+            {
+                ctx.declared_target_choice_timing = None;
+            }
             // A subject-led placement names its own follower, which this seam does
             // not resolve to an arranger: no printed card puts an announced target
             // set "in any order" under a subject, so the owner default stands.
@@ -48540,11 +48550,6 @@ fn parse_effect_chain_ir_body(
             } else {
                 strip_any_number_quantifier(text_no_temporal)
             };
-        ctx.choice_quantifier = if multi_target.is_some() {
-            ChoiceQuantifierState::Stripped
-        } else {
-            ChoiceQuantifierState::NotStripped
-        };
         let retained_type_clause = {
             let lower = text_no_qty.to_lowercase();
             parse_retained_type_clause(TextPair::new(&text_no_qty, &lower))
