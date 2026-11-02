@@ -42126,3 +42126,198 @@ fn enchanted_land_creature_retention_clause_keeps_land_type() {
         }));
     }
 }
+
+fn dynamic_count_of(line: &str) -> QuantityRef {
+    match parse_static_line(line).map(|def| def.mode) {
+        Some(StaticMode::ModifyCost {
+            dynamic_count: Some(count),
+            ..
+        }) => count,
+        other => panic!("{line}: expected a counted cost modifier, got {other:?}"),
+    }
+}
+
+/// CR 601.2f + CR 108.3 + CR 400.1: cost-modifier counts keep every qualifier
+/// of a coordinated population — owned cards across listed zones restricted by
+/// a card-description list, an "and each" union of populations, and a
+/// spell-relative name reference.
+#[test]
+fn cost_modifier_counts_keep_coordinated_population_qualifiers() {
+    let owned = || FilterProp::Owned {
+        controller: ControllerRef::You,
+    };
+    assert_eq!(
+        dynamic_count_of("This spell costs {1} less to cast for each card you own in exile and in your graveyard that's an instant card, a sorcery card, or a card that has an Adventure."),
+        QuantityRef::ObjectCount {
+            filter: TargetFilter::And {
+                filters: vec![
+                    TargetFilter::Typed(TypedFilter::card().properties(vec![
+                        owned(),
+                        FilterProp::InAnyZone {
+                            zones: vec![Zone::Exile, Zone::Graveyard],
+                        },
+                    ])),
+                    TargetFilter::Or {
+                        filters: vec![
+                            TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
+                            TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
+                            TargetFilter::Typed(
+                                TypedFilter::card().properties(vec![FilterProp::HasAdventure]),
+                            ),
+                        ],
+                    },
+                ],
+            },
+        }
+    );
+    assert_eq!(
+        dynamic_count_of("This spell costs {1} less to cast for each artifact you control and each artifact card in your hand."),
+        QuantityRef::ObjectCount {
+            filter: TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Artifact).controller(ControllerRef::You),
+                    ),
+                    TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).properties(vec![
+                        FilterProp::InZone { zone: Zone::Hand },
+                        owned(),
+                    ])),
+                ],
+            },
+        }
+    );
+    // CR 400.1: legs in one zone can share an object, which a single union count
+    // would count once instead of once per leg, so that union declines.
+    // Synthetic; Machinist's Dismissal is the nearest printed card.
+    assert!(!matches!(
+        parse_static_line("This spell costs {1} less to cast for each artifact you control and each creature you control.")
+            .map(|def| def.mode),
+        Some(StaticMode::ModifyCost {
+            dynamic_count: Some(QuantityRef::ObjectCount {
+                filter: TargetFilter::Or { .. }
+            }),
+            ..
+        })
+    ));
+    assert_eq!(
+        dynamic_count_of("Spells you cast cost {1} less to cast for each card with the same name as that spell in your graveyard."),
+        QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(TypedFilter::card().properties(vec![
+                FilterProp::InZone {
+                    zone: Zone::Graveyard
+                },
+                owned(),
+                FilterProp::SharesQuality {
+                    quality: SharedQuality::Name,
+                    reference: Some(Box::new(TargetFilter::CastingSpell)),
+                    relation: SharedQualityRelation::Shares,
+                },
+            ])),
+        }
+    );
+}
+
+/// CR 509.1h + CR 105.2: a combat-status word after a `non-`
+/// prefix, and "that each share a color with one or more <objects>", both
+/// stay in the parsed filter.
+#[test]
+fn type_phrase_keeps_post_negation_status_and_plural_shared_color_reference() {
+    let (filter, rest) =
+        crate::parser::oracle_target::parse_target("target nonartifact attacking creature");
+    assert_eq!(rest, "");
+    assert_eq!(
+        filter,
+        TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Creature)
+                .with_type(TypeFilter::Non(Box::new(TypeFilter::Artifact)))
+                .properties(vec![FilterProp::Attacking { defender: None }])
+        )
+    );
+    let (filter, rest) = crate::parser::oracle_target::parse_target(
+        "target card that each share a color with one or more permanents you control",
+    );
+    assert_eq!(rest, "");
+    assert_eq!(
+        filter,
+        TargetFilter::Typed(
+            TypedFilter::card().properties(vec![FilterProp::SharesQuality {
+                quality: SharedQuality::Color,
+                reference: Some(Box::new(TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Permanent).controller(ControllerRef::You)
+                ))),
+                relation: SharedQualityRelation::Shares,
+            }])
+        )
+    );
+}
+
+fn parsed_json(name: &str, text: &str, card_type: &str) -> String {
+    let parsed =
+        crate::parser::oracle::parse_oracle_text(text, name, &[], &[card_type.to_string()], &[]);
+    serde_json::to_string(&(&parsed.abilities, &parsed.triggers)).expect("parse serializes")
+}
+
+/// Neighbours of the repaired grammars stay honest: each either parses to its
+/// printed meaning or keeps an explicit gap instead of a silently wrong shape.
+#[test]
+fn repaired_grammar_neighbours_parse_to_their_meaning_or_an_explicit_gap() {
+    // CR 608.2c + CR 109.4: "Other creatures that player controls" excludes the
+    // target (Mark for Death), not the spell.
+    let mark = parsed_json(
+        "Mark for Death",
+        "Target creature an opponent controls blocks this turn if able. Untap that creature. Other creatures that player controls can't block this turn.",
+        "Sorcery",
+    );
+    assert!(
+        mark.contains(r#""controller":"ParentTargetController","properties":[{"type":"DistinctFrom","reference":{"type":"ParentTarget"}}]"#),
+        "{mark}"
+    );
+    // CR 508.1k / CR 509.1g / CR 509.1h: "goaded attacking or blocking" keeps both legs goaded.
+    let baeloth = parsed_json(
+        "Baeloth Barrityl, Entertainer",
+        "Whenever a goaded attacking or blocking creature dies, you create a Treasure token.",
+        "Creature",
+    );
+    assert!(
+        baeloth.contains(r#"[{"type":"Goaded"},{"type":"Attacking"}]"#),
+        "{baeloth}"
+    );
+    assert!(
+        baeloth.contains(r#"[{"type":"Goaded"},{"type":"Blocking"}]"#),
+        "{baeloth}"
+    );
+    // CR 607.2d: a trigger reading "the chosen quality" binds the persisted choice.
+    let gollum = parsed_json(
+        "Gollum, Riddle Master",
+        "As Gollum enters, choose odd or even. (Zero is even.)\nWhenever an opponent casts a spell with mana value of the chosen quality, you draw a card.",
+        "Creature",
+    );
+    assert!(
+        gollum.contains(r#""parity":{"type":"SourceChosen"}"#),
+        "{gollum}"
+    );
+    // Unmodeled riders and targeted fixed-kind adjustments stay explicit gaps.
+    for (name, text, card_type) in [
+        (
+            "Watcher of Hours",
+            "Whenever you remove a time counter from this card while it's exiled, surveil 1.",
+            "Creature",
+        ),
+        (
+            "Sigurd, Jarl of Ravensthorpe",
+            "Boast \u{2014} {1}: Put a lore counter on target Saga you control or remove one from it.",
+            "Creature",
+        ),
+        (
+            "Discover the Formula",
+            "Seek three nonland cards, then nonland cards in your hand perpetually gain \"This spell costs {1} less to cast.\"",
+            "Instant",
+        ),
+    ] {
+        let json = parsed_json(name, text, card_type);
+        assert!(
+            json.contains("Unknown") || json.contains("Unimplemented"),
+            "{name} must stay an explicit gap: {json}"
+        );
+    }
+}
