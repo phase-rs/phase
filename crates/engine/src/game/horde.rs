@@ -1125,7 +1125,24 @@ fn reveal_library_token(
     let before: HashSet<ObjectId> = state.battlefield.iter().copied().collect();
     match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Execute(event) => {
-            apply_create_token_after_replacement(state, event, events);
+            if !apply_create_token_after_replacement(state, event, events) {
+                // The creation delivery raised its own sub-prompt (an ETB
+                // counter-ordering prompt from the entering token's counter
+                // replacements). Park the completion payload and pause the
+                // wave: dropping the unexecuted tail would lose the
+                // token-reveal bookkeeping and let the countdown run past an
+                // uncreated token. The priority re-entry seam resumes via
+                // `pending_horde_reveal` once the nested prompt resolves.
+                state.pending_horde_reveal = Some(Box::new(
+                    crate::types::game_state::PendingHordeReveal::TokenCreation {
+                        card: card_id,
+                        before,
+                        pinned: pinned_token_ref,
+                        revealed_name,
+                    },
+                ));
+                return RevealOutcome::Pause(Box::new(state.waiting_for.clone()));
+            }
             complete_token_reveal(
                 state,
                 card_id,

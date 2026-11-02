@@ -17055,6 +17055,28 @@ pub struct PendingHeroEvent {
     pub steps: Vec<HeroEventApplyStep>,
     /// Baxter's Experiments copies still owed after the steps complete.
     pub copies_pending: u32,
+    /// Battlefield-departure cohort accumulated across replacement pauses.
+    /// A pause splits one Event instruction across action fragments, so the
+    /// terminal completion stamps the full cohort (carried + final segment)
+    /// as a single simultaneous batch (CR 101.4 / CR 603.10a).
+    #[serde(default)]
+    pub departure_carry: HeroEventDepartureCarry,
+}
+
+/// Battlefield-departure cohort carried across one hero-Event instruction's
+/// replacement pauses. Ids name every Sacrifice/Destroy candidate executed
+/// before each park (departure verified at completion via
+/// `zones::departed_subset`, so a regenerated or otherwise surviving member
+/// drops out); indices pin the already-delivered zone-ledger records, which
+/// the trigger look-back consults when the departure's own event buffer is no
+/// longer at hand.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeroEventDepartureCarry {
+    /// Sacrifice/Destroy step cards executed in earlier segments, in order.
+    pub ids: Vec<ObjectId>,
+    /// `turn_zone_change_index` values of the delivered battlefield departures
+    /// among `ids`, collected from each segment's event buffer.
+    pub record_indices: Vec<usize>,
 }
 
 /// CR 508.1g–j: An eligible optional attack cost, bound before any payment.

@@ -2878,9 +2878,10 @@ function HeroEventModal({
 
   if (!objects) return null;
 
-  // CR 701.9b: "up to N" allows min..=count (min floors the team
-  // contribution where the engine sets one, e.g. Krang's Stratagem); exact
-  // requires precisely count.
+  // Krang's Stratagem Oracle text ("As a team, the heroes discard a total of
+  // two cards" — not CR 701.9b, which only covers who chooses the discarded
+  // card): "up to N" allows min..=count (min floors the team contribution
+  // where the engine sets one); exact requires precisely count.
   const min = data.min ?? 0;
   const isReady = isUpTo
     ? selected.size >= min && selected.size <= data.count

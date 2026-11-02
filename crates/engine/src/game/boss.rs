@@ -26,7 +26,8 @@ use crate::game::effects::change_zone::{execute_zone_move, ZoneMoveResult};
 use crate::game::game_object::GameObject;
 use crate::types::card_type::CoreType;
 use crate::types::game_state::{
-    GameState, HeroEventAnswer, HeroEventApplyStep, HeroEventKind, PendingHeroEvent, WaitingFor,
+    GameState, HeroEventAnswer, HeroEventApplyStep, HeroEventDepartureCarry, HeroEventKind,
+    PendingHeroEvent, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
@@ -874,7 +875,15 @@ fn apply_event_steps(
     for card in fired {
         steps.push(HeroEventApplyStep::DiscardFiredBaxters { cards: vec![*card] });
     }
-    apply_hero_event_steps(state, horde, event_id, steps, copies, events)
+    apply_hero_event_steps(
+        state,
+        horde,
+        event_id,
+        steps,
+        copies,
+        events,
+        HeroEventDepartureCarry::default(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1256,9 +1265,11 @@ fn hero_event_offer(
                 .iter()
                 .any(|other| !hero_hand(state, *other).is_empty());
             if cover_after {
-                // "As a team, the heroes discard a total of two cards" (CR
-                // 701.9b): floor this hero's contribution at what the later
-                // heroes cannot cover, so the team total cannot fall short
+                // "As a team, the heroes discard a total of two cards"
+                // (Krang's Stratagem Oracle text — not CR 701.9b, which only
+                // covers who chooses the discarded card): floor this hero's
+                // contribution at what the later heroes cannot cover, so the
+                // team total cannot fall short
                 // however the later prompts resolve. Floored at 0 (a hero
                 // whose successors can cover everything may still pass), and
                 // never above `remaining` (the prompt's own ceiling). No
@@ -1460,7 +1471,15 @@ fn finish_hero_event(
     for card in fired_baxters {
         steps.push(HeroEventApplyStep::DiscardFiredBaxters { cards: vec![card] });
     }
-    apply_hero_event_steps(state, horde, event_id, steps, copies_pending, events)
+    apply_hero_event_steps(
+        state,
+        horde,
+        event_id,
+        steps,
+        copies_pending,
+        events,
+        HeroEventDepartureCarry::default(),
+    )
 }
 
 /// Turn recorded answers into application steps. Amounts read here (Smackdown
@@ -1552,13 +1571,58 @@ fn build_answer_steps(
     steps
 }
 
+/// Battlefield-departure candidates of one hero-Event instruction: every
+/// Sacrifice and Destroy step card. Discard/LoseLife/GainLife/Tap/AddCounters
+/// never leave the battlefield; Damage kills through a later SBA check (not
+/// simultaneous with the instruction); ZoneMove producers in hero Events move
+/// non-battlefield cards; Bounce is never paired with a destroy/sacrifice
+/// cohort by any Event, so stamping it would newly enable cross-observation
+/// the sequential path deliberately forbids.
+fn hero_event_departure_candidates(steps: &[HeroEventApplyStep]) -> Vec<ObjectId> {
+    steps
+        .iter()
+        .filter_map(|step| match step {
+            HeroEventApplyStep::Sacrifice { card, .. } => Some(*card),
+            HeroEventApplyStep::Destroy { card } => Some(*card),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `turn_zone_change_index` values of the delivered battlefield departures
+/// among `candidates`, read off this segment's event buffer (the same record
+/// the `perform_player_scope_sacrifices` authority retains per sacrifice).
+fn collect_hero_event_departure_indices(
+    events: &[crate::types::events::GameEvent],
+    candidates: &[ObjectId],
+    into: &mut Vec<usize>,
+) {
+    use crate::types::events::GameEvent;
+    use crate::types::zones::Zone;
+    for event in events {
+        if let GameEvent::ZoneChanged {
+            object_id,
+            from: Some(Zone::Battlefield),
+            record,
+            ..
+        } = event
+        {
+            if candidates.contains(object_id) && !into.contains(&record.turn_zone_change_index) {
+                into.push(record.turn_zone_change_index);
+            }
+        }
+    }
+}
+
 /// Apply a step batch in order. After each step the driver checks whether the
 /// waiting variant moved: a nested replacement prompt (regeneration, Library
 /// of Leng) that took over mid-batch parks the remainder in
-/// `PendingHeroEvent` for `drain_pending_hero_event`. Destroys that complete
-/// unpaused mark as one simultaneous group (the `destroy_all` Blood Artist
-/// handling); a parked call marks nothing, exactly like `destroy_all`'s pause
-/// path.
+/// `PendingHeroEvent` for `drain_pending_hero_event`, carrying the departure
+/// cohort executed so far. The terminal completion stamps the full cohort
+/// (carried + final segment) as one simultaneous batch — CR 101.4: the whole
+/// Event instruction is one batch even when a pause splits it across action
+/// fragments, so CR 603.10a look-back observes cross-pause co-departures
+/// (Chrome Dome's Overload sacrificing a Blood Artist before the pause).
 fn apply_hero_event_steps(
     state: &mut GameState,
     horde: PlayerId,
@@ -1566,6 +1630,7 @@ fn apply_hero_event_steps(
     steps: Vec<HeroEventApplyStep>,
     copies_pending: u32,
     events: &mut Vec<crate::types::events::GameEvent>,
+    departure_carry: HeroEventDepartureCarry,
 ) -> HeroEventProgress {
     for (index, step) in steps.iter().enumerate() {
         // Stepping runs under Priority (fresh dispatch, funnel resume), the
@@ -1580,28 +1645,46 @@ fn apply_hero_event_steps(
         if std::mem::discriminant(&state.waiting_for) != before
             && !matches!(state.waiting_for, WaitingFor::Priority { .. })
         {
+            // The parking step's own departure (if any) completes through the
+            // replacement resume into the next segment's buffer, so the carry
+            // names candidates through the parking step while indices cover
+            // only the delivered prefix.
+            let mut ids = departure_carry.ids;
+            ids.extend(hero_event_departure_candidates(&steps[..=index]));
+            let mut record_indices = departure_carry.record_indices;
+            // Re-pause: the previous parking step left `steps` at the first
+            // park, but its departure emitted into THIS segment's buffer
+            // during the resume — so re-scan the carried ids too, or its
+            // ledger index is lost while its id stays in the cohort (the
+            // terminal stamp would flag the departure without its record).
+            // The current parking step's own candidates ride along in `ids`:
+            // harmless while its departure is still pending, load-bearing
+            // when the step emitted before the prompt arose.
+            collect_hero_event_departure_indices(events, &ids, &mut record_indices);
             state.pending_hero_event = Some(Box::new(PendingHeroEvent {
                 event_id,
                 horde,
                 steps: steps[index + 1..].to_vec(),
                 copies_pending,
+                departure_carry: HeroEventDepartureCarry {
+                    ids,
+                    record_indices,
+                },
             }));
             return HeroEventProgress::Prompted;
         }
     }
-    let destroyed: Vec<ObjectId> = steps
-        .iter()
-        .filter_map(|step| match step {
-            HeroEventApplyStep::Destroy { card } => Some(*card),
-            _ => None,
-        })
-        .collect();
-    if !destroyed.is_empty() {
-        crate::game::zones::mark_simultaneous_departures(
-            events,
-            &crate::game::zones::departed_subset(state, &destroyed),
-        );
-    }
+    // CR 101.4: one Event instruction is one departure batch. The cohort is
+    // the carried prefix plus this segment; `departed_subset` drops members
+    // that never actually left (regenerated, replacement-redirected), and the
+    // ledger stamp reaches departures whose own event buffer is long consumed.
+    let mut cohort_ids = departure_carry.ids;
+    cohort_ids.extend(hero_event_departure_candidates(&steps));
+    let mut cohort_indices = departure_carry.record_indices;
+    collect_hero_event_departure_indices(events, &cohort_ids, &mut cohort_indices);
+    let departed = crate::game::zones::departed_subset(state, &cohort_ids);
+    crate::game::zones::mark_simultaneous_departures(events, &departed);
+    crate::game::zones::mark_simultaneous_departure_records(state, &cohort_indices, &departed);
     if copies_pending > 0 {
         // Copies re-resolve the whole Event (fresh choices included — Baxter's
         // "resolve it again"), chained through the same driver.
@@ -1849,6 +1932,7 @@ pub(crate) fn drain_pending_hero_event(
         pending.steps,
         pending.copies_pending,
         events,
+        pending.departure_carry,
     ) {
         HeroEventProgress::Prompted => HeroEventDrainOutcome::PausedForReplacement,
         HeroEventProgress::Settled => HeroEventDrainOutcome::Completed,
@@ -3448,7 +3532,15 @@ mod tests {
         ];
 
         let mut events = Vec::new();
-        let progress = apply_hero_event_steps(&mut state, horde, event, steps, 0, &mut events);
+        let progress = apply_hero_event_steps(
+            &mut state,
+            horde,
+            event,
+            steps,
+            0,
+            &mut events,
+            HeroEventDepartureCarry::default(),
+        );
         assert_eq!(
             progress,
             HeroEventProgress::Prompted,

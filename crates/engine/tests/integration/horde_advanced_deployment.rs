@@ -838,6 +838,7 @@ fn combat_damage_to_mill_preserves_lifelink_and_recording() {
         "Rhox's damage must be recorded exactly once, got {:?}",
         runner.state().damage_dealt_this_turn
     );
+
     assert_eq!(
         records[0].target,
         TargetRef::Player(HORDE),
@@ -847,4 +848,166 @@ fn combat_damage_to_mill_preserves_lifelink_and_recording() {
         records[0].amount, 1,
         "the record must carry the 1 damage dealt"
     );
+}
+
+/// R6-#4 width — an unblocked Rhox Faithmender (1/5 lifelink) and an unblocked
+/// Llanowar Elves (1/1, no lifelink) hit the Horde while Rest in Peace +
+/// Leyline of the Void redirect each mill-1. The first leg's mill pauses the
+/// batch with the second leg unrun; the resume runs the remnant's remaining
+/// leg, whose own mill-1 re-pauses (`RemnantOutcome::Repaused`) before the
+/// batch completes. Each leg's mill exiles, the Rhox gains its doubled
+/// lifelink (a lone replacement, so the gain never pauses), and each leg
+/// records — each exactly once.
+///
+/// Revert guard: without the remnant's remaining-legs run, the Elves' damage
+/// never applies (no record, one mill prompt); without the re-pause, the
+/// second mill's ordering is never answered and combat never reaches
+/// post-combat.
+#[test]
+fn combat_damage_to_mill_two_attackers_pause_twice() {
+    let Some(db) = load_db() else {
+        return;
+    };
+
+    let mut scenario = advanced_horde_scenario();
+    scenario.with_life(SURVIVOR, 20);
+    scenario.add_real_card(SURVIVOR, "Rest in Peace", Zone::Battlefield, db);
+    scenario.add_real_card(SURVIVOR, "Leyline of the Void", Zone::Battlefield, db);
+    let rhox = scenario.add_real_card(SURVIVOR, "Rhox Faithmender", Zone::Battlefield, db);
+    let elves = scenario.add_real_card(SURVIVOR, "Llanowar Elves", Zone::Battlefield, db);
+    let milled_a = scenario.add_real_card(HORDE, "Lightning Bolt", Zone::Library, db);
+    let milled_b = scenario.add_real_card(HORDE, "Lightning Bolt", Zone::Library, db);
+    for _ in 0..8 {
+        scenario.add_real_card(HORDE, "Lightning Bolt", Zone::Library, db);
+    }
+
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    park_survivor_priority(&mut runner);
+
+    // PREMISES: both attackers swing for exactly 1, and only the Rhox has
+    // lifelink — or the life and record assertions below fail for fixture
+    // reasons, not the pause defect.
+    flush_layers(runner.state_mut());
+    let rhox_obj = runner
+        .state()
+        .objects
+        .get(&rhox)
+        .expect("Rhox still on the battlefield");
+    assert_eq!(rhox_obj.power, Some(1), "Rhox must hit for exactly 1");
+    assert!(
+        rhox_obj.keywords.contains(&Keyword::Lifelink),
+        "Rhox must have lifelink"
+    );
+    let elves_obj = runner
+        .state()
+        .objects
+        .get(&elves)
+        .expect("Elves still on the battlefield");
+    assert_eq!(elves_obj.power, Some(1), "Elves must hit for exactly 1");
+    assert!(
+        !elves_obj.keywords.contains(&Keyword::Lifelink),
+        "Elves must not have lifelink, or the gain math below is wrong"
+    );
+
+    // Walk the survivor's turn into combat and send both attackers at the Horde.
+    runner.pass_both_players();
+    runner
+        .declare_attackers(&[
+            (rhox, AttackTarget::Player(HORDE)),
+            (elves, AttackTarget::Player(HORDE)),
+        ])
+        .expect("both attackers must be able to attack the Horde");
+    // Drive through combat damage to post-combat, leaving both unblocked and
+    // answering each mill-ordering prompt (both redirects exile either way).
+    let mut mill_prompts = 0;
+    for _ in 0..60 {
+        if runner.state().phase == Phase::PostCombatMain {
+            break;
+        }
+        match &runner.state().waiting_for {
+            WaitingFor::Priority { .. } => runner.pass_both_players(),
+            WaitingFor::DeclareBlockers { .. } => {
+                runner
+                    .declare_blockers(&[])
+                    .expect("declaring no blockers should succeed");
+            }
+            WaitingFor::ReplacementChoice { candidates, .. } => {
+                mill_prompts += 1;
+                let names: Vec<&str> = candidates.iter().map(|c| c.source_name.as_str()).collect();
+                assert!(
+                    names.contains(&"Rest in Peace") && names.contains(&"Leyline of the Void"),
+                    "each mill prompt must name both redirects, got {names:?}"
+                );
+                runner
+                    .act(GameAction::ChooseReplacement { index: 0 })
+                    .expect("answer the CR 616.1 ordering prompt");
+            }
+            other => panic!("unexpected window during combat: {other:?}"),
+        }
+    }
+    assert_eq!(
+        runner.state().phase,
+        Phase::PostCombatMain,
+        "combat must complete, stuck at {:?} with {:?}",
+        runner.state().phase,
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        mill_prompts, 2,
+        "each leg's redirected mill-1 must pause on its ordering — one means \
+         only the first leg ran, zero means the board stopped pausing and \
+         the test is vacuous"
+    );
+
+    // DISCRIMINATORS: both mills landed AND both legs' post-loss work
+    // survived the pauses — the doubled lifelink and the CR 120.1 records,
+    // each exactly once per source.
+    for milled in [milled_a, milled_b] {
+        assert_eq!(
+            runner
+                .state()
+                .objects
+                .get(&milled)
+                .expect("milled Bolt still exists")
+                .zone,
+            Zone::Exile,
+            "each milled Bolt must be exiled by its answered redirect"
+        );
+    }
+    assert_eq!(
+        runner
+            .state()
+            .players
+            .iter()
+            .find(|p| p.id == SURVIVOR)
+            .unwrap()
+            .life,
+        22,
+        "Rhox's 1 combat damage must gain exactly 1*2 = 2 even though each \
+         redirected mill paused"
+    );
+    for source in [rhox, elves] {
+        let records: Vec<_> = runner
+            .state()
+            .damage_dealt_this_turn
+            .iter()
+            .filter(|r| r.source_id == source)
+            .collect();
+        assert_eq!(
+            records.len(),
+            1,
+            "each attacker's damage must be recorded exactly once, got {:?}",
+            runner.state().damage_dealt_this_turn
+        );
+        assert_eq!(
+            records[0].target,
+            TargetRef::Player(HORDE),
+            "the record must name the Horde as the damage recipient"
+        );
+        assert_eq!(
+            records[0].amount, 1,
+            "the record must carry the 1 damage dealt"
+        );
+    }
 }
