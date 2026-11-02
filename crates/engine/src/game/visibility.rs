@@ -12400,7 +12400,7 @@ mod tests {
     /// CR 400.2: `pending_single_discard` names a card still in a HAND (a hidden
     /// zone) and must be absent from every viewer projection, mirroring
     /// `pending_discard_batch`. REVERT PROBE: delete
-    /// `filtered.pending_single_discard = None;` from `filter_state_for_viewer`.
+    /// `filtered.pending_single_discard = None;` from `filter_state_for_scope`.
     #[test]
     fn parked_single_discard_is_absent_from_every_viewer_projection() {
         let mut state = GameState::new_two_player(42);

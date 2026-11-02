@@ -418,7 +418,7 @@ fn handle_replacement_choice_inner(
     // pre-move incarnation and the exact proposed event. Capture this before
     // `continue_replacement` consumes the pending record.
     let parked_zone_change_delivery = state.pending_zone_change_delivery_from_replacement();
-    // CR 616.1f: the paused frameless single-card discard this answer owns, if any.
+    // CR 616.1: the paused frameless single-card discard this answer owns, if any.
     // Captured with the other `parked_*` reads; a carrier installed while this
     // answer resolves (a nested connive) belongs to the next answer and is left
     // in place.
@@ -1161,7 +1161,7 @@ fn handle_replacement_choice_inner(
             // now that its move has been delivered, before post-replacement and
             // `waiting_for`-gated drains run. Gated on the carrier latched before
             // `continue_replacement` so a carrier installed during this answer
-            // (CR 616.1f: the next answer's) is not consumed here.
+            // (a different discard's, owed to a later answer) is not consumed here.
             if parked_single_discard.is_some()
                 && state.pending_single_discard.as_deref().copied() == parked_single_discard
             {
