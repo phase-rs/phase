@@ -513,7 +513,7 @@ fn lair_pending_activations_keep_independent_x_and_reject_zero() {
     assert_animation(&runner, second, 5, "Hydra");
     for land in [first, second] {
         assert!(runner.state().objects[&land]
-            .colors
+            .color
             .contains(&ManaColor::Green));
     }
     pass_cleanup(&mut runner, &[first, second]);
