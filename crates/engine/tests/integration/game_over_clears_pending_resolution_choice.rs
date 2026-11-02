@@ -263,6 +263,10 @@ fn assert_resolution_retired(runner: &GameRunner, winner: Option<PlayerId>) {
         state.return_result_frames.is_empty() && state.active_return_result_occurrence.is_none(),
         "a finished game keeps no return-result occurrence"
     );
+    assert!(
+        state.pending_miracle_offers.is_empty(),
+        "a finished game keeps no queued miracle offer"
+    );
     assert_no_parked_resolution_work(state);
     assert_round_trips(runner);
 }
@@ -1707,4 +1711,143 @@ fn a_nonterminal_concession_preserves_a_token_entry() {
     assert_eq!(runner.state().objects[&painter].zone, Zone::Battlefield);
     assert!(runner.state().game_end.is_none());
     assert_round_trips(&runner);
+}
+
+const BRAINSTORM: &str =
+    "Draw three cards, then put two cards from your hand on top of your library in any order.";
+const TEMPORAL_MASTERY: &str = "Take an extra turn after this one. Exile Temporal Mastery.\nMiracle {1}{U} (You may cast this card for its miracle cost when you draw it if it's the first card you drew this turn.)";
+
+fn add_miracle_to_library(scenario: &mut GameScenario) -> ObjectId {
+    scenario
+        .add_spell_to_library_top(P0, "Temporal Mastery", false)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue; 2],
+            generic: 5,
+        })
+        .from_oracle_text(TEMPORAL_MASTERY)
+        .id()
+}
+
+fn brainstorm_with_a_queued_miracle(players: u8) -> (GameRunner, ObjectId, Vec<ObjectId>) {
+    let mut scenario = board(players);
+    let miracle = add_miracle_to_library(&mut scenario);
+    scenario.add_basic_land(P0, ManaColor::Blue);
+    let brainstorm = scenario
+        .add_spell_to_hand_from_oracle(P0, "Brainstorm", true, BRAINSTORM)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 0,
+        })
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(brainstorm).commit();
+    let events = pass_until_prompt(&mut runner);
+    assert!(
+        events.iter().any(|event| matches!(event,
+            GameEvent::CardDrawn { object_id, nth_in_turn: 1, .. } if *object_id == miracle
+        )),
+        "reach guard: Temporal Mastery was the first actual draw"
+    );
+    let WaitingFor::EffectZoneChoice {
+        cards,
+        count: 2,
+        zone: Zone::Hand,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "reach guard: Brainstorm must pause for its two-card placement: {:?}",
+            runner.state().waiting_for
+        );
+    };
+    let put_back: Vec<_> = cards.iter().copied().filter(|id| *id != miracle).collect();
+    assert_eq!(put_back.len(), 2);
+    assert!(carrier_is_live(&runner));
+    assert_eq!(runner.state().pending_miracle_offers.len(), 1);
+    assert_eq!(runner.state().pending_miracle_offers[0].object_id, miracle);
+    assert_eq!(runner.state().objects[&miracle].zone, Zone::Hand);
+    (runner, miracle, put_back)
+}
+
+/// CR 104.1 + CR 104.3a: a concession ends the game while Brainstorm has
+/// queued a first-draw miracle but still waits for its placement instruction.
+#[test]
+fn terminal_concession_retires_a_queued_miracle_offer() {
+    let (mut runner, miracle, _) = brainstorm_with_a_queued_miracle(2);
+    concede(&mut runner, P1);
+    assert_eq!(runner.state().objects[&miracle].zone, Zone::Hand);
+    assert_finished_game_retired_its_resolution(&runner, Some(P0));
+}
+
+#[test]
+fn sideboarding_retires_a_queued_miracle_offer() {
+    let (mut runner, _, _) = brainstorm_with_a_queued_miracle(2);
+    runner.state_mut().set_match_config(MatchConfig {
+        match_type: MatchType::Bo3,
+        ..Default::default()
+    });
+    concede(&mut runner, P1);
+    assert_eq!(runner.state().match_phase, MatchPhase::BetweenGames);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::BetweenGamesSideboard { .. }
+    ));
+    assert_resolution_retired(&runner, Some(P0));
+}
+
+/// CR 702.94a: a nonterminal concession preserves the pending offer, which
+/// becomes the reveal prompt after Brainstorm finishes its remaining choice.
+#[test]
+fn nonterminal_concession_preserves_a_queued_miracle_offer() {
+    let (mut runner, miracle, put_back) = brainstorm_with_a_queued_miracle(3);
+    concede(&mut runner, P2);
+    assert!(runner.state().game_end.is_none());
+    assert_eq!(runner.state().pending_miracle_offers.len(), 1);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::EffectZoneChoice { .. }
+    ));
+    runner
+        .act(GameAction::SelectCards { cards: put_back })
+        .unwrap();
+    assert!(
+        matches!(runner.state().waiting_for,
+            WaitingFor::MiracleReveal { player: P0, object_id, .. } if object_id == miracle
+        ),
+        "the continuing game presents the miracle reveal: {:?}",
+        runner.state().waiting_for
+    );
+    assert!(runner.state().pending_miracle_offers.is_empty());
+    assert_eq!(runner.state().objects[&miracle].zone, Zone::Hand);
+}
+
+/// CR 104.1: Divination draws a miracle, then Laboratory Maniac replaces its
+/// empty-library second draw with a win. Its queued offer must retire even
+/// when the spell's carrier has already completed.
+#[test]
+fn an_effect_win_retires_a_miracle_offer_after_the_spell_finishes() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let miracle = add_miracle_to_library(&mut scenario);
+    scenario.add_creature_from_oracle(P0, "Laboratory Maniac", 2, 2, LABORATORY_MANIAC);
+    for _ in 0..3 {
+        scenario.add_basic_land(P0, ManaColor::Blue);
+    }
+    let divination = scenario
+        .add_spell_to_hand_from_oracle(P0, "Divination", false, "Draw two cards.")
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 2,
+        })
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(divination).commit();
+    let events = pass_until_prompt(&mut runner);
+    assert!(events.iter().any(|event| matches!(event,
+        GameEvent::CardDrawn { object_id, nth_in_turn: 1, .. } if *object_id == miracle
+    )));
+    assert_eq!(runner.state().objects[&miracle].zone, Zone::Hand);
+    assert_eq!(runner.state().objects[&divination].zone, Zone::Graveyard);
+    assert!(!carrier_is_live(&runner), "the drawing spell has completed");
+    assert_finished_game_retired_its_resolution(&runner, Some(P0));
 }
