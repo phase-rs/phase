@@ -86,6 +86,30 @@ fn has_debug_used(events: &[GameEvent]) -> bool {
         .any(|event| matches!(event, GameEvent::DebugActionUsed { .. }))
 }
 
+/// Index of the replacement candidate whose description satisfies `pick`,
+/// asserting that `player` is the one being asked.
+fn choice_index(
+    runner: &GameRunner,
+    player: PlayerId,
+    what: &str,
+    pick: impl Fn(&str) -> bool,
+) -> usize {
+    match &runner.state().waiting_for {
+        WaitingFor::ReplacementChoice {
+            player: chooser,
+            candidates,
+            ..
+        } => {
+            assert_eq!(*chooser, player, "{what}: wrong chooser");
+            candidates
+                .iter()
+                .position(|candidate| pick(&candidate.description))
+                .unwrap_or_else(|| panic!("{what}: no matching candidate in {candidates:?}"))
+        }
+        other => panic!("expected the {what}, got {other:?}"),
+    }
+}
+
 fn is_priority(runner: &GameRunner) -> bool {
     matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
 }
@@ -283,13 +307,14 @@ fn r6_library_of_leng_applies_to_sandbox_discard() {
     let card = card.unwrap();
 
     runner.act(discard(card)).expect("discard succeeds");
-    match &runner.state().waiting_for {
-        WaitingFor::ReplacementChoice { player, .. } => assert_eq!(*player, P0),
-        other => panic!("expected the Library of Leng prompt, got {other:?}"),
-    }
+    let accept = choice_index(&runner, P0, "Library of Leng prompt", |d| d != "Decline");
 
+    // Pre-existing upstream gap, out of scope here: the accepted library
+    // placement resumes through a frameless zone-change delivery that emits no
+    // `Discarded` event, although the card was still discarded (CR 701.9c). This
+    // row therefore asserts only the placement.
     runner
-        .act(GameAction::ChooseReplacement { index: 0 })
+        .act(GameAction::ChooseReplacement { index: accept })
         .expect("choosing the library option succeeds");
     let state = runner.state();
     let top = state
@@ -327,13 +352,15 @@ fn r7_parked_choice_refuses_second_debug_discard() {
     assert!(runner.act(discard(second)).is_err());
     assert_eq!(digest(&runner), before, "a refused action changes nothing");
 
-    // Pre-existing upstream gap: answering a Library of Leng choice for an
-    // effect-caused discard moves the card but emits no `Discarded` event, so
-    // discard triggers do not fire; no trigger is asserted after the answer.
-    runner
-        .act(GameAction::ChooseReplacement { index: 1 })
+    // Declining resumes through the discard arm, which completes the discard
+    // and emits `Discarded`, so the opponent's Grimoire triggers once.
+    let decline = choice_index(&runner, P0, "Library of Leng prompt", |d| d == "Decline");
+    let result = runner
+        .act(GameAction::ChooseReplacement { index: decline })
         .expect("choosing the graveyard option succeeds");
     assert_eq!(zone_of(&runner, first), Zone::Graveyard);
+    assert_eq!(discarded_events(&result.events), vec![(P0, first)]);
+    assert_eq!(runner.state().stack.len(), 1, "one Grimoire trigger");
 }
 
 /// R8: no source object, so "a spell or ability an opponent controls causes you

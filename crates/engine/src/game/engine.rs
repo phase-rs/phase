@@ -17959,8 +17959,8 @@ pub fn preflight_debug_action(
         .validate_player_resource_amount()
         .map_err(EngineError::InvalidAction)?;
 
-    // CR 616.1: a sandbox life change or player-counter/energy gain is a real
-    // event whose replacements can park a replacement-order choice for the
+    // CR 616.1: a sandbox life change, player-counter/energy gain or discard
+    // is a real event whose replacements can park a replacement-order choice for the
     // affected player. Only a settled Priority boundary can own that choice;
     // admitting a second event under an open prompt would replace the
     // outstanding proposal before it resolves.

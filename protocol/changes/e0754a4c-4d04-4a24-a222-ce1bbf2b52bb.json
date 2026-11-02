@@ -3,5 +3,5 @@
     "full",
     "wire"
   ],
-  "reason": "Add DebugAction::Discard"
+  "reason": "Sandbox DebugAction gains the Discard tag (CR 701.9a discard through the effect-caused discard authority). A previous peer cannot deserialize the new action tag, so full and wire peers move in lockstep."
 }
