@@ -1727,8 +1727,7 @@ fn mosswort_bridge_that_hid_nothing_offers_no_play() {
 
 /// The `sub_ability` chain starting at `def`, in order.
 fn ability_chain(def: &AbilityDefinition) -> Vec<&AbilityDefinition> {
-    std::iter::successors(Some(def), |link| link.sub_ability.as_deref())
-        .collect()
+    std::iter::successors(Some(def), |link| link.sub_ability.as_deref()).collect()
 }
 
 /// P0's Smuggler's Buggy (verbatim Oracle) as a 5/5 Vehicle artifact creature
