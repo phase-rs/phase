@@ -37,7 +37,9 @@
     "approve": "Zustimmen",
     "decline": "Ablehnen",
     "cancel": "Anfrage abbrechen",
-    "declinedToast": "Rücknahmeanfrage abgelehnt"
+    "declinedToast": "Rücknahmeanfrage abgelehnt",
+    "cancelledToast": "Rücknahmeanfrage abgebrochen",
+    "withdrawnToast": "Rücknahmeanfrage zurückgezogen: Ein Spieler hat das Spiel verlassen"
   },
   "connectionDot": {
     "connected": "Verbunden",
@@ -128,7 +130,6 @@
     "waitTimeJustNow": "gerade eben",
     "waitTimeMinutes": "vor {{count}}m",
     "waitTimeHours": "vor {{count}}h",
-    "buildMismatchTitle": "Host nutzt {{version}} ({{commit}}) — dein Build ist anders. Aktualisiere, um auf den neuesten Stand zu kommen.",
     "gameFull": "Dieses Spiel ist voll.",
     "youAreHosting": "Du hostest dieses Spiel.",
     "hosting": "Hosten",
@@ -267,8 +268,6 @@
     "hostServerUnscored": "{{name}} — noch nicht bewertet",
     "sandboxMode": "Sandbox-Modus — Debug-Aktionen erlauben",
     "sandboxModeHelp": "Der Host kann den Spielzustand direkt manipulieren (Karten verschieben, Leben ändern, Marken anpassen) und anderen Spielern Debug-Berechtigung erteilen. Zum Testen oder für Sandbox-Spiele nutzen — nicht für kompetitive Partien. Diese Einstellung kann nach dem Spielstart nicht mehr geändert werden.",
-    "experimentalDungeons": "Experimentelle Dungeons",
-    "experimentalDungeonsHelp": "Sich in den Dungeon wagen bietet Baldur's Gate Wilderness zusätzlich zu den üblichen Optionen an, und die Initiative zu ergreifen bietet es als Alternative zur Unterstadt an. Experimentell und inoffiziell. Standardmäßig deaktiviert. Diese Einstellung kann nach Spielbeginn nicht mehr geändert werden.",
     "setPassword": "Passwort festlegen",
     "passwordPlaceholder": "Spielpasswort",
     "back": "Zurück",
@@ -288,7 +287,8 @@
     "botGameNotice": "Du hostest das Discord-Spiel {{code}}. Verbindung und Privatsphäre legt der Discord-Beitrag fest.",
     "botSeedIgnored": "Einige Einstellungen aus dem Discord-Beitrag können hier nicht verwendet werden — prüfe Format und Spielerzahl.",
     "botP2PNotice": "Dein Gerät führt das Spiel aus. Lass die App geöffnet und bleib verbunden.",
-    "botServerNotice": "Ein dedizierter Server führt das Spiel aus. Er kann langsamer werden oder offline gehen."
+    "botServerNotice": "Ein dedizierter Server führt das Spiel aus. Er kann langsamer werden oder offline gehen.",
+    "poolBracketConflict": "Keines der {{selected}} gewählten Decks ist unter den aktuellen Filtern legal, daher ziehen zufällige KI-Gegner aus allen {{total}} Decks."
   },
   "page": {
     "deckRejected": "Das Deck wurde vom Host abgelehnt.",
@@ -354,5 +354,11 @@
   "deepLink": {
     "gameInProgressTitle": "Spiel läuft",
     "gameInProgressBody": "Beende oder verlasse dein aktuelles Spiel und öffne den Link dann erneut."
+  },
+  "p2pStateWithheld": "Der Spielzustand nach dieser Aktion ist zu groß zum Senden, daher ist dieses Spielfeld nicht aktuell. Ein Spieler kann im Spielmenü eine Rücknahme der letzten Aktion beantragen, um fortzufahren (bei einer Schleife: mit einer kleineren Anzahl ausführen).",
+  "terminalRecovery": {
+    "finalViewsUnpublished": "Die Aufgabe hat einen Full-Endzustand erreicht, aber die nativen Endansichten konnten nicht veröffentlicht werden.",
+    "concedeUnreconciled": "Das Ergebnis der Aufgabe konnte nicht abgeglichen werden; der Platz bleibt gesperrt.",
+    "receiptUnsent": "Die dauerhafte Empfangsbestätigung für das Endergebnis konnte nicht gesendet werden; warte auf erneute Zustellung"
   }
 }

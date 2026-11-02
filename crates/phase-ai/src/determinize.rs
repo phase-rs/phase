@@ -24,7 +24,10 @@
 //! cast-from-hand enumeration) see exactly the real cards, so the K sampled
 //! worlds share an identical AI-legal-action set. Only cards the AI cannot
 //! legitimately know are swapped, which is precisely the set no AI candidate can
-//! reference by identity (see the pin-invariant in `search.rs`).
+//! reference by identity (see the pin-invariant in `search.rs`). A shared
+//! library is the exception: it is resampled whole for the opponent, so
+//! `card_name_choice_candidates` keys it by the registered pool, never by live
+//! identities.
 //!
 //! # Identity-swap caveat (residual fields not rewritten by the primitive)
 //!
@@ -156,31 +159,33 @@ fn pinned_known_ids(state: &GameState, ai_player: PlayerId) -> HashSet<ObjectId>
 }
 
 /// Ordered unknown hidden-zone slots for `opponent`: its `hand` (in order) then
-/// its `library` (in order), skipping cards `ai_player` legitimately knows
-/// (`known`), tokens, and cards not owned by `opponent` (a borrowed card's
-/// identity is already public). Both zones are ordered `im::Vector`s, so the
-/// slot order is deterministic (#4878 discipline).
+/// its library (in order), skipping cards `ai_player` legitimately knows
+/// (`known`) and tokens. Hand cards not owned by `opponent` are skipped too (a
+/// borrowed card's identity is already public). Both zones are ordered
+/// `im::Vector`s, so the slot order is deterministic (#4878 discipline).
 fn unknown_slots(
     state: &GameState,
     opponent: PlayerId,
     known: &HashSet<ObjectId>,
 ) -> Vec<ObjectId> {
-    let player = &state.players[opponent.0 as usize];
-    player
+    let hand = state.players[opponent.0 as usize]
         .hand
         .iter()
-        .chain(player.library.iter())
         .copied()
         .filter(|id| {
-            if known.contains(id) {
-                return false;
-            }
-            state
-                .objects
-                .get(id)
-                .is_some_and(|obj| !obj.is_token && obj.owner == opponent)
-        })
-        .collect()
+            !known.contains(id)
+                && state
+                    .objects
+                    .get(id)
+                    .is_some_and(|obj| !obj.is_token && obj.owner == opponent)
+        });
+    // CR 400.2 + CR 401.2: a library's contents are hidden whoever owns each card, so a
+    // shared pile is selected by storage, not by owner.
+    let library =
+        state.library_of(opponent).iter().copied().filter(|id| {
+            !known.contains(id) && state.objects.get(id).is_some_and(|obj| !obj.is_token)
+        });
+    hand.chain(library).collect()
 }
 
 /// SplitMix64 finalizer — mixes the per-sample index into the ensemble seed so
@@ -601,6 +606,59 @@ mod tests {
             sim.objects[&hidden].counters.get(&charge),
             Some(&3),
             "determinizer must not defensively reset residual counters (F2)"
+        );
+    }
+
+    /// Under the shared pile the opponent's hidden library is the whole pile
+    /// whoever owns each card; the hand filter keeps its owner test.
+    #[test]
+    fn unknown_slots_select_the_shared_pile_by_storage() {
+        use engine::types::format::FormatConfig;
+
+        for opponent in [PlayerId(1), PlayerId(0)] {
+            let mut state = GameState::new(FormatConfig::dandan(), 2, 1);
+            let mine = add(&mut state, opponent, "Island", Zone::Library);
+            let theirs = add(
+                &mut state,
+                PlayerId(1 - opponent.0),
+                "Brainstorm",
+                Zone::Library,
+            );
+            let token = add(&mut state, opponent, "Token", Zone::Library);
+            state.objects.get_mut(&token).unwrap().is_token = true;
+            let known_card = add(&mut state, opponent, "Opt", Zone::Library);
+            let hand = add(&mut state, opponent, "Predict", Zone::Hand);
+            let borrowed = add(
+                &mut state,
+                PlayerId(1 - opponent.0),
+                "Memory Lapse",
+                Zone::Hand,
+            );
+            let lender = &mut state.players[usize::from(1 - opponent.0)].hand;
+            lender.retain(|id| *id != borrowed);
+            state.players[opponent.0 as usize].hand.push_back(borrowed);
+            let known = HashSet::from([known_card]);
+
+            assert_eq!(
+                unknown_slots(&state, opponent, &known),
+                vec![hand, mine, theirs],
+                "{opponent:?}: hand then the whole pile, minus tokens and known cards"
+            );
+            assert!(
+                state.players[opponent.0 as usize].hand.contains(&borrowed),
+                "reach: the borrowed card sits in the opponent's hand"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_slots_in_a_per_seat_format_stay_per_seat() {
+        let mut state = GameState::new_two_player(1);
+        let mine = add(&mut state, PlayerId(1), "Island", Zone::Library);
+        add(&mut state, PlayerId(0), "Brainstorm", Zone::Library);
+        assert_eq!(
+            unknown_slots(&state, PlayerId(1), &HashSet::new()),
+            vec![mine]
         );
     }
 }

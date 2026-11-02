@@ -18,7 +18,7 @@ use engine::types::game_state::{
 };
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::log::{LogCategory, LogSegment};
-use engine::types::mana::{ManaColor, ManaType};
+use engine::types::mana::{ManaColor, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use phase_ai::auto_play::{run_ai_actions, run_ai_actions_bounded, run_driver_loop, DriverExit};
@@ -33,7 +33,8 @@ fn gunzip_fixture(gz: &[u8]) -> String {
     flate2::read::GzDecoder::new(gz)
         .read_to_string(&mut json)
         .expect("fixture .json.gz must inflate to UTF-8 JSON");
-    json
+    // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+    engine::types::game_state::record_captured_onsets_json(&json)
 }
 
 #[test]
@@ -127,6 +128,233 @@ fn saved_cosmic_crucible_mana_prompt_uses_an_issued_action_and_advances() {
     assert!(
         !matches!(state.waiting_for, WaitingFor::ChooseManaColor { .. }),
         "applying the choice must advance beyond Cosmic Crucible's mana prompt"
+    );
+}
+
+/// Saved positions mtg-bot's judge rated as clear mistakes (pattern "Timing: Priority"): the AI
+/// used a deferrable ability in its own upkeep or draw step, with an empty stack, instead of
+/// waiting for its precombat main phase. Returns the state, the acting seat, and that ability's
+/// activation, which the position must still offer (the reach guard).
+fn judged_early_activation(
+    gz: &[u8],
+    phase: Phase,
+    source_name: &str,
+) -> (engine::types::game_state::GameState, PlayerId, GameAction) {
+    let state = load_saved_game_state(&gunzip_fixture(gz)).expect("judged position deserializes");
+    let player = state.active_player;
+    assert_eq!(
+        state.phase, phase,
+        "reach: the capture is in the judged step"
+    );
+    assert!(state.stack.is_empty(), "reach: the stack is empty");
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { player: holder } if holder == player),
+        "reach: the active player holds priority"
+    );
+    let activation = engine::ai_support::AiDecisionContract::issue(&state, player)
+        .candidates
+        .into_iter()
+        .map(|candidate| candidate.action)
+        .find(|action| {
+            matches!(action, GameAction::ActivateAbility { source_id, .. }
+            if state.objects[source_id].name == source_name)
+        })
+        .unwrap_or_else(|| panic!("reach: {source_name}'s activation is offered"));
+    (state, player, activation)
+}
+
+/// The root ranking the chooser samples from (CR 117.3a: the AI holds priority) must put
+/// passing above the early activation, at the four-seat Hard configuration the games ran at.
+fn assert_pass_outranks(
+    state: &engine::types::game_state::GameState,
+    player: PlayerId,
+    activation: &GameAction,
+    message: &str,
+) {
+    let config = phase_ai::config::create_config_for_players(
+        AiDifficulty::Hard,
+        Platform::Native,
+        state.players.len() as u8,
+    )
+    .into_measurement(42);
+    let scores = phase_ai::score_candidates(state, player, &config);
+    let score = |action: &GameAction| {
+        scores
+            .iter()
+            .find(|(candidate, _)| candidate == action)
+            .map(|(_, score)| *score)
+            .unwrap_or_else(|| panic!("reach: {action:?} is scored"))
+    };
+    assert!(
+        score(&GameAction::PassPriority) > score(activation),
+        "{message}: {scores:?}"
+    );
+}
+
+/// Cryptbreaker ("{1}{B}, {T}, Discard a card: Create a 2/2 black Zombie creature token.") in
+/// the AI's own draw step, with nothing happening as the main phase begins that an activation
+/// now could change: the mana and card stay available for it there, and passing must rank first.
+#[test]
+fn judged_cryptbreaker_draw_step_activation_waits_for_the_main_phase() {
+    let (state, player, activation) = judged_early_activation(
+        include_bytes!("../fixtures/scenarios/judged-cryptbreaker-draw-step.json.gz"),
+        Phase::Draw,
+        "Cryptbreaker",
+    );
+    assert_pass_outranks(
+        &state,
+        player,
+        &activation,
+        "the AI must not activate Cryptbreaker in its draw step",
+    );
+}
+
+/// Karn's Bastion ("{4}, {T}: Proliferate.") in the AI's own upkeep at 14 life of 40: low life
+/// alone gives no reason to act before the main phase, since no opponent attacks first, and
+/// passing must rank first.
+#[test]
+fn judged_karns_bastion_upkeep_activation_waits_at_low_life() {
+    let (state, player, activation) = judged_early_activation(
+        include_bytes!("../fixtures/scenarios/judged-karns-bastion-upkeep.json.gz"),
+        Phase::Upkeep,
+        "Karn's Bastion",
+    );
+    assert_eq!(
+        state.players[player.0 as usize].life, 14,
+        "reach: the AI is below 40% of 40"
+    );
+    assert_pass_outranks(
+        &state,
+        player,
+        &activation,
+        "the AI must not activate Karn's Bastion in its upkeep",
+    );
+}
+
+/// Staff of Domination ("{2}, {T}: You gain 1 life.") in the AI's own upkeep, with two
+/// Mountains untapped. With {C}{C} of activation-only mana floating (Thran Turbine's "This
+/// mana can't be spent to cast spells"), activating now spends mana that empties as the step
+/// ends (CR 500.5), so the production root score must not carry the patience hold it carries
+/// when only the lands could pay.
+#[test]
+fn floating_upkeep_mana_is_not_held_for_the_main_phase() {
+    use engine::types::mana::ManaRestriction;
+    let margin = |floating: bool| {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::Upkeep);
+        let staff = scenario
+            .add_artifact_from_oracle(P0, "Staff of Domination", "{2}, {T}: You gain 1 life.")
+            .id();
+        scenario.add_basic_land(P0, ManaColor::Red);
+        scenario.add_basic_land(P0, ManaColor::Red);
+        if floating {
+            scenario.with_mana_pool(
+                P0,
+                vec![
+                    ManaUnit::new(
+                        ManaType::Colorless,
+                        ObjectId(9_900),
+                        false,
+                        vec![ManaRestriction::OnlyForActivation]
+                    );
+                    2
+                ],
+            );
+        }
+        let runner = scenario.build();
+        let state = runner.state();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0)
+                && state.active_player == P0
+                && state.stack.is_empty(),
+            "reach: P0 holds priority in its own upkeep with an empty stack"
+        );
+        let config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(42);
+        let scores = phase_ai::score_candidates(state, P0, &config);
+        let score = |pick: &dyn Fn(&GameAction) -> bool| {
+            scores
+                .iter()
+                .find(|(action, _)| pick(action))
+                .map(|(_, score)| *score)
+                .unwrap_or_else(|| panic!("reach: candidate scored in {scores:?}"))
+        };
+        score(
+            &|action| matches!(action, GameAction::ActivateAbility { source_id, .. } if *source_id == staff),
+        ) - score(&|action| matches!(action, GameAction::PassPriority))
+    };
+    let (held, floating) = (margin(false), margin(true));
+    assert!(
+        floating > held,
+        "floating mana must lift the activation's margin over passing: held {held}, floating {floating}"
+    );
+}
+
+/// Words of Worship ("{1}: The next time you would draw a card this turn, you gain 5 life
+/// instead.") in the AI's own upkeep after Phyrexian Arena's trigger, with one Plains untapped.
+/// CR 614.4: the replacement must exist before the draw step's draw, so the production root
+/// score must not carry the patience hold there. The reference is the same board with one
+/// colorless mana floating, which stands patience down through its own escape hatch, so the
+/// two margins must agree. (The draw-step control, where the replacement is held, is pinned at
+/// the policy level in `activation_patience_repro.rs`.)
+#[test]
+fn a_draw_replacement_is_not_held_in_the_upkeep() {
+    let margin = |phase: Phase, floating: bool| {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(phase);
+        scenario.add_enchantment_from_oracle(
+            P0,
+            "Phyrexian Arena",
+            "At the beginning of your upkeep, you draw a card and you lose 1 life.",
+        );
+        let words = scenario
+            .add_enchantment_from_oracle(
+                P0,
+                "Words of Worship",
+                "{1}: The next time you would draw a card this turn, you gain 5 life instead.",
+            )
+            .id();
+        scenario.add_basic_land(P0, ManaColor::White);
+        // A library, so the draw the replacement skips isn't a draw from an empty library.
+        scenario.with_library_top(P0, &["Plains"; 5]);
+        if floating {
+            scenario.with_mana_pool(
+                P0,
+                vec![ManaUnit::new(
+                    ManaType::Colorless,
+                    ObjectId(9_900),
+                    false,
+                    vec![],
+                )],
+            );
+        }
+        let runner = scenario.build();
+        let state = runner.state();
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0)
+                && state.active_player == P0
+                && state.stack.is_empty(),
+            "reach: P0 holds priority in its own {phase:?} with an empty stack"
+        );
+        let config = create_config(AiDifficulty::Hard, Platform::Native).into_measurement(42);
+        let scores = phase_ai::score_candidates(state, P0, &config);
+        let score = |pick: &dyn Fn(&GameAction) -> bool| {
+            scores
+                .iter()
+                .find(|(action, _)| pick(action))
+                .map(|(_, score)| *score)
+                .unwrap_or_else(|| panic!("reach: candidate scored in {scores:?}"))
+        };
+        score(
+            &|action| matches!(action, GameAction::ActivateAbility { source_id, .. } if *source_id == words),
+        ) - score(&|action| matches!(action, GameAction::PassPriority))
+    };
+    // At Hard the patience hold moves the root margin by about 0.17 (its -1.68 verdict times the
+    // 0.1 root tactical weight); with the draw replacement exempt, the floating-mana reference
+    // must agree with the unfloated board well inside that.
+    let held = margin(Phase::Upkeep, true) - margin(Phase::Upkeep, false);
+    assert!(
+        held.abs() < 0.08,
+        "the upkeep must not hold the draw replacement (reference minus board: {held})"
     );
 }
 
@@ -1211,12 +1439,14 @@ fn scenario_claws_of_gix_witness_board_does_not_dead_end() {
 /// once `apply_interaction` succeeded (`auto_play.rs:214-250`), and the
 /// pending-cast `CancelCast` is offered to the AI only by
 /// `semantic_candidate_actions_with_probe`'s guarded push
-/// (`engine/src/ai_support/candidates.rs`, which requires `has_pending_cast` AND
-/// `allows_cancel_cast`; `candidate_actions_broad_with_probe`, which it calls,
-/// emits `CancelCast` only for Equipment/Vehicle/modal shapes absent from these
-/// boards). A dead-end satisfying only `allows_cancel_cast` therefore never
-/// becomes an applied action — it lands in `break_reason`, and a results-only
-/// assertion would miss it.
+/// (`engine/src/ai_support/candidates.rs`, which requires `allows_cancel_cast`
+/// — covering pending casts and pre-cost keyword-activation announcements
+/// alike, with keyword-state offers unreachable on these boards, which have no
+/// Equipment and no Vehicle — while `candidate_actions_broad_with_probe`,
+/// which it calls, emits `CancelCast` only for modal shapes likewise absent
+/// from these boards). A dead-end satisfying only `allows_cancel_cast`
+/// therefore never becomes an applied action — it lands in `break_reason`,
+/// and a results-only assertion would miss it.
 fn assert_no_fallback_cancel(run: &phase_ai::auto_play::AiActionsRun, what: &str) {
     use phase_ai::auto_play::AiActionsStop;
 
@@ -2445,5 +2675,104 @@ fn ai_tax_decision_counts_a_tapped_sick_tapless_mana_source() {
         !engine::game::mana_sources::activatable_mana_source_selections(runner.state(), P1)
             .is_empty(),
         "another legal mana source remains after paying the tax"
+    );
+}
+
+/// Both seats AI over the one shared Dandan pile: each seat acts and draws from
+/// it, and the session carries analysis for both seats.
+#[test]
+fn dandan_shared_pile_ai_pair_both_act_and_draw() {
+    use engine::game::deck_loading::{
+        load_deck_into_state, DeckEntry, DeckPayload, PlayerDeckPayload,
+    };
+    use engine::types::card::CardFace;
+    use engine::types::card_type::CardType;
+    use engine::types::format::FormatConfig;
+
+    let forests = || {
+        vec![DeckEntry {
+            card: CardFace {
+                name: "Forest".to_string(),
+                card_type: CardType {
+                    core_types: vec![CoreType::Land],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            count: 60,
+        }]
+    };
+    let mut scenario = GameScenario::new_with_format(FormatConfig::dandan(), 2, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    let mut runner = scenario.build();
+    load_deck_into_state(
+        runner.state_mut(),
+        &DeckPayload {
+            player: PlayerDeckPayload {
+                main_deck: forests(),
+                ..Default::default()
+            },
+            opponent: PlayerDeckPayload {
+                main_deck: forests(),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    );
+    let state = runner.state();
+    assert_eq!(state.deck_pools.len(), 1, "reach: one pool for the pile");
+    assert!(state.players[1].library.is_empty());
+    assert_eq!(state.library_of(P1).len(), 60);
+    assert_eq!(state.library_of(P0), state.library_of(P1));
+
+    let session = phase_ai::session::AiSession::arc_from_game(state);
+    assert!(
+        session.features.contains_key(&P0) && session.features.contains_key(&P1),
+        "reach: the session analyses both seats"
+    );
+    let start_turn = state.turn_number;
+    let pile_before = state.library_of(P0).len();
+    let mut actor = state.waiting_for.acting_players();
+
+    let ai_players = HashSet::from([P0, P1]);
+    let ai_configs = HashMap::from([
+        (P0, create_config(AiDifficulty::VeryHard, Platform::Native)),
+        (P1, create_config(AiDifficulty::VeryHard, Platform::Native)),
+    ]);
+    let mut ai_rng = SmallRng::seed_from_u64(42);
+    let run = run_ai_actions_bounded(
+        runner.state_mut(),
+        &ai_players,
+        &ai_configs,
+        &mut ai_rng,
+        &session,
+        400,
+    );
+
+    let mut acted = HashSet::new();
+    let mut drew: HashMap<PlayerId, usize> = HashMap::new();
+    for result in &run.results {
+        acted.extend(actor.iter().copied());
+        actor = result.state.waiting_for.acting_players();
+        for event in &result.events {
+            if let GameEvent::CardDrawn { player_id, .. } = event {
+                *drew.entry(*player_id).or_default() += 1;
+            }
+        }
+    }
+    let state = runner.state();
+    assert!(state.turn_number >= start_turn + 3, "the game advanced");
+    assert!(
+        acted.contains(&P0) && acted.contains(&P1),
+        "both seats acted: {acted:?}"
+    );
+    assert!(
+        drew.get(&P0).copied().unwrap_or(0) > 0 && drew.get(&P1).copied().unwrap_or(0) > 0,
+        "each seat drew from the pile: {drew:?}"
+    );
+    assert_eq!(
+        state.library_of(P0).len(),
+        pile_before - drew.values().sum::<usize>(),
+        "every draw came out of the one pile"
     );
 }

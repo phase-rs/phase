@@ -391,6 +391,7 @@ mod tests {
                 player_id: PlayerId(1),
                 source_amounts: vec![(bearer, 3)],
                 total_damage: 3,
+                source_incarnations: vec![],
             }],
         );
 

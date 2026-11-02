@@ -21,8 +21,8 @@ cargo check --release --bin card-data-validate
 echo "  [rust] parser combinator gate"
 ./scripts/check-parser-combinators.sh
 
-echo "  [rust] engine parser tests"
-PROPTEST_CASES="${PROPTEST_CASES:-4}" cargo test -p phase-engine --features proptest parser::oracle::tests
+echo "  [rust] parser tests"
+PROPTEST_CASES="${PROPTEST_CASES:-4}" cargo test -p phase-parser parser::oracle::tests
 
 echo "  [rust] phase-ai lib tests"
 cargo test -p phase-ai --lib

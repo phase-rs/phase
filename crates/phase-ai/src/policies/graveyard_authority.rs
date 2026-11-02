@@ -466,6 +466,10 @@ mod tests {
                 extra_cost: None,
                 enters_with_counter: None,
                 required_cast_keyword: None,
+                pool: engine::types::statics::GraveyardPermissionPool::OwnGraveyard,
+                cast_limit: engine::types::statics::PermissionCastLimit::Unlimited,
+                mana_spend_permission: None,
+                enters_modifications: Default::default(),
             })
             .affected(TargetFilter::Typed(TypedFilter::creature()))
         };
@@ -551,6 +555,10 @@ mod tests {
                 }),
                 enters_with_counter: None,
                 required_cast_keyword: None,
+                pool: engine::types::statics::GraveyardPermissionPool::OwnGraveyard,
+                cast_limit: engine::types::statics::PermissionCastLimit::Unlimited,
+                mana_spend_permission: None,
+                enters_modifications: Default::default(),
             })
             .affected(TargetFilter::Typed(TypedFilter::creature()))
         };

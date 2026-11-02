@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 import {
   isCustomFormatRulesShape,
   isFormatConfigShape,
-  rehydrateExperimentalDungeons,
 } from "../format-config-shape";
 import type { CustomFormatRules, FormatConfig } from "../types";
 
@@ -31,7 +30,6 @@ function builtInConfig(): FormatConfig {
     sideboard_policy: { type: "Forbidden" },
     default_deck_copy_limit: { type: "UpTo", data: 1 },
     allow_debug_actions: false,
-    allow_experimental_dungeons: false,
   };
 }
 
@@ -87,7 +85,6 @@ function customConfig(id = 0): FormatConfig {
     sideboard_policy: { type: "Limited", data: 15 },
     default_deck_copy_limit: { type: "UpTo", data: 4 },
     allow_debug_actions: false,
-    allow_experimental_dungeons: false,
     custom_rules: customRules(id),
   };
 }
@@ -391,36 +388,18 @@ describe("isCustomFormatRulesShape", () => {
   });
 });
 
-describe("rehydrateExperimentalDungeons", () => {
-  it("passes current payloads through by reference", () => {
-    const config = builtInConfig();
-    expect(rehydrateExperimentalDungeons(config)).toBe(config);
-  });
-
-  it("fills a missing flag with false", () => {
-    const { allow_experimental_dungeons: _dropped, ...legacy } =
-      builtInConfig();
-    expect(legacy).not.toHaveProperty("allow_experimental_dungeons");
-    const filled = rehydrateExperimentalDungeons(legacy);
-    expect(filled).toEqual(
-      expect.objectContaining({ allow_experimental_dungeons: false }),
-    );
-    // ...which is exactly what the shape guard needs to accept it.
-    expect(isFormatConfigShape(filled)).toBe(true);
-  });
-
-  it("resets a corrupt flag to false rather than passing it through", () => {
-    const filled = rehydrateExperimentalDungeons({
-      ...builtInConfig(),
-      allow_experimental_dungeons: "yes",
-    });
-    expect(filled).toEqual(
-      expect.objectContaining({ allow_experimental_dungeons: false }),
-    );
-  });
-
-  it("leaves non-records untouched", () => {
-    expect(rehydrateExperimentalDungeons(null)).toBeNull();
-    expect(rehydrateExperimentalDungeons(42)).toBe(42);
+describe("removed experimental-dungeons key", () => {
+  it("still validates a blob persisting the removed key", () => {
+    // Saves and broker frames written before the flag was deleted still
+    // carry it. The guard names required fields but never rejects unknown
+    // ones, so the stale key — true or false — must not fail validation.
+    for (const stale of [true, false]) {
+      expect(
+        isFormatConfigShape({
+          ...builtInConfig(),
+          allow_experimental_dungeons: stale,
+        }),
+      ).toBe(true);
+    }
   });
 });

@@ -1,10 +1,12 @@
 import { act } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { ActionRejection, EngineAdapter, GameEvent, GameState } from "../../adapter/types";
-import { actionRejectionError } from "../../adapter/types";
+import type { ActionRejection, EngineAdapter, GameEvent, PersistedGameState } from "../../adapter/types";
+import { actionRejectionError, persistedGameStateView } from "../../adapter/types";
 import { saveAuthoritativeGame, saveAuthoritativeGameStrict } from "../../services/gamePersistence";
 import { useAppNotificationStore } from "../../stores/appToastStore";
+import { usePreferencesStore } from "../../stores/preferencesStore";
+import { useUiStore } from "../../stores/uiStore";
 import { buildEngineAdapterMock } from "../../test/factories/engineAdapterFactory";
 import {
   buildGameState,
@@ -200,6 +202,64 @@ describe("gameStore", () => {
     expect(adapter.submitAction).toHaveBeenCalledWith({ type: "PassPriority" }, 0);
   });
 
+  describe("activation payment preference", () => {
+    const activation = {
+      type: "ActivateAbility",
+      data: { source_id: 12, ability_index: 1 },
+    } as const;
+
+    beforeEach(() => {
+      act(() => {
+        usePreferencesStore.setState({ spellPaymentMode: "auto" });
+        useUiStore.setState({ manualManaOverride: false });
+      });
+    });
+
+    it("submits an activation under a saved manual preference as Manual", async () => {
+      const adapter = buildEngineAdapterMock(buildGameState());
+      await act(() => useGameStore.getState().initGame("test-id", adapter));
+      adapter.submitAction.mockResolvedValue({ events: [] });
+      act(() => usePreferencesStore.setState({ spellPaymentMode: "manual" }));
+
+      await act(() => useGameStore.getState().dispatch(activation));
+
+      expect(adapter.submitAction).toHaveBeenCalledWith(
+        {
+          type: "ActivateAbility",
+          data: { source_id: 12, ability_index: 1, payment_mode: { type: "Manual" } },
+        },
+        0,
+      );
+    });
+
+    it("submits an activation as Manual when only the per-game override is on", async () => {
+      const adapter = buildEngineAdapterMock(buildGameState());
+      await act(() => useGameStore.getState().initGame("test-id", adapter));
+      adapter.submitAction.mockResolvedValue({ events: [] });
+      act(() => useUiStore.setState({ manualManaOverride: true }));
+
+      await act(() => useGameStore.getState().dispatch(activation));
+
+      expect(adapter.submitAction).toHaveBeenCalledWith(
+        {
+          type: "ActivateAbility",
+          data: { source_id: 12, ability_index: 1, payment_mode: { type: "Manual" } },
+        },
+        0,
+      );
+    });
+
+    it("submits the offered activation unchanged under a saved auto preference", async () => {
+      const adapter = buildEngineAdapterMock(buildGameState());
+      await act(() => useGameStore.getState().initGame("test-id", adapter));
+      adapter.submitAction.mockResolvedValue({ events: [] });
+
+      await act(() => useGameStore.getState().dispatch(activation));
+
+      expect(adapter.submitAction).toHaveBeenCalledWith(activation, 0);
+    });
+  });
+
   it("surfaces a direct structured rejection at the first rendered related object", async () => {
     const state = buildGameState();
     const adapter = buildEngineAdapterMock(state);
@@ -249,18 +309,54 @@ describe("gameStore", () => {
     expect(useAppNotificationStore.getState().notification).toBeNull();
   });
 
-  it("dispatch pushes to stateHistory for undoable actions", async () => {
+  it("dispatch pushes the trusted pre-action envelope to stateHistory", async () => {
     const state1 = buildGameState({ turn_number: 1 });
     const state2 = buildGameState({ turn_number: 2 });
-    const adapter = buildEngineAdapterMock(state1);
+    // Rendered screen states are viewer projections the restore ingress
+    // rejects — the checkpoint must be the engine-authored envelope captured
+    // BEFORE the action submits, never the store's own gameState.
+    const envelope = { state: state1, precast_shortcut_runtime: null };
+    const exportPersistenceState = vi.fn().mockResolvedValue(JSON.stringify(envelope));
+    const adapter = buildEngineAdapterMock(state1, { exportPersistenceState });
 
     await act(() => useGameStore.getState().initGame("test-id", adapter));
     adapter.getState.mockResolvedValue(state2);
 
     await act(() => useGameStore.getState().dispatch({ type: "PassPriority" }));
 
+    expect(exportPersistenceState).toHaveBeenCalledOnce();
+    expect(exportPersistenceState.mock.invocationCallOrder[0]).toBeLessThan(
+      adapter.submitAction.mock.invocationCallOrder[0],
+    );
     expect(useGameStore.getState().stateHistory).toHaveLength(1);
-    expect(useGameStore.getState().stateHistory[0]).toEqual(state1);
+    expect(useGameStore.getState().stateHistory[0]).toEqual(envelope);
+  });
+
+  it("dispatch drops the checkpoint when the session turns over mid-flight", async () => {
+    const state1 = buildGameState({ turn_number: 1 });
+    const state2 = buildGameState({ turn_number: 2 });
+    let resolveExport!: (json: string) => void;
+    const exportPromise = new Promise<string>((resolve) => {
+      resolveExport = resolve;
+    });
+    const adapter = buildEngineAdapterMock(state1, {
+      exportPersistenceState: vi.fn().mockReturnValue(exportPromise),
+    });
+
+    await act(() => useGameStore.getState().initGame("test-id", adapter));
+    adapter.getState.mockResolvedValue(state2);
+
+    const inFlight = useGameStore.getState().dispatch({ type: "PassPriority" });
+    // Session turns over mid-capture: replacement adapter and generation.
+    const replacement = buildEngineAdapterMock(state2);
+    act(() => useGameStore.setState({ adapter: replacement, gameSessionGeneration: 999 }));
+
+    await act(async () => {
+      resolveExport(JSON.stringify({ state: state1, precast_shortcut_runtime: null }));
+      await inFlight;
+    });
+
+    expect(useGameStore.getState().stateHistory).toHaveLength(0);
   });
 
   it("dispatch does not push to stateHistory when the stack is non-empty", async () => {
@@ -280,7 +376,8 @@ describe("gameStore", () => {
     });
     const state1 = buildGameState({ turn_number: 1, stack: [triggerOnStack] });
     const state2 = buildGameState({ turn_number: 2 });
-    const adapter = buildEngineAdapterMock(state1);
+    const exportPersistenceState = vi.fn().mockResolvedValue("{}");
+    const adapter = buildEngineAdapterMock(state1, { exportPersistenceState });
 
     await act(() => useGameStore.getState().initGame("test-id", adapter));
     adapter.getState.mockResolvedValue(state2);
@@ -288,12 +385,14 @@ describe("gameStore", () => {
     await act(() => useGameStore.getState().dispatch({ type: "PassPriority" }));
 
     expect(useGameStore.getState().stateHistory).toHaveLength(0);
+    expect(exportPersistenceState).not.toHaveBeenCalled();
   });
 
   it("dispatch does not push to stateHistory for revealed-info actions", async () => {
     const state1 = buildGameState();
     const state2 = buildGameState({ turn_number: 2 });
-    const adapter = buildEngineAdapterMock(state1);
+    const exportPersistenceState = vi.fn().mockResolvedValue("{}");
+    const adapter = buildEngineAdapterMock(state1, { exportPersistenceState });
 
     await act(() => useGameStore.getState().initGame("test-id", adapter));
     adapter.getState.mockResolvedValue(state2);
@@ -304,19 +403,23 @@ describe("gameStore", () => {
     );
 
     expect(useGameStore.getState().stateHistory).toHaveLength(0);
+    expect(exportPersistenceState).not.toHaveBeenCalled();
   });
 
   it("undo restores previous state from stateHistory", async () => {
     const state1 = buildGameState({ turn_number: 1 });
     const state2 = buildGameState({ turn_number: 2 });
-    const adapter = buildEngineAdapterMock(state1);
+    const envelope = { state: state1, precast_shortcut_runtime: null };
+    const adapter = buildEngineAdapterMock(state1, {
+      exportPersistenceState: vi.fn().mockResolvedValue(JSON.stringify(envelope)),
+    });
     // Model a real engine: `restoreState` actually rewinds it, so the read that
     // follows returns the restored state. `undo` commits the snapshot's own
     // post-restore state (post-restore, the engine is the source of truth and
     // both halves of the pair must come from it), so a mock whose reads ignored
     // `restoreState` would be lying about the engine.
-    adapter.restoreState.mockImplementation((restored: GameState) => {
-      adapter.getState.mockResolvedValue(restored);
+    adapter.restoreState.mockImplementation((restored: PersistedGameState) => {
+      adapter.getState.mockResolvedValue(persistedGameStateView(restored));
     });
 
     await act(() => useGameStore.getState().initGame("test-id", adapter));
@@ -331,13 +434,16 @@ describe("gameStore", () => {
     expect(store.gameState?.turn_number).toBe(1);
     expect(store.stateHistory).toHaveLength(0);
     expect(store.events).toEqual([]);
-    expect(adapter.restoreState).toHaveBeenCalledWith(state1);
+    expect(adapter.restoreState).toHaveBeenCalledWith(envelope);
   });
 
   it("undo calls adapter.restoreState with previous state", async () => {
     const state1 = buildGameState({ turn_number: 1 });
     const state2 = buildGameState({ turn_number: 2 });
-    const adapter = buildEngineAdapterMock(state1);
+    const envelope = { state: state1, precast_shortcut_runtime: null };
+    const adapter = buildEngineAdapterMock(state1, {
+      exportPersistenceState: vi.fn().mockResolvedValue(JSON.stringify(envelope)),
+    });
 
     await act(() => useGameStore.getState().initGame("test-id", adapter));
     adapter.getState.mockResolvedValue(state2);
@@ -347,7 +453,7 @@ describe("gameStore", () => {
     act(() => useGameStore.getState().undo());
 
     expect(adapter.restoreState).toHaveBeenCalledOnce();
-    expect(adapter.restoreState).toHaveBeenCalledWith(state1);
+    expect(adapter.restoreState).toHaveBeenCalledWith(envelope);
   });
 
   it("undo with no adapter does nothing", () => {
@@ -376,7 +482,11 @@ describe("gameStore", () => {
     const states = Array.from({ length: 7 }, (_, i) =>
       buildGameState({ turn_number: i }),
     );
-    const adapter = buildEngineAdapterMock(states[0]);
+    const adapter = buildEngineAdapterMock(states[0], {
+      exportPersistenceState: vi.fn().mockResolvedValue(
+        JSON.stringify({ state: states[0], precast_shortcut_runtime: null }),
+      ),
+    });
 
     await act(() => useGameStore.getState().initGame("test-id", adapter));
 
@@ -396,7 +506,8 @@ describe("gameStore", () => {
     // suppressed — rewinding a single client's view would desync.
     const state1 = buildGameState({ turn_number: 1 });
     const state2 = buildGameState({ turn_number: 2 });
-    const adapter = buildEngineAdapterMock(state1);
+    const exportPersistenceState = vi.fn().mockResolvedValue("{}");
+    const adapter = buildEngineAdapterMock(state1, { exportPersistenceState });
 
     await act(() => useGameStore.getState().initGame("test-id", adapter));
     act(() => useGameStore.getState().setGameMode("online"));
@@ -405,6 +516,7 @@ describe("gameStore", () => {
     await act(() => useGameStore.getState().dispatch({ type: "PassPriority" }));
 
     expect(useGameStore.getState().stateHistory).toHaveLength(0);
+    expect(exportPersistenceState).not.toHaveBeenCalled();
   });
 
   it("undo is a no-op in multiplayer even if stateHistory is non-empty", async () => {

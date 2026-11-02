@@ -90,6 +90,7 @@ fn eternal_wanderer_plus_one_returns_at_exiled_owners_next_end_step() {
         .act(GameAction::ActivateAbility {
             source_id: wanderer,
             ability_index: plus_one_index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("+1 activation must be accepted");
 

@@ -163,6 +163,92 @@ describe("turn-control PayCost queueing (#6431)", () => {
     vi.useFakeTimers();
   });
 
+  it.each([false, true])("clears both preference lists across fresh snapshots (game action already queued: %s)", async (gameActionInFlight) => {
+    const clearTriggers: GameAction = { type: "SetMayTriggerAutoChoice", data: { op: { type: "ClearAll" } } };
+    const clearReplacements: GameAction = { type: "SetReplacementAutoChoice", data: { selector: null } };
+    let state = buildGameState({
+      may_trigger_auto_choices: [{
+        selector: { type: "ExactInstance", data: { player: 0, source_id: 50, origin: { type: "Printed", trigger_index: 0 } } },
+        choice: { type: "Accept" },
+      }],
+      replacement_auto_choices: [{
+        id: `r${"a".repeat(64)}`,
+        key: { player: 0, event: "LoseMana", kind: { type: "Order" }, candidates: [] },
+        choice: { type: "Order", data: { order: [0, 1] } },
+        descriptions: ["Convert to red", "Keep mana"],
+      }],
+    });
+    const legal = buildLegalActionsResult({ actions: [] });
+    const adapter: EngineAdapter = {
+      ...baseAdapter(),
+      submitAction: vi.fn(async (action: GameAction): Promise<SubmitResult> => {
+        if (action.type === "SetMayTriggerAutoChoice") state = { ...state, may_trigger_auto_choices: [] };
+        if (action.type === "SetReplacementAutoChoice") state = { ...state, replacement_auto_choices: [] };
+        return { events: [], log_entries: [] };
+      }),
+      getState: vi.fn(async () => state),
+      getLegalActions: vi.fn(async () => legal),
+      getSnapshot: vi.fn(async (): Promise<EngineSnapshot> => ({
+        state: { ...state, waiting_for: buildPriorityWaitingFor() },
+        legalResult: legal,
+        seq: nextSnapshotSeq(),
+      })),
+    };
+    seedStore(adapter);
+    useGameStore.setState({ gameState: state, waitingFor: state.waiting_for, legalActions: [] });
+    expect(useGameStore.getState().gameState?.may_trigger_auto_choices).toHaveLength(1);
+    expect(useGameStore.getState().gameState?.replacement_auto_choices).toHaveLength(1);
+
+    // These immediate dispatches mirror Clear all while the mutex is held.
+    // Every snapshot supplies a fresh prompt and omits preference legal actions.
+    const inFlight = gameActionInFlight ? dispatchAction({ type: "PassPriority" }, 0) : Promise.resolve();
+    const triggerDispatch = dispatchAction(clearTriggers, 0);
+    const replacementDispatch = dispatchAction(clearReplacements, 0);
+    await Promise.all([inFlight, triggerDispatch, replacementDispatch]);
+
+    expect(adapter.submitAction).toHaveBeenCalledWith(clearTriggers, 0);
+    expect(adapter.submitAction).toHaveBeenCalledWith(clearReplacements, 0);
+    expect(adapter.submitAction).toHaveBeenCalledTimes(gameActionInFlight ? 3 : 2);
+    expect(useGameStore.getState().gameState?.may_trigger_auto_choices).toEqual([]);
+    expect(useGameStore.getState().gameState?.replacement_auto_choices).toEqual([]);
+  });
+
+  it("removes the two selected preferences when rapid clicks queue across snapshots", async () => {
+    const records = ["A", "B", "C"].map((description, source) => ({
+      id: `r${source.toString(16).padStart(64, "0")}`,
+      key: { player: 0, event: "LoseMana", kind: { type: "Order" as const }, candidates: [{ source }] },
+      choice: { type: "Order" as const, data: { order: [0] } },
+      descriptions: [description],
+    }));
+    let state = buildGameState({ replacement_auto_choices: records });
+    const legal = buildLegalActionsResult({ actions: [] });
+    const adapter: EngineAdapter = {
+      ...baseAdapter(),
+      submitAction: vi.fn(async (action: GameAction): Promise<SubmitResult> => {
+        if (action.type === "SetReplacementAutoChoice") {
+          state = { ...state, replacement_auto_choices: state.replacement_auto_choices?.filter((record) => record.id !== action.data.selector) };
+        }
+        return { events: [], log_entries: [] };
+      }),
+      getState: vi.fn(async () => state),
+      getLegalActions: vi.fn(async () => legal),
+      getSnapshot: vi.fn(async (): Promise<EngineSnapshot> => ({
+        state: { ...state, waiting_for: buildPriorityWaitingFor() },
+        legalResult: legal,
+        seq: nextSnapshotSeq(),
+      })),
+    };
+    seedStore(adapter);
+    useGameStore.setState({ gameState: state, waitingFor: state.waiting_for, legalActions: [] });
+    const first = dispatchAction({ type: "SetReplacementAutoChoice", data: { selector: records[0].id } }, 0);
+    const second = dispatchAction({ type: "SetReplacementAutoChoice", data: { selector: records[1].id } }, 0);
+    await Promise.all([first, second]);
+    expect(adapter.submitAction).toHaveBeenCalledWith({ type: "SetReplacementAutoChoice", data: { selector: records[0].id } }, 0);
+    expect(adapter.submitAction).toHaveBeenCalledWith({ type: "SetReplacementAutoChoice", data: { selector: records[1].id } }, 0);
+    expect(adapter.submitAction).toHaveBeenCalledTimes(2);
+    expect(useGameStore.getState().gameState?.replacement_auto_choices).toEqual([records[2]]);
+  });
+
   it("submits a queued sacrifice-cost response instead of dropping it as stale", async () => {
     const engine = fakeEngine();
     const adapter: EngineAdapter = {

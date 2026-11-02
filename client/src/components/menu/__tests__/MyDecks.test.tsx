@@ -5,6 +5,8 @@ import userEvent from "@testing-library/user-event";
 import { MyDecks } from "../MyDecks";
 import {
   ACTIVE_DECK_KEY,
+  DECK_FOLDERS_KEY,
+  DECK_METADATA_KEY,
   RANDOM_DECK_SELECTION,
   createFolder,
   getDeckMeta,
@@ -20,6 +22,8 @@ import {
   STORAGE_KEY_PREFIX,
 } from "../../../constants/storage";
 import type { ParsedDeck } from "../../../services/deckParser";
+import type { AiDeckCandidate } from "../../../services/aiDeckCatalog";
+import type { CommanderBracket } from "../../../types/bracket";
 import {
   awaitSavedDeckLibraryIdle,
   installFifoWebLocks,
@@ -29,6 +33,17 @@ import {
 } from "../../../test/helpers/webLocks";
 import { setSavedDeckTxnLockWaitForTests, withSavedDeckLibrary } from "../../../services/savedDeckTransaction";
 import { useAppNotificationStore } from "../../../stores/appToastStore";
+import { AI_DECK_RANDOM, usePreferencesStore } from "../../../stores/preferencesStore";
+import { savedDeckCatalogId } from "../../../services/deckCatalog";
+import {
+  PRECON_POOL_GROUP,
+  UNFILED_POOL_GROUP,
+  emptyPoolSelection,
+  feedPoolGroup,
+  folderPoolGroup,
+  setPoolDeckIncluded,
+  setPoolGroupIncluded,
+} from "../../../services/randomPoolSelection";
 import { evaluateDeckCompatibilityBatch } from "../../../services/deckCompatibility";
 import { setCachedFeed } from "../../../services/feedPersistence";
 import { loadPreconDeckMap, useDecks } from "../../../hooks/useDecks";
@@ -98,6 +113,31 @@ function compatibleBatch(decks: Array<{ name: string }>) {
   }]));
 }
 
+function legalCandidate(name: string, bracket: CommanderBracket | null): AiDeckCandidate {
+  return {
+    id: savedDeckCatalogId(name),
+    name,
+    source: { type: "saved" },
+    deck: { main: [], sideboard: [] } as ParsedDeck,
+    coveragePct: null,
+    archetype: null,
+    bracket,
+  };
+}
+
+function preconCandidate(deckId: string, name: string): AiDeckCandidate {
+  return {
+    id: `precon:${deckId}`,
+    name,
+    source: { type: "precon", deckId, code: "TST" },
+    deck: { main: [], sideboard: [] } as ParsedDeck,
+    coveragePct: null,
+    archetype: null,
+    bracket: null,
+    knownFormat: "Commander",
+  };
+}
+
 describe("MyDecks", () => {
   beforeEach(() => {
     localStorage.clear();
@@ -131,6 +171,32 @@ describe("MyDecks", () => {
     cleanup();
     useConnectivityStore.setState({ forcedOffline: false, browserOnline: true });
     vi.unstubAllGlobals();
+  });
+
+  it("shows a saved manual bracket only for Commander-family decks", async () => {
+    localStorage.setItem(STORAGE_KEY_PREFIX + "Standard Bracket", JSON.stringify({
+      main: [{ name: "Island", count: 60 }],
+      sideboard: [],
+      format: "Standard",
+      bracket: 3,
+    }));
+    localStorage.setItem(STORAGE_KEY_PREFIX + "Commander Bracket", JSON.stringify({
+      main: [{ name: "Island", count: 99 }],
+      sideboard: [],
+      commander: ["Test Commander"],
+      format: "Commander",
+      bracket: 3,
+    }));
+    vi.mocked(evaluateDeckCompatibilityBatch).mockResolvedValue({});
+
+    render(<MyDecks mode="manage" activeDeckName={null} />);
+
+    const standardTile = (await screen.findByText("Standard Bracket")).closest<HTMLElement>("[role='button']");
+    const commanderTile = (await screen.findByText("Commander Bracket")).closest<HTMLElement>("[role='button']");
+    expect(standardTile).not.toBeNull();
+    expect(commanderTile).not.toBeNull();
+    expect(within(standardTile!).queryByLabelText("Declared bracket: B3 Upgraded")).not.toBeInTheDocument();
+    expect(within(commanderTile!).getByLabelText("Declared bracket: B3 Upgraded")).toBeInTheDocument();
   });
 
   it("keeps cached subscriptions usable while offline and re-enables refresh on reconnect", async () => {
@@ -1090,6 +1156,229 @@ describe("MyDecks", () => {
     expect(onSelectDeck).not.toHaveBeenCalledWith("User Pauper");
   });
 
+  it("falls back to a legal deck when the pool selection holds only an incompatible one", async () => {
+    saveDeck("Known Standard", { main: [{ name: "Island", count: 60 }], sideboard: [] });
+    saveDeck("User Pauper", { main: [{ name: "Lightning Bolt", count: 60 }], sideboard: [] });
+    saveDeckOrigins({ "Known Standard": "mtggoldfish-standard" });
+    vi.mocked(evaluateDeckCompatibilityBatch).mockResolvedValue({
+      "User Pauper": {
+        standard: { compatible: false, reasons: [] },
+        commander: { compatible: false, reasons: [] },
+        bo3_ready: false,
+        unknown_cards: [],
+        selected_format_compatible: false,
+        selected_format_reasons: ["Not Standard legal"],
+        color_identity: ["R"],
+        color_distribution: [],
+      },
+    });
+    // The legal feed mirror is visible but unselected; only the unchecked
+    // user deck is selected. The first click must discover the mismatch and
+    // still serve the legal deck.
+    const prefs = usePreferencesStore.getState();
+    const restoreSelection = prefs.humanPoolSelection;
+    act(() => {
+      usePreferencesStore.setState({
+        humanPoolSelection: setPoolDeckIncluded(
+          {
+            ...emptyPoolSelection(),
+            excludedGroups: [UNFILED_POOL_GROUP, feedPoolGroup("mtggoldfish-standard")],
+          },
+          savedDeckCatalogId("User Pauper"),
+          true,
+        ),
+      });
+    });
+    try {
+      const onSelectDeck = vi.fn();
+      render(
+        <MyDecks
+          mode="select"
+          selectedFormat="Standard"
+          activeDeckName={null}
+          onSelectDeck={onSelectDeck}
+        />,
+      );
+
+      expect(await screen.findByText("Known Standard")).toBeInTheDocument();
+      await userEvent.click(screen.getByRole("button", { name: "Random Deck" }));
+
+      await waitFor(() => expect(onSelectDeck).toHaveBeenCalledWith("Known Standard"));
+      expect(onSelectDeck).not.toHaveBeenCalledWith("User Pauper");
+    } finally {
+      act(() => {
+        usePreferencesStore.setState({ humanPoolSelection: restoreSelection });
+      });
+    }
+  });
+
+  it("keeps a legal curated user deck instead of falling back to an excluded known-format deck", async () => {
+    saveDeck("Known Standard", { main: [{ name: "Island", count: 60 }], sideboard: [] });
+    saveDeck("User Standard", { main: [{ name: "Plains", count: 60 }], sideboard: [] });
+    saveDeckOrigins({ "Known Standard": "mtggoldfish-standard" });
+    vi.mocked(evaluateDeckCompatibilityBatch).mockImplementation(async (decks) => compatibleBatch(decks));
+    // The known-format feed mirror is visible but excluded; only the
+    // compatibility-confirmed user deck is selected. Tier 1 is fully legal,
+    // so curation must hold — no fallback to the tier-0 mirror.
+    const prefs = usePreferencesStore.getState();
+    const restoreSelection = prefs.humanPoolSelection;
+    act(() => {
+      usePreferencesStore.setState({
+        humanPoolSelection: setPoolDeckIncluded(
+          {
+            ...emptyPoolSelection(),
+            excludedGroups: [UNFILED_POOL_GROUP, feedPoolGroup("mtggoldfish-standard")],
+          },
+          savedDeckCatalogId("User Standard"),
+          true,
+        ),
+      });
+    });
+    try {
+      const onSelectDeck = vi.fn();
+      render(
+        <MyDecks
+          mode="select"
+          selectedFormat="Standard"
+          activeDeckName={null}
+          onSelectDeck={onSelectDeck}
+        />,
+      );
+
+      expect(await screen.findByText("Known Standard")).toBeInTheDocument();
+      await userEvent.click(screen.getByRole("button", { name: "Random Deck" }));
+
+      await waitFor(() => expect(onSelectDeck).toHaveBeenCalledWith("User Standard"));
+      expect(onSelectDeck).not.toHaveBeenCalledWith("Known Standard");
+    } finally {
+      act(() => {
+        usePreferencesStore.setState({ humanPoolSelection: restoreSelection });
+      });
+    }
+  });
+
+  it("clears a search-hidden explicit include when its folder is unselected", async () => {
+    saveDeck("Alpha Aggro", { main: [{ name: "Island", count: 60 }], sideboard: [] });
+    saveDeck("Beta Beatdown", { main: [{ name: "Mountain", count: 60 }], sideboard: [] });
+    localStorage.setItem(
+      DECK_FOLDERS_KEY,
+      JSON.stringify([{ id: "f1", name: "Battlebox", order: 0 }]),
+    );
+    localStorage.setItem(
+      DECK_METADATA_KEY,
+      JSON.stringify({
+        "Alpha Aggro": { addedAt: 1, folderId: "f1" },
+        "Beta Beatdown": { addedAt: 2, folderId: "f1" },
+      }),
+    );
+    vi.mocked(evaluateDeckCompatibilityBatch).mockImplementation(async (decks) => compatibleBatch(decks));
+    // Beta carries a pre-existing explicit include (rescued before searching).
+    const prefs = usePreferencesStore.getState();
+    const restoreSelection = prefs.humanPoolSelection;
+    act(() => {
+      usePreferencesStore.setState({
+        humanPoolSelection: setPoolDeckIncluded(
+          emptyPoolSelection(),
+          savedDeckCatalogId("Beta Beatdown"),
+          true,
+        ),
+      });
+    });
+    try {
+      render(
+        <MyDecks
+          mode="select"
+          selectedFormat="Standard"
+          activeDeckName={null}
+          onSelectDeck={vi.fn()}
+        />,
+      );
+
+      await screen.findByText("Alpha Aggro");
+      await screen.findByText("Beta Beatdown");
+      await userEvent.type(screen.getByPlaceholderText(/Search decks/), "alpha");
+      expect(screen.queryByText("Beta Beatdown")).not.toBeInTheDocument();
+
+      await userEvent.click(screen.getByRole("button", { name: /Your random pool/ }));
+      await userEvent.click(screen.getByRole("checkbox", { name: "Battlebox" }));
+
+      const selection = usePreferencesStore.getState().humanPoolSelection;
+      expect(selection.excludedGroups).toEqual([folderPoolGroup("f1")]);
+      expect(selection.includedDecks).toEqual([]);
+    } finally {
+      act(() => {
+        usePreferencesStore.setState({ humanPoolSelection: restoreSelection });
+      });
+    }
+  });
+
+  it("drops a deck moved to an excluded folder by a storage event from the random pool", async () => {
+    saveDeck("Mover", { main: [{ name: "Island", count: 60 }], sideboard: [] });
+    saveDeck("Stayer", { main: [{ name: "Mountain", count: 60 }], sideboard: [] });
+    localStorage.setItem(
+      DECK_FOLDERS_KEY,
+      JSON.stringify([
+        { id: "f1", name: "Kept", order: 0 },
+        { id: "f2", name: "Cut", order: 1 },
+      ]),
+    );
+    localStorage.setItem(
+      DECK_METADATA_KEY,
+      JSON.stringify({
+        Mover: { addedAt: 1, folderId: "f1" },
+        Stayer: { addedAt: 2, folderId: "f1" },
+      }),
+    );
+    vi.mocked(evaluateDeckCompatibilityBatch).mockImplementation(async (decks) => compatibleBatch(decks));
+    // Both decks start included; Stayer never moves, so no fallback can mask
+    // a stale membership memo.
+    const prefs = usePreferencesStore.getState();
+    const restoreSelection = prefs.humanPoolSelection;
+    act(() => {
+      usePreferencesStore.setState({
+        humanPoolSelection: { ...emptyPoolSelection(), excludedGroups: [folderPoolGroup("f2")] },
+      });
+    });
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
+    try {
+      const onSelectDeck = vi.fn();
+      render(
+        <MyDecks
+          mode="select"
+          selectedFormat="Standard"
+          activeDeckName={null}
+          onSelectDeck={onSelectDeck}
+        />,
+      );
+
+      await screen.findByText("Mover");
+      await screen.findByText("Stayer");
+
+      // Another tab moves Mover into the excluded folder: same catalog, same
+      // selection, only the folder assignment changes.
+      localStorage.setItem(
+        DECK_METADATA_KEY,
+        JSON.stringify({
+          Mover: { addedAt: 1, folderId: "f2" },
+          Stayer: { addedAt: 2, folderId: "f1" },
+        }),
+      );
+      act(() => {
+        window.dispatchEvent(new Event("storage"));
+      });
+      await screen.findByRole("button", { name: /Your random pool 1 of 2/ });
+
+      await userEvent.click(screen.getByRole("button", { name: "Random Deck" }));
+      await waitFor(() => expect(onSelectDeck).toHaveBeenCalledWith("Stayer"));
+      expect(onSelectDeck).not.toHaveBeenCalledWith("Mover");
+    } finally {
+      randomSpy.mockRestore();
+      act(() => {
+        usePreferencesStore.setState({ humanPoolSelection: restoreSelection });
+      });
+    }
+  });
+
   it("can defer random selection without materializing a concrete deck", async () => {
     saveDeck("Known Standard", { main: [{ name: "Island", count: 60 }], sideboard: [] });
     const onSelectDeck = vi.fn();
@@ -1112,6 +1401,292 @@ describe("MyDecks", () => {
       expect.any(Array),
       expect.objectContaining({ summaryOnly: true }),
     );
+  });
+
+  it("restricts the human pool preview by cedhMode even when every seat is Medium, ignoring search", async () => {
+    saveDeck("Bracket Two", { main: [{ name: "Island", count: 99 }], sideboard: [], format: "Commander" } as ParsedDeck);
+    saveDeck("Bracket Five", { main: [{ name: "Swamp", count: 99 }], sideboard: [], format: "Commander" } as ParsedDeck);
+    vi.mocked(evaluateDeckCompatibilityBatch).mockImplementation(async (decks) => compatibleBatch(decks));
+    const twoId = savedDeckCatalogId("Bracket Two");
+    const fiveId = savedDeckCatalogId("Bracket Five");
+    // cEDH is table-wide: the persisted seats keep their remembered Medium
+    // difficulty while the toggle restricts the draw to bracket 5.
+    const prefs = usePreferencesStore.getState();
+    const restore = {
+      aiSeats: prefs.aiSeats,
+      cedhMode: prefs.cedhMode,
+      aiBracketFilter: prefs.aiBracketFilter,
+      humanPoolSelection: prefs.humanPoolSelection,
+    };
+    act(() => {
+      usePreferencesStore.setState({
+        aiSeats: [{ difficulty: "Medium", deckId: AI_DECK_RANDOM }],
+        cedhMode: true,
+        aiBracketFilter: [],
+        // The simulated legal catalog holds only the two saved decks, so the
+        // bundled precon demos never enter the deferred tree.
+        humanPoolSelection: setPoolDeckIncluded(
+          setPoolGroupIncluded(emptyPoolSelection(), UNFILED_POOL_GROUP, [twoId, fiveId], false),
+          twoId,
+          true,
+        ),
+      });
+    });
+    try {
+      render(
+        <MyDecks
+          mode="select"
+          selectedFormat="Commander"
+          activeDeckName={null}
+          onSelectDeck={vi.fn()}
+          randomSelectionMode="defer"
+          aiCatalog={{
+            candidates: [legalCandidate("Bracket Two", 2), legalCandidate("Bracket Five", 5)],
+            allCandidates: [legalCandidate("Bracket Two", 2), legalCandidate("Bracket Five", 5)],
+          }}
+        />,
+      );
+
+      await screen.findByText("Bracket Two");
+      await screen.findByText("Bracket Five");
+      expect(screen.getByRole("button", { name: /Your random pool 1 of 2.*0 playable/ })).toBeInTheDocument();
+      // Both the tree warning and the seat-adjacent banner fire: the lone
+      // bracket-2 pick cannot survive the cEDH bracket-5 draw base.
+      expect(screen.getAllByText(/None of the 1 selected/)).toHaveLength(2);
+      expect(within(screen.getByRole("status")).getByText(/your random deck/)).toBeInTheDocument();
+
+      // Both legal decks are in the pool universe before the search …
+      await userEvent.click(screen.getByRole("button", { name: /Your random pool/ }));
+      await userEvent.click(screen.getByRole("button", { name: /Unfiled 1 of 2/ }));
+      expect(screen.getByRole("checkbox", { name: "Bracket Two" })).toBeInTheDocument();
+      expect(screen.getByRole("checkbox", { name: "Bracket Five" })).toBeInTheDocument();
+
+      // … and searching narrows only the tiles: the deferred pool still
+      // resolves from the full legal catalog, so the warning to the real
+      // bracket-5 base is retained instead of collapsing onto the subset.
+      await userEvent.type(screen.getByPlaceholderText(/Search decks/), "Bracket Two");
+      expect(screen.getByRole("button", { name: "Bracket Two 99 cards" })).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Bracket Five 99 cards" })).not.toBeInTheDocument();
+      expect(screen.getByRole("checkbox", { name: "Bracket Five" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /Your random pool 1 of 2.*0 playable/ })).toBeInTheDocument();
+      expect(screen.getAllByText(/None of the 1 selected/)).toHaveLength(2);
+    } finally {
+      act(() => {
+        usePreferencesStore.setState(restore);
+      });
+    }
+  });
+
+  it("warns zero selected when the only selected deck is absent from the legal catalog", async () => {
+    saveDeck("Pauper Deck", { main: [{ name: "Lightning Bolt", count: 60 }], sideboard: [] });
+    saveDeck("Standard Deck", { main: [{ name: "Island", count: 60 }], sideboard: [] });
+    // Only the Standard deck has scanned: the Pauper deck stays visible (the
+    // display retains unscanned user decks) but the completed legal catalog
+    // finished without it, so game start cannot draw it.
+    vi.mocked(evaluateDeckCompatibilityBatch).mockImplementation(async (decks) =>
+      compatibleBatch(decks.filter((deck) => deck.name === "Standard Deck")),
+    );
+    const pauperId = savedDeckCatalogId("Pauper Deck");
+    const standardId = savedDeckCatalogId("Standard Deck");
+    const prefs = usePreferencesStore.getState();
+    const restoreSelection = prefs.humanPoolSelection;
+    act(() => {
+      usePreferencesStore.setState({
+        humanPoolSelection: setPoolDeckIncluded(
+          setPoolGroupIncluded(emptyPoolSelection(), UNFILED_POOL_GROUP, [pauperId, standardId], false),
+          pauperId,
+          true,
+        ),
+      });
+    });
+    try {
+      render(
+        <MyDecks
+          mode="select"
+          selectedFormat="Standard"
+          activeDeckName={null}
+          onSelectDeck={vi.fn()}
+          randomSelectionMode="defer"
+          aiCatalog={{
+            candidates: [legalCandidate("Standard Deck", null)],
+            allCandidates: [legalCandidate("Pauper Deck", null), legalCandidate("Standard Deck", null)],
+          }}
+        />,
+      );
+
+      // The display universe is untouched: both tiles still show.
+      await screen.findByText("Pauper Deck");
+      await screen.findByText("Standard Deck");
+      // But the deferred preview counts the legal universe, where the
+      // selection matches nothing: the zero-selection fallback warning fires.
+      expect(screen.getByRole("button", { name: /Your random pool 0 of 1/ })).toBeInTheDocument();
+      expect(screen.getByText(/Everything is excluded/)).toBeInTheDocument();
+    } finally {
+      act(() => {
+        usePreferencesStore.setState({ humanPoolSelection: restoreSelection });
+      });
+    }
+  });
+
+  it("clears a hidden cross-format override when its folder is unselected", async () => {
+    saveDeck("Standard Deck", { main: [{ name: "Island", count: 60 }], sideboard: [] });
+    saveDeck("Commander Deck", { main: [{ name: "Sol Ring", count: 60 }], sideboard: [] });
+    const commanderId = savedDeckCatalogId("Commander Deck");
+    const prefs = usePreferencesStore.getState();
+    const restoreSelection = prefs.humanPoolSelection;
+    act(() => {
+      usePreferencesStore.setState({
+        // The Commander deck was excluded while browsing Commander; switching
+        // the setup to Standard hides it from the legal display universe, but
+        // the per-deck override persists in the format-global curation.
+        humanPoolSelection: setPoolDeckIncluded(emptyPoolSelection(), commanderId, false),
+      });
+    });
+    try {
+      render(
+        <MyDecks
+          mode="select"
+          selectedFormat="Standard"
+          activeDeckName={null}
+          onSelectDeck={vi.fn()}
+          randomSelectionMode="defer"
+          aiCatalog={{
+            candidates: [legalCandidate("Standard Deck", null)],
+            allCandidates: [
+              legalCandidate("Standard Deck", null),
+              { ...legalCandidate("Commander Deck", null), knownFormat: "Commander" },
+            ],
+          }}
+        />,
+      );
+
+      // Display stays legal-only: the Commander deck has no tree checkbox …
+      await screen.findByText("Standard Deck");
+      await userEvent.click(screen.getByRole("button", { name: /Your random pool/ }));
+      await userEvent.click(screen.getByRole("button", { name: /Unfiled/ }));
+      expect(screen.getByRole("checkbox", { name: "Standard Deck" })).toBeInTheDocument();
+      expect(screen.queryByRole("checkbox", { name: "Commander Deck" })).not.toBeInTheDocument();
+
+      // … but the folder toggle covers the raw universe: unselecting Unfiled
+      // clears the hidden override instead of letting it linger invisibly.
+      await userEvent.click(screen.getByRole("checkbox", { name: "Unfiled" }));
+      const selection = usePreferencesStore.getState().humanPoolSelection;
+      expect(selection.excludedGroups).toContain(UNFILED_POOL_GROUP);
+      expect(selection.excludedDecks).not.toContain(commanderId);
+    } finally {
+      act(() => {
+        usePreferencesStore.setState({ humanPoolSelection: restoreSelection });
+      });
+    }
+  });
+
+  it("moves an adopted feed mirror from its feed group into its folder on catalog refresh", async () => {
+    saveDeck("Mirror Deck", { main: [{ name: "Island", count: 60 }], sideboard: [] });
+    saveDeck("User C", { main: [{ name: "Plains", count: 60 }], sideboard: [] });
+    const folder = createFolder(testSavedDeckTxn, "F");
+    expect(folder).not.toBeNull();
+    setDeckFolder(testSavedDeckTxn, "Mirror Deck", folder!.id);
+    const folderGroup = folderPoolGroup(folder!.id);
+    const prefs = usePreferencesStore.getState();
+    const restoreSelection = prefs.humanPoolSelection;
+    act(() => {
+      usePreferencesStore.setState({
+        // Feed group included, folder F excluded: the mirror's grouping
+        // decides its eligibility.
+        humanPoolSelection: { ...emptyPoolSelection(), excludedGroups: [folderGroup] },
+      });
+    });
+    // Adopting removes the origin without renaming: same id and bracket,
+    // only the source provenance changes.
+    const feedOwned: AiDeckCandidate = {
+      ...legalCandidate("Mirror Deck", null),
+      source: { type: "saved", feedId: "mtggoldfish-standard" },
+    };
+    const adopted = legalCandidate("Mirror Deck", null);
+    const deckC = legalCandidate("User C", null);
+    const renderDecks = (mirror: AiDeckCandidate) => (
+      <MyDecks
+        mode="select"
+        selectedFormat="Standard"
+        activeDeckName={null}
+        onSelectDeck={vi.fn()}
+        randomSelectionMode="defer"
+        aiCatalog={{ candidates: [mirror, deckC], allCandidates: [mirror, deckC] }}
+      />
+    );
+    try {
+      const { rerender } = render(renderDecks(feedOwned));
+
+      // Feed-owned: the mirror sits in its feed group, included …
+      await screen.findByText("Mirror Deck");
+      await userEvent.click(screen.getByRole("button", { name: /Your random pool/ }));
+      expect(screen.getByRole("checkbox", { name: "Standard Meta" })).toBeInTheDocument();
+      await userEvent.click(screen.getByRole("button", { name: /Standard Meta/ }));
+      expect(screen.getByRole("checkbox", { name: "Mirror Deck" })).toBeChecked();
+
+      // … adopting it regroups the same id into excluded folder F.
+      rerender(renderDecks(adopted));
+      expect(screen.queryByRole("checkbox", { name: "Standard Meta" })).not.toBeInTheDocument();
+      await userEvent.click(screen.getByRole("button", { name: /F 0 of 1/ }));
+      expect(screen.getByRole("checkbox", { name: "Mirror Deck" })).not.toBeChecked();
+      expect(screen.getByRole("button", { name: /Your random pool 1 of 2/ })).toBeInTheDocument();
+    } finally {
+      act(() => {
+        usePreferencesStore.setState({ humanPoolSelection: restoreSelection });
+      });
+    }
+  });
+
+  it("clears a saved-duplicate precon's explicit include when the Precons group is unselected", async () => {
+    saveDeck("[Pre-built] P", { main: [{ name: "Island", count: 99 }], sideboard: [] });
+    saveDeck("User C", { main: [{ name: "Plains", count: 60 }], sideboard: [] });
+    const preconP = preconCandidate("P", "P");
+    const preconQ = preconCandidate("Q", "Q");
+    const savedCopy = legalCandidate("[Pre-built] P", null);
+    const deckC = legalCandidate("User C", null);
+    const prefs = usePreferencesStore.getState();
+    const restoreSelection = prefs.humanPoolSelection;
+    act(() => {
+      usePreferencesStore.setState({
+        humanPoolSelection: setPoolDeckIncluded(emptyPoolSelection(), preconP.id, true),
+      });
+    });
+    try {
+      render(
+        <MyDecks
+          mode="select"
+          selectedFormat="Commander"
+          activeDeckName={null}
+          onSelectDeck={vi.fn()}
+          randomSelectionMode="defer"
+          aiCatalog={{
+            candidates: [preconP, preconQ, savedCopy, deckC],
+            allCandidates: [preconP, preconQ, savedCopy, deckC],
+          }}
+        />,
+      );
+
+      await screen.findByText("User C");
+      expect(screen.getByRole("button", { name: /Your random pool 4 of 4/ })).toBeInTheDocument();
+      await userEvent.click(screen.getByRole("button", { name: /Your random pool/ }));
+      // The catalog precon is listed even though its saved copy exists …
+      await userEvent.click(screen.getByRole("button", { name: /Precons 2 of 2/ }));
+      expect(screen.getByRole("checkbox", { name: "P" })).toBeInTheDocument();
+
+      // … and unselecting the group clears its explicit include.
+      await userEvent.click(screen.getByRole("checkbox", { name: "Precons" }));
+      const selection = usePreferencesStore.getState().humanPoolSelection;
+      expect(selection.excludedGroups).toContain(PRECON_POOL_GROUP);
+      expect(selection.includedDecks).not.toContain(preconP.id);
+      // P is no longer eligible; C keeps the pool non-empty so fallback
+      // cannot explain the count.
+      expect(screen.getByRole("checkbox", { name: "P" })).not.toBeChecked();
+      expect(screen.getByRole("button", { name: /Your random pool 2 of 4/ })).toBeInTheDocument();
+    } finally {
+      act(() => {
+        usePreferencesStore.setState({ humanPoolSelection: restoreSelection });
+      });
+    }
   });
 
   it("preserves saved cover printing identity and advances the installed art crop", async () => {

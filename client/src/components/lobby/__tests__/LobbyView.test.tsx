@@ -851,6 +851,28 @@ describe("LobbyView", () => {
     expect(screen.queryByRole("button", { name: /Direct table/ })).not.toBeInTheDocument();
   });
 
+  it("renders a row from a different build as joinable", async () => {
+    const onJoinGame = vi.fn();
+    const source: LobbySource = {
+      url: SERVER_PRESETS[0].url,
+      name: "lobby.phase-rs.dev",
+      origin: "official",
+    };
+    useMultiplayerStore.setState({
+      subscribeLobby: vi.fn(async (onUpdate: (games: LobbyGame[], source: LobbySource) => void) => {
+        onUpdate([{ ...lobbyGame("OTHR1", "Other build table", 100), host_build_commit: "otherhash" }], source);
+        return () => {};
+      }),
+      subscribeAmbientLobby: vi.fn(() => () => {}),
+    });
+    renderLobby({ onJoinGame });
+
+    const row = await screen.findByRole("button", { name: /Other build table/ });
+    expect(row).toBeEnabled();
+    await userEvent.setup().click(row);
+    expect(onJoinGame).toHaveBeenCalledOnce();
+  });
+
   it("a format filter hides draft rows", async () => {
     const user = userEvent.setup();
     const source: LobbySource = {

@@ -8,9 +8,8 @@
 //! resolution time (mirroring the `ManaDynamic` resolution path).
 //!
 //! Runtime discriminator: a source with a NON-ZERO mana cost must stop at a real
-//! `WaitingFor::UnlessPayment` prompt (NOT the CR 118.5 zero-cost short-circuit
-//! that would fire if `SelfManaCost` wrongly resolved to {0}); declining then
-//! sacrifices the permanent.
+//! `WaitingFor::UnlessPayment` prompt (NOT a {0} cost, which `SelfManaCost`
+//! would wrongly resolve to); declining then sacrifices the permanent.
 //!
 //! CR 118.12 (unless-pay alternative) + CR 202.1 (mana cost characteristic).
 
@@ -76,9 +75,9 @@ fn declining_own_mana_cost_upkeep_tax_sacrifices_the_source() {
     );
     runner.advance_until_stack_empty();
 
-    // CR 118.5 discriminator: a real non-zero cost surfaces an UnlessPayment
-    // prompt. If SelfManaCost had wrongly resolved to {0}, the zero-cost
-    // short-circuit would skip the prompt and the creature would survive.
+    // Discriminator: a real non-zero cost surfaces an UnlessPayment prompt.
+    // If SelfManaCost had wrongly resolved to {0}, the prompt would carry {0}
+    // rather than the real cost.
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::UnlessPayment { .. }),
         "own-mana-cost upkeep tax must stop at an UnlessPayment prompt, got {:?}",
@@ -109,7 +108,7 @@ fn costless_source_upkeep_tax_is_unpayable_and_sacrificed() {
 
     // A 2/2 with NO printed mana cost (as a token would have). SelfManaCost
     // resolves to ManaCost::NoCost, which must route to the unpayable branch —
-    // NOT the {0} "always payable" short-circuit that would let it survive.
+    // NOT a {0} cost.
     let creature = scenario
         .add_creature_from_oracle(P0, "Test Upkeep Tax", 2, 2, UPKEEP_OWN_COST)
         .with_mana_cost(ManaCost::NoCost)

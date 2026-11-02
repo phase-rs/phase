@@ -84,10 +84,9 @@
 
 use engine::game::scenario::{GameRunner, GameScenario, P0};
 use engine::types::events::GameEvent;
+use engine::types::game_state::GameRng;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
-use rand::SeedableRng;
-use rand_chacha::ChaCha20Rng;
 
 /// Verbatim Oracle text, including the printed em-dash result rows.
 const LAEZELS_ACROBATICS: &str = "Exile all nontoken creatures you control, then roll a d20.\n1\u{2014}9 | Return those cards to the battlefield under their owner's control at the beginning of the next end step.\n10\u{2014}20 | Return those cards to the battlefield under their owner's control, then exile them again. Return those cards to the battlefield under their owner's control at the beginning of the next end step.";
@@ -141,7 +140,7 @@ fn drive(seed: u64) -> (GameRunner, Option<u32>, Vec<String>) {
     let state = committed.state_mut();
     state.rng_seed = seed;
     state.rng_word_pos = 0;
-    state.rng = ChaCha20Rng::seed_from_u64(seed);
+    state.rng = GameRng::seed_from_u64(seed);
     let outcome = committed.resolve();
     let face = outcome.events().iter().find_map(|event| match event {
         GameEvent::DieRolled {

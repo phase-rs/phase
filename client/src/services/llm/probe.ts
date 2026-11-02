@@ -10,10 +10,10 @@
  * back as well-formed HTTP responses.
  */
 
-import { ensureWasmInit } from "../engineRuntime";
+import { getSharedAdapter } from "../../adapter/wasm-adapter";
 import { executeLlmRequest, LlmTransportError } from "./llmClient";
+import { resolvedEndpointOf } from "./endpoint";
 import {
-  endpointOf,
   type LlmFailure,
   type LlmHttpRequestSpec,
   type LlmProfile,
@@ -38,17 +38,17 @@ export async function testLlmEndpoint(
   profile: LlmProfile,
   options: { timeoutMs?: number; signal?: AbortSignal } = {},
 ): Promise<LlmProbeResult> {
-  let wasm: typeof import("@wasm/engine");
+  // The engine refuses here for a missing model, a missing key, or a credential
+  // bound for a plaintext endpoint — before anything reaches the network.
+  let built: ProbeRequestResult;
   try {
-    await ensureWasmInit();
-    wasm = await import("@wasm/engine");
+    built = (await getSharedAdapter().query(
+      "buildLlmProbeRequest",
+      JSON.stringify(resolvedEndpointOf(profile)),
+    )) as ProbeRequestResult;
   } catch (error) {
     return { ok: false, code: "engineUnavailable", detail: describe(error) };
   }
-
-  // The engine refuses here for a missing model, a missing key, or a credential
-  // bound for a plaintext endpoint — before anything reaches the network.
-  const built = wasm.buildLlmProbeRequest(JSON.stringify(endpointOf(profile))) as ProbeRequestResult;
   if (!built?.request) {
     // `built.error` is the ENGINE's own refusal (no model, missing key, a
     // credential bound for a plaintext endpoint). It is data, shown verbatim.
@@ -72,11 +72,19 @@ export async function testLlmEndpoint(
   }
 
   // Status travels with the body: a non-2xx reply is refused however it parses.
-  const verdict = wasm.validateLlmProbeResponse(
-    profile.provider,
-    response.status,
-    response.body,
-  ) as ProbeValidation;
+  // The engine worker can stop answering during the network wait above, so a
+  // refused query is the engine's failure, not the endpoint's.
+  let verdict: ProbeValidation;
+  try {
+    verdict = (await getSharedAdapter().query(
+      "validateLlmProbeResponse",
+      profile.provider,
+      response.status,
+      response.body,
+    )) as ProbeValidation;
+  } catch (error) {
+    return { ok: false, code: "engineUnavailable", detail: describe(error) };
+  }
   if (verdict?.ok) return { ok: true };
   // The vendor's own message ("Incorrect API key provided", "models/x is not
   // found") is the most useful half and survives untranslated.

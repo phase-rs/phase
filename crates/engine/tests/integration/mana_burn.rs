@@ -15,8 +15,8 @@
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, PlayerFilter, QuantityExpr, QuantityModification,
-    ReplacementDefinition, ReplacementPlayerScope, TargetFilter,
+    AbilityDefinition, AbilityKind, ChooseOneOfKind, Effect, PlayerFilter, QuantityExpr,
+    QuantityModification, ReplacementDefinition, ReplacementPlayerScope, TargetFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::custom_format::{old_school_93_94, swedish_old_school};
@@ -269,6 +269,7 @@ fn gain_branches() -> Effect {
     Effect::ChooseOneOf {
         chooser: PlayerFilter::Controller,
         branches: vec![gain(1), gain(2)],
+        kind: ChooseOneOfKind::Ordinary,
     }
 }
 
@@ -432,7 +433,7 @@ fn a_prevented_burn_leaves_no_provenance_behind() {
         "nothing may be narrated as mana burn when no burn resolved: {:?}",
         burns(&events)
     );
-    assert!(runner.state().players[1].mana_pool.mana.is_empty());
+    assert!(runner.state().players[1].mana_pool.is_empty());
     assert_eq!(runner.state().phase, Phase::BeginCombat);
 }
 

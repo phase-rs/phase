@@ -59,6 +59,8 @@ Ingress.
 | `phase_drafts_active` / `phase_drafts_with_connected_humans` | the same pair for server-hosted drafts |
 | `phase_replica_ordinal` | this replica's ordinal, when one was set |
 | `phase_admission_rejects_total{reason}` | refusals by `connection_limit`, `game_limit`, `origin_not_allowed` |
+| `phase_ws_disconnects_total{cause}` | transport closures by bounded cause, including `read_deadline`, `write_failure`, `ingress_overflow`, `quota_refusal_overflow` and `quota_discard_overflow` |
+| `phase_ws_discarded_frames_total{reason="quota_exhausted"}` | post-ordinary-quota discards when recovery is exhausted or a recovered frame is ineligible for dispatch/refusal, including the abuse-closing frame; excludes binary envelope decode failures, dispatched compact clicks and owned refusals |
 | `phase_build_info{version,commit,mode}` | build identity, always `1` |
 
 The occupancy gauges count *live sockets*, not map entries — a player who
@@ -127,6 +129,25 @@ Under `scaleOut`, logs are per-replica (each ordinal owns its own `data` PVC),
 so port-forward the specific ordinal's Service (`<release>-<ordinal>`) — same
 as reaching that ordinal's games.
 
+## Game CPU admission
+
+Full-mode game computation and state encoding run on blocking workers, not the
+WebSocket/HTTP runtime. `PHASE_GAME_CPU_PERMITS` (native CLI:
+`--game-cpu-permits`) overrides their shared concurrency limit; set it through
+`server.extraEnv` in this chart. The default is one less than the available
+processor count, with a minimum of one, respecting CPU affinity and cgroup
+quotas. Increasing it spends the headroom reserved for socket and HTTP work.
+
+Individual AI decisions release CPU admission between steps so another game's
+action can proceed during a long AI sequence. Background Full-session saves
+serialize one snapshot at a time and do not occupy a game CPU slot while
+waiting for SQLite.
+
+Pending saves coalesce to the latest revision per Full lifetime, retaining at
+most one captured snapshot per game rather than a full snapshot per queued
+action. Capture under the game lease comes first, followed by the I/O-admitted currency check and serialization; the final SQLite
+generation, revision and activation fences still protect the write.
+
 ## Behind Cloudflare
 
 Traefik typically sees a SNAT'd node IP (Service `externalTrafficPolicy: Cluster`),
@@ -141,8 +162,130 @@ if a firewall or Cloudflare Tunnel already guarantees it. Traefik falls back to 
 router serves the same host with different options, so keep all Ingresses for
 the host in this chart.
 
-Cloudflare closes idle WebSockets after ~100 s; the client's 5 s application
-ping keeps game connections alive.
+The server sends a native WebSocket Ping every 10 s, independently of the
+client's JavaScript ping timer. Its 30 s response budget begins only after an
+unanswered Ping has flushed. Any inbound frame clears it; actual in-flight
+writes pause the remaining budget, but later Pings or application writes do
+not renew it.
+
+`ServerHello.heartbeat` optionally advertises a 5,000 ms application Ping
+cadence and a 45,000 ms silence diagnostic budget. This diagnostic contract
+does not replace the native WebSocket response deadline above.
+
+Queued application ingress is limited to 64 commands and 1 MiB of retained
+payload across the raw and decoded queues. Overflow closes the connection with
+WebSocket code 1013 rather than silently discarding a command. Established
+connections may bypass command slots only through a probe of at most 256 bytes.
+Every probe parse, including a non-Ping, spends a separate work allowance
+(burst 64, replenished at 64/s). Recognized Pings and malformed probes also spend
+the reply reserve (burst eight, replenished at two/s). The reply reserve still
+depends on shared probe-work credit: ordinary bursts preserve reply credit,
+but a non-Ping abuse stream can exhaust the work allowance and delay JSON Pong.
+Reader and decoder share these allowances; frames queued before ClientHello
+acceptance are probed only after negotiation, without repeating reader work.
+Replies remain coalesced.
+
+Every full JSON parse and metadata recovery is admitted before inspecting the
+payload. Ordinary admission permits 30 full parses per configured one-second
+window, up to the 64 KiB command cap. Recovery initially charges each top-level
+metadata scan to a separate 30-entry allowance, skipping the engine payload.
+Malformed ordinary commands share that allowance. A recognized `ContestClick`
+of at most 1 KiB transfers its scan charge to an independent 30-entry click
+allowance before its extra typed parse: only then is the recovery entry refunded.
+Clicks beyond their allowance are discarded and keep the recovery entry spent.
+Thus admitted recovered clicks cannot consume all correlated-refusal capacity.
+
+With refills frozen, the exact ceiling is 184 JSON entries: 64 reader probes,
+30 ordinary full parses, 30 nonrefunded recovery scans, 30 transferred click
+scans and 30 compact click parses. Non-click traffic retains the 124-entry
+ceiling. Binary envelope decode/inflation has at most 90 admissions in that
+frozen window (30 ordinary + 30 nonrefunded recovery + 30 transferred clicks),
+each subject to the 64 KiB inflation cap. This is a parsing bound, not a
+handler or outbound-memory bound: ordinary commands plus
+recovered clicks can dispatch up to 60 handler calls per window, each involving
+a session lease and executor hop. Recovered clicks can also produce up to
+30 uncorrelated guard replies per window outside the flush-held correlated
+refusal admission below.
+
+An action larger than 1 KiB after a policy-maximal click stream can still get
+its owned CommandIdV1 refusal; recovered clicks have a separate work allowance.
+Past the parse allowances, excess bursts are discarded without parsing or
+decompression. A per-connection allowance permits 64 quota discards per window;
+the 65th is counted, then closes with 1013 `quota_discard_overflow` and the
+bounded drain below. This deliberately discards for short bursts but closes
+sustained abuse, rather than processing unlimited discarded frames.
+
+An isolated legitimate 40-click burst is dispatched in full when ingress has
+capacity. Recovered clicks retain ingress admission until handled. At the
+policy-maximal rate (40-click burst plus 30/s), an approximately 1–2 s handler
+stall can exhaust the shared 64-command or 1 MiB bound and close with 1013
+`IngressOverflow` mid-contest. This known limit requires both maximal traffic
+and the stall; recovery does not bypass ingress capacity. Uncorrelated non-click
+requests over ordinary quota remain dropped, even if their header is inspected.
+Discards refund no allowance. Normal client JSON Pings use plain/raw frames
+and their credited fast path.
+Up to eight correlated quota refusals may remain unflushed per connection;
+that admission is released only after socket flush, so a draining client may
+receive later refusals without a lifetime strike limit. Exhausting it closes
+with 1013 and records `quota_refusal_overflow` rather than retaining an
+unbounded reply backlog.
+
+Capacity and sustained-abuse closes retain the read half for the peer's Close
+acknowledgement, bounded by one second, 64 frames and 1 MiB of drained payload.
+Idle read-deadline closes do not drain. The drain parses no JSON, retains no
+command, and holds no game or CPU permit. Disconnect detection is immediate;
+seat bookkeeping and notifications follow transport teardown. Reconnect grace
+uses the original transport detection timestamp, not later cleanup time.
+Contest presence carries that timestamp too, but the contest's monotonic
+observation clock clamps it to at least its last tick/click observation.
+Consequently a pause/grace starts at the later of detection and that last
+observation, rather than being unconditionally backdated to detection.
+Accepted mutations still finish independently.
+
+Clicks and ticks apply queued contest presence edges only through their host
+observation cutoff; later edges stay queued for a later observation. Each seat
+keeps a contest-local causal presence clock: a later-admitted transition is
+stamped no earlier than that seat's preceding queued or applied transition.
+Thus a reconnect received before the old route's departure cannot sort before
+the departure it reverses. Cross-seat observations remain timestamp-ordered,
+and replacing a contest resets its causal clocks. Presence before the earliest
+queued return is absent; before a queued departure it is present. Duplicate
+live-presence reports queue no edge.
+
+Publication drains flush only through the engine's already-observed contest
+clock, not wall time. They cannot advance time past an earlier pending click.
+The autonomous tick still applies disconnects and grace forfeits without
+further client traffic. Full reconnect admission keeps the original transport
+receipt for registry grace. The contest's causal stamp controls both ordering
+and the time passed to the engine, whose monotonic clock can raise it further.
+For example, absent a later engine observation, D@200/C@100 applies the return
+at 200 with a zero-length pause. An admitted return is not restamped to a later
+worker time or sorted before the departure it reverses.
+
+**Known timing limits:** a return received within registry grace can still lose
+the session lease to an autonomous tick after the contest's reconnect grace.
+If that tick forfeits the contest before the return handler is admitted, the
+earlier receipt does not undo the forfeit. This pre-existing admission race is
+unchanged, alongside the separate registry expiry-finalization race.
+
+`ServerHello.data.command_correlation = "CommandIdV1"` advertises correlated
+game-command completion. Action/Interaction messages may carry a top-level
+numeric `command_id`; only the originating socket's own StateUpdate,
+ActionRejected, ActionFailed or ActionNoOp echoes it. Ambient updates do not
+acknowledge another command. Older servers without this capability retain the
+legacy completion behavior. These IDs are correlation metadata, not
+idempotency keys: commands are not automatically retried or deduplicated.
+
+Reattachment bootstraps precede updates from the new room, and a successful
+spectator switch stops routing the previous room. If a draft match ends while
+a handoff waits, the server returns `DraftActionRejected` and the current draft
+view instead of an active-game bootstrap. This is an operation refusal, not a
+WebSocket disconnect.
+
+A Full connection installed during a draft handoff takes precedence over that
+older handoff. A database validation error does not leave an unowned seat
+marked connected: reconnect grace is retained or started, without replacing
+another current Full connection or resetting an existing deadline.
 
 ## Announcing to a public directory
 
@@ -379,8 +522,8 @@ helm upgrade phase-server deploy/helm/phase-server -n phase \
 The digest is required; see [Building the image](#building-the-image) for the
 one case where you trade it for `web.image.followServerTag: true` instead.
 
-The site is then at `https://phase.example.com/`, and `/ws`, `/health` and
-`/p2p-draft-backup` still reach the server. `/admin` is deliberately not routed
+The site is then at `https://phase.example.com/`, and `/ws`, `/health`,
+`/p2p-draft-backup` and `/jev` (the Jev relay) still reach the server. `/admin` is deliberately not routed
 with or without the SPA — it stays operator-only over `kubectl port-forward`, so
 a request for it from the public edge lands on the site and 404s there.
 Routing rests on longest-prefix matching for the plain Ingress and on Traefik's

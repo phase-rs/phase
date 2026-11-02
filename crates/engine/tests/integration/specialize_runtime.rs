@@ -90,6 +90,7 @@ fn specialize_applies_chosen_face_and_emits_event() {
         .act(GameAction::ActivateAbility {
             source_id: creature,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate specialize");
 
@@ -184,6 +185,7 @@ fn specialize_accepts_basic_land_subtype_discard() {
         .act(GameAction::ActivateAbility {
             source_id: creature,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate specialize with land discard available");
 
@@ -247,6 +249,7 @@ fn specialize_rejects_colorless_nonland_discard_before_cost_payment() {
         .act(GameAction::ActivateAbility {
             source_id: creature,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect_err("colorless nonland card must not be a legal specialize discard");
 

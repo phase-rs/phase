@@ -1,0 +1,43 @@
+---
+source: crates/phase-parser/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&lowered"
+---
+{
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Pump",
+        "power": {
+          "type": "Fixed",
+          "value": -5
+        },
+        "toughness": {
+          "type": "Fixed",
+          "value": -5
+        },
+        "target": {
+          "type": "Typed",
+          "type_filters": [
+            "Creature"
+          ],
+          "controller": null,
+          "properties": []
+        }
+      },
+      "cost": null,
+      "sub_ability": null,
+      "duration": "UntilEndOfTurn",
+      "description": "Target creature gets -5/-5 until end of turn.",
+      "target_prompt": null,
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "extractedKeywords": []
+}

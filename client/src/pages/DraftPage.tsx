@@ -1,3 +1,4 @@
+import type { ParseKeys } from "i18next";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { motion } from "framer-motion";
@@ -36,6 +37,7 @@ import {
   type ResponsiveDraftLayout,
 } from "../components/draft/workspace/workspacePreferences";
 import { DraftProgress } from "../components/draft/DraftProgress";
+import { LlmDrafterStatus } from "../components/draft/LlmDrafterStatus";
 import { LimitedDeckBuilder } from "../components/draft/LimitedDeckBuilder";
 import { SealedPackOpening } from "../components/draft/SealedPackOpening";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
@@ -47,7 +49,7 @@ import type { DraftRunFormat, DraftRunState } from "../services/quickDraftPersis
 
 // ── Format Picker ─────────────────────────────────────────────────────
 
-const FORMAT_OPTIONS: Array<{ value: DraftRunFormat; labelKey: string; descKey: string }> = [
+const FORMAT_OPTIONS: Array<{ value: DraftRunFormat; labelKey: ParseKeys<"draft">; descKey: ParseKeys<"draft"> }> = [
   { value: "single", labelKey: "formatPicker.single.label", descKey: "formatPicker.single.description" },
   { value: "bo3", labelKey: "formatPicker.bo3.label", descKey: "formatPicker.bo3.description" },
   { value: "run", labelKey: "formatPicker.run.label", descKey: "formatPicker.run.description" },
@@ -779,6 +781,7 @@ export function DraftPage() {
                 onStartDraft={handleStartDraft}
                 defaultPackCount={setupMode === "sealed" ? SEALED_PACK_COUNT : DRAFT_PACK_COUNT}
                 fixedPackCount={setupMode === "sealed"}
+                showPickEnhancements={setupMode === "quick"}
                 startLabel={
                   setupMode === "sealed"
                     ? t("setSelector.startSealed")
@@ -814,10 +817,15 @@ export function DraftPage() {
                     ? "grid h-[calc(100dvh_-_8rem)] w-full min-w-0 grid-rows-[minmax(0,56%)_minmax(0,44%)] gap-2"
                     : "grid h-[calc(100dvh_-_8rem)] w-full min-w-0 grid-cols-[minmax(340px,40%)_minmax(0,60%)] gap-2"}
           >
-            <div className={responsiveLayout === "desktop" ? "w-full min-w-0" : "h-full min-h-0 w-full min-w-0 overflow-hidden"}>
+            <div className={responsiveLayout === "desktop" ? "w-full min-w-0" : "relative h-full min-h-0 w-full min-w-0 overflow-hidden"}>
               {responsiveLayout === "desktop" && (
                 <DraftProgress />
               )}
+              {/* Inline on desktop; overlaid on compact layouts, where the pack
+                  fills its whole cell and an extra row would clip it. */}
+              <LlmDrafterStatus
+                className={responsiveLayout === "desktop" ? "mt-2" : "absolute left-2 top-2 z-20 max-w-[calc(100%-1rem)]"}
+              />
               <PackDisplay
                 controller={packController}
                 presentation={packPresentation}

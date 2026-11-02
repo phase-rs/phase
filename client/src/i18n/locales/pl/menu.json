@@ -117,6 +117,8 @@
     "coverageThresholdHint": "Wyklucz talie poniżej tego progu obsługi przez silnik",
     "bracket": "Poziom",
     "bracketHint": "Losowe AI wybiera z tych poziomów. Talie bez tagów są wykluczane podczas filtrowania.",
+    "bracketPoolEmpty": "Żadne talie nie odpowiadają wybranym poziomom. Losowe AI będzie dobierać ze wszystkich dozwolonych talii.",
+    "cedhPoolEmpty": "Brak talii poziomu 5. Nie można przydzielić talii losowemu AI.",
     "opponentLabel": "Przeciwnik {{number}}",
     "deck": "Talia",
     "difficulty": "Poziom trudności",
@@ -133,7 +135,19 @@
       "precon": "Precon"
     },
     "brain": "Sterowany przez",
-    "brainEngine": "AI silnika"
+    "brainEngine": "AI silnika",
+    "poolBracketConflict": "Żadna z {{selected}} wybranych talii nie jest legalna przy obecnych filtrach, więc losowi przeciwnicy korzystają ze wszystkich {{total}} talii."
+  },
+  "randomPool": {
+    "titleHuman": "Twoja pula losowa",
+    "titleAi": "Pula losowa SI",
+    "hint": "Odznacz foldery lub talie, aby usunąć je z losowań.",
+    "count": "{{selected}} z {{total}}",
+    "emptyWarning": "Wszystko jest wykluczone, więc losowanie korzysta ze wszystkich {{total}} talii.",
+    "reset": "Resetuj",
+    "precons": "Precon",
+    "playable": "{{playable}} grywalne",
+    "nonePlayable": "Żadna z {{selected}} wybranych talii nie jest legalna przy obecnych filtrach, więc losowanie korzysta ze wszystkich {{total}} talii."
   },
   "feedManager": {
     "title": "Zarządzaj kanałami",
@@ -296,7 +310,8 @@
     "sectionStarred": "Ulubione",
     "sectionUnfiled": "Bez folderu",
     "collapseAll": "Zwiń wszystko",
-    "expandAll": "Rozwiń wszystko"
+    "expandAll": "Rozwiń wszystko",
+    "poolBracketConflict": "Żadna z {{selected}} wybranych talii nie jest legalna przy obecnych filtrach, więc twoja losowa talia zostanie wybrana ze wszystkich {{total}} talii."
   },
   "subscriptions": {
     "emptyTitle": "Brak subskrypcji kanałów",
@@ -362,5 +377,9 @@
       "ai": "AI",
       "multiplayer": "Multiplayer"
     }
+  },
+  "pileSource": {
+    "label": "Stos",
+    "default": "Domyślny stos"
   }
 }

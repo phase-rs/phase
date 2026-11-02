@@ -278,7 +278,9 @@
     "dataVersion": "Daten: {{version}}",
     "aboutBrackets": "Über Brackets ↗",
     "estimatedChip": "Geschätzt: B{{tier}}",
-    "estimatedChipFull": "Geschätztes Bracket: B{{tier}} {{label}}"
+    "estimatedChipFull": "Geschätztes Bracket: B{{tier}} {{label}}",
+    "manualChip": "B{{tier}}",
+    "manualChipFull": "Deklariertes Bracket: B{{tier}} {{label}}"
   },
   "bracketPicker": {
     "ariaLabel": "Deck-Bracket",

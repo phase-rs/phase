@@ -15,24 +15,31 @@ vi.mock("idb-keyval", () => ({
   createStore: vi.fn(() => ({})),
   del: vi.fn().mockResolvedValue(undefined),
   get: vi.fn().mockResolvedValue(undefined),
+  keys: vi.fn().mockResolvedValue([]),
   set: vi.fn().mockResolvedValue(undefined),
 }));
 
-import { del as idbDel, get as idbGet, set as idbSet } from "idb-keyval";
+import { del as idbDel, get as idbGet, keys as idbKeys, set as idbSet } from "idb-keyval";
 import {
+  clearFullTerminalCleanupStrict,
   clearGame,
   clearGameStrict,
+  listFullTerminalCleanupStrict,
   loadGame,
+  loadFullTerminalCleanupStrict,
   loadGameStrict,
   loadCheckpoints,
   loadP2PHostSession,
   migratePersistedGameState,
   saveAuthoritativeGame,
   saveAuthoritativeGameStrict,
+  saveFullTerminalCleanupStrict,
   saveGame,
   saveResumableGameStrict,
+  saveP2PHostSession,
   saveActiveGame,
 } from "../gamePersistence";
+import type { FullTerminalCleanupObligation } from "../gamePersistence";
 
 function fixtureState(): GameState {
   return buildGameState({
@@ -83,6 +90,8 @@ describe("game persistence", () => {
     vi.mocked(idbDel).mockResolvedValue(undefined);
     vi.mocked(idbGet).mockReset();
     vi.mocked(idbGet).mockResolvedValue(undefined);
+    vi.mocked(idbKeys).mockReset();
+    vi.mocked(idbKeys).mockResolvedValue([]);
     vi.mocked(idbSet).mockReset();
     vi.mocked(idbSet).mockResolvedValue(undefined);
   });
@@ -368,6 +377,64 @@ describe("game persistence", () => {
     expect(idbSet).not.toHaveBeenCalled();
   });
 
+  it("keeps resumable records when the cleanup owner cannot be written", async () => {
+    const owner = cleanupObligation("owner-write-failure");
+    const gameKey = GAME_KEY_PREFIX + owner.gameId;
+    vi.mocked(idbGet).mockImplementation(async (key) =>
+      String(key) === gameKey ? fixtureState() : undefined,
+    );
+    vi.mocked(idbSet).mockRejectedValueOnce(new Error("IndexedDB unavailable"));
+
+    await expect(saveFullTerminalCleanupStrict(owner)).rejects.toThrow("IndexedDB unavailable");
+    expect(idbDel).not.toHaveBeenCalled();
+    await expect(loadGameStrict(owner.gameId)).resolves.toBeTruthy();
+  });
+
+  it("retains a discoverable cleanup-only owner after resume deletion and blocks late saves", async () => {
+    const owner = cleanupObligation("cleanup-restart");
+    const cleanupKey = "phase-full-terminal-cleanup:" + owner.gameId;
+    const records = new Map<string, unknown>([
+      [GAME_KEY_PREFIX + owner.gameId, fixtureState()],
+      ["phase-p2p-host:" + owner.gameId, { gameStarted: true }],
+      ["phase-game-checkpoints:" + owner.gameId, [fixtureState()]],
+    ]);
+    vi.mocked(idbGet).mockImplementation(async (key) => records.get(String(key)));
+    vi.mocked(idbKeys).mockImplementation(async () => [...records.keys()]);
+    vi.mocked(idbSet).mockImplementation(async (key, value) => {
+      records.set(String(key), value);
+    });
+    vi.mocked(idbDel).mockImplementation(async (key) => {
+      records.delete(String(key));
+    });
+    saveActiveGame({ id: owner.gameId, mode: "p2p-host", difficulty: "" });
+
+    await saveFullTerminalCleanupStrict(owner);
+    await clearGameStrict(owner.gameId);
+    expect(records.has(cleanupKey)).toBe(true);
+    expect(records.has(GAME_KEY_PREFIX + owner.gameId)).toBe(false);
+    expect(localStorage.getItem(ACTIVE_GAME_KEY)).not.toBeNull();
+    await expect(loadFullTerminalCleanupStrict(owner.gameId)).resolves.toEqual(owner);
+    await expect(listFullTerminalCleanupStrict()).resolves.toEqual([owner]);
+
+    await saveGame(owner.gameId, fixtureState());
+    await saveP2PHostSession(owner.gameId, { gameId: owner.gameId } as never);
+    await expect(saveResumableGameStrict(owner.gameId, fixtureState())).rejects.toThrow(
+      "Terminal cleanup is pending",
+    );
+    expect(idbSet).toHaveBeenCalledTimes(1);
+
+    vi.mocked(idbDel).mockRejectedValueOnce(new Error("final owner delete failed"));
+    await expect(clearFullTerminalCleanupStrict(owner.gameId)).rejects.toThrow("final owner delete failed");
+    expect(records.has(cleanupKey)).toBe(true);
+    expect(localStorage.getItem(ACTIVE_GAME_KEY)).not.toBeNull();
+    vi.mocked(idbDel).mockImplementation(async (key) => {
+      records.delete(String(key));
+    });
+    await clearFullTerminalCleanupStrict(owner.gameId);
+    expect(records.has(cleanupKey)).toBe(false);
+    expect(localStorage.getItem(ACTIVE_GAME_KEY)).toBeNull();
+  });
+
   it("propagates a strict resumable-write failure", async () => {
     vi.mocked(idbSet).mockRejectedValueOnce(new Error("IndexedDB unavailable"));
 
@@ -385,3 +452,27 @@ describe("game persistence", () => {
     await expect(loadP2PHostSession("legacy-p2p")).resolves.toBeNull();
   });
 });
+
+function cleanupObligation(gameId: string): FullTerminalCleanupObligation {
+  const p2pResult = {
+    key: "p2p-session",
+    lease: { sessionKey: "p2p-session", hostIncarnation: "host-incarnation" },
+    recipient: 0,
+    revision: 12,
+    terminalId: "terminal-result-id",
+    finalStateCommitment: "sha256:committed-state",
+    display: { winner: 0, reason: "Game complete" },
+  };
+  return {
+    gameId,
+    p2pSessionKey: p2pResult.key,
+    p2pTerminalId: p2pResult.terminalId,
+    p2pResult,
+    fullKey: { game_code: "ABCDE", generation: 4 },
+    terminalRevision: 12,
+    deliveries: [
+      { recipient: 0, deliveryId: "host-delivery", credential: "host-credential" },
+      { recipient: 1, deliveryId: "guest-delivery", credential: "guest-credential" },
+    ],
+  };
+}

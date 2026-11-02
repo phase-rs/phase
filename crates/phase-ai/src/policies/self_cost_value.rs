@@ -107,11 +107,7 @@ impl TacticalPolicy for SelfCostValuePolicy {
     }
 
     fn verdict(&self, ctx: &PolicyContext<'_>) -> PolicyVerdict {
-        let GameAction::ActivateAbility {
-            source_id,
-            ability_index: _,
-        } = &ctx.candidate.action
-        else {
+        let GameAction::ActivateAbility { source_id, .. } = &ctx.candidate.action else {
             return PolicyVerdict::neutral(PolicyReason::new("self_cost_value_na"));
         };
 
@@ -580,14 +576,14 @@ mod tests {
     /// Rebuilt VERBATIM from the parsed shape in `data/card-data.json`
     /// (`.["notion thief"].replacements[0]`): `event: Draw`, `mode: Mandatory`,
     /// `valid_player: Opponent`, `condition: ExceptFirstDrawInDrawStep`,
-    /// `draw_scope: IndividualDraw`, and an `execute` whose head effect is the
-    /// `Unimplemented("draw")` gap node carrying the `Draw{1, Controller}`
-    /// sub-ability. That `Unimplemented` head is LOAD-BEARING — it is what makes
-    /// the branch a non-Draw substitution for
-    /// `replacement::draw_is_substituted_away`, and the engine is runtime-proven
-    /// correct on this card (`notion_thief_opponent_draw_redirect.rs`). It is
-    /// reproduced, never "fixed", and is built through the single authority
-    /// `Effect::unimplemented` rather than a hand-written literal.
+    /// `draw_scope: IndividualDraw`, and an `execute` that is a lone
+    /// `Draw{1, Controller}` ("you draw a card"). The "that player skips that
+    /// draw" clause has no effect of its own — the replacement is the skip
+    /// (CR 614.6) — so the parser drops it. A `Draw` head aimed at the
+    /// replacement's controller is what makes the branch a substitution for an
+    /// opponent's draw in `replacement::draw_is_substituted_away`, and the
+    /// engine is runtime-proven correct on this card
+    /// (`notion_thief_opponent_draw_redirect.rs`).
     ///
     /// The condition is a LIVE gate, not a decoration: it exempts the active
     /// player's first draw of their own draw step, so the caller must be in the
@@ -602,12 +598,7 @@ mod tests {
             "Notion Thief".to_string(),
             Zone::Battlefield,
         );
-        let mut execute =
-            AbilityDefinition::new(AbilityKind::Spell, Effect::unimplemented("draw", "draw"));
-        execute.sub_ability = Some(Box::new(AbilityDefinition::new(
-            AbilityKind::Spell,
-            draw(1),
-        )));
+        let execute = AbilityDefinition::new(AbilityKind::Spell, draw(1));
         let mut replacement = ReplacementDefinition::new(ReplacementEvent::Draw)
             .draw_scope(DrawReplacementScope::IndividualDraw)
             .execute(execute)
@@ -881,6 +872,7 @@ mod tests {
             action: GameAction::ActivateAbility {
                 source_id,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             },
             metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
         };
@@ -2694,6 +2686,7 @@ mod tests {
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),

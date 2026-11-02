@@ -114,7 +114,7 @@ fn leyline_bonus_fires_exactly_once_during_cast() {
     // 3 floating + 1 tapped + 1 Leyline bonus = exactly 5, fully spent on
     // {3}{G}{G}. A double-fire (payment-time resolution AND post-action scan)
     // would add a second bonus {G}, leaving one mana floating.
-    let leftover = runner.state().players[0].mana_pool.mana.len();
+    let leftover = runner.state().players[0].mana_pool.total();
     assert_eq!(
         leftover, 0,
         "Leyline must fire exactly once — the post-action trigger scan must not \
@@ -140,10 +140,11 @@ fn leyline_bonus_still_fires_on_manual_mana_activation() {
         .act(GameAction::ActivateAbility {
             source_id: beast_id,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activating the mana ability must succeed");
 
-    let pool = runner.state().players[0].mana_pool.mana.len();
+    let pool = runner.state().players[0].mana_pool.total();
     assert_eq!(
         pool, 2,
         "manual mana-ability activation must still receive Leyline's bonus {{G}} \

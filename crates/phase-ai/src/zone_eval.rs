@@ -105,9 +105,12 @@ fn hand_quality(
 }
 
 /// Evaluate graveyard value: each card gets a base value, recursion-capable cards get a bonus.
+///
+/// CR 404.1 + CR 400.1: a player's graveyard is the zone `graveyard_of` resolves, so a shared
+/// graveyard is every seat's.
 fn graveyard_value(state: &GameState, player: PlayerId, weights: &ZoneWeights) -> f64 {
-    state.players[player.0 as usize]
-        .graveyard
+    state
+        .graveyard_of(player)
         .iter()
         .filter_map(|&oid| state.objects.get(&oid))
         .map(|obj| {
@@ -266,6 +269,89 @@ mod tests {
             score_flashback > score_plain,
             "Flashback card should score higher: {score_flashback} > {score_plain}"
         );
+    }
+
+    fn dandan_state() -> GameState {
+        GameState::new(engine::types::format::FormatConfig::dandan(), 2, 42)
+    }
+
+    fn add_graveyard_cards(
+        state: &mut GameState,
+        owner: PlayerId,
+        n: u64,
+        flashback_on_first: bool,
+    ) {
+        for i in 0..n {
+            let id = create_object(
+                state,
+                CardId(400 + i),
+                owner,
+                format!("Pile Card {i}"),
+                Zone::Graveyard,
+            );
+            if flashback_on_first && i == 0 {
+                state
+                    .objects
+                    .get_mut(&id)
+                    .unwrap()
+                    .keywords
+                    .push(Keyword::Flashback(
+                        engine::types::keywords::FlashbackCost::Mana(ManaCost::generic(3)),
+                    ));
+            }
+        }
+    }
+
+    #[test]
+    fn shared_graveyard_cancels_for_both_seats() {
+        for archetype in [DeckArchetype::Aggro, DeckArchetype::Control] {
+            let mut state = dandan_state();
+            add_graveyard_cards(&mut state, PlayerId(1), 3, true);
+            assert_eq!(
+                state.graveyard_of(PlayerId(1)).len(),
+                3,
+                "reach: pile is shared"
+            );
+            assert!(
+                state.players[1].graveyard.is_empty(),
+                "reach: held by the canonical seat"
+            );
+            assert!(has_recursion_keyword(
+                &state.objects[&state.graveyard_of(PlayerId(0))[0]]
+            ));
+            assert_eq!(zone_bonus(&state, PlayerId(0), archetype), 0.0);
+            assert_eq!(zone_bonus(&state, PlayerId(1), archetype), 0.0);
+        }
+    }
+
+    #[test]
+    fn shared_graveyard_leaves_hand_difference_intact() {
+        let mut state = dandan_state();
+        add_graveyard_cards(&mut state, PlayerId(0), 3, true);
+        let hand = create_object(
+            &mut state,
+            CardId(500),
+            PlayerId(0),
+            "Expensive".to_string(),
+            Zone::Hand,
+        );
+        state.objects.get_mut(&hand).unwrap().mana_cost = ManaCost::generic(9);
+        let weights = ZoneWeights::for_archetype(DeckArchetype::Midrange);
+        let expected = weights.hand_card_base;
+        assert!((zone_bonus(&state, PlayerId(0), DeckArchetype::Midrange) - expected).abs() < 1e-9);
+        assert!((zone_bonus(&state, PlayerId(1), DeckArchetype::Midrange) + expected).abs() < 1e-9);
+    }
+
+    #[test]
+    fn per_seat_graveyard_counts_for_its_owner_only() {
+        let mut state = make_state();
+        add_graveyard_cards(&mut state, PlayerId(0), 3, true);
+        let weights = ZoneWeights::for_archetype(DeckArchetype::Midrange);
+        let expected = 3.0 * weights.graveyard_base + weights.recursion_bonus;
+        assert_eq!(state.graveyard_of(PlayerId(0)).len(), 3);
+        assert!(state.graveyard_of(PlayerId(1)).is_empty());
+        assert!((zone_bonus(&state, PlayerId(0), DeckArchetype::Midrange) - expected).abs() < 1e-9);
+        assert!((zone_bonus(&state, PlayerId(1), DeckArchetype::Midrange) + expected).abs() < 1e-9);
     }
 
     #[test]

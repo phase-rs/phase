@@ -31,6 +31,8 @@ const NON_DIALOG_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> = new Set<Wa
   "BetweenGamesSideboard",
   "BetweenGamesChoosePlayDraw",
   "GameOver",
+  // Eye to Eye / Mouth to Mouth render their own full-screen ContestOverlay.
+  "PhysicalContest",
 ]);
 
 // `WaitingFor` variants whose UI deliberately uses `pointer-events: none` so
@@ -51,8 +53,11 @@ export const CLICK_THROUGH_WAITING_FOR_TYPES: ReadonlySet<WaitingFor["type"]> = 
   "ExploreChoice",
   "PopulateChoice",
   "ReturnAsAuraTarget",
+  "EquipTarget",
+  "ChooseTokenHost",
   "UntapChoice",
   "ChooseUntapSubset",
+  "ChooseObjectsSelection",
 ]);
 
 // CR 118.3 + CR 605.3b: a `PayCost` prompt is click-through only for the
@@ -69,6 +74,15 @@ export function isClickThroughWaitingFor(
   if (waitingFor.type === "RetargetChoice") {
     return waitingFor.data.scope.type === "Single";
   }
+  // CR 601.2c + CR 115.1: a copy announcement's announcing-opponent election
+  // is a modal choice, not a board pick.
+  if (waitingFor.type === "CopyRetarget" && waitingFor.data.announcer_election) {
+    return false;
+  }
+  // CR 608.2d: only a single-pick object selection is a board pick; a
+  // multi-pick selection renders ProliferateModal, whose toggles and Confirm
+  // need the host's pointer events.
+  if (waitingFor.type === "ChooseObjectsSelection" && waitingFor.data.max !== 1) return false;
   if (CLICK_THROUGH_WAITING_FOR_TYPES.has(waitingFor.type)) return true;
   return getBoardChoiceView(waitingFor, objects) != null;
 }
@@ -95,7 +109,7 @@ function isClickThroughDialog(
   // `ManaPayment` WaitingFor only ever reaches the UI when board taps are live.)
   // Convoke/improvise (CR 702.51a / CR 702.126a), which additionally tap
   // creatures/artifacts, are a subset of this same click-through behavior.
-  return waitingFor.type === "ManaPayment";
+  return waitingFor.type === "ManaPayment" || waitingFor.type === "ManaAbilityManaPayment";
 }
 
 export function DialogHost({ children }: { children: ReactNode }) {

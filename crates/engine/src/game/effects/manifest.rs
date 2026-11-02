@@ -43,7 +43,9 @@ pub fn resolve(
     // `player` is the LIBRARY OWNER (whose top cards are manifested), resolved
     // from `target`. `controller` is the optional CR 110.2a override for which
     // player the cards enter the battlefield under ("under your control").
-    let player = super::resolve_player_for_context_ref(state, ability, &target);
+    let Some(player) = super::resolve_player_for_context_ref(state, ability, &target) else {
+        return Ok(());
+    };
     // CR 110.2a: Resolve the optional controller override through the single
     // canonical authority shared with `ChangeZone`/`ChangeZoneAll` — never a
     // hand-rolled second resolver (per the single-authority rule). `None` keeps
@@ -391,7 +393,9 @@ mod tests {
                 counters: std::collections::HashMap::new(),
                 tapped: false,
                 is_suspected: false,
+                was_prepared: false,
                 attachments: Vec::new(),
+                intensity: 0,
             },
             incarnation: 0,
         });
@@ -439,6 +443,7 @@ mod tests {
             amount: 5,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         });
 
         let mut ability =
@@ -522,6 +527,7 @@ mod tests {
             amount: 4,
             is_combat: true,
             excess: 0,
+            source_incarnation: None,
         });
 
         let mut events = Vec::new();

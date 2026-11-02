@@ -117,6 +117,8 @@
     "coverageThresholdHint": "Excluir mazos por debajo de este umbral de compatibilidad del motor",
     "bracket": "Nivel",
     "bracketHint": "La IA aleatoria elige de estos niveles. Los mazos sin etiqueta se excluyen al filtrar.",
+    "bracketPoolEmpty": "Ningún mazo coincide con los niveles seleccionados. La IA aleatoria elegirá entre todos los mazos legales.",
+    "cedhPoolEmpty": "No hay mazos de nivel 5 disponibles. No se pueden asignar mazos a la IA aleatoria.",
     "opponentLabel": "Oponente {{number}}",
     "deck": "Mazo",
     "difficulty": "Dificultad",
@@ -133,7 +135,19 @@
       "precon": "Precon"
     },
     "brain": "Controlado por",
-    "brainEngine": "IA del motor"
+    "brainEngine": "IA del motor",
+    "poolBracketConflict": "Ninguno de los {{selected}} mazos elegidos es legal con los filtros actuales, así que los rivales aleatorios eligen entre los {{total}} mazos."
+  },
+  "randomPool": {
+    "titleHuman": "Tu selección aleatoria",
+    "titleAi": "Selección aleatoria de la IA",
+    "hint": "Desmarca carpetas o mazos para quitarlos de las elecciones aleatorias.",
+    "count": "{{selected}} de {{total}}",
+    "emptyWarning": "Todo está excluido, así que Aleatorio elige entre los {{total}} mazos.",
+    "reset": "Restablecer",
+    "precons": "Precons",
+    "playable": "{{playable}} jugables",
+    "nonePlayable": "Ninguno de los {{selected}} mazos elegidos es legal con los filtros actuales, así que Aleatorio elige entre los {{total}} mazos."
   },
   "feedManager": {
     "title": "Gestionar feeds",
@@ -296,7 +310,8 @@
     "sectionStarred": "Destacados",
     "sectionUnfiled": "Sin clasificar",
     "collapseAll": "Contraer todo",
-    "expandAll": "Expandir todo"
+    "expandAll": "Expandir todo",
+    "poolBracketConflict": "Ninguno de los {{selected}} mazos elegidos es legal con los filtros actuales, así que tu mazo aleatorio se elegirá entre los {{total}} mazos."
   },
   "subscriptions": {
     "emptyTitle": "Sin suscripciones a feeds",
@@ -362,5 +377,9 @@
       "ai": "AI",
       "multiplayer": "Multiplayer"
     }
+  },
+  "pileSource": {
+    "label": "Pila",
+    "default": "Pila predeterminada"
   }
 }

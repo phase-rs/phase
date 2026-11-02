@@ -1,5 +1,5 @@
 use crate::types::ability::{ResolvedAbility, TargetRef};
-use crate::types::events::GameEvent;
+use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{
     GameState, TargetSelectionConstraint, TargetSelectionSlot, WaitingFor,
 };
@@ -8,7 +8,7 @@ use crate::types::player::PlayerId;
 
 use super::ability_utils::{
     assign_selected_slots_in_chain, assign_targets_in_chain, choose_target_for_ability,
-    distribution_targets, flatten_targets_in_chain, validate_selected_targets_for_ability,
+    declared_targets_in_chain, distribution_targets, validate_selected_targets_for_ability,
     TargetSelectionAdvance,
 };
 use super::casting_targets::extract_distribution_total;
@@ -31,7 +31,7 @@ pub(super) fn finalize_trigger_target_selection(
     ability: Box<ResolvedAbility>,
     events: &mut Vec<GameEvent>,
 ) -> WaitingFor {
-    let assigned_targets = flatten_targets_in_chain(&ability);
+    let assigned_targets = declared_targets_in_chain(&ability);
     let crime_candidate =
         casting::targets_commit_crime(state, &assigned_targets, trigger.controller);
     casting::emit_targeting_events(
@@ -39,6 +39,9 @@ pub(super) fn finalize_trigger_target_selection(
         &assigned_targets,
         trigger.source_id,
         trigger.controller,
+        Some(crate::types::events::Targeter::Ability(
+            crate::types::ability::StackAbilityKind::Triggered,
+        )),
         events,
     );
 
@@ -420,11 +423,34 @@ pub(super) fn handle_multi_target_selection(
     }
 
     let mut ability = pending_ability;
-    ability.targets = selected.iter().map(|&id| TargetRef::Object(id)).collect();
+    ability.set_unpinned_targets(selected.iter().map(|&id| TargetRef::Object(id)).collect());
 
     state.waiting_for = WaitingFor::Priority { player };
     state.priority_player = player;
+    let events_before = events.len();
     let _ = effects::resolve_ability_chain(state, &ability, events, 0);
+    // CR 608.2c + CR 118.12: "if a player does" reads the instruction, not the
+    // acceptance. An accepted instruction that resolved without doing anything
+    // retracts the mark its accept parked on the printed tail. A replacement
+    // choice has not finished the instruction, so it is not judged yet.
+    if matches!(state.waiting_for, WaitingFor::Priority { .. })
+        && !effects::mandatory_parent_effect_performed(&ability.effect, &events[events_before..])
+    {
+        if let Some(acceptor) = ability.context.accepting_player {
+            state
+                .player_actions_this_way
+                .remove(&(acceptor, PlayerActionKind::AcceptedOptionalEffect));
+            if let Some(frame) = state
+                .active_ability_continuation_frame_mut()
+                .filter(|frame| frame.pending.chain.context.accepting_player == Some(acceptor))
+            {
+                frame
+                    .pending
+                    .chain
+                    .set_optional_effect_performed_recursive(false);
+            }
+        }
+    }
     resume_pending_continuation_if_priority(state, events)?;
 
     Ok(state.waiting_for.clone())
