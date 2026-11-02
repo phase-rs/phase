@@ -18,12 +18,16 @@ use super::functioning_abilities::{
 };
 use super::morph::{turn_face_up_offer, turn_face_up_prepare, TurnFaceUpOffer};
 use crate::database::synthesis::synthesize_conspiracy;
-use crate::types::ability::{StaticDefinition, TargetFilter, TriggerDefinition};
+use crate::types::ability::{
+    AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, StaticDefinition, TargetFilter,
+    TriggerDefinition,
+};
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
 use crate::types::game_state::{GameState, StaticSourceIndex};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::player::PlayerId;
+use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::StaticMode;
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
@@ -460,9 +464,27 @@ fn face_down_conspiracy_has_no_characteristics_until_turned_up() {
 
 #[test]
 fn face_down_conspiracy_visibility_redacted_for_opponent_revealed_for_controller() {
+    // One marker per kind of rules payload a conspiracy's face can carry, so the
+    // serialized checks below cover every definition list and not just the name.
+    const RULES_PAYLOAD: [&str; 4] = [
+        "static-rules-payload",
+        "trigger-rules-payload",
+        "replacement-rules-payload",
+        "ability-rules-payload",
+    ];
     let mut state = GameState::new_two_player(7);
-    let cda = StaticDefinition::new(StaticMode::from_str("Continuous").unwrap());
-    let mut face = synthesized_conspiracy_face(vec![cda], vec![]);
+    let cda = StaticDefinition::new(StaticMode::from_str("Continuous").unwrap())
+        .description(RULES_PAYLOAD[0].to_string());
+    let trigger =
+        TriggerDefinition::new(TriggerMode::SpellCast).description(RULES_PAYLOAD[1].to_string());
+    let mut face = synthesized_conspiracy_face(vec![cda], vec![trigger]);
+    face.replacements = vec![ReplacementDefinition::new(ReplacementEvent::Moved)
+        .description(RULES_PAYLOAD[2].to_string())];
+    face.abilities = vec![AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::unimplemented("Marker", "marker"),
+    )
+    .description(RULES_PAYLOAD[3].to_string())];
     face.name = "Brago's Favor".to_string();
     face.mana_cost = crate::types::mana::ManaCost::generic(1);
     let id = create_conspiracy_object(&mut state, "Brago's Favor", &face, P0);
@@ -511,6 +533,9 @@ fn face_down_conspiracy_visibility_redacted_for_opponent_revealed_for_controller
         .expect("wire state serializes");
         assert!(!wire.contains("Brago's Favor"), "viewer {viewer:?}");
         assert!(!wire.contains("Continuous"), "viewer {viewer:?}");
+        for payload in RULES_PAYLOAD {
+            assert!(!wire.contains(payload), "{payload} for viewer {viewer:?}");
+        }
     }
 
     // Turn face up
@@ -526,6 +551,16 @@ fn face_down_conspiracy_visibility_redacted_for_opponent_revealed_for_controller
     let p1_card_after = p1_view_after.objects.get(&id).unwrap();
     assert_eq!(p1_card_after.name, "Brago's Favor");
     assert_eq!(p1_card_after.static_definitions.len(), 1);
+    // Reach guard: the same markers do serialize once the card is public, so their
+    // absence above is the redaction and not a field the wire never carries.
+    let wire = serde_json::to_string(&crate::game::derived_views::ClientGameStateRef::wrap(
+        &state,
+        Some(P1),
+    ))
+    .expect("wire state serializes");
+    for payload in RULES_PAYLOAD {
+        assert!(wire.contains(payload), "{payload} after the turn-up");
+    }
     assert!(p1_card_after
         .card_types
         .core_types
