@@ -5199,27 +5199,52 @@ pub(crate) fn handle_resolution_optional_sacrifice_for_cost(
 
 /// CR 701.3d + CR 608.2k + CR 601.2d: Complete a non-self `UnattachFrom` cost
 /// (Captain America's Throw) after the player selects which attachment(s) to
-/// unattach. Validates each chosen object is still a controlled battlefield
-/// attachment on the source matching `filter`, snapshots the first as the
-/// cost-referent BEFORE detaching (CR 608.2k — "that Equipment's mana value"),
-/// detaches them (CR 701.3d — the Equipment stays on the battlefield), then
-/// re-surfaces the deferred damage division now that the divided total is known
-/// (CR 601.2d). Mirrors `handle_sacrifice_for_cost`, but the object is detached
-/// rather than destroyed and stays on the battlefield.
+/// unattach. Validates the selection against the prompt's exact cardinality and
+/// distinctness BEFORE touching state (CR 601.2h — "Partial payments are not
+/// allowed", so neither a short nor an over-long selection is a payment; CR
+/// 118.3 — one attachment is one resource and cannot pay two slots), then
+/// validates each chosen object is still a controlled battlefield attachment on
+/// the source matching `filter`, snapshots the first as the cost-referent
+/// BEFORE detaching (CR 608.2k — "that Equipment's mana value"), detaches them
+/// (CR 701.3d — the Equipment stays on the battlefield), then re-surfaces the
+/// deferred damage division now that the divided total is known (CR 601.2d).
+/// Mirrors `handle_sacrifice_for_cost`, but the object is detached rather than
+/// destroyed and stays on the battlefield. `bounds` is the prompt's
+/// `(min_count, count)`, the same contract `handle_exile_materials_for_cost`
+/// consumes.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_unattach_for_cost(
     state: &mut GameState,
     player: PlayerId,
     filter: &TargetFilter,
     mut pending: PendingCast,
+    bounds: (usize, usize),
     choices: &[ObjectId],
     chosen: &[ObjectId],
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    // CR 601.2h: at least one attachment must be chosen (the detour sets
-    // min_count == count, so an empty selection is an illegal partial payment).
-    if chosen.is_empty() {
+    // CR 118.1 + CR 601.2h + CR 602.2b: "The player pays the total cost ...
+    // Partial payments are not allowed." This leg's prompt advertises
+    // `count == min_count` (the parser emits only `count: 1` today), so a
+    // selection of any other size is not a legal payment — a two-Equipment
+    // selection cannot pay a one-Equipment cost.
+    let (min_count, max_count) = bounds;
+    if chosen.len() < min_count || chosen.len() > max_count {
+        let expected = if min_count == max_count {
+            format!("exactly {min_count}")
+        } else {
+            format!("{min_count} to {max_count}")
+        };
+        return Err(EngineError::InvalidAction(format!(
+            "Must unattach {expected} attachment(s), got {}",
+            chosen.len()
+        )));
+    }
+    // CR 118.3 + CR 601.2h: one object can't pay for two slots — unattaching
+    // the same attachment twice detaches it once, leaving the cost underpaid.
+    if mana_abilities::contains_duplicate_object_id(chosen) {
         return Err(EngineError::InvalidAction(
-            "Must unattach at least one attachment to pay the cost".to_string(),
+            "Cannot unattach the same attachment more than once for a cost".to_string(),
         ));
     }
     // "You" in a cost is the cost's payer (CR 109.5 when paying for a spell or an
