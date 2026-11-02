@@ -415,49 +415,126 @@ fn stamp_self_return_origin_from_trigger_condition(def: &mut TriggerDefinition) 
     }
 }
 
-// CR 400.7e + CR 603.6: every immediate instruction referring to the
-// zone-change source must retain the zone in which the trigger can find it.
-fn stamp_self_return_origin_in_ability(ability: &mut AbilityDefinition, origin: Zone) {
-    stamp_self_return_origin_in_effect(&mut ability.effect, origin);
-    for mode in &mut ability.mode_abilities {
-        stamp_self_return_origin_in_ability(mode, origin);
-    }
-    if let Some(sub) = ability.sub_ability.as_deref_mut() {
-        stamp_self_return_origin_in_ability(sub, origin);
-    }
-    if let Some(else_ability) = ability.else_ability.as_deref_mut() {
-        stamp_self_return_origin_in_ability(else_ability, origin);
+/// Where the trigger's zone-change source is while an immediate chain resolves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChainSourceZone {
+    /// CR 400.7e + CR 400.7j: the source is in this public zone, where the
+    /// ability (or the effect that moved it there) can still find it.
+    Known(Zone),
+    /// CR 608.2d: an optional instruction moved the source to `moved_to` only
+    /// if the player chose to perform it, so only an "if you do" instruction
+    /// (CR 608.2c) can rely on that zone.
+    IfPerformed { moved_to: Zone },
+}
+
+impl ChainSourceZone {
+    /// The zone the source occupies when `link` resolves, when that is certain.
+    fn at(self, link: &AbilityDefinition) -> Option<Zone> {
+        match self {
+            ChainSourceZone::Known(zone) => Some(zone),
+            ChainSourceZone::IfPerformed { moved_to } => link
+                .condition
+                .as_ref()
+                .is_some_and(AbilityCondition::is_optional_effect_performed)
+                .then_some(moved_to),
+        }
     }
 }
 
-fn stamp_self_return_origin_in_effect(effect: &mut Effect, origin: Zone) {
+/// How one instruction relocated the zone-change source.
+enum SourceMove {
+    /// The instruction did not move the source.
+    Stays,
+    /// The instruction moved the source to this zone.
+    To(Zone),
+    /// The instruction may have moved the source somewhere it cannot track.
+    Untracked,
+}
+
+/// CR 400.7e + CR 400.7j + CR 603.6: stamp each immediate self-return in the
+/// chain with the public zone in which the trigger can find its source.
+///
+/// The walk follows the source through the chain: an instruction that moves
+/// it to another public zone (Lamplight Phoenix's "exile it") changes the
+/// origin of a later return, and a move into a hidden zone, or one whose
+/// outcome the walk cannot know, ends it. It also ends at the first
+/// instruction that hands a chosen or newly produced object to the next one
+/// (`introduces_chosen_object_target`, CR 608.2c): a later return then names
+/// that object, never the source (Gorex, the Tombshell; Wildgrove Summoner).
+/// A delayed trigger's payload observes its own later event (CR 603.7c), so
+/// the walk does not enter it.
+fn stamp_self_return_origin_in_ability(ability: &mut AbilityDefinition, origin: Zone) {
+    for mode in &mut ability.mode_abilities {
+        stamp_self_return_origin_in_ability(mode, origin);
+    }
+    let mut zone = ChainSourceZone::Known(origin);
+    let mut node = Some(ability);
+    while let Some(link) = node {
+        if introduces_chosen_object_target(link.effect.as_ref()) {
+            break;
+        }
+        let here = zone.at(link);
+        // CR 608.2c: an otherwise branch replaces this instruction, so it sees
+        // the source where the instruction would have found it.
+        if let (ChainSourceZone::Known(zone), Some(else_ability)) =
+            (zone, link.else_ability.as_deref_mut())
+        {
+            stamp_self_return_origin_in_ability(else_ability, zone);
+        }
+        match stamp_self_return_origin_in_effect(&mut link.effect, here) {
+            SourceMove::Stays => {}
+            SourceMove::To(moved_to) if moved_to.is_public() && link.condition.is_none() => {
+                zone = match (link.optional, zone) {
+                    (false, _) => ChainSourceZone::Known(moved_to),
+                    (true, ChainSourceZone::Known(_)) => ChainSourceZone::IfPerformed { moved_to },
+                    (true, ChainSourceZone::IfPerformed { .. }) => break,
+                };
+            }
+            // CR 400.7j: only a move to a public zone leaves the source
+            // findable, and a conditional move leaves its zone unknown.
+            SourceMove::To(_) | SourceMove::Untracked => break,
+        }
+        node = link.sub_ability.as_deref_mut();
+    }
+}
+
+/// Stamp one instruction whose source is in `here` (when known) and report how
+/// the instruction moves the source.
+fn stamp_self_return_origin_in_effect(effect: &mut Effect, here: Option<Zone>) -> SourceMove {
     match effect {
         Effect::ChangeZone {
-            origin: o,
+            origin,
             destination,
             target,
             ..
         } if matches!(
             target,
             TargetFilter::SelfRef | TargetFilter::TriggeringSource
-        ) && matches!(destination, Zone::Battlefield | Zone::Hand) =>
+        ) =>
         {
-            if o.is_none() {
-                *o = Some(origin);
+            if let (Some(here), Zone::Battlefield | Zone::Hand) = (here, *destination) {
+                if origin.is_none() {
+                    *origin = Some(here);
+                }
+                if matches!(target, TargetFilter::TriggeringSource) {
+                    *target = TargetFilter::SelfRef;
+                }
             }
-            if matches!(target, TargetFilter::TriggeringSource) {
-                *target = TargetFilter::SelfRef;
-            }
+            SourceMove::To(*destination)
         }
         // CR 603.7c: a delayed trigger observes its own later event. Its
         // payload cannot inherit the enclosing trigger's source or origin.
-        Effect::CreateDelayedTrigger { .. } => {}
+        Effect::CreateDelayedTrigger { .. } => SourceMove::Stays,
         Effect::ChooseOneOf { branches, .. } => {
-            for branch in branches.iter_mut() {
-                stamp_self_return_origin_in_ability(branch, origin);
+            if let Some(here) = here {
+                for branch in branches.iter_mut() {
+                    stamp_self_return_origin_in_ability(branch, here);
+                }
             }
+            // The chosen branch may have moved the source.
+            SourceMove::Untracked
         }
-        _ => {}
+        _ => SourceMove::Stays,
     }
 }
 
@@ -3376,8 +3453,11 @@ fn valid_target_blocks_event_source_lift(
 ) -> bool {
     match mode {
         TriggerMode::Discarded | TriggerMode::DiscardedAll | TriggerMode::Unattach => false,
-        // CR 608.2k + CR 603.6: only a self-dies trigger's player attachment
-        // slot is distinct from its "it" anaphor. Other player-targeted
+        // CR 608.2k + CR 603.6: on a self put-into-a-graveyard trigger, a
+        // player-scoped `valid_target` (Accursed Witch's "attached to target
+        // opponent" host, or the owner scope of "put into your graveyard" —
+        // Narcomoeba, Creeping Chill) is never the "it" anaphor, which names
+        // the card that moved. Other player-targeted
         // zone-change triggers can bind later instructions to that player
         // (Thought Prison's "from it"), so they must retain ParentTarget.
         TriggerMode::ChangesZone
@@ -4237,7 +4317,12 @@ fn lift_filter_shared_quality_parent_target_to_triggering_source(filter: &mut Ta
 /// A zone choice (`Effect::ChooseFromZone`, every form) also returns `true`: it
 /// hands the chosen card(s) to the next instruction, so a later `ParentTarget`
 /// binds to the pick and never to the trigger event (Gorex, the Tombshell's
-/// dies half).
+/// dies half). Seek hands its sought cards over the same way (Wildgrove
+/// Summoner).
+///
+/// An unparsed instruction (`Effect::Unimplemented`) also returns `true`: it may
+/// have produced the object a later pronoun names (Bone Rattler), so the later
+/// anaphor is left unbound rather than guessed onto the trigger event.
 ///
 /// An exile-until loop (`Effect::ExileFromTopUntil`, every `UntilCondition`)
 /// also returns `true`: it hands what it exiled to the next instruction — a
@@ -4279,10 +4364,22 @@ fn introduces_chosen_object_target(effect: &Effect) -> bool {
     // never one of them.
     // CR 608.2c + CR 701.23a: search establishes the found-object antecedent
     // for every later instruction, including sequential siblings.
+    // Seek (an Alchemy random library selection) hands its sought cards to
+    // the next instruction the same way: Wildgrove Summoner's "seek two
+    // Forest cards and put them onto the battlefield" moves the sought cards,
+    // never the dying source.
     if matches!(
         effect,
-        Effect::ChooseFromZone { .. } | Effect::SearchLibrary { .. }
+        Effect::ChooseFromZone { .. } | Effect::SearchLibrary { .. } | Effect::Seek { .. }
     ) {
+        return true;
+    }
+    // CR 608.2c: an instruction the parser could not read may have produced
+    // the object a later pronoun names (Bone Rattler's unparsed "create four
+    // Reassembling Skeleton token cards and put them into your graveyard").
+    // The later anaphor stays unbound rather than being guessed onto the
+    // trigger event; the unparsed instruction keeps the card unsupported.
+    if matches!(effect, Effect::Unimplemented { .. }) {
         return true;
     }
     // CR 608.2c + CR 701.13a: an exile-until loop ("exile cards from the top of

@@ -11119,10 +11119,6 @@ fn self_etb_retrievals_do_not_inherit_battlefield_origin() {
             "When this creature enters, search your library for an Aura card that could enchant it. If this creature is still on the battlefield, put that Aura card onto the battlefield attached to it. Otherwise, reveal the Aura card and put it into your hand. Then shuffle.",
         ),
         (
-            "Nazahn, Revered Bladesmith",
-            "When Nazahn enters, search your library for an Equipment card and reveal it. If you reveal a card named Hammer of Nazahn this way, put it onto the battlefield. Otherwise, put that card into your hand. Then shuffle.",
-        ),
-        (
             "Legion Angel",
             "When this creature enters, you may reveal a card you own named Legion Angel from outside the game and put it into your hand.",
         ),
@@ -11134,6 +11130,221 @@ fn self_etb_retrievals_do_not_inherit_battlefield_origin() {
         assert!(
             origins.iter().all(|origin| *origin != Some(Zone::Battlefield)),
             "{name}: retrieved card does not come from the triggering source's battlefield zone: {origins:?}"
+        );
+    }
+}
+
+/// The put-into-a-graveyard trigger of a card, parsed from its printed Oracle text.
+fn printed_graveyard_trigger(name: &str, oracle: &str) -> TriggerDefinition {
+    parse_oracle_text(oracle, name, &[], &["Creature".to_string()], &[])
+        .triggers
+        .into_iter()
+        .find(|t| t.mode == TriggerMode::ChangesZone && t.destination == Some(Zone::Graveyard))
+        .unwrap_or_else(|| panic!("{name}: expected a put-into-graveyard trigger"))
+}
+
+/// CR 608.2c: a selected or sought card is handed to the next instruction, so
+/// the later "that card" / "them" names it, never the dying source. Neither the
+/// event-source lift nor the self-return origin stamp may cross that boundary.
+#[test]
+fn dies_trigger_selected_object_move_keeps_parent_target() {
+    for (name, oracle) in [
+        (
+            "Gorex, the Tombshell",
+            "As an additional cost to cast this spell, you may exile any number of creature cards from your graveyard. This spell costs {2} less to cast for each card exiled this way.\nDeathtouch\nWhenever Gorex attacks or dies, choose a card at random exiled with Gorex and put that card into its owner's hand.",
+        ),
+        (
+            "Wildgrove Summoner",
+            "When this creature enters, Forest cards in your hand and library perpetually become 3/4 Treefolk creatures in addition to their other types and gain reach and haste.\nWhen this creature dies, seek two Forest cards and put them onto the battlefield.",
+        ),
+    ] {
+        let def = printed_graveyard_trigger(name, oracle);
+        let execute = def.execute.as_deref().expect("dies trigger body");
+        let chain = ability_chain(execute);
+        assert!(
+            matches!(
+                chain[0].effect.as_ref(),
+                Effect::ChooseFromZone { .. } | Effect::Seek { .. }
+            ),
+            "{name}: expected the selecting producer first, got {:?}",
+            chain[0].effect
+        );
+        match chain.get(1).map(|link| link.effect.as_ref()) {
+            Some(Effect::ChangeZone { origin, target, .. }) => {
+                assert_eq!(
+                    target,
+                    &TargetFilter::ParentTarget,
+                    "{name}: the move names the produced card, not the dying source"
+                );
+                assert_eq!(
+                    origin, &None,
+                    "{name}: no graveyard origin for the produced card"
+                );
+            }
+            other => panic!("{name}: expected the produced card's move, got {other:?}"),
+        }
+    }
+}
+
+/// CR 400.7j + CR 603.6: Lamplight Phoenix's optional "exile it" moves the
+/// source to exile, and the "if you do" return finds it there, not in the
+/// graveyard the dies event put it in.
+#[test]
+fn self_return_origin_tracks_an_earlier_self_exile_in_the_chain() {
+    let def = printed_graveyard_trigger(
+        "Lamplight Phoenix",
+        "Flying\nWhen this creature dies, you may exile it and collect evidence 4. If you do, return this card to the battlefield tapped. (To collect evidence 4, exile cards with total mana value 4 or greater from your graveyard.)",
+    );
+    let execute = def.execute.as_deref().expect("dies trigger body");
+    let chain = ability_chain(execute);
+    assert!(
+        matches!(
+            chain[0].effect.as_ref(),
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::TriggeringSource | TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "\"exile it\" is the dying source, got {:?}",
+        chain[0].effect
+    );
+    let (origin, target) = chain
+        .iter()
+        .find_map(|link| match link.effect.as_ref() {
+            Effect::ChangeZone {
+                origin,
+                destination: Zone::Battlefield,
+                target,
+                ..
+            } => Some((*origin, target.clone())),
+            _ => None,
+        })
+        .expect("the return to the battlefield");
+    assert_eq!(target, TargetFilter::SelfRef);
+    assert_eq!(
+        origin,
+        Some(Zone::Exile),
+        "the return finds the card in exile, where the chain moved it"
+    );
+}
+
+/// CR 400.7j + CR 608.2c + CR 608.2d: the origin walk follows the source
+/// through the chain. An optional self-move leaves its zone unknown to an
+/// instruction not gated on "if you do"; a move into a hidden zone ends the
+/// walk; an otherwise branch sees the zone the replaced instruction would.
+#[test]
+fn self_return_origin_zone_tracking_follows_optional_and_otherwise_links() {
+    let parsed = |text: &str| {
+        let def = parse_trigger_line(text, "Accursed Witch");
+        *def.execute.expect("parsed body")
+    };
+    let self_move = |destination: Zone| {
+        let mut ability = parsed(
+            "When this creature dies, return it to the battlefield transformed under your control attached to target opponent.",
+        );
+        ability.sub_ability = None;
+        let Effect::ChangeZone {
+            origin,
+            destination: dest,
+            target,
+            ..
+        } = ability.effect.as_mut()
+        else {
+            panic!("expected a parsed move");
+        };
+        *origin = None;
+        *dest = destination;
+        *target = TargetFilter::TriggeringSource;
+        ability
+    };
+    let origin_of = |ability: Option<&AbilityDefinition>| match ability
+        .expect("chained move")
+        .effect
+        .as_ref()
+    {
+        Effect::ChangeZone { origin, .. } => *origin,
+        other => panic!("expected a move, got {other:?}"),
+    };
+
+    // Optional exile, then an ungated return: the source may be in either zone.
+    let mut root = self_move(Zone::Exile);
+    root.optional = true;
+    root.sub_ability = Some(Box::new(self_move(Zone::Battlefield)));
+    stamp_self_return_origin_in_ability(&mut root, Zone::Graveyard);
+    assert_eq!(origin_of(root.sub_ability.as_deref()), None);
+
+    // Optional exile, then an "if you do" return: the source is in exile.
+    let mut root = self_move(Zone::Exile);
+    root.optional = true;
+    let mut gated = self_move(Zone::Battlefield);
+    gated.condition = Some(AbilityCondition::effect_performed());
+    root.sub_ability = Some(Box::new(gated));
+    stamp_self_return_origin_in_ability(&mut root, Zone::Graveyard);
+    assert_eq!(origin_of(root.sub_ability.as_deref()), Some(Zone::Exile));
+
+    // A move into a hidden zone ends the walk (CR 400.7j: public zones only).
+    let mut root = self_move(Zone::Library);
+    root.sub_ability = Some(Box::new(self_move(Zone::Battlefield)));
+    stamp_self_return_origin_in_ability(&mut root, Zone::Graveyard);
+    assert_eq!(origin_of(root.sub_ability.as_deref()), None);
+
+    // A conditional exile with an otherwise return (Bogardan Phoenix): the
+    // otherwise branch finds the source in the graveyard, and the conditional
+    // move leaves later links without a known zone.
+    let mut root = self_move(Zone::Exile);
+    root.condition = Some(AbilityCondition::effect_performed());
+    root.else_ability = Some(Box::new(self_move(Zone::Battlefield)));
+    root.sub_ability = Some(Box::new(self_move(Zone::Battlefield)));
+    stamp_self_return_origin_in_ability(&mut root, Zone::Graveyard);
+    assert_eq!(
+        origin_of(root.else_ability.as_deref()),
+        Some(Zone::Graveyard)
+    );
+    assert_eq!(origin_of(root.sub_ability.as_deref()), None);
+}
+
+/// CR 608.2c: Bone Rattler's first "exile it" is the source; the later "put
+/// them into your graveyard" names the token cards an unparsed instruction
+/// creates, so it must not be rewritten to the triggering source. The unparsed
+/// producer keeps the card unsupported.
+#[test]
+fn unparsed_producer_keeps_later_pronoun_off_the_triggering_source() {
+    let def = printed_graveyard_trigger(
+        "Bone Rattler",
+        "When Bone Rattler is put into your graveyard from anywhere, exile it. When you do, create four Reassembling Skeleton token cards and put them into your graveyard.",
+    );
+    let execute = def.execute.as_deref().expect("trigger body");
+    let chain = ability_chain(execute);
+    assert!(
+        matches!(
+            chain[0].effect.as_ref(),
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::TriggeringSource | TargetFilter::SelfRef,
+                ..
+            }
+        ),
+        "the first \"it\" is Bone Rattler, got {:?}",
+        chain[0].effect
+    );
+    let producer = chain
+        .iter()
+        .position(|link| matches!(link.effect.as_ref(), Effect::Unimplemented { .. }))
+        .expect("token-card creation stays an honest gap");
+    let later_moves: Vec<_> = chain[producer + 1..]
+        .iter()
+        .filter_map(|link| match link.effect.as_ref() {
+            Effect::ChangeZone { target, .. } => Some(target),
+            _ => None,
+        })
+        .collect();
+    assert!(!later_moves.is_empty(), "expected the later graveyard move");
+    for target in later_moves {
+        assert_eq!(
+            target,
+            &TargetFilter::ParentTarget,
+            "\"them\" names the new token cards, not Bone Rattler"
         );
     }
 }

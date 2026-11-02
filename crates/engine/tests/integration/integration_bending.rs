@@ -4,8 +4,6 @@
 use engine::ai_support::candidate_actions;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
-use engine::game::triggers::process_triggers;
-use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
 use engine::game::zones::create_object;
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, Effect, EffectScope, PtValue, QuantityExpr, ResolvedAbility,
@@ -230,6 +228,9 @@ fn badgermole_cub_earthbend_returns_khalni_garden_after_exile() {
         })
         .id();
     let garden = scenario.add_real_card(P0, "Khalni Garden", Zone::Battlefield, db);
+    let exile = scenario
+        .add_spell_to_hand_from_oracle(P0, "Exile spell", true, "Exile target creature.")
+        .id();
     let mut runner = scenario.build();
 
     runner.cast(cub).target_object(garden).resolve();
@@ -241,14 +242,8 @@ fn badgermole_cub_earthbend_returns_khalni_garden_after_exile() {
         "the live-parsed Earthbend trigger must animate the land"
     );
 
-    let mut events = Vec::new();
-    assert!(!move_object_for_test(
-        runner.state_mut(),
-        ZoneMoveRequest::effect(garden, Zone::Exile, cub),
-        &mut events,
-    ));
-    assert_eq!(runner.state().objects[&garden].zone, Zone::Exile);
-    process_triggers(runner.state_mut(), &events);
+    // CR 603.7c: the delayed trigger observes the land's own later exile event.
+    runner.cast(exile).target_object(garden).resolve();
     runner.advance_until_stack_empty();
 
     let returned = &runner.state().objects[&garden];
