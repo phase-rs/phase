@@ -344,6 +344,40 @@ pub fn strip_reminder_text(text: &str) -> String {
     result.trim().to_string()
 }
 
+/// CR 207.2a: reminder text has no rules meaning. Mask only balanced spans
+/// crossing lines; preserve byte offsets and physical lines for source anchors.
+/// Single-line reminders remain available to specialized semantic readers.
+pub(crate) fn mask_multiline_reminder_text(text: &str) -> String {
+    let mut view = text.as_bytes().to_vec();
+    let mut depth = 0usize;
+    let mut start = 0;
+    let mut crosses_line = false;
+    for (index, byte) in text.bytes().enumerate() {
+        match byte {
+            b'(' => {
+                if depth == 0 {
+                    start = index;
+                    crosses_line = false;
+                }
+                depth += 1;
+            }
+            b'\n' if depth > 0 => crosses_line = true,
+            b')' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 && crosses_line {
+                    for masked in &mut view[start..=index] {
+                        if *masked != b'\n' && *masked != b'\r' {
+                            *masked = b' ';
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    String::from_utf8(view).expect("only complete parenthetical spans are blanked")
+}
+
 /// CR 702.148a: How a square-bracketed span in a cleave spell's rules text is
 /// rendered for a given casting mode.
 ///
@@ -1692,14 +1726,26 @@ fn alchemy_effective_name(card_name: &str) -> &str {
 /// multi-word legendary names (for example, "Captain James T. Kirk" →
 /// "Captain Kirk").
 ///
-/// The leading word must be a proper-name/title word, not an article, game
-/// term, keyword, verb, or subtype. This rejects ambiguous prose and flavor
+/// The leading word must be a capitalized proper-name/title word, not an
+/// article, core type, keyword, verb, or subtype. A role noun is allowed only
+/// alongside further proper-name components. This rejects ambiguous prose and flavor
 /// labels such as "The Minstrel's Ballad" for "The Wandering Minstrel"
 /// (CR 207.2c–d) while keeping the rule independent of any individual card.
 fn compound_short_self_name(card_name: &str) -> Option<String> {
-    let effective_name = alchemy_effective_name(card_name);
+    let effective_name =
+        comma_short_self_name(card_name).unwrap_or_else(|| alchemy_effective_name(card_name));
     let words: Vec<&str> = effective_name.split_whitespace().collect();
-    if comma_short_self_name(card_name).is_some() || words.contains(&"//") || words.len() < 3 {
+    // Structural printed-name words, including quoted nicknames, must be proper
+    // name components. A capitalized role noun can lead this multiword form;
+    // the separate single-word fallback keeps its rules-vocabulary exclusions.
+    if words.len() < 3
+        || !words.iter().all(|word| {
+            word.trim_start_matches(['\"', '“'])
+                .chars()
+                .next()
+                .is_some_and(char::is_uppercase)
+        })
+    {
         return None;
     }
     let first = words[0];
@@ -1711,7 +1757,6 @@ fn compound_short_self_name(card_name: &str) -> Option<String> {
             "the" | "a" | "an" | "of" | "in" | "on" | "to" | "for" | "at" | "by"
         )
         || is_core_type_name(&lower_first)
-        || is_non_subtype_subject_name(&lower_first)
         || is_supertype_word(&lower_first)
         || is_rules_vocabulary_word(&lower_first)
         || is_subtype_word(&lower_first)
@@ -3925,6 +3970,21 @@ mod tests {
 
     #[test]
     fn normalize_compound_printed_short_names() {
+        for (name, short) in [
+            ("Commander Raffi Musiker", "Commander Musiker"),
+            ("Ensign Harry Kim, Operations", "Ensign Kim"),
+            ("Dr. Leonard \"Bones\" McCoy", "Dr. McCoy"),
+            ("A-Ensign Harry Kim, Operations", "Ensign Kim"),
+        ] {
+            let text = format!("When {short} enters, draw a card.");
+            let normalized = normalize_card_name_refs(&text, name);
+            assert_eq!(normalized, "When ~ enters, draw a card.");
+            assert_eq!(normalize_card_name_refs(&normalized, name), normalized);
+            let named = format!("Create a token named {short}.");
+            assert_eq!(normalize_card_name_refs(&named, name), named);
+            let granted = format!("Creatures you control have \"Sacrifice {short}: Draw a card.\"");
+            assert_eq!(normalize_card_name_refs(&granted, name), format!("Creatures you control have \"Sacrifice {GRANTING_SELF_PLACEHOLDER}: Draw a card.\""));
+        }
         // CR 201.5c: printed shortened names are the same object reference.
         assert_eq!(
             normalize_card_name_refs(
@@ -3966,6 +4026,32 @@ mod tests {
             normalize_card_name_refs("Search Tomorrow for a card.", "Search for Tomorrow"),
             "Search Tomorrow for a card."
         );
+    }
+
+    #[test]
+    fn bones_full_oracle_preserves_deferred_rider_and_self_etb() {
+        let name = "Dr. Leonard \"Bones\" McCoy";
+        let oracle = "Flash\nWhen Dr. McCoy enters, choose one —\n• Return target non-Doctor permanent card from your graveyard to your hand.\n• Choose up to one other target creature. When it dies this turn, return that card to the battlefield under its owner's control with a +1/+1 counter on it at the beginning of the next end step.";
+        let normalized = normalize_card_name_refs(oracle, name);
+        assert_eq!(normalized, oracle.replace("Dr. McCoy", "~"));
+        assert_eq!(normalize_card_name_refs(&normalized, name), normalized);
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            oracle,
+            name,
+            &["Flash".into()],
+            &["Creature".into()],
+            &["Human".into(), "Doctor".into()],
+        );
+        let etb = parsed
+            .triggers
+            .iter()
+            .find(|trigger| trigger.mode == crate::types::triggers::TriggerMode::ChangesZone)
+            .expect("self ETB remains parsed");
+        assert_eq!(etb.valid_card, Some(TargetFilter::SelfRef));
+        let execute = etb.execute.as_deref().expect("modal body");
+        assert_eq!(execute.mode_abilities.len(), 2);
+        // SHAPE only: the delayed death/return consumer belongs to phase 21.
+        // Its full-card coverage must stay unsupported at final projection.
     }
 
     #[test]
@@ -5113,6 +5199,22 @@ mod tests {
             ),
             "Flying"
         );
+    }
+
+    #[test]
+    fn multiline_reminder_view_preserves_source_positions_and_unbalanced_text() {
+        let raw = "(Reminder é (nested)\ncontinued.)\nI — Draw two cards.\n(Unmatched\nFlying";
+        let view = mask_multiline_reminder_text(raw);
+        assert_eq!(view.len(), raw.len());
+        assert_eq!(view.lines().nth(2), Some("I — Draw two cards."));
+        assert_eq!(view.lines().nth(3), Some("(Unmatched"));
+        assert_eq!(view.lines().nth(4), Some("Flying"));
+        assert!(view.lines().take(2).all(|line| line.trim().is_empty()));
+        assert_eq!(
+            mask_multiline_reminder_text("Ward {1} (Pay {1}.)"),
+            "Ward {1} (Pay {1}.)"
+        );
+        assert_eq!(mask_multiline_reminder_text(&view), view);
     }
 
     #[test]

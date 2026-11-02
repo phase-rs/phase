@@ -313,6 +313,7 @@ mod triggered_ability_mana_ledger;
 mod triple_triad_owned_plus_lesser_mv_impulse;
 mod triumphant_chomp;
 mod trk_compound_short_names;
+mod trk_phase1_subjects;
 mod true_conviction_double_keyword_grant;
 mod trusted_precast_restore_characterization;
 mod turn_based_draw_step_miracle_offer;

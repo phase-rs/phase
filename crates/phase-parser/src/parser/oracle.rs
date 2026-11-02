@@ -148,8 +148,9 @@ use super::oracle_trigger::{
     parse_trigger_lines_at_index_ir,
 };
 use super::oracle_util::{
-    normalize_card_name_refs, normalize_card_name_refs_reporting, parse_mana_symbols, parse_number,
-    render_granting_self_reference, split_same_is_true_static_tail, strip_reminder_text, TextPair,
+    mask_multiline_reminder_text, normalize_card_name_refs, normalize_card_name_refs_reporting,
+    parse_mana_symbols, parse_number, render_granting_self_reference,
+    split_same_is_true_static_tail, strip_reminder_text, TextPair,
 };
 
 /// Collected parsed abilities from Oracle text.
@@ -5793,7 +5794,11 @@ fn parse_normalized_oracle_ir(
     // `normalize_card_name_refs` on this pre-normalized text; strategies 1-4
     // find nothing to replace and strategy 5 is short-circuited by its
     // `!result.contains('~')` guard, making re-entry an idempotent no-op.
-    let lines: Vec<&str> = normalized_oracle_text.split('\n').collect();
+    // allow-noncombinator: structural physical-line framing for source anchors, not Oracle phrase dispatch.
+    let source_lines: Vec<&str> = normalized_oracle_text.split('\n').collect();
+    let document_view = mask_multiline_reminder_text(normalized_oracle_text);
+    // allow-noncombinator: structural physical-line framing of the byte-preserving parser view.
+    let lines: Vec<&str> = document_view.split('\n').collect();
 
     // u4-c2 source-order emission: the document builder, wrapped in the emitter
     // that owns the single per-line ordinal authority. Every non-Class emission —
@@ -5803,7 +5808,7 @@ fn parse_normalized_oracle_ir(
     // which need mid-loop read-back/merge/dedup; its VECTOR fields stay empty and
     // are emitted through the builder instead. The singletons are emitted post-loop
     // at their captured source line.
-    let mut emitter = DocEmitter::new(&lines, observer);
+    let mut emitter = DocEmitter::new(&source_lines, observer);
     let mut document_relations = Vec::new();
     let mut additional_cost_line: Option<usize> = None;
     let mut solve_condition_line: Option<usize> = None;
@@ -5854,7 +5859,7 @@ fn parse_normalized_oracle_ir(
             // overwrite that would replace it with `source_text`.
             emitter.trigger_ir_at_route(
                 line,
-                TriggerNodeIr::from_definition(lines[line], trigger),
+                TriggerNodeIr::from_definition(source_lines[line], trigger),
                 OuterRoute::Saga,
             );
         }
@@ -6129,7 +6134,7 @@ fn parse_normalized_oracle_ir(
         // first line, the dispatch-start line, regardless of how many `i` consumes).
         let item_line = i;
 
-        let raw_line = lines[i].trim();
+        let raw_line = source_lines[i].trim();
         if raw_line.is_empty() {
             i += 1;
             continue;
@@ -6150,7 +6155,13 @@ fn parse_normalized_oracle_ir(
             .as_deref()
             .unwrap_or(raw_line);
 
-        let line = strip_reminder_text(raw_line);
+        let dispatch_line =
+            if reminder_body_owned.is_some() || activation_timing_parenthetical_owned.is_some() {
+                raw_line
+            } else {
+                lines[i].trim()
+            };
+        let line = strip_reminder_text(dispatch_line);
         let ability_cant_be_copied = x_annotation_marks_ability_uncopyable(&line);
         let min_x_value = x_annotation_min_value(&line);
         // Strip "X can't be 0." casting constraint suffix — annotation only, not an ability.
