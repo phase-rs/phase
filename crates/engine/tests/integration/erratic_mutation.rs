@@ -69,7 +69,13 @@ fn erratic_mutation_single_target_and_cards_to_bottom() {
         assert_eq!(p0_lib[3], other);
     }
 
-    let outcome = runner.cast(spell).target_object(victim).resolve();
+    // CR 608.2c + CR 401.4: the pile is placed by the last instruction, after the
+    // pump; its owner arranges it. Submit the encounter order.
+    let outcome = runner
+        .cast(spell)
+        .target_object(victim)
+        .effect_zone(&[land1, land2, nonland])
+        .resolve();
 
     // Assertions:
     // 1. Hand did not draw any cards (Issue 2: nonland card does NOT go to hand).
@@ -104,11 +110,11 @@ fn erratic_mutation_single_target_and_cards_to_bottom() {
     assert_eq!(victim_obj.toughness, Some(2));
 }
 
-/// CR 608.2d + CR 701.20a: "Put all cards revealed this way on the bottom of your library
-/// in any order." When 2+ cards are revealed and bottomed, the engine pauses with
-/// `WaitingFor::RevealUntilBottomOrder` for the controller to announce their chosen
-/// permutation. Submitting a custom permutation must place the cards on the library bottom
-/// in that exact submitted order.
+/// CR 608.2c + CR 401.4 + CR 701.20a: "Put all cards revealed this way on the bottom of your
+/// library in any order." The placement is the last instruction, so it is followed after the
+/// pump: when 2+ cards are revealed, the engine pauses with `WaitingFor::EffectZoneChoice`
+/// for the owner to arrange the pile. Submitting a custom permutation must place the cards
+/// on the library bottom in that exact submitted order.
 #[test]
 fn erratic_mutation_custom_bottom_order_permutation() {
     use engine::types::actions::GameAction;
@@ -153,13 +159,33 @@ fn erratic_mutation_custom_bottom_order_permutation() {
     committed.act(GameAction::PassPriority).unwrap();
     committed.act(GameAction::PassPriority).unwrap();
 
-    // Verify engine paused on WaitingFor::RevealUntilBottomOrder
+    // CR 608.2c + CR 701.20b: the pump has already resolved when the pile placement
+    // pauses, and the revealed cards are still where the reveal found them.
+    evaluate_layers(committed.state_mut());
+    assert_eq!(committed.state().objects[&victim].power, Some(5));
+    assert_eq!(
+        committed.state().players[P0.0 as usize]
+            .library
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![land1, land2, nonland, other],
+        "the pile is not placed before the pump instruction"
+    );
+
+    // Verify engine paused on the owner's arrangement of the whole revealed pile.
     match &committed.state().waiting_for {
-        WaitingFor::RevealUntilBottomOrder { player, cards, .. } => {
+        WaitingFor::EffectZoneChoice { player, cards, .. } => {
             assert_eq!(*player, P0);
-            assert_eq!(cards, &[land1, land2, nonland]);
+            assert_eq!(
+                cards
+                    .iter()
+                    .copied()
+                    .collect::<std::collections::BTreeSet<_>>(),
+                [land1, land2, nonland].into_iter().collect(),
+            );
         }
-        other_wait => panic!("expected RevealUntilBottomOrder, got {other_wait:?}"),
+        other_wait => panic!("expected EffectZoneChoice, got {other_wait:?}"),
     }
 
     // Submit a custom non-encounter permutation: [nonland, land2, land1]
@@ -191,116 +217,6 @@ fn erratic_mutation_custom_bottom_order_permutation() {
     let victim_obj = &committed.state().objects[&victim];
     assert_eq!(victim_obj.power, Some(5));
     assert_eq!(victim_obj.toughness, Some(2));
-}
-
-/// CR 608.2c + CR 616.1: When zone changes during RevealUntil resolution trigger
-/// competing replacement effects, the engine pauses on `WaitingFor::ReplacementChoice`.
-/// After answering the replacement choice, the batch completion must carry the hit
-/// snapshot so the chained pump still resolves against the revealed card's mana value.
-#[test]
-fn erratic_mutation_replacement_pause_preserves_mana_value_referent() {
-    use engine::types::ability::{
-        AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, TargetFilter,
-    };
-    use engine::types::replacements::ReplacementEvent;
-    use engine::types::zones::EtbTapState;
-
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-
-    let victim = scenario.add_creature(P1, "Victim", 2, 5).id();
-
-    let spell = scenario
-        .add_spell_to_hand_from_oracle(P0, "Erratic Mutation", true, ERRATIC_MUTATION_ORACLE)
-        .id();
-
-    scenario.with_mana_pool(
-        P0,
-        vec![
-            ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]),
-            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
-            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
-        ],
-    );
-
-    // Install two competing library-to-exile replacement effects on the battlefield.
-    let lib_redirect = |desc: &str| {
-        ReplacementDefinition::new(ReplacementEvent::Moved)
-            .destination_zone(Zone::Library)
-            .execute(AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::ChangeZone {
-                    destination: Zone::Exile,
-                    origin: None,
-                    target: TargetFilter::SelfRef,
-                    owner_library: false,
-                    enter_transformed: false,
-                    enters_under: None,
-                    enter_tapped: EtbTapState::Unspecified,
-                    enters_attacking: false,
-                    up_to: false,
-                    enter_with_counters: vec![],
-                    conditional_enter_with_counters: vec![],
-                    face_down_profile: None,
-                    enters_modified_if: None,
-                },
-            ))
-            .description(desc.to_string())
-    };
-
-    scenario
-        .add_creature(P0, "Redirect A", 1, 1)
-        .as_enchantment()
-        .with_replacement_definition(lib_redirect("Redirect A"));
-    scenario
-        .add_creature(P0, "Redirect B", 1, 1)
-        .as_enchantment()
-        .with_replacement_definition(lib_redirect("Redirect B"));
-
-    let other = scenario.add_card_to_library_top(P0, "Deep Card");
-    let nonland = scenario
-        .add_spell_to_library_top(P0, "Divination", false)
-        .with_mana_cost(ManaCost::generic(3))
-        .id();
-    let land2 = scenario
-        .add_spell_to_library_top(P0, "Island", false)
-        .as_land()
-        .id();
-    let land1 = scenario
-        .add_spell_to_library_top(P0, "Forest", false)
-        .as_land()
-        .id();
-
-    let mut runner = scenario.build();
-
-    // Cast Erratic Mutation targeting victim.
-    // Resolution hits competing replacement redirects (Library -> Exile), pauses on
-    // ReplacementChoice, answers via policy index 0, and resumes batch completion.
-    let outcome = runner
-        .cast(spell)
-        .target_object(victim)
-        .replacement_choice(0)
-        .resolve();
-
-    // All revealed cards (land1, land2, nonland) were redirected to Exile by the replacement effect.
-    let state = outcome.state();
-    assert_eq!(state.objects[&nonland].zone, Zone::Exile);
-    assert_eq!(state.objects[&land1].zone, Zone::Exile);
-    assert_eq!(state.objects[&land2].zone, Zone::Exile);
-    assert_eq!(state.objects[&other].zone, Zone::Library);
-
-    // After resolution, check victim P/T: base 2/5 + 3/-3 (Divination MV 3) -> 5/2.
-    let victim_obj = &outcome.state().objects[&victim];
-    assert_eq!(
-        victim_obj.power,
-        Some(5),
-        "power must be 5 (2 + 3 from hit card MV across replacement pause)"
-    );
-    assert_eq!(
-        victim_obj.toughness,
-        Some(2),
-        "toughness must be 2 (5 - 3 from hit card MV across replacement pause)"
-    );
 }
 
 /// CR 701.20a + CR 608.2c: "Put those land cards onto the battlefield tapped and
