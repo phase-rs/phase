@@ -5088,7 +5088,6 @@ fn redact_hidden_library_identity_carriers(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::derived_views::ClientGameStateRef;
     use crate::game::engine::{apply, EngineError};
     use crate::game::merge::{merge_object_onto, MergeSide};
     use crate::game::morph::{apply_face_down_creature_characteristics, manifest};
@@ -7930,15 +7929,13 @@ mod tests {
 
     /// CR 608.2d: the paused resolution-time division effect is retained in
     /// authoritative state, but its resolution-only look-result provenance never
-    /// reaches a viewer — through the typed filter OR the direct client wire.
+    /// reaches a viewer through the typed filter. The direct client serializer's
+    /// own redaction is pinned in `derived_views` on an unfiltered state.
     #[test]
     fn resolution_division_projection_redacts_private_iteration_members() {
         let mut state = GameState::new_two_player(42);
         let mut pending = ResolvedAbility::new(
-            Effect::Unimplemented {
-                name: "private loop probe".to_string(),
-                description: None,
-            },
+            Effect::unimplemented("private loop probe", "private loop probe"),
             vec![],
             ObjectId(10),
             PlayerId(0),
@@ -7971,18 +7968,6 @@ mod tests {
         // Typed viewer filter.
         let filtered = filter_state_for_viewer(&state, PlayerId(1));
         assert_eq!(members(&filtered.waiting_for), None);
-
-        // Direct client serializer, with no prior viewer filter.
-        let wire = serde_json::to_value(ClientGameStateRef::wrap(&state, None)).unwrap();
-        let pending_effect =
-            &wire["state"]["waiting_for"]["data"]["scope"]["data"]["pending_effect"];
-        assert!(pending_effect.is_object(), "reach guard: {wire}");
-        assert!(
-            pending_effect["context"]
-                .get("parent_target_iteration_members")
-                .is_none(),
-            "wire payload leaked iteration members: {pending_effect}"
-        );
 
         // Authoritative state still carries the provenance for the resume.
         assert!(members(&state.waiting_for).is_some());

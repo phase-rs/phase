@@ -8251,6 +8251,54 @@ mod tests {
         );
     }
 
+    /// CR 608.2d: `client_state_wire_value` redacts a paused resolution-time
+    /// division's look-result provenance by itself. The fixture is the raw
+    /// authoritative state — no viewer filter runs first — so this fails if the
+    /// serializer's own `redact_waiting_for_iteration_members` call is removed.
+    #[test]
+    fn client_wire_redacts_resolution_division_provenance_without_viewer_filter() {
+        use crate::types::game_state::{DistributionScope, DistributionUnit};
+
+        let mut state = GameState::new_two_player(42);
+        let mut pending = ResolvedAbility::new(
+            Effect::unimplemented("private loop probe", "private loop probe"),
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        pending.context.parent_target_iteration_members = Some(vec![ObjectId(1), ObjectId(2)]);
+        state.waiting_for = WaitingFor::DistributeAmong {
+            player: PlayerId(0),
+            total: 3,
+            targets: vec![
+                TargetRef::Object(ObjectId(1)),
+                TargetRef::Object(ObjectId(2)),
+            ],
+            unit: DistributionUnit::Damage,
+            scope: DistributionScope::ResolutionCandidates {
+                pending_effect: Box::new(pending),
+            },
+        };
+
+        let wire = client_state_wire_value(&state).expect("client projection serializes");
+        let pending_effect = &wire["waiting_for"]["data"]["scope"]["data"]["pending_effect"];
+        assert!(pending_effect.is_object(), "reach guard: {wire}");
+        assert!(
+            pending_effect["context"]
+                .get("parent_target_iteration_members")
+                .is_none(),
+            "wire payload leaked iteration members: {pending_effect}"
+        );
+        // Reach guard: the trusted serialization of the same state carries the
+        // provenance, so its absence above is the projection's own redaction.
+        let trusted = serde_json::to_value(&state).expect("trusted state serializes");
+        assert!(
+            trusted["waiting_for"]["data"]["scope"]["data"]["pending_effect"]["context"]
+                .get("parent_target_iteration_members")
+                .is_some()
+        );
+    }
+
     /// CR 605.4a + CR 117.3c: `client_state_wire_value` is a defence-in-depth
     /// boundary.
     ///

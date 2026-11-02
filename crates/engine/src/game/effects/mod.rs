@@ -13885,9 +13885,12 @@ fn effect_references_tracked_set(effect: &Effect) -> bool {
     // chain's tracked set ("Each Wolf tapped this way deals damage …") consumes
     // that set. `Effect::target_filter()` surfaces only the recipient, so the
     // source filter must be inspected here or the producer never publishes and
-    // the sources resolve to nothing.
+    // the sources resolve to nothing. A typed source population that tests
+    // membership (`FilterProp::InTrackedSet`) consumes the set the same way.
     if let Effect::EachSourceDealsDamage { sources, .. } = effect {
-        if filter_references_tracked_set(sources) {
+        if filter_references_tracked_set(sources)
+            || filter_properties_reference_tracked_membership(sources)
+        {
             return true;
         }
     }
@@ -62655,6 +62658,18 @@ mod tests {
         };
         assert!(next_sub_needs_tracked_set(
             &tap_all().sub_ability(each_source(tracked))
+        ));
+        // A typed source population testing tracked-set membership consumes
+        // the set too, so the tap must publish it.
+        let member_wolf = TargetFilter::Typed(
+            TypedFilter::default()
+                .subtype("Wolf".to_string())
+                .properties(vec![FilterProp::InTrackedSet {
+                    id: TrackedSetId(0),
+                }]),
+        );
+        assert!(next_sub_needs_tracked_set(
+            &tap_all().sub_ability(each_source(member_wolf))
         ));
         assert!(!next_sub_needs_tracked_set(
             &tap_all().sub_ability(each_source(wolf))
