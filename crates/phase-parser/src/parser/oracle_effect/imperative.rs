@@ -5096,11 +5096,15 @@ pub(super) fn parse_choose_ast(
             let diagnostic_count = ctx.diagnostics.len();
             let (target, remainder) = parse_target_with_ctx(rest, ctx);
             ctx.diagnostics.truncate(diagnostic_count);
-            // CR 115.10a + CR 608.2d: only a fully parsed, untargeted object
-            // choice under your control establishes resolution timing. A
-            // third-party choice may have had its targeted subject stripped.
+            // CR 115.10a + CR 608.2d: only a fully parsed, untargeted singular
+            // "a/an <object> you control" choice establishes resolution timing.
+            // Exact counts must not enter the count-1 chooser; a third-party
+            // choice may have had its targeted subject stripped.
             // Random selections must not become controller-choice prompts.
             if remainder.trim().is_empty()
+                && alt((tag::<_, _, OracleError<'_>>("a "), tag("an ")))
+                    .parse(rest_lower.trim_start())
+                    .is_ok()
                 && !ctx.choice_quantifier_stripped
                 && ctx.target_selection_mode == TargetSelectionMode::Chosen
                 && !nom_primitives::scan_contains(rest_lower, "target ")

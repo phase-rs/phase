@@ -78511,6 +78511,47 @@ fn bare_choose_stripped_quantifier_keeps_stack_timing() {
     );
 }
 
+/// SHAPE: an exact-count choice cannot enter the single-object chooser.
+#[test]
+fn bare_choose_exact_count_keeps_stack_timing() {
+    let clarion = "Choose five permanents you control. For each of those permanents, you may search your library for a card with the same name as that permanent. Put those cards onto the battlefield tapped, then shuffle.";
+    let final_showdown =
+        "Choose a creature you control. It gains indestructible until end of turn.";
+    for (text, target, declared, timing) in [
+        (
+            clarion,
+            TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You)),
+            None,
+            TargetChoiceTiming::Stack,
+        ),
+        (
+            final_showdown,
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            Some(TargetChoiceTiming::Resolution),
+            TargetChoiceTiming::Resolution,
+        ),
+    ] {
+        let ir = parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default());
+        let head = &ir.clauses[0];
+        assert_eq!(
+            head.parsed.effect,
+            Effect::TargetOnly {
+                target: target.clone(),
+            },
+            "{text}: the choice producer must be reached"
+        );
+        assert_eq!(head.declared_target_choice_timing, declared, "{text}");
+
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        assert_eq!(
+            def.effect.as_ref(),
+            &Effect::TargetOnly { target },
+            "{text}"
+        );
+        assert_eq!(def.target_choice_timing, timing, "{text}");
+    }
+}
+
 /// SHAPE: a random object selection must not enter the controller-choice path.
 #[test]
 fn bare_choose_random_object_keeps_stack_timing() {
