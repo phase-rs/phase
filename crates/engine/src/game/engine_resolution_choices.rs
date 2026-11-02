@@ -237,9 +237,10 @@ fn legacy_mass_library_order_prompt_is_current(
 }
 
 /// CR 608.2c: whether a departure settled an open resolution choice (an owner
-/// library arrangement or a player-scope sacrifice) through its handler
-/// (`settle_owner_library_arrangement_after_departure`,
-/// `settle_player_scope_sacrifice_after_departure`).
+/// library arrangement, a player-scope sacrifice or a player-scope return)
+/// through its handler (`settle_owner_library_arrangement_after_departure`,
+/// `settle_player_scope_sacrifice_after_departure`,
+/// `settle_player_scope_bounce_after_departure`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DepartureSettlement {
     /// Nothing was settled: no choice was open, its prompt still stands or
@@ -370,6 +371,43 @@ pub(crate) fn settle_player_scope_sacrifice_after_departure(
             // `resume.next_wait` is deliberately not adopted: it is a clone of
             // `state.waiting_for` taken inside the helper, and the boundary and
             // collection above may since have replaced that wait.
+            Ok(DepartureSettlement::Settled)
+        }
+    }
+}
+
+/// CR 800.4a + CR 101.4 + CR 608.2m: after a player leaves, continue an open
+/// player-scope return ("each player returns a permanent they control…") with
+/// the players and objects still in the game: republish the current chooser's
+/// prompt, or settle it through this handler so the collected returns are
+/// delivered as one batch. Reports whether it settled, so a departed
+/// controller's spell the settlement continued is not retired.
+pub(crate) fn settle_player_scope_bounce_after_departure(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<DepartureSettlement, EngineError> {
+    match effects::bounce::reconcile_player_scope_bounce(state) {
+        effects::bounce::PlayerScopeBounceReconciliation::Unchanged
+        | effects::bounce::PlayerScopeBounceReconciliation::Retired => {
+            Ok(DepartureSettlement::NotSettled)
+        }
+        effects::bounce::PlayerScopeBounceReconciliation::Prompted(chooser) => {
+            state.priority_player = chooser;
+            Ok(DepartureSettlement::NotSettled)
+        }
+        effects::bounce::PlayerScopeBounceReconciliation::Settle { chooser, cards } => {
+            // CR 800.4a: priority never names a player who has left the game.
+            if super::players::is_alive(state, chooser) {
+                state.priority_player = chooser;
+            }
+            let waiting_for = state.waiting_for.clone();
+            let outcome = handle_resolution_choice(
+                state,
+                waiting_for,
+                GameAction::SelectCards { cards },
+                events,
+            )?;
+            adopt_departure_choice_outcome(state, events, outcome);
             Ok(DepartureSettlement::Settled)
         }
     }
@@ -6706,12 +6744,16 @@ pub(super) fn handle_resolution_choice(
             }
 
             if matches!(effect_kind, EffectKind::Bounce)
-                && state.pending_player_scope_bounce_choice.is_some()
+                && state
+                    .pending_player_scope_bounce_choice
+                    .as_ref()
+                    .is_some_and(|pending| pending.ability.source_id == source_id)
             {
                 // CR 101.4: collect every player's return choice before the
-                // chosen permanents move as one simultaneous batch.
+                // chosen permanents move as one simultaneous batch. Only the
+                // carrier of this prompt's own instruction collects the answer.
                 match effects::bounce::advance_pending_player_scope_bounce_choice(
-                    state, &chosen, events,
+                    state, player, &chosen, events,
                 ) {
                     effects::bounce::PendingPlayerScopeBounceOutcome::WaitingForNextChoice
                     | effects::bounce::PendingPlayerScopeBounceOutcome::PausedForReplacement => {

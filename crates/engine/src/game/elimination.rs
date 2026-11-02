@@ -517,6 +517,8 @@ pub(crate) fn eliminate_players(
         state.pending_mass_library_order_choice = None;
         // CR 104.1: the game is over; no player-scope sacrifice is owed to a finished game.
         state.pending_player_scope_sacrifice_choice = None;
+        // CR 104.1: nor is a player-scope return owed to a finished game.
+        state.pending_player_scope_bounce_choice = None;
         state.waiting_for = WaitingFor::GameOver { winner };
     } else {
         // CR 800.4a + CR 608.2m + CR 800.4g/800.4h: once every departure,
@@ -581,6 +583,26 @@ pub(crate) fn eliminate_players(
                     debug_assert!(
                         false,
                         "player-scope sacrifice was not reconciled after a departure: {error}"
+                    );
+                    super::engine_resolution_choices::DepartureSettlement::NotSettled
+                }
+            };
+
+        // CR 800.4a + CR 101.4 + CR 608.2m: an open player-scope return ("each
+        // player returns a permanent they control…") is reconciled the same way:
+        // a departed player chooses and returns nothing, a collected pick that
+        // left the battlefield is not moved, and the walk goes on or the
+        // collected batch is delivered.
+        let player_scope_bounce =
+            match super::engine_resolution_choices::settle_player_scope_bounce_after_departure(
+                state, events,
+            ) {
+                Ok(settlement) => settlement,
+                Err(error) => {
+                    tracing::error!(%error, "player-scope return was not reconciled after a departure");
+                    debug_assert!(
+                        false,
+                        "player-scope return was not reconciled after a departure: {error}"
                     );
                     super::engine_resolution_choices::DepartureSettlement::NotSettled
                 }
@@ -729,6 +751,10 @@ pub(crate) fn eliminate_players(
                 )
                 && matches!(
                     player_scope_sacrifice,
+                    super::engine_resolution_choices::DepartureSettlement::NotSettled
+                )
+                && matches!(
+                    player_scope_bounce,
                     super::engine_resolution_choices::DepartureSettlement::NotSettled
                 )
                 && state

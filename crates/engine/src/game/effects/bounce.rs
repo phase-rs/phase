@@ -1,3 +1,4 @@
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest, ZoneMoveResult};
 use crate::types::ability::{
     BounceSelection, ControllerRef, Effect, EffectError, EffectKind, FilterProp, ResolvedAbility,
@@ -7,7 +8,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{
     CastingVariant, GameState, PendingPlayerScopeBounceChoice, StackEntryKind, WaitingFor,
 };
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
@@ -442,6 +443,12 @@ pub fn resolve(
 /// untargeted battlefield return ("each player returns a permanent they control
 /// to its owner's hand") whose per-player choices must all be made before any
 /// chosen permanent moves.
+///
+/// Only the bare instruction is collected. A per-player rider the generic
+/// fan-out evaluates for each seat — an unless-cost ("… unless they pay 2
+/// life", CR 118.12), an optional or "may" grant, a repeat, a condition, or a
+/// published return result — keeps the generic per-seat route, which owns
+/// those prompts.
 pub(super) fn should_collect_player_scope_choices(ability: &ResolvedAbility) -> bool {
     matches!(
         &ability.effect,
@@ -451,6 +458,14 @@ pub(super) fn should_collect_player_scope_choices(ability: &ResolvedAbility) -> 
             ..
         } if !filter_targets_zone(target, Zone::Graveyard)
     ) && ability.sub_ability.is_none()
+        && ability.unless_pay.is_none()
+        && !ability.optional
+        && ability.optional_for.is_none()
+        && ability.optional_player.is_none()
+        && ability.condition.is_none()
+        && ability.repeat_for.is_none()
+        && ability.repeat_until.is_none()
+        && ability.declares_return_result.is_none()
 }
 
 enum ScopedBounceStep {
@@ -495,6 +510,27 @@ fn scoped_bounce_step(
     }
 }
 
+/// CR 400.7: pin a chosen permanent to the object it is now, with its chooser.
+fn selection_for(
+    state: &GameState,
+    chooser: PlayerId,
+    id: ObjectId,
+) -> Option<(PlayerId, ObjectIncarnationRef)> {
+    state
+        .objects
+        .get(&id)
+        .map(|object| (chooser, ObjectIncarnationRef::from_object(object)))
+}
+
+/// CR 400.7: the chosen permanent is still that object on the battlefield.
+fn selection_is_on_battlefield(state: &GameState, pin: &ObjectIncarnationRef) -> bool {
+    pin.is_current(state)
+        && state
+            .objects
+            .get(&pin.object_id)
+            .is_some_and(|object| object.zone == Zone::Battlefield)
+}
+
 fn set_scoped_bounce_waiting_for(
     state: &mut GameState,
     template: &ResolvedAbility,
@@ -505,11 +541,14 @@ fn set_scoped_bounce_waiting_for(
         Effect::Bounce { destination, .. } => destination.unwrap_or(Zone::Hand),
         _ => Zone::Hand,
     };
+    // "a permanent": exactly one when anything is eligible; an emptied pool
+    // (a departure took everything, CR 800.4a) admits only the empty answer.
+    let count = cards.len().min(1);
     state.waiting_for = WaitingFor::EffectZoneChoice {
         player,
         cards,
-        count: 1,
-        min_count: 1,
+        count,
+        min_count: count,
         up_to: false,
         source_id: template.source_id,
         effect_kind: EffectKind::Bounce,
@@ -537,10 +576,12 @@ fn set_scoped_bounce_waiting_for(
 
 /// CR 101.4: deliver every announced return as ONE simultaneous batch through
 /// the zone-change pipeline (CR 614.6 redirects fire; CR 603.10a co-departure).
+/// CR 400.7: a pick that left the battlefield since it was chosen is a new
+/// object; it is not moved from wherever it is now.
 fn deliver_scoped_bounces(
     state: &mut GameState,
     template: &ResolvedAbility,
-    selections: Vec<ObjectId>,
+    selections: Vec<(PlayerId, ObjectIncarnationRef)>,
     events: &mut Vec<GameEvent>,
 ) -> PendingPlayerScopeBounceOutcome {
     let destination = match &template.effect {
@@ -548,12 +589,13 @@ fn deliver_scoped_bounces(
         _ => Zone::Hand,
     };
     let events_before = events.len();
-    state.last_effect_count = Some(selections.len() as i32);
-    if !selections.is_empty() {
-        let reqs: Vec<ZoneMoveRequest> = selections
-            .into_iter()
-            .map(|id| ZoneMoveRequest::effect(id, destination, template.source_id))
-            .collect();
+    let reqs: Vec<ZoneMoveRequest> = selections
+        .into_iter()
+        .filter(|(_, pin)| selection_is_on_battlefield(state, pin))
+        .map(|(_, pin)| ZoneMoveRequest::effect(pin.object_id, destination, template.source_id))
+        .collect();
+    state.last_effect_count = Some(reqs.len() as i32);
+    if !reqs.is_empty() {
         if let BatchMoveResult::NeedsChoice =
             zone_pipeline::move_objects_simultaneously_then(state, reqs, None, events)
         {
@@ -579,14 +621,14 @@ fn collect_scoped_bounce_choices(
     template: &ResolvedAbility,
     original_controller: PlayerId,
     mut remaining: Vec<PlayerId>,
-    mut selections: Vec<ObjectId>,
+    mut selections: Vec<(PlayerId, ObjectIncarnationRef)>,
     events: &mut Vec<GameEvent>,
 ) -> PendingPlayerScopeBounceOutcome {
     while !remaining.is_empty() {
         let seat = remaining.remove(0);
         match scoped_bounce_step(state, template, original_controller, seat) {
             ScopedBounceStep::Noop => {}
-            ScopedBounceStep::Auto(id) => selections.push(id),
+            ScopedBounceStep::Auto(id) => selections.extend(selection_for(state, seat, id)),
             ScopedBounceStep::Prompt { player, cards } => {
                 state.pending_player_scope_bounce_choice = Some(PendingPlayerScopeBounceChoice {
                     ability: Box::new(template.clone()),
@@ -636,16 +678,21 @@ pub(super) fn start_player_scope_choices(
     }
 }
 
-/// CR 101.4: record `player`'s answer and continue the APNAP walk.
+/// CR 101.4: record `chooser`'s answer and continue the APNAP walk.
 pub(crate) fn advance_pending_player_scope_bounce_choice(
     state: &mut GameState,
+    chooser: PlayerId,
     chosen: &[ObjectId],
     events: &mut Vec<GameEvent>,
 ) -> PendingPlayerScopeBounceOutcome {
     let Some(mut pending) = state.pending_player_scope_bounce_choice.take() else {
         return PendingPlayerScopeBounceOutcome::WaitingForNextChoice;
     };
-    pending.selections.extend_from_slice(chosen);
+    let answered: Vec<_> = chosen
+        .iter()
+        .filter_map(|id| selection_for(state, chooser, *id))
+        .collect();
+    pending.selections.extend(answered);
     let original_controller = pending.ability.controller;
     collect_scoped_bounce_choices(
         state,
@@ -655,6 +702,116 @@ pub(crate) fn advance_pending_player_scope_bounce_choice(
         pending.selections,
         events,
     )
+}
+
+/// What a departure did to an open player-scope return
+/// (`reconcile_player_scope_bounce`).
+pub(crate) enum PlayerScopeBounceReconciliation {
+    /// No carrier, or its open prompt still stands for a living player with the
+    /// same choices, or the carrier was only pruned.
+    Unchanged,
+    /// The current chooser's prompt was republished over what they control now.
+    Prompted(PlayerId),
+    /// The current chooser's prompt was republished with the only answer it
+    /// admits; answering it with `cards` continues the instruction.
+    Settle {
+        chooser: PlayerId,
+        cards: Vec<ObjectId>,
+    },
+    /// The carrier binds no open prompt and its acting player left; nothing
+    /// can continue it, so it is dropped without completion.
+    Retired,
+}
+
+/// CR 800.4a + CR 101.4: prune a return carrier to the players and picks still
+/// in the game. A departed player makes no further choice and returns nothing;
+/// a pick that left the battlefield (with its departed owner, CR 800.4a) is a
+/// new object the instruction no longer finds (CR 400.7).
+fn prune_player_scope_bounce_carrier(
+    state: &GameState,
+    pending: &mut PendingPlayerScopeBounceChoice,
+) {
+    pending
+        .remaining_players
+        .retain(|player| crate::game::players::is_alive(state, *player));
+    pending.selections.retain(|(chooser, pin)| {
+        crate::game::players::is_alive(state, *chooser) && selection_is_on_battlefield(state, pin)
+    });
+}
+
+/// CR 800.4a + CR 101.4 + CR 608.2m: reconcile an open player-scope return with
+/// the players and objects still in the game after a departure. The only
+/// departure authority for the carrier and its prompt: departed players and
+/// picks that left are pruned, and the current chooser's prompt is re-derived
+/// through `scoped_bounce_step` and continued, settled or republished. A
+/// departed current chooser's part does nothing, and the instruction continues
+/// for the players still in the game.
+pub(crate) fn reconcile_player_scope_bounce(
+    state: &mut GameState,
+) -> PlayerScopeBounceReconciliation {
+    let Some(mut pending) = state.pending_player_scope_bounce_choice.take() else {
+        return PlayerScopeBounceReconciliation::Unchanged;
+    };
+    let source_id = pending.ability.source_id;
+    let open = match &state.waiting_for {
+        WaitingFor::EffectZoneChoice {
+            player,
+            cards,
+            source_id: prompt_source,
+            effect_kind: EffectKind::Bounce,
+            is_cost_payment: false,
+            ..
+        } if *prompt_source == source_id => Some((*player, cards.clone())),
+        _ => None,
+    };
+    prune_player_scope_bounce_carrier(state, &mut pending);
+    let Some((chooser, open_cards)) = open else {
+        let actor_departed = state
+            .waiting_for
+            .acting_player()
+            .is_some_and(|player| !crate::game::players::is_alive(state, player));
+        if actor_departed {
+            return PlayerScopeBounceReconciliation::Retired;
+        }
+        state.pending_player_scope_bounce_choice = Some(pending);
+        return PlayerScopeBounceReconciliation::Unchanged;
+    };
+
+    let template = (*pending.ability).clone();
+    state.pending_player_scope_bounce_choice = Some(pending);
+    if !crate::game::players::is_alive(state, chooser) {
+        // CR 800.4a: a player who has left the game makes no choice.
+        set_scoped_bounce_waiting_for(state, &template, chooser, vec![]);
+        return PlayerScopeBounceReconciliation::Settle {
+            chooser,
+            cards: vec![],
+        };
+    }
+    // CR 101.4: the chooser who has not yet chosen chooses among what they
+    // control now; `scoped_bounce_step` is the single authority for that pool.
+    match scoped_bounce_step(state, &template, template.controller, chooser) {
+        ScopedBounceStep::Noop => {
+            set_scoped_bounce_waiting_for(state, &template, chooser, vec![]);
+            PlayerScopeBounceReconciliation::Settle {
+                chooser,
+                cards: vec![],
+            }
+        }
+        ScopedBounceStep::Auto(id) => {
+            set_scoped_bounce_waiting_for(state, &template, chooser, vec![id]);
+            PlayerScopeBounceReconciliation::Settle {
+                chooser,
+                cards: vec![id],
+            }
+        }
+        ScopedBounceStep::Prompt { cards, .. } if cards == open_cards => {
+            PlayerScopeBounceReconciliation::Unchanged
+        }
+        ScopedBounceStep::Prompt { player, cards } => {
+            set_scoped_bounce_waiting_for(state, &template, player, cards);
+            PlayerScopeBounceReconciliation::Prompted(player)
+        }
+    }
 }
 
 /// CR 400.7: Mass-bounce — return every battlefield permanent

@@ -35,6 +35,9 @@ const WORDS_OF_WORSHIP: &str =
     "{1}: The next time you would draw a card this turn, you gain 5 life instead.";
 
 const DRAW_A_CARD: &str = "{T}: Draw a card.";
+const CURFEW: &str = "Each player returns a creature they control to its owner's hand.";
+const TRADEWIND_RIDER_AVATAR: &str =
+    "{3}: Each player returns a permanent they control to its owner's hand unless they pay 2 life.";
 
 fn colorless_mana(count: usize) -> Vec<ManaUnit> {
     (0..count)
@@ -713,4 +716,273 @@ fn answer_choices_with_first_legal(runner: &mut GameRunner) {
         runner.act(action).expect("choice accepted");
         resolve_stack(runner);
     }
+}
+
+/// CR 800.4a + CR 608.2m + CR 101.4: the active player concedes while choosing
+/// their Words of Wind return. The resolution continues fully for the players
+/// still in the game: the departed player returns nothing, and P1–P3 still
+/// choose in turn order and return their picks together.
+///
+/// REVERT-FAILING: without the departure reconciliation, the departed
+/// player's prompt is left standing (or is replaced by unrelated priority) and
+/// no surviving player returns anything.
+#[test]
+fn words_of_wind_survivors_still_choose_after_the_chooser_concedes() {
+    let mut scenario = GameScenario::new_n_player(4, 7);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_card_to_library_top(P0, "P0 Library Top");
+    let words = scenario
+        .add_enchantment_from_oracle(P0, "Words of Wind", WORDS_OF_WIND)
+        .id();
+    let drawer = scenario
+        .add_artifact_from_oracle(P0, "Test Drawing Artifact", DRAW_A_CARD)
+        .id();
+    let p1_a = scenario.add_creature(P1, "P1 A", 1, 1).id();
+    let p1_b = scenario.add_creature(P1, "P1 B", 1, 1).id();
+    let p2 = engine::types::player::PlayerId(2);
+    let p2_sole = scenario.add_creature(p2, "P2 Sole", 1, 1).id();
+    let p3 = engine::types::player::PlayerId(3);
+    let p3_a = scenario.add_creature(p3, "P3 A", 1, 1).id();
+    let p3_b = scenario.add_creature(p3, "P3 B", 1, 1).id();
+    scenario.with_mana_pool(P0, colorless_mana(1));
+    let mut runner = scenario.build();
+
+    let index = first_ability_index(&runner, words);
+    runner.activate(words, index).resolve();
+    resolve_stack(&mut runner);
+    draw_one(&mut runner, drawer);
+
+    let (chooser, cards) = pending_return_choice(&runner);
+    assert_eq!(
+        chooser, P0,
+        "reach-guard: the active player announces first"
+    );
+    assert!(cards.contains(&words) && cards.contains(&drawer));
+
+    runner
+        .act(GameAction::Concede { player_id: P0 })
+        .expect("P0 concedes during their return choice");
+
+    let (chooser, cards) = pending_return_choice(&runner);
+    assert_eq!(
+        chooser, P1,
+        "the walk continues with the next living player"
+    );
+    assert_eq!(cards.len(), 2);
+    runner
+        .act(GameAction::SelectCards { cards: vec![p1_a] })
+        .expect("P1's choice is accepted");
+
+    let (chooser, _) = pending_return_choice(&runner);
+    assert_eq!(
+        chooser, p3,
+        "P2's sole permanent is forced; P3 chooses next"
+    );
+    assert!(
+        on_battlefield(&runner, p1_a) && on_battlefield(&runner, p2_sole),
+        "earlier picks stay on the battlefield while P3 chooses"
+    );
+    runner
+        .act(GameAction::SelectCards { cards: vec![p3_b] })
+        .expect("P3's choice is accepted");
+    resolve_stack(&mut runner);
+
+    assert!(in_hand(&runner, p1_a));
+    assert!(in_hand(&runner, p2_sole));
+    assert!(in_hand(&runner, p3_b));
+    assert!(on_battlefield(&runner, p1_b), "unchosen permanents stay");
+    assert!(on_battlefield(&runner, p3_a), "unchosen permanents stay");
+}
+
+/// CR 614.11a + CR 121.6b: Words of Wind replaces the first draw of "draw two
+/// cards"; the replacement, including every player's return choice, completes
+/// before the sequence resumes with the second draw.
+#[test]
+fn words_of_wind_inside_a_two_card_draw_resumes_the_second_draw() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P1, &["P1 Library A", "P1 Library B"]);
+    let library_top = scenario.add_card_to_library_top(P0, "P0 Library Top");
+    let words = scenario
+        .add_enchantment_from_oracle(P0, "Words of Wind", WORDS_OF_WIND)
+        .id();
+    let drawer = scenario
+        .add_artifact_from_oracle(P0, "Test Draw Two Artifact", "{T}: Draw two cards.")
+        .id();
+    let p1_a = scenario.add_creature(P1, "P1 A", 1, 1).id();
+    let p1_b = scenario.add_creature(P1, "P1 B", 1, 1).id();
+    scenario.with_mana_pool(P0, colorless_mana(1));
+    let mut runner = scenario.build();
+    let hand_before = runner.state().players[0].hand.len();
+
+    let index = first_ability_index(&runner, words);
+    runner.activate(words, index).resolve();
+    resolve_stack(&mut runner);
+    let index = first_ability_index(&runner, drawer);
+    runner.activate(drawer, index).resolve();
+    resolve_stack(&mut runner);
+
+    let (chooser, _) = pending_return_choice(&runner);
+    assert_eq!(chooser, P0);
+    assert!(
+        !in_hand(&runner, library_top),
+        "the second draw waits for the replacement to finish"
+    );
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![drawer],
+        })
+        .expect("P0's choice is accepted");
+    let (chooser, _) = pending_return_choice(&runner);
+    assert_eq!(chooser, P1);
+    assert!(
+        !in_hand(&runner, library_top),
+        "the second draw still waits while P1 chooses"
+    );
+    runner
+        .act(GameAction::SelectCards { cards: vec![p1_a] })
+        .expect("P1's choice is accepted");
+    resolve_stack(&mut runner);
+
+    assert!(in_hand(&runner, drawer) && in_hand(&runner, p1_a));
+    assert!(on_battlefield(&runner, words) && on_battlefield(&runner, p1_b));
+    assert!(
+        in_hand(&runner, library_top),
+        "the sequence resumes: the second draw happens"
+    );
+    assert_eq!(
+        runner.state().players[0].hand.len(),
+        hand_before + 2,
+        "one drawn card plus the returned artifact"
+    );
+}
+
+/// CR 118.12 + CR 101.4: "Each player returns a permanent they control to its
+/// owner's hand unless they pay 2 life" (Tradewind Rider Avatar) keeps its
+/// unless-cost: a player is offered the payment before anything returns. The
+/// collect-then-move route does not take an instruction with a per-player
+/// rider.
+///
+/// REVERT-FAILING: if the collector takes the instruction, the unless-cost is
+/// dropped and the first player is asked only which permanent to return.
+#[test]
+fn each_player_return_unless_they_pay_life_keeps_the_payment_prompt() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let avatar = scenario
+        .add_artifact_from_oracle(P0, "Tradewind Rider Avatar", TRADEWIND_RIDER_AVATAR)
+        .id();
+    let p0_extra = scenario.add_creature(P0, "P0 Bear", 2, 2).id();
+    let p1_a = scenario.add_creature(P1, "P1 A", 1, 1).id();
+    let p1_b = scenario.add_creature(P1, "P1 B", 1, 1).id();
+    scenario.with_mana_pool(P0, colorless_mana(3));
+    let mut runner = scenario.build();
+
+    let index = first_ability_index(&runner, avatar);
+    runner.activate(avatar, index).resolve();
+    resolve_stack(&mut runner);
+
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::UnlessPayment { .. }),
+        "a player must be offered the 2-life payment, got {:?}",
+        runner.state().waiting_for
+    );
+    for id in [avatar, p0_extra, p1_a, p1_b] {
+        assert!(
+            on_battlefield(&runner, id),
+            "nothing returns before the payment is answered"
+        );
+    }
+}
+
+/// CR 101.4 + CR 608.2n: Curfew ("Each player returns a creature they control
+/// to its owner's hand") collects every player's choice at spell resolution,
+/// returns the picks together, and then goes to its owner's graveyard.
+#[test]
+fn curfew_collects_choices_then_returns_together_and_finishes() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let curfew = scenario
+        .add_spell_to_hand_from_oracle(P0, "Curfew", true, CURFEW)
+        .id();
+    let p0_a = scenario.add_creature(P0, "P0 A", 1, 1).id();
+    let p0_b = scenario.add_creature(P0, "P0 B", 1, 1).id();
+    let p1_a = scenario.add_creature(P1, "P1 A", 1, 1).id();
+    let p1_b = scenario.add_creature(P1, "P1 B", 1, 1).id();
+    let mut runner = scenario.build();
+
+    runner.cast(curfew).resolve();
+    let (chooser, cards) = pending_return_choice(&runner);
+    assert_eq!(chooser, P0);
+    assert_eq!(cards.len(), 2);
+    runner
+        .act(GameAction::SelectCards { cards: vec![p0_a] })
+        .expect("P0's choice is accepted");
+    let (chooser, _) = pending_return_choice(&runner);
+    assert_eq!(chooser, P1);
+    assert!(
+        on_battlefield(&runner, p0_a),
+        "P0's pick does not move while P1 chooses"
+    );
+    runner
+        .act(GameAction::SelectCards { cards: vec![p1_b] })
+        .expect("P1's choice is accepted");
+    resolve_stack(&mut runner);
+
+    assert!(in_hand(&runner, p0_a) && in_hand(&runner, p1_b));
+    assert!(on_battlefield(&runner, p0_b) && on_battlefield(&runner, p1_a));
+    assert_eq!(runner.state().objects[&curfew].zone, Zone::Graveyard);
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
+/// CR 903.9b + CR 616.1 + CR 101.4: a commander among the collected returns may
+/// go to the command zone instead. Its owner's choice pauses the one
+/// simultaneous return after every player has chosen; answering it finishes the
+/// return and the spell.
+#[test]
+fn curfew_commander_replacement_pauses_the_batch_and_finishes() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let curfew = scenario
+        .add_spell_to_hand_from_oracle(P0, "Curfew", true, CURFEW)
+        .id();
+    let p0_a = scenario.add_creature(P0, "P0 A", 1, 1).id();
+    let p0_b = scenario.add_creature(P0, "P0 B", 1, 1).id();
+    // CR 903.3: the commander designation is an attribute of the card, so the
+    // commander stays on the battlefield (`with_commander` would move it).
+    let commander = {
+        let mut builder = scenario.add_creature(P1, "Commanding Bear", 2, 2);
+        builder.as_legendary().commander();
+        builder.id()
+    };
+    let mut runner = scenario.build();
+    runner.state_mut().format_config.command_zone = true;
+
+    runner.cast(curfew).resolve();
+    let (chooser, _) = pending_return_choice(&runner);
+    assert_eq!(chooser, P0);
+    runner
+        .act(GameAction::SelectCards { cards: vec![p0_a] })
+        .expect("P0's choice is accepted");
+
+    // Reach guard: P1's only creature is forced, and its owner's CR 903.9b
+    // replacement choice pauses the batch.
+    match &runner.state().waiting_for {
+        WaitingFor::ReplacementChoice { player, .. } => assert_eq!(*player, P1),
+        other => panic!("expected P1's CR 903.9b replacement choice, got {other:?}"),
+    }
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("P1 sends the commander to the command zone");
+    resolve_stack(&mut runner);
+
+    assert_eq!(runner.state().objects[&commander].zone, Zone::Command);
+    assert!(in_hand(&runner, p0_a));
+    assert!(on_battlefield(&runner, p0_b));
+    assert_eq!(runner.state().objects[&curfew].zone, Zone::Graveyard);
+    assert!(runner.state().stack.is_empty());
 }

@@ -5542,11 +5542,11 @@ pub struct PendingPlayerScopeSacrificeChoice {
 }
 
 /// CR 101.4: If players make choices for one instruction, they choose in
-/// APNAP order before the simultaneous action happens.
-/// CR 400.3: Per-player untargeted return choices for one
-/// simultaneous instruction such as "each player returns a permanent they
-/// control to its owner's hand." No chosen permanent moves until every player
-/// has chosen; the whole selection is then delivered as one batch.
+/// APNAP order before the simultaneous action happens. Per-player untargeted
+/// return choices for one simultaneous instruction such as "each player returns
+/// a permanent they control to its owner's hand." No chosen permanent moves
+/// until every player has chosen; the whole selection is then delivered as one
+/// batch (CR 400.3: each to its owner's hand).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PendingPlayerScopeBounceChoice {
     /// The scoped `Effect::Bounce` template. The current chooser is rebound
@@ -5555,8 +5555,11 @@ pub struct PendingPlayerScopeBounceChoice {
     /// Players not yet prompted, in APNAP order.
     pub remaining_players: Vec<PlayerId>,
     /// Permanents already chosen (or forced by a one-card pool), in APNAP
-    /// order. They stay on the battlefield until the batch is delivered.
-    pub selections: Vec<ObjectId>,
+    /// order, each with the player who chose it and the incarnation it had when
+    /// chosen. They stay on the battlefield until the batch is delivered; a
+    /// pick that has since left the battlefield is a new object (CR 400.7) and
+    /// is not moved.
+    pub selections: Vec<(PlayerId, ObjectIncarnationRef)>,
 }
 
 /// CR 101.4 + CR 118.12a + CR 111.2: An APNAP poll for a player-scoped
