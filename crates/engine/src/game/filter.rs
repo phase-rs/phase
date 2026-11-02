@@ -9419,7 +9419,8 @@ fn first_object_target(ability: &ResolvedAbility) -> Option<ObjectId> {
 /// zone it was expected to be in). Only when neither is available does this
 /// fall to the live object at the referenced id; an object that left and
 /// returned is a new object (CR 400.7) and finds nothing its predecessor
-/// recorded. `ParentTarget` prefers the incarnation pinned when it was chosen.
+/// recorded. `ParentTarget` and `AnaphoricTarget` prefer the incarnation pinned
+/// when it was chosen.
 fn combat_relation_subject_ref(
     state: &GameState,
     subject: CombatRelationSubject,
@@ -9444,7 +9445,9 @@ fn combat_relation_subject_ref(
                     .and_then(|ability| ability.source_ref(state))
             })
             .or_else(|| live(source.id)),
-        CombatRelationSubject::ParentTarget => {
+        // CR 608.2i: a look-back takes no action on its subject, so a departed
+        // subject keeps its name. No liveness check on either arm.
+        CombatRelationSubject::ParentTarget | CombatRelationSubject::AnaphoricTarget => {
             let ability = source.ability?;
             // The pin of the ORIGINATING occurrence (the first object target),
             // read positionally; a delayed-trigger referent pin is keyed by id.

@@ -14678,8 +14678,9 @@ fn filter_prop_binding_diverges(prop: &FilterProp) -> bool {
         // `state.last_named_choice` diverges; a printed parity does not.
         FilterProp::ManaValueParity { parity } => parity_source_binding_diverges(parity),
         // CR 115.1 + CR 400.7: the combat relation can be scoped to the parent
-        // target (`ability.targets`, empty at fire time) or to the source, which
-        // the `TriggerSourceContext` carries on both legs.
+        // target or an earlier instruction's target (`ability.targets`, empty at
+        // fire time) or to the source, which the `TriggerSourceContext` carries on
+        // both legs.
         FilterProp::CombatRelation { subject, .. } => {
             combat_relation_subject_binding_diverges(subject)
         }
@@ -14972,7 +14973,7 @@ fn combat_relation_subject_binding_diverges(
     use crate::types::ability::CombatRelationSubject;
     match subject {
         // CR 115.1: reads `ability.targets`, empty at fire time.
-        CombatRelationSubject::ParentTarget => true,
+        CombatRelationSubject::ParentTarget | CombatRelationSubject::AnaphoricTarget => true,
         // CR 400.7: the source object, carried by the `TriggerSourceContext` on
         // both legs — the same authority `ObjectScope::Source` is adjudicated
         // non-divergent under.
@@ -29121,6 +29122,12 @@ pub mod tests {
                 &crate::types::ability::CombatRelationSubject::ParentTarget
             ),
             "CR 115.1: the parent target is read from `ability.targets`"
+        );
+        assert!(
+            combat_relation_subject_binding_diverges(
+                &crate::types::ability::CombatRelationSubject::AnaphoricTarget
+            ),
+            "CR 115.1: an earlier instruction's target is read from `ability.targets`"
         );
         assert!(
             !combat_relation_subject_binding_diverges(

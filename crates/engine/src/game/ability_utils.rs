@@ -12830,6 +12830,7 @@ mod tests {
                 true,
                 vec![creature.clone()],
             ),
+            (CombatRelationSubject::AnaphoricTarget, false, vec![]),
             (CombatRelationSubject::Source, false, vec![]),
         ] {
             assert_declaration_witnesses(
@@ -13254,6 +13255,23 @@ mod tests {
             },
             1,
             1,
+        ));
+        cases.push((
+            "combat relation anaphor",
+            Effect::DestroyAll {
+                cant_regenerate: false,
+                target: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                    FilterProp::CombatRelation {
+                        subject: CombatRelationSubject::AnaphoricTarget,
+                        relation: CombatRelation::BlockPairing {
+                            direction: BlockPairDirection::Either,
+                            scope: None,
+                        },
+                    },
+                ])),
+            },
+            0,
+            0,
         ));
         cases.push((
             "one-sided quantity source",

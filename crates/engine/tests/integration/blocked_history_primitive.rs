@@ -15,8 +15,11 @@ use engine::game::filter::{
 use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{
-    BlockPairDirection, CombatHistoryScope, CombatRelation, CombatRelationSubject, FilterProp,
-    TargetFilter, TypedFilter,
+    AbilityCondition, AbilityDefinition, AbilityKind, BlockPairDirection, CombatHistoryScope,
+    CombatRelation, CombatRelationSubject, Comparator, ContinuousModification,
+    DelayedTriggerCondition, DelayedTriggerLifetime, Duration, Effect, FilterProp, QuantityExpr,
+    QuantityRef, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef, TriggerDefinition,
+    TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::{GameState, StackEntryKind, WaitingFor};
@@ -25,7 +28,10 @@ use engine::types::keywords::Keyword;
 use engine::types::mana::ManaCost;
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::statics::StaticMode;
+use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
+use std::sync::Arc;
 
 const MURDER: &str = "Destroy target creature.";
 const EPHEMERATE: &str =
@@ -33,6 +39,9 @@ const EPHEMERATE: &str =
 const MIRROR_MATCH: &str = "Cast this spell only during the declare blockers step.\nFor each creature attacking you or a planeswalker you control, create a token that's a copy of that creature and that's blocking that creature. Exile those tokens at end of combat.";
 const FULL_THROTTLE: &str = "After this main phase, there are two additional combat phases.
 At the beginning of each combat this turn, untap all creatures that attacked this turn.";
+const GAZE_OF_THE_GORGON: &str = "({B/G} can be paid with either {B} or {G}.)\nRegenerate target creature. At this turn's next end of combat, destroy all creatures that blocked or were blocked by it this turn.";
+const VENOMOUS_BREATH: &str = "Choose target creature. At this turn's next end of combat, destroy all creatures that blocked or were blocked by it this turn.";
+const RIDE_DOWN: &str = "Destroy target blocking creature. Creatures that were blocked by that creature this combat gain trample until end of turn.";
 
 /// Drive from `PreCombatMain` through a single declare-blockers step: pass to
 /// declare-attackers, declare `attacks`/`bands`, pass the CR 508.2 post-attack
@@ -1423,4 +1432,470 @@ fn block_pairing_current_read_refuses_a_blocking_tokens_entry_record() {
             "an entry record answers no current pairing, {direction:?}"
         );
     }
+}
+
+/// A history relation to an earlier instruction's target. No parser path emits
+/// this subject before the grammar lands, so these rows keep each card's parsed
+/// head and supply its clause directly.
+fn anaphoric_relation(direction: BlockPairDirection, scope: CombatHistoryScope) -> TargetFilter {
+    TargetFilter::Typed(
+        TypedFilter::creature().properties(vec![FilterProp::CombatRelation {
+            relation: CombatRelation::BlockPairing {
+                direction,
+                scope: Some(scope),
+            },
+            subject: CombatRelationSubject::AnaphoricTarget,
+        }]),
+    )
+}
+
+fn at_next_end_of_combat(payload: AbilityDefinition) -> AbilityDefinition {
+    AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::WhenNextEvent {
+                trigger: Box::new(
+                    TriggerDefinition::new(TriggerMode::Phase).phase(Phase::EndCombat),
+                ),
+                or_trigger: None,
+                lifetime: DelayedTriggerLifetime::ThisTurn,
+            },
+            effect: Box::new(payload),
+            uses_tracked_set: false,
+        },
+    )
+}
+
+fn destroy_all(target: TargetFilter) -> AbilityDefinition {
+    AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::DestroyAll {
+            target,
+            cant_regenerate: false,
+        },
+    )
+}
+
+/// The delayed clause Gaze of the Gorgon and Venomous Breath print: "destroy all
+/// creatures that blocked or were blocked by it this turn".
+fn blocked_or_blocked_by_it_this_turn() -> TargetFilter {
+    anaphoric_relation(BlockPairDirection::Either, CombatHistoryScope::ThisTurn)
+}
+
+/// Ride Down's clause: "Creatures that were blocked by that creature this combat
+/// gain trample until end of turn."
+fn gain_trample_until_end_of_turn(affected: TargetFilter) -> AbilityDefinition {
+    let mut grant = StaticDefinition::new(StaticMode::Continuous);
+    grant.affected = Some(affected);
+    grant.modifications = vec![ContinuousModification::AddKeyword {
+        keyword: Keyword::Trample,
+    }];
+    let mut definition = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::GenericEffect {
+            static_abilities: vec![grant],
+            duration: Some(Duration::UntilEndOfTurn),
+            target: None,
+            end_cost: None,
+        },
+    );
+    definition.duration = Some(Duration::UntilEndOfTurn);
+    definition
+}
+
+/// Replace the parsed tail after `spell`'s first instruction.
+fn replace_tail(runner: &mut GameRunner, spell: ObjectId, tail: AbilityDefinition) {
+    let object = runner.state_mut().objects.get_mut(&spell).expect("spell");
+    let mut abilities = (*object.abilities).clone();
+    abilities[0].sub_ability = Some(Box::new(tail));
+    object.abilities = Arc::new(abilities.clone());
+    object.base_abilities = Arc::new(abilities);
+}
+
+/// P0's attackers each blocked by one of P1's blockers, in the declare blockers
+/// step with P0 holding priority. Every creature is textless, and blockers are 1/6
+/// and attackers have toughness 5, so combat damage kills nothing a row reads.
+struct BlockedBoard {
+    runner: GameRunner,
+    attacker: ObjectId,
+    other_attacker: ObjectId,
+    blocker: ObjectId,
+    other_blocker: ObjectId,
+    spell: ObjectId,
+    murder: ObjectId,
+    ephemerate: ObjectId,
+}
+
+/// `oracle` is the card's verbatim text. `tail` replaces what follows its first
+/// instruction, so the row reaches each gate through real actions.
+fn blocked_board(oracle: &str, attacker_power: i32, tail: AbilityDefinition) -> BlockedBoard {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker = scenario.add_creature(P0, "A", attacker_power, 5).id();
+    let other_attacker = scenario.add_creature(P0, "A2", attacker_power, 5).id();
+    let blocker = scenario.add_creature(P1, "B", 1, 6).id();
+    let other_blocker = scenario.add_creature(P1, "B2", 1, 6).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Spell", true, oracle)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, MURDER)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let ephemerate = scenario
+        .add_spell_to_hand_from_oracle(P0, "Ephemerate", true, EPHEMERATE)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    replace_tail(&mut runner, spell, tail);
+
+    drive_declare_blockers(
+        &mut runner,
+        vec![
+            (attacker, AttackTarget::Player(P1)),
+            (other_attacker, AttackTarget::Player(P1)),
+        ],
+        vec![],
+        vec![(blocker, attacker), (other_blocker, other_attacker)],
+    );
+    assert_eq!(
+        runner.state().phase,
+        Phase::DeclareBlockers,
+        "reach guard: the rows cast during the declare blockers step"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0),
+        "reach guard: P0 holds priority after blocks"
+    );
+    BlockedBoard {
+        runner,
+        attacker,
+        other_attacker,
+        blocker,
+        other_blocker,
+        spell,
+        murder,
+        ephemerate,
+    }
+}
+
+fn cast_on(runner: &mut GameRunner, spell: ObjectId, target: ObjectId) {
+    runner.cast(spell).target_object(target).resolve();
+    runner.advance_until_stack_empty();
+}
+
+/// Pass priority through the end of combat step. Completion is `PostCombatMain`
+/// with an empty stack and priority held, not merely a drained stack.
+fn advance_to_postcombat_main(runner: &mut GameRunner) {
+    for _ in 0..96 {
+        let state = runner.state();
+        if state.phase == Phase::PostCombatMain
+            && state.stack.is_empty()
+            && matches!(state.waiting_for, WaitingFor::Priority { .. })
+        {
+            return;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("only priority passes remain before the postcombat main phase");
+    }
+    panic!(
+        "never reached the postcombat main phase; phase = {:?}, waiting_for = {:?}",
+        runner.state().phase,
+        runner.state().waiting_for,
+    );
+}
+
+fn zone_of(runner: &GameRunner, object: ObjectId) -> Zone {
+    runner.state().objects[&object].zone
+}
+
+/// CR 603.7c + CR 608.2i: the delayed ability freezes its target when it is
+/// created and reads that target's block history when it resolves, in both
+/// directions, for both creating heads. Only the frozen target's pair dies, so the
+/// filter does not widen to the other pair. An ability with no bound object target
+/// reads nothing, while `Source` on the same board and an ability bound to the
+/// attacker do match.
+#[test]
+fn anaphoric_subject_reads_the_frozen_target_at_end_of_combat() {
+    let filter = blocked_or_blocked_by_it_this_turn();
+    let board = blocked_board(
+        VENOMOUS_BREATH,
+        1,
+        at_next_end_of_combat(destroy_all(filter.clone())),
+    );
+    let state = board.runner.state();
+    let source_relation = combat_relation_filter(CombatRelation::BlockPairing {
+        direction: BlockPairDirection::Either,
+        scope: Some(CombatHistoryScope::ThisTurn),
+    });
+    let no_ability = FilterContext::from_source_with_controller(board.attacker, P0);
+    assert!(
+        matches_target_filter(state, board.blocker, &source_relation, &no_ability),
+        "reach guard: a `Source` subject matches the pair with no ability in context"
+    );
+    assert!(
+        !matches_target_filter(state, board.blocker, &filter, &no_ability),
+        "a context with no ability names no anaphor"
+    );
+    let effect = Effect::DestroyAll {
+        target: filter.clone(),
+        cant_regenerate: false,
+    };
+    let unbound = ResolvedAbility::new(effect.clone(), vec![], board.spell, P0);
+    assert!(
+        !matches_target_filter(
+            state,
+            board.blocker,
+            &filter,
+            &FilterContext::from_ability(&unbound),
+        ),
+        "an ability with empty `targets` names no anaphor"
+    );
+    let bound = ResolvedAbility::new(
+        effect,
+        vec![TargetRef::Object(board.attacker)],
+        board.spell,
+        P0,
+    );
+    let bound_context = FilterContext::from_ability(&bound);
+    assert!(
+        matches_target_filter(state, board.blocker, &filter, &bound_context),
+        "reach guard: an ability bound to the attacker reads its blocker"
+    );
+    assert!(
+        !matches_target_filter(state, board.other_blocker, &filter, &bound_context),
+        "a blocker of the other attacker is no partner of the bound target"
+    );
+
+    for oracle in [VENOMOUS_BREATH, GAZE_OF_THE_GORGON] {
+        for target_is_attacker in [true, false] {
+            let mut board = blocked_board(
+                oracle,
+                1,
+                at_next_end_of_combat(destroy_all(filter.clone())),
+            );
+            let (target, partner) = if target_is_attacker {
+                (board.attacker, board.blocker)
+            } else {
+                (board.blocker, board.attacker)
+            };
+            cast_on(&mut board.runner, board.spell, target);
+
+            let delayed = &board.runner.state().delayed_triggers;
+            assert_eq!(delayed.len(), 1, "reach guard: the delayed ability exists");
+            assert_eq!(
+                delayed[0].ability.targets,
+                vec![TargetRef::Object(target)],
+                "CR 603.7c: the target is frozen at creation"
+            );
+            assert_eq!(
+                delayed[0].ability.target_incarnations.len(),
+                1,
+                "CR 400.7: the frozen target carries one pin"
+            );
+
+            advance_to_postcombat_main(&mut board.runner);
+
+            assert!(
+                board.runner.state().delayed_triggers.is_empty(),
+                "reach guard: the delayed ability fired"
+            );
+            assert_eq!(zone_of(&board.runner, partner), Zone::Graveyard);
+            for survivor in [target, board.other_attacker, board.other_blocker] {
+                assert_eq!(zone_of(&board.runner, survivor), Zone::Battlefield);
+            }
+        }
+    }
+}
+
+/// CR 608.2i: "destroy all creatures that blocked or were blocked by it" takes no
+/// action on "it", so its leaving does not end the read. Gaze of the Gorgon's 2005
+/// ruling applies this to the printed text. Reverting the pin or the read through
+/// it fails here and not on a live target, which is why this row exists beside the
+/// frozen-target one.
+#[test]
+fn anaphoric_subject_survives_the_target_leaving() {
+    let mut board = blocked_board(
+        VENOMOUS_BREATH,
+        1,
+        at_next_end_of_combat(destroy_all(blocked_or_blocked_by_it_this_turn())),
+    );
+    cast_on(&mut board.runner, board.spell, board.attacker);
+    cast_on(&mut board.runner, board.murder, board.attacker);
+
+    assert_eq!(
+        zone_of(&board.runner, board.attacker),
+        Zone::Graveyard,
+        "reach guard: the target left before the delayed ability resolved"
+    );
+    assert!(
+        !board.runner.state().delayed_triggers[0]
+            .ability
+            .target_incarnations
+            .is_empty(),
+        "reach guard: the delayed ability still names the departed incarnation"
+    );
+
+    advance_to_postcombat_main(&mut board.runner);
+
+    assert_eq!(zone_of(&board.runner, board.blocker), Zone::Graveyard);
+    assert_eq!(
+        zone_of(&board.runner, board.other_blocker),
+        Zone::Battlefield
+    );
+}
+
+/// CR 400.7: the subject is the announced incarnation. One id carries two
+/// incarnations here, and only the frozen one blocked anything, so reading the live
+/// object would find nothing and the blocker would survive.
+#[test]
+fn anaphoric_subject_names_the_announced_incarnation() {
+    let mut board = blocked_board(
+        VENOMOUS_BREATH,
+        1,
+        at_next_end_of_combat(destroy_all(blocked_or_blocked_by_it_this_turn())),
+    );
+    let announced = board.runner.state().objects[&board.attacker].incarnation;
+    cast_on(&mut board.runner, board.spell, board.attacker);
+    cast_on(&mut board.runner, board.ephemerate, board.attacker);
+
+    let state = board.runner.state();
+    assert_eq!(
+        state.objects[&board.attacker].zone,
+        Zone::Battlefield,
+        "reach guard: the target is back on the battlefield"
+    );
+    assert_ne!(
+        state.objects[&board.attacker].incarnation, announced,
+        "reach guard: the blink changed the live incarnation"
+    );
+    let pin = state.delayed_triggers[0].ability.target_incarnations[0];
+    assert_eq!(
+        (pin.object_id, pin.incarnation),
+        (board.attacker, announced),
+        "reach guard: the pin holds the same id at its announced incarnation"
+    );
+
+    advance_to_postcombat_main(&mut board.runner);
+
+    assert_eq!(zone_of(&board.runner, board.blocker), Zone::Graveyard);
+    assert_eq!(
+        zone_of(&board.runner, board.other_blocker),
+        Zone::Battlefield
+    );
+}
+
+/// CR 611.2c: Ride Down's filter describes a population, so the grant stays on the
+/// broadcast path and its set is fixed when the effect begins. "That creature" is
+/// the target the first instruction just destroyed, read through its announced pin.
+#[test]
+fn anaphoric_subject_grants_to_the_blocked_attacker() {
+    let mut board = blocked_board(
+        RIDE_DOWN,
+        5,
+        gain_trample_until_end_of_turn(anaphoric_relation(
+            BlockPairDirection::SubjectIsBlocker,
+            CombatHistoryScope::ThisCombat,
+        )),
+    );
+    let life_before = board.runner.state().players[1].life;
+    cast_on(&mut board.runner, board.spell, board.blocker);
+
+    assert_eq!(
+        zone_of(&board.runner, board.blocker),
+        Zone::Graveyard,
+        "reach guard: the first instruction destroyed the target"
+    );
+    let state = board.runner.state();
+    let affected: Vec<_> = state
+        .transient_continuous_effects
+        .iter()
+        .map(|effect| effect.affected.clone())
+        .collect();
+    assert_eq!(
+        affected,
+        vec![TargetFilter::SpecificObject { id: board.attacker }],
+        "CR 611.2c: exactly the blocked attacker is latched"
+    );
+    assert!(
+        state.objects[&board.attacker].has_keyword(&Keyword::Trample),
+        "the grant reaches the attacker the target blocked"
+    );
+    assert!(
+        !state.objects[&board.other_attacker].has_keyword(&Keyword::Trample),
+        "an attacker the target did not block gains nothing"
+    );
+
+    advance_to_postcombat_main(&mut board.runner);
+
+    assert_eq!(
+        board.runner.state().players[1].life,
+        life_before - 5,
+        "only the blocked attacker's 5 tramples through, and the other stays blocked"
+    );
+}
+
+/// CR 603.4: a gate that reads this subject is not hoisted to fire time, because
+/// the delayed ability's frozen target is what the gate needs. If the hoist ran,
+/// the fire-time evaluator would count 0 with no targets and consume the one-shot.
+/// No printed card gates on this relation. Nearest: Daredevil Dragster, 'At end of
+/// combat, if this Vehicle attacked or blocked this combat, put a velocity counter
+/// on it.' Kept because the charter requires this arm.
+#[test]
+fn anaphoric_subject_gate_declines_the_fire_time_hoist() {
+    let filter = blocked_or_blocked_by_it_this_turn();
+    let mut payload = destroy_all(filter.clone());
+    payload.condition = Some(AbilityCondition::QuantityCheck {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        },
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed { value: 1 },
+    });
+    let mut board = blocked_board(VENOMOUS_BREATH, 1, at_next_end_of_combat(payload));
+    cast_on(&mut board.runner, board.spell, board.attacker);
+
+    advance_to_postcombat_main(&mut board.runner);
+
+    assert_eq!(zone_of(&board.runner, board.blocker), Zone::Graveyard);
+    assert_eq!(
+        zone_of(&board.runner, board.other_blocker),
+        Zone::Battlefield
+    );
+}
+
+/// CR 603.7c: this subject in a condition is a dependency, never the condition's
+/// moving subject, so it does not withhold the payload's pin. The row's shape is
+/// hand-built: no printed text puts this subject in a condition. Nearest: Barreling
+/// Attack, 'When that creature becomes blocked this turn, it gets +1/+1 until end of
+/// turn for each creature blocking it.' Kept because the charter says 'never the
+/// condition's moving subject'. This is the only board that witnesses that gate.
+#[test]
+fn anaphoric_subject_in_a_condition_keeps_the_pin() {
+    let filter = blocked_or_blocked_by_it_this_turn();
+    let mut board = blocked_board(
+        VENOMOUS_BREATH,
+        1,
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::WhenLeavesPlayFiltered {
+                    filter: filter.clone(),
+                },
+                effect: Box::new(destroy_all(filter)),
+                uses_tracked_set: false,
+            },
+        ),
+    );
+    cast_on(&mut board.runner, board.spell, board.attacker);
+
+    let delayed = &board.runner.state().delayed_triggers;
+    assert_eq!(delayed.len(), 1, "reach guard: the delayed ability exists");
+    assert_eq!(
+        delayed[0].ability.target_incarnations.len(),
+        1,
+        "a condition naming the relation does not withhold the pin"
+    );
 }

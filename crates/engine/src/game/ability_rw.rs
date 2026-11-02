@@ -2993,14 +2993,16 @@ fn member_bound_filter_prop(p: &FilterProp) -> bool {
         // shared function. Two such triggers from one event must prompt (the
         // same-event discriminator); two Abu Ja'fars dying together prompt through
         // the batch `MemberBinding::SourceCombatPairing` row. A parent-target subject is
-        // a declared target, closed by the target gate.
+        // a declared target, closed by the target gate. An anaphoric subject is the
+        // same read: the delayed ability that carries it holds its frozen target in
+        // `targets`, so `trigger_has_no_ordering_input` refuses the group first.
         FilterProp::CombatRelation {
             relation: _,
             subject: CombatRelationSubject::Source,
         } => true,
         FilterProp::CombatRelation {
             relation: _,
-            subject: CombatRelationSubject::ParentTarget,
+            subject: CombatRelationSubject::ParentTarget | CombatRelationSubject::AnaphoricTarget,
         } => false,
         FilterProp::Token
         | FilterProp::NonToken
@@ -8305,6 +8307,37 @@ mod tests {
     // ---- builders ----
     fn ra(effect: Effect) -> ResolvedAbility {
         ResolvedAbility::new(effect, vec![], ObjectId(1), PlayerId(0))
+    }
+
+    /// CR 603.3b: only a `Source` subject is a per-member referent.
+    /// A target subject, in either form, is closed by the target gate, so it binds
+    /// no member and names no `SourceCombatPairing` row.
+    #[test]
+    fn combat_relation_subject_decides_member_binding() {
+        for (subject, bound) in [
+            (CombatRelationSubject::Source, true),
+            (CombatRelationSubject::ParentTarget, false),
+            (CombatRelationSubject::AnaphoricTarget, false),
+        ] {
+            let profile = ability_rw_profile(&ra(Effect::DestroyAll {
+                target: TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                    FilterProp::CombatRelation {
+                        relation: crate::types::ability::CombatRelation::BlockPairing {
+                            direction: crate::types::ability::BlockPairDirection::Either,
+                            scope: Some(CombatHistoryScope::ThisTurn),
+                        },
+                        subject,
+                    },
+                ])),
+                cant_regenerate: false,
+            }));
+            assert_eq!(profile.reads_member_bound(), bound, "{subject:?}");
+            assert_eq!(
+                profile.member_binding.names_source_combat_pairing(),
+                bound,
+                "{subject:?}"
+            );
+        }
     }
 
     fn zone_choice_for_rw(

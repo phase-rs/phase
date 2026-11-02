@@ -6784,6 +6784,13 @@ pub enum CombatRelationSubject {
     Source,
     /// The first selected object target of the resolving spell or ability.
     ParentTarget,
+    /// CR 608.2c + CR 115.10a: a target an EARLIER instruction of the same spell
+    /// announced ("creatures that were blocked by that creature", Ride Down, Glyph
+    /// of Doom). Reads as `ParentTarget` does, the first object target by its
+    /// announced incarnation, and opens no target slot: the word "target" does not
+    /// identify it here. `ParentTarget` is the same-instruction form that does open
+    /// one (Trial).
+    AnaphoricTarget,
 }
 
 /// CR 701.3a + CR 303.4b: What a [`FilterProp::AttachedTo`] candidate must be
@@ -10632,6 +10639,14 @@ pub fn filter_refs_parent_target(filter: &TargetFilter) -> bool {
                     FilterProp::AttachedTo {
                         to: AttachmentReferent::Host { filter },
                     } => filter_refs_parent_target(filter),
+                    // CR 608.2c + CR 608.2i: a mass set defined by its history with
+                    // an earlier instruction's target names that target inside a
+                    // property, so propagation, delayed-trigger snapshotting and
+                    // the mass-population validation arm must see it.
+                    FilterProp::CombatRelation {
+                        subject: CombatRelationSubject::AnaphoricTarget,
+                        ..
+                    } => true,
                     _ => false,
                 })
         }
@@ -12013,7 +12028,7 @@ fn filter_prop_has_unsupported_selected_ref(prop: &FilterProp, nested: bool) -> 
         // Inherently selected: the resolving ability's first object
         // target, with no parked equivalent.
         FilterProp::SameNameAsParentTarget => true,
-        // Both subjects read ability-carried records (selected target,
+        // Every subject reads ability-carried records (selected target,
         // ability capture) with no parked equivalent.
         FilterProp::CombatRelation { .. } => true,
         FilterProp::AttachedTo { to } => match to {
@@ -26859,6 +26874,8 @@ fn effect_references_parent_target_combat_relation(effect: &Effect) -> bool {
     }
 }
 
+/// CR 115.10a: `ParentTarget` only. `AnaphoricTarget` reads a target an earlier
+/// instruction announced, so it must not open a second slot.
 fn filter_references_parent_target_combat_relation(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Typed(TypedFilter { properties, .. }) => properties.iter().any(|prop| {
@@ -44239,6 +44256,16 @@ mod tests {
                 }]),
             ),
             (
+                "combat relation against an earlier instruction's target",
+                typed(vec![FilterProp::CombatRelation {
+                    subject: CombatRelationSubject::AnaphoricTarget,
+                    relation: CombatRelation::BlockPairing {
+                        direction: BlockPairDirection::Either,
+                        scope: Some(CombatHistoryScope::ThisTurn),
+                    },
+                }]),
+            ),
+            (
                 "SharesQuality indexed reference (no parked slot authority in the nested scan)",
                 typed(vec![FilterProp::SharesQuality {
                     quality: SharedQuality::CardType,
@@ -48858,6 +48885,76 @@ mod tests {
                 assert_eq!(read, prop, "{written}");
             }
         }
+    }
+
+    /// CR 608.2c + CR 115.10a: `AnaphoricTarget` names an earlier instruction's
+    /// target. The parent-read walk sees it wherever it nests, no slot opens for
+    /// it, its mass filter stays off the inherited-target path, and the value
+    /// round-trips. `ParentTarget` is the reverse on the first two axes, and
+    /// `Source` reads no target at all.
+    #[test]
+    fn anaphoric_target_subject_reads_the_parent_and_opens_no_slot() {
+        let filter_of = |subject| {
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::CombatRelation {
+                    relation: CombatRelation::BlockPairing {
+                        direction: BlockPairDirection::SubjectIsBlocker,
+                        scope: Some(CombatHistoryScope::ThisTurn),
+                    },
+                    subject,
+                },
+            ]))
+        };
+        let destroy_all = |target| Effect::DestroyAll {
+            target,
+            cant_regenerate: false,
+        };
+
+        let anaphor = filter_of(CombatRelationSubject::AnaphoricTarget);
+        assert!(filter_refs_parent_target(&anaphor));
+        assert!(filter_refs_parent_target(&TargetFilter::Not {
+            filter: Box::new(anaphor.clone()),
+        }));
+        assert!(filter_refs_parent_target(&TargetFilter::Or {
+            filters: vec![TargetFilter::SelfRef, anaphor.clone()],
+        }));
+        assert!(effect_refs_parent_target(&destroy_all(anaphor.clone())));
+        assert!(!effect_needs_parent_target_combat_relation_slot(
+            &destroy_all(anaphor.clone())
+        ));
+        assert!(!generic_effect_affected_uses_inherited_targets(&anaphor));
+
+        let parent_target = filter_of(CombatRelationSubject::ParentTarget);
+        assert!(!filter_refs_parent_target(&parent_target));
+        assert!(effect_needs_parent_target_combat_relation_slot(
+            &destroy_all(parent_target)
+        ));
+        let source = filter_of(CombatRelationSubject::Source);
+        assert!(!filter_refs_parent_target(&source));
+        assert!(!effect_needs_parent_target_combat_relation_slot(
+            &destroy_all(source)
+        ));
+
+        let prop: FilterProp = serde_json::from_value(serde_json::json!({
+            "type": "CombatRelation",
+            "relation": {"BlockPairing": {"direction": "Either", "scope": "ThisTurn"}},
+            "subject": "AnaphoricTarget",
+        }))
+        .expect("the new subject reads");
+        assert_eq!(
+            prop,
+            FilterProp::CombatRelation {
+                relation: CombatRelation::BlockPairing {
+                    direction: BlockPairDirection::Either,
+                    scope: Some(CombatHistoryScope::ThisTurn),
+                },
+                subject: CombatRelationSubject::AnaphoricTarget,
+            }
+        );
+        let written = serde_json::to_value(&prop).expect("a FilterProp serializes");
+        assert_eq!(written["subject"], "AnaphoricTarget");
+        let read: FilterProp = serde_json::from_value(written).expect("the written shape reads");
+        assert_eq!(read, prop);
     }
 
     /// The wire shim reads what was once written and invents nothing: no default

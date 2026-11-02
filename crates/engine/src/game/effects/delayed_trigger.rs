@@ -1996,6 +1996,14 @@ fn filter_refs_parent_object_anaphor_in(filter: &TargetFilter, relation: HostRel
                     relation == HostRelation::Dependency
                         && filter_refs_parent_object_anaphor_in(filter, relation)
                 }
+                // CR 603.7c + CR 400.7: a history relation to the parent object is a
+                // DEPENDENCY of the payload, like the attachment host above. Without
+                // the pin, a target that changed zones would read as its new object,
+                // which blocked nothing (CR 608.2i, Gaze of the Gorgon's ruling).
+                crate::types::ability::FilterProp::CombatRelation {
+                    subject: crate::types::ability::CombatRelationSubject::AnaphoricTarget,
+                    ..
+                } => relation == HostRelation::Dependency,
                 _ => false,
             })
         }
@@ -6142,6 +6150,36 @@ mod tests {
         assert!(
             filter_names_parent_object_subject(&TargetFilter::ParentTarget),
             "a direct referent is still the moving subject"
+        );
+
+        // T-U4c — a history relation to an earlier instruction's target follows
+        // the attachment host: a dependency the payload pins, never the
+        // condition's moving subject. `Source` names the parent in neither role.
+        let history_with =
+            |subject| {
+                TargetFilter::Typed(crate::types::ability::TypedFilter::creature().properties(
+                    vec![crate::types::ability::FilterProp::CombatRelation {
+                        relation: crate::types::ability::CombatRelation::BlockPairing {
+                            direction: crate::types::ability::BlockPairDirection::Either,
+                            scope: Some(crate::types::ability::CombatHistoryScope::ThisTurn),
+                        },
+                        subject,
+                    }],
+                ))
+            };
+        let anaphoric = history_with(crate::types::ability::CombatRelationSubject::AnaphoricTarget);
+        assert!(
+            filter_refs_parent_object_anaphor(&anaphoric),
+            "payload pins must see the history dependency"
+        );
+        assert!(
+            !filter_names_parent_object_subject(&anaphoric),
+            "a history dependency is not the condition's moving subject"
+        );
+        let source = history_with(crate::types::ability::CombatRelationSubject::Source);
+        assert!(
+            !filter_refs_parent_object_anaphor(&source),
+            "a source-subject relation names no parent object"
         );
 
         // ---- The shared function was NOT modified: all four still true. ----
