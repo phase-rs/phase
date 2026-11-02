@@ -16,9 +16,11 @@ use crate::types::ability::{
 use crate::types::card::{
     LayoutKind, PrintedCardRef, PrintedLoyalty, TokenArtDescriptor, TokenImageRef,
 };
+use crate::types::card_printing::SharedPrinting;
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::counter::{counter_map_serde, CounterType};
 use crate::types::definitions::Definitions;
+use crate::types::display_only::DisplayOnly;
 use crate::types::game_state::{
     AttackDeclarationRecord, CastOccurrence, GameState, LKISnapshot, TriggerSourceContext,
 };
@@ -414,6 +416,11 @@ pub struct EmblemSource {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub printed_ref: Option<PrintedCardRef>,
+    /// The source card's printing, rendered on the emblem chip. Display-only: CR 203.1 +
+    /// CR 206.1, a printing has no effect on game play, so no rules or AI path reads it.
+    /// Absent from the wire when empty.
+    #[serde(default, skip_serializing_if = "DisplayOnly::is_none")]
+    pub printing: DisplayOnly<Option<SharedPrinting>>,
 }
 
 /// CR 607.1d + CR 607.5 + CR 400.7: an emblem's pairing identity — the exact
@@ -674,6 +681,26 @@ pub fn token_art_derivation_count() -> usize {
     TOKEN_ART_DERIVATION_COUNT.with(std::cell::Cell::get)
 }
 
+/// CR 601.2a + CR 400.1: the zone a cast starts from, together with that
+/// zone's owner. Each player has their own library, hand and graveyard
+/// (CR 400.1), and an object there is in its owner's zone (CR 400.3), so an
+/// origin restriction scoped to "your graveyard" (CR 109.5) needs both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CastOrigin {
+    pub zone: Zone,
+    pub zone_owner: PlayerId,
+}
+
+impl CastOrigin {
+    /// The origin of a cast of `obj` from where it is now.
+    pub fn of(obj: &GameObject) -> Self {
+        Self {
+            zone: obj.zone,
+            zone_owner: obj.owner,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameObject {
     pub id: ObjectId,
@@ -865,6 +892,11 @@ pub struct GameObject {
     pub color: Vec<ManaColor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub printed_ref: Option<PrintedCardRef>,
+    /// The printing of the physical card this object represents, as its owner chose it.
+    /// Display-only: CR 203.1 + CR 206.1, a printing has no effect on game play, so no rules or
+    /// AI path reads it. Absent from the wire when empty.
+    #[serde(default, skip_serializing_if = "DisplayOnly::is_none")]
+    pub printing: DisplayOnly<Option<SharedPrinting>>,
     /// Exact token-art lookup metadata, populated only when the engine can
     /// identify one printed token catalog entry without guessing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1007,6 +1039,17 @@ pub struct GameObject {
     /// `base_name`/`name` pair so a temporary copy's art reverts on expiry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_printed_ref: Option<PrintedCardRef>,
+    /// The physical card's submitted printing; transform, flip, control change and zone changes
+    /// leave it unchanged. Paired with `printing` as `base_printed_ref` is with `printed_ref`,
+    /// but card-level: no face install or copy changes it. Both printings are cleared by
+    /// `conceal_printing` when the object becomes able to hide its name (turned face down, or
+    /// merged) and no later face write returns them; the one authority that replays recorded
+    /// values, the cast reversal (CR 733.1), can return the printing held before a cast. Deck
+    /// loading never stamps a token; a token that is a resolved copy of a permanent spell
+    /// (CR 707.10f) carries the printing cloned from the spell it copies. Display-only: CR 203.1 + CR 206.1, a printing has no effect on game
+    /// play, so no rules or AI path reads it. Absent from the wire when empty.
+    #[serde(default, skip_serializing_if = "DisplayOnly::is_none")]
+    pub base_printing: DisplayOnly<Option<SharedPrinting>>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub base_characteristics_initialized: bool,
 
@@ -1568,6 +1611,17 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cast_from_zone: Option<Zone>,
 
+    /// CR 707.12 + CR 400.1: where the object this copy was made from was when
+    /// the copy was created: its zone and that zone's owner (the original's
+    /// owner, CR 400.3). A copy of a card is created in that zone and, if cast,
+    /// is cast from there, so the copy's own origin restrictions
+    /// (`CastingRestriction::OnlyFromZones`, including whose graveyard) are
+    /// checked against it. Written once by the copy-creating effects
+    /// (`CopySpell`, `CastCopyOfCard`); `None` on every object that isn't such
+    /// a copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copied_from_zone: Option<CastOrigin>,
+
     /// CR 601.2i + CR 707.10: Exact turn-journal coordinate of this cast while
     /// it remains a spell on the stack. Cleared on every Stack exit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1779,6 +1833,9 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         cleave_variant: _,
         color: _,
         printed_ref: _,
+        // OMITTED, DISPLAY-ONLY: CR 203.1 + CR 206.1, a printing has no effect on game play, and
+        // `DisplayOnly` is always equal, so no comparator could tell two printings apart.
+        printing: _,
         token_image_ref: _,
         token_art: _,
         source_related_token_ids: _,
@@ -1816,6 +1873,8 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         base_static_definitions: _,
         base_color: _,
         base_printed_ref: _,
+        // OMITTED, DISPLAY-ONLY (see `printing`).
+        base_printing: _,
         base_characteristics_initialized: _,
         timestamp: _,
         incarnation: _,
@@ -1898,6 +1957,8 @@ fn _gameobject_partition_is_total(o: &GameObject) {
         base_name_origin: _,
         class_level: _,
         cast_from_zone: _,
+        // omitted-safe-by-write-site: written once when a copy is created.
+        copied_from_zone: _,
         // COMPARED: finalized-cast provenance can affect resolution semantics while
         // this object remains a spell on the stack (types/game_state.rs).
         cast_occurrence: _,
@@ -2841,6 +2902,7 @@ impl GameObject {
                 lki: self.snapshot_public_characteristics(),
                 card_id: self.card_id,
                 printed_ref: self.printed_ref.clone(),
+                printing: self.printing.clone(),
                 is_token: self.is_token,
                 face_down: self.face_down,
                 mana_cost: self.mana_cost.clone(),
@@ -3098,7 +3160,9 @@ impl GameObject {
             static_definitions: Definitions::default(),
             color: Vec::new(),
             printed_ref: None,
+            printing: DisplayOnly::default(),
             base_printed_ref: None,
+            base_printing: DisplayOnly::default(),
             token_image_ref: None,
             token_art: None,
             source_related_token_ids: Vec::new(),
@@ -3204,6 +3268,7 @@ impl GameObject {
             base_name_origin: None,
             class_level: None,
             cast_from_zone: None,
+            copied_from_zone: None,
             cast_occurrence: None,
             spell_announcement: None,
             cast_controller: None,
@@ -3220,6 +3285,16 @@ impl GameObject {
             phase_status: PhaseStatus::PhasedIn,
             mana_spent_to_activate: Vec::new(),
         }
+    }
+
+    /// CR 708.2 + CR 708.5: forget the physical card's printing on the authoritative object at the
+    /// moment the object becomes able to hide its name (turned face down, or merged). Nothing writes a
+    /// printing after an object is created except a clone of an existing object, so a concealed
+    /// printing stays concealed through every later face rewrite (turn up, flip, specialize,
+    /// transform, reload) and every capture of the object carries none.
+    pub(crate) fn conceal_printing(&mut self) {
+        self.printing = DisplayOnly::default();
+        self.base_printing = DisplayOnly::default();
     }
 
     /// Capture public object characteristics for event-time look-back queries.

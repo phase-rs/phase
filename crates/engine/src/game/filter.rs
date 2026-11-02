@@ -205,6 +205,7 @@ pub(crate) fn affected_filter_uses_object_population(filter: &TargetFilter) -> b
         | TargetFilter::EventTargetController
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
@@ -472,6 +473,7 @@ pub(crate) fn affected_filter_requires_attachment_relation(filter: &TargetFilter
         | TargetFilter::EventTargetController
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
@@ -630,6 +632,7 @@ pub(crate) fn target_filter_characteristic_reads_at(
         | TargetFilter::EventTargetController
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
@@ -1028,6 +1031,7 @@ pub(crate) fn entered_object_perturbs_affected_filter(
         | TargetFilter::EventTargetController
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
@@ -2854,6 +2858,7 @@ fn filter_contains_input(
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
@@ -4347,6 +4352,7 @@ fn absent_search_predicate_truth(filter: &TargetFilter) -> Option<bool> {
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
@@ -6748,6 +6754,10 @@ fn filter_inner_for_object(
 ) -> bool {
     match filter {
         TargetFilter::None => false,
+        // CR 601.2f: the spell whose cost is being determined is a reference a
+        // cost-modifier quantity binds to that exact object before evaluating
+        // (`quantity::bind_casting_spell_referent`); unbound, it names nothing.
+        TargetFilter::CastingSpell => false,
         TargetFilter::Any => true,
         TargetFilter::Player => false, // Players are not objects
         // CR 118.12a: unless-payer population — never matches an object.
@@ -7953,6 +7963,7 @@ fn zone_change_filter_inner(
         | TargetFilter::EventTargetController
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
@@ -8138,7 +8149,10 @@ fn zone_change_record_matches_type_filter(
                 || record.core_types.contains(&CoreType::Planeswalker)
                 || record.core_types.contains(&CoreType::Battle)
         }
-        TypeFilter::Card | TypeFilter::Any => true,
+        // CR 108.2 + CR 108.2b: a card noun excludes tokens, including after
+        // cessation when the original departure record is the only authority.
+        TypeFilter::Card => !record.is_token,
+        TypeFilter::Any => true,
         TypeFilter::Non(inner) => {
             !zone_change_record_matches_type_filter(record, inner, all_creature_types)
         }
@@ -8292,6 +8306,7 @@ pub fn spell_record_matches_filter(
         | TargetFilter::EventTargetController
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
@@ -8618,6 +8633,7 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::EventTargetController
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
@@ -8671,7 +8687,10 @@ fn spell_object_matches_property(
         }
         FilterProp::ManaValueParity { parity } => {
             let choice = context.and_then(|ctx| ctx.state.last_named_choice.as_ref());
-            mana_value_matches_parity_source(record.mana_value, parity, choice)
+            let source_choice = context
+                .and_then(|ctx| ctx.state.objects.get(&ctx.source_id))
+                .and_then(|source| chosen_parity(&source.chosen_attributes));
+            mana_value_matches_parity_source(record.mana_value, parity, choice, source_choice)
         }
         FilterProp::IsChosenCreatureType => context.is_some_and(|context| {
             context
@@ -8860,7 +8879,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
             }
         },
         FilterProp::ManaValueParity { parity } => {
-            mana_value_matches_parity_source(record.mana_value, parity, None)
+            mana_value_matches_parity_source(record.mana_value, parity, None, None)
         }
         // CR 202.1: SpellCastRecord retains colors + mana_value but no per-shard
         // ManaCost, so colored-pip count is unsupported here. RUNTIME: TODO.
@@ -9846,13 +9865,27 @@ fn matches_last_chosen_card_predicate(
     }
 }
 
-fn parity_from_source(source: &ParitySource, choice: Option<&ChoiceValue>) -> Option<Parity> {
+/// CR 607.2d: the odd/even quality a source object chose and keeps.
+fn chosen_parity(attributes: &[ChosenAttribute]) -> Option<Parity> {
+    attributes.iter().find_map(|attribute| match attribute {
+        ChosenAttribute::OddOrEven(parity) => Some(*parity),
+        _ => None,
+    })
+}
+
+fn parity_from_source(
+    source: &ParitySource,
+    choice: Option<&ChoiceValue>,
+    source_choice: Option<Parity>,
+) -> Option<Parity> {
     match source {
         ParitySource::Fixed(parity) => Some(*parity),
         ParitySource::LastNamedChoice => match choice {
             Some(ChoiceValue::OddOrEven(parity)) => Some(*parity),
             _ => None,
         },
+        // CR 607.2d: the source's own persisted as-enters choice.
+        ParitySource::SourceChosen => source_choice,
     }
 }
 
@@ -9860,8 +9893,10 @@ fn mana_value_matches_parity_source(
     mana_value: u32,
     source: &ParitySource,
     choice: Option<&ChoiceValue>,
+    source_choice: Option<Parity>,
 ) -> bool {
-    parity_from_source(source, choice).is_some_and(|parity| parity.matches(i64::from(mana_value)))
+    parity_from_source(source, choice, source_choice)
+        .is_some_and(|parity| parity.matches(i64::from(mana_value)))
 }
 
 fn attacking_defender_matches(
@@ -10200,7 +10235,12 @@ fn matches_filter_prop(
             // CR 202.3d + CR 709.4b: combined mana value off the stack (a split
             // card's parity is that of both halves), chosen half on the stack.
             let mana_value = obj.effective_mana_value();
-            mana_value_matches_parity_source(mana_value, parity, state.last_named_choice.as_ref())
+            mana_value_matches_parity_source(
+                mana_value,
+                parity,
+                state.last_named_choice.as_ref(),
+                chosen_parity(&source.chosen_attributes),
+            )
         }
         // CR 107.4 + CR 202.1: count colored mana symbols in the object's printed
         // mana cost via the single counting authority, then compare with the
@@ -11060,6 +11100,25 @@ pub(crate) fn card_names_match(a: &str, b: &str) -> bool {
     }
 }
 
+/// CR 709.4a + CR 709.4d: An object has the chosen name if one of its names is the
+/// chosen name; a fused split spell on the stack has both halves' names.
+/// `source_name` is a last-known-information name for a departed source and takes
+/// precedence over the live object's front name.
+pub(crate) fn source_has_chosen_name(
+    source: Option<&GameObject>,
+    source_name: Option<&str>,
+    chosen: &str,
+) -> bool {
+    let front_name = source_name.or_else(|| source.map(|o| o.name.as_str()));
+    front_name.is_some_and(|name| card_names_match(name, chosen))
+        || source.is_some_and(|o| {
+            o.fused_split_spell
+                && o.back_face
+                    .as_ref()
+                    .is_some_and(|back| card_names_match(&back.name, chosen))
+        })
+}
+
 /// CR 603.10: Evaluate a `FilterProp` against a zone-change event snapshot.
 ///
 /// Properties fall into four groups:
@@ -11139,7 +11198,12 @@ fn zone_change_record_matches_property(
         // CR 202.3 + CR 608.2c: The event-time mana value is fixed in the
         // snapshot; the chosen odd/even quality is read from resolution state.
         FilterProp::ManaValueParity { parity } => {
-            mana_value_matches_parity_source(record.mana_value, parity, state.last_named_choice.as_ref())
+            mana_value_matches_parity_source(
+                record.mana_value,
+                parity,
+                state.last_named_choice.as_ref(),
+                chosen_parity(&source.chosen_attributes),
+            )
         }
         // CR 202.1: Zone-change records currently snapshot mana value, not the
         // full printed mana cost. Exact-cost predicates fail closed here.
@@ -12579,6 +12643,7 @@ pub(crate) fn single_target_count(filter: &TargetFilter) -> Option<SingleTargetC
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
@@ -28132,5 +28197,42 @@ mod parser_oracle_trigger_tests {
         assert!(crate::game::filter::filter_denotes_battlefield_permanent(
             bare.valid_card.as_ref().unwrap()
         ));
+    }
+
+    /// CR 709.4a + CR 709.4d: an object has the chosen name if one of its names is the
+    /// chosen name; only a fused split spell carries both halves' names.
+    #[test]
+    fn source_has_chosen_name_covers_fused_split_halves_only() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let id = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(1),
+            crate::types::player::PlayerId(0),
+            "Toil".to_string(),
+            crate::types::zones::Zone::Stack,
+        );
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.back_face = Some(crate::game::game_object::BackFaceData {
+                name: "Trouble".to_string(),
+                ..Default::default()
+            });
+        }
+        let obj = &state.objects[&id];
+        assert!(super::source_has_chosen_name(Some(obj), None, "toil"));
+        assert!(!super::source_has_chosen_name(Some(obj), None, "Trouble"));
+
+        state.objects.get_mut(&id).unwrap().fused_split_spell = true;
+        let obj = &state.objects[&id];
+        assert!(super::source_has_chosen_name(Some(obj), None, "Trouble"));
+        assert!(super::source_has_chosen_name(Some(obj), None, "Toil"));
+        assert!(!super::source_has_chosen_name(Some(obj), None, "Other"));
+        // A last-known name takes precedence over the live front name.
+        assert!(super::source_has_chosen_name(
+            Some(obj),
+            Some("Clone"),
+            "Clone"
+        ));
+        assert!(!super::source_has_chosen_name(None, None, "Toil"));
     }
 }

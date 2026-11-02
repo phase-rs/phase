@@ -8396,6 +8396,7 @@ fn referent_exists_without_gated_action(
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
@@ -9299,7 +9300,9 @@ fn effect_fields_read_filter_population(
             target, arranger, ..
         } => has_filter(target) || arranger.as_ref().is_some_and(has_filter),
         Effect::ChooseDrawnThisTurnPayOrTopdeck { player, .. } => has_filter(player),
-        Effect::PutOnTopOrBottom { target, chooser } => has_filter(target) || has_filter(chooser),
+        Effect::PutOnTopOrBottom {
+            target, chooser, ..
+        } => has_filter(target) || has_filter(chooser),
         Effect::Goad { target } => has_filter(target),
         Effect::Detain { target } => has_filter(target),
         Effect::SetRoomDoorLock { target, .. } => has_filter(target),
@@ -9710,6 +9713,7 @@ fn protection_target_reads_filter_population(
         | ProtectionTarget::ChosenColor
         | ProtectionTarget::ChosenCardType
         | ProtectionTarget::ChosenPlayer
+        | ProtectionTarget::ChosenCardName
         | ProtectionTarget::Everything
         | ProtectionTarget::FromPlayer(_)
         // A color set (CR 702.16i) names colors, never an object population.
@@ -10415,6 +10419,7 @@ fn static_mode_reads_filter_population(
         | StaticMode::PayLifeAsColoredMana { .. }
         | StaticMode::StepEndUnspentMana { .. }
         | StaticMode::UnspentManaLossCausesLifeLoss
+        | StaticMode::WinFirstCoinFlipSetEachTurn
         | StaticMode::CanAttackWithDefender
         | StaticMode::IgnoreLandwalkForBlocking { .. }
         | StaticMode::CanActivateAbilitiesAsThoughHaste
@@ -13771,7 +13776,15 @@ fn node_or_branch_references_tracked_set(
         || ability
             .player_scope
             .as_ref()
-            .is_some_and(player_filter_references_tracked_set);
+            .is_some_and(player_filter_references_tracked_set)
+        // CR 608.2c: a gate that measures the set ("If all cards revealed this
+        // way are creature cards, …") reads it as surely as the effect does.
+        || ability
+            .condition
+            .as_ref()
+            .is_some_and(|condition| {
+                condition.any_quantity_expr(&quantity_expr_references_tracked_set)
+            });
 
     // CR 700.2 + CR 608.2c: both descents stop at a mode boundary. Guarding only
     // the entry hop in `next_sub_needs_tracked_set` is INSUFFICIENT whenever a
