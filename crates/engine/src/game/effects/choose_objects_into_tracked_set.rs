@@ -84,6 +84,11 @@ pub fn resolve(
             let achievable = count.min(available);
             (achievable, Some(achievable))
         }
+        // CR 107.1c: "any number" — any positive number of the eligible
+        // objects, or zero.
+        Some(ObjectSelectionCardinality::AnyNumber) => {
+            (0, Some(u32::try_from(eligible.len()).unwrap_or(u32::MAX)))
+        }
         None => {
             let available = u32::try_from(eligible.len()).unwrap_or(u32::MAX);
             let max = max.map(|maximum| maximum.min(available));
@@ -217,6 +222,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: host,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             })
             .expect("activate required-choice ability");
         runner.advance_until_stack_empty();
@@ -370,6 +376,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: host,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             })
             .expect("activate exact counter-removal choice");
         runner.advance_until_stack_empty();
@@ -458,6 +465,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: host,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             })
             .expect("activate the chapter IV ability");
         runner.advance_until_stack_empty();

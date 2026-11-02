@@ -13,17 +13,19 @@ use tauri::{ipc::Channel, WebviewWindow};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio_tungstenite::{
-    connect_async,
+    connect_async_with_config,
     tungstenite::{
+        self,
         client::IntoClientRequest,
+        handshake::client::Response,
         http::{header::ORIGIN, HeaderValue, Request},
-        protocol::{frame::coding::CloseCode, CloseFrame, Message},
+        protocol::{frame::coding::CloseCode, CloseFrame, Message, WebSocketConfig},
     },
     MaybeTlsStream, WebSocketStream,
 };
 
 use crate::native_engine;
-use crate::native_engine_contract::{BridgeEvent, NativeEngineBridgeError};
+use crate::native_engine_contract::{BridgeEvent, BridgeTextDelivery, NativeEngineBridgeError};
 
 /// phase-server's WebSocket route. Kept as a named constant so the one place
 /// that dials it reads as a contract rather than an incidental URL suffix.
@@ -32,6 +34,14 @@ const SERVER_WEBSOCKET_PATH: &str = "/ws";
 /// How long a graceful close may spend delivering queued frames and its Close
 /// frame before the forwarder is aborted.
 const CLOSE_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Largest text one `BridgeEvent` carries for a client that accepts fragments;
+/// longer frames are split so no single IPC message depends on a webview's size limit.
+const BRIDGE_FRAGMENT_BYTES: usize = 1 << 20;
+
+/// Largest message or frame the bridge reads: headroom over the largest game-state export.
+/// Equals server-core's `MAX_SERVER_FRAME_BYTES`, which the server never exceeds.
+const MAX_BRIDGE_MESSAGE_BYTES: usize = 256 << 20;
 
 impl NativeEngineBridgeError {
     fn internal(detail: impl Into<String>) -> Self {
@@ -75,6 +85,7 @@ impl BridgeHandle {
 #[tauri::command]
 pub async fn connect_native_engine(
     on_event: Channel<BridgeEvent>,
+    text_delivery: Option<BridgeTextDelivery>,
 ) -> Result<u64, NativeEngineBridgeError> {
     let (outbound, receiver) = mpsc::unbounded_channel();
     let (abort, registration) = AbortHandle::new_pair();
@@ -99,7 +110,7 @@ pub async fn connect_native_engine(
             return Err(error);
         }
     };
-    let socket = match connect_async(request).await {
+    let socket = match dial(request).await {
         Ok((socket, _)) => socket,
         Err(error) => {
             native_engine::close_native_engine_bridge(bridge_id);
@@ -120,6 +131,7 @@ pub async fn connect_native_engine(
             receiver,
             registration,
             on_event,
+            text_delivery,
             native_engine::remove_native_engine_bridge,
         )
         .await;
@@ -155,6 +167,46 @@ pub fn native_engine_bridge_close(id: u64) -> Result<(), NativeEngineBridgeError
     }
 }
 
+async fn dial<R: IntoClientRequest + Unpin>(
+    request: R,
+) -> Result<
+    (
+        WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
+        Response,
+    ),
+    tungstenite::Error,
+> {
+    let config = WebSocketConfig::default()
+        .max_message_size(Some(MAX_BRIDGE_MESSAGE_BYTES))
+        .max_frame_size(Some(MAX_BRIDGE_MESSAGE_BYTES));
+    connect_async_with_config(request, Some(config), false).await
+}
+
+/// Sends one server text frame; under `Fragments` a text over
+/// `BRIDGE_FRAGMENT_BYTES` goes as `Fragment` events plus a final `Message`.
+fn send_text(
+    on_event: &Channel<BridgeEvent>,
+    text: &str,
+    delivery: Option<BridgeTextDelivery>,
+) -> tauri::Result<()> {
+    let mut rest = text;
+    match delivery {
+        Some(BridgeTextDelivery::Fragments) => {
+            while rest.len() > BRIDGE_FRAGMENT_BYTES {
+                let (head, tail) = rest.split_at(rest.floor_char_boundary(BRIDGE_FRAGMENT_BYTES));
+                on_event.send(BridgeEvent::Fragment {
+                    text: head.to_owned(),
+                })?;
+                rest = tail;
+            }
+        }
+        None => {}
+    }
+    on_event.send(BridgeEvent::Message {
+        text: rest.to_owned(),
+    })
+}
+
 fn bridge_request(port: u16, origin: &str) -> Result<Request<()>, NativeEngineBridgeError> {
     // phase-server serves its socket at `/ws` (`crates/phase-server/src/main.rs`
     // route table), the same path web clients dial. The root path answers 404,
@@ -179,9 +231,14 @@ async fn forward_bridge(
     outbound: UnboundedReceiver<Message>,
     registration: AbortRegistration,
     on_event: Channel<BridgeEvent>,
+    text_delivery: Option<BridgeTextDelivery>,
     remove: fn(u64),
 ) {
-    let result = Abortable::new(run_bridge(socket, outbound, on_event.clone()), registration).await;
+    let result = Abortable::new(
+        run_bridge(socket, outbound, on_event.clone(), text_delivery),
+        registration,
+    )
+    .await;
     let (error, close) = match result {
         Ok((error, close)) => (error, close),
         Err(_) => (None, None),
@@ -199,6 +256,7 @@ async fn run_bridge(
     socket: WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>,
     mut outbound: UnboundedReceiver<Message>,
     on_event: Channel<BridgeEvent>,
+    text_delivery: Option<BridgeTextDelivery>,
 ) -> (Option<String>, Option<(u16, String)>) {
     let (mut write, mut read) = socket.split();
     let mut error = None;
@@ -226,7 +284,7 @@ async fn run_bridge(
             },
             incoming = read.next() => match incoming {
                 Some(Ok(Message::Text(text))) => {
-                    if on_event.send(BridgeEvent::Message { text: text.to_string() }).is_err() {
+                    if send_text(&on_event, &text, text_delivery).is_err() {
                         break;
                     }
                 }
@@ -522,6 +580,7 @@ pub async fn connect_lan_server(
     window: WebviewWindow,
     url: String,
     on_event: Channel<BridgeEvent>,
+    text_delivery: Option<BridgeTextDelivery>,
 ) -> Result<u64, NativeEngineBridgeError> {
     let endpoint = lan_endpoint(&url)?;
     let client = invoking_lan_client(&window)?;
@@ -553,7 +612,7 @@ pub async fn connect_lan_server(
         );
         id
     };
-    let connection = tokio::time::timeout(Duration::from_secs(5), connect_async(request)).await;
+    let connection = tokio::time::timeout(Duration::from_secs(5), dial(request)).await;
     let socket = match connection {
         Ok(Ok((socket, _))) if !dial_abort.is_aborted() => socket,
         other => {
@@ -574,6 +633,7 @@ pub async fn connect_lan_server(
             receiver,
             registration,
             on_event,
+            text_delivery,
             remove_lan_bridge,
         )
         .await;
@@ -659,6 +719,7 @@ pub(crate) fn abort_lan_bridges() {
 #[cfg(test)]
 mod tests {
     use tokio::io::AsyncWriteExt;
+    use tokio_tungstenite::connect_async;
 
     use super::*;
 
@@ -878,6 +939,7 @@ mod tests {
             receiver,
             registration,
             on_event,
+            None,
             |_| {},
         ));
         (forwarder, events)
@@ -974,6 +1036,211 @@ mod tests {
         });
     }
 
+    fn capture_events() -> (
+        Channel<BridgeEvent>,
+        mpsc::UnboundedReceiver<serde_json::Value>,
+    ) {
+        let (events_sender, events) = mpsc::unbounded_channel();
+        let on_event = Channel::new(move |body: tauri::ipc::InvokeResponseBody| {
+            let _ = events_sender.send(body.deserialize::<serde_json::Value>().unwrap());
+            Ok(())
+        });
+        (on_event, events)
+    }
+
+    #[test]
+    fn a_dialed_bridge_forwards_a_frame_the_size_of_the_largest_export() {
+        tauri::async_runtime::block_on(async {
+            let (listener, port) = bound_listener().await;
+            const SPROUT_SWARM_THOUSAND_EXPORT_BYTES: usize = 128_817_409;
+            let large = "x".repeat(SPROUT_SWARM_THOUSAND_EXPORT_BYTES);
+            let sent = large.clone();
+            let peer = tauri::async_runtime::spawn(async move {
+                let (tcp, _) = listener.accept().await.unwrap();
+                let config = WebSocketConfig::default()
+                    .max_message_size(None)
+                    .max_frame_size(None);
+                let mut socket = tokio_tungstenite::accept_async_with_config(tcp, Some(config))
+                    .await
+                    .unwrap();
+                // A capped client resets the connection mid-frame; the bridge's events report it.
+                let _ = socket.send(Message::Text("small".into())).await;
+                let _ = socket.send(Message::Text(sent.into())).await;
+                let normal = CloseFrame {
+                    code: CloseCode::Normal,
+                    reason: "".into(),
+                };
+                let _ = socket.send(Message::Close(Some(normal))).await;
+                while let Some(Ok(_)) = socket.next().await {}
+            });
+            let (socket, _) = dial(format!("ws://127.0.0.1:{port}/")).await.unwrap();
+            let (on_event, mut events) = capture_events();
+            let (_outbound, receiver) = mpsc::unbounded_channel();
+            let (_abort, registration) = AbortHandle::new_pair();
+            tokio::time::timeout(
+                Duration::from_secs(30),
+                forward_bridge(
+                    1,
+                    socket,
+                    receiver,
+                    registration,
+                    on_event,
+                    Some(BridgeTextDelivery::Fragments),
+                    |_| {},
+                ),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                events.try_recv().unwrap(),
+                serde_json::json!({ "type": "message", "text": "small" })
+            );
+            let mut text = String::new();
+            loop {
+                let event = events.try_recv().unwrap();
+                text.push_str(event["text"].as_str().unwrap_or_else(|| panic!("{event}")));
+                if event["type"] == "message" {
+                    break;
+                }
+                assert_eq!(event["type"], "fragment");
+            }
+            assert!(text == large);
+            assert_eq!(
+                events.try_recv().unwrap(),
+                serde_json::json!({ "type": "closed", "code": 1000, "reason": "" })
+            );
+            assert!(events.try_recv().is_err());
+            peer.await.unwrap();
+        });
+    }
+
+    #[test]
+    fn the_bridge_reads_every_frame_the_server_may_send() {
+        let server =
+            include_str!("../../../crates/server-core/src/game_state_snapshot_wire_guard.rs");
+        assert!(server.contains("pub const MAX_SERVER_FRAME_BYTES: usize = 256 << 20;"));
+        assert_eq!(MAX_BRIDGE_MESSAGE_BYTES, 256 << 20);
+    }
+
+    #[test]
+    fn a_dialed_bridge_refuses_a_frame_over_the_bound_before_its_payload() {
+        tauri::async_runtime::block_on(async {
+            let (listener, port) = bound_listener().await;
+            let size = MAX_BRIDGE_MESSAGE_BYTES + 1;
+            let peer = tauri::async_runtime::spawn(async move {
+                let (tcp, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+                // RFC 6455 §5.2: a final text frame's header with a 64-bit length and no payload.
+                let mut header = vec![0x81, 127];
+                header.extend_from_slice(&u64::try_from(size).unwrap().to_be_bytes());
+                socket.get_mut().write_all(&header).await.unwrap();
+                socket
+            });
+            let (socket, _) = dial(format!("ws://127.0.0.1:{port}/")).await.unwrap();
+            let (on_event, mut events) = capture_events();
+            let (_outbound, receiver) = mpsc::unbounded_channel();
+            let (_abort, registration) = AbortHandle::new_pair();
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                forward_bridge(
+                    1,
+                    socket,
+                    receiver,
+                    registration,
+                    on_event,
+                    Some(BridgeTextDelivery::Fragments),
+                    |_| {},
+                ),
+            )
+            .await
+            .unwrap();
+            let refused =
+                tungstenite::Error::Capacity(tungstenite::error::CapacityError::MessageTooLong {
+                    size,
+                    max_size: MAX_BRIDGE_MESSAGE_BYTES,
+                });
+            assert_eq!(
+                events.try_recv().unwrap(),
+                serde_json::json!({ "type": "error", "detail": refused.to_string() })
+            );
+            assert_eq!(
+                events.try_recv().unwrap(),
+                serde_json::json!({ "type": "closed", "code": 1006, "reason": "" })
+            );
+            assert!(events.try_recv().is_err());
+            drop(peer.await.unwrap());
+        });
+    }
+
+    #[test]
+    fn oversized_texts_arrive_as_fragments_cut_on_char_boundaries() {
+        // 2^20 is not a multiple of 3, so every cut lands inside a three-byte `€`.
+        let text = format!("ab{}", "€".repeat(1_048_577));
+        assert_eq!(text.len(), 3 * BRIDGE_FRAGMENT_BYTES + 5);
+        let (on_event, mut events) = capture_events();
+        send_text(&on_event, &text, Some(BridgeTextDelivery::Fragments)).unwrap();
+        let mut received = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            received.push(event);
+        }
+        let kinds: Vec<_> = received.iter().map(|event| event["type"].clone()).collect();
+        assert_eq!(kinds, ["fragment", "fragment", "fragment", "message"]);
+        let pieces: Vec<&str> = received
+            .iter()
+            .map(|event| event["text"].as_str().unwrap())
+            .collect();
+        assert!(pieces
+            .iter()
+            .all(|piece| piece.len() <= BRIDGE_FRAGMENT_BYTES));
+        assert!(pieces.concat() == text);
+
+        let exact = "x".repeat(BRIDGE_FRAGMENT_BYTES);
+        send_text(&on_event, &exact, Some(BridgeTextDelivery::Fragments)).unwrap();
+        let single = events.try_recv().unwrap();
+        assert_eq!(single["type"], "message");
+        assert!(single["text"] == exact.as_str());
+        assert!(events.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_client_without_fragment_delivery_receives_an_oversized_text_whole() {
+        tauri::async_runtime::block_on(async {
+            let (listener, port) = bound_listener().await;
+            let large = "x".repeat(3 * BRIDGE_FRAGMENT_BYTES);
+            let sent = large.clone();
+            let peer = tauri::async_runtime::spawn(async move {
+                let (tcp, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(tcp).await.unwrap();
+                socket.send(Message::Text(sent.into())).await.unwrap();
+                let normal = CloseFrame {
+                    code: CloseCode::Normal,
+                    reason: "".into(),
+                };
+                socket.send(Message::Close(Some(normal))).await.unwrap();
+                while let Some(Ok(_)) = socket.next().await {}
+            });
+            let (socket, _) = dial(format!("ws://127.0.0.1:{port}/")).await.unwrap();
+            let (on_event, mut events) = capture_events();
+            let (_outbound, receiver) = mpsc::unbounded_channel();
+            let (_abort, registration) = AbortHandle::new_pair();
+            tokio::time::timeout(
+                Duration::from_secs(30),
+                forward_bridge(1, socket, receiver, registration, on_event, None, |_| {}),
+            )
+            .await
+            .unwrap();
+            let whole = events.try_recv().unwrap();
+            assert_eq!(whole["type"], "message");
+            assert!(whole["text"] == large.as_str());
+            assert_eq!(
+                events.try_recv().unwrap(),
+                serde_json::json!({ "type": "closed", "code": 1000, "reason": "" })
+            );
+            assert!(events.try_recv().is_err());
+            peer.await.unwrap();
+        });
+    }
+
     #[test]
     fn lan_endpoint_accepts_only_explicit_private_or_loopback_ipv4() {
         for url in [
@@ -1059,6 +1326,13 @@ mod tests {
             r#"{"type":"message","text":"frame"}"#
         );
         assert_eq!(
+            serde_json::to_string(&BridgeEvent::Fragment {
+                text: "fra".to_owned(),
+            })
+            .unwrap(),
+            r#"{"type":"fragment","text":"fra"}"#
+        );
+        assert_eq!(
             serde_json::to_string(&BridgeEvent::Closed {
                 code: 1000,
                 reason: "normal".to_owned(),
@@ -1091,7 +1365,7 @@ mod tests {
     #[test]
     fn connect_without_a_running_engine_returns_not_running() {
         let channel = Channel::new(|_| Ok(()));
-        let result = tauri::async_runtime::block_on(connect_native_engine(channel));
+        let result = tauri::async_runtime::block_on(connect_native_engine(channel, None));
 
         assert!(matches!(
             result,

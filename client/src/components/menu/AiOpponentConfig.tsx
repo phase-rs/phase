@@ -5,8 +5,17 @@ import type { GameFormat, MatchType } from "../../adapter/types";
 import { formatSuppliesDeck } from "../../data/formatRegistry";
 import { AI_DIFFICULTIES, type AIDifficulty } from "../../constants/ai";
 import type { AiDeckCandidate } from "../../services/aiDeckCatalog";
-import { useAiDeckCatalog } from "../../services/aiDeckCatalog";
-import { restrictAiPoolByBracket } from "../../services/aiRandomPool";
+import { useAiDeckCatalog, type UseAiDeckCatalogResult } from "../../services/aiDeckCatalog";
+import {
+  resolveBracketDrawBase,
+  resolveEffectiveAiRandomPool,
+  restrictAiPoolByBracket,
+} from "../../services/aiRandomPool";
+import {
+  summarizePoolSelection,
+  withCatalogSavedNames,
+} from "../../services/randomPoolSelection";
+import { usePoolFolderIndex } from "../../hooks/usePoolFolderIndex";
 import { isCommanderFamilyFormat } from "../../types/bracket";
 import {
   AI_DECK_RANDOM,
@@ -14,10 +23,13 @@ import {
   type AiArchetypeFilter,
   type AiDeckSelection,
 } from "../../stores/preferencesStore";
-import { isProfileUsable, useLlmStore } from "../../stores/llmStore";
+import { isProfileUsable, profileForSeat, useLlmStore } from "../../stores/llmStore";
+import { useLlmProviderCatalog } from "../../hooks/useLlmProviderCatalog";
 import { MenuSelect } from "../ui/MenuSelect";
 import type { DeckArchetype } from "../../services/engineRuntime";
+import { AiDeckPicker } from "./AiDeckPicker";
 import { BracketFilter } from "./BracketFilter";
+import { RandomPoolTree } from "./RandomPoolTree";
 
 const AI_MENU_CLASS =
   "min-h-[44px] rounded-lg border border-gray-700 bg-gray-800/60 px-2 py-1.5 text-sm sm:min-h-0";
@@ -32,6 +44,12 @@ interface Props {
    *  page's player-count context. */
   opponentCount?: number;
   onCandidateCountChange?: (count: number | null) => void;
+  /**
+   * Hoisted catalog from the setup page, which shares one analysis between
+   * the AI seats and the human pool's bracket base. When absent the component
+   * runs its own analysis (other mounts, tests).
+   */
+  catalog?: UseAiDeckCatalogResult;
 }
 
 /** Sentinel for "this seat is driven by the built-in engine AI". */
@@ -68,6 +86,7 @@ export function AiOpponentConfig({
   selectedMatchType,
   opponentCount = 1,
   onCandidateCountChange,
+  catalog,
 }: Props) {
   const { t } = useTranslation("menu");
   const aiSeats = usePreferencesStore((s) => s.aiSeats);
@@ -82,6 +101,11 @@ export function AiOpponentConfig({
   const setCoverageFloor = usePreferencesStore((s) => s.setAiCoverageFloor);
   const bracketFilter = usePreferencesStore((s) => s.aiBracketFilter);
   const setBracketFilter = usePreferencesStore((s) => s.setAiBracketFilter);
+  const aiPoolSelection = usePreferencesStore((s) => s.aiPoolSelection);
+  // Reactive folder revision: the preview memos below resolve through this
+  // index so a deck moved between folders recomputes instead of serving
+  // stale membership.
+  const poolFolderIndex = usePoolFolderIndex();
   const isCedhFormat = isCommanderFamilyFormat(selectedFormat);
   const effectiveCedhMode = cedhMode && isCedhFormat;
   // Fixed-deck formats (Momir's Madness) have the engine supply every AI seat's
@@ -107,7 +131,12 @@ export function AiOpponentConfig({
     }
   }, [selectedFormat, isCedhFormat, cedhMode, setCedhMode]);
 
-  const { candidates, loading, error } = useAiDeckCatalog({ selectedFormat, selectedMatchType });
+  const fallbackCatalog = useAiDeckCatalog({
+    selectedFormat,
+    selectedMatchType,
+    enabled: catalog === undefined,
+  });
+  const { candidates, allCandidates, loading, error } = catalog ?? fallbackCatalog;
 
   useEffect(() => {
     onCandidateCountChange?.(loading ? null : candidates.length);
@@ -129,15 +158,63 @@ export function AiOpponentConfig({
       }),
     [candidates, bracketFilter, cedhMode, selectedFormat],
   );
-  const filteredDecks = useMemo(() => {
-    return bracketPool.filter((d) => {
-      if (d.coveragePct != null && d.coveragePct < coverageFloor) return false;
-      if (archetypeFilter !== "Any" && d.archetype && d.archetype !== archetypeFilter) {
-        return false;
-      }
-      return true;
-    });
-  }, [bracketPool, coverageFloor, archetypeFilter]);
+  // The "Random (N)" counts resolve the full production layering — bracket
+  // with catalog fallback, curation with bracket-pool fallback, soft
+  // preferences with draw-pool fallback — through the same authority game
+  // start uses, so the preview matches what seats can actually draw. The raw
+  // bracket pool above stays separate for the empty-bracket diagnostic below.
+  const filteredDecks = useMemo(
+    () =>
+      resolveEffectiveAiRandomPool(
+        withCatalogSavedNames(candidates),
+        {
+          bracketFilter,
+          cedhMode,
+          selectedFormat: selectedFormat ?? null,
+          poolSelection: aiPoolSelection,
+          archetypeFilter,
+          coverageFloor,
+        },
+        poolFolderIndex,
+      ),
+    [
+      candidates,
+      bracketFilter,
+      cedhMode,
+      selectedFormat,
+      aiPoolSelection,
+      archetypeFilter,
+      coverageFloor,
+      poolFolderIndex,
+    ],
+  );
+  // The tree lists the full legal catalog (the curation is format-global),
+  // but reports playable counts against the draw base — the same base
+  // `pickAiSeatDecks` draws from — so a selection the bracket filter empties
+  // warns instead of silently falling back.
+  const poolTreeItems = useMemo(() => withCatalogSavedNames(candidates), [candidates]);
+  // Group toggles clear overrides against the complete raw universe: the
+  // curation is format-global, so an override on a currently-unlisted deck
+  // must not survive a folder-wide unselect.
+  const poolToggleItems = useMemo(() => withCatalogSavedNames(allCandidates), [allCandidates]);
+  const poolBaseIds = useMemo(
+    () =>
+      new Set(
+        resolveBracketDrawBase(candidates, {
+          bracketFilter,
+          cedhMode,
+          selectedFormat: selectedFormat ?? null,
+        }).map((candidate) => candidate.id),
+      ),
+    [candidates, bracketFilter, cedhMode, selectedFormat],
+  );
+  // Decks are selected but none survive the bracket restriction, so Random
+  // seats silently fall back to the full bracket pool. Say so next to the
+  // seats (the tree warns too) — the "Random (N)" count alone hides the why.
+  const poolConflict = useMemo(() => {
+    const summary = summarizePoolSelection(poolTreeItems, aiPoolSelection, poolBaseIds, poolFolderIndex);
+    return summary.selected > 0 && summary.playable === 0 && summary.baseSize > 0 ? summary : null;
+  }, [poolTreeItems, aiPoolSelection, poolBaseIds, poolFolderIndex]);
   // Soft gate: the catalog is non-empty but the bracket constraint matched
   // nothing, so game start will fall back to the full legal catalog. Warn
   // here (Start stays enabled) rather than failing the game.
@@ -292,6 +369,13 @@ export function AiOpponentConfig({
             )}
           </div>
         )}
+
+        <RandomPoolTree pool="ai" items={poolTreeItems} allItems={poolToggleItems} baseIds={poolBaseIds} />
+        {poolConflict !== null && (
+          <div role="status" className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+            {t("aiOpponent.poolBracketConflict", { selected: poolConflict.selected, total: poolConflict.baseSize })}
+          </div>
+        )}
       </div>
       )}
     </div>
@@ -332,24 +416,6 @@ function AiSeatPanel({
 }: AiSeatPanelProps) {
   const { t } = useTranslation("menu");
   const isRandom = seat.deckId === AI_DECK_RANDOM;
-  // When the user has pinned a deck, expose the full list so they can switch
-  // to another pinned deck; otherwise scope to the filtered Random pool so
-  // the "Random" summary count matches the options shown.
-  const deckOptions = isRandom ? filteredDecks : candidates;
-  const selectionValid = isRandom || deckOptions.some((d) => d.id === seat.deckId);
-  const effectiveSelection: AiDeckSelection = selectionValid ? seat.deckId : AI_DECK_RANDOM;
-
-  const sourceLabel = (candidate: AiDeckCandidate): string => {
-    switch (candidate.source.type) {
-      case "saved":
-        return candidate.source.feedId ? t("aiOpponent.source.feed") : t("aiOpponent.source.user");
-      case "feed":
-        return candidate.source.feedId;
-      case "precon":
-        return t("aiOpponent.source.precon");
-    }
-  };
-
   const selectedCandidate = candidates.find((d) => d.id === seat.deckId);
   const summaryDeck = isRandom
     ? t("aiOpponent.deckRandomCount", { count: filteredDecks.length })
@@ -357,26 +423,6 @@ function AiSeatPanel({
   const summaryDifficulty = cedhMode
     ? t("aiOpponent.cedhToggle.badge")
     : t(`aiDifficulty.levels.${seat.difficulty}`);
-
-  const formatDeckLabel = (candidate: AiDeckCandidate): string => {
-    const suffix = [sourceLabel(candidate), candidate.archetype, candidate.coveragePct != null ? `${candidate.coveragePct}%` : null]
-      .filter(Boolean)
-      .join(" · ");
-    return suffix ? `${candidate.name} — ${suffix}` : candidate.name;
-  };
-
-  const randomDeckLabel = t("aiOpponent.deckRandomCount", { count: filteredDecks.length });
-  const deckMenuItems = useMemo(
-    () => [
-      { value: AI_DECK_RANDOM, label: randomDeckLabel },
-      ...deckOptions.map((d) => ({ value: d.id, label: formatDeckLabel(d) })),
-    ],
-    [deckOptions, randomDeckLabel],
-  );
-  const selectedDeckLabel =
-    effectiveSelection === AI_DECK_RANDOM
-      ? randomDeckLabel
-      : (deckMenuItems.find((item) => item.value === effectiveSelection)?.label ?? randomDeckLabel);
 
   const difficultyItems = useMemo(
     () =>
@@ -395,14 +441,11 @@ function AiSeatPanel({
       {!hideDeckPicker && (
       <label className="flex flex-col gap-1">
         <span className="text-xs text-slate-400">{t("aiOpponent.deck")}</span>
-        <MenuSelect
-          ariaLabel={t("aiOpponent.deck")}
-          label={selectedDeckLabel}
-          selectedValue={effectiveSelection}
-          items={deckMenuItems}
-          onSelect={(value) => onDeckChange(value as AiDeckSelection)}
-          menuLayout={AI_MENU_LAYOUT}
-          fitContainer
+        <AiDeckPicker
+          value={seat.deckId}
+          candidates={candidates}
+          randomPool={filteredDecks}
+          onChange={onDeckChange}
           wrapperClassName={AI_MENU_WRAPPER}
           className={`${AI_MENU_CLASS} text-white`}
         />
@@ -475,15 +518,20 @@ function AiSeatPanel({
  */
 function AiBrainPicker({ index }: { index: number }) {
   const { t } = useTranslation("menu");
+  const catalog = useLlmProviderCatalog();
   const profiles = useLlmStore((s) => s.profiles);
-  const seatBindings = useLlmStore((s) => s.seatBindings);
   const bindSeat = useLlmStore((s) => s.bindSeat);
+  // The same lookup the game loop uses, so a seat that inherits the default
+  // opponent shows it here rather than "built-in engine".
+  const driver = useLlmStore((s) => profileForSeat(s, index, catalog));
 
-  const usable = useMemo(() => profiles.filter(isProfileUsable), [profiles]);
+  const usable = useMemo(
+    () => profiles.filter((profile) => isProfileUsable(profile, catalog)),
+    [profiles, catalog],
+  );
   if (usable.length === 0) return null;
 
-  const bound = seatBindings[index];
-  const selected = usable.some((profile) => profile.id === bound) ? bound : ENGINE_BRAIN;
+  const selected = driver?.id ?? ENGINE_BRAIN;
   const items = [
     { value: ENGINE_BRAIN, label: t("aiOpponent.brainEngine") },
     ...usable.map((profile) => ({

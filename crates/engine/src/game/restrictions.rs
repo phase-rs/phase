@@ -1,4 +1,5 @@
-use crate::game::game_object::GameObject;
+use crate::game::cost_payability::AbilityCostPayability;
+use crate::game::game_object::{CastOrigin, GameObject};
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, ActivationRestriction, CastingPermission, CastingRestriction,
     CommanderOwnership, ControllerRef, FilterProp, ParsedCondition, QuantityExpr,
@@ -155,7 +156,9 @@ pub fn flash_timing_cost(
         match &option.cost {
             None => Some(ManaCost::NoCost),
             Some(AbilityCost::Mana { cost }) => Some(cost.clone()),
-            Some(cost) if cost.is_payable(state, player, obj.id) => Some(ManaCost::NoCost),
+            Some(cost) if cost.is_payable_for_spell(state, player, obj.id) => {
+                Some(ManaCost::NoCost)
+            }
             Some(_) => None,
         }
     })
@@ -281,6 +284,13 @@ pub(crate) fn spell_cast_record_for(
         // history record carries provenance so own-cast exclusion (CR 601.2i)
         // can identify a permanent's own pending cast positionally.
         spell_object_id: Some(obj.id),
+        // CR 722.3d + CR 601.2i: capture the prepare-spell designation the
+        // spell has as it becomes cast (the CR 722.3c linked copy's marker), so
+        // `FilterProp::PrepareSpell` and its negation are exact on the history
+        // record after the spell leaves the stack. Unconditional on zone: the
+        // live candidate seam projects the linked copy while it still waits in
+        // exile, and that object can only be cast as a prepare spell.
+        prepared_copy_source: obj.prepared_copy_source,
     }
 }
 
@@ -430,7 +440,7 @@ pub fn record_battlefield_entry(
     }
 
     let record = battlefield_entry_record_for(obj);
-    state.battlefield_entries_this_turn.push(record);
+    state.battlefield_entries_this_turn.push_back(record);
 }
 
 fn entry_controller_matches(
@@ -571,67 +581,6 @@ pub(crate) fn battlefield_entry_matches_filter(
         TargetFilter::And { filters } => filters.iter().all(|inner| {
             battlefield_entry_matches_filter(record, inner, player, all_creature_types, source_id)
         }),
-        _ => false,
-    }
-}
-
-/// CR 403.3 + CR 608.2h: can [`battlefield_entry_matches_filter`] actually answer this filter
-/// against a `BattlefieldEntryRecord`?
-///
-/// The record is an entry-time snapshot carrying only `object_id / name / core_types / subtypes /
-/// supertypes / colors / keywords / controller` (`types::game_state::BattlefieldEntryRecord`). Every other
-/// characteristic a `FilterProp` can name is live-object state the snapshot never captured, so the
-/// matcher fails closed at the `FilterProp` match's fail-closed arm inside
-/// `battlefield_entry_matches_filter`'s `TargetFilter::Typed` case, and at the fail-closed
-/// `_ => false` arm that closes out that function's outer `match`, and the whole tally reads
-/// a silent constant 0 — but see the `Or` exception documented beside that function's
-/// `TargetFilter::Or` arm: an `Or` with one unsupported leaf yields a SILENT PARTIAL COUNT
-/// instead. Measured: 100
-/// `FilterProp` variants exist (`types::ability::FilterProp`); the matcher answers 4.
-///
-/// This is an ALLOW-LIST, deliberately not an exhaustive `match`. A `FilterProp` added later is
-/// absent from the list and therefore defaults to "not evaluable" — the conservative side, which
-/// yields an honest `Effect::Unimplemented` at the parser guard and an honest `Unhandled` in the
-/// coverage classifier. A deny-list would need exhaustiveness; a positive allow-list does not.
-/// The list (this function's own `TargetFilter::Typed` arm, below) must name exactly the props
-/// the matcher answers; the binder is
-/// `ledger_guard_agrees_with_matcher` (test, below).
-///
-/// Upgrade path, ascending cost: `HasSupertype` and `Named` are answerable from `record.supertypes`
-/// / `record.name` TODAY — one matcher arm plus one line here. `FaceDown` (Tunnel Tipster),
-/// `Token`/`NonToken` and `Tapped` need a new snapshot field on `BattlefieldEntryRecord`.
-///
-/// `TypedFilter::type_filters` is intentionally NOT screened: `entry_type_filter_matches` is
-/// exhaustive; `Instant`/`Sorcery` answer `false` per CR 403.3, whose negation is correctly
-/// `true` for every permanent.
-pub(crate) fn ledger_filter_is_evaluable(filter: &TargetFilter) -> bool {
-    match filter {
-        TargetFilter::Any => true,
-        TargetFilter::Typed(typed) => {
-            // CR 109.5: `entry_controller_matches` answers only these two.
-            typed
-                .controller
-                .as_ref()
-                .is_none_or(|c| matches!(c, ControllerRef::You | ControllerRef::Opponent))
-                && typed.properties.iter().all(|prop| {
-                    matches!(
-                        prop,
-                        FilterProp::HasColor { .. }
-                            | FilterProp::InZone { .. }
-                            | FilterProp::WithKeyword { .. }
-                            | FilterProp::Another
-                    )
-                })
-        }
-        // CR 608.2i: mirrors the monotone connectives (the `TargetFilter::Or` and
-        // `TargetFilter::And` arms) of `battlefield_entry_matches_filter`; every leaf must be
-        // answerable, otherwise the composite silently drops one.
-        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-            filters.iter().all(ledger_filter_is_evaluable)
-        }
-        // Everything else is the fail-closed `_ => false` arm that closes out
-        // `battlefield_entry_matches_filter`'s outer `match`, including the anti-monotone
-        // `TargetFilter::Not`.
         _ => false,
     }
 }
@@ -879,10 +828,7 @@ pub(crate) fn tap_permanent_for_cost(
     )
     .map_err(|error| EngineError::InvalidAction(error.to_string()))?
     {
-        events.push(GameEvent::PermanentTapped {
-            object_id: id,
-            caused_by: None,
-        });
+        events.push(GameEvent::permanent_tapped(state, id, None));
     }
     Ok(())
 }
@@ -922,6 +868,31 @@ fn effective_activation_limit(
         return 1; // No tag → default once-per-turn
     };
     activation_limit_from_statics(state, player, source_id, tag.keyword_str(), gates)
+}
+
+/// CR 606.3 + CR 611.3a: The loyalty-activation cap's static term — the max
+/// `new_limit` over `ModifyActivationLimit { keyword: "loyalty" }` statics
+/// (Oath of Teferi class) whose controller is `player` and whose affected
+/// filter matches the planeswalker `source_id`. Base limit 1; max semantics
+/// (multiple Oaths do not stack, per the card's ruling). Read live at
+/// activation time — nothing is latched. Fills `None` gates via the O(1)
+/// presence index.
+pub(crate) fn loyalty_activation_cap_from_statics(
+    state: &crate::types::game_state::GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    gates: Option<&ActivationRestrictionStaticGates>,
+) -> u32 {
+    match gates {
+        Some(gates) => activation_limit_from_statics(state, player, source_id, "loyalty", gates),
+        None => activation_limit_from_statics(
+            state,
+            player,
+            source_id,
+            "loyalty",
+            &ActivationRestrictionStaticGates::compute(state),
+        ),
+    }
 }
 
 /// CR 602.5b: Scan the battlefield for `ModifyActivationLimit` statics that
@@ -1164,9 +1135,17 @@ fn activation_restriction_applies(
                 .unwrap_or(0)
                 < u32::from(*count)
         }
-        ActivationRestriction::RequiresCondition { condition } => condition
-            .as_ref()
-            .is_none_or(|cond| evaluate_condition(state, player, source_id, cond)),
+        // CR 201.5a + CR 602.5c: the condition reads the granter stamped on the ability being activated.
+        ActivationRestriction::RequiresCondition { condition } => {
+            condition.as_ref().is_none_or(|cond| {
+                let granting_object = state
+                    .objects
+                    .get(&source_id)
+                    .and_then(|obj| obj.abilities.get(ability_index))
+                    .and_then(|ability| ability.granting_object);
+                evaluate_condition_for_granter(state, player, source_id, granting_object, cond)
+            })
+        }
         // CR 719.3c: Only activatable while the source Case is solved.
         ActivationRestriction::IsSolved => state
             .objects
@@ -1286,6 +1265,100 @@ fn casting_restriction_applies(
         // CR 601.2b / CR 601.2h: "Spend only ... on X" restricts how the cost is paid,
         // never when. Always satisfied here; enforced in the mana-payment path.
         CastingRestriction::SpendOnlyOnX { .. } => true,
+        // CR 601.3 + CR 113.6f: the cast's ORIGIN zone must be one the object
+        // may be cast from. Consulted at announcement, where the object still
+        // occupies its origin — unless an in-flight pending cast (CR 601.2a has
+        // already moved it to the stack) records it. The persisted post-finalize
+        // origin is deliberately NOT consulted: at a NEW announcement it can only
+        // describe a PREVIOUS cast of this object, and a stale graveyard stamp
+        // must not admit a later hand cast. The origin zone's owner is the
+        // object's owner (CR 400.3).
+        CastingRestriction::OnlyFromZones { .. } => {
+            let origin = state.objects.get(&source_id).map(|obj| CastOrigin {
+                zone: super::casting::pending_cast_origin_zone_for(state, source_id)
+                    .unwrap_or(obj.zone),
+                zone_owner: obj.owner,
+            });
+            restriction_permits_cast_origin(restriction, player, origin)
+        }
+    }
+}
+
+/// CR 601.3 + CR 113.6f: whether an object's own casting restrictions permit
+/// `caster` to cast it from `origin`. The single answer to the cast-origin
+/// question, shared by the announcement check ([`check_casting_restrictions`])
+/// and the CR 707.12 cast-a-copy routes, which create the copy in the
+/// original's zone and cast it from there without announcing through the cast
+/// pipeline.
+///
+/// `origin: None` means the caller can't establish the origin. A restriction on
+/// the origin then refuses (fail closed); every other restriction is
+/// origin-independent and permits.
+pub(crate) fn restrictions_permit_cast_origin(
+    restrictions: &[CastingRestriction],
+    caster: PlayerId,
+    origin: Option<CastOrigin>,
+) -> bool {
+    restrictions
+        .iter()
+        .all(|restriction| restriction_permits_cast_origin(restriction, caster, origin))
+}
+
+fn restriction_permits_cast_origin(
+    restriction: &CastingRestriction,
+    caster: PlayerId,
+    origin: Option<CastOrigin>,
+) -> bool {
+    match restriction {
+        CastingRestriction::OnlyFromZones { zones, pool } => origin.is_some_and(|origin| {
+            zones.contains(&origin.zone) && cast_origin_in_pool(origin, *pool, caster)
+        }),
+        // Timing, condition and payment restrictions say nothing about origin.
+        CastingRestriction::AsSorcery
+        | CastingRestriction::DuringCombat
+        | CastingRestriction::DuringOpponentsTurn
+        | CastingRestriction::DuringYourTurn
+        | CastingRestriction::DuringYourUpkeep
+        | CastingRestriction::DuringOpponentsUpkeep
+        | CastingRestriction::DuringAnyUpkeep
+        | CastingRestriction::DuringYourEndStep
+        | CastingRestriction::DuringOpponentsEndStep
+        | CastingRestriction::DeclareAttackersStep
+        | CastingRestriction::DeclareBlockersStep
+        | CastingRestriction::BeforeAttackersDeclared
+        | CastingRestriction::BeforeBlockersDeclared
+        | CastingRestriction::AfterBlockersDeclared
+        | CastingRestriction::BeforeCombatDamage
+        | CastingRestriction::AfterCombat
+        | CastingRestriction::RequiresCondition { .. }
+        | CastingRestriction::CantSpendMana
+        | CastingRestriction::SpendOnlyOnX { .. } => true,
+    }
+}
+
+/// CR 109.5 + CR 400.1: whether `origin` lies in the graveyard pool an
+/// `OnlyFromZones` restriction names. "Your graveyard" is the caster's
+/// (CR 109.5: the would-be controller's), and each player has their own
+/// graveyard (CR 400.1), so an `OwnGraveyard` pool admits a graveyard origin
+/// only when the caster owns it. The pool says nothing about other zones.
+fn cast_origin_in_pool(
+    origin: CastOrigin,
+    pool: crate::types::statics::GraveyardPermissionPool,
+    caster: PlayerId,
+) -> bool {
+    use crate::types::statics::GraveyardPermissionPool;
+    match (origin.zone, pool) {
+        (Zone::Graveyard, GraveyardPermissionPool::OwnGraveyard) => origin.zone_owner == caster,
+        (Zone::Graveyard, GraveyardPermissionPool::AnyGraveyard)
+        | (
+            Zone::Library
+            | Zone::Hand
+            | Zone::Battlefield
+            | Zone::Stack
+            | Zone::Exile
+            | Zone::Command,
+            GraveyardPermissionPool::OwnGraveyard | GraveyardPermissionPool::AnyGraveyard,
+        ) => true,
     }
 }
 
@@ -1295,6 +1368,17 @@ pub(crate) fn evaluate_condition(
     state: &crate::types::game_state::GameState,
     player: PlayerId,
     source_id: ObjectId,
+    condition: &ParsedCondition,
+) -> bool {
+    evaluate_condition_for_granter(state, player, source_id, None, condition)
+}
+
+/// CR 201.5a: [`evaluate_condition`] for a definition carrying a granter stamp.
+fn evaluate_condition_for_granter(
+    state: &crate::types::game_state::GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    granting_object: Option<crate::types::identifiers::ObjectIncarnationRef>,
     condition: &ParsedCondition,
 ) -> bool {
     match condition {
@@ -1442,8 +1526,13 @@ pub(crate) fn evaluate_condition(
             rhs,
         } => {
             let lhs_expr = QuantityExpr::Ref { qty: lhs.clone() };
-            let lhs_val =
-                crate::game::quantity::resolve_quantity_scoped(state, &lhs_expr, source_id, player);
+            let lhs_val = crate::game::quantity::resolve_quantity_scoped(
+                state,
+                &lhs_expr,
+                source_id,
+                player,
+                granting_object,
+            );
             // CR 102.2 + CR 102.3 + CR 800.4a: each opponent still in the game,
             // not every other seat (a player who left the game or a teammate is
             // not an opponent).
@@ -1452,7 +1541,11 @@ pub(crate) fn evaluate_condition(
                 .all(|opponent| {
                     let rhs_expr = QuantityExpr::Ref { qty: rhs.clone() };
                     let rhs_val = crate::game::quantity::resolve_quantity_scoped(
-                        state, &rhs_expr, source_id, opponent,
+                        state,
+                        &rhs_expr,
+                        source_id,
+                        opponent,
+                        granting_object,
                     );
                     comparator.evaluate(lhs_val, rhs_val)
                 })
@@ -1462,10 +1555,20 @@ pub(crate) fn evaluate_condition(
             comparator,
             rhs,
         } => {
-            let lhs_val =
-                crate::game::quantity::resolve_quantity_scoped(state, lhs, source_id, player);
-            let rhs_val =
-                crate::game::quantity::resolve_quantity_scoped(state, rhs, source_id, player);
+            let lhs_val = crate::game::quantity::resolve_quantity_scoped(
+                state,
+                lhs,
+                source_id,
+                player,
+                granting_object,
+            );
+            let rhs_val = crate::game::quantity::resolve_quantity_scoped(
+                state,
+                rhs,
+                source_id,
+                player,
+                granting_object,
+            );
             comparator.evaluate(lhs_val, rhs_val)
         }
         ParsedCondition::CreaturesYouControlTotalPowerAtLeast { minimum } => {
@@ -1573,7 +1676,8 @@ pub(crate) fn evaluate_condition(
             Some(filter) => {
                 let filter_ctx = crate::game::filter::FilterContext::from_source_with_controller(
                     source_id, player,
-                );
+                )
+                .with_granting_object(granting_object);
                 state
                     .attacker_declarations_this_turn
                     .iter()
@@ -1693,14 +1797,8 @@ pub(crate) fn evaluate_condition(
                 filter,
                 player,
                 crate::game::quantity::QuantityContext {
-                    entering: None,
-                    source: source_id,
-                    trigger_source: None,
-                    recipient: None,
-                    scoped_player: None,
-                    damage_source: None,
-                    event_amount: None,
-                    spell: None,
+                    granting_object,
+                    ..crate::game::quantity::QuantityContext::new(source_id)
                 },
             ) as usize
                 >= *minimum
@@ -1777,9 +1875,9 @@ pub(crate) fn evaluate_condition(
         ParsedCondition::IsOpponentsTurn => {
             super::players::is_opponent(state, player, state.active_player)
         }
-        // CR 503.1: The game is currently in the upkeep step. Player scope, if
-        // any, is composed by the caller via `And([IsOpponentsTurn, ..])`.
-        ParsedCondition::IsDuringUpkeep => state.phase == Phase::Upkeep,
+        // CR 500.1 + CR 602.5: the game is in one of the named steps; player
+        // scope, if any, is composed by the caller via `And`.
+        ParsedCondition::CurrentPhaseIs { phases } => phases.contains(&state.phase),
         // CR 601.3d + CR 608.2c: "if it targets a [filter]" — gates a casting
         // permission on the chosen targets of the in-flight spell. Read from
         // `state.pending_cast.ability.targets` when targets have been committed.
@@ -1796,14 +1894,14 @@ pub(crate) fn evaluate_condition(
         // CR 601.3 / CR 602.5: Compound restriction — all inner conditions must be true.
         ParsedCondition::And { conditions } => conditions
             .iter()
-            .all(|c| evaluate_condition(state, player, source_id, c)),
+            .all(|c| evaluate_condition_for_granter(state, player, source_id, granting_object, c)),
         // CR 601.3 / CR 602.5: Disjunctive restriction — any inner condition must be true.
         ParsedCondition::Or { conditions } => conditions
             .iter()
-            .any(|c| evaluate_condition(state, player, source_id, c)),
+            .any(|c| evaluate_condition_for_granter(state, player, source_id, granting_object, c)),
         // CR 601.3 / CR 602.5: Logical negation — true when the inner condition is false.
         ParsedCondition::Not { condition } => {
-            !evaluate_condition(state, player, source_id, condition)
+            !evaluate_condition_for_granter(state, player, source_id, granting_object, condition)
         }
     }
 }
@@ -2370,9 +2468,9 @@ fn player_zone_ids<'a>(
         return Box::new(std::iter::empty());
     };
     match zone {
-        crate::types::zones::Zone::Graveyard => Box::new(p.graveyard.iter()),
+        crate::types::zones::Zone::Graveyard => Box::new(state.graveyard_of(p.id).iter()),
         crate::types::zones::Zone::Hand => Box::new(p.hand.iter()),
-        crate::types::zones::Zone::Library => Box::new(p.library.iter()),
+        crate::types::zones::Zone::Library => Box::new(state.library_of(p.id).iter()),
         _ => Box::new(std::iter::empty()),
     }
 }
@@ -2520,12 +2618,103 @@ mod tests {
     use crate::game::game_object::{PhaseOutCause, PhaseStatus};
     use crate::game::zones::create_object;
     use crate::parser::oracle_condition::parse_restriction_condition;
-    use crate::types::ability::{AbilityKind, Effect, ParsedCondition, QuantityExpr};
+    use crate::types::ability::{
+        ledger_filter_is_evaluable, AbilityKind, Effect, ParsedCondition, QuantityExpr,
+    };
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
-    use crate::types::game_state::WaitingFor;
+    use crate::types::game_state::{ArrivalIdentity, WaitingFor, ZoneChangeRecord};
     use crate::types::identifiers::CardId;
     use crate::types::zones::Zone;
+
+    /// CR 109.5 + CR 400.1: the shared cast-origin predicate's whole matrix —
+    /// caster vs the origin zone's owner, each pool, a graveyard vs a shared
+    /// zone, a zone outside the list, and an unknown origin. Every caller (the
+    /// announcement check and both CR 707.12 copy routes) reaches the
+    /// ownership question only through this predicate.
+    #[test]
+    fn only_from_zones_origin_matrix() {
+        use crate::types::statics::GraveyardPermissionPool::{AnyGraveyard, OwnGraveyard};
+        let only = |zones: Vec<Zone>, pool| vec![CastingRestriction::OnlyFromZones { zones, pool }];
+        let at = |zone, owner| {
+            Some(CastOrigin {
+                zone,
+                zone_owner: PlayerId(owner),
+            })
+        };
+        let me = PlayerId(0);
+        let graveyard = only(vec![Zone::Graveyard], OwnGraveyard);
+        assert!(restrictions_permit_cast_origin(
+            &graveyard,
+            me,
+            at(Zone::Graveyard, 0)
+        ));
+        assert!(
+            !restrictions_permit_cast_origin(&graveyard, me, at(Zone::Graveyard, 1)),
+            "another player's graveyard is not \"your graveyard\""
+        );
+        assert!(!restrictions_permit_cast_origin(
+            &graveyard,
+            me,
+            at(Zone::Hand, 0)
+        ));
+        assert!(!restrictions_permit_cast_origin(
+            &graveyard,
+            me,
+            at(Zone::Exile, 0)
+        ));
+        assert!(
+            !restrictions_permit_cast_origin(&graveyard, me, None),
+            "an unknown origin fails closed"
+        );
+        let any = only(vec![Zone::Graveyard], AnyGraveyard);
+        assert!(restrictions_permit_cast_origin(
+            &any,
+            me,
+            at(Zone::Graveyard, 1)
+        ));
+        let with_exile = only(vec![Zone::Graveyard, Zone::Exile], OwnGraveyard);
+        assert!(
+            restrictions_permit_cast_origin(&with_exile, me, at(Zone::Exile, 1)),
+            "exile is shared, so the graveyard pool doesn't scope it"
+        );
+        assert!(!restrictions_permit_cast_origin(
+            &with_exile,
+            me,
+            at(Zone::Graveyard, 1)
+        ));
+        assert!(
+            restrictions_permit_cast_origin(&[CastingRestriction::AsSorcery], me, None),
+            "an origin-independent restriction permits any origin"
+        );
+    }
+
+    #[test]
+    fn cards_left_your_graveyard_counts_the_departure_owner() {
+        let mut state = crate::types::game_state::GameState::new(
+            crate::types::format::FormatConfig::dandan(),
+            2,
+            42,
+        );
+        let mut record =
+            ZoneChangeRecord::test_minimal(ObjectId(1), Some(Zone::Graveyard), Zone::Battlefield);
+        record.owner = PlayerId(0);
+        record.controller = PlayerId(0);
+        record.arrival = ArrivalIdentity {
+            owner: PlayerId(1),
+            controller: PlayerId(1),
+        };
+        state.zone_changes_this_turn.push_back(record);
+        let condition = ParsedCondition::CardsLeftYourGraveyardThisTurnAtLeast { count: 1 };
+        assert!(
+            evaluate_condition(&state, PlayerId(0), ObjectId(9), &condition),
+            "the card left the departure owner's graveyard"
+        );
+        assert!(
+            !evaluate_condition(&state, PlayerId(1), ObjectId(9), &condition),
+            "the installed owner's graveyard lost nothing"
+        );
+    }
 
     /// Two-step pattern: parse condition text, then evaluate.
     /// Returns `true` for unrecognized conditions (matching prior permissive behavior).
@@ -3271,7 +3460,7 @@ mod tests {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
         state
             .battlefield_entries_this_turn
-            .push(BattlefieldEntryRecord {
+            .push_back(BattlefieldEntryRecord {
                 object_id: ObjectId(99),
                 name: "Green Creature".to_string(),
                 core_types: vec![CoreType::Creature],
@@ -3340,7 +3529,7 @@ mod tests {
                 for _ in 0..*count {
                     state
                         .battlefield_entries_this_turn
-                        .push(BattlefieldEntryRecord {
+                        .push_back(BattlefieldEntryRecord {
                             object_id: ObjectId(next_id),
                             name: "Bear".to_string(),
                             core_types: vec![CoreType::Creature],
@@ -3709,7 +3898,7 @@ mod tests {
         state.phase = Phase::Upkeep;
         assert!(allowed(&state), "opponent's upkeep must permit activation");
 
-        // Opponent's turn, non-upkeep step -> denied (IsDuringUpkeep false).
+        // Opponent's turn, non-upkeep step -> denied (CurrentPhaseIs false).
         state.phase = Phase::PreCombatMain;
         assert!(
             !allowed(&state),
@@ -3947,6 +4136,7 @@ mod tests {
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
                 was_kicked: false,
                 spell_object_id: None,
+                prepared_copy_source: None,
             }]),
         );
 
@@ -3984,6 +4174,7 @@ mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    prepared_copy_source: None,
                 },
                 crate::types::game_state::SpellCastRecord {
                     name: String::new(),
@@ -3999,6 +4190,7 @@ mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    prepared_copy_source: None,
                 },
                 crate::types::game_state::SpellCastRecord {
                     name: String::new(),
@@ -4014,6 +4206,7 @@ mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    prepared_copy_source: None,
                 },
             ]),
         );
@@ -5378,5 +5571,86 @@ mod tests {
             vec![],
             Some(ControllerRef::Opponent)
         )));
+    }
+}
+
+#[cfg(test)]
+mod dandan_read_sweep_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::ParsedCondition;
+    use crate::types::card_type::CoreType;
+    use crate::types::format::FormatConfig;
+    use crate::types::game_state::GameState;
+    use crate::types::identifiers::CardId;
+    use crate::types::zones::Zone;
+
+    const P0: PlayerId = PlayerId(0);
+    const P1: PlayerId = PlayerId(1);
+
+    fn holds(state: &GameState, seat: PlayerId, condition: ParsedCondition) -> bool {
+        evaluate_condition(state, seat, ObjectId(0), &condition)
+    }
+
+    fn put(state: &mut GameState, id: u64, owner: PlayerId, zone: Zone, core: CoreType) {
+        let object = create_object(state, CardId(id), owner, format!("Card {id}"), zone);
+        state
+            .objects
+            .get_mut(&object)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(core);
+    }
+
+    /// CR 400.1 + CR 404.1: "N or more cards (of M types) in your graveyard or
+    /// library" reads the shared pile for either seat of a shared-pile format.
+    #[test]
+    fn zone_count_conditions_read_the_shared_pile() {
+        let mut state = GameState::new(FormatConfig::dandan(), 2, 1);
+        put(&mut state, 1, P1, Zone::Graveyard, CoreType::Creature);
+        put(&mut state, 2, P0, Zone::Graveyard, CoreType::Instant);
+        put(&mut state, 3, P1, Zone::Graveyard, CoreType::Land);
+        put(&mut state, 4, P1, Zone::Library, CoreType::Land);
+        put(&mut state, 5, P1, Zone::Library, CoreType::Land);
+
+        for seat in [P0, P1] {
+            let zone = |zone, count| ParsedCondition::ZoneCardCountAtLeast { zone, count };
+            assert!(holds(&state, seat, zone(Zone::Graveyard, 3)), "{seat:?}");
+            assert!(!holds(&state, seat, zone(Zone::Graveyard, 4)), "{seat:?}");
+            assert!(holds(&state, seat, zone(Zone::Library, 2)), "{seat:?}");
+            assert!(!holds(&state, seat, zone(Zone::Library, 3)), "{seat:?}");
+            let types = |count| ParsedCondition::ZoneCardTypeCountAtLeast {
+                zone: Zone::Graveyard,
+                count,
+            };
+            assert!(holds(&state, seat, types(3)), "{seat:?}");
+            assert!(!holds(&state, seat, types(4)), "{seat:?}");
+            assert!(
+                holds(
+                    &state,
+                    seat,
+                    ParsedCondition::ZoneCoreTypeCardCountAtLeast {
+                        zone: Zone::Graveyard,
+                        core_type: CoreType::Land,
+                        count: 1,
+                    }
+                ),
+                "{seat:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn zone_count_conditions_in_a_per_seat_format_read_the_seats_own_zone() {
+        let mut state = GameState::new_two_player(1);
+        put(&mut state, 1, P1, Zone::Graveyard, CoreType::Creature);
+        let one = ParsedCondition::ZoneCardCountAtLeast {
+            zone: Zone::Graveyard,
+            count: 1,
+        };
+
+        assert!(holds(&state, P1, one.clone()));
+        assert!(!holds(&state, P0, one));
     }
 }

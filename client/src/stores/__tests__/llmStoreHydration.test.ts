@@ -284,6 +284,8 @@ describe("persisted store hydration", () => {
         { id: "a", provider: "anthropic", model: "m" },
         { id: "b", provider: "Open-AI", model: "m" },
         { id: "c", provider: "some-self-hosted-thing", model: "m" },
+        { id: "d", provider: "OpenRouter", model: "m" },
+        { id: "e", provider: "oPeN-rOuTeR", model: "m" },
       ],
       seatBindings: {},
       draftEnabled: false,
@@ -296,7 +298,13 @@ describe("persisted store hydration", () => {
       useLlmStore.getState().profiles.map((profile) => [profile.id, profile.provider]),
     );
     // Same normalization the engine's `LlmProvider::from_label` applies.
-    expect(byId).toEqual({ a: "Anthropic", b: "OpenAi", c: "OpenAiCompatible" });
+    expect(byId).toEqual({
+      a: "Anthropic",
+      b: "OpenAi",
+      c: "OpenAiCompatible",
+      d: "OpenRouter",
+      e: "OpenRouter",
+    });
   });
 
   it("drops a record with no usable id rather than fabricating one", async () => {
@@ -364,11 +372,11 @@ describe("persisted store hydration", () => {
 
       expect(useLlmStore.getState().seatBindings).toEqual({});
       // The read path that would have thrown.
-      expect(profileForSeat(useLlmStore.getState(), 0)).toBeUndefined();
+      expect(profileForSeat(useLlmStore.getState(), 0, [])).toBeUndefined();
     }
   });
 
-  it("keeps only seat bindings that name a seat index and a profile id", async () => {
+  it("keeps only seat bindings that name a seat index and a profile id or the engine", async () => {
     seed({
       profiles: [],
       seatBindings: {
@@ -387,7 +395,19 @@ describe("persisted store hydration", () => {
 
     const { useLlmStore } = await freshStore();
 
-    expect(useLlmStore.getState().seatBindings).toEqual({ 0: "good", 4: "also-good" });
+    // `null` survives: it is the player's explicit choice of the built-in
+    // engine, which must keep overriding the default opponent after a reload.
+    expect(useLlmStore.getState().seatBindings).toEqual({ 0: "good", 2: null, 4: "also-good" });
+  });
+
+  it("restores the default opponent only when it is a non-empty profile id", async () => {
+    seed({ profiles: [], seatBindings: {}, defaultOpponentProfileId: "p1" });
+    expect((await freshStore()).useLlmStore.getState().defaultOpponentProfileId).toBe("p1");
+
+    for (const junk of ["", 7, null, {}]) {
+      seed({ profiles: [], seatBindings: {}, defaultOpponentProfileId: junk });
+      expect((await freshStore()).useLlmStore.getState().defaultOpponentProfileId).toBeNull();
+    }
   });
 
   it("removes a profile without throwing when bindings arrived malformed", async () => {

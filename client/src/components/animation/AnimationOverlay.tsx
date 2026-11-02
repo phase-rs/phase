@@ -16,6 +16,7 @@ import { currentSnapshot } from "../../hooks/useGameDispatch.ts";
 import { useAnimationStore } from "../../stores/animationStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
+import { resolvePileSeat } from "../../viewmodel/gameStateView.ts";
 import { audioManager } from "../../audio/AudioManager.ts";
 import { FORGE_YELLOW, hexToRgb } from "./particleEffects.ts";
 import { CardRevealBurst } from "./CardRevealBurst.tsx";
@@ -759,8 +760,11 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
                 )
                 .indexOf(effect);
               const ownerId = object?.owner ?? 0;
-              const libRect = document.querySelector(`[data-library-pile="${ownerId}"]`)?.getBoundingClientRect();
-              const gyRect = document.querySelector(`[data-graveyard-pile="${ownerId}"]`)?.getBoundingClientRect();
+              const pileState = useGameStore.getState().gameState;
+              const libSeat = resolvePileSeat(pileState, "library", ownerId);
+              const gySeat = resolvePileSeat(pileState, "graveyard", ownerId);
+              const libRect = document.querySelector(`[data-library-pile="${libSeat}"]`)?.getBoundingClientRect();
+              const gyRect = document.querySelector(`[data-graveyard-pile="${gySeat}"]`)?.getBoundingClientRect();
               const hudFallback = getPlayerHudPosition(ownerId);
               const id = ++millRevealIdCounter;
               setActiveMillReveals((prev) => [
@@ -890,7 +894,9 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
           if (vfxQuality === "minimal" || cardNames.length === 0) break;
           const newState = useAnimationStore.getState().animationNewState;
           const revealCards: MillCard[] = revealFanCards(cardIds, cardNames, newState?.objects);
-          const libEl = document.querySelector(`[data-library-pile="${player}"]`);
+          const libEl = document.querySelector(
+            `[data-library-pile="${resolvePileSeat(useGameStore.getState().gameState, "library", player)}"]`,
+          );
           const libRect = libEl?.getBoundingClientRect();
           const fromPos = libRect
             ? { x: libRect.x + libRect.width / 2, y: libRect.y + libRect.height / 2 }

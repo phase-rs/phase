@@ -7,7 +7,7 @@ import {
   type RefObject,
 } from "react";
 import { Trans, useTranslation } from "react-i18next";
-import type { TFunction } from "i18next";
+import type { ParseKeys, TFunction } from "i18next";
 
 import { audioManager } from "../../audio/AudioManager.ts";
 import { cacheThemeManifest, clearThemeCache } from "../../audio/audioCache.ts";
@@ -19,6 +19,7 @@ import {
   CARD_PREVIEW_HOVER_DELAY_STEP,
   usePreferencesStore,
 } from "../../stores/preferencesStore.ts";
+import { ESCALATE_AFTER_MS } from "../../game/priorityAttention.ts";
 import { useMultiplayerStore } from "../../stores/multiplayerStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import {
@@ -31,7 +32,6 @@ import {
   PACING_MAX,
   PACING_MIN,
   PACING_STEP,
-  type CardAnimationStyle,
   type PacingCategory,
   type VfxQuality,
 } from "../../animation/types.ts";
@@ -49,6 +49,7 @@ import type { SupportedLng } from "../../i18n/resources.ts";
 import { LanguageFlag } from "../ui/LanguageFlag.tsx";
 import { BATTLEFIELDS } from "../board/battlefields.ts";
 import { PLAIN_BACKGROUNDS } from "../board/plainBackgrounds.ts";
+import { CardAnimationStylePicker } from "./CardAnimationStylePicker.tsx";
 import { ConfirmDialog } from "../ui/ConfirmDialog.tsx";
 import { ModalPanelShell } from "../ui/ModalPanelShell";
 import { MenuSelect } from "../ui/MenuSelect";
@@ -84,6 +85,8 @@ const LANGUAGE_OPTIONS: { value: SupportedLng; label: string }[] = [
   { value: "pt", label: "Português" },
   { value: "pl", label: "Polski" },
   { value: "ja", label: "日本語" },
+  // Autonym, like every other entry — deliberately not translated.
+  { value: "zh", label: "简体中文" },
 ];
 
 const CARD_SIZES: CardSizePreference[] = ["small", "medium", "large"];
@@ -94,7 +97,6 @@ const DRAFT_CARD_PREVIEW_MODES: DraftCardPreviewMode[] = ["none", ...CARD_PREVIE
 const DRAFT_DOUBLE_CLICK_CONFIRM_PICK_OPTIONS: Array<"disabled" | "enabled"> = ["disabled", "enabled"];
 const SPELL_PAYMENT_MODES: SpellPaymentMode[] = ["auto", "autoExceptSacrificialMana", "manual"];
 const VFX_QUALITIES: VfxQuality[] = ["full", "reduced", "minimal"];
-const CARD_ANIMATION_STYLES: CardAnimationStyle[] = ["webgl", "classic"];
 const MULTIPLAYER_BOARD_LAYOUTS: MultiplayerBoardLayout[] = ["auto", "focused", "split"];
 
 /** Format a speed value as a user-facing label. The slider goes 0→max where
@@ -122,8 +124,8 @@ export type SettingsTabId = (typeof SETTINGS_TABS)[number]["id"];
  *  for the frontend-authored group/option labels; battlefield and plain
  *  background labels come from engine/asset modules and stay raw. */
 type BoardBackgroundGroup = {
-  labelKey: string;
-  options: { value: string; labelKey?: string; label?: string }[];
+  labelKey: ParseKeys<"settings">;
+  options: { value: string; labelKey?: ParseKeys<"settings">; label?: string }[];
 };
 const BOARD_BACKGROUND_GROUPS: BoardBackgroundGroup[] = [
   {
@@ -160,7 +162,7 @@ export function PreferencesModal({
   highlight,
   returnFocusRef,
 }: PreferencesModalProps) {
-  const { t } = useTranslation("settings");
+  const { t } = useTranslation(["settings", "common"]);
   const [troubleshootingOpen, setTroubleshootingOpen] = useState(false);
   const troubleshootingButtonRef = useRef<HTMLButtonElement>(null);
   const setFlexEditMode = useUiStore((s) => s.setFlexEditMode);
@@ -190,6 +192,14 @@ export function PreferencesModal({
   const multiplayerBoardLayout = usePreferencesStore((s) => s.multiplayerBoardLayout);
   const spellPaymentMode = usePreferencesStore((s) => s.spellPaymentMode);
   const priorityPassingMode = usePreferencesStore((s) => s.priorityPassingMode);
+  const priorityAlertVisual = usePreferencesStore((s) => s.priorityAlertVisual);
+  const priorityAlertSound = usePreferencesStore((s) => s.priorityAlertSound);
+  const priorityAlertTitle = usePreferencesStore((s) => s.priorityAlertTitle);
+  const setPriorityAlertVisual = usePreferencesStore((s) => s.setPriorityAlertVisual);
+  const setPriorityAlertSound = usePreferencesStore((s) => s.setPriorityAlertSound);
+  const setPriorityAlertTitle = usePreferencesStore((s) => s.setPriorityAlertTitle);
+  const unCardActionsEnabled = usePreferencesStore((s) => s.unCardActionsEnabled);
+  const setUnCardActionsEnabled = usePreferencesStore((s) => s.setUnCardActionsEnabled);
   const experimentalTournamentsEnabled = usePreferencesStore((s) => s.experimentalTournamentsEnabled);
   const boardBackground = usePreferencesStore((s) => s.boardBackground);
   const vfxQuality = usePreferencesStore((s) => s.vfxQuality);
@@ -237,6 +247,8 @@ export function PreferencesModal({
   const setCardPreviewHoverDelayMs = usePreferencesStore((s) => s.setCardPreviewHoverDelayMs);
   const showCardPreviewFooter = usePreferencesStore((s) => s.showCardPreviewFooter) ?? true;
   const setShowCardPreviewFooter = usePreferencesStore((s) => s.setShowCardPreviewFooter);
+  const showOwnerPrintings = usePreferencesStore((s) => s.showOwnerPrintings);
+  const setShowOwnerPrintings = usePreferencesStore((s) => s.setShowOwnerPrintings);
   const artChain = usePreferencesStore((s) => s.artChain);
   const addArtChainEntry = usePreferencesStore((s) => s.addArtChainEntry);
   const removeArtChainEntry = usePreferencesStore((s) => s.removeArtChainEntry);
@@ -429,6 +441,46 @@ export function PreferencesModal({
                     </label>
                   </SettingGroup>
 
+                  <SettingGroup label={t("gameplay.priorityAlerts")}>
+                    <div
+                      role="group"
+                      aria-label={t("gameplay.priorityAlerts")}
+                      className="flex flex-wrap gap-2"
+                    >
+                      <ToggleChip
+                        pressed={priorityAlertVisual}
+                        onToggle={setPriorityAlertVisual}
+                        label={t("gameplay.priorityAlertVisual")}
+                      />
+                      <ToggleChip
+                        pressed={priorityAlertSound}
+                        onToggle={setPriorityAlertSound}
+                        label={t("gameplay.priorityAlertSound")}
+                      />
+                      <ToggleChip
+                        pressed={priorityAlertTitle}
+                        onToggle={setPriorityAlertTitle}
+                        label={t("gameplay.priorityAlertTitle")}
+                      />
+                    </div>
+                    <p className="mt-2 text-xs leading-relaxed text-slate-400">
+                      {t("gameplay.priorityAlertsDescription", {
+                        seconds: ESCALATE_AFTER_MS / 1000,
+                      })}
+                    </p>
+                  </SettingGroup>
+
+                  <SettingGroup label={t("gameplay.unCardActions")}>
+                    <ToggleChip
+                      pressed={unCardActionsEnabled}
+                      onToggle={setUnCardActionsEnabled}
+                      label={t("gameplay.unCardActionsToggle")}
+                    />
+                    <p className="mt-2 text-xs leading-relaxed text-slate-400">
+                      {t("gameplay.unCardActionsDescription")}
+                    </p>
+                  </SettingGroup>
+
                   <SettingGroup label={t("gameplay.commandZone")}>
                     <SegmentedControl
                       options={COMMAND_ZONE_DISPLAYS}
@@ -554,12 +606,7 @@ export function PreferencesModal({
                   </SettingGroup>
 
                   <SettingGroup label={t("visual.cardAnimationStyle")}>
-                    <SegmentedControl
-                      options={CARD_ANIMATION_STYLES}
-                      value={cardAnimationStyle}
-                      onChange={setCardAnimationStyle}
-                      renderLabel={(opt) => t(`visual.cardAnimationStyleOptions.${opt}`)}
-                    />
+                    <CardAnimationStylePicker value={cardAnimationStyle} onChange={setCardAnimationStyle} />
                   </SettingGroup>
 
                   <SettingGroup label={t("visual.keywordStrip")}>
@@ -672,6 +719,23 @@ export function PreferencesModal({
                     </label>
                     <p className="mt-1.5 text-xs text-slate-400">
                       {t("visual.cardPreviewFooterHint")}
+                    </p>
+                  </SettingGroup>
+
+                  <SettingGroup label={t("visual.ownerCardArt")}>
+                    <label className="flex min-h-11 items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={showOwnerPrintings}
+                        onChange={(e) => setShowOwnerPrintings(e.target.checked)}
+                        className="accent-cyan-500"
+                      />
+                      <span className="text-sm text-slate-200">
+                        {t("visual.showOwnerPrintings")}
+                      </span>
+                    </label>
+                    <p className="mt-1.5 text-xs text-slate-400">
+                      {t("visual.ownerPrintingsHint")}
                     </p>
                   </SettingGroup>
 
@@ -1324,6 +1388,38 @@ function SettingGroup({ label, children }: { label: string; children: React.Reac
   );
 }
 
+/** On/off chip, styled like the language picker's selected state. */
+function ToggleChip({
+  pressed,
+  onToggle,
+  label,
+}: {
+  pressed: boolean;
+  onToggle: (next: boolean) => void;
+  label: string;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={pressed}
+      onClick={() => onToggle(!pressed)}
+      className={`flex min-h-11 items-center rounded-[14px] border px-3 py-2 text-sm transition-colors ${
+        pressed
+          ? "border-sky-400/60 bg-sky-400/15 text-white"
+          : "border-white/10 bg-black/18 text-slate-200 hover:border-white/25 hover:text-white"
+      }`}
+    >
+      {pressed && (
+        <span aria-hidden="true" className="mr-1.5">
+          ✓
+        </span>
+      )}
+      {label}
+    </button>
+  );
+}
+
 /** Single labelled multiplier slider with an inline reset affordance. The
  *  reset button is rendered always (so the layout doesn't shift), but is
  *  visually faded and disabled when the value already equals `defaultValue`.
@@ -1486,7 +1582,7 @@ function PacingSection({
   );
 }
 
-const ART_CHAIN_RULE_OPTIONS: { type: ArtChainEntry["type"]; labelKey: string }[] = [
+const ART_CHAIN_RULE_OPTIONS: { type: ArtChainEntry["type"]; labelKey: ParseKeys<"settings"> }[] = [
   { type: "source_printing", labelKey: "artChain.rules.sourcePrinting" },
   { type: "newest", labelKey: "artChain.rules.newest" },
   { type: "oldest", labelKey: "artChain.rules.oldest" },

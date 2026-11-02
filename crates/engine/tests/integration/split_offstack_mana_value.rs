@@ -106,7 +106,7 @@ fn exile_cast_permission_mv_le(ceiling: i32) -> CastingPermission {
         mana_spend_permission: None,
         enters_with_counter: None,
         // Added on main after this test was written; no modifications on entry.
-        enters_with_modifications: Vec::new(),
+        enters_with_modifications: Default::default(),
         cast_cost_modifier: None,
     }
 }

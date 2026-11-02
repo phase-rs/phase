@@ -34,6 +34,14 @@
     "autoPass": "Auto-Pass",
     "skipLowUsePriorityWindows": "Pular janelas de prioridade pouco usadas (experimental)",
     "skipLowUsePriorityWindowsDescription": "Passe automaticamente suas próprias janelas de prioridade com a pilha vazia durante a manutenção, a etapa de compra e a etapa final. As paradas de fase e o Controle total continuam pausando.",
+    "priorityAlerts": "Alertas de prioridade",
+    "priorityAlertVisual": "Brilho",
+    "priorityAlertSound": "Som",
+    "priorityAlertTitle": "Título da aba",
+    "unCardActions": "Un-card actions",
+    "unCardActionsToggle": "Play Un-card actions",
+    "unCardActionsDescription": "Join in the silly parts of Unglued, Unhinged, Unstable and Unfinity cards: say-it prompts (Rod of Spanking), the Gotcha! button, and a menu of gestures. Off by default. Prompts and menu entries only appear when a card in the game uses them.",
+    "priorityAlertsDescription": "Receba um aviso quando a prioridade voltar a você após uma espera. O som toca quando você está em outra aba ou janela, ou quando uma janela no turno de um oponente fica sem resposta por {{seconds}} segundos; nesse momento o brilho dela também fica mais forte.",
     "logDockSide": "Posição do registro do jogo",
     "spellPayment": "Pagamento de Mágicas",
     "manualManaPayment": "Pagamento manual de mana para mágicas",
@@ -113,6 +121,9 @@
     "cardPreviewFooter": "Informações da pré-visualização",
     "showCardPreviewFooter": "Mostrar informações sob as pré-visualizações das cartas",
     "cardPreviewFooterHint": "Inclui o nome da carta, habilidades ativadas disponíveis e dicas de teclado. Alt ainda abre os detalhes de análise quando esta opção está oculta.",
+    "ownerCardArt": "Arte dos proprietários",
+    "showOwnerPrintings": "Mostrar as cartas como seus proprietários escolheram",
+    "ownerPrintingsHint": "Use a arte escolhida pelo proprietário de cada carta quando disponível. Desative esta opção para usar suas próprias preferências de arte das cartas.",
     "cardArtPreferences": "Preferências de Arte das Cartas",
     "clearArtOverrides_one": "Limpar Todas as Substituições de Arte ({{count}})",
     "clearArtOverrides_other": "Limpar Todas as Substituições de Arte ({{count}})",
@@ -127,7 +138,9 @@
     "cardAnimationStyleOptions": {
       "webgl": "Novas",
       "classic": "Clássicas"
-    }
+    },
+    "cardAnimationPreviewHintHover": "Passe o cursor para pré-visualizar",
+    "cardAnimationPreviewHintTap": "Toque para pré-visualizar"
   },
   "flexLayout": {
     "title": "Layout flexível",
@@ -503,14 +516,28 @@
     "modelPlaceholder": "ID do modelo (p. ex. gpt-5, claude-sonnet-5)",
     "endpoint": "Endpoint",
     "endpointPlaceholder": "https://o-teu-servidor/v1",
+    "jevEndpointPlaceholder": "Por predefinição, o teu servidor multijogador",
+    "jevEndpointHint": "O Jev é acedido através de um servidor multijogador do phase, que reencaminha cada pedido para a TypeSafe. A tua chave viaja apenas dentro desse pedido e nunca é guardada no servidor.",
     "apiKey": "Chave de API",
     "apiKeyPlaceholder": "Cola a tua chave de API",
     "apiKeyOptional": "Opcional para servidores locais",
+    "apiKeyMissing": "Introduz novamente a tua chave de API. As chaves não são guardadas após recarregar, e este fornecedor não é usado nos lugares de IA nem nos bots do draft até o fazeres.",
     "apiKeyStorage": "Mantida em memória apenas nesta sessão do navegador. As chaves de API nunca são escritas em disco e ficam excluídas da exportação de cópia de segurança e da sincronização na nuvem, por isso terás de a introduzir novamente após recarregar. Uma chave de API exige também um endpoint https://, a menos que o servidor esteja em localhost.",
     "apiKeyGet": "Obter uma chave",
     "test": "Testar ligação",
     "testing": "A testar…",
     "testOk": "Ligado.",
+    "defaultPrompt": {
+      "connected": "Ligado. Usá-lo como oponente predefinido?",
+      "ready": "Usar este fornecedor como oponente predefinido?",
+      "action": "Usar como predefinido",
+      "badge": "Oponente predefinido"
+    },
+    "defaultOpponent": {
+      "label": "Oponente predefinido",
+      "hint": "Os oponentes de IA usam este fornecedor, a menos que escolhas outro para um lugar ao preparar uma partida. Inclui o oponente das partidas de draft.",
+      "engine": "IA integrada do motor"
+    },
     "draftToggle": {
       "label": "Usar para os bots do draft",
       "hint": "Os lugares de bot de um draft escolhem com o modelo, usando o contexto de colecções do formato.",

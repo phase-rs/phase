@@ -69,7 +69,7 @@ vi.mock("peerjs", () => {
 import { dialPeer, fetchFreshTurnConfig, safePeerError, PEER_CONNECT_OPTIONS, TURN_CREDENTIALS_URL, hostRoom, joinRoom, logSelectedIceCandidate } from "../connection";
 import { resolveTurnCredentialsUrl } from "../../config/turnCredentials";
 import { peerTransportFactory } from "../transport";
-import type { PeerTransportFactory } from "../transport";
+import type { PeerTransportFactory, TransportPeer, TransportPeerOptions } from "../transport";
 
 import { getDiagnosticHistory } from "../../services/troubleshooting";
 
@@ -95,6 +95,118 @@ function fakeConn(stats: RTCStatsReport | Error): {
         return stats;
       },
     } as Pick<RTCPeerConnection, "getStats">,
+  };
+}
+
+type FakeTransportHandler = (value?: unknown) => void;
+
+class FakeTransportEmitter {
+  private readonly handlers = new Map<string, Set<FakeTransportHandler>>();
+  private readonly onceWrappers = new Map<FakeTransportHandler, FakeTransportHandler>();
+
+  on(event: string, handler: FakeTransportHandler): this {
+    const handlers = this.handlers.get(event) ?? new Set<FakeTransportHandler>();
+    handlers.add(handler);
+    this.handlers.set(event, handlers);
+    return this;
+  }
+
+  once(event: string, handler: FakeTransportHandler): this {
+    const wrapped: FakeTransportHandler = (value) => {
+      this.off(event, handler);
+      handler(value);
+    };
+    this.onceWrappers.set(handler, wrapped);
+    return this.on(event, wrapped);
+  }
+
+  off(event: string, handler: FakeTransportHandler): this {
+    const registered = this.onceWrappers.get(handler) ?? handler;
+    this.handlers.get(event)?.delete(registered);
+    this.onceWrappers.delete(handler);
+    return this;
+  }
+
+  emit(event: string, value?: unknown): void {
+    for (const handler of [...(this.handlers.get(event) ?? [])]) handler(value);
+  }
+
+  clear(): void {
+    this.handlers.clear();
+    this.onceWrappers.clear();
+  }
+}
+
+interface FakeTransportPeerHandle {
+  peer: TransportPeer;
+  connections: Array<{ peerId: string; options: unknown; emit: (event: string, value?: unknown) => void }>;
+  emit: (event: string, value?: unknown) => void;
+  destroy: ReturnType<typeof vi.fn>;
+  reconnect: ReturnType<typeof vi.fn>;
+}
+
+interface FakeTransportCreation {
+  id?: string;
+  options?: TransportPeerOptions;
+  handle: FakeTransportPeerHandle;
+}
+
+function makeFakeTransportFactory(creations: FakeTransportCreation[]): PeerTransportFactory {
+  return {
+    create(id, options) {
+      const peerEvents = new FakeTransportEmitter();
+      const connections: FakeTransportPeerHandle["connections"] = [];
+      const peer: Record<string, unknown> = {
+        id: id ?? `fake-peer-${creations.length + 1}`,
+        destroyed: false,
+        disconnected: false,
+        connect: vi.fn((peerId: string, connectOptions: unknown) => {
+          const connectionEvents = new FakeTransportEmitter();
+          const connection = {
+            open: false,
+            peer: peerId,
+            peerConnection: null,
+            dataChannel: null,
+            send: vi.fn(),
+            close: vi.fn(() => connectionEvents.emit("close")),
+            on: (event: string, handler: FakeTransportHandler) => { connectionEvents.on(event, handler); return connection; },
+            once: (event: string, handler: FakeTransportHandler) => { connectionEvents.once(event, handler); return connection; },
+            off: (event: string, handler: FakeTransportHandler) => { connectionEvents.off(event, handler); return connection; },
+          };
+          connections.push({ peerId, options: connectOptions, emit: (event, value) => {
+            if (event === "open") connection.open = true;
+            connectionEvents.emit(event, value);
+          } });
+          return connection;
+        }),
+        destroy: undefined,
+        reconnect: undefined,
+        on: (event: string, handler: FakeTransportHandler) => { peerEvents.on(event, handler); return peer; },
+        once: (event: string, handler: FakeTransportHandler) => { peerEvents.once(event, handler); return peer; },
+        off: (event: string, handler: FakeTransportHandler) => { peerEvents.off(event, handler); return peer; },
+      };
+      const destroy = vi.fn(() => {
+        peer.destroyed = true;
+        peerEvents.emit("close");
+        peerEvents.clear();
+      });
+      const reconnect = vi.fn(() => { peer.disconnected = false; });
+      peer.destroy = destroy;
+      peer.reconnect = reconnect;
+      const handle: FakeTransportPeerHandle = {
+        peer: peer as unknown as TransportPeer,
+        connections,
+        emit: (event, value) => {
+          if (event === "open") peer.disconnected = false;
+          if (event === "disconnected") peer.disconnected = true;
+          peerEvents.emit(event, value);
+        },
+        destroy,
+        reconnect,
+      };
+      creations.push({ id, options, handle });
+      return handle.peer;
+    },
   };
 }
 
@@ -359,6 +471,217 @@ describe("joinRoom", () => {
     peerState.emitPeer("open");
     const host = await hosting;
     host.destroy();
+  });
+});
+
+describe("bootstrap transport selector integration", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    vi.resetModules();
+  });
+
+  const turnResponse = () => ({
+    ok: true,
+    json: async () => ({ iceServers: [{ urls: "turn:turn.example.org:3478", username: "user", credential: "credential" }] }),
+  });
+
+  it("keeps concurrent host and guest selections local when ICE replies in reverse order", async () => {
+    vi.resetModules();
+    vi.useFakeTimers();
+    const transport = await import("../transport");
+    const connection = await import("../connection");
+    const hostCreations: FakeTransportCreation[] = [];
+    const guestCreations: FakeTransportCreation[] = [];
+    const hostFactory = makeFakeTransportFactory(hostCreations);
+    const guestFactory = makeFakeTransportFactory(guestCreations);
+    const contexts: Array<{ role: "host" | "guest"; hostPeerId: string }> = [];
+    const pendingFetches: Array<(response: ReturnType<typeof turnResponse>) => void> = [];
+    vi.stubGlobal("fetch", vi.fn(() => new Promise((resolve) => pendingFetches.push(resolve))));
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "debug").mockImplementation(() => {});
+
+    transport.installPeerTransportSelector((context) => {
+      contexts.push(context);
+      return context.role === "host" ? hostFactory : guestFactory;
+    });
+
+    const hosting = connection.hostRoom(undefined, { preferredRoomCode: "phase2-AAAAA" });
+    const joining = connection.joinRoom("phase2-BBBBB");
+    expect(contexts).toEqual([
+      { role: "host", hostPeerId: "phase2-AAAAA" },
+      { role: "guest", hostPeerId: "phase2-BBBBB" },
+    ]);
+    expect(pendingFetches).toHaveLength(2);
+
+    // Let the guest's later ICE request finish first. Its operation must keep
+    // the guest factory selected with its own host ID.
+    pendingFetches[1](turnResponse());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(guestCreations).toHaveLength(1);
+    expect(hostCreations).toHaveLength(0);
+
+    pendingFetches[0](turnResponse());
+    await vi.advanceTimersByTimeAsync(0);
+    expect(hostCreations).toHaveLength(1);
+    expect(hostCreations[0].id).toBe("phase2-AAAAA");
+    expect(guestCreations[0].id).toBeUndefined();
+    expect(guestCreations[0].options?.config.iceServers).toEqual(expect.arrayContaining([
+      expect.objectContaining({ urls: ["turn:turn.example.org:3478"] }),
+    ]));
+
+    hostCreations[0].handle.emit("open");
+    const host = await hosting;
+    guestCreations[0].handle.emit("open");
+    expect(guestCreations[0].handle.connections[0].peerId).toBe("phase2-BBBBB");
+    guestCreations[0].handle.connections[0].emit("open");
+    const joined = await joining;
+
+    hostCreations[0].handle.emit("disconnected");
+    guestCreations[0].handle.emit("disconnected");
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(hostCreations[0].handle.reconnect).toHaveBeenCalledTimes(1);
+    expect(guestCreations[0].handle.reconnect).toHaveBeenCalledTimes(1);
+    expect(hostCreations).toHaveLength(1);
+    expect(guestCreations).toHaveLength(1);
+    expect(guestCreations[0].handle.connections).toHaveLength(1);
+    expect(contexts).toHaveLength(2);
+
+    // Pending recovery timers are owned by the existing peers and disappear
+    // when both sessions are destroyed.
+    hostCreations[0].handle.emit("disconnected");
+    guestCreations[0].handle.emit("disconnected");
+
+    host.destroy();
+    joined.destroyPeer();
+    expect(hostCreations[0].handle.destroy).toHaveBeenCalledTimes(1);
+    expect(guestCreations[0].handle.destroy).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(hostCreations[0].handle.reconnect).toHaveBeenCalledTimes(1);
+    expect(guestCreations[0].handle.reconnect).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("preserves compound draft IDs and passes their exact prefixed host ID to selection", async () => {
+    vi.resetModules();
+    vi.useFakeTimers();
+    const transport = await import("../transport");
+    const connection = await import("../connection");
+    const hostCreations: FakeTransportCreation[] = [];
+    const guestCreations: FakeTransportCreation[] = [];
+    const hostFactory = makeFakeTransportFactory(hostCreations);
+    const guestFactory = makeFakeTransportFactory(guestCreations);
+    const contexts: Array<{ role: "host" | "guest"; hostPeerId: string }> = [];
+    const roomCode = "Draft-commander-aBc123ef";
+    const hostPeerId = `phase2-${roomCode}`;
+    vi.stubGlobal("fetch", vi.fn(async () => turnResponse()));
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "debug").mockImplementation(() => {});
+    transport.installPeerTransportSelector((context) => {
+      contexts.push(context);
+      return context.role === "host" ? hostFactory : guestFactory;
+    });
+
+    const hosting = connection.hostRoom(undefined, { preferredRoomCode: roomCode });
+    const joining = connection.joinRoom(roomCode);
+    expect(contexts).toEqual([
+      { role: "host", hostPeerId },
+      { role: "guest", hostPeerId },
+    ]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(hostCreations).toHaveLength(1);
+    expect(hostCreations[0].id).toBe(hostPeerId);
+    expect(guestCreations).toHaveLength(1);
+
+    hostCreations[0].handle.emit("open");
+    const host = await hosting;
+    guestCreations[0].handle.emit("open");
+    expect(guestCreations[0].handle.connections[0].peerId).toBe(hostPeerId);
+    guestCreations[0].handle.connections[0].emit("open");
+    const guest = await joining;
+
+    host.destroy();
+    guest.destroyPeer();
+    expect(contexts).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("selects once before ICE and reuses the exact factory, host ID and options across retries", async () => {
+    vi.resetModules();
+    vi.useFakeTimers();
+    const transport = await import("../transport");
+    const connection = await import("../connection");
+    const creations: FakeTransportCreation[] = [];
+    const factory = makeFakeTransportFactory(creations);
+    const selector = vi.fn(() => factory);
+    vi.stubGlobal("fetch", vi.fn(async () => turnResponse()));
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "debug").mockImplementation(() => {});
+    transport.installPeerTransportSelector(selector);
+
+    const hosting = connection.hostRoom(undefined, { preferredRoomCode: "ABCDE" });
+    expect(selector).toHaveBeenCalledTimes(1);
+    expect(selector).toHaveBeenCalledWith({ role: "host", hostPeerId: "phase2-ABCDE" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(creations).toHaveLength(1);
+
+    creations[0].handle.emit("error", Object.assign(new Error("occupied"), { type: "unavailable-id" }));
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(creations).toHaveLength(2);
+    expect(creations[0].id).toBe("phase2-ABCDE");
+    expect(creations[1].id).toBe(creations[0].id);
+    expect(creations[1].options).toBe(creations[0].options);
+    expect(selector).toHaveBeenCalledTimes(1);
+
+    creations[1].handle.emit("open");
+    const host = await hosting;
+    host.destroy();
+    expect(creations[0].handle.destroy).toHaveBeenCalledTimes(1);
+    expect(creations[1].handle.destroy).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("does not lock on pre-aborted or invalid operations and preserves explicit join overrides", async () => {
+    vi.resetModules();
+    vi.useFakeTimers();
+    const transport = await import("../transport");
+    const connection = await import("../connection");
+    const controller = new AbortController();
+    controller.abort();
+    await expect(connection.joinRoom("ABCDE", controller.signal)).rejects.toMatchObject({ name: "AbortError" });
+    await expect(connection.hostRoom(controller.signal)).rejects.toMatchObject({ name: "AbortError" });
+    await expect(connection.joinRoom("")).rejects.toThrow("Invalid room code");
+    await expect(connection.hostRoom(undefined, { preferredRoomCode: "" })).rejects.toThrow("Invalid room code");
+
+    const overrideCreations: FakeTransportCreation[] = [];
+    const override = makeFakeTransportFactory(overrideCreations);
+    const selectorCreations: FakeTransportCreation[] = [];
+    const selectorFactory = makeFakeTransportFactory(selectorCreations);
+    const selector = vi.fn(() => selectorFactory);
+    vi.stubGlobal("fetch", vi.fn(async () => turnResponse()));
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "debug").mockImplementation(() => {});
+
+    const joining = connection.joinRoom("ABCDE", undefined, undefined, override);
+    // Installation after an explicit override proves that it did not lock or
+    // replace the shared selection policy.
+    transport.installPeerTransportSelector(selector);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(overrideCreations).toHaveLength(1);
+    expect(selector).not.toHaveBeenCalled();
+    overrideCreations[0].handle.emit("open");
+    overrideCreations[0].handle.connections[0].emit("open");
+    const joined = await joining;
+    expect(selectorCreations).toHaveLength(0);
+    joined.destroyPeer();
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
 

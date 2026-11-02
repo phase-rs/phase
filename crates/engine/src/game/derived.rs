@@ -374,7 +374,7 @@ pub fn sync_continuous_reveals(state: &mut GameState) {
                         .players
                         .iter()
                         .find(|player| player.id == controller)
-                        .and_then(|player| player.library.front().copied())
+                        .and_then(|player| state.library_of(player.id).front().copied())
                 })
                 .collect()
         };

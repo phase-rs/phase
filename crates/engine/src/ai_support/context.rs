@@ -465,9 +465,11 @@ mod tests {
     fn stack_pass_proposal_uses_the_verified_recheck_seam() {
         let player = PlayerId(0);
         let mut state = priority_state(player);
+        // P0's own entry: P1 has no standing pass over it
+        // (`priority::standing_priority_pass`), so the session is retained.
         state
             .stack
-            .push_back(no_op_stack_entry(70_101, PlayerId(1)));
+            .push_back(no_op_stack_entry(70_101, PlayerId(0)));
         let contract = AiDecisionContract::issue(&state, player);
 
         assert!(matches!(

@@ -58,40 +58,40 @@ describe("waitingForReason", () => {
   });
 
   it("maps common decision variants to their reason keys", () => {
-    expect(waitingForReason(wf("DeclareAttackers"), gs("DeclareAttackers"))?.key)
-      .toBe("status.reason.declareAttackers");
-    expect(waitingForReason(wf("DeclareBlockers"), gs("DeclareBlockers"))?.key)
-      .toBe("status.reason.declareBlockers");
-    expect(waitingForReason(wf("TargetSelection"), gs("PreCombatMain"))?.key)
-      .toBe("status.reason.choosingTargets");
-    expect(waitingForReason(wf("ManaPayment"), gs("PreCombatMain"))?.key)
-      .toBe("status.reason.payingCost");
-    expect(waitingForReason(wf("MulliganDecision"), gs("Untap"))?.key)
-      .toBe("status.reason.mulligan");
-    expect(waitingForReason(wf("OrderTriggers"), gs("Upkeep"))?.key)
-      .toBe("status.reason.orderingTriggers");
+    expect(waitingForReason(wf("DeclareAttackers"), gs("DeclareAttackers"))?.id)
+      .toBe("declareAttackers");
+    expect(waitingForReason(wf("DeclareBlockers"), gs("DeclareBlockers"))?.id)
+      .toBe("declareBlockers");
+    expect(waitingForReason(wf("TargetSelection"), gs("PreCombatMain"))?.id)
+      .toBe("choosingTargets");
+    expect(waitingForReason(wf("ManaPayment"), gs("PreCombatMain"))?.id)
+      .toBe("payingCost");
+    expect(waitingForReason(wf("MulliganDecision"), gs("Untap"))?.id)
+      .toBe("mulligan");
+    expect(waitingForReason(wf("OrderTriggers"), gs("Upkeep"))?.id)
+      .toBe("orderingTriggers");
   });
 
   it("disambiguates the Priority window by stack depth then phase", () => {
     // Non-empty stack wins regardless of phase.
-    expect(waitingForReason(wf("Priority"), gs("PreCombatMain", 1))?.key)
-      .toBe("status.reason.respondingToStack");
+    expect(waitingForReason(wf("Priority"), gs("PreCombatMain", 1))?.id)
+      .toBe("respondingToStack");
     // Empty stack: main phases.
-    expect(waitingForReason(wf("Priority"), gs("PreCombatMain"))?.key)
-      .toBe("status.reason.priorityMain");
-    expect(waitingForReason(wf("Priority"), gs("PostCombatMain"))?.key)
-      .toBe("status.reason.priorityMain");
+    expect(waitingForReason(wf("Priority"), gs("PreCombatMain"))?.id)
+      .toBe("priorityMain");
+    expect(waitingForReason(wf("Priority"), gs("PostCombatMain"))?.id)
+      .toBe("priorityMain");
     // Empty stack: combat steps.
-    expect(waitingForReason(wf("Priority"), gs("DeclareBlockers"))?.key)
-      .toBe("status.reason.priorityCombat");
+    expect(waitingForReason(wf("Priority"), gs("DeclareBlockers"))?.id)
+      .toBe("priorityCombat");
     // Empty stack: other phases (e.g. upkeep) fall to the generic priority key.
-    expect(waitingForReason(wf("Priority"), gs("Upkeep"))?.key)
-      .toBe("status.reason.priority");
+    expect(waitingForReason(wf("Priority"), gs("Upkeep"))?.id)
+      .toBe("priority");
   });
 
   it("falls back to a generic reason for unmapped variants (graceful degradation)", () => {
     // A real variant with no explicit case must not break — it degrades.
-    expect(waitingForReason(wf("ScryChoice"), gs("Upkeep"))?.key)
-      .toBe("status.reason.thinking");
+    expect(waitingForReason(wf("ScryChoice"), gs("Upkeep"))?.id)
+      .toBe("thinking");
   });
 });

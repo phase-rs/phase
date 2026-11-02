@@ -98,6 +98,7 @@ fn wayta_parsed_static_doubles_only_damage_caused_triggers() {
         amount: 1,
         is_combat: false,
         excess: 0,
+        source_incarnation: None,
     };
 
     engine::game::triggers::process_triggers(&mut state, &[event]);

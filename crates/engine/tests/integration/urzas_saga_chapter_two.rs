@@ -81,6 +81,7 @@ fn chapter_two_granted_ability() -> AbilityDefinition {
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: vec![],
             static_abilities: vec![boost],
             enter_with_counters: vec![],

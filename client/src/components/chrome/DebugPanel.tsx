@@ -3,8 +3,8 @@ import type { ChangeEvent } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 
-import type { GameState } from "../../adapter/types";
-import { supportsServerRewind } from "../../adapter/types";
+import type { PersistedGameState } from "../../adapter/types";
+import { persistedGameStateView, supportsTurnRewind } from "../../adapter/types";
 import { audioManager } from "../../audio/AudioManager";
 import { restoreGameState } from "../../game/dispatch";
 import { usePlayerId } from "../../hooks/usePlayerId";
@@ -76,7 +76,7 @@ export function DebugPanel({
     && adapter?.exportPersistenceState !== undefined;
   // The transport, not the mode, decides whether a rollback request can be
   // bound to an authenticated session — same idiom as `supportsMatchConcede`.
-  const rewindAdapter = supportsServerRewind(adapter) ? adapter : null;
+  const rewindAdapter = supportsTurnRewind(adapter) ? adapter : null;
   const localPlayerId = usePlayerId();
   const [importText, setImportText] = useState("");
   const [status, setStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
@@ -110,7 +110,7 @@ export function DebugPanel({
   // wire-authoritative sessions is a separate piece of work.
   const canRestoreCheckpoints = gameMode === "ai" || gameMode === "local";
 
-  const handleRestore = useCallback(async (state: GameState) => {
+  const handleRestore = useCallback(async (state: PersistedGameState) => {
     setStatus(null);
     const err = await restoreGameState(state, { preserveCheckpoints: true });
     if (err) {
@@ -198,7 +198,7 @@ export function DebugPanel({
         if (err instanceof DOMException && err.name === "AbortError") return;
         console.error("Game state export failed:", err);
         const detail = err instanceof Error ? err.message : String(err);
-        setStatus({ type: "error", message: `${t("help.status.exportFailed")} ${detail}` });
+        setStatus({ type: "error", message: t("help.status.exportFailedDetail", { detail }) });
       });
   }, [adapter, gameState, t]);
 
@@ -329,7 +329,7 @@ export function DebugPanel({
     <div className="fixed right-0 top-0 z-[9999] flex h-full w-80 flex-col border-l border-gray-700 bg-gray-900/95 text-sm text-gray-300 shadow-xl backdrop-blur-sm">
       <div className="flex items-center justify-between border-b border-gray-700 px-3 py-2">
         <span className="font-mono text-xs font-bold uppercase tracking-wider text-gray-400">
-          Debug Panel
+          {t("game:sandboxTools.panelTitle")}
         </span>
         <button
           onClick={() => useUiStore.getState().toggleDebugPanel()}
@@ -351,7 +351,7 @@ export function DebugPanel({
                 : "text-gray-500 hover:text-gray-300")
             }
           >
-            {tab}
+            {t(`game:sandboxTools.${tab}`)}
           </button>
         ))}
       </div>
@@ -468,10 +468,11 @@ export function DebugPanel({
           ) : (
             <div className="flex flex-col gap-1">
               {turnCheckpoints.map((cp, i) => {
-                const activePlayerName = getPlayerDisplayName(cp.active_player, localPlayerId);
+                const view = persistedGameStateView(cp);
+                const activePlayerName = getPlayerDisplayName(view.active_player, localPlayerId);
                 const activePlayerColor = getSeatColor(
-                  cp.active_player,
-                  cp.seat_order ?? gameState?.seat_order,
+                  view.active_player,
+                  view.seat_order ?? gameState?.seat_order,
                 );
                 return (
                   <button
@@ -479,7 +480,7 @@ export function DebugPanel({
                     onClick={() => handleRestore(cp)}
                     className="flex items-center justify-between gap-2 rounded bg-gray-800 px-2 py-1 text-left text-xs transition-colors hover:bg-gray-700"
                   >
-                    <span>Turn {cp.turn_number}</span>
+                    <span>Turn {view.turn_number}</span>
                     <span
                       className="max-w-36 truncate rounded px-1.5 py-0.5 font-semibold"
                       style={{

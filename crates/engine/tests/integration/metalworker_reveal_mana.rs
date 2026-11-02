@@ -1,19 +1,23 @@
-//! CR 106.1 + CR 701.20a: Metalworker activated mana ability:
-//! "{T}: Reveal any number of artifact cards in your hand. Add {C}{C} for each card revealed this way."
+//! CR 605.1a + CR 605.3b + CR 107.1c + CR 701.20a: "reveal any number of
+//! [filter] cards in your hand" through production entry points.
 //!
-//! Verifies:
-//! 1. Activating Metalworker with artifact cards in hand enters `WaitingFor::RevealChoice`
-//!    with `any_number: true` and `optional: true`.
-//! 2. Revealing 2 artifact cards produces 4 colorless mana ({C}{C}{C}{C}) and emits `CardsRevealed`.
-//! 3. Revealing 1 artifact card produces 2 colorless mana ({C}{C}).
-//! 4. Declining / revealing 0 cards produces 0 mana without error.
-//! 5. Activating with 0 artifact cards in hand completes immediately with 0 mana.
+//! Metalworker (verified Oracle text, Scryfall): "{T}: Reveal any number of
+//! artifact cards in your hand. Add {C}{C} for each card revealed this way." —
+//! a mana ability whose reveal is a resolution-time selection of zero or more
+//! matching cards, whose mana scales with the cards actually revealed.
+//!
+//! Scent of Jasmine (verified Oracle text, Scryfall): "Reveal any number of white
+//! cards in your hand. You gain 2 life for each card revealed this way." — the
+//! same selection resolving from the stack.
 
-use engine::game::scenario::{GameScenario, P0};
+use engine::ai_support::legal_actions;
+use engine::game::scenario::{GameRunner, GameScenario, P0};
+use engine::types::ability::{ObjectSelectionCardinality, TargetFilter};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
-use engine::types::mana::{ManaCost, ManaType};
+use engine::types::identifiers::ObjectId;
+use engine::types::mana::{ManaColor, ManaCost, ManaType};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -21,311 +25,272 @@ const METALWORKER_ORACLE: &str =
     "{T}: Reveal any number of artifact cards in your hand. Add {C}{C} for each card revealed this way.";
 const KINNAN_ORACLE: &str =
     "Whenever you tap a nonland permanent for mana, add one mana of any type that permanent produced.";
+const SCENT_OF_JASMINE_ORACLE: &str =
+    "Reveal any number of white cards in your hand. You gain 2 life for each card revealed this way.";
 
-#[test]
-fn metalworker_reveal_two_artifacts_adds_four_colorless_mana() {
+/// Metalworker on P0's battlefield plus `artifacts` artifact cards and one
+/// non-artifact card in P0's hand. Returns the runner, Metalworker, the artifact
+/// ids, and the non-artifact id.
+fn metalworker_board(artifacts: usize) -> (GameRunner, ObjectId, Vec<ObjectId>, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-
     let metalworker = scenario
         .add_creature_from_oracle(P0, "Metalworker", 1, 2, METALWORKER_ORACLE)
         .as_artifact()
         .id();
-
-    let art1 = scenario
-        .add_creature_to_hand(P0, "Ornithopter", 0, 2)
-        .as_artifact()
-        .id();
-
-    let art2 = scenario
-        .add_creature_to_hand(P0, "Memnite", 1, 1)
-        .as_artifact()
-        .id();
-
-    let non_art = scenario
+    let artifact_ids = (0..artifacts)
+        .map(|i| {
+            scenario
+                .add_creature_to_hand(P0, &format!("Artifact {i}"), 1, 1)
+                .as_artifact()
+                .id()
+        })
+        .collect();
+    let non_artifact = scenario
         .add_creature_to_hand(P0, "Grizzly Bears", 2, 2)
         .id();
+    (scenario.build(), metalworker, artifact_ids, non_artifact)
+}
 
-    let mut runner = scenario.build();
+fn colorless(runner: &GameRunner) -> usize {
+    runner.state().players[P0.0 as usize]
+        .mana_pool
+        .count_color(ManaType::Colorless)
+}
 
-    // Activating Metalworker's {T} ability
-    let result = runner.act(GameAction::ActivateAbility {
-        source_id: metalworker,
-        ability_index: 0,
-    });
-    assert!(result.is_ok(), "activation succeeds: {result:?}");
-
-    // Engine should be waiting for reveal choice with any_number: true
-    match runner.state().waiting_for {
-        WaitingFor::RevealChoice {
-            player,
-            ref cards,
-            optional,
-            any_number,
-            ..
-        } => {
-            assert_eq!(player, P0);
-            assert!(optional);
-            assert!(any_number);
-            assert!(cards.contains(&art1));
-            assert!(cards.contains(&art2));
-            assert!(!cards.contains(&non_art));
-        }
-        ref wf => panic!("expected WaitingFor::RevealChoice, got {:?}", wf),
-    }
-
-    // Player chooses to reveal both artifact cards
-    let result = runner.act(GameAction::SelectCards {
-        cards: vec![art1, art2],
-    });
-    assert!(result.is_ok(), "selection succeeds: {result:?}");
-    let events = result.unwrap().events;
-
-    // Mana pool should have 4 colorless mana
-    assert_eq!(
-        runner.state().players[P0.0 as usize]
-            .mana_pool
-            .count_color(ManaType::Colorless),
-        4,
-        "expected 4 colorless mana from 2 revealed artifacts"
+/// Positive completion of a Metalworker activation: P0 holds priority, nothing
+/// is suspended on the stack, and the {T} cost was paid.
+fn assert_activation_completed(runner: &GameRunner, metalworker: ObjectId) {
+    let state = runner.state();
+    assert!(
+        matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0),
+        "the activation must complete back to P0's priority, got {:?}",
+        state.waiting_for
     );
+    assert!(
+        state.stack.is_empty(),
+        "a mana ability never uses the stack"
+    );
+    assert!(
+        state.objects[&metalworker].tapped,
+        "the {{T}} activation cost must be paid"
+    );
+}
 
-    // CardsRevealed event should have been emitted
-    let revealed_events: Vec<_> = events
+fn activate(runner: &mut GameRunner, metalworker: ObjectId) {
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: metalworker,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Metalworker activation is legal");
+}
+
+fn revealed_ids(events: &[GameEvent]) -> Vec<Vec<ObjectId>> {
+    events
         .iter()
-        .filter_map(|e| match e {
-            GameEvent::CardsRevealed {
-                player, card_ids, ..
-            } => Some((*player, card_ids.clone())),
+        .filter_map(|event| match event {
+            GameEvent::CardsRevealed { card_ids, .. } => Some(card_ids.clone()),
             _ => None,
         })
-        .collect();
-    assert!(
-        revealed_events
-            .iter()
-            .any(|(p, c)| *p == P0 && c.contains(&art1) && c.contains(&art2)),
-        "expected CardsRevealed event containing both artifact cards, got {revealed_events:?}"
-    );
+        .collect()
 }
 
 #[test]
-fn metalworker_reveal_one_artifact_adds_two_colorless_mana() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
+fn metalworker_prompts_any_number_and_two_revealed_artifacts_add_four_colorless() {
+    let (mut runner, metalworker, artifacts, non_artifact) = metalworker_board(2);
+    activate(&mut runner, metalworker);
 
-    let metalworker = scenario
-        .add_creature_from_oracle(P0, "Metalworker", 1, 2, METALWORKER_ORACLE)
-        .as_artifact()
-        .id();
+    match &runner.state().waiting_for {
+        WaitingFor::RevealChoice {
+            player,
+            cards,
+            cardinality,
+            pending_mana_ability,
+            ..
+        } => {
+            assert_eq!(*player, P0);
+            assert_eq!(*cardinality, ObjectSelectionCardinality::AnyNumber);
+            assert!(pending_mana_ability.is_some(), "the mana ability resumes");
+            assert_eq!(cards, &artifacts, "only artifact cards are eligible");
+            assert!(!cards.contains(&non_artifact));
+        }
+        other => panic!("expected an any-number RevealChoice, got {other:?}"),
+    }
 
-    let art1 = scenario
-        .add_creature_to_hand(P0, "Ornithopter", 0, 2)
-        .as_artifact()
-        .id();
-
-    let _art2 = scenario
-        .add_creature_to_hand(P0, "Memnite", 1, 1)
-        .as_artifact()
-        .id();
-
-    let mut runner = scenario.build();
-
-    runner
-        .act(GameAction::ActivateAbility {
-            source_id: metalworker,
-            ability_index: 0,
+    let outcome = runner
+        .act(GameAction::SelectCards {
+            cards: artifacts.clone(),
         })
-        .expect("activation succeeds");
+        .expect("revealing both artifacts is legal");
 
-    // Choose to reveal only 1 artifact
-    runner
-        .act(GameAction::SelectCards { cards: vec![art1] })
-        .expect("selection succeeds");
-
-    // Mana pool should have 2 colorless mana
-    assert_eq!(
-        runner.state().players[P0.0 as usize]
-            .mana_pool
-            .count_color(ManaType::Colorless),
-        2,
-        "expected 2 colorless mana from 1 revealed artifact"
-    );
+    assert_eq!(colorless(&runner), 4, "{{C}}{{C}} for each of two cards");
+    assert_eq!(revealed_ids(&outcome.events), vec![artifacts]);
+    assert_activation_completed(&runner, metalworker);
 }
 
 #[test]
-fn metalworker_reveal_zero_artifacts_by_selecting_empty_adds_zero_mana() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-
-    let metalworker = scenario
-        .add_creature_from_oracle(P0, "Metalworker", 1, 2, METALWORKER_ORACLE)
-        .as_artifact()
-        .id();
-
-    let _art1 = scenario
-        .add_creature_to_hand(P0, "Ornithopter", 0, 2)
-        .as_artifact()
-        .id();
-
-    let mut runner = scenario.build();
-
+fn metalworker_one_revealed_artifact_adds_two_colorless() {
+    let (mut runner, metalworker, artifacts, _) = metalworker_board(2);
+    activate(&mut runner, metalworker);
     runner
-        .act(GameAction::ActivateAbility {
-            source_id: metalworker,
-            ability_index: 0,
+        .act(GameAction::SelectCards {
+            cards: vec![artifacts[0]],
         })
-        .expect("activation succeeds");
+        .expect("revealing one artifact is legal");
 
-    // Choose to reveal 0 cards
-    runner
+    assert_eq!(colorless(&runner), 2);
+    assert_activation_completed(&runner, metalworker);
+}
+
+#[test]
+fn metalworker_revealing_zero_cards_completes_with_no_mana() {
+    let (mut runner, metalworker, _, _) = metalworker_board(1);
+    activate(&mut runner, metalworker);
+    let outcome = runner
         .act(GameAction::SelectCards { cards: vec![] })
-        .expect("empty selection succeeds");
+        .expect("CR 107.1c: zero is a legal any-number choice");
 
-    // Mana pool should have 0 colorless mana
-    assert_eq!(
-        runner.state().players[P0.0 as usize]
-            .mana_pool
-            .count_color(ManaType::Colorless),
-        0,
-        "expected 0 colorless mana when revealing 0 cards"
+    assert_eq!(colorless(&runner), 0);
+    assert!(
+        revealed_ids(&outcome.events).is_empty(),
+        "nothing is revealed"
     );
+    assert_activation_completed(&runner, metalworker);
 }
 
 #[test]
-fn metalworker_with_no_artifacts_in_hand_resolves_immediately_with_zero_mana() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-
-    let metalworker = scenario
-        .add_creature_from_oracle(P0, "Metalworker", 1, 2, METALWORKER_ORACLE)
-        .as_artifact()
-        .id();
-
-    let _non_art = scenario
-        .add_creature_to_hand(P0, "Grizzly Bears", 2, 2)
-        .id();
-
-    let mut runner = scenario.build();
-
-    runner
+fn metalworker_with_no_artifacts_in_hand_completes_without_a_prompt() {
+    let (mut runner, metalworker, _, _) = metalworker_board(0);
+    let outcome = runner
         .act(GameAction::ActivateAbility {
             source_id: metalworker,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
-        .expect("activation succeeds");
+        .expect("activation is legal with no artifacts in hand");
 
-    // Should NOT be waiting for reveal choice since no eligible cards exist
-    assert!(
-        !matches!(runner.state().waiting_for, WaitingFor::RevealChoice { .. }),
-        "should not prompt for reveal choice when hand has 0 artifacts"
-    );
-
-    assert_eq!(
-        runner.state().players[P0.0 as usize]
-            .mana_pool
-            .count_color(ManaType::Colorless),
-        0,
-        "expected 0 colorless mana"
-    );
+    assert_eq!(colorless(&runner), 0);
+    assert!(revealed_ids(&outcome.events).is_empty());
+    assert_activation_completed(&runner, metalworker);
 }
 
 #[test]
-fn metalworker_with_kinnan_produces_three_colorless_and_one_tapped_for_mana_event() {
+fn metalworker_rejects_a_repeated_card_before_revealing_anything() {
+    let (mut runner, metalworker, artifacts, _) = metalworker_board(2);
+    activate(&mut runner, metalworker);
+
+    let rejected = runner.act(GameAction::SelectCards {
+        cards: vec![artifacts[0], artifacts[0]],
+    });
+    assert!(
+        rejected.is_err(),
+        "a repeated card must be rejected, got {rejected:?}"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::RevealChoice { .. }),
+        "the prompt stays open after a rejected selection"
+    );
+    assert_eq!(colorless(&runner), 0, "no mana from a rejected selection");
+
+    // Reach-guard: the same prompt accepts the distinct selection.
+    runner
+        .act(GameAction::SelectCards {
+            cards: artifacts.clone(),
+        })
+        .expect("a distinct selection is legal");
+    assert_eq!(colorless(&runner), 4);
+    assert_activation_completed(&runner, metalworker);
+}
+
+#[test]
+fn metalworker_prompt_issues_a_legal_multi_card_action() {
+    let (mut runner, metalworker, artifacts, _) = metalworker_board(2);
+    activate(&mut runner, metalworker);
+
+    let both = GameAction::SelectCards {
+        cards: artifacts.clone(),
+    };
+    let issued = legal_actions(runner.state());
+    assert!(
+        issued.contains(&both),
+        "the any-number prompt must issue revealing every eligible card, got {issued:?}"
+    );
+    assert!(
+        issued.contains(&GameAction::SelectCards { cards: vec![] }),
+        "CR 107.1c: revealing zero cards is issued too, got {issued:?}"
+    );
+
+    runner.act(both).expect("the issued action is accepted");
+    assert_eq!(colorless(&runner), 4);
+    assert_activation_completed(&runner, metalworker);
+}
+
+#[test]
+fn metalworker_with_kinnan_adds_three_colorless_from_one_mana_event() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-
     let metalworker = scenario
         .add_creature_from_oracle(P0, "Metalworker", 1, 2, METALWORKER_ORACLE)
         .as_artifact()
         .id();
-
-    let _kinnan = scenario
-        .add_creature_from_oracle(P0, "Kinnan, Bonder Prodigy", 2, 2, KINNAN_ORACLE)
-        .id();
-
-    let art1 = scenario
+    scenario.add_creature_from_oracle(P0, "Kinnan, Bonder Prodigy", 2, 2, KINNAN_ORACLE);
+    let artifact = scenario
         .add_creature_to_hand(P0, "Ornithopter", 0, 2)
         .as_artifact()
         .id();
-
     let mut runner = scenario.build();
 
-    let result = runner.act(GameAction::ActivateAbility {
-        source_id: metalworker,
-        ability_index: 0,
-    });
-    assert!(result.is_ok(), "activation succeeds: {result:?}");
+    activate(&mut runner, metalworker);
+    let outcome = runner
+        .act(GameAction::SelectCards {
+            cards: vec![artifact],
+        })
+        .expect("reveal selection is legal");
 
-    let result = runner.act(GameAction::SelectCards { cards: vec![art1] });
-    assert!(result.is_ok(), "reveal selection succeeds: {result:?}");
-    let outcome = result.unwrap();
-
-    // 1 artifact revealed -> Metalworker produces {C}{C}, Kinnan adds {C} -> 3 total colorless mana
-    assert_eq!(
-        runner.state().players[P0.0 as usize]
-            .mana_pool
-            .count_color(ManaType::Colorless),
-        3,
-        "expected 3 colorless mana ({{C}}{{C}} from Metalworker + {{C}} from Kinnan)"
-    );
-
-    // Exactly one TappedForMana event emitted for Metalworker's aggregate activation
-    let tapped_for_mana_events: Vec<_> = outcome
+    // {C}{C} from Metalworker plus Kinnan's one added {C}.
+    assert_eq!(colorless(&runner), 3);
+    let tapped_for_mana = outcome
         .events
         .iter()
-        .filter(
-            |e| matches!(e, GameEvent::TappedForMana { source_id, .. } if *source_id == metalworker),
-        )
-        .collect();
-    assert_eq!(
-        tapped_for_mana_events.len(),
-        1,
-        "expected exactly one TappedForMana event for Metalworker activation, got {tapped_for_mana_events:?}"
-    );
-
-    let mana_produced_events: Vec<_> = outcome
+        .filter(|e| matches!(e, GameEvent::TappedForMana { source_id, .. } if *source_id == metalworker))
+        .count();
+    assert_eq!(tapped_for_mana, 1, "one TappedForMana for the activation");
+    let produced = outcome
         .events
         .iter()
         .filter(|e| {
             matches!(e, GameEvent::ManaAbilityProduced { source_id, .. } if *source_id == metalworker)
         })
-        .collect();
-    assert_eq!(
-        mana_produced_events.len(),
-        1,
-        "expected exactly one ManaAbilityProduced event for Metalworker activation, got {mana_produced_events:?}"
-    );
+        .count();
+    assert_eq!(produced, 1, "one ManaAbilityProduced for the activation");
+    assert_activation_completed(&runner, metalworker);
 }
 
 #[test]
-fn metalworker_activated_during_spell_mana_payment_resumes_and_finalizes_cast() {
+fn metalworker_activated_during_spell_payment_resumes_and_finalizes_the_cast() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
-
     let metalworker = scenario
         .add_creature_from_oracle(P0, "Metalworker", 1, 2, METALWORKER_ORACLE)
         .as_artifact()
         .id();
-
     let art1 = scenario
         .add_creature_to_hand(P0, "Ornithopter", 0, 2)
         .as_artifact()
         .id();
-
     let art2 = scenario
         .add_creature_to_hand(P0, "Memnite", 1, 1)
         .as_artifact()
         .id();
-
     let spell = scenario
         .add_spell_to_hand(P0, "Juggernaut", true)
         .with_mana_cost(ManaCost::generic(4))
         .id();
-
     let mut runner = scenario.build();
     let card_id = runner.state().objects[&spell].card_id;
 
-    // Begin casting the spell in manual payment mode
     runner
         .act(GameAction::CastSpell {
             object_id: spell,
@@ -333,152 +298,161 @@ fn metalworker_activated_during_spell_mana_payment_resumes_and_finalizes_cast() 
             targets: Vec::new(),
             payment_mode: CastPaymentMode::Manual,
         })
-        .expect("manual cast begins and reaches mana payment prompt");
-
+        .expect("manual cast reaches the mana payment prompt");
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
-        "expected WaitingFor::ManaPayment, got {:?}",
+        "expected ManaPayment, got {:?}",
         runner.state().waiting_for
     );
 
-    // Activate Metalworker during spell mana payment
-    runner
-        .act(GameAction::ActivateAbility {
-            source_id: metalworker,
-            ability_index: 0,
-        })
-        .expect("Metalworker activation during spell payment succeeds");
-
-    // Engine pauses at WaitingFor::RevealChoice with pending_mana_ability preserving payment resume
+    activate(&mut runner, metalworker);
     assert!(
-        matches!(runner.state().waiting_for, WaitingFor::RevealChoice { .. }),
-        "expected WaitingFor::RevealChoice, got {:?}",
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::RevealChoice {
+                pending_mana_ability: Some(_),
+                ..
+            }
+        ),
+        "expected the mana ability's RevealChoice, got {:?}",
         runner.state().waiting_for
     );
 
-    // Reveal 2 artifacts to produce 4 colorless mana
     runner
         .act(GameAction::SelectCards {
             cards: vec![art1, art2],
         })
-        .expect("reveal selection succeeds");
-
-    // Engine must have resumed exactly to the spell's mana payment context
+        .expect("reveal selection is legal");
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
-        "expected return to WaitingFor::ManaPayment, got {:?}",
+        "the activation resumes the spell's payment, got {:?}",
         runner.state().waiting_for
     );
+    assert_eq!(colorless(&runner), 4);
+    assert!(runner.state().objects[&metalworker].tapped);
 
-    assert_eq!(
-        runner.state().players[P0.0 as usize]
-            .mana_pool
-            .count_color(ManaType::Colorless),
-        4,
-        "expected 4 colorless mana in pool from Metalworker"
-    );
-
-    // Finalize payment / cast the spell
     runner
         .act(GameAction::PassPriority)
-        .expect("spell mana payment succeeds and cast completes");
-
-    // Spell is now on the stack
+        .expect("the pooled mana pays the spell and the cast completes");
     assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0),
+        "the cast completes to P0's priority, got {:?}",
+        runner.state().waiting_for
+    );
 }
 
 #[test]
-fn metalworker_independent_sequential_activations_isolate_tracked_sets() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
+fn metalworker_sequential_activations_each_count_only_their_own_reveal() {
+    let (mut runner, metalworker, artifacts, _) = metalworker_board(2);
+    let untap = |runner: &mut GameRunner| {
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&metalworker)
+            .unwrap()
+            .tapped = false;
+    };
 
-    let metalworker = scenario
-        .add_creature_from_oracle(P0, "Metalworker", 1, 2, METALWORKER_ORACLE)
-        .as_artifact()
-        .id();
-
-    let art1 = scenario
-        .add_creature_to_hand(P0, "Ornithopter", 0, 2)
-        .as_artifact()
-        .id();
-
-    let art2 = scenario
-        .add_creature_to_hand(P0, "Memnite", 1, 1)
-        .as_artifact()
-        .id();
-
-    let mut runner = scenario.build();
-
-    // 1st activation: reveal Art1 -> produces {C}{C} (pool = 2)
+    activate(&mut runner, metalworker);
     runner
-        .act(GameAction::ActivateAbility {
-            source_id: metalworker,
-            ability_index: 0,
+        .act(GameAction::SelectCards {
+            cards: vec![artifacts[0]],
         })
-        .expect("1st activation succeeds");
-    runner
-        .act(GameAction::SelectCards { cards: vec![art1] })
-        .expect("reveal art1 succeeds");
+        .expect("first reveal is legal");
+    assert_eq!(colorless(&runner), 2);
+    assert_activation_completed(&runner, metalworker);
 
-    assert_eq!(
-        runner.state().players[P0.0 as usize]
-            .mana_pool
-            .count_color(ManaType::Colorless),
-        2,
-        "expected 2 colorless mana after revealing 1st artifact"
-    );
-
-    // Untap Metalworker for 2nd independent activation
-    runner
-        .state_mut()
-        .objects
-        .get_mut(&metalworker)
-        .unwrap()
-        .tapped = false;
-
-    // 2nd activation: choose empty (0 cards) -> produces 0 mana (pool remains 2)
-    runner
-        .act(GameAction::ActivateAbility {
-            source_id: metalworker,
-            ability_index: 0,
-        })
-        .expect("2nd activation succeeds");
+    // An empty reveal must not reuse the first activation's revealed set.
+    untap(&mut runner);
+    activate(&mut runner, metalworker);
     runner
         .act(GameAction::SelectCards { cards: vec![] })
-        .expect("empty reveal succeeds");
+        .expect("empty reveal is legal");
+    assert_eq!(colorless(&runner), 2);
+    assert_activation_completed(&runner, metalworker);
 
-    assert_eq!(
-        runner.state().players[P0.0 as usize]
-            .mana_pool
-            .count_color(ManaType::Colorless),
-        2,
-        "expected pool to remain 2 after choosing 0 cards (not retaining prior activation's set)"
-    );
-
-    // Untap Metalworker for 3rd independent activation
+    // A later reveal counts only its own card, not a union with the first.
+    untap(&mut runner);
+    activate(&mut runner, metalworker);
     runner
-        .state_mut()
-        .objects
-        .get_mut(&metalworker)
-        .unwrap()
-        .tapped = false;
-
-    // 3rd activation: reveal Art2 -> produces {C}{C} (pool = 2 + 2 = 4)
-    runner
-        .act(GameAction::ActivateAbility {
-            source_id: metalworker,
-            ability_index: 0,
+        .act(GameAction::SelectCards {
+            cards: vec![artifacts[1]],
         })
-        .expect("3rd activation succeeds");
-    runner
-        .act(GameAction::SelectCards { cards: vec![art2] })
-        .expect("reveal art2 succeeds");
+        .expect("third reveal is legal");
+    assert_eq!(colorless(&runner), 4);
+    assert_activation_completed(&runner, metalworker);
+}
 
+/// The same any-number selection resolving from the stack: only the chosen
+/// white cards are revealed, a repeated card is rejected, and the life gain
+/// counts the cards revealed this way.
+#[test]
+fn scent_of_jasmine_reveals_any_number_of_white_cards_from_the_stack() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let scent = scenario
+        .add_spell_to_hand_from_oracle(P0, "Scent of Jasmine", true, SCENT_OF_JASMINE_ORACLE)
+        .id();
+    let white: Vec<ObjectId> = (0..3)
+        .map(|i| {
+            scenario
+                .add_creature_to_hand(P0, &format!("White {i}"), 1, 1)
+                .with_color(vec![ManaColor::White])
+                .id()
+        })
+        .collect();
+    let green = scenario
+        .add_creature_to_hand(P0, "Green", 1, 1)
+        .with_color(vec![ManaColor::Green])
+        .id();
+    let mut runner = scenario.build();
+    let life_before = runner.state().players[P0.0 as usize].life;
+
+    let cast = runner.cast(scent).resolve();
+    match cast.final_waiting_for() {
+        WaitingFor::RevealChoice {
+            player,
+            cards,
+            filter,
+            cardinality,
+            pending_mana_ability,
+            ..
+        } => {
+            assert_eq!(*player, P0);
+            assert_eq!(*cardinality, ObjectSelectionCardinality::AnyNumber);
+            assert!(pending_mana_ability.is_none());
+            assert!(matches!(filter, TargetFilter::Typed(_)));
+            assert_eq!(cards, &white, "only white cards are eligible");
+            assert!(!cards.contains(&green));
+        }
+        other => panic!("expected an any-number RevealChoice, got {other:?}"),
+    }
+
+    let rejected = runner.act(GameAction::SelectCards {
+        cards: vec![white[0], white[0]],
+    });
+    assert!(rejected.is_err(), "a repeated card must be rejected");
+
+    let chosen = vec![white[0], white[2]];
+    let outcome = runner
+        .act(GameAction::SelectCards {
+            cards: chosen.clone(),
+        })
+        .expect("a distinct any-number selection is legal");
+    assert_eq!(revealed_ids(&outcome.events), vec![chosen]);
     assert_eq!(
-        runner.state().players[P0.0 as usize]
-            .mana_pool
-            .count_color(ManaType::Colorless),
-        4,
-        "expected 4 total colorless mana after 3rd activation revealing 1 artifact (not unioned with art1)"
+        runner.state().players[P0.0 as usize].life,
+        life_before + 4,
+        "2 life for each of the two cards revealed this way"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0),
+        "the spell resolves to P0's priority, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(
+        runner.state().stack.is_empty(),
+        "the spell finished resolving"
     );
 }

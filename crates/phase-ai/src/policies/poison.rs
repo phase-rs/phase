@@ -100,6 +100,7 @@ impl PoisonClockPolicy {
             GameAction::ActivateAbility {
                 source_id,
                 ability_index,
+                ..
             } => ctx
                 .state
                 .objects

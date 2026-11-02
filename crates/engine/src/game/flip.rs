@@ -271,6 +271,9 @@ pub(crate) fn flipped_normal_copiable_values(obj: &GameObject) -> Option<Copiabl
         // alternative characteristics share one face — never one of CR 709.5's
         // shared-type-line Room permanents, so there is no half data to carry.
         room_halves: None,
+        // A flip card is not a preparation card; its `back_face` holds the
+        // stashed normal half, not a prepare spell.
+        prepare_face: None,
         name_origin: Default::default(),
     })
 }

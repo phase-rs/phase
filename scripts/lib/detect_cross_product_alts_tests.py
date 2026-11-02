@@ -219,5 +219,15 @@ class PreservedBehaviourTests(unittest.TestCase):
         self.assertEqual(xp.flagged_blocks(lines, set(), "t.rs"), [])
 
 
+class RecordInputTests(unittest.TestCase):
+    """The detector reads the gate's genuinely-added records, not a diff."""
+
+    def test_added_line_numbers_reads_helper_records(self) -> None:
+        # `added_lines_for` records are "<line>\t<content>". A blank content, a tab
+        # inside content and a form feed inside content (one line to git, two to
+        # str.splitlines()) are each one record, counted by its number.
+        self.assertEqual(xp.added_line_numbers("3\tfoo\n7\t\n12\t\tx\x0cy\n"), {3, 7, 12})
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

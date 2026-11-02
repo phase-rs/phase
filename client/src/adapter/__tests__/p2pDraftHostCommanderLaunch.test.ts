@@ -8,12 +8,10 @@ import type { DraftCommanderLaunch, DraftP2PMessage } from "../../network/draftP
  * game (CR 903.13a: "a draft ... followed by a multiplayer game").
  *
  * Three units live here:
- *   - `commanderSeatPlan`, the SINGLE authority for which pod seats a human
- *     will pilot (`!is_bot && connected`) and which the engine must pilot;
- *   - `commanderSeatDecks`, the SINGLE authority for every deck the launch
- *     needs, which sends nothing; and
- *   - `sendCommanderLaunches`, which puts one `draft_commander_launch` on each
- *     live human seat, from those decks alone.
+ *   - `commanderSeatPlan`, the provisional view-based preparation split;
+ *   - `commanderSeatDecks`, the authority for every prepared deck; and
+ *   - `sendCommanderLaunches`, which commits engine seats and current transport
+ *     recipients before dispatching their own decks.
  *
  * A test that asserts only on the returned decks drives `commanderSeatDecks`
  * alone. The moment an assertion reads a SENT launch or an EMITTED
@@ -49,6 +47,7 @@ function newHost() {
 
 type PrivateHost = {
   guestSessions: Map<number, { send: ReturnType<typeof vi.fn> }>;
+  disconnectedSeats: Map<number, unknown>;
   adapter: Record<string, ReturnType<typeof vi.fn>>;
   commanderSeatPlan: (view: unknown) => { liveHumanSeats: number[]; engineSeats: number[] };
 };
@@ -71,8 +70,8 @@ function seatGuestSession(privateHost: PrivateHost, seat: number) {
  * from omitted the key entirely, and under `!is_bot && connected` an
  * `undefined` is falsy — so EVERY seat, host included, would classify
  * engine-piloted, `liveHumanSeats` would be `[]`, and the ported axes would go
- * green while exercising a state `commanderSeatPlan` itself says cannot occur
- * in production (the host is always live).
+ * green while exercising a state that cannot occur in production (the host,
+ * pod seat 0, is always live).
  *
  * Default shape: seat 0 live human host, seat 1 bot, seat 2 live human guest,
  * seat 3 a human who dropped before the launch.
@@ -211,16 +210,16 @@ describe("P2PDraftHost.commanderSeatDecks + sendCommanderLaunches", () => {
     const privateHost = asPrivate(host);
     const adapter = launchAdapter();
     privateHost.adapter = adapter;
-    // Seat 3 dropped, but it still has a seeded session: the conservation count
-    // is only meaningful if an engine-piloted seat COULD have been sent to.
+    // Seat 3 retains a stale session but is explicitly in disconnect grace.
     const seat2Send = seatGuestSession(privateHost, 2);
     const seat3Send = seatGuestSession(privateHost, 3);
+    privateHost.disconnectedSeats.set(3, {});
     const events: DraftHostEvent[] = [];
     host.onEvent((event) => events.push(event));
 
     const view = commanderPodView();
     const decks = await host.commanderSeatDecks(view, 0);
-    host.sendCommanderLaunches(view, "game-1", "room-1", decks);
+    await host.sendCommanderLaunches(view, "game-1", "room-1", decks, vi.fn(async () => {}), new AbortController().signal);
     const hostDeck = decks.hostDeck;
 
     // The DISCRIMINATING exactly-once assertion. Its twin on the pure test
@@ -256,8 +255,9 @@ describe("P2PDraftHost.commanderSeatDecks + sendCommanderLaunches", () => {
   /**
    * `localSeat` is a PARAMETER, not a hardcoded 0.
    *
-   * The recipient set does not vary with `localSeat` — it is exactly
-   * `liveHumanSeats`. What `localSeat` selects is which seat's deck becomes
+   * The recipient set does not vary with `localSeat` — `sendCommanderLaunches`
+   * finalizes it from both deck arrays against current transports. What
+   * `localSeat` selects is which seat's deck becomes
    * `hostDeck`. At a non-zero `localSeat` that seat is reached over the wire
    * like any other live seat, so this row asserts the wire delivery rather than
    * a local emit; the seat-0 row above covers the emit.
@@ -275,7 +275,7 @@ describe("P2PDraftHost.commanderSeatDecks + sendCommanderLaunches", () => {
 
     const view = commanderPodView();
     const decks = await host.commanderSeatDecks(view, 2);
-    host.sendCommanderLaunches(view, "game-2", "room-2", decks);
+    await host.sendCommanderLaunches(view, "game-2", "room-2", decks, vi.fn(async () => {}), new AbortController().signal);
     const hostDeck = decks.hostDeck;
 
     // The pure half of the identity mandate: `localSeat`'s entry in
@@ -406,7 +406,7 @@ describe("P2PDraftHost.commanderSeatDecks + sendCommanderLaunches", () => {
     const decks = await host.commanderSeatDecks(view, 0);
     // Seat 2's designation is observable only on its SENT launch, so this row
     // spans the seam and must drive the sender too.
-    host.sendCommanderLaunches(view, "game-4", "room-4", decks);
+    await host.sendCommanderLaunches(view, "game-4", "room-4", decks, vi.fn(async () => {}), new AbortController().signal);
     const { hostDeck, engineSeatDecks } = decks;
 
     // Reach guard before any designation claim: the assembler really built a
@@ -450,11 +450,13 @@ describe("P2PDraftHost.commanderSeatDecks + sendCommanderLaunches", () => {
     // `draftSetCodes` lives ONLY on the sent launch — `CommanderSeatDecks` has
     // no such field and must not grow one — so this axis spans the seam.
     const view = commanderPodView({ draftSetCodes: ["CMM", "CLB"] });
-    host.sendCommanderLaunches(
+    await host.sendCommanderLaunches(
       view,
       "game-5",
       "room-5",
       await host.commanderSeatDecks(view, 0),
+      vi.fn(async () => {}),
+      new AbortController().signal,
     );
 
     const launch = (
@@ -485,7 +487,7 @@ describe("P2PDraftHost.commanderSeatDecks + sendCommanderLaunches", () => {
     host.onEvent((event) => events.push(event));
 
     const view = commanderPodView();
-    host.sendCommanderLaunches(view, "game-6", "room-6", await host.commanderSeatDecks(view, 0));
+    await host.sendCommanderLaunches(view, "game-6", "room-6", await host.commanderSeatDecks(view, 0), vi.fn(async () => {}), new AbortController().signal);
 
     const launch = (
       events.find((e) => e.type === "commanderLaunch") as Extract<
@@ -528,5 +530,123 @@ describe("P2PDraftHost.commanderSeatDecks + sendCommanderLaunches", () => {
     await expect(
       host.commanderSeatDecks(commanderPodView(), 0),
     ).rejects.toThrow("Seat 0 has no submitted deck");
+  });
+});
+
+describe("P2PDraftHost Commander transport finalization", () => {
+  it("captures the current same-seat session after installation and preserves private deck identities", async () => {
+    const host = newHost();
+    const privateHost = asPrivate(host);
+    privateHost.adapter = launchAdapter();
+    const oldSend = seatGuestSession(privateHost, 2);
+    const siblingSend = seatGuestSession(privateHost, 3);
+    const botSend = seatGuestSession(privateHost, 1);
+    const events: DraftHostEvent[] = [];
+    host.onEvent((event) => events.push(event));
+    const view = commanderPodView({
+      seats: [
+        { is_bot: false, connected: true },
+        { is_bot: true, connected: true },
+        { is_bot: false, connected: true },
+        { is_bot: false, connected: true },
+      ],
+      draftSetCodes: ["CLB"],
+    });
+    const decks = await host.commanderSeatDecks(view, 0);
+    let currentSend!: ReturnType<typeof vi.fn>;
+    const install = vi.fn(async () => {
+      expect(launchesOn(oldSend)).toEqual([]);
+      expect(launchesOn(siblingSend)).toEqual([]);
+      // Present in guestSessions is the authentication/publication boundary
+      // used here, including the existing tentative-reconnect rollback window.
+      currentSend = seatGuestSession(privateHost, 2);
+    });
+    await host.sendCommanderLaunches(view, "identity-game", "identity-room", decks, install, new AbortController().signal);
+    expect(install).toHaveBeenCalledExactlyOnceWith(1, decks.engineSeatDecks[0].deck);
+    const seat2 = decks.liveSeatDecks.find(({ seat }) => seat === 2)!.deck;
+    const seat3 = decks.liveSeatDecks.find(({ seat }) => seat === 3)!.deck;
+    expect(launchesOn(currentSend)).toEqual([{
+      gameId: "identity-game", roomCode: "identity-room", localDeck: seat2,
+      playerCount: 4, draftSetCodes: ["CLB"],
+    }]);
+    expect(launchesOn(siblingSend)).toEqual([{
+      gameId: "identity-game", roomCode: "identity-room", localDeck: seat3,
+      playerCount: 4, draftSetCodes: ["CLB"],
+    }]);
+    expect(seat2).toEqual({
+      main_deck: ["Guest Legend", "Island"], sideboard: ["Guest Spare"], commander: ["Guest Legend"],
+    });
+    expect(seat3).toEqual({
+      main_deck: ["Dropped Legend", "Swamp"], sideboard: ["Dropped Spare"], commander: ["Dropped Legend"],
+    });
+    expect(launchesOn(oldSend)).toEqual([]);
+    expect(launchesOn(botSend)).toEqual([]);
+    expect(events.filter((event) => event.type === "commanderLaunch")).toEqual([{
+      type: "commanderLaunch", launch: {
+        gameId: "identity-game", roomCode: "identity-room", localDeck: decks.hostDeck,
+        playerCount: 4, draftSetCodes: ["CLB"],
+      },
+    }]);
+  });
+
+  it("rescans after every installation batch and latches removed candidates through reconnect", async () => {
+    const host = newHost();
+    const privateHost = asPrivate(host);
+    privateHost.adapter = launchAdapter();
+    const targetSend = seatGuestSession(privateHost, 2);
+    const laterSend = seatGuestSession(privateHost, 3);
+    const events: DraftHostEvent[] = [];
+    host.onEvent((event) => events.push(event));
+    const view = commanderPodView();
+    const decks = await host.commanderSeatDecks(view, 0);
+    let reconnectedSend!: ReturnType<typeof vi.fn>;
+    const install = vi.fn(async (seat: number) => {
+      expect(events).toEqual([]);
+      if (seat === 1) privateHost.guestSessions.delete(2);
+      if (seat === 2) {
+        reconnectedSend = seatGuestSession(privateHost, 2);
+        privateHost.guestSessions.delete(3);
+      }
+    });
+    await host.sendCommanderLaunches(view, "bounded", "room", decks, install, new AbortController().signal);
+    expect(install.mock.calls.map(([seat]) => seat)).toEqual([1, 2, 3]);
+    expect(install).toHaveBeenCalledWith(2, decks.liveSeatDecks.find(({ seat }) => seat === 2)!.deck);
+    expect(install).toHaveBeenCalledWith(3, decks.engineSeatDecks.find(({ seat }) => seat === 3)!.deck);
+    expect(events.filter((event) => event.type === "commanderLaunch")).toHaveLength(1);
+    expect(launchesOn(targetSend)).toEqual([]);
+    expect(launchesOn(laterSend)).toEqual([]);
+    expect(launchesOn(reconnectedSend)).toEqual([]);
+  });
+
+  it("observes an abort after selected sends settle", async () => {
+    const host = newHost();
+    const privateHost = asPrivate(host);
+    privateHost.adapter = launchAdapter();
+    const send = seatGuestSession(privateHost, 2);
+    const abort = new AbortController();
+    send.mockImplementation(async () => { abort.abort(); });
+    const view = commanderPodView();
+    const decks = await host.commanderSeatDecks(view, 0);
+    await expect(host.sendCommanderLaunches(view, "cancel-send", "room", decks, vi.fn(async () => {}), abort.signal))
+      .rejects.toThrow();
+    expect(launchesOn(send)).toHaveLength(1);
+  });
+
+  it("propagates a selected send failure after the other sends settle", async () => {
+    const host = newHost();
+    const privateHost = asPrivate(host);
+    privateHost.adapter = launchAdapter();
+    const failedSend = seatGuestSession(privateHost, 2);
+    const healthySend = seatGuestSession(privateHost, 3);
+    failedSend.mockRejectedValue(new Error("closed transport"));
+    let settled = false;
+    healthySend.mockImplementation(async () => { await Promise.resolve(); settled = true; });
+    const view = commanderPodView();
+    const decks = await host.commanderSeatDecks(view, 0);
+    await expect(host.sendCommanderLaunches(view, "failed-send", "room", decks, vi.fn(async () => {}), new AbortController().signal))
+      .rejects.toThrow("closed transport");
+    expect(launchesOn(failedSend)).toHaveLength(1);
+    expect(launchesOn(healthySend)).toHaveLength(1);
+    expect(settled).toBe(true);
   });
 });

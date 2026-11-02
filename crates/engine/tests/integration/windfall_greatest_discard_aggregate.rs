@@ -24,8 +24,8 @@
 use engine::game::engine::apply;
 use engine::game::scenario::{GameRunner, GameScenario, Outcome, P0, P1};
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, ReplacementMode,
-    ResolvedAbility, TargetFilter, TargetRef,
+    AbilityDefinition, AbilityKind, Effect, FilterProp, ReplacementDefinition, ReplacementMode,
+    ResolvedAbility, TargetFilter, TargetRef, TypedFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -653,7 +653,9 @@ fn replacement_resumed_targeted_discard_preserves_the_announced_multi_owner_tail
     let ability = ResolvedAbility::new(
         Effect::DiscardCard {
             count: 2,
-            target: TargetFilter::SpecificObject { id: first },
+            target: TargetFilter::Typed(
+                TypedFilter::card().properties(vec![FilterProp::InZone { zone: Zone::Hand }]),
+            ),
         },
         vec![TargetRef::Object(first), TargetRef::Object(second)],
         source,

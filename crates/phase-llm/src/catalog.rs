@@ -142,6 +142,40 @@ const DEEPSEEK_MODELS: &[ModelOption] = &[
     },
 ];
 
+// OpenRouter model ids are `vendor/model`. `openrouter/auto` is OpenRouter's own
+// router and cannot rot as vendors retire models, so it leads and is the
+// default; the vendor-prefixed ids are a shortlist. Anything else OpenRouter
+// serves is reachable through the free-text field.
+const OPENROUTER_MODELS: &[ModelOption] = &[
+    ModelOption {
+        id: "openrouter/auto",
+        label: "OpenRouter Auto",
+    },
+    ModelOption {
+        id: "openai/gpt-5",
+        label: "OpenAI GPT-5",
+    },
+    ModelOption {
+        id: "anthropic/claude-sonnet-4.5",
+        label: "Anthropic Claude Sonnet 4.5",
+    },
+    ModelOption {
+        id: "google/gemini-2.5-pro",
+        label: "Google Gemini 2.5 Pro",
+    },
+    ModelOption {
+        id: "deepseek/deepseek-chat",
+        label: "DeepSeek Chat",
+    },
+];
+
+// Jev ships as an alias that always names TypeSafe's current flagship, so there
+// is nothing to pin.
+const JEV_MODELS: &[ModelOption] = &[ModelOption {
+    id: "jev-latest",
+    label: "Jev (latest)",
+}];
+
 /// No suggestions: a compatible endpoint's model ids are whatever the operator
 /// loaded. The UI shows the free-text field alone for this provider.
 const COMPATIBLE_MODELS: &[ModelOption] = &[];
@@ -188,6 +222,16 @@ const CATALOG: &[ProviderCatalogEntry] = &[
         models: DEEPSEEK_MODELS,
     },
     ProviderCatalogEntry {
+        provider: LlmProvider::OpenRouter,
+        value: "OpenRouter",
+        display_name: "OpenRouter",
+        default_base_url: Some("https://openrouter.ai/api/v1"),
+        default_model: "openrouter/auto",
+        requires_api_key: true,
+        api_key_url: "https://openrouter.ai/keys",
+        models: OPENROUTER_MODELS,
+    },
+    ProviderCatalogEntry {
         provider: LlmProvider::OpenAiCompatible,
         value: "OpenAiCompatible",
         display_name: "OpenAI-compatible endpoint",
@@ -196,6 +240,16 @@ const CATALOG: &[ProviderCatalogEntry] = &[
         requires_api_key: false,
         api_key_url: "",
         models: COMPATIBLE_MODELS,
+    },
+    ProviderCatalogEntry {
+        provider: LlmProvider::Jev,
+        value: "Jev",
+        display_name: "Jev (TypeSafe)",
+        default_base_url: None,
+        default_model: "jev-latest",
+        requires_api_key: true,
+        api_key_url: "https://docs.typesafe.ai/api",
+        models: JEV_MODELS,
     },
 ];
 

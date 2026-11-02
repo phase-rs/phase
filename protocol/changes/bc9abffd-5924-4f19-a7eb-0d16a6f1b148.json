@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "GameState records which players flipped coins this turn (players_who_flipped_coins_this_turn) and StaticMode gains WinFirstCoinFlipSetEachTurn (Edgar, King of Figaro; CR 705.3)."
+}

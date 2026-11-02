@@ -25,7 +25,7 @@ pub fn resolve(
     };
 
     let targets: Vec<_> = if use_self {
-        vec![ability.source_id]
+        ability.self_ref_binding(state).into_iter().collect()
     } else {
         ability
             .targets

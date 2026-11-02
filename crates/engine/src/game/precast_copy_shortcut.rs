@@ -208,6 +208,7 @@ pub(super) fn note_meaningful_action(state: &mut GameState, actor: PlayerId, act
                 | GameAction::SetPriorityPassingMode { .. }
                 | GameAction::SetPriorityYield { .. }
                 | GameAction::SetMayTriggerAutoChoice { .. }
+                | GameAction::SetReplacementAutoChoice { .. }
                 | GameAction::SetTriggerOrderTemplate { .. }
                 | GameAction::ReorderHand { .. }
                 | GameAction::PrecastCopyShortcut { .. }
@@ -535,6 +536,7 @@ fn is_fixed_magecraft_definition(ability: &AbilityDefinition) -> bool {
         && ability.repeat_for.is_none()
         && ability.repeat_until.is_none()
         && !ability.cant_be_copied
+        && ability.illegal_targets_disposition.is_does_not_resolve()
         && !ability.forward_result
         && ability.starting_with.is_none()
         && ability.target_chooser.is_none()
@@ -569,6 +571,7 @@ fn is_fixed_magecraft_definition(ability: &AbilityDefinition) -> bool {
                 && gain.repeat_for.is_none()
                 && gain.repeat_until.is_none()
                 && !gain.cant_be_copied
+                && gain.illegal_targets_disposition.is_does_not_resolve()
                 && !gain.forward_result
                 && gain.player_scope.is_none()
                 && gain.starting_with.is_none()

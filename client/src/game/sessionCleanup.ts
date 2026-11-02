@@ -17,16 +17,15 @@ import { useUiStore } from "../stores/uiStore.ts";
  * The generation it bumps is also an epoch this clear can lean on — partially.
  * The clear writes the prompt + legal-action fields without advancing
  * `lastCommittedSeq`, so a commit landing afterwards still wins the store's own
- * `seq` gate. Of the four `commitEngineSnapshot` call sites in `dispatch.ts`, two
- * capture the generation and decline once it is bumped: `processAction` (via
- * `isDispatchContextCurrent`) and `processRemoteUpdateInner` (via
- * `isCurrentDispatchGeneration`). Those can no longer re-populate the prompts this
- * function just cleared.
+ * `seq` gate. `processAction` (via `isDispatchContextCurrent`) and
+ * `processRemoteUpdateInner` (via `isCurrentDispatchGeneration`) capture the
+ * dispatch generation. `dispatchInteraction` now captures that generation and
+ * its bound session, checking both after its submit and snapshot awaits. Those
+ * three paths can no longer re-populate the prompts this function just cleared.
  *
- * `dispatchInteraction` and `restoreGameState` commit outside the generation gate
- * and still can. That race pre-dates this mechanism and is not fixed here; closing
- * it means threading the generation through those two paths, which is a change to
- * the single-writer invariant rather than to this boundary.
+ * `restoreGameState` still commits outside the generation gate and can write after
+ * this clear. Closing that remaining race requires changing its restore path, not
+ * this boundary.
  */
 export function clearPromptOverlayState(): void {
   abandonPendingDispatches();

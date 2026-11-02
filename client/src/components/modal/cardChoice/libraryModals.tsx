@@ -879,24 +879,21 @@ export function RevealModal({ data }: { data: RevealChoice["data"] }) {
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
   const hoverProps = useInspectHoverProps();
-  const [selected, setSelected] = useState<ObjectId | null>(null);
-  const [selectedMultiple, setSelectedMultiple] = useState<ObjectId[]>([]);
+  const [selected, setSelected] = useState<ObjectId[]>([]);
   const isOptional = data.optional === true;
-  const isAnyNumber = data.any_number === true;
+  // Engine-published cardinality: `null` = any number (CR 107.1c), otherwise
+  // the exact count a selection must hold (one when omitted).
+  const exactCount =
+    data.cardinality === "AnyNumber" ? null : (data.cardinality?.Exactly.count ?? 1);
+  const isAnyNumber = exactCount === null;
+  const canConfirm = exactCount === null || selected.length === exactCount;
 
   const handleConfirm = useCallback(() => {
-    if (isAnyNumber) {
-      dispatch({
-        type: "SelectCards",
-        data: { cards: selectedMultiple },
-      });
-    } else if (selected !== null) {
-      dispatch({
-        type: "SelectCards",
-        data: { cards: [selected] },
-      });
-    }
-  }, [dispatch, isAnyNumber, selected, selectedMultiple]);
+    dispatch({
+      type: "SelectCards",
+      data: { cards: selected },
+    });
+  }, [dispatch, selected]);
 
   const handleDecline = useCallback(() => {
     dispatch({
@@ -907,27 +904,38 @@ export function RevealModal({ data }: { data: RevealChoice["data"] }) {
 
   const toggleSelect = useCallback(
     (id: ObjectId) => {
-      if (isAnyNumber) {
-        setSelectedMultiple((prev) =>
-          prev.includes(id) ? prev.filter((cardId) => cardId !== id) : [...prev, id],
-        );
-      } else {
-        setSelected((prev) => (prev === id ? null : id));
-      }
+      setSelected((prev) => {
+        if (prev.includes(id)) return prev.filter((cardId) => cardId !== id);
+        if (exactCount === 1) return [id];
+        if (exactCount !== null && prev.length >= exactCount) return prev;
+        return [...prev, id];
+      });
     },
-    [isAnyNumber],
+    [exactCount],
   );
 
   if (!objects) return null;
 
   return (
     <ChoiceOverlay
-      title={isOptional ? t("cardChoice.reveal.titleReveal") : t("cardChoice.reveal.titleOpponentHand")}
-      subtitle={isOptional ? t("cardChoice.reveal.subtitleReveal") : t("cardChoice.reveal.subtitleChoose")}
+      title={
+        isOptional || isAnyNumber
+          ? t("cardChoice.reveal.titleReveal")
+          : t("cardChoice.reveal.titleOpponentHand")
+      }
+      subtitle={
+        isAnyNumber
+          ? t("cardChoice.reveal.subtitleRevealAnyNumber")
+          : isOptional
+            ? t("cardChoice.reveal.subtitleReveal")
+            : exactCount === 1
+              ? t("cardChoice.reveal.subtitleChoose")
+              : t("cardChoice.reveal.subtitleChooseCount", { count: exactCount })
+      }
       footer={
         <div className="flex gap-2">
           {isOptional && <ConfirmButton onClick={handleDecline} label={t("cardChoice.buttons.decline")} />}
-          <ConfirmButton onClick={handleConfirm} disabled={!isAnyNumber && selected === null} />
+          <ConfirmButton onClick={handleConfirm} disabled={!canConfirm} />
         </div>
       }
     >
@@ -935,7 +943,7 @@ export function RevealModal({ data }: { data: RevealChoice["data"] }) {
         {data.cards.map((id, index) => {
           const obj = objects[id];
           if (!obj) return null;
-          const isSelected = isAnyNumber ? selectedMultiple.includes(id) : selected === id;
+          const isSelected = selected.includes(id);
           return (
             <motion.button
               key={id}

@@ -6,6 +6,7 @@ import type { FormatConfig, FormatGroup, GameFormat, LoopDetectionMode, MatchTyp
 import {
   formatMetadata,
   formatSuppliesDeck,
+  isPlanechaseFamilyFormat,
   isSetupFormat,
   SETUP_FORMATS,
 } from "../data/formatRegistry";
@@ -13,6 +14,12 @@ import { useAudioContext } from "../audio/useAudioContext";
 import { loopDetectionModeToQuery } from "../game/loopDetectionMode";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
 import { AiOpponentConfig } from "../components/menu/AiOpponentConfig";
+import {
+  catalogRequestKey,
+  useAiDeckCatalog,
+  useSettledAiCatalog,
+} from "../services/aiDeckCatalog";
+import { PileSourceChoice } from "../components/menu/PileSourceChoice";
 import { FormatPicker } from "../components/menu/FormatPicker";
 import { MenuParticles } from "../components/menu/MenuParticles";
 import { MenuPanel, MenuShell } from "../components/menu/MenuShell";
@@ -25,6 +32,7 @@ import {
   getDeckColorIdentityPips,
 } from "../components/menu/deckHelpers";
 import { ManaSymbol } from "../components/mana/ManaSymbol";
+import { cappedMatchType, useBestOfThreeCeiling } from "../components/lobby/HostSetup";
 import { menuButtonClass } from "../components/menu/buttonStyles";
 import {
   ACTIVE_DECK_KEY,
@@ -42,6 +50,7 @@ import { usePreferencesStore } from "../stores/preferencesStore";
 import { useCardDataStore } from "../stores/cardDataStore";
 import { saveActiveGame, useGameStore } from "../stores/gameStore";
 import type { DeckCompatibilityResult } from "../services/deckCompatibility";
+import { DEFAULT_PILE_CHOICE, pileSourceParam, type PileChoice } from "../services/pileSource";
 
 // --- Format trigger styling ---
 //
@@ -68,7 +77,7 @@ function setupDefaults(format: GameFormat): FormatConfig | null {
 // --- Component ---
 
 export function GameSetupPage() {
-  const { t } = useTranslation("game");
+  const { t } = useTranslation(["game", "common"]);
   const navigate = useNavigate();
   const location = useLocation();
   const [searchParams] = useSearchParams();
@@ -92,6 +101,9 @@ export function GameSetupPage() {
   const [formatConfig, setFormatConfig] = useState<FormatConfig | null>(null);
   const [playerCount, setPlayerCount] = useState(2);
   const [matchType, setMatchType] = useState<MatchType>("Bo1");
+  const ceiling = useBestOfThreeCeiling(formatConfig?.format ?? null);
+  const effectiveMatchType = cappedMatchType(matchType, ceiling);
+  const bo3Disabled = playerCount !== 2 || ceiling !== "Bo3";
   // CR 732.2a: combo (infinite-loop) detector opt-in, chosen here at creation and
   // immutable once the game starts. Available at every player count.
   const [loopDetection, setLoopDetection] = useState<LoopDetectionMode>({ type: "Off" });
@@ -103,6 +115,29 @@ export function GameSetupPage() {
   const [selectedCompat, setSelectedCompat] = useState<DeckCompatibilityResult | null>(null);
   const [firstPlayer, setFirstPlayer] = useState<"random" | "play" | "draw">("random");
   const [legalAiDeckCount, setLegalAiDeckCount] = useState<number | null>(null);
+  // One legal-catalog analysis shared by the AI seats and the human pool's
+  // bracket base (per-deck legality + bracket estimates run sequentially, so a
+  // second call would double the "Analyzing decks" pass).
+  const aiCatalog = useAiDeckCatalog({
+    selectedFormat: formatConfig?.format,
+    selectedMatchType: effectiveMatchType,
+  });
+  // Last settled catalog for the human pool, bound to the format/match
+  // request that produced it: inventory rescans within the same request keep
+  // the previous legal universe until the fresh one lands, while a parameter
+  // change (or a failed new request) exposes nothing rather than a stale
+  // differently-keyed snapshot.
+  const settledAiCatalog = useSettledAiCatalog(
+    aiCatalog,
+    catalogRequestKey(formatConfig?.format, effectiveMatchType),
+  );
+  const [pile, setPile] = useState<PileChoice>(DEFAULT_PILE_CHOICE);
+  // A pile is picked for one format; any format change returns to the default pile.
+  const [pileFormat, setPileFormat] = useState(selectedFormat);
+  if (pileFormat !== selectedFormat) {
+    setPileFormat(selectedFormat);
+    setPile(DEFAULT_PILE_CHOICE);
+  }
   const [setupError, setSetupError] = useState<string | null>(() => {
     const state = location.state as { setupError?: string } | null;
     return state?.setupError ?? null;
@@ -176,11 +211,12 @@ export function GameSetupPage() {
 
   const handleStartAI = () => {
     if (!formatConfig) return;
-    if (formatConfig.format === "Planechase") return;
+    if (isPlanechaseFamilyFormat(formatConfig.format)) return;
     // Fixed-deck formats (Momir's Madness) supply the deck automatically, so an
     // active deck is not required to start.
     const suppliesDeck = formatSuppliesDeck(formatConfig.format);
     if (!activeDeckName && !suppliesDeck) return;
+    if (!pile.legal) return;
     if (activeDeckName && !isRandomDeckSelection(activeDeckName)) void withSavedDeckLibraryOrSkip((txn) => touchDeckPlayed(txn, activeDeckName), "run-unguarded");
     const gameId = crypto.randomUUID();
     // Snapshot the per-seat AI config from preferences into the active-game
@@ -213,13 +249,15 @@ export function GameSetupPage() {
     // GamePage projects it onto the local MatchConfig. Omitted = Off (engine default).
     const loopMode = loopDetectionModeToQuery(loopDetection);
     const loopParam = loopMode ? `&loop=${loopMode}` : "";
+    const pileName = pileSourceParam(pile.source);
+    const pileParam = pileName ? `&pile=${encodeURIComponent(pileName)}` : "";
     // The URL carries the format NAME only, so the edited config (starting
     // life) has to ride along out-of-band or GamePage re-derives it from
     // `FORMAT_DEFAULTS` and silently discards the edit. Router state — the
     // same channel `useBroker` uses — rather than a URL param, because the
     // native-engine route above deliberately writes no resume pointer.
     navigate(
-      `/game/${gameId}?mode=ai&difficulty=${headDifficulty}&format=${formatConfig.format}&players=${playerCount}&match=${matchType.toLowerCase()}${loopParam}${firstParam}`,
+      `/game/${gameId}?mode=ai&difficulty=${headDifficulty}&format=${formatConfig.format}&players=${playerCount}&match=${effectiveMatchType.toLowerCase()}${loopParam}${firstParam}${pileParam}`,
       { state: { formatConfig } },
     );
   };
@@ -230,7 +268,7 @@ export function GameSetupPage() {
   // AI seats automatically (the engine synthesizes them), so the deck-selection
   // and AI-deck-availability gates do not apply.
   const suppliesDeck = selectedFormat ? formatSuppliesDeck(selectedFormat) : false;
-  const formatSupportsAi = selectedFormat !== "Planechase";
+  const formatSupportsAi = !isPlanechaseFamilyFormat(selectedFormat);
   const noDeckSelected = !suppliesDeck && !activeDeckName;
   const deckBlockedForSelectedFormat =
     !suppliesDeck && !isRandomDeckSelection(activeDeckName) && selectedCompat?.selected_format_compatible === false;
@@ -240,7 +278,7 @@ export function GameSetupPage() {
   // trap the user on this screen.
   const cardDataLoading = cardStatus === "loading";
   const cannotStartAi =
-    !formatSupportsAi || noDeckSelected || deckBlockedForSelectedFormat || noLegalAiDecks || cardDataLoading;
+    !formatSupportsAi || noDeckSelected || deckBlockedForSelectedFormat || noLegalAiDecks || cardDataLoading || !pile.legal;
 
   // cEDH warning: shown when the human deck is not bracket 5 but the table is
   // in cEDH mode (all AI play cEDH).
@@ -339,13 +377,14 @@ export function GameSetupPage() {
           <MyDecks
             mode="select"
             selectedFormat={selectedFormat ?? undefined}
-            selectedMatchType={matchType}
+            selectedMatchType={effectiveMatchType}
             onSelectDeck={handleSelectDeck}
             onEditDeck={handleEditDeck}
             activeDeckName={activeDeckName}
             randomSelectionMode="defer"
             bare
             onActiveDeckCompatChange={setSelectedCompat}
+            aiCatalog={settledAiCatalog}
           />
 
           {/* Sidebar */}
@@ -501,24 +540,6 @@ export function GameSetupPage() {
                     />
                   </label>
 
-                  <label
-                    className="flex items-center justify-between"
-                    title={t("gameSetup.config.experimentalDungeonsHelp")}
-                  >
-                    <span className="text-xs text-slate-400">{t("gameSetup.config.experimentalDungeons")}</span>
-                    <input
-                      type="checkbox"
-                      checked={formatConfig.allow_experimental_dungeons}
-                      onChange={(e) =>
-                        setFormatConfig({
-                          ...formatConfig,
-                          allow_experimental_dungeons: e.target.checked,
-                        })
-                      }
-                      className="h-4 w-4 accent-sky-500"
-                    />
-                  </label>
-
                   {!formatConfig.team_based && formatConfig.max_players > 2 && (
                     <label className="flex flex-col gap-1">
                       <div className="flex items-center justify-between">
@@ -549,7 +570,7 @@ export function GameSetupPage() {
                       type="button"
                       onClick={() => { setMatchType("Bo1"); setLastMatchType("Bo1"); }}
                       className={`rounded-[7px] px-3 py-1.5 text-xs font-medium transition-colors ${
-                        matchType === "Bo1"
+                        effectiveMatchType === "Bo1"
                           ? "bg-indigo-600 text-white"
                           : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
                       }`}
@@ -559,12 +580,12 @@ export function GameSetupPage() {
                     <button
                       type="button"
                       onClick={() => { setMatchType("Bo3"); setLastMatchType("Bo3"); }}
-                      disabled={playerCount !== 2}
+                      disabled={bo3Disabled}
                       className={`rounded-[7px] px-3 py-1.5 text-xs font-medium transition-colors ${
-                        matchType === "Bo3"
+                        effectiveMatchType === "Bo3"
                           ? "bg-indigo-600 text-white"
                           : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
-                      } ${playerCount !== 2 ? "cursor-not-allowed opacity-40" : ""}`}
+                      } ${bo3Disabled ? "cursor-not-allowed opacity-40" : ""}`}
                     >
                       BO3
                     </button>
@@ -635,12 +656,19 @@ export function GameSetupPage() {
               {/* Separator */}
               <div className="border-t border-white/8" />
 
+              <PileSourceChoice
+                format={selectedFormat}
+                value={pile.source}
+                onChange={setPile}
+              />
+
               {/* AI opponent configuration */}
               <AiOpponentConfig
                 selectedFormat={formatConfig?.format}
-                selectedMatchType={matchType}
+                selectedMatchType={effectiveMatchType}
                 opponentCount={Math.max(1, playerCount - 1)}
                 onCandidateCountChange={setLegalAiDeckCount}
+                catalog={aiCatalog}
               />
 
               {setupError && (

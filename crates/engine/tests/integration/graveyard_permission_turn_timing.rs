@@ -462,15 +462,11 @@ fn zombie_grant_nests_is_present() {
 }
 
 /// Player-scoped grant with a board predicate, source ≠ holder: I grant P1
-/// "as long as you control a Zombie". `IsPresent` isn't holder-bound, so the
-/// permission fails closed on BOTH boards:
-/// - I control the Zombie (a source-bound evaluation would wrongly pass): not
-///   offered.
-/// - P1 controls the Zombie: also not offered. This is the documented
-///   fail-closed limitation (a holder-bound `IsPresent` is a logged follow-up).
-///   Refusing is safer than guessing whose Zombies count.
+/// "as long as you control a Zombie". `IsPresent` is evaluated for the holder
+/// (CR 113.1b + CR 109.5), so P1 is offered the card only while P1 controls the
+/// Zombie, not while the granting spell's controller does.
 #[test]
-fn player_grant_with_a_board_condition_fails_closed() {
+fn player_grant_with_a_board_condition_binds_the_grantee() {
     for zombie_controller in [P0, P1] {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
@@ -489,36 +485,44 @@ fn player_grant_with_a_board_condition_fails_closed() {
             1,
             "reach: the grant is installed"
         );
-        assert!(
-            !offered_to(&runner, P1, theirs),
-            "Zombie under {zombie_controller:?}: a non-holder-bound gate fails closed"
+        assert_eq!(
+            offered_to(&runner, P1, theirs),
+            zombie_controller == P1,
+            "Zombie under {zombie_controller:?}"
         );
     }
 }
 
-/// Sibling: "as long as an opponent controls a Zombie", granted to P1, with the
-/// Zombie under P1 (an opponent of the granting spell's controller, but not of
-/// the holder). Fails closed, so it's not offered.
+/// Sibling: "as long as an opponent controls a Zombie", granted to P1. The
+/// condition is evaluated for the grantee, so a Zombie under P0 (P1's opponent)
+/// opens it and one under P1 (an opponent of the granting spell's controller,
+/// not of the holder) does not.
 #[test]
-fn player_grant_with_an_opponent_board_condition_fails_closed() {
-    let mut scenario = GameScenario::new();
-    scenario.at_phase(Phase::PreCombatMain);
-    let grant = scenario
-        .add_spell_to_hand_from_oracle(P0, "Grant Spell", true, OPP_ZOMBIE_GRANT)
-        .with_mana_cost(ManaCost::zero())
-        .id();
-    scenario
-        .add_creature(P1, "Walking Corpse", 2, 2)
-        .with_subtypes(vec!["Zombie"]);
-    let theirs = flash_creature_in_graveyard(&mut scenario, P1, "Flash Bear");
-    let mut runner = scenario.build();
-    let outcome = runner.cast(grant).target_player(P1).resolve();
-    assert_eq!(
-        outcome.state().transient_continuous_effects.len(),
-        1,
-        "reach: the grant is installed"
-    );
-    assert!(!offered_to(&runner, P1, theirs), "fails closed");
+fn player_grant_with_an_opponent_board_condition_binds_the_grantee() {
+    for zombie_controller in [P0, P1] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let grant = scenario
+            .add_spell_to_hand_from_oracle(P0, "Grant Spell", true, OPP_ZOMBIE_GRANT)
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        scenario
+            .add_creature(zombie_controller, "Walking Corpse", 2, 2)
+            .with_subtypes(vec!["Zombie"]);
+        let theirs = flash_creature_in_graveyard(&mut scenario, P1, "Flash Bear");
+        let mut runner = scenario.build();
+        let outcome = runner.cast(grant).target_player(P1).resolve();
+        assert_eq!(
+            outcome.state().transient_continuous_effects.len(),
+            1,
+            "reach: the grant is installed"
+        );
+        assert_eq!(
+            offered_to(&runner, P1, theirs),
+            zombie_controller == P0,
+            "Zombie under {zombie_controller:?}"
+        );
+    }
 }
 
 // ── Parse shapes ─────────────────────────────────────────────────────────────

@@ -42,6 +42,47 @@ from among them onto the battlefield. Put the rest on the bottom of your library
 order. When a creature is put onto the battlefield this way, it deals damage equal to its power \
 to target creature an opponent controls.";
 
+/// The same body under an "If" head: a resolution-time condition (CR 608.2c),
+/// so the clause stays supported and its amount anaphor can be driven here. The
+/// printed "When" head is a CR 603.12 reflexive whose recipient is misbound to
+/// the parent's target, so the printed card fails closed (pinned below).
+const VIVIEN_IF_HEAD: &str = "Look at the top seven cards of your library. You may put a creature \
+card from among them onto the battlefield. Put the rest on the bottom of your library in a random \
+order. If a creature is put onto the battlefield this way, it deals damage equal to its power \
+to target creature an opponent controls.";
+
+/// CR 603.12 + CR 603.3d (fail closed): the printed reflexive's explicit
+/// recipient ("target creature an opponent controls") is misbound to the
+/// parent's target, and a reflexive created by the Dig has no parent target to
+/// inherit, so the clause is honestly unsupported.
+#[test]
+fn vivien_invocation_printed_reflexive_fails_closed() {
+    let parsed = parse_oracle_text(
+        VIVIEN,
+        "Vivien's Invocation",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let spell_ability = parsed.abilities.first().expect("one spell ability");
+    assert!(
+        matches!(spell_ability.effect.as_ref(), Effect::Dig { .. }),
+        "reach guard: the reflexive rides the Dig"
+    );
+    let reflexive = spell_ability
+        .sub_ability
+        .as_ref()
+        .expect("reflexive clause");
+    assert!(
+        matches!(
+            reflexive.effect.as_ref(),
+            Effect::Unimplemented { name, .. } if name == "zone_change_reflexive_unbound_referent"
+        ),
+        "got {:?}",
+        reflexive.effect
+    );
+}
+
 /// CR 603.2 + CR 208.1 + CR 608.2: the reflexive trigger deals damage equal to
 /// the ENTERING creature's power. A power-4 entering creature deals 4 to a 4/7
 /// recipient (survives, but marked exactly 4 — discriminating both 0 and 7).
@@ -51,7 +92,7 @@ fn vivien_invocation_reflexive_trigger_deals_entering_creatures_power() {
     // exactly what the regression touched). Extract it verbatim — do not
     // hand-author the amount.
     let parsed = parse_oracle_text(
-        VIVIEN,
+        VIVIEN_IF_HEAD,
         "Vivien's Invocation",
         &[],
         &["Sorcery".to_string()],

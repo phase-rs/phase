@@ -175,124 +175,6 @@ fn a_self_exile_after_a_free_cast_from_zones_rider_exiles_the_resolved_spell() {
     );
 }
 
-/// CR 608.2c + issue #8721: the guard for a repair that was MEASURED AND
-/// REJECTED.
-///
-/// Invasion of Alara prints "Put one of them into your hand." — a real
-/// instruction, not a graveyard replacement — and `graveyard_destination_rider`'s
-/// HAND arm swallows it. It is the one member of that arm without the "if you
-/// don't cast it" gate the other four carry (Rashmi, Eternities Crafter;
-/// Discover the Impossible; Solstice Revelations; Ziatora's Envoy), so gating
-/// the arm on that condition looks like the repair. It is not: with no chosen
-/// target on the head, the instruction's `ParentTarget` binds to the SOURCE, and
-/// the permanent returns ITSELF to its owner's hand. Measured, then reverted.
-///
-/// What this test therefore asserts is only that: the source stays put. It is a
-/// discriminating guard for the rejected repair — with that repair in place the
-/// zone assertion goes red (the reach guard still passes) — and for NOTHING
-/// else.
-///
-/// Deliberately understated, because two limits are real. The card is a Battle
-/// (Siege) and is built here as an artifact stand-in, so only the chain is under
-/// test, not the type. And the OBSERVED fact — stated without a cause, because
-/// the cause was not measured — is that this scenario's outcome is identical
-/// with the tail handling on and off. So this test says nothing about the tail,
-/// in either direction.
-#[test]
-fn invasion_of_alara_does_not_return_itself_to_hand() {
-    use engine::types::actions::GameAction;
-
-    const ALARA: &str = "When this Siege enters, exile cards from the top of your library until \
-you exile two nonland cards with mana value 4 or less. You may cast one of those two cards \
-without paying its mana cost. Put one of them into your hand. Then put the other cards exiled \
-this way on the bottom of your library in a random order.";
-
-    for accept in [false, true] {
-        let mut scenario = GameScenario::new_n_player(2, 42);
-        scenario.at_phase(Phase::PreCombatMain);
-        for i in 0..6 {
-            scenario.add_spell_to_library_top(P0, &format!("Cheap Spell {i}"), true);
-        }
-        for _ in 0..6 {
-            scenario.add_basic_land(P0, engine::types::mana::ManaColor::Red);
-        }
-        // Built as an artifact so the enters-the-battlefield trigger actually
-        // fires; see the limits named in this test's doc comment.
-        let siege = scenario
-            .add_artifact_to_hand_from_oracle(P0, "Invasion of Alara", ALARA)
-            .id();
-        let mut runner = scenario.build();
-        let _ = runner.cast(siege).try_resolve();
-        for _ in 0..40 {
-            match runner.state().waiting_for.clone() {
-                WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. } => {
-                    if runner.choose_first_legal_target().is_err() {
-                        break;
-                    }
-                }
-                WaitingFor::OptionalEffectChoice { .. } => {
-                    if runner
-                        .act(GameAction::DecideOptionalEffect { accept })
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-                WaitingFor::OrderTriggers { triggers, .. } => {
-                    let order = (0..triggers.len()).collect();
-                    if runner.act(GameAction::OrderTriggers { order }).is_err() {
-                        break;
-                    }
-                }
-                WaitingFor::Priority { .. } => {
-                    if runner.state().stack.is_empty()
-                        || runner.act(GameAction::PassPriority).is_err()
-                    {
-                        break;
-                    }
-                }
-                WaitingFor::EffectZoneChoice { cards, count, .. } => {
-                    let pick: Vec<_> = cards.into_iter().take(count.max(1)).collect();
-                    if runner.act(GameAction::SelectCards { cards: pick }).is_err() {
-                        break;
-                    }
-                }
-                _ => {
-                    break;
-                }
-            }
-        }
-        runner.advance_until_stack_empty();
-        let mut zones: std::collections::BTreeMap<String, Vec<String>> = Default::default();
-        let mut with_perm: Vec<(String, String)> = Vec::new();
-        for (id, o) in runner.state().objects.iter() {
-            if *id == siege {
-                continue;
-            }
-            zones
-                .entry(format!("{:?}", o.zone))
-                .or_default()
-                .push(o.name.clone());
-            if !o.casting_permissions.is_empty() {
-                with_perm.push((o.name.clone(), format!("{:?}", o.zone)));
-            }
-        }
-        // Reach guard: without it this test also passes when the ETB trigger
-        // never resolved — which is how an earlier draft of it measured nothing.
-        assert!(
-            zones.contains_key("Exile"),
-            "reach guard (accept={accept}): the ETB trigger must have exiled at least one \
-             card, got {zones:?} / {with_perm:?}"
-        );
-        assert_eq!(
-            runner.state().objects[&siege].zone,
-            Zone::Battlefield,
-            "accept={accept}: the source must not move itself — \"Put one of them into your \
-             hand.\" names an exiled card, never the permanent"
-        );
-    }
-}
-
 /// CR 400.7 + issue #8721: the tail handling stops at a tail that chains
 /// further instructions, and this pins that boundary.
 ///
@@ -420,20 +302,19 @@ instead. Exile Sins of the Past, then return it to the battlefield.";
 /// Issue #8721, review of PR #8749: the SECOND scope boundary — the tail's
 /// effect must be a family this change has runtime evidence for.
 ///
-/// Six corpus cards hang a `SequentialSibling` tail behind a `CastFromZone`
-/// graveyard rider, and their tails are four different effects that read four
-/// different pieces of state. Two of them — Invasion of Alara
-/// (`PutAtLibraryPosition`) and Finale of Promise (`CopySpell`) — could not be
-/// driven to their tail in any scenario, so #8749 leaves them exactly as they
-/// are on main rather than changing them unmeasured.
+/// #8749 measured six corpus cards hanging a `SequentialSibling` tail behind a
+/// `CastFromZone` graveyard rider, with four different tail effects that read
+/// four different pieces of state. Finale of Promise (`CopySpell`) could not
+/// be driven to its tail in any scenario, and no card reaches the branch with a
+/// `PutAtLibraryPosition` tail since Invasion of Alara's cast became a window
+/// (issue #8750), so neither family is changed unmeasured.
 ///
 /// A STAND-IN, and said plainly: the sorcery below is a synthetic composite
 /// built for this test, not any printed card. Its first two sentences are Sins
 /// of the Past verbatim (`client/public/card-data.json`), so the head and rider
 /// are the real shapes; the third sentence is written to lower to a
-/// `PutAtLibraryPosition` tail whose target is OBSERVABLE — which Invasion of
-/// Alara's own `ExiledBySource` tail is not, and which is exactly why the real
-/// card could not serve here. MEASURED: it lowers to `CastFromZone` + rider +
+/// `PutAtLibraryPosition` tail whose target is OBSERVABLE. MEASURED: it lowers
+/// to `CastFromZone` + rider +
 /// single-link `PutAtLibraryPosition`, so it clears the last-link rule and is
 /// stopped by the family allowlist alone.
 ///
@@ -518,8 +399,7 @@ instead. Put target creature card from a graveyard on the bottom of its owner's 
         outcome.state().objects[&bait].zone,
         Zone::Graveyard,
         "a tail whose effect family has no test that fails when the branch is reverted must \
-         not be run: Invasion of Alara and Finale of Promise keep their main behaviour until \
-         that measurement exists (issue #8750)"
+         not be run until that measurement exists (issue #8750)"
     );
     assert_eq!(
         outcome.state().objects[&fodder].zone,

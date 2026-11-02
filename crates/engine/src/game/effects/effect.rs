@@ -1,14 +1,20 @@
 use crate::game::filter;
 use crate::game::layers::evaluate_condition;
-use crate::game::quantity::{quantity_expr_uses_recipient, resolve_quantity_with_targets};
+use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{
-    ContinuousModification, ControllerRef, Duration, Effect, EffectError, EffectKind, QuantityExpr,
-    QuantityRef, ResolvedAbility, StaticCondition, StaticDefinition, TargetFilter, TargetRef,
+    quantity_expr_uses_recipient, ContinuousModification, ControllerRef, Duration, Effect,
+    EffectError, EffectKind, QuantityExpr, QuantityRef, ResolvedAbility, StaticCondition,
+    StaticDefinition, TargetFilter, TargetRef, TypedFilter,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{EndEffectPermission, GameState};
+use crate::types::game_state::{EndEffectPermission, GameState, TransientContinuousEffectBindings};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
+
+pub use crate::types::ability::{
+    generic_effect_affected_uses_inherited_targets, generic_effect_application_filter,
+    generic_effect_population_filter,
+};
 
 /// Effect handler: creates transient continuous effects from a GenericEffect.
 ///
@@ -122,6 +128,24 @@ pub fn resolve(
                     // continuous effect for the rest of the turn (CR 611.2c).
                     ContinuousModification::GrantStaticAbility { definition } => {
                         snapshot_granted_cost_modifier(state, ability, definition);
+                        // CR 611.2c + CR 608.2h: a granted graveyard cast
+                        // permission modifies the rules of the game, so its
+                        // card set stays live — but the information its filter
+                        // reads (the players it names, e.g. "from that player's
+                        // graveyard" — Whispersteel Dagger, and any quantity
+                        // bound) is determined once, now, while the resolving
+                        // ability's context (for Whispersteel Dagger, its
+                        // trigger event — CR 608.2c) still exists.
+                        if matches!(
+                            definition.mode,
+                            crate::types::statics::StaticMode::GraveyardCastPermission { .. }
+                        ) {
+                            definition.affected = definition.affected.take().map(|affected| {
+                                crate::game::effects::cast_from_zone::freeze_resolution_cast_filter(
+                                    state, ability, affected, None,
+                                )
+                            });
+                        }
                         // CR 109.5 + CR 508.1c + CR 611.2c: A resolving
                         // one-shot effect that grants a bare recipient-local
                         // attack prohibition fixes the installing player as
@@ -229,6 +253,9 @@ fn evaluate_static_condition_for_ability(
             resolve_quantity_with_targets(state, lhs, ability),
             resolve_quantity_with_targets(state, rhs, ability),
         ),
+        StaticCondition::QuantityQuality { quantity, quality } => quality.matches(i64::from(
+            resolve_quantity_with_targets(state, quantity, ability),
+        )),
         StaticCondition::And { conditions } => conditions
             .iter()
             .all(|condition| evaluate_static_condition_for_ability(state, condition, ability)),
@@ -246,7 +273,9 @@ fn evaluate_static_condition_for_ability(
 /// pay-to-end permission into the state-level construction authority so the
 /// field rides INSIDE the journaled `ResolvedContinuousEffectCommand` rather
 /// than being post-stamped after the fact (which is what `duration_subject`
-/// does, and which a journal replay would lose).
+/// does, and which a journal replay would lose). It also passes the creating
+/// ability, so an `UntilEvent` deadline is bound to that ability's own source
+/// (`ResolvedAbility::effect_source_ref`).
 ///
 /// Every `register_transient_effect` branch installs through here, so a branch
 /// that forgets the permission is impossible to write: the parameter is
@@ -255,32 +284,44 @@ fn evaluate_static_condition_for_ability(
 fn install_transient(
     state: &mut GameState,
     end_permission: Option<&EndEffectPermission>,
-    source_id: ObjectId,
-    controller: PlayerId,
+    ability: &ResolvedAbility,
     duration: Duration,
     affected: TargetFilter,
     modifications: Vec<ContinuousModification>,
     condition: Option<StaticCondition>,
-) -> u64 {
-    match end_permission {
-        Some(permission) => state.add_transient_continuous_effect_with_end_permission(
-            source_id,
-            controller,
-            duration,
-            affected,
-            modifications,
-            condition,
-            permission.clone(),
-        ),
-        None => state.add_transient_continuous_effect(
-            source_id,
-            controller,
-            duration,
-            affected,
-            modifications,
-            condition,
-        ),
+) -> Option<u64> {
+    let mut modifications = modifications;
+    // CR 201.5a + CR 400.7 + CR 113.7: a grant names the object whose ability resolved, as
+    // it was then; a resolving spell is still on the stack (CR 608.2n).
+    if let Some(granter) = ability.source_ref(state) {
+        crate::game::layers::latch_grants(
+            &mut modifications,
+            granter,
+            // CR 601.2i + CR 707.10: the caster is fixed when the spell became cast; a copy
+            // that was not cast has none.
+            ability
+                .cast_occurrence
+                .as_ref()
+                .map(|occurrence| occurrence.caster),
+        );
     }
+    state.add_transient_continuous_effect_inner(
+        ability.source_id,
+        ability.controller,
+        duration,
+        affected,
+        modifications,
+        condition,
+        end_permission.cloned(),
+        // CR 201.5a: a granted ability's effect names the object that granted it.
+        TransientContinuousEffectBindings {
+            granting_object: ability.context.granting_object,
+            ..TransientContinuousEffectBindings::default()
+        },
+        // CR 113.7a: an event deadline is bound to the creating ability's own
+        // source (or its last known information), not to whatever now holds the id.
+        Some(ability),
+    )
 }
 
 fn register_transient_effect(
@@ -292,7 +333,27 @@ fn register_transient_effect(
     end_permission: Option<&EndEffectPermission>,
 ) {
     let modifications = snapshot_transient_modifications(state, ability, &static_def.modifications);
+    let modifications = latch_chosen_text_words(state, modifications);
+    bind_transient_effect(
+        state,
+        ability,
+        static_def,
+        target_filter,
+        duration,
+        end_permission,
+        modifications,
+    );
+}
 
+fn bind_transient_effect(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    static_def: &StaticDefinition,
+    target_filter: Option<&TargetFilter>,
+    duration: &Duration,
+    end_permission: Option<&EndEffectPermission>,
+    modifications: Vec<ContinuousModification>,
+) {
     // CR 708.5: A duration-bound "you may look at face-down [permanents] you don't
     // control any time" permission (Lumbering Laundry) is a *player-scoped* look
     // permission, not an object grant. Unlike a pump or keyword grant, the set of
@@ -317,8 +378,7 @@ fn register_transient_effect(
             install_transient(
                 state,
                 end_permission,
-                ability.source_id,
-                ability.controller,
+                ability,
                 duration.clone(),
                 affected,
                 modifications,
@@ -355,8 +415,7 @@ fn register_transient_effect(
             install_transient(
                 state,
                 end_permission,
-                ability.source_id,
-                ability.controller,
+                ability,
                 duration.clone(),
                 affected,
                 modifications,
@@ -389,8 +448,7 @@ fn register_transient_effect(
             install_transient(
                 state,
                 end_permission,
-                ability.source_id,
-                ability.controller,
+                ability,
                 duration.clone(),
                 affected,
                 modifications,
@@ -444,8 +502,7 @@ fn register_transient_effect(
                 install_transient(
                     state,
                     end_permission,
-                    ability.source_id,
-                    ability.controller,
+                    ability,
                     duration.clone(),
                     affected,
                     modifications,
@@ -475,11 +532,23 @@ fn register_transient_effect(
         generic_effect_application_filter(target_filter, static_def.affected.as_ref()),
         Some(TargetFilter::SelfRef)
     ) {
+        // CR 400.7: a returned source is a new object, even when its storage ID
+        // is reused. Keep triggered self-reference exceptions and resolution-local
+        // relatching in their existing authorities.
+        let source_is_current = if ability.trigger_source.is_some() {
+            ability.self_ref_is_current(state)
+        } else {
+            ability.self_ref_binding(state).is_some()
+        };
+        if !source_is_current {
+            // CR 113.7a: only this definition loses its source recipient; the
+            // ability, independent definitions, and later instructions still resolve.
+            return;
+        }
         install_transient(
             state,
             end_permission,
-            ability.source_id,
-            ability.controller,
+            ability,
             duration.clone(),
             TargetFilter::SpecificObject {
                 id: ability.source_id,
@@ -501,8 +570,7 @@ fn register_transient_effect(
             install_transient(
                 state,
                 end_permission,
-                ability.source_id,
-                ability.controller,
+                ability,
                 duration.clone(),
                 TargetFilter::SpecificObject { id: obj_id },
                 modifications.clone(),
@@ -538,8 +606,7 @@ fn register_transient_effect(
             install_transient(
                 state,
                 end_permission,
-                ability.source_id,
-                ability.controller,
+                ability,
                 duration.clone(),
                 TargetFilter::SpecificObject { id: obj_id },
                 modifications,
@@ -562,9 +629,9 @@ fn register_transient_effect(
         && static_def
             .affected
             .as_ref()
-            .is_some_and(crate::game::ability_utils::filter_references_target_player);
+            .is_some_and(crate::types::ability::filter_references_target_player);
     let forwarded_parent_target = ability.context.forwarded_result_context.is_some()
-        && application_filter.is_some_and(crate::game::effects::filter_refs_parent_target);
+        && application_filter.is_some_and(crate::types::ability::filter_refs_parent_target);
     let inherited_object_target = (static_def
         .affected
         .as_ref()
@@ -576,9 +643,18 @@ fn register_transient_effect(
             .iter()
             .any(|target| matches!(target, TargetRef::Object(_)))
             || forwarded_parent_target);
-    let direct_binding_uses_targets = target_filter.is_some()
+    // CR 608.2b + CR 608.2c: a `DeclaredPlayer` application filter names one
+    // declared slot of the resolving chain, so it binds through
+    // `transient_bound_filters` (zero or one player) and never through the
+    // local target list, whichever other targets were carried.
+    let declared_player_binding =
+        application_filter.is_some_and(|f| matches!(f, TargetFilter::DeclaredPlayer { .. }));
+    // CR 109.5: "you" names the controller, never a target, so an inherited parent target must not rebind it.
+    let direct_binding_uses_targets = target_filter
+        .is_some_and(|f| !matches!(f, TargetFilter::Controller))
         || application_filter.is_some_and(generic_effect_affected_uses_inherited_targets)
-        || inherited_object_target;
+        || inherited_object_target
+        || declared_player_binding;
     // CR 608.2b + CR 608.2c: a `ParentTargetSlot` anaphor names a DECLARED slot
     // of the resolving chain root, so it binds through the carrier rather than
     // through this node's local list. Chain propagation copies the immediately
@@ -590,8 +666,9 @@ fn register_transient_effect(
     // broadcast path and drop its grant, but CR 608.2b's Plague Spores example
     // keeps it: "other parts of the effect for which those targets are not
     // illegal may still affect them."
-    let slot_anaphor_binding = application_filter
-        .is_some_and(|filter| matches!(filter, TargetFilter::ParentTargetSlot { .. }));
+    let slot_anaphor_binding = declared_player_binding
+        || application_filter
+            .is_some_and(|filter| matches!(filter, TargetFilter::ParentTargetSlot { .. }));
 
     // CR 611.1 + CR 611.2c + CR 115.1: Targeted effects — register one transient
     // continuous effect per target. `TargetRef::Object` binds to
@@ -610,7 +687,7 @@ fn register_transient_effect(
         && !static_affected_references_target_player
     {
         let skip_companion_player_target = target_filter
-            .is_some_and(crate::game::ability_utils::filter_references_target_player)
+            .is_some_and(crate::types::ability::filter_references_target_player)
             && matches!(ability.targets.first(), Some(TargetRef::Player(_)));
         for bound_filter in transient_bound_filters(
             state,
@@ -622,8 +699,7 @@ fn register_transient_effect(
             install_transient(
                 state,
                 end_permission,
-                ability.source_id,
-                ability.controller,
+                ability,
                 duration.clone(),
                 bound_filter,
                 modifications.clone(),
@@ -641,8 +717,7 @@ fn register_transient_effect(
             install_transient(
                 state,
                 end_permission,
-                ability.source_id,
-                ability.controller,
+                ability,
                 duration.clone(),
                 TargetFilter::SpecificPlayer { id: player_id },
                 modifications.clone(),
@@ -650,6 +725,37 @@ fn register_transient_effect(
             );
         }
     };
+
+    // CR 109.5 + CR 702.11c: "You and permanents you control gain hexproof" — the
+    // object broadcast below cannot bind a player, so each player member of an
+    // `Or` binds through its player arm and the object members broadcast together.
+    if let Some(TargetFilter::Or { filters }) = application_filter {
+        let (players, mut objects): (Vec<_>, Vec<_>) =
+            filters.iter().cloned().partition(binds_as_player);
+        if !players.is_empty() {
+            let objects = match objects.len() {
+                0 => None,
+                1 => objects.pop(),
+                _ => Some(TargetFilter::Or { filters: objects }),
+            };
+            for member in players.into_iter().chain(objects) {
+                let split = StaticDefinition {
+                    affected: Some(member),
+                    ..static_def.clone()
+                };
+                bind_transient_effect(
+                    state,
+                    ability,
+                    &split,
+                    None,
+                    duration,
+                    end_permission,
+                    modifications.clone(),
+                );
+            }
+            return;
+        }
+    }
 
     // Non-targeted: resolve the affected filter (SelfRef handled above).
     match application_filter {
@@ -661,8 +767,7 @@ fn register_transient_effect(
             install_transient(
                 state,
                 end_permission,
-                ability.source_id,
-                ability.controller,
+                ability,
                 duration.clone(),
                 TargetFilter::SpecificPlayer {
                     id: ability.controller,
@@ -672,17 +777,19 @@ fn register_transient_effect(
             );
         }
         // Pass-through: the caller already pinned a specific player.
+        // CR 800.4a: a player who left the game holds no objects.
         Some(TargetFilter::SpecificPlayer { id }) => {
-            install_transient(
-                state,
-                end_permission,
-                ability.source_id,
-                ability.controller,
-                duration.clone(),
-                TargetFilter::SpecificPlayer { id: *id },
-                modifications.clone(),
-                static_def.condition.clone(),
-            );
+            if crate::game::players::is_alive(state, *id) {
+                install_transient(
+                    state,
+                    end_permission,
+                    ability,
+                    duration.clone(),
+                    TargetFilter::SpecificPlayer { id: *id },
+                    modifications.clone(),
+                    static_def.condition.clone(),
+                );
+            }
         }
         // CR 104.3: "There are several ways to lose the game." + CR 119.7: "If an
         // effect says that a player can't gain life, that player can't make their
@@ -722,14 +829,7 @@ fn register_transient_effect(
         // keeps the arm scoped to `You`/`Opponent`/unscoped controllers; filters
         // carrying `properties` or a context-relative controller are genuine
         // object filters and stay on the broadcast path.
-        Some(player_filter @ TargetFilter::Typed(tf))
-            if tf.type_filters.is_empty()
-                && tf.properties.is_empty()
-                && matches!(
-                    tf.controller,
-                    None | Some(ControllerRef::You) | Some(ControllerRef::Opponent)
-                ) =>
-        {
+        Some(player_filter @ TargetFilter::Typed(tf)) if is_bare_player_typed(tf) => {
             // CR 104.2: eliminated players hold no game-state restrictions.
             let eliminated: std::collections::HashSet<PlayerId> = state
                 .players
@@ -767,8 +867,7 @@ fn register_transient_effect(
                 install_transient(
                     state,
                     end_permission,
-                    ability.source_id,
-                    ability.controller,
+                    ability,
                     duration.clone(),
                     TargetFilter::SpecificObject { id },
                     modifications.clone(),
@@ -802,8 +901,7 @@ fn register_transient_effect(
                 install_transient(
                     state,
                     end_permission,
-                    ability.source_id,
-                    ability.controller,
+                    ability,
                     duration.clone(),
                     TargetFilter::SpecificObject { id },
                     modifications.clone(),
@@ -821,8 +919,31 @@ fn register_transient_effect(
                 install_transient(
                     state,
                     end_permission,
-                    ability.source_id,
-                    ability.controller,
+                    ability,
+                    duration.clone(),
+                    TargetFilter::SpecificObject { id: obj_id },
+                    modifications.clone(),
+                    static_def.condition.clone(),
+                );
+            }
+        }
+        // CR 608.2k + CR 400.7: "it doesn't untap ..." after "tap that
+        // creature" names the trigger event's recipient — an untargeted referent, not
+        // a battlefield population. Bind only the incarnation the event recorded and
+        // only while it is a phased-in permanent, so a recipient that left and
+        // returned before resolution is a new object and receives nothing. A delayed
+        // trigger that pinned its referent into `targets` (CR 603.7c) keeps the
+        // existing path.
+        Some(TargetFilter::EventTarget) if ability.targets.is_empty() => {
+            for obj_id in crate::game::targeting::resolve_event_referent_permanents(
+                state,
+                &TargetFilter::EventTarget,
+                ability.source_id,
+            ) {
+                install_transient(
+                    state,
+                    end_permission,
+                    ability,
                     duration.clone(),
                     TargetFilter::SpecificObject { id: obj_id },
                     modifications.clone(),
@@ -849,8 +970,7 @@ fn register_transient_effect(
                 install_transient(
                     state,
                     end_permission,
-                    ability.source_id,
-                    ability.controller,
+                    ability,
                     duration.clone(),
                     TargetFilter::SpecificObject { id: obj_id },
                     modifications.clone(),
@@ -859,6 +979,84 @@ fn register_transient_effect(
             }
         }
     }
+}
+
+/// An application filter that `bind_transient_effect`'s non-targeted match binds to players.
+fn binds_as_player(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Controller | TargetFilter::SpecificPlayer { .. } | TargetFilter::Player => {
+            true
+        }
+        TargetFilter::Typed(tf) => is_bare_player_typed(tf),
+        TargetFilter::None
+        | TargetFilter::Any
+        | TargetFilter::SourceController
+        | TargetFilter::ControllerAndControlledPermanents { .. }
+        | TargetFilter::Opponent
+        | TargetFilter::SelfRef
+        | TargetFilter::GrantingObject { .. }
+        | TargetFilter::SourceOrPaired
+        | TargetFilter::Not { .. }
+        | TargetFilter::Or { .. }
+        | TargetFilter::And { .. }
+        | TargetFilter::StackAbility { .. }
+        | TargetFilter::StackSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::PlayerWhoChoseLabel { .. }
+        | TargetFilter::PlayerMatching { .. }
+        | TargetFilter::Neighbor { .. }
+        | TargetFilter::ScopedPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::LastRevealed
+        | TargetFilter::LastZoneChanged
+        | TargetFilter::CostPaidObject
+        | TargetFilter::AmassedArmy
+        | TargetFilter::ChosenCard
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::TrackedSetFiltered { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::ExiledCardByIndex { .. }
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::AffectedObjectOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
+        | TargetFilter::AttackedPlayerOrPlaneswalker
+        | TargetFilter::EventTarget
+        | TargetFilter::TriggeringSourceController
+        | TargetFilter::EventTargetController
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
+        | TargetFilter::DeclaredPlayer { .. }
+        | TargetFilter::ParentTargetController
+        | TargetFilter::ParentTargetOwner
+        | TargetFilter::SourceChosenPlayer
+        | TargetFilter::OriginalController
+        | TargetFilter::OriginalSource
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageSource
+        | TargetFilter::PostReplacementDamageTarget
+        | TargetFilter::PostReplacementDamageTargetOwner
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::HasChosenName
+        | TargetFilter::ChosenDamageSource { .. }
+        | TargetFilter::Named { .. }
+        | TargetFilter::Owner
+        | TargetFilter::AllPlayers => false,
+    }
+}
+
+/// A `Typed` filter with no types or properties and a `You`/`Opponent`/unscoped
+/// controller names players, not permanents.
+fn is_bare_player_typed(tf: &TypedFilter) -> bool {
+    tf.type_filters.is_empty()
+        && tf.properties.is_empty()
+        && matches!(
+            tf.controller,
+            None | Some(ControllerRef::You) | Some(ControllerRef::Opponent)
+        )
 }
 
 // CR 400.7 + CR 603.7c: a delayed `GenericEffect` whose pinned referent became a
@@ -935,6 +1133,15 @@ fn transient_bound_filters(
         return parent_target_slot_filters(state, ability, *index);
     }
 
+    // CR 608.2b + CR 608.2c: the declared player of the chain, bound to no one
+    // when that target was illegal on resolution.
+    if let Some(TargetFilter::DeclaredPlayer { group }) = resolved_filter {
+        return crate::game::targeting::resolve_live_declared_player(state, ability, *group)
+            .map(|id| TargetFilter::SpecificPlayer { id })
+            .into_iter()
+            .collect();
+    }
+
     // The `skip` is positional (it drops a companion player slot), but it skips
     // from the FRONT of a list whose leading element is a player ref, and
     // `live_object_targets` passes every `TargetRef::Player` through unfiltered.
@@ -990,75 +1197,47 @@ fn forwarded_result_object_targets(
         })
 }
 
-pub fn generic_effect_affected_uses_inherited_targets(filter: &TargetFilter) -> bool {
-    matches!(
-        filter,
-        TargetFilter::TriggeringSource
-            | TargetFilter::ParentTarget
-            | TargetFilter::ParentTargetSlot { .. }
-            | TargetFilter::CostPaidObject
-            // CR 701.47c: "the amassed Army" is a resolution-local single-object
-            // reference (`ResolvedAbility.amassed_army_object`), not a broadcast
-            // population — mirrors `CostPaidObject` immediately above. This
-            // routes a future "amass N, then the amassed Army gains/gets ..."
-            // continuous grant to the dedicated `amassed_army_object` arm below
-            // (mirroring the `CostPaidObject` arm) and to the matching
-            // early-return guard in the broadcast-scan arm, instead of relying
-            // on the battlefield re-scan happening to narrow to one object.
-            | TargetFilter::AmassedArmy
-    )
-}
+/// CR 608.2d + CR 611.2c: the pending `Chosen` modification latches to the `Fixed` pair the controller just named, and the answer is taken so a skipped prompt can never latch a stale earlier one.
+fn latch_chosen_text_words(
+    state: &mut GameState,
+    modifications: Vec<ContinuousModification>,
+) -> Vec<ContinuousModification> {
+    use crate::types::ability::{ChoiceValue, TextSubstitution, TextSubstitutionSpec};
 
-/// CR 608.2c: Choose the filter that governs *where modifications land* at
-/// resolution. The outer `GenericEffect.target` slot names what the player
-/// chose; `static_def.affected` names how that choice is bound onto objects.
-/// Inherited-reference `affected` values (`ParentTarget`, …) win over the
-/// targeting descriptor so a `target: Typed(Creature)` + `affected:
-/// ParentTarget` pair binds to the chosen creature, not every creature.
-pub fn generic_effect_application_filter<'a>(
-    target_filter: Option<&'a TargetFilter>,
-    static_affected: Option<&'a TargetFilter>,
-) -> Option<&'a TargetFilter> {
-    if static_affected.is_some_and(generic_effect_affected_uses_inherited_targets) {
-        static_affected
-    } else {
-        target_filter.or(static_affected)
+    let has_chosen = modifications.iter().any(|m| {
+        matches!(
+            m,
+            ContinuousModification::SubstituteTextWord {
+                substitution: TextSubstitutionSpec::Chosen { .. },
+            }
+        )
+    });
+    if !has_chosen {
+        return modifications;
     }
-}
-
-/// CR 508.1a + CR 608.2c + CR 611.2c: SINGLE AUTHORITY for "which static on this
-/// `GenericEffect` names the population `those creatures` freezes" — shared by the
-/// parser's population-publisher routing (`oracle_effect::lower`) and the runtime's
-/// publish arm (`effects::affected_objects_from_events`) so lowering can never mark
-/// a head a publisher that resolution then declines to publish.
-///
-/// Eligible modes are the ones whose population is FROZEN at resolution rather than
-/// re-evaluated live at each future check: a coercion requirement (`MustAttack` /
-/// `MustAttackDefender`, CR 508.1a/d) or a `Continuous` grant.
-///
-/// Selection is `find_map`, NOT `find`-then-ask: a chain may carry an earlier
-/// eligible static with no application filter (a `Continuous` coercion with neither
-/// an outer `target` nor an `affected`), and taking it would suppress a later
-/// application-bearing broadcast static — so neither routing nor publishing would
-/// see the actual population. Shape mirrors the `any`-quantified sibling
-/// `is_mass_coerce_static` (`oracle_effect/mod.rs`) rather than a first-wins scan.
-pub fn generic_effect_population_filter<'a>(
-    target_filter: Option<&'a TargetFilter>,
-    static_abilities: &'a [StaticDefinition],
-) -> Option<&'a TargetFilter> {
-    static_abilities
-        .iter()
-        .filter(|static_def| {
-            matches!(
-                static_def.mode,
-                crate::types::statics::StaticMode::MustAttack
-                    | crate::types::statics::StaticMode::MustAttackDefender { .. }
-                    | crate::types::statics::StaticMode::Continuous
-            )
+    let answer = state.last_named_choice.take();
+    modifications
+        .into_iter()
+        .map(|modification| match modification {
+            ContinuousModification::SubstituteTextWord {
+                substitution: TextSubstitutionSpec::Chosen { domains },
+            } => {
+                let latched = match &answer {
+                    Some(ChoiceValue::Label(label)) => {
+                        TextSubstitution::from_label(label, &domains)
+                    }
+                    _ => None,
+                };
+                ContinuousModification::SubstituteTextWord {
+                    substitution: latched.map_or(
+                        TextSubstitutionSpec::Chosen { domains },
+                        TextSubstitutionSpec::Fixed,
+                    ),
+                }
+            }
+            other => other,
         })
-        .find_map(|static_def| {
-            generic_effect_application_filter(target_filter, static_def.affected.as_ref())
-        })
+        .collect()
 }
 
 fn snapshot_transient_modifications(
@@ -1184,6 +1363,42 @@ fn snapshot_transient_modifications(
                 // Symmetric with the Protection arm above: CR 609.3 + F1.
                 None => modification.clone(),
             },
+            // CR 608.2d + CR 608.2h: "becomes the creature type / basic land type of
+            // your choice" announces its answer while the effect is applied
+            // (`persist: false`, so it lives only in `last_named_choice`), and CR 608.2h
+            // fixes that answer ONCE, when the effect is applied. Latch it into the
+            // payload so each resolution's type change carries its own answer — a
+            // second activation (Mistform Stalker), or the same ability on another
+            // target, can no longer read or overwrite it.
+            //
+            // CR 611.3a: only resolution-created effects are latched — a printed
+            // static's `AddChosenSubtype` / `SetChosenBasicLandType` (Metallic Mimic,
+            // Phantasmal Terrain) never reaches this function and stays a live read in
+            // `game/layers.rs`.
+            ContinuousModification::AddChosenSubtype { kind } => {
+                match crate::game::effects::choose::resolution_chosen_subtype(
+                    state,
+                    ability.source_id,
+                    kind,
+                ) {
+                    Some(subtype) => ContinuousModification::AddSubtype { subtype },
+                    // CR 609.3: nothing was chosen; leave the payload untouched so
+                    // the existing live layer read stays byte-identical.
+                    None => modification.clone(),
+                }
+            }
+            // CR 305.7: the bare land form sets the land's subtype to the chosen basic
+            // land type, latched exactly as above (CR 608.2d + CR 608.2h).
+            ContinuousModification::SetChosenBasicLandType => {
+                match crate::game::effects::choose::resolution_chosen_basic_land_type(
+                    state,
+                    ability.source_id,
+                ) {
+                    Some(land_type) => ContinuousModification::SetBasicLandType { land_type },
+                    // CR 609.3: as above.
+                    None => modification.clone(),
+                }
+            }
             _ => modification.clone(),
         })
         .collect()
@@ -1354,18 +1569,75 @@ fn defended_scope_uses_source_controller_anchor(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::game_object::ObjectIncarnationRefExt;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        ContinuousModification, ControllerRef, Duration, QuantityExpr, QuantityRef,
-        StaticDefinition, TargetFilter, TypedFilter,
+        BasicLandType, ChoiceValue, ChosenSubtypeKind, ContinuousModification, ControllerRef,
+        Duration, QuantityExpr, QuantityRef, StaticDefinition, TargetFilter, TypedFilter,
     };
-    use crate::types::card_type::CoreType;
+    use crate::types::card_type::{CoreType, SubtypeSet};
     use crate::types::events::GameEvent;
     use crate::types::game_state::{StackEntry, StackEntryKind};
     use crate::types::identifiers::{CardId, ObjectIncarnationRef, TrackedSetId};
     use crate::types::keywords::Keyword;
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
+
+    #[test]
+    fn quantity_quality_static_condition_for_ability_resolves_targets() {
+        use crate::types::ability::{NumberQuality, Parity, PlayerScope, TargetRef};
+        // The ability-scoped evaluator resolves the quantity against the
+        // ability's targets: "target player has an odd number of cards in hand".
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(0x0D000),
+            PlayerId(0),
+            "Quality Target Source".to_string(),
+            Zone::Battlefield,
+        );
+        for (owner, count) in [(PlayerId(1), 3_u64), (PlayerId(0), 2)] {
+            for i in 0..count {
+                create_object(
+                    &mut state,
+                    CardId(0x0D100 + u64::from(owner.0) * 0x10 + i),
+                    owner,
+                    format!("Hand Card {i}"),
+                    Zone::Hand,
+                );
+            }
+        }
+        let ability = ResolvedAbility::new(
+            Effect::Proliferate,
+            vec![TargetRef::Player(PlayerId(1))],
+            source,
+            PlayerId(0),
+        );
+        let target_hand = |quality| StaticCondition::QuantityQuality {
+            quantity: QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::Target,
+                },
+            },
+            quality,
+        };
+        assert!(
+            evaluate_static_condition_for_ability(
+                &state,
+                &target_hand(NumberQuality::Parity(Parity::Odd)),
+                &ability
+            ),
+            "the targeted player's 3 cards are odd"
+        );
+        assert!(
+            !evaluate_static_condition_for_ability(
+                &state,
+                &target_hand(NumberQuality::Parity(Parity::Even)),
+                &ability
+            ),
+            "the targeted player's 3 cards are not even"
+        );
+    }
 
     #[test]
     fn generic_effect_registers_transient_effect_for_self_ref() {
@@ -1410,6 +1682,96 @@ mod tests {
             vec![ContinuousModification::AddKeyword {
                 keyword: Keyword::Flying,
             }]
+        );
+    }
+
+    /// CR 608.2d + CR 608.2h: a resolution-created chosen-subtype type change
+    /// latches THIS resolution's `persist: false` answer into a fixed payload;
+    /// with no answer anywhere the payload is left untouched (CR 609.3).
+    #[test]
+    fn snapshot_latches_this_resolutions_chosen_subtype() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+                end_cost: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let set_creature_type = vec![
+            ContinuousModification::RemoveAllSubtypes {
+                set: SubtypeSet::Creature,
+            },
+            ContinuousModification::AddChosenSubtype {
+                kind: ChosenSubtypeKind::CreatureType,
+            },
+        ];
+
+        // Creature type: the set pair keeps its RemoveAllSubtypes and the chosen
+        // half becomes a fixed AddSubtype.
+        state.last_named_choice = Some(ChoiceValue::CreatureType("Elf".to_string()));
+        assert_eq!(
+            snapshot_transient_modifications(&state, &ability, &set_creature_type),
+            vec![
+                ContinuousModification::RemoveAllSubtypes {
+                    set: SubtypeSet::Creature,
+                },
+                ContinuousModification::AddSubtype {
+                    subtype: "Elf".to_string(),
+                },
+            ]
+        );
+
+        // Basic land type: the set form becomes a fixed SetBasicLandType; the
+        // retain form becomes a fixed AddSubtype.
+        state.last_named_choice = Some(ChoiceValue::BasicLandType(BasicLandType::Island));
+        assert_eq!(
+            snapshot_transient_modifications(
+                &state,
+                &ability,
+                &[ContinuousModification::SetChosenBasicLandType],
+            ),
+            vec![ContinuousModification::SetBasicLandType {
+                land_type: BasicLandType::Island,
+            }]
+        );
+        assert_eq!(
+            snapshot_transient_modifications(
+                &state,
+                &ability,
+                &[ContinuousModification::AddChosenSubtype {
+                    kind: ChosenSubtypeKind::BasicLandType,
+                }],
+            ),
+            vec![ContinuousModification::AddSubtype {
+                subtype: "Island".to_string(),
+            }]
+        );
+
+        // No answer and a bare source: nothing to latch, payload unchanged.
+        state.last_named_choice = None;
+        assert_eq!(
+            snapshot_transient_modifications(&state, &ability, &set_creature_type),
+            set_creature_type
+        );
+        assert_eq!(
+            snapshot_transient_modifications(
+                &state,
+                &ability,
+                &[ContinuousModification::SetChosenBasicLandType],
+            ),
+            vec![ContinuousModification::SetChosenBasicLandType]
         );
     }
 
@@ -2592,6 +2954,133 @@ mod tests {
             .contains(&ContinuousModification::AddKeyword {
                 keyword: Keyword::Haste,
             }));
+    }
+
+    /// CR 608.2k + CR 400.7: Kashi-Tribe Warriors' "it doesn't untap
+    /// during its controller's next untap step" (`affected: EventTarget`, no
+    /// chosen targets) binds exactly the damage recipient the trigger event
+    /// recorded. A recipient that left the battlefield and returned before
+    /// resolution is a new object and receives no restriction.
+    #[test]
+    fn generic_effect_event_target_skips_blinked_recipient() {
+        use crate::types::ability::PlayerScope;
+        use crate::types::game_state::DamageRecord;
+        use crate::types::phase::Phase;
+        use crate::types::statics::StaticMode;
+
+        // Source and recipient with distinct incarnations, the published
+        // combat damage event, and the matching ledger record (same source,
+        // source incarnation, amount and combat-ness) stamping the recipient.
+        fn fixture(blink_recipient: bool) -> (GameState, ResolvedAbility, ObjectId) {
+            let mut state = GameState::new_two_player(42);
+            let source = create_object(
+                &mut state,
+                CardId(1),
+                PlayerId(0),
+                "Kashi-Tribe Warriors".to_string(),
+                Zone::Battlefield,
+            );
+            let recipient = create_object(
+                &mut state,
+                CardId(2),
+                PlayerId(1),
+                "Wall of Wood".to_string(),
+                Zone::Battlefield,
+            );
+            for _ in 0..3 {
+                state.objects.get_mut(&source).unwrap().bump_incarnation();
+            }
+            let source_epoch = state.objects[&source].incarnation;
+            let recipient_epoch = state.objects[&recipient].incarnation;
+            assert_ne!(source_epoch, recipient_epoch, "fixture reach guard");
+            state.damage_dealt_this_turn.push_back(DamageRecord {
+                source_id: source,
+                source_incarnation: Some(source_epoch),
+                target: TargetRef::Object(recipient),
+                target_incarnation: Some(recipient_epoch),
+                amount: 2,
+                is_combat: true,
+                ..Default::default()
+            });
+            state.current_trigger_event = Some(GameEvent::DamageDealt {
+                source_id: source,
+                target: TargetRef::Object(recipient),
+                amount: 2,
+                is_combat: true,
+                excess: 0,
+                source_incarnation: Some(source_epoch),
+            });
+            if blink_recipient {
+                let mut zone_events = Vec::new();
+                crate::game::zones::move_to_zone(
+                    &mut state,
+                    recipient,
+                    Zone::Exile,
+                    &mut zone_events,
+                );
+                crate::game::zones::move_to_zone(
+                    &mut state,
+                    recipient,
+                    Zone::Battlefield,
+                    &mut zone_events,
+                );
+                assert_eq!(state.objects[&recipient].zone, Zone::Battlefield);
+                assert_ne!(
+                    state.objects[&recipient].incarnation, recipient_epoch,
+                    "fixture reach guard: the blink must create a new incarnation"
+                );
+            }
+            let duration = Duration::UntilNextStepOf {
+                step: Phase::Untap,
+                player: PlayerScope::Controller,
+            };
+            let static_def = StaticDefinition::new(StaticMode::CantUntap)
+                .affected(TargetFilter::EventTarget)
+                .modifications(vec![ContinuousModification::AddStaticMode {
+                    mode: StaticMode::CantUntap,
+                }]);
+            let ability = ResolvedAbility::new(
+                Effect::GenericEffect {
+                    static_abilities: vec![static_def],
+                    duration: Some(duration.clone()),
+                    target: None,
+                    end_cost: None,
+                },
+                vec![],
+                source,
+                PlayerId(0),
+            )
+            .duration(duration);
+            (state, ability, recipient)
+        }
+
+        // Positive half: the recipient the event recorded is bound.
+        let (mut state, ability, recipient) = fixture(false);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(
+            state.transient_continuous_effects.len(),
+            1,
+            "{:?}",
+            state.transient_continuous_effects
+        );
+        assert_eq!(
+            state.transient_continuous_effects[0].affected,
+            TargetFilter::SpecificObject { id: recipient }
+        );
+
+        // Negative half: the recipient blinked before resolution.
+        let (mut state, ability, recipient) = fixture(true);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        assert!(
+            !state
+                .transient_continuous_effects
+                .iter()
+                .any(|tce| tce.affected == TargetFilter::SpecificObject { id: recipient }),
+            "CR 400.7: the returned permanent is a new object and gets no restriction; TCEs: {:?}",
+            state.transient_continuous_effects
+        );
     }
 
     /// Issue #323 class: propagated `ability.targets` must not override TriggeringSource.
@@ -4869,6 +5358,42 @@ mod tests {
                 .affected,
             TargetFilter::SpecificObject { id: army },
             "the grant must name the amassed Army itself"
+        );
+    }
+
+    /// CR 608.2d: the word answer latches once, so a later effect whose prompt was skipped must not read it.
+    #[test]
+    fn text_word_latch_consumes_the_answer() {
+        use crate::types::ability::{
+            ChoiceValue, TextSubstitution, TextSubstitutionSpec, TextWordDomain,
+        };
+
+        let mut state = GameState::new_two_player(42);
+        let chosen = || {
+            vec![ContinuousModification::SubstituteTextWord {
+                substitution: TextSubstitutionSpec::Chosen {
+                    domains: vec![TextWordDomain::BasicLandType],
+                },
+            }]
+        };
+        state.last_named_choice = Some(ChoiceValue::Label("Swamp -> Plains".into()));
+
+        let latched = latch_chosen_text_words(&mut state, chosen());
+        let expected =
+            TextSubstitution::from_label("Swamp -> Plains", &[TextWordDomain::BasicLandType])
+                .expect("valid pair");
+        assert_eq!(
+            latched,
+            [ContinuousModification::SubstituteTextWord {
+                substitution: TextSubstitutionSpec::Fixed(expected),
+            }]
+        );
+        assert!(state.last_named_choice.is_none(), "the answer is taken");
+
+        assert_eq!(
+            latch_chosen_text_words(&mut state, chosen()),
+            chosen(),
+            "with no fresh answer the effect stays inert"
         );
     }
 }

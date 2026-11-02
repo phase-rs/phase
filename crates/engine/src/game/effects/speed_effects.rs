@@ -1,7 +1,8 @@
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::speed::{decrease_speed, increase_speed, set_speed};
 use crate::types::ability::{
-    Effect, EffectError, PlayerFilter, ResolvedAbility, SpeedDelta, TargetFilter, TargetRef,
+    Effect, EffectError, PlayerFilter, PlayerRelation, ResolvedAbility, SpeedDelta, TargetFilter,
+    TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -91,50 +92,53 @@ pub(crate) fn players_for_filter(
             })
             .map(|player| player.id)
             .collect(),
-        // CR 508.6 + CR 102.2 + CR 508.1b: each opponent of the controller who
-        // is attacking the enchanted/defending player this combat (the Commander
-        // 2017 "each opponent attacking that player does the same" curse rider).
-        // The "that player" anchor is the trigger source's AttachedTo host.
-        PlayerFilter::OpponentAttackingEnchantedPlayer => {
-            match crate::game::effects::enchanted_player_anchor(state, source_id) {
-                Some(enchanted) => state
-                    .players
-                    .iter()
-                    .filter(|player| !player.is_eliminated)
-                    .filter(|player| {
-                        player.id != controller
-                            && state.player_attacked_player_this_combat(player.id, enchanted)
-                    })
-                    .map(|player| player.id)
-                    .collect(),
-                None => Vec::new(),
-            }
-        }
+        // CR 508.6 + CR 102.2 + CR 102.3: each opponent of the controller who is
+        // attacking the enchanted player (the Commander 2017 "each opponent
+        // attacking that player does the same" curse rider). Delegates to the
+        // single scope authority (live, kind-preserving, team-aware).
+        PlayerFilter::OpponentAttackingEnchantedPlayer => state
+            .players
+            .iter()
+            .filter(|player| !player.is_eliminated)
+            .filter(|player| {
+                crate::game::effects::matches_player_scope(
+                    state, player.id, filter, controller, source_id,
+                )
+            })
+            .map(|player| player.id)
+            .collect(),
         PlayerFilter::All => state
             .players
             .iter()
             .filter(|player| !player.is_eliminated)
             .map(|player| player.id)
             .collect(),
-        // CR 608.2c + CR 109.4 + CR 608.2h: every non-eliminated player except
-        // the anchor's set. The ability-aware path: the `exclude` anchor is
-        // resolved recursively through this same function so an
-        // ability-target-dependent anchor (ParentObjectTargetController) reads
-        // `ability.targets` / last-known info, which the generic
-        // `matches_player_scope` predicate cannot. This is the authoritative
-        // resolver for `AllExcept` effect-iteration (see the player_scope driver
-        // routing in `effects::mod.rs`).
-        PlayerFilter::AllExcept { exclude }
+        // CR 608.2c + CR 109.4 + CR 608.2h: every non-eliminated player
+        // matching the base `relation` except the anchor's set. The
+        // ability-aware path: the `exclude` anchor is resolved recursively
+        // through this same function so an ability-target-dependent anchor
+        // (ParentObjectTargetController) reads `ability.targets` /
+        // last-known info, which the generic `matches_player_scope`
+        // predicate cannot. This is the authoritative resolver for
+        // `AllExcept` effect-iteration (see the player_scope driver routing
+        // in `effects::mod.rs`).
+        PlayerFilter::AllExcept { exclude, relation }
             if matches!(exclude.as_ref(), PlayerFilter::ParentObjectTargetOwner) =>
         {
-            players_except_required_owner_anchor(state, ability)
+            players_except_required_owner_anchor(state, ability, relation)
         }
-        PlayerFilter::AllExcept { exclude } => {
+        PlayerFilter::AllExcept { exclude, relation } => {
             let excluded = players_for_filter(state, exclude, ability);
             state
                 .players
                 .iter()
-                .filter(|player| !player.is_eliminated && !excluded.contains(&player.id))
+                .filter(|player| {
+                    !player.is_eliminated
+                        && crate::game::players::matches_relation(
+                            state, player.id, controller, *relation,
+                        )
+                        && !excluded.contains(&player.id)
+                })
                 .map(|player| player.id)
                 .collect()
         }
@@ -267,6 +271,31 @@ pub(crate) fn players_for_filter(
         PlayerFilter::ParentObjectTargetOwner => parent_object_target_owner_player(state, ability)
             .into_iter()
             .collect(),
+        // CR 201.5a: an unlatched caster names nobody.
+        PlayerFilter::GrantingObjectCaster => Vec::new(),
+        // CR 102.1 + CR 608.2c: the union of the members, each resolved by its
+        // own ability-aware verdict here. The union never adds a player no
+        // member names; first-seen order is kept and duplicates are dropped.
+        PlayerFilter::AnyOf { filters } => {
+            let mut players: Vec<PlayerId> = Vec::new();
+            for member in filters {
+                for player in players_for_filter(state, member, ability) {
+                    if !players.contains(&player) {
+                        players.push(player);
+                    }
+                }
+            }
+            players
+        }
+        // CR 115.1 + CR 608.2b: the first declared player target of the
+        // resolving ability (root-chain fallback included); names nobody when
+        // none is declared or that player has left the game.
+        PlayerFilter::TargetPlayer => {
+            crate::game::filter::target_player_from_ability_or_root(state, Some(ability))
+                .and_then(|player| live_player(state, player))
+                .into_iter()
+                .collect()
+        }
         // CR 608.2c + CR 109.4: the resolution-scoped chosen player at `index`.
         PlayerFilter::ChosenPlayer { index } => ability
             .chosen_players
@@ -330,14 +359,8 @@ pub(crate) fn players_for_filter(
                         value,
                         controller,
                         crate::game::quantity::QuantityContext {
-                            entering: None,
-                            source: source_id,
-                            trigger_source: None,
-                            recipient: None,
                             scoped_player: Some(player.id),
-                            damage_source: None,
-                            spell: None,
-                            event_amount: None,
+                            ..crate::game::quantity::QuantityContext::new(source_id)
                         },
                     );
                     crate::game::effects::candidate_player_scalar_with_state(
@@ -413,6 +436,7 @@ fn parent_object_target_owner_anchor(
 fn players_except_required_owner_anchor(
     state: &GameState,
     ability: &ResolvedAbility,
+    relation: &PlayerRelation,
 ) -> Vec<PlayerId> {
     // CR 108.3 + CR 800.4a: "each other player" excludes the object's owner
     // even if that owner has left the game before this still-controlled trigger
@@ -423,7 +447,16 @@ fn players_except_required_owner_anchor(
     state
         .players
         .iter()
-        .filter(|player| !player.is_eliminated && player.id != owner)
+        .filter(|player| {
+            !player.is_eliminated
+                && player.id != owner
+                && crate::game::players::matches_relation(
+                    state,
+                    player.id,
+                    ability.controller,
+                    *relation,
+                )
+        })
         .map(|player| player.id)
         .collect()
 }
@@ -617,6 +650,7 @@ mod tests {
 
         let filter = PlayerFilter::AllExcept {
             exclude: Box::new(PlayerFilter::ParentObjectTargetController),
+            relation: PlayerRelation::All,
         };
         let ability = ResolvedAbility::new(
             Effect::StartYourEngines {
@@ -636,6 +670,162 @@ mod tests {
         );
     }
 
+    /// CR 102.2 + CR 102.3 + CR 115.1 + CR 608.2c: `AllExcept` with an
+    /// `Opponent` base and a `TargetPlayer` anchor (the "each of your other
+    /// opponents" shape) names the controller's opponents minus the declared
+    /// player target. With a 3-player free-for-all, controller P0, and player
+    /// target P1, the result is {P2}; the same anchor under the `All` base
+    /// keeps the controller ({P0, P2}).
+    #[test]
+    fn all_except_opponent_base_excludes_declared_player_target() {
+        let state = GameState::new(FormatConfig::standard(), 3, 0);
+        let ability = ResolvedAbility::new(
+            Effect::StartYourEngines {
+                player_scope: PlayerFilter::Controller,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(0),
+            PlayerId(0),
+        );
+
+        let opponents = PlayerFilter::AllExcept {
+            exclude: Box::new(PlayerFilter::TargetPlayer),
+            relation: PlayerRelation::Opponent,
+        };
+        let mut selected = players_for_filter(&state, &opponents, &ability);
+        selected.sort_by_key(|p| p.0);
+        assert_eq!(
+            selected,
+            vec![PlayerId(2)],
+            "opponents {{P1, P2}} minus declared target P1"
+        );
+
+        let everyone = PlayerFilter::AllExcept {
+            exclude: Box::new(PlayerFilter::TargetPlayer),
+            relation: PlayerRelation::All,
+        };
+        let mut selected = players_for_filter(&state, &everyone, &ability);
+        selected.sort_by_key(|p| p.0);
+        assert_eq!(
+            selected,
+            vec![PlayerId(0), PlayerId(2)],
+            "all players {{P0, P1, P2}} minus declared target P1"
+        );
+    }
+
+    /// CR 102.1 + CR 608.2c + CR 115.1 + CR 608.2b: `TargetPlayer` reads the
+    /// first declared PLAYER target, and `AnyOf` is the ordered, deduplicated
+    /// union of each member's ability-aware set — so an ability-anchored member
+    /// (`ParentObjectTargetController`) that the generic predicate cannot
+    /// answer still contributes its player.
+    #[test]
+    fn any_of_and_target_player_resolve_through_the_ability_aware_resolver() {
+        use crate::game::zones::create_object;
+        use crate::types::identifiers::CardId;
+
+        let mut state = GameState::new_two_player(42);
+        // Object owned and controlled by P1 — the parent object target.
+        let permanent = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Targeted Permanent".to_string(),
+            Zone::Battlefield,
+        );
+        let ability_with = |targets: Vec<TargetRef>| {
+            ResolvedAbility::new(
+                Effect::StartYourEngines {
+                    player_scope: PlayerFilter::Controller,
+                },
+                targets,
+                ObjectId(0),
+                PlayerId(0),
+            )
+        };
+        let controller_and_target = PlayerFilter::AnyOf {
+            filters: vec![PlayerFilter::Controller, PlayerFilter::TargetPlayer],
+        };
+
+        // (a) Positive: the controller and the declared player target.
+        assert_eq!(
+            players_for_filter(
+                &state,
+                &controller_and_target,
+                &ability_with(vec![TargetRef::Player(PlayerId(1))]),
+            ),
+            vec![PlayerId(0), PlayerId(1)],
+        );
+        // (b) Both members name P0: the union holds it once.
+        assert_eq!(
+            players_for_filter(
+                &state,
+                &controller_and_target,
+                &ability_with(vec![TargetRef::Player(PlayerId(0))]),
+            ),
+            vec![PlayerId(0)],
+        );
+        // (c) The union adds no implicit controller.
+        assert_eq!(
+            players_for_filter(
+                &state,
+                &PlayerFilter::AnyOf {
+                    filters: vec![PlayerFilter::Opponent],
+                },
+                &ability_with(Vec::new()),
+            ),
+            vec![PlayerId(1)],
+        );
+        // (d) An ability-anchored member resolves ability-aware: the parent
+        // target's controller (P1) joins the controller.
+        assert_eq!(
+            players_for_filter(
+                &state,
+                &PlayerFilter::AnyOf {
+                    filters: vec![
+                        PlayerFilter::Controller,
+                        PlayerFilter::ParentObjectTargetController,
+                    ],
+                },
+                &ability_with(vec![TargetRef::Object(permanent)]),
+            ),
+            vec![PlayerId(0), PlayerId(1)],
+        );
+        // (e) The first PLAYER target is read past an earlier object target.
+        assert_eq!(
+            players_for_filter(
+                &state,
+                &PlayerFilter::TargetPlayer,
+                &ability_with(vec![
+                    TargetRef::Object(permanent),
+                    TargetRef::Player(PlayerId(1)),
+                ]),
+            ),
+            vec![PlayerId(1)],
+        );
+        // (f) No declared player target names nobody.
+        assert!(players_for_filter(
+            &state,
+            &PlayerFilter::TargetPlayer,
+            &ability_with(Vec::new())
+        )
+        .is_empty());
+        assert!(players_for_filter(
+            &state,
+            &PlayerFilter::TargetPlayer,
+            &ability_with(vec![TargetRef::Object(permanent)]),
+        )
+        .is_empty());
+        // (g) A target player who has left the game names nobody; (a) is the
+        // reach guard that the read fires for a live target.
+        state.players[1].is_eliminated = true;
+        assert!(players_for_filter(
+            &state,
+            &PlayerFilter::TargetPlayer,
+            &ability_with(vec![TargetRef::Player(PlayerId(1))]),
+        )
+        .is_empty());
+    }
+
     /// CR 108.3 + CR 603.10a + CR 608.2c + CR 608.2h: owner-relative
     /// `AllExcept { ParentObjectTargetOwner }` must exclude the departed
     /// object's owner from the zone-change record, not the trigger controller.
@@ -649,6 +839,10 @@ mod tests {
             to: Zone::Graveyard,
             record: Box::new(ZoneChangeRecord {
                 owner: PlayerId(0),
+                arrival: crate::types::game_state::ArrivalIdentity {
+                    owner: PlayerId(0),
+                    controller: PlayerId(1),
+                },
                 controller: PlayerId(1),
                 ..ZoneChangeRecord::test_minimal(moved, Some(Zone::Battlefield), Zone::Graveyard)
             }),
@@ -656,6 +850,7 @@ mod tests {
 
         let filter = PlayerFilter::AllExcept {
             exclude: Box::new(PlayerFilter::ParentObjectTargetOwner),
+            relation: PlayerRelation::All,
         };
         let ability = ResolvedAbility::new(
             Effect::StartYourEngines {
@@ -683,6 +878,7 @@ mod tests {
         let state = GameState::new(FormatConfig::standard(), 3, 0);
         let filter = PlayerFilter::AllExcept {
             exclude: Box::new(PlayerFilter::ParentObjectTargetOwner),
+            relation: PlayerRelation::All,
         };
         let ability = ResolvedAbility::new(
             Effect::StartYourEngines {
@@ -696,6 +892,272 @@ mod tests {
         assert!(
             players_for_filter(&state, &filter, &ability).is_empty(),
             "missing owner anchor must not leak to every player"
+        );
+    }
+
+    /// CR 102.2 + CR 108.3: the owner-anchor arm must honor the base
+    /// `relation`, not just liveness and not-owner. Same departed-owner
+    /// fixture as above (owner P0, controller P1) with `Opponent`: only P2
+    /// is both an opponent of P1 and not the owner. Dropping `relation`
+    /// returns P1 and P2 and wrongly includes the caster.
+    #[test]
+    fn all_except_owner_anchor_opponent_relation_excludes_caster() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 0);
+        let moved = ObjectId(7);
+        state.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: moved,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(ZoneChangeRecord {
+                owner: PlayerId(0),
+                arrival: crate::types::game_state::ArrivalIdentity {
+                    owner: PlayerId(0),
+                    controller: PlayerId(1),
+                },
+                controller: PlayerId(1),
+                ..ZoneChangeRecord::test_minimal(moved, Some(Zone::Battlefield), Zone::Graveyard)
+            }),
+        });
+
+        let filter = PlayerFilter::AllExcept {
+            exclude: Box::new(PlayerFilter::ParentObjectTargetOwner),
+            relation: PlayerRelation::Opponent,
+        };
+        let ability = ResolvedAbility::new(
+            Effect::StartYourEngines {
+                player_scope: PlayerFilter::Controller,
+            },
+            Vec::<TargetRef>::new(),
+            ObjectId(900),
+            PlayerId(1),
+        );
+
+        let mut selected = players_for_filter(&state, &filter, &ability);
+        selected.sort_by_key(|p| p.0);
+        assert_eq!(
+            selected,
+            vec![PlayerId(2)],
+            "only P2 is an opponent of P1 and not the departed owner P0"
+        );
+    }
+
+    /// CR 102.3: team membership flows through the same relation leg. 2HG
+    /// teams are {P0, P1} vs {P2, P3}; controller P1 with owner anchor P2
+    /// and `Opponent` selects only P3 — never the controller or teammate.
+    #[test]
+    fn all_except_owner_anchor_opponent_relation_respects_teams() {
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 0);
+        let moved = ObjectId(7);
+        state.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: moved,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(ZoneChangeRecord {
+                owner: PlayerId(2),
+                arrival: crate::types::game_state::ArrivalIdentity {
+                    owner: PlayerId(2),
+                    controller: PlayerId(1),
+                },
+                controller: PlayerId(1),
+                ..ZoneChangeRecord::test_minimal(moved, Some(Zone::Battlefield), Zone::Graveyard)
+            }),
+        });
+
+        let filter = PlayerFilter::AllExcept {
+            exclude: Box::new(PlayerFilter::ParentObjectTargetOwner),
+            relation: PlayerRelation::Opponent,
+        };
+        let ability = ResolvedAbility::new(
+            Effect::StartYourEngines {
+                player_scope: PlayerFilter::Controller,
+            },
+            Vec::<TargetRef>::new(),
+            ObjectId(900),
+            PlayerId(1),
+        );
+
+        let mut selected = players_for_filter(&state, &filter, &ability);
+        selected.sort_by_key(|p| p.0);
+        assert_eq!(
+            selected,
+            vec![PlayerId(3)],
+            "P3 is the only opponent of P1 outside the owner anchor P2"
+        );
+    }
+
+    /// The missing-anchor fail-closed behavior holds under every relation:
+    /// no anchor plus `Opponent` still selects nobody.
+    #[test]
+    fn all_except_owner_anchor_missing_anchor_empty_under_opponent() {
+        let state = GameState::new(FormatConfig::standard(), 3, 0);
+        let filter = PlayerFilter::AllExcept {
+            exclude: Box::new(PlayerFilter::ParentObjectTargetOwner),
+            relation: PlayerRelation::Opponent,
+        };
+        let ability = ResolvedAbility::new(
+            Effect::StartYourEngines {
+                player_scope: PlayerFilter::Controller,
+            },
+            Vec::<TargetRef>::new(),
+            ObjectId(900),
+            PlayerId(1),
+        );
+
+        assert!(
+            players_for_filter(&state, &filter, &ability).is_empty(),
+            "missing owner anchor must not leak to opponents either"
+        );
+    }
+
+    /// Curse-rider fixture: a curse controlled by P0 enchanting `enchanted`, and
+    /// one creature per `attacking` player attacking `enchanted`, with the
+    /// declaration ledger written exactly as declaration writes it. Returns the
+    /// state, the curse, and the attackers in `attacking` order.
+    fn curse_attack_fixture(
+        format: FormatConfig,
+        enchanted: PlayerId,
+        attacking: &[PlayerId],
+    ) -> (GameState, ObjectId, Vec<ObjectId>) {
+        use crate::game::combat::{AttackerInfo, CombatState};
+        use crate::game::game_object::AttachTarget;
+        use crate::game::zones::create_object;
+        use crate::types::card_type::CoreType;
+        use crate::types::identifiers::CardId;
+
+        let mut state = GameState::new(format, 4, 0);
+        let curse = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Curse".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&curse).unwrap().attached_to = Some(AttachTarget::Player(enchanted));
+
+        let attackers: Vec<ObjectId> = attacking
+            .iter()
+            .map(|&player| {
+                let card_id = CardId(state.next_object_id);
+                let id = create_object(
+                    &mut state,
+                    card_id,
+                    player,
+                    "Attacker".to_string(),
+                    Zone::Battlefield,
+                );
+                state
+                    .objects
+                    .get_mut(&id)
+                    .unwrap()
+                    .card_types
+                    .core_types
+                    .push(CoreType::Creature);
+                id
+            })
+            .collect();
+
+        let mut combat = CombatState {
+            attackers: attackers
+                .iter()
+                .map(|&id| AttackerInfo::attacking_player(id, enchanted))
+                .collect(),
+            ..CombatState::default()
+        };
+        for &player in attacking {
+            combat
+                .attacked_defenders_this_combat
+                .entry(player)
+                .or_default()
+                .insert(enchanted);
+        }
+        state.combat = Some(combat);
+        (state, curse, attackers)
+    }
+
+    fn start_engines_for_attackers_of_enchanted(curse: ObjectId) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::StartYourEngines {
+                player_scope: PlayerFilter::OpponentAttackingEnchantedPlayer,
+            },
+            Vec::<TargetRef>::new(),
+            curse,
+            PlayerId(0),
+        )
+    }
+
+    /// CR 508.6 + CR 506.4: `players_for_filter` reads LIVE combat membership for
+    /// `OpponentAttackingEnchantedPlayer`. P2 and P3 both attack the enchanted
+    /// P1; P2's attacker is then removed from combat, which prunes the attacker
+    /// but not the declaration ledger. Only P3 is still attacking P1. Reverting
+    /// to the ledger read starts P2's engines too.
+    #[test]
+    fn opponent_attacking_enchanted_player_drops_attacker_removed_from_combat() {
+        let (mut state, curse, attackers) = curse_attack_fixture(
+            FormatConfig::standard(),
+            PlayerId(1),
+            &[PlayerId(2), PlayerId(3)],
+        );
+        crate::game::effects::remove_from_combat::remove_object_from_combat(
+            &mut state,
+            attackers[0],
+        );
+        assert!(
+            state.player_attacked_player_this_combat(PlayerId(2), PlayerId(1)),
+            "precondition: the declaration ledger still records P2 attacking P1"
+        );
+
+        let ability = start_engines_for_attackers_of_enchanted(curse);
+        let mut events = Vec::new();
+        resolve_start(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.players[2].speed, None,
+            "P2's attacker was removed from combat: P2 is not attacking P1"
+        );
+        assert_eq!(
+            state.players[3].speed,
+            Some(1),
+            "P3 is still attacking the enchanted player"
+        );
+        assert_eq!(
+            state.players[0].speed, None,
+            "the controller is not an opponent"
+        );
+        assert_eq!(
+            state.players[1].speed, None,
+            "the enchanted player is not attacking"
+        );
+    }
+
+    /// CR 102.3 + CR 508.6: "opponent" is team-aware. In Two-Headed Giant P1 is
+    /// P0's teammate, so P1 attacking the enchanted P2 is not an opponent
+    /// attacking that player. The same board in a free-for-all game makes P1 an
+    /// opponent, which proves the arm is reached and the team axis alone decides.
+    /// Reverting to the raw `!= controller` test starts P1's engines in 2HG.
+    #[test]
+    fn opponent_attacking_enchanted_player_excludes_teammates() {
+        let (mut state, curse, _) = curse_attack_fixture(
+            FormatConfig::two_headed_giant(),
+            PlayerId(2),
+            &[PlayerId(1)],
+        );
+        let ability = start_engines_for_attackers_of_enchanted(curse);
+        let mut events = Vec::new();
+        resolve_start(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(
+            state.players[1].speed, None,
+            "P1 is P0's teammate in 2HG, not an opponent"
+        );
+
+        let (mut state, curse, _) =
+            curse_attack_fixture(FormatConfig::standard(), PlayerId(2), &[PlayerId(1)]);
+        let ability = start_engines_for_attackers_of_enchanted(curse);
+        let mut events = Vec::new();
+        resolve_start(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(
+            state.players[1].speed,
+            Some(1),
+            "reach-guard: in a free-for-all game P1 is an opponent attacking P2"
         );
     }
 }

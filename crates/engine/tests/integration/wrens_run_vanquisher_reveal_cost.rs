@@ -2,7 +2,7 @@
 //! "As an additional cost to cast this spell, reveal an Elf card from your hand or pay {3}."
 //!
 //! Verifies:
-//! 1. Choosing to reveal an Elf card prompts `WaitingFor::PayCost { kind: PayCostKind::Reveal }`,
+//! 1. Choosing to reveal an Elf card prompts `WaitingFor::PayCost { kind: PayCostKind::Reveal { .. } }`,
 //!    and selecting an Elf card from hand successfully completes the cast for {1}{G}.
 //! 2. Choosing to pay {3} instead charges {4}{G} total ({1}{G} base + {3} additional).
 //! 3. Casting with no Elf card in hand falls through directly to the {3} additional cost.
@@ -98,7 +98,7 @@ fn wrens_run_vanquisher_cast_by_revealing_elf() {
     // 3. Must prompt to select the Elf card from hand.
     match runner.state().waiting_for.clone() {
         WaitingFor::PayCost {
-            kind: PayCostKind::Reveal,
+            kind: PayCostKind::Reveal { .. },
             choices,
             count,
             ..

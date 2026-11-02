@@ -132,8 +132,7 @@ fn assert_capture_is_the_reported_wedge(state: &GameState) {
         .expect("seat 1 is in the capture");
     let red_available = stuck_player
         .mana_pool
-        .mana
-        .iter()
+        .units()
         .filter(|unit| unit.color == ManaType::Red && unit.restrictions.is_empty())
         .count();
     assert!(
