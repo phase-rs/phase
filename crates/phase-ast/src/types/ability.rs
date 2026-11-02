@@ -26079,10 +26079,12 @@ pub fn extract_target_filter_from_effect(effect: &Effect) -> Option<&TargetFilte
     // Kind, Biorhythm, Worldfire) is not a targeted spell — its text never uses
     // the phrase "target [something]". `AllPlayers` is the resolution-time
     // population `resolve_set_life_total` iterates in APNAP order, not a
-    // declared target. Surfacing it here would mint a required slot whose legal
-    // candidates are every player, so `build_target_slots_for_announcement`
-    // rejected the cast with "No legal targets available" before it could ever
-    // be announced (phase-rs/phase#10455). Mirrors the `UnattachAll` and
+    // declared target. Surfacing it here would mint a required slot, but
+    // `AllPlayers` is not a shape `targeting::find_legal_targets` enumerates as a
+    // player or object target, so that slot's candidate pool is EMPTY and
+    // `build_target_slots_for_announcement` rejected the cast with
+    // "No legal targets available" before it could ever be announced
+    // (phase-rs/phase#10455). Mirrors the `UnattachAll` and
     // `Sacrifice` carve-outs above; the single-player forms ("your" →
     // `Controller`, "target player's" → `Player`) keep their slots untouched.
     if matches!(

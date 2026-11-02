@@ -263,7 +263,6 @@ fn repay_in_kind_seat_one_archenemy_sets_all_sides_to_ten() {
     // announced from that seat — the production path only casts for the player
     // holding priority, and the life-total assertion is caster-independent.
     scenario.at_phase(Phase::PreCombatMain);
-    scenario.add_creature(PlayerId(1), "Caster Bear", 1, 1);
     let spell = scenario
         .add_spell_to_hand_from_oracle(PlayerId(1), "Repay in Kind", false, REPAY_IN_KIND)
         .with_mana_cost(ManaCost::zero())
