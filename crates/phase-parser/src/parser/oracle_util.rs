@@ -2031,6 +2031,79 @@ fn unmask_ring_tempts_you_phrase(text: String) -> String {
 }
 
 const KEYWORD_ACTION_PLACEHOLDER: &str = "\u{E0001}";
+const SAY_PHRASE_PLACEHOLDER: &str = "\u{E0005}";
+
+/// Whether `lower_before` (the lowercased text before an opening double quote)
+/// ends in the verb that introduces VERBATIM player speech — `say "…"`/
+/// `says "…"`, as in Toy Boat's "Say \"Toy Boat\" quickly" and Rod of
+/// Spanking's "unless that player says \"…\"". The check is word-bounded so
+/// "essay \"…\"" never counts.
+fn preceded_by_say_verb(lower_before: &str) -> bool {
+    // This checks the ONE word immediately in front of a quote, so it is a
+    // structural tail check (Gate A escape hatch), not Oracle-phrase dispatch.    // allow-noncombinator: structural tail-token check before verbatim-quote masking
+    let Some(head) = lower_before.strip_suffix(' ') else {
+        return false;
+    };
+    // allow-noncombinator: structural tail-token check (verb word boundary)
+    let says = head.strip_suffix("says");
+    // allow-noncombinator: structural tail-token check (verb word boundary)
+    let verb = says.or_else(|| head.strip_suffix("say"));
+    verb.is_some_and(|before_verb| {
+        !before_verb
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric())
+    })
+}
+
+/// Un-card: a phrase a player must SAY is verbatim speech, not a card-name
+/// reference — CR 201.5 governs a name written in rules text, not words spoken
+/// aloud. Toy Boat prints `Cumulative upkeep—Say "Toy Boat" quickly.`, and
+/// without this mask the card's own name inside the quote collapses to `~`, so
+/// the payer would be asked to say "~". Mask the quoted body of every `say …`
+/// here and restore it after normalization; [`parse_say_phrase_payment`]
+/// (in the effect parser) then sees the printed phrase.
+fn mask_say_phrase_literal_spans(text: &str) -> (String, Vec<String>) {
+    let lower = text.to_ascii_lowercase();
+    let mut masked = String::with_capacity(text.len());
+    let mut originals: Vec<String> = Vec::new();
+    let mut rest = text;
+    let mut lower_rest = lower.as_str();
+    while let Some(idx) = lower_rest.find('"') {
+        let open = idx + 1;
+        let quoted = quoted_body_end(rest, open);
+        if preceded_by_say_verb(&lower_rest[..idx]) {
+            let Some(close) = quoted else { break };
+            masked.push_str(&rest[..open]);
+            masked.push_str(SAY_PHRASE_PLACEHOLDER);
+            originals.push(rest[open..open + close].to_string());
+            rest = &rest[open + close..];
+            lower_rest = &lower_rest[open + close..];
+        } else {
+            masked.push_str(&rest[..open]);
+            rest = &rest[open..];
+            lower_rest = &lower_rest[open..];
+        }
+    }
+    masked.push_str(rest);
+    (masked, originals)
+}
+
+/// Byte length of the quoted body starting at `open`, or `None` when the quote
+/// is unterminated.
+fn quoted_body_end(text: &str, open: usize) -> Option<usize> {
+    text.get(open..)?.find('"')
+}
+
+/// Restore the verbatim spoken phrases masked by
+/// [`mask_say_phrase_literal_spans`], in the order they were captured.
+fn unmask_say_phrase_literal_spans(text: String, originals: &[String]) -> String {
+    let mut result = text;
+    for original in originals {
+        result = result.replacen(SAY_PHRASE_PLACEHOLDER, original, 1);
+    }
+    result
+}
 const CARD_NAMED_LITERAL_PLACEHOLDER: &str = "\u{E0002}";
 const KEYWORD_ACTION_WALKER_PLACEHOLDER: &str = "\u{E0003}";
 
@@ -2817,6 +2890,7 @@ pub fn normalize_card_name_refs_reporting(
         None => (pre, Vec::new()),
     };
     let (text, card_named_originals) = mask_card_named_literal_spans(&text);
+    let (text, say_phrase_originals) = mask_say_phrase_literal_spans(&text);
     let (text, walker_originals) = mask_keyword_action_walker_names(&text);
     // Strip A- prefix (Alchemy rebalanced cards in MTGJSON)
     let effective_name = alchemy_effective_name(card_name);
@@ -3099,6 +3173,7 @@ pub fn normalize_card_name_refs_reporting(
 
     result = unmask_keyword_action_walker_names(result, &walker_originals);
     result = unmask_card_named_literal_spans(result, &card_named_originals);
+    result = unmask_say_phrase_literal_spans(result, &say_phrase_originals);
     result = unmask_card_name_keyword_action(result, &kw_action_originals);
     (unmask_ring_tempts_you_phrase(result), refused_lines)
 }

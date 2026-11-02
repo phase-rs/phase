@@ -40,9 +40,21 @@ pub fn player_can_say_phrases(state: &GameState, player: PlayerId) -> bool {
 pub fn say_phrase_prompt(effect: &Effect) -> Option<String> {
     match effect {
         Effect::PayCost {
-            cost: AbilityCost::SayPhrase { phrase },
+            cost:
+                AbilityCost::SayPhrase {
+                    phrase,
+                    repetitions,
+                    ..
+                },
             ..
-        } => Some(format!("Say \"{phrase}\"")),
+        } => {
+            let times = (*repetitions).max(1);
+            Some(if times > 1 {
+                format!("Say \"{phrase}\" {times} times")
+            } else {
+                format!("Say \"{phrase}\"")
+            })
+        }
         _ => None,
     }
 }

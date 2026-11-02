@@ -51770,9 +51770,7 @@ fn extract_resolution_unless_pay_modifier(
             return (
                 cleaned,
                 Some(UnlessPayModifier {
-                    cost: AbilityCost::SayPhrase {
-                        phrase: phrase.trim().to_string(),
-                    },
+                    cost: AbilityCost::say_phrase(phrase.trim().to_string()),
                     payer,
                 }),
             );

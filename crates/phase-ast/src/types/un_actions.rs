@@ -39,6 +39,56 @@ pub enum PhysicalTell {
     FlickCards,
 }
 
+/// How a spoken payment must be delivered.
+///
+/// Most say-it costs are simply "say \"...\"": the payer says it whenever they
+/// like ([`PhrasePace::Said`]). Toy Boat's cumulative upkeep instead prints
+/// "Say \"Toy Boat\" quickly" with the reminder "without pausing between or
+/// fumbling it" — the phrase must be said once per age counter, each repetition
+/// following the previous one inside [`PhrasePace::QUICKLY_MAX_GAP_MS`]
+/// ([`PhrasePace::Quickly`]).
+///
+/// The interval lives in the type, not in a client constant, so the real-time
+/// requirement is stated once — the engine publishes it with the payment and
+/// every consumer (browser client, host adapters) renders the same window.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum PhrasePace {
+    /// Say it once, at the payer's own pace.
+    #[default]
+    Said,
+    /// "quickly", "without pausing between or fumbling it": the next repetition
+    /// must follow the previous one within `max_gap_ms`.
+    Quickly { max_gap_ms: u32 },
+}
+
+impl PhrasePace {
+    /// The window Toy Boat's "quickly" wording allows between repetitions.
+    pub const QUICKLY_MAX_GAP_MS: u32 = 1000;
+
+    /// The pace a printed "quickly" qualifier imposes.
+    pub const fn quickly() -> Self {
+        Self::Quickly {
+            max_gap_ms: Self::QUICKLY_MAX_GAP_MS,
+        }
+    }
+
+    /// Whether the payment is timed (the payer must not pause between
+    /// repetitions).
+    pub const fn is_quick(&self) -> bool {
+        matches!(self, Self::Quickly { .. })
+    }
+
+    /// The maximum time between repetitions, or `None` when the phrase may be
+    /// said at the payer's own pace.
+    pub const fn max_gap_ms(&self) -> Option<u32> {
+        match self {
+            Self::Said => None,
+            Self::Quickly { max_gap_ms } => Some(*max_gap_ms),
+        }
+    }
+}
+
 /// One gesture performed by a player: a physical gesture, or something said aloud.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]

@@ -1455,7 +1455,18 @@ fn optional_replacement_choice_labels(
 /// forces a deliberate label decision here.
 fn replacement_cost_description(cost: &AbilityCost) -> String {
     match cost {
-        AbilityCost::SayPhrase { phrase } => format!("Say \"{phrase}\""),
+        AbilityCost::SayPhrase {
+            phrase,
+            repetitions,
+            ..
+        } => {
+            let times = (*repetitions).max(1);
+            if times > 1 {
+                format!("Say \"{phrase}\" {times} times")
+            } else {
+                format!("Say \"{phrase}\"")
+            }
+        }
         AbilityCost::Mana { cost } => match cost {
             crate::types::mana::ManaCost::NoCost => "Pay no mana".to_string(),
             crate::types::mana::ManaCost::Cost { shards, generic } => {

@@ -34,6 +34,7 @@ use super::statics::{ActivationExemption, CastFrequency, CostModifyMode, StaticM
 use super::stickers::{AppliedSticker, StickerKind};
 use super::text_word_carriers::{carrier_class, walk_strings, WordClass};
 use super::triggers::TriggerMode;
+use super::un_actions::PhrasePace;
 use super::zones::{EtbTapState, Zone};
 use crate::types::object_data::{BackFaceData, DisplayIdentity};
 
@@ -18690,6 +18691,15 @@ pub enum AbilityCost {
     /// (`un_actions::player_can_say_phrases`).
     SayPhrase {
         phrase: String,
+        /// How the phrase must be delivered: at the payer's own pace, or (Toy
+        /// Boat's "Say \"Toy Boat\" quickly") within a fixed gap per repetition.
+        #[serde(default)]
+        pace: PhrasePace,
+        /// CR 702.24a: how many times the phrase must be said. `PerCounter`
+        /// expansion multiplies it by the age counters (Toy Boat: "say \"Toy
+        /// Boat\" once for each age counter on it").
+        #[serde(default = "default_say_repetitions")]
+        repetitions: u32,
     },
     Sacrifice(SacrificeCost),
     /// CR 119.4: Pay life as an activation or additional cost. `amount` is a
@@ -18943,6 +18953,23 @@ pub enum AbilityCost {
     Unimplemented {
         description: String,
     },
+}
+
+/// Un-card (no CR entry): a say-it cost is said once; `expand_per_counter`
+/// (CR 702.24a) raises the count for a per-age-counter upkeep.
+fn default_say_repetitions() -> u32 {
+    1
+}
+
+impl AbilityCost {
+    /// Un-card (no CR entry): a spoken payment said once, at the payer's pace.
+    pub fn say_phrase(phrase: impl Into<String>) -> Self {
+        Self::SayPhrase {
+            phrase: phrase.into(),
+            pace: PhrasePace::Said,
+            repetitions: 1,
+        }
+    }
 }
 
 /// CR 608.2d: choices made while applying an effect must be legal; CR 118.12:
@@ -19652,6 +19679,11 @@ impl AbilityCost {
             // folded by `expand_per_counter` and paid by the `remaining`
             // re-prompt loop in `handle_unless_payment` end-to-end.
             | AbilityCost::Discard { .. } => true,
+            // CR 702.24a + Un-card (no CR entry): Toy Boat's "Cumulative
+            // upkeep—Say \"Toy Boat\" quickly". The phrase costs no resource, so
+            // the per-counter expansion only raises the repetition count and the
+            // ordinary unless-payment prompt pays it for an opted-in player.
+            | AbilityCost::SayPhrase { .. } => true,
             // CR 702.24a: Thought Lash-style "exile the top card of your
             // library" is payable as a deterministic top-library cost. Other
             // exile costs still need interactive object selection and stay

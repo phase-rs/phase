@@ -2941,7 +2941,10 @@
     },
     "sayPhrase": {
       "title": "Say it to stop the effect",
-      "say": "Say “{{phrase}}”",
+      "say": "说出“{{phrase}}”",
+      "sayTimes": "说出“{{phrase}}”{{count}}次",
+      "progress": "已说出{{said}}/{{required}}",
+      "quickly": "不要停顿，不要结巴——每次点击都要在一秒内完成！",
       "stayQuiet": "Stay quiet"
     },
     "fx": {

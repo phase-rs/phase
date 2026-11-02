@@ -18472,6 +18472,51 @@ fn parse_cumulative_upkeep_or_mana() {
 }
 
 #[test]
+fn parse_cumulative_upkeep_say_phrase_quickly() {
+    // Un-card (no CR entry) + CR 702.24a: Toy Boat's cumulative upkeep is a
+    // spoken payment with the "quickly" delivery qualifier. The qualifier is
+    // part of the payment (`PhrasePace::Quickly` with the engine's window), not
+    // part of the phrase, and the base cost is said once before the per-counter
+    // expansion raises the repetition count.
+    use crate::types::un_actions::PhrasePace;
+
+    let r = parse(
+        "Cumulative upkeep\u{2014}Say \"Toy Boat\" quickly. (At the beginning of your upkeep, put an age counter on this creature, then sacrifice it unless you say \"Toy Boat\" once for each age counter on it\u{2014}without pausing between or fumbling it.)",
+        "Toy Boat",
+        &[],
+        &["Artifact", "Creature"],
+        &["Ship"],
+    );
+    let cu_kw = r
+        .extracted_keywords
+        .iter()
+        .find(|k| matches!(k, Keyword::CumulativeUpkeep(_)));
+    let Some(Keyword::CumulativeUpkeep(cost)) = cu_kw else {
+        panic!(
+            "CumulativeUpkeep keyword not extracted: {:?}",
+            r.extracted_keywords
+        );
+    };
+    match cost {
+        AbilityCost::SayPhrase {
+            phrase,
+            pace,
+            repetitions,
+        } => {
+            assert_eq!(phrase, "Toy Boat");
+            assert_eq!(*pace, PhrasePace::quickly());
+            assert_eq!(
+                pace.max_gap_ms(),
+                Some(1000),
+                "the published window is one second"
+            );
+            assert_eq!(*repetitions, 1, "PerCounter raises the count at resolution");
+        }
+        other => panic!("expected SayPhrase(\"Toy Boat\", quickly), got {other:?}"),
+    }
+}
+
+#[test]
 fn parse_two_cumulative_upkeep_instances_both_extracted() {
     // CR 702.24b: A permanent can have multiple cumulative upkeep
     // abilities. Each must surface as its own Keyword entry, AND each

@@ -3820,6 +3820,10 @@ function formatUnlessCost(
         count?: number;
         /** Un-card `SayPhrase` cost: the phrase the payer says. */
         phrase?: string;
+        /** CR 702.24a: how many times it must be said (Toy Boat: one per age counter). */
+        repetitions?: number;
+        /** Delivery pace; a `Quickly` pace carries the engine's window. */
+        pace?: { type: "Said" } | { type: "Quickly"; max_gap_ms: number };
       },
   t: TFunction<"game">,
 ): string {
@@ -3853,8 +3857,13 @@ function formatUnlessCost(
   switch (cost.type) {
     // Legacy `UnlessCost` JSON (pre-2026-05-09 fold) — preserved for
     // saved-game compat.
-    case "SayPhrase":
-      return t("unActions.sayPhrase.say", { phrase: cost.phrase ?? "" });
+    case "SayPhrase": {
+      const times = cost.repetitions ?? 1;
+      const phrase = cost.phrase ?? "";
+      return times > 1
+        ? t("unActions.sayPhrase.sayTimes", { phrase, count: times })
+        : t("unActions.sayPhrase.say", { phrase });
+    }
     case "Fixed":
       return cost.cost ? formatManaCost(cost.cost) : "0";
     case "DiscardCard":
@@ -3886,10 +3895,55 @@ function formatUnlessCost(
   }
 }
 
-/** The say-it prompt for a `SayPhrase` unless-cost. Answering "pay" says the phrase. */
-function SayPhrasePanel({ phrase, effect }: { phrase: string; effect?: string }) {
+/**
+ * The say-it prompt for a `SayPhrase` unless-cost. Answering "pay" says the
+ * phrase. Toy Boat's cumulative upkeep asks for the phrase once per age counter
+ * *quickly*: the engine publishes both the repetition count (CR 702.24a) and the
+ * pace window, and this panel's only job is to collect that many clicks and time
+ * them. A lapsed window is reported as declining the payment (CR 118.12a), so the
+ * engine -- not the client -- produces the sacrifice.
+ */
+function SayPhrasePanel({
+  phrase,
+  repetitions,
+  quickWindowMs,
+  effect,
+}: {
+  phrase: string;
+  repetitions: number;
+  /** Present for a "quickly" payment: each click must land inside the window. */
+  quickWindowMs?: number;
+  effect?: string;
+}) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
+  const required = Math.max(1, repetitions);
+  const [said, setSaid] = useState(0);
+  const settled = useRef(false);
+
+  // CR 118.12a: the pace is part of the payment. Every click re-arms the
+  // engine's window; a window that lapses unanswered is a refusal to pay.
+  useEffect(() => {
+    if (quickWindowMs === undefined || said >= required || settled.current) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      settled.current = true;
+      void dispatch({ type: "PayUnlessCost", data: { pay: false } });
+    }, quickWindowMs);
+    return () => clearTimeout(timer);
+  }, [dispatch, quickWindowMs, required, said]);
+
+  const say = () => {
+    if (settled.current) return;
+    const next = said + 1;
+    if (next >= required) {
+      settled.current = true;
+      void dispatch({ type: "PayUnlessCost", data: { pay: true } });
+      return;
+    }
+    setSaid(next);
+  };
 
   return (
     <AnimatePresence>
@@ -3907,20 +3961,26 @@ function SayPhrasePanel({ phrase, effect }: { phrase: string; effect?: string })
           {effect && (
             <p className="mb-2 text-center text-xs text-gray-400">{effect}</p>
           )}
+          {quickWindowMs !== undefined && (
+            <p className="mb-2 text-center text-xs font-semibold text-fuchsia-200">
+              {t("unActions.sayPhrase.quickly")}
+            </p>
+          )}
           <div className="flex flex-col items-center gap-3">
-            <motion.button
+            {/* The text box that says the phrase: one click per repetition. */}
+            <button
               type="button"
-              onClick={() =>
-                dispatch({ type: "PayUnlessCost", data: { pay: true } })
-              }
-              className={gameButtonClass({ tone: "emerald", size: "md" })}
-              animate={{ rotate: [0, -2, 2, -2, 0], scale: [1, 1.03, 1] }}
-              transition={{ duration: 1.2, repeat: Infinity }}
-              whileTap={{ scale: 0.92, rotate: 6 }}
+              onClick={say}
+              aria-label={t("unActions.sayPhrase.say", { phrase })}
+              className="w-full rounded-lg border-2 border-fuchsia-300/40 bg-gray-950 px-4 py-3 text-center font-mono text-lg font-semibold text-fuchsia-100 shadow-inner transition hover:border-fuchsia-300/70 active:scale-[0.98]"
             >
-              <span aria-hidden className="mr-2">{"\u{1F64F}"}</span>
-              {t("unActions.sayPhrase.say", { phrase })}
-            </motion.button>
+              {phrase}
+            </button>
+            {required > 1 && (
+              <p className="text-center text-xs text-gray-400">
+                {t("unActions.sayPhrase.progress", { said, required })}
+              </p>
+            )}
             <button
               type="button"
               onClick={() =>
@@ -3950,7 +4010,21 @@ function UnlessPaymentPanel() {
   // Un-card say-it payment (Rod of Spanking's "unless that player says ..."):
   // the "payment" is a spoken phrase, so it gets its own button and gag.
   if (waitingFor.data.cost.type === "SayPhrase") {
-    return <SayPhrasePanel phrase={waitingFor.data.cost.phrase} effect={effect} />;
+    const sayCost = waitingFor.data.cost as {
+      phrase?: string;
+      repetitions?: number;
+      pace?: { type: "Said" } | { type: "Quickly"; max_gap_ms: number };
+    };
+    return (
+      <SayPhrasePanel
+        phrase={sayCost.phrase ?? ""}
+        repetitions={sayCost.repetitions ?? 1}
+        quickWindowMs={
+          sayCost.pace?.type === "Quickly" ? sayCost.pace.max_gap_ms : undefined
+        }
+        effect={effect}
+      />
+    );
   }
 
   const costDisplay = formatUnlessCost(waitingFor.data.cost, t);

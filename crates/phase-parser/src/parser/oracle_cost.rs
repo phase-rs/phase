@@ -827,8 +827,12 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
     // activation cost (Infernal Spawn of Evil). Must precede the effect-parser
     // fallback, whose `EffectCost { PayCost(SayPhrase) }` wrapper is unpayable.
     if let Some((_, rest)) = nom_on_lower(text, &lower, |i| value((), tag("say ")).parse(i)) {
-        if let Ok((_, phrase)) = parse_say_phrase_payment(rest) {
-            return AbilityCost::SayPhrase { phrase };
+        if let Ok((_, (phrase, pace))) = parse_say_phrase_payment(rest) {
+            return AbilityCost::SayPhrase {
+                phrase,
+                pace,
+                repetitions: 1,
+            };
         }
     }
 

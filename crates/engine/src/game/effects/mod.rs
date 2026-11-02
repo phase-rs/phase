@@ -28491,6 +28491,21 @@ fn expand_per_counter(base: &AbilityCost, n: u32) -> AbilityCost {
             selection: *selection,
             self_scope: *self_scope,
         },
+        // CR 702.24a + Un-card (no CR entry): Toy Boat's "Say \"Toy Boat\" once
+        // for each age counter on it" is one spoken payment repeated N times, so
+        // scale the repetition count instead of building a Composite of N
+        // identical phrases — the payer says it N times inside the pace window,
+        // and the resulting cost stays the single typed SayPhrase the prompt
+        // renders (phrase, pace, repetitions).
+        AbilityCost::SayPhrase {
+            phrase,
+            pace,
+            repetitions,
+        } => AbilityCost::SayPhrase {
+            phrase: phrase.clone(),
+            pace: *pace,
+            repetitions: repetitions.saturating_mul(n),
+        },
         // CR 702.24a: Thought Lash-style cumulative upkeep scales the number
         // of top-library cards exiled by the number of age counters.
         AbilityCost::Exile {
@@ -38484,6 +38499,27 @@ mod tests {
                 count: 3,
                 zone: Some(Zone::Library),
                 filter: None,
+            }
+        );
+    }
+
+    #[test]
+    fn expand_per_counter_say_phrase_scales_repetitions() {
+        // Un-card (no CR entry) + CR 702.24a: Toy Boat's "say \"Toy Boat\" once
+        // for each age counter on it" raises the repetition count and keeps the
+        // published pace, rather than becoming a Composite of N identical
+        // phrases (the prompt renders one text box clicked N times).
+        let base = AbilityCost::SayPhrase {
+            phrase: "Toy Boat".to_string(),
+            pace: crate::types::un_actions::PhrasePace::quickly(),
+            repetitions: 1,
+        };
+        assert_eq!(
+            expand_per_counter(&base, 3),
+            AbilityCost::SayPhrase {
+                phrase: "Toy Boat".to_string(),
+                pace: crate::types::un_actions::PhrasePace::quickly(),
+                repetitions: 3,
             }
         );
     }
