@@ -40,7 +40,20 @@ use crate::types::zones::Zone;
 /// Parse the cost portion before `:` in an Oracle activated ability.
 /// Input: the raw text before the colon, e.g., "{T}", "{2}{W}, Sacrifice a creature", "Pay 3 life".
 /// Returns an AbilityCost (possibly Composite for multi-part costs).
+///
+/// A compound cost's trailing leg may be the bare pronoun ("Remove three quest
+/// counters from this enchantment and sacrifice it"); see
+/// [`bind_bare_it_sacrifice_leg`] for why that leg can only be bound once the
+/// whole cost is known.
 pub fn parse_oracle_cost(text: &str) -> AbilityCost {
+    let cost = parse_oracle_cost_unbound_pronoun(text);
+    bind_bare_it_sacrifice_leg(text, cost)
+}
+
+/// The cost grammar proper. Legs are parsed in isolation, so a pronoun that
+/// refers to an object named by an EARLIER leg is not visible here — that
+/// binding belongs to [`parse_oracle_cost`]'s whole-cost pass.
+fn parse_oracle_cost_unbound_pronoun(text: &str) -> AbilityCost {
     let text = text.trim();
     let lower = text.to_lowercase();
 
@@ -51,6 +64,73 @@ pub fn parse_oracle_cost(text: &str) -> AbilityCost {
     }
 
     parse_oracle_cost_no_or(text)
+}
+
+/// CR 608.2c + CR 701.21a: in a compound printed cost, a trailing bare pronoun
+/// leg names the object the cost's earlier leg already names — the ability's
+/// source (CR 608.2c requires reading the printed text as a whole rather than
+/// one leg at a time; CR 701.21a fixes that the sacrificing player must control
+/// the permanent, so a bystander is not a legal payment). The Quest cycle, Grimoire of the Dead, Hellion Crucible and Goblin
+/// Bomb print "Remove <N> <type> counters from this <permanent> and sacrifice
+/// it" (13 cards). Parsed leg-by-leg, "sacrifice it" reaches `parse_target` and
+/// lowers to an empty typed filter, which names no permanent in particular: the
+/// payer can satisfy that leg with a bystander permanent while the source — the
+/// only object the printed cost names — stays on the battlefield.
+///
+/// The gate is the printed compound shape ("… and sacrifice it"), not the leg
+/// alone. A bare "sacrifice it" also reaches this parser from effect-side
+/// optional payments ("you may sacrifice it. When you do, …" — Gorbag of Minas
+/// Morgul), where the pronoun's antecedent is the trigger's subject, not the
+/// source; those stay untouched.
+fn bind_bare_it_sacrifice_leg(text: &str, cost: AbilityCost) -> AbilityCost {
+    if !compound_cost_ends_with_bare_it(&text.trim().to_lowercase()) {
+        return cost;
+    }
+    let mut cost = cost;
+    rebind_bare_it_sacrifice(&mut cost);
+    cost
+}
+
+/// CR 608.2c: the gate for [`bind_bare_it_sacrifice_leg`] — a compound printed
+/// cost whose LAST leg is the bare pronoun. The non-empty earlier leg is the
+/// antecedent the pronoun names; a cost that is only the pronoun (the
+/// effect-side "you may sacrifice it" shape) has none and is refused.
+fn compound_cost_ends_with_bare_it(lower: &str) -> bool {
+    type E<'a> = super::oracle_nom::error::OracleError<'a>;
+    all_consuming((
+        take_until::<_, _, E<'_>>(" and sacrifice it"),
+        tag::<_, _, E<'_>>(" and sacrifice it"),
+        opt(tag(".")),
+    ))
+    .parse(lower)
+    .is_ok_and(|(_, (earlier, _, _))| !earlier.trim().is_empty())
+}
+
+/// Rewrite the placeholder empty-typed sacrifice leg a bare "it" lowered to.
+/// Only the TRAILING leg is visited — the gate established that the printed
+/// cost ends with the pronoun, so no other leg can be the one it names — and
+/// only the exact unconstrained shape is rewritten, so a described leg
+/// ("Sacrifice a Wall", "Sacrifice a creature") keeps its filter.
+fn rebind_bare_it_sacrifice(cost: &mut AbilityCost) {
+    match cost {
+        AbilityCost::Sacrifice(sacrifice)
+            if matches!(
+                &sacrifice.target,
+                TargetFilter::Typed(tf)
+                    if tf.type_filters.is_empty()
+                        && tf.controller.is_none()
+                        && tf.properties.is_empty()
+            ) =>
+        {
+            sacrifice.target = TargetFilter::SelfRef;
+        }
+        AbilityCost::Composite { costs } | AbilityCost::OneOf { costs } => {
+            if let Some(trailing) = costs.last_mut() {
+                rebind_bare_it_sacrifice(trailing);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// CR 118.12: parse exactly two top-level cost alternatives with full input
@@ -4482,6 +4562,82 @@ mod tests {
             }
             other => panic!("Expected Composite, got {:?}", other),
         }
+    }
+
+    /// CR 608.2c + CR 701.21a: "… and sacrifice it" pays with the ability's own
+    /// source. The Quest cycle, Grimoire of the Dead, Hellion Crucible and
+    /// Goblin Bomb print this counter-removal-and-sacrifice cost; before this
+    /// arm the pronoun lowered to an empty typed filter, which the payer could
+    /// satisfy with a bystander permanent and never bound to the source.
+    #[test]
+    fn cost_composite_counter_removal_and_sacrifice_it_binds_the_source() {
+        match parse_oracle_cost(
+            "Remove three quest counters from this enchantment and sacrifice it",
+        ) {
+            AbilityCost::Composite { costs } => {
+                assert_eq!(costs.len(), 2, "{costs:?}");
+                assert!(matches!(
+                    costs[0],
+                    AbilityCost::RemoveCounter { count: 3, .. }
+                ));
+                let AbilityCost::Sacrifice(sacrifice) = &costs[1] else {
+                    panic!("expected a sacrifice leg, got {:?}", costs[1]);
+                };
+                assert_eq!(sacrifice.target, TargetFilter::SelfRef);
+                assert_eq!(sacrifice.requirement, SacrificeRequirement::count(1));
+            }
+            other => panic!("Expected Composite, got {:?}", other),
+        }
+    }
+
+    /// The compound-shape gate: a bare "sacrifice it" reaches this parser from
+    /// effect-side optional payments ("you may sacrifice it. When you do, …"),
+    /// where the pronoun's antecedent is the trigger's subject, not the source.
+    /// Pinning the gate, not the placeholder shape below it.
+    #[test]
+    fn cost_bare_sacrifice_it_is_left_unbound_without_a_compound_antecedent() {
+        let AbilityCost::Sacrifice(sacrifice) = parse_oracle_cost("sacrifice it") else {
+            panic!("expected a sacrifice leg");
+        };
+        assert!(
+            !matches!(sacrifice.target, TargetFilter::SelfRef),
+            "a standalone pronoun leg has no compound antecedent to bind to"
+        );
+    }
+
+    /// The same leg inside a comma-separated cost list ("{T}, Remove three
+    /// study counters from Grimoire of the Dead and sacrifice it") reaches the
+    /// binder through a nested composite; only the trailing leg is bound.
+    #[test]
+    fn cost_tap_and_counter_removal_and_sacrifice_it_binds_the_source() {
+        match parse_oracle_cost("{T}, Remove three study counters from Grimoire of the Dead and sacrifice it")
+        {
+            AbilityCost::Composite { costs } => {
+                let AbilityCost::Sacrifice(sacrifice) = &costs[costs.len() - 1] else {
+                    panic!("expected the trailing sacrifice leg, got {costs:?}");
+                };
+                assert_eq!(sacrifice.target, TargetFilter::SelfRef);
+            }
+            other => panic!("Expected Composite, got {:?}", other),
+        }
+    }
+
+    /// Negative control for the pronoun arm: a described sacrifice cost keeps
+    /// its own filter, so the new "it" arm cannot widen or narrow it.
+    #[test]
+    fn cost_sacrifice_described_permanent_keeps_its_filter() {
+        let AbilityCost::Sacrifice(sacrifice) = parse_oracle_cost("Sacrifice a Wall") else {
+            panic!("expected a sacrifice leg");
+        };
+        assert!(
+            matches!(
+                &sacrifice.target,
+                TargetFilter::Typed(tf)
+                    if tf.type_filters == [TypeFilter::Subtype("Wall".to_string())]
+            ),
+            "described sacrifice cost keeps its subtype, got {:?}",
+            sacrifice.target
+        );
     }
 
     #[test]
