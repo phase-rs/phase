@@ -1428,6 +1428,9 @@ impl AbilityCostPayability for AbilityCost {
             ObjectLegPayment::GuidedActivation,
             CostSourceRole::AbilitySource,
         )
+            // CR 614.17b + CR 121.2b: the whole cost's draws, per drawer, before
+            // any leg is paid (each `EffectCost` leaf is admitted on its own above).
+            && super::costs::activation_draw_legs_are_drawable(state, player, source, self)
     }
 }
 

@@ -12468,6 +12468,13 @@ fn apply_action(
     if let GameAction::Concede { player_id } = action {
         let mut events = Vec::new();
         super::elimination::concede(state, player_id, &mut events);
+        // CR 800.4a + CR 118.12: a surviving staged payment re-materializes on
+        // the base the departure changed (`settle_after_outside_action`).
+        if let Some(settled) = payment_transaction::settle_after_outside_action(state)? {
+            events.extend(settled.events);
+            return Ok(ActionResult::applied(events, state.waiting_for.clone())
+                .with_log_entries(settled.log_entries));
+        }
         return Ok(ActionResult::applied(events, state.waiting_for.clone()));
     }
 

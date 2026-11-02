@@ -15,13 +15,11 @@ use engine::game::effects::resolve_ability_chain;
 use engine::game::engine::apply;
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::game::staged_payment_shadow_for_test;
 use engine::types::ability::{AbilityCost, Effect, QuantityExpr, ResolvedAbility, TargetFilter};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
-use engine::types::resolution::ResolutionFrame;
 
 /// Alms Collector, verbatim Oracle text: an instruction-level CR 121.2a
 /// replacement that applies only to an instruction to draw two or more cards.
@@ -365,21 +363,10 @@ fn is_dredge_prompt_for_p0(state: &GameState) -> bool {
     matches!(state.waiting_for, WaitingFor::ReplacementChoice { player, .. } if player == P0)
 }
 
-/// The head of the topmost ability continuation on the staged shadow, if any.
-fn shadow_continuation_head(state: &GameState) -> Option<Effect> {
-    staged_payment_shadow_for_test(state)
-        .resolution_stack
-        .iter()
-        .filter_map(|frame| match frame {
-            ResolutionFrame::AbilityContinuation(frame) => Some(frame.pending.chain.effect.clone()),
-            _ => None,
-        })
-        .last()
-}
-
-/// P0 resolves `PayCost{Composite[Draw 1; legs]}` with a GainLife 3 rider on the concession board; when
-/// `concede`, P2 concedes at the first Dredge prompt. Every Dredge prompt is declined. Returns the hand
-/// delta, the life delta and the failure flag, after asserting the payment settled with no transaction.
+/// P0 resolves `PayCost{Composite[Draw 1; legs]}` with a GainLife 3 rider on the concession board. Without a
+/// concession every leg raises a legal Dredge prompt, each declined. With one, P2 concedes at leg 1's prompt.
+/// Returns the hand delta, the life delta and the failure flag, after asserting the payment settled with no
+/// transaction and, after a concession, that no Dredge was offered or applied.
 fn pay_staged_draw_cost_around_a_concession(legs: usize, concede: bool) -> (i64, i32, bool) {
     let (mut runner, source) = concession_board();
     let mut root = ResolvedAbility::new(pay_cost(draw_legs(legs)), vec![], source, P0);
@@ -393,11 +380,12 @@ fn pay_staged_draw_cost_around_a_concession(legs: usize, concede: bool) -> (i64,
         P0,
     )));
     let life_before = runner.life(P0);
-    let (hand_before, _) = hand_and_library(&runner, P0);
+    let (hand_before, library_before) = hand_and_library(&runner, P0);
     let state = runner.state_mut();
     resolve_ability_chain(state, &root, &mut Vec::new(), 0).expect("the staged payment resolves");
 
-    // Reach guard: Humility mutes Maralen, so the fresh gate admitted the choice and staged it.
+    // Reach guard: Humility mutes Maralen, so the fresh gate admitted the choice and staged it, and leg 1's
+    // draw can happen, so Dredge is a legal replacement of it.
     assert!(state.payment_transaction.is_some(), "the payment is staged");
     assert!(
         is_dredge_prompt_for_p0(state),
@@ -405,8 +393,10 @@ fn pay_staged_draw_cost_around_a_concession(legs: usize, concede: bool) -> (i64,
     );
 
     if concede {
-        // CR 104.3a + CR 800.4a: P2 leaves the game and Humility with them, so Maralen's
-        // "Players can't draw cards" applies again on canonical state.
+        // CR 104.3a + CR 800.4a: P2 leaves the game and Humility with them, so Maralen's "Players can't draw
+        // cards" applies again. The staged payment re-materializes latched on that base: every leg's draw
+        // can't happen, so Dredge can't replace it (CR 614.17c) and each draw is clamped. Nothing waits on
+        // P0 any more, so the payment commits paid and its rider runs.
         apply(
             state,
             PlayerId(2),
@@ -416,41 +406,30 @@ fn pay_staged_draw_cost_around_a_concession(legs: usize, concede: bool) -> (i64,
         )
         .expect("a player can concede at any time");
         assert!(
-            state.payment_transaction.is_some(),
-            "the transaction survives the concession"
+            !is_dredge_prompt_for_p0(state),
+            "no Dredge prompt survives the concession"
         );
-        assert!(is_dredge_prompt_for_p0(&staged_payment_shadow_for_test(
-            state
-        )));
-        if legs == 3 {
-            // Reach guard: the parked remainder exists after the first pause.
-            assert_eq!(
-                shadow_continuation_head(state),
-                Some(pay_cost(draw_legs(2)))
+        let graveyard = &runner.state().players[P0.0 as usize].graveyard;
+        assert_eq!(graveyard.len(), 1, "nothing was milled");
+        assert_eq!(
+            runner.state().objects[&graveyard[0]].name,
+            "Stinkweed Imp",
+            "the Imp was not returned"
+        );
+        let (_, library_after) = hand_and_library(&runner, P0);
+        assert_eq!(library_after, library_before, "no card left P0's library");
+    } else {
+        for leg in 1..=legs {
+            assert!(
+                is_dredge_prompt_for_p0(state),
+                "leg {leg} raised its Dredge prompt"
             );
+            apply(state, P0, GameAction::ChooseReplacement { index: 1 })
+                .unwrap_or_else(|error| panic!("declining Dredge on leg {leg}: {error:?}"));
         }
     }
 
-    for leg in 1..=legs {
-        assert!(
-            is_dredge_prompt_for_p0(state),
-            "leg {leg} raised its Dredge prompt"
-        );
-        apply(state, P0, GameAction::ChooseReplacement { index: 1 })
-            .unwrap_or_else(|error| panic!("declining Dredge on leg {leg}: {error:?}"));
-        if concede && legs == 3 {
-            match leg {
-                // The latched remainder re-prepends its own latched remainder.
-                1 => assert_eq!(
-                    shadow_continuation_head(state),
-                    Some(pay_cost(draw_cost(1)))
-                ),
-                2 => assert_eq!(shadow_continuation_head(state), None),
-                _ => {}
-            }
-        }
-    }
-
+    let state = runner.state();
     assert!(state.payment_transaction.is_none(), "the payment committed");
     assert!(state.active_ability_continuation().is_none());
     assert!(matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0));
@@ -463,19 +442,18 @@ fn pay_staged_draw_cost_around_a_concession(legs: usize, concede: bool) -> (i64,
     )
 }
 
-/// CR 118.12 + CR 614.17a + CR 118.11: a staged draw cost P0 already chose stays paid when another player's
-/// concession (CR 104.3a + CR 800.4a) removes Humility mid-payment and Maralen's can't-draw effect returns.
-/// Every replay re-materializes the choice latched: the remaining draws are clamped, never unpaid, and the
-/// rider runs once.
+/// CR 118.12 + CR 614.17a + CR 118.11 + CR 614.17c: a staged draw cost P0 already chose stays paid when another
+/// player's concession (CR 104.3a + CR 800.4a) removes Humility mid-payment and Maralen's can't-draw effect
+/// returns. The re-materialized payment is latched: its draws are clamped, never unpaid, no Dredge replaces a
+/// draw that can't happen, and the rider runs once. Control: without the concession every leg's Dredge is
+/// legal (declined here) and both cards are drawn.
 ///
-/// Revert probes: (A) `replay` not installing `LatchedSuffix` re-gates the root fresh, so the replay after
-/// the concession refuses the payment and the post-concession reach guard
-/// `is_dredge_prompt_for_p0(&staged_payment_shadow_for_test(state))` fails; (B) the prepend helpers queueing
-/// `FreshChoice` re-gate the remainder head, which is refused before the Draw arm, so the per-leg
-/// "leg 2 raised its Dredge prompt" assertion fails.
+/// Revert probes: (A) `replay` not installing `LatchedSuffix` re-gates the root fresh, so the concession aborts
+/// the payment (flag true); (B) dropping the can't-happen filter from `find_applicable_replacements` keeps a
+/// Dredge prompt pending after the concession; (C) dropping `settle_after_outside_action` from the concession
+/// path leaves the stale leg-1 prompt as the canonical `waiting_for`.
 #[test]
 fn another_players_concession_does_not_unpay_a_staged_draw_cost() {
-    // Control: without the concession both legs draw.
     assert_eq!(
         pay_staged_draw_cost_around_a_concession(2, false),
         (2, 3, false)
@@ -488,10 +466,14 @@ fn another_players_concession_does_not_unpay_a_staged_draw_cost() {
     );
 }
 
-/// CR 118.12 + CR 702.24a: the three-leg form of the concession row, where the latched remainder pauses
-/// again and re-prepends its own latched remainder, driven through the production route.
+/// CR 118.12 + CR 702.24a: the three-leg form of the concession row (and its control), driven through the
+/// production route.
 #[test]
 fn another_players_concession_does_not_unpay_a_three_leg_draw_cost() {
+    assert_eq!(
+        pay_staged_draw_cost_around_a_concession(3, false),
+        (3, 3, false)
+    );
     assert_eq!(
         pay_staged_draw_cost_around_a_concession(3, true),
         (0, 3, false),

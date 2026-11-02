@@ -362,7 +362,21 @@ pub(crate) fn apply_pending_action(
             action,
         });
 
-    match replay(state, &transaction)? {
+    let outcome = replay(state, &transaction)?;
+    settle_replay_outcome(state, transaction, outcome)
+}
+
+/// Settle one materialization of the staged payment. Pause keeps the canonical
+/// base and stores `transaction` (with its transcript) and its current prompt.
+/// Completion swaps in the materialized shadow and returns the complete
+/// buffered event stream. Failure aborts the descriptor and restores its base
+/// without publishing any payment events.
+fn settle_replay_outcome(
+    state: &mut GameState,
+    transaction: ResolutionPaymentTransaction,
+    outcome: ReplayOutcome,
+) -> Result<ActionResult, EngineError> {
+    match outcome {
         ReplayOutcome::Failed => {
             let mut restored = state.clone();
             restored.payment_transaction = None;
@@ -423,6 +437,43 @@ pub(crate) fn apply_pending_action(
             Ok(ActionResult::applied(events, waiting_for).with_log_entries(log_entries))
         }
     }
+}
+
+/// CR 104.3a + CR 800.4a + CR 118.12: another player's concession is an action
+/// outside the transaction that changes the canonical base every replay starts
+/// from (their permanents leave, and the effects they generated end). The
+/// staged payment is re-materialized once on that base so the canonical prompt
+/// is the one the payment now actually waits on: a payment the new base lets
+/// complete without the pending answer commits (its rider continues), one still
+/// paused exposes its current prompt, and a failed one aborts with its printed
+/// continuation. The root stays latched on replay, so the departure never
+/// unpays a choice already made (CR 614.17a); each event is judged as it
+/// happens on the new base — e.g. a draw a can't-draw effect now forbids is no
+/// longer replaceable (CR 614.17c), so a Dredge choice offered before the
+/// departure is withdrawn. A replay the transcript can no longer follow keeps
+/// the existing descriptor.
+pub(crate) fn settle_after_outside_action(
+    state: &mut GameState,
+) -> Result<Option<ActionResult>, EngineError> {
+    let Some(transaction) = state.payment_transaction.as_deref().cloned() else {
+        return Ok(None);
+    };
+    let outcome = match replay(state, &transaction) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            tracing::debug!(
+                ?error,
+                "a staged payment's transcript no longer replays after an outside action"
+            );
+            return Ok(None);
+        }
+    };
+    if let ReplayOutcome::Paused { shadow } = &outcome {
+        if shadow.waiting_for == state.waiting_for {
+            return Ok(None);
+        }
+    }
+    settle_replay_outcome(state, transaction, outcome).map(Some)
 }
 
 /// Materialize the public shadow used by viewer projections, client wires, and

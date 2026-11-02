@@ -2388,19 +2388,9 @@ fn pay_ability_cost_inner(
                     count,
                     target: target @ (TargetFilter::Controller | TargetFilter::OriginalController),
                 } => {
-                    let requested = resolved_cost_count(resolve_cost_quantity(
-                        state, count, player, source_id, scope,
-                    ));
-                    let drawer = match scope {
-                        PaymentScope::Resolution { ability, .. } => {
-                            super::effects::resolve_player_for_context_ref(state, ability, target)
-                        }
-                        // An activated ability's controller and original
-                        // controller are both the activating player.
-                        PaymentScope::Activation { .. } | PaymentScope::TurnFaceUp { .. } => {
-                            Some(player)
-                        }
-                    };
+                    let frame = DrawLegFrame::for_scope(scope, player, source_id);
+                    let requested = frame.cards(state, count);
+                    let drawer = frame.drawer(state, target);
                     // CR 608.2b + CR 608.2c: a drawer reference that names no player draws nothing, as in
                     // `draw::resolve`. `Controller` and `OriginalController` are context refs that always name
                     // one, so this only guards the resolver's general contract.
@@ -2410,11 +2400,11 @@ fn pay_ability_cost_inner(
                     // CR 614.17b + CR 121.3 + CR 121.2b: a drawer who can't draw
                     // every card this cost includes can't choose to pay it.
                     //
-                    // Activation scope only. At resolution the fresh-payment gate at the authority's entry refuses
-                    // the choice before any leg is paid (every drawer's total across a `Composite`, CR 121.2b), and
-                    // a latched resume must not re-gate (CR 118.12). `is_payable_for_activation` admits every
-                    // `EffectCost` and `can_pay` dry-runs this arm, so here it is the only CR 614.17b gate an
-                    // activated draw cost meets, mirroring the `PutCounter` arm above.
+                    // The whole-cost measure (every drawer's total across a `Composite`) is read before any leg is
+                    // paid, at the fresh entry of each scope: activation admission (`is_payable_for_activation`)
+                    // and the resolution authority's `FreshChoice` gate. A latched resolution resume must not re-gate (CR 118.12).
+                    // This per-leg refusal is the activation arm's backstop for a payment reached without that
+                    // admission, mirroring the `PutCounter` arm above.
                     if matches!(scope, PaymentScope::Activation { .. })
                         && super::effects::draw::allowed_draw_count(state, drawer, requested)
                             < requested
@@ -3393,50 +3383,132 @@ fn resolved_cost_count(resolved: i32) -> u32 {
     u32::try_from(resolved.max(0)).unwrap_or(0)
 }
 
+/// Who pays a cost's draw legs and how their counts resolve, for the joint
+/// CR 121.2b measure ([`draw_legs_are_drawable`]) and the `Draw` pay arm.
+#[derive(Clone, Copy)]
+enum DrawLegFrame<'a> {
+    /// CR 602.2b: an activated ability's (or a face-down permanent's) cost. The
+    /// controller and the original controller are both the paying player.
+    Activation {
+        player: PlayerId,
+        source_id: ObjectId,
+    },
+    /// CR 118.12: a resolution-time payment of `ability`'s cost; its context
+    /// refs resolve against the resolving ability (CR 121.3a: Decoy Gambit's
+    /// payer has the spell's original controller draw).
+    Resolution { ability: &'a ResolvedAbility },
+}
+
+impl<'a> DrawLegFrame<'a> {
+    fn for_scope(scope: &PaymentScope<'a>, player: PlayerId, source_id: ObjectId) -> Self {
+        match scope {
+            PaymentScope::Resolution { ability, .. } => Self::Resolution { ability },
+            PaymentScope::Activation { .. } | PaymentScope::TurnFaceUp { .. } => {
+                Self::Activation { player, source_id }
+            }
+        }
+    }
+
+    /// CR 608.2b + CR 608.2c: the player a draw leg's context ref names, if any.
+    fn drawer(self, state: &GameState, target: &TargetFilter) -> Option<PlayerId> {
+        match self {
+            Self::Activation { player, .. } => Some(player),
+            Self::Resolution { ability } => {
+                super::effects::resolve_player_for_context_ref(state, ability, target)
+            }
+        }
+    }
+
+    /// CR 107.1b: a draw leg's card count; a negative result is zero.
+    fn cards(self, state: &GameState, count: &crate::types::ability::QuantityExpr) -> u32 {
+        resolved_cost_count(match self {
+            Self::Activation { player, source_id } => {
+                resolve_quantity(state, count, player, source_id)
+            }
+            Self::Resolution { ability } => resolve_quantity_with_targets(state, count, ability),
+        })
+    }
+}
+
+/// CR 614.17b + CR 121.2b: fresh activation admission for a cost's draws —
+/// "the player can't pay a cost that includes drawing multiple cards" a
+/// can't-draw or per-turn limit forbids. The whole cost's draws are summed per
+/// drawer before any leg is paid: paying legs in order would let a first-leg
+/// replacement choice (Dredge) pause the payment, and so admit the cost, before
+/// its later draw legs are judged. Read by
+/// `AbilityCostPayability::is_payable_for_activation`, the gate both the live
+/// activation path and `can_pay`'s dry run pass through.
+pub(crate) fn activation_draw_legs_are_drawable(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &AbilityCost,
+) -> bool {
+    draw_legs_are_drawable(
+        state,
+        std::slice::from_ref(cost),
+        DrawLegFrame::Activation { player, source_id },
+    )
+}
+
 /// CR 614.17b + CR 121.2b + CR 121.3 + CR 121.3a: true when every drawer can draw the TOTAL its draw legs
 /// demand. "The player can't pay a cost that includes drawing multiple cards" under a one-card limit, so the
 /// legs of one cost are summed per drawer — keyed on the drawer, never the payer (Decoy Gambit: the payer
 /// has the spell's caster draw). Nested `Composite`s are flattened; a `OneOf` is not a draw leg here and is
 /// judged by the calling predicate's own `OneOf` arm. A zero total is always
 /// drawable (CR 118.5: such a cost includes no draw). The draw-leg counterpart of
-/// `cost_payability::discard_legs_jointly_payable`.
-fn draw_legs_are_drawable(
-    state: &GameState,
-    legs: &[AbilityCost],
-    ability: &ResolvedAbility,
-) -> bool {
-    use crate::types::ability::Effect;
-    let mut leaves = Vec::new();
-    for leg in legs {
-        flatten_cost_components(leg, &mut leaves);
-    }
+/// `cost_payability::discard_legs_jointly_payable`. The single fresh-choice
+/// measure for both scopes: the resolution entry gate
+/// (`resolution_cost_includes_impossible_event`) and fresh activation admission
+/// (`activation_draw_legs_are_drawable`) read it before any leg is paid or prompts.
+fn draw_legs_are_drawable(state: &GameState, legs: &[AbilityCost], frame: DrawLegFrame) -> bool {
+    // Allocation-free for the common draw-less cost: activation admission reads
+    // this for every activatable ability on every legal-action pass.
     let mut totals: Vec<(PlayerId, u32)> = Vec::new();
-    for leaf in &leaves {
-        // Non-draw legs are outside the question; their own arms judge them.
-        let AbilityCost::EffectCost { effect } = leaf else {
-            continue;
-        };
-        let Effect::Draw {
-            count,
-            target: target @ (TargetFilter::Controller | TargetFilter::OriginalController),
-        } = effect.as_ref()
-        else {
-            continue;
-        };
-        // CR 608.2b + CR 608.2c: a drawer reference that names no player demands no draw.
-        let Some(drawer) = super::effects::resolve_player_for_context_ref(state, ability, target)
-        else {
-            continue;
-        };
-        let cards = resolved_cost_count(resolve_quantity_with_targets(state, count, ability));
-        match totals.iter_mut().find(|(player, _)| *player == drawer) {
-            Some((_, total)) => *total = total.saturating_add(cards),
-            None => totals.push((drawer, cards)),
-        }
+    for leg in legs {
+        accumulate_draw_leg_totals(state, leg, frame, &mut totals);
     }
     totals.iter().all(|&(drawer, total)| {
         super::effects::draw::allowed_draw_count(state, drawer, total) >= total
     })
+}
+
+/// Adds each context-ref draw leaf under `cost` (nested `Composite`s
+/// flattened) to its drawer's running total.
+fn accumulate_draw_leg_totals(
+    state: &GameState,
+    cost: &AbilityCost,
+    frame: DrawLegFrame,
+    totals: &mut Vec<(PlayerId, u32)>,
+) {
+    use crate::types::ability::Effect;
+    let effect = match cost {
+        AbilityCost::Composite { costs } => {
+            for leg in costs {
+                accumulate_draw_leg_totals(state, leg, frame, totals);
+            }
+            return;
+        }
+        AbilityCost::EffectCost { effect } => effect,
+        // Non-draw legs are outside the question; their own arms judge them.
+        _ => return,
+    };
+    let Effect::Draw {
+        count,
+        target: target @ (TargetFilter::Controller | TargetFilter::OriginalController),
+    } = effect.as_ref()
+    else {
+        return;
+    };
+    // CR 608.2b + CR 608.2c: a drawer reference that names no player demands no draw.
+    let Some(drawer) = frame.drawer(state, target) else {
+        return;
+    };
+    let cards = frame.cards(state, count);
+    match totals.iter_mut().find(|(player, _)| *player == drawer) {
+        Some((_, total)) => *total = total.saturating_add(cards),
+        None => totals.push((drawer, cards)),
+    }
 }
 
 /// CR 614.17b: "If an event can't happen, a player can't choose to pay a cost
@@ -3503,7 +3575,11 @@ pub(crate) fn resolution_cost_includes_impossible_event(
             Effect::Draw {
                 target: TargetFilter::Controller | TargetFilter::OriginalController,
                 ..
-            } => !draw_legs_are_drawable(state, std::slice::from_ref(cost), ability),
+            } => !draw_legs_are_drawable(
+                state,
+                std::slice::from_ref(cost),
+                DrawLegFrame::Resolution { ability },
+            ),
             // `supports_effect_cost_payment` admits exactly the three shapes above
             // (source counters, fixed mana, a context-ref draw) and refuses every
             // other effect-cost shape upstream.
@@ -3528,7 +3604,7 @@ pub(crate) fn resolution_cost_includes_impossible_event(
                 .iter()
                 .any(|c| resolution_cost_includes_impossible_event(state, payer, c, ability))
                 // CR 121.2b: draw legs that are each drawable can still exceed a per-turn limit together.
-                || !draw_legs_are_drawable(state, costs, ability)
+                || !draw_legs_are_drawable(state, costs, DrawLegFrame::Resolution { ability })
         }
         // CR 614.17b + CR 118.12a: exactly one option is paid, so the cost is unchoosable
         // only if EVERY option includes an impossible event.
@@ -3770,7 +3846,7 @@ fn can_pay_resolution(
                     ability.context.granting_object,
                     costs,
                 )
-                && draw_legs_are_drawable(state, costs, ability)
+                && draw_legs_are_drawable(state, costs, DrawLegFrame::Resolution { ability })
         }
         // CR 118.12a: Disjunctive — payable iff any sub-cost is payable. The
         // choice is made interactively via `UnlessPaymentChooseCost`; the
@@ -5709,13 +5785,14 @@ mod tests {
         let ability = draw_cost_ability(source);
 
         // Reach guard: Maralen is live, so a one-card draw is not drawable.
+        let frame = DrawLegFrame::Resolution { ability: &ability };
         assert!(!draw_legs_are_drawable(
             &scenario.state,
             &[draw_effect_cost(1)],
-            &ability
+            frame
         ));
         assert!(
-            draw_legs_are_drawable(&scenario.state, &[draw_effect_cost(0)], &ability),
+            draw_legs_are_drawable(&scenario.state, &[draw_effect_cost(0)], frame),
             "a zero-card draw cost includes no draw"
         );
     }

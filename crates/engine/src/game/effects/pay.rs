@@ -4140,17 +4140,27 @@ mod tests {
             matches!(state.waiting_for, WaitingFor::ReplacementChoice { player, .. } if player == P0)
         }
 
-        fn decline_dredge(state: &mut GameState) {
-            crate::game::engine::apply(state, P0, GameAction::ChooseReplacement { index: 1 })
-                .expect("declining Dredge is legal");
+        /// CR 614.17c + CR 702.52a: under Maralen each draw can't happen, so Stinkweed Imp's Dredge (a
+        /// continuous replacement, never a self-replacement) is not offered for it: no prompt, nothing milled,
+        /// and the Imp stays in P0's graveyard. A latched draw leg still reaches the Draw arm and is clamped.
+        fn assert_dredge_not_offered(state: &GameState) {
+            assert!(
+                !is_dredge_prompt_for_p0(state),
+                "Dredge can't replace a draw that can't happen"
+            );
+            let graveyard = &state.players[P0.0 as usize].graveyard;
+            assert_eq!(graveyard.len(), 1, "nothing was milled");
+            assert_eq!(
+                state.objects[&graveyard[0]].name, "Stinkweed Imp",
+                "the Imp was not returned"
+            );
         }
 
         /// CR 118.12 + CR 118.11: the remainder a paused PayCost
-        /// queues pays latched. Under Maralen the draw still reaches the Draw arm (the Dredge prompt is
-        /// its marker), is clamped, and the remainder settles paid.
+        /// queues pays latched. Under Maralen the draw still reaches the Draw arm, is clamped (no Dredge:
+        /// CR 614.17c), and the remainder settles paid.
         ///
-        /// Revert probe: queueing the remainder `FreshChoice` refuses it before the Draw arm (no prompt,
-        /// flag true).
+        /// Revert probe: queueing the remainder `FreshChoice` refuses it before the Draw arm (flag true).
         #[test]
         fn a_prepended_pay_cost_remainder_is_latched() {
             let (mut runner, source) = board(Restriction::Maralen, true);
@@ -4166,11 +4176,7 @@ mod tests {
             // Pre-seeded, so a final `false` is a positive clear by `pay::resolve`.
             state.cost_payment_failed_flag = true;
             crate::game::effects::drain_pending_continuation(state, &mut Vec::new());
-            assert!(
-                is_dredge_prompt_for_p0(state),
-                "the latched remainder must reach the Draw arm's Dredge prompt"
-            );
-            decline_dredge(state);
+            assert_dredge_not_offered(state);
             assert!(
                 !state.cost_payment_failed_flag,
                 "the latched remainder is paid"
@@ -4196,6 +4202,44 @@ mod tests {
                 !is_dredge_prompt_for_p0(state),
                 "the fresh gate refuses before the Draw arm"
             );
+        }
+
+        /// CR 614.17c control + CR 702.52a: where the latched draw CAN happen (Spirit of the Labyrinth, P0's
+        /// first draw this turn), Stinkweed Imp's Dredge is a legal replacement of it. Accepting mills five
+        /// and returns the Imp, and the remainder settles paid.
+        ///
+        /// Revert probe: a can't-happen filter that ignored the per-turn allowance (refusing every draw
+        /// under a limit) withholds this prompt.
+        #[test]
+        fn a_latched_draw_that_can_happen_offers_a_legal_dredge() {
+            let (mut runner, source) = board(Restriction::Spirit, true);
+            let root = ResolvedAbility::new(pay_cost(two_draw_legs()), vec![], source, P0);
+            let state = runner.state_mut();
+            let library_before = state.players[P0.0 as usize].library.len();
+            crate::game::effects::prepend_remaining_pay_cost_continuation(
+                state,
+                &root,
+                P0,
+                draw_cost(1),
+            );
+            state.cost_payment_failed_flag = true;
+            crate::game::effects::drain_pending_continuation(state, &mut Vec::new());
+            assert!(
+                is_dredge_prompt_for_p0(state),
+                "the latched draw offers Dredge"
+            );
+            crate::game::engine::apply(state, P0, GameAction::ChooseReplacement { index: 0 })
+                .expect("accepting Dredge is legal");
+            let p0 = &state.players[P0.0 as usize];
+            assert!(
+                p0.hand
+                    .iter()
+                    .any(|id| state.objects[id].name == "Stinkweed Imp"),
+                "Dredge returned the Imp"
+            );
+            assert_eq!(p0.library.len(), library_before - 5, "Dredge milled five");
+            assert!(!state.cost_payment_failed_flag, "the latched draw is paid");
+            assert!(state.active_ability_continuation().is_none());
         }
 
         /// CR 118.12 + CR 121.2b (multi-authority): the latch binds the queued head only.
@@ -4319,11 +4363,7 @@ mod tests {
             state.cost_payment_failed_flag = true;
             let mut events = Vec::new();
             crate::game::effects::drain_pending_continuation(state, &mut events);
-            assert!(
-                is_dredge_prompt_for_p0(state),
-                "the latched suffix must reach the Draw arm's Dredge prompt"
-            );
-            decline_dredge(state);
+            assert_dredge_not_offered(state);
             assert!(
                 !state.cost_payment_failed_flag,
                 "the latched suffix is paid"
@@ -4389,11 +4429,7 @@ mod tests {
 
             state.cost_payment_failed_flag = true;
             crate::game::effects::drain_pending_continuation(state, &mut Vec::new());
-            assert!(
-                is_dredge_prompt_for_p0(state),
-                "the latched head must reach the Draw arm's Dredge prompt"
-            );
-            decline_dredge(state);
+            assert_dredge_not_offered(state);
             assert!(!state.cost_payment_failed_flag, "the latched head is paid");
             assert_eq!(
                 hand_size(state),
@@ -4408,7 +4444,7 @@ mod tests {
         /// It still resolves first; the latched record drains right after it, still latched.
         ///
         /// Revert probe: splicing onto the latched record hands its latch to the new head, so the PayCost
-        /// tail is gated fresh (no prompt, flag true).
+        /// tail is gated fresh (flag true).
         #[test]
         fn a_later_prepend_parks_above_a_latched_record() {
             let (mut runner, source) = board(Restriction::Maralen, true);
@@ -4455,11 +4491,7 @@ mod tests {
                 ),
                 "the later head resolves first, got {first_life_change:?}"
             );
-            assert!(
-                is_dredge_prompt_for_p0(state),
-                "the latched record drains next and reaches the Draw arm's Dredge prompt"
-            );
-            decline_dredge(state);
+            assert_dredge_not_offered(state);
             assert!(!state.cost_payment_failed_flag, "the latched head is paid");
             assert_eq!(
                 hand_size(state),
@@ -4654,7 +4686,7 @@ mod tests {
         /// remainder is the head node itself, so it pays latched and reaches the Draw arm under Maralen.
         ///
         /// Revert probe: keeping `player_scope` fans the remainder out into per-player legs, each a node of
-        /// its own; the head's latch stays with the head, so the leg is gated fresh (no prompt, flag true).
+        /// its own; the head's latch stays with the head, so the leg is gated fresh (flag true).
         #[test]
         fn a_remainder_does_not_inherit_its_roots_player_fan_out() {
             let (mut runner, source) = board(Restriction::Maralen, true);
@@ -4670,11 +4702,7 @@ mod tests {
             );
             state.cost_payment_failed_flag = true;
             crate::game::effects::drain_pending_continuation(state, &mut Vec::new());
-            assert!(
-                is_dredge_prompt_for_p0(state),
-                "the latched head must reach the Draw arm's Dredge prompt"
-            );
-            decline_dredge(state);
+            assert_dredge_not_offered(state);
             assert!(!state.cost_payment_failed_flag, "the latched head is paid");
             assert_eq!(
                 hand_size(state),

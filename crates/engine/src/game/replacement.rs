@@ -8742,6 +8742,16 @@ pub fn find_applicable_replacements(
         return union;
     }
 
+    // CR 614.17c: "If an event can't happen, it can only be replaced by a
+    // self-replacement effect (see rule 614.15). Other replacement and/or
+    // prevention effects can't modify or replace it." Every pipeline draw
+    // candidate is a continuous replacement (Dredge, CR 702.52a; Alms
+    // Collector; a Prevent "skip that draw"): a self-replacement is folded into
+    // its own ability before the draw is proposed (see `ReplacementStep`).
+    if proposed_draw_cannot_happen(state, event) {
+        return Vec::new();
+    }
+
     let mut candidates = Vec::new();
 
     match event {
@@ -11862,6 +11872,23 @@ fn effect_overrides_controller(effect: &Effect) -> bool {
             ..
         }
     )
+}
+
+/// CR 614.17c + CR 121.2b: true when a proposed draw is an event
+/// that can't happen — no card of it may be drawn (`allowed_draw_count` is
+/// zero: a `CantDraw` effect such as Maralen of the Mornsong, or an exhausted
+/// per-turn limit such as Spirit of the Labyrinth's after the player's first
+/// draw). The test is per stage: a multi-card instruction a per-turn limit
+/// only shortens can still partly happen (CR 121.2b), so it stays replaceable,
+/// while each individual draw the limit forbids can't. An empty library is
+/// not a can't: the attempted draw still happens (CR 121.4).
+fn proposed_draw_cannot_happen(state: &GameState, event: &ProposedEvent) -> bool {
+    match event {
+        ProposedEvent::Draw {
+            player_id, count, ..
+        } => *count > 0 && super::effects::draw::allowed_draw_count(state, *player_id, *count) == 0,
+        _ => false,
+    }
 }
 
 fn is_counter_placement_event(event: &ProposedEvent) -> bool {
