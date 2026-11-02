@@ -89,6 +89,7 @@ mod frenzy_attacker_unblocked_pump;
 mod frostcliff_siege_anchor_word_modes;
 mod gaeas_liege;
 mod galion_elvenkings_butler_attack_pt_set;
+mod game_over_clears_pending_resolution_choice;
 mod giggling_skitterspike_issue_890;
 mod gimbal_gremlin_prodigy;
 mod goaded_creature_under_pacifism_visible;
