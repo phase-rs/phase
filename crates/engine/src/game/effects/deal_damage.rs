@@ -1194,13 +1194,12 @@ fn stash_remaining_post_replacement_damage(
 ) {
     let mut iter = remaining
         .iter()
-        .filter_map(|(ctx, event)| build_post_replacement_damage_node(ctx, event));
+        .filter_map(|(ctx, event)| build_post_replacement_damage_node(ctx, event))
+        .map(|node| keep_chain_identity(node, ability));
     let Some(mut head) = iter.next() else {
         if let Some(sub) = ability.sub_ability.as_ref() {
-            append_to_pending_continuation(
-                state,
-                Some(Box::new(cast_tail_with_parent_targets(sub, ability))),
-            );
+            let tail = cast_tail_with_parent_targets(state, sub, ability);
+            append_to_pending_continuation(state, Some(Box::new(tail)));
         }
         return;
     };
@@ -1209,7 +1208,10 @@ fn stash_remaining_post_replacement_damage(
         append_to_sub_chain(&mut head, node);
     }
     if let Some(sub) = ability.sub_ability.as_ref() {
-        append_to_sub_chain(&mut head, cast_tail_with_parent_targets(sub, ability));
+        append_to_sub_chain(
+            &mut head,
+            cast_tail_with_parent_targets(state, sub, ability),
+        );
     }
     append_to_pending_continuation(state, Some(Box::new(head)));
 }
@@ -1229,15 +1231,16 @@ fn stash_remaining_damage_chain(
         // No remaining batch work — still forward the parent's sub_ability so the
         // downstream chain resumes after the pending replacement choice resolves.
         if let Some(sub) = ability.sub_ability.as_ref() {
-            append_to_pending_continuation(
-                state,
-                Some(Box::new(cast_tail_with_parent_targets(sub, ability))),
-            );
+            let tail = cast_tail_with_parent_targets(state, sub, ability);
+            append_to_pending_continuation(state, Some(Box::new(tail)));
         }
         return;
     };
     if let Some(sub) = ability.sub_ability.as_ref() {
-        append_to_sub_chain(&mut head, cast_tail_with_parent_targets(sub, ability));
+        append_to_sub_chain(
+            &mut head,
+            cast_tail_with_parent_targets(state, sub, ability),
+        );
     }
     append_to_pending_continuation(state, Some(Box::new(head)));
 }
@@ -1254,7 +1257,7 @@ fn remaining_damage_chain(
         let mut node =
             build_remaining_damage_node(damage_source_id, ability.controller, target, amount);
         node.trigger_source = ability.trigger_source.clone();
-        node
+        keep_chain_identity(node, ability)
     };
     let mut iter = remaining.into_iter();
     let (first_target, first_amount) = iter.next()?;
@@ -1277,7 +1280,13 @@ fn remaining_damage_chain(
 /// false and no object target leaks; for Lady Loki's `CastFromZone
 /// { target: ParentTarget }` tail (empty targets, non-`Resolution` timing) it
 /// returns true and the hit is preserved so the free cast still addresses it.
+///
+/// The tail also takes the same chain-context hand-off as the generic pause path, so
+/// a kicker survives the park (Hurloon Battle Hymn, "If this spell was kicked, you
+/// gain 4 life."). The context object is `None` because `resolve_chain_body` has
+/// already set it recursively on `ability`.
 fn cast_tail_with_parent_targets(
+    state: &mut GameState,
     sub: &ResolvedAbility,
     ability: &ResolvedAbility,
 ) -> ResolvedAbility {
@@ -1285,7 +1294,29 @@ fn cast_tail_with_parent_targets(
     if crate::game::effects::should_propagate_parent_targets(ability, &tail) {
         tail.mirror_targets_from(ability);
     }
+    crate::game::effects::apply_parent_chain_context(&mut tail, ability, None, state);
     tail
+}
+
+/// CR 608.2c: a node parked for a remaining recipient is the same instruction of the same
+/// spell or ability. `resolve_chain_body` evaluates the next node's gate against this node
+/// and hands this node's context on, so it carries the chain's (Nibelheim Aflame, "If this
+/// spell was cast from a graveyard"; Tannuk, "the second time this ability has resolved").
+/// A drain runs at depth 1, so the index counts no resolution.
+fn keep_chain_identity(mut node: ResolvedAbility, ability: &ResolvedAbility) -> ResolvedAbility {
+    node.context = ability.context.clone();
+    node.ability_index = ability.ability_index;
+    node
+}
+
+/// CR 608.2c: tell `resolve_chain_body` that this pause parked the node's later
+/// instructions behind its remaining recipients, so the generic pause path must not run
+/// them again ahead of those recipients. A node with no tail tags nothing: the mark
+/// writes to whatever frame is active, and this node may have parked none.
+fn report_parked_tail(state: &mut GameState, ability: &ResolvedAbility) {
+    if ability.sub_ability.is_some() {
+        mark_pending_continuation_parent(state, EffectKind::from(&ability.effect));
+    }
 }
 
 /// CR 120.4b + CR 616.1e: Stash a two-part continuation for an
@@ -1310,6 +1341,7 @@ fn stash_each_source_combined_continuation(
 
     for (ctx, event) in already_replaced {
         if let Some(node) = build_post_replacement_damage_node(ctx, event) {
+            let node = keep_chain_identity(node, ability);
             match head_opt.as_mut() {
                 None => head_opt = Some(node),
                 Some(h) => append_to_sub_chain(h, node),
@@ -1318,7 +1350,10 @@ fn stash_each_source_combined_continuation(
     }
 
     for (source_id, target, amount) in raw_remaining {
-        let node = build_remaining_damage_node(source_id, controller, target, amount);
+        let node = keep_chain_identity(
+            build_remaining_damage_node(source_id, controller, target, amount),
+            ability,
+        );
         match head_opt.as_mut() {
             None => head_opt = Some(node),
             Some(h) => append_to_sub_chain(h, node),
@@ -1329,13 +1364,11 @@ fn stash_each_source_combined_continuation(
         match head_opt.as_mut() {
             None => {
                 // Nothing to stash — forward sub_ability so downstream fires.
-                append_to_pending_continuation(
-                    state,
-                    Some(Box::new(cast_tail_with_parent_targets(sub, ability))),
-                );
+                let tail = cast_tail_with_parent_targets(state, sub, ability);
+                append_to_pending_continuation(state, Some(Box::new(tail)));
                 return;
             }
-            Some(h) => append_to_sub_chain(h, cast_tail_with_parent_targets(sub, ability)),
+            Some(h) => append_to_sub_chain(h, cast_tail_with_parent_targets(state, sub, ability)),
         }
     }
 
@@ -1363,22 +1396,28 @@ fn stash_remaining_each_source_damage(
         // No remaining batch work — forward the parent's sub_ability so the
         // downstream chain resumes after the pending replacement choice resolves.
         if let Some(sub) = ability.sub_ability.as_ref() {
-            append_to_pending_continuation(
-                state,
-                Some(Box::new(cast_tail_with_parent_targets(sub, ability))),
-            );
+            let tail = cast_tail_with_parent_targets(state, sub, ability);
+            append_to_pending_continuation(state, Some(Box::new(tail)));
         }
         return;
     };
 
-    let mut head =
-        build_remaining_damage_node(first_source, controller, first_target, first_amount);
+    let mut head = keep_chain_identity(
+        build_remaining_damage_node(first_source, controller, first_target, first_amount),
+        ability,
+    );
     for (source_id, target, amount) in iter {
-        let node = build_remaining_damage_node(source_id, controller, target, amount);
+        let node = keep_chain_identity(
+            build_remaining_damage_node(source_id, controller, target, amount),
+            ability,
+        );
         append_to_sub_chain(&mut head, node);
     }
     if let Some(sub) = ability.sub_ability.as_ref() {
-        append_to_sub_chain(&mut head, cast_tail_with_parent_targets(sub, ability));
+        append_to_sub_chain(
+            &mut head,
+            cast_tail_with_parent_targets(state, sub, ability),
+        );
     }
     append_to_pending_continuation(state, Some(Box::new(head)));
 }
@@ -1482,6 +1521,7 @@ pub fn resolve(
                     // DealDamage continuation keyed to the same damage-source id.
                     let remaining = distribution[i + 1..].iter().map(|(t, a)| (t.clone(), *a));
                     stash_remaining_damage_chain(state, ability, ctx.source_id, remaining);
+                    report_parked_tail(state, ability);
                     return Ok(());
                 }
             }
@@ -1497,6 +1537,7 @@ pub fn resolve(
                         .iter()
                         .map(|t| (t.clone(), num_dmg));
                     stash_remaining_damage_chain(state, ability, ctx.source_id, remaining);
+                    report_parked_tail(state, ability);
                     return Ok(());
                 }
             }
@@ -1989,6 +2030,7 @@ fn resolve_each_target_power_damage(
                     .skip(idx + 1)
                     .map(|(src, _, amt)| (*src, recipient.clone(), *amt));
                 stash_remaining_each_source_damage(state, ability, remaining);
+                report_parked_tail(state, ability);
                 return Ok(());
             }
         }
@@ -2028,6 +2070,7 @@ fn apply_batch_survivors(
             DamageResult::NeedsChoice
         ) {
             stash_remaining_post_replacement_damage(state, ability, &survivors[idx + 1..]);
+            report_parked_tail(state, ability);
             return false;
         }
     }
@@ -3263,11 +3306,14 @@ fn stash_remaining_each_deals_chain(
         if power <= 0 {
             continue;
         }
-        let node = build_remaining_damage_node(
-            source_id,
-            ability.controller,
-            TargetRef::Object(recipient_id),
-            power as u32,
+        let node = keep_chain_identity(
+            build_remaining_damage_node(
+                source_id,
+                ability.controller,
+                TargetRef::Object(recipient_id),
+                power as u32,
+            ),
+            ability,
         );
         match head.as_mut() {
             Some(h) => append_to_sub_chain(h, node),
@@ -3277,16 +3323,14 @@ fn stash_remaining_each_deals_chain(
     match head {
         Some(mut h) => {
             if let Some(sub) = ability.sub_ability.as_ref() {
-                append_to_sub_chain(&mut h, cast_tail_with_parent_targets(sub, ability));
+                append_to_sub_chain(&mut h, cast_tail_with_parent_targets(state, sub, ability));
             }
             append_to_pending_continuation(state, Some(Box::new(h)));
         }
         None => {
             if let Some(sub) = ability.sub_ability.as_ref() {
-                append_to_pending_continuation(
-                    state,
-                    Some(Box::new(cast_tail_with_parent_targets(sub, ability))),
-                );
+                let tail = cast_tail_with_parent_targets(state, sub, ability);
+                append_to_pending_continuation(state, Some(Box::new(tail)));
             }
         }
     }
@@ -5386,14 +5430,14 @@ mod tests {
         );
     }
 
-    /// CR 615.5: Crumbling Sanctuary-class prevention follow-ups resolve "that
-    /// player" from the prevented damage event's target and "that many" from
-    /// the prevented damage amount.
+    /// CR 614.1a: Crumbling Sanctuary's substitution resolves "that player" from
+    /// the replaced damage event's target and "that many" from the amount that
+    /// would have been dealt. Nothing is prevented.
     #[test]
     fn damage_to_player_prevention_exiles_from_that_players_library() {
         use crate::types::ability::{
             AbilityDefinition, AbilityKind, DamageTargetFilter, DamageTargetPlayerScope,
-            PreventionAmount, QuantityExpr, QuantityRef, ReplacementDefinition,
+            QuantityExpr, QuantityRef, ReplacementDefinition,
         };
         use crate::types::replacements::ReplacementEvent;
 
@@ -5412,7 +5456,7 @@ mod tests {
             .replacement_definitions
             .push(
                 ReplacementDefinition::new(ReplacementEvent::DamageDone)
-                    .prevention_shield(PreventionAmount::All)
+                    .substitution_shield()
                     .damage_target_filter(DamageTargetFilter::Player {
                         player: DamageTargetPlayerScope::Any,
                     })
@@ -5428,7 +5472,7 @@ mod tests {
                             actor: crate::types::ability::LibraryInstructionActor::LibraryPlayer,
                         },
                     ))
-                    .description("Crumbling Sanctuary prevention shield".to_string()),
+                    .description("Crumbling Sanctuary substitution".to_string()),
             );
 
         let first = create_object(
@@ -5472,16 +5516,9 @@ mod tests {
             state.objects.get(&third).map(|obj| obj.zone),
             Some(Zone::Library)
         );
-        assert!(events.iter().any(|event| {
-            matches!(
-                event,
-                GameEvent::DamagePrevented {
-                    target: TargetRef::Player(PlayerId(1)),
-                    amount: 2,
-                    ..
-                }
-            )
-        }));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, GameEvent::DamagePrevented { .. })));
         assert!(!events
             .iter()
             .any(|event| matches!(event, GameEvent::DamageDealt { .. })));

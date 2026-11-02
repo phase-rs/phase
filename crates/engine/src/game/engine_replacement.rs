@@ -1904,17 +1904,15 @@ fn handle_replacement_choice_inner(
             // Battlefield-scoped and cannot re-match a →Graveyard move. A
             // board-wide `Moved` graveyard→exile redirect (Rest in Peace /
             // Leyline of the Void) now fires on the discarded spell — the
-            // un-migrated twin of stack.rs's C2 prevented-permanent site. The
-            // dead continuation is cleared BEFORE the move so a CR 616.1
-            // ordering pause (two simultaneous redirects) cannot leave it for
-            // the next resume's epilogue to drain; on a pause, surface the
-            // parked prompt (its resume delivers the chosen event through the
-            // ZoneChange arm above).
-            if state.active_ability_continuation().is_some() {
-                let _ = state
-                    .clear_active_ability_continuation()
-                    .expect("replacement cancellation cannot clear a buried continuation");
-            }
+            // un-migrated twin of stack.rs's C2 prevented-permanent site. On a
+            // pause, surface the parked prompt (its resume delivers the chosen
+            // event through the ZoneChange arm above).
+            //
+            // CR 608.2c: a prevented or replaced event ends nothing else in what is resolving. The
+            // continuation stays, and `resume_pending_continuation_if_priority` below drains it:
+            // Lightning Helix's "and you gain 3 life" with Mending Hands first under Furnace of Rath,
+            // or the "you draw that many cards" of New Way Forward's reflexive trigger (CR 603.12)
+            // under two Force Bubbles.
             if let Some(ctx) = state.take_active_spell_resolution() {
                 match crate::game::zone_pipeline::move_object(
                     state,
@@ -3754,13 +3752,25 @@ pub(super) fn apply_post_replacement_effect(
     // a pre-selected sacrifice target.
     //
     // Gated on `event == ReplacementEvent::Moved` so the suppression scopes to
-    // ETB-style replacements (the Devour shape). Non-ETB events that carry
-    // `Sacrifice { Typed }` post-effects — Dralnu, Lich Lord (DealtDamage:
-    // "sacrifice that many permanents") and Outfitted Jouster (DamageDone:
-    // "sacrifice an Equipment") — keep the pre-Devour injection path so their
-    // target-as-pre-selected resolution is unchanged.
+    // ETB-style replacements (the Devour shape). Damage riders with the same shape
+    // take `damage_rider_population` below.
     let sacrifice_typed_scope = is_as_enters_sacrifice_scope_replacement(event, &real_work.effect);
-    let targets = if sacrifice_typed_scope {
+    // CR 614.6 + CR 615.5 + CR 608.2d: a damage rider that picks from a population ("sacrifice that
+    // many permanents", "exile that many cards from your graveyard", "sacrifice an
+    // Equipment attached to Outfitted Jouster") names no pre-selected object; the injected
+    // host would be acted on instead. `event_source` is populated only for damage riders.
+    let damage_rider_population = state.post_replacement_event_source().is_some()
+        && matches!(
+            &*effect_def.effect,
+            Effect::Sacrifice {
+                target: TargetFilter::Typed(_) | TargetFilter::Any,
+                ..
+            } | Effect::ChangeZone {
+                target: TargetFilter::Typed(_),
+                ..
+            }
+        );
+    let targets = if sacrifice_typed_scope || damage_rider_population {
         Vec::new()
     } else {
         object_id
@@ -8039,57 +8049,6 @@ mod tests {
             state.active_post_replacement_drains().is_none(),
             "resuming the inner draw retires it without leaving the completed outer drain"
         );
-    }
-
-    /// Issue #575: Non-Moved `Sacrifice { Typed }` post-replacements (Dralnu)
-    /// inject the source as a pre-selected sacrifice target. Re-broadening the
-    /// Devour guard to all events would route this through `EffectZoneChoice`.
-    #[test]
-    fn issue_575_dealt_damage_sacrifice_injects_source_target() {
-        let mut state = GameState::new_two_player(42);
-        let dralnu = create_object(
-            &mut state,
-            CardId(1),
-            PlayerId(0),
-            "Dralnu, Lich Lord".to_string(),
-            Zone::Battlefield,
-        );
-        let other = create_object(
-            &mut state,
-            CardId(2),
-            PlayerId(0),
-            "Other Bear".to_string(),
-            Zone::Battlefield,
-        );
-
-        let template = AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::Sacrifice {
-                target: TargetFilter::Typed(crate::types::ability::TypedFilter::permanent()),
-                count: QuantityExpr::Fixed { value: 1 },
-                min_count: 0,
-            },
-        );
-
-        let mut events = Vec::new();
-        let waiting = apply_post_replacement_effect(
-            &mut state,
-            &template,
-            ContinuationSubjects::affected_only(Some(dralnu)),
-            None,
-            Some(&ReplacementEvent::DealtDamage),
-            Default::default(),
-            &mut events,
-        );
-
-        assert!(
-            !matches!(state.waiting_for, WaitingFor::EffectZoneChoice { .. }),
-            "DealtDamage sacrifice must use injected source target, not a chooser; got {:?}",
-            state.waiting_for
-        );
-        assert!(waiting.is_none());
-        assert_eq!(state.objects[&dralnu].zone, Zone::Graveyard);
-        assert_eq!(state.objects[&other].zone, Zone::Battlefield);
     }
 
     /// Issue #575: Moved (ETB) `Sacrifice { Typed }` post-replacements (Devour)

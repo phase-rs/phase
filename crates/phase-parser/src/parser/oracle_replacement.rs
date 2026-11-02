@@ -13934,6 +13934,10 @@ fn parse_damage_heal_self_replacement(
     )
 }
 
+/// CR 614.1a + CR 614.6: "If damage would be dealt to ~ / you, <effect> that many …
+/// instead" replaces the damage event with `<effect>` (Phytohydra, Force Bubble). This is
+/// a substitution, not a prevention effect (CR 615.1a), so damage that can't be prevented
+/// is still replaced.
 fn parse_damage_to_self_instead_followup(
     norm_lower: &str,
     normalized: &str,
@@ -13998,10 +14002,15 @@ fn parse_damage_to_self_instead_followup(
     // it is not a new activated/triggered ability body.
     let followup = parse_effect_chain_with_context(&followup_text, AbilityKind::Spell, &mut ctx);
 
-    let mut def = ReplacementDefinition::new(ReplacementEvent::DealtDamage)
-        .prevention_shield(PreventionAmount::All)
+    // `DamageDone`, not `DealtDamage`: `dealt_damage_applier` returns the event unchanged,
+    // so on that event these lines replaced nothing.
+    let mut def = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+        .substitution_shield()
         .execute(followup)
         .description(original_text.to_string());
+    if recipient_scope.is_none() {
+        def = def.damage_target_filter(damage_target_controller());
+    }
     if let Some(scope) = recipient_scope {
         // CR 614.1: scope the replacement to damage dealt TO the source's own
         // object (the "shield around whatever it's affecting"). The runtime
@@ -14040,7 +14049,7 @@ fn parse_damage_to_player_instead_followup(
 
     Some(
         ReplacementDefinition::new(ReplacementEvent::DamageDone)
-            .prevention_shield(PreventionAmount::All)
+            .substitution_shield()
             .damage_target_filter(damage_target_any_player())
             .execute(followup)
             .description(original_text.to_string()),
@@ -16800,12 +16809,12 @@ mod tests {
         let rep = parsed
             .replacements
             .iter()
-            .find(|r| matches!(r.event, ReplacementEvent::DealtDamage))
+            .find(|r| matches!(r.event, ReplacementEvent::DamageDone))
             .expect("damage-substitution replacement must exist (was inert on main)");
-        assert!(
-            matches!(rep.shield_kind, ShieldKind::Prevention { .. }),
-            "the substituted damage must be prevented, got {:?}",
-            rep.shield_kind
+        assert_eq!(
+            rep.shield_kind,
+            ShieldKind::Substitution,
+            "CR 614.1a: the damage is replaced, not prevented"
         );
         let execute = rep
             .execute
@@ -18321,13 +18330,8 @@ mod tests {
         )
         .expect("damage-to-self counter replacement should parse");
 
-        assert_eq!(def.event, ReplacementEvent::DealtDamage);
-        assert_eq!(
-            def.shield_kind,
-            ShieldKind::Prevention {
-                amount: PreventionAmount::All
-            }
-        );
+        assert_eq!(def.event, ReplacementEvent::DamageDone);
+        assert_eq!(def.shield_kind, ShieldKind::Substitution);
         let execute = def.execute.as_ref().expect("execute present");
         assert!(matches!(
             *execute.effect,
@@ -18349,7 +18353,8 @@ mod tests {
         )
         .expect("damage-to-controller counter replacement should parse");
 
-        assert_eq!(def.event, ReplacementEvent::DealtDamage);
+        assert_eq!(def.event, ReplacementEvent::DamageDone);
+        assert_eq!(def.shield_kind, ShieldKind::Substitution);
         let execute = def.execute.as_ref().expect("execute present");
         assert!(matches!(
             *execute.effect,
@@ -18372,12 +18377,7 @@ mod tests {
         .expect("damage-to-player exile-top replacement should parse");
 
         assert_eq!(def.event, ReplacementEvent::DamageDone);
-        assert_eq!(
-            def.shield_kind,
-            ShieldKind::Prevention {
-                amount: PreventionAmount::All
-            }
-        );
+        assert_eq!(def.shield_kind, ShieldKind::Substitution);
         assert_eq!(def.damage_target_filter, Some(damage_target_any_player()));
         let execute = def.execute.as_ref().expect("execute present");
         assert!(
@@ -18393,9 +18393,126 @@ mod tests {
                     actor: crate::types::ability::LibraryInstructionActor::LibraryPlayer,
                 }
             ),
-            "expected ExileTop against prevented damage recipient, got {:?}",
+            "expected ExileTop against replaced damage recipient, got {:?}",
             execute.effect
         );
+    }
+
+    /// CR 614.1a + CR 615.1a: every "...instead" damage line is a substitution on
+    /// `DamageDone`, whatever the recipient. A line with "prevent" and no "instead"
+    /// stays a prevention effect.
+    #[test]
+    fn damage_instead_lines_are_substitutions_scoped_to_their_recipient() {
+        for (name, text) in [
+            (
+                "Phytohydra",
+                "If damage would be dealt to this creature, put that many +1/+1 counters on it instead.",
+            ),
+            (
+                "Lichenthrope",
+                "If damage would be dealt to this creature, put that many -1/-1 counters on it instead.",
+            ),
+            (
+                "Dralnu, Lich Lord",
+                "If damage would be dealt to Dralnu, sacrifice that many permanents instead.",
+            ),
+        ] {
+            let def = parse_replacement_line(text, name).expect("object line should parse");
+            assert_eq!(def.event, ReplacementEvent::DamageDone, "{name}");
+            assert_eq!(def.shield_kind, ShieldKind::Substitution, "{name}");
+            assert_eq!(def.valid_card, Some(TargetFilter::SelfRef), "{name}");
+            assert_eq!(def.damage_target_filter, None, "{name}");
+        }
+        for (name, text) in [
+            (
+                "Force Bubble",
+                "If damage would be dealt to you, put that many depletion counters on this enchantment instead.",
+            ),
+            (
+                "Delaying Shield",
+                "If damage would be dealt to you, put that many delay counters on this enchantment instead.",
+            ),
+            (
+                "Nefarious Lich",
+                "If damage would be dealt to you, exile that many cards from your graveyard instead. If you can't, you lose the game.",
+            ),
+        ] {
+            let def = parse_replacement_line(text, name).expect("player line should parse");
+            assert_eq!(def.event, ReplacementEvent::DamageDone, "{name}");
+            assert_eq!(def.shield_kind, ShieldKind::Substitution, "{name}");
+            assert_eq!(def.valid_card, None, "{name}");
+            assert_eq!(
+                def.damage_target_filter,
+                Some(damage_target_controller()),
+                "{name}"
+            );
+        }
+
+        // Phantom Centaur's line says "prevent", so it stays a CR 615 prevention effect.
+        let def = parse_replacement_line(
+            "If damage would be dealt to this creature, prevent that damage. Remove a +1/+1 counter from this creature.",
+            "Phantom Centaur",
+        )
+        .expect("prevention line should parse");
+        assert_eq!(
+            def.shield_kind,
+            ShieldKind::Prevention {
+                amount: PreventionAmount::All
+            }
+        );
+    }
+
+    /// CR 301.5a + CR 701.21a: "sacrifice an Equipment attached to ~" names a population,
+    /// in replacement and triggered text alike.
+    #[test]
+    fn sacrifice_attached_to_source_on_an_effect_keeps_the_relation() {
+        fn has_attached_to_source(target: &TargetFilter) -> bool {
+            matches!(
+                target,
+                TargetFilter::Typed(typed) if typed.properties.contains(&FilterProp::AttachedTo {
+                    to: crate::types::ability::AttachmentReferent::Source,
+                })
+            )
+        }
+
+        let jouster = parse_oracle_text(
+            "If damage would be dealt to Outfitted Jouster while it's equipped, prevent that damage. When damage is prevented this way, sacrifice an Equipment attached to Outfitted Jouster.",
+            "Outfitted Jouster",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let execute = jouster.replacements[0]
+            .execute
+            .as_ref()
+            .expect("rider present");
+        assert!(
+            matches!(&*execute.effect, Effect::Sacrifice { target, .. } if has_attached_to_source(target)),
+            "got {:?}",
+            execute.effect
+        );
+
+        let three_dog = parse_oracle_text(
+            "Whenever you attack, you may pay {2} and sacrifice an Aura attached to Three Dog. When you sacrifice an Aura this way, for each other attacking creature you control, create a token that's a copy of that Aura attached to that creature.",
+            "Three Dog, Galaxy News DJ",
+            &[],
+            &["Creature".to_string()],
+            &[],
+        );
+        let mut found = false;
+        for trigger in &three_dog.triggers {
+            let Some(execute) = trigger.execute.as_deref() else {
+                continue;
+            };
+            let mut node = Some(execute);
+            while let Some(ability) = node {
+                if let Effect::Sacrifice { target, .. } = &*ability.effect {
+                    found |= has_attached_to_source(target);
+                }
+                node = ability.sub_ability.as_deref();
+            }
+        }
+        assert!(found, "got {:?}", three_dog.triggers);
     }
 
     #[test]

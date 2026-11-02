@@ -21722,6 +21722,7 @@ fn resolve_chain_body(
     // value catches the replace case correctly (issue #491).
     let pending_continuation_before = state.active_ability_continuation().cloned();
     let child_stack_start = state.resolution_stack.capture_child_boundary();
+    let damage_rider_resident_before = state.post_replacement_event_source().is_some();
 
     // CR 608.2c + CR 701.20b + CR 603.3d: A multi-target reveal-all producer whose
     // per-target referent (the revealed card) is consumed by later co-instructions
@@ -25222,6 +25223,32 @@ fn resolve_chain_body(
         if attach_child_already_owns_tail {
             return Ok(progress);
         }
+        // CR 608.2c + CR 616.1: a damage resolver that paused on a replacement choice parks this
+        // node's later instructions itself, behind its remaining recipients, and reports it with
+        // its frame's `parent_kind`. The generic path below would run them twice, the first time
+        // ahead of those recipients: Lightning Helix's "you gain 3 life" under Furnace of Rath and
+        // Phytohydra, or Shake the Foundations' "Draw a card." before the creatures still to be
+        // dealt damage. A rider this node opened keeps its pause with the path below, whatever
+        // tagged the frame.
+        let damage_resolver_owns_tail = pending_continuation_before.is_none()
+            // A rider this node opened is not this node's park: the frame's tag may be the
+            // rider's own damage resolver (New Way Forward), and the tail takes the
+            // child-boundary arm below.
+            && (damage_rider_resident_before || state.post_replacement_event_source().is_none())
+            && matches!(
+                ability.effect,
+                Effect::DealDamage { .. }
+                    | Effect::DamageAll { .. }
+                    | Effect::DamageEachPlayer { .. }
+                    | Effect::EachDealsDamageEqualToPower { .. }
+                    | Effect::EachSourceDealsDamage { .. }
+            )
+            && state.active_ability_continuation().is_some_and(|pending| {
+                pending.parent_kind == Some(EffectKind::from(&ability.effect))
+            });
+        if damage_resolver_owns_tail {
+            return Ok(progress);
+        }
         // CR 608.2c: every later condition, alternative, sibling and target
         // choice follows the completed parent instruction. Retain the intact
         // tail before evaluating any of it while this invocation is pending.
@@ -25296,7 +25323,16 @@ fn resolve_chain_body(
                 || sub_clone.reads_return_result.is_some()
                 || state
                     .resolution_stack
-                    .copy_token_at_child_boundary(child_stack_start))
+                    .copy_token_at_child_boundary(child_stack_start)
+                // CR 608.2c + CR 614.6 + CR 615.5: a damage rider that paused is part of the
+                // replaced event, and this chain's next instruction follows all of it. Merged
+                // into the rider's chain, the tail would run between its clauses: Lightning
+                // Helix's "you gain 3 life" ahead of Nefarious Lich's "If you can't, you lose
+                // the game.", which then reads the wrong instruction and loses the game with
+                // the cards exiled. The rider's own chain entered with its drain resident, and
+                // its tail stays with that drain.
+                || (!damage_rider_resident_before
+                    && state.post_replacement_event_source().is_some()))
                 && state.resolution_stack.capture_child_boundary() > child_stack_start
             {
                 // CR 608.2c: the rest of the chain follows the complete producer action,

@@ -2930,6 +2930,29 @@ fn damage_done_applier(
         return ApplyResult::Modified(event);
     }
 
+    // CR 614.1a + CR 614.6: a substitution replaces the event wholesale. Its rider
+    // reads the amount that would have been dealt; nothing is dealt or prevented, so
+    // there is no tally and no `DamagePrevented` (CR 615.13). Force Bubble: "the damage
+    // is neither dealt or prevented."
+    if matches!(
+        shield_kind_for_rid(state, rid),
+        Some(ShieldKind::Substitution)
+    ) {
+        if let ProposedEvent::Damage { amount, .. } = &event {
+            let amount = *amount;
+            // CR 615.5: an earlier effect's rider takes place now, ahead of the stamp below,
+            // because the drain stack keeps one Ready rider and both read `last_effect_count`.
+            // Test of Faith, then Phytohydra: 3 counters for the 3 prevented and 1 for the last
+            // damage. `Prevented` ends this pipeline, so nothing here outlives the drain.
+            if state.has_post_replacement_drain() {
+                drain_damage_rider(state, events);
+            }
+            state.last_effect_count = Some(u32_to_i32_saturating(amount));
+            return ApplyResult::Prevented;
+        }
+        return ApplyResult::Modified(event);
+    }
+
     // Branch 2: CR 615 — Prevention shield
     // Look up shield from either object replacement_definitions or pending_damage_replacements.
     let shield_kind = if rid.source == ObjectId(0) {
@@ -6575,17 +6598,22 @@ fn is_damage_prevention_replacement(
     // `damage_done_applier`'s Branch 2 consults, so this gate and the apply-time
     // route cannot drift apart (an `Unmapped` shield stays classified as
     // prevention here and fails closed there — either way it does nothing).
-    if let ShieldKind::Prevention { amount } = repl.shield_kind {
-        return !matches!(
-            prevention_shield_route_for_def(repl, amount),
-            PreventionShieldRoute::Redirect(_)
-        );
-    }
-
-    // CR 615.3: a source-qualified one-shot shield prevents damage rather than
-    // redirecting it, so "damage can't be prevented" suppresses it as well.
-    if matches!(repl.shield_kind, ShieldKind::PreventionOneShot) {
-        return true;
+    match repl.shield_kind {
+        ShieldKind::Prevention { amount } => {
+            return !matches!(
+                prevention_shield_route_for_def(repl, amount),
+                PreventionShieldRoute::Redirect(_)
+            );
+        }
+        // CR 615.3: a source-qualified one-shot shield prevents damage rather than
+        // redirecting it, so "damage can't be prevented" suppresses it as well.
+        ShieldKind::PreventionOneShot => return true,
+        // CR 614.1a + CR 615.1a: "instead" replaces; Phytohydra's ruling: "doesn't prevent damage".
+        ShieldKind::Substitution => return false,
+        ShieldKind::None
+        | ShieldKind::Regeneration
+        | ShieldKind::DamageReplacementOneShot
+        | ShieldKind::Redirection { .. } => {}
     }
 
     // Legacy: description-based prevention from parsed replacement definitions
@@ -7992,6 +8020,15 @@ fn object_replacement_candidate_applies(
             ProposedEvent::ProduceMana { .. } => return false,
             _ => {}
         }
+    }
+    // CR 120.8: a source that would deal 0 damage deals no damage, so a substitution has no
+    // event to replace. Urza's Armor applied first leaves a ping at 0, and Nefarious Lich's
+    // "If you can't, you lose the game." must not run. The applier is too late: its
+    // `Modified` result still stashes the rider.
+    if matches!(repl_def.shield_kind, ShieldKind::Substitution)
+        && matches!(event, ProposedEvent::Damage { amount: 0, .. })
+    {
+        return false;
     }
     if is_damage_prevention_replacement(state, &rid, &repl_def.event)
         && is_prevention_disabled(state, event)
@@ -11631,9 +11668,12 @@ fn candidate_materiality(
     // this it fell through to `Disjoint` and the CR 616.1 order choice was
     // silently skipped. CR 615.3: the one-shot `PreventionOneShot` shield (Awe
     // Strike) writes the same `Damage` field and is equally order-material.
+    // CR 616.1: a substitution reads and consumes the amount, so it doesn't commute with a
+    // doubler either (Phytohydra's ruling). Its `execute` walk below would classify
+    // `PutCounter` as `Disjoint`.
     if matches!(
         repl_def.shield_kind,
-        ShieldKind::Prevention { .. } | ShieldKind::PreventionOneShot
+        ShieldKind::Prevention { .. } | ShieldKind::PreventionOneShot | ShieldKind::Substitution
     ) {
         return CandidateMateriality::Writes {
             field: EventField::Damage,
@@ -13310,6 +13350,42 @@ pub fn replace_event(
     result
 }
 
+/// CR 614.6 + CR 615.5: run the resident damage rider, immediately after the replacement that
+/// stashed it.
+fn drain_damage_rider(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    // CR 700.1: Follow-up damage is an independent event, even if its
+    // source also participates in the original simultaneous instance.
+    let applications = state.combat_one_shot_applications.take();
+    let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
+        state, None, None, None, events,
+    );
+    state.combat_one_shot_applications = applications;
+}
+
+/// CR 616.1 + CR 510.2: the affected player orders these effects, but combat damage
+/// can't pause for the choice yet (Command Zone #140), so each order park takes one
+/// legal order instead of dropping the damage. Polukranos, Unchained under Furnace of
+/// Rath still removes counters and Torbran, Thane of Red Fell still adds 2, under
+/// ordinary and unpreventable damage alike. CR 616.1f: one answer can leave two
+/// candidates still in order (Torbran, Furnace of Rath, Gratuitous Violence), so
+/// repeat. A parked "may" is not an order, and index 0 there means "accept"
+/// (Battletide Alchemist: "you may prevent X of that damage"), so it gets no answer.
+fn settle_combat_order_parks(
+    state: &mut GameState,
+    mut result: ReplacementResult,
+    events: &mut Vec<GameEvent>,
+) -> ReplacementResult {
+    while matches!(result, ReplacementResult::NeedsChoice(_))
+        && state
+            .pending_replacement
+            .as_ref()
+            .is_some_and(|pending| !pending.is_optional)
+    {
+        result = continue_replacement(state, 0, events);
+    }
+    result
+}
+
 /// CR 510.2 + CR 615.7 + CR 615.13: Run the replacement pipeline over a whole
 /// simultaneous combat-damage batch.
 ///
@@ -13330,6 +13406,8 @@ pub fn replace_event(
 /// the shielded player to choose which damage each shield prevents; that
 /// player-choice path is not modeled — the shields apply per-event in pipeline
 /// order instead.
+///
+/// `settle_combat_order_parks` answers each CR 616.1 order park inside the batch.
 ///
 /// Returns a vector aligned 1:1 with `proposed`: `Some(event)` is a survivor
 /// post-replacement `Damage` event for `combat_damage.rs` Phase C to apply;
@@ -13361,6 +13439,9 @@ pub(crate) fn replace_combat_damage_batch(
         prepare_replacement_index_for_pipeline(state);
         let result = pipeline_loop(state, event, 0, registry, events);
         clear_replacement_index_pipeline(state);
+        // Before the drain below, which skips a paused result: the answered effect's rider
+        // must drain in its own portion (two Phytohydras blocking under Furnace of Rath).
+        let result = settle_combat_order_parks(state, result, events);
         // CR 615.5: A `Prevention::Next(N)` shield's rider is stashed per-event
         // by the applier (the all-damage and one-shot prevention batch paths
         // suppress their stash and fire once post-batch instead). Resolve any such per-event
@@ -13370,13 +13451,13 @@ pub(crate) fn replace_combat_damage_batch(
         if !matches!(result, ReplacementResult::NeedsChoice(_))
             && state.has_post_replacement_drain()
         {
-            // CR 700.1: Follow-up damage is an independent event, even if its
-            // source also participates in the original simultaneous instance.
-            let applications = state.combat_one_shot_applications.take();
-            let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
-                state, None, None, None, events,
-            );
-            state.combat_one_shot_applications = applications;
+            // strict-failure: CR 510.2 deals this batch simultaneously and the engine can't
+            // suspend it yet (an engine limit, not a rule), so this drain drops a rider's
+            // prompt (Command Zone #140). Nefarious Lich with 4 cards in graveyard, an unblocked
+            // 3/3: no prompt, its controller loses the game. Dralnu, Lich Lord blocking a 2/2 with
+            // 4 other creatures: no prompt, 0 damage, nothing sacrificed. Outfitted Jouster with
+            // Steelclaw Lance and Brawler's Plate, blocking a 2/2: the same.
+            drain_damage_rider(state, events);
         }
         match result {
             ReplacementResult::Execute(survivor) => survivors.push(Some(survivor)),
@@ -13384,11 +13465,10 @@ pub(crate) fn replace_combat_damage_batch(
                 survivors.push(None);
             }
             ReplacementResult::NeedsChoice(_) => {
-                // CR 510.2: Combat damage cannot pause for a replacement
-                // ordering choice. Mirror the legacy per-event behavior
-                // (`apply_damage_to_target`'s combat `NeedsChoice` arm) — skip
-                // this source's damage. Clear the pending pause so it does not
-                // leak out of the batch.
+                // strict-failure: CR 510.2 + CR 616.1: only a parked "may" reaches here
+                // (`settle_combat_order_parks`), and combat can't ask it yet (Command Zone #140), so
+                // this source's damage is skipped (Battletide Alchemist). Clear the pending pause so
+                // it does not leak out of the batch.
                 state.pending_replacement = None;
                 survivors.push(None);
             }

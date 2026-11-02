@@ -2166,7 +2166,10 @@ fn sacrifice_filter_lost_a_restriction(filter: &TargetFilter, tail: &str) -> boo
 /// is deliberately just `~`: the recipient-anaphoric "attached to it" of
 /// `oracle_nom::quantity::parse_for_each_attached_to_source` has no recipient in
 /// a cost, and no corpus sacrifice cost uses it.
-fn fold_attached_to_source_rider(filter: TargetFilter, tail: &str) -> (TargetFilter, &str) {
+pub(crate) fn fold_attached_to_source_rider(
+    filter: TargetFilter,
+    tail: &str,
+) -> (TargetFilter, &str) {
     if !matches!(filter, TargetFilter::Typed(_)) {
         return (filter, tail);
     }
