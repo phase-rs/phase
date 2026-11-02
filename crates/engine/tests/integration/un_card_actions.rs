@@ -1968,3 +1968,234 @@ fn a_touch_during_a_decision_triggers_when_a_paid_answer_returns_priority() {
     // Saying the phrase ends the Rod's resolution with no further instruction.
     touch_vile_bile_during_the_rods_unless_prompt(true);
 }
+
+fn touch_result(
+    runner: &mut GameRunner,
+    actor: engine::types::player::PlayerId,
+    object_id: ObjectId,
+) -> Result<engine::types::game_state::ActionResult, EngineError> {
+    apply(
+        runner.state_mut(),
+        actor,
+        GameAction::UnAction {
+            action: UnAction::TouchObject { object_id },
+        },
+    )
+}
+
+#[test]
+fn a_touch_trigger_restarts_the_pass_succession() {
+    let (mut runner, bile, _, _) = vile_bile_scenario();
+    // P0 (active) passes priority with an empty stack; P1 now holds it.
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P0 passes priority");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P1),
+        "reach guard: P1 holds priority after P0's pass, got {:?}",
+        runner.state().waiting_for
+    );
+
+    // P1 touches Vile Bile: its trigger joins the stack after P0 passed.
+    touch(&mut runner, P1, bile);
+    assert_eq!(runner.state().stack.len(), 1);
+
+    // CR 117.4: P0's earlier pass was not a pass on the new trigger, so P1
+    // passing hands priority to P0 instead of resolving it.
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P1 passes priority");
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "the trigger waits until both players pass in succession"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P0),
+        "P0 may respond to the trigger, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(runner.life(P1), 20);
+
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P0 passes priority");
+    assert!(
+        runner.state().stack.is_empty(),
+        "both players passed in succession"
+    );
+    assert_eq!(runner.life(P1), 18, "the touch trigger resolved");
+}
+
+#[test]
+fn waiting_touch_triggers_are_bounded_per_player() {
+    let max = engine::game::un_actions::MAX_PENDING_TOUCH_TRIGGERS;
+    let (mut runner, bile, _, _) = vile_bile_scenario();
+    runner.state_mut().players[1].life = 1000;
+    for _ in 0..max {
+        touch(&mut runner, P1, bile);
+    }
+    assert_eq!(runner.state().stack.len(), max, "every touch triggered");
+
+    let rejected = touch_result(&mut runner, P1, bile);
+    assert!(
+        matches!(rejected, Err(EngineError::InvalidAction(_))),
+        "a touch past the bound is rejected: {rejected:?}"
+    );
+    assert_eq!(runner.state().stack.len(), max, "nothing more was added");
+
+    // The bound is per player: the other player may still touch.
+    touch(&mut runner, P0, bile);
+    assert_eq!(runner.state().stack.len(), max + 1);
+
+    // Once one of P1's touches resolves, P1 may touch again.
+    runner.resolve_top();
+    runner.resolve_top();
+    assert_eq!(runner.life(P0), 18, "P0's touch resolved first");
+    assert_eq!(runner.life(P1), 998, "then one of P1's touches resolved");
+    touch(&mut runner, P1, bile);
+    assert_eq!(runner.state().stack.len(), max);
+}
+
+#[test]
+fn a_phased_out_or_absorbed_vile_bile_cannot_be_touched() {
+    let (mut runner, bile, other_bile, _) = vile_bile_scenario();
+
+    // CR 702.26b: a phased-out permanent is treated as though it does not exist.
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&bile)
+        .unwrap()
+        .phase_status = engine::game::game_object::PhaseStatus::PhasedOut {
+        cause: engine::game::game_object::PhaseOutCause::Directly,
+    };
+    // CR 730.2: an absorbed merge component still records the battlefield as
+    // its zone but is part of the merged permanent, not a member of the
+    // battlefield in its own right.
+    runner
+        .state_mut()
+        .battlefield
+        .retain(|&id| id != other_bile);
+    assert_eq!(
+        runner.state().objects[&other_bile].zone,
+        Zone::Battlefield,
+        "reach guard: the absorbed component still records the battlefield"
+    );
+
+    // Any action refreshes the published touch list.
+    un_action(&mut runner, P1, UnAction::SetEnabled { enabled: true });
+    assert!(
+        runner.state().un_actions.touchable.is_empty(),
+        "neither is offered as touchable: {:?}",
+        runner.state().un_actions.touchable
+    );
+    for object_id in [bile, other_bile] {
+        let rejected = touch_result(&mut runner, P1, object_id);
+        assert!(
+            matches!(rejected, Err(EngineError::InvalidAction(_))),
+            "touching {object_id:?} is rejected: {rejected:?}"
+        );
+    }
+    assert!(runner.state().stack.is_empty());
+
+    // Positive control: phased back in, the same Vile Bile is touchable.
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&bile)
+        .unwrap()
+        .phase_status = engine::game::game_object::PhaseStatus::PhasedIn;
+    touch(&mut runner, P1, bile);
+    runner.resolve_top();
+    assert_eq!(runner.life(P1), 18);
+}
+
+/// P0 begins casting Lightning Bolt, which pauses for its target; P1 touches
+/// Vile Bile during that announcement.
+fn touch_vile_bile_during_a_bolt_announcement() -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bile = scenario
+        .add_creature_from_oracle(P0, "Vile Bile", 2, 2, VILE_BILE)
+        .id();
+    let bolt = scenario.add_bolt_to_hand(P0);
+    let mut runner = scenario.build();
+    un_action(&mut runner, P1, UnAction::SetEnabled { enabled: true });
+    let card_id = runner.state().objects[&bolt].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: bolt,
+            card_id,
+            targets: vec![],
+            payment_mode: Default::default(),
+        })
+        .expect("P0 begins casting Lightning Bolt");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ),
+        "reach guard: the announcement pauses for Bolt's target, got {:?}",
+        runner.state().waiting_for
+    );
+    touch(&mut runner, P1, bile);
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ),
+        "the touch leaves the announcement paused"
+    );
+    (runner, bile, bolt)
+}
+
+#[test]
+fn a_touch_during_a_spell_announcement_triggers_once() {
+    let (mut runner, bile, bolt) = touch_vile_bile_during_a_bolt_announcement();
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Player(P0)),
+        })
+        .expect("P0 targets themself with Bolt");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "Bolt is cast, got {:?}",
+        runner.state().waiting_for
+    );
+    let touch_triggers = runner
+        .state()
+        .stack
+        .iter()
+        .filter(|entry| entry.source_id == bile)
+        .count();
+    assert_eq!(touch_triggers, 1, "one touch is one trigger, not two");
+    assert!(
+        runner.state().stack.iter().any(|entry| entry.id == bolt),
+        "reach guard: Bolt is on the stack"
+    );
+    while !runner.state().stack.is_empty() {
+        runner.resolve_top();
+    }
+    assert_eq!(runner.life(P1), 18, "the touching player lost 2 life once");
+    assert_eq!(runner.life(P0), 17, "Bolt resolved");
+}
+
+#[test]
+fn a_touch_during_a_cancelled_announcement_still_triggers() {
+    let (mut runner, _, bolt) = touch_vile_bile_during_a_bolt_announcement();
+    runner
+        .act(GameAction::CancelCast)
+        .expect("P0 cancels the cast");
+    assert_eq!(
+        runner.state().objects[&bolt].zone,
+        Zone::Hand,
+        "reach guard: the cast was reversed"
+    );
+    // CR 733.1 undoes only the cancelled announcement; the touch was not part
+    // of it.
+    assert_eq!(runner.state().stack.len(), 1, "the touch trigger remains");
+    runner.resolve_top();
+    assert_eq!(runner.life(P1), 18);
+    assert_settled(&runner, "after the touch trigger resolves");
+}
