@@ -178,7 +178,7 @@ pub fn pay_life_as_cost(
     // deduction below is a life loss of the paying player (CR 810.9) applied to
     // the team's shared total; the edit authority stores it on the payer's own
     // `Player::life` first, so that field may go negative while the team total
-    // is positive (CR 810.9a: the split across members is storage only).
+    // is positive (CR 810.9a: affordability reads the team's total, not the split).
     if !can_pay_life_cost(state, player, amount) {
         return PayLifeCostResult::InsufficientLife;
     }
@@ -474,9 +474,11 @@ mod tests {
     /// "Energy Substitute" is synthetic: no printed card replaces a life loss
     /// with an energy gain, and the test needs a substitute that moves a `u32`
     /// total by the replaced amount, so the settlement can be unrepresentable
-    /// while the payment is affordable. The nearest printed card is Nefarious
-    /// Lich, whose "If you would gain life, draw that many cards instead."
-    /// substitutes another resource for a life change of the same amount.
+    /// while the payment is affordable. The nearest printed card is Ashiok, Wicked
+    /// Manipulator, whose "If you would pay life while your library has at least
+    /// that many cards in it, exile that many cards from the top of your library
+    /// instead." substitutes another resource for a payment of life of the same
+    /// amount.
     #[test]
     fn pay_life_reports_a_nested_unrepresentable_settlement_as_insufficient_life() {
         let board = |energy: u32| {
@@ -671,9 +673,9 @@ mod tests {
     /// CR 119.4a + CR 810.9: pay-life affordability is team-bounded, and the
     /// deduction (the payer's life loss, applied to the team's shared total) is
     /// stored on the payer's own `Player::life` first, so a member's field may go
-    /// negative while the team stays positive (CR 810.9a: the split is storage
-    /// only). Pay 6 from a {2, 6} team: payer goes to -4 (team 2), no SBA runs
-    /// here (this is the cost helper only).
+    /// negative while the team stays positive (CR 810.9a: affordability reads the
+    /// team's total, not the split). Pay 6 from a {2, 6} team: payer goes to -4
+    /// (team 2), no SBA runs here (this is the cost helper only).
     #[test]
     fn pay_life_team_bounded_deduction_lands_individual_in_2hg() {
         let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 0);

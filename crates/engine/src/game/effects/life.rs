@@ -100,8 +100,9 @@ type LifeSettleFn = fn(
 ) -> Result<u32, LifeChangeUnrepresentable>;
 
 /// Runs `body` with a fresh action-ingress window open and returns its result
-/// together with the window as it stood at close. Any player-resource
-/// settlement (life, player counter, or energy) inside `body` that proves unrepresentable is recorded in the window instead
+/// together with the window as it stood at close. Any player-counter or energy
+/// settlement inside `body`, on its own or nested under a life change, that proves
+/// unrepresentable is recorded in the window instead
 /// of being skipped, so the ingress caller can reject the action. Windows nest:
 /// the prior window is restored untouched on close, so an inner window reports
 /// only to its own caller.
@@ -488,8 +489,8 @@ fn drain_substitution_continuation(
 /// at `u32::MAX`), then the edit authority applies the whole amount as an exact `i64` delta,
 /// saturating the total it adjusts (the player's own life, or in Two-Headed
 /// Giant the team's shared total, CR 810.9) at `i32::MAX` and the
-/// gained-this-turn counter at `u32::MAX`; the `LifeChanged` amount and the
-/// returned amount are the rules amount (`arithmetic::reported_life_magnitude`),
+/// gained-this-turn counter at `u32::MAX`; the `LifeChanged` amount
+/// (`arithmetic::life_changed_amount`) and the returned amount are the rules amount,
 /// even when the total moved less. An unrepresentable result is handled per
 /// `policy`: `Reject` returns the typed error; `IgnoreImpossible` reports
 /// `Ok(0)` without a `LifeChanged`. An open ingress window records the failure
@@ -522,28 +523,21 @@ fn settle_life_gain(
     // CR 119.9: if a player gains 0 life, no life gain event has occurred — no
     // state mutation and no journal command; the event below still fires as
     // before.
-    let applied = if gain_amount == 0 {
-        0
-    } else {
-        // The applied amount is how far the total the change adjusts moved
-        // (CR 810.9: in Two-Headed Giant, the team's shared total).
-        let before = crate::game::players::life_change_total(state, pid);
+    if gain_amount != 0 {
         if let Err(unrepresentable) = apply_final_life_edit(state, pid, i64::from(gain_amount)) {
             return settle_unrepresentable(state, unrepresentable, policy, "life gain");
         }
-        before.abs_diff(crate::game::players::life_change_total(state, pid))
-    };
-    let reported = arithmetic::reported_life_magnitude(u64::from(gain_amount), applied);
+    }
     // CR 611.3a + CR 119: gate escalation on a live life-reading static.
     crate::game::layers::mark_layers_full_if_life_reading_static_live(state);
     events.push(GameEvent::LifeChanged {
         player_id: pid,
-        amount: arithmetic::life_changed_amount(LifeDirection::Gain, reported),
+        amount: arithmetic::life_changed_amount(LifeDirection::Gain, u64::from(gain_amount)),
         // CR 119.3: read back after the edit, so a run of life changes carries
         // each intermediate total rather than only the final snapshot's.
         new_total: LifeTotalReading(stored_life(state, pid)),
     });
-    Ok(arithmetic::u64_to_u32_saturating(reported))
+    Ok(gain_amount)
 }
 
 /// The player's stored life field, `None` for an unknown player.
@@ -607,8 +601,8 @@ pub(crate) fn ingress_window_has_failed(state: &GameState) -> bool {
 
 /// The failure branch of a settle step, per policy. `Reject` hands the typed
 /// error to the caller. `IgnoreImpossible` reports `Ok(0)` for an
-/// engine-unrepresentable player-resource change (life, player counter, or
-/// energy). An open ingress window records the failure so
+/// engine-unrepresentable player-counter or energy change, on its own or nested
+/// under a life change. An open ingress window records the failure so
 /// its public action boundary rejects and restores; with no window, ordinary
 /// resolution and legacy parked records log and skip it for compatibility. This
 /// fallback is an engine-capacity policy, not CR 101.3 impossibility.
@@ -808,12 +802,7 @@ fn settle_life_loss(
     }
     // Losing 0 life leaves the total unchanged (CR 119.3) — no state mutation
     // and no journal command; the event below still fires as before.
-    let applied = if loss_amount == 0 {
-        0
-    } else {
-        // The applied amount is how far the total the change adjusts moved
-        // (CR 810.9: in Two-Headed Giant, the team's shared total).
-        let shared_before = crate::game::players::life_change_total(state, pid);
+    if loss_amount != 0 {
         let before = crate::game::players::team_life_total(state, pid);
         if let Err(unrepresentable) = apply_final_life_edit(state, pid, -i64::from(loss_amount)) {
             return settle_unrepresentable(state, unrepresentable, policy, "life loss");
@@ -828,20 +817,18 @@ fn settle_life_loss(
             after,
             loss_amount,
         );
-        shared_before.abs_diff(crate::game::players::life_change_total(state, pid))
-    };
-    let reported = arithmetic::reported_life_magnitude(u64::from(loss_amount), applied);
+    }
     // CR 611.3a + CR 119 + CR 120.3a: gate escalation on a live life-reading
     // static. Also the sink for non-infect player damage (deal_damage.rs).
     crate::game::layers::mark_layers_full_if_life_reading_static_live(state);
     events.push(GameEvent::LifeChanged {
         player_id: pid,
-        amount: arithmetic::life_changed_amount(LifeDirection::Loss, reported),
+        amount: arithmetic::life_changed_amount(LifeDirection::Loss, u64::from(loss_amount)),
         // CR 119.3: read back after the edit, so a run of combat-damage life
         // losses carries each intermediate total rather than only the final one.
         new_total: LifeTotalReading(stored_life(state, pid)),
     });
-    Ok(arithmetic::u64_to_u32_saturating(reported))
+    Ok(loss_amount)
 }
 
 /// CR 119.3: Apply a post-replacement `ProposedEvent::LifeLoss` under the

@@ -545,8 +545,7 @@ pub fn team_life_sum(state: &GameState, player: PlayerId) -> i64 {
 /// that cost or effect uses the team's life total instead" — callers that
 /// read an individual life total for a comparison, cost, or SBA check in a
 /// team-based format must go through this accessor rather than `Player::life`
-/// directly. The members' `life` fields are the only storage, and how the
-/// team's total is split across them is storage only (CR 810.9a). A life
+/// directly. The members' `life` fields are the only storage. A life
 /// change happens to a player and adjusts the team's shared total, which
 /// [`spread_life_change`] stores (CR 810.9). This is a pure derived reading,
 /// not a separate stored pool: the exact [`team_life_sum`] saturated into
@@ -592,8 +591,15 @@ pub(crate) fn life_change_total(state: &GameState, player: PlayerId) -> i64 {
 /// `player` adjusts ([`life_change_total`]). The change lands on `player`'s
 /// own field first, and only the part that field cannot hold within the `i32`
 /// limits moves on to its teammates, each field saturating at its own limits.
-/// How a team's total is split across its members' fields is storage only:
-/// every rules reading uses the team's total (CR 810.9a).
+/// CR 810.9a has a cost or effect that needs a player's life total use the
+/// team's, but these effects still read a member's field:
+/// `effects::double::resolve_double_life`, `effects::exchange_life_totals`,
+/// `effects::exchange_life`, `effects::redistribute_life_totals` and
+/// `DamageModification::LifeFloor` (`game::replacement`). The loop analysis reads
+/// members' fields too: the per-seat life axis of
+/// `analysis::resource::ResourceVector::snapshot`, the seat headroom readers in
+/// `analysis::resource`, and `analysis::loop_check`'s `winner_life_never_dips`
+/// and `fallers_lives_pairwise_equal`.
 pub(crate) fn spread_life_change(state: &mut GameState, player: PlayerId, change: i64) {
     let mut remaining = change;
     for member in life_change_fields(state, player) {

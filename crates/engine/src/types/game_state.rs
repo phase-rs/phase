@@ -28625,7 +28625,8 @@ pub struct PendingReplacement {
     pub unrepresentable_life_change: UnrepresentablePolicy,
 }
 
-/// Who owns a player-resource change (life, player counter, energy) whose final
+/// Who owns a player-resource change (a player counter or energy, on its own or nested under a
+/// life change) whose final
 /// result the engine cannot represent (a player-counter or energy amount beyond
 /// an `i32` delta or total past `u32::MAX`, or a player-counter or energy
 /// replacement quantity that overflowed while the event was replaced). A life
@@ -28655,8 +28656,8 @@ impl UnrepresentablePolicy {
 }
 
 /// State of the transient action-ingress window (see
-/// `GameState::ingress_life_window`): the first player whose player-resource
-/// (life, player counter, energy) settlement inside the window proved
+/// `GameState::ingress_life_window`): the first player whose player-counter or energy
+/// settlement inside the window, on its own or nested under a life change, proved
 /// unrepresentable, if any.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct IngressLifeWindow {
@@ -31696,9 +31697,10 @@ impl GameState {
     /// (CR 810.4 + CR 810.9, `players::life_change_total`) — and saturates it
     /// at the `i32` limit the change moves toward
     /// (`arithmetic::saturating_life_total`). It stores the result across the
-    /// team's fields (`players::spread_life_change`) and adds the reported
-    /// magnitude to the acting player's per-turn gained/lost counter,
-    /// saturating at `u32::MAX`. Energy and player counters keep the checked
+    /// team's fields (`players::spread_life_change`) and adds the rules amount
+    /// to the acting player's per-turn gained/lost counter, whatever the total
+    /// moved, saturating at `u32::MAX` (CR 119.3 + CR 119.9). Energy and player
+    /// counters keep the checked
     /// edit. Replaying a recorded command on the same prefix reproduces the
     /// same result, the spread included.
     pub fn apply_resolved_player_edit(
@@ -31726,13 +31728,16 @@ impl GameState {
                 // CR 119.3 + CR 107.1b: the gain or loss adjusts the total,
                 // which stops at the `i32` limit the change moves toward.
                 let total = arithmetic::saturating_life_total(current, *delta);
+                debug_assert!(
+                    total.abs_diff(current) <= rules,
+                    "a saturating life total never moves past the rules amount"
+                );
                 // CR 810.9 + CR 810.9a: the adjusted total is stored across the
                 // team's fields, the acting player's own field first.
                 crate::game::players::spread_life_change(self, command.player, total - current);
-                // The per-turn counters add the reported magnitude, saturating.
-                let counted = arithmetic::u64_to_u32_saturating(
-                    arithmetic::reported_life_magnitude(rules, total.abs_diff(current)),
-                );
+                // CR 119.3 + CR 119.9: the per-turn counters add the rules amount, saturating,
+                // since a gain held at the cap is still a life gain.
+                let counted = arithmetic::u64_to_u32_saturating(rules);
                 let player = &mut self.players[index];
                 if delta.is_positive() {
                     player.life_gained_this_turn =
@@ -35998,8 +36003,8 @@ impl GameState {
     ///     precondition: the batch route is entered only when no observer can make the lump apply
     ///     differently from N separate applications. Life is applied at the take (route (f)),
     ///     and the gate and the limit reading of `game::engine`'s
-    ///     `PeriodGrowth::collapse_is_replay` send every cycle whose life the lump would not
-    ///     store as performing stores it to route (b).
+    ///     `PeriodGrowth::collapse_is_replay` send every cycle whose life changes the lump would
+    ///     not land as performing lands them to route (b).
     /// (b) OBSERVED AT ACCEPT → the take performs the period
     ///     (`game::engine::drive_persistent_axis_collapse`), so observers fire exactly as they
     ///     would in manual play.
@@ -36019,17 +36024,16 @@ impl GameState {
     ///     nothing, so neither may take the elision. Identity again holds by performance.
     /// (f) LIFE LANDS AT THE TAKE → a Mark take applies its `Life` items at the accepted count
     ///     (`game::engine`'s `materialize_object_growth_shortcut`), so no life waits for the
-    ///     boundary and no later change can reorder against it. Identity holds for every total
-    ///     and field because the take batches life only where each player's net life change in
-    ///     the driven cycle is a gain, or nothing, stored whole on its own field, and no cycle of
-    ///     the accepted count would carry a total its life changes touch, or a gaining player's
-    ///     own field, past an `i32` limit. Then no change is held back and nothing spills, so
-    ///     every cycle repeats the driven cycle from where the one before it ended, and the lump
-    ///     lands every total and field where performing the cycles would. A period that also
-    ///     loses life is batched at its net, so the lump moves the gained counter by the net and
-    ///     the lost counter by nothing (route (a)'s net batching, unchanged by this route).
-    ///     A take that would batch life beside a `Tokens` or `Counters` item, which the boundary
-    ///     applies at the count its controller names there, is performed instead (route (b)).
+    ///     boundary and no later change can reorder against it. Identity holds for every total,
+    ///     field and per-turn counter because the take batches life only where every life change
+    ///     in the driven cycle is a gain stored whole on its player's own field, and no cycle of
+    ///     the accepted count would carry a total those gains touch, or a gaining player's own
+    ///     field, past an `i32` limit. Then no change is held back and nothing spills, so every
+    ///     cycle repeats the driven cycle from where the one before it ended, the lump moves each
+    ///     total, field and gained counter as the cycles' gains do, and no lost counter moves
+    ///     either way. A cycle with any loss is performed (route (b)), since a lump cannot add to a
+    ///     lost counter. A take that would batch life beside a `Tokens` or `Counters` item, which
+    ///     the boundary applies at the count its controller names there, is performed too.
     ///
     /// Route (c) is the one the review indicted, and it is the route that ENFORCES CR 732.2c rather
     /// than departing from it. Once an observer appears, the other two options both break the

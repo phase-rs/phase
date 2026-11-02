@@ -4725,8 +4725,8 @@ pub(crate) mod tests {
     /// in the engine's `life_total_saturation` tests). A player's energy keeps
     /// the engine's checked edit, so an energy total past `u32::MAX` is refused
     /// with `EngineError::LifeChangeUnrepresentable`, the error the engine's
-    /// energy and player-counter edits report (its name predates life
-    /// saturation). No printed card chooses a creature type and gives energy
+    /// energy and player-counter edits report. No printed card chooses a
+    /// creature type and gives energy
     /// or a player counter for each permanent of that type.
     const ENERGY_RAIN_ORACLE: &str =
         "Choose a creature type. You get {E}{E} for each permanent you control of that type.";

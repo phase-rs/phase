@@ -25,9 +25,9 @@
 //! [`u32_to_i32_saturating`] for a magnitude.
 //!
 //! Life totals saturate at the `i32` limits through [`saturating_life_total`],
-//! the one place a total is computed; [`reported_life_magnitude`] decides what
-//! a capped change reports, and [`life_changed_amount`] converts it to the
-//! `LifeChanged` event field.
+//! the one place a total is computed. A capped change still reports its rules
+//! amount, and [`life_changed_amount`] converts that to the `LifeChanged` event
+//! field.
 
 use std::cmp::Ordering;
 
@@ -112,12 +112,7 @@ pub enum LifeDirection {
 /// the change moves toward and never moves against the change. This is the one
 /// place a life total is computed. `current` is the total the change adjusts:
 /// the player's own life, or in Two-Headed Giant the team's exact shared total,
-/// which a state this function never wrote may hold outside `i32`. To refuse at
-/// a limit instead of saturating, return `None` past it (`Option<i64>`) and
-/// have the Life arm, the one caller that stores a total, map `None` to
-/// `ResourceOverflow`; the settle's retained refusal routing turns that into
-/// the refusal, and each caller that only asks how far a change moves a total
-/// must then answer for `None` too.
+/// which a state this function never wrote may hold outside `i32`.
 #[inline]
 pub fn saturating_life_total(current: i64, delta: i64) -> i64 {
     let moved = current.saturating_add(delta);
@@ -128,26 +123,10 @@ pub fn saturating_life_total(current: i64, delta: i64) -> i64 {
     }
 }
 
-/// The magnitude a life change reports, from the rules amount and the amount
-/// the total actually moved (`applied`).
-///
-/// CR 119.3 + CR 119.9: the rules amount; reporting the capped movement (0 at
-/// the cap) would make a gain no life-gain event and stop "whenever you gain
-/// life" triggers. The per-turn counters, the `LifeChanged` amount and the
-/// settle's returned amount all come from here; reporting `applied` instead is
-/// a one-body change.
-#[inline]
-pub fn reported_life_magnitude(rules: u64, applied: u64) -> u64 {
-    debug_assert!(
-        applied <= rules,
-        "a saturating life total never moves past the rules amount"
-    );
-    rules
-}
-
-/// The `LifeChanged` event amount for a reported magnitude: a gain clamps at
-/// `i32::MAX`, a loss at `i32::MIN`; clamping both signs to `±i32::MAX` is a
-/// one-body change.
+/// CR 119.3 + CR 119.9: the `LifeChanged` event amount for a life change of this
+/// rules amount, whatever the total moved, so a gain held at the cap is still a
+/// life gain event and "whenever you gain life" triggers fire: a gain clamps at
+/// `i32::MAX`, a loss at `i32::MIN`.
 #[inline]
 pub fn life_changed_amount(direction: LifeDirection, magnitude: u64) -> i32 {
     let magnitude = i64::try_from(magnitude).unwrap_or(i64::MAX);
@@ -245,17 +224,6 @@ mod tests {
         for current in [min - 1, min, -3, 0, 7, max, max + 1] {
             assert_eq!(saturating_life_total(current, 0), current);
         }
-    }
-
-    #[test]
-    fn reported_life_magnitude_is_the_rules_amount() {
-        assert_eq!(reported_life_magnitude(5, 3), 5);
-        assert_eq!(reported_life_magnitude(5, 5), 5);
-        assert_eq!(
-            reported_life_magnitude(u64::from(u32::MAX), 0),
-            u64::from(u32::MAX)
-        );
-        assert_eq!(reported_life_magnitude(0, 0), 0);
     }
 
     #[test]

@@ -371,9 +371,10 @@ fn drive_all_accept_n(state: &mut GameState, n: u32) {
     }
 }
 
-/// The offer's OWN stated count — exactly what the real frontend dispatches
-/// (`LoopShortcutModal`'s `handleConfirm` sends `count: schema.iteration_count`, there being no
-/// declare-time picker) — and the ceiling the SAME offer published.
+/// The offer's OWN stated count — what the real frontend dispatches when its controller accepts
+/// the suggestion (`LoopShortcutModal`'s count picker opens on it, and with no published count
+/// spec `handleConfirm` sends `count: schema.iteration_count`) — and the ceiling the SAME offer
+/// published.
 fn offered_count_and_ceiling(
     state: &GameState,
 ) -> (engine::analysis::decision_template::IterationCount, u32) {
@@ -460,9 +461,9 @@ fn kilo_accept_delivers_exactly_n_counters_at_the_take() {
 /// the older fixture the rows above drive).
 ///
 /// The unbounded object-growth producer publishes the global safety limit as its ceiling but seeded
-/// its stated count with a bare 1. The frontend echoes that stated count verbatim (there is no
-/// declare-time picker), and CR 732.2c makes the accepted count binding — so a stated count below
-/// the published ceiling silently picks the controller's number for them.
+/// its stated count with a bare 1. The frontend's count picker opens on that stated count, and
+/// CR 732.2c makes the accepted count binding — so a stated count below the published ceiling
+/// picks the number for a controller who accepts the suggestion.
 ///
 /// The flipping conjunct is the stated count: it reads the ceiling off the SAME live offer rather
 /// than restating a literal, so it cannot pass on both sides of the regression. Pre-fix the offer
@@ -524,8 +525,9 @@ fn kilo_reported_capture_offer_states_the_full_ceiling_it_publishes() {
         "the offer publishes a ceiling above 1, so a capped boundary is a real narrowing"
     );
 
-    // (4) THE FLIPPING ASSERTION. The modal echoes the stated count, and CR 732.2c binds it, so the
-    // offer must state the very ceiling it publishes. Pre-fix it states 1 against a ceiling of 1000.
+    // (4) THE FLIPPING ASSERTION. The modal's count picker opens on the stated count, and CR 732.2c
+    // binds the declared count, so the offer must state the very ceiling it publishes. Pre-fix it
+    // states 1 against a ceiling of 1000.
     assert_eq!(
         stated,
         engine::analysis::decision_template::IterationCount::Fixed(ceiling),
@@ -543,8 +545,9 @@ fn kilo_reported_capture_offer_states_the_full_ceiling_it_publishes() {
 }
 
 /// CR 732.2a + CR 732.2c: the offer has TWO live declare authorities, and they must state the same
-/// count. `LoopShortcutModal` echoes `schema.iteration_count` verbatim; the interaction wire echoes
-/// it through the published `suggested`, and `AcceptSuggested` turns that `suggested` into the
+/// count. `LoopShortcutModal` declares `schema.iteration_count` verbatim where no count spec is
+/// published; the interaction wire echoes it through the published `suggested`, which the modal's
+/// count picker opens on, and `AcceptSuggested` turns that `suggested` into the
 /// declared `IterationCount`. If they disagree, a client on the wire binds a different CR 732.2c
 /// count than the React client binds for the SAME offer.
 ///

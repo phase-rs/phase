@@ -1407,8 +1407,8 @@ impl ProspectiveSimulationOutcome {
 }
 
 /// Closes this boundary's ingress window and restores the window that was open
-/// before it. Returns the player whose life, player-counter or energy change
-/// failed inside the boundary.
+/// before it. Returns the player whose player-counter or energy change, on its own or nested
+/// under a life change, failed inside the boundary.
 fn close_ingress_window(
     state: &mut GameState,
     prior: &mut Option<crate::types::game_state::IngressLifeWindow>,
@@ -1418,8 +1418,9 @@ fn close_ingress_window(
     window.and_then(|window| window.failed_player)
 }
 
-/// The player whose life, player-counter or energy change inside the current
-/// action proved unrepresentable, if any. An open ingress window records the first failure;
+/// The player whose player-counter or energy change, on its own or nested under a life change,
+/// proved unrepresentable inside the current action, if any. An open ingress window records the
+/// first failure;
 /// the enclosing action boundary turns it into a rejection and restores its
 /// pre-action snapshot.
 fn boundary_life_change_failure(state: &GameState) -> Option<PlayerId> {
@@ -1574,8 +1575,9 @@ fn apply_action_boundary_core(
     // A player-resource change this action resolves must be representable: open
     // the ingress window after transient cleanup (which clears any prior window)
     // and close it before returning a `RawActionApplication`. Every ordinary
-    // life, player-counter and energy settlement records a failure here instead of silently treating the
-    // change as zero, so the boundary rejects the whole action atomically.
+    // player-counter or energy settlement, on its own or nested under a life change, records a
+    // failure here instead of silently treating the change as zero, so the boundary rejects the
+    // whole action atomically.
     state.ingress_life_window = Some(crate::types::game_state::IngressLifeWindow::default());
     // CR 601.2c + CR 602.2b + CR 603.2: the live announcement's trigger
     // carrier is held by `announcement_triggers` for this action. The boundary
@@ -2903,15 +2905,7 @@ fn interactive_loop_bridge_paths(
 
     // Path B: CR 732.4 all-mandatory draw, on zero progress or on net progress with no loss
     // axis, over a period that left every unmeasured axis unchanged. Only reached when Path A
-    // found no determinate winner. A seat whose life total sits at `i32::MAX` at both ends of
-    // the compared cycle has its life axis read from the cycle's rules amount
-    // (`ResourceVector::with_at_limit_life_reading`), so a loop that only gains life at the cap
-    // reads as it does below the cap: drawn when its period is forced, offered without end when
-    // its only non-mandatory members are outs (CR 732.5). Where a per-turn counter fell or ends
-    // the cycle at `u32::MAX` there is no reading and the stored 0 stands; a period that then
-    // recurs with no other change is read on the zero-progress leg. `i32::MIN` is not read: a
-    // seat alive there has an effect keeping it from losing (CR 704.5a), and a loss axis there
-    // would veto the CR 104.4b draw of a loop that drains it.
+    // found no determinate winner.
     {
         let _timed = crate::analysis::resource::CostTimer::start(if mandatory {
             |cost| {
@@ -2955,13 +2949,7 @@ fn interactive_loop_bridge_paths(
                 let delta = crate::analysis::resource::ResourceVector::delta(
                     &crate::analysis::resource::ResourceVector::snapshot(prior),
                     &cur,
-                )
-                // CR 104.4b + CR 732.4: a life total held at `i32::MAX` at both ends of the
-                // cycle reads the cycle's rules amount, not the stored 0, unless a per-turn
-                // counter fell or ends the cycle at `u32::MAX`. `i32::MIN` is not read
-                // (CR 704.5a + CR 104.4b: a seat alive there cannot lose, and a loss axis
-                // would veto the draw of a loop that drains it).
-                .with_at_limit_life_reading(prior, frames.current());
+                );
                 let recurs = crate::analysis::resource::loop_states_equal_modulo_resources_side(
                     prior, &frames,
                 );
@@ -3055,8 +3043,6 @@ fn interactive_loop_bridge_paths(
                 // `has_no_loss_axis` rejects nothing here that recurrence, `is_net_progress`
                 // or the `Advantage` conjunct has not already rejected; Path B's ring scan has
                 // no `Advantage` conjunct, so there it is the only veto on a rising poison axis.
-                // Unlike Path B, this delta takes no at-limit life reading
-                // (`ResourceVector::with_at_limit_life_reading`).
                 // CR 122.1 + CR 104.4b: the third disjunct is a pure preserved-`Generic`
                 // counter-growth cover (proliferate/charge Pentad Prism, burden The One
                 // Ring). It reaches only an offer, which ends the game only when every player
@@ -6970,12 +6956,12 @@ enum TakeRoute {
 /// the mark would refill restricted mana without its restriction (CR 106.6), it batches none of
 /// the damage a period marks (CR 120.3e), its mint makes bare tapped copies under the proposer,
 /// without a keyword, delayed trigger, other controller or certified departure the cover admitted
-/// as growth, its batched collapse must not miss what the board observes, each player's net life
-/// change in its cycle must be a gain, or nothing, stored whole on its own field (CR 810.9), none
-/// of its cycles may carry a total its life changes touch or a gaining player's own field past an
-/// `i32` limit, and it may batch life only alone, since the life lands at the take
-/// (CR 732.2c), and a signed proposal's departures are seen only as its repetitions cross them
-/// (CR 704.3).
+/// as growth, its batched collapse must not miss what the board observes, every life change in
+/// its cycle must be a gain stored whole on its player's own field (CR 119.3 + CR 810.9), since
+/// a lump carries gains only, none of its cycles may carry a total its gains touch or a gaining
+/// player's own field past an `i32` limit, and it may batch life only alone, since the life lands
+/// at the take (CR 732.2c), and a signed proposal's departures are seen only as its repetitions
+/// cross them (CR 704.3).
 fn take_route(
     state: &GameState,
     proposal: &crate::analysis::loop_check::ShortcutProposal,
@@ -7009,7 +6995,7 @@ fn take_route(
 /// CR 732.2a: one accepted period's growth, derived at accept from one driven cycle: the fodder
 /// its ∞ pile is drawn from, the batched N×δ items a marked take applies (its life at the take,
 /// its tokens and counters at the CR 500.5 collapse), and the readings that decide whether the
-/// lump stores what performing stores.
+/// lump lands what performing lands.
 struct PeriodGrowth {
     fodder: Option<PeriodFodder>,
     batched: Vec<crate::types::game_state::PersistentAxisMaterialization>,
@@ -7018,10 +7004,10 @@ struct PeriodGrowth {
     /// (`analysis::resource::life_not_stored_as_gains`). Empty on every growth the Mark route
     /// keeps.
     life_not_stored_as_gains: BTreeSet<PlayerId>,
-    /// CR 119.3: the driven cycle's running life changes, read off its `LifeChanged` events
-    /// (`analysis::resource::cycle_life_excursions`), for [`Self::life_passes_a_limit`]. Empty
-    /// where the cycle did not complete.
-    life_excursions: crate::analysis::resource::CycleLifeExcursions,
+    /// CR 119.3: what the driven cycle's `LifeChanged` events report
+    /// (`analysis::resource::cycle_life_changes`), read by the field above and by
+    /// [`Self::life_passes_a_limit`]. Empty where the cycle did not complete.
+    life_changes: crate::analysis::resource::CycleLifeChanges,
 }
 
 impl PeriodGrowth {
@@ -7036,7 +7022,7 @@ impl PeriodGrowth {
                 fodder: None,
                 batched: Vec::new(),
                 life_not_stored_as_gains: BTreeSet::new(),
-                life_excursions: Default::default(),
+                life_changes: Default::default(),
             };
         };
         let fodder = current_period_fodder(before, after, controller);
@@ -7063,13 +7049,16 @@ impl PeriodGrowth {
                 per_cycle_delta,
             },
         ));
+        let life_changes = crate::analysis::resource::cycle_life_changes(after, events);
         Self {
             fodder,
             batched,
             life_not_stored_as_gains: crate::analysis::resource::life_not_stored_as_gains(
-                before, after,
+                before,
+                after,
+                &life_changes,
             ),
-            life_excursions: crate::analysis::resource::cycle_life_excursions(after, events),
+            life_changes,
         }
     }
 
@@ -7103,19 +7092,19 @@ impl PeriodGrowth {
             axis.unbounded_mark_kind() == res::UnboundedMarkKind::DeferredAccrual
                 && crate::types::game_state::LoopCollapseAxis::from_resource_axis(*axis).is_none()
         });
-        // CR 732.2c + CR 119.3 + CR 810.9 + CR 810.9a: some player's net life change in the
-        // driven cycle is not a gain, or nothing, stored whole on that player's own field: a net
-        // loss, a change the spread stored on a teammate, a change an `i32` limit held back, or a
-        // shared total's change its unreadable counters cannot attribute. The lump carries
-        // per-player gains read off the fields, so it would credit or drop that change, where
-        // performing the cycles stores each change as it happens. A cycle that also loses life
-        // but nets a gain on its player's own field is batched at its net. A spill can be the
-        // take's only life change, so this is read whatever the take batches.
+        // CR 732.2c + CR 119.3 + CR 810.9 + CR 810.9a: some life change in the driven cycle is
+        // not a gain stored whole on its player's own field: a loss of any size, a gain the
+        // spread stored on a teammate, a gain an `i32` limit held back, or a shared total's change
+        // its unreadable counters cannot attribute. The lump carries per-player gains read off
+        // the fields, so it would add nothing to a lost counter and only the net to a gained
+        // counter, or credit or drop the change, where performing the cycles stores each change
+        // and counts it as it happens. A cycle that nets nothing, or only spills, may batch no
+        // item at all, so this is read whatever the take batches.
         let life_not_stored_as_gains = !self.life_not_stored_as_gains.is_empty();
-        // CR 732.2c + CR 119.3: one of this take's `n` cycles would carry a total its life
-        // changes touch, or a gaining player's own field, past an `i32` limit, which holds a
-        // change back where the lump would not. A take with no `Life` item can still pass one (a
-        // gain held at the cap), so this too is read whatever the take batches.
+        // CR 732.2c + CR 119.3: one of this take's `n` cycles would carry a total its gains
+        // touch, or a gaining player's own field, past an `i32` limit, which holds a gain back
+        // where the lump would not. A take with no `Life` item can still pass one (a gain held at
+        // the cap), so this too is read whatever the take batches.
         let life_passes_a_limit = self.life_passes_a_limit(state, n);
         // CR 122.1 / CR 119.3: a lump counter or life application fires an observer once, not
         // once per cycle.
@@ -7150,8 +7139,9 @@ impl PeriodGrowth {
 
     /// CR 119.3 + CR 810.9 + CR 810.9a + CR 732.2c: whether a batched take of `n` cycles from
     /// `state` would meet an `i32` life limit (an engine limit, not a rule) that performing the
-    /// cycles meets, so a lump applied at the take would not store what performing stores. True
-    /// when any of these holds:
+    /// cycles meets, so a lump applied at the take would not store what performing stores. It
+    /// decides only for a cycle that only gains: a cycle with a loss is performed whatever this
+    /// says (`analysis::resource::life_not_stored_as_gains`). True when either holds:
     ///
     /// - (a) The lump. This take's `Life` items' `n·δ`, summed against the total each item
     ///   player's life changes adjust (`players::life_change_total`; in Two-Headed Giant both
@@ -7160,23 +7150,15 @@ impl PeriodGrowth {
     ///   the spread (`players::spread_life_change`) fills first, does not move that total or
     ///   field by its whole sum. This covers an item whose player no event of the cycle names (a
     ///   field that only received a teammate's spill), so no lump is applied unchecked.
-    /// - (b) A total the driven cycle's life events touch passes a limit in one of the `n`
-    ///   cycles repeated from `state` (`analysis::resource::LifeExcursion::passes_a_limit`).
-    ///   Cycle k starts where k−1 cycles' net leaves the total and reaches its running peak and
-    ///   trough from there, so a cycle that gains past the cap and then loses is caught though
-    ///   its net fits, and a cycle that dips past `i32::MIN` before it gains is caught too. The
-    ///   events report each change's rules amount (CR 119.3), which a pinned per-turn counter
-    ///   cannot hide.
-    /// - (c) The own field of a player with a `Life` item passes a limit over that player's own
-    ///   excursion. Other players' own fields are not read: a player with no item receives
-    ///   nothing from the lump, and whether such a player's changes stayed on its own field is
-    ///   the gate's question (`analysis::resource::life_not_stored_as_gains`), where a spill
-    ///   moves a teammate's field.
+    /// - (b) A total the driven cycle's gains touch cannot take `n` cycles of them from `state`
+    ///   (`analysis::resource::CycleLifeChanges`). The events report each gain's rules amount
+    ///   (CR 119.3), which a pinned per-turn counter cannot hide, so a gain held at the cap with
+    ///   no item is caught.
     ///
     /// Each test is the edit authority's own saturation (`arithmetic::saturating_life_total`);
-    /// the sums saturate in `i64`, and a saturated sum passes any limit. A take whose cycle has
-    /// no life event and batches no `Life` item reads false whatever other seats hold, and a
-    /// cycle that reaches a limit exactly passes none.
+    /// the sums saturate in `i64`, and a saturated sum passes any limit. A take whose cycle gains
+    /// nothing and batches no `Life` item reads false whatever other seats hold, and a cycle that
+    /// reaches a limit exactly passes none.
     fn life_passes_a_limit(&self, state: &GameState, n: u32) -> bool {
         use crate::game::{arithmetic, players, topology};
         use crate::types::game_state::PersistentAxisMaterialization as Item;
@@ -7214,21 +7196,20 @@ impl PeriodGrowth {
                 .or_insert_with(|| (field_of(player), 0));
             *sum = sum.saturating_add(lump);
         }
+        let passes =
+            |start: i64, sum: i64| arithmetic::saturating_life_total(start, sum) - start != sum;
         let lump_passes = totals
             .values()
             .chain(fields.values())
-            .any(|&(start, sum)| arithmetic::saturating_life_total(start, sum) - start != sum);
-        // (b) Each total the cycle's events touch, from its start on this board.
-        let total_passes = self.life_excursions.totals().any(|(player, excursion)| {
-            excursion.passes_a_limit(players::life_change_total(state, player), n)
+            .any(|&(start, sum)| passes(start, sum));
+        // (b) Each total the cycle's gains touch, from its start on this board.
+        let total_passes = self.life_changes.gains().any(|(player, gained)| {
+            passes(
+                players::life_change_total(state, player),
+                gained.saturating_mul(i64::from(n)),
+            )
         });
-        // (c) Each item player's own field, over its own excursion.
-        let field_passes = lumps.iter().any(|&(player, _)| {
-            self.life_excursions
-                .field(player)
-                .is_some_and(|excursion| excursion.passes_a_limit(field_of(player), n))
-        });
-        lump_passes || total_passes || field_passes
+        lump_passes || total_passes
     }
 }
 
@@ -8359,8 +8340,9 @@ struct DrivenCycle {
 /// `current_period_fodder` (object-growth ∞ pile), `current_period_counter_growth` (beneficial
 /// counter δ, feeding both the batched stash and the ∞ counter pills) and
 /// `current_period_life_growth` (life δ) all diff these two frames, and the events feed the
-/// life-limit reading (`PeriodGrowth::life_passes_a_limit`, through
-/// `analysis::resource::cycle_life_excursions`). `None` when the cycle does not complete. The
+/// life readings (`analysis::resource::cycle_life_changes`, read by
+/// `analysis::resource::life_not_stored_as_gains` and `PeriodGrowth::life_passes_a_limit`).
+/// `None` when the cycle does not complete. The
 /// `SimulationProbeGuard` is HELD across the drive so its internal `apply` never recurses into
 /// the shortcut hooks.
 ///
@@ -8446,18 +8428,13 @@ fn current_period_counter_growth(
 }
 
 /// CR 119.3 + CR 732.2a: the per-player life GAIN δ of the accepted period, diffed off the one
-/// driven iteration's frames (`grown_life_deltas`): the stored gain or, where the period ends
-/// with the player's life total (the team's shared total in a shared-life format) at
-/// `i32::MAX`, the larger of that gain and the rules amount the period carried (the stored
-/// gain alone when a per-turn counter fell or ends at `u32::MAX`). The
-/// batched δ source for the life axis, which a marked take applies at the take, at the accepted
-/// count (CR 732.2c). Empty when no player gains across the period; a total held at `i32::MAX`
-/// throughout gains the rules amount its counters read. A take in whose cycle some player's net
-/// life change is not a gain, or nothing, stored whole on its own field, one of whose cycles
-/// would pass an `i32` limit, or that would batch life beside a `Tokens` or `Counters` item, is
-/// not batched: the take performs the period instead (`PeriodGrowth::collapse_is_replay`). A
-/// period that also loses life is batched at its net.
-/// Only reached in the UNOBSERVED batched route (the firewall gates it).
+/// driven iteration's frames (`grown_life_deltas`). The batched δ source for the life axis, which
+/// a marked take applies at the take, at the accepted count (CR 732.2c). Empty when no player's
+/// field rises across the period. A take in whose cycle some life change is not a gain stored
+/// whole on its player's own field, one of whose cycles would pass an `i32` limit, or that would
+/// batch life beside a `Tokens` or `Counters` item, is not batched: the take performs the period
+/// instead (`PeriodGrowth::collapse_is_replay`). Its items land only on the UNOBSERVED batched
+/// route (the firewall gates them).
 fn current_period_life_growth(before: &GameState, after: &GameState) -> Vec<(PlayerId, u32)> {
     crate::analysis::resource::grown_life_deltas(before, after)
 }
@@ -8514,11 +8491,13 @@ fn try_offer_object_growth_shortcut(
     // threshold and passes the absence, leaving the constructor to derive a capacity at the
     // engine's own budget.
     //
-    // CR 732.2a + CR 732.2c: the count this offer STATES is the count the table binds. There is
-    // no declare-time picker (the frontend echoes `iteration_count` verbatim), and once the last
-    // player accepts, "the shortcut is taken" at that count, which then caps the CR 500.5
-    // collapse prompt. An offer that measures no threshold must therefore STATE the capacity it
-    // publishes as its ceiling; stating less silently caps the controller's collapse choice. The
+    // CR 732.2a + CR 732.2c: the count this offer STATES is the suggestion its count picker opens
+    // on (`InteractionShortcutCountSpec::Fixed`'s `suggested`, which `LoopShortcutModal` renders);
+    // no declaration may name a count above `deliverable_capacity`, published as its `max`. Once
+    // the last player accepts, "the shortcut is taken" at the declared count, which then caps the
+    // CR 500.5 collapse prompt. An offer that measures no threshold must therefore STATE the
+    // capacity it publishes as its ceiling; stating less would cap a controller who accepts the
+    // suggestion. The
     // coercion below is what states it: `build_shortcut_schema` only ever NARROWS a suggestion
     // to the capacity, so deleting this as newly redundant would publish the bare win-kind seed
     // instead. This mirrors `bounded_offer_tail`, which states its own measured
@@ -31449,7 +31428,7 @@ mod legacy_copy_announcement_tests {
 #[cfg(test)]
 mod period_growth_life_cap_tests {
     use super::{build_cert, DrivenCycle, PeriodGrowth};
-    use crate::analysis::resource::{cycle_life_excursions, ResourceAxis, ResourceVector};
+    use crate::analysis::resource::{cycle_life_changes, ResourceAxis, ResourceVector};
     use crate::types::events::GameEvent;
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{GameState, PersistentAxisMaterialization};
@@ -31488,13 +31467,11 @@ mod period_growth_life_cap_tests {
 
     /// CR 119.3 + CR 810.9 + CR 810.9a + CR 732.2c: a batched take of `n` cycles meets an `i32`
     /// life limit exactly where the lump of its `Life` items cannot be stored under the limits,
-    /// on the total each item adjusts and on the gaining player's own field, or where one of the
-    /// `n` cycles, repeated from this board, carries a total its `LifeChanged` events touch, or
-    /// an item player's own field, past a limit: a gain then a loss whose later cycle peaks past
-    /// the cap while the net fits, a cycle that dips past `i32::MIN` before it gains, a gain held
-    /// at the cap with no item, and an amount the event clamps. A cycle that reaches a limit
-    /// exactly, a loss then a gain whose running peak stays within the cap, a bystander at the
-    /// cap that the cycle leaves alone, another seat's item, and the other team's item do not.
+    /// on the total each item adjusts and on the gaining player's own field, or where the total a
+    /// cycle's gain events touch cannot take `n` cycles' gains from this board: a gain held at the
+    /// cap with no item, and an amount the event clamps. A cycle that reaches a limit exactly, a
+    /// bystander at the cap that the cycle leaves alone, another seat's item, and the other team's
+    /// item do not.
     #[test]
     fn life_passes_a_limit_where_a_cycle_or_the_lump_cannot_be_stored_as_performing_stores_it() {
         /// (name, Two-Headed Giant, life fields, this take's items, the cycle's events, cycles,
@@ -31509,11 +31486,9 @@ mod period_growth_life_cap_tests {
             bool,
         );
         let max = i32::MAX;
-        let min = i32::MIN;
         // Team A's fields give it `max - 10` with room on both members' own fields.
         let room = || vec![1_000, max - 1_010, 15, 15];
-        let rows: Vec<Row> =
-            vec![
+        let rows: Vec<Row> = vec![
             (
                 "reaches the cap exactly",
                 false,
@@ -31559,7 +31534,15 @@ mod period_growth_life_cap_tests {
                 u32::MAX,
                 true,
             ),
-            ("no life item", false, vec![max, 20], vec![], vec![], 1000, false),
+            (
+                "no life item",
+                false,
+                vec![max, 20],
+                vec![],
+                vec![],
+                1000,
+                false,
+            ),
             (
                 "another seat's item",
                 false,
@@ -31568,42 +31551,6 @@ mod period_growth_life_cap_tests {
                 vec![(1, 2)],
                 1000,
                 false,
-            ),
-            (
-                "a gain then a loss: the last cycle's gain passes the cap",
-                false,
-                vec![max - 40, 20],
-                vec![(0, 13)],
-                vec![(0, 15), (0, -2)],
-                3,
-                true,
-            ),
-            (
-                "the same two lower",
-                false,
-                vec![max - 42, 20],
-                vec![(0, 13)],
-                vec![(0, 15), (0, -2)],
-                3,
-                false,
-            ),
-            (
-                "a loss then a gain reaches only its net",
-                false,
-                vec![max - 39, 20],
-                vec![(0, 13)],
-                vec![(0, -2), (0, 15)],
-                3,
-                false,
-            ),
-            (
-                "dips past i32::MIN before it gains",
-                false,
-                vec![min + 1, 20],
-                vec![(0, 3)],
-                vec![(0, -2), (0, 5)],
-                1,
-                true,
             ),
             (
                 "no item: the cycle's gain held at the cap",
@@ -31704,16 +31651,6 @@ mod period_growth_life_cap_tests {
                 1,
                 true,
             ),
-            (
-                "a gain then a loss passes the gaining member's own field in a later cycle while \
-                 the team has room",
-                true,
-                vec![max - 40, -1_000, 15, 15],
-                vec![(0, 13)],
-                vec![(0, 15), (0, -2)],
-                3,
-                true,
-            ),
         ];
         for (name, team, fields, items, events, cycles, passes) in rows {
             let mut state = if team {
@@ -31728,14 +31665,14 @@ mod period_growth_life_cap_tests {
                 fodder: None,
                 batched: life_items(&items),
                 life_not_stored_as_gains: BTreeSet::new(),
-                life_excursions: cycle_life_excursions(&state, &life_events(&events)),
+                life_changes: cycle_life_changes(&state, &life_events(&events)),
             };
             assert_eq!(growth.life_passes_a_limit(&state, cycles), passes, "{name}");
         }
     }
 
-    /// CR 732.2c + CR 119.3 + CR 810.9 + CR 810.9a: a take in whose driven cycle some player's net
-    /// life change is not a gain, or nothing, stored whole on that player's own field is
+    /// CR 732.2c + CR 119.3 + CR 810.9 + CR 810.9a: a take in whose driven cycle some life change
+    /// is not a gain stored whole on its player's own field is
     /// performed, whatever its batched items: a loss spilled onto the teammate at `i32::MIN`, a
     /// loss on the member's own field, and a loss that reaches `i32::MIN` exactly. A take whose
     /// cycle only gains, each gain on its own player's field, is not routed by that. The frames
