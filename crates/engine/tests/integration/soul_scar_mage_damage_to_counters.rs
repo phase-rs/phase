@@ -119,13 +119,15 @@ fn burn_at_own_creature_deals_normal_damage() {
 }
 
 /// CR 614.1a: only sources Soul-Scar's controller controls are replaced — an
-/// opponent's burn spell at your creature deals damage normally.
+/// opponent's burn spell deals damage normally, even to a creature inside the
+/// recipient scope (a creature an opponent of Soul-Scar's controller controls),
+/// so only the source predicate rejects it.
 #[test]
-fn opponents_burn_at_your_creature_deals_normal_damage() {
+fn opponents_burn_at_an_in_scope_creature_deals_normal_damage() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.add_creature_from_oracle(P0, "Soul-Scar Mage", 1, 2, SOUL_SCAR_ORACLE);
-    let golem = scenario.add_creature(P0, "Own Golem", 4, 4).id();
+    let golem = scenario.add_creature(P1, "Opposing Golem", 4, 4).id();
     let bolt = scenario.add_bolt_to_hand(P1);
     scenario.with_mana_pool(P1, red_mana());
 
@@ -562,10 +564,53 @@ fn filtered_sources_each_ask_their_counter_order() {
     assert_eq!(runner.state().objects[&wall].damage_marked, 0);
 }
 
+/// Answer each CR 616.1 prompt P1 is asked with Doubling Season first,
+/// checking before every answer that the instruction written after the damage
+/// ("Draw a card.") has not run: the damage instruction is unfinished while any
+/// recipient still awaits its counter order (CR 608.2c). Returns the number of
+/// prompts answered.
+fn answer_season_first_while_the_tail_waits(
+    runner: &mut engine::game::scenario::GameRunner,
+    season: ObjectId,
+    hand_while_unfinished: usize,
+) -> usize {
+    let mut answered = 0usize;
+    for _ in 0..16 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::ReplacementChoice {
+                player, candidates, ..
+            } => {
+                assert_eq!(player, P1, "the affected creature's controller orders");
+                assert_eq!(
+                    runner.state().players[0].hand.len(),
+                    hand_while_unfinished,
+                    "the trailing draw ran while prompt {} of the damage instruction was open",
+                    answered + 1
+                );
+                let index = candidates
+                    .iter()
+                    .position(|c| c.source_id == season)
+                    .expect("Doubling Season is a candidate");
+                answered += 1;
+                runner
+                    .act(GameAction::ChooseReplacement { index })
+                    .expect("choose replacement order");
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                runner.act(GameAction::PassPriority).expect("pass priority");
+            }
+            other => panic!("unexpected prompt {other:?}"),
+        }
+    }
+    answered
+}
+
 /// CR 608.2c + CR 616.1g: pausing the sweep behind the first creature's
-/// counter prompt keeps the rest of the sweep AND runs the instruction after it
-/// ("Draw a card.") exactly once — the pause stashes only the remaining
-/// recipients, because `resolve_ability_chain` parks the parent's own tail.
+/// counter prompt keeps the rest of the sweep, and the instruction after it
+/// ("Draw a card.") follows the WHOLE damage instruction: it has not run while
+/// the second creature's counter order is still open, and runs exactly once
+/// after the last answer.
 #[test]
 fn sweep_tail_runs_once_after_the_counter_prompts() {
     let mut scenario = GameScenario::new();
@@ -592,7 +637,7 @@ fn sweep_tail_runs_once_after_the_counter_prompts() {
     give_priority(&mut runner, P0);
     let hand_before = runner.state().players[0].hand.len();
     runner.cast(sweep).commit();
-    let answered = answer_p1_orderings(&mut runner, &[season, season]);
+    let answered = answer_season_first_while_the_tail_waits(&mut runner, season, hand_before - 1);
 
     assert_eq!(answered, 2, "one ordering prompt per creature");
     assert_eq!(minus_counters(&runner, first), 3);
@@ -602,4 +647,171 @@ fn sweep_tail_runs_once_after_the_counter_prompts() {
         hand_before - 1 + 1,
         "the spell left the hand and the trailing draw ran once"
     );
+}
+
+/// CR 608.2c + CR 616.1g: the targeted form ("deals 2 damage to each of two
+/// target creatures", `Effect::DealDamage` with two targets) keeps the same
+/// order: the draw waits for the second target's counter order.
+#[test]
+fn targeted_damage_tail_waits_for_every_counter_prompt() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P0, "Soul-Scar Mage", 1, 2, SOUL_SCAR_ORACLE);
+    let first = scenario.add_creature(P1, "First Wall", 0, 10).id();
+    let second = scenario.add_creature(P1, "Second Wall", 0, 10).id();
+    let season = scenario
+        .add_enchantment_from_oracle(P1, "Doubling Season", DOUBLING_SEASON)
+        .id();
+    scenario.add_creature_from_oracle(P1, "Vizier of Remedies", 2, 1, VIZIER);
+    scenario.with_library_top(P0, &["L1", "L2", "L3"]);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Twin Scorch",
+            false,
+            "Twin Scorch deals 2 damage to each of two target creatures. Draw a card.",
+        )
+        .with_mana_cost(engine::types::mana::ManaCost::zero())
+        .id();
+
+    let mut runner = scenario.build();
+    give_priority(&mut runner, P0);
+    let hand_before = runner.state().players[0].hand.len();
+    runner.cast(spell).target_objects(&[first, second]).commit();
+    let answered = answer_season_first_while_the_tail_waits(&mut runner, season, hand_before - 1);
+
+    assert_eq!(answered, 2, "one ordering prompt per target");
+    assert_eq!(minus_counters(&runner, first), 3);
+    assert_eq!(minus_counters(&runner, second), 3);
+    assert_eq!(
+        runner.state().players[0].hand.len(),
+        hand_before,
+        "the trailing draw ran once"
+    );
+}
+
+/// CR 608.2c + CR 616.1g + CR 120.1: the same whole-instruction order for the
+/// multi-source shapes — targeted sources each dealing their power
+/// (`EachDealsDamageEqualToPower`) and filter-selected sources
+/// (`EachSourceDealsDamage`). The draw waits for the second source's counter
+/// order and runs once.
+#[test]
+fn multi_source_tail_waits_for_every_counter_prompt() {
+    for targeted in [true, false] {
+        let (mut scenario, bird3, bird2, wall, season) = multi_source_board();
+        scenario.with_library_top(P0, &["L1", "L2", "L3"]);
+        let text = if targeted {
+            "Up to two target creatures you control each deal damage equal to their power to \
+             target creature an opponent controls. Draw a card."
+        } else {
+            "Each Bird you control deals damage equal to its power to target creature an \
+             opponent controls. Draw a card."
+        };
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Bird Volley", false, text)
+            .with_mana_cost(engine::types::mana::ManaCost::zero())
+            .id();
+        let mut runner = scenario.build();
+        give_priority(&mut runner, P0);
+        let hand_before = runner.state().players[0].hand.len();
+        if targeted {
+            runner
+                .cast(spell)
+                .target_objects(&[bird3, bird2, wall])
+                .commit();
+        } else {
+            runner.cast(spell).target_object(wall).commit();
+        }
+
+        let answered =
+            answer_season_first_while_the_tail_waits(&mut runner, season, hand_before - 1);
+        assert_eq!(answered, 2, "targeted={targeted}: one prompt per source");
+        assert_eq!(minus_counters(&runner, wall), 5 + 3, "targeted={targeted}");
+        assert_eq!(
+            runner.state().players[0].hand.len(),
+            hand_before,
+            "targeted={targeted}: the trailing draw ran once"
+        );
+    }
+}
+
+/// Give every replacement printed on `id` an optional ("you may") mode, the
+/// typed `ReplacementMode::Optional` boundary no current Oracle line of this
+/// class produces.
+fn make_replacements_optional(runner: &mut engine::game::scenario::GameRunner, id: ObjectId) {
+    use engine::types::ability::ReplacementMode;
+    let optional = ReplacementMode::Optional { decline: None };
+    let obj = runner
+        .state_mut()
+        .objects
+        .get_mut(&id)
+        .expect("replacement source exists");
+    for index in 0..obj.replacement_definitions.len() {
+        obj.replacement_definitions[index].mode = optional.clone();
+    }
+    let mut base = (*obj.base_replacement_definitions).clone();
+    for definition in &mut base {
+        definition.mode = optional.clone();
+    }
+    obj.base_replacement_definitions = std::sync::Arc::new(base);
+}
+
+/// CR 614.6 + CR 614.1a: an optional damage substitution, accepted, replaces
+/// the damage with its whole substitute bound to the replaced event — three
+/// -1/-1 counters on the creature the bolt would have damaged ("that many",
+/// "that creature"). Declined, the event is untouched: 3 damage, no counters.
+#[test]
+fn optional_substitution_accept_puts_counters_and_decline_deals_damage() {
+    for accept in [true, false] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let mage = scenario
+            .add_creature_from_oracle(P0, "Soul-Scar Mage", 1, 2, SOUL_SCAR_ORACLE)
+            .id();
+        let ogre = scenario.add_creature(P1, "Hill Ogre", 4, 4).id();
+        let bolt = scenario.add_bolt_to_hand(P0);
+        scenario.with_mana_pool(P0, red_mana());
+
+        let mut runner = scenario.build();
+        make_replacements_optional(&mut runner, mage);
+        give_priority(&mut runner, P0);
+        runner.cast(bolt).target_object(ogre).commit();
+
+        let mut asked = 0;
+        for _ in 0..8 {
+            match runner.state().waiting_for.clone() {
+                WaitingFor::ReplacementChoice { .. } => {
+                    asked += 1;
+                    let index = if accept { 0 } else { 1 };
+                    runner
+                        .act(GameAction::ChooseReplacement { index })
+                        .expect("answer the optional substitution");
+                }
+                WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+                WaitingFor::Priority { .. } => {
+                    runner.act(GameAction::PassPriority).expect("pass priority");
+                }
+                other => panic!("unexpected prompt {other:?}"),
+            }
+        }
+        assert_eq!(
+            asked, 1,
+            "accept={accept}: the optional substitution is offered once"
+        );
+        let ogre_state = &runner.state().objects[&ogre];
+        if accept {
+            assert_eq!(minus_counters(&runner, ogre), 3, "the substitute happened");
+            assert_eq!(
+                ogre_state.damage_marked, 0,
+                "the replaced damage never happens"
+            );
+        } else {
+            assert_eq!(
+                minus_counters(&runner, ogre),
+                0,
+                "declined: nothing replaced"
+            );
+            assert_eq!(ogre_state.damage_marked, 3, "declined: the damage is dealt");
+        }
+    }
 }

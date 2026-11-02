@@ -675,3 +675,121 @@ fn awe_strike_prevents_both_trample_portions_and_gains_five_life_once() {
     assert_eq!(gains, vec![5], "the rider must gain five life in ONE event");
     assert_eq!(runner.life(P0), 25);
 }
+
+/// CR 510.2 + CR 615.8 + CR 616.1: the next instance of a trampler's damage
+/// spans every portion of its simultaneous combat damage, even when a
+/// replacement-order choice on one portion parks the batch. The trampler
+/// assigns 2 to a plain blocker, 2 to a self-shielded blocker and 2 to the
+/// player. Awe Strike applies to the plain blocker's portion; on the shielded
+/// blocker's portion its controller orders Awe Strike against the blocker's
+/// own shield (choosing the shield), and the batch is saved and restored at
+/// that choice. The player's portion is proposed after the pause and is still
+/// part of the instance Awe Strike prevents: P1 loses no life and the rider
+/// gains P0 the 4 Awe Strike prevented, once.
+#[test]
+fn awe_strike_covers_portions_after_a_parked_ordering_choice() {
+    use engine::types::actions::GameAction;
+    use engine::types::game_state::{GameState, WaitingFor};
+    use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+
+    use crate::impulsive_maneuvers_batch_shield::{
+        assert_damage_complete, declare_attacks, reach_combat_damage,
+    };
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker = scenario.add_creature(P0, "Trampler", 6, 6).trample().id();
+    let plain = scenario.add_creature(P1, "Plain Blocker", 0, 2).id();
+    let shielded = scenario
+        .add_creature_from_oracle(
+            P1,
+            "Shielded Blocker",
+            0,
+            2,
+            "Prevent all damage that would be dealt to Shielded Blocker.",
+        )
+        .id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Awe Strike", true, AWE_STRIKE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 0,
+        })
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::White, spell, false, vec![])],
+    );
+    let mut runner = scenario.build();
+    runner.cast(spell).target_objects(&[attacker]).resolve();
+
+    let mut events = declare_attacks(&mut runner, &[attacker]);
+    events.extend(reach_combat_damage(
+        &mut runner,
+        &[(plain, attacker), (shielded, attacker)],
+    ));
+    events.extend(
+        runner
+            .act(GameAction::AssignCombatDamage {
+                mode: engine::types::game_state::CombatDamageAssignmentMode::Normal,
+                assignments: vec![(plain, 2), (shielded, 2)],
+                trample_damage: 2,
+                controller_damage: 0,
+            })
+            .expect("submit the trample split")
+            .events,
+    );
+
+    // The shielded blocker's portion meets Awe Strike (already applied to
+    // this instance) and the blocker's own shield: P1 orders them.
+    let WaitingFor::ReplacementChoice {
+        player, candidates, ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "expected the shielded portion's ordering choice, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(player, P1, "CR 616.1: the affected object's controller");
+    assert!(
+        candidates.iter().any(|c| c.source_id != shielded),
+        "Awe Strike still applies to the instance after its first portion"
+    );
+    let index = candidates
+        .iter()
+        .position(|c| c.source_id == shielded)
+        .expect("the blocker's own shield is a candidate");
+
+    // Persist the parked batch at the choice and continue on the restored game.
+    let json = serde_json::to_string(runner.state()).expect("serialize parked state");
+    *runner.state_mut() = serde_json::from_str::<GameState>(&json).expect("restore");
+
+    events.extend(
+        runner
+            .act(GameAction::ChooseReplacement { index })
+            .expect("order the blocker's shield first")
+            .events,
+    );
+    assert_damage_complete(&runner);
+
+    assert_eq!(
+        runner.life(P1),
+        20,
+        "the player's portion, proposed after the pause, is prevented"
+    );
+    let gains: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::LifeChanged {
+                player_id, amount, ..
+            } if *player_id == P0 && *amount > 0 => Some(*amount),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        gains,
+        vec![4],
+        "the rider gains what Awe Strike prevented (2 + 2) once"
+    );
+}

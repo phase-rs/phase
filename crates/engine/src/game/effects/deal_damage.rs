@@ -1235,10 +1235,28 @@ fn pause_behind_continuation_prompt(state: &GameState, has_remaining: bool) -> b
     has_remaining && !matches!(state.waiting_for, WaitingFor::Priority { .. })
 }
 
+/// CR 608.2c: the damage instructions that deal damage to, or from, several
+/// objects or players one event at a time and can therefore pause between two
+/// of their events. When one of them pauses behind a recipient's replacement
+/// continuation, `resolve_ability_chain` places the parent's next instruction
+/// outside the whole child stack, after the paused continuation and the
+/// remaining recipients this module stashes.
+pub(crate) fn is_multi_event_damage_instruction(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::DealDamage { .. }
+            | Effect::DamageAll { .. }
+            | Effect::DamageEachPlayer { .. }
+            | Effect::EachDealsDamageEqualToPower { .. }
+            | Effect::EachSourceDealsDamage { .. }
+    )
+}
+
 /// The ability whose remaining recipients a pause stashes. On a `NeedsChoice`
 /// pause the stash also carries the parent's `sub_ability` tail. On a
 /// [`pause_behind_continuation_prompt`] pause the effect returns with a prompt
-/// open, and `resolve_ability_chain` parks that tail itself — stashing it here
+/// open, and `resolve_ability_chain` places that tail itself, outside the whole
+/// child stack (see [`is_multi_event_damage_instruction`]) — stashing it here
 /// too would run it twice.
 fn pause_stash_owner(ability: &ResolvedAbility, result: &DamageResult) -> ResolvedAbility {
     let mut owner = ability.clone();
@@ -2905,43 +2923,50 @@ pub fn resolve_each_player(
             &ability.targets,
         )
         .max(0) as u32;
-        if dmg > 0 {
-            match apply_damage_to_target(state, &ctx, TargetRef::Player(*pid), dmg, false, events)?
-            {
-                DamageResult::Applied(_)
-                    if !pause_behind_continuation_prompt(state, i + 1 < player_ids.len()) => {}
-                result => {
-                    // CR 120.3 + CR 616.1e: Remaining players must resume after the
-                    // replacement choice resolves. Pre-resolve per-player amounts now
-                    // so each continuation node carries a Fixed quantity.
-                    let remaining: Vec<(TargetRef, u32)> = player_ids[i + 1..]
-                        .iter()
-                        .filter_map(|&next_pid| {
-                            // Thread `ability.targets` here too — otherwise every
-                            // opponent AFTER the first (once a replacement pause
-                            // occurs) would pre-resolve an `ObjectManaValue
-                            // { scope: Target }` leaf to 0.
-                            let next_dmg =
-                                crate::game::quantity::resolve_quantity_scoped_with_targets(
-                                    state,
-                                    amount_expr,
-                                    ability.source_id,
-                                    next_pid,
-                                    &ability.targets,
-                                )
-                                .max(0) as u32;
-                            (next_dmg > 0).then_some((TargetRef::Player(next_pid), next_dmg))
-                        })
-                        .collect();
-                    let owner = pause_stash_owner(ability, &result);
-                    stash_remaining_damage_chain(state, &owner, ctx.source_id, remaining);
-                    // Tag the stashed chain with the parent `EffectKind::DamageEachPlayer`
-                    // so the drain re-emits the parent event the non-pause tail fires.
-                    mark_pending_continuation_parent(state, EffectKind::DamageEachPlayer);
-                    return Ok(());
-                }
-            }
+        if dmg == 0 {
+            continue;
         }
+        let result =
+            apply_damage_to_target(state, &ctx, TargetRef::Player(*pid), dmg, false, events)?;
+        if matches!(result, DamageResult::Applied(_))
+            && matches!(state.waiting_for, WaitingFor::Priority { .. })
+        {
+            continue;
+        }
+        // CR 120.3 + CR 616.1e: Remaining players must resume after the
+        // replacement choice resolves. Pre-resolve per-player amounts now so
+        // each continuation node carries a Fixed quantity.
+        let remaining: Vec<(TargetRef, u32)> = player_ids[i + 1..]
+            .iter()
+            .filter_map(|&next_pid| {
+                // Thread `ability.targets` here too — otherwise every opponent
+                // AFTER the first (once a replacement pause occurs) would
+                // pre-resolve an `ObjectManaValue { scope: Target }` leaf to 0.
+                let next_dmg = crate::game::quantity::resolve_quantity_scoped_with_targets(
+                    state,
+                    amount_expr,
+                    ability.source_id,
+                    next_pid,
+                    &ability.targets,
+                )
+                .max(0) as u32;
+                (next_dmg > 0).then_some((TargetRef::Player(next_pid), next_dmg))
+            })
+            .collect();
+        // CR 608.2c + CR 616.1g: behind an open continuation prompt only damage
+        // still to be dealt is stashed; with none left the instruction is
+        // complete and the chain places its next instruction after the prompt.
+        if matches!(result, DamageResult::Applied(_))
+            && !pause_behind_continuation_prompt(state, !remaining.is_empty())
+        {
+            break;
+        }
+        let owner = pause_stash_owner(ability, &result);
+        stash_remaining_damage_chain(state, &owner, ctx.source_id, remaining);
+        // Tag the stashed chain with the parent `EffectKind::DamageEachPlayer`
+        // so the drain re-emits the parent event the non-pause tail fires.
+        mark_pending_continuation_parent(state, EffectKind::DamageEachPlayer);
+        return Ok(());
     }
 
     events.push(GameEvent::EffectResolved {
@@ -3021,8 +3046,15 @@ pub fn resolve_each_deals_equal_to_power(
             false,
             events,
         )? {
+            // CR 608.2c + CR 616.1g: behind an open continuation prompt, pause
+            // only while a later source still deals damage (power above 0).
             DamageResult::Applied(_)
-                if !pause_behind_continuation_prompt(state, i + 1 < source_ids.len()) => {}
+                if !pause_behind_continuation_prompt(
+                    state,
+                    source_ids[i + 1..]
+                        .iter()
+                        .any(|&next| object_power_with_lki(state, next) > 0),
+                ) => {}
             result => {
                 // CR 120.3 + CR 616.1e: This source's damage paused for a
                 // replacement choice. Each remaining source deals its own power

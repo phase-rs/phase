@@ -17,9 +17,9 @@ use super::oracle_classifier::has_enters_with_counter_tokens;
 use super::oracle_effect::become_copy_except::parse_except_clause;
 use super::oracle_effect::lower::{apply_where_x_quantity_expression, parse_where_x_quantity_core};
 use super::oracle_effect::{
-    excise_selection_qualifier, parse_effect_chain, parse_effect_chain_with_context,
-    parse_effect_clause, parse_named_choice_object, try_parse_named_choice,
-    try_parse_named_choice_conjunction,
+    excise_selection_qualifier, lower_ability_ir, parse_ability_ir, parse_effect_chain,
+    parse_effect_chain_with_context, parse_effect_clause, parse_named_choice_object,
+    try_parse_named_choice, try_parse_named_choice_conjunction, ChainLoweringMode,
 };
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::doc::OracleNodeIr;
@@ -8861,7 +8861,32 @@ fn parse_damage_to_counters_substitution(
     let source_filter = parse_damage_source_filter(norm_lower)?;
 
     let effect_text = effect_text.trim().trim_end_matches('.');
-    let mut execute = parse_effect_chain(effect_text, AbilityKind::Spell);
+    // CR 614.1a + CR 608.2c: a bare object pronoun in the substitute ("put that
+    // many -1/-1 counters on it instead") refers back to an object of the
+    // replaced event, never by default to the replacement's own source. With an
+    // object recipient the antecedent is that recipient. With a player
+    // recipient the only object antecedent is the damage source: the
+    // replacement's own source when the subject is "~", otherwise the event's
+    // damage source, which no supported substitute link accepts, so the line
+    // fails closed below.
+    let pronoun_antecedent = if object_recipient.is_some() {
+        TargetFilter::PostReplacementDamageTarget
+    } else if matches!(source_filter, TargetFilter::SelfRef) {
+        TargetFilter::SelfRef
+    } else {
+        TargetFilter::PostReplacementDamageSource
+    };
+    let mut substitute_ctx = ParseContext {
+        object_pronoun_ref: Some(pronoun_antecedent),
+        in_replacement: true,
+        ..ParseContext::default()
+    };
+    let mut execute = lower_ability_ir(&parse_ability_ir(
+        effect_text,
+        AbilityKind::Spell,
+        ChainLoweringMode::Standalone,
+        &mut substitute_ctx,
+    ));
     // CR 608.2c: "that <noun>" lowers to `ParentTarget`; in a passive
     // replacement it names the replaced event's damage recipient.
     rewrite_parent_target_to_post_replacement_damage_target(&mut execute);
@@ -8930,7 +8955,11 @@ fn damage_substitute_chain_is_supported(def: &AbilityDefinition, player_recipien
         }
         _ => false,
     };
+    // CR 614.6: the substitute is the modified event that happens instead; an
+    // optional link ("you may put …") would let the replaced event vanish with
+    // nothing in its place, which this mandatory definition cannot express.
     link_ok
+        && !def.optional
         && def.else_ability.is_none()
         && def.condition.is_none()
         && def
@@ -19306,6 +19335,95 @@ mod tests {
         }
     }
 
+    /// The substitute's first link, for the damage-substitution tests below.
+    fn damage_substitute_counter_target(text: &str) -> Option<TargetFilter> {
+        let def = parse_replacement_line(text, "Substitution Probe")?;
+        match &*def.execute?.effect {
+            Effect::PutCounter { target, .. } => Some(target.clone()),
+            _ => None,
+        }
+    }
+
+    /// CR 614.1a + CR 608.2c: a bare "it" in a damage substitute names an
+    /// object of the replaced event, never by default the replacement's own
+    /// source. With an object recipient it is the damaged object — the same
+    /// binding "that creature" receives — so the counters land on the
+    /// creature that would have been dealt damage.
+    #[test]
+    fn damage_substitute_bare_pronoun_binds_the_object_recipient() {
+        let by_pronoun = damage_substitute_counter_target(
+            "If a source you control would deal noncombat damage to a creature an \
+             opponent controls, put that many -1/-1 counters on it instead.",
+        );
+        let by_anaphor = damage_substitute_counter_target(
+            "If a source you control would deal noncombat damage to a creature an \
+             opponent controls, put that many -1/-1 counters on that creature instead.",
+        );
+        assert_eq!(by_pronoun, Some(TargetFilter::PostReplacementDamageTarget));
+        assert_eq!(by_pronoun, by_anaphor);
+    }
+
+    /// CR 614.1a + CR 608.2c: with a player recipient the only object
+    /// antecedent of a bare "it" is the damage source. Under a "~" subject that
+    /// is the replacement's own source (the same tree as "on ~"); under any
+    /// other subject it is the event's damage source, which no supported
+    /// substitute link accepts, so the line stays on the honest stub instead of
+    /// putting the counters on the replacement's source.
+    #[test]
+    fn damage_substitute_bare_pronoun_with_player_recipient_binds_the_source() {
+        assert_eq!(
+            damage_substitute_counter_target(
+                "If Szadek would deal combat damage to a player, instead put that many \
+                 +1/+1 counters on it and that player mills that many cards.",
+            ),
+            Some(TargetFilter::SelfRef),
+        );
+        assert_eq!(
+            damage_substitute_counter_target(
+                "If a Zombie you control would deal combat damage to a player, instead \
+                 put that many +1/+1 counters on it.",
+            ),
+            None,
+            "the dealing Zombie is not a supported substitute recipient: fail closed"
+        );
+    }
+
+    /// CR 614.1a + CR 614.6: every shape the substitution cannot express stays
+    /// on the unclaimed stub (no `execute`), next to a supported positive
+    /// control so the negatives are not vacuous.
+    #[test]
+    fn damage_substitute_rejects_unsupported_links() {
+        assert!(damage_substitute_counter_target(
+            "If a source you control would deal noncombat damage to a creature an \
+             opponent controls, put that many -1/-1 counters on that creature instead.",
+        )
+        .is_some());
+        for text in [
+            // A fixed count is not the replaced amount.
+            "If a source you control would deal noncombat damage to a creature an \
+             opponent controls, put two -1/-1 counters on that creature instead.",
+            // A creature recipient cannot mill.
+            "If a source you control would deal noncombat damage to a creature an \
+             opponent controls, that creature's controller mills that many cards instead.",
+            // A player recipient cannot receive counters as "that player".
+            "If Szadek would deal combat damage to a player, instead put that many \
+             +1/+1 counters on that player.",
+            // An optional substitute could leave nothing in the event's place.
+            "If a source you control would deal noncombat damage to a creature an \
+             opponent controls, you may put that many -1/-1 counters on that creature \
+             instead.",
+            // An unsupported second link.
+            "If Szadek would deal combat damage to a player, instead put that many \
+             +1/+1 counters on Szadek and that player discards that many cards.",
+        ] {
+            let def = parse_replacement_line(text, "Substitution Probe");
+            assert!(
+                def.as_ref().is_none_or(|def| def.execute.is_none()),
+                "{text:?} must not claim a substitution, got {def:?}"
+            );
+        }
+    }
+
     /// CR 614.1a + CR 615.5 + CR 608.2c: Vigor — "If damage would be dealt to
     /// another creature you control, prevent that damage. Put a +1/+1 counter
     /// on that creature for each 1 damage prevented this way."
@@ -24828,7 +24946,8 @@ mod tests {
             // swallowing "(It can't be blocked except by ...)" into the keyword.
             (
                 "Duskwalker",
-                "If this creature was kicked, it enters with two +1/+1 counters on it and with fear.                  (It can't be blocked except by artifact creatures and/or black creatures.)",
+                "If this creature was kicked, it enters with two +1/+1 counters on it and with fear. \
+                 (It can't be blocked except by artifact creatures and/or black creatures.)",
                 Keyword::Fear,
             ),
         ] {
@@ -24923,7 +25042,8 @@ mod tests {
         // the scan at the period keeps it out.
         assert_eq!(
             parse_enters_with_keyword_riders(
-                "it enters with two +1/+1 counters on it and with flying.                  exile it and with trample."
+                "it enters with two +1/+1 counters on it and with flying. \
+                 exile it and with trample."
             ),
             vec![Keyword::Flying],
             "a later sentence's \" and with \" must not be attached to this replacement"
@@ -24934,7 +25054,8 @@ mod tests {
         // which fails if the candidate bound reads through the period.
         assert_eq!(
             parse_enters_with_keyword_riders(
-                "it enters with two +1/+1 counters on it and with flying.                  when this creature dies, exile it and with trample it fights."
+                "it enters with two +1/+1 counters on it and with flying. \
+                 when this creature dies, exile it and with trample it fights."
             ),
             vec![Keyword::Flying],
             "the candidate bound must not read through the period into a later sentence"

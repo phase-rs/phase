@@ -1695,16 +1695,20 @@ fn run_combat_damage_replacements(
         } => {
             // CR 616.1: nothing of this batch has been dealt; park all of it.
             // The tally is carried as a `Vec` (an enum key is not a JSON map key)
-            // and reinstalled on resume. strict-failure: the CR 615.8 one-shot
-            // application ledger (`pass.one_shot_applications`) is not parked —
-            // a consumed one-shot shield stops covering the source's later
-            // portions once the batch has paused for a choice.
-            record.prevention_tally = pass.tally.into_iter().collect();
+            // and reinstalled on resume. CR 615.8: the one-shot application
+            // ledger is parked with it, so a "next time" shield that already
+            // applied to an earlier portion still covers the source's portions
+            // proposed after the pause. The tally is sorted so a parked state
+            // serializes identically however the map iterated.
+            let mut prevention_tally: Vec<_> = pass.tally.into_iter().collect();
+            prevention_tally.sort_unstable();
+            record.prevention_tally = prevention_tally;
             record.replacement = Some(PendingCombatDamageReplacement {
                 entries,
                 resolved: pass.resolved,
                 unstarted: pass.unstarted,
                 awaiting,
+                one_shot_applications: pass.one_shot_applications,
             });
             state.waiting_for = (*waiting_for).clone();
             let events = record.batch_events.clone();
@@ -1743,7 +1747,7 @@ fn resume_combat_damage_replacements(
         tally: std::mem::take(&mut record.prevention_tally)
             .into_iter()
             .collect(),
-        one_shot_applications: Vec::new(),
+        one_shot_applications: parked.one_shot_applications,
     };
     run_combat_damage_replacements(state, record, parked.entries, pass, Some(resume))
 }

@@ -19418,6 +19418,14 @@ pub struct PendingCombatDamageReplacement {
     pub unstarted: VecDeque<ProposedEvent>,
     /// What the parked entry `entries[resolved.len()]` is waiting on.
     pub awaiting: PendingCombatDamageAwait,
+    /// CR 510.2 + CR 615.8: the one-shot shields that already applied to an
+    /// earlier portion of this simultaneous instance, keyed by damage source. A
+    /// "the next time [source] would deal damage" shield prevents the source's
+    /// whole instance, so a portion proposed after the pause must still see the
+    /// application recorded before it. Absent from saves written before it
+    /// existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub one_shot_applications: Vec<(AppliedReplacementKey, ObjectId)>,
 }
 
 /// CR 616.1 / CR 616.1g: why the parked entry of a

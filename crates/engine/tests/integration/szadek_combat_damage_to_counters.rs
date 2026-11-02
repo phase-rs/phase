@@ -765,84 +765,98 @@ fn first_strike_batch_parks_and_the_regular_sub_step_still_runs_once() {
 /// batch waits in its replacement pass. Its lifelink blocker's gain has not
 /// been computed yet (Phase C derives it from the parked entry), so the
 /// departure must drop it there: the departed seat gains no life, and the
-/// defender's answer still completes the batch once.
+/// defender's answer still completes the batch once. The same board without
+/// the concession is the positive control: the answer gains P2 exactly the 1
+/// life its lifelink wall's damage owes (CR 702.15b).
 #[test]
 fn departed_seat_gains_no_life_from_a_batch_parked_in_its_replacement_pass() {
-    let mut scenario = GameScenario::new_n_player(3, 42);
-    scenario.at_phase(Phase::PreCombatMain);
-    let szadek = scenario
-        .add_creature_from_oracle(P0, SZADEK_NAME, 5, 5, SZADEK_ORACLE)
-        .id();
-    let bear = scenario.add_creature(P0, "Bear", 1, 1).id();
-    let p2 = PlayerId(2);
-    let lifelinker = {
-        let mut builder = scenario.add_creature(p2, "Lifelink Wall", 1, 4);
-        builder.with_keyword(engine::types::keywords::Keyword::Lifelink);
-        builder.id()
-    };
-    scenario.add_enchantment_from_oracle(P1, "Combat Ward", COMBAT_WARD_ORACLE);
-    with_p1_library(&mut scenario, 7);
-    let mut runner = scenario.build();
-    runner.advance_to_combat();
-    runner
-        .declare_attackers(&[
-            (szadek, AttackTarget::Player(P1)),
-            (bear, AttackTarget::Player(p2)),
-        ])
-        .expect("declare attackers");
-    for _ in 0..16 {
-        match &runner.state().waiting_for {
-            WaitingFor::DeclareBlockers { player, .. } if *player == p2 => {
-                runner
-                    .declare_blockers(&[(lifelinker, bear)])
-                    .expect("P2 blocks the bear");
-            }
-            WaitingFor::DeclareBlockers { .. } => {
-                runner.declare_blockers(&[]).expect("no blocks");
-            }
-            WaitingFor::ReplacementChoice { .. } => break,
-            WaitingFor::Priority { .. } => {
-                runner.act(GameAction::PassPriority).expect("pass priority");
-            }
-            other => panic!("unexpected prompt {other:?}"),
-        }
-    }
-    let WaitingFor::ReplacementChoice { player, .. } = runner.state().waiting_for else {
-        panic!(
-            "expected P1's CR 616.1 prompt, got {:?}",
-            runner.state().waiting_for
-        );
-    };
-    assert_eq!(
-        player, P1,
-        "reach guard: the batch parks on the defender's choice"
-    );
-    assert!(
+    for concede in [true, false] {
+        let mut scenario = GameScenario::new_n_player(3, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let szadek = scenario
+            .add_creature_from_oracle(P0, SZADEK_NAME, 5, 5, SZADEK_ORACLE)
+            .id();
+        let bear = scenario.add_creature(P0, "Bear", 1, 1).id();
+        let p2 = PlayerId(2);
+        let lifelinker = {
+            let mut builder = scenario.add_creature(p2, "Lifelink Wall", 1, 4);
+            builder.with_keyword(engine::types::keywords::Keyword::Lifelink);
+            builder.id()
+        };
+        scenario.add_enchantment_from_oracle(P1, "Combat Ward", COMBAT_WARD_ORACLE);
+        with_p1_library(&mut scenario, 7);
+        let mut runner = scenario.build();
+        runner.advance_to_combat();
         runner
-            .state()
-            .combat
-            .as_ref()
-            .is_some_and(|combat| combat.blocker_to_attacker.contains_key(&lifelinker)),
-        "reach guard: the lifelink wall blocks"
-    );
-    let p2_life = runner.state().players[2].life;
+            .declare_attackers(&[
+                (szadek, AttackTarget::Player(P1)),
+                (bear, AttackTarget::Player(p2)),
+            ])
+            .expect("declare attackers");
+        for _ in 0..16 {
+            match &runner.state().waiting_for {
+                WaitingFor::DeclareBlockers { player, .. } if *player == p2 => {
+                    runner
+                        .declare_blockers(&[(lifelinker, bear)])
+                        .expect("P2 blocks the bear");
+                }
+                WaitingFor::DeclareBlockers { .. } => {
+                    runner.declare_blockers(&[]).expect("no blocks");
+                }
+                WaitingFor::ReplacementChoice { .. } => break,
+                WaitingFor::Priority { .. } => {
+                    runner.act(GameAction::PassPriority).expect("pass priority");
+                }
+                other => panic!("unexpected prompt {other:?}"),
+            }
+        }
+        let WaitingFor::ReplacementChoice { player, .. } = runner.state().waiting_for else {
+            panic!(
+                "expected P1's CR 616.1 prompt, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(
+            player, P1,
+            "reach guard: the batch parks on the defender's choice"
+        );
+        assert!(
+            runner
+                .state()
+                .combat
+                .as_ref()
+                .is_some_and(|combat| combat.blocker_to_attacker.contains_key(&lifelinker)),
+            "reach guard: the lifelink wall blocks"
+        );
+        let p2_life = runner.state().players[2].life;
 
-    runner
-        .act(GameAction::Concede { player_id: p2 })
-        .expect("CR 800.4: a player may leave at any time");
-    choose_replacement_from(&mut runner, P1, szadek);
-    assert_batch_completed_by_the_answer(&runner);
+        if concede {
+            runner
+                .act(GameAction::Concede { player_id: p2 })
+                .expect("CR 800.4: a player may leave at any time");
+        }
+        choose_replacement_from(&mut runner, P1, szadek);
+        assert_batch_completed_by_the_answer(&runner);
 
-    assert_eq!(
-        runner.state().players[2].life,
-        p2_life,
-        "CR 800.4a: the departed seat gains no life"
-    );
-    assert_eq!(
-        counters_on(&runner, szadek),
-        5,
-        "the defender's answer still applies"
-    );
+        if concede {
+            assert_eq!(
+                runner.state().players[2].life,
+                p2_life,
+                "CR 800.4a: the departed seat gains no life"
+            );
+        } else {
+            assert_eq!(
+                runner.state().players[2].life,
+                p2_life + 1,
+                "positive control: the seat that stays gains its lifelink life"
+            );
+        }
+        assert_eq!(
+            counters_on(&runner, szadek),
+            5,
+            "the defender's answer still applies"
+        );
+    }
 }
 
 const TORBRAN_ORACLE: &str = "If a red source you control would deal damage to an opponent or \
@@ -900,5 +914,65 @@ fn surviving_event_ordered_by_defender_keeps_combat_bookkeeping() {
             tally, dealt,
             "CR 704.6c: Phase C books the chosen amount as commander damage"
         );
+    }
+}
+
+/// CR 614.6 + CR 614.1a: an optional Szadek substitution (the typed
+/// `ReplacementMode::Optional` boundary), accepted, performs its WHOLE
+/// substitute — five +1/+1 counters on Szadek AND the damaged player mills
+/// five — instead of the combat damage. Declined, the damage is dealt and
+/// nothing is substituted.
+#[test]
+fn optional_substitution_accept_performs_counters_and_mill_decline_deals_damage() {
+    use engine::types::ability::ReplacementMode;
+    for accept in [true, false] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let szadek = scenario
+            .add_creature_from_oracle(P0, SZADEK_NAME, 5, 5, SZADEK_ORACLE)
+            .id();
+        with_p1_library(&mut scenario, 8);
+        let mut runner = scenario.build();
+        {
+            let optional = ReplacementMode::Optional { decline: None };
+            let obj = runner.state_mut().objects.get_mut(&szadek).expect("Szadek");
+            for index in 0..obj.replacement_definitions.len() {
+                obj.replacement_definitions[index].mode = optional.clone();
+            }
+            let mut base = (*obj.base_replacement_definitions).clone();
+            for definition in &mut base {
+                definition.mode = optional.clone();
+            }
+            obj.base_replacement_definitions = std::sync::Arc::new(base);
+        }
+        attack_and_run_to_prompt(&mut runner, &[szadek]);
+        assert!(
+            matches!(
+                runner.state().waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ),
+            "accept={accept}: the optional substitution is offered, got {:?}",
+            runner.state().waiting_for
+        );
+        runner
+            .act(GameAction::ChooseReplacement {
+                index: if accept { 0 } else { 1 },
+            })
+            .expect("answer the optional substitution");
+        assert_batch_completed_by_the_answer(&runner);
+
+        if accept {
+            assert_eq!(counters_on(&runner, szadek), 5, "counters on Szadek");
+            assert_eq!(
+                zone_len(&runner, Zone::Graveyard),
+                5,
+                "the player mills five"
+            );
+            assert_eq!(runner.life(P1), 20, "the replaced damage never happens");
+        } else {
+            assert_eq!(counters_on(&runner, szadek), 0);
+            assert_eq!(zone_len(&runner, Zone::Graveyard), 0);
+            assert_eq!(runner.life(P1), 15, "declined: the damage is dealt");
+        }
     }
 }

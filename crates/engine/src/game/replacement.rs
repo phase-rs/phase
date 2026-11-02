@@ -13943,6 +13943,14 @@ fn continue_replacement_impl(
                 // grant rider after the zone move, so accepting an optional
                 // replacement must not also enqueue the generic child.
                 None
+            } else if matches!(proposed, ProposedEvent::Damage { .. }) {
+                // CR 614.6 + CR 615.5: a damage event has no event-modifier
+                // slot, so no link of the accepted branch was folded into it —
+                // a self-targeted `PutCounter` is the substitute's own work
+                // ("put that many +1/+1 counters on Szadek and that player
+                // mills that many cards"). Keep the whole chain, exactly as the
+                // mandatory stash does for damage events.
+                accept_effect
             } else {
                 let real_work = accept_effect.as_deref().and_then(|def| {
                     EventModifiers::first_non_modifier_ability(Some(def))
@@ -14029,10 +14037,33 @@ fn continue_replacement_impl(
         // `applied.clear()` into this stack; the `None` half of that plain
         // assignment was never a designed cleanup.
         //
-        // CR 615.5 + CR 609.7: an optional/decline post-effect carries no
-        // prevention-event-source semantics, so `event_source`/`event_target` are
-        // empty — a prior prevention must not leak into a non-prevention drain.
-        // The drain owns those fields, so replacing it clears them by construction.
+        // CR 615.5 + CR 609.7: a prior prevention's event context must not leak
+        // into this drain; the drain owns those fields, so replacing it clears
+        // them by construction. CR 614.6 + CR 615.5: an ACCEPTED damage
+        // replacement's own work reads the replaced event — its source, its
+        // recipient ("that player", "that creature") and, for a substitution,
+        // its amount ("that many") — exactly as the mandatory stash carries
+        // them. A declined branch replaced nothing, so it carries none.
+        let replaced = match (branch, &proposed) {
+            (
+                ReplacementBranch::Execute,
+                ProposedEvent::Damage {
+                    source_id,
+                    target,
+                    amount,
+                    ..
+                },
+            ) => ReplacedEventContext {
+                source: Some(*source_id),
+                target: Some(target.clone()),
+                amount: damage_execute_substitutes_event_type(state, rid).then_some(*amount),
+            },
+            _ => ReplacedEventContext {
+                source: None,
+                target: None,
+                amount: None,
+            },
+        };
         match (branch, post_effect) {
             (ReplacementBranch::Execute | ReplacementBranch::Decline, Some(def)) => {
                 state.install_post_replacement_drain(
@@ -14040,9 +14071,9 @@ fn continue_replacement_impl(
                         status: DrainStatus::Ready(PostReplacementContinuation::Template(def)),
                         source: Some(rid.source),
                         applied: proposed.applied_set().clone(),
-                        event_source: None,
-                        event_target: None,
-                        event_amount: None,
+                        event_source: replaced.source,
+                        event_target: replaced.target,
+                        event_amount: replaced.amount,
                         // CR 109.5: same split as the mandatory stash — the
                         // zone-change drain rebinds `source` to the entering /
                         // moving object, so the branch's "you" needs its own slot.

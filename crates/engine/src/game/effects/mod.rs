@@ -25276,7 +25276,8 @@ fn resolve_chain_body(
                 || sub_clone.reads_return_result.is_some()
                 || state
                     .resolution_stack
-                    .copy_token_at_child_boundary(child_stack_start))
+                    .copy_token_at_child_boundary(child_stack_start)
+                || deal_damage::is_multi_event_damage_instruction(&ability.effect))
                 && state.resolution_stack.capture_child_boundary() > child_stack_start
             {
                 // CR 608.2c: the rest of the chain follows the complete producer action,
@@ -25284,7 +25285,11 @@ fn resolve_chain_body(
                 // before resolving the producer. A named-result reader needs this because
                 // a replacement post-effect may have parked a continuation beneath the
                 // producer's batch frame; a copy-token producer parks its own batch owner
-                // at that boundary.
+                // at that boundary. CR 608.2c + CR 616.1g: a damage instruction that
+                // paused behind one recipient's replacement continuation (a damage
+                // substitute's counter-order prompt) has parked that continuation and
+                // its remaining recipients inside the child stack; the next instruction
+                // follows all of them.
                 let mut pending = PendingContinuation::new(Box::new(sub_clone), state);
                 pending.pending_return_result_producer = pending_return_result_producer;
                 state
