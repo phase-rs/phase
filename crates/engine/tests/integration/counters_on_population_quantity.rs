@@ -22,7 +22,7 @@ use engine::game::triggers::drain_order_triggers_with_identity;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::counter::{parse_counter_type, CounterType};
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -178,7 +178,7 @@ fn deepwood_offered(board: &DeepwoodBoard) -> bool {
     let by_actions = legal_actions(board.runner.state()).iter().any(|action| {
         matches!(
             action,
-            GameAction::ActivateAbility { source_id, ability_index: 0 } if *source_id == board.deepwood
+            GameAction::ActivateAbility { source_id, ability_index: 0, .. } if *source_id == board.deepwood
         )
     });
     assert_eq!(by_gate, by_actions, "the gate and the legal actions agree");
@@ -200,6 +200,7 @@ fn deepwood_denizen_counts_counters_on_every_creature_you_control() {
         .act(GameAction::ActivateAbility {
             source_id: board.deepwood,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("{2}{G} is affordable from [G, C, C]");
     drive_to_empty_stack(&mut board.runner, &[]);
@@ -298,6 +299,7 @@ fn deepwood_denizen_cost_tracks_counters_added_before_activation() {
         .act(GameAction::ActivateAbility {
             source_id: magistrate,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Magistrate activates");
     drive_to_empty_stack(&mut runner, &[deepwood]);

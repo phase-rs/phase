@@ -6907,27 +6907,29 @@ If you sang a song the whole time you were searching and shuffling, you may unta
         );
     }
 
-    /// Blue, Loyal Raptor: a kinds census over a named object no census arm
-    /// reads stays an honest `DynamicQty` swallow that names its operand,
-    /// rather than being absorbed as a source counter count.
+    /// Blue, Loyal Raptor: a kinds census over a named object that no census
+    /// arm reads leaves the whole line an explicit unimplemented replacement
+    /// structure. It is never absorbed as a source counter count, a supported
+    /// replacement, or a counter named "kind of".
     #[test]
-    fn dynamic_qty_swallow_names_an_unread_kinds_census_operand() {
+    fn unread_kinds_census_over_a_named_object_stays_an_explicit_gap() {
         let parsed = parse_named(
-            "Partner with Owen Grady, Raptor Trainer (When this creature enters, target \
-             player may put Owen into their hand from their library, then shuffle.)\nFor \
-             each kind of counter on Blue, Loyal Raptor, each other Dinosaur you control \
-             enters with a counter of that kind on it.",
+            "Partner with Owen Grady, Raptor Trainer (When this creature enters, target              player may put Owen into their hand from their library, then shuffle.)
+For              each kind of counter on Blue, Loyal Raptor, each other Dinosaur you control              enters with a counter of that kind on it.",
             "Blue, Loyal Raptor",
             &["Creature"],
         );
-        let warning = only_swallow(&parsed, "DynamicQty");
-
-        assert_eq!(
-            warning.gap(),
-            Some(&ClauseGap::Quantity {
-                operand: "kind of counter on blue".to_string()
-            }),
-            "full warning: {warning:?}"
+        assert!(parsed.replacements.is_empty(), "{parsed:#?}");
+        assert!(parsed.statics.is_empty(), "{parsed:#?}");
+        assert!(
+            matches!(
+                parsed.abilities.as_slice(),
+                [only] if matches!(
+                    only.effect.as_ref(),
+                    Effect::Unimplemented { name, .. } if name == "replacement_structure"
+                )
+            ),
+            "{parsed:#?}"
         );
     }
 

@@ -19,7 +19,7 @@ use engine::game::triggers::drain_order_triggers_with_identity;
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::counter::{parse_counter_type, CounterType};
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -123,6 +123,7 @@ fn warriors_blades_equip_costs_less_per_counter_on_its_target() {
         .act(GameAction::ActivateAbility {
             source_id: board.blades,
             ability_index: board.equip,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("equip is offered: the countered creature makes it affordable");
     board
@@ -150,6 +151,7 @@ fn warriors_blades_equip_on_a_counterless_target_is_unaffordable() {
         .act(GameAction::ActivateAbility {
             source_id: board.blades,
             ability_index: board.equip,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("reach guard: equip is offered");
     let result = board
@@ -192,6 +194,7 @@ fn blitzball_stadium_grant_draws_per_kind_of_counter_on_the_creature() {
         .act(GameAction::ActivateAbility {
             source_id: stadium,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Go for the Goal! activates");
     // The runner is the only creature, so the engine may settle the single
@@ -353,6 +356,7 @@ fn moth_herb_elixir_puts_an_acquired_taste_counter_on_itself() {
         .act(GameAction::ActivateAbility {
             source_id: elixir,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("the counter ability activates");
     drive_to_empty_stack(&mut runner);
@@ -382,6 +386,7 @@ fn moth_herb_elixir_gains_life_per_acquired_taste_counter() {
         .act(GameAction::ActivateAbility {
             source_id: elixir,
             ability_index: 1,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("the sacrifice ability activates");
     drive_to_empty_stack(&mut runner);

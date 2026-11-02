@@ -9,7 +9,6 @@ use super::test_helpers::{
     outer_gap_names, unimplemented_name,
 };
 use super::*;
-use crate::parser::oracle::has_unimplemented;
 use crate::parser::oracle_ir::ast::{EntersUnderSpec, TargetedImperativeAst};
 use crate::parser::oracle_ir::diagnostic::{ClauseGap, ClauseGapKind, OracleDiagnostic};
 use crate::parser::oracle_nom::enters_under::{
@@ -11237,7 +11236,7 @@ fn full_pump_parser_declines_a_discarded_for_each_color_chooser() {
     );
     assert_eq!(admitted.abilities.len(), 1);
     assert!(
-        !has_unimplemented(&admitted.abilities[0]),
+        !crate::parser::oracle::has_unimplemented(&admitted.abilities[0]),
         "reach guard: the ordinary population clause must still lower: {admitted:#?}",
     );
     assert!(matches!(

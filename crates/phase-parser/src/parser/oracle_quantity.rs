@@ -3571,7 +3571,9 @@ pub(crate) fn kinds_census_pronoun_self_antecedent(ctx: &ParseContext) -> Option
         // CR 603.1 + CR 608.2k: the condition names no object besides the
         // source, so "it" cannot name a second one.
         && ctx.trigger_condition_objects == TriggerConditionObjects::SourceOnly
-        && ctx.object_pronoun_ref.is_none()
+        // A condition that pins "it" may pin it only to the source itself
+        // (CR 509.3a: "~ blocks" names no other object), never to another one.
+        && matches!(ctx.object_pronoun_ref, None | Some(TargetFilter::SelfRef))
         && resolve_it_pronoun(ctx) == TargetFilter::SelfRef;
     let chain_names_no_nearer_object = !ctx.parent_target_available
         && ctx.chain_declared_object_target.is_none()
@@ -4860,6 +4862,15 @@ mod tests {
         };
         assert_eq!(
             kinds_census_pronoun_self_antecedent(&self_trigger),
+            Some(TargetFilter::SelfRef)
+        );
+        // CR 509.3a: a condition that pins "it" to the source itself ("~
+        // blocks") still names only the ability's own object.
+        assert_eq!(
+            kinds_census_pronoun_self_antecedent(&ParseContext {
+                object_pronoun_ref: Some(TargetFilter::SelfRef),
+                ..self_trigger.clone()
+            }),
             Some(TargetFilter::SelfRef)
         );
         // The shared quantity entry declines the pronoun census even here, so

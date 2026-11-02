@@ -13932,6 +13932,12 @@ fn trigger_condition_objects(
         valid_target,
         zone_change_clauses,
         condition,
+        // CR 508.1g: a pre-payment eligibility condition on a linked attack
+        // cost is a qualifier like `condition`, so it is not proven object-free.
+        attack_cost_condition,
+        // Un-card Gotcha: the opponent behavior the ability watches for is a
+        // qualifier too, and is classified the same way.
+        gotcha_condition,
         attack_target_filter,
         // CR 115.1: the player leaf of a becomes-target subject — a player,
         // never an object.
@@ -13970,6 +13976,9 @@ fn trigger_condition_objects(
         // CR 201.5a: the granter stamp set when the trigger is granted (unset at
         // condition-parse time), not an object the condition names.
         granting_object: _,
+        // CR 603.2h: split-definition bookkeeping for one printed ability's
+        // limit ledger, not an object the condition names.
+        limit_leader_offset: _,
     } = def;
     let event_objects = [valid_card, valid_source, valid_target];
     let names_source = event_objects
@@ -14003,6 +14012,8 @@ fn trigger_condition_objects(
     let source_only = !matches!(mode, TriggerMode::Unknown(_))
         && zone_change_clauses.is_empty()
         && condition.is_none()
+        && attack_cost_condition.is_none()
+        && gotcha_condition.is_none()
         && names_source
         && names_no_other_object
         && attacks_no_object

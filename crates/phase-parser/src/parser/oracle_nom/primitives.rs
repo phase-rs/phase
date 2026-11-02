@@ -5,7 +5,7 @@ use std::borrow::Cow;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till1, take_until};
 use nom::character::complete::{char, digit1, multispace0, satisfy, space0};
-use nom::combinator::{all_consuming, eof, map, map_res, opt, peek, recognize, value, verify};
+use nom::combinator::{all_consuming, eof, map, map_res, not, opt, peek, recognize, value, verify};
 use nom::multi::many1;
 use nom::sequence::{delimited, preceded, terminated};
 use nom::Parser;
