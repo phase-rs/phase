@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "StaticCondition::SourceHasDealtDamage gains kind (CR 120.2a/b); GameObject gains dealt_damage_kinds. An older peer drops both and evaluates the condition as Any."
+}

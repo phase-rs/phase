@@ -7145,7 +7145,7 @@ pub fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Tri
         // Variants with no TriggerCondition equivalent (combat-only / source-state / cost).
         // CR 702.11b + CR 120.3: "has dealt damage since entering" is a static-only
         // Layer-6 gate with no intervening-if (`TriggerCondition`) equivalent.
-        StaticCondition::SourceHasDealtDamage
+        StaticCondition::SourceHasDealtDamage { .. }
         | StaticCondition::SourceExertedThisTurn
         | StaticCondition::IsRingBearer
         | StaticCondition::RingLevelAtLeast { .. }

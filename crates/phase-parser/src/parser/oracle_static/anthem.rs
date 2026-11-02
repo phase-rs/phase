@@ -65,7 +65,12 @@ pub(crate) fn parse_typed_you_control(
                     } else {
                         (prop_filter, after_prefix)
                     };
-                return parse_continuous_gets_has(after_prefix, prop_filter, text);
+                return parse_continuous_gets_has(
+                    after_prefix,
+                    prop_filter,
+                    text,
+                    PrintedSubject::Other,
+                );
             }
             // CR 205.3m: Try compound subtypes first ("Ninja and Rogue", "Elf or Warrior")
             // The helper bakes in extra_props and is_other, so skip add_another_filter below.
@@ -79,7 +84,12 @@ pub(crate) fn parse_typed_you_control(
                     } else {
                         (compound_filter, after_prefix)
                     };
-                return parse_continuous_gets_has(after_prefix, compound_filter, text);
+                return parse_continuous_gets_has(
+                    after_prefix,
+                    compound_filter,
+                    text,
+                    PrintedSubject::Other,
+                );
             }
             let typed_filter = if extra_props.is_empty() {
                 // No combat-status prefix — use original dispatch path
@@ -215,7 +225,12 @@ pub(crate) fn parse_typed_you_control(
             } else {
                 typed_filter
             };
-            return parse_continuous_gets_has(after_prefix, typed_filter, text);
+            return parse_continuous_gets_has(
+                after_prefix,
+                typed_filter,
+                text,
+                PrintedSubject::Other,
+            );
         }
     }
 
@@ -256,7 +271,12 @@ pub(crate) fn parse_typed_you_control(
                     } else {
                         (compound_filter, after_prefix)
                     };
-                return parse_continuous_gets_has(after_prefix, compound_filter, text);
+                return parse_continuous_gets_has(
+                    after_prefix,
+                    compound_filter,
+                    text,
+                    PrintedSubject::Other,
+                );
             }
             let typed_filter = if extra_props.is_empty() {
                 if let Some(filter) = parse_modified_creature_subject_filter(full_subject) {
@@ -343,7 +363,12 @@ pub(crate) fn parse_typed_you_control(
             } else {
                 typed_filter
             };
-            return parse_continuous_gets_has(after_prefix, typed_filter, text);
+            return parse_continuous_gets_has(
+                after_prefix,
+                typed_filter,
+                text,
+                PrintedSubject::Other,
+            );
         }
     }
 
@@ -426,7 +451,7 @@ pub(crate) fn parse_subject_continuous_static(text: &str) -> Option<StaticDefini
     if nom_primitives::scan_contains(&pred_lower, "for each")
         || nom_primitives::scan_contains(&pred_lower, "as long as")
     {
-        return parse_continuous_gets_has(predicate, affected, text);
+        return parse_continuous_gets_has(predicate, affected, text, printed_subject(&tp));
     }
 
     // CR 604.1: Strip suffix turn conditions from the ORIGINAL-case predicate
@@ -703,7 +728,7 @@ pub(crate) fn parse_contextual_continuous_subject_static(
     let condition = predicate_condition(&predicate);
     let affected =
         contextual_continuous_subject_filter(subject, subject_original, condition.as_ref())?;
-    parse_continuous_gets_has(&predicate, affected, description)
+    parse_continuous_gets_has(&predicate, affected, description, PrintedSubject::Other)
 }
 
 pub(crate) fn continuous_subject_verb(lower: &str) -> Option<(&str, &'static str, &str)> {
@@ -819,6 +844,7 @@ pub(crate) fn parse_soulbond_paired_static(
         predicate.original,
         TargetFilter::SourceOrPaired,
         description,
+        PrintedSubject::Other,
     )?;
     def.condition = Some(StaticCondition::SourceIsPaired);
     Some(def)
@@ -891,15 +917,19 @@ pub(crate) fn parse_typed_you_control_subject_filter(
 ///    enchanted/equipped creature) the pronoun is not the source.
 /// 2. Only the bare source-STATE predicates that `~ is …` already resolves to a
 ///    typed condition are rewritten. The list below is the WHOLE list and must
-///    stay in lockstep with the `tag`s in `parse_self_pronoun_rewrite` below,
-///    which is the single combinator implementing every arm:
+///    stay in lockstep with the `tag`s in `parse_singular_pronoun_rewrite` and
+///    `parse_plural_pronoun_rewrite` below, the two combinators implementing
+///    every arm:
 ///    "tapped" / "untapped", their combat-state siblings "attacking" /
 ///    "blocking" / "blocked" and the compound "attacking or blocking" (which
 ///    `~ is …` lowers to `Or([SourceIsAttacking, SourceIsBlocking])`)
 ///    (CR 508.1k / 509.1g / 509.1h), "modified" (CR 700.9), "equipped"
 ///    (CR 301.5a) and "enchanted" (CR 303.4b) — nine phrases — plus the two
 ///    non-contraction "it entered …" forms handled below, "it entered this turn"
-///    and "it entered the battlefield this turn" (CR 400.7).
+///    and "it entered the battlefield this turn" (CR 400.7), plus the plural
+///    sticky-damage-history form "they haven't dealt [combat |noncombat ]damage
+///    yet" (CR 120.2a / CR 120.2b, Ruric Thar, Magecrusher), rewritten to
+///    "~ hasn't dealt … damage yet".
 ///    "it" is otherwise overloaded: "it's your
 ///    turn" is impersonal (a turn reference, not the source); "it's a Wall" /
 ///    "it's red" / "it's legendary" are type/characteristic gates with their own
@@ -922,16 +952,43 @@ pub(crate) fn parse_typed_you_control_subject_filter(
 /// census of SelfRef-affected statics whose description begins
 /// "Enchanted|Equipped creature".
 ///
-/// Returns the condition unchanged when no arm of `parse_self_pronoun_rewrite`
-/// matches.
-pub(crate) fn rewrite_self_pronoun_subject(condition: &str) -> String {
+/// The plural "they haven't dealt … damage yet" arm does NOT rely on guard #1:
+/// it runs only when `subject` is [`PrintedSubject::SourceNamed`], i.e. the
+/// host line's printed subject names the source itself. The hardcoded-SelfRef
+/// restriction arms (and the legacy "~ has/gets …" fallback, whose subject
+/// check is a negative list) therefore no longer feed it an attached or typed
+/// subject. The singular arms above are unchanged under either value — the
+/// Hobble family is out of this function's scope and keeps today's binding.
+///
+/// Returns the condition unchanged when no permitted arm matches.
+pub(crate) fn rewrite_self_pronoun_subject(condition: &str, subject: PrintedSubject) -> String {
     let lower = condition.to_lowercase();
     // The combinator reads the lowercase text and emits only canonical
     // lowercase templating, so no original-case remainder has to be mapped back.
-    nom_parse_lower(&lower, parse_self_pronoun_rewrite).unwrap_or_else(|| condition.to_string())
+    let rewritten = match subject {
+        PrintedSubject::SourceNamed => nom_parse_lower(&lower, |input| {
+            alt((parse_singular_pronoun_rewrite, parse_plural_pronoun_rewrite)).parse(input)
+        }),
+        PrintedSubject::Other => nom_parse_lower(&lower, parse_singular_pronoun_rewrite),
+    };
+    rewritten.unwrap_or_else(|| condition.to_string())
 }
 
-/// The EXACT-tail contract shared by every arm of `parse_self_pronoun_rewrite`,
+/// CR 611.3a: whether a static's printed subject names the static's own source
+/// ("~", "this creature", "this Aura", …) — a static "applies at any given moment
+/// to whatever its text indicates", so only a source-named subject lets a plural
+/// bound pronoun in its gate name the source. Derived once per host line by
+/// `shared::printed_subject`; consumed by [`rewrite_self_pronoun_subject`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PrintedSubject {
+    /// The printed subject is the source itself.
+    SourceNamed,
+    /// Any other subject: attached ("enchanted creature"), typed ("creatures
+    /// you control", "each artifact"), or a bare pronoun ("it").
+    Other,
+}
+
+/// The EXACT-tail contract shared by every arm of `parse_singular_pronoun_rewrite`,
 /// as a combinator: the tag must consume the whole remaining condition, so a
 /// trailing word survives instead of being silently dropped ("it's attacking
 /// alone" keeps "alone" and falls through to `SourceAttackingAlone`; "it's
@@ -945,12 +1002,14 @@ fn exact_tail<'a>(tail: &'static str) -> impl FnMut(&'a str) -> OracleResult<'a,
     move |input| terminated(tag(tail), (space0, eof)).parse(input)
 }
 
-/// CR 611.3a: the ONE combinator behind `rewrite_self_pronoun_subject` — the
-/// whole closed list of bound-pronoun subjects, in the three grammatical forms
-/// the doc comment on that function enumerates. Runs on lowercase text and
-/// emits the canonical `~ …` templating the context-free grammar
-/// (`oracle_nom::condition`) already types.
-fn parse_self_pronoun_rewrite(input: &str) -> OracleResult<'_, String> {
+/// CR 611.3a: the singular half of the closed list behind
+/// `rewrite_self_pronoun_subject` — the "it's …" / "it entered …" / "it
+/// attacked …" bound-pronoun subjects the doc comment on that function
+/// enumerates. Runs on lowercase text and emits the canonical `~ …` templating
+/// the context-free grammar (`oracle_nom::condition`) already types. Permitted
+/// for every printed subject (pre-existing behavior; see the Hobble standing
+/// constraint).
+fn parse_singular_pronoun_rewrite(input: &str) -> OracleResult<'_, String> {
     alt((
         // CR 508.1k / CR 509.1g / CR 509.1h: combat-state pronoun siblings of the
         // tapped/untapped rewrite. CR 700.9: "modified" is the self-state sibling
@@ -1004,10 +1063,38 @@ fn parse_self_pronoun_rewrite(input: &str) -> OracleResult<'_, String> {
     .parse(input)
 }
 
+/// CR 120.2a / CR 120.2b + CR 400.7: the plural bound pronoun of the sticky
+/// "hasn't dealt [combat |noncombat ]damage yet" gate (Ruric Thar, Magecrusher:
+/// "has hexproof as long as they haven't dealt combat damage yet"). The plural
+/// "they" pairs with the plural "haven't" only; the tail is the grammar's own
+/// `parse_dealt_damage_yet`, anchored to `eof` so a trailing "this turn" is
+/// refused. Re-emits the canonical "~ hasn't …" the grammar types as
+/// `Not(SourceHasDealtDamage { kind })`. Permitted only for a
+/// [`PrintedSubject::SourceNamed`] host line (`rewrite_self_pronoun_subject`).
+fn parse_plural_pronoun_rewrite(input: &str) -> OracleResult<'_, String> {
+    map(
+        preceded(
+            (tag("they "), nom_condition::parse_havent, tag(" ")),
+            terminated(
+                recognize(nom_condition::parse_dealt_damage_yet),
+                (space0, eof),
+            ),
+        ),
+        |tail: &str| format!("~ hasn't {tail}"),
+    )
+    .parse(input)
+}
+
+/// `subject` is the host line's printed subject (`shared::printed_subject`),
+/// forwarded to the gate's pronoun rewrite. Callers whose `affected` is not
+/// `SelfRef` pass [`PrintedSubject::Other`] (the rewrite is skipped anyway);
+/// a caller that hardcodes `SelfRef` derives it from the host line so the
+/// plural "they" arm cannot bind a non-source subject to the source.
 pub(crate) fn parse_continuous_gets_has(
     text: &str,
     affected: TargetFilter,
     description: &str,
+    subject: PrintedSubject,
 ) -> Option<StaticDefinition> {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
@@ -1023,14 +1110,15 @@ pub(crate) fn parse_continuous_gets_has(
         let condition_text = after_cond.original.trim().trim_end_matches('.');
         // Recursively parse the continuous part without the condition
         if let Some(mut def) =
-            parse_continuous_gets_has(continuous_text, affected.clone(), description)
+            parse_continuous_gets_has(continuous_text, affected.clone(), description, subject)
         {
             // CR 611.3a: only resolve the self-pronoun "it" to the source when the
             // static modifies itself; attached-subject statics keep "it" bound to
             // the enchanted/equipped creature and stay an honest gap. That binding
             // decision has ONE authority — `parse_affected_scoped_static_condition`
             // (shared.rs) — shared with the "as long as"/"unless"/"if" gate parsers.
-            let typed = parse_affected_scoped_static_condition(condition_text, Some(&affected));
+            let typed =
+                parse_affected_scoped_static_condition(condition_text, Some(&affected), subject);
             let condition = typed.unwrap_or_else(|| {
                 unparsed_gate_condition(condition_text, ConditionGatePolarity::Positive)
             });
@@ -1055,9 +1143,10 @@ pub(crate) fn parse_continuous_gets_has(
         let continuous_text = before_cond.original;
         let condition_text = after_cond.original.trim().trim_end_matches('.');
         if let Some(mut def) =
-            parse_continuous_gets_has(continuous_text, affected.clone(), description)
+            parse_continuous_gets_has(continuous_text, affected.clone(), description, subject)
         {
-            let typed = parse_affected_scoped_static_condition(condition_text, Some(&affected));
+            let typed =
+                parse_affected_scoped_static_condition(condition_text, Some(&affected), subject);
             let condition = match typed {
                 Some(inner) => StaticCondition::Not {
                     condition: Box::new(inner),
@@ -1661,7 +1750,8 @@ mod rewrite_self_pronoun_subject_tests {
     use super::*;
 
     /// The whole closed list the function's doc comment enumerates, pinned arm by
-    /// arm so the single `parse_self_pronoun_rewrite` combinator cannot silently
+    /// arm so the `parse_singular_pronoun_rewrite` / `parse_plural_pronoun_rewrite`
+    /// combinators cannot silently
     /// widen or narrow it. Every entry here was accepted by the three literal-tail
     /// `matches!` arms this combinator replaced, and the outputs are byte-identical.
     #[test]
@@ -1683,7 +1773,7 @@ mod rewrite_self_pronoun_subject_tests {
             for subject in ["it's", "it is"] {
                 let input = format!("{subject} {state}");
                 assert_eq!(
-                    rewrite_self_pronoun_subject(&input),
+                    rewrite_self_pronoun_subject(&input, PrintedSubject::SourceNamed),
                     expected,
                     "{input:?} must normalize to the canonical source-state form"
                 );
@@ -1691,24 +1781,54 @@ mod rewrite_self_pronoun_subject_tests {
             // Same phrase with an uppercase printed subject: the rewrite reads
             // lowercase and emits canonical lowercase templating.
             assert_eq!(
-                rewrite_self_pronoun_subject(&format!("It's {state}")),
+                rewrite_self_pronoun_subject(&format!("It's {state}"), PrintedSubject::SourceNamed),
                 expected
             );
         }
         // CR 400.7: both "it entered …" tails.
         assert_eq!(
-            rewrite_self_pronoun_subject("it entered this turn"),
+            rewrite_self_pronoun_subject("it entered this turn", PrintedSubject::SourceNamed),
             "~ entered this turn"
         );
         assert_eq!(
-            rewrite_self_pronoun_subject("it entered the battlefield this turn"),
+            rewrite_self_pronoun_subject(
+                "it entered the battlefield this turn",
+                PrintedSubject::SourceNamed
+            ),
             "~ entered the battlefield this turn"
         );
         // CR 508.1a: the combat-history arm.
         assert_eq!(
-            rewrite_self_pronoun_subject("it attacked this turn"),
+            rewrite_self_pronoun_subject("it attacked this turn", PrintedSubject::SourceNamed),
             "~ attacked this turn"
         );
+        // CR 120.2a / CR 120.2b: the plural sticky-damage-history arm (Ruric
+        // Thar, Magecrusher), both apostrophes, every damage class.
+        for (input, expected) in [
+            (
+                "they haven't dealt combat damage yet",
+                "~ hasn't dealt combat damage yet",
+            ),
+            (
+                "they haven\u{2019}t dealt combat damage yet",
+                "~ hasn't dealt combat damage yet",
+            ),
+            (
+                "They haven't dealt combat damage yet",
+                "~ hasn't dealt combat damage yet",
+            ),
+            ("they haven't dealt damage yet", "~ hasn't dealt damage yet"),
+            (
+                "they haven't dealt noncombat damage yet",
+                "~ hasn't dealt noncombat damage yet",
+            ),
+        ] {
+            assert_eq!(
+                rewrite_self_pronoun_subject(input, PrintedSubject::SourceNamed),
+                expected,
+                "{input:?}"
+            );
+        }
     }
 
     /// The `terminated(tag(..), eof)` anchor is the whole exact-tail contract: a
@@ -1719,7 +1839,10 @@ mod rewrite_self_pronoun_subject_tests {
     fn rewrite_self_pronoun_leaves_inexact_tails_alone() {
         // Positive reach guard: the rewrite itself is live, so the identity
         // assertions below cannot pass because the function stopped rewriting.
-        assert_eq!(rewrite_self_pronoun_subject("it's tapped"), "~ is tapped");
+        assert_eq!(
+            rewrite_self_pronoun_subject("it's tapped", PrintedSubject::SourceNamed),
+            "~ is tapped"
+        );
         for untouched in [
             // Trailing words that belong to other parse paths.
             "it's attacking alone",
@@ -1733,6 +1856,11 @@ mod rewrite_self_pronoun_subject_tests {
             "it entered this turn and attacked",
             "it attacked this combat",
             "it attacked",
+            // The plural sticky-damage arm pairs "they" with "haven't" only and
+            // anchors its tail.
+            "they hasn't dealt combat damage yet",
+            "they haven't dealt damage yet this turn",
+            "they haven't been dealt damage yet",
             // Off-list predicates: characteristics, types, and the impersonal
             // "it's your turn" turn reference.
             "it's black",
@@ -1746,7 +1874,7 @@ mod rewrite_self_pronoun_subject_tests {
             "enchanted creature is tapped",
         ] {
             assert_eq!(
-                rewrite_self_pronoun_subject(untouched),
+                rewrite_self_pronoun_subject(untouched, PrintedSubject::SourceNamed),
                 untouched,
                 "{untouched:?} is outside the closed list and must pass through unchanged"
             );
@@ -1765,14 +1893,56 @@ mod rewrite_self_pronoun_subject_tests {
     #[test]
     fn rewrite_self_pronoun_it_attacked_this_turn() {
         assert_eq!(
-            rewrite_self_pronoun_subject("it attacked this turn"),
+            rewrite_self_pronoun_subject("it attacked this turn", PrintedSubject::SourceNamed),
             "~ attacked this turn"
         );
         for untouched in ["it attacked this combat", "it attacked"] {
             assert_eq!(
-                rewrite_self_pronoun_subject(untouched),
+                rewrite_self_pronoun_subject(untouched, PrintedSubject::SourceNamed),
                 untouched,
                 "{untouched:?} has no turn-scoped runtime fact and must stay unrewritten"
+            );
+        }
+    }
+
+    /// CR 611.3a: the plural "they haven't dealt … damage yet" arm is allowed only
+    /// when the host line's printed subject names the source; for any other
+    /// subject the condition passes through unchanged. The singular arms keep
+    /// their pre-existing behavior under `Other` (entry-point contract, not a
+    /// card reading).
+    #[test]
+    fn rewrite_self_pronoun_plural_arm_requires_source_named_subject() {
+        for (input, expected) in [
+            (
+                "they haven't dealt combat damage yet",
+                "~ hasn't dealt combat damage yet",
+            ),
+            (
+                "they haven't dealt noncombat damage yet",
+                "~ hasn't dealt noncombat damage yet",
+            ),
+            ("they haven't dealt damage yet", "~ hasn't dealt damage yet"),
+        ] {
+            assert_eq!(
+                rewrite_self_pronoun_subject(input, PrintedSubject::SourceNamed),
+                expected,
+                "{input:?}"
+            );
+            assert_eq!(
+                rewrite_self_pronoun_subject(input, PrintedSubject::Other),
+                input,
+                "{input:?} must not bind a non-source subject's `they` to the source"
+            );
+        }
+        // Legacy singular arms are untouched by the subject parameter.
+        for subject in [PrintedSubject::SourceNamed, PrintedSubject::Other] {
+            assert_eq!(
+                rewrite_self_pronoun_subject("it's tapped", subject),
+                "~ is tapped"
+            );
+            assert_eq!(
+                rewrite_self_pronoun_subject("it entered this turn", subject),
+                "~ entered this turn"
             );
         }
     }

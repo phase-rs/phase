@@ -1,12 +1,12 @@
 // CR 604 / CR 613 — shared static parser infrastructure.
 
-use super::anthem::rewrite_self_pronoun_subject;
+use super::anthem::{rewrite_self_pronoun_subject, PrintedSubject};
 #[allow(unused_imports)]
 use super::prelude::*;
 #[allow(unused_imports)]
 use super::support::*;
 use nom::character::complete::anychar;
-use nom::combinator::{map_opt, not, success, value};
+use nom::combinator::{map_opt, not, peek, success, value};
 use nom::multi::many1;
 
 /// Whose spells and abilities a "can be the target of spells and abilities …
@@ -447,7 +447,12 @@ pub(crate) fn try_parse_inverted_attached_subject_grant(
     let effect_tp = TextPair::new(&split.effect_text, &effect_lower);
     let predicate = nom_tag_tp(&effect_tp, "it ").or_else(|| nom_tag_tp(&effect_tp, "they "))?;
 
-    parse_continuous_gets_has(predicate.original, affected, description)
+    parse_continuous_gets_has(
+        predicate.original,
+        affected,
+        description,
+        PrintedSubject::Other,
+    )
 }
 
 /// CR 509.1c + CR 604.1 + CR 611.3a: the inverted `"As long as <cond>, <self-ref>
@@ -1232,7 +1237,7 @@ impl<'a> ZoneConditionNode<'a> {
             | StaticCondition::DuringOpponentsTurn
             | StaticCondition::SharesColorWithMostCommonColorAmongPermanents
             | StaticCondition::SourceEnteredThisTurn
-            | StaticCondition::SourceHasDealtDamage
+            | StaticCondition::SourceHasDealtDamage { .. }
             | StaticCondition::WasCast { .. }
             | StaticCondition::IsRingBearer
             | StaticCondition::RingLevelAtLeast { .. }
@@ -4172,15 +4177,38 @@ pub(crate) fn rebind_source_object_quantity_ref_to_recipient(qty: QuantityRef) -
 /// target-anaphoric in spell bodies (Awaken the Sleeper), and a blanket arm would
 /// mis-bind every attached-subject static. See
 /// `parse_contraction_source_state_condition`.
+///
+/// `subject` is the host line's printed subject. It does not widen the SelfRef
+/// gate above; it only narrows which rewrite arms run inside it (the plural
+/// "they haven't dealt … damage yet" arm needs [`PrintedSubject::SourceNamed`]),
+/// because several callers hardcode `affected: SelfRef` for any subject.
 pub(crate) fn parse_affected_scoped_static_condition(
     text: &str,
     affected: Option<&TargetFilter>,
+    subject: PrintedSubject,
 ) -> Option<StaticCondition> {
     let text = text.trim().trim_end_matches('.');
     if matches!(affected, Some(TargetFilter::SelfRef)) {
-        parse_static_condition(&rewrite_self_pronoun_subject(text))
+        parse_static_condition(&rewrite_self_pronoun_subject(text, subject))
     } else {
         parse_static_condition(text)
+    }
+}
+
+/// CR 611.3a: classify a static's host line by its printed subject — the ONE
+/// derivation of [`PrintedSubject`]. `SourceNamed` exactly when the line opens
+/// with the source's own self-reference vocabulary (`~` or a
+/// `SELF_REF_TYPE_PHRASES` entry such as "this creature" / "this Aura")
+/// followed by a word boundary; everything else ("enchanted creature",
+/// "creatures you control", "each artifact", a bare "it", "~'s …") is `Other`.
+pub(crate) fn printed_subject(tp: &TextPair<'_>) -> PrintedSubject {
+    let mut source_named = (
+        crate::parser::oracle_nom::duration::parse_self_reference_subject,
+        peek(tag::<_, _, OracleError<'_>>(" ")),
+    );
+    match source_named.parse(tp.lower.trim_start()) {
+        Ok(_) => PrintedSubject::SourceNamed,
+        Err(_) => PrintedSubject::Other,
     }
 }
 
@@ -4206,7 +4234,9 @@ pub(crate) fn parse_unless_static_condition(
     // <condition> is false — fall back to the shared static-condition parser and
     // negate, so a recognized inner condition (e.g. Heroic Defiance's most-common-
     // color check) gates the grant instead of being swallowed as Unrecognized.
-    if let Some(condition) = parse_affected_scoped_static_condition(original, affected) {
+    if let Some(condition) =
+        parse_affected_scoped_static_condition(original, affected, printed_subject(tp))
+    {
         return Some(StaticCondition::Not {
             condition: Box::new(condition),
         });
@@ -4481,7 +4511,7 @@ pub(crate) fn parse_if_static_condition(
     affected: Option<&TargetFilter>,
 ) -> Option<StaticCondition> {
     let condition_text = split_trailing_if_condition_tp(tp)?;
-    parse_affected_scoped_static_condition(condition_text, affected)
+    parse_affected_scoped_static_condition(condition_text, affected, printed_subject(tp))
 }
 
 /// CR 611.3a: Parse the trailing " as long as [condition]" clause of a
@@ -4510,7 +4540,7 @@ pub(crate) fn parse_as_long_as_static_condition(
         return None;
     }
     let (_, as_long_as_text) = tp.split_around(" as long as ")?;
-    parse_affected_scoped_static_condition(as_long_as_text.original, affected)
+    parse_affected_scoped_static_condition(as_long_as_text.original, affected, printed_subject(tp))
 }
 
 /// Result of the combat-tax nom parse.

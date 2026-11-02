@@ -6,6 +6,7 @@
 
 use crate::game::combat::AttackTarget;
 use crate::game::game_object::{AttachTarget, GameObject};
+use crate::types::ability::DamageKindFilter;
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterMatch;
 use crate::types::game_state::{GameState, LKISnapshot};
@@ -222,8 +223,24 @@ pub(crate) fn eval_source_entered_this_turn(state: &GameState, source_id: Object
 /// negation wraps this via `StaticCondition::Not`. The flag is set in
 /// `deal_damage` on the first nonzero amount actually dealt and cleared on a
 /// battlefield exit (`apply_zone_exit_cleanup`).
-pub(crate) fn eval_source_has_dealt_damage(state: &GameState, source_id: ObjectId) -> bool {
-    state.objects_that_dealt_damage.contains(&source_id)
+///
+/// CR 120.2a / CR 120.2b: `kind` selects which damage class counts. `Any` reads
+/// the id set above (the unchanged path for the unqualified "hasn't dealt damage
+/// yet" cards); `CombatOnly` / `NoncombatOnly` read the source object's
+/// `dealt_damage_kinds` latch, which the same writer sets in the same battlefield
+/// guard and `GameObject::reset_for_battlefield_exit` clears (CR 400.7).
+pub(crate) fn eval_source_has_dealt_damage(
+    state: &GameState,
+    source_id: ObjectId,
+    kind: DamageKindFilter,
+) -> bool {
+    match kind {
+        DamageKindFilter::Any => state.objects_that_dealt_damage.contains(&source_id),
+        DamageKindFilter::CombatOnly | DamageKindFilter::NoncombatOnly => state
+            .objects
+            .get(&source_id)
+            .is_some_and(|obj| obj.dealt_damage_kinds.has(kind)),
+    }
 }
 
 /// CR 105.2 + CR 611.3a: True when the source permanent shares a color with the
@@ -290,6 +307,53 @@ mod tests {
     use crate::types::game_state::GameState;
     use crate::types::player::PlayerId;
     use crate::types::CardId;
+
+    /// A8 - CR 120.2a / CR 120.2b: `Any` reads the id set, `CombatOnly` /
+    /// `NoncombatOnly` read the object's latch. Objects: none, combat-only,
+    /// noncombat-only, both; plus an id absent from `state.objects`.
+    #[test]
+    fn eval_source_has_dealt_damage_selects_store_by_kind() {
+        let mut state = GameState::new_two_player(42);
+        let mut make = |card: u64, record: &[bool]| {
+            let id = create_object(
+                &mut state,
+                CardId(card),
+                PlayerId(0),
+                "Source".to_string(),
+                Zone::Battlefield,
+            );
+            for &is_combat in record {
+                state
+                    .objects
+                    .get_mut(&id)
+                    .unwrap()
+                    .dealt_damage_kinds
+                    .record(is_combat);
+                state.objects_that_dealt_damage.insert(id);
+            }
+            id
+        };
+        let none = make(1, &[]);
+        let combat = make(2, &[true]);
+        let noncombat = make(3, &[false]);
+        let both = make(4, &[false, true]);
+        let absent = ObjectId(9_999);
+        assert!(!state.objects.contains_key(&absent));
+
+        use DamageKindFilter::{Any, CombatOnly, NoncombatOnly};
+        let answers = |id| {
+            (
+                eval_source_has_dealt_damage(&state, id, Any),
+                eval_source_has_dealt_damage(&state, id, CombatOnly),
+                eval_source_has_dealt_damage(&state, id, NoncombatOnly),
+            )
+        };
+        assert_eq!(answers(none), (false, false, false));
+        assert_eq!(answers(combat), (true, true, false));
+        assert_eq!(answers(noncombat), (true, false, true));
+        assert_eq!(answers(both), (true, true, true));
+        assert_eq!(answers(absent), (false, false, false));
+    }
 
     #[test]
     fn eval_is_initiative_matches_designation_holder() {

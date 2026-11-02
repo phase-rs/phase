@@ -272,13 +272,20 @@ fn parse_max_untap_per_type_static(tp: &TextPair<'_>, text: &str) -> Option<Stat
         let condition_text = after_cond.original.trim().trim_end_matches('.');
         let mut def = parse_max_untap_per_type_static(&before_cond, text)?;
         // CR 611.3a: MaxUntapPerType has no attached-subject ("enchanted
-        // creature") variant — its condition is always a state check on the
-        // cap's own source, so the self-pronoun rewrite always applies
-        // (unlike parse_continuous_gets_has's SelfRef-only guard).
-        let condition = parse_static_condition(&rewrite_self_pronoun_subject(condition_text))
-            .unwrap_or_else(|| {
-                unparsed_gate_condition(condition_text, ConditionGatePolarity::Positive)
-            });
+        // creature") variant — a singular "it" in its condition is a state
+        // check on the cap's own source, so the self-pronoun rewrite always
+        // applies (unlike parse_continuous_gets_has's SelfRef-only guard).
+        // The printed subject is the players, not the source, so the subject
+        // is `PrintedSubject::Other`: the singular "it" arms still run, but a
+        // plural "they" names the players and must not become the source's
+        // damage-history gate.
+        let condition = parse_static_condition(&rewrite_self_pronoun_subject(
+            condition_text,
+            PrintedSubject::Other,
+        ))
+        .unwrap_or_else(|| {
+            unparsed_gate_condition(condition_text, ConditionGatePolarity::Positive)
+        });
         def.condition = Some(condition);
         return Some(def);
     }
@@ -1607,7 +1614,7 @@ pub(crate) fn parse_static_line_inner(
                     defender: Some(defender),
                 }]),
             );
-        if let Some(def) = parse_continuous_gets_has(rest, filter, &text) {
+        if let Some(def) = parse_continuous_gets_has(rest, filter, &text, PrintedSubject::Other) {
             return Some(def);
         }
     }
@@ -1620,7 +1627,9 @@ pub(crate) fn parse_static_line_inner(
     // construction and `TargetFilter::Or` for the union case.
     if let Some(rest) = nom_tag_tp(&tp, "each creature you control that's a ") {
         if let Some((filter, predicate)) = try_parse_thats_a_subtype_list(rest.original) {
-            if let Some(def) = parse_continuous_gets_has(predicate, filter, &text) {
+            if let Some(def) =
+                parse_continuous_gets_has(predicate, filter, &text, PrintedSubject::Other)
+            {
                 return Some(def);
             }
         }
@@ -1652,9 +1661,12 @@ pub(crate) fn parse_static_line_inner(
                 let subject_len = tp.lower.len() - rest.lower.len() + qualifier.len();
                 let (subject, predicate) = tp.split_at(subject_len);
                 if let Some(affected) = parse_continuous_subject_filter(subject.original) {
-                    if let Some(def) =
-                        parse_continuous_gets_has(predicate.original, affected, &text)
-                    {
+                    if let Some(def) = parse_continuous_gets_has(
+                        predicate.original,
+                        affected,
+                        &text,
+                        PrintedSubject::Other,
+                    ) {
                         return Some(def);
                     }
                 }
@@ -1664,6 +1676,7 @@ pub(crate) fn parse_static_line_inner(
                     rest.original,
                     TargetFilter::Typed(TypedFilter::creature()),
                     &text,
+                    PrintedSubject::Other,
                 ) {
                     return Some(def);
                 }
@@ -1871,7 +1884,9 @@ pub(crate) fn parse_static_line_inner(
                 after_prefix,
             )
         };
-        if let Some(def) = parse_continuous_gets_has(predicate_text, filter, &text) {
+        if let Some(def) =
+            parse_continuous_gets_has(predicate_text, filter, &text, PrintedSubject::Other)
+        {
             return Some(def);
         }
     }
@@ -1950,7 +1965,9 @@ pub(crate) fn parse_static_line_inner(
                 after_prefix,
             )
         };
-        if let Some(def) = parse_continuous_gets_has(predicate_text, filter, &text) {
+        if let Some(def) =
+            parse_continuous_gets_has(predicate_text, filter, &text, PrintedSubject::Other)
+        {
             return Some(def);
         }
     }
@@ -2274,9 +2291,16 @@ pub(crate) fn parse_static_line_inner(
             // condition + "has first strike".
             let (effective_predicate, suffix_condition) = strip_suffix_turn_condition(&predicate);
 
-            if let Some(mut def) =
-                parse_continuous_gets_has(&effective_predicate, TargetFilter::SelfRef, tp.original)
-            {
+            // CR 611.3a: `affected` is hardcoded `SelfRef` while the subject
+            // check above is only a negative list ("Enchanted artifact", "Each
+            // artifact", "It" all pass it), so the gate's pronoun scope comes
+            // from the printed subject of the host line, not from `affected`.
+            if let Some(mut def) = parse_continuous_gets_has(
+                &effective_predicate,
+                TargetFilter::SelfRef,
+                tp.original,
+                printed_subject(&tp),
+            ) {
                 if let Some(cond) = suffix_condition {
                     def.condition = Some(cond);
                 }
