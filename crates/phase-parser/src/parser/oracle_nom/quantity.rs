@@ -18,7 +18,7 @@ use super::duration::parse_cast_snapshot_suffix;
 use super::error::{oracle_err, OracleResult};
 use super::primitives::{
     parse_article, parse_color, parse_core_type, parse_counter_type_typed, parse_keyword_name,
-    parse_number, scan_preceded,
+    parse_number, scan_at_word_boundaries, scan_preceded,
 };
 use super::target::{
     parse_controller_phrase, parse_type_filter_word, ControllerForm, ControllerSubject,
@@ -1388,10 +1388,12 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         parse_devotion_ref,
         parse_chroma_devotion_ref,
         parse_graveyard_chroma_ref,
-        // Bare suffix form — reachable after a parent consumed 'there are N ';
-        // anaphoric 'they control' binds to a target player (same convention as
-        // the basic-land-types sibling above).
-        |i| parse_counters_on_population(i, Some(ControllerRef::TargetPlayer)),
+        // Bare suffix form — reachable after a parent consumed 'there are N '.
+        // CR 608.2c: this context-free registration has no antecedent for an
+        // anaphoric 'they control', so it supplies none and the census
+        // declines it rather than inventing a player; only a context-aware
+        // caller (`parse_quantity_ref_with_context`) can bind one.
+        |i| parse_counters_on_population(i, None),
         // CR 105.1 + CR 105.2: bare "colors among <filter>" — reached after a
         // parent has consumed "there are N " (Puca's Eye: "there are five colors
         // among permanents you control"). The tail combinator (`tag("colors
@@ -1804,6 +1806,13 @@ pub(crate) fn parse_counters_on_population_with_ctx<'a>(
         return Err(oracle_err(population));
     }
     let rest = population_consumed_rest(population, type_text, remainder)?;
+    // CR 608.2i: a past-tense controller phrase ("creatures you controlled")
+    // looks back at a previous game state, but `CountersOnObjects` counts the
+    // objects that match now. The census has no historical reading, so it
+    // declines the population rather than drop the tense.
+    if consumed_population_names_past_control(type_text, remainder) {
+        return Err(oracle_err(population));
+    }
     // CR 109.5: with no player context an anaphoric controller has no
     // referent; the context-aware caller binds it.
     if ctx.relative_player_scope.is_none() && population_reads_relative_player(type_text, ctx) {
@@ -1816,6 +1825,29 @@ pub(crate) fn parse_counters_on_population_with_ctx<'a>(
             filter,
         },
     ))
+}
+
+/// CR 608.2i: whether the consumed part of a census population (`type_text`
+/// up to the type reader's `remainder`) carries a past-tense controller phrase
+/// ("you controlled", "they controlled", "an opponent controlled"). The shared
+/// controller grammar (`parse_controller_phrase`) is the single authority for
+/// the phrase and its tense; the word-boundary scanner finds it anywhere in the
+/// population, and a phrase that starts in the unconsumed remainder is not part
+/// of the census.
+fn consumed_population_names_past_control(type_text: &str, remainder: &str) -> bool {
+    scan_at_word_boundaries(type_text, |i: &str| {
+        if i.len() <= remainder.len() {
+            return Err(oracle_err(i));
+        }
+        value(
+            (),
+            verify(parse_controller_phrase, |phrase| {
+                phrase.tense == ControllerTense::Past
+            }),
+        )
+        .parse(i)
+    })
+    .is_some()
 }
 
 /// CR 109.5: whether a population's controller phrase is anaphoric — its
@@ -15616,17 +15648,104 @@ mod tests {
             parse_type_phrase_folding("artifacts and creatures you control");
         assert_eq!(census(untyped), (None, artifacts_and_creatures));
 
-        let (rest, theirs) =
-            parse_quantity_ref("+1/+1 counters among creatures they control").unwrap();
+        // CR 608.2c: the context-free bare suffix has no antecedent for an
+        // anaphoric "they control", so the all-consuming read declines it
+        // instead of inventing a target player. An explicitly scoped census
+        // binds the same phrase to the caller's player.
+        assert!(
+            !matches!(
+                all_consuming(parse_quantity_ref)
+                    .parse("+1/+1 counters among creatures they control"),
+                Ok((_, QuantityRef::CountersOnObjects { .. }))
+            ),
+            "an unbound anaphoric census must not invent a player"
+        );
+        let (rest, scoped) = parse_counters_on_population(
+            "+1/+1 counters among creatures they control",
+            Some(ControllerRef::ScopedPlayer),
+        )
+        .unwrap();
         assert_eq!(rest, "");
         assert_eq!(
-            census(theirs),
+            census(scoped),
             (
                 Some(CounterType::Plus1Plus1),
                 TargetFilter::Typed(
-                    TypedFilter::creature().controller(ControllerRef::TargetPlayer)
+                    TypedFilter::creature().controller(ControllerRef::ScopedPlayer)
                 )
             )
+        );
+    }
+
+    /// CR 608.2i: a census population under past-tense control ("creatures
+    /// you controlled") looks back in time, but `CountersOnObjects` counts the
+    /// objects that match now, so the census declines it. Each historical row
+    /// is paired with the identical present-tense phrase, which the census
+    /// reads — directly, under a scoped "they", through the bare suffix and
+    /// through the "for each" head.
+    #[test]
+    fn counter_census_declines_a_historical_controller_population() {
+        let present_and_past = [
+            (
+                "+1/+1 counters on creatures you control",
+                "+1/+1 counters on creatures you controlled",
+            ),
+            (
+                "counters among permanents you control",
+                "counters among permanents you controlled",
+            ),
+        ];
+        for (present, past) in present_and_past {
+            assert!(
+                matches!(
+                    parse_counters_on_population(present, None),
+                    Ok(("", QuantityRef::CountersOnObjects { .. }))
+                ),
+                "direct control: {present:?}"
+            );
+            assert!(
+                parse_counters_on_population(past, None).is_err(),
+                "direct: {past:?}"
+            );
+        }
+
+        let scoped = |text| parse_counters_on_population(text, Some(ControllerRef::ScopedPlayer));
+        assert!(
+            matches!(
+                scoped("+1/+1 counters on creatures they control"),
+                Ok(("", QuantityRef::CountersOnObjects { .. }))
+            ),
+            "scoped control"
+        );
+        assert!(scoped("+1/+1 counters on creatures they controlled").is_err());
+
+        let bare = |text| all_consuming(parse_quantity_ref).parse(text);
+        assert!(
+            matches!(
+                bare("lore counters among sagas you control"),
+                Ok((_, QuantityRef::CountersOnObjects { .. }))
+            ),
+            "bare control"
+        );
+        assert!(
+            !matches!(
+                bare("lore counters among sagas you controlled"),
+                Ok((_, QuantityRef::CountersOnObjects { .. }))
+            ),
+            "bare historical census"
+        );
+
+        assert_eq!(
+            for_each_census("+1/+1 counter on creatures you control"),
+            (Some(CounterType::Plus1Plus1), creatures_you_control()),
+            "for-each control"
+        );
+        assert!(
+            !matches!(
+                parse_for_each_clause_ref_complete("+1/+1 counter on creatures you controlled"),
+                Ok((_, QuantityRef::CountersOnObjects { .. }))
+            ),
+            "for-each historical census"
         );
     }
 
