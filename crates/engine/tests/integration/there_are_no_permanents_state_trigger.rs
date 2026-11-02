@@ -18,7 +18,7 @@
 //!
 //! Widening that one gate to also accept the bridged `QuantityComparison`
 //! routes the emptiness form to a real `StateCondition` trigger. No new effect,
-//! no resolver change: `check_state_triggers` fires any `StateCondition` trigger
+//! no resolver change: `collect_state_triggers` fires any `StateCondition` trigger
 //! whose `check_trigger_condition` predicate becomes true, and
 //! `QuantityComparison` is already evaluated there (the count is taken across
 //! the whole battlefield with no controller restriction, so "no creatures" /
@@ -30,7 +30,7 @@
 //!     "When there are no creatures on the battlefield, sacrifice this enchantment."
 //!   * Mana Vortex — "When there are no lands on the battlefield, sacrifice this enchantment."
 //!
-//! Each test drives the REAL state-trigger pipeline (`check_state_triggers` →
+//! Each test drives the REAL state-trigger pipeline (a priority pass →
 //! stack resolution) and asserts the CR 603.8 boundary: the sacrifice fires only
 //! once the last matching permanent is gone. On `main` the line lowers to
 //! `Unimplemented`, so the `StateCondition` reach-guard is empty and every
@@ -46,6 +46,7 @@
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zones::create_object;
+use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::{CardId, ObjectId};
@@ -143,10 +144,12 @@ fn run_case(oracle: &str, filler: Option<(PlayerId, CoreType)>) -> (GameRunner, 
     );
 
     // CR 603.8 + CR 117.1: state triggers are checked whenever a player would
-    // receive priority. Invoke the same scan the priority pipeline runs, then
-    // resolve whatever it put on the stack.
+    // receive priority, so P0's pass runs the check; then resolve whatever it put
+    // on the stack.
     runner.state_mut().waiting_for = WaitingFor::Priority { player: P0 };
-    engine::game::triggers::check_state_triggers(runner.state_mut());
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P0 passes priority");
     runner.advance_until_stack_empty();
     (runner, ench)
 }

@@ -1,4 +1,5 @@
 use engine::game::game_object::AttachTarget;
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::keywords::has_keyword;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
@@ -885,6 +886,7 @@ fn activate_chest_twenty(
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .unwrap()
         .events;
@@ -1231,6 +1233,7 @@ fn demolition_field_later_search_owns_its_result_after_opponent_declines() {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 1,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             })
             .unwrap()
             .events;

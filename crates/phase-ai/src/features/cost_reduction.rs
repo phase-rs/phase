@@ -3,17 +3,17 @@
 //!
 //! Parser AST verification — VERIFIED against engine source:
 //! - `StaticMode::ModifyCost { mode, amount, spell_filter, dynamic_count }` at
-//!   `crates/engine/src/types/statics.rs:1017` — the reducer itself.
+//!   `crates/phase-ast/src/types/statics.rs` — the reducer itself.
 //! - `CostModifyMode::{Reduce, Raise, Minimum}` at `statics.rs:698`; only
 //!   `Reduce` discounts (CR 601.2f), `Raise`/`Minimum` are the Thalia /
 //!   Trinisphere tax shapes and are NOT this axis.
 //! - `StaticDefinition.affected: Option<TargetFilter>` at
-//!   `crates/engine/src/types/ability.rs:20740` — carries the caster scope
+//!   `crates/phase-ast/src/types/ability.rs` — carries the caster scope
 //!   (`TypedFilter.controller`), exactly as `collect_battlefield_cost_modifiers` reads it.
 //! - `CardFace.static_abilities: Vec<StaticDefinition>` at `card.rs:162`;
 //!   the runtime counterpart is `GameObject.static_definitions`.
 //! - `ManaCost::Cost { generic, shards }` at
-//!   `crates/engine/src/types/mana.rs:1714`.
+//!   `crates/phase-ast/src/types/mana.rs`.
 //!
 //! No parser remediation required — every axis is expressible over existing
 //! typed AST. `features::mana_ramp` explicitly deferred this shape

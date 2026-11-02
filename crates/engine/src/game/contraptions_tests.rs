@@ -140,8 +140,9 @@ fn assemble_reveals_top_contraption_before_sprocket_choice() {
     }
 }
 
-#[test]
-fn upkeep_crank_prompts_for_current_sprocket_subset() {
+/// Two of P0's Contraptions on sprockets 1 and 2, with the crank sprocket at 1:
+/// the upkeep crank prompt offers only the sprocket-1 Contraption (`first`).
+fn two_sprocket_contraptions() -> (GameState, ObjectId) {
     let mut state = GameState::new_two_player(1);
     let first = create_object(
         &mut state,
@@ -167,6 +168,12 @@ fn upkeep_crank_prompts_for_current_sprocket_subset() {
     );
     state.objects.get_mut(&first).unwrap().contraption_sprocket = Some(1);
     state.objects.get_mut(&second).unwrap().contraption_sprocket = Some(2);
+    (state, first)
+}
+
+#[test]
+fn upkeep_crank_prompts_for_current_sprocket_subset() {
+    let (mut state, first) = two_sprocket_contraptions();
 
     let mut events = Vec::new();
     let prompt = perform_contraption_upkeep_turn_based_action(&mut state, &mut events);
@@ -185,6 +192,52 @@ fn upkeep_crank_prompts_for_current_sprocket_subset() {
         other => panic!("expected upkeep contraption selection, got {other:?}"),
     }
     assert_eq!(state.players[0].contraption_crank_sprocket, 1);
+}
+
+/// The crank prompt is a multi-pick (`min 0`, `max None`) object-only selection,
+/// so a single `ChooseTarget` board click — on an object or a player — is
+/// refused with the prompt unchanged; the published `SelectTargets` answer
+/// (here the legal empty selection) is still accepted.
+#[test]
+fn upkeep_crank_prompt_refuses_a_board_click() {
+    use crate::types::ability::TargetRef;
+    use crate::types::actions::GameAction;
+
+    let (mut state, first) = two_sprocket_contraptions();
+    let mut events = Vec::new();
+    perform_contraption_upkeep_turn_based_action(&mut state, &mut events);
+    match &state.waiting_for {
+        WaitingFor::ChooseObjectsSelection {
+            eligible,
+            min: 0,
+            max: None,
+            ..
+        } => assert_eq!(eligible, &vec![TargetRef::Object(first)]),
+        other => panic!("expected the multi-pick crank selection, got {other:?}"),
+    }
+    let before = state.waiting_for.clone();
+
+    for target in [TargetRef::Object(first), TargetRef::Player(PlayerId(0))] {
+        let result = crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::ChooseTarget {
+                target: Some(target.clone()),
+            },
+        );
+        assert!(result.is_err(), "{target:?}: the crank keeps SelectTargets");
+        assert_eq!(
+            state.waiting_for, before,
+            "{target:?}: the prompt is unchanged"
+        );
+    }
+
+    crate::game::engine::apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SelectTargets { targets: vec![] },
+    )
+    .expect("paired positive: the empty published answer is legal (min 0)");
 }
 
 #[test]
@@ -369,6 +422,7 @@ fn reassemble_with_gain_control_uses_controller_change_path() {
                 object_id,
                 old_controller,
                 new_controller,
+                ..
             } if *object_id == contraption
                 && *old_controller == PlayerId(1)
                 && *new_controller == PlayerId(0)

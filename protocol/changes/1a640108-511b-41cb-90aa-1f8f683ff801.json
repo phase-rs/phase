@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "GameEvent::AbilityActivated and AbilityActivationRecord gain activation_cost (BoundActivationCost: Unknown | Costless | Cost(AbilityCost)), the activation's own cost bound before payment (CR 602.1a, CR 605.3). Both ride in GameState (pending and current trigger events, deferred event queues, the turn activation journal, the CR733 ledger). An older full-game or P2P peer drops the field on decode and re-encode, so activation triggers reading it ('activate an ability with {X} in its activation cost') silently answer false (silent capability loss under the protocol policy). Effect gains ModifyAnnouncedX { modification: XModification }, where XModification is Times { factor } (X becomes X times factor; \"double the value of X\" is factor 2, CR 107.3), carried in card data and GameState stack entries, and EffectKind gains ModifyAnnouncedX, carried in GameEvent::EffectResolved; a peer on the previous version cannot decode either. GameState gains departed_activated_abilities, an activated ability's stack entry as it last existed once removed without resolving (CR 113.7a, CR 608.2h), so 'copy that ability' still copies a countered ability (CR 707.10); an older full-game or P2P peer drops the field, so such a copy silently copies nothing."
+}

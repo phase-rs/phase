@@ -339,9 +339,9 @@ export function formatKeywordManaCost(cost: ManaCost): string {
 /** Keywords whose payload is a bare ManaCost. */
 const MANA_COST_KEYWORDS = new Set([
   "Unearth", "Reconfigure", "Kicker", "Equip", "Ninjutsu", "CommanderNinjutsu",
-  "Prowl", "Morph", "Megamorph", "Mayhem", "Madness", "Miracle", "Dash",
+  "Prowl", "Megamorph", "Mayhem", "Madness", "Miracle", "Dash",
   "Harmonize", "Foretell", "Mutate", "Disturb", "Overload",
-  "Spectacle", "Surge", "Encore", "Entwine", "Outlast", "Scavenge", "Fortify",
+  "Spectacle", "Surge", "Encore", "Outlast", "Scavenge", "Fortify",
   "Plot", "Offspring", "LevelUp", "Warp", "Sneak", "WebSlinging", "Squad",
   "Transmute", "Transfigure", "Recover", "Cleave", "Replicate",
   "MoreThanMeetsTheEye", "Freerunning", "Specialize",
@@ -353,7 +353,7 @@ const MANA_COST_KEYWORDS = new Set([
  */
 const MANA_OR_NON_MANA_COST_KEYWORDS = new Set([
   "Bestow", "Embalm", "Eternalize", "Cycling", "Flashback", "Escape", "Evoke",
-  "Buyback", "Echo", "Blitz",
+  "Buyback", "Echo", "Blitz", "Entwine", "Morph",
 ]);
 
 /** Keywords whose payload is an AbilityCost. */
@@ -372,15 +372,49 @@ type KeywordAbilityCost = Parameters<typeof formatKnownCost>[0];
  * drops out of the text or turns into `formatCost`'s "Activate" fallback.
  */
 function formatKeywordAbilityCost(cost: KeywordAbilityCost): string | null {
-  // A sacrifice cost also names what and how many permanents to sacrifice.
-  // formatKnownCost only returns the verb, so its detail would be misleading.
-  if (cost.type === "Sacrifice") return null;
+  // A sacrifice cost names what and how many permanents to sacrifice
+  // ("Sacrifice two lands"), so it can render as detail instead of dropping to
+  // null and hiding a mandatory cost.
+  if (cost.type === "Sacrifice") return formatSacrificeCost(cost);
   if (cost.type === "Composite" || cost.type === "OneOf") {
     const legs = (cost.costs ?? []).map(formatKeywordAbilityCost);
     if (legs.length === 0 || !legs.every((leg): leg is string => leg !== null)) return null;
     return legs.join(cost.type === "Composite" ? ", " : " or ");
   }
   return formatKnownCost(cost);
+}
+
+/** Render a Sacrifice cost's count and target as keyword detail ("Sacrifice two lands"). */
+function formatSacrificeCost(cost: { count?: unknown; target?: unknown }): string | null {
+  const targetKey = formatSacrificeTargetKey(cost.target);
+  if (!targetKey) return null;
+  const count = typeof cost.count === "number" ? Math.max(cost.count, 1) : 1;
+  return i18n.t(`game:keywordDetail.sacrifice${targetKey}`, { count });
+}
+
+/** Keyword target key for a Sacrifice cost ("Permanent", "Land", "Creature", "Artifact"). */
+function formatSacrificeTargetKey(target: unknown): "Permanent" | "Land" | "Creature" | "Artifact" | null {
+  if (typeof target === "object" && target !== null) {
+    const t = target as { type?: string; type_filters?: unknown[] };
+    if (t.type === "Typed") {
+      const typeFilters = t.type_filters ?? [];
+      const filters = typeFilters
+        .filter((f): f is string => typeof f === "string" && f !== "Card" && f !== "Any");
+      const relevantFilters = typeFilters.filter((f) => f !== "Card" && f !== "Any");
+      // If there are type_filters but no renderable strings (e.g. Subtype objects),
+      // the full restriction cannot be rendered — return null so the caller
+      // falls back to null rather than silently dropping the detail.
+      if (filters.length !== relevantFilters.length || filters.length !== 1) return null;
+      const f = filters[0];
+      if (f === "Land" || f === "Creature" || f === "Artifact" || f === "Permanent") {
+        return f;
+      }
+      return null;
+    }
+    if (t.type === "Any") return "Permanent";
+    return null;
+  }
+  return null;
 }
 
 /** CR 702.168a: DisguiseCost is untagged — a bare ManaCost, or `{ cost, reduction }`. */
@@ -496,7 +530,18 @@ function formatWard(val: unknown): string {
   const w = val as { type: string; data?: unknown };
   if (w.type === "Mana") return formatKeywordManaCost(w.data as ManaCost);
   if (w.type === "PayLife") return `pay ${w.data} life`;
-  if (w.type === "DiscardCard") return "discard a card";
+  if (w.type === "Discard") {
+    const d = w.data as
+      | { count: number; filter: unknown; selection: "Chosen" | "Random" }
+      | undefined;
+    if (!d || d.filter != null) return "";
+    return i18n.t(
+      d.selection === "Random"
+        ? "game:keywordDetail.wardDiscardAtRandom"
+        : "game:keywordDetail.wardDiscard",
+      { count: d.count },
+    );
+  }
   if (w.type === "Sacrifice") {
     const d = w.data as { count: number; filter: { type: string } } | undefined;
     if (d?.filter.type !== "Any") return "";

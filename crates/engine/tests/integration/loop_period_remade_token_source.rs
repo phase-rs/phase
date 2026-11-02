@@ -24,10 +24,12 @@ use engine::game::{play_trace_view, NamingCause};
 use engine::types::ability::{AbilityKind, TargetFilter, TargetRef};
 use engine::types::actions::{DebugAction, DebugTokenRequest, GameAction};
 use engine::types::counter::CounterType;
+use engine::types::events::GameEvent;
 use engine::types::game_state::{
-    CastPaymentMode, GameState, LoopDetectionMode, ManaChoice, WaitingFor,
+    ActionResult, CastPaymentMode, GameState, LoopDetectionMode, ManaChoice, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
+use engine::types::log::{LogCategory, LogImportance, LogSegment};
 use engine::types::mana::{ManaColor, ManaType};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -142,6 +144,7 @@ fn activate(state: &mut GameState, source_id: ObjectId, ability_index: usize) {
         GameAction::ActivateAbility {
             source_id,
             ability_index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         },
     );
 }
@@ -249,6 +252,118 @@ fn take(state: &mut GameState, count: u32) {
             },
         );
     }
+}
+
+/// Declares the standing offer at `count` and every seat asked accepts it; the last accept's
+/// result, which carries the whole take.
+pub(crate) fn take_recorded(state: &mut GameState, count: u32) -> ActionResult {
+    act(
+        state,
+        GameAction::DeclareShortcut {
+            count: IterationCount::Fixed(count),
+            template: None,
+        },
+    );
+    let mut last = None;
+    while let WaitingFor::RespondToShortcut { player, .. } = state.waiting_for.clone() {
+        let accepted = apply(
+            state,
+            player,
+            GameAction::RespondToShortcut {
+                response: ShortcutResponse::Accept,
+            },
+        );
+        last = Some(accepted.unwrap_or_else(|error| panic!("accept rejected: {error:?}")));
+    }
+    last.expect("a seat accepts")
+}
+
+/// The take's repetition markers in order, as `(proposer, repetition)`.
+pub(crate) fn markers(events: &[GameEvent]) -> Vec<(PlayerId, u32)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::ShortcutRepetition {
+                controller,
+                repetition,
+            } => Some((*controller, *repetition)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The events after each marker, up to the next one.
+pub(crate) fn repetitions(events: &[GameEvent]) -> Vec<&[GameEvent]> {
+    let starts: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| matches!(event, GameEvent::ShortcutRepetition { .. }))
+        .map(|(index, _)| index + 1)
+        .collect();
+    starts
+        .iter()
+        .enumerate()
+        .map(|(at, start)| {
+            let end = starts.get(at + 1).map_or(events.len(), |next| next - 1);
+            &events[*start..end]
+        })
+        .collect()
+}
+
+/// The entries the game log's default view lists (`Essential` and `Context`), each as its
+/// importance and segments, a player named by seat only.
+fn timeline(result: &ActionResult) -> Vec<(LogImportance, Vec<LogSegment>)> {
+    result
+        .log_entries
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.presentation.importance,
+                LogImportance::Essential | LogImportance::Context
+            )
+        })
+        .map(|entry| {
+            let segments = entry
+                .segments
+                .iter()
+                .map(|segment| match segment {
+                    LogSegment::PlayerName { player_id, .. } => seat(*player_id),
+                    other => other.clone(),
+                })
+                .collect();
+            (entry.presentation.importance, segments)
+        })
+        .collect()
+}
+
+fn seat(player_id: PlayerId) -> LogSegment {
+    LogSegment::PlayerName {
+        name: String::new(),
+        player_id,
+    }
+}
+
+fn said(text: &str) -> LogSegment {
+    LogSegment::Text(text.to_string())
+}
+
+fn card(name: &str, object_id: ObjectId) -> LogSegment {
+    LogSegment::CardName {
+        name: name.to_string(),
+        object_id,
+    }
+}
+
+/// The timeline entry a marker reads as.
+fn marker_line(proposer: PlayerId, repetition: i32) -> (LogImportance, Vec<LogSegment>) {
+    (
+        LogImportance::Context,
+        vec![
+            seat(proposer),
+            said(" repeats the loop — repetition "),
+            LogSegment::Number(repetition),
+        ],
+    )
 }
 
 /// Whether P0 has priority.
@@ -543,6 +658,147 @@ fn a_treasure_remade_by_damage_on_smaug_is_offered_and_taken() {
     }
 }
 
+/// CR 732.1b + CR 732.2c: a take of the Smaug loop keeps its first and last repetition, each opened
+/// by a marker the game log's default view lists. One repetition: P0 sacrifices a Treasure for
+/// mana (CR 111.10a); Mayhem Devil ("Whenever a player sacrifices a permanent, this creature deals
+/// 1 damage to any target.") targets Smaug (CR 115.4 + CR 115.1d) and deals it 1 damage (CR
+/// 120.3e); Smaug ("Whenever Smaug is dealt noncombat damage, create that many Treasure tokens.")
+/// makes one Treasure.
+#[test]
+fn a_take_of_the_smaug_loop_keeps_its_first_and_last_repetition() {
+    let db = shared_card_db().expect("the card fixture");
+    let (scenario, smaug) = smaug_scenario(db);
+    let board = built(scenario, 1);
+    let devil = board
+        .battlefield
+        .iter()
+        .copied()
+        .find(|id| board.objects[id].name == "Mayhem Devil")
+        .expect("Mayhem Devil");
+    let answers = Answers {
+        color: ManaType::Red,
+        aim: Some(TargetRef::Object(smaug)),
+        cost: None,
+        accept: true,
+    };
+    for (count, kept) in [(1, vec![1]), (2, vec![1, 2]), (TAKEN, vec![1, TAKEN])] {
+        let mut live = in_mode(&board, LoopDetectionMode::Interactive);
+        treasure_cycle(&mut live, &answers);
+        offer(&live);
+        let before = reading(&live, smaug);
+        assert_eq!(
+            (before.damage, before.tokens),
+            (1, 1),
+            "reach: one cycle to the offer"
+        );
+
+        let result = take_recorded(&mut live, count);
+
+        assert_eq!(
+            markers(&result.events),
+            kept.iter()
+                .map(|repetition| (P0, *repetition))
+                .collect::<Vec<_>>(),
+            "Fixed({count})"
+        );
+        let mut expected = Vec::new();
+        for (repetition, events) in kept.iter().zip(repetitions(&result.events)) {
+            let sacrificed: Vec<ObjectId> = events
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::PermanentSacrificed {
+                        object_id,
+                        player_id: P0,
+                    } => Some(*object_id),
+                    _ => None,
+                })
+                .collect();
+            let created: Vec<ObjectId> = events
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::TokenCreated {
+                        object_id, name, ..
+                    } if name == "Treasure" => Some(*object_id),
+                    _ => None,
+                })
+                .collect();
+            let hits = events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event,
+                        GameEvent::DamageDealt {
+                            source_id,
+                            target: TargetRef::Object(target),
+                            amount: 1,
+                            ..
+                        } if *source_id == devil && *target == smaug
+                    )
+                })
+                .count();
+            assert_eq!(
+                (sacrificed.len(), hits, created.len()),
+                (1, 1, 1),
+                "Fixed({count}), repetition {repetition}"
+            );
+            expected.extend([
+                marker_line(P0, *repetition as i32),
+                (
+                    LogImportance::Essential,
+                    vec![
+                        seat(P0),
+                        said(" sacrifices "),
+                        card("Treasure", sacrificed[0]),
+                    ],
+                ),
+                (
+                    LogImportance::Context,
+                    vec![
+                        card("Smaug the Impenetrable", smaug),
+                        said(" is targeted by "),
+                        card("Mayhem Devil", devil),
+                    ],
+                ),
+                (
+                    LogImportance::Essential,
+                    vec![
+                        card("Mayhem Devil", devil),
+                        said(" deals "),
+                        LogSegment::Number(1),
+                        said(" damage to "),
+                        card("Smaug the Impenetrable", smaug),
+                    ],
+                ),
+                (
+                    LogImportance::Essential,
+                    vec![card("Treasure", created[0]), said(" token is created")],
+                ),
+            ]);
+        }
+        assert_eq!(timeline(&result), expected, "Fixed({count})");
+        assert!(
+            result
+                .log_entries
+                .iter()
+                .filter(|entry| entry
+                    .segments
+                    .contains(&said(" repeats the loop — repetition ")))
+                .all(|entry| entry.category == LogCategory::Game),
+            "Fixed({count})"
+        );
+        assert_eq!(
+            reading(&live, smaug),
+            Reading {
+                mana: mana_of(ManaType::Red, 1 + count as usize),
+                damage: 1 + count,
+                ..before
+            },
+            "Fixed({count})"
+        );
+        assert_eq!(live.waiting_for, WaitingFor::Priority { player: P0 });
+    }
+}
+
 /// A land tapped through its mana ability earlier in the step is a consumed play, and the
 /// Treasure made again is still offered at its first recurrence, as a play restored.
 #[test]
@@ -699,6 +955,95 @@ fn the_bats_capture_sacrificing_its_oldest_treasure_is_offered_a_bounded_shortcu
 #[test]
 fn the_bats_capture_sacrificing_its_newest_treasure_is_offered_a_bounded_shortcut_and_taken() {
     bats_capture_offered_and_taken(<[ObjectId]>::last);
+}
+
+/// CR 704.5a + CR 800.4a: a take of the Bats capture keeps the seat that loses and leaves in an
+/// elided repetition. Each repetition's Treasure sacrifice triggers Mirkwood Bats ("Whenever you
+/// create or sacrifice a token, each opponent loses 1 life.") and Mayhem Devil; the Devil's 1
+/// damage makes Smaug create a Treasure, which triggers the Bats again (CR 119.3), so each living
+/// opponent loses 2 life a repetition. From 23 at the offer P2 is at 1 after repetition 11 and
+/// reaches 0 in repetition 12; P3 reaches 0 from 32 in repetition 16, leaving P0 the last player.
+#[test]
+fn a_take_of_the_bats_capture_keeps_each_seat_that_leaves_in_an_elided_repetition() {
+    const P2: PlayerId = PlayerId(2);
+    const P3: PlayerId = PlayerId(3);
+    const BOUND: u32 = 16;
+    let (board, smaug) = bats_capture();
+    let answers = Answers {
+        color: ManaType::Red,
+        aim: Some(TargetRef::Object(smaug)),
+        cost: None,
+        accept: true,
+    };
+    let mut offered = in_mode(&board, LoopDetectionMode::Interactive);
+    treasure_cycle(&mut offered, &answers);
+    let (_, schema) = offer(&offered);
+    assert_eq!(schema.measured_repetition_bound, Some(BOUND));
+    let life = |state: &GameState, seat: PlayerId| state.players[seat.0 as usize].life;
+    assert_eq!((life(&offered, P2), life(&offered, P3)), (23, 32));
+
+    let mut live = offered.clone();
+    let result = take_recorded(&mut live, TAKEN);
+    assert_eq!(markers(&result.events), [(P0, 1), (P0, TAKEN)]);
+    for events in repetitions(&result.events) {
+        let count = |hit: &dyn Fn(&GameEvent) -> bool| events.iter().filter(|e| hit(e)).count();
+        let losses = |seat: PlayerId| {
+            count(
+                &|event| matches!(event, GameEvent::LifeChanged { player_id, amount: -1, .. } if *player_id == seat),
+            )
+        };
+        assert_eq!(
+            count(&|event| matches!(event, GameEvent::PermanentSacrificed { .. })),
+            1
+        );
+        assert_eq!(
+            count(&|event| matches!(
+                event,
+                GameEvent::DamageDealt { target: TargetRef::Object(target), amount: 1, .. }
+                    if *target == smaug
+            )),
+            1
+        );
+        assert_eq!(
+            count(&|event| matches!(event, GameEvent::TokenCreated { .. })),
+            1
+        );
+        assert_eq!(
+            count(&|event| matches!(event, GameEvent::LifeChanged { .. })),
+            4
+        );
+        assert_eq!((losses(P2), losses(P3)), (2, 2));
+    }
+    assert_eq!((life(&live, P2), life(&live, P3)), (13, 22));
+    assert_eq!(live.waiting_for, WaitingFor::Priority { player: P0 });
+
+    let mut live = offered;
+    let result = take_recorded(&mut live, BOUND);
+    assert_eq!(live.waiting_for, WaitingFor::GameOver { winner: Some(P0) });
+    assert_eq!(markers(&result.events), [(P0, 1), (P0, BOUND)]);
+    let at = |wanted: &GameEvent| {
+        result
+            .events
+            .iter()
+            .position(|event| event == wanted)
+            .unwrap_or_else(|| panic!("{wanted:?} in the record"))
+    };
+    let first = at(&GameEvent::ShortcutRepetition {
+        controller: P0,
+        repetition: 1,
+    });
+    let last = at(&GameEvent::ShortcutRepetition {
+        controller: P0,
+        repetition: BOUND,
+    });
+    let p2_lost = at(&GameEvent::PlayerLost { player_id: P2 });
+    let p2_left = at(&GameEvent::PlayerEliminated { player_id: P2 });
+    let p3_lost = at(&GameEvent::PlayerLost { player_id: P3 });
+    let p3_left = at(&GameEvent::PlayerEliminated { player_id: P3 });
+    let over = at(&GameEvent::GameOver { winner: Some(P0) });
+    assert!(first < p2_lost && p2_lost < p2_left && p2_left < last);
+    assert!(last < p3_lost && p3_lost < p3_left && p3_left < over);
+    assert_eq!((life(&live, P2), life(&live, P3)), (0, 0));
 }
 
 /// CR 111.7: with the Devil's damage aimed at an opponent nothing makes a Treasure, so each

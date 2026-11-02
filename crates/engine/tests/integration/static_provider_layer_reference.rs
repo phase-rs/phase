@@ -2,6 +2,7 @@
 //! March of the Machines changes Sol Ring's type in layer 4; Marvin's printed
 //! static ability must then see Sol Ring as a creature in layer 6.
 
+use engine::types::game_state::CastPaymentMode;
 use std::sync::Arc;
 
 use engine::game::casting::{activated_ability_definitions, can_activate_ability_now};
@@ -143,6 +144,7 @@ fn march_animation_updates_marvins_live_activated_ability_providers() {
         .act(GameAction::ActivateAbility {
             source_id: marvin,
             ability_index: *ability_index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("Marvin must activate Sol Ring's donated mana ability");
     assert!(runner.state().objects[&marvin].tapped);

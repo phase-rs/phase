@@ -3030,6 +3030,11 @@ impl<'a> CastCommit<'a> {
         &self.runner.state
     }
 
+    /// Engine events emitted while committing this cast to the stack.
+    pub fn events(&self) -> &[GameEvent] {
+        &self.events
+    }
+
     /// Submit an action while this cast remains committed on the stack.
     ///
     /// This keeps response tests on the same `apply()` pipeline as the live
@@ -3433,6 +3438,13 @@ impl<'a> AbilityActivation<'a> {
     /// Drive the full activation pipeline to its conclusion and return the
     /// outcome. See [`SpellCast::resolve`] for the shared contract.
     pub fn resolve(self) -> Outcome {
+        self.try_resolve()
+            .expect("ability resolution must be accepted by the engine")
+    }
+
+    /// Drive the full activation pipeline and return engine rejection instead of
+    /// panicking when the reducer rejects a step.
+    pub fn try_resolve(self) -> Result<Outcome, EngineError> {
         let AbilityActivation {
             runner,
             source,
@@ -3464,6 +3476,7 @@ impl<'a> AbilityActivation<'a> {
             GameAction::ActivateAbility {
                 source_id: source,
                 ability_index,
+                payment_mode: CastPaymentMode::Auto,
             },
             &mut events,
         )
@@ -3590,16 +3603,14 @@ impl<'a> AbilityActivation<'a> {
             copy_target: None,
             spellbook_pick,
         };
-        events.extend(
-            drive_resolution(runner, &policy).expect("ability resolution must be accepted"),
-        );
+        events.extend(drive_resolution(runner, &policy)?);
 
-        Outcome {
+        Ok(Outcome {
             state: runner.state.clone(),
             events,
             hand_baseline,
             life_before,
-        }
+        })
     }
 }
 
@@ -4025,6 +4036,12 @@ fn drive_resolution(
                 }
                 match runner.act(GameAction::PassPriority) {
                     Ok(result) => events.extend(result.events),
+                    // An unrepresentable life change is an engine limit, not an
+                    // unhandled prompt: the driver must report it rather than
+                    // silently stop with a partially resolved effect.
+                    Err(error @ EngineError::LifeChangeUnrepresentable { .. }) => {
+                        return Err(error);
+                    }
                     Err(_) => {
                         break;
                     }

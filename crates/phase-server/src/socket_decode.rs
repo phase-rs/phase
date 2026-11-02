@@ -4,6 +4,8 @@
 //! Native Full and LobbyOnly sockets answer Pong here without game admission.
 //! Shared/WASM broker callers retain `LobbyClientMessage::Ping` parity; hosted
 //! listing refreshes still use the broker's registration-aware liveness kernel.
+//! Codec confirmation is FIFO-before application dispatch. Resync ownership is
+//! acquired after ordinary quota/guards and survives delayed application work.
 
 use axum::extract::ws::Message;
 use lobby_broker::LobbyRegistration;
@@ -14,7 +16,9 @@ use server_core::protocol::{ClientMessage, ServerMessage, ServerMode};
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{debug, info, warn};
 
+use crate::socket_ingress::Pool;
 use crate::socket_io::{HeartbeatInspection, NegotiatedSocket, Received};
+use crate::socket_mailbox::RefusalReason;
 use crate::{
     classify_hello_gate, hello_acceptance, reject_if_disabled, wire, ClientHelloInfo,
     HelloGateOutcome, SharedLobby, SysEnv, MAX_WS_MESSAGE_BYTES,
@@ -27,7 +31,7 @@ enum DecoderWake {
 
 enum RateCharge {
     Applied,
-    RefusalInspection,
+    RefusalInspection(RefusalReason),
 }
 
 // Per frozen window: <=30 ordinary parses, <=30 nonrefunded recovery scans,
@@ -41,12 +45,14 @@ enum RateCharge {
 const MAX_RECOVERY_CLICK_BYTES: usize = 1024;
 pub(crate) const MAX_QUOTA_DISCARDS_PER_WINDOW: u32 = 64;
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run(
     mut frames: mpsc::Receiver<Received<Message>>,
     mut socket: NegotiatedSocket,
     lobby: SharedLobby,
     host: watch::Receiver<Option<LobbyRegistration>>,
     mode: ServerMode,
+    public_url: Option<String>,
     hello: oneshot::Sender<ClientHelloInfo>,
     application: mpsc::Sender<Received<crate::socket_mailbox::ClientEnvelope>>,
 ) {
@@ -107,24 +113,36 @@ pub(crate) async fn run(
         if !matches!(&frame, Message::Text(_) | Message::Binary(_)) {
             continue;
         }
-        let charge = if limiter.allow() {
-            RateCharge::Applied
-        } else {
-            #[cfg(test)]
-            if let Some(work) = &parser_work {
-                work.rate_limited();
-            }
-            // CommandIdV1 submissions are sequential. Even a large action just
-            // after a legitimate click burst gets an owned refusal: recovery
-            // skips payload structures and never dispatches an engine command.
-            // Only traffic past BOTH work windows is discarded unparsed.
-            if refusal_inspection.check() {
-                RateCharge::RefusalInspection
-            } else {
-                if !discard_quota_frame(&socket, &mut discards) {
-                    break;
+        let charge = match admission.pool() {
+            // Over-capacity frames are only ever refused or discarded.
+            Pool::RefusalTransit => {
+                if refusal_inspection.check() {
+                    RateCharge::RefusalInspection(RefusalReason::GameBusy)
+                } else {
+                    if !discard_quota_frame(&socket, &mut discards) {
+                        break;
+                    }
+                    continue;
                 }
-                continue;
+            }
+            Pool::Retained if limiter.allow() => RateCharge::Applied,
+            Pool::Retained => {
+                #[cfg(test)]
+                if let Some(work) = &parser_work {
+                    work.rate_limited();
+                }
+                // CommandIdV1 submissions are sequential. Even a large action just
+                // after a legitimate click burst gets an owned refusal: recovery
+                // skips payload structures and never dispatches an engine command.
+                // Only traffic past BOTH work windows is discarded unparsed.
+                if refusal_inspection.check() {
+                    RateCharge::RefusalInspection(RefusalReason::RateQuota)
+                } else {
+                    if !discard_quota_frame(&socket, &mut discards) {
+                        break;
+                    }
+                    continue;
+                }
             }
         };
         let text = match frame {
@@ -142,27 +160,45 @@ pub(crate) async fn run(
                 continue
             }
         };
-        if let Err(limit) = admission.resize(text.len()) {
-            warn!(
-                ?limit,
-                "decoded WebSocket ingress payload capacity exceeded"
-            );
-            socket.ingress_overflow();
-            break;
-        }
-        if matches!(charge, RateCharge::RefusalInspection) {
+        let charge = match admission.resize(text.len()) {
+            Ok(()) => charge,
+            Err(limit) => {
+                warn!(
+                    ?limit,
+                    "decoded WebSocket ingress payload capacity exceeded"
+                );
+                match charge {
+                    RateCharge::Applied if refusal_inspection.check() => {
+                        RateCharge::RefusalInspection(RefusalReason::GameBusy)
+                    }
+                    RateCharge::Applied => {
+                        if !discard_quota_frame(&socket, &mut discards) {
+                            break;
+                        }
+                        continue;
+                    }
+                    RateCharge::RefusalInspection(_) => {
+                        RateCharge::RefusalInspection(RefusalReason::GameBusy)
+                    }
+                }
+            }
+        };
+        if let RateCharge::RefusalInspection(reason) = charge {
             #[cfg(test)]
             if let Some(work) = &parser_work {
                 work.metadata_recovery();
             }
             match crate::socket_mailbox::ClientEnvelope::quota_recovery(&text) {
+                // Only a frame whose retained charge holds may be dispatched.
                 Some(crate::socket_mailbox::QuotaRecovery::ContestClick)
-                    if text.len() <= MAX_RECOVERY_CLICK_BYTES && recovered_clicks.check() =>
+                    if reason == RefusalReason::RateQuota
+                        && text.len() <= MAX_RECOVERY_CLICK_BYTES
+                        && recovered_clicks.check() =>
                 {
                     refusal_inspection.refund();
                 }
                 Some(crate::socket_mailbox::QuotaRecovery::Correlated(Some(id))) => {
-                    if socket.enqueue_quota_refusal(Some(id)).is_err() {
+                    if socket.enqueue_refusal(reason, Some(id)).is_err() {
                         break;
                     }
                     continue;
@@ -184,10 +220,11 @@ pub(crate) async fn run(
         if let Some(work) = &parser_work {
             work.deserialization();
         }
-        let envelope: crate::socket_mailbox::ClientEnvelope = match serde_json::from_str(&text) {
+        let mut envelope: crate::socket_mailbox::ClientEnvelope = match serde_json::from_str(&text)
+        {
             Ok(message) => message,
             Err(error) => {
-                if matches!(charge, RateCharge::RefusalInspection) {
+                if matches!(charge, RateCharge::RefusalInspection(_)) {
                     if !discard_quota_frame(&socket, &mut discards) {
                         break;
                     }
@@ -224,6 +261,19 @@ pub(crate) async fn run(
                 socket.bootstrap_hooks().before_hello_accept().await;
                 info!(version = %info.client_version, commit = %info.build_commit, "ClientHello accepted");
                 socket.set_wire_format(info.wire_format);
+                if info.state_codec == Some(server_core::protocol::StateCodec::StateCodecV1) {
+                    if socket
+                        .enqueue_reply(crate::native_server_hello(
+                            mode,
+                            public_url.clone(),
+                            info.state_codec,
+                        ))
+                        .is_err()
+                    {
+                        break;
+                    }
+                    socket.set_state_codec(info.state_codec);
+                }
                 if hello
                     .take()
                     .expect("first accepted hello owns the handoff")
@@ -303,6 +353,22 @@ pub(crate) async fn run(
                     .notify();
             }
         } else {
+            if matches!(message, ClientMessage::ResyncState) {
+                if socket.state_codec() != Some(server_core::protocol::StateCodec::StateCodecV1) {
+                    if socket
+                        .enqueue_reply(ServerMessage::error("State codec is not negotiated"))
+                        .is_err()
+                    {
+                        break;
+                    }
+                    continue;
+                }
+                match socket.try_admit_resync() {
+                    Ok(permit) => envelope.resync = Some(permit),
+                    Err(crate::socket_mailbox::RefusalError::Full) => continue,
+                    Err(crate::socket_mailbox::RefusalError::Closed) => break,
+                }
+            }
             match application.try_send(Received {
                 message: envelope,
                 received_at,
@@ -310,9 +376,22 @@ pub(crate) async fn run(
                 heartbeat: HeartbeatInspection::Complete,
             }) {
                 Ok(()) => {}
-                Err(mpsc::error::TrySendError::Full(_)) => {
-                    socket.ingress_overflow();
-                    break;
+                Err(mpsc::error::TrySendError::Full(rejected)) => {
+                    match rejected.message.command_id() {
+                        Some(id) => {
+                            if socket
+                                .enqueue_refusal(RefusalReason::GameBusy, Some(id))
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        None => {
+                            if !discard_quota_frame(&socket, &mut discards) {
+                                break;
+                            }
+                        }
+                    }
                 }
                 Err(mpsc::error::TrySendError::Closed(_)) => break,
             }

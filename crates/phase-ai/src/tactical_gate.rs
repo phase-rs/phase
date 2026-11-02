@@ -68,7 +68,11 @@ use crate::policies::context::{
 use crate::policies::effect_classify::{
     effect_polarity, extract_target_filter, targets_creatures_only, EffectPolarity,
 };
-use crate::policies::stack_awareness::{has_pending_removal, will_target_die_from_stack};
+use crate::policies::stack_awareness::{
+    can_be_destroyed, chain_has_effect, damage_kills, has_pending_removal,
+    is_creature_permanent_controlled_by, node_damage, removal_steps_acting_on, removes_or_damages,
+    will_target_die_from_stack, RemovalStep,
+};
 use crate::policies::strategy_helpers::can_pay_ward_cost;
 use crate::search::ability_is_temporary_combat_modifier;
 
@@ -161,6 +165,7 @@ pub fn gate_candidates(
             source_index,
             candidate,
             payment_successor: None,
+            payment_step: None,
         })
         .collect();
     gate_prepared_candidates(state, decision, prepared, ai_player, config, context)
@@ -307,6 +312,7 @@ fn assess_pre_cast(ctx: &PolicyContext<'_>) -> GateDecision {
     if let GameAction::ActivateAbility {
         source_id,
         ability_index,
+        ..
     } = &ctx.candidate.action
     {
         if let Some(object) = ctx.state.objects.get(source_id) {
@@ -1411,6 +1417,7 @@ fn assess_counter_announcement(ctx: &PolicyContext<'_>) -> Option<GateDecision> 
         GameAction::ActivateAbility {
             source_id,
             ability_index,
+            ..
         } => {
             let definition = ctx.effective_activated_ability()?;
             if !collect_definition_effects_with(&definition, ModeWalk::All)
@@ -1890,6 +1897,7 @@ fn activated_ueot_pump_source(ctx: &PolicyContext<'_>) -> Option<ObjectId> {
     let GameAction::ActivateAbility {
         source_id,
         ability_index,
+        ..
     } = &ctx.candidate.action
     else {
         return None;
@@ -2001,57 +2009,83 @@ fn should_reject_pump_window(
     !pump_changes_combat_outcome(ctx.state, ctx.ai_player, power_bonus, toughness_bonus)
 }
 
-/// Check if pumping can actually save a creature from hostile stack effects.
-/// Destroy/Exile/Counter/Bounce kill regardless of stats — pump doesn't help.
-/// Only damage-based removal can be survived with a toughness boost.
+/// Whether a pump of `toughness_bonus` toughness, which resolves before every
+/// stack entry (CR 405.5), keeps an AI creature a stack entry acts on from
+/// dying.
+///
+/// The nodes acting on the creature are read in the order they resolve
+/// ([`removal_steps_acting_on`]) up to the first `Destroy`, `Counter`, `Bounce` or
+/// `ChangeZone` node, where a `Destroy` counts only if it can destroy the
+/// creature ([`can_be_destroyed`]). A `Destroy` or `Counter` there answers
+/// false: a pump does not stop it. A `Bounce` or `ChangeZone` there ends the
+/// read: damage that resolves after it does not reach the creature (CR 400.7),
+/// so only the damage before it is judged.
+///
+/// Only the AI's creature permanents are judged
+/// ([`is_creature_permanent_controlled_by`]): a pump's "target creature" is a
+/// creature permanent (CR 109.2). A creature card that left the battlefield is
+/// a new object (CR 400.7), and a phased-out creature is treated as though it
+/// does not exist (CR 702.26b), so no pump reaches either.
 fn pump_can_save_from_hostile_stack(
     state: &GameState,
     ai_player: PlayerId,
     toughness_bonus: i32,
 ) -> bool {
-    use engine::types::ability::QuantityExpr;
-
-    state.stack.iter().any(|entry| {
-        let Some(ability) = entry.ability() else {
+    // The answer for an AI creature that only entries without a
+    // `removes_or_damages` node act on: the walk below reads no node for it,
+    // so only the damage already marked on it is judged. While no AI creature
+    // permanent answers true this way, such an entry cannot change the
+    // result, so its reach is not built; when one does, every entry's reach
+    // is read. One answers true only while it carries lethal marked damage,
+    // which CR 704.5g destroys before any player gets priority (CR 117.5), so
+    // in practice the guard is off. It is on only where the engine's
+    // state-based actions leave such a creature on the battlefield phased in:
+    // a check stopped at its iteration cap.
+    let already_saved = state.objects.values().any(|object| {
+        is_creature_permanent_controlled_by(object, ai_player)
+            && damage_kills(object, &[], 0)
+            && !damage_kills(object, &[], toughness_bonus)
+    });
+    let mut acted_on: Vec<ObjectId> = Vec::new();
+    for target in state
+        .stack
+        .iter()
+        .filter(|entry| already_saved || chain_has_effect(entry, removes_or_damages))
+        .flat_map(|entry| engine::game::effects::stack_reach::stack_entry_node_reach(state, entry))
+        .flat_map(|reach| reach.acted_on)
+    {
+        if let TargetRef::Object(id) = target {
+            if !acted_on.contains(&id) {
+                acted_on.push(id);
+            }
+        }
+    }
+    acted_on.iter().any(|object_id| {
+        let Some(object) = state.objects.get(object_id) else {
             return false;
         };
-        ability.targets.iter().any(|target| {
-            let TargetRef::Object(object_id) = target else {
-                return false;
-            };
-            let Some(object) = state.objects.get(object_id) else {
-                return false;
-            };
-            if object.controller != ai_player
-                || !object.card_types.core_types.contains(&CoreType::Creature)
-            {
-                return false;
-            }
+        if !is_creature_permanent_controlled_by(object, ai_player) {
+            return false;
+        }
 
-            let effects = collect_ability_effects(ability);
-            for effect in &effects {
-                match effect {
-                    // Destroy/Exile/Counter/Bounce — pump doesn't save
-                    Effect::Destroy { .. } | Effect::Counter { .. } | Effect::Bounce { .. } => {
-                        return false
-                    }
-                    Effect::ChangeZone { .. } => return false,
-                    // Damage — pump saves if toughness + bonus > damage
-                    Effect::DealDamage {
-                        amount: QuantityExpr::Fixed { value },
-                        ..
-                    } => {
-                        let toughness = object.toughness.unwrap_or(0);
-                        let remaining = toughness - object.damage_marked as i32;
-                        if remaining + toughness_bonus > *value {
-                            return true;
-                        }
-                    }
-                    _ => {}
+        let mut dealt = Vec::new();
+        for (step, reach) in removal_steps_acting_on(state, *object_id) {
+            match step {
+                RemovalStep::Destroy if can_be_destroyed(object) => return false,
+                RemovalStep::Counter => return false,
+                RemovalStep::Bounce | RemovalStep::ChangeZone { .. } => break,
+                // Damage whose amount is not fixed is not judged.
+                RemovalStep::Damage => {
+                    dealt.extend(node_damage(state, reach.node, object));
                 }
+                // CR 702.12b: a Destroy that cannot destroy the creature; the
+                // read goes on.
+                RemovalStep::Destroy => {}
             }
-            false
-        })
+        }
+        // The pump saves the creature only from damage that kills it without
+        // the pump and not with it.
+        damage_kills(object, &dealt, 0) && !damage_kills(object, &dealt, toughness_bonus)
     })
 }
 
@@ -2344,7 +2378,7 @@ mod tests {
                     candidate.action,
                     GameAction::ActivateAbility {
                         source_id: candidate_source,
-                        ability_index: candidate_index,
+                        ability_index: candidate_index, ..
                     } if candidate_source == source_id && candidate_index == ability_index
                 )
             })
@@ -3596,7 +3630,7 @@ mod tests {
                     candidate.action,
                     GameAction::ActivateAbility {
                         source_id,
-                        ability_index: 0,
+                        ability_index: 0, ..
                     } if source_id == source
                 )
             })
@@ -4673,13 +4707,23 @@ mod tests {
         state.waiting_for = WaitingFor::Priority { player: P0 };
 
         assert_eq!(harvest_amount(state, harvest), Some(0));
-        let pre_harvest_cast = engine::ai_support::candidate_actions(state)
-            .into_iter()
-            .find(|candidate| {
-                matches!(candidate.action, GameAction::CastSpell { object_id, .. } if object_id == held_draw)
-            })
-            .expect("the engine issues a held-spell cast before resource payment preflight")
-            .action;
+        // CR 601.2b + CR 601.2h: the castability predicate already rejects the
+        // unpayable graveyard-exile cost, so no candidate is issued; a forged
+        // submission must still be rejected by the casting authority.
+        assert!(
+            !engine::ai_support::candidate_actions(state)
+                .into_iter()
+                .any(|candidate| {
+                    matches!(candidate.action, GameAction::CastSpell { object_id, .. } if object_id == held_draw)
+                }),
+            "the engine does not issue a cast whose required additional cost is unpayable"
+        );
+        let pre_harvest_cast = GameAction::CastSpell {
+            object_id: held_draw,
+            card_id: state.objects[&held_draw].card_id,
+            targets: vec![],
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        };
         let pre_harvest_state = state.clone();
         let mut rejected_state = state.clone();
         let rejected =
@@ -5984,7 +6028,7 @@ mod tests {
                     &candidate.action,
                     GameAction::ActivateAbility {
                         source_id,
-                        ability_index: 0,
+                        ability_index: 0, ..
                     } if *source_id == untap_source
                 )
             })
@@ -8106,6 +8150,7 @@ mod tests {
                     GameAction::ActivateAbility {
                         source_id,
                         ability_index,
+                        ..
                     },
                     Some(index),
                 ) => *source_id == source && *ability_index == index,
@@ -8653,6 +8698,7 @@ mod tests {
                 .act(GameAction::ActivateAbility {
                     source_id: source,
                     ability_index: 0,
+                    payment_mode: engine::types::game_state::CastPaymentMode::Auto,
                 })
                 .unwrap();
             let target = candidate_actions(setup.state())
@@ -8841,6 +8887,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             })
             .unwrap();
         let target = candidate_actions(setup.state())
@@ -9524,6 +9571,7 @@ mod tests {
                     .act(GameAction::ActivateAbility {
                         source_id: drawback,
                         ability_index: 0,
+                        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
                     })
                     .expect("the engine announces the harmful own ability");
                 assert!(runner.state().stack.iter().any(|entry| {
@@ -9804,6 +9852,122 @@ mod tests {
             search_depth: crate::policies::context::SearchDepth::Root,
         };
         assert_ne!(assess_candidate(&ctx), GateDecision::Reject);
+    }
+
+    /// Gate verdict for P0 targeting a P1 creature warded with `ward`, with P0's
+    /// hand staged by `stage_hand`. When `stage_hand` returns the id of a hand
+    /// card, that card is the spell being cast (the decision's pending cast), as
+    /// for a real `TargetSelection`.
+    fn ward_discard_gate(
+        ward: WardCost,
+        stage_hand: impl FnOnce(&mut GameScenario) -> Option<ObjectId>,
+    ) -> GateDecision {
+        let mut scenario = GameScenario::new();
+        let creature = scenario
+            .add_creature(P1, "Warded", 2, 2)
+            .with_keyword(Keyword::Ward(ward))
+            .id();
+        let spell_being_cast = stage_hand(&mut scenario);
+        let runner = scenario.build();
+        let state = runner.state();
+        let mut decision = damage_target_decision(creature, 3);
+        if let (Some(spell), WaitingFor::TargetSelection { pending_cast, .. }) =
+            (spell_being_cast, &mut decision.waiting_for)
+        {
+            pending_cast.object_id = spell;
+            pending_cast.card_id = state.objects[&spell].card_id;
+        }
+        let candidate = choose_target_candidate(creature);
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: P0,
+            config: &config,
+            context: &AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assess_candidate(&ctx)
+    }
+
+    /// Saruman of Many Colors: "Ward—Discard an enchantment, instant, or
+    /// sorcery card."
+    fn saruman_ward() -> WardCost {
+        use engine::types::ability::{TypeFilter, TypedFilter};
+        WardCost::Discard {
+            count: 1,
+            filter: Some(TargetFilter::Or {
+                filters: [
+                    TypeFilter::Enchantment,
+                    TypeFilter::Instant,
+                    TypeFilter::Sorcery,
+                ]
+                .into_iter()
+                .map(|card_type| TargetFilter::Typed(TypedFilter::new(card_type)))
+                .collect(),
+            }),
+            selection: engine::types::ability::CardSelectionMode::Chosen,
+        }
+    }
+
+    /// CR 702.21a + CR 701.9a + CR 205.2a + CR 118.3: a card-type-filtered ward
+    /// discard is payable only from a hand card of a listed type.
+    #[test]
+    fn ward_discard_filter_requires_a_matching_hand_card() {
+        let creature_only = ward_discard_gate(saruman_ward(), |scenario| {
+            scenario.add_creature_to_hand(P0, "Bear", 2, 2);
+            None
+        });
+        assert_eq!(creature_only, GateDecision::Reject);
+
+        let with_instant = ward_discard_gate(saruman_ward(), |scenario| {
+            scenario.add_creature_to_hand(P0, "Bear", 2, 2);
+            scenario.add_spell_to_hand(P0, "Shock", true);
+            None
+        });
+        assert_ne!(with_instant, GateDecision::Reject);
+    }
+
+    /// CR 702.21a + CR 701.9a + CR 118.3: a counted ward discard needs that many
+    /// cards in hand.
+    #[test]
+    fn ward_discard_count_requires_enough_hand_cards() {
+        let ward = WardCost::Discard {
+            count: 2,
+            filter: None,
+            selection: engine::types::ability::CardSelectionMode::Chosen,
+        };
+        let one_card = ward_discard_gate(ward.clone(), |scenario| {
+            scenario.add_creature_to_hand(P0, "Bear", 2, 2);
+            None
+        });
+        assert_eq!(one_card, GateDecision::Reject);
+
+        let two_cards = ward_discard_gate(ward, |scenario| {
+            scenario.add_creature_to_hand(P0, "Bear", 2, 2);
+            scenario.add_creature_to_hand(P0, "Cub", 1, 1);
+            None
+        });
+        assert_ne!(two_cards, GateDecision::Reject);
+    }
+
+    /// CR 601.2a + CR 702.21a: the spell being cast is on the stack, not in
+    /// hand, when the ward trigger resolves, so it cannot pay its own target's
+    /// ward discard.
+    #[test]
+    fn ward_discard_excludes_the_spell_being_cast() {
+        let only_the_spell = ward_discard_gate(saruman_ward(), |scenario| {
+            Some(scenario.add_spell_to_hand(P0, "Shock", true).id())
+        });
+        assert_eq!(only_the_spell, GateDecision::Reject);
+
+        let with_a_second_instant = ward_discard_gate(saruman_ward(), |scenario| {
+            scenario.add_spell_to_hand(P0, "Opt", true);
+            Some(scenario.add_spell_to_hand(P0, "Shock", true).id())
+        });
+        assert_ne!(with_a_second_instant, GateDecision::Reject);
     }
 
     /// CR 702.21a + CR 119.4: Phyrexian Fleshgorger's Ward uses its current
@@ -10607,6 +10771,7 @@ mod tests {
             action: GameAction::ActivateAbility {
                 source_id,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             },
             metadata: ActionMetadata::for_actor(Some(P0), TacticalClass::Ability),
         };
@@ -10850,5 +11015,984 @@ mod tests {
 
         assert_parses_as_temporary_pump(state, dragon);
         assert_eq!(gate_activation(state, dragon), GateDecision::Reject);
+    }
+
+    const ARC_TRAIL: &str =
+        "Arc Trail deals 2 damage to any target and 1 damage to any other target.";
+
+    /// Arc Trail cast by P0 at `first` (2 damage) and `second` (1 damage).
+    fn arc_trail_on_stack(
+        first: (PlayerId, i32),
+        second: (PlayerId, i32),
+    ) -> (GameRunner, ObjectId, ObjectId) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let a = scenario
+            .add_creature(first.0, "First", first.1, first.1)
+            .id();
+        let b = scenario
+            .add_creature(second.0, "Second", second.1, second.1)
+            .id();
+        let card = scenario
+            .add_spell_to_hand_from_oracle(P0, "Arc Trail", true, ARC_TRAIL)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 1,
+            })
+            .id();
+        for _ in 0..2 {
+            scenario.add_basic_land(P0, engine::types::mana::ManaColor::Red);
+        }
+        let mut runner = scenario.build();
+        runner.cast(card).target_objects(&[a, b]).commit();
+        (runner, a, b)
+    }
+
+    /// `assess_candidate` for P1 choosing `target` for a destroy spell.
+    fn destroy_target_gate(state: &GameState, target: ObjectId) -> GateDecision {
+        let destroy = Effect::Destroy {
+            target: TargetFilter::Any,
+            cant_regenerate: false,
+        };
+        let decision = AiDecisionContext {
+            waiting_for: WaitingFor::TargetSelection {
+                player: P1,
+                pending_cast: Box::new(PendingCast::new(
+                    ObjectId(902),
+                    CardId(902),
+                    ResolvedAbility::new(destroy, Vec::new(), ObjectId(902), P1),
+                    ManaCost::zero(),
+                )),
+                target_slots: vec![TargetSelectionSlot {
+                    legal_targets: vec![TargetRef::Object(target)],
+                    optional: false,
+                    chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
+                }],
+                mode_labels: Vec::new(),
+                selection: TargetSelectionProgress::default(),
+            },
+            candidates: Vec::new(),
+        };
+        let candidate = CandidateAction {
+            action: GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(target)),
+            },
+            metadata: ActionMetadata::for_actor(Some(P1), TacticalClass::Target),
+        };
+        let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+        let ctx = PolicyContext {
+            state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: P1,
+            config: &config,
+            context: &AiContext::empty(&config.weights),
+            cast_facts: None,
+            search_depth: crate::policies::context::SearchDepth::Root,
+        };
+        assess_candidate(&ctx)
+    }
+
+    #[test]
+    fn arc_trail_penalizes_the_creature_it_kills_not_the_one_it_grazes() {
+        let (runner, grazed, killed) = arc_trail_on_stack((P1, 3), (P1, 1));
+        let state = runner.state();
+        let root = state
+            .stack
+            .back()
+            .and_then(|e| e.ability())
+            .expect("Arc Trail");
+        assert!(
+            root.sub_ability
+                .as_ref()
+                .is_some_and(|node| node.targets == vec![TargetRef::Object(killed)]),
+            "reach guard: the 1-damage node declares the creature it kills"
+        );
+        assert_eq!(
+            destroy_target_gate(state, killed),
+            GateDecision::AllowWithPenalty(-10.0)
+        );
+        assert_eq!(destroy_target_gate(state, grazed), GateDecision::Allow);
+    }
+
+    #[test]
+    fn pump_cannot_save_a_creature_from_damage_aimed_at_another() {
+        let (runner, ai_creature, _) = arc_trail_on_stack((P1, 1), (P0, 1));
+        let state = runner.state();
+        let root = state
+            .stack
+            .back()
+            .and_then(|e| e.ability())
+            .expect("Arc Trail");
+        assert_eq!(
+            root.targets,
+            vec![TargetRef::Object(ai_creature)],
+            "reach guard: the 2-damage root aims at the AI's creature"
+        );
+        assert!(
+            pump_can_save_from_hostile_stack(state, P1, 2),
+            "control: +2 toughness survives the 2 damage aimed at it"
+        );
+        assert!(!pump_can_save_from_hostile_stack(state, P1, 1));
+    }
+
+    const SHOCK: &str = "Shock deals 2 damage to any target.";
+    const PRODIGAL_PYROMANCER: &str = "{T}: This creature deals 1 damage to any target.";
+
+    /// P0's Shock at P1's creature with toughness `toughness` and `keywords`,
+    /// on the stack.
+    fn shock_on_stack(toughness: i32, keywords: &[Keyword]) -> (GameRunner, ObjectId) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let victim = {
+            let mut builder = scenario.add_creature(P1, "Victim", 2, toughness);
+            for keyword in keywords {
+                builder.with_keyword(keyword.clone());
+            }
+            builder.id()
+        };
+        let shock = scenario
+            .add_spell_to_hand_from_oracle(P0, "Shock", true, SHOCK)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 0,
+            })
+            .id();
+        scenario.add_basic_land(P0, engine::types::mana::ManaColor::Red);
+        let mut runner = scenario.build();
+        runner.cast(shock).target_object(victim).commit();
+        (runner, victim)
+    }
+
+    #[test]
+    fn a_pump_saves_a_creature_only_from_damage_that_kills_it_without_the_pump() {
+        let (runner, _) = shock_on_stack(2, &[]);
+        assert!(
+            pump_can_save_from_hostile_stack(runner.state(), P1, 1),
+            "control: 2 damage kills a 2-toughness creature, and +1 toughness survives it"
+        );
+        let (runner, _) = shock_on_stack(3, &[]);
+        assert!(!pump_can_save_from_hostile_stack(runner.state(), P1, 1));
+        let (runner, _) = shock_on_stack(2, &[Keyword::Indestructible]);
+        assert!(!pump_can_save_from_hostile_stack(runner.state(), P1, 1));
+
+        // A 1/1 of P0's pings P1's 1/1: +1 toughness survives the ping unless
+        // the 1/1 has deathtouch.
+        for deathtouch in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let victim = scenario.add_creature(P1, "Victim", 1, 1).id();
+            let pinger = {
+                let mut builder = scenario.add_creature_from_oracle(
+                    P0,
+                    "Prodigal Pyromancer",
+                    1,
+                    1,
+                    PRODIGAL_PYROMANCER,
+                );
+                if deathtouch {
+                    builder.with_keyword(Keyword::Deathtouch);
+                }
+                builder.id()
+            };
+            let mut state = scenario.build().state().clone();
+            let ability = engine::game::ability_utils::build_resolved_from_def_with_targets(
+                &state.objects[&pinger].abilities[0],
+                pinger,
+                P0,
+                vec![TargetRef::Object(victim)],
+            );
+            let id = ObjectId(state.next_object_id);
+            state.next_object_id += 1;
+            state.stack.push_back(StackEntry {
+                id,
+                source_id: pinger,
+                controller: P0,
+                kind: StackEntryKind::ActivatedAbility {
+                    source_id: pinger,
+                    ability: Box::new(ability),
+                },
+            });
+            assert_eq!(pump_can_save_from_hostile_stack(&state, P1, 1), !deathtouch);
+        }
+    }
+
+    #[test]
+    fn a_pump_is_judged_against_the_damage_of_every_node_that_acts_on_the_creature() {
+        let (runner, victim) = shock_on_stack(3, &[]);
+        let mut state = runner.state().clone();
+        let root = state
+            .stack
+            .back_mut()
+            .and_then(StackEntry::ability_mut)
+            .expect("Shock");
+        let mut again = root.clone();
+        again.targets = Vec::new();
+        let Effect::DealDamage { target, .. } = &mut again.effect else {
+            panic!("Shock deals damage");
+        };
+        *target = TargetFilter::ParentTarget;
+        root.sub_ability = Some(Box::new(again));
+        let entry = state.stack.back().expect("Shock");
+        assert_eq!(
+            engine::game::effects::stack_reach::stack_entry_node_reach(&state, entry)
+                .iter()
+                .filter(|reach| reach.acted_on == vec![TargetRef::Object(victim)])
+                .count(),
+            2,
+            "reach guard: both damage nodes act on the creature"
+        );
+        assert!(!pump_can_save_from_hostile_stack(&state, P1, 1));
+        assert!(
+            pump_can_save_from_hostile_stack(&state, P1, 2),
+            "control: 4 damage does not kill it with +2 toughness"
+        );
+    }
+
+    #[test]
+    fn a_three_player_arc_trail_threatens_each_creature_it_damages() {
+        let mut scenario = GameScenario::new_n_player(3, 7);
+        scenario.at_phase(Phase::PreCombatMain);
+        let third = PlayerId(2);
+        let first = scenario.add_creature(third, "First", 2, 2).id();
+        let second = scenario.add_creature(P1, "Second", 1, 1).id();
+        let card = scenario
+            .add_spell_to_hand_from_oracle(P0, "Arc Trail", true, ARC_TRAIL)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 1,
+            })
+            .id();
+        for _ in 0..2 {
+            scenario.add_basic_land(P0, engine::types::mana::ManaColor::Red);
+        }
+        let mut runner = scenario.build();
+        runner.cast(card).target_objects(&[first, second]).commit();
+        let state = runner.state();
+        assert_eq!(state.players.len(), 3, "reach guard: three players");
+        assert_eq!(
+            state
+                .stack
+                .back()
+                .and_then(|e| e.ability())
+                .map(|root| root.targets.clone()),
+            Some(vec![TargetRef::Object(first)]),
+            "reach guard: the root aims only at the third player's creature"
+        );
+        assert!(will_target_die_from_stack(state, second));
+        assert!(pump_can_save_from_hostile_stack(state, P1, 1));
+        assert!(pump_can_save_from_hostile_stack(state, third, 1));
+    }
+
+    const MURDER: &str = "Destroy target creature.";
+    const RECKLESS_EMBERMAGE: &str =
+        "{1}{R}: This creature deals 1 damage to any target and 1 damage to itself.";
+    const PSIONIC_ENTITY: &str =
+        "{T}: This creature deals 2 damage to any target and 3 damage to itself.";
+
+    /// P0 casts each of `spells` (name, Oracle text) at P1's creature with
+    /// toughness `toughness`, each spell its own stack entry.
+    fn spells_at_one_creature(toughness: i32, spells: &[(&str, &str)]) -> (GameRunner, ObjectId) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let victim = scenario.add_creature(P1, "Victim", 2, toughness).id();
+        let ids: Vec<ObjectId> = spells
+            .iter()
+            .map(|(name, text)| {
+                scenario
+                    .add_spell_to_hand_from_oracle(P0, name, true, text)
+                    .with_mana_cost(ManaCost::generic(1))
+                    .id()
+            })
+            .collect();
+        for _ in spells {
+            scenario.add_basic_land(P0, engine::types::mana::ManaColor::Red);
+        }
+        let mut runner = scenario.build();
+        for id in ids {
+            runner.cast(id).target_object(victim).commit();
+        }
+        (runner, victim)
+    }
+
+    /// Puts `source`'s first ability on the stack under `controller`, aimed at
+    /// `targets`.
+    fn activate_first_ability(
+        state: &mut GameState,
+        source: ObjectId,
+        controller: PlayerId,
+        targets: Vec<TargetRef>,
+    ) {
+        let ability = engine::game::ability_utils::build_resolved_from_def_with_targets(
+            &state.objects[&source].abilities[0],
+            source,
+            controller,
+            targets,
+        );
+        let id = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        state.stack.push_back(StackEntry {
+            id,
+            source_id: source,
+            controller,
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: source,
+                ability: Box::new(ability),
+            },
+        });
+    }
+
+    #[test]
+    fn a_pump_is_judged_against_the_damage_of_every_stack_entry_that_acts_on_the_creature() {
+        let (runner, victim) = spells_at_one_creature(3, &[("Shock", SHOCK), ("Shock", SHOCK)]);
+        let state = runner.state();
+        assert!(
+            state.stack.len() == 2
+                && state.stack.iter().all(|entry| {
+                    engine::game::effects::stack_reach::stack_entry_node_reach(state, entry)
+                        .iter()
+                        .any(|reach| reach.acted_on == vec![TargetRef::Object(victim)])
+                }),
+            "reach guard: each Shock is its own stack entry acting on the creature"
+        );
+        assert!(will_target_die_from_stack(state, victim));
+        assert!(!pump_can_save_from_hostile_stack(state, P1, 1));
+        assert!(pump_can_save_from_hostile_stack(state, P1, 2));
+        assert!(pump_can_save_from_hostile_stack(state, P1, 3));
+
+        let (runner, _) = spells_at_one_creature(2, &[("Murder", MURDER), ("Shock", SHOCK)]);
+        assert!(!pump_can_save_from_hostile_stack(runner.state(), P1, 3));
+    }
+
+    #[test]
+    fn damage_from_an_entry_of_the_creatures_controller_counts_toward_the_pump() {
+        // P1's Reckless Embermage pings P0 and itself; P0's Prodigal Pyromancer
+        // pings the Embermage.
+        for embermage_activated in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let embermage = scenario
+                .add_creature_from_oracle(P1, "Reckless Embermage", 2, 2, RECKLESS_EMBERMAGE)
+                .id();
+            let pyromancer = scenario
+                .add_creature_from_oracle(P0, "Prodigal Pyromancer", 1, 1, PRODIGAL_PYROMANCER)
+                .id();
+            let mut state = scenario.build().state().clone();
+            if embermage_activated {
+                activate_first_ability(&mut state, embermage, P1, vec![TargetRef::Player(P0)]);
+            }
+            activate_first_ability(
+                &mut state,
+                pyromancer,
+                P0,
+                vec![TargetRef::Object(embermage)],
+            );
+            assert_eq!(
+                pump_can_save_from_hostile_stack(&state, P1, 1),
+                embermage_activated
+            );
+        }
+    }
+
+    #[test]
+    fn damage_the_creatures_protection_prevents_is_not_lethal() {
+        // P1's Psionic Entity (blue) deals 2 damage to P0 and 3 damage to itself.
+        for protected in [false, true] {
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let entity = {
+                let mut builder =
+                    scenario.add_creature_from_oracle(P1, "Psionic Entity", 2, 2, PSIONIC_ENTITY);
+                builder.with_color(vec![engine::types::mana::ManaColor::Blue]);
+                if protected {
+                    builder.with_keyword(Keyword::Protection(
+                        engine::types::keywords::ProtectionTarget::Color(
+                            engine::types::mana::ManaColor::Blue,
+                        ),
+                    ));
+                }
+                builder.id()
+            };
+            let mut state = scenario.build().state().clone();
+            activate_first_ability(&mut state, entity, P1, vec![TargetRef::Player(P0)]);
+            let entry = state.stack.back().expect("Psionic Entity's ability");
+            assert!(
+                engine::game::effects::stack_reach::stack_entry_node_reach(&state, entry)
+                    .iter()
+                    .any(|reach| reach.acted_on == vec![TargetRef::Object(entity)]),
+                "reach guard: the 3-damage node acts on the Entity"
+            );
+            assert_eq!(will_target_die_from_stack(&state, entity), !protected);
+            assert_eq!(pump_can_save_from_hostile_stack(&state, P1, 2), !protected);
+        }
+    }
+
+    const CLOUDSHIFT: &str = "Exile target creature you control, then return that card to the battlefield under your control.";
+    const OTHERWORLDLY_JOURNEY: &str = "Exile target creature. At the beginning of the next end step, return that card to the battlefield under its owner's control with a +1/+1 counter on it.";
+    const GIANT_GROWTH: &str = "Target creature gets +3/+3 until end of turn.";
+    const NO_KEYWORDS: &[&str] = &[];
+    const UNSUMMON: &str = "Return target creature to its owner's hand.";
+
+    /// Gives `caster` priority, then casts `spell` at `target`.
+    fn cast_at(runner: &mut GameRunner, caster: PlayerId, spell: ObjectId, target: ObjectId) {
+        let state = runner.state_mut();
+        state.priority_player = caster;
+        state.waiting_for = WaitingFor::Priority { player: caster };
+        runner.cast(spell).target_object(target).commit();
+    }
+
+    /// Each of `spells` (caster, name, MTGJSON keyword names, Oracle text) cast
+    /// in order at P1's 2/2 with `victim_keywords`, each its own stack entry,
+    /// then, when `pumped`, P1's Giant Growth at the 2/2 on top of them.
+    /// Returns the board before the Giant Growth and the zone the 2/2 is in
+    /// once the stack has resolved.
+    fn spells_then_giant_growth(
+        spells: &[(PlayerId, &str, &[&str], &str)],
+        victim_keywords: &[Keyword],
+        pumped: bool,
+    ) -> (GameState, Zone) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let victim = {
+            let mut builder = scenario.add_creature(P1, "Victim", 2, 2);
+            for keyword in victim_keywords {
+                builder.with_keyword(keyword.clone());
+            }
+            builder.id()
+        };
+        let ids: Vec<(PlayerId, ObjectId)> = spells
+            .iter()
+            .map(|(caster, name, keyword_names, text)| {
+                let id = scenario
+                    .add_spell_to_hand(*caster, name, true)
+                    .from_oracle_text_with_keywords(keyword_names, text)
+                    .with_mana_cost(ManaCost::zero())
+                    .id();
+                (*caster, id)
+            })
+            .collect();
+        let growth = scenario
+            .add_spell_to_hand_from_oracle(P1, "Giant Growth", true, GIANT_GROWTH)
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let mut runner = scenario.build();
+        for (caster, id) in ids {
+            cast_at(&mut runner, caster, id, victim);
+        }
+        let board = runner.state().clone();
+        assert!(
+            board.stack.len() == spells.len()
+                && board.stack.iter().all(|entry| {
+                    engine::game::effects::stack_reach::stack_entry_node_reach(&board, entry)
+                        .iter()
+                        .any(|reach| reach.acted_on == vec![TargetRef::Object(victim)])
+                }),
+            "reach guard: each spell is its own stack entry acting on the 2/2"
+        );
+        if pumped {
+            cast_at(&mut runner, P1, growth, victim);
+        }
+        runner.advance_until_stack_empty();
+        let state = runner.state();
+        assert!(state.stack.is_empty(), "the stack resolved");
+        let zones: Vec<Zone> = state
+            .objects
+            .values()
+            .filter(|object| object.name == "Victim")
+            .map(|object| object.zone)
+            .collect();
+        let [zone] = zones[..] else {
+            panic!("one Victim, found in {zones:?}");
+        };
+        (board, zone)
+    }
+
+    /// Whether, once the stack has resolved, P1's 2/2 with `victim_keywords`
+    /// is in the graveyard without the Giant Growth and elsewhere with it,
+    /// paired with the board before the Giant Growth.
+    fn giant_growth_saves_the_two_two(
+        spells: &[(PlayerId, &str, &[&str], &str)],
+        victim_keywords: &[Keyword],
+    ) -> (bool, GameState) {
+        let (board, unpumped) = spells_then_giant_growth(spells, victim_keywords, false);
+        let (_, pumped) = spells_then_giant_growth(spells, victim_keywords, true);
+        (
+            unpumped == Zone::Graveyard && pumped != Zone::Graveyard,
+            board,
+        )
+    }
+
+    #[test]
+    fn a_pump_is_judged_against_the_damage_that_resolves_before_a_zone_change() {
+        for zone_change in [
+            (P1, "Cloudshift", NO_KEYWORDS, CLOUDSHIFT),
+            (
+                P0,
+                "Otherworldly Journey",
+                NO_KEYWORDS,
+                OTHERWORLDLY_JOURNEY,
+            ),
+            (P0, "Unsummon", NO_KEYWORDS, UNSUMMON),
+        ] {
+            let (saves, board) = giant_growth_saves_the_two_two(
+                &[zone_change, (P0, "Shock", NO_KEYWORDS, SHOCK)],
+                &[],
+            );
+            assert!(saves, "engine: {}, then Shock", zone_change.1);
+            assert_eq!(pump_can_save_from_hostile_stack(&board, P1, 3), saves);
+        }
+    }
+
+    #[test]
+    fn damage_below_a_zone_change_leaves_the_pump_nothing_to_save() {
+        let (saves, board) = giant_growth_saves_the_two_two(
+            &[
+                (P0, "Shock", NO_KEYWORDS, SHOCK),
+                (P1, "Cloudshift", NO_KEYWORDS, CLOUDSHIFT),
+            ],
+            &[],
+        );
+        assert!(!saves, "engine: Shock, then Cloudshift");
+        assert_eq!(pump_can_save_from_hostile_stack(&board, P1, 3), saves);
+    }
+
+    #[test]
+    fn a_pump_saves_nothing_from_a_destroy_above_or_below_the_damage() {
+        for spells in [
+            [
+                (P0, "Murder", NO_KEYWORDS, MURDER),
+                (P0, "Shock", NO_KEYWORDS, SHOCK),
+            ],
+            [
+                (P0, "Shock", NO_KEYWORDS, SHOCK),
+                (P0, "Murder", NO_KEYWORDS, MURDER),
+            ],
+        ] {
+            let (saves, board) = giant_growth_saves_the_two_two(&spells, &[]);
+            assert!(!saves, "engine: {}, then {}", spells[0].1, spells[1].1);
+            assert_eq!(pump_can_save_from_hostile_stack(&board, P1, 3), saves);
+        }
+    }
+
+    const PUNCTURE_BLAST: &str = "Wither (This deals damage to creatures in the form of -1/-1 counters.)\nPuncture Blast deals 3 damage to any target.";
+
+    #[test]
+    fn a_pump_is_judged_past_a_destroy_that_cannot_destroy_the_creature() {
+        for (victim_keywords, indestructible) in
+            [(&[Keyword::Indestructible][..], true), (&[][..], false)]
+        {
+            for spells in [
+                [
+                    (P0, "Murder", NO_KEYWORDS, MURDER),
+                    (P0, "Puncture Blast", &["Wither"][..], PUNCTURE_BLAST),
+                ],
+                [
+                    (P0, "Puncture Blast", &["Wither"][..], PUNCTURE_BLAST),
+                    (P0, "Murder", NO_KEYWORDS, MURDER),
+                ],
+            ] {
+                let (saves, board) = giant_growth_saves_the_two_two(&spells, victim_keywords);
+                assert_eq!(
+                    saves, indestructible,
+                    "engine: {}, then {}, indestructible {indestructible}",
+                    spells[0].1, spells[1].1
+                );
+                assert_eq!(pump_can_save_from_hostile_stack(&board, P1, 3), saves);
+            }
+        }
+    }
+
+    #[test]
+    fn a_pump_is_judged_in_resolution_order_among_landfall_triggers_without_reading_their_reach() {
+        use crate::test_support::{reading_with_reach_count, with_landfall_triggers};
+        for (spells, engine_saves) in [
+            (
+                [
+                    (P0, "Unsummon", NO_KEYWORDS, UNSUMMON),
+                    (P0, "Shock", NO_KEYWORDS, SHOCK),
+                ],
+                true,
+            ),
+            (
+                [
+                    (P0, "Shock", NO_KEYWORDS, SHOCK),
+                    (P1, "Cloudshift", NO_KEYWORDS, CLOUDSHIFT),
+                ],
+                false,
+            ),
+        ] {
+            let (saves, board) = giant_growth_saves_the_two_two(&spells, &[]);
+            assert_eq!(
+                saves, engine_saves,
+                "engine: {}, then {}",
+                spells[0].1, spells[1].1
+            );
+            // A landfall trigger below, between and above the two spells.
+            let landfall = with_landfall_triggers(&board, P0);
+            let (answer, builds) =
+                reading_with_reach_count(|| pump_can_save_from_hostile_stack(&board, P1, 3));
+            assert_eq!(answer, saves);
+            assert!(builds > 0, "reach guard: the spells' reach is read");
+            assert_eq!(
+                reading_with_reach_count(|| pump_can_save_from_hostile_stack(&landfall, P1, 3)),
+                (saves, builds),
+                "the same answer, without reading the triggers' reach"
+            );
+        }
+    }
+
+    const CURSECLOTH_WRAPPINGS: &str = "Zombies you control get +1/+1.\n{T}: Target creature card in your graveyard gains embalm until end of turn. The embalm cost is equal to its mana cost. (Exile that card and pay its embalm cost: Create a token that's a copy of it, except it's a white Zombie in addition to its other types and has no mana cost. Embalm only as a sorcery.)";
+
+    const CREMATE: &str = "Exile target card from a graveyard.\nDraw a card.";
+
+    /// P1's Shock kills P0's 2/2 "Victim" on a board `setup` adds to. Returns
+    /// the runner once the stack has resolved, the 2/2's card in P0's
+    /// graveyard and what `setup` returned.
+    fn ai_creature_card_dead_to_shock<T>(
+        setup: impl FnOnce(&mut GameScenario) -> T,
+    ) -> (GameRunner, ObjectId, T) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let victim = scenario.add_creature(P0, "Victim", 2, 2).id();
+        let shock = scenario
+            .add_spell_to_hand_from_oracle(P1, "Shock", true, SHOCK)
+            .with_mana_cost(ManaCost::zero())
+            .id();
+        let value = setup(&mut scenario);
+        let mut runner = scenario.build();
+        cast_at(&mut runner, P1, shock, victim);
+        runner.advance_until_stack_empty();
+        let card = runner
+            .state()
+            .objects
+            .values()
+            .find(|object| {
+                object.name == "Victim" && object.owner == P0 && object.zone == Zone::Graveyard
+            })
+            .map(|object| object.id)
+            .expect("the 2/2 died to the Shock");
+        // The 2 damage it died with. The engine keeps it on the card today;
+        // setting it keeps this a hostile fixture if the engine later clears
+        // damage when a card leaves the battlefield.
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&card)
+            .expect("the card")
+            .damage_marked = 2;
+        (runner, card, value)
+    }
+
+    #[test]
+    fn a_pump_cannot_save_an_ai_creature_card_off_the_battlefield() {
+        use crate::test_support::{reading_with_reach_count, with_landfall_triggers};
+        // P1's Shock killed P0's 2/2. P0's Cursecloth Wrappings, whose
+        // ability removes and damages nothing, or P1's Cremate, which exiles,
+        // then aims at its card.
+        let (mut runner, card, (wrappings, cremate, growth)) =
+            ai_creature_card_dead_to_shock(|scenario| {
+                let wrappings = scenario
+                    .add_artifact_from_oracle(P0, "Cursecloth Wrappings", CURSECLOTH_WRAPPINGS)
+                    .id();
+                let cremate = scenario
+                    .add_spell_to_hand_from_oracle(P1, "Cremate", true, CREMATE)
+                    .with_mana_cost(ManaCost::zero())
+                    .id();
+                let growth = scenario
+                    .add_spell_to_hand_from_oracle(P0, "Giant Growth", true, GIANT_GROWTH)
+                    .with_mana_cost(ManaCost::zero())
+                    .id();
+                // A legal target for the Giant Growth that nothing acts on.
+                scenario.add_creature(P0, "Bystander", 2, 2);
+                (wrappings, cremate, growth)
+            });
+        let mut wrappings_board = runner.state().clone();
+        activate_first_ability(
+            &mut wrappings_board,
+            wrappings,
+            P0,
+            vec![TargetRef::Object(card)],
+        );
+        cast_at(&mut runner, P1, cremate, card);
+        let cremate_board = runner.state().clone();
+
+        for (board, judged) in [(wrappings_board, false), (cremate_board, true)] {
+            let entry = board.stack.back().expect("the entry aimed at the card");
+            let dead = &board.objects[&card];
+            assert!(
+                dead.zone == Zone::Graveyard
+                    && dead.controller == P0
+                    && dead.card_types.core_types.contains(&CoreType::Creature)
+                    && damage_kills(dead, &[], 0)
+                    && !damage_kills(dead, &[], 3),
+                "reach guard: the AI's creature card carries damage that +3 toughness outlasts"
+            );
+            assert!(
+                engine::game::effects::stack_reach::stack_entry_node_reach(&board, entry)
+                    .iter()
+                    .any(|reach| reach.acted_on.contains(&TargetRef::Object(card))),
+                "reach guard: the entry acts on the card (judged {judged})"
+            );
+            assert_eq!(
+                chain_has_effect(entry, removes_or_damages),
+                judged,
+                "reach guard: whether the entry removes or damages"
+            );
+            let landfall = with_landfall_triggers(&board, P1);
+            let (answer, builds) =
+                reading_with_reach_count(|| pump_can_save_from_hostile_stack(&board, P0, 3));
+            // CR 109.2 + CR 400.7: a pump's "target creature" is a creature
+            // permanent, and the card is a new object, so no pump saves it.
+            assert!(!answer, "judged {judged}");
+            if judged {
+                assert!(builds > 0, "reach guard: the Cremate's reach is read");
+            } else {
+                assert_eq!(builds, 0, "no entry removes or damages, so none is read");
+            }
+            assert_eq!(
+                reading_with_reach_count(|| pump_can_save_from_hostile_stack(&landfall, P0, 3)),
+                (false, builds),
+                "the triggers' reach is not read (judged {judged})"
+            );
+            // Nothing of the AI's on the battlefield is threatened and there
+            // is no combat, so the gate's pump-window rule rejects a +3/+3
+            // that ends at cleanup.
+            assert_eq!(
+                gate_cast(&mut board.clone(), growth),
+                GateDecision::Reject,
+                "judged {judged}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pump_is_judged_among_landfall_triggers_after_an_ai_creature_died_to_damage() {
+        use crate::test_support::{reading_with_reach_count, with_landfall_triggers};
+        for toughness in [2, 3] {
+            // P1's Shock killed P0's 2/2; P1's second Shock aims at P0's
+            // 2/`toughness`.
+            let (mut runner, card, (survivor, shock, growth)) =
+                ai_creature_card_dead_to_shock(|scenario| {
+                    let survivor = scenario.add_creature(P0, "Survivor", 2, toughness).id();
+                    let shock = scenario
+                        .add_spell_to_hand_from_oracle(P1, "Shock", true, SHOCK)
+                        .with_mana_cost(ManaCost::zero())
+                        .id();
+                    let growth = scenario
+                        .add_spell_to_hand_from_oracle(P0, "Giant Growth", true, GIANT_GROWTH)
+                        .with_mana_cost(ManaCost::zero())
+                        .id();
+                    (survivor, shock, growth)
+                });
+            cast_at(&mut runner, P1, shock, survivor);
+            let board = runner.state().clone();
+            let dead = &board.objects[&card];
+            assert!(
+                dead.zone == Zone::Graveyard
+                    && dead.controller == P0
+                    && dead.card_types.core_types.contains(&CoreType::Creature)
+                    && damage_kills(dead, &[], 0)
+                    && !damage_kills(dead, &[], 3),
+                "reach guard: the AI's creature card carries damage that +3 toughness outlasts"
+            );
+            let landfall = with_landfall_triggers(&board, P1);
+            let (answer, builds) =
+                reading_with_reach_count(|| pump_can_save_from_hostile_stack(&board, P0, 3));
+            // CR 704.5g: the Shock's 2 damage is lethal to toughness 2 but not
+            // to 2 + 3, and not lethal to toughness 3.
+            assert_eq!(answer, toughness == 2, "toughness {toughness}");
+            assert!(builds > 0, "reach guard: the Shock's reach is read");
+            assert_eq!(
+                reading_with_reach_count(|| pump_can_save_from_hostile_stack(&landfall, P0, 3)),
+                (answer, builds),
+                "the same answer, without reading the triggers' reach (toughness {toughness})"
+            );
+            let decision = gate_cast(&mut board.clone(), growth);
+            if toughness == 2 {
+                assert_ne!(decision, GateDecision::Reject, "the pump saves the 2/2");
+            } else {
+                assert_eq!(decision, GateDecision::Reject, "the 2/3 needs no saving");
+            }
+        }
+    }
+
+    #[test]
+    fn a_battlefield_ai_creature_carrying_lethal_damage_is_judged_alike_whichever_entry_acts_on_it()
+    {
+        use crate::test_support::{reading_with_reach_count, with_landfall_triggers};
+        // P1's 2/2 with one spell at it, then 2 damage marked on it: the state
+        // the engine leaves when its state-based-action check stops at its
+        // iteration cap with lethal damage still marked. CR 704.3 + CR 117.5
+        // forbid it, so the answer is not derived from the rules; this pins
+        // that skipping entries does not change it.
+        let lethal_board = |caster: PlayerId, name: &str, text: &str, judged: bool| {
+            let (mut board, _) =
+                spells_then_giant_growth(&[(caster, name, NO_KEYWORDS, text)], &[], false);
+            let victim = board
+                .objects
+                .values()
+                .find(|object| object.name == "Victim" && object.zone == Zone::Battlefield)
+                .map(|object| object.id)
+                .expect("the 2/2");
+            board
+                .objects
+                .get_mut(&victim)
+                .expect("the 2/2")
+                .damage_marked = 2;
+            let creature = &board.objects[&victim];
+            assert!(
+                creature.zone == Zone::Battlefield
+                    && creature.is_phased_in()
+                    && creature.controller == P1
+                    && creature.card_types.core_types.contains(&CoreType::Creature)
+                    && damage_kills(creature, &[], 0)
+                    && !damage_kills(creature, &[], 3),
+                "reach guard: the AI's creature carries lethal damage that +3 toughness outlasts"
+            );
+            let entry = board.stack.back().expect("the spell");
+            assert_eq!(
+                chain_has_effect(entry, removes_or_damages),
+                judged,
+                "reach guard: whether {name} removes or damages"
+            );
+            board
+        };
+        let growth_board = lethal_board(P1, "Giant Growth", GIANT_GROWTH, false);
+        let unsummon_board = lethal_board(P0, "Unsummon", UNSUMMON, true);
+        assert_eq!(
+            pump_can_save_from_hostile_stack(&growth_board, P1, 3),
+            pump_can_save_from_hostile_stack(&unsummon_board, P1, 3),
+            "the Unsummon ends the read, so marked damage alone decides both"
+        );
+        let landfall = with_landfall_triggers(&growth_board, P0);
+        let (answer, builds) =
+            reading_with_reach_count(|| pump_can_save_from_hostile_stack(&growth_board, P1, 3));
+        let (landfall_answer, landfall_builds) =
+            reading_with_reach_count(|| pump_can_save_from_hostile_stack(&landfall, P1, 3));
+        assert_eq!(landfall_answer, answer);
+        assert!(
+            landfall_builds > builds,
+            "every entry's reach is read while the creature carries lethal damage \
+             ({landfall_builds} vs {builds})"
+        );
+    }
+
+    const GHYRSON_STARN: &str = "Ward {2} (Whenever this creature becomes the target of a spell or ability an opponent controls, counter it unless that player pays {2}.)\nThree Autostubs — Whenever another source you control deals exactly 1 damage to a permanent or player, Ghyrson Starn deals 2 damage to that permanent or player.";
+    const HORNET_STING: &str = "Hornet Sting deals 1 damage to any target.";
+    const REALITY_RIPPLE: &str = "Target artifact, creature, or land phases out. (While it's phased out, it's treated as though it doesn't exist. It phases in before its controller untaps during their next untap step.)";
+
+    #[test]
+    fn a_pump_cannot_save_a_phased_out_ai_creature() {
+        use crate::test_support::{reading_with_reach_count, with_landfall_triggers};
+        for lethal in [false, true] {
+            // P1's Hornet Sting deals 1 damage to P0's 3/3 and P1's Ghyrson
+            // Starn triggers on it.
+            let mut scenario = GameScenario::new();
+            scenario.at_phase(Phase::PreCombatMain);
+            let victim = scenario.add_creature(P0, "Victim", 3, 3).id();
+            // A legal target for the Giant Growth that nothing acts on.
+            scenario.add_creature(P0, "Bystander", 2, 2);
+            scenario
+                .add_creature(P1, "Ghyrson Starn, Kelermorph", 3, 2)
+                .from_oracle_text_with_keywords(&["Three Autostubs", "Ward"], GHYRSON_STARN);
+            let sting = scenario
+                .add_spell_to_hand_from_oracle(P1, "Hornet Sting", true, HORNET_STING)
+                .with_mana_cost(ManaCost::zero())
+                .id();
+            let ripple = scenario
+                .add_spell_to_hand_from_oracle(P0, "Reality Ripple", true, REALITY_RIPPLE)
+                .with_mana_cost(ManaCost::zero())
+                .id();
+            let growth = scenario
+                .add_spell_to_hand_from_oracle(P0, "Giant Growth", true, GIANT_GROWTH)
+                .with_mana_cost(ManaCost::zero())
+                .id();
+            let mut runner = scenario.build();
+            cast_at(&mut runner, P1, sting, victim);
+            for _ in 0..4 {
+                if runner.state().stack.back().is_some_and(|entry| {
+                    matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
+                }) {
+                    break;
+                }
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("P1 and P0 pass priority");
+            }
+            let trigger_acts_on_victim = |board: &GameState| {
+                let entry = board.stack.back().expect("Ghyrson Starn's trigger");
+                matches!(entry.kind, StackEntryKind::TriggeredAbility { .. })
+                    && entry.controller == P1
+                    && chain_has_effect(entry, removes_or_damages)
+                    && engine::game::effects::stack_reach::stack_entry_node_reach(board, entry)
+                        .iter()
+                        .any(|reach| reach.acted_on == vec![TargetRef::Object(victim)])
+            };
+            // Control: phased in, the 3/3 dies to the trigger's 2 damage on
+            // top of the Sting's 1 (CR 704.5g), and +3 toughness outlasts it.
+            let phased_in = runner.state().clone();
+            assert!(
+                trigger_acts_on_victim(&phased_in),
+                "reach guard: P1's trigger acts on the 3/3"
+            );
+            assert!(pump_can_save_from_hostile_stack(&phased_in, P0, 3));
+            assert_ne!(
+                gate_cast(&mut phased_in.clone(), growth),
+                GateDecision::Reject,
+                "the pump saves the phased-in 3/3"
+            );
+            // P0's Reality Ripple phases the 3/3 out with the trigger waiting.
+            cast_at(&mut runner, P0, ripple, victim);
+            runner.resolve_top();
+            if lethal {
+                // Lethal damage marked on the phased-out 3/3.
+                runner
+                    .state_mut()
+                    .objects
+                    .get_mut(&victim)
+                    .expect("the 3/3")
+                    .damage_marked = 3;
+            }
+            let board = runner.state().clone();
+            let creature = &board.objects[&victim];
+            assert!(
+                creature.zone == Zone::Battlefield
+                    && !creature.is_phased_in()
+                    && creature.controller == P0
+                    && creature.card_types.core_types.contains(&CoreType::Creature)
+                    && damage_kills(creature, &[], 0) == lethal
+                    && !damage_kills(creature, &[], 3),
+                "reach guard: the AI's phased-out 3/3 (lethal damage marked: {lethal})"
+            );
+            assert!(
+                trigger_acts_on_victim(&board),
+                "reach guard: the trigger still acts on the phased-out 3/3"
+            );
+            let (answer, builds) =
+                reading_with_reach_count(|| pump_can_save_from_hostile_stack(&board, P0, 3));
+            // CR 702.26b: a phased-out creature is treated as though it does
+            // not exist, so no pump saves it.
+            assert!(!answer, "lethal {lethal}");
+            assert!(builds > 0, "reach guard: the trigger's reach is read");
+            assert_eq!(
+                reading_with_reach_count(|| pump_can_save_from_hostile_stack(
+                    &with_landfall_triggers(&board, P1),
+                    P0,
+                    3
+                )),
+                (false, builds),
+                "the triggers' reach is not read (lethal {lethal})"
+            );
+            // Nothing of the AI's on the battlefield is threatened and there
+            // is no combat, so the gate's pump-window rule rejects a +3/+3
+            // that ends at cleanup.
+            assert_eq!(
+                gate_cast(&mut board.clone(), growth),
+                GateDecision::Reject,
+                "lethal {lethal}"
+            );
+        }
     }
 }

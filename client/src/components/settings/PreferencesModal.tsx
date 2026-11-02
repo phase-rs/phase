@@ -7,7 +7,7 @@ import {
   type RefObject,
 } from "react";
 import { Trans, useTranslation } from "react-i18next";
-import type { TFunction } from "i18next";
+import type { ParseKeys, TFunction } from "i18next";
 
 import { audioManager } from "../../audio/AudioManager.ts";
 import { cacheThemeManifest, clearThemeCache } from "../../audio/audioCache.ts";
@@ -124,8 +124,8 @@ export type SettingsTabId = (typeof SETTINGS_TABS)[number]["id"];
  *  for the frontend-authored group/option labels; battlefield and plain
  *  background labels come from engine/asset modules and stay raw. */
 type BoardBackgroundGroup = {
-  labelKey: string;
-  options: { value: string; labelKey?: string; label?: string }[];
+  labelKey: ParseKeys<"settings">;
+  options: { value: string; labelKey?: ParseKeys<"settings">; label?: string }[];
 };
 const BOARD_BACKGROUND_GROUPS: BoardBackgroundGroup[] = [
   {
@@ -162,7 +162,7 @@ export function PreferencesModal({
   highlight,
   returnFocusRef,
 }: PreferencesModalProps) {
-  const { t } = useTranslation("settings");
+  const { t } = useTranslation(["settings", "common"]);
   const [troubleshootingOpen, setTroubleshootingOpen] = useState(false);
   const troubleshootingButtonRef = useRef<HTMLButtonElement>(null);
   const setFlexEditMode = useUiStore((s) => s.setFlexEditMode);
@@ -198,6 +198,8 @@ export function PreferencesModal({
   const setPriorityAlertVisual = usePreferencesStore((s) => s.setPriorityAlertVisual);
   const setPriorityAlertSound = usePreferencesStore((s) => s.setPriorityAlertSound);
   const setPriorityAlertTitle = usePreferencesStore((s) => s.setPriorityAlertTitle);
+  const unCardActionsEnabled = usePreferencesStore((s) => s.unCardActionsEnabled);
+  const setUnCardActionsEnabled = usePreferencesStore((s) => s.setUnCardActionsEnabled);
   const experimentalTournamentsEnabled = usePreferencesStore((s) => s.experimentalTournamentsEnabled);
   const boardBackground = usePreferencesStore((s) => s.boardBackground);
   const vfxQuality = usePreferencesStore((s) => s.vfxQuality);
@@ -245,6 +247,8 @@ export function PreferencesModal({
   const setCardPreviewHoverDelayMs = usePreferencesStore((s) => s.setCardPreviewHoverDelayMs);
   const showCardPreviewFooter = usePreferencesStore((s) => s.showCardPreviewFooter) ?? true;
   const setShowCardPreviewFooter = usePreferencesStore((s) => s.setShowCardPreviewFooter);
+  const showOwnerPrintings = usePreferencesStore((s) => s.showOwnerPrintings);
+  const setShowOwnerPrintings = usePreferencesStore((s) => s.setShowOwnerPrintings);
   const artChain = usePreferencesStore((s) => s.artChain);
   const addArtChainEntry = usePreferencesStore((s) => s.addArtChainEntry);
   const removeArtChainEntry = usePreferencesStore((s) => s.removeArtChainEntry);
@@ -463,6 +467,17 @@ export function PreferencesModal({
                       {t("gameplay.priorityAlertsDescription", {
                         seconds: ESCALATE_AFTER_MS / 1000,
                       })}
+                    </p>
+                  </SettingGroup>
+
+                  <SettingGroup label={t("gameplay.unCardActions")}>
+                    <ToggleChip
+                      pressed={unCardActionsEnabled}
+                      onToggle={setUnCardActionsEnabled}
+                      label={t("gameplay.unCardActionsToggle")}
+                    />
+                    <p className="mt-2 text-xs leading-relaxed text-slate-400">
+                      {t("gameplay.unCardActionsDescription")}
                     </p>
                   </SettingGroup>
 
@@ -704,6 +719,23 @@ export function PreferencesModal({
                     </label>
                     <p className="mt-1.5 text-xs text-slate-400">
                       {t("visual.cardPreviewFooterHint")}
+                    </p>
+                  </SettingGroup>
+
+                  <SettingGroup label={t("visual.ownerCardArt")}>
+                    <label className="flex min-h-11 items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={showOwnerPrintings}
+                        onChange={(e) => setShowOwnerPrintings(e.target.checked)}
+                        className="accent-cyan-500"
+                      />
+                      <span className="text-sm text-slate-200">
+                        {t("visual.showOwnerPrintings")}
+                      </span>
+                    </label>
+                    <p className="mt-1.5 text-xs text-slate-400">
+                      {t("visual.ownerPrintingsHint")}
                     </p>
                   </SettingGroup>
 
@@ -1550,7 +1582,7 @@ function PacingSection({
   );
 }
 
-const ART_CHAIN_RULE_OPTIONS: { type: ArtChainEntry["type"]; labelKey: string }[] = [
+const ART_CHAIN_RULE_OPTIONS: { type: ArtChainEntry["type"]; labelKey: ParseKeys<"settings"> }[] = [
   { type: "source_printing", labelKey: "artChain.rules.sourcePrinting" },
   { type: "newest", labelKey: "artChain.rules.newest" },
   { type: "oldest", labelKey: "artChain.rules.oldest" },

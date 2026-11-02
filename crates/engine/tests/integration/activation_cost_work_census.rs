@@ -45,6 +45,11 @@ const PAY_ABILITY_COST: &[(&str, &str, Class)] = &[
     ),
     (
         "game/casting_costs.rs",
+        "handle_sacrifice_for_cost",
+        Class::Guarded("SacrificeSource"),
+    ),
+    (
+        "game/casting_costs.rs",
         "finish_counter_cost_payment",
         Class::Guarded("CounterCostTail"),
     ),

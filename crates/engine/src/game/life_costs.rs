@@ -17,7 +17,7 @@
 //! - **CR 119.4** — "If a player pays life, the payment is subtracted from their
 //!   life total; in other words, the player loses that much life." Paying life IS
 //!   losing life, so the deduction routes through
-//!   [`effects::life::apply_life_loss`] which runs the replacement pipeline.
+//!   [`effects::life::try_apply_life_loss`] which runs the replacement pipeline.
 //! - **CR 119.4b** — Players can always pay 0 life, even under a pay-life prohibition.
 //! - **CR 119.8** — "A cost that involves having that player pay life can't be paid."
 //!
@@ -35,7 +35,9 @@
 //!   so a player under a CR 119.7 lock is not a choosable recipient. A gain that a
 //!   replacement reduces to zero CAN still happen and stays payable.
 
-use crate::game::effects::life::{apply_life_gain, apply_life_loss, ReplacementDeferred};
+use crate::game::effects::life::{
+    apply_life_gain, try_apply_life_loss, LifeChangeError, ReplacementDeferred,
+};
 use crate::game::static_abilities::{
     player_cant_pay_life_as_cost, player_has_cant_gain_life, player_has_cant_lose_life,
 };
@@ -66,6 +68,8 @@ pub enum PayLifeCostResult {
         choice_player: PlayerId,
     },
     /// CR 118.3: Player's life total is below `amount` — cost can't be paid.
+    /// Also returned when the post-replacement deduction is not representable
+    /// (life total or lost-this-turn counter overflow).
     InsufficientLife,
     /// CR 119.8 / CR 118.3: A static prohibition makes the cost unpayable.
     Prohibited,
@@ -130,7 +134,7 @@ pub fn can_pay_life_cost(state: &GameState, player: PlayerId, amount: u32) -> bo
 
 /// CR 118.3b + CR 119.4 + CR 119.8: Pay `amount` life from `player` as a cost.
 ///
-/// Routes the life deduction through [`apply_life_loss`] per CR 119.4
+/// Routes the life deduction through [`try_apply_life_loss`] per CR 119.4
 /// ("paying life IS losing life"), so the replacement pipeline and the
 /// `CantLoseLife` short-circuit run consistently with every other life-loss event.
 ///
@@ -139,7 +143,7 @@ pub fn can_pay_life_cost(state: &GameState, player: PlayerId, amount: u32) -> bo
 /// failure signal for their context (cost-payment flag, `EngineError`, etc.).
 ///
 /// Defense in depth: the prohibition check happens here AND inside
-/// `apply_life_loss`. This module is also called from pre-validation
+/// `try_apply_life_loss`. This module is also called from pre-validation
 /// paths which may not have reached the executor yet, so checking at the cost
 /// boundary keeps the result enum accurate.
 pub fn pay_life_as_cost(
@@ -172,9 +176,13 @@ pub fn pay_life_as_cost(
     // the action performed while paying, but the cost is still paid. Preserve
     // the typed paused-substitute outcome so callers cannot confuse a paid
     // cost whose replacement is still resolving with insufficient life.
-    match apply_life_loss(state, player, amount, events) {
+    // Engine representability limit, not a rule: a deduction the engine cannot
+    // record leaves life and counters untouched and is reported through the
+    // existing unpayable variant.
+    match try_apply_life_loss(state, player, amount, events) {
         Ok(_) => PayLifeCostResult::Paid { amount },
-        Err(ReplacementDeferred::ReplacementChoice) => {
+        Err(LifeChangeError::Unrepresentable(_)) => PayLifeCostResult::InsufficientLife,
+        Err(LifeChangeError::Deferred(ReplacementDeferred::ReplacementChoice)) => {
             let WaitingFor::ReplacementChoice {
                 player: choice_player,
                 ..
@@ -187,9 +195,9 @@ pub fn pay_life_as_cost(
                 choice_player: *choice_player,
             }
         }
-        Err(ReplacementDeferred::SubstitutionContinuation { .. }) => {
-            PayLifeCostResult::PaidWithDeferredSubstitution { amount }
-        }
+        Err(LifeChangeError::Deferred(ReplacementDeferred::SubstitutionContinuation {
+            ..
+        })) => PayLifeCostResult::PaidWithDeferredSubstitution { amount },
     }
 }
 
@@ -473,6 +481,44 @@ mod tests {
         assert_eq!(result, PayLifeCostResult::InsufficientLife);
         assert_eq!(state.players[0].life, 2);
         assert!(events.is_empty());
+    }
+
+    /// A payment that is affordable but whose deduction the engine cannot
+    /// record (the lost-this-turn counter would overflow) reports the existing
+    /// unpayable variant and leaves life and counters untouched; one below the
+    /// limit pays normally.
+    #[test]
+    fn pay_life_unrepresentable_deduction_returns_insufficient_unmutated() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life_lost_this_turn = u32::MAX - 1;
+        let mut events = Vec::new();
+
+        assert!(
+            can_pay_life_cost(&state, PlayerId(0), 2),
+            "reach guard: the payment is affordable, so only representability fails"
+        );
+        let result = pay_life_as_cost(&mut state, PlayerId(0), 2, &mut events);
+
+        assert_eq!(result, PayLifeCostResult::InsufficientLife);
+        assert_eq!(state.players[0].life, 20);
+        assert_eq!(state.players[0].life_lost_this_turn, u32::MAX - 1);
+        assert_eq!(state.players[0].life_gained_this_turn, 0);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, GameEvent::LifeChanged { .. })),
+            "no life change may be announced for an unrepresentable payment: {events:?}"
+        );
+        assert_eq!(
+            state.ingress_life_window, None,
+            "the ingress window must be closed after the call"
+        );
+
+        state.players[0].life_lost_this_turn = u32::MAX - 2;
+        let result = pay_life_as_cost(&mut state, PlayerId(0), 2, &mut events);
+        assert_eq!(result, PayLifeCostResult::Paid { amount: 2 });
+        assert_eq!(state.players[0].life, 18);
+        assert_eq!(state.players[0].life_lost_this_turn, u32::MAX);
     }
 
     /// CR 119.8: CantLoseLife → cost can't be paid; life total unchanged.

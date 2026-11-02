@@ -9,6 +9,7 @@ use std::ops::ControlFlow;
 use crate::game::combat::{self, AttackTarget};
 use crate::game::engine::apply_as_current_for_simulation;
 use crate::game::functioning_abilities::active_static_definitions;
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::replacement::{find_applicable_replacements, replacement_registry};
 use crate::types::ability::TargetRef;
 use crate::types::actions::GameAction;

@@ -119,6 +119,7 @@ fn activation_is_refused(runner: &mut GameRunner, id: ObjectId, index: usize) ->
         .act(GameAction::ActivateAbility {
             source_id: id,
             ability_index: index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .is_err()
 }
@@ -682,6 +683,7 @@ fn run_chain_walker(blink_in_response: bool) -> ChainRun {
         .act(GameAction::ActivateAbility {
             source_id: w,
             ability_index: chain_index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("the {T} ability activates");
 

@@ -34,7 +34,8 @@ fn gunzip(gz: &[u8]) -> String {
     flate2::read::GzDecoder::new(gz)
         .read_to_string(&mut json)
         .expect("fixture .json.gz must inflate to UTF-8 JSON");
-    json
+    // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+    engine::types::game_state::record_captured_onsets_json(&json)
 }
 
 /// Load the realistic 4p dump's `["gameState"]` through the REAL production restore chokepoint
@@ -197,8 +198,7 @@ fn sprout_broad_matching_observer_still_vetoes_offer() {
         .objects
         .get_mut(&observer)
         .unwrap()
-        .trigger_definitions
-        .push(trig);
+        .push_printed_trigger(trig);
 
     let outcome_a = drive_sprout_cast(state);
     assert!(

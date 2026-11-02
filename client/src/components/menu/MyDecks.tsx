@@ -272,7 +272,7 @@ interface DeckTileProps {
 }
 
 const DeckTile = memo(function DeckTile({ deckName, isActive, compatibility, onClick, onEdit, onDelete, onAdopt, hideFeedBadge, feedDeckOverride, preconDeckOverride, catalogCandidate, actionsMenu }: DeckTileProps) {
-  const { t } = useTranslation("menu");
+  const { t } = useTranslation(["menu", "common"]);
   const [coverageHovered, setCoverageHovered] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
 
@@ -678,7 +678,7 @@ export function MyDecks({
   onActiveDeckCompatChange,
   aiCatalog,
 }: MyDecksProps) {
-  const { t } = useTranslation("menu");
+  const { t } = useTranslation(["menu", "common"]);
   const effectiveOffline = useEffectiveOffline();
   const [activeTab, setActiveTab] = useState<MyDecksTab>("decks");
   const [deckNames, setDeckNames] = useState<string[]>([]);

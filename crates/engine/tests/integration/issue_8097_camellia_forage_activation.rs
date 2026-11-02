@@ -105,6 +105,7 @@ fn activate(runner: &mut GameRunner, source_id: ObjectId) -> Vec<AbilityCost> {
         .act(GameAction::ActivateAbility {
             source_id,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activation must be legal on this board");
     match result.waiting_for {
@@ -396,7 +397,7 @@ fn camellia_forage_ai_legal_actions_match_engine_branches() {
             action,
             GameAction::ActivateAbility {
                 source_id,
-                ability_index: 0,
+                ability_index: 0, ..
             } if *source_id == camellia
         )),
         "AI must see Camellia's forage activation: {priority_actions:?}"

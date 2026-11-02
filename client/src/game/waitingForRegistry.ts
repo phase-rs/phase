@@ -235,21 +235,38 @@ export function isWaitingForHandled(
   return HANDLED_WAITING_FOR_TYPES.has(waitingFor.type);
 }
 
-/** A localized-reason descriptor: an i18n key plus optional interpolation params. */
+/** A waiting-reason id: the shared suffix of its `status.reason.*` and `status.seat.*` keys. */
+export type WaitingReasonId =
+  | "declareAttackers"
+  | "declareBlockers"
+  | "assigningDamage"
+  | "choosingTargets"
+  | "payingCost"
+  | "mulligan"
+  | "discarding"
+  | "orderingTriggers"
+  | "orderingCostReductions"
+  | "respondingToStack"
+  | "priorityCombat"
+  | "priorityMain"
+  | "priority"
+  | "thinking";
+
+/** A localized-reason descriptor: a reason id plus optional interpolation params. */
 export interface WaitingReason {
-  key: string;
+  id: WaitingReasonId;
   params?: Record<string, unknown>;
 }
 
 /**
- * Map a pending decision to a human-readable *reason* (an i18n key under
- * `status.reason.*`) describing WHY the game is waiting. This is display
+ * Map a pending decision to a human-readable *reason* (an id naming its
+ * `status.reason.*` key) describing WHY the game is waiting. This is display
  * formatting over engine-provided facts (the `waiting_for` variant, plus
  * `phase` / `stack` for the generic priority window) — it labels a state the
  * engine already decided; it never infers game state.
  *
  * Returns `null` when there is nothing to narrate (no pending decision or the
- * game is over). Unknown variants fall through to a generic key so a new
+ * game is over). Unknown variants fall through to a generic reason so a new
  * engine `WaitingFor` variant degrades gracefully instead of breaking the
  * build (coverage of the common variants is asserted in tests, not via a
  * compile-time exhaustiveness check).
@@ -262,19 +279,19 @@ export function waitingForReason(
 
   switch (waitingFor.type) {
     case "DeclareAttackers":
-      return { key: "status.reason.declareAttackers" };
+      return { id: "declareAttackers" };
     case "DeclareBlockers":
-      return { key: "status.reason.declareBlockers" };
+      return { id: "declareBlockers" };
     case "AssignCombatDamage":
     case "AssignBlockerDamage":
     case "DistributeAmong":
-      return { key: "status.reason.assigningDamage" };
+      return { id: "assigningDamage" };
     case "TargetSelection":
     case "TriggerTargetSelection":
     case "MultiTargetSelection":
     case "CopyRetarget":
     case "RetargetChoice":
-      return { key: "status.reason.choosingTargets" };
+      return { id: "choosingTargets" };
     case "ManaPayment":
     case "ManaSourceSelection":
     case "PhyrexianPayment":
@@ -282,22 +299,22 @@ export function waitingForReason(
     case "PayManaAbilityMana":
     case "ManaAbilityManaPayment":
     case "UnlessPayment":
-      return { key: "status.reason.payingCost" };
+      return { id: "payingCost" };
     case "MulliganDecision":
     case "OpeningHandBottomCards":
-      return { key: "status.reason.mulligan" };
+      return { id: "mulligan" };
     case "DiscardToHandSize":
     case "DiscardChoice":
-      return { key: "status.reason.discarding" };
+      return { id: "discarding" };
     case "OrderTriggers":
-      return { key: "status.reason.orderingTriggers" };
+      return { id: "orderingTriggers" };
     case "OrderCostReductions":
-      return { key: "status.reason.orderingCostReductions" };
+      return { id: "orderingCostReductions" };
     case "Priority": {
       // CR 117: the priority window. The engine-provided stack depth and phase
       // tell us what kind of window this is — purely descriptive labeling.
       if ((gameState?.stack.length ?? 0) > 0) {
-        return { key: "status.reason.respondingToStack" };
+        return { id: "respondingToStack" };
       }
       switch (gameState?.phase) {
         case "BeginCombat":
@@ -305,28 +322,15 @@ export function waitingForReason(
         case "DeclareBlockers":
         case "CombatDamage":
         case "EndCombat":
-          return { key: "status.reason.priorityCombat" };
+          return { id: "priorityCombat" };
         case "PreCombatMain":
         case "PostCombatMain":
-          return { key: "status.reason.priorityMain" };
+          return { id: "priorityMain" };
         default:
-          return { key: "status.reason.priority" };
+          return { id: "priority" };
       }
     }
     default:
-      return { key: "status.reason.thinking" };
+      return { id: "thinking" };
   }
-}
-
-/**
- * Map a reason to its standalone seat-badge key. `status.seat.*` mirrors
- * `status.reason.*` key-for-key but holds self-contained chip labels
- * ("Responding") instead of sentence fragments meant for composition
- * ("Your priority — responding to the stack").
- */
-export function seatStatusKey(reason: WaitingReason | null): string {
-  return (reason?.key ?? "status.reason.thinking").replace(
-    "status.reason.",
-    "status.seat.",
-  );
 }

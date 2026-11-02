@@ -1,0 +1,134 @@
+---
+source: crates/phase-parser/src/parser/oracle_ir/snapshot_tests.rs
+assertion_line: 1192
+expression: "&lowered"
+---
+{
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Unimplemented",
+        "name": "unknown",
+        "description": "Haste"
+      },
+      "cost": null,
+      "sub_ability": null,
+      "duration": null,
+      "description": "Haste",
+      "target_prompt": null,
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false
+    },
+    {
+      "kind": "Activated",
+      "effect": {
+        "type": "ChangeZoneAll",
+        "origin": "Exile",
+        "destination": "Hand",
+        "target": {
+          "type": "ExiledBySource"
+        }
+      },
+      "cost": {
+        "type": "Composite",
+        "costs": [
+          {
+            "type": "Mana",
+            "cost": {
+              "type": "Cost",
+              "shards": [
+                "Red"
+              ],
+              "generic": 0
+            }
+          },
+          {
+            "type": "Discard",
+            "count": {
+              "type": "Ref",
+              "qty": {
+                "type": "HandSize",
+                "player": {
+                  "type": "Controller"
+                }
+              }
+            },
+            "filter": null,
+            "random": false,
+            "self_ref": false
+          },
+          {
+            "type": "Sacrifice",
+            "target": {
+              "type": "SelfRef"
+            },
+            "count": 1
+          }
+        ]
+      },
+      "sub_ability": null,
+      "duration": null,
+      "description": "{R}, Discard your hand, Sacrifice ~: Put all cards exiled with ~ into their owners' hands.",
+      "target_prompt": null,
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "Attacks",
+      "execute": {
+        "kind": "Spell",
+        "effect": {
+          "type": "ExileTop",
+          "player": {
+            "type": "Controller"
+          },
+          "count": {
+            "type": "Fixed",
+            "value": 1
+          },
+          "position": {
+            "type": "Top"
+          },
+          "face_down": true
+        },
+        "cost": null,
+        "sub_ability": null,
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": false,
+        "forward_result": false
+      },
+      "valid_card": {
+        "type": "SelfRef"
+      },
+      "origin": null,
+      "destination": null,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "phase": null,
+      "optional": false,
+      "damage_kind": "Any",
+      "secondary": false,
+      "valid_target": null,
+      "valid_source": null,
+      "description": "Whenever ~ attacks, exile the top card of your library face down.",
+      "constraint": null,
+      "condition": null,
+      "batched": false
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "extractedKeywords": []
+}

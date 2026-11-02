@@ -1,3 +1,4 @@
+import type { TFunction } from "i18next";
 import { useCallback, useMemo, useState } from "react";
 import { motion, useReducedMotion } from "framer-motion";
 import { Trans, useTranslation } from "react-i18next";
@@ -5,10 +6,12 @@ import { Trans, useTranslation } from "react-i18next";
 import type { AttackTarget, GameObject, ObjectId, PlayerId } from "../../adapter/types.ts";
 import { getSeatColor } from "../../hooks/useSeatColor.ts";
 import { isUnbounded, pillsOf, useCounterDisplay } from "../../hooks/useCounterDisplay.ts";
+import { formatLifeReadout, lifeReadout } from "../../hooks/useDisplayedLife.ts";
 import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../stores/multiplayerStore.ts";
+import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { formatCounterType } from "../../viewmodel/cardProps.ts";
 import {
   type AttackerStack,
@@ -76,7 +79,7 @@ export function AttackTargetPicker({
   onConfirm,
   onCancel,
 }: AttackTargetPickerProps) {
-  const { t } = useTranslation("game");
+  const { t } = useTranslation(["game", "common"]);
   const [mode, setMode] = useState<"all" | "distribute">("all");
   const [peeked, setPeeked] = useState(false);
   // Every attacker starts in the Unassigned bucket (null). Keyed by attacker
@@ -89,6 +92,7 @@ export function AttackTargetPicker({
 
   const gameState = useGameStore((s) => s.gameState);
   const playerNames = useMultiplayerStore((s) => s.playerNames);
+  const showOwnerPrintings = usePreferencesStore((s) => s.showOwnerPrintings);
   const myId = usePlayerId();
   const hoverProps = useInspectHoverProps();
   const seatOrder = gameState?.seat_order;
@@ -131,8 +135,8 @@ export function AttackTargetPicker({
   // split so identically-named attackers with different legal-target sets are
   // not treated as one interchangeable stack.
   const stacks = useMemo(
-    () => groupAttackers(selectedAttackers, gameState, targetsFor),
-    [selectedAttackers, gameState, targetsFor],
+    () => groupAttackers(selectedAttackers, gameState, showOwnerPrintings, targetsFor),
+    [selectedAttackers, gameState, showOwnerPrintings, targetsFor],
   );
 
   // Distribute-mode columns: the union of legal targets across the selected
@@ -167,13 +171,16 @@ export function AttackTargetPicker({
 
   function getTargetLabel(target: AttackTarget, showProjectedLife = false): string {
     if (target.type === "Player") {
-      const life = gameState?.players.find((player) => player.id === target.data)?.life;
+      const readout = lifeReadout(gameState, target.data);
       const name = target.data === myId
         ? t("attackTargetPicker.you")
         : teamBased && Math.floor(target.data / 2) === Math.floor(myId / 2)
           ? t("attackTargetPicker.ally")
           : playerNames.get(target.data) ?? `Opp ${target.data + 1}`;
-      const currentLife = life ?? 0;
+      if (readout.magnitude === "Unbounded") {
+        return t("attackTargetPicker.playerTarget", { name, life: formatLifeReadout(readout) });
+      }
+      const currentLife = readout.life;
       const assignedDamage = showProjectedLife
         ? (assignedDamageByPlayer.get(target.data) ?? 0)
         : 0;
@@ -817,7 +824,7 @@ function StepperCell({ count, color, canInc, canDec, onDec, onInc, onAll, decTit
 
 interface StackLabelProps {
   stack: AttackerStack;
-  t: ReturnType<typeof useTranslation>["t"];
+  t: TFunction<"game">;
   hoverProps: ReturnType<typeof useInspectHoverProps>;
 }
 

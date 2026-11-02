@@ -4,6 +4,8 @@
 // own decklist text format, which deckParser already consumes. Going through
 // the worker also sidesteps CORS, which both upstreams enforce on browsers.
 
+import type { ParseKeys } from "i18next";
+
 import { getEffectiveOffline } from "../stores/connectivityStore";
 
 // Default points at the official lobby worker in production builds; the dev
@@ -21,14 +23,14 @@ const ARCHIDEKT_HOST_RE = /^(?:www\.)?archidekt\.com$/;
  * Translation keys for frontend-authored errors this module can throw.
  * Distinct from upstream worker error messages, which arrive as JSON bodies
  * and flow through verbatim as `Error.message` (server-authored pass-through,
- * per `client/src/i18n/README.md`). The modal layer uses the `importDeck.`
- * prefix to detect that a thrown message is a translation key vs server text.
+ * per `client/src/i18n/README.md`). The modal layer matches a thrown message
+ * against these values to tell a translation key from server text.
  */
 export const IMPORT_ERROR_KEYS = {
   invalidUrl: "importDeck.errorInvalidUrl",
   offline: "importDeck.errorOffline",
   networkFailure: "importDeck.errorNetworkFailure",
-} as const;
+} as const satisfies Record<string, ParseKeys<"menu">>;
 
 // Users commonly paste URLs without the protocol ("moxfield.com/decks/abc").
 // The WHATWG URL parser requires a scheme, so normalize once at the boundary

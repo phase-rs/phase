@@ -7,9 +7,6 @@
 //!   - Boreal Outrider: "Whenever you cast a creature spell, if {S} of any of
 //!     that spell's colors was spent to cast it, that creature enters with an
 //!     additional +1/+1 counter on it. ({S} is mana from a snow source.)"
-//!   - Torgal, A Fine Hound: "Whenever you cast your first Human creature spell
-//!     each turn, that creature enters with an additional +1/+1 counter on it for
-//!     each Dog and/or Wolf you control." / "{T}: Add one mana of any color."
 //!   - Hosting Season (three paragraphs, below).
 //!   - Dark Intimations (two paragraphs, below).
 //!
@@ -19,13 +16,14 @@
 //!     that permanent or a general subset of permanents.
 //!   - CR 608.2c: instructions are followed in the order written; a later
 //!     instruction refers to what an earlier one produced.
-//!   - CR 603.1: a "When/Whenever …" ability is a triggered ability; Dark
-//!     Intimations' second paragraph is one, left as an explicit gap.
+//!   - CR 603.1: Dark Intimations' second paragraph is a cast trigger whose
+//!     resolution exiles its source and installs a floating entry replacement.
 
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{AbilityDefinition, Effect, TargetFilter};
 use engine::types::counter::CounterType;
+use engine::types::game_state::WaitingFor;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::replacements::ReplacementEvent;
@@ -34,8 +32,6 @@ use engine::types::zones::Zone;
 use engine::types::ObjectId;
 
 const BOREAL_OUTRIDER: &str = "Whenever you cast a creature spell, if {S} of any of that spell's colors was spent to cast it, that creature enters with an additional +1/+1 counter on it. ({S} is mana from a snow source.)";
-
-const TORGAL: &str = "Whenever you cast your first Human creature spell each turn, that creature enters with an additional +1/+1 counter on it for each Dog and/or Wolf you control.\n{T}: Add one mana of any color.";
 
 const HOSTING_SEASON: &str = "While it's October 25th, 2024, whenever you cast your commander, create a token that's a copy of it except it isn't legendary.\nWhile it's October 26th or 27th, 2024, if one or more tokens would be created under your control, instead twice that many tokens are created and each of them enters with a +1/+1 counter on it.\nOn any other date, both abilities apply. (Because why not?)";
 
@@ -167,90 +163,6 @@ fn boreal_outrider_is_an_honest_gap() {
     );
 }
 
-/// Torgal's rider names the Human creature spell its trigger watches. The
-/// trigger head is read faithfully; the body is an honest gap until the floating
-/// replacement can evaluate "Dogs and/or Wolves you control" for its installer.
-/// Torgal itself enters with no counter (its text gives it none). This test
-/// deliberately does not assert what a later Human gets, which would lock the
-/// gap in as behaviour.
-#[test]
-fn torgal_is_an_honest_gap_and_does_not_count_itself() {
-    let parsed = parse_oracle_text(
-        TORGAL,
-        "Torgal, A Fine Hound",
-        &[],
-        &["Creature".to_string()],
-        &["Wolf".to_string()],
-    );
-    let triggers: Vec<_> = parsed
-        .triggers
-        .iter()
-        .filter(|t| t.mode == TriggerMode::SpellCast)
-        .collect();
-    assert_eq!(triggers.len(), 1, "reach guard: {parsed:?}");
-    assert!(
-        matches!(
-            triggers[0].constraint,
-            Some(engine::types::ability::TriggerConstraint::NthSpellThisTurn { n: 1, .. })
-        ),
-        "the first-Human-spell head is read, got {:?}",
-        triggers[0].constraint
-    );
-    assert!(
-        matches!(
-            triggers[0].execute.as_deref().map(|e| e.effect.as_ref()),
-            Some(Effect::Unimplemented { .. })
-        ),
-        "the body is one explicit gap leaf, got {:?}",
-        triggers[0].execute
-    );
-    assert!(
-        parsed.replacements.is_empty(),
-        "got {:?}",
-        parsed.replacements
-    );
-    assert!(
-        triggers[0]
-            .execute
-            .as_deref()
-            .map(chain_effects)
-            .unwrap_or_default()
-            .iter()
-            .all(|effect| !matches!(
-                effect,
-                Effect::AddTargetReplacement { .. }
-                    | Effect::PutCounter { .. }
-                    | Effect::AddPendingETBCounters { .. }
-            )),
-        "no install or put in the trigger body"
-    );
-
-    let cost = || ManaCost::Cost {
-        shards: vec![ManaCostShard::Green],
-        generic: 1,
-    };
-    let pool = || {
-        let mut pool = colorless(1);
-        pool.push(ManaUnit::new(
-            ManaType::Green,
-            ObjectId(0),
-            false,
-            Vec::new(),
-        ));
-        pool
-    };
-    assert_eq!(
-        cast_creature_and_count("Torgal, A Fine Hound", TORGAL, cost(), pool()),
-        0,
-        "Torgal's text gives no counter to Torgal"
-    );
-    assert_eq!(
-        cast_creature_and_count("Test Grower", SELF_COUNTER, cost(), pool()),
-        1,
-        "control"
-    );
-}
-
 /// Hosting Season's second paragraph doubles created tokens and gives each of
 /// THEM a counter; it is not a counter on Hosting Season. The line is not
 /// claimed by the enters-with parser or by the token parser behind it, so it
@@ -348,16 +260,10 @@ fn loyalty_of(state: &engine::types::game_state::GameState, name: &str) -> u32 {
         .unwrap_or(0)
 }
 
-/// Dark Intimations' second paragraph ("When you cast a Bolas planeswalker
-/// spell, exile this card from your graveyard. That planeswalker enters with an
-/// additional loyalty counter on it.") is one honest gap: the card parses to its
-/// first paragraph plus exactly one `Unimplemented` ability for the second, with
-/// no trigger and no replacement. At runtime the first paragraph resolves as
-/// printed; afterwards a Bolas planeswalker cast with the card in the graveyard
-/// enters with only its printed loyalty, and the card stays in the graveyard —
-/// no self-exile trigger and no loyalty rider are ever published on their own.
+/// CR 113.6m + CR 608.2c: after the printed first paragraph resolves, the
+/// graveyard-only cast trigger exiles Dark Intimations, then installs the rider.
 #[test]
-fn dark_intimations_second_paragraph_is_an_honest_gap() {
+fn dark_intimations_self_exiles_and_adds_loyalty_after_its_spell_resolves() {
     let parsed = parse_oracle_text(
         DARK_INTIMATIONS,
         "Dark Intimations",
@@ -365,41 +271,33 @@ fn dark_intimations_second_paragraph_is_an_honest_gap() {
         &["Sorcery".to_string()],
         &[],
     );
-    assert!(parsed.triggers.is_empty(), "got {:?}", parsed.triggers);
+    assert_eq!(parsed.triggers.len(), 1, "{parsed:?}");
+    assert_eq!(parsed.triggers[0].mode, TriggerMode::SpellCast);
+    assert_eq!(parsed.triggers[0].trigger_zones, vec![Zone::Graveyard]);
+    assert!(parsed.replacements.is_empty(), "{parsed:?}");
     assert!(
-        parsed.replacements.is_empty(),
-        "got {:?}",
-        parsed.replacements
+        all_effects(&parsed)
+            .iter()
+            .all(|e| !matches!(e, Effect::Unimplemented { .. })),
+        "{parsed:?}"
     );
-    let gaps: Vec<_> = parsed
-        .abilities
-        .iter()
-        .filter(|def| {
-            chain_effects(def)
-                .iter()
-                .any(|effect| matches!(effect, Effect::Unimplemented { .. }))
-        })
-        .collect();
-    assert_eq!(gaps.len(), 1, "one gap, got {:?}", parsed.abilities);
-    let paragraph_two = DARK_INTIMATIONS
-        .lines()
-        .nth(1)
-        .expect("Dark Intimations has two paragraphs");
-    assert!(
-        matches!(
-            gaps[0].effect.as_ref(),
-            Effect::Unimplemented { description: Some(text), .. } if text == paragraph_two
-        ) && gaps[0].sub_ability.is_none(),
-        "the gap is the whole second paragraph, got {:?}",
-        gaps[0]
-    );
-    assert!(
-        all_effects(&parsed).iter().all(|effect| !matches!(
-            effect,
-            Effect::AddTargetReplacement { .. } | Effect::PutCounter { .. }
-        )),
-        "no install or loyalty placement, got {parsed:?}"
-    );
+    let exile = parsed.triggers[0].execute.as_deref().unwrap();
+    assert!(matches!(
+        exile.effect.as_ref(),
+        Effect::ChangeZone {
+            origin: Some(Zone::Graveyard),
+            destination: Zone::Exile,
+            target: TargetFilter::SelfRef,
+            ..
+        }
+    ));
+    assert!(matches!(
+        exile.sub_ability.as_deref().unwrap().effect.as_ref(),
+        Effect::AddTargetReplacement {
+            target: TargetFilter::None,
+            ..
+        }
+    ));
 
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
@@ -436,26 +334,54 @@ fn dark_intimations_second_paragraph_is_an_honest_gap() {
         Zone::Graveyard,
         "the sorcery resolved"
     );
-    assert!(
-        runner.state().objects[&dark]
-            .trigger_definitions
-            .as_slice()
-            .iter()
-            .all(|entry| entry.definition.mode != TriggerMode::SpellCast),
-        "no cast trigger is registered on the card"
-    );
+    assert!(outcome.state().stack.is_empty());
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().objects[&dark]
+        .trigger_definitions
+        .as_slice()
+        .iter()
+        .any(|entry| entry.definition.mode == TriggerMode::SpellCast));
 
-    let outcome = runner.cast(walker).resolve();
+    runner.cast(walker).commit();
     assert_eq!(
-        loyalty_of(outcome.state(), "Test Bolas Walker"),
-        BOLAS_LOYALTY,
-        "the planeswalker enters with its printed loyalty only"
+        runner.state().stack.len(),
+        2,
+        "cast spell plus graveyard trigger"
+    );
+    assert_eq!(runner.state().objects[&dark].zone, Zone::Graveyard);
+    runner.resolve_top();
+    assert_eq!(
+        runner.state().objects[&dark].zone,
+        Zone::Exile,
+        "exile happens before entry"
+    );
+    assert_eq!(runner.state().objects[&walker].zone, Zone::Stack);
+    runner.advance_until_stack_empty();
+    // CR 306.5b + CR 306.5c: intrinsic four plus one additional loyalty.
+    assert_eq!(
+        loyalty_of(runner.state(), "Test Bolas Walker"),
+        BOLAS_LOYALTY + 1
     );
     assert_eq!(
-        outcome.zone_of(dark),
-        Zone::Graveyard,
-        "the card is not exiled"
+        runner.state().objects[&walker].loyalty,
+        Some(BOLAS_LOYALTY + 1)
     );
+    assert_eq!(
+        runner.state().objects[&walker]
+            .counters
+            .get(&CounterType::Plus1Plus1)
+            .copied()
+            .unwrap_or(0),
+        0
+    );
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
 }
 
 // Synthetic (no corpus member): a keyword-qualified distributive subject.

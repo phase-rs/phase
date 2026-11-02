@@ -173,6 +173,12 @@ pub(super) fn collect_object_targets(
         return from_targets;
     }
 
+    // CR 400.7: a self-reference cannot phase out a later same-ID incarnation.
+    // Explicit targets retain precedence; other filters retain their mass lookup.
+    if matches!(target, TargetFilter::SelfRef) && !ability.self_ref_is_current(state) {
+        return Vec::new();
+    }
+
     // Mass filter — expand against the phased-in battlefield.
     let ctx = FilterContext::from_ability(ability);
     state

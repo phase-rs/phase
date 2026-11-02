@@ -258,7 +258,7 @@ fn answer(b: &mut Board, done: &mut [bool]) {
             !done[k]
                 && (lands[k].is_some()
                     || flat.iter().any(|x| {
-                        matches!(x, GameAction::ActivateAbility { source_id, ability_index }
+                        matches!(x, GameAction::ActivateAbility { source_id, ability_index, .. }
                             if *source_id == source && *ability_index == index)
                     }))
         });
@@ -267,6 +267,7 @@ fn answer(b: &mut Board, done: &mut [bool]) {
             Some(lands[p].clone().unwrap_or(GameAction::ActivateAbility {
                 source_id: b.acts[p].0,
                 ability_index: b.acts[p].1,
+                payment_mode: CastPaymentMode::Auto,
             }))
         } else {
             let fodder_only = |a: &&GameAction| {
@@ -392,6 +393,7 @@ fn drive(row: &Row) -> (bool, String) {
         let action = land_row(c.r.state(), act, &c.hint).unwrap_or(GameAction::ActivateAbility {
             source_id: act.0,
             ability_index: act.1,
+            payment_mode: CastPaymentMode::Auto,
         });
         if step(&mut c.r, action) {
             answer(&mut c, &mut done);
@@ -871,14 +873,17 @@ fn unchanged_boards_read_as_before() {
 const UNCHANGED: &[Row] = &[
     ("t/cryptex", "Cryptex", "{T}, Collect evidence 3: Add one mana of any color. Put an unlock counter on ~.", &[("Hill Giant", G, 'f')], &[], "Llanowar Elves", true, "tt/BF"),
     ("t/master-of-dark-rites", "Master of Dark Rites", "{T}, Sacrifice another creature: Add {B}{B}{B}. Spend this mana only to cast Vampire, Cleric, and/or Demon spells.", &[("Grizzly Bears", B, 'f')], &[], "Vampire Nighthawk", false, "ff/H"),
-    ("t/rubble-rouser", "Rubble Rouser", "{T}, Exile a card from your graveyard: Add {R}. When you do, ~ deals 1 damage to each opponent.", &[("Grizzly Bears", G, 'f')], &[], "Lightning Bolt", true, "ft/H"),
+    // #9812: offered once the bounded reducer witness completes the targeted cast (was ft/H).
+    ("t/rubble-rouser", "Rubble Rouser", "{T}, Exile a card from your graveyard: Add {R}. When you do, ~ deals 1 damage to each opponent.", &[("Grizzly Bears", G, 'f')], &[], "Lightning Bolt", true, "tt/GY"),
     ("t/springjack-pasture", "Springjack Pasture", "{T}, Sacrifice X Goats: Add X mana of any one color. You gain X life.", &[("Mountain Goat", B, 'f')], &[], "Llanowar Elves", false, "ff/H"),
     ("t/thornvault-forager", "Thornvault Forager", "{T}, Forage: Add two mana in any combination of colors.", &[("Hill Giant", G, 'f'), ("Hill Giant", G, 'f'), ("Hill Giant", G, 'f')], &[], "Grizzly Bears", false, "ff/H"),
     ("x/Eldrazi Temple", "Eldrazi Temple", "{T}: Add {C}{C}. Spend this mana only to cast colorless Eldrazi spells or activate abilities of colorless Eldrazi.", &[("Phyrexian Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[], "Glaring Fleshraker", true, "tt/BF"),
     ("x/Rafi, Retro Racer", "Rafi, Retro Racer", "{R}, Sacrifice ~: Each player adds {R}{R}{R}.", &[("Mountain", B, 'p')], &[], "Fearless Halberdier", true, "tt/BF"),
     ("x/Satyr Hedonist", "Satyr Hedonist", "{R}, Sacrifice ~: Add {R}{R}{R}.", &[("Mountain", B, 'p')], &[], "Fearless Halberdier", true, "tt/BF"),
     ("x/Vessel of Volatility", "Vessel of Volatility", "{1}{R}, Sacrifice ~: Add {R}{R}{R}{R}.", &[("Mountain", B, 'p'), ("Wastes", B, 'p')], &[], "Barbarian Horde", true, "tt/BF"),
-    ("e/Archaeomancer's Spade#spellgy", "Archaeomancer's Spade", "{T}: Add {R}{W}. This mana can't be spent to cast spells from your hand.", &[("Ashnod's Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[], "Electric Revelation", true, "ft/GY"),
+    // CR 601.2h: Electric Revelation's "discard a card" can't be paid from an
+    // empty hand, so neither the legality predicate nor the offer admits it.
+    ("e/Archaeomancer's Spade#spellgy", "Archaeomancer's Spade", "{T}: Add {R}{W}. This mana can't be spent to cast spells from your hand.", &[("Ashnod's Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[], "Electric Revelation", false, "ff/GY"),
     ("e/Cloudpost", "Cloudpost", "{T}: Add {C} for each Locus on the battlefield.", &[("Glimmerpost", B, 'p'), ("Phyrexian Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[], "Glaring Fleshraker", true, "tt/BF"),
     ("e/Codsworth, Handy Helper", "Codsworth, Handy Helper", "{T}: Add {W}{W}. Spend this mana only to cast Aura and/or Equipment spells.", &[("Ashnod's Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[], "Suppression Bonds", false, "ff/H"),
     ("e/Elfhame Druid", "Elfhame Druid", "{T}: Add {G}{G}. Spend this mana only to cast kicked spells.", &[("Ashnod's Altar", B, 'a'), ("Grizzly Bears", B, 'f')], &[], "Axebane Beast", false, "ff/H"),
@@ -912,5 +917,6 @@ const UNCHANGED: &[Row] = &[
     ("h/ignus+mountain/bronze-sable", "Grinning Ignus", "{R}, Return ~ to its owner's hand: Add {C}{C}{R}. Activate only as a sorcery.", &[("Mountain", B, 'p')], &[], "Bronze Sable", true, "ft/H"),
     ("m/ignus+mountain/bronze-sable", "Grinning Ignus", "{R}, Return ~ to its owner's hand: Add {C}{C}{R}. Activate only as a sorcery.", &[("Mountain", B, 'p')], &[], "Bronze Sable", true, "ft/H"),
     ("m/Jack-o'-Lantern (2)#membergy", "Jack-o'-Lantern", "{1}, Exile this card from your graveyard: Add one mana of any color.", &[("Wastes", B, 'p')], &[], "Llanowar Elves", true, "ff/H"),
-    ("m/Wizard's Rockets (2)", "Wizard's Rockets", "{X}, {T}, Sacrifice ~: Add X mana in any combination of colors.", &[("Wastes", B, 'p')], &[], "Llanowar Elves", false, "ff/H"),
+    // Oracle-derived reading is "tt/BF" (X=1 from Wastes adds {G}); the end now matches it (BF), while "ff" pins the pre-existing castability gap for sources whose yield is sized by an announced amount.
+    ("m/Wizard's Rockets (2)", "Wizard's Rockets", "{X}, {T}, Sacrifice ~: Add X mana in any combination of colors.", &[("Wastes", B, 'p')], &[], "Llanowar Elves", false, "ff/BF"),
 ];

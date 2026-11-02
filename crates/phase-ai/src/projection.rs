@@ -1260,6 +1260,7 @@ mod tests {
             predicted_winner: Some(PlayerId(1)),
             certificate: engine::analysis::loop_check::LoopCertificate {
                 unbounded: vec![],
+                rising: vec![],
                 win_kind: Some(engine::analysis::loop_check::WinKind::LethalDamage),
                 win_kind_at: None,
                 mandatory: false,
@@ -1269,6 +1270,7 @@ mod tests {
             schema: engine::analysis::decision_template::ShortcutDecisionSchema::default(),
             declaration: None,
             road: engine::analysis::loop_check::OfferRoad::Ring,
+            counted_take: Default::default(),
             period: Default::default(),
         };
 
@@ -1504,6 +1506,7 @@ mod tests {
             player: PlayerId(0),
             total: 0,
             resume_at_resolution_depth: 0,
+            pending_entry: None,
         });
         assert_eq!(
             classify_payment_continuation(&state),
