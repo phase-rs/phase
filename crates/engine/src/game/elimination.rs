@@ -2229,9 +2229,10 @@ pub(super) fn retire_finished_game_resolution(state: &mut GameState) {
     // A resolving spell may already have completed its final part. Its queued
     // triggers still belong to the ended game even after that carrier is gone.
     retire_finished_game_triggers(state);
-    // CR 104.1: no later priority window can present a queued miracle reveal,
-    // including when its drawing spell has already completed its final part.
+    // CR 104.1: no later priority window can present queued miracle reveals or
+    // remaining paradigm offers, even without a live resolution carrier.
     state.pending_miracle_offers.clear();
+    state.pending_paradigm_remaining_offers = None;
     let resolution_live =
         state.resolving_stack_entry.is_some() || !state.resolution_stack.is_empty();
     if !resolution_live {

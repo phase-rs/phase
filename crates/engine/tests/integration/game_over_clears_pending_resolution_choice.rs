@@ -267,6 +267,10 @@ fn assert_resolution_retired(runner: &GameRunner, winner: Option<PlayerId>) {
         state.pending_miracle_offers.is_empty(),
         "a finished game keeps no queued miracle offer"
     );
+    assert!(
+        state.pending_paradigm_remaining_offers.is_none(),
+        "a finished game keeps no remaining paradigm offer"
+    );
     assert_no_parked_resolution_work(state);
     assert_round_trips(runner);
 }
@@ -1850,4 +1854,157 @@ fn an_effect_win_retires_a_miracle_offer_after_the_spell_finishes() {
     assert_eq!(runner.state().objects[&divination].zone, Zone::Graveyard);
     assert!(!carrier_is_live(&runner), "the drawing spell has completed");
     assert_finished_game_retired_its_resolution(&runner, Some(P0));
+}
+
+const DECORUM_DISSERTATION: &str = "Target player draws two cards and loses 2 life.\nParadigm (Then exile this spell. After you first resolve a spell with this name, you may cast a copy of it from exile without paying its mana cost at the beginning of each of your first main phases.)";
+const ECHOCASTING_SYMPOSIUM: &str = "Target player creates a token that's a copy of target creature you control.\nParadigm (Then exile this spell. After you first resolve a spell with this name, you may cast a copy of it from exile without paying its mana cost at the beginning of each of your first main phases.)";
+const ARCHMAGE_EMERITUS: &str =
+    "Magecraft — Whenever you cast or copy an instant or sorcery spell, draw a card.";
+const STORM_KILN_ARTIST: &str = "This creature gets +1/+0 for each artifact you control.\nMagecraft — Whenever you cast or copy an instant or sorcery spell, create a Treasure token. (It's an artifact with \"{T}, Sacrifice this token: Add one mana of any color.\")";
+
+/// Stage the established exiled sources, as in the existing multiple-offer
+/// regression. Accepting/targeting the copy and collecting its Magecraft
+/// observers use public actions; no pending-offer or trigger queue is injected.
+fn paradigm_copy_at_its_observer_order(players: u8) -> (GameRunner, ObjectId) {
+    use engine::game::effects::paradigm::{arm_paradigm, enqueue_offer_if_any};
+
+    let mut scenario = board(players);
+    let source = scenario
+        .add_spell_to_exile(P0, "Decorum Dissertation", false)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black; 2],
+            generic: 3,
+        })
+        .with_subtypes(vec!["Lesson"])
+        .from_oracle_text(DECORUM_DISSERTATION)
+        .id();
+    let remaining = scenario
+        .add_spell_to_exile(P0, "Echocasting Symposium", false)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue; 2],
+            generic: 4,
+        })
+        .with_subtypes(vec!["Lesson"])
+        .from_oracle_text(ECHOCASTING_SYMPOSIUM)
+        .id();
+    scenario
+        .add_creature_from_oracle(P0, "Archmage Emeritus", 2, 2, ARCHMAGE_EMERITUS)
+        .with_subtypes(vec!["Human", "Wizard"])
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue; 2],
+            generic: 2,
+        });
+    scenario
+        .add_creature_from_oracle(P0, "Storm-Kiln Artist", 2, 2, STORM_KILN_ARTIST)
+        .with_subtypes(vec!["Dwarf", "Shaman"])
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Red],
+            generic: 3,
+        });
+    let mut runner = scenario.build();
+    assert!(arm_paradigm(
+        runner.state_mut(),
+        source,
+        P0,
+        "Decorum Dissertation"
+    ));
+    assert!(arm_paradigm(
+        runner.state_mut(),
+        remaining,
+        P0,
+        "Echocasting Symposium"
+    ));
+    assert!(enqueue_offer_if_any(runner.state_mut(), P0));
+    runner.act(GameAction::CastParadigmCopy { source }).unwrap();
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::CopyRetarget { .. }
+    ));
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(engine::types::ability::TargetRef::Player(P1)),
+        })
+        .unwrap();
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::OrderTriggers { .. }),
+        "reach guard: Magecraft observers must pause at ordering: {:?}",
+        runner.state().waiting_for
+    );
+    let pending = runner
+        .state()
+        .pending_paradigm_remaining_offers
+        .as_ref()
+        .expect("the other source is parked while observers are ordered");
+    assert_eq!(pending.player, P0);
+    assert_eq!(pending.offers, vec![remaining]);
+    assert!(
+        !carrier_is_live(&runner),
+        "the copy is announced, not resolving"
+    );
+    (runner, remaining)
+}
+
+/// CR 104.1 + CR 104.3a: no resumed offer is owed after terminal concession.
+#[test]
+fn terminal_concession_retires_remaining_paradigm_offers() {
+    let (mut runner, remaining) = paradigm_copy_at_its_observer_order(2);
+    concede(&mut runner, P1);
+    assert_eq!(runner.state().objects[&remaining].zone, Zone::Exile);
+    assert_finished_game_retired_its_resolution(&runner, Some(P0));
+}
+
+#[test]
+fn sideboarding_retires_remaining_paradigm_offers() {
+    let (mut runner, _) = paradigm_copy_at_its_observer_order(2);
+    runner.state_mut().set_match_config(MatchConfig {
+        match_type: MatchType::Bo3,
+        ..Default::default()
+    });
+    concede(&mut runner, P1);
+    assert_eq!(runner.state().match_phase, MatchPhase::BetweenGames);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::BetweenGamesSideboard { .. }
+    ));
+    assert_resolution_retired(&runner, Some(P0));
+}
+
+/// CR 603.3b: ordering the observers in a continuing game resumes the same
+/// remaining source offer; another player's departure must not discard it.
+#[test]
+fn nonterminal_concession_preserves_remaining_paradigm_offers() {
+    let (mut runner, remaining) = paradigm_copy_at_its_observer_order(3);
+    concede(&mut runner, P2);
+    assert!(runner.state().game_end.is_none());
+    assert_eq!(
+        runner
+            .state()
+            .pending_paradigm_remaining_offers
+            .as_ref()
+            .unwrap()
+            .offers,
+        vec![remaining]
+    );
+    let WaitingFor::OrderTriggers { triggers, .. } = &runner.state().waiting_for else {
+        panic!("the trigger order prompt must survive");
+    };
+    let count = triggers.len();
+    assert!(
+        count >= 2,
+        "both different Magecraft observers require ordering"
+    );
+    runner
+        .act(GameAction::OrderTriggers {
+            order: (0..count).collect(),
+        })
+        .unwrap();
+    assert!(
+        matches!(&runner.state().waiting_for,
+            WaitingFor::CastOffer { player: P0, kind: engine::types::game_state::CastOfferKind::Paradigm { offers } }
+            if offers == &vec![remaining]
+        ),
+        "remaining source must be offered: {:?}",
+        runner.state().waiting_for
+    );
+    assert!(runner.state().pending_paradigm_remaining_offers.is_none());
 }
