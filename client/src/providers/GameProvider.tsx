@@ -47,7 +47,7 @@ import { hostRoom, joinRoom } from "../network/connection";
 import type { BrokerClient } from "../services/brokerClient";
 import { loadP2PSession } from "../services/p2pSession";
 import { loadP2PTerminalResult, type P2PTerminalResult } from "../services/p2pTerminalResult";
-import type { ExpandedDeck, ParsedDeck } from "../services/deckParser";
+import { expandParsedDeck, type ExpandedDeck, type ParsedDeck } from "../services/deckParser";
 import {
   captureSubmissionArtPreferences,
   submitDeckList,
