@@ -58,6 +58,9 @@ fn sage_board(gate_count: usize, phase: Phase) -> SageBoard {
             .with_subtypes(vec!["Gate"]);
     }
     let other_land = scenario.add_basic_land(P0, ManaColor::Green);
+    // Keep two legal recipients even with zero Gates, so the engine must
+    // request a target instead of auto-selecting its sole legal assignment.
+    scenario.add_basic_land(P0, ManaColor::Green);
     let boomerang = scenario
         .add_spell_to_hand_from_oracle(P0, "Boomerang", true, BOOMERANG)
         .with_mana_cost(ManaCost::Cost {
