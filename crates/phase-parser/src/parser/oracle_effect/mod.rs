@@ -36776,10 +36776,6 @@ pub(super) fn def_is_damage_dealer(def: &AbilityDefinition) -> bool {
     )
 }
 
-pub(super) fn def_is_draw(def: &AbilityDefinition) -> bool {
-    matches!(intrinsic_continuation_effect(def), Effect::Draw { .. })
-}
-
 /// Mutable counterpart to `def_is_damage_dealer` — the effect to patch when a
 /// rider binds to the `DamageDealer` role, unwrapping the same `TargetOnly`
 /// head.

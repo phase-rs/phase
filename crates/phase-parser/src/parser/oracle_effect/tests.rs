@@ -46687,10 +46687,9 @@ fn reveal_until_rest_pile_after_intervening_damage_is_absorbed() {
 
 /// CR 701.20a + CR 608.2c + CR 401.4: Erratic Mutation has a pump instruction between
 /// the RevealUntil and "Put all cards revealed this way on the bottom of your library in any order."
-/// The entire revealed pile (matching nonland card + preceding lands) goes to the bottom of the library
-/// (kept_destination=Library, rest_destination=Library); CR 401.4 lets its owner arrange that pile.
-/// The placement clause must be absorbed into
-/// RevealUntil, NOT emitted as a trailing PutAtLibraryPosition sibling that prompts for a second target.
+/// The entire revealed pile (matching nonland card + preceding lands) goes to the bottom of the library;
+/// CR 401.4 lets its owner arrange that pile. Because the pump is written between them, the placement
+/// stays a later ChangeZoneAll over the revealed cards rather than folding into RevealUntil.
 #[test]
 fn reveal_until_all_cards_revealed_this_way_erratic_mutation() {
     let def = parse_effect_chain(
@@ -46710,17 +46709,13 @@ fn reveal_until_all_cards_revealed_this_way_erratic_mutation() {
         .as_ref()
         .expect("TargetOnly head must chain into RevealUntil");
     let Effect::RevealUntil {
-        kept_destination,
-        rest_destination,
-        rest_order,
+        matched_disposition,
         ..
     } = &*reveal.effect
     else {
         panic!("expected RevealUntil, got {:?}", reveal.effect);
     };
-    assert_eq!(*kept_destination, Zone::Library);
-    assert_eq!(*rest_destination, Zone::Library);
-    assert_eq!(*rest_order, DigRestOrder::PlayerChoice);
+    assert_eq!(*matched_disposition, RevealUntilDisposition::RevealOnly);
 
     let pump = reveal
         .sub_ability
@@ -46755,11 +46750,27 @@ fn reveal_until_all_cards_revealed_this_way_erratic_mutation() {
             }),
         })
     );
+    let placement = pump
+        .sub_ability
+        .as_ref()
+        .expect("pump must chain into the whole-pile placement");
+    assert_eq!(placement.sub_link, SubAbilityLink::SequentialSibling);
     assert!(
-        pump.sub_ability.is_none(),
-        "all-revealed-cards placement must be absorbed by RevealUntil, not emitted as {:?}",
-        pump.sub_ability
+        matches!(
+            &*placement.effect,
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Library),
+                destination: Zone::Library,
+                target: TargetFilter::LastRevealed,
+                library_position: Some(LibraryPosition::Bottom),
+                random_order: false,
+                ..
+            }
+        ),
+        "expected bottom-of-library ChangeZoneAll placement, got {:?}",
+        placement.effect
     );
+    assert!(placement.sub_ability.is_none());
 }
 
 /// CR 701.24a: A trailing shuffle instruction after RevealUntil must be emitted

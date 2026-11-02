@@ -6719,8 +6719,8 @@ pub(super) fn apply_clause_continuation(
         // CR 701.20a: "puts those cards into [zone]" / "put all cards revealed this way
         // into [zone]" — both the matching card and the non-matching cards go to the
         // same zone. Resolves back to the nearest DigOrRevealUntil antecedent via env
-        // so that intervening transparent instructions (such as Pump on Erratic Mutation
-        // or DealDamage on Explosive Revelation) do not block destination patching.
+        // so that intervening instructions (such as Pump on Erratic Mutation) still
+        // bind the placement to that reveal's pile.
         ContinuationAst::RevealUntilAllToZone {
             destination,
             rest_order,
@@ -6737,15 +6737,13 @@ pub(super) fn apply_clause_continuation(
                 .or_else(|| defs.len().checked_sub(1));
             if let Some(target_idx) = target_idx {
                 // CR 608.2c: instructions are followed in the order written. When
-                // another instruction sits between the reveal and this pile
-                // placement (Goblin Charbelcher's damage, an intervening Draw clause,
-                // etc.), folding the placement into the reveal would move the pile
-                // BEFORE that instruction. Leave the cards where the reveal found them
-                // and emit the placement as a later chain instruction over the revealed set.
-                let intervening_order_dependent = defs[target_idx + 1..]
-                    .iter()
-                    .any(|d| super::def_is_damage_dealer(d) || super::def_is_draw(d));
-                if intervening_order_dependent && defs[target_idx].sub_ability.is_none() {
+                // any instruction sits between the reveal and this pile placement
+                // (Goblin Charbelcher's damage, Erratic Mutation's pump, a Draw),
+                // folding the placement into the reveal would move the pile BEFORE
+                // that instruction. Leave the cards where the reveal found them and
+                // emit the placement as a later chain instruction over the revealed set.
+                let has_intervening_instruction = target_idx + 1 < defs.len();
+                if has_intervening_instruction && defs[target_idx].sub_ability.is_none() {
                     if let Effect::RevealUntil {
                         matched_disposition,
                         ..
