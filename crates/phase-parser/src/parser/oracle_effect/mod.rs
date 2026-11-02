@@ -1123,13 +1123,31 @@ fn def_chain_is_zone_ledger_invisible(def: &AbilityDefinition) -> bool {
             .is_none_or(def_chain_is_zone_ledger_invisible)
 }
 
+/// CR 608.2c: the clauses of the instruction printed immediately before the
+/// clause being parsed. A `Sentence` boundary starts the next instruction, and
+/// every other boundary continues the same one (`sub_link_after_boundary`), so
+/// the slice keeps each node of a compound or continuation chain.
+fn immediately_preceding_instruction(clauses: &[ClauseIr]) -> &[ClauseIr] {
+    let start = clauses.split_last().map_or(0, |(_, earlier)| {
+        earlier
+            .iter()
+            .rposition(|clause| {
+                sub_link_after_boundary(clause.boundary) == SubAbilityLink::SequentialSibling
+            })
+            .map_or(0, |index| index + 1)
+    });
+    &clauses[start..]
+}
+
 /// CR 608.2c: "If you can't" names the outcome of the instruction before it
 /// (Fading's printed form (CR 702.32a) — "remove a fade counter … If you
 /// can't, sacrifice" — is answered by the counter-removal count,
 /// `PreviousEffectAmount`, never the ledger). After antecedents whose success
 /// is never a zone change, the generic `Not { ZoneChangedThisWay }` guard is
 /// true whether or not the instruction was performed, so the rider is a
-/// strict failure until its guard is repaired (Temp of the Damned, Cocoon). A
+/// strict failure until its guard is repaired (Temp of the Damned, Cocoon).
+/// Only that instruction is certified: the node after an earlier sentence
+/// rewrites the ledger, so the earlier sentence cannot answer the guard. A
 /// rider any rewrite above already re-expressed is not this shape; an
 /// uncertified clause (another effect, another disposition, a continuation
 /// channel, an "unless" payment) keeps today's parse.
@@ -1137,9 +1155,10 @@ fn cant_rider_reads_only_zone_ledger_invisible_antecedents(
     condition: Option<&AbilityCondition>,
     clauses: &[ClauseIr],
 ) -> bool {
+    let antecedents = immediately_preceding_instruction(clauses);
     is_generic_cant_rider(condition)
-        && !clauses.is_empty()
-        && clauses.iter().all(|clause| {
+        && !antecedents.is_empty()
+        && antecedents.iter().all(|clause| {
             matches!(
                 clause.disposition,
                 ClauseDisposition::Emit {

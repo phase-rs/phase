@@ -373,7 +373,7 @@ fn run_post_action_pipeline_core(
             .iter()
             .filter(|event| {
                 !matches!(event, GameEvent::PhaseChanged { .. })
-                    && !state.park_contains_event(event)
+                    && !crate::game::engine_replacement::entry_event_is_parked(state, event)
                     && !retained_logical_zone_events.contains(event)
             })
             .cloned()
@@ -382,7 +382,7 @@ fn run_post_action_pipeline_core(
             .iter()
             .filter(|event| {
                 !matches!(event, GameEvent::PhaseChanged { .. })
-                    && !state.park_contains_event(event)
+                    && !crate::game::engine_replacement::entry_event_is_parked(state, event)
                     && !retained_logical_zone_events.contains(event)
             })
             .cloned()
@@ -844,7 +844,7 @@ pub(super) fn unclaimed_delayed_trigger_input(
         retained.extend(retained_cost_events(state));
         input.retain(|event| {
             !matches!(event, GameEvent::PhaseChanged { .. })
-                && !state.park_contains_event(event)
+                && !crate::game::engine_replacement::entry_event_is_parked(state, event)
                 && !retained.contains(event)
         });
     }

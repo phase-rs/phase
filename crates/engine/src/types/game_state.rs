@@ -31231,11 +31231,6 @@ impl GameState {
             .map(|parked| &parked.event)
     }
 
-    /// Whether `event` is parked, in either state, by equality.
-    pub(crate) fn park_contains_event(&self, event: &GameEvent) -> bool {
-        self.parked_entry_events().any(|parked| parked == event)
-    }
-
     /// CR 608.2c + CR 614.1a: Retires the exact top general drain after its
     /// interrupted instruction completes. An empty Attach replacement pair
     /// also retires its marked child before generic continuation draining can

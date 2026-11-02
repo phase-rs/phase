@@ -3605,8 +3605,8 @@ pub(crate) fn is_entry_event_of(event: &GameEvent, source_id: ObjectId) -> bool 
 /// Does the parked event `parked` hold `event`? A battlefield `ZoneChanged` is
 /// matched by its per-turn ledger key (the key
 /// `zones::settle_battlefield_entry_observations` uses), so later record
-/// stamping of the action's copy cannot unpark it; `LandPlayed` and the attach
-/// resolution by equality. No other shape is ever parked.
+/// stamping of the action's copy cannot unpark it; every other event, a
+/// `LandPlayed` and the attach resolution among them, by equality.
 fn parked_event_holds(parked: &GameEvent, event: &GameEvent) -> bool {
     match event {
         GameEvent::ZoneChanged {
@@ -3619,12 +3619,7 @@ fn parked_event_holds(parked: &GameEvent, event: &GameEvent) -> bool {
                 if parked_record.recorded_turn_number == record.recorded_turn_number
                     && parked_record.turn_zone_change_index == record.turn_zone_change_index
         ),
-        GameEvent::LandPlayed { .. }
-        | GameEvent::EffectResolved {
-            kind: EffectKind::Attach,
-            ..
-        } => parked == event,
-        _ => false,
+        _ => parked == event,
     }
 }
 
@@ -10670,6 +10665,204 @@ mod entry_continuation_release_tests {
             !entrant_entry_is_pending(&state, ObjectId(9_999)),
             "a missing object"
         );
+    }
+
+    /// CR 110.2a: an entry parked before the controller override stamped the
+    /// action's copy, which leaves the two copies one ledger key and two records.
+    /// No printed route reaches this order: delivery stamps before its
+    /// continuation parks, and the meld refresh writes both copies. These rows run
+    /// the stamp out of order to pin what the park's readers key on.
+    fn stamped_parked_entry(state: &mut GameState) -> (ObjectId, Vec<GameEvent>) {
+        let (id, entry) = parked_entry(state, 900, P0, P0, PENDING);
+        let mut events = vec![entry.clone()];
+        crate::game::zones::apply_battlefield_entry_controller_override(state, &mut events, id, P1);
+        assert_ne!(events, vec![entry], "reach guard: the copy was stamped");
+        (id, events)
+    }
+
+    /// CR 614.12a + CR 603.2c: the hold predicate reads a battlefield entry by its
+    /// ledger key and every other event by equality, so it holds all that full
+    /// equality held.
+    #[test]
+    fn the_hold_predicate_reads_an_entrys_ledger_key_and_any_other_event_by_equality() {
+        let mut state = settled_state(2);
+        let (id, stamped) = stamped_parked_entry(&mut state);
+        assert!(entry_event_is_parked(&state, &stamped[0]), "a stamped copy");
+        let (other, other_entry) = entered(&mut state, 901, P0, P0);
+        assert!(
+            !entry_event_is_parked(&state, &other_entry),
+            "another entry"
+        );
+
+        let mut moved = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, other, Zone::Graveyard, &mut moved);
+        let departure = moved
+            .into_iter()
+            .find(|event| matches!(event, GameEvent::ZoneChanged { .. }))
+            .expect("departure event");
+        let land_played = |object_id| GameEvent::LandPlayed {
+            object_id,
+            player_id: P0,
+            from_zone: Zone::Hand,
+        };
+        let attached = |source_id| GameEvent::EffectResolved {
+            kind: EffectKind::Attach,
+            source_id,
+            subject: None,
+        };
+        let tapped = |object_id| GameEvent::PermanentTapped {
+            object_id,
+            caused_by: None,
+            incarnation: None,
+        };
+        for parked in [land_played(id), attached(id), tapped(id), departure] {
+            state.deferred_entry_events = vec![seeded(parked.clone(), PENDING)];
+            assert!(entry_event_is_parked(&state, &parked), "{parked:?}");
+        }
+        for (parked, event) in [
+            (land_played(id), land_played(other)),
+            (attached(id), attached(other)),
+            (tapped(id), tapped(other)),
+        ] {
+            state.deferred_entry_events = vec![seeded(parked, PENDING)];
+            assert!(!entry_event_is_parked(&state, &event), "{event:?}");
+        }
+    }
+
+    /// A paused action's stamped entry, with the park as stamped when `held`, and
+    /// emptied otherwise as each reader row's reach guard.
+    fn paused_stamped_entry(held: bool) -> (GameState, Vec<GameEvent>) {
+        let mut state = settled_state(2);
+        let (id, events) = stamped_parked_entry(&mut state);
+        if !held {
+            state.deferred_entry_events.clear();
+        }
+        state.waiting_for = WaitingFor::ScryChoice {
+            player: P0,
+            cards: vec![id],
+        };
+        (state, events)
+    }
+
+    /// CR 603.2c + CR 614.12a: the post-action pass's ordinary scan leaves a
+    /// stamped copy of a parked entry to its collector.
+    #[test]
+    fn the_ordinary_scan_skips_a_stamped_copy_of_a_parked_entry() {
+        for (held, collected) in [(true, 0), (false, 1)] {
+            let (mut state, mut events) = paused_stamped_entry(held);
+            let paused = state.waiting_for.clone();
+            crate::game::engine_priority::run_post_action_pipeline(
+                &mut state,
+                &mut events,
+                &paused,
+                false,
+                false,
+            )
+            .expect("the pass settles");
+            assert_eq!(state.deferred_triggers.len(), collected, "held={held}");
+        }
+    }
+
+    /// CR 603.2c + CR 614.12a: the paused observer collector leaves a stamped copy
+    /// of a parked entry to its collector.
+    #[test]
+    fn the_paused_observer_collector_skips_a_stamped_copy_of_a_parked_entry() {
+        for (held, collected) in [(true, 0), (false, 1)] {
+            let (mut state, mut events) = paused_stamped_entry(held);
+            crate::game::triggers::park_observer_triggers_if_paused(&mut state, &mut events, 0);
+            assert_eq!(state.deferred_triggers.len(), collected, "held={held}");
+        }
+    }
+
+    /// CR 603.2 + CR 603.7 + CR 614.12a: a delivery-owned delayed scan's input
+    /// omits a stamped copy of a parked entry.
+    #[test]
+    fn the_delivery_delayed_input_omits_a_stamped_copy_of_a_parked_entry() {
+        for (held, kept) in [(true, 0), (false, 1)] {
+            let (mut state, events) = paused_stamped_entry(held);
+            let input = crate::game::engine_priority::unclaimed_delayed_trigger_input(
+                &mut state,
+                &events,
+                0,
+                &mut Vec::new(),
+                Some(0),
+            );
+            assert_eq!(input.events.len(), kept, "held={held}");
+        }
+    }
+
+    /// CR 603.3b + CR 603.12 + CR 614.12a: a stamped copy of a parked entry is not
+    /// an SBA-choice answer event, so it selects no closing `Any` scope, and an
+    /// unmatched reflexive stays live past the batch's ordering prompt, which ends
+    /// the pass before its closing delayed scan. With the entry unparked, the
+    /// scope closes it.
+    #[test]
+    fn a_stamped_copy_of_a_parked_entry_closes_no_sba_answer_scope() {
+        for (held, reflexives) in [(true, 1), (false, 0)] {
+            let mut scenario = scenario(2);
+            scenario.add_creature_from_oracle(
+                P0,
+                "Second Warden",
+                1,
+                1,
+                "Whenever another creature enters, you lose 1 life.",
+            );
+            let mut state = scenario.build().state().clone();
+            let (id, mut events) = stamped_parked_entry(&mut state);
+            if !held {
+                state.deferred_entry_events.clear();
+            }
+            let (_, parked_batch_entry) = entered(&mut state, 901, P0, P0);
+            crate::game::triggers::collect_parked_triggers_into_deferred(
+                &mut state,
+                std::slice::from_ref(&parked_batch_entry),
+                crate::game::triggers::DeferredTriggerBatchOrigin::StateBasedActionChoice,
+            );
+            assert!(
+                crate::game::triggers::has_sba_choice_trigger_batch(&state),
+                "reach guard: the SBA choice parked a batch"
+            );
+            state
+                .delayed_triggers
+                .push(crate::types::game_state::DelayedTrigger {
+                    condition: crate::types::ability::DelayedTriggerCondition::WhenNextEvent {
+                        trigger: Box::new(crate::types::ability::TriggerDefinition::new(
+                            crate::types::triggers::TriggerMode::SpellCast,
+                        )),
+                        or_trigger: None,
+                        lifetime: crate::types::ability::DelayedTriggerLifetime::Reflexive,
+                    },
+                    ability: Box::new(ResolvedAbility::new(
+                        Effect::GainLife {
+                            amount: QuantityExpr::Fixed { value: 1 },
+                            player: TargetFilter::Controller,
+                        },
+                        Vec::new(),
+                        id,
+                        P0,
+                    )),
+                    controller: P0,
+                    source_id: id,
+                    one_shot: true,
+                    kind: crate::types::ability::DelayedTriggerKind::Ordinary,
+                    provenance: crate::types::identifiers::DelayedInstallIdentity::LegacyDelayed,
+                });
+            let priority = state.waiting_for.clone();
+            crate::game::engine_priority::run_post_action_pipeline(
+                &mut state,
+                &mut events,
+                &priority,
+                false,
+                false,
+            )
+            .expect("the pass settles");
+            assert!(
+                matches!(state.waiting_for, WaitingFor::OrderTriggers { .. }),
+                "reach guard: the batch opened its ordering prompt: {:?}",
+                state.waiting_for
+            );
+            assert_eq!(state.delayed_triggers.len(), reflexives, "held={held}");
+        }
     }
 
     /// The printed chain's shape: the roll, then its counters on the entrant.

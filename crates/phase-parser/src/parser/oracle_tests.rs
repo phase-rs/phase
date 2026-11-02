@@ -4423,7 +4423,9 @@ fn etrata_granted_turn_face_up_ability_parses() {
 /// guards that pass at base: a zone-changing antecedent (Eldrazi Monument), a
 /// `PayCost` antecedent outside the set that keeps the rewrite's performed
 /// signal (Greenbelt Rampager), and a compound antecedent with a zone-changing
-/// conjunct. They share this test so it fails at base.
+/// conjunct. They share this test so it fails at base. Rows (g)–(i) bound the
+/// antecedent to the instruction immediately before the rider, across the
+/// sentence and `then` boundaries.
 #[test]
 fn generic_cant_rider_after_zone_ledger_invisible_antecedents_is_a_strict_failure() {
     use crate::types::ability::AbilityCondition;
@@ -4618,6 +4620,93 @@ fn generic_cant_rider_after_zone_ledger_invisible_antecedents_is_a_strict_failur
             .iter()
             .any(|def| matches!(&*def.effect, Effect::PutAtLibraryPosition { .. })),
         "the compound antecedent carries a zone-changing conjunct: {head:#?}"
+    );
+    assert!(!chain(head).iter().any(|def| is_marker(def)), "{head:#?}");
+
+    let exiles = |head: &AbilityDefinition| {
+        chain(head).iter().any(|def| {
+            matches!(
+                &*def.effect,
+                Effect::ChangeZone {
+                    destination: crate::types::zones::Zone::Exile,
+                    ..
+                }
+            )
+        })
+    };
+    let removes_counter = |head: &AbilityDefinition| {
+        chain(head)
+            .iter()
+            .any(|def| matches!(&*def.effect, Effect::RemoveCounter { .. }))
+    };
+
+    // (g) Building block: the instruction before the rider is the counter
+    // removal, whose node rewrites the ledger the earlier exile wrote, so the
+    // earlier sentence does not keep the generic guard.
+    let earlier_sentence_mover = parse_oracle_text(
+        "At the beginning of your upkeep, exile target creature. Remove a +1/+1 counter from this creature. If you can't, you lose 4 life.",
+        "Test Creature",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let head = upkeep_execute(&earlier_sentence_mover);
+    assert!(
+        exiles(head) && removes_counter(head),
+        "both instructions parse: {head:#?}"
+    );
+    assert!(
+        chain(head).iter().any(|def| is_marker(def)),
+        "the rider after a ledger-invisible instruction must be the marker: {head:#?}"
+    );
+    assert!(
+        chain(head)
+            .iter()
+            .all(|def| def.condition.as_ref() != Some(&generic_cant)),
+        "no node may keep the generic guard: {head:#?}"
+    );
+
+    // (h) Building block: the same sentences reversed. The instruction before
+    // the rider is the exile, whose success the ledger reads.
+    let later_sentence_mover = parse_oracle_text(
+        "At the beginning of your upkeep, remove a +1/+1 counter from this creature. Exile target creature. If you can't, you lose 4 life.",
+        "Test Creature",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let head = upkeep_execute(&later_sentence_mover);
+    assert!(
+        exiles(head) && removes_counter(head),
+        "both instructions parse: {head:#?}"
+    );
+    assert!(
+        chain(head)
+            .iter()
+            .any(|def| def.condition.as_ref() == Some(&generic_cant)),
+        "the rider after the exile keeps the generic guard: {head:#?}"
+    );
+    assert!(!chain(head).iter().any(|def| is_marker(def)), "{head:#?}");
+
+    // (i) Building block: a `then` continuation is one instruction with its
+    // head, so the zone-changing head is retained and keeps the generic guard.
+    let continuation_mover = parse_oracle_text(
+        "At the beginning of your upkeep, exile target creature, then remove a +1/+1 counter from this creature. If you can't, you lose 4 life.",
+        "Test Creature",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let head = upkeep_execute(&continuation_mover);
+    assert!(
+        exiles(head) && removes_counter(head),
+        "both conjuncts parse: {head:#?}"
+    );
+    assert!(
+        chain(head)
+            .iter()
+            .any(|def| def.condition.as_ref() == Some(&generic_cant)),
+        "the rider was lowered generically and reached the predicate: {head:#?}"
     );
     assert!(!chain(head).iter().any(|def| is_marker(def)), "{head:#?}");
 }

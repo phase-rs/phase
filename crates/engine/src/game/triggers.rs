@@ -9543,7 +9543,7 @@ fn paused_observer_trigger_events(state: &GameState, candidates: Vec<GameEvent>)
             !matches!(
                 ev,
                 GameEvent::PhaseChanged { .. } | GameEvent::SpellCopied { .. }
-            ) && !state.park_contains_event(ev)
+            ) && !crate::game::engine_replacement::entry_event_is_parked(state, ev)
         })
         .collect()
 }
@@ -45904,6 +45904,39 @@ pub mod tests {
                 "settled={settled}: the owner's store is untouched"
             );
         }
+    }
+
+    /// U-D2 — CR 603.2c + CR 614.12a: the paused observer filter reads the park
+    /// through the hold predicate, so a copy the controller override stamped
+    /// (CR 110.2a) after the park stays its replay owner's. The park emptied is
+    /// the reach guard: the same stamped copy passes the filter.
+    #[test]
+    fn paused_observer_filter_leaves_a_stamped_copy_of_a_parked_entry_to_its_owner() {
+        let mut state = setup();
+        let entrant = make_creature(&mut state, PlayerId(0), "Entrant", 2, 2);
+        let mut events = Vec::new();
+        crate::game::zones::record_and_emit_entry_from_no_zone(&mut state, entrant, &mut events)
+            .expect("the entrant exists");
+        let parked = events[0].clone();
+        state.deferred_entry_events = vec![crate::types::game_state::ParkedEntry::pending(
+            parked.clone(),
+            None,
+        )];
+        crate::game::zones::apply_battlefield_entry_controller_override(
+            &mut state,
+            &mut events,
+            entrant,
+            PlayerId(1),
+        );
+        let stamped = events[0].clone();
+        assert_ne!(stamped, parked, "reach guard: the copy was stamped");
+
+        assert!(paused_observer_trigger_events(&state, vec![stamped.clone()]).is_empty());
+        state.deferred_entry_events.clear();
+        assert_eq!(
+            paused_observer_trigger_events(&state, vec![stamped.clone()]),
+            vec![stamped]
+        );
     }
 
     /// Round-18 closure: the ordinary (no-sidecar) branch of both helpers now
