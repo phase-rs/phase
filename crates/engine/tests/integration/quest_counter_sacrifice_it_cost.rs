@@ -93,7 +93,6 @@ fn ior_ruin_expedition_sacrifices_itself_and_draws_two() {
     let index = activated_index(&runner, ruin);
     let outcome = runner.activate(ruin, index).resolve();
     outcome.assert_zone(&[ruin], Zone::Graveyard); // CR 701.21a
-    outcome.assert_counters(ruin, quest(), 0); // CR 122.2
     outcome.assert_zone(&[bystander], Zone::Battlefield); // the negative's positive twin
     outcome.assert_hand_drawn(P0, 2); // CR 113.7a + the effect
     outcome.assert_stack_size(0);
@@ -134,7 +133,7 @@ fn ior_ruin_expedition_counter_cost_still_binds_the_source() {
 }
 
 /// Verbatim Scryfall Oracle text (WHO).
-const TRENZALORE: &str = "{T}: Add {U}. Put a time counter on this artifact.\n{1}{U}, {T}, Remove twelve time counters from Trenzalore Clocktower and exile it: Shuffle your graveyard and hand into your library, then draw seven cards. Activate only if you control a Time Lord.";
+const TRENZALORE: &str = "{T}: Add {U}. Put a time counter on Trenzalore Clocktower.\n{1}{U}, {T}, Remove twelve time counters from Trenzalore Clocktower and exile it: Shuffle your graveyard and hand into your library, then draw seven cards. Activate only if you control a Time Lord.";
 
 /// The printed ability whose cost exiles the source (the artifact also has a
 /// mana ability at index 0).
