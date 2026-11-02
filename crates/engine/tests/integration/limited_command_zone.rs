@@ -24,7 +24,9 @@ use engine::game::deck_loading::{
 };
 use engine::game::derived_views::ClientGameStateRef;
 use engine::game::engine::{apply, start_game_with_starting_player};
-use engine::game::interaction::{derive_viewer_interaction, submit_interaction};
+use engine::game::interaction::{
+    bind_interaction_authority, derive_viewer_interaction, submit_interaction,
+};
 use engine::game::scenario::{GameRunner, P0, P1};
 use engine::game::visibility::{filter_state_for_viewer, HIDDEN_CARD_NAME};
 use engine::types::ability::{
@@ -41,7 +43,7 @@ use engine::types::identifiers::ObjectId;
 use engine::types::interaction::{
     InteractionOpportunity, InteractionOpportunityResponse, InteractionPresentationSurface,
     InteractionReasonCode, InteractionResponse, InteractionResponseSpec, InteractionRoleCode,
-    InteractionSubmission,
+    InteractionSessionId, InteractionSubmission,
 };
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
@@ -731,6 +733,8 @@ fn pregame_agenda_interaction_accepts_player_supplied_names() {
     let bond_id = state.command_zone[1];
     start_game_with_starting_player(&mut state, P0);
     state.all_card_names = known_card_names();
+    bind_interaction_authority(&mut state, InteractionSessionId("agenda".to_string()))
+        .expect("valid interaction authority binding");
 
     assert!(
         agenda_opportunity(&state, P1).is_none(),
