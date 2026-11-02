@@ -225,9 +225,7 @@ export async function companionCandidates(request: unknown): Promise<string[]> {
  * The engine is the single authority on whether a card is a Companion.
  */
 export async function isCardCompanion(cardName: string): Promise<boolean> {
-  await ensureCardDatabase();
-  const engine = await loadEngineModule();
-  return Boolean(engine.isCardCompanion(cardName));
+  return Boolean(await engine().query("isCardCompanion", cardName));
 }
 
 /**

@@ -1,3 +1,6 @@
+use std::collections::BTreeMap;
+
+use engine::ai_support::legal_actions;
 use engine::game::companion::can_activate_companion;
 use engine::game::deck_loading::{load_deck_into_state, DeckEntry, DeckPayload, PlayerDeckPayload};
 use engine::game::match_flow::{handle_choose_play_draw, handle_submit_sideboard};
@@ -13,7 +16,7 @@ use engine::types::game_state::{
 };
 use engine::types::keywords::{CompanionCondition, Keyword};
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
-use engine::types::match_config::{DeckCardCount, MatchPhase};
+use engine::types::match_config::{DeckCardCount, MatchPhase, MatchType};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 use engine::types::{ObjectId, PlayerId};
@@ -95,6 +98,221 @@ fn gyruda_companion() -> DeckEntry {
             ..Default::default()
         },
         count: 1,
+    }
+}
+
+/// Ends game 1 of a best-of-three the way a real match ends it: P0 concedes through `apply`
+/// (CR 104.3a), so the production game-over transition and its between-games projection run.
+/// The loser, P0, chooses play/draw for game 2.
+fn concede_game_one(state: &mut GameState) {
+    state.match_config.match_type = MatchType::Bo3;
+    apply(state, P0, GameAction::Concede { player_id: P0 }).expect("conceding ends game 1");
+    assert_eq!(state.match_phase, MatchPhase::BetweenGames);
+    assert!(
+        matches!(
+            state.waiting_for,
+            WaitingFor::BetweenGamesSideboard { player: P0, .. }
+        ),
+        "game 1 must end into P0's sideboard prompt, got {:?}",
+        state.waiting_for
+    );
+    assert_eq!(state.next_game_chooser, Some(P0));
+}
+
+fn pool_total(state: &GameState, player: PlayerId) -> u32 {
+    let pool = state
+        .deck_pools
+        .iter()
+        .find(|p| p.player == player)
+        .unwrap();
+    pool.registered_main
+        .iter()
+        .chain(pool.registered_sideboard.iter())
+        .chain(pool.registered_companion.iter())
+        .map(|entry| entry.count)
+        .sum()
+}
+
+/// The submission a player makes by keeping the engine-published between-games partitions
+/// unchanged: what the sideboard modal sends when the player edits nothing.
+fn published_submission(state: &GameState, player: PlayerId) -> GameAction {
+    let pool = state
+        .deck_pools
+        .iter()
+        .find(|p| p.player == player)
+        .unwrap();
+    let counts = |entries: &[DeckEntry]| -> Vec<DeckCardCount> {
+        let mut by_name: BTreeMap<String, u32> = BTreeMap::new();
+        for entry in entries {
+            *by_name.entry(entry.card.name.clone()).or_insert(0) += entry.count;
+        }
+        by_name
+            .into_iter()
+            .map(|(name, count)| DeckCardCount { name, count })
+            .collect()
+    };
+    GameAction::SubmitSideboard {
+        main: counts(&pool.current_main),
+        sideboard: counts(&pool.current_sideboard),
+    }
+}
+
+/// CR 100.4b + CR 702.139a: plays a Limited Bo3 with a dedicated Lurrus from game 1 to game 2
+/// without editing either deck. Game 1 ends naturally (a concession), both seats submit the
+/// published `current_main` / `current_sideboard` (the AI's candidate is checked to be that
+/// same submission), and game 2 must rebuild the same pool and offer Lurrus again.
+fn natural_bo3_round_trip_keeps_dedicated_companion(
+    label: &str,
+    p0_sideboard: Vec<DeckEntry>,
+    declaration: CompanionDeclaration,
+) {
+    let mut main_deck: Vec<DeckEntry> = (0..23)
+        .map(|i| creature(&format!("Small Creature {i}"), 2))
+        .collect();
+    main_deck.push(land("Plains", 17));
+    let payload = DeckPayload {
+        player: PlayerDeckPayload {
+            main_deck: main_deck.clone(),
+            sideboard: p0_sideboard,
+            companion: vec![lurrus_companion()],
+            ..Default::default()
+        },
+        opponent: PlayerDeckPayload {
+            main_deck,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let mut state = GameState::new(FormatConfig::limited(), 2, 42);
+    load_deck_into_state(&mut state, &payload);
+    let registered_total = pool_total(&state, P0);
+
+    let start = start_game_with_starting_player(&mut state, P0);
+    state.waiting_for = start.waiting_for;
+    assert!(
+        matches!(
+            state.waiting_for,
+            WaitingFor::CompanionReveal { player: P0, .. }
+        ),
+        "{label}: game 1 must offer the dedicated Lurrus"
+    );
+    apply(
+        &mut state,
+        P0,
+        GameAction::DeclareCompanion {
+            choice: declaration,
+        },
+    )
+    .unwrap_or_else(|e| panic!("{label}: companion declaration failed: {e}"));
+
+    concede_game_one(&mut state);
+
+    // The dedicated copy is back in the published sideboard (CR 100.4b), exactly once.
+    let p0_pool = state.deck_pools.iter().find(|p| p.player == P0).unwrap();
+    let lurrus_in_sideboard: u32 = p0_pool
+        .current_sideboard
+        .iter()
+        .filter(|entry| entry.card.name == "Lurrus of the Dream-Den")
+        .map(|entry| entry.count)
+        .sum();
+    assert_eq!(lurrus_in_sideboard, 1, "{label}: published sideboard");
+    assert!(
+        p0_pool.current_companion.is_empty(),
+        "{label}: no second copy outside the partitions"
+    );
+
+    for player in [P0, P1] {
+        let submission = published_submission(&state, player);
+        assert!(
+            legal_actions(&state).contains(&submission),
+            "{label}: the AI's sideboard candidate for {player:?} is the published partitions"
+        );
+        apply(&mut state, player, submission).unwrap_or_else(|e| {
+            panic!("{label}: unchanged published partitions for {player:?} rejected: {e}")
+        });
+    }
+
+    assert!(
+        matches!(
+            state.waiting_for,
+            WaitingFor::BetweenGamesChoosePlayDraw { player: P0, .. }
+        ),
+        "{label}: both submissions accepted"
+    );
+    apply(
+        &mut state,
+        P0,
+        GameAction::ChoosePlayDraw { play_first: true },
+    )
+    .unwrap_or_else(|e| panic!("{label}: game 2 restart failed: {e}"));
+
+    assert_eq!(state.game_number, 2, "{label}");
+    assert_eq!(
+        pool_total(&state, P0),
+        registered_total,
+        "{label}: pool conserved"
+    );
+    let game2 = state.deck_pools.iter().find(|p| p.player == P0).unwrap();
+    assert_eq!(game2.registered_companion.len(), 1, "{label}");
+    assert_eq!(game2.registered_companion[0].count, 1, "{label}");
+    assert!(
+        !game2
+            .registered_sideboard
+            .iter()
+            .any(|entry| entry.card.name == "Lurrus of the Dream-Den"),
+        "{label}: the designated copy is netted out of the sideboard, not duplicated"
+    );
+    match &state.waiting_for {
+        WaitingFor::CompanionReveal {
+            player,
+            eligible_companions,
+        } => {
+            assert_eq!(*player, P0, "{label}");
+            assert_eq!(
+                eligible_companions,
+                &vec![CompanionRevealChoice {
+                    name: "Lurrus of the Dream-Den".to_string(),
+                    source: CompanionChoiceSource::Dedicated,
+                }],
+                "{label}"
+            );
+        }
+        other => panic!("{label}: game 2 must offer Lurrus again, got {other:?}"),
+    }
+}
+
+fn reveal_lurrus() -> CompanionDeclaration {
+    CompanionDeclaration::Reveal(CompanionRevealChoice {
+        name: "Lurrus of the Dream-Den".to_string(),
+        source: CompanionChoiceSource::Dedicated,
+    })
+}
+
+/// The quick-draft / pod payload: the designated copy is also listed in the sideboard, and the
+/// Limited loader nets it out into the dedicated slot.
+#[test]
+fn limited_dedicated_companion_bo3_netted_sideboard_payload_survives_unchanged_sideboarding() {
+    for (label, declaration) in [
+        ("netted payload, revealed", reveal_lurrus()),
+        ("netted payload, declined", CompanionDeclaration::Decline),
+    ] {
+        natural_bo3_round_trip_keeps_dedicated_companion(
+            label,
+            vec![lurrus_companion(), land("Plains", 4)],
+            declaration,
+        );
+    }
+}
+
+/// The server payload: `sideboard` is empty and the companion travels only in its own slot.
+#[test]
+fn limited_dedicated_companion_bo3_empty_sideboard_payload_survives_unchanged_sideboarding() {
+    for (label, declaration) in [
+        ("server payload, revealed", reveal_lurrus()),
+        ("server payload, declined", CompanionDeclaration::Decline),
+    ] {
+        natural_bo3_round_trip_keeps_dedicated_companion(label, Vec::new(), declaration);
     }
 }
 
@@ -437,10 +655,8 @@ fn test_one_drafted_copy_bo3_move_to_main_suppresses_outside_companion() {
         .as_ref()
         .is_some_and(|c| c.card.card.name == "Gyruda, Doom of Depths"));
 
-    // Transition to BetweenGames BO3 sideboarding
-    state.match_phase = MatchPhase::BetweenGames;
-    state.game_number = 1;
-    state.next_game_chooser = Some(P0);
+    // End game 1 through the production game-over transition.
+    concede_game_one(&mut state);
 
     // Player moves Gyruda into main deck for Game 2 (replacing Even Creature 0)
     let mut new_main: Vec<DeckCardCount> = main_deck[1..]
@@ -608,10 +824,8 @@ fn test_one_drafted_copy_bo3_all_cards_in_main_empty_sideboard_suppresses_outsid
     )
     .expect("Game 1 Gyruda reveal must succeed");
 
-    // Transition to BetweenGames BO3 sideboarding
-    state.match_phase = MatchPhase::BetweenGames;
-    state.game_number = 1;
-    state.next_game_chooser = Some(P0);
+    // End game 1 through the production game-over transition.
+    concede_game_one(&mut state);
 
     // Player submits ALL 45 registered cards into the main deck with an EMPTY sideboard
     // 23 creatures + 1 Gyruda + 21 Plains = 45 cards
@@ -798,10 +1012,8 @@ fn test_two_drafted_copies_bo3_one_in_main_one_outside_preserves_companion() {
         .as_ref()
         .is_some_and(|c| c.card.card.name == "Gyruda, Doom of Depths"));
 
-    // Transition to BetweenGames BO3 sideboarding
-    state.match_phase = MatchPhase::BetweenGames;
-    state.game_number = 1;
-    state.next_game_chooser = Some(P0);
+    // End game 1 through the production game-over transition.
+    concede_game_one(&mut state);
 
     // Submit Game 2: 1 Gyruda in main, 1 Gyruda in sideboard
     let p0_main: Vec<DeckCardCount> = main_deck
@@ -913,4 +1125,137 @@ fn limited_companion_state_roundtrip_preserves_companion_declaration() {
         .companion
         .as_ref()
         .is_some_and(|c| c.card.card.name == "Lurrus of the Dream-Den" && !c.used));
+}
+
+/// Yorion, Sky Nomad's printed Oracle text (verified against Scryfall).
+const YORION_ORACLE: &str = "Companion \u{2014} Your starting deck contains at least twenty cards more than the minimum deck size. (If this card is your chosen companion, you may put it into your hand from outside the game for {3} as a sorcery.)\nFlying\nWhen Yorion enters, exile any number of other nonland permanents you own and control. Return those cards to the battlefield at the beginning of the next end step.";
+
+/// Yorion built from its real Oracle text through the production parser, so these tests read
+/// the condition the card-data pipeline exports rather than a hand-picked variant.
+fn yorion_from_oracle() -> DeckEntry {
+    let parsed = engine::parser::oracle::parse_oracle_text(
+        YORION_ORACLE,
+        "Yorion, Sky Nomad",
+        &["Companion".into(), "Flying".into()],
+        &["Creature".into()],
+        &["Bird".into(), "Serpent".into()],
+    );
+    let keywords: Vec<Keyword> = parsed
+        .extracted_keywords
+        .into_iter()
+        .filter(|keyword| matches!(keyword, Keyword::Companion(_)))
+        .collect();
+    assert_eq!(
+        keywords,
+        vec![Keyword::Companion(CompanionCondition::MinDeckSizeOver(20))],
+        "Yorion's companion condition is the deck-size surplus"
+    );
+    DeckEntry {
+        card: CardFace {
+            name: "Yorion, Sky Nomad".to_string(),
+            mana_cost: ManaCost::Cost {
+                shards: vec![],
+                generic: 5,
+            },
+            card_type: CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Bird".to_string(), "Serpent".to_string()],
+            },
+            keywords,
+            ..Default::default()
+        },
+        count: 1,
+    }
+}
+
+/// CR 702.139a + CR 702.139b: in 40-card Limited, Yorion needs a starting deck of at least 60
+/// cards. Pregame offers it at 60 and not at 59 (paired boundary).
+#[test]
+fn limited_yorion_from_oracle_is_offered_only_at_twenty_over_the_limited_minimum() {
+    for (deck_size, offered) in [(60, true), (59, false)] {
+        let payload = DeckPayload {
+            player: PlayerDeckPayload {
+                main_deck: vec![land("Plains", deck_size)],
+                companion: vec![yorion_from_oracle()],
+                ..Default::default()
+            },
+            opponent: PlayerDeckPayload {
+                main_deck: vec![land("Plains", 40)],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut state = GameState::new(FormatConfig::limited(), 2, 42);
+        load_deck_into_state(&mut state, &payload);
+        let p0_pool = state.deck_pools.iter().find(|p| p.player == P0).unwrap();
+        assert_eq!(
+            p0_pool.current_companion.len(),
+            1,
+            "{deck_size}: Yorion reached the pool"
+        );
+
+        let start = start_game_with_starting_player(&mut state, P0);
+        let yorion_offered = matches!(
+            &start.waiting_for,
+            WaitingFor::CompanionReveal { player, eligible_companions }
+                if *player == P0
+                    && eligible_companions.iter().any(|c| c.name == "Yorion, Sky Nomad")
+        );
+        assert_eq!(
+            yorion_offered, offered,
+            "{deck_size}-card deck: {:?}",
+            start.waiting_for
+        );
+    }
+}
+
+/// CR 702.139a + CR 702.139b: the engine's Limited compatibility check (what the deck builder
+/// shows and what admission enforces) rejects the real Yorion with 59 cards and accepts 60.
+#[test]
+fn limited_yorion_from_oracle_compatibility_requires_twenty_over_the_limited_minimum() {
+    use engine::database::CardDatabase;
+    use engine::game::deck_validation::{evaluate_deck_compatibility, DeckCompatibilityRequest};
+
+    let faces = [yorion_from_oracle().card, land("Plains", 1).card];
+    let export: serde_json::Map<String, serde_json::Value> = faces
+        .iter()
+        .map(|face| {
+            (
+                face.name.to_lowercase(),
+                serde_json::to_value(face).expect("CardFace serializes"),
+            )
+        })
+        .collect();
+    let db = CardDatabase::from_json_str(&serde_json::Value::Object(export).to_string())
+        .expect("synthetic export parses");
+
+    for (deck_size, compatible) in [(60usize, true), (59, false)] {
+        let request: DeckCompatibilityRequest = serde_json::from_value(serde_json::json!({
+            "main_deck": vec!["Plains"; deck_size],
+            "companion": ["Yorion, Sky Nomad"],
+            "selected_format": "Limited",
+        }))
+        .expect("request deserializes");
+        let result = evaluate_deck_compatibility(&db, &request);
+        assert!(
+            result.unknown_cards.is_empty(),
+            "{deck_size}: every card resolves"
+        );
+        assert_eq!(
+            result.selected_format_compatible,
+            Some(compatible),
+            "{deck_size}-card deck: {:?}",
+            result.selected_format_reasons
+        );
+        assert_eq!(
+            result
+                .selected_format_reasons
+                .iter()
+                .any(|reason| reason.contains("not a legal companion")),
+            !compatible,
+            "{deck_size}-card deck: {:?}",
+            result.selected_format_reasons
+        );
+    }
 }

@@ -268,6 +268,7 @@ export interface DraftDeckPayload {
   main_deck: string[];
   sideboard: string[];
   commander: string[];
+  companion?: string[];
 }
 
 export interface DraftMatchDeckPayload {
@@ -476,6 +477,10 @@ export type DraftP2PMessage =
        * missing field.
        */
       commanders: string[];
+      /**
+       * CR 702.139a: optional companion designated for this deck.
+       */
+      companion?: string | null;
     }
   | {
       type: "draft_workspace_update";
@@ -1005,7 +1010,20 @@ function validateSubmitDeck(raw: Record<string, unknown>): DraftP2PMessage {
   // engine: `draftPeerSession`'s decode `.catch` drops a validator throw, so
   // raising a size refusal here would convert an engine-loud refusal (which
   // reaches the guest as `draft_error`) into a wire-silent one.
-  return { ...raw, type: "draft_submit_deck", commanders } as DraftP2PMessage;
+  //
+  // CR 702.139a: the optional companion designation is a bounded card name or
+  // null; its legality against the pool stays with the engine reducer.
+  let companion: string | null | undefined = undefined;
+  if (raw.companion !== undefined && raw.companion !== null) {
+    if (typeof raw.companion !== "string" || !raw.companion.trim()) {
+      throw new Error("Invalid draft deck submission: companion must be a non-empty string or null");
+    }
+    companion = requireDraftCardInstanceId(raw.companion, "companion", "deck submission");
+  } else if (raw.companion === null) {
+    companion = null;
+  }
+
+  return { ...raw, type: "draft_submit_deck", commanders, ...(companion !== undefined ? { companion } : {}) } as DraftP2PMessage;
 }
 
 function validateDraftEffectPick(raw: Record<string, unknown>): DraftP2PMessage {
@@ -1698,6 +1716,8 @@ function validateCommanderLaunch(raw: Record<string, unknown>): DraftP2PMessage 
     !isStringArray(localDeck.main_deck)
     || !isStringArray(localDeck.sideboard)
     || !isStringArray(localDeck.commander)
+    // CR 702.139a: the companion slot is optional, but typed when present.
+    || (localDeck.companion !== undefined && !isStringArray(localDeck.companion))
   ) {
     throw new Error("Invalid commander launch: malformed localDeck");
   }

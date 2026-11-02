@@ -58,17 +58,55 @@ fn entries_to_count_map(entries: &[DeckEntry]) -> HashMap<String, u32> {
     map
 }
 
-/// Restores the single companion promoted from a normal-format sideboard to
-/// the editable current partition before a BetweenGames sideboard submission.
-/// Registered sideboards remain immutable: legal post-board swaps are kept in
-/// `current_main`/`current_sideboard` and only the revealed companion copy is
-/// returned (CR 400.11a).
+/// Adds `copies` of `card` to an editable partition, merging into an existing
+/// entry of the same name.
+fn add_partition_copies(partition: &mut Vec<DeckEntry>, card: &DeckEntry, copies: u32) {
+    if let Some(entry) = partition
+        .iter_mut()
+        .find(|entry| entry.card.name == card.card.name)
+    {
+        entry.count += copies;
+    } else {
+        partition.push(DeckEntry {
+            card: card.card.clone(),
+            count: copies,
+        });
+    }
+}
+
+/// Projects every companion copy held outside the editable partitions back into
+/// `current_sideboard` before a BetweenGames sideboard submission, so the
+/// published `current_main` + `current_sideboard` is exactly the registered pool
+/// that `handle_submit_sideboard` checks against. Registered sideboards remain
+/// immutable: legal post-board swaps are kept in `current_main`/`current_sideboard`.
+///
+/// Two sources, both outside the commander family (whose dedicated companion is
+/// an external slot that never joins a sideboard):
+/// - a dedicated Limited companion (`registered_companion`), revealed or declined;
+/// - a companion revealed from a normal-format sideboard (CR 400.11a).
 fn restore_revealed_sideboard_companions(state: &mut GameState) {
     if state.format_config.uses_commander {
         return;
     }
 
     for pool in &mut state.deck_pools {
+        // CR 100.4b: "In limited play involving individual players, all cards in a
+        // player's card pool not included in their deck are in that player's
+        // sideboard." The dedicated Limited companion is one such pool card, held in
+        // its own slot only for the game it was set aside for (CR 702.139a). Between
+        // games it rejoins the sideboard whether it was revealed or declined; the next
+        // game's payload re-derives the designation from the copy left outside the
+        // main deck (`companion_for_rebuild`). Outside the commander family only the
+        // Limited loader fills this slot, so a non-empty slot is that case.
+        if !pool.registered_companion.is_empty() {
+            let sideboard = std::sync::Arc::make_mut(&mut pool.current_sideboard);
+            for entry in pool.registered_companion.iter() {
+                add_partition_copies(sideboard, entry, entry.count);
+            }
+            std::sync::Arc::make_mut(&mut pool.current_companion).clear();
+            continue;
+        }
+
         let Some(companion) = state
             .players
             .iter()
@@ -85,12 +123,11 @@ fn restore_revealed_sideboard_companions(state: &mut GameState) {
         {
             continue;
         }
-        let sideboard = std::sync::Arc::make_mut(&mut pool.current_sideboard);
-        if let Some(entry) = sideboard.iter_mut().find(|entry| entry.card.name == *name) {
-            entry.count += 1;
-        } else {
-            sideboard.push(companion.card.clone());
-        }
+        add_partition_copies(
+            std::sync::Arc::make_mut(&mut pool.current_sideboard),
+            &companion.card,
+            1,
+        );
     }
 }
 

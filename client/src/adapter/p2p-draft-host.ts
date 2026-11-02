@@ -402,7 +402,8 @@ function deckPayload(
   commander: string[] = [],
   companion: string[] = [],
 ): DraftDeckPayload {
-  return { main_deck: mainDeck, sideboard, commander, companion };
+  // An absent companion keeps the pre-companion payload shape.
+  return { main_deck: mainDeck, sideboard, commander, ...(companion.length > 0 ? { companion } : {}) };
 }
 
 function deckCardCounts(cards: readonly string[]): DeckCardCount[] {

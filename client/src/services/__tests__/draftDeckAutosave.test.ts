@@ -1,13 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CUSTOM_CUBE_SET_CODE, DRAFT_KINDS } from "../../adapter/draftKinds";
-import { listSavedDeckNames } from "../../constants/storage";
+import { listSavedDeckNames, loadSavedDeck, STORAGE_KEY_PREFIX } from "../../constants/storage";
 import {
   installFifoWebLocks,
   refusingWebLocks,
   resetSavedDeckLibraryForTests,
   uninstallWebLocks,
 } from "../../test/helpers/webLocks";
+import { migrateSavedDecks } from "../deckMigrations";
 import { autosaveDraftDeck, draftAutosaveSlot, draftSubmissionToParsedDeck } from "../draftDeckAutosave";
 
 describe("draftAutosaveSlot", () => {
@@ -83,5 +84,51 @@ describe("autosaveDraftDeck", () => {
     await resetSavedDeckLibraryForTests();
     await expect(autosaveDraftDeck(submission)).resolves.toBeUndefined();
     expect(listSavedDeckNames().length).toBeGreaterThan(0);
+  });
+
+  // CR 100.4b + CR 702.139a: a Limited companion is a pool card outside the main deck, so it is
+  // saved in the sideboard and named by the designation. Reading the deck back and the boot
+  // migration must both keep the designation and that single sideboard copy.
+  it("keeps a Limited companion designation through autosave, load and the boot migration", async () => {
+    installFifoWebLocks();
+    await resetSavedDeckLibraryForTests();
+    await autosaveDraftDeck({
+      ...submission,
+      partition: { mainDeck: ["Bolt"], sideboard: ["Lurrus of the Dream-Den", "Bear"] },
+      companion: "Lurrus of the Dream-Den",
+    });
+    const [name] = listSavedDeckNames();
+    expect(name).toBeDefined();
+    const expectSurvives = () => {
+      const loaded = loadSavedDeck(name);
+      expect(loaded?.companion).toBe("Lurrus of the Dream-Den");
+      expect(loaded?.sideboard).toEqual(expect.arrayContaining([
+        { name: "Lurrus of the Dream-Den", count: 1 },
+        { name: "Bear", count: 1 },
+      ]));
+      expect(loaded?.sideboard).toHaveLength(2);
+    };
+
+    expectSurvives();
+    const stored = localStorage.getItem(STORAGE_KEY_PREFIX + name);
+    migrateSavedDecks();
+    expect(localStorage.getItem(STORAGE_KEY_PREFIX + name)).toBe(stored);
+    expectSurvives();
+  });
+
+  it("paired control: a non-Limited traditional format still clears the dedicated slot", () => {
+    localStorage.setItem(
+      STORAGE_KEY_PREFIX + "Modern Companion",
+      JSON.stringify({
+        main: [{ count: 1, name: "Bolt" }],
+        sideboard: [{ count: 1, name: "Lurrus of the Dream-Den" }],
+        companion: "Lurrus of the Dream-Den",
+        format: "Modern",
+      }),
+    );
+    migrateSavedDecks();
+    const migrated = JSON.parse(localStorage.getItem(STORAGE_KEY_PREFIX + "Modern Companion") ?? "{}");
+    expect(migrated.companion).toBeUndefined();
+    expect(loadSavedDeck("Modern Companion")?.companion).toBeUndefined();
   });
 });

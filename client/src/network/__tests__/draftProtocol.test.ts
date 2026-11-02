@@ -1241,6 +1241,14 @@ describe("draftProtocol", () => {
         });
       });
 
+      it("accepts a launch whose localDeck carries a companion slot", () => {
+        const launch = withDeck({ companion: ["Lurrus of the Dream-Den"] });
+        expect(validateDraftMessage({ type: "draft_commander_launch", launch })).toEqual({
+          type: "draft_commander_launch",
+          launch,
+        });
+      });
+
       it("accepts a launch carrying every set the draft contained", () => {
         const launch = { ...commanderLaunch(), draftSetCodes: ["CMM", "CLB"] };
         expect(validateDraftMessage({ type: "draft_commander_launch", launch })).toEqual({
@@ -1276,6 +1284,7 @@ describe("draftProtocol", () => {
         ["main_deck holds a non-string element", withDeck({ main_deck: ["Island", 3] })],
         ["sideboard is not an array", withDeck({ sideboard: "Mountain" })],
         ["commander is not an array", withDeck({ commander: null })],
+        ["companion is present but not a string array", withDeck({ companion: "Lurrus of the Dream-Den" })],
         ["draftSetCodes is neither null nor an array", { ...commanderLaunch(), draftSetCodes: "CMM" }],
         ["draftSetCodes is absent", withoutKey("draftSetCodes")],
       ];

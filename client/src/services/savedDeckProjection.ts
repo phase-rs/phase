@@ -33,8 +33,11 @@ export function projectSignatureSpellForFormat(
  * Projects persisted companion and signature-spell slots for their format.
  *
  * Commander-family decks retain their dedicated companion and remove exactly
- * one stale Maybeboard copy. Traditional formats instead retain one sideboard
- * copy and clear the dedicated Commander-family slot.
+ * one stale Maybeboard copy. Limited decks retain the designation and keep its
+ * physical copy in the sideboard: the pool outside the main deck is the
+ * sideboard (CR 100.4b), and the engine's Limited loader allocates the
+ * companion from that copy. Other traditional formats retain one sideboard copy
+ * and clear the dedicated slot, which only the commander family and Limited use.
  */
 export function projectSavedDeckSpecialSlots(
   saved: ParsedDeck & Record<string, unknown>,
@@ -53,11 +56,12 @@ export function projectSavedDeckSpecialSlots(
     };
   }
 
+  const sideboard = projected.sideboard.some((entry) => entry.name === saved.companion)
+    ? projected.sideboard
+    : [...projected.sideboard, { count: 1, name: saved.companion }];
   return {
     ...projected,
-    sideboard: projected.sideboard.some((entry) => entry.name === saved.companion)
-      ? projected.sideboard
-      : [...projected.sideboard, { count: 1, name: saved.companion }],
-    companion: undefined,
+    sideboard,
+    companion: format === "Limited" ? saved.companion : undefined,
   };
 }
