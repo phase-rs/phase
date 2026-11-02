@@ -23,8 +23,10 @@ vi.mock("../../../game/dispatch.ts", () => ({
   dispatchAction: vi.fn(),
 }));
 
+const dockDisplay = vi.hoisted(() => ({ mode: "compact" as "compact" | "inline" }));
+
 vi.mock("../../../hooks/useResolvedCommandZoneDisplay.ts", () => ({
-  useResolvedCommandZoneDisplay: () => "compact",
+  useResolvedCommandZoneDisplay: () => dockDisplay.mode,
 }));
 
 const localizedNames = vi.hoisted(() => new Map<string, string>());
@@ -461,25 +463,29 @@ describe("ConspiracyCardZone", () => {
 
   // CR 315.5b: an opponent's face-down conspiracy reaches the client with no
   // card types, so the engine's display classification alone keeps it visible.
-  it("shows an opponent's redacted face-down conspiracy in the command dock", () => {
-    const conspiracy = conspiracyObject({
-      owner: 1,
-      controller: 1,
-      name: "Hidden Card",
-      card_types: { core_types: [], supertypes: [], subtypes: [] },
-    });
-    const gameState = makeState(conspiracy);
-    useGameStore.setState({
-      gameMode: "local",
-      gameState,
-      waitingFor: gameState.waiting_for,
-      legalActions: [],
-      legalActionsByObject: {},
-      spellCosts: {},
-    });
+  it.each(["compact", "inline"] as const)(
+    "shows an opponent's redacted face-down conspiracy in the %s command dock",
+    (mode) => {
+      dockDisplay.mode = mode;
+      const conspiracy = conspiracyObject({
+        owner: 1,
+        controller: 1,
+        name: "Hidden Card",
+        card_types: { core_types: [], supertypes: [], subtypes: [] },
+      });
+      const gameState = makeState(conspiracy);
+      useGameStore.setState({
+        gameMode: "local",
+        gameState,
+        waitingFor: gameState.waiting_for,
+        legalActions: [],
+        legalActionsByObject: {},
+        spellCosts: {},
+      });
 
-    render(<CommandDock playerId={1} isMirrored />);
+      render(<CommandDock playerId={1} isMirrored />);
 
-    expect(screen.getByRole("img", { name: "Hidden Card" })).toBeInTheDocument();
-  });
+      expect(screen.getByRole("img", { name: "Hidden Card" })).toBeInTheDocument();
+    },
+  );
 });
