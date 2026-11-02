@@ -17246,9 +17246,7 @@ fn real_targeted_graveyard_shuffle_cards_bind_mass_move_and_shuffle_to_player_ta
 /// Depth-first over the parsed definition tree, collecting the class root: a
 /// player `TargetOnly` wrapper whose immediate sub-ability is the typed
 /// graveyard→library `ChangeZone` that carries the moved cards' own filter.
-fn collect_wrapped_unit_library_moves<'a>(
-    parsed: &'a ParsedAbilities,
-) -> Vec<&'a AbilityDefinition> {
+fn collect_wrapped_unit_library_moves(parsed: &ParsedAbilities) -> Vec<&AbilityDefinition> {
     let mut defs = Vec::new();
     collect_parsed_roots(parsed, false, &mut defs);
     defs.into_iter()
@@ -17436,7 +17434,7 @@ fn real_targeted_up_to_graveyard_shuffle_cards_bind_terminal_shuffle_to_player_t
 }
 
 /// Depth-first collection of every `Effect::Shuffle` node in a parsed card.
-fn collect_shuffle_targets<'a>(parsed: &'a ParsedAbilities) -> Vec<&'a TargetFilter> {
+fn collect_shuffle_targets(parsed: &ParsedAbilities) -> Vec<&TargetFilter> {
     let mut defs = Vec::new();
     collect_parsed_roots(parsed, false, &mut defs);
     defs.into_iter()
