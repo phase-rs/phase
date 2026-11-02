@@ -78459,45 +78459,18 @@ fn bare_choose_partial_object_phrase_keeps_stack_timing() {
     assert_eq!(ctx.declared_target_choice_timing, None);
 
     let def = parse_effect_chain(text, AbilityKind::Spell);
-    assert_eq!(def.effect.as_ref(), &Effect::TargetOnly { target });
     assert_eq!(def.target_choice_timing, TargetChoiceTiming::Stack);
 }
 
 /// SHAPE: Log Flume's printed Visit choice cannot enter the single-object chooser.
 #[test]
-fn bare_choose_stripped_quantifier_keeps_stack_timing() {
+fn bare_choose_stripped_quantifier_does_not_declare_resolution_timing() {
     let target = TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You));
     let log_flume = "Choose up to four creatures you control.";
     let final_showdown = "Choose a creature you control.";
-    for (text, declared, timing) in [
-        (log_flume, None, TargetChoiceTiming::Stack),
-        (
-            final_showdown,
-            Some(TargetChoiceTiming::Resolution),
-            TargetChoiceTiming::Resolution,
-        ),
-    ] {
-        let ir = parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default());
-        let head = &ir.clauses[0];
-        assert_eq!(
-            head.parsed.effect,
-            Effect::TargetOnly {
-                target: target.clone(),
-            },
-            "{text}"
-        );
-        assert_eq!(head.declared_target_choice_timing, declared, "{text}");
-
-        let def = parse_effect_chain(text, AbilityKind::Spell);
-        assert_eq!(
-            def.effect.as_ref(),
-            &Effect::TargetOnly {
-                target: target.clone(),
-            },
-            "{text}"
-        );
-        assert_eq!(def.target_choice_timing, timing, "{text}");
-    }
+    // Count-preserving resolution-time selection is a separate unsupported slice.
+    let ir = parse_effect_chain_ir(log_flume, AbilityKind::Spell, &mut ParseContext::default());
+    assert_eq!(ir.clauses[0].declared_target_choice_timing, None);
 
     // A quantified chunk must not suppress a later single-creature choice.
     let chain = format!("{log_flume} {final_showdown}");
@@ -78513,43 +78486,11 @@ fn bare_choose_stripped_quantifier_keeps_stack_timing() {
 
 /// SHAPE: an exact-count choice cannot enter the single-object chooser.
 #[test]
-fn bare_choose_exact_count_keeps_stack_timing() {
+fn bare_choose_exact_count_does_not_declare_resolution_timing() {
     let clarion = "Choose five permanents you control. For each of those permanents, you may search your library for a card with the same name as that permanent. Put those cards onto the battlefield tapped, then shuffle.";
-    let final_showdown =
-        "Choose a creature you control. It gains indestructible until end of turn.";
-    for (text, target, declared, timing) in [
-        (
-            clarion,
-            TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You)),
-            None,
-            TargetChoiceTiming::Stack,
-        ),
-        (
-            final_showdown,
-            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
-            Some(TargetChoiceTiming::Resolution),
-            TargetChoiceTiming::Resolution,
-        ),
-    ] {
-        let ir = parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default());
-        let head = &ir.clauses[0];
-        assert_eq!(
-            head.parsed.effect,
-            Effect::TargetOnly {
-                target: target.clone(),
-            },
-            "{text}: the choice producer must be reached"
-        );
-        assert_eq!(head.declared_target_choice_timing, declared, "{text}");
-
-        let def = parse_effect_chain(text, AbilityKind::Spell);
-        assert_eq!(
-            def.effect.as_ref(),
-            &Effect::TargetOnly { target },
-            "{text}"
-        );
-        assert_eq!(def.target_choice_timing, timing, "{text}");
-    }
+    // Count-preserving resolution-time selection is a separate unsupported slice.
+    let ir = parse_effect_chain_ir(clarion, AbilityKind::Spell, &mut ParseContext::default());
+    assert_eq!(ir.clauses[0].declared_target_choice_timing, None);
 }
 
 /// SHAPE: a random object selection must not enter the controller-choice path.

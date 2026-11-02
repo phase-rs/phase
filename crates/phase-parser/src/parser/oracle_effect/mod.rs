@@ -196,11 +196,11 @@ use self::subject::{
     try_parse_subject_predicate_ast, try_parse_targeted_controller_gain_life,
 };
 use crate::parser::oracle_ir::ast::*;
-use crate::parser::oracle_ir::context::BodyScope;
 pub(crate) use crate::parser::oracle_ir::context::{
     BareCardAggregateBinding, ChosenColorQualifierScope, DeclaredSlotEntry, DeclaredSlotRegistry,
     ParseContext, PriorZoneChoicePartition, TokenPtFollowup, TriggerConditionScope,
 };
+use crate::parser::oracle_ir::context::{BodyScope, ChoiceQuantifierState};
 use crate::parser::oracle_ir::effect_chain::{
     AbilityIr, AbilityRootTransform, AbilityShellIr, AbsorbKind, ClauseDisposition, ClauseId,
     ClauseIr, ClauseIrBuilder, ClausePlacement, DieResultBranchIr, EffectChainIr,
@@ -48493,7 +48493,11 @@ fn parse_effect_chain_ir_body(
             } else {
                 strip_any_number_quantifier(text_no_temporal)
             };
-        ctx.choice_quantifier_stripped = multi_target.is_some();
+        ctx.choice_quantifier = if multi_target.is_some() {
+            ChoiceQuantifierState::Stripped
+        } else {
+            ChoiceQuantifierState::NotStripped
+        };
         let retained_type_clause = {
             let lower = text_no_qty.to_lowercase();
             parse_retained_type_clause(TextPair::new(&text_no_qty, &lower))

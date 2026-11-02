@@ -31,6 +31,7 @@ use super::{
     resolve_it_pronoun, ParseContext, PriorZoneChoicePartition,
 };
 use crate::parser::oracle_ir::ast::*;
+use crate::parser::oracle_ir::context::ChoiceQuantifierState;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::effect_chain::ChosenReturnSpec;
 use crate::parser::oracle_nom::bridge::{nom_on_lower, nom_parse_lower, split_once_on_lower};
@@ -5105,7 +5106,7 @@ pub(super) fn parse_choose_ast(
                 && alt((tag::<_, _, OracleError<'_>>("a "), tag("an ")))
                     .parse(rest_lower.trim_start())
                     .is_ok()
-                && !ctx.choice_quantifier_stripped
+                && matches!(ctx.choice_quantifier, ChoiceQuantifierState::NotStripped)
                 && ctx.target_selection_mode == TargetSelectionMode::Chosen
                 && !nom_primitives::scan_contains(rest_lower, "target ")
                 && is_you_controlled_target(&target)
