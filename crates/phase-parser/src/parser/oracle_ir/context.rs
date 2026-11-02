@@ -7,8 +7,8 @@ use super::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_nom::target::{ControllerPhrase, ControllerSubject, PlayerAnaphor};
 use crate::types::ability::{
     ChosenGroupId, ControllerRef, CostCategory, Duration, MultiTargetSpec, ObjectScope,
-    PlayerFilter, PtValue, QuantityExpr, QuantityRef, TargetChoiceTiming, TargetFilter,
-    TargetSelectionMode, ZoneChoiceCandidateSource,
+    OpponentMayScope, PlayerFilter, PtValue, QuantityExpr, QuantityRef, TargetChoiceTiming,
+    TargetFilter, TargetSelectionMode, ZoneChoiceCandidateSource,
 };
 use crate::types::card_type::CoreType;
 use crate::types::zones::Zone;
@@ -471,6 +471,9 @@ pub struct ParseContext {
     /// The chain loop supplies its composed scope before parsing the body so a
     /// bare choose cannot mistake another player's choice for the controller's.
     pub clause_player_scope: Option<PlayerFilter>,
+    /// First-accept-wins optional scope peeled from this chunk ("any ... may").
+    /// Like `clause_player_scope`, it prevents a controller-only bare-choice prompt.
+    pub clause_opponent_may_scope: Option<OpponentMayScope>,
     /// CR 608.2c + CR 701.16a: Transient per-chunk `repeat_for` lifted from a
     /// fieldless-effect subject-predicate that carries a "for each <filter> …
     /// this way" SUFFIX count (Declaration in Stone's "investigate for each
@@ -614,13 +617,15 @@ pub struct ParseContext {
     ///
     /// The legacy bare-choose producer declares `Resolution` only for a singular
     /// "a/an <object> you control" phrase fully consumed by the target parser,
-    /// with chosen selection and no peeled player scope, printed target, context
-    /// reference, or player target. Optional quantifiers are stripped by the
-    /// chunk loop; those chunks and exact counts reach the gate but fail its
+    /// with chosen selection and no peeled player/opponent-may scope, printed
+    /// target, context reference, or player target. The chunk loop strips optional
+    /// quantifiers; those chunks and exact counts reach the gate but fail its
     /// a/an conjunct. The chain builder retains this declaration only for a
     /// `TargetOnly` head; later bare choices keep the pre-existing `Stack` timing
     /// so they cannot defer subsequent printed targets. Partial and quantified
     /// choices also leave this unset, without a filter-shape inference.
+    /// Peeled opponent-may choices explicitly declare `Stack` so the
+    /// accepting-player timing fallback cannot reintroduce `Resolution`.
     ///
     /// Set and consumed within a single chunk parse; never serialized. A
     /// speculative sub-parse that discards its cloned context discards this too.

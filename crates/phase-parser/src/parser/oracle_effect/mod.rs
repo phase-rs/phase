@@ -47965,6 +47965,7 @@ fn parse_effect_chain_ir_body(
             current_ability_index: ctx.current_ability_index,
             actor: chunk_actor,
             clause_player_scope: player_scope.clone(),
+            clause_opponent_may_scope: opponent_may_scope,
             // CR 109.4 + CR 115.1 + CR 506.2: propagate relative-player scope
             // from the trigger condition so "that player controls" inside any
             // chunk resolves to TargetPlayer rather than defaulting to You.

@@ -1471,9 +1471,8 @@ impl ClauseDraft<'_> {
     /// "target", and classify a targeted announcement as a described
     /// resolution-time pick — suppressing its target slots entirely.
     ///
-    /// A bare `TargetOnly` choice may declare `Resolution` only at the chain
-    /// head. A deferred mid-chain node would also suppress the stack-time
-    /// targets of its following instructions; retain their existing timing.
+    /// The engine tolerates mid-chain `Resolution` `TargetOnly` nodes from modal
+    /// composition, but the parser leaves non-head choices at pre-existing `Stack` timing.
     pub(crate) fn declared_target_choice_timing(mut self, v: Option<TargetChoiceTiming>) -> Self {
         self.declared_target_choice_timing = if v == Some(TargetChoiceTiming::Resolution)
             && matches!(self.parsed.effect, Effect::TargetOnly { .. })

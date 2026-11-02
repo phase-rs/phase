@@ -78323,6 +78323,7 @@ fn bare_choose_printed_cards_use_resolution_timing() {
     for (name, text) in [
         ("Final Showdown", "Spree (Choose one or more additional costs.)\n+ {1} — All creatures lose all abilities until end of turn.\n+ {1} — Choose a creature you control. It gains indestructible until end of turn.\n+ {3}{W}{W} — Destroy all creatures."),
         ("Sakashima's Will", "Choose one. If you control a commander as you cast this spell, you may choose both instead.\n• Target opponent chooses a creature they control. You gain control of it.\n• Choose a creature you control. Each other creature you control becomes a copy of that creature until end of turn."),
+        ("Modal choice timing probe", "Spree (Choose one or more additional costs.)\n+ {1} — Draw a card.\n+ {1} — Choose a creature you control. It gains indestructible until end of turn.\n+ {1} — Deal 2 damage to target creature you don't control."),
     ] {
         let parsed = parse_oracle_text(text, name, &[], &[], &[]);
         let head = &parsed.abilities[1];
@@ -78578,6 +78579,9 @@ fn bare_choose_non_controller_subject_keeps_stack_timing() {
         "Target opponent chooses a permanent you control other than this creature.",
         "Each opponent chooses a permanent you control.",
         "Each opponent may choose a permanent you control.",
+        "Any opponent may choose a permanent you control.",
+        "Any player may choose a permanent you control.",
+        "Any other player may choose a permanent you control.",
     ] {
         let def = parse_effect_chain(text, AbilityKind::Spell);
         assert!(

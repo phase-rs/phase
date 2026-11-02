@@ -7953,10 +7953,13 @@ fn defers_conditional_target_selection(sub: &ResolvedAbility) -> bool {
             &sub.condition,
             Some(AbilityCondition::AdditionalCostPaidInstead) if !sub.context.additional_cost_paid
         )
-        // CR 608.2c: the sticker's recipient is chosen during resolution,
-        // but its independent following instructions still announce targets.
+        // CR 601.2c: sticker and bare-object choices defer only their own picks,
+        // not the targets of independent following instructions.
         || (sub.target_choice_timing == TargetChoiceTiming::Resolution
-            && !matches!(sub.effect, Effect::PutSticker { .. }))
+            && !matches!(
+                sub.effect,
+                Effect::PutSticker { .. } | Effect::TargetOnly { .. }
+            ))
 }
 
 fn defers_sub_ability_target_selection(effect: &Effect) -> bool {

@@ -5118,9 +5118,14 @@ pub(super) fn parse_choose_ast(
             // "a/an <object> you control" choice can establish resolution timing.
             // Optional quantifiers are stripped by the chunk loop; those chunks
             // and exact counts reach this gate but fail its a/an conjunct.
-            // Peeled player scopes and random selections are not controller
+            // Peeled actor scopes and random selections are not controller
             // choices. The chain builder retains this declaration only at the head.
-            if remainder.trim().is_empty()
+            if ctx.clause_opponent_may_scope.is_some() {
+                // The accepting-player timing fallback also retimes described
+                // objects. TargetOnly cannot prompt that chooser, so override
+                // the fallback rather than merely withholding Resolution.
+                ctx.declared_target_choice_timing = Some(TargetChoiceTiming::Stack);
+            } else if remainder.trim().is_empty()
                 && alt((tag::<_, _, OracleError<'_>>("a "), tag("an ")))
                     .parse(rest_lower.trim_start())
                     .is_ok()
