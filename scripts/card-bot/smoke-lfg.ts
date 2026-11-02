@@ -59,6 +59,9 @@ const deps: LfgDeps = {
   servers,
   now: () => (clock += 1000),
   followup: async (_appId, _token, body) => void pings.push(body),
+  editOriginal: async () => {},
+  threads: null,
+  roles: null,
 };
 
 const base = (userId: string) => ({
@@ -68,7 +71,8 @@ const base = (userId: string) => ({
   member: { user: { id: userId, username: `user-${userId.slice(-1)}` } },
 });
 
-async function show(label: string, response: Response): Promise<unknown> {
+async function show(label: string, pendingResponse: Response | Promise<Response>): Promise<unknown> {
+  const response = await pendingResponse;
   const body = await response.json();
   console.log(`\n== ${label} (HTTP ${response.status})\n${JSON.stringify(body, null, 2)}`);
   return body;

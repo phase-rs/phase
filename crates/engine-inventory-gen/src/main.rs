@@ -1,6 +1,6 @@
 //! Engine surface inventory generator.
 //!
-//! Walks `crates/engine/src/` via `syn`, enumerates every `pub enum` and
+//! Walks the engine crates' sources (`TARGET_DIRS`) via `syn`, enumerates every `pub enum` and
 //! its variants with file:line, doc comments, and CR annotations. Auto-detects
 //! sibling-cluster smells (variants sharing a name root that look like
 //! parameterization candidates per the workspace "Parameterize, don't proliferate"
@@ -81,9 +81,9 @@ struct ClusterSmell {
 /// Every directory whose `pub enum`s are engine surface a variant proposal must be able to
 /// discover. CLAUDE.md makes an inventory grep the mandatory discoverability gate before
 /// proposing a variant and scopes it to "any other engine enum", so the walk is the WHOLE
-/// engine crate rather than a hand-kept subset: a `types/` + `analysis/` walk leaves 85
-/// top-level `pub enum`s under `crates/engine/src` structurally invisible to the gate
-/// (`game/` 61, `ai_support/` 13, `parser/` 7, `database/` 4). That split is the standing
+/// engine across its crates rather than a hand-kept subset: a `types/` + `analysis/` walk leaves 85
+/// top-level `pub enum`s structurally invisible to the gate (`crates/engine/src`: `game/` 61,
+/// `ai_support/` 13, `database/` 4; `crates/phase-parser/src`: `parser/` 7). That split is the standing
 /// reason for the walk root, and it is re-derivable at any time by grouping the emitted
 /// `file` fields. One root is also shorter than the list it replaces.
 ///
@@ -108,7 +108,11 @@ struct ClusterSmell {
 /// `types::card::LayoutKind`, so the skill's `rg "<concept>" data/engine-inventory.json`
 /// existence check is unaffected. Unique keys additionally make the `BTreeMap` order — and so
 /// the emitted JSON — a function of the source tree alone.
-const TARGET_DIRS: &[&str] = &["crates/engine/src"];
+const TARGET_DIRS: &[&str] = &[
+    "crates/engine/src",
+    "crates/phase-ast/src",
+    "crates/phase-parser/src",
+];
 const OUTPUT: &str = "data/engine-inventory.json";
 
 fn main() -> Result<()> {

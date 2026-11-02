@@ -28,9 +28,13 @@ client/src/wasm/*.wasm.d.ts
 .claude/projects/
 .pr-review/
 
+# Generated protocol constants
+/client/src/generated/protocol-versions.ts
+
 # Build output
 client/dist/
 client/bootstrap/dist/
+client/storybook-static/
 
 # Locally-generated SSL certs (./scripts/setup-ssl.sh) — per-machine, never committed.
 certs/

@@ -46,7 +46,7 @@ export function ConfirmDialog({
   secondaryTone = "primary",
   returnFocusRef,
 }: ConfirmDialogProps) {
-  const { t } = useTranslation();
+  const { t } = useTranslation(["common"]);
   const titleId = useId();
   const messageId = useId();
   const overlayRef = useRef<HTMLDivElement>(null);

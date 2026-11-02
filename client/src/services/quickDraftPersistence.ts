@@ -48,6 +48,10 @@ export interface DraftRunState {
   playerDeck: string[];
   opponentDeck: string[];
   usedBotSeats: number[];
+  /** Seat bound to opponentDeck; absent only in legacy records. */
+  lastOpponentSeat?: number;
+  /** Exact engine tokens; an empty array is authoritative, absence is legacy. */
+  draft_set_codes?: string[];
   activeMatch?: DraftRunActiveMatch;
 }
 
@@ -349,6 +353,32 @@ export function publishStagedDraftMatch(input: {
   });
 }
 
+/** Recover identity only from a matching stage or an unambiguous legacy history. */
+export function resolveDraftRunOpponentSeat(run: DraftRunState, draftId: string): number | undefined {
+  if (!Array.isArray(run.usedBotSeats) || run.usedBotSeats.length === 0
+    || !run.usedBotSeats.every((seat) => Number.isInteger(seat) && seat > 0)) return undefined;
+  if (run.lastOpponentSeat !== undefined) {
+    return Number.isInteger(run.lastOpponentSeat) && run.lastOpponentSeat > 0
+      && run.usedBotSeats.includes(run.lastOpponentSeat) ? run.lastOpponentSeat : undefined;
+  }
+  const stage = run.activeMatch;
+  if (stage !== undefined) {
+    return stage && stage.draftId === draftId
+      && typeof stage.gameId === "string" && stage.gameId.length > 0
+      && stage.format === run.format
+      && Number.isInteger(stage.botSeat) && stage.botSeat > 0
+      && run.usedBotSeats.includes(stage.botSeat)
+      && Array.isArray(run.opponentDeck) && run.opponentDeck.length > 0
+      && run.opponentDeck.every((card) => typeof card === "string")
+      && Array.isArray(stage.opponentDeck)
+      && stage.opponentDeck.length === run.opponentDeck.length
+      && stage.opponentDeck.every((card, index) => card === run.opponentDeck[index])
+      ? stage.botSeat : undefined;
+  }
+  const seats = [...new Set(run.usedBotSeats)];
+  return seats.length === 1 ? seats[0] : undefined;
+}
+
 export function recordDraftMatchResult(input: {
   draftId: string;
   gameId: string;
@@ -363,13 +393,15 @@ export function recordDraftMatchResult(input: {
     }
     const alreadyRecorded = run.results.some((entry) => entry.gameId === input.gameId);
     const { activeMatch: _resolvedMatch, ...resolvedRun } = run;
+    const lastOpponentSeat = resolveDraftRunOpponentSeat(run, input.draftId);
     const nextRun: DraftRunState = {
       ...resolvedRun,
+      ...(lastOpponentSeat === undefined ? {} : { lastOpponentSeat }),
       results: alreadyRecorded
         ? run.results
         : [...run.results, { gameId: input.gameId, result: input.result }],
     };
-    if (!alreadyRecorded || run.activeMatch !== undefined) {
+    if (!alreadyRecorded || run.activeMatch !== undefined || nextRun.lastOpponentSeat !== run.lastOpponentSeat) {
       await rawSaveDraftRun(input.draftId, nextRun);
     }
     const meta = input.makeMeta(nextRun);

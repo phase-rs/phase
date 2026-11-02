@@ -89,6 +89,61 @@ function seatGuestSession(privateHost: PrivateHost, seat: number) {
 
 describe("P2P deck-submission channel", () => {
   /**
+   * Adjacent host-side reach for Set bot launch. The adapter is stubbed here:
+   * draft-wasm's no-database proposal is tested in its Rust entry-point test.
+   */
+  it("launches a submitted Set Premier deck against a full bot proposal", async () => {
+    const host = newHost("Premier");
+    const privateHost = asPrivate(host);
+    privateHost.draftStarted = true;
+    privateHost.paused = false;
+    privateHost.persistSessionStrict = vi.fn(async () => {});
+    const humanDeck = Array<string>(40).fill("Forest");
+    const getBotDeck = vi.fn(async () => ({
+      main_deck: ["Alpha", "Beta", "Gamma", "Delta"],
+      lands: { Plains: 36 },
+      commander: [],
+    }));
+    privateHost.adapter = stubAdapter({
+      exportSession: vi.fn(async () => JSON.stringify({
+        pools: [[], []],
+        submitted_decks: { 0: { seat: 0, main_deck: humanDeck, commanders: [] } },
+      })),
+      getBotDeck,
+      boosterPackPoolForGame: vi.fn(async () => null),
+    });
+    const launches: DraftMatchLaunch[] = [];
+    host.onEvent((event) => {
+      if (event.type === "matchStart") launches.push(event.launch);
+    });
+
+    await host.submitHostDeck(humanDeck, []);
+    expect(privateHost.adapter.submitDeckForSeat).toHaveBeenCalledWith(0, humanDeck, []);
+    await privateHost.dispatchMatchLaunch({
+      match_id: "set-bot-match", round: 1, seat_a: 0, seat_b: 1,
+      name_a: "Host", name_b: "Bot 1",
+    } as PairingView, {
+      seats: [
+        { seat_index: 0, is_bot: false },
+        { seat_index: 1, is_bot: true },
+      ],
+      match_config: { match_type: "Bo1" },
+    } as DraftPlayerView);
+
+    expect(getBotDeck).toHaveBeenCalledWith(1);
+    expect(launches).toHaveLength(1);
+    expect(launches[0]).toMatchObject({
+      type: "Bot", matchId: "set-bot-match", localSeat: 0, botSeat: 1,
+      deckPayload: {
+        player: { main_deck: humanDeck },
+        opponent: { main_deck: ["Alpha", "Beta", "Gamma", "Delta", ...Array<string>(36).fill("Plains")] },
+        booster_pack_pool: null,
+      },
+    });
+    expect(privateHost.matchLaunches.get("set-bot-match")?.get(0)).toEqual(launches[0]);
+  });
+
+  /**
    * The original Cube multiset is private to the host's device. In a pod of
    * three or more, a pairing that excludes seat 0 elects a guest as its engine
    * authority (`HumanHost`, or the human side of a `Bot` launch); that

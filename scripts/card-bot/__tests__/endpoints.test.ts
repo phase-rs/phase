@@ -64,10 +64,12 @@ describe("desktop link matches the desktop shell", () => {
       mode: "p2p" as const,
       build: "release" as const,
       server: null,
+      description: null,
       state: "ready" as const,
       code: "AB12CD",
       touchedMs: 0,
       seated: ["111", "222"],
+      thread: null,
     };
     const to = new URL(new URL(desktopLink(lfg, hostLink(lfg))).searchParams.get("to")!);
     expect(schemes).toEqual([to.protocol.slice(0, -1)]);

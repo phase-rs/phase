@@ -301,7 +301,10 @@ export function CommanderPanel({
         <div
           className={`text-xs ${deckSizeSatisfied(deckSizeRule, totalCards) ? "text-green-400" : "text-yellow-400"}`}
         >
-          {t("commanderPanel.cardCount", { count: totalCards, expected: deckSizeRule.data })}
+          {/* `Minimum(0)` refuses no count, so it is not shown as an expected size. */}
+          {deckSizeRule.type === "Minimum" && deckSizeRule.data === 0
+            ? t("commanderPanel.cardCountNoMinimum", { count: totalCards })
+            : t("commanderPanel.cardCount", { count: totalCards, expected: deckSizeRule.data })}
         </div>
         {formatValidationReasons.map((reason) => (
           <div key={reason} className="text-xs text-red-400">

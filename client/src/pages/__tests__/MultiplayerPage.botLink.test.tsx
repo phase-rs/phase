@@ -1,8 +1,10 @@
-import { StrictMode, useEffect, useState } from "react";
+import { StrictMode, useEffect, useLayoutEffect, useState } from "react";
 import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createMemoryRouter, RouterProvider, useLocation } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { refuseRealWebSockets } from "../../test/helpers/refusingWebSocket";
 
 /**
  * Discord bot-link arrival on the real page and store, through a DATA router
@@ -41,7 +43,10 @@ vi.mock("../../components/lobby/HostSetup", () => ({
   HostSetup: (props: Record<string, unknown>) => {
     harness.hostSetup = props;
     const [firstProps] = useState(props);
-    useEffect(() => {
+    // Layout, not passive: it runs in the commit that inserts `host-setup`, so
+    // a `findByTestId("host-setup")` can never resolve before the mount is
+    // recorded. A passive effect can still be pending then under CI load.
+    useLayoutEffect(() => {
       harness.hostMounts.push(firstProps);
     }, [firstProps]);
     return <div data-testid="host-setup" />;
@@ -209,9 +214,11 @@ const joinTargetNotFound = {
 
 describe("MultiplayerPage Discord bot links", () => {
   let reload: ReturnType<typeof vi.fn>;
+  let socketUrls: string[] = [];
 
   beforeEach(() => {
     vi.clearAllMocks();
+    socketUrls = refuseRealWebSockets();
     harness.hostSetup = null;
     harness.lobby = null;
     harness.myDecks = null;
@@ -247,8 +254,10 @@ describe("MultiplayerPage Discord bot links", () => {
   });
 
   afterEach(() => {
+    const opened = [...socketUrls];
     cleanup();
     vi.unstubAllGlobals();
+    expect(opened).toEqual([]);
   });
 
   describe("host arrival", () => {

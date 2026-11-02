@@ -7,19 +7,30 @@ use crate::types::game_state::GameState;
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::zones::Zone;
 
-/// CR 707.12 + CR 201.2a: create a copy of a card identified by NAME.
+/// The zone the copy is staged in until a following cast moves it to the stack.
+///
+/// BOUNDARY (CR 707.13 + CR 400.11): the rule creates this copy *outside the
+/// game*, and outside the game is not a zone. The engine has no zone-less object
+/// location yet — every `GameObject` carries a `Zone`, and the casting pipeline's
+/// CR 601.2a origin (`cast_from_zone`, the move to the stack) is keyed on that
+/// zone — so the copy is staged in exile for the remainder of this resolution.
+/// This is the one place that staging is decided; an outside-the-game location
+/// replaces this constant, not the effect's shape.
+const STAGING_ZONE: Zone = Zone::Exile;
+
+/// CR 707.13: create a copy of a card defined by NAME (Garth One-Eye).
 ///
 /// The named card need not be anywhere in the game, so there is no object to read
 /// copiable values from (which is why `cast_copy_of_card.rs` cannot serve): the
-/// copy is materialized from `state.card_face_registry`, the same registry
+/// player uses the Oracle card reference to determine the copy's
+/// characteristics, which here is `state.card_face_registry` — the same registry
 /// `conjure.rs` draws on for a card from outside the game.
 ///
 /// The product is a COPY, not a conjured card. It is stamped `is_copy`, so the
 /// CR 704.5e state-based action in `game::sba` removes it as soon as it is in any
 /// zone but the stack or the battlefield. No SBA check runs during a resolution
-/// (CR 608.2), so a following `CastFromZone { LastCreated }` in the same chain
-/// still gets to cast it — and a copy nobody casts disappears on its own rather
-/// than leaving a stray card in exile forever.
+/// (CR 704.3), so a following `CastFromZone { LastCreated }` in the same chain
+/// still gets to cast it, and a copy nobody casts disappears on its own.
 ///
 /// An unknown name creates nothing: a nameless, characteristic-less object would
 /// be castable-looking and uncastable, which is worse than the effect doing
@@ -29,12 +40,8 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (name, destination, count) = match &ability.effect {
-        Effect::CreateCardCopyByName {
-            name,
-            destination,
-            count,
-        } => (name.clone(), *destination, count.clone()),
+    let (name, count) = match &ability.effect {
+        Effect::CreateCardCopyByName { name, count } => (name.clone(), count.clone()),
         _ => {
             return Err(EffectError::MissingParam(
                 "CreateCardCopyByName".to_string(),
@@ -42,32 +49,25 @@ pub fn resolve(
         }
     };
 
-    // CR 201.2a: an absent literal name means "the card with the chosen name" —
+    // CR 201.4: an absent literal name means "the card with the chosen name" —
     // the name this source committed through a preceding `Effect::Choose`.
-    let card_name = match name {
-        Some(name) => Some(name),
-        None => state
+    let card_name = name.or_else(|| {
+        state
             .objects
             .get(&ability.source_id)
             .and_then(|source| source.chosen_card_name())
-            .map(str::to_string),
-    };
-    let Some(card_name) = card_name else {
-        events.push(GameEvent::EffectResolved {
-            kind: EffectKind::CreateCardCopyByName,
-            source_id: ability.source_id,
-            subject: None,
-        });
-        return Ok(());
-    };
+            .map(str::to_string)
+    });
 
     // The registry is keyed by lowercase name (see `conjure.rs`). A name that is
     // not in it is one the engine has no characteristics for.
-    let Some(face) = state
-        .card_face_registry
-        .get(&card_name.to_lowercase())
-        .cloned()
-    else {
+    let face = card_name.and_then(|card_name| {
+        state
+            .card_face_registry
+            .get(&card_name.to_lowercase())
+            .cloned()
+    });
+    let Some(face) = face else {
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::CreateCardCopyByName,
             source_id: ability.source_id,
@@ -77,7 +77,7 @@ pub fn resolve(
     };
 
     let copies = resolve_quantity_with_targets(state, &count, ability).max(0) as u32;
-    let mut created_ids: Vec<ObjectId> = Vec::new();
+    let mut created_ids: Vec<ObjectId> = Vec::with_capacity(copies as usize);
 
     for _ in 0..copies {
         let obj_id = zones::create_object(
@@ -85,40 +85,16 @@ pub fn resolve(
             CardId(0),
             ability.controller,
             face.name.clone(),
-            destination,
+            STAGING_ZONE,
         );
-
-        // CR 613.7d: an object receives a timestamp when it enters a zone; only a
-        // battlefield entry draws one in this engine's staging. Taken before the
-        // `get_mut` borrow.
-        let entry_timestamp = (destination == Zone::Battlefield).then(|| state.next_timestamp());
-
         if let Some(obj) = state.objects.get_mut(&obj_id) {
             apply_card_face_to_object(obj, &face);
-            // CR 707.12a: the copy is not represented by a card. `is_token` stays
-            // false (it is a copy of a card, not a token — CR 704.5d and CR 704.5e
-            // are different sweeps with different legal zones), and `is_copy` is
-            // what CR 704.5e reads.
+            // CR 707.10a: a copy of a card is not a card. `is_token` stays false
+            // (CR 704.5d and CR 704.5e are different sweeps with different legal
+            // zones), and `is_copy` is what CR 704.5e reads.
             obj.is_token = false;
             obj.is_copy = true;
-
-            if destination == Zone::Battlefield {
-                obj.reset_for_battlefield_entry(
-                    state.turn_number,
-                    entry_timestamp.expect("battlefield entry draws a timestamp"),
-                );
-            }
         }
-
-        if destination == Zone::Battlefield {
-            crate::game::layers::mark_layers_entered(state, obj_id);
-            // CR 400.7 + CR 608.2i: a copy created straight onto the battlefield is
-            // a zone change from no zone, and enters-the-battlefield triggers have
-            // to see it. Same authority `conjure.rs` routes through.
-            crate::game::zones::record_and_emit_entry_from_no_zone(state, obj_id, events)
-                .expect("copy object was just created");
-        }
-
         created_ids.push(obj_id);
         events.push(GameEvent::CardCopyCreated {
             object_id: obj_id,

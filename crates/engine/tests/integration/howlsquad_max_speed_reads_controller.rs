@@ -52,11 +52,12 @@ fn mana_produced_by_activating(
     source: ObjectId,
 ) -> usize {
     let index = mana_ability_index(runner, source);
-    let before = runner.state().players[0].mana_pool.mana.len();
+    let before = runner.state().players[0].mana_pool.total();
     if runner
         .act(engine::types::actions::GameAction::ActivateAbility {
             source_id: source,
             ability_index: index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .is_err()
     {
@@ -68,8 +69,7 @@ fn mana_produced_by_activating(
     // player saw real red mana appear.
     runner.state().players[0]
         .mana_pool
-        .mana
-        .len()
+        .total()
         .saturating_sub(before)
 }
 

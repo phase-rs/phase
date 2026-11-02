@@ -40,37 +40,44 @@ vi.mock("../../network/protocol", async (orig) => {
 });
 
 
-const mocks = vi.hoisted(() => ({
-  initializeMultiplayerHostGame: vi.fn(async () => ({ events: [] })),
-  getLegalActions: vi.fn(async () => ({
-    actions: [],
-    autoPassRecommended: false,
-  })),
-  getLegalActionsForViewer: vi.fn(async (_pid: number) => ({
-    actions: [],
-    autoPassRecommended: false,
-  })),
-  getFilteredState: vi.fn(async (pid: number) => ({ filteredFor: pid })),
-  getViewerSnapshot: vi.fn(async (pid: number) => ({
+const mocks = vi.hoisted(() => {
+  const getViewerSnapshot = vi.fn(async (pid: number) => ({
     state: { filteredFor: pid },
     actions: [],
     autoPassRecommended: false,
-  })),
-  projectSeatView: vi.fn(async (stateJson: string) => {
-    const state = JSON.parse(stateJson) as {
-      seats: Array<{ type: string }>;
-      format: unknown;
-      gameStarted: boolean;
-    };
-    return {
-      seats: state.seats,
-      format: state.format,
-      isFull: state.seats.every((seat) => seat.type !== "WaitingHuman"),
-      gameStarted: state.gameStarted,
-    };
-  }),
-  setMultiplayerMode: vi.fn(async (_enabled: boolean) => undefined),
-}));
+  }));
+  return {
+    initializeMultiplayerHostGame: vi.fn(async () => ({ events: [] })),
+    getLegalActions: vi.fn(async () => ({
+      actions: [],
+      autoPassRecommended: false,
+    })),
+    getLegalActionsForViewer: vi.fn(async (_pid: number) => ({
+      actions: [],
+      autoPassRecommended: false,
+    })),
+    getFilteredState: vi.fn(async (pid: number) => ({ filteredFor: pid })),
+    getViewerSnapshot,
+    getViewerTransitionSnapshot: vi.fn(async (pid: number, events: unknown[]) => ({
+      ...(await getViewerSnapshot(pid)),
+      events,
+    })),
+    projectSeatView: vi.fn(async (stateJson: string) => {
+      const state = JSON.parse(stateJson) as {
+        seats: Array<{ type: string }>;
+        format: unknown;
+        gameStarted: boolean;
+      };
+      return {
+        seats: state.seats,
+        format: state.format,
+        isFull: state.seats.every((seat) => seat.type !== "WaitingHuman"),
+        gameStarted: state.gameStarted,
+      };
+    }),
+    setMultiplayerMode: vi.fn(async (_enabled: boolean) => undefined),
+  };
+});
 
 // Mirrors `p2p-adapter-multiplayer.test.ts`: the host acquires its engine via
 // `getHostAdapter()`, and teardown goes through `releaseHostSession()`.
@@ -84,6 +91,7 @@ vi.mock("../wasm-adapter", () => {
     getLegalActionsForViewer: mocks.getLegalActionsForViewer,
     getFilteredState: mocks.getFilteredState,
     getViewerSnapshot: mocks.getViewerSnapshot,
+    getViewerTransitionSnapshot: mocks.getViewerTransitionSnapshot,
     projectSeatView: mocks.projectSeatView,
     setMultiplayerMode: mocks.setMultiplayerMode,
     releaseHostSession: vi.fn(async (_claimed: boolean) => undefined),

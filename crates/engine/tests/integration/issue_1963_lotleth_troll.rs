@@ -49,6 +49,7 @@ fn lotleth_discard_activation_only_offers_creature_cards_in_hand() {
         .act(GameAction::ActivateAbility {
             source_id: troll_id,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate Lotleth discard ability");
 
@@ -90,6 +91,7 @@ fn lotleth_discard_creature_puts_counter_on_troll() {
         .act(GameAction::ActivateAbility {
             source_id: troll_id,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate discard ability");
 

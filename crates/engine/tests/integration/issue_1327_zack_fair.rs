@@ -134,6 +134,7 @@ fn zack_fair_sacrifice_moves_counters_and_reattaches_equipment() {
         .act(GameAction::ActivateAbility {
             source_id: zack,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating Zack Fair must succeed");
 

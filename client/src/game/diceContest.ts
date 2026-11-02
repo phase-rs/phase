@@ -1,7 +1,6 @@
 import type { GameEvent, PlayerId, TurnOrderSlotView } from "../adapter/types";
 import { useUiStore } from "../stores/uiStore";
 
-type DieRolledEvent = Extract<GameEvent, { type: "DieRolled" }>;
 type CoinFlippedEvent = Extract<GameEvent, { type: "CoinFlipped" }>;
 type StartingPlayerContestEvent = Extract<GameEvent, { type: "StartingPlayerContest" }>;
 
@@ -48,11 +47,12 @@ export function flashStartingPlayerContest(
 /**
  * Fire the in-game roll overlay for an action's event batch. Groups all
  * `DieRolled` into one die overlay (e.g. a Krark's Thumb double) and queues
- * every `CoinFlipped` after it. Always `context: "ability"`. No-ops when the
- * batch contains neither.
+ * every `CoinFlipped` after it. Always `context: "ability"`. CR 706.6-ignored
+ * dice (`DieRollIgnored`) join the SAME overlay, marked ignored, in batch
+ * order — players see what the lowest roll was. No-ops when the batch
+ * contains neither dice nor coins.
  */
 export function flashInGameRolls(events: GameEvent[]): void {
-  const dice = events.filter((e): e is DieRolledEvent => e.type === "DieRolled");
   const coins = events.filter((e): e is CoinFlippedEvent => e.type === "CoinFlipped");
   const flash = useUiStore.getState().flashDiceRoll;
   // All dice in the batch group into one overlay (e.g. a Krark's Thumb double);
@@ -60,14 +60,28 @@ export function flashInGameRolls(events: GameEvent[]): void {
   // serializes both rather than dropping either).
   // CR 901.9d / CR 706.7: the symbolic planar die emits DieRolled with a null
   // result (no numeric face to animate); drop those before building the overlay.
-  const numericDice = dice.filter(
-    (e): e is DieRolledEvent & { data: { result: number } } => e.data.result !== null,
-  );
-  if (numericDice.length > 0) {
+  // The engine emits surviving rolls and ignored display mirrors in die order.
+  const rolls = events.flatMap((event) => {
+    if (event.type === "DieRolled") {
+      return event.data.result === null
+        ? []
+        : [{ playerId: event.data.player_id, value: event.data.result, sides: event.data.sides, ignored: false }];
+    }
+    if (event.type === "DieRollIgnored") {
+      return [{ playerId: event.data.player_id, value: event.data.result, sides: event.data.sides, ignored: true }];
+    }
+    return [];
+  });
+  if (rolls.length > 0) {
     flash({
       kind: "die",
-      sides: numericDice[0].data.sides,
-      rolls: numericDice.map((e) => ({ playerId: e.data.player_id, value: e.data.result })),
+      sides: rolls[0].sides,
+      rolls: rolls.map(({ playerId, value, sides, ignored }) => ({
+        playerId,
+        value,
+        sides,
+        ...(ignored ? { ignored: true } : {}),
+      })),
       context: "ability",
     });
   }

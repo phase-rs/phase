@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 
 import { FORMAT_REGISTRY } from "../../../client/src/data/formatRegistry";
-import { findFormat, FORMATS, MAX_SEATS, P2P_MAX_PEERS, seatCap } from "../formats";
+import { defaultSeats, findFormat, FORMATS, MAX_SEATS, P2P_MAX_PEERS, seatCap } from "../formats";
+import { LFG_FORMAT_OPTION } from "../lfgInteractions";
 import { roomName } from "../lfgView";
 
 describe("FORMATS mirrors the client format registry", () => {
@@ -18,8 +19,13 @@ describe("FORMATS mirrors the client format registry", () => {
     expect(FORMATS).toEqual(projection);
   });
 
-  test("fits Discord's 25-choice cap", () => {
-    expect(FORMATS.length).toBeLessThanOrEqual(25);
+  test("the /lfg format option is served by autocomplete, not static choices", async () => {
+    expect(LFG_FORMAT_OPTION.autocomplete).toBe(true);
+    expect(LFG_FORMAT_OPTION.name).toBe("format");
+    expect("choices" in LFG_FORMAT_OPTION).toBe(false);
+    const register = await Bun.file(join(import.meta.dir, "../register.ts")).text();
+    expect(register).toMatch(/options:\s*\[\s*LFG_FORMAT_OPTION,/);
+    expect(register).not.toMatch(/\bFORMATS\b/);
   });
 
   test("P2P_MAX_PEERS equals HostSetup's", async () => {
@@ -43,5 +49,15 @@ describe("FORMATS mirrors the client format registry", () => {
     expect(seatCap(findFormat("Standard")!, "p2p")).toBe(2);
     expect(MAX_SEATS).toBe(8);
     expect(findFormat("NotAFormat")).toBeUndefined();
+  });
+
+  test("default seats: Commander prefers 4 in either mode; other formats take their cap", () => {
+    const commander = findFormat("Commander")!;
+    expect(seatCap(commander, "server")).toBe(6);
+    expect(defaultSeats(commander, "p2p")).toBe(4);
+    expect(defaultSeats(commander, "server")).toBe(4);
+    const draft = findFormat("CommanderDraft")!;
+    expect(defaultSeats(draft, "p2p")).toBe(seatCap(draft, "p2p"));
+    expect(defaultSeats(draft, "server")).toBe(8);
   });
 });

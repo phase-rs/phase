@@ -14,9 +14,10 @@ import { SplashScreen } from "./components/splash/SplashScreen";
 import { useFeedInitialization } from "./hooks/useFeedInitialization";
 import { useDesktopDeepLinks } from "./hooks/useDesktopDeepLinks";
 import { useHostingSession } from "./hooks/useHostingSession";
-import { migrateSavedDecks } from "./services/deckMigrations";
+import { canonicalizeSavedDeckNames, migrateSavedDecks } from "./services/deckMigrations";
 import { useDeckLibraryAutoSync } from "./services/visualPacks/deckLibraryAutoSync";
 import { ensurePreload, subscribePreload } from "./startup/preloadAssets";
+import { useCardDataStore } from "./stores/cardDataStore";
 import { useCloudSyncStore } from "./stores/cloudSyncStore";
 import { useEffectiveOffline } from "./stores/connectivityStore";
 import { MenuPage } from "./pages/MenuPage";
@@ -80,6 +81,12 @@ function AppContent() {
   useEffect(() => {
     migrateSavedDecks();
   }, []);
+
+  const cardDataStatus = useCardDataStore((s) => s.status);
+  useEffect(() => {
+    if (cardDataStatus !== "ready") return;
+    void canonicalizeSavedDeckNames().catch(() => {/* best-effort; saved names still resolve */});
+  }, [cardDataStatus]);
 
   // Connectivity policy is the sole lifecycle authority. Offline mode keeps
   // local dirty observation alive through pause(); only online generations own

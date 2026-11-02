@@ -241,6 +241,7 @@ fn candidate_draws_structurally(ctx: &PolicyContext<'_>) -> bool {
         | GameAction::SelectTargets { .. }
         | GameAction::ChooseTarget { .. }
         | GameAction::ChooseReplacement { .. }
+        | GameAction::ChooseReplacementAndRemember { .. }
         | GameAction::ChooseEntryController { .. }
         | GameAction::OrderTriggers { .. }
         | GameAction::OrderCostReductions { .. }
@@ -303,6 +304,8 @@ fn candidate_draws_structurally(ctx: &PolicyContext<'_>) -> bool {
         | GameAction::SetPriorityPassingMode { .. }
         | GameAction::SetPriorityYield { .. }
         | GameAction::SetMayTriggerAutoChoice { .. }
+        | GameAction::SetReplacementAutoChoice { .. }
+        | GameAction::UnAction { .. }
         | GameAction::SetTriggerOrderTemplate { .. }
         | GameAction::AssignCombatDamage { .. }
         | GameAction::AssignBlockerDamage { .. }

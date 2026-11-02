@@ -1,13 +1,29 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { EngineAdapter, EngineSnapshot, LegalActionsResult } from "../../adapter/types";
+import type {
+  EngineAdapter,
+  EngineSnapshot,
+  FormatConfig,
+  GameState,
+  LegalActionsResult,
+} from "../../adapter/types";
 import { useGameStore } from "../../stores/gameStore";
+import { buildEngineAdapterMock } from "../../test/factories/engineAdapterFactory";
 import {
   buildGameState,
   buildLegalActionsResult,
   buildPriorityWaitingFor,
 } from "../../test/factories/gameStateFactory";
 import { attemptStateRehydrate } from "../engineRecovery";
+
+vi.mock("idb-keyval", () => ({
+  createStore: vi.fn(() => ({})),
+  del: vi.fn().mockResolvedValue(undefined),
+  get: vi.fn().mockResolvedValue(undefined),
+  set: vi.fn().mockResolvedValue(undefined),
+}));
+
+import { get as idbGet } from "idb-keyval";
 
 const PRIORITY = buildPriorityWaitingFor({ data: { player: 0 } });
 const LEGAL = buildLegalActionsResult({ actions: [] }) as LegalActionsResult;
@@ -22,6 +38,7 @@ function deferred<T>() {
 
 describe("engine recovery session fencing", () => {
   beforeEach(() => {
+    vi.clearAllMocks();
     useGameStore.getState().reset();
   });
 
@@ -40,8 +57,9 @@ describe("engine recovery session fencing", () => {
     const oldAdapter = {
       restoreState: vi.fn(async () => undefined),
       resumeRestoredGameState: vi.fn(() => resumed.promise),
+      dispose: vi.fn(),
     } as unknown as EngineAdapter;
-    const newAdapter = {} as EngineAdapter;
+    const newAdapter = { dispose: vi.fn() } as unknown as EngineAdapter;
 
     useGameStore.setState({
       adapter: oldAdapter,
@@ -85,5 +103,36 @@ describe("engine recovery session fencing", () => {
     expect(useGameStore.getState().gameState).toBe(replacementState);
     expect(useGameStore.getState().lastCommittedSeq).toBe(30);
     expect(useGameStore.getState().restoredStackAutomation).toBeNull();
+  });
+
+  it("migrates a pre-v42 checkpoint before the real restore path", async () => {
+    const checkpoint = buildGameState({ waiting_for: PRIORITY, turn_number: 4 });
+    checkpoint.format_config = {
+      ...checkpoint.format_config,
+      format: "CommanderDraft",
+      command_zone: true,
+      deck_size: 60 as never,
+    } as FormatConfig;
+    vi.mocked(idbGet).mockResolvedValueOnce([checkpoint]);
+
+    const restored: GameState[] = [];
+    const adapter = buildEngineAdapterMock(checkpoint, {
+      restoreState: vi.fn(async (state: GameState) => {
+        restored.push(state);
+      }),
+    });
+    useGameStore.setState({
+      adapter,
+      gameMode: "local",
+      gameState: null,
+      gameId: "legacy-checkpoint",
+      gameSessionGeneration: 1,
+    });
+
+    await expect(attemptStateRehydrate()).resolves.toBe(true);
+    expect(restored).toHaveLength(1);
+    expect(restored[0]).toMatchObject({
+      format_config: { deck_size: { type: "Minimum", data: 60 } },
+    });
   });
 });

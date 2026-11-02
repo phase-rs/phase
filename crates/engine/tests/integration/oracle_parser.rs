@@ -1,11 +1,11 @@
 use engine::parser::oracle::{keyword_display_name, parse_oracle_text};
 use engine::parser::oracle_ir::diagnostic::ClauseGapKind;
 use engine::types::ability::{
-    ChosenSubtypeKind, ContinuousModification, ControllerRef, DamageModification,
-    DamageTargetFilter, DamageTargetPlayerScope, Effect, FilterProp, SourceExclusion,
-    StaticCondition, TargetFilter, TypeFilter,
+    ChosenSubtypeKind, Comparator, ContinuousModification, ControllerRef, DamageModification,
+    DamageTargetFilter, DamageTargetPlayerScope, Effect, FilterProp, PlayerScope, QuantityExpr,
+    QuantityRef, SourceExclusion, StaticCondition, TargetFilter, TypeFilter,
 };
-use engine::types::keywords::Keyword;
+use engine::types::keywords::{HexproofFilter, Keyword};
 use engine::types::statics::StaticMode;
 use engine::types::zones::Zone;
 
@@ -1367,4 +1367,67 @@ fn havi_the_all_father_full_card_parser_snapshot() {
         "Sage Project's supported return must remain a ChangeZone effect: {parsed:#?}"
     );
     insta::assert_json_snapshot!("havi_the_all_father_full_card", &parsed);
+}
+
+/// Elenda's full printed text must route both continuous abilities through the
+/// public parser and preserve their distinct starting-life thresholds.
+#[test]
+fn elenda_saint_of_dusk_full_card_parser() {
+    let parsed = parse(
+        "Lifelink, hexproof from instants\nAs long as your life total is greater than your starting life total, Elenda gets +1/+1 and has menace. Elenda gets an additional +5/+5 as long as your life total is at least 10 greater than your starting life total.",
+        "Elenda, Saint of Dusk",
+        &[
+            Keyword::Lifelink,
+            Keyword::HexproofFrom(HexproofFilter::CardType("instants".to_string())),
+        ],
+        &["Legendary", "Creature"],
+        &["Vampire", "Knight"],
+    );
+    assert_eq!(
+        parsed.statics.len(),
+        2,
+        "both printed continuous abilities must parse: {parsed:#?}"
+    );
+    assert!(
+        parsed.parse_warnings.is_empty(),
+        "the full Elenda card must not leave parse warnings: {parsed:#?}"
+    );
+    assert!(
+        parsed.statics.iter().any(|static_def| {
+            static_def.condition
+                == Some(StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::LifeTotal {
+                            player: PlayerScope::Controller,
+                        },
+                    },
+                    comparator: Comparator::GT,
+                    rhs: QuantityExpr::Ref {
+                        qty: QuantityRef::StartingLifeTotal {
+                            player: PlayerScope::Controller,
+                        },
+                    },
+                })
+        }),
+        "the first static must gate on life above starting: {parsed:#?}"
+    );
+    assert!(
+        parsed.statics.iter().any(|static_def| {
+            static_def.condition
+                == Some(StaticCondition::QuantityComparison {
+                    lhs: QuantityExpr::Ref {
+                        qty: QuantityRef::LifeAboveStarting,
+                    },
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 10 },
+                })
+                && static_def
+                    .modifications
+                    .contains(&ContinuousModification::AddPower { value: 5 })
+                && static_def
+                    .modifications
+                    .contains(&ContinuousModification::AddToughness { value: 5 })
+        }),
+        "the additional +5/+5 must use LifeAboveStarting >= 10: {parsed:#?}"
+    );
 }

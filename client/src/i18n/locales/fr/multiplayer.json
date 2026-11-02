@@ -37,7 +37,9 @@
     "approve": "Approuver",
     "decline": "Refuser",
     "cancel": "Annuler la demande",
-    "declinedToast": "Demande de reprise refusée"
+    "declinedToast": "Demande de reprise refusée",
+    "cancelledToast": "Demande de reprise annulée",
+    "withdrawnToast": "Demande de reprise retirée : un joueur a quitté la partie"
   },
   "connectionDot": {
     "connected": "Connecté",
@@ -79,6 +81,7 @@
     "draws_one": " ({{count}} nul)",
     "draws_other": " ({{count}} nuls)",
     "main": "Principal ({{count}}, min. {{min}})",
+    "mainNoMinimum": "Principal ({{count}})",
     "sideboard": "Réserve ({{count}})",
     "sideboardCapped": "Réserve ({{count}}/{{max}})",
     "moveFromSideboard": "Déplacez des cartes depuis la réserve.",
@@ -95,6 +98,9 @@
     "title": "Serveur du salon injoignable",
     "message": "Votre partie ne sera pas répertoriée publiquement. Vous pouvez toujours héberger en P2P — partagez simplement le code de la salle directement avec votre adversaire.",
     "continueWithoutLobby": "Continuer sans salon"
+  },
+  "lobbyCapability": {
+    "formatNeedsNewerServer": "Ce serveur de salon est trop ancien pour lister des parties dans le format choisi (il faut le protocole de lobby {{needed}})."
   },
   "joinErrorDialog": {
     "dismiss": "Ignorer"
@@ -124,13 +130,14 @@
     "waitTimeJustNow": "à l'instant",
     "waitTimeMinutes": "il y a {{count}} min",
     "waitTimeHours": "il y a {{count}} h",
-    "buildMismatchTitle": "L'hôte est en {{version}} ({{commit}}) — votre version est différente. Actualisez pour mettre à jour.",
     "gameFull": "Cette partie est complète.",
     "youAreHosting": "Vous hébergez cette partie.",
     "hosting": "Hébergement",
     "sandboxConfirm": "Il s'agit d'une partie bac à sable. Les joueurs disposant de la permission de débogage peuvent manipuler directement l'état de la partie. Continuer ?",
     "draftBadgeTitle": "Draft {{kind}} — {{setCode}}",
     "draftBadge": "Draft {{setCode}}",
+    "cubeDraftBadgeTitle": "Draft {{kind}} — {{cubeName}}",
+    "cubeDraftBadge": "Draft {{cubeName}}",
     "p2pBadgeTitle": "Partie pair-à-pair (l'hôte exécute le moteur)",
     "sandboxBadgeTitle": "Cette partie autorise les actions de débogage. À utiliser pour des tests — pas pour un match compétitif.",
     "hintSlow": "LENT",
@@ -280,7 +287,8 @@
     "botGameNotice": "Vous hébergez la partie Discord {{code}}. La connexion et la confidentialité sont fixées par la publication Discord.",
     "botSeedIgnored": "Certains paramètres de la publication Discord ne peuvent pas être utilisés ici — vérifiez le format et le nombre de joueurs.",
     "botP2PNotice": "Votre appareil exécute la partie. Gardez l’application ouverte et restez connecté.",
-    "botServerNotice": "Un serveur dédié exécute la partie. Il peut ralentir ou se déconnecter."
+    "botServerNotice": "Un serveur dédié exécute la partie. Il peut ralentir ou se déconnecter.",
+    "poolBracketConflict": "Aucun des {{selected}} decks sélectionnés n'est légal avec les filtres actuels, les adversaires aléatoires utiliseront les {{total}} decks."
   },
   "page": {
     "deckRejected": "Le deck a été refusé par l'hôte.",
@@ -296,11 +304,9 @@
     "joinErrorCantJoinTitle": "Impossible de rejoindre cette salle",
     "titleLobby": "Rejoignez ou hébergez une table.",
     "titleHostSetup": "Configurez votre table.",
-    "titleDraftLobby": "Pod de draft",
     "titleDeckSelect": "Choisissez un deck.",
     "descriptionLobby": "Parcourez les tables disponibles, rejoignez par code ou hébergez un nouveau match.",
     "descriptionHostSetup": "Ajustez le format, la confidentialité et le timing avant d'ouvrir la salle.",
-    "descriptionDraftLobby": "En attente que des joueurs rejoignent le pod de draft.",
     "descriptionDeckSelectFormat": "Choisissez un deck pour {{format}}.",
     "descriptionDeckSelect": "Choisissez le deck que vous voulez amener en ligne.",
     "offlineUnavailableTitle": "Le multijoueur n’est pas disponible hors ligne.",
@@ -314,6 +320,9 @@
     "anonymous": "Anonyme",
     "joining": "Connexion",
     "joinNeedsServer": "Choisissez un serveur avant de rejoindre une partie.",
+    "serverDraftJoinUnsupported": "Impossible de rejoindre depuis le lobby les pods de draft hébergés par le serveur.",
+    "p2pDraftSpectateUnsupported": "Les pods de draft hébergés par un joueur ne peuvent pas être regardés.",
+    "alreadyInDraftPod": "Vous êtes déjà dans un pod de draft. Quittez-le avant d'en rejoindre un autre.",
     "invalidGameLink": "Ce lien de partie est invalide ou incomplet.",
     "waitingForHostTitle": "En attente de l’hôte…",
     "waitingForHostMessage": "L’hôte n’a pas encore ouvert cette partie, ou elle a été fermée. Réessayez une fois que l’hôte a ouvert son lien.",
@@ -324,15 +333,6 @@
     "updateFailedTitle": "Impossible de mettre à jour automatiquement",
     "updateFailedMessage": "Actualisez pour obtenir la dernière version, ou continuez avec celle-ci. Les joueurs sur des versions différentes ne peuvent pas rejoindre la même partie.",
     "continueAnyway": "Continuer quand même"
-  },
-  "draftLobbyPanel": {
-    "draftPod": "Pod de draft",
-    "connecting": "Connexion au pod de draft...",
-    "connectionFailed": "Échec de la connexion.",
-    "playersJoined": "{{joined}}/{{total}} joueurs ont rejoint",
-    "seat": "Siège {{number}}",
-    "draftInProgress": "Draft en cours. La vue du draft s'ouvrira automatiquement.",
-    "leaveDraft": "Quitter le draft"
   },
   "deckLegalityChip": {
     "checking": "Vérification du deck pour {{format}}…",
@@ -354,5 +354,11 @@
   "deepLink": {
     "gameInProgressTitle": "Partie en cours",
     "gameInProgressBody": "Terminez ou quittez votre partie en cours, puis rouvrez le lien."
+  },
+  "p2pStateWithheld": "L'état de la partie après cette action est trop volumineux pour être envoyé, ce plateau n'est donc pas à jour. Un joueur peut demander une reprise de la dernière action depuis le menu de la partie pour continuer (pour une boucle, exécutez-la avec un nombre plus petit).",
+  "terminalRecovery": {
+    "finalViewsUnpublished": "La concession a atteint un état final Full, mais les vues finales natives n’ont pas pu être publiées.",
+    "concedeUnreconciled": "Impossible de rapprocher le résultat de la concession ; le siège reste verrouillé.",
+    "receiptUnsent": "L’accusé de réception durable du résultat final n’a pas pu être envoyé ; en attente d’une nouvelle livraison"
   }
 }

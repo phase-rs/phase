@@ -16,7 +16,7 @@ export class GzipEnvelopeSocket implements PhaseSocketTransport {
   private receiveQueue = Promise.resolve();
   private closeQueued = false;
 
-  constructor(private readonly socket: PhaseSocketTransport) {
+  constructor(private readonly socket: PhaseSocketTransport, private readonly onFrameSent?: () => void) {
     if ("binaryType" in socket) {
       (socket as PhaseSocketTransport & { binaryType: BinaryType }).binaryType = "arraybuffer";
     }
@@ -80,6 +80,7 @@ export class GzipEnvelopeSocket implements PhaseSocketTransport {
       .then(async () => {
         const encoded = await encodeJsonEnvelope(data);
         (this.socket as unknown as { send(data: Uint8Array): void }).send(encoded);
+        this.onFrameSent?.();
       })
       .catch(() => {
         // The close is what `withReconnect` recovers from, so it must survive a

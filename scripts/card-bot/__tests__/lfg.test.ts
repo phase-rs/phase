@@ -24,6 +24,7 @@ function input(overrides: Partial<NewLfg> = {}): NewLfg {
     mode: "p2p",
     build: "release",
     server: null,
+    description: null,
     ...overrides,
   };
 }
@@ -287,4 +288,63 @@ test("a server-mode LFG round-trips its server", () => {
   const server = { url: "wss://phase-0.example/ws", name: "Phase 0" };
   const lfg = created(store, { mode: "server", server, format: format("CommanderDraft"), seats: 8 });
   expect(lfg).toMatchObject({ mode: "server", server, build: "release", seats: 8 });
+});
+
+test("a game's description survives seat and state changes", () => {
+  const store = new LfgStore(":memory:");
+  const lfg = created(store, { seats: 2, description: "Bracket 3; precons welcome" });
+  expect(lfg.description).toBe("Bracket 3; precons welcome");
+  expect(lfgOf(store.join(lfg.id, GUILD, "b", T0 + 1)).description).toBe(lfg.description);
+});
+
+describe("game threads", () => {
+  function readyWithThread(store: LfgStore): Lfg {
+    const lfg = created(store, { seats: 2 });
+    store.join(lfg.id, GUILD, "b", T0 + 1);
+    store.attachThread(lfg.id, "t-1");
+    return lfg;
+  }
+
+  test("an attached thread is carried on the LFG until the game ends", () => {
+    const store = new LfgStore(":memory:");
+    const lfg = readyWithThread(store);
+    expect(lfgOf(store.linkFor(lfg.id, GUILD, "b", T0 + 2)).thread).toEqual({ id: "t-1", ended: false });
+    expect(store.endGame(lfg.id, GUILD, "b", T0 + 3)).toEqual({ kind: "ending", threadId: "t-1" });
+    expect(lfgOf(store.linkFor(lfg.id, GUILD, "b", T0 + 4)).thread).toEqual({ id: "t-1", ended: true });
+    expect(store.endGame(lfg.id, GUILD, "creator", T0 + 5)).toEqual({ kind: "ended" });
+  });
+
+  test("End game is guild-scoped", () => {
+    const store = new LfgStore(":memory:");
+    const lfg = readyWithThread(store);
+    expect(store.endGame(lfg.id, "other-guild", "b", T0 + 2)).toEqual({ kind: "ended" });
+    expect(store.endGame(lfg.id, GUILD, "b", T0 + 2)).toMatchObject({ kind: "ending" });
+  });
+
+  test("an older database gains new optional columns on open", () => {
+    const dir = mkdtempSync(join(tmpdir(), "lfg-migrate-"));
+    try {
+      const path = join(dir, "lfg.sqlite");
+      const first = new LfgStore(path);
+      const lfg = created(first, { seats: 2 });
+      first.join(lfg.id, GUILD, "b", T0 + 1);
+      const raw = new Database(path);
+      for (const column of ["description", "thread_id", "thread_end_ms", "thread_closed_ms"]) {
+        raw.run(`ALTER TABLE lfg DROP COLUMN ${column}`);
+      }
+      raw.close();
+
+      const reopened = new LfgStore(path);
+      expect(lfgOf(reopened.linkFor(lfg.id, GUILD, "b", T0 + 2))).toMatchObject({
+        description: null,
+        thread: null,
+      });
+      reopened.attachThread(lfg.id, "t-1");
+      expect(reopened.endGame(lfg.id, GUILD, "b", T0 + 3)).toEqual({ kind: "ending", threadId: "t-1" });
+      reopened.markThreadClosed(lfg.id, T0 + 4);
+      expect(reopened.threadsToClose(T0 + DAY_MS / 2)).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

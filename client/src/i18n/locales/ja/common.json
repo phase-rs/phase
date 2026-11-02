@@ -179,6 +179,7 @@
       "exportedTo": "{{path}}にエクスポートしました。",
       "exportRequested": "エクスポートを要求しました — {{filename}}。",
       "exportFailed": "ゲーム状態をエクスポートできませんでした。",
+      "exportFailedDetail": "ゲーム状態をエクスポートできませんでした。{{detail}}",
       "replayExported": "リプレイを{{filename}}として保存しました。",
       "replayExportUnavailable": "このゲームのリプレイ記録はありません。",
       "replayExportFailed": "リプレイをエクスポートできませんでした。"
@@ -285,13 +286,16 @@
     "loading": "読み込み中…"
   },
   "turnBanner": {
-    "turn": "{{number}}ターン目"
+    "turn": "{{number}}ターン目",
+    "yourTurn": "あなたのターン",
+    "opponentTurn": "{{name}}のターン"
   },
   "diceRoll": {
     "rollingForFirst": "先攻を決めるためにダイスを振っています",
     "tieReroll": "同数 — 振り直し！",
     "versus": "対",
     "skip": "タップしてスキップ",
+    "ignoredDie": "無視",
     "continue": "タップして続行",
     "you": "あなた",
     "youPlayFirst": "あなたが先攻",
@@ -423,5 +427,25 @@
       "no-turn": "TURNリレーが提供されませんでした",
       "aborted": "要求をキャンセルしました"
     }
+  },
+  "savedDeckLibraryBusy": {
+    "description": "別のPhaseタブが使用中です。他のPhaseタブを閉じてから再試行してください。",
+    "title": {
+      "save": "デッキを保存できませんでした",
+      "clone": "デッキを複製できませんでした",
+      "import": "デッキをインポートできませんでした",
+      "delete": "デッキを削除できませんでした",
+      "organize": "デッキの整理を更新できませんでした",
+      "updateFeeds": "デッキフィードを更新できませんでした",
+      "restore": "バックアップを復元できませんでした",
+      "applyCloud": "クラウドデッキを適用できませんでした",
+      "autosaveDraft": "ドラフトデッキを自動保存できませんでした"
+    }
+  },
+  "savedDeckLibraryStorageFailure": {
+    "description": "Phaseはブラウザのストレージにアクセスできませんでした。しばらくしてから再試行してください。"
+  },
+  "savedDeckChanged": {
+    "description": "操作の実行前にこのデッキが変更されたため、何も変更されませんでした。デッキを確認してもう一度お試しください。"
   }
 }

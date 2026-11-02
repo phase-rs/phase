@@ -1,0 +1,1730 @@
+{
+  "precast_shortcut_runtime": {
+    "materializing": false,
+    "must_diverge": null,
+    "next_epoch": 0,
+    "offer": null,
+    "suppressed_cast": null
+  },
+  "state": {
+    "active_player": 0,
+    "all_creature_types": [],
+    "allows_cancel_cast": false,
+    "alt_cost_grant_permissions_used": [],
+    "attacked_defenders_this_turn": {},
+    "attacking_creatures_this_turn": {},
+    "battlefield": [
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "cancelled_casts": [],
+    "cards_discarded_this_turn_by_player": {},
+    "combat": null,
+    "combat_phase_skip_next_turn": [
+      {
+        "active": false,
+        "pending": 0
+      },
+      {
+        "active": false,
+        "pending": 0
+      }
+    ],
+    "command_zone": [],
+    "commander_cast_count": {},
+    "commander_damage": [],
+    "creature_attacked_defenders_this_turn": {},
+    "creature_blocked_attackers_this_turn": [],
+    "creatures_attacked_this_turn": [],
+    "creatures_blocked_this_turn": [],
+    "crew_activated_this_turn": [],
+    "crew_resolved_this_turn": [],
+    "current_combat_attacker_restriction": null,
+    "current_combat_attacker_restriction_source": null,
+    "current_starting_player": 0,
+    "damage_dealt_this_turn": [],
+    "day_night": null,
+    "debug_mode": false,
+    "debug_permitted": [],
+    "deck_pools": [],
+    "delayed_triggers": [],
+    "eliminated_players": [],
+    "exerted_this_turn": [],
+    "exile": [],
+    "exile_cast_permissions_used": [],
+    "exile_links": [],
+    "exile_play_permissions_used": [],
+    "exile_play_single_use_consumed": [],
+    "extra_loyalty_activations_this_turn": {},
+    "extra_phase_resume": [],
+    "extra_phases": [],
+    "extra_turn_sequence_anchor": null,
+    "extra_turns": [],
+    "format_config": {
+      "allow_debug_actions": false,
+      "command_zone": false,
+      "commander_damage_threshold": null,
+      "deck_size": {
+        "data": 60,
+        "type": "Minimum"
+      },
+      "default_deck_copy_limit": {
+        "data": 4,
+        "type": "UpTo"
+      },
+      "format": "Standard",
+      "max_players": 2,
+      "min_players": 2,
+      "range_of_influence": null,
+      "sideboard_policy": {
+        "data": 15,
+        "type": "Limited"
+      },
+      "singleton": false,
+      "starting_life": 20,
+      "supplies_fixed_deck": false,
+      "team_based": false,
+      "uses_commander": false
+    },
+    "game_number": 1,
+    "graveyard_cast_permissions_used": [],
+    "graveyard_cast_permissions_used_per_type": [],
+    "hand_cast_free_permissions_used": [],
+    "has_pending_cast": false,
+    "lands_played_this_turn": 0,
+    "lands_played_this_turn_by_player": {},
+    "last_vote_ballots": [],
+    "loop_detection": {
+      "type": "Off"
+    },
+    "loyalty_abilities_activated_this_turn": {},
+    "mana_spent_on_spells_this_turn": {},
+    "match_config": {
+      "match_type": "Bo1"
+    },
+    "match_phase": "InGame",
+    "match_score": {
+      "draws": 0,
+      "p0_wins": 0,
+      "p1_wins": 0
+    },
+    "max_lands_per_turn": 1,
+    "modal_modes_chosen_this_game": [],
+    "modal_modes_chosen_this_turn": [],
+    "next_continuous_effect_id": 1,
+    "next_delayed_trigger_instance": 1,
+    "next_delayed_trigger_token": 1,
+    "next_end_effect_group_id": 1,
+    "next_game_chooser": null,
+    "next_logical_zone_change_group_id": 1,
+    "next_object_id": 6,
+    "next_pip_id": 9,
+    "next_resolution_cast_offer_id": 1,
+    "next_resolve_all_consent_epoch": 1,
+    "next_timestamp": 6,
+    "next_tracked_set_id": 1,
+    "objects": {
+      "1": {
+        "abilities": [],
+        "attached_to": null,
+        "attachments": [],
+        "base_card_types": {
+          "core_types": [
+            "Artifact"
+          ],
+          "subtypes": [],
+          "supertypes": []
+        },
+        "base_characteristics_initialized": true,
+        "base_color": [],
+        "base_controller": 0,
+        "base_keywords": [],
+        "base_name": "Unfloored Reducer",
+        "base_power": null,
+        "base_static_definitions": [
+          {
+            "active_zones": [],
+            "affected": {
+              "controller": "You",
+              "properties": [],
+              "type": "Typed",
+              "type_filters": [
+                "Creature"
+              ]
+            },
+            "affected_zone": null,
+            "characteristic_defining": false,
+            "condition": null,
+            "description": "Activated abilities of creatures you control cost {1} less to activate.",
+            "effect_zone": null,
+            "mode": {
+              "ReduceAbilityCost": {
+                "amount": 1,
+                "exemption": "None",
+                "keyword": "activated",
+                "mode": "Reduce"
+              }
+            },
+            "modifications": []
+          }
+        ],
+        "base_toughness": null,
+        "card_id": 1,
+        "card_types": {
+          "core_types": [
+            "Artifact"
+          ],
+          "subtypes": [],
+          "supertypes": []
+        },
+        "color": [],
+        "controller": 0,
+        "counters": {},
+        "damage_marked": 0,
+        "dealt_deathtouch_damage": false,
+        "entered_battlefield_turn": 1,
+        "face_down": false,
+        "flipped": false,
+        "id": 1,
+        "keywords": [],
+        "loyalty": null,
+        "mana_cost": {
+          "generic": 0,
+          "shards": [],
+          "type": "Cost"
+        },
+        "name": "Unfloored Reducer",
+        "owner": 0,
+        "power": null,
+        "replacement_definitions": [],
+        "static_definitions": [
+          {
+            "active_zones": [],
+            "affected": {
+              "controller": "You",
+              "properties": [],
+              "type": "Typed",
+              "type_filters": [
+                "Creature"
+              ]
+            },
+            "affected_zone": null,
+            "characteristic_defining": false,
+            "condition": null,
+            "description": "Activated abilities of creatures you control cost {1} less to activate.",
+            "effect_zone": null,
+            "mode": {
+              "ReduceAbilityCost": {
+                "amount": 1,
+                "exemption": "None",
+                "keyword": "activated",
+                "mode": "Reduce"
+              }
+            },
+            "modifications": []
+          }
+        ],
+        "tapped": false,
+        "timestamp": 1,
+        "toughness": null,
+        "transformed": false,
+        "trigger_definitions": [],
+        "zone": "Battlefield"
+      },
+      "2": {
+        "abilities": [
+          {
+            "condition": null,
+            "cost": {
+              "costs": [
+                {
+                  "cost": {
+                    "generic": 2,
+                    "shards": [],
+                    "type": "Cost"
+                  },
+                  "type": "Mana"
+                },
+                {
+                  "count": 2,
+                  "target": {
+                    "controller": null,
+                    "properties": [],
+                    "type": "Typed",
+                    "type_filters": [
+                      "Artifact"
+                    ]
+                  },
+                  "type": "Sacrifice"
+                }
+              ],
+              "type": "Composite"
+            },
+            "description": null,
+            "duration": null,
+            "effect": {
+              "duration": null,
+              "static_abilities": [],
+              "target": null,
+              "type": "GenericEffect"
+            },
+            "forward_result": false,
+            "kind": "Activated",
+            "modal": {
+              "allow_repeat_modes": false,
+              "chooser": {
+                "type": "Controller"
+              },
+              "max_choices": 1,
+              "min_choices": 1,
+              "mode_count": 3,
+              "mode_descriptions": [
+                "~ deals 3 damage to target player or planeswalker.",
+                "Target creature gets -4/-4 until end of turn.",
+                "You gain 5 life."
+              ]
+            },
+            "mode_abilities": [
+              {
+                "condition": null,
+                "cost": null,
+                "description": null,
+                "duration": null,
+                "effect": {
+                  "amount": {
+                    "type": "Fixed",
+                    "value": 3
+                  },
+                  "target": {
+                    "filters": [
+                      {
+                        "type": "Player"
+                      },
+                      {
+                        "controller": null,
+                        "properties": [],
+                        "type": "Typed",
+                        "type_filters": [
+                          "Planeswalker"
+                        ]
+                      }
+                    ],
+                    "type": "Or"
+                  },
+                  "type": "DealDamage"
+                },
+                "forward_result": false,
+                "kind": "Activated",
+                "optional": false,
+                "optional_targeting": false,
+                "sub_ability": null,
+                "target_prompt": null
+              },
+              {
+                "condition": null,
+                "cost": null,
+                "description": null,
+                "duration": "UntilEndOfTurn",
+                "effect": {
+                  "power": {
+                    "type": "Fixed",
+                    "value": -4
+                  },
+                  "target": {
+                    "controller": null,
+                    "properties": [],
+                    "type": "Typed",
+                    "type_filters": [
+                      "Creature"
+                    ]
+                  },
+                  "toughness": {
+                    "type": "Fixed",
+                    "value": -4
+                  },
+                  "type": "Pump"
+                },
+                "forward_result": false,
+                "kind": "Activated",
+                "optional": false,
+                "optional_targeting": false,
+                "sub_ability": null,
+                "target_prompt": null
+              },
+              {
+                "condition": null,
+                "cost": null,
+                "description": null,
+                "duration": null,
+                "effect": {
+                  "amount": {
+                    "type": "Fixed",
+                    "value": 5
+                  },
+                  "type": "GainLife"
+                },
+                "forward_result": false,
+                "kind": "Activated",
+                "optional": false,
+                "optional_targeting": false,
+                "sub_ability": null,
+                "target_prompt": null
+              }
+            ],
+            "optional": false,
+            "optional_targeting": false,
+            "sub_ability": null,
+            "target_prompt": null
+          }
+        ],
+        "attached_to": null,
+        "attachments": [],
+        "base_abilities": [
+          {
+            "condition": null,
+            "cost": {
+              "costs": [
+                {
+                  "cost": {
+                    "generic": 2,
+                    "shards": [],
+                    "type": "Cost"
+                  },
+                  "type": "Mana"
+                },
+                {
+                  "count": 2,
+                  "target": {
+                    "controller": null,
+                    "properties": [],
+                    "type": "Typed",
+                    "type_filters": [
+                      "Artifact"
+                    ]
+                  },
+                  "type": "Sacrifice"
+                }
+              ],
+              "type": "Composite"
+            },
+            "description": null,
+            "duration": null,
+            "effect": {
+              "duration": null,
+              "static_abilities": [],
+              "target": null,
+              "type": "GenericEffect"
+            },
+            "forward_result": false,
+            "kind": "Activated",
+            "modal": {
+              "allow_repeat_modes": false,
+              "chooser": {
+                "type": "Controller"
+              },
+              "max_choices": 1,
+              "min_choices": 1,
+              "mode_count": 3,
+              "mode_descriptions": [
+                "~ deals 3 damage to target player or planeswalker.",
+                "Target creature gets -4/-4 until end of turn.",
+                "You gain 5 life."
+              ]
+            },
+            "mode_abilities": [
+              {
+                "condition": null,
+                "cost": null,
+                "description": null,
+                "duration": null,
+                "effect": {
+                  "amount": {
+                    "type": "Fixed",
+                    "value": 3
+                  },
+                  "target": {
+                    "filters": [
+                      {
+                        "type": "Player"
+                      },
+                      {
+                        "controller": null,
+                        "properties": [],
+                        "type": "Typed",
+                        "type_filters": [
+                          "Planeswalker"
+                        ]
+                      }
+                    ],
+                    "type": "Or"
+                  },
+                  "type": "DealDamage"
+                },
+                "forward_result": false,
+                "kind": "Activated",
+                "optional": false,
+                "optional_targeting": false,
+                "sub_ability": null,
+                "target_prompt": null
+              },
+              {
+                "condition": null,
+                "cost": null,
+                "description": null,
+                "duration": "UntilEndOfTurn",
+                "effect": {
+                  "power": {
+                    "type": "Fixed",
+                    "value": -4
+                  },
+                  "target": {
+                    "controller": null,
+                    "properties": [],
+                    "type": "Typed",
+                    "type_filters": [
+                      "Creature"
+                    ]
+                  },
+                  "toughness": {
+                    "type": "Fixed",
+                    "value": -4
+                  },
+                  "type": "Pump"
+                },
+                "forward_result": false,
+                "kind": "Activated",
+                "optional": false,
+                "optional_targeting": false,
+                "sub_ability": null,
+                "target_prompt": null
+              },
+              {
+                "condition": null,
+                "cost": null,
+                "description": null,
+                "duration": null,
+                "effect": {
+                  "amount": {
+                    "type": "Fixed",
+                    "value": 5
+                  },
+                  "type": "GainLife"
+                },
+                "forward_result": false,
+                "kind": "Activated",
+                "optional": false,
+                "optional_targeting": false,
+                "sub_ability": null,
+                "target_prompt": null
+              }
+            ],
+            "optional": false,
+            "optional_targeting": false,
+            "sub_ability": null,
+            "target_prompt": null
+          }
+        ],
+        "base_card_types": {
+          "core_types": [
+            "Creature"
+          ],
+          "subtypes": [],
+          "supertypes": []
+        },
+        "base_characteristics_initialized": true,
+        "base_color": [],
+        "base_controller": 0,
+        "base_keywords": [],
+        "base_name": "Breya, Etherium Shaper",
+        "base_power": 4,
+        "base_toughness": 4,
+        "base_trigger_definitions": [
+          {
+            "batched": false,
+            "condition": null,
+            "constraint": null,
+            "damage_kind": "Any",
+            "description": "When ~ enters, create two 1/1 blue Thopter artifact creature tokens with flying.",
+            "destination": "Battlefield",
+            "execute": {
+              "condition": null,
+              "cost": null,
+              "description": null,
+              "duration": null,
+              "effect": {
+                "colors": [
+                  "Blue"
+                ],
+                "count": {
+                  "type": "Fixed",
+                  "value": 2
+                },
+                "enters_attacking": false,
+                "keywords": [
+                  "Flying"
+                ],
+                "name": "Thopter",
+                "owner": {
+                  "type": "Controller"
+                },
+                "power": {
+                  "type": "Fixed",
+                  "value": 1
+                },
+                "tapped": false,
+                "toughness": {
+                  "type": "Fixed",
+                  "value": 1
+                },
+                "type": "Token",
+                "types": [
+                  "Artifact",
+                  "Creature",
+                  "Thopter"
+                ]
+              },
+              "forward_result": false,
+              "kind": "Spell",
+              "optional": false,
+              "optional_targeting": false,
+              "sub_ability": null,
+              "target_prompt": null
+            },
+            "mode": "ChangesZone",
+            "optional": false,
+            "origin": null,
+            "phase": null,
+            "secondary": false,
+            "trigger_zones": [
+              "Battlefield"
+            ],
+            "valid_card": {
+              "type": "SelfRef"
+            },
+            "valid_source": null,
+            "valid_target": null
+          }
+        ],
+        "card_id": 2,
+        "card_types": {
+          "core_types": [
+            "Creature"
+          ],
+          "subtypes": [],
+          "supertypes": []
+        },
+        "color": [],
+        "controller": 0,
+        "counters": {},
+        "damage_marked": 0,
+        "dealt_deathtouch_damage": false,
+        "entered_battlefield_turn": 1,
+        "face_down": false,
+        "flipped": false,
+        "id": 2,
+        "keywords": [],
+        "layer_base_power": 4,
+        "layer_base_toughness": 4,
+        "loyalty": null,
+        "mana_cost": {
+          "generic": 0,
+          "shards": [],
+          "type": "Cost"
+        },
+        "name": "Breya, Etherium Shaper",
+        "owner": 0,
+        "power": 4,
+        "replacement_definitions": [],
+        "static_definitions": [],
+        "tapped": false,
+        "timestamp": 2,
+        "toughness": 4,
+        "transformed": false,
+        "trigger_definitions": [
+          {
+            "definition": {
+              "batched": false,
+              "condition": null,
+              "constraint": null,
+              "damage_kind": "Any",
+              "description": "When ~ enters, create two 1/1 blue Thopter artifact creature tokens with flying.",
+              "destination": "Battlefield",
+              "execute": {
+                "condition": null,
+                "cost": null,
+                "description": null,
+                "duration": null,
+                "effect": {
+                  "colors": [
+                    "Blue"
+                  ],
+                  "count": {
+                    "type": "Fixed",
+                    "value": 2
+                  },
+                  "enters_attacking": false,
+                  "keywords": [
+                    "Flying"
+                  ],
+                  "name": "Thopter",
+                  "owner": {
+                    "type": "Controller"
+                  },
+                  "power": {
+                    "type": "Fixed",
+                    "value": 1
+                  },
+                  "tapped": false,
+                  "toughness": {
+                    "type": "Fixed",
+                    "value": 1
+                  },
+                  "type": "Token",
+                  "types": [
+                    "Artifact",
+                    "Creature",
+                    "Thopter"
+                  ]
+                },
+                "forward_result": false,
+                "kind": "Spell",
+                "optional": false,
+                "optional_targeting": false,
+                "sub_ability": null,
+                "target_prompt": null
+              },
+              "mode": "ChangesZone",
+              "optional": false,
+              "origin": null,
+              "phase": null,
+              "secondary": false,
+              "trigger_zones": [
+                "Battlefield"
+              ],
+              "valid_card": {
+                "type": "SelfRef"
+              },
+              "valid_source": null,
+              "valid_target": null
+            },
+            "occurrence": {
+              "data": {
+                "base_set": 1,
+                "printed_index": 0
+              },
+              "type": "Printed"
+            }
+          }
+        ],
+        "zone": "Battlefield"
+      },
+      "3": {
+        "abilities": [
+          {
+            "condition": null,
+            "cost": {
+              "type": "Tap"
+            },
+            "description": "{T}: You gain 1 life.",
+            "duration": null,
+            "effect": {
+              "amount": {
+                "type": "Fixed",
+                "value": 1
+              },
+              "type": "GainLife"
+            },
+            "forward_result": false,
+            "kind": "Activated",
+            "optional": false,
+            "optional_targeting": false,
+            "sub_ability": null,
+            "target_prompt": null
+          }
+        ],
+        "attached_to": null,
+        "attachments": [],
+        "base_abilities": [
+          {
+            "condition": null,
+            "cost": {
+              "type": "Tap"
+            },
+            "description": "{T}: You gain 1 life.",
+            "duration": null,
+            "effect": {
+              "amount": {
+                "type": "Fixed",
+                "value": 1
+              },
+              "type": "GainLife"
+            },
+            "forward_result": false,
+            "kind": "Activated",
+            "optional": false,
+            "optional_targeting": false,
+            "sub_ability": null,
+            "target_prompt": null
+          }
+        ],
+        "base_card_types": {
+          "core_types": [
+            "Artifact"
+          ],
+          "subtypes": [],
+          "supertypes": []
+        },
+        "base_characteristics_initialized": true,
+        "base_color": [],
+        "base_controller": 0,
+        "base_keywords": [],
+        "base_name": "Bauble A",
+        "base_power": null,
+        "base_toughness": null,
+        "card_id": 3,
+        "card_types": {
+          "core_types": [
+            "Artifact"
+          ],
+          "subtypes": [],
+          "supertypes": []
+        },
+        "color": [],
+        "controller": 0,
+        "counters": {},
+        "damage_marked": 0,
+        "dealt_deathtouch_damage": false,
+        "entered_battlefield_turn": 1,
+        "face_down": false,
+        "flipped": false,
+        "id": 3,
+        "keywords": [],
+        "loyalty": null,
+        "mana_cost": {
+          "generic": 0,
+          "shards": [],
+          "type": "Cost"
+        },
+        "name": "Bauble A",
+        "owner": 0,
+        "power": null,
+        "replacement_definitions": [],
+        "static_definitions": [],
+        "tapped": false,
+        "timestamp": 3,
+        "toughness": null,
+        "transformed": false,
+        "trigger_definitions": [],
+        "zone": "Battlefield"
+      },
+      "4": {
+        "abilities": [
+          {
+            "condition": null,
+            "cost": {
+              "type": "Tap"
+            },
+            "description": "{T}: You gain 1 life.",
+            "duration": null,
+            "effect": {
+              "amount": {
+                "type": "Fixed",
+                "value": 1
+              },
+              "type": "GainLife"
+            },
+            "forward_result": false,
+            "kind": "Activated",
+            "optional": false,
+            "optional_targeting": false,
+            "sub_ability": null,
+            "target_prompt": null
+          }
+        ],
+        "attached_to": null,
+        "attachments": [],
+        "base_abilities": [
+          {
+            "condition": null,
+            "cost": {
+              "type": "Tap"
+            },
+            "description": "{T}: You gain 1 life.",
+            "duration": null,
+            "effect": {
+              "amount": {
+                "type": "Fixed",
+                "value": 1
+              },
+              "type": "GainLife"
+            },
+            "forward_result": false,
+            "kind": "Activated",
+            "optional": false,
+            "optional_targeting": false,
+            "sub_ability": null,
+            "target_prompt": null
+          }
+        ],
+        "base_card_types": {
+          "core_types": [
+            "Artifact"
+          ],
+          "subtypes": [],
+          "supertypes": []
+        },
+        "base_characteristics_initialized": true,
+        "base_color": [],
+        "base_controller": 0,
+        "base_keywords": [],
+        "base_name": "Bauble B",
+        "base_power": null,
+        "base_toughness": null,
+        "card_id": 4,
+        "card_types": {
+          "core_types": [
+            "Artifact"
+          ],
+          "subtypes": [],
+          "supertypes": []
+        },
+        "color": [],
+        "controller": 0,
+        "counters": {},
+        "damage_marked": 0,
+        "dealt_deathtouch_damage": false,
+        "entered_battlefield_turn": 1,
+        "face_down": false,
+        "flipped": false,
+        "id": 4,
+        "keywords": [],
+        "loyalty": null,
+        "mana_cost": {
+          "generic": 0,
+          "shards": [],
+          "type": "Cost"
+        },
+        "name": "Bauble B",
+        "owner": 0,
+        "power": null,
+        "replacement_definitions": [],
+        "static_definitions": [],
+        "tapped": false,
+        "timestamp": 4,
+        "toughness": null,
+        "transformed": false,
+        "trigger_definitions": [],
+        "zone": "Battlefield"
+      },
+      "5": {
+        "abilities": [],
+        "attached_to": null,
+        "attachments": [],
+        "base_card_types": {
+          "core_types": [
+            "Creature"
+          ],
+          "subtypes": [],
+          "supertypes": []
+        },
+        "base_characteristics_initialized": true,
+        "base_color": [],
+        "base_controller": 1,
+        "base_keywords": [],
+        "base_name": "Bear",
+        "base_power": 5,
+        "base_toughness": 5,
+        "card_id": 5,
+        "card_types": {
+          "core_types": [
+            "Creature"
+          ],
+          "subtypes": [],
+          "supertypes": []
+        },
+        "color": [],
+        "controller": 1,
+        "counters": {},
+        "damage_marked": 0,
+        "dealt_deathtouch_damage": false,
+        "entered_battlefield_turn": 1,
+        "face_down": false,
+        "flipped": false,
+        "id": 5,
+        "keywords": [],
+        "layer_base_power": 5,
+        "layer_base_toughness": 5,
+        "loyalty": null,
+        "mana_cost": {
+          "generic": 0,
+          "shards": [],
+          "type": "Cost"
+        },
+        "name": "Bear",
+        "owner": 1,
+        "power": 5,
+        "replacement_definitions": [],
+        "static_definitions": [],
+        "tapped": false,
+        "timestamp": 5,
+        "toughness": 5,
+        "transformed": false,
+        "trigger_definitions": [],
+        "zone": "Battlefield"
+      }
+    },
+    "pending_replacement": null,
+    "pending_trigger": null,
+    "phase": "PreCombatMain",
+    "players": [
+      {
+        "attraction_deck": [],
+        "bending_types_this_turn": [],
+        "can_look_at_top_of_library": false,
+        "cards_drawn_this_step": 0,
+        "cards_drawn_this_turn": 0,
+        "commander_color_identity": [],
+        "contraption_crank_sprocket": 3,
+        "contraption_deck": [],
+        "crimes_committed_this_turn": 0,
+        "descended_this_turn": false,
+        "drew_from_empty_library": false,
+        "energy": 0,
+        "graveyard": [],
+        "hand": [],
+        "has_drawn_this_turn": false,
+        "id": 0,
+        "is_eliminated": false,
+        "lands_played_this_turn": 0,
+        "library": [],
+        "life": 20,
+        "life_gained_this_turn": 0,
+        "life_lost_last_turn": 0,
+        "life_lost_this_turn": 0,
+        "mana_pool": {
+          "mana": [
+            {
+              "color": "Blue",
+              "pip_id": 1,
+              "restrictions": [],
+              "snow": false,
+              "source_id": 0
+            },
+            {
+              "color": "Blue",
+              "pip_id": 2,
+              "restrictions": [],
+              "snow": false,
+              "source_id": 0
+            },
+            {
+              "color": "Blue",
+              "pip_id": 3,
+              "restrictions": [],
+              "snow": false,
+              "source_id": 0
+            },
+            {
+              "color": "Blue",
+              "pip_id": 4,
+              "restrictions": [],
+              "snow": false,
+              "source_id": 0
+            },
+            {
+              "color": "Blue",
+              "pip_id": 5,
+              "restrictions": [],
+              "snow": false,
+              "source_id": 0
+            },
+            {
+              "color": "Blue",
+              "pip_id": 6,
+              "restrictions": [],
+              "snow": false,
+              "source_id": 0
+            },
+            {
+              "color": "Blue",
+              "pip_id": 7,
+              "restrictions": [],
+              "snow": false,
+              "source_id": 0
+            },
+            {
+              "color": "Blue",
+              "pip_id": 8,
+              "restrictions": [],
+              "snow": false,
+              "source_id": 0
+            }
+          ]
+        },
+        "poison_counters": 0,
+        "speed_trigger_used_this_turn": false,
+        "status": {
+          "type": "Active"
+        },
+        "turns_taken": 0
+      },
+      {
+        "attraction_deck": [],
+        "bending_types_this_turn": [],
+        "can_look_at_top_of_library": false,
+        "cards_drawn_this_step": 0,
+        "cards_drawn_this_turn": 0,
+        "commander_color_identity": [],
+        "contraption_crank_sprocket": 3,
+        "contraption_deck": [],
+        "crimes_committed_this_turn": 0,
+        "descended_this_turn": false,
+        "drew_from_empty_library": false,
+        "energy": 0,
+        "graveyard": [],
+        "hand": [],
+        "has_drawn_this_turn": false,
+        "id": 1,
+        "is_eliminated": false,
+        "lands_played_this_turn": 0,
+        "library": [],
+        "life": 20,
+        "life_gained_this_turn": 0,
+        "life_lost_last_turn": 0,
+        "life_lost_this_turn": 0,
+        "mana_pool": {
+          "mana": []
+        },
+        "poison_counters": 0,
+        "speed_trigger_used_this_turn": false,
+        "status": {
+          "type": "Active"
+        },
+        "turns_taken": 0
+      }
+    ],
+    "players_attacked_this_step": [],
+    "players_attacked_this_turn": [],
+    "players_who_created_token_this_turn": [],
+    "players_who_discarded_card_this_turn": [],
+    "players_who_sacrificed_artifact_this_turn": [],
+    "players_who_searched_library_this_turn": [],
+    "priority_pass_count": 0,
+    "priority_passes": [],
+    "priority_player": 0,
+    "public_revealed_cards": [],
+    "resolution_frames": {
+      "frames": [],
+      "last_post_replacement_frame_id": 0,
+      "next_discard_frame_id": 0,
+      "next_draw_sequence_frame_id": 0
+    },
+    "resolution_state_version": 3,
+    "resolved_rules_journal": {
+      "entries": [
+        {
+          "node": {
+            "Proposal": 0
+          },
+          "ordinal": 0
+        },
+        {
+          "command": {
+            "ManaInsert": {
+              "player": 0,
+              "producer": {
+                "Proposal": 0
+              },
+              "unit": {
+                "color": "Blue",
+                "pip_id": 1,
+                "restrictions": [],
+                "snow": false,
+                "source_id": 0
+              }
+            }
+          },
+          "node": {
+            "Proposal": 0
+          },
+          "ordinal": 1
+        },
+        {
+          "node": {
+            "Proposal": 2
+          },
+          "ordinal": 2
+        },
+        {
+          "command": {
+            "ManaInsert": {
+              "player": 0,
+              "producer": {
+                "Proposal": 2
+              },
+              "unit": {
+                "color": "Blue",
+                "pip_id": 2,
+                "restrictions": [],
+                "snow": false,
+                "source_id": 0
+              }
+            }
+          },
+          "node": {
+            "Proposal": 2
+          },
+          "ordinal": 3
+        },
+        {
+          "node": {
+            "Proposal": 4
+          },
+          "ordinal": 4
+        },
+        {
+          "command": {
+            "ManaInsert": {
+              "player": 0,
+              "producer": {
+                "Proposal": 4
+              },
+              "unit": {
+                "color": "Blue",
+                "pip_id": 3,
+                "restrictions": [],
+                "snow": false,
+                "source_id": 0
+              }
+            }
+          },
+          "node": {
+            "Proposal": 4
+          },
+          "ordinal": 5
+        },
+        {
+          "node": {
+            "Proposal": 6
+          },
+          "ordinal": 6
+        },
+        {
+          "command": {
+            "ManaInsert": {
+              "player": 0,
+              "producer": {
+                "Proposal": 6
+              },
+              "unit": {
+                "color": "Blue",
+                "pip_id": 4,
+                "restrictions": [],
+                "snow": false,
+                "source_id": 0
+              }
+            }
+          },
+          "node": {
+            "Proposal": 6
+          },
+          "ordinal": 7
+        },
+        {
+          "node": {
+            "Proposal": 8
+          },
+          "ordinal": 8
+        },
+        {
+          "command": {
+            "ManaInsert": {
+              "player": 0,
+              "producer": {
+                "Proposal": 8
+              },
+              "unit": {
+                "color": "Blue",
+                "pip_id": 5,
+                "restrictions": [],
+                "snow": false,
+                "source_id": 0
+              }
+            }
+          },
+          "node": {
+            "Proposal": 8
+          },
+          "ordinal": 9
+        },
+        {
+          "node": {
+            "Proposal": 10
+          },
+          "ordinal": 10
+        },
+        {
+          "command": {
+            "ManaInsert": {
+              "player": 0,
+              "producer": {
+                "Proposal": 10
+              },
+              "unit": {
+                "color": "Blue",
+                "pip_id": 6,
+                "restrictions": [],
+                "snow": false,
+                "source_id": 0
+              }
+            }
+          },
+          "node": {
+            "Proposal": 10
+          },
+          "ordinal": 11
+        },
+        {
+          "node": {
+            "Proposal": 12
+          },
+          "ordinal": 12
+        },
+        {
+          "command": {
+            "ManaInsert": {
+              "player": 0,
+              "producer": {
+                "Proposal": 12
+              },
+              "unit": {
+                "color": "Blue",
+                "pip_id": 7,
+                "restrictions": [],
+                "snow": false,
+                "source_id": 0
+              }
+            }
+          },
+          "node": {
+            "Proposal": 12
+          },
+          "ordinal": 13
+        },
+        {
+          "node": {
+            "Proposal": 14
+          },
+          "ordinal": 14
+        },
+        {
+          "command": {
+            "ManaInsert": {
+              "player": 0,
+              "producer": {
+                "Proposal": 14
+              },
+              "unit": {
+                "color": "Blue",
+                "pip_id": 8,
+                "restrictions": [],
+                "snow": false,
+                "source_id": 0
+              }
+            }
+          },
+          "node": {
+            "Proposal": 14
+          },
+          "ordinal": 15
+        }
+      ],
+      "next_command_ordinal": 16,
+      "next_settlement_node_ordinal": 8,
+      "nodes": [
+        {
+          "identity": {
+            "Proposal": 0
+          },
+          "journal_ordinals": [
+            0,
+            1
+          ],
+          "kind": "Proposal",
+          "ordinal": 0,
+          "produced_pips": [
+            1
+          ]
+        },
+        {
+          "identity": {
+            "Proposal": 2
+          },
+          "journal_ordinals": [
+            2,
+            3
+          ],
+          "kind": "Proposal",
+          "ordinal": 1,
+          "produced_pips": [
+            2
+          ]
+        },
+        {
+          "identity": {
+            "Proposal": 4
+          },
+          "journal_ordinals": [
+            4,
+            5
+          ],
+          "kind": "Proposal",
+          "ordinal": 2,
+          "produced_pips": [
+            3
+          ]
+        },
+        {
+          "identity": {
+            "Proposal": 6
+          },
+          "journal_ordinals": [
+            6,
+            7
+          ],
+          "kind": "Proposal",
+          "ordinal": 3,
+          "produced_pips": [
+            4
+          ]
+        },
+        {
+          "identity": {
+            "Proposal": 8
+          },
+          "journal_ordinals": [
+            8,
+            9
+          ],
+          "kind": "Proposal",
+          "ordinal": 4,
+          "produced_pips": [
+            5
+          ]
+        },
+        {
+          "identity": {
+            "Proposal": 10
+          },
+          "journal_ordinals": [
+            10,
+            11
+          ],
+          "kind": "Proposal",
+          "ordinal": 5,
+          "produced_pips": [
+            6
+          ]
+        },
+        {
+          "identity": {
+            "Proposal": 12
+          },
+          "journal_ordinals": [
+            12,
+            13
+          ],
+          "kind": "Proposal",
+          "ordinal": 6,
+          "produced_pips": [
+            7
+          ]
+        },
+        {
+          "identity": {
+            "Proposal": 14
+          },
+          "journal_ordinals": [
+            14,
+            15
+          ],
+          "kind": "Proposal",
+          "ordinal": 7,
+          "produced_pips": [
+            8
+          ]
+        }
+      ],
+      "produced_mana": [
+        {
+          "producer": {
+            "Proposal": 0
+          },
+          "unit": {
+            "color": "Blue",
+            "pip_id": 1,
+            "restrictions": [],
+            "snow": false,
+            "source_id": 0
+          }
+        },
+        {
+          "producer": {
+            "Proposal": 2
+          },
+          "unit": {
+            "color": "Blue",
+            "pip_id": 2,
+            "restrictions": [],
+            "snow": false,
+            "source_id": 0
+          }
+        },
+        {
+          "producer": {
+            "Proposal": 4
+          },
+          "unit": {
+            "color": "Blue",
+            "pip_id": 3,
+            "restrictions": [],
+            "snow": false,
+            "source_id": 0
+          }
+        },
+        {
+          "producer": {
+            "Proposal": 6
+          },
+          "unit": {
+            "color": "Blue",
+            "pip_id": 4,
+            "restrictions": [],
+            "snow": false,
+            "source_id": 0
+          }
+        },
+        {
+          "producer": {
+            "Proposal": 8
+          },
+          "unit": {
+            "color": "Blue",
+            "pip_id": 5,
+            "restrictions": [],
+            "snow": false,
+            "source_id": 0
+          }
+        },
+        {
+          "producer": {
+            "Proposal": 10
+          },
+          "unit": {
+            "color": "Blue",
+            "pip_id": 6,
+            "restrictions": [],
+            "snow": false,
+            "source_id": 0
+          }
+        },
+        {
+          "producer": {
+            "Proposal": 12
+          },
+          "unit": {
+            "color": "Blue",
+            "pip_id": 7,
+            "restrictions": [],
+            "snow": false,
+            "source_id": 0
+          }
+        },
+        {
+          "producer": {
+            "Proposal": 14
+          },
+          "unit": {
+            "color": "Blue",
+            "pip_id": 8,
+            "restrictions": [],
+            "snow": false,
+            "source_id": 0
+          }
+        }
+      ],
+      "spent_mana": []
+    },
+    "revealed_cards": [],
+    "ring_bearer": {},
+    "ring_level": {},
+    "rng_seed": 42,
+    "rng_word_pos": 0,
+    "scheduled_turn_controls": [],
+    "seat_order": [
+      0,
+      1
+    ],
+    "sideboard_submitted": [],
+    "spells_cast_last_turn": null,
+    "spells_cast_this_game": {},
+    "spells_cast_this_game_by_player": {},
+    "spells_cast_this_turn": 0,
+    "spells_cast_this_turn_by_player": {},
+    "stack": [],
+    "steps_to_skip": [
+      {},
+      {}
+    ],
+    "top_of_library_cast_permissions_used": [],
+    "tracked_object_sets": {},
+    "transient_continuous_effects": [],
+    "triggers_fired_this_game": [],
+    "triggers_fired_this_turn": [],
+    "triggers_fired_this_turn_per_opponent": [],
+    "turn_direction": "Normal",
+    "turn_number": 2,
+    "turns_to_skip": [
+      0,
+      0
+    ],
+    "waiting_for": {
+      "data": {
+        "ability_cost": {
+          "costs": [
+            {
+              "cost": {
+                "generic": 1,
+                "shards": [],
+                "type": "Cost"
+              },
+              "type": "Mana"
+            },
+            {
+              "count": 2,
+              "target": {
+                "controller": null,
+                "properties": [],
+                "type": "Typed",
+                "type_filters": [
+                  "Artifact"
+                ]
+              },
+              "type": "Sacrifice"
+            }
+          ],
+          "type": "Composite"
+        },
+        "ability_index": 0,
+        "is_activated": true,
+        "modal": {
+          "allow_repeat_modes": false,
+          "chooser": {
+            "type": "Controller"
+          },
+          "max_choices": 1,
+          "min_choices": 1,
+          "mode_count": 3,
+          "mode_descriptions": [
+            "~ deals 3 damage to target player or planeswalker.",
+            "Target creature gets -4/-4 until end of turn.",
+            "You gain 5 life."
+          ]
+        },
+        "mode_abilities": [
+          {
+            "condition": null,
+            "cost": null,
+            "description": null,
+            "duration": null,
+            "effect": {
+              "amount": {
+                "type": "Fixed",
+                "value": 3
+              },
+              "target": {
+                "filters": [
+                  {
+                    "type": "Player"
+                  },
+                  {
+                    "controller": null,
+                    "properties": [],
+                    "type": "Typed",
+                    "type_filters": [
+                      "Planeswalker"
+                    ]
+                  }
+                ],
+                "type": "Or"
+              },
+              "type": "DealDamage"
+            },
+            "forward_result": false,
+            "kind": "Activated",
+            "optional": false,
+            "optional_targeting": false,
+            "sub_ability": null,
+            "target_prompt": null
+          },
+          {
+            "condition": null,
+            "cost": null,
+            "description": null,
+            "duration": "UntilEndOfTurn",
+            "effect": {
+              "power": {
+                "type": "Fixed",
+                "value": -4
+              },
+              "target": {
+                "controller": null,
+                "properties": [],
+                "type": "Typed",
+                "type_filters": [
+                  "Creature"
+                ]
+              },
+              "toughness": {
+                "type": "Fixed",
+                "value": -4
+              },
+              "type": "Pump"
+            },
+            "forward_result": false,
+            "kind": "Activated",
+            "optional": false,
+            "optional_targeting": false,
+            "sub_ability": null,
+            "target_prompt": null
+          },
+          {
+            "condition": null,
+            "cost": null,
+            "description": null,
+            "duration": null,
+            "effect": {
+              "amount": {
+                "type": "Fixed",
+                "value": 5
+              },
+              "type": "GainLife"
+            },
+            "forward_result": false,
+            "kind": "Activated",
+            "optional": false,
+            "optional_targeting": false,
+            "sub_ability": null,
+            "target_prompt": null
+          }
+        ],
+        "player": 0,
+        "source_id": 2
+      },
+      "type": "AbilityModeChoice"
+    }
+  }
+}

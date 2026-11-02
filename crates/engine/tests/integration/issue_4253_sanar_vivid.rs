@@ -68,6 +68,7 @@ fn sanar_vivid_chain(source: ObjectId) -> ResolvedAbility {
             matched_disposition: RevealUntilDisposition::RevealOnly,
             kept_destination: Zone::Library,
             rest_destination: Zone::Library,
+            rest_order: engine::types::ability::DigRestOrder::Preserve,
             enter_tapped: EtbTapState::Unspecified,
             enters_attacking: false,
             kept_optional_to: None,

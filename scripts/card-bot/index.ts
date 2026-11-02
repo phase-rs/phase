@@ -4,14 +4,15 @@
 // verify the Ed25519 signature, then:
 //   • PING            → PONG
 //   • /card           → defer, then follow up with the parse embed
-//   • /lfg            → post the LFG publicly (or refuse ephemerally), synchronously
+//   • /lfg            → post the LFG publicly (or refuse ephemerally)
 //   • autocomplete    → /lfg: eligible dedicated servers; otherwise card names
 //                       from the (warm) default build
-//   • button          → /lfg Join / Leave / Start / Get my link (lfgInteractions.ts)
+//   • button          → /lfg Join / Leave / Start / Get my link, and the game
+//                       thread's End game (lfgInteractions.ts)
 //
 // Deferring /card guarantees we never hit Discord's 3s response window, even on
 // a cold preview load or a slow Scryfall call. /lfg needs only in-memory and
-// sqlite state, so it answers directly.
+// sqlite state plus one cached guild-role lookup, so it answers directly.
 
 import {
   DEFAULT_BUILD,
@@ -33,6 +34,8 @@ import {
   type Interaction,
   InteractionType,
   ResponseType,
+  botMessageApi,
+  botThreadApi,
   createFollowupMessage,
   editOriginalResponse,
   jsonResponse,
@@ -40,8 +43,16 @@ import {
   verifyRequest,
 } from "./discord";
 import { LfgStore } from "./lfg";
-import { type LfgDeps, lfgAutocomplete, lfgCommand, lfgComponent } from "./lfgInteractions";
+import {
+  closeThreads,
+  type LfgDeps,
+  lfgAutocomplete,
+  lfgCommand,
+  lfgComponent,
+} from "./lfgInteractions";
 import { parseCustomId } from "./lfgView";
+import { LfgRoleCache } from "./lfgRoles";
+import { LOBBY_POLL_INTERVAL_MS, type LobbyMirrorDeps, LobbyPostStore, syncLobbyPosts } from "./lobbyMirror";
 import type { Embed } from "./render";
 import {
   renderCardEmbed,
@@ -149,6 +160,9 @@ const MIN_AUTOCOMPLETE_CHARS = 2;
 const MAX_AUTOCOMPLETE_CHOICES = 25;
 const MAX_TOKEN_CHOICES = 5;
 
+/** How often the timer looks for game threads to close (lfg.ts GAME_THREAD_MAX_MS). */
+const THREAD_SWEEP_INTERVAL_MS = 10 * 60_000;
+
 /** Synchronous autocomplete: suggest names from the warm default build. */
 async function autocomplete(interaction: CommandInteraction): Promise<Response> {
   const focused = interaction.data.options?.find((o) => o.focused);
@@ -228,10 +242,57 @@ if (import.meta.main) {
 
   const servers = new ServerCache();
   servers.start();
+  const botToken = discord.tokenIfSet();
+  const threads = botToken === undefined ? null : botThreadApi(botToken);
+  const roles = botToken === undefined ? null : new LfgRoleCache(discord.guildId(), botToken);
+  const store = new LfgStore(LFG_DB_PATH);
   const deps: InteractionDeps = {
     publicKey: discord.publicKey(),
-    lfg: { store: new LfgStore(LFG_DB_PATH), servers, now: Date.now, followup: createFollowupMessage },
+    lfg: {
+      store,
+      servers,
+      now: Date.now,
+      followup: createFollowupMessage,
+      editOriginal: editOriginalResponse,
+      threads,
+      roles,
+    },
   };
+  if (threads !== null) {
+    setInterval(() => {
+      void closeThreads(store, threads, Date.now()).catch((err) =>
+        console.error("[lfg] thread sweep failed:", err),
+      );
+    }, THREAD_SWEEP_INTERVAL_MS);
+  }
+
+  const lobbyChannelId = discord.lobbyChannelId();
+  const mirror: LobbyMirrorDeps | null =
+    botToken === undefined || lobbyChannelId === undefined
+      ? null
+      : {
+          posts: new LobbyPostStore(LFG_DB_PATH),
+          messages: botMessageApi(botToken),
+          channelId: lobbyChannelId,
+          fetchFn: fetch,
+          readable: new Map(),
+          now: Date.now,
+        };
+  if (mirror !== null) {
+    // A pass can outlast the interval (Discord rate limits); one never overlaps the last.
+    let syncing = false;
+    const syncLobby = () => {
+      if (syncing) return;
+      syncing = true;
+      void syncLobbyPosts(mirror)
+        .catch((err) => console.error("[lobby-mirror] pass failed:", err))
+        .finally(() => {
+          syncing = false;
+        });
+    };
+    syncLobby();
+    setInterval(syncLobby, LOBBY_POLL_INTERVAL_MS);
+  }
 
   Bun.serve({
     port: PORT,
@@ -247,5 +308,7 @@ if (import.meta.main) {
     },
   });
 
-  console.log(`card-bot listening on :${PORT} (default build: ${DEFAULT_BUILD})`);
+  console.log(
+    `card-bot listening on :${PORT} (default build: ${DEFAULT_BUILD}, game threads: ${threads === null ? "off, no CARD_BOT_TOKEN" : "on"}, lobby mirror: ${mirror === null ? "off" : `on (channel ${mirror.channelId})`})`,
+  );
 }

@@ -9,13 +9,16 @@ use engine::game::effects::draw::{preview_draw_delivery, DrawDeliveryPreview};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, DrawReplacementScope, Effect, QuantityExpr,
-    QuantityModification, ReplacementDefinition, ReplacementMode, SearchSelectionConstraint,
-    TargetFilter, TypeFilter, TypedFilter,
+    AbilityDefinition, AbilityKind, CardSelectionMode, DrawReplacementScope, Effect, QuantityExpr,
+    QuantityModification, ReplacementDefinition, ReplacementMode, ResolvedAbility,
+    SearchSelectionConstraint, TargetFilter, TypeFilter, TypedFilter,
 };
 use engine::types::actions::{DebugAction, GameAction};
 use engine::types::card_type::CoreType;
-use engine::types::game_state::{GameState, WaitingFor};
+use engine::types::events::{GameEvent, PlayerActionKind};
+use engine::types::game_state::{
+    CastingVariant, GameState, StackEntry, StackEntryKind, WaitingFor,
+};
 use engine::types::identifiers::CardId;
 use engine::types::phase::Phase;
 use engine::types::replacements::ReplacementEvent;
@@ -78,6 +81,44 @@ fn issue_draw(runner: &mut GameRunner, requested: u32) {
         .expect("debug draw must be accepted");
 }
 
+fn resolve_stacked_draw(runner: &mut GameRunner, requested: i32) {
+    runner.state_mut().debug_mode = false;
+    let card_id = CardId(97_100);
+    let source_id = create_object(
+        runner.state_mut(),
+        card_id,
+        P0,
+        "Draw spell".to_string(),
+        Zone::Stack,
+    );
+    let ability = ResolvedAbility::new(
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: requested },
+            target: TargetFilter::Controller,
+        },
+        Vec::new(),
+        source_id,
+        P0,
+    );
+    runner.state_mut().stack.push_back(StackEntry {
+        id: source_id,
+        source_id,
+        controller: P0,
+        kind: StackEntryKind::Spell {
+            card_id,
+            ability: Some(Box::new(ability)),
+            casting_variant: CastingVariant::Normal,
+            actual_mana_spent: 0,
+        },
+    });
+    runner
+        .act(GameAction::PassPriority)
+        .expect("active player passes priority");
+    runner
+        .act(GameAction::PassPriority)
+        .expect("second player passes and resolves the draw spell");
+}
+
 fn completed_delivery(mut runner: GameRunner, requested: u32) -> (usize, GameState) {
     issue_draw(&mut runner, requested);
     runner.advance_until_stack_empty();
@@ -126,6 +167,27 @@ fn draw_two_instead() -> ReplacementDefinition {
             target: TargetFilter::Controller,
         },
     ))
+}
+
+fn draw_two_then_discard() -> ReplacementDefinition {
+    let mut draw = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 2 },
+            target: TargetFilter::Controller,
+        },
+    );
+    draw.sub_ability = Some(Box::new(AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Discard {
+            count: QuantityExpr::Fixed { value: 1 },
+            target: TargetFilter::Controller,
+            selection: CardSelectionMode::Chosen,
+            unless_filter: None,
+            filter: None,
+        },
+    )));
+    individual_draw_replacement().execute(draw)
 }
 
 fn search_library_substitute() -> ReplacementDefinition {
@@ -268,6 +330,141 @@ fn preview_reports_count_modified_draw_delivery() {
     );
 }
 
+/// A count-changing Draw replacement must finish every child delivery before
+/// its non-LoseLife follow-up starts, including when one delivery pauses.
+#[test]
+fn count_modified_draw_follow_up_waits_for_paused_child_delivery() {
+    let mut runner = runner(4, vec![draw_two_then_discard()]);
+    let first_library_card = runner.state().players[P0.0 as usize].library[0];
+    let existing_hand_cards: Vec<_> = (0..2)
+        .map(|index| {
+            create_object(
+                runner.state_mut(),
+                CardId(97_000 + index),
+                P0,
+                format!("Existing hand card {index}"),
+                Zone::Hand,
+            )
+        })
+        .collect();
+    let pause_source = create_object(
+        runner.state_mut(),
+        CardId(97_002),
+        P0,
+        "Paused draw delivery replacement".to_string(),
+        Zone::Battlefield,
+    );
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&pause_source)
+        .expect("pause replacement source exists")
+        .replacement_definitions
+        .push(
+            ReplacementDefinition::new(ReplacementEvent::Moved)
+                .valid_card(TargetFilter::SpecificObject {
+                    id: first_library_card,
+                })
+                .mode(ReplacementMode::Optional { decline: None }),
+        );
+
+    resolve_stacked_draw(&mut runner, 1);
+
+    let WaitingFor::ReplacementChoice {
+        player: P0,
+        kind: engine::types::game_state::ReplacementChoiceKind::OptionalBranch,
+        candidates,
+        ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "the child delivery must remain paused before its Discard follow-up; got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert!(candidates
+        .iter()
+        .any(|candidate| candidate.source_id == pause_source));
+    let (has_pending_delivery, child_id, owner) = runner
+        .state()
+        .active_draw_sequence()
+        .map(|child| {
+            (
+                child.pending_delivery.is_some(),
+                child.frame_id,
+                child.delivery_owner,
+            )
+        })
+        .expect("the paused child draw remains the active sequence");
+    assert!(has_pending_delivery);
+    let owner = owner.expect("the child delivery is owned by the interrupted parent draw");
+    let parent = runner
+        .state_mut()
+        .draw_sequence_frame_mut(owner)
+        .expect("the paused child delivery owner remains live");
+    assert_eq!(parent.player, P0);
+    assert_ne!(parent.frame_id, child_id);
+    assert!(runner
+        .state()
+        .active_multi_draw_frame()
+        .is_some_and(|frame| frame.draw_sequences.validate().is_ok()));
+
+    let pause_index = candidates
+        .iter()
+        .position(|candidate| candidate.source_id == pause_source)
+        .expect("the delivery pause source is offered");
+    let resumed = runner
+        .act(GameAction::ChooseReplacement { index: pause_index })
+        .expect("accept the movement replacement and resume the child delivery");
+    assert_eq!(
+        resumed
+            .events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::CardDrawn { player_id: P0, .. }))
+            .count(),
+        2,
+        "both replacement-created child draws finish before Discard is offered"
+    );
+    runner.advance_until_stack_empty();
+    let WaitingFor::DiscardChoice {
+        player: P0,
+        count: 1,
+        cards,
+        ..
+    } = runner.state().waiting_for.clone()
+    else {
+        panic!(
+            "the follow-up starts after both child draws complete; got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(
+        cards.len(),
+        4,
+        "the Discard sees both existing cards and both draws"
+    );
+
+    let discarded = runner
+        .act(GameAction::SelectCards {
+            cards: vec![existing_hand_cards[0]],
+        })
+        .expect("resolve the single follow-up Discard");
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        discarded
+            .events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::Discarded { player_id: P0, .. }))
+            .count(),
+        1,
+        "the replacement follow-up executes exactly once"
+    );
+    assert_eq!(runner.state().last_effect_count, Some(1));
+    assert_eq!(runner.state().players[P0.0 as usize].hand.len(), 3);
+    assert!(runner.state().active_draw_sequence().is_none());
+    assert!(runner.state().resolution_stack.is_empty());
+}
+
 /// E7: an optional replacement is owned by the affected player, so no preview
 /// branch is selected on their behalf.
 #[test]
@@ -350,4 +547,86 @@ fn preview_checks_empty_library_replacements_before_exact_zero() {
         live.state().waiting_for,
         WaitingFor::ReplacementChoice { .. }
     ));
+}
+
+#[test]
+fn scrivener_child_draw_delivery_matches_live_events_and_preview() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    for index in 0..5 {
+        scenario.add_card_to_library_top(P0, &format!("P0 library card {index}"));
+    }
+    scenario.add_creature_from_oracle(
+        P0,
+        "Blood Scrivener",
+        2,
+        1,
+        "If you would draw a card while you have no cards in hand, instead you draw two cards and you lose 1 life.",
+    );
+    let mut live = scenario.build();
+    live.state_mut().debug_mode = true;
+
+    let preview = preview_draw_delivery(live.state(), P0, 1);
+    let action = live
+        .act(GameAction::Debug(DebugAction::DrawCards {
+            player_id: P0,
+            count: 1,
+        }))
+        .expect("the draw action must succeed");
+    live.advance_until_stack_empty();
+    let card_drawn_events = action
+        .events
+        .iter()
+        .filter(|event| matches!(event, GameEvent::CardDrawn { player_id: P0, .. }))
+        .count();
+    let draw_action_events = action
+        .events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    player_id: P0,
+                    action: PlayerActionKind::Draw,
+                    ..
+                }
+            )
+        })
+        .count();
+    let draw_action_ledger_entries = live
+        .state()
+        .player_actions_this_turn
+        .iter()
+        .filter(|entry| **entry == (P0, PlayerActionKind::Draw))
+        .count();
+    println!(
+        "task30 F3: CardDrawn={card_drawn_events}, PlayerPerformedAction::Draw={draw_action_events}, player_actions_this_turn={draw_action_ledger_entries}"
+    );
+    assert_eq!(
+        draw_action_events, 2,
+        "child and parent instructions each complete once"
+    );
+    assert_eq!(
+        draw_action_ledger_entries, 2,
+        "completed draw instructions are recorded once"
+    );
+    let observed = (
+        preview,
+        card_drawn_events,
+        live.state().players[P0.0 as usize].hand.len(),
+        live.state().players[P0.0 as usize].life,
+        live.state().last_effect_count,
+    );
+
+    assert_eq!(
+        observed,
+        (
+            DrawDeliveryPreview::Exact { delivered: 2 },
+            2,
+            2,
+            19,
+            Some(2),
+        ),
+        "the child draw must contribute its actual delivery to the owning draw result"
+    );
 }

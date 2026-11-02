@@ -4,9 +4,10 @@
 // Guild-scoped → instant propagation on the single community server. The PUT
 // replaces the whole guild command set, so both commands go in one call.
 
-import { BUILDS, discord } from "./config";
+import { BUILDS, discord, LFG_DEFAULT_BUILD } from "./config";
 import { OptionType, registerGuildCommands } from "./discord";
-import { FORMATS, MAX_SEATS } from "./formats";
+import { MAX_SEATS } from "./formats";
+import { LFG_FORMAT_OPTION } from "./lfgInteractions";
 
 const cardCommand = {
   name: "card",
@@ -37,20 +38,21 @@ const lfgCommand = {
   name: "lfg",
   description: "Find players for a phase.rs multiplayer game",
   options: [
-    {
-      type: OptionType.STRING,
-      name: "format",
-      description: "Game format",
-      required: true,
-      choices: FORMATS.map((f) => ({ name: f.label, value: f.format })),
-    },
+    LFG_FORMAT_OPTION,
     {
       type: OptionType.INTEGER,
       name: "seats",
-      description: "Players including you (default: format maximum)",
+      description: "Players including you (default: 4 for Commander, else format maximum)",
       required: false,
       min_value: 2,
       max_value: MAX_SEATS,
+    },
+    {
+      type: OptionType.STRING,
+      name: "description",
+      description: "Game details, e.g. Commander bracket, power level, or deck preferences",
+      required: false,
+      max_length: 500,
     },
     {
       type: OptionType.STRING,
@@ -65,7 +67,7 @@ const lfgCommand = {
     {
       type: OptionType.STRING,
       name: "build",
-      description: "Which site everyone plays on (default: release)",
+      description: `Which site everyone plays on (default: ${LFG_DEFAULT_BUILD})`,
       required: false,
       choices: BUILDS.map((b) => ({ name: b, value: b })),
     },

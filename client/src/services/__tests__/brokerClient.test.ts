@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PhaseSocket } from "../openPhaseSocket";
 import {
   BrokerRequestError,
+  LobbyCapabilityError,
   lookupJoinTargetOver,
   makeBrokerClient,
   resolveGuestOver,
@@ -10,7 +11,12 @@ import {
 } from "../brokerClient";
 import type { RegisterHostRequest } from "../brokerClient";
 import type { LobbyGame } from "../../adapter/types";
-import { PROTOCOL_VERSION, type ServerInfo } from "../../adapter/ws-adapter";
+import {
+  MIN_LOBBY_PROTOCOL_FOR_FREEFORM_FORMATS,
+  PROTOCOL_VERSION,
+  type ServerInfo,
+} from "../../adapter/ws-adapter";
+import { formatMetadata } from "../../data/formatRegistry";
 
 class MockWebSocket extends EventTarget {
   static OPEN = 1;
@@ -275,6 +281,93 @@ describe("lookupJoinTargetOver", () => {
     );
     await promise;
   });
+
+  it.each([
+    {
+      label: "no format_config",
+      frame: {
+        game_code: "ABC123",
+        is_p2p: true,
+        player_count: 4,
+        filled_seats: 1,
+        match_config: { match_type: "Bo1" },
+        draft_metadata: { setCode: "MKM", draftKind: "Premier" },
+      },
+    },
+    {
+      label: "a malformed format_config",
+      frame: {
+        game_code: "ABC123",
+        is_p2p: true,
+        player_count: 4,
+        filled_seats: 1,
+        match_config: { match_type: "Bo1" },
+        format_config: { format: 42 },
+        draft_metadata: { setCode: "MKM", draftKind: "Premier" },
+      },
+    },
+  ])("carries draft_metadata through ($label)", async ({ frame }) => {
+    const ws = new MockWebSocket();
+    const promise = lookupJoinTargetOver(makePhaseSocket(ws), "ABC123");
+    ws.deliver(JSON.stringify({ type: "JoinTargetInfo", data: frame }));
+
+    const result = await promise;
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("unreachable: reach guard above");
+    expect(result.info.draft_metadata).toEqual(frame.draft_metadata);
+    // Reach guard for `withValidatedFormatConfig`'s rebuild branch: a
+    // malformed `format_config` is dropped to `null` rather than passed
+    // through, so this only discriminates when the frame supplied one.
+    if ("format_config" in frame) {
+      expect(result.info.format_config).toBeNull();
+    }
+  });
+
+  it("keeps a format_config carrying the removed experimental flag", async () => {
+    const ws = new MockWebSocket();
+    const promise = lookupJoinTargetOver(makePhaseSocket(ws), "ABC123");
+    ws.deliver(
+      JSON.stringify({
+        type: "JoinTargetInfo",
+        data: {
+          game_code: "ABC123",
+          is_p2p: false,
+          player_count: 2,
+          filled_seats: 1,
+          match_config: { match_type: "Bo1" },
+          // Minted before the experimental-dungeons flag was removed: every
+          // field of today's schema plus the stale key.
+          format_config: {
+            format: "Commander",
+            starting_life: 40,
+            min_players: 2,
+            max_players: 6,
+            deck_size: { type: "Exactly", data: 100 },
+            singleton: true,
+            command_zone: true,
+            commander_damage_threshold: 21,
+            range_of_influence: null,
+            team_based: false,
+            uses_commander: true,
+            supplies_fixed_deck: false,
+            sideboard_policy: { type: "Forbidden" },
+            default_deck_copy_limit: { type: "UpTo", data: 1 },
+            allow_debug_actions: false,
+            allow_experimental_dungeons: true,
+          },
+        },
+      }),
+    );
+    const result = await promise;
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("unreachable: reach guard above");
+    // Kept (not dropped to null) with the stale key ignored.
+    expect(result.info.format_config).toEqual(
+      expect.objectContaining({
+        format: "Commander",
+      }),
+    );
+  });
 });
 
 describe("subscribeLobbyOver", () => {
@@ -388,6 +481,105 @@ describe("broker host registration privacy", () => {
       gameCode: "ABC123",
       playerToken: "token",
     });
+  });
+});
+
+describe("registerHost lobby-capability floor", () => {
+  function baseRequest(
+    formatConfig: RegisterHostRequest["formatConfig"],
+  ): RegisterHostRequest {
+    return {
+      hostPeerId: "peer-host",
+      displayName: "Host",
+      public: true,
+      password: null,
+      timerSeconds: null,
+      playerCount: 2,
+      matchConfig: { match_type: "Bo1" },
+      formatConfig,
+      roomName: null,
+      draftMetadata: null,
+    };
+  }
+
+  it.each([
+    ["Freeform", 9],
+    ["FreeformCommander", 9],
+  ] as const)("rejects %s against lobby protocol %i without sending", async (name, lobbyProtocolVersion) => {
+    const ws = new MockWebSocket();
+    const client = makeBrokerClient(
+      makePhaseSocket(ws, { lobbyProtocolVersion }),
+    );
+    const request = baseRequest(formatMetadata(name)!.default_config);
+
+    await expect(client.registerHost(request)).rejects.toEqual(
+      expect.objectContaining({
+        neededLobbyVersion: MIN_LOBBY_PROTOCOL_FOR_FREEFORM_FORMATS,
+      }),
+    );
+    const err = await client.registerHost(request).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(LobbyCapabilityError);
+    expect(ws.send).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when the broker advertises no lobby protocol version", async () => {
+    const ws = new MockWebSocket();
+    const client = makeBrokerClient(makePhaseSocket(ws, { lobbyProtocolVersion: undefined }));
+    const request = baseRequest(formatMetadata("Freeform")!.default_config);
+
+    await expect(client.registerHost(request)).rejects.toBeInstanceOf(LobbyCapabilityError);
+    expect(ws.send).not.toHaveBeenCalled();
+  });
+
+  it("sends once the broker is at the floor (reach guard)", async () => {
+    const ws = new MockWebSocket();
+    const client = makeBrokerClient(
+      makePhaseSocket(ws, { lobbyProtocolVersion: MIN_LOBBY_PROTOCOL_FOR_FREEFORM_FORMATS }),
+    );
+    const request = baseRequest(formatMetadata("Freeform")!.default_config);
+
+    void client.registerHost(request);
+
+    expect(ws.send).toHaveBeenCalledTimes(1);
+    const frame = JSON.parse(ws.send.mock.calls[0][0] as string) as {
+      type: string;
+      data: { format_config: { format: string } };
+    };
+    expect(frame.type).toBe("CreateGameWithSettings");
+    expect(frame.data.format_config.format).toBe("Freeform");
+  });
+
+  it("sends when formatConfig is null (nothing to gate on)", async () => {
+    const ws = new MockWebSocket();
+    const client = makeBrokerClient(makePhaseSocket(ws, { lobbyProtocolVersion: 9 }));
+    const request = baseRequest(null);
+
+    void client.registerHost(request);
+
+    expect(ws.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends a long-standing format name regardless of lobby version (name-driven gate)", async () => {
+    const ws = new MockWebSocket();
+    const client = makeBrokerClient(makePhaseSocket(ws, { lobbyProtocolVersion: 9 }));
+    const request = baseRequest(formatMetadata("Commander")!.default_config);
+
+    void client.registerHost(request);
+
+    expect(ws.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends a Custom: format regardless of lobby version", async () => {
+    const ws = new MockWebSocket();
+    const client = makeBrokerClient(makePhaseSocket(ws, { lobbyProtocolVersion: 9 }));
+    const request = baseRequest({
+      ...formatMetadata("Standard")!.default_config,
+      format: "Custom:5",
+    } as RegisterHostRequest["formatConfig"]);
+
+    void client.registerHost(request);
+
+    expect(ws.send).toHaveBeenCalledTimes(1);
   });
 });
 

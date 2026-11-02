@@ -179,6 +179,7 @@
       "exportedTo": "Exportado para {{path}}.",
       "exportRequested": "Exportação solicitada: {{filename}}.",
       "exportFailed": "Não foi possível exportar o estado do jogo.",
+      "exportFailedDetail": "Não foi possível exportar o estado do jogo. {{detail}}",
       "replayExported": "Replay salvo como {{filename}}.",
       "replayExportUnavailable": "Nenhuma gravação de replay disponível para esta partida.",
       "replayExportFailed": "Não foi possível exportar o replay."
@@ -285,7 +286,9 @@
     "loading": "Carregando..."
   },
   "turnBanner": {
-    "turn": "Turno {{number}}"
+    "turn": "Turno {{number}}",
+    "yourTurn": "Sua vez",
+    "opponentTurn": "Vez de {{name}}"
   },
   "diceRoll": {
     "rollingForFirst": "Rolagem para ver quem começa",
@@ -303,7 +306,8 @@
     "lostCoinFlip": "{{name}} perdeu o lançamento",
     "turnOrder": "Ordem dos turnos",
     "turnOrderItem": "Turno {{turn}}: {{name}}",
-    "youTakeTurn": "Você joga no turno {{turn}}"
+    "youTakeTurn": "Você joga no turno {{turn}}",
+    "ignoredDie": "Ignorado"
   },
   "chrome": {
     "back": "Voltar",
@@ -423,5 +427,25 @@
       "no-turn": "Nenhum relay TURN fornecido",
       "aborted": "Pedido cancelado"
     }
+  },
+  "savedDeckLibraryBusy": {
+    "description": "Outra aba do Phase está ocupada. Fecha as outras abas do Phase e tenta novamente.",
+    "title": {
+      "save": "Não foi possível salvar o baralho",
+      "clone": "Não foi possível clonar o baralho",
+      "import": "Não foi possível importar o baralho",
+      "delete": "Não foi possível excluir o baralho",
+      "organize": "Não foi possível atualizar a organização dos baralhos",
+      "updateFeeds": "Não foi possível atualizar os feeds de baralhos",
+      "restore": "Não foi possível restaurar o backup",
+      "applyCloud": "Não foi possível aplicar os baralhos da nuvem",
+      "autosaveDraft": "Não foi possível salvar automaticamente o baralho do draft"
+    }
+  },
+  "savedDeckLibraryStorageFailure": {
+    "description": "O Phase não conseguiu acessar o armazenamento do navegador. Tenta novamente em um instante."
+  },
+  "savedDeckChanged": {
+    "description": "Este baralho mudou antes de a tua ação ser executada, por isso nada foi alterado. Verifica o baralho e tenta novamente."
   }
 }

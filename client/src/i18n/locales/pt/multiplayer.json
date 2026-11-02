@@ -37,7 +37,9 @@
     "approve": "Aprovar",
     "decline": "Recusar",
     "cancel": "Cancelar solicitação",
-    "declinedToast": "Solicitação de retrocesso recusada"
+    "declinedToast": "Solicitação de retrocesso recusada",
+    "cancelledToast": "Solicitação de retrocesso cancelada",
+    "withdrawnToast": "Solicitação de retrocesso retirada: um jogador saiu do jogo"
   },
   "connectionDot": {
     "connected": "Conectado",
@@ -79,6 +81,7 @@
     "draws_one": " ({{count}} empate)",
     "draws_other": " ({{count}} empates)",
     "main": "Principal ({{count}}, mín. {{min}})",
+    "mainNoMinimum": "Principal ({{count}})",
     "sideboard": "Sideboard ({{count}})",
     "sideboardCapped": "Sideboard ({{count}}/{{max}})",
     "moveFromSideboard": "Mova cartas do sideboard.",
@@ -95,6 +98,9 @@
     "title": "Servidor de lobby inacessível",
     "message": "Seu jogo não será listado publicamente. Você ainda pode hospedar via P2P — basta compartilhar o código da sala diretamente com seu oponente.",
     "continueWithoutLobby": "Continuar sem lobby"
+  },
+  "lobbyCapability": {
+    "formatNeedsNewerServer": "Este servidor de lobby é muito antigo para listar partidas no formato selecionado (precisa do protocolo de lobby {{needed}})."
   },
   "joinErrorDialog": {
     "dismiss": "Dispensar"
@@ -124,13 +130,14 @@
     "waitTimeJustNow": "agora mesmo",
     "waitTimeMinutes": "há {{count}}m",
     "waitTimeHours": "há {{count}}h",
-    "buildMismatchTitle": "O anfitrião está na {{version}} ({{commit}}) — sua build é diferente. Atualize para sincronizar.",
     "gameFull": "Este jogo está cheio.",
     "youAreHosting": "Você está hospedando este jogo.",
     "hosting": "Hospedando",
     "sandboxConfirm": "Este é um jogo de Sandbox. Jogadores com permissão de depuração podem manipular diretamente o estado do jogo. Continuar?",
     "draftBadgeTitle": "Draft {{kind}} — {{setCode}}",
     "draftBadge": "Draft {{setCode}}",
+    "cubeDraftBadgeTitle": "Draft {{kind}} — {{cubeName}}",
+    "cubeDraftBadge": "Draft {{cubeName}}",
     "p2pBadgeTitle": "Jogo ponto a ponto (o anfitrião executa o motor)",
     "sandboxBadgeTitle": "Este jogo permite ações de depuração. Use para testes — não é uma partida competitiva.",
     "hintSlow": "LENTO",
@@ -280,7 +287,8 @@
     "botGameNotice": "Hospedando a partida do Discord {{code}}. A conexão e a privacidade vêm da publicação no Discord.",
     "botSeedIgnored": "Algumas configurações da publicação no Discord não puderam ser usadas aqui — verifique o formato e o número de jogadores.",
     "botP2PNotice": "Seu dispositivo executa a partida. Mantenha o app aberto e conectado.",
-    "botServerNotice": "Um servidor dedicado executa a partida. Ele pode ficar lento ou sair do ar."
+    "botServerNotice": "Um servidor dedicado executa a partida. Ele pode ficar lento ou sair do ar.",
+    "poolBracketConflict": "Nenhum dos {{selected}} decks selecionados é legal com os filtros atuais, então os oponentes aleatórios escolhem entre os {{total}} decks."
   },
   "page": {
     "deckRejected": "O deck foi rejeitado pelo anfitrião.",
@@ -296,11 +304,9 @@
     "joinErrorCantJoinTitle": "Não é possível entrar nesta sala",
     "titleLobby": "Entre em uma mesa ou hospede uma.",
     "titleHostSetup": "Configure sua mesa.",
-    "titleDraftLobby": "Pod de Draft",
     "titleDeckSelect": "Escolha um deck.",
     "descriptionLobby": "Navegue pelas mesas disponíveis, entre por código ou hospede uma nova partida.",
     "descriptionHostSetup": "Ajuste o formato, a privacidade e o tempo antes de abrir a sala.",
-    "descriptionDraftLobby": "Aguardando os jogadores entrarem no pod de draft.",
     "descriptionDeckSelectFormat": "Escolha um deck para {{format}}.",
     "descriptionDeckSelect": "Escolha o deck que você quer levar para o online.",
     "offlineUnavailableTitle": "O modo multijogador não está disponível offline.",
@@ -314,6 +320,9 @@
     "anonymous": "Anônimo",
     "joining": "Entrando",
     "joinNeedsServer": "Escolha um servidor antes de entrar em um jogo.",
+    "serverDraftJoinUnsupported": "Não é possível entrar pelo lobby em pods de draft hospedados no servidor.",
+    "p2pDraftSpectateUnsupported": "Não é possível assistir a pods de draft hospedados por jogadores.",
+    "alreadyInDraftPod": "Você já está em um pod de draft. Saia dele antes de entrar em outro.",
     "invalidGameLink": "Este link de partida é inválido ou está incompleto.",
     "waitingForHostTitle": "Aguardando o anfitrião…",
     "waitingForHostMessage": "O anfitrião ainda não abriu esta partida, ou ela foi encerrada. Tente novamente quando o anfitrião tiver aberto o link dele.",
@@ -324,15 +333,6 @@
     "updateFailedTitle": "Não foi possível atualizar automaticamente",
     "updateFailedMessage": "Atualize para obter a versão mais recente ou continue nesta. Jogadores em versões diferentes não podem entrar na mesma partida.",
     "continueAnyway": "Continuar mesmo assim"
-  },
-  "draftLobbyPanel": {
-    "draftPod": "Pod de Draft",
-    "connecting": "Conectando ao pod de draft...",
-    "connectionFailed": "Falha na conexão.",
-    "playersJoined": "{{joined}}/{{total}} jogadores entraram",
-    "seat": "Assento {{number}}",
-    "draftInProgress": "Draft em andamento. A tela de draft abrirá automaticamente.",
-    "leaveDraft": "Sair do Draft"
   },
   "deckLegalityChip": {
     "checking": "Verificando o deck em {{format}}…",
@@ -354,5 +354,11 @@
   "deepLink": {
     "gameInProgressTitle": "Partida em andamento",
     "gameInProgressBody": "Termine ou saia da sua partida atual e abra o link novamente."
+  },
+  "p2pStateWithheld": "O estado do jogo após esta ação é grande demais para ser enviado, por isso este tabuleiro está desatualizado. Um jogador pode solicitar um retrocesso da última ação no menu do jogo para continuar (em um loop, execute-o com uma contagem menor).",
+  "terminalRecovery": {
+    "finalViewsUnpublished": "A concessão atingiu um estado final Full, mas não foi possível publicar as visualizações finais nativas.",
+    "concedeUnreconciled": "Não foi possível reconciliar o resultado da concessão; o assento permanece bloqueado.",
+    "receiptUnsent": "Não foi possível enviar o recibo durável do resultado final; aguardando nova entrega"
   }
 }

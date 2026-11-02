@@ -1,5 +1,6 @@
 //! Issue #5981: Gift recipient selection + Peerless Recycling gift-gated targets.
 
+use engine::ai_support::legal_actions;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::{AdditionalCostOrigin, TargetRef};
 use engine::types::actions::GameAction;
@@ -292,6 +293,62 @@ fn gift_card_three_player_delivery_uses_chosen_recipient_not_next_player() {
         runner.state().players[1].library.contains(&p1_draw),
         "seat-next opponent must not receive the gift"
     );
+}
+
+/// CR 702.174a: at a 3p Gift recipient prompt, `legal_actions` must list each
+/// opponent exactly once, in candidate order, before CancelCast. The exact and
+/// broad enumerators both used to emit this arm, so every recipient appeared
+/// twice — and a softmax over candidates weighted each one double.
+#[test]
+fn gift_recipient_prompt_lists_each_recipient_once() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    with_green_mana(&mut scenario, P0, 2);
+    let spell = add_gift_spell_from_oracle(&mut scenario, P0, "Gift Draw Test", GIFT_DRAW_SPELL);
+
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("cast Gift Draw Test");
+
+    for _ in 0..20 {
+        match &runner.state().waiting_for {
+            WaitingFor::ManaPayment { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("complete mana payment");
+            }
+            WaitingFor::OptionalCostChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .expect("promise Gift");
+            }
+            WaitingFor::ChooseGiftRecipient { candidates, .. } => {
+                let candidates = candidates.clone();
+                assert_eq!(candidates, vec![P1, PlayerId(2)]);
+                let recipients: Vec<PlayerId> = legal_actions(runner.state())
+                    .into_iter()
+                    .filter_map(|action| match action {
+                        GameAction::ChooseGiftRecipient { opponent } => Some(opponent),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(
+                    recipients, candidates,
+                    "each Gift recipient must appear exactly once, in candidate order"
+                );
+                return;
+            }
+            other => panic!("unexpected prompt before Gift recipient: {other:?}"),
+        }
+    }
+    panic!("3p Gift promise must raise ChooseGiftRecipient");
 }
 
 /// CR 400.7 + CR 702.174a: Gift recipient stamped on a permanent at cast must

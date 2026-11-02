@@ -530,10 +530,12 @@ fn counter_target_worth(ctx: &PolicyContext<'_>, entry: &StackEntry) -> f64 {
 /// every stack entry the AI does not control.
 ///
 /// Approximation: the counter's own target filter is not applied (the engine
-/// matcher is not reachable from here), so a counter that can only hit creature
-/// spells still sees a noncreature entry's impact. Accepted — the filter narrows
-/// the set, so this can only over-estimate, and `SelectTarget` still picks
-/// legally.
+/// matcher is not reachable from here), so a counter that can only hit
+/// noncreature spells still sees a creature entry's impact. Accepted — the
+/// filter narrows the set, so this can only over-estimate. Target selection
+/// picks legally, but "legally" can mean the AI's own spell when that is all
+/// the filter reaches; that cast is vetoed in `tactical_gate`
+/// (`counter_reaches_nothing_foreign`), not here.
 fn best_counter_impact(ctx: &PolicyContext<'_>) -> f64 {
     ctx.state
         .stack
@@ -606,16 +608,17 @@ mod tests {
     use engine::game::zones::create_object;
     use engine::types::ability::{
         AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification,
-        ControllerRef, Duration, MultiTargetSpec, ResolvedAbility, StaticDefinition, TargetFilter,
-        TargetRef, TypeFilter, TypedFilter,
+        ControllerRef, Duration, ExtraPhaseAnchor, ExtraPhaseRecipient, MultiTargetSpec,
+        ResolvedAbility, StaticDefinition, TargetFilter, TargetRef, TypeFilter, TypedFilter,
     };
     use engine::types::format::FormatConfig;
     use engine::types::game_state::{
         ExtraPhase, GameState, PendingCast, StackEntryKind, TargetEffectDetail,
         TargetSelectionProgress, TargetSelectionSlot, WaitingFor,
     };
-    use engine::types::identifiers::{CardId, ObjectId};
+    use engine::types::identifiers::{CardId, ExtraPhaseId, ObjectId};
     use engine::types::mana::ManaCost;
+    use engine::types::phase::{PhaseGroup, TurnSegment};
     use engine::types::player::PlayerId;
     use engine::types::statics::StaticMode;
     use engine::types::zones::Zone;
@@ -802,6 +805,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("reach guard: Whirler Rogue's two-artifact activation must be payable");
         let state = runner.state();
@@ -883,6 +887,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("reach guard: Whirler Rogue's two-artifact activation must be payable");
         let state = runner.state();
@@ -972,10 +977,10 @@ mod tests {
         let mut rng = SmallRng::seed_from_u64(0); // any seed: rank/score/probability are seed-invariant here
         let selection = crate::search::choose_action_with_session_diagnostic(
             state,
-            P0,
             &config,
             &mut rng,
             &crate::AiSession::arc_from_game(state),
+            &engine::ai_support::AiDecisionContract::issue(state, P0),
         );
         let receipt = selection
             .receipt
@@ -1048,6 +1053,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("reach guard: Whirler Rogue's two-artifact activation must be payable");
         let state = runner.state();
@@ -1334,7 +1340,7 @@ mod tests {
     #[test]
     fn two_headed_giant_teammate_evasion_target_is_judged_by_the_attacking_teams_authority() {
         let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 42);
-        state.phase = Phase::DeclareAttackers;
+        state.phase = Phase::BeginCombat;
         state.active_player = PlayerId(1);
         let source = creature(&mut state, P0, "Source");
         let futile = creature(&mut state, P0, "Futile Teammate Target");
@@ -1368,7 +1374,7 @@ mod tests {
         assert!(matches!(
             effect_timing_verdict(&state, &target_candidate(ready), &AiConfig::default()),
             PolicyVerdict::Score { delta: 0.0, reason }
-                if reason.kind == "effect_timing_no_pair_blockable_evasion_target"
+                if reason.kind == "effect_timing_evasion_target_na"
         ));
     }
 
@@ -1413,6 +1419,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("reach guard: Whirler Rogue's two-artifact activation must be payable");
         let state = runner.state();
@@ -1532,6 +1539,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("reach guard: Whirler Rogue's two-artifact activation must be payable");
         let state = runner.state();
@@ -1591,6 +1599,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("reach guard: Whirler Rogue's two-artifact activation must be payable");
         let state = runner.state();
@@ -1650,10 +1659,10 @@ mod tests {
                 AbilityDefinition::new(
                     AbilityKind::Activated,
                     Effect::AdditionalPhase {
-                        target: TargetFilter::Controller,
-                        phase: Phase::BeginCombat,
-                        after: Phase::PreCombatMain,
-                        followed_by: vec![Phase::PostCombatMain],
+                        recipient: ExtraPhaseRecipient::Controller,
+                        segment: TurnSegment::Phase(PhaseGroup::Combat),
+                        after: ExtraPhaseAnchor::this_main_phase(),
+                        followed_by: vec![TurnSegment::Phase(PhaseGroup::PostcombatMain)],
                         count: engine::types::ability::QuantityExpr::Fixed { value: 1 },
                         attacker_restriction: None,
                     },
@@ -1682,6 +1691,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: extra_combat_source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("reach guard: the extra-combat activation must be legal");
         runner.advance_until_stack_empty();
@@ -1689,13 +1699,14 @@ mod tests {
             .state()
             .extra_phases
             .iter()
-            .any(|extra| extra.phase == Phase::BeginCombat));
+            .any(|extra| extra.segment == TurnSegment::Phase(PhaseGroup::Combat)));
         assert!(get_valid_attacker_ids(runner.state()).contains(&ready));
 
         runner
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("reach guard: Whirler Rogue's two-artifact activation must be payable");
         let state = runner.state();
@@ -1758,20 +1769,16 @@ mod tests {
 
         // Reach guards.
         assert!(outcome.state().stack.is_empty());
-        assert!(
-            runner
-                .state()
-                .extra_phases
-                .iter()
-                .any(|extra| extra.phase == Phase::BeginCombat
-                    && extra.attacker_restriction.is_some())
-        );
+        assert!(runner.state().extra_phases.iter().any(|extra| extra.segment
+            == TurnSegment::Phase(PhaseGroup::Combat)
+            && extra.attacker_restriction.is_some()));
         assert!(get_valid_attacker_ids(runner.state()).contains(&unchosen));
 
         runner
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("reach guard: Whirler Rogue's two-artifact activation must be payable");
 
@@ -1817,9 +1824,10 @@ mod tests {
         state.current_combat_attacker_restriction_source = Some(source);
         state.extra_phases.push(ExtraPhase {
             anchor: Phase::PostCombatMain,
-            phase: Phase::BeginCombat,
+            segment: TurnSegment::Phase(PhaseGroup::Combat),
             attacker_restriction: None,
             attacker_restriction_source: None,
+            id: ExtraPhaseId::default(),
         });
 
         // Reach guard: this is exactly the value HEAD's conjunct reads, so
@@ -1860,10 +1868,10 @@ mod tests {
                 AbilityDefinition::new(
                     AbilityKind::Activated,
                     Effect::AdditionalPhase {
-                        target: TargetFilter::Controller,
-                        phase: Phase::BeginCombat,
-                        after: Phase::PreCombatMain,
-                        followed_by: vec![Phase::PostCombatMain],
+                        recipient: ExtraPhaseRecipient::Controller,
+                        segment: TurnSegment::Phase(PhaseGroup::Combat),
+                        after: ExtraPhaseAnchor::this_main_phase(),
+                        followed_by: vec![TurnSegment::Phase(PhaseGroup::PostcombatMain)],
                         count: engine::types::ability::QuantityExpr::Fixed { value: 1 },
                         attacker_restriction: None,
                     },
@@ -1886,6 +1894,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: extra_combat_source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .expect("reach guard: the extra-combat activation must be legal");
         runner.advance_until_stack_empty();
@@ -1913,7 +1922,7 @@ mod tests {
         assert!(!state
             .extra_phases
             .iter()
-            .any(|e| e.phase == Phase::BeginCombat));
+            .any(|e| e.segment == TurnSegment::Phase(PhaseGroup::Combat)));
         assert!(state
             .combat
             .as_ref()
@@ -2130,7 +2139,7 @@ mod tests {
 
     fn counter_effect() -> Effect {
         Effect::Counter {
-            target: TargetFilter::Any,
+            target: TargetFilter::StackSpell,
             source_rider: None,
             countered_spell_zone: None,
         }
@@ -2162,8 +2171,7 @@ mod tests {
             obj.toughness = Some(toughness);
         }
         let ability = ResolvedAbility::new(effect, targets, source_id, controller);
-        let id = ObjectId(state.next_object_id);
-        state.next_object_id += 1;
+        let id = source_id;
         state.stack.push_back(StackEntry {
             id,
             source_id,

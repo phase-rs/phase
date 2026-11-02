@@ -42,7 +42,7 @@ function setLife(playerId: number, life: number) {
 
 function playSteps(steps: AnimationStep[]) {
   act(() => {
-    useAnimationStore.getState().enqueueSteps(steps);
+    useAnimationStore.getState().enqueueSteps(steps, 1);
   });
 }
 

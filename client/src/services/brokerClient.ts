@@ -6,7 +6,7 @@ import type {
   MatchConfig,
   PeerInfo,
 } from "../adapter/types";
-import type { ServerInfo } from "../adapter/ws-adapter";
+import { lobbyProtocolRequiredForFormat, type ServerInfo } from "../adapter/ws-adapter";
 import { isFormatConfigShape } from "../adapter/format-config-shape";
 import {
   HandshakeError,
@@ -36,7 +36,12 @@ function withValidatedFormatConfig<T extends { format_config?: FormatConfig | nu
   info: T,
 ): T {
   if (info.format_config == null) return info;
-  if (isFormatConfigShape(info.format_config)) return info;
+  // The shape guard names required fields but never rejects unknown ones,
+  // so frames minted when the removed experimental-dungeons flag still
+  // existed keep validating with the stale key ignored.
+  if (isFormatConfigShape(info.format_config)) {
+    return info;
+  }
   console.warn(
     "[broker] dropping a malformed format_config from a lobby frame; "
       + "the room's format will be treated as unknown",
@@ -82,6 +87,23 @@ export class BrokerRequestError extends Error {
 export interface RegisteredGame {
   gameCode: string;
   playerToken: string;
+}
+
+/**
+ * Rejection from `registerHost` when the broker's advertised lobby protocol
+ * is below what the registration's format needs; nothing is sent.
+ */
+export class LobbyCapabilityError extends Error {
+  constructor(
+    public readonly neededLobbyVersion: number,
+    public readonly advertisedLobbyVersion: number | undefined,
+  ) {
+    super(
+      `Broker lobby protocol ${advertisedLobbyVersion ?? "unknown"} is below the ${neededLobbyVersion} `
+        + "this format's name requires",
+    );
+    this.name = "LobbyCapabilityError";
+  }
 }
 
 /**
@@ -177,6 +199,15 @@ export function makeBrokerClient(socket: PhaseSocket): BrokerClient {
     return new Promise<RegisteredGame>((resolve, reject) => {
       if (closed || ws.readyState !== WebSocket.OPEN) {
         reject(new Error("Broker socket not open"));
+        return;
+      }
+
+      const needed = req.formatConfig ? lobbyProtocolRequiredForFormat(req.formatConfig.format) : null;
+      if (
+        needed !== null
+        && (serverInfo.lobbyProtocolVersion === undefined || serverInfo.lobbyProtocolVersion < needed)
+      ) {
+        reject(new LobbyCapabilityError(needed, serverInfo.lobbyProtocolVersion));
         return;
       }
 

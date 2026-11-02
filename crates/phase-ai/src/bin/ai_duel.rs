@@ -17,7 +17,9 @@ use engine::types::format::FormatConfig;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::log::{GameLogEntry, LogCategory, LogSegment};
 use engine::types::player::PlayerId;
-use phase_ai::auto_play::{driver_step, run_ai_actions, run_ai_actions_bounded, AiActionsStop};
+use phase_ai::auto_play::{
+    driver_step, run_ai_actions_bounded_headless, run_ai_actions_headless, AiActionsStop,
+};
 use phase_ai::config::{
     create_config_for_players, AiDifficulty, Platform, ACCEPTED_DIFFICULTY_LABELS,
 };
@@ -623,7 +625,7 @@ fn run_game(
     let ai_session = phase_ai::session::AiSession::arc_from_game(&state);
 
     loop {
-        let results = run_ai_actions(
+        let results = run_ai_actions_headless(
             &mut state,
             &ai_players,
             &ai_configs,
@@ -1194,7 +1196,7 @@ fn run_commander_game(options: CommanderGameOptions<'_>) -> CommanderGameResult 
 
         // `budget.exceeded` has already refused to reach here at or past the cap,
         // so the remaining budget is at least one action.
-        let run = run_ai_actions_bounded(
+        let run = run_ai_actions_bounded_headless(
             &mut state,
             &ai_players,
             &ai_configs,

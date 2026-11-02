@@ -955,6 +955,8 @@ mod tests {
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
             children: vec![],
+            diagnoses: vec![],
+            gap: None,
         }
     }
 
@@ -1255,6 +1257,8 @@ mod tests {
             supported: true,
             details: vec![],
             children: vec![item("Mill", &[("amount", "2")], child_supported)],
+            diagnoses: vec![],
+            gap: None,
         };
         let changes = diff(&[parent(false)], &[parent(true)]);
         assert_eq!(changes.len(), 1);
@@ -1278,9 +1282,13 @@ mod tests {
                     supported: true,
                     details: vec![("affects".into(), "self".into())],
                     children: vec![],
+                    diagnoses: vec![],
+                    gap: None,
                 })
                 .into_iter()
                 .collect(),
+            diagnoses: vec![],
+            gap: None,
         };
 
         let changes = diff(&[token(false)], &[token(true)]);

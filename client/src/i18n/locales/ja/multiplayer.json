@@ -37,7 +37,9 @@
     "approve": "承認",
     "decline": "拒否",
     "cancel": "要求を取り消す",
-    "declinedToast": "巻き戻し要求が拒否されました"
+    "declinedToast": "巻き戻し要求が拒否されました",
+    "cancelledToast": "巻き戻し要求が取り消されました",
+    "withdrawnToast": "プレイヤーがゲームを離れたため、巻き戻し要求は取り下げられました"
   },
   "connectionDot": {
     "connected": "接続済み",
@@ -79,6 +81,7 @@
     "draws_one": "（{{count}}引き分け）",
     "draws_other": "（{{count}}引き分け）",
     "main": "メイン（{{count}}、最低{{min}}）",
+    "mainNoMinimum": "メイン（{{count}}）",
     "sideboard": "サイドボード（{{count}}）",
     "sideboardCapped": "サイドボード（{{count}}/{{max}}）",
     "moveFromSideboard": "サイドボードからカードを移動します。",
@@ -95,6 +98,9 @@
     "title": "ロビーサーバーに接続できません",
     "message": "ゲームは公開リストに表示されません。P2Pでホストし、対戦相手にルームコードを直接共有できます。",
     "continueWithoutLobby": "ロビーなしで続行"
+  },
+  "lobbyCapability": {
+    "formatNeedsNewerServer": "このロビーサーバーは古いため、選択したフォーマットのゲームを掲載できません（ロビープロトコル{{needed}}が必要です）。"
   },
   "joinErrorDialog": {
     "dismiss": "閉じる"
@@ -124,13 +130,14 @@
     "waitTimeJustNow": "たった今",
     "waitTimeMinutes": "{{count}}分前",
     "waitTimeHours": "{{count}}時間前",
-    "buildMismatchTitle": "ホストは{{version}}（{{commit}}）です — あなたのビルドと異なります。更新してください。",
     "gameFull": "このゲームは満員です。",
     "youAreHosting": "このゲームをホストしています。",
     "hosting": "ホスト中",
     "sandboxConfirm": "これはサンドボックスゲームです。デバッグ権限を持つプレイヤーはゲーム状態を直接操作できます。続行しますか？",
     "draftBadgeTitle": "{{kind}}ドラフト — {{setCode}}",
     "draftBadge": "{{setCode}}ドラフト",
+    "cubeDraftBadgeTitle": "{{kind}}ドラフト — {{cubeName}}",
+    "cubeDraftBadge": "{{cubeName}}ドラフト",
     "p2pBadgeTitle": "P2Pゲーム（ホストがエンジンを実行）",
     "sandboxBadgeTitle": "このゲームではデバッグ操作が可能です。テスト用であり、競技対戦には使わないでください。",
     "hintSlow": "低速",
@@ -280,7 +287,8 @@
     "botGameNotice": "Discordゲーム {{code}} をホストしています。接続とプライバシーの設定はDiscordの投稿に従います。",
     "botSeedIgnored": "Discordの投稿の一部の設定はここでは使用できません — フォーマットとプレイヤー数を確認してください。",
     "botP2PNotice": "この端末がゲームを実行します。アプリを開いたまま接続を維持してください。",
-    "botServerNotice": "専用サーバーがゲームを実行します。遅くなったりオフラインになったりする場合があります。"
+    "botServerNotice": "専用サーバーがゲームを実行します。遅くなったりオフラインになったりする場合があります。",
+    "poolBracketConflict": "選択中の{{selected}}デッキは現在のフィルターで1つも使用できないため、ランダムな対戦相手は全{{total}}デッキから選択します。"
   },
   "page": {
     "deckRejected": "ホストにデッキを拒否されました。",
@@ -296,11 +304,9 @@
     "joinErrorCantJoinTitle": "このルームに参加できません",
     "titleLobby": "対戦に参加・作成",
     "titleHostSetup": "対戦の準備",
-    "titleDraftLobby": "ドラフトポッド",
     "titleDeckSelect": "デッキを選択",
     "descriptionLobby": "公開中の対戦を探す、コードで参加する、新しいルームを作ることができます。",
     "descriptionHostSetup": "開始前にフォーマットや公開範囲、時間設定を調整します。",
-    "descriptionDraftLobby": "プレイヤーがドラフトポッドに参加するのを待っています。",
     "descriptionDeckSelectFormat": "{{format}}用のデッキを選択してください。",
     "descriptionDeckSelect": "オンラインで使うデッキを選択してください。",
     "offlineUnavailableTitle": "オフライン中はマルチプレイヤーを利用できません。",
@@ -314,6 +320,9 @@
     "anonymous": "匿名",
     "joining": "参加中",
     "joinNeedsServer": "ゲームに参加する前にサーバーを選択してください。",
+    "serverDraftJoinUnsupported": "サーバーホストのドラフトポッドにはロビーから参加できません。",
+    "p2pDraftSpectateUnsupported": "プレイヤーホストのドラフトポッドは観戦できません。",
+    "alreadyInDraftPod": "すでにドラフトポッドに参加しています。別のポッドに参加する前に退出してください。",
     "invalidGameLink": "このゲームリンクは無効か、不完全です。",
     "waitingForHostTitle": "ホストを待っています…",
     "waitingForHostMessage": "ホストがまだこのゲームを開いていないか、ゲームが終了しています。ホストがリンクを開いたら再試行してください。",
@@ -324,15 +333,6 @@
     "updateFailedTitle": "自動で更新できませんでした",
     "updateFailedMessage": "更新して最新バージョンを取得するか、このバージョンのまま続行してください。異なるバージョンのプレイヤーは同じゲームに参加できません。",
     "continueAnyway": "このまま続行"
-  },
-  "draftLobbyPanel": {
-    "draftPod": "ドラフトポッド",
-    "connecting": "ドラフトポッドに接続中…",
-    "connectionFailed": "接続に失敗しました。",
-    "playersJoined": "{{joined}}/{{total}}人が参加",
-    "seat": "座席{{number}}",
-    "draftInProgress": "ドラフト進行中です。ドラフト画面が自動的に開きます。",
-    "leaveDraft": "ドラフトを退出"
   },
   "deckLegalityChip": {
     "checking": "{{format}}でデッキを確認中…",
@@ -354,5 +354,11 @@
   "deepLink": {
     "gameInProgressTitle": "ゲーム進行中",
     "gameInProgressBody": "現在のゲームを終了するか退出してから、もう一度リンクを開いてください。"
+  },
+  "p2pStateWithheld": "このアクション後のゲーム状態は大きすぎて送信できないため、この盤面は最新ではありません。続行するには、プレイヤーがゲームメニューから直前の行動の巻き戻しを要求できます（ループの場合は、より少ない回数で実行してください）。",
+  "terminalRecovery": {
+    "finalViewsUnpublished": "投了により Full の終了状態に達しましたが、ネイティブの最終ビューを公開できませんでした。",
+    "concedeUnreconciled": "投了の結果を照合できませんでした。この席はロックされたままです。",
+    "receiptUnsent": "最終結果の永続的な受領確認を送信できませんでした。再配信を待っています"
   }
 }

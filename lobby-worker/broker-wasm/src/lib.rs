@@ -279,6 +279,14 @@ impl WasmBroker {
         self.inner.lobby().len()
     }
 
+    /// The public listing as a JSON array of `LobbyGame` — exactly what
+    /// `LobbyUpdate` carries to lobby subscribers. Read-only, so the shell need
+    /// not re-snapshot after calling; served by the `/games` endpoint.
+    pub fn public_games(&self) -> String {
+        serde_json::to_string(&self.inner.lobby().public_games())
+            .expect("lobby listing always serializes")
+    }
+
     /// Handle one raw client frame (the exact JSON the client sent over the
     /// WebSocket). Parsing + dispatch happen in Rust; the shell never inspects
     /// the protocol. `conn_json` is the per-socket [`ConnState`] from the WS
@@ -355,6 +363,12 @@ impl Default for WasmBroker {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The broker's per-viewer projection of one serialized fan-out frame.
+#[wasm_bindgen]
+pub fn lobby_frame_for_viewer(frame_json: &str, viewer_build_commit: &str) -> Option<String> {
+    lobby_broker::lobby_frame_json_for_viewer(frame_json, viewer_build_commit)
 }
 
 /// The shared phase.rs wire-protocol version. The Cloudflare Worker shell uses
@@ -688,6 +702,53 @@ mod tests {
             "the persisted clock is the refreshed one, so the listing survives: {reaped}"
         );
         assert_eq!(restored.active_games(), 1);
+    }
+
+    /// `/games` serves this listing, so it must hold the listed rooms only: a
+    /// private room is registered but never appears.
+    #[test]
+    fn public_games_lists_only_public_rooms() {
+        const T0: f64 = 1_000_000.0;
+        let hello_frame = serde_json::to_string(&LobbyClientMessage::ClientHello {
+            client_version: "0.1.0".into(),
+            build_commit: "abc".into(),
+            protocol_version: PROTOCOL_VERSION,
+            lobby_protocol_version: Some(lobby_broker::LOBBY_PROTOCOL_VERSION),
+        })
+        .expect("hello serializes");
+        let create_frame = |public: bool, peer: &str| {
+            serde_json::json!({
+                "type": "CreateGameWithSettings",
+                "data": {
+                    "deck": { "main_deck": [] },
+                    "display_name": "Host",
+                    "public": public,
+                    "password": null,
+                    "timer_seconds": null,
+                    "host_peer_id": peer,
+                },
+            })
+            .to_string()
+        };
+
+        let mut b = WasmBroker::new();
+        let mut host_code = |public: bool, peer: &str| {
+            let (conn, _) = call(&mut b, "{}", &hello_frame, T0);
+            let (conn, _) = call(&mut b, &conn, &create_frame(public, peer), T0);
+            let conn: ConnState = serde_json::from_str(&conn).expect("conn parses");
+            conn.host_game
+                .expect("the create registered a game")
+                .game_code()
+                .to_string()
+        };
+        let public_code = host_code(true, "peer-public");
+        host_code(false, "peer-private");
+        assert_eq!(b.active_games(), 2, "reach guard: both rooms registered");
+
+        let listing = parse(b.public_games());
+        let games = listing.as_array().expect("the listing is a JSON array");
+        assert_eq!(games.len(), 1, "only the public room is listed: {listing}");
+        assert_eq!(games[0]["game_code"], public_code);
     }
 
     fn raw_announcement() -> RawAnnouncement {

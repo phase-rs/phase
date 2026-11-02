@@ -17,6 +17,10 @@ export const LFG_IDLE_MS = 30 * 60_000;
 /** Any row untouched for this long is deleted (bounded growth, no timer). */
 const SWEEP_AFTER_MS = 24 * 60 * 60_000;
 
+/** A game thread still open this long after its LFG became ready is ended by
+ *  the bot's timer. Well inside SWEEP_AFTER_MS, so the row still exists then. */
+export const GAME_THREAD_MAX_MS = 6 * 60 * 60_000;
+
 const CODE_LENGTH = 6;
 const CODE_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
 /** Largest multiple of 36 that fits a byte (7 · 36); bytes at or above it are
@@ -34,11 +38,17 @@ export interface Lfg {
   mode: LfgMode;
   build: Build;
   server: { url: string; name: string } | null;
+  description: string | null;
   state: LfgState;
   code: string | null;
   touchedMs: number;
   /** Seated user ids in join order; the creator is first. */
   seated: string[];
+  /** The ready game's private thread, once the bot has opened one. `ended`: a
+   *  player pressed End game, or the thread timed out or failed to set up; the
+   *  bot then closes it in Discord, retrying until that succeeds or Discord
+   *  refuses (a 4xx). */
+  thread: { id: string; ended: boolean } | null;
 }
 
 export interface NewLfg {
@@ -49,6 +59,7 @@ export interface NewLfg {
   mode: LfgMode;
   build: Build;
   server: { url: string; name: string } | null;
+  description: string | null;
 }
 
 export type Refusal =
@@ -70,6 +81,22 @@ export type Outcome =
   /** `linkFor` only: a seated user of a ready LFG (→ ephemeral link reply). */
   | { kind: "ready"; lfg: Lfg };
 
+/** `endGame`'s result (the thread's End game button). */
+export type EndResult =
+  /** The game is now ended (→ close the thread in Discord). */
+  | { kind: "ending"; threadId: string }
+  | { kind: "refused"; reason: "not_seated"; lfg: Lfg }
+  /** Already ended, or the LFG or its thread is gone. */
+  | { kind: "ended" };
+
+/** A game thread the bot still has to close in Discord. `timedOut`: nothing has
+ *  ended it yet, it is just past GAME_THREAD_MAX_MS (→ post the notice once). */
+export interface ThreadToClose {
+  id: string;
+  threadId: string;
+  timedOut: boolean;
+}
+
 export type CreateResult =
   | { kind: "created"; lfg: Lfg }
   | { kind: "refused"; reason: "has_open" };
@@ -85,6 +112,7 @@ CREATE TABLE IF NOT EXISTS lfg (
   build       TEXT NOT NULL CHECK (build IN ('release','preview')),
   server_url  TEXT,
   server_name TEXT,
+  description TEXT,
   state       TEXT NOT NULL CHECK (state IN ('open','ready','cancelled','expired')),
   code        TEXT,
   touched_ms  INTEGER NOT NULL,
@@ -110,10 +138,25 @@ interface LfgRow {
   build: Build;
   server_url: string | null;
   server_name: string | null;
+  description: string | null;
   state: LfgState;
   code: string | null;
   touched_ms: number;
+  thread_id: string | null;
+  thread_end_ms: number | null;
 }
+
+/** Columns added after the first release, so an existing database gains them in
+ *  place (CREATE TABLE IF NOT EXISTS never alters a table that exists). */
+const ADDED_COLUMNS: readonly { name: string; type: string }[] = [
+  { name: "description", type: "TEXT" },
+  { name: "thread_id", type: "TEXT" },
+  /** When the game was ended (End game, time-out, or a failed setup). */
+  { name: "thread_end_ms", type: "INTEGER" },
+  /** When the bot stopped trying to close the thread: Discord closed it, or
+   *  refused with a 4xx. */
+  { name: "thread_closed_ms", type: "INTEGER" },
+];
 
 /**
  * A 6-symbol `[A-Z0-9]` room code. Bytes ≥ 252 are rejected (rejection sampling)
@@ -149,6 +192,12 @@ export class LfgStore {
     this.db.run("PRAGMA journal_mode = WAL");
     this.db.run("PRAGMA foreign_keys = ON");
     this.db.run(SCHEMA);
+    const existing = new Set(
+      (this.db.query("PRAGMA table_info(lfg)").all() as { name: string }[]).map((c) => c.name),
+    );
+    for (const column of ADDED_COLUMNS) {
+      if (!existing.has(column.name)) this.db.run(`ALTER TABLE lfg ADD COLUMN ${column.name} ${column.type}`);
+    }
   }
 
   create(input: NewLfg, now: number): CreateResult {
@@ -173,9 +222,9 @@ export class LfgStore {
       this.db
         .query(
           `INSERT INTO lfg (id, guild_id, creator_id, format, seats, mode, build,
-                            server_url, server_name, state, code, touched_ms)
+                            server_url, server_name, description, state, code, touched_ms)
            VALUES ($id, $guildId, $creatorId, $format, $seats, $mode, $build,
-                   $serverUrl, $serverName, 'open', NULL, $now)`,
+                   $serverUrl, $serverName, $description, 'open', NULL, $now)`,
         )
         .run({
           id,
@@ -187,6 +236,7 @@ export class LfgStore {
           build: input.build,
           serverUrl: input.server?.url ?? null,
           serverName: input.server?.name ?? null,
+          description: input.description,
           now,
         });
       this.insertSeat(id, input.creatorId, now);
@@ -242,9 +292,61 @@ export class LfgStore {
     });
   }
 
-  /** Shared prologue of every click: sweep, load (guild-scoped), lazy expiry of
-   *  an idle open post, closed posts → `ended`; then the action, all in one
-   *  transaction. */
+  /** Records the private thread opened for a ready LFG (whose `becameReady`
+   *  click just returned, so the row is ready and has no thread yet). */
+  attachThread(id: string, threadId: string): void {
+    this.db.query("UPDATE lfg SET thread_id = $threadId WHERE id = $id").run({ id, threadId });
+  }
+
+  /** A seated player's End game click in the game thread. */
+  endGame(id: string, guildId: string, userId: string, now: number): EndResult {
+    return this.db.transaction((): EndResult => {
+      const lfg = this.loadForClick(id, guildId, now);
+      if (lfg === null || lfg.thread === null || lfg.thread.ended) return { kind: "ended" };
+      if (!lfg.seated.includes(userId)) return { kind: "refused", reason: "not_seated", lfg };
+      this.endThread(id, now);
+      return { kind: "ending", threadId: lfg.thread.id };
+    })();
+  }
+
+  /** Marks the game's thread ended, so the timer closes it whatever its age. */
+  endThread(id: string, now: number): void {
+    this.db
+      .query("UPDATE lfg SET thread_end_ms = $now WHERE id = $id AND thread_end_ms IS NULL")
+      .run({ id, now });
+  }
+
+  /** Threads not yet closed in Discord that are ended, or that became ready at
+   *  least GAME_THREAD_MAX_MS ago. A ready row's `touched_ms` is its ready time:
+   *  nothing touches it afterwards. */
+  threadsToClose(now: number): ThreadToClose[] {
+    return (
+      this.db
+        .query(
+          `SELECT id, thread_id, thread_end_ms FROM lfg
+           WHERE thread_id IS NOT NULL AND thread_closed_ms IS NULL
+             AND (thread_end_ms IS NOT NULL OR touched_ms <= $cutoff)`,
+        )
+        .all({ cutoff: now - GAME_THREAD_MAX_MS }) as { id: string; thread_id: string; thread_end_ms: number | null }[]
+    ).map((row) => ({ id: row.id, threadId: row.thread_id, timedOut: row.thread_end_ms === null }));
+  }
+
+  /** Discord closed the thread (or it cannot be closed); the timer stops trying. */
+  markThreadClosed(id: string, now: number): void {
+    this.db.query("UPDATE lfg SET thread_closed_ms = $now WHERE id = $id").run({ id, now });
+  }
+
+  /** Every click's first step: sweep, then load the LFG, or null when it is
+   *  gone or belongs to another guild (a custom_id is only honoured in its own
+   *  guild). Runs inside the caller's transaction. */
+  private loadForClick(id: string, guildId: string, now: number): Lfg | null {
+    this.sweep(now);
+    const lfg = this.load(id);
+    return lfg === null || lfg.guildId !== guildId ? null : lfg;
+  }
+
+  /** Shared prologue of every post click: `loadForClick`, lazy expiry of an idle
+   *  open post, closed posts → `ended`; then the action, all in one transaction. */
   private act(
     id: string,
     guildId: string,
@@ -252,10 +354,8 @@ export class LfgStore {
     action: (lfg: Lfg) => Outcome,
   ): Outcome {
     return this.db.transaction((): Outcome => {
-      this.sweep(now);
-      const lfg = this.load(id);
-      // A custom_id is only honoured in its own guild.
-      if (lfg === null || lfg.guildId !== guildId) return { kind: "ended", lfg: null };
+      const lfg = this.loadForClick(id, guildId, now);
+      if (lfg === null) return { kind: "ended", lfg: null };
       if (lfg.state === "open" && now - lfg.touchedMs > LFG_IDLE_MS) {
         this.db.query("UPDATE lfg SET state = 'expired' WHERE id = $id").run({ id });
         return { kind: "ended", lfg: this.mustLoad(id) };
@@ -314,10 +414,12 @@ export class LfgStore {
       build: row.build,
       server:
         row.server_url === null ? null : { url: row.server_url, name: row.server_name ?? row.server_url },
+      description: row.description,
       state: row.state,
       code: row.code,
       touchedMs: row.touched_ms,
       seated,
+      thread: row.thread_id === null ? null : { id: row.thread_id, ended: row.thread_end_ms !== null },
     };
   }
 

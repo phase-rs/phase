@@ -99,6 +99,7 @@ fn temporal_anchor_parses_completed_scry_predicate_and_bottom_exile() {
                 qty: QuantityRef::TriggeringScryBottomCount
             },
             face_down: false,
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
         }
     ));
     assert!(

@@ -125,9 +125,11 @@ fn collect_face_up_exile_candidates(
     let controller = ability.controller;
     let ctx = crate::game::filter::FilterContext::from_ability(ability);
     // CR 406.3: A card's default face state in exile is face-up; the
-    // `face_down: true` marker means the card is exiled face-down. Use the
-    // canonical `targeting::zone_object_ids` helper for zone iteration.
-    crate::game::targeting::zone_object_ids(state, Zone::Exile)
+    // `face_down: true` marker means the card is exiled face-down.
+    // CR 108.2 + CR 109.1: the candidates are CARDS in exile, so iterate the
+    // card-level `targeting::zone_card_ids` listing; the CR 722.3c retained
+    // prepare copy is not a card.
+    crate::game::targeting::zone_card_ids(state, Zone::Exile)
         .into_iter()
         .filter_map(|object_id| {
             let object = state.objects.get(&object_id)?;
@@ -182,22 +184,25 @@ pub(crate) fn put_face_up_exile_into(
         origin: Some(Zone::Exile),
         destination,
         enter_transformed: false,
-        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         enters_under_player: None,
-        enters_attacking: false,
-        enter_with_counters: Vec::new(),
-        conditional_enter_with_counters: vec![],
         duration: None,
         track_exiled_by_source: false,
+        face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         // Search-from-outside brings cards in face up.
         face_down_profile: None,
         library_placement: None,
-        // CR 614.12: search-from-outside carries no moved-object type gate.
-        enters_modified_if: None,
         enter_attached_to: None,
     };
+    // Search-from-outside carries no entry modifications: no counters, no
+    // tapped/attacking rider, and no moved-object type gate.
+    let member = crate::types::game_state::ChangeZoneMemberEntry {
+        object_id,
+        enter_with_counters: Vec::new(),
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+        enters_attacking: false,
+    };
     Ok(change_zone::process_one_zone_move(
-        state, &ctx, object_id, events,
+        state, &ctx, &member, events,
     ))
 }
 
@@ -1017,6 +1022,44 @@ mod tests {
             Some(Zone::Hand)
         );
         assert!(!legacy.exile.contains(&exiled));
+    }
+
+    /// CR 108.2 + CR 109.1 + CR 722.3c: the face-up exile half of the pool
+    /// offers CARDS. A non-card copy of a card (the CR 722.3c retained prepare
+    /// copy's shape: `is_copy`, not a token, owned by the Wish's controller)
+    /// in exile is not offered, while the real card of the same type is.
+    #[test]
+    fn exile_card_population_wish_offers_only_cards_in_exile() {
+        let (mut state, exiled, ability) = wish_board(PlayerId(0), false);
+        let copy = create_object(
+            &mut state,
+            CardId(51),
+            PlayerId(0),
+            "Retained Copy".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&copy).unwrap();
+            obj.card_types = CardType {
+                core_types: vec![CoreType::Artifact],
+                ..Default::default()
+            };
+            obj.is_copy = true;
+        }
+        with_wish_scope(
+            &mut state,
+            crate::types::custom_format::WishOutsideGameScope::PreM10ReachesExile,
+        );
+        effects::resolve_ability_chain(&mut state, &ability, &mut Vec::new(), 0).unwrap();
+        assert!(
+            offers_face_up_exile(&state, exiled),
+            "reach guard: the real exiled card is offered, got {:?}",
+            state.waiting_for
+        );
+        assert!(
+            !offers_face_up_exile(&state, copy),
+            "the non-card copy is not a card in exile"
+        );
     }
 
     /// The widening is additive: the sideboard half of the pool is untouched.

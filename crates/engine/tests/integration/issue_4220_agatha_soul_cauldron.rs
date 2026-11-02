@@ -91,6 +91,7 @@ fn build_agatha_yawgmoth_state() -> (GameState, ObjectId, usize) {
             StaticMode::SpendManaAsAnyColor {
                 spell_filter: None,
                 activation_source_filter: Some(_),
+                concession: engine::types::ability::ManaSpendPermission::AnyColor,
             }
         )),
         "Agatha spend line must parse to activation-source-scoped SpendManaAsAnyColor; got {:?}",
@@ -204,6 +205,7 @@ fn agatha_spend_line_parses_activation_source_filter() {
             StaticMode::SpendManaAsAnyColor {
                 spell_filter: None,
                 activation_source_filter: Some(_),
+                concession: engine::types::ability::ManaSpendPermission::AnyColor,
             }
         )),
         "expected activation-source-scoped SpendManaAsAnyColor; got {:?}",

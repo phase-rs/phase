@@ -31,7 +31,7 @@ fn pay_reveal_and_resolve(runner: &mut GameRunner, revealed: ObjectId) {
     for _ in 0..16 {
         match runner.state().waiting_for.clone() {
             WaitingFor::PayCost {
-                kind: PayCostKind::Reveal,
+                kind: PayCostKind::Reveal { .. },
                 choices,
                 ..
             } => {

@@ -6,7 +6,7 @@ export const meta = {
     { title: 'Select', detail: 'resolve explicit card arg or auto-pick low-gap unsupported cards' },
     { title: 'Plan', detail: 'engine-planner + review-engine-plan loop' },
     { title: 'Implement', detail: 'branch + implement the card on the AI-CONTRIBUTOR §4 prompt' },
-    { title: 'Review', detail: 'review-impl loop + independent fresh-context cross-check' },
+    { title: 'Review', detail: 'review-engine-impl loop + independent fresh-context cross-check' },
     { title: 'Verify', detail: 'fmt, combinator gate, clippy/test/card-data, coverage, semantic-audit' },
     { title: 'PR', detail: 'commit, push, open PR with the §7 body template' },
   ],
@@ -192,7 +192,7 @@ function replanPrompt(card, plan, findings) {
 
 function reviewImplPrompt(card) {
   return (
-    `Use the \`review-impl\` skill against the current uncommitted working-tree diff ` +
+    `Use the \`review-engine-impl\` skill against the current uncommitted working-tree diff ` +
     `for the card "${card}". Set clean=true only if there are no defects, gaps, or ` +
     `missing cases. CRITICAL (engine-implementer feedback_review_impl_verify_bug_fixed): you MUST ` +
     `confirm "${card}" actually parses/behaves correctly now via a discriminating runtime check ` +
@@ -203,7 +203,7 @@ function reviewImplPrompt(card) {
 
 function fixImplPrompt(card, findings) {
   return (
-    `Address every one of these \`review-impl\` findings for "${card}" with code ` +
+    `Address every one of these \`review-engine-impl\` findings for "${card}" with code ` +
     `changes in the working tree. Do not commit.\n\nFINDINGS:\n` +
     findings.map((f) => `- ${f}`).join('\n')
   )
@@ -346,7 +346,7 @@ async function reviewImpl(card) {
   // This workflow reviews its uncommitted diff and fixes it with a fresh general implementation agent.
   for (let round = 1; round <= MAX_IMPL_REVIEW_ROUNDS; round++) {
     const review = await agent(reviewImplPrompt(card), {
-      label: `review-impl:${card}#${round}`,
+      label: `review-engine-impl:${card}#${round}`,
       phase: 'Review',
       schema: REVIEW_SCHEMA,
     })

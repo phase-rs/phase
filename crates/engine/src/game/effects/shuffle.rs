@@ -1,6 +1,9 @@
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter};
+use crate::types::ability::{
+    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
+use crate::types::game_state::RandomDraw;
 
 /// CR 701.24a: Shuffle — randomize the cards in a library.
 pub fn resolve(
@@ -38,8 +41,12 @@ pub fn resolve(
             rng,
             ..
         } = state;
-        if let Some(set) = tracked_object_sets.get_mut(&id) {
-            set.shuffle(rng);
+        let pile = tracked_object_sets.get_mut(&id).map(|set| {
+            set.shuffle(rng.draw(RandomDraw::Placement));
+            set.clone()
+        });
+        if let Some(pile) = pile {
+            crate::game::exile_links::reset_look_latches(state, &pile);
         }
         events.push(GameEvent::EffectResolved {
             kind: EffectKind::Shuffle,
@@ -49,15 +56,34 @@ pub fn resolve(
         return Ok(());
     }
 
-    let target_player = if matches!(shuffle_target, TargetFilter::Owner) {
+    let target_player = match &shuffle_target {
         // CR 400.3: "its owner's library" resolves to the owner of source_id.
-        state
+        TargetFilter::Owner => state
             .objects
             .get(&ability.source_id)
             .map(|obj| obj.owner)
-            .unwrap_or(ability.controller)
-    } else {
-        super::resolve_player_for_context_ref(state, ability, &shuffle_target)
+            .unwrap_or(ability.controller),
+        // CR 608.2b: a slot that was an illegal target names no player, so no library is shuffled.
+        TargetFilter::ParentTargetSlot { index } => {
+            match crate::game::targeting::resolve_live_parent_slot_from_root(state, ability, *index)
+            {
+                Some(TargetRef::Player(player)) => player,
+                Some(TargetRef::Object(_)) => {
+                    let Some(player) =
+                        super::resolve_player_for_context_ref(state, ability, &shuffle_target)
+                    else {
+                        return Ok(());
+                    };
+                    player
+                }
+                None => return Ok(()),
+            }
+        }
+        // CR 608.2b: a declared player whose target was illegal names no library.
+        _ => match super::resolve_player_for_context_ref(state, ability, &shuffle_target) {
+            Some(player) => player,
+            None => return Ok(()),
+        },
     };
 
     // CR 701.24a: the target player must exist before any shuffle logic runs.
@@ -427,7 +453,7 @@ mod tests {
         );
         assert_eq!(
             resolved_player,
-            PlayerId(1),
+            Some(PlayerId(1)),
             "Visions's shuffle must resolve to the targeted opponent, not the caster (filter was {shuffle_filter:?})"
         );
 

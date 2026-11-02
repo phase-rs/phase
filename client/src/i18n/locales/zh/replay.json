@@ -1,0 +1,26 @@
+{
+  "viewer": {
+    "title": "回放查看器",
+    "eyebrow": "观看已录制的牌局",
+    "chooseFile": "选择回放文件",
+    "loading": "正在加载回放…",
+    "errorGeneric": "无法加载该回放文件。",
+    "backToMenu": "返回主菜单"
+  },
+  "controls": {
+    "play": "播放",
+    "pause": "暂停",
+    "stepBack": "后退一步",
+    "stepForward": "前进一步",
+    "actionOf": "动作 {{current}} / {{total}}",
+    "speed": "速度",
+    "speedValue": "{{value}} 倍速",
+    "seekError": "无法重建回放中的这一位置：{{message}}"
+  },
+  "export": {
+    "button": "导出回放",
+    "success": "回放已保存为 {{filename}}",
+    "noRecording": "本局游戏没有可用的回放记录。",
+    "error": "无法导出回放。"
+  }
+}

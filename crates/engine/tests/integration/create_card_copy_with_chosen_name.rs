@@ -13,17 +13,17 @@
 //!
 //! Three rules are under test.
 //!
-//! CR 201.2a — the domain is CLOSED. The six names are printed on the card, and
+//! CR 201.4 — the domain is CLOSED. The six names are printed on the card, and
 //! a prompt that accepts a seventh is not that card's ability.
 //!
-//! CR 609.3 — "that hasn't been chosen" removes each committed name from the
-//! domain of the next activation.
+//! CR 608.2d — "that hasn't been chosen" makes each committed name an illegal
+//! option for the next activation.
 //!
-//! CR 707.12 + CR 704.5e — the copy is a copy, not a conjured card: it is
-//! materialized from the card registry into exile, it may be cast during the
-//! same resolution (CR 608.2: no state-based action runs mid-resolution), and if
-//! it is not cast the next SBA check removes it rather than leaving a stray card
-//! in exile for the rest of the game.
+//! CR 707.13 + CR 704.5e — the copy is a copy, not a conjured card: its
+//! characteristics come from the Oracle card reference (the face registry), it
+//! may be cast during the same resolution (CR 608.2g; no state-based action runs
+//! before a player would receive priority, CR 704.3), and if it is not cast the
+//! next SBA check removes it rather than leaving a stray object behind.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -90,7 +90,7 @@ fn garth_parses_a_closed_distinct_name_domain_and_a_card_copy() {
         .first()
         .expect("Garth has one activated ability");
 
-    // CR 201.2a: the closed domain, in PRINTED order and printed case. Lowercase
+    // CR 201.4: the closed domain, in PRINTED order and printed case. Lowercase
     // names here would mean the parser read them off its own lowercased copy of
     // the text — and the prompt would then offer "black lotus".
     let Effect::Choose {
@@ -116,20 +116,17 @@ fn garth_parses_a_closed_distinct_name_domain_and_a_card_copy() {
         ],
         "the six printed names, in printed order and case"
     );
-    // CR 609.3: "that hasn't been chosen".
+    // CR 608.2d: "that hasn't been chosen".
     assert_eq!(*distinctness, NameDistinctness::DistinctFromSourceHistory);
     // The chosen name has to survive the choice for the next clause to read it.
     assert!(*persist, "a card-name choice persists on the source");
 
-    // CR 707.12: the copy, created from the name rather than from an object.
+    // CR 707.13: the copy, created from the name rather than from an object.
     let create = ability
         .sub_ability
         .as_deref()
         .expect("the copy clause follows the choice");
-    let Effect::CreateCardCopyByName {
-        name, destination, ..
-    } = &*create.effect
-    else {
+    let Effect::CreateCardCopyByName { name, .. } = &*create.effect else {
         panic!(
             "expected CreateCardCopyByName, got {:?} — the recorded gap was \
              `unparsed_verb_arguments` on \"Create a copy of the card with the chosen name\"",
@@ -137,7 +134,6 @@ fn garth_parses_a_closed_distinct_name_domain_and_a_card_copy() {
         );
     };
     assert_eq!(*name, None, "the name comes from the choice, not the text");
-    assert_eq!(*destination, Zone::Exile);
 
     // CR 118.9b: "you may cast the copy" — a normal, PAID cast ("You still pay
     // its costs"), bound to the copy this chain created. `ParentTarget` would
@@ -202,7 +198,7 @@ fn the_rest_of_the_closed_domain_class_parses_the_same_way() {
         options[0], "Enlightened Tutor",
         "printed order and case: {options:?}"
     );
-    // CR 609.3: Ersta prints no "that hasn't been chosen" cue, so repeats are legal.
+    // CR 608.2d: Ersta prints no "that hasn't been chosen" cue, so repeats are legal.
     assert_eq!(*distinctness, NameDistinctness::Repeatable);
     assert!(
         matches!(
@@ -350,6 +346,7 @@ fn activate_to_the_prompt(runner: &mut GameRunner, garth: ObjectId) {
         .act(GameAction::ActivateAbility {
             source_id: garth,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("the tap ability is activatable");
     runner.resolve_top();
@@ -380,7 +377,7 @@ fn the_prompt_offers_exactly_the_printed_names_and_creates_the_chosen_copy() {
         })
         .expect("a printed name is a legal answer");
 
-    // CR 707.12: a real Lightning Bolt object, materialized from the registry and
+    // CR 707.13: a real Lightning Bolt object, materialized from the registry and
     // marked as a copy so CR 704.5e can sweep it.
     let copy = runner
         .state()
@@ -390,8 +387,7 @@ fn the_prompt_offers_exactly_the_printed_names_and_creates_the_chosen_copy() {
         .map(|(id, _)| *id)
         .expect("the copy was created");
     let copy_obj = &runner.state().objects[&copy];
-    assert_eq!(copy_obj.zone, Zone::Exile);
-    assert!(copy_obj.is_copy, "CR 707.12a: it is a copy, not a card");
+    assert!(copy_obj.is_copy, "CR 707.13: it is a copy, not a card");
     assert!(!copy_obj.is_token, "CR 704.5d is the wrong sweep for it");
     assert_eq!(
         runner.state().last_created_token_ids,
@@ -455,10 +451,10 @@ fn accepting_the_cast_puts_the_copy_on_the_stack() {
             .expect("pay {1}{G} from the pool");
     }
 
-    // CR 707.12: the copy left exile for the stack, cast for its own cost.
-    assert_ne!(
+    // CR 707.12 + CR 601.2a: the copy moved to the stack, cast for its own cost.
+    assert_eq!(
         runner.state().objects[&hit].zone,
-        Zone::Exile,
+        Zone::Stack,
         "the copy was cast: {:?}",
         runner.state().waiting_for
     );
@@ -493,7 +489,9 @@ fn a_copy_nobody_casts_ceases_to_exist() {
 
     // Decline the cast, then let the game reach a point where state-based actions
     // are checked (CR 704.3).
-    let _ = runner.act(GameAction::DecideOptionalEffect { accept: false });
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: false })
+        .expect("declining the optional cast is legal");
     runner.advance_until_stack_empty();
 
     assert!(
@@ -516,7 +514,9 @@ fn a_name_already_chosen_leaves_the_domain() {
             choice: "Disenchant".to_string(),
         })
         .expect("a printed name is a legal answer");
-    let _ = runner.act(GameAction::DecideOptionalEffect { accept: false });
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: false })
+        .expect("declining the optional cast is legal");
     runner.advance_until_stack_empty();
 
     // Untap for a second activation.
@@ -526,7 +526,7 @@ fn a_name_already_chosen_leaves_the_domain() {
     let offered = offered_names(&runner);
     assert!(
         !offered.contains(&"Disenchant".to_string()),
-        "CR 609.3: \"a card name that hasn't been chosen\" — got {offered:?}"
+        "CR 608.2d: \"a card name that hasn't been chosen\" — got {offered:?}"
     );
     assert_eq!(
         offered.len(),

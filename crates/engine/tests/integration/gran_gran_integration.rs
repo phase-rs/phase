@@ -194,6 +194,7 @@ fn gran_gran_taps_trigger_draws_before_discard_choice() {
         &[GameEvent::PermanentTapped {
             object_id: gran_gran,
             caused_by: None,
+            incarnation: None,
         }],
     );
     assert_eq!(state.stack.len(), 1);

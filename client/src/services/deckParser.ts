@@ -1,4 +1,3 @@
-import { isCardCommanderEligible } from "./engineRuntime";
 import { BASIC_LAND_NAMES } from "../constants/game";
 import type { SourcePrinting } from "../hooks/useCardImage";
 
@@ -189,17 +188,19 @@ function parseDeckEntryLine(line: string): LineParseResult | null {
     };
   }
 
-  // Collector number is the first token after the set parens. Tolerate (and
-  // discard) any trailing annotation the foil/finish strip above didn't catch
-  // — e.g. an unrecognized finish code or a language tag — mirroring the
-  // trailing-group allowance in MTGA_LINE_PATTERN so a detected MTGA line is
-  // never demoted to the simple matcher (which would swallow the set/number
-  // into the card name).
+  // The collector number is the token after the set parens, and may not start
+  // with "(": a card name can end in a parenthesized word ("Hazmat Suit
+  // (Used)"), and without that exclusion the lazy name group stops there and
+  // hands the word over as the set code. Tolerate (and discard) any trailing
+  // annotation the foil/finish strip above didn't catch — e.g. an unrecognized
+  // finish code or a language tag — so the set/number is still extracted rather
+  // than the line falling through to the simple matcher, which would swallow
+  // them into the card name.
   // The set code may be lowercase (Scryfall-style, e.g. `(2xm) 123`); several
   // exporters emit it that way. `setCode.toLowerCase()` below already normalizes
   // case, so widening the char class only keeps the line from being demoted to
   // the simple matcher (which would swallow the set/number into the card name).
-  const mtgaMatch = remainder.match(/^(\d+)x?\s+(.+?)\s+\(([A-Za-z0-9]*)\)\s+(\S+)(?:\s+.*)?$/);
+  const mtgaMatch = remainder.match(/^(\d+)x?\s+(.+?)\s+\(([A-Za-z0-9]*)\)\s+([^\s(]\S*)(?:\s+.*)?$/);
   if (mtgaMatch) {
     const setCode = mtgaMatch[3];
     const collectorNumber = mtgaMatch[4];
@@ -238,15 +239,10 @@ function normalizeCardName(name: string): string {
       : trimmed;
   }
 
-  // Single-slash exporter forms upgrade to canonical. Split on each "/" so both
-  // two-part ("Revival/Revenge") and multi-part
-  // ("Who / What / When / Where / Why") split cards collapse to " // " joins.
-  if (!trimmed.includes("/")) return trimmed;
-  return trimmed
-    .split("/")
-    .map((part) => part.trim())
-    .filter(Boolean)
-    .join(" // ");
+  // A bare "/" is left verbatim: it can be part of a printed name
+  // ("Summon: Choco/Mog"), and the engine resolves a single-slash split-card
+  // name ("Revival/Revenge") to its front face itself.
+  return trimmed;
 }
 
 function normalizeEntries(entries: DeckEntry[]): DeckEntry[] {
@@ -260,7 +256,7 @@ function normalizeNames(names: string[] | undefined): string[] | undefined {
   return names?.map(normalizeCardName);
 }
 
-function totalCards(entries: DeckEntry[]): number {
+export function totalCards(entries: DeckEntry[]): number {
   return entries.reduce((sum, entry) => sum + entry.count, 0);
 }
 
@@ -316,7 +312,7 @@ export function deriveImportedDeckName(content: string, deck: ParsedDeck): strin
   return "Untitled Deck";
 }
 
-function looksCommanderSingleton(entries: DeckEntry[]): boolean {
+export function looksCommanderSingleton(entries: DeckEntry[]): boolean {
   return entries.every((entry) => entry.count === 1 || BASIC_LAND_NAMES.has(entry.name));
 }
 
@@ -338,7 +334,7 @@ function removeOneCopy(entries: DeckEntry[], name: string): DeckEntry[] {
   return next;
 }
 
-function removeCommandersFromMain(deck: ParsedDeck): ParsedDeck {
+export function removeCommandersFromMain(deck: ParsedDeck): ParsedDeck {
   if (!deck.commander?.length) return deck;
 
   let main = deck.main;
@@ -759,41 +755,4 @@ export function exportMtgaDeck(deck: ParsedDeck): string {
  */
 export function exportDeck(deck: ParsedDeck, format: ExportFormat): string {
   return format === "mtga" ? exportMtgaDeck(deck) : exportDeckFile(deck);
-}
-
-/**
- * Final step in the commander identification waterfall (semantic, async).
- *
- * Steps already applied during sync parsing:
- *   1. Explicit `[Commander]` / `Commander` section header
- *   2. Inline `[Commander]` / `*CMDR*` annotation on a card line
- *   3. 99 main + 1–2 sideboard singletons in a 100-card deck
- *
- * This step:
- *   4. 100-card singleton deck with no commander identified, where the first
- *      commander-eligible card per CR 903.3 (legendary creature, legendary
- *      background, or "can be your commander") is promoted.
- *
- * The eligibility check is delegated to the engine via WASM — the frontend
- * never replicates rules logic.
- */
-export async function resolveCommander(deck: ParsedDeck): Promise<ParsedDeck> {
-  const normalized = repairParsedDeck(deck);
-  if (normalized.commander?.length) return normalized;
-  if (normalized.sideboard.length > 0) return normalized;
-  if (normalized.main.length === 0) return normalized;
-  if (totalCards(normalized.main) !== 100) return normalized;
-  if (!looksCommanderSingleton(normalized.main)) return normalized;
-
-  for (const entry of normalized.main) {
-    if (entry.count !== 1) continue;
-    if (!(await isCardCommanderEligible(entry.name))) continue;
-
-    return removeCommandersFromMain({
-      ...normalized,
-      commander: [entry.name],
-    });
-  }
-
-  return normalized;
 }

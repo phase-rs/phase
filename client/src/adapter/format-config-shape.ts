@@ -99,7 +99,8 @@ function isCommandZoneMode(value: unknown): value is CommandZoneMode {
     && (enabled.eligibility_rule === "Standard"
       || enabled.eligibility_rule === "TinyLeaders"
       || enabled.eligibility_rule === "OathbreakerSignatureSpell"
-      || enabled.eligibility_rule === "BrawlColorIdentity")
+      || enabled.eligibility_rule === "BrawlColorIdentity"
+      || enabled.eligibility_rule === "FreeformAnyCastableCard")
   );
 }
 
@@ -181,6 +182,10 @@ export function isFormatConfigShape(value: unknown): value is FormatConfig {
   if (!isRecord(value)) return false;
   if (typeof value.format !== "string") return false;
 
+  // A blob persisting the removed `allow_experimental_dungeons` key (saves
+  // and broker frames written before the flag was deleted) still validates:
+  // this guard names required fields but never rejects unknown ones, and the
+  // pool is format-derived now, so the stale key is inert either way.
   if (
     !isInteger(value.starting_life)
     || !isInteger(value.min_players)

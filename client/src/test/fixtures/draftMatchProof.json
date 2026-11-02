@@ -1,0 +1,5 @@
+{
+  "set_code": "TST",
+  "spells": ["Alpha", "Beta", "Gamma", "Delta"],
+  "basics": ["Plains", "Island", "Swamp", "Mountain", "Forest"]
+}

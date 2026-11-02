@@ -29,6 +29,7 @@ import {
   directory_validate_announcement,
   directory_version,
   initSync,
+  lobby_frame_for_viewer,
   lobby_protocol_version,
   min_supported_lobby_protocol,
   protocol_version,
@@ -59,6 +60,7 @@ import { toDataPoint } from "./telemetry";
 import {
   classifyHelloGate,
   helloGateErrorMessage,
+  lobbyFrameFor,
   type ConnAttachment,
   type LobbyHelloPolicy,
 } from "./hello-gate";
@@ -246,6 +248,11 @@ export class LobbyDO {
       // Public usage/analytics snapshot (read by the in-app lobby stats panel).
       if (pathname === "/stats") {
         return this.statsResponse();
+      }
+      // Public lobby listing (polled by the Discord card bot). Branched before
+      // the info-document fallthrough below, like the directory paths.
+      if (pathname === "/games") {
+        return this.gamesResponse();
       }
       // Server directory. These MUST be branched explicitly: this method's
       // default answer for any non-WebSocket path is the info document, so a
@@ -485,6 +492,17 @@ export class LobbyDO {
     });
     return Response.json(payload, {
       headers: { "Access-Control-Allow-Origin": "*", "Cache-Control": "no-store" },
+    });
+  }
+
+  /** Build the `/games` JSON: `{"games": [LobbyGame…]}`, the same listing
+   *  `LobbyUpdate` carries. The broker already serialized the array, so it is
+   *  spliced in rather than parsed and re-stringified. No CORS header: the only
+   *  consumer is the server-side bot. */
+  private async gamesResponse(): Promise<Response> {
+    const broker = await this.loadBroker();
+    return new Response(`{"games":${broker.public_games()}}`, {
+      headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
     });
   }
 
@@ -850,7 +868,9 @@ export class LobbyDO {
 
   private broadcastToSubscribers(frame: string): void {
     for (const sock of this.ctx.getWebSockets()) {
-      if (this.isSubscribed(sock)) sock.send(frame);
+      const conn = sock.deserializeAttachment() as ConnAttachment | null;
+      const out = lobbyFrameFor(conn, frame, lobby_frame_for_viewer);
+      if (out !== null) sock.send(out);
     }
   }
 
