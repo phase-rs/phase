@@ -282,19 +282,15 @@ fn effect_window_reach(effect: &Effect) -> WindowReach {
         // Absent `target_player` is an engine parser convention for "the
         // actor's own library". It is a true description of engine behaviour
         // and it is NOT the safety warrant for this arm, because it is NOT
-        // reliable: MEASURED over `data/card-data.json`, five abilities whose
-        // Oracle text explicitly names a FOREIGN library still carry a
-        // `SearchLibrary` node with `target_player: None` — Head Games[0],
-        // Jester's Mask[0], Haunting Echoes[0], Jace, Architect of Thought[2],
-        // and the SECOND search of Sadistic Sacrament[0] (whose first search
-        // does carry a `Typed` target_player). No aggregate count is claimed
+        // reliable: Mimeofacture[0] and Jace, Architect of Thought[2] name a
+        // foreign library yet carry `target_player: None`. No aggregate count is claimed
         // here: "how many abilities name a foreign library" has no
         // scope-independent answer, and an unscoped census is worse than none.
         //
         // What makes the arm safe is the ABSORBING ability-level fold in
         // `ability_window_reach`: a foreign-library ability carries some
         // sibling effect or cost that folds to `MayInterfere` regardless of
-        // what `target_player` says. `Haunting Echoes[0]` is the in-suite
+        // what `target_player` says. `Mimeofacture[0]` is the in-suite
         // witness for that fold — see
         // `a_foreign_library_search_is_confined_alone_then_absorbed`. Bribery[0]
         // and Praetor's Grasp[0] are also `MayInterfere`, but they witness the
@@ -665,6 +661,7 @@ fn ability_window_reach(def: &AbilityDefinition) -> WindowReach {
         target_selection_mode: _,
         sub_link: _,
         target_reads: _, // TargetReadOrigin: which announcement `Target` reads name
+        entry_onset: _,  // ContinuousEffectOnset: when the effect starts, not what it does
         sibling_condition: _,
         // Parser scratch, not runtime state: `parse_oracle_pipeline` settles every
         // deferred guard verdict before it hands a tree out, so this is `None` on
@@ -1068,7 +1065,8 @@ fn indexed_ability_window_reach(
 }
 
 /// CR 603.2: can a CONFINED action's event stream ever match this trigger's
-/// trigger event? Returns `true` iff it PROVABLY cannot.
+/// trigger event? Returns `true` iff it PROVABLY cannot, where the proof covers
+/// only the events the `## Boundary` section below considers.
 ///
 /// # This predicate is NOT a fact about the trigger
 ///
@@ -1109,15 +1107,17 @@ fn indexed_ability_window_reach(
 /// `true` in [`any_action_may_interfere`] without consulting this. Events are
 /// counted from announcement through full resolution, INCLUDING cost payment
 /// (CR 601.2b–i for a spell, CR 602.2b for an activated ability, which routes to
-/// the same process). `GameAction::PassPriority` is excluded by construction (it
-/// returns `false` before the fold), so phase advance is out of domain and a
-/// beginning-of-phase trigger cannot be reached through this predicate's callers.
+/// the same process). The arms below reason over what the allowlisted costs and
+/// effects themselves produce; an event that a replacement effect's `execute`
+/// produces while replacing one of the action's own events is not considered.
+/// `GameAction::PassPriority` is excluded by construction (it returns `false`
+/// before the fold), so phase advance is out of domain and a beginning-of-phase
+/// trigger cannot be reached through this predicate's callers.
 ///
 /// ## Fail-closed
 ///
-/// Exhaustive dispatch with a `_ => false` arm, mirroring
-/// [`crate::game::triggers::trigger_event_unreachable_in_phase`]: a mode this
-/// predicate cannot classify KEEPS its veto. A future mode is swallowed into
+/// Exhaustive dispatch with a `_ => false` arm: a mode this predicate cannot
+/// classify KEEPS its veto. A future mode is swallowed into
 /// conservatism, never into relief.
 fn trigger_event_unreachable_by_confined_action(
     def: &crate::types::ability::TriggerDefinition,
@@ -1213,7 +1213,12 @@ fn trigger_event_unreachable_by_confined_action(
         // * `TokenCreated`/`TokenCreatedOnce` — CR 111.1: tokens are put onto the
         //   battlefield by effects that say so. `Effect::Token` is not allowlisted,
         //   and `match_token_created` keys on the dedicated
-        //   `GameEvent::TokenCreated`.
+        //   `GameEvent::TokenCreated`. That ground does not cover a token that a
+        //   replacement effect (CR 614.1a) creates while replacing the confined
+        //   action's own event, and a `TokenCreated` observer sees that token: an
+        //   opponent's Kalitas, Traitor of Ghet replaces the death of a Sakura-Tribe
+        //   Elder sacrificed to its own ability with exile plus a Zombie token, and
+        //   that opponent's Akim, the Soaring Wind triggers on the token.
         //
         // `Milled`/`MilledOnce`/`MilledAll` are DELIBERATELY ABSENT — see below.
         TriggerMode::Drawn
@@ -1428,6 +1433,7 @@ pub(crate) fn any_action_may_interfere(
         GameAction::ActivateAbility {
             source_id,
             ability_index,
+            ..
         } => indexed_ability_window_reach(state, *source_id, *ability_index).may_interfere(),
         // Every other priority action (play a land, declare attackers, special
         // actions, ...) is unclassified and therefore interference.
@@ -1440,6 +1446,7 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::ChooseOneOfKind;
     use crate::types::card::{CardFace, CardMetadata};
     use crate::types::keywords::Keyword;
 
@@ -1546,6 +1553,13 @@ mod tests {
         oracle:
             "Search target opponent's library for a card and exile it face down. Then that player \
         shuffles. You may play that card for as long as it remains exiled.",
+    };
+    const MIMEOFACTURE: Card = Card {
+        name: "Mimeofacture",
+        oracle: "Replicate {3}{U} (When you cast this spell, copy it for each time you paid its \
+        replicate cost. You may choose new targets for the copies.)\nChoose target permanent an \
+        opponent controls. Search that player's library for a card with the same name and put it \
+        onto the battlefield under your control. Then that player shuffles.",
     };
     const HAUNTING_ECHOES: Card = Card {
         name: "Haunting Echoes",
@@ -1704,12 +1718,9 @@ mod tests {
             // Library analogue — caught by `SearchLibrary.target_player`
             (&BRIBERY, 0),
             (&PRAETORS_GRASP, 0),
-            // Library analogue caught by the ABSORBING FOLD instead: its
-            // search node carries `target_player: None` and is confined on its
-            // own, so neither row above covers this path. The premise that
-            // makes it a fold witness is pinned separately by
-            // `a_foreign_library_search_is_confined_alone_then_absorbed`.
             (&HAUNTING_ECHOES, 0),
+            // The library analogue caught by the ABSORBING FOLD instead is
+            // pinned by `a_foreign_library_search_is_confined_alone_then_absorbed`.
             // Hand analogue — these do not ride `ChangeZone` at all; they fall
             // to the fail-closed default
             (&THOUGHTSEIZE, 0),
@@ -1758,56 +1769,55 @@ mod tests {
     }
 
     /// The `SearchLibrary` arm's safety warrant is the ABSORBING fold, not the
-    /// arm itself — and the two library rows in the table above do NOT witness
-    /// it: `Bribery[0]` and `Praetor's Grasp[0]` each carry
-    /// `target_player: Typed{controller: Opponent}`, so the arm catches them
+    /// arm itself — and the library rows in the table above do NOT witness
+    /// it: `Bribery[0]`, `Praetor's Grasp[0]` and `Haunting Echoes[0]` each carry
+    /// a `target_player`, so the arm catches them
     /// directly and the fold is never asked to do anything. This test pins the
-    /// path they miss, on one of the five abilities the arm's own comment names
-    /// as foreign-library-with-`target_player: None`.
+    /// path they miss.
     ///
-    /// MEASURED at this base: `Haunting Echoes[0]` searches "that player's
-    /// library" — FOREIGN — yet its `sub_ability` heads
+    /// `Mimeofacture[0]` searches "that player's library" — FOREIGN, the
+    /// controller of a target permanent — yet its `sub_ability` heads
     /// `SearchLibrary { target_player: None }`, so that node ALONE classifies
-    /// `OwnResourcesOnly`. What makes the ability interference is its sibling
-    /// head, `ChangeZoneAll` (graveyard exile, not an allowlisted effect).
+    /// `OwnResourcesOnly`. Its absorber is the `TargetOnly` head, which reaches
+    /// `effect_window_reach`'s fail-closed `_` arm.
     ///
-    /// The two assertions name the fail-open node and its absorber; the
-    /// composed verdict is the `HAUNTING_ECHOES` row in the interfering table
-    /// above, so no assertion here duplicates one there.
-    ///
-    /// Read the split correctly: MEASURED, that table row's verdict is carried
-    /// ENTIRELY by the `ChangeZoneAll` head — the ability has no cost, no
-    /// `player_scope` and no conservative-when-present field, so dropping the
-    /// fold's `sub_ability` leg leaves it `MayInterfere` unchanged. The reason is
-    /// specific to THIS fixture and does NOT generalize: in
-    /// `ability_window_reach` the head is the only term that is not optional, so
-    /// when the absorber IS the head, there is no leg the fold could lose that
-    /// would carry it away. Do NOT read that as "an absorbed verdict can never
-    /// flip" — when the absorbers sit on OPTIONAL legs, the verdict flips as soon
-    /// as those legs go. MEASURED at this base by fresh `parse_oracle_text` on
-    /// `Jace, Architect of Thought[2]`, another of the five abilities the
-    /// `SearchLibrary` arm's own comment names: its head is
-    /// `SearchLibrary { target_player: None }` — `OwnResourcesOnly` — and all
-    /// THREE of its absorbers are optional legs: `cost: Loyalty(-8)` (the
-    /// `cost_window_reach` wildcard), a `sub_ability` heading
-    /// `ChangeZone { Library -> Exile, target: Any }`, and `player_scope: All`.
-    /// Dropping the `sub_ability` and `cost` legs together still measures
-    /// `MayInterfere`, because `player_scope` alone still absorbs; dropping all
-    /// three measures `OwnResourcesOnly`. That card is NOT a fixture in this
-    /// suite, so nothing here pins it — it is cited to bound the claim above, not
-    /// as coverage. What remains lockable on Haunting Echoes is therefore the
-    /// premise, and the first assertion is what locks it. MEASURED: closing the
-    /// `SearchLibrary` arm (`WindowReach::of(target_player.is_none())` to a bare
-    /// `MayInterfere`) flips that assertion. It cannot flip `Bribery[0]` or
-    /// `Praetor's Grasp[0]` — DERIVED, not measured: closing the arm can only
-    /// move a verdict toward `MayInterfere`, and both are already there.
+    /// The absorber here is the head, the one term of `ability_window_reach` that
+    /// is not optional; that does NOT generalize to "an absorbed verdict can never
+    /// flip". `Jace, Architect of Thought[2]` (not a fixture here) heads
+    /// `SearchLibrary { target_player: None }` and its absorbers sit on optional
+    /// legs (`cost: Loyalty(-8)`, a `ChangeZone` `sub_ability`, `player_scope: All`):
+    /// dropping all three flips it to `OwnResourcesOnly`.
     #[test]
     fn a_foreign_library_search_is_confined_alone_then_absorbed() {
-        let echoes = ability(&HAUNTING_ECHOES, 0);
-        let search = echoes
+        // Its "Choose target permanent" head parses only on a sorcery.
+        let parsed = parse_oracle_text(
+            MIMEOFACTURE.oracle,
+            MIMEOFACTURE.name,
+            &[],
+            &["Sorcery".to_string()],
+            &[],
+        );
+        let mimeofacture = &parsed.abilities[0];
+        assert!(
+            matches!(&*mimeofacture.effect, Effect::TargetOnly { .. }),
+            "VACUITY GUARD: Mimeofacture[0] must parse its `TargetOnly` head, got {:?}",
+            mimeofacture.effect
+        );
+        let search = mimeofacture
             .sub_ability
             .as_ref()
-            .expect("PREMISE: Haunting Echoes[0] carries the library search as its sub_ability");
+            .expect("PREMISE: Mimeofacture[0] carries the library search as its sub_ability");
+        assert!(
+            matches!(
+                &*search.effect,
+                Effect::SearchLibrary {
+                    target_player: None,
+                    ..
+                }
+            ),
+            "PREMISE: Mimeofacture[0]'s sub_ability is the foreign-library search, got {:?}",
+            search.effect
+        );
         assert_eq!(
             effect_window_reach(&search.effect),
             WindowReach::OwnResourcesOnly,
@@ -1816,9 +1826,13 @@ mod tests {
              the foreign `target_player` and this row has silently become a second Bribery"
         );
         assert_eq!(
-            effect_window_reach(&echoes.effect),
+            effect_window_reach(&mimeofacture.effect),
             WindowReach::MayInterfere,
-            "the absorber: the sibling graveyard-exile head is what the fold ORs in"
+            "the absorber: the `TargetOnly` head is what the fold ORs in"
+        );
+        assert_eq!(
+            ability_window_reach(mimeofacture),
+            WindowReach::MayInterfere
         );
     }
 
@@ -1925,6 +1939,7 @@ mod tests {
         let container = Effect::ChooseOneOf {
             chooser: PlayerFilter::Controller,
             branches: vec![confined_branch.clone(), confined_branch],
+            kind: ChooseOneOfKind::Ordinary,
         };
         assert_eq!(
             effect_window_reach(&container),
@@ -2207,13 +2222,13 @@ mod tests {
     /// only ever correct on the day it is written; a `..`-free destructure is correct
     /// until the compiler says otherwise.
     ///
-    /// **Why `CardFace` and not `GameObject`.** `GameObject` has 149 fields, most of them
-    /// runtime state (zone, damage, counters, attachments) with no bearing on what a card
-    /// can do. Destructuring it here would be a churn magnet that every unrelated field
-    /// addition breaks, and it would be blanket-`..`'d back within a round. `CardFace` has
-    /// 33 and is the actual source `printed_cards` reads to populate object rules content,
-    /// so it guards the defect class that occurred rather than the largest surface
-    /// available.
+    /// **Why `CardFace` and not `GameObject`.** `GameObject`'s fields are mostly runtime
+    /// state (zone, damage, counters, attachments) with no bearing on what a card can do,
+    /// and there are far more of them. Destructuring it here would be a churn magnet that
+    /// every unrelated field addition breaks, and it would be blanket-`..`'d back within a
+    /// round. `CardFace` has 33 and is the actual source `printed_cards` reads to populate
+    /// object rules content, so it guards the defect class that occurred rather than the
+    /// largest surface available.
     ///
     /// **Honest scope limit:** this guards fields that reach an object THROUGH
     /// `printed_cards`. A `GameObject` field written by some other path is not covered —
@@ -2265,8 +2280,8 @@ mod tests {
                     forge_triggers: _,
                     forge_statics: _,
                     forge_replacements: _,
-                    // Names tokens this card can make; MAKING one runs through
-                    // `Effect::Token` in `abilities`, which this fold already reads.
+                    // Names tokens this card can make; MAKING one runs through the
+                    // effects in `abilities`, which this fold already reads.
                     related_token_ids: _,
                     // Image/catalog identifiers.
                     source_printing_ids: _,
@@ -2449,8 +2464,8 @@ mod tests {
         // `back_face` is the one gated field with no `apply_card_face_to_object` route:
         // `printed_cards::apply_card_face_to_back_face` fills a `BackFaceData` on the
         // transform path instead. Asserted directly, and reusing `game::specialize`'s
-        // existing empty constructor rather than hand-rolling a 22-field literal that would
-        // go stale the moment `BackFaceData` gains a field.
+        // existing empty constructor rather than hand-rolling a full `BackFaceData` literal
+        // that would go stale the moment it gains a field.
         let mut state = GameState::default();
         let id = create_object(
             &mut state,
@@ -2597,6 +2612,7 @@ mod tests {
                 &[GameAction::ActivateAbility {
                     source_id: missing,
                     ability_index: 7,
+                    payment_mode: crate::types::game_state::CastPaymentMode::Auto
                 }]
             ),
             "an out-of-range ability index is interference, not a confined no-op"
@@ -3383,7 +3399,7 @@ mod tests {
         // card pipeline uses.
         let source = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/src/types/triggers.rs"
+            "/../phase-ast/src/types/triggers.rs"
         ))
         .expect("the enum's own source file is readable");
         let body = source

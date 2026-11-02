@@ -1,5 +1,6 @@
 //! P2 replay coverage for resolved mana, scalar, status, counter, and ledger commands.
 
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
@@ -255,6 +256,7 @@ fn activated_signet_states() -> (GameState, GameState, ObjectId) {
         .act(GameAction::ActivateAbility {
             source_id: signet,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("the real Signet mana ability must activate");
     (pre_state, runner.state().clone(), signet)
@@ -392,14 +394,12 @@ fn real_mana_activation_replays_recorded_insert_and_spend_commands() {
         assert_eq!(
             replayed
                 .mana_pool
-                .mana
-                .iter()
+                .units()
                 .map(|unit| unit.pip_id)
                 .collect::<Vec<_>>(),
             ordinary
                 .mana_pool
-                .mana
-                .iter()
+                .units()
                 .map(|unit| unit.pip_id)
                 .collect::<Vec<_>>(),
             "replay preserves the exact surviving mana identities"
@@ -762,7 +762,7 @@ fn rootwater_activation(runner: &mut GameRunner, source: ObjectId, recipient: Ob
     assert!(outcome.state().objects[&source].tapped);
     assert_eq!(outcome.state().objects[&recipient].controller, P0);
     assert!(outcome.events().iter().any(|event| matches!(event,
-        GameEvent::ControllerChanged { object_id, old_controller: P1, new_controller: P0 }
+        GameEvent::ControllerChanged { object_id, old_controller: P1, new_controller: P0, .. }
             if *object_id == recipient)));
     assert!(outcome.events().iter().any(|event| matches!(
         event,

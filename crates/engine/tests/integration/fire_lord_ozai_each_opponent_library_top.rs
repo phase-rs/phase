@@ -53,7 +53,8 @@ use engine::game::scenario::GameScenario;
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
-    AbilityDefinition, Effect, LibraryPosition, PlayerFilter, QuantityExpr, TargetFilter,
+    AbilityDefinition, CardPlayMode, CastingPermission, Duration, Effect, LibraryPosition,
+    PlayFromExileProvenance, PlayerFilter, QuantityExpr, TargetFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::WaitingFor;
@@ -61,7 +62,8 @@ use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
-use engine::types::zones::Zone;
+use engine::types::statics::CastFrequency;
+use engine::types::zones::{EtbTapState, Zone};
 
 use crate::support::shared_card_db;
 
@@ -307,6 +309,317 @@ fn ozai_grants_play_permission_over_every_opponents_exiled_card() {
     assert!(
         !castable(p0_top),
         "the controller's own library card was never exiled and must not be playable"
+    );
+}
+
+/// CR 305.1: a land is PLAYED, never cast, so the land companion of Ozai's
+/// `mode: Play` grant surfaces as `GameAction::PlayLand`.
+fn can_play_land(state: &engine::types::game_state::GameState, id: ObjectId) -> bool {
+    engine::ai_support::legal_actions(state)
+        .iter()
+        .any(|action| matches!(action, GameAction::PlayLand { object_id, .. } if *object_id == id))
+}
+
+/// V-Oz (cast route): Ozai's free shared budget — casting one exiled spell
+/// spends the budget and the sibling rejects on every route. The cast is FREE:
+/// P0's pool is empty (the `{6}` activation spent the funding) yet the
+/// `{1}{G}` Grizzly Bears is offered and resolves, and the pool stays empty.
+///
+/// DISCRIMINATING: with the refusal reverted, nothing is offered and the
+/// reach-guard assertions fail; with an uncapped grant, the sibling stays
+/// offered and the rejection assertions fail.
+#[test]
+fn ozai_free_grant_spends_shared_budget_on_cast() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+
+    let mut scenario = GameScenario::new_n_player(3, 8_394);
+    scenario.at_phase(Phase::PreCombatMain);
+    let p1_top = scenario.add_real_card(P1, "Grizzly Bears", Zone::Library, db);
+    let p2_top = scenario.add_real_card(P2, "Memnite", Zone::Library, db);
+    let p1_second = scenario.add_real_card(P1, "Runeclaw Bear", Zone::Library, db);
+
+    let ozai = scenario
+        .add_creature_from_oracle(P0, "Fire Lord Ozai", 4, 4, OZAI)
+        .id();
+    scenario.with_mana_pool(P0, six_colorless(ozai));
+    let mut runner = scenario.build();
+    rehydrate_game_from_card_db(runner.state_mut(), db);
+
+    let outcome = runner.activate(ozai, 0).resolve();
+    assert_eq!(
+        outcome.zone_of(p1_top),
+        Zone::Exile,
+        "reach guard: P1's top exiled"
+    );
+    assert_eq!(
+        outcome.zone_of(p2_top),
+        Zone::Exile,
+        "reach guard: P2's top exiled"
+    );
+    let actions = legal_actions(outcome.state());
+    assert!(!actions.is_empty(), "reach guard: P0 has legal actions");
+    let castable = |id: ObjectId| {
+        actions.iter().any(
+            |action| matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == id),
+        )
+    };
+    assert!(
+        castable(p1_top) && castable(p2_top),
+        "reach guard: both exiled cards must be offered before the budget is spent"
+    );
+    // The `{6}` activation spent the whole funding: no mana left to pay with.
+    assert_eq!(
+        runner.state().players[0].mana_pool.total(),
+        0,
+        "reach guard: the pool must be empty so the cast below proves freeness"
+    );
+
+    // Cast the {1}{G} Grizzly Bears with an empty pool — free, zero mana spent.
+    runner.cast(p1_top).commit();
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        runner.state().objects[&p1_top].zone,
+        Zone::Battlefield,
+        "reach guard: the free cast must resolve"
+    );
+    assert_eq!(
+        runner.state().players[0].mana_pool.total(),
+        0,
+        "the free grant must spend zero mana"
+    );
+
+    // The sibling rejects; it never moved; the never-exiled card stays dark.
+    let actions = legal_actions(runner.state());
+    let offered = |id: ObjectId| {
+        actions.iter().any(
+            |action| matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == id),
+        )
+    };
+    assert!(
+        !offered(p2_top),
+        "the sibling spell must reject once the shared budget is spent"
+    );
+    assert!(
+        !offered(p1_second),
+        "the never-exiled card must stay unoffered"
+    );
+    assert_eq!(
+        runner.state().objects[&p2_top].zone,
+        Zone::Exile,
+        "the rejected sibling must not have moved"
+    );
+}
+
+/// V-Oz (land route): playing the exiled land spends the same shared budget
+/// and the exiled spell rejects on the cast route.
+#[test]
+fn ozai_free_grant_spends_shared_budget_on_land_play() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+
+    let mut scenario = GameScenario::new_n_player(3, 8_395);
+    scenario.at_phase(Phase::PreCombatMain);
+    let p1_top = scenario.add_real_card(P1, "Forest", Zone::Library, db);
+    let p2_top = scenario.add_real_card(P2, "Grizzly Bears", Zone::Library, db);
+
+    let ozai = scenario
+        .add_creature_from_oracle(P0, "Fire Lord Ozai", 4, 4, OZAI)
+        .id();
+    scenario.with_mana_pool(P0, six_colorless(ozai));
+    let mut runner = scenario.build();
+    rehydrate_game_from_card_db(runner.state_mut(), db);
+
+    let outcome = runner.activate(ozai, 0).resolve();
+    assert_eq!(
+        outcome.zone_of(p1_top),
+        Zone::Exile,
+        "reach guard: the land exiled"
+    );
+    assert_eq!(
+        outcome.zone_of(p2_top),
+        Zone::Exile,
+        "reach guard: the spell exiled"
+    );
+    assert!(
+        can_play_land(outcome.state(), p1_top),
+        "reach guard: the exiled land must be playable before the budget is spent"
+    );
+    let actions = legal_actions(outcome.state());
+    assert!(
+        actions.iter().any(
+            |action| matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == p2_top),
+        ),
+        "reach guard: the exiled spell must be offered before the budget is spent"
+    );
+
+    // Play the land through the production pipeline.
+    let card_id = runner.state().objects[&p1_top].card_id;
+    runner
+        .act(GameAction::PlayLand {
+            object_id: p1_top,
+            card_id,
+        })
+        .expect("the first granted land play must be accepted");
+    assert_eq!(
+        runner.state().objects[&p1_top].zone,
+        Zone::Battlefield,
+        "reach guard: the land must actually have been played"
+    );
+
+    // The spell rejects; it never moved.
+    let actions = legal_actions(runner.state());
+    assert!(
+        !actions.iter().any(
+            |action| matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == p2_top),
+        ),
+        "the exiled spell must reject once the land spent the shared budget"
+    );
+    assert_eq!(
+        runner.state().objects[&p2_top].zone,
+        Zone::Exile,
+        "the rejected spell must not have moved"
+    );
+}
+
+/// A paid (non-free) `PlayFromExile` sibling with the same shape as Ozai's
+/// grant except the free channel — the hostile authority for the election
+/// test below.
+fn paid_play_from_exile_sibling() -> CastingPermission {
+    CastingPermission::PlayFromExile {
+        duration: Duration::UntilEndOfTurn,
+        granted_to: P0,
+        mode: CardPlayMode::Play,
+        frequency: CastFrequency::Unlimited,
+        source_id: None,
+        exiled_by_ability_controller: None,
+        mana_spend_permission: None,
+        card_filter: None,
+        single_use_group: None,
+        single_use: false,
+        cast_cost_modifier: None,
+        alt_ability_cost: None,
+        without_paying_mana_cost: false,
+        land_enter_tapped: EtbTapState::Unspecified,
+        invalidation: None,
+        provenance: PlayFromExileProvenance::Impulse,
+    }
+}
+
+/// V-OzM: free-vs-paid election — two grants on one card, only one free; the
+/// ELECTED permission determines the cost.
+///
+/// (a) Ozai's free grant first + paid sibling second: the free grant is
+/// elected, so the `{1}{G}` cast is offered with an empty pool and spends
+/// zero. (b) Paid sibling first + Ozai's free grant second: the paid grant is
+/// elected, so the same card is NOT offered with an empty pool; funded with
+/// exactly `{1}{G}`, it resolves and debits both mana.
+#[test]
+fn ozai_free_grant_election_against_paid_sibling_determines_cost() {
+    let Some(db) = shared_card_db() else {
+        return;
+    };
+
+    // --- (a) free elected: zero paid. ---
+    let mut scenario = GameScenario::new_n_player(3, 8_396);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_real_card(P1, "Memnite", Zone::Library, db);
+    let target_a = scenario.add_real_card(P2, "Grizzly Bears", Zone::Library, db);
+    let ozai_a = scenario
+        .add_creature_from_oracle(P0, "Fire Lord Ozai", 4, 4, OZAI)
+        .id();
+    scenario.with_mana_pool(P0, six_colorless(ozai_a));
+    let mut runner = scenario.build();
+    rehydrate_game_from_card_db(runner.state_mut(), db);
+    runner.activate(ozai_a, 0).resolve();
+    assert_eq!(runner.state().objects[&target_a].zone, Zone::Exile);
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&target_a)
+        .expect("exiled target present")
+        .casting_permissions
+        .push(paid_play_from_exile_sibling());
+    assert_eq!(
+        runner.state().objects[&target_a].casting_permissions.len(),
+        2,
+        "reach guard: the hostile needs exactly two authorities on one card"
+    );
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    assert!(
+        legal_actions(runner.state()).iter().any(
+            |action| matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == target_a),
+        ),
+        "the free-elected cast must be offered with an empty pool"
+    );
+    runner.cast(target_a).commit();
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.state().objects[&target_a].zone, Zone::Battlefield);
+    assert_eq!(
+        runner.state().players[0].mana_pool.total(),
+        0,
+        "the free-elected cast must spend zero mana"
+    );
+
+    // --- (b) paid elected: full cost paid. ---
+    let mut scenario = GameScenario::new_n_player(3, 8_397);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_real_card(P1, "Memnite", Zone::Library, db);
+    let target_b = scenario.add_real_card(P2, "Grizzly Bears", Zone::Library, db);
+    let ozai_b = scenario
+        .add_creature_from_oracle(P0, "Fire Lord Ozai", 4, 4, OZAI)
+        .id();
+    scenario.with_mana_pool(P0, six_colorless(ozai_b));
+    let mut runner = scenario.build();
+    rehydrate_game_from_card_db(runner.state_mut(), db);
+    // The paid sibling lands FIRST, so the election finds it before Ozai's.
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&target_b)
+        .expect("library target present")
+        .casting_permissions
+        .push(paid_play_from_exile_sibling());
+    runner.activate(ozai_b, 0).resolve();
+    assert_eq!(runner.state().objects[&target_b].zone, Zone::Exile);
+    assert_eq!(
+        runner.state().objects[&target_b].casting_permissions.len(),
+        2,
+        "reach guard: the hostile needs exactly two authorities on one card"
+    );
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+    assert!(
+        !legal_actions(runner.state()).iter().any(
+            |action| matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == target_b),
+        ),
+        "the paid-elected cast must NOT be offered with an empty pool"
+    );
+    // Fund exactly {1}{G}; the paid election resolves and debits both mana.
+    for unit in [
+        ManaUnit::new(ManaType::Colorless, ozai_b, false, vec![]),
+        ManaUnit::new(ManaType::Green, ozai_b, false, vec![]),
+    ] {
+        runner.state_mut().players[0].mana_pool.add(unit);
+    }
+    assert!(
+        legal_actions(runner.state()).iter().any(
+            |action| matches!(action, GameAction::CastSpell { object_id, .. } if *object_id == target_b),
+        ),
+        "reach guard: funding {{1}}{{G}} must offer the paid-elected cast"
+    );
+    runner.cast(target_b).commit();
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        runner.state().objects[&target_b].zone,
+        Zone::Battlefield,
+        "the paid-elected cast must resolve once funded"
+    );
+    assert_eq!(
+        runner.state().players[0].mana_pool.total(),
+        0,
+        "the paid-elected cast must debit the full {{1}}{{G}}"
     );
 }
 

@@ -365,11 +365,22 @@ fn localized_destruction_declined_destroys_every_creature() {
     assert_eq!(runner.state().objects[&o1].zone, Zone::Graveyard);
 }
 
-/// J-2e: paid, the creature whose power equals the energy paid survives.
-/// GREEN AT BASE: reach guard of J-2c; preservation only.
+/// J-2e VACUITY PIN (PR #10008 round 2, B3a): the "pay one or more {E}" clause
+/// is deliberately unimplemented — a min-1 variable payment needing prompt-min
+/// machinery (see `one_or_more_energy_range_declines_while_neighbors_parse` in
+/// `parser::oracle_effect::imperative`). Accepting the optional therefore
+/// spends no energy and applies no power filter: c1's survival rides the
+/// pre-existing unfiltered indestructible grant, a filter gap that pre-dates
+/// this PR (report for triage; out of scope here). This row pins the decline:
+/// energy kept plus the resolution assertions that still hold.
 #[test]
-fn localized_destruction_paid_spares_the_matching_creature() {
+fn localized_destruction_accepted_pay_unimplemented_energy_kept() {
     let (runner, c1, o1) = localized_destruction(true);
+    assert_eq!(
+        runner.state().players[0].energy,
+        1,
+        "no energy spent: the pay clause is unimplemented"
+    );
     assert_eq!(runner.state().objects[&c1].zone, Zone::Battlefield);
     assert_eq!(runner.state().objects[&o1].zone, Zone::Graveyard);
 }
@@ -492,6 +503,7 @@ fn wyll(accept: bool) -> (GameRunner, ObjectId, ObjectId) {
         .act(GameAction::ActivateAbility {
             source_id: wyll,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("specialize is activated");
     runner
@@ -973,18 +985,22 @@ fn hollow_specter_declined_reveals_and_discards_nothing() {
     assert_eq!(runner.state().players[1].hand.len(), 2);
 }
 
-/// J-6 (b2) reach guard at X = 1: paid, the gated reveal and discard effects
-/// resolve. GREEN AT BASE; preservation only. KNOWN-BAD (residue): at X = 1
-/// the whole hand is revealed and nothing is discarded, at base and on the
-/// candidate (measured: 2 cards revealed, P1's hand 2, graveyard 0). This row
-/// pins only the resolved kinds.
+/// J-6 (b2) at X = 1, paid. CR 701.20a: "reveals X cards from their hand and
+/// you choose one of them" is a counted reveal whose chooser rider the reveal
+/// verb does not read, so the clause is an honest gap instead of a whole-hand
+/// reveal (the count-position migration; base resolved `[Reveal, DiscardCard]`
+/// with both cards revealed). The discard after the gap still resolves and
+/// discards nothing: no card was chosen.
 #[test]
-fn hollow_specter_paid_x1_resolves_the_reveal_and_discard_kinds() {
-    let (_, events) = hollow_specter(true);
-    assert_eq!(
-        resolved(&events),
-        vec![EffectKind::Reveal, EffectKind::DiscardCard]
-    );
+fn hollow_specter_paid_x1_reaches_the_honest_reveal_gap() {
+    let (runner, events) = hollow_specter(true);
+    let kinds = resolved(&events);
+    // Reach guard: the declined row resolves nothing, so a non-empty list is
+    // the paid branch running.
+    assert!(!kinds.is_empty());
+    assert_eq!(kinds, vec![EffectKind::DiscardCard]);
+    assert_eq!(runner.state().players[1].hand.len(), 2);
+    assert!(runner.state().players[1].graveyard.is_empty());
 }
 
 /// J-6 (b3): Ardent Dustspeaker declined: nothing is exiled and no play

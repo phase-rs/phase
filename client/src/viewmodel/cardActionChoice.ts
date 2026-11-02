@@ -194,6 +194,7 @@ export function deriveActivationAffordances(
     && (
       (waitingFor.type === "Priority" && canActForWaitingState)
       || (waitingFor.type === "ManaPayment" && canActForWaitingState)
+      || (waitingFor.type === "ManaAbilityManaPayment" && canActForWaitingState)
       || (waitingFor.type === "UnlessPayment" && canActForWaitingState)
       // CR 118.12a: Disjunctive unless-cost — same input enablement as
       // UnlessPayment (player chooses among sub-costs).

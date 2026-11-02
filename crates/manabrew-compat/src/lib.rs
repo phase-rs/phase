@@ -2711,6 +2711,7 @@ pub fn convert_available_action(
         GameAction::ActivateAbility {
             source_id,
             ability_index,
+            ..
         } => AvailableActionConversion::Available(AvailableAction {
             id,
             kind: AvailableActionKind::ActivateAbility(ActivatableAbilityInfo {
@@ -2995,6 +2996,7 @@ pub fn convert_available_action(
         | GameAction::SetPriorityYield { .. }
         | GameAction::SetMayTriggerAutoChoice { .. }
         | GameAction::SetReplacementAutoChoice { .. }
+        | GameAction::UnAction { .. }
         | GameAction::SetTriggerOrderTemplate { .. } => {
             AvailableActionConversion::Unsupported("local.autopass-settings-unsupported")
         }
@@ -3569,7 +3571,7 @@ fn build_player_dto(
         is_human: player.id == viewer,
         life: player.life,
         counters,
-        mana_pool: mana_pool_counts(&player.mana_pool.mana),
+        mana_pool: mana_pool_counts(&player.mana_pool),
         commander_damage,
         has_city_blessing: state.city_blessing.contains(&player_id),
         has_enduring_story: state.enduring_story.contains(&player_id),
@@ -4012,6 +4014,7 @@ pub fn convert_payment_action(action: &GameAction, id: String) -> PaymentActionC
         GameAction::ActivateAbility {
             source_id,
             ability_index,
+            ..
         } => PaymentActionConversion::Available(PaymentAction {
             id,
             kind: PaymentActionKind::ActivateManaAbility(ActivatableAbilityInfo {
@@ -4602,10 +4605,10 @@ fn parse_attack_target_id(value: &str) -> Result<AttackTarget> {
 }
 
 /// CR 106.4: the viewer's floating mana, one entry per color actually held.
-fn mana_pool_counts(units: &[engine::types::mana::ManaUnit]) -> BTreeMap<ManaColorDto, u32> {
+fn mana_pool_counts(pool: &engine::types::mana::ManaPool) -> BTreeMap<ManaColorDto, u32> {
     let mut counts = BTreeMap::new();
-    for unit in units {
-        *counts.entry(mana_color_dto(unit.color)).or_insert(0) += 1;
+    for (shape, count) in pool.shapes() {
+        *counts.entry(mana_color_dto(shape.color)).or_insert(0) += count as u32;
     }
     counts
 }
@@ -4875,6 +4878,7 @@ fn waiting_for_type(waiting_for: &WaitingFor) -> &'static str {
         WaitingFor::CombatTaxPayment { .. } => "CombatTaxPayment",
         WaitingFor::ChooseManaColor { .. } => "ChooseManaColor",
         WaitingFor::PayManaAbilityMana { .. } => "PayManaAbilityMana",
+        WaitingFor::ManaAbilityManaPayment { .. } => "ManaAbilityManaPayment",
         WaitingFor::GameOver { .. } => "GameOver",
         _ => "Unsupported",
     }
@@ -6062,6 +6066,13 @@ mod tests {
         let exert = prepared_for(WaitingFor::ExertChoice {
             player: PlayerId(0),
             attacker: ObjectId(1),
+            permission: engine::types::ability::TriggerDefinitionRef {
+                source: engine::types::identifiers::ObjectIncarnationRef::of(ObjectId(1), 0),
+                occurrence: engine::types::ability::TriggerDefinitionOccurrenceRef::Printed {
+                    base_set: engine::types::ability::TriggerBaseSetInstanceRef::INITIAL,
+                    printed_index: 0,
+                },
+            },
             remaining: vec![],
         });
         assert_eq!(
@@ -6315,6 +6326,7 @@ mod tests {
         state.waiting_for = WaitingFor::TopOrBottomChoice {
             player: PlayerId(0),
             object_id,
+            top_position: Default::default(),
         };
         bind_interaction_authority(&mut state, InteractionSessionId("generic-path".to_string()))
             .expect("valid interaction authority binding");
@@ -6348,6 +6360,39 @@ mod tests {
         )
         .expect("the echoed index resolves back through the engine");
         assert_eq!(action, GameAction::ChooseTopOrBottom { top: true });
+    }
+
+    /// CR 401.7: for "second from the top or on the bottom" the projected "top"
+    /// label must name the slot instead of reading as plain "top".
+    #[test]
+    fn nth_from_top_choice_is_labelled_with_its_position() {
+        let mut state = GameState::new_two_player(7);
+        let object_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Tucked Card".to_string(),
+            Zone::Library,
+        );
+        state.waiting_for = WaitingFor::TopOrBottomChoice {
+            player: PlayerId(0),
+            object_id,
+            top_position: engine::types::ability::LibraryPosition::NthFromTop { n: 2 },
+        };
+        bind_interaction_authority(&mut state, InteractionSessionId("nth-top".to_string()))
+            .expect("valid interaction authority binding");
+        let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
+        let prompt = build_prompt_input(&prepared, &lookup).expect("projection prompt");
+        let PromptInput::Upstream(UpstreamPromptInput::ChooseFromSelection(input)) = prompt else {
+            panic!("expected ChooseFromSelection, got {prompt:?}");
+        };
+        let labels: Vec<_> = input.options.iter().map(|o| o.label.clone()).collect();
+        assert!(
+            labels.iter().any(|l| l == "position 2 from the top")
+                && labels.iter().any(|l| l == "bottom")
+                && !labels.iter().any(|l| l == "top"),
+            "got {labels:?}"
+        );
     }
 
     /// The `Select` half of the generic path: a subset choice, not a one-of.
@@ -6791,6 +6836,7 @@ mod tests {
         state.waiting_for = WaitingFor::TopOrBottomChoice {
             player: PlayerId(0),
             object_id,
+            top_position: Default::default(),
         };
 
         let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
@@ -9216,6 +9262,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto,
             })
             .expect("the activation reaches its election");
         let state = runner.state().clone();

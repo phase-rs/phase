@@ -459,7 +459,7 @@ fn per_opponent_incomplete_binding_refuses_mandatory_and_optional_casts() {
             matches!(r.state().waiting_for, WaitingFor::Priority { .. }),
             "no partial menu published"
         );
-        assert_eq!(r.state().players[0].mana_pool.mana.len(), 12);
+        assert_eq!(r.state().players[0].mana_pool.total(), 12);
         assert_zones(&r, &own[0], Zone::Battlefield);
     }
 }

@@ -45,7 +45,7 @@ export type InteractionManaAbilityActivationScope = "ofSpellType" | "any";
 
 export type InteractionManaZoneSpendPolarity = "from" | "notFrom";
 
-export type InteractionManaSpecialAction = "companionToHand" | "unlockDoor" | "plot" | "turnFaceUp" | "rollPlanarDie" | "endContinuousEffect";
+export type InteractionManaSpecialAction = "companionToHand" | "unlockDoor" | "plot" | "turnFaceUp" | "rollPlanarDie" | "endContinuousEffect" | "foretell";
 
 export type InteractionManaSpellCostCriterion = { "type": "manaValue", "data": { comparator: InteractionManaComparator, value: number, } } | { "type": "hasXInCost" };
 
@@ -57,7 +57,7 @@ export type SelectionConstraint = { "type": "count", "data": { min: number, max:
 
 export type ConfirmSemantics = "immediate" | "explicit";
 
-export type InteractionActionCode = "passPriority" | "chooseMeldPair" | "chooseEntryAttackTarget" | "playLand" | "castSpell" | "foretell" | "activateAbility" | "declareAttackers" | "declareBlockers" | "chooseUntap" | "chooseExert" | "chooseEnlist" | "chooseClashOpponent" | "chooseZoneOpponentChooser" | "choosePileOpponent" | "chooseAnnouncingOpponent" | "chooseGiftRecipient" | "chooseAssistPlayer" | "commitAssistPayment" | "mulliganDecision" | "reorderHand" | "tapLandForMana" | "activateManaSource" | "backToManaPayment" | "untapLandForMana" | "spendPoolMana" | "unspendPoolMana" | "selectCards" | "chooseRemoveCounterCostDistribution" | "selectCoinFlips" | "selectDieRolls" | "chooseOutsideGameCards" | "selectTargets" | "chooseTarget" | "chooseReplacement" | "chooseReplacementAndRemember" | "setReplacementAutoChoice" | "chooseEntryController" | "orderTriggers" | "orderCostReductions" | "cancelCast" | "equip" | "crewVehicle" | "activateStation" | "saddleMount" | "transform" | "playFaceDown" | "turnFaceUp" | "submitSideboard" | "choosePlayDraw" | "chooseOption" | "submitVoteCandidate" | "submitSpellbookDraft" | "submitPilePartition" | "choosePile" | "chooseBranch" | "submitLifeRedistribution" | "chooseDamageSource" | "selectModes" | "decideOptionalCost" | "chooseAdventureFace" | "chooseModalFace" | "chooseAlternativeCast" | "chooseCastingVariant" | "keepAllCopyTargets" | "choosePermanentTypeSlot" | "activateNinjutsu" | "castSpellAsSneak" | "castSpellAsWebSlinging" | "castSpellForFree" | "castSpellAsMiracle" | "castSpellAsMadness" | "decideOptionalEffect" | "chooseResolutionOptionalPaymentBranch" | "respondToSpliceOffer" | "decideOptionalEffectAndRemember" | "payUnlessCost" | "chooseUnlessCostBranch" | "chooseActivationCostBranch" | "payCombatTax" | "chooseRingBearer" | "choosePair" | "chooseDungeon" | "chooseDungeonRoom" | "unlockRoomDoor" | "rollPlanarDie" | "chooseRoomDoor" | "tapForConvoke" | "harmonizeTap" | "declareCompanion" | "companionToHand" | "discoverChoice" | "graveyardPaidCastChoice" | "cascadeChoice" | "rippleChoice" | "freeCastWindowChoice" | "chooseTopOrBottom" | "chooseMutateMergeSide" | "cipherEncode" | "chooseLegend" | "chooseBattleProtector" | "setAutoPass" | "cancelAutoPass" | "setPhaseStops" | "setPriorityPassingMode" | "setPriorityYield" | "setMayTriggerAutoChoice" | "setTriggerOrderTemplate" | "assignCombatDamage" | "assignBlockerDamage" | "distributeAmong" | "chooseCounterMoveDistribution" | "chooseCountersToRemove" | "submitPayAmount" | "retargetSpell" | "learnDecision" | "selectCategoryPermanents" | "chooseKeptCreatures" | "chooseKeptPermanents" | "chooseX" | "submitPhyrexianChoices" | "chooseManaColor" | "payManaAbilityMana" | "castPreparedCopy" | "chooseSpecializeColor" | "castParadigmCopy" | "passParadigmOffer" | "grantDebugPermission" | "revokeDebugPermission" | "concede" | "declareShortcut" | "respondToShortcut" | "declineShortcut" | "precastCopyShortcut" | "endContinuousEffect" | "debug";
+export type InteractionActionCode = "passPriority" | "chooseMeldPair" | "chooseEntryAttackTarget" | "playLand" | "castSpell" | "foretell" | "activateAbility" | "declareAttackers" | "declareBlockers" | "chooseUntap" | "chooseExert" | "chooseEnlist" | "chooseClashOpponent" | "chooseZoneOpponentChooser" | "choosePileOpponent" | "chooseAnnouncingOpponent" | "chooseGiftRecipient" | "chooseAssistPlayer" | "commitAssistPayment" | "mulliganDecision" | "reorderHand" | "tapLandForMana" | "activateManaSource" | "backToManaPayment" | "untapLandForMana" | "spendPoolMana" | "unspendPoolMana" | "selectCards" | "chooseRemoveCounterCostDistribution" | "selectCoinFlips" | "selectDieRolls" | "chooseOutsideGameCards" | "selectTargets" | "chooseTarget" | "chooseReplacement" | "chooseReplacementAndRemember" | "setReplacementAutoChoice" | "chooseEntryController" | "orderTriggers" | "orderCostReductions" | "cancelCast" | "equip" | "crewVehicle" | "activateStation" | "saddleMount" | "transform" | "playFaceDown" | "turnFaceUp" | "submitSideboard" | "choosePlayDraw" | "chooseOption" | "submitVoteCandidate" | "submitSpellbookDraft" | "submitPilePartition" | "choosePile" | "chooseBranch" | "submitLifeRedistribution" | "chooseDamageSource" | "selectModes" | "decideOptionalCost" | "chooseAdventureFace" | "chooseModalFace" | "chooseAlternativeCast" | "chooseCastingVariant" | "keepAllCopyTargets" | "choosePermanentTypeSlot" | "activateNinjutsu" | "castSpellAsSneak" | "castSpellAsWebSlinging" | "castSpellForFree" | "castSpellAsMiracle" | "castSpellAsMadness" | "decideOptionalEffect" | "chooseResolutionOptionalPaymentBranch" | "respondToSpliceOffer" | "decideOptionalEffectAndRemember" | "payUnlessCost" | "chooseUnlessCostBranch" | "chooseActivationCostBranch" | "payCombatTax" | "chooseRingBearer" | "choosePair" | "chooseDungeon" | "chooseDungeonRoom" | "unlockRoomDoor" | "rollPlanarDie" | "chooseRoomDoor" | "tapForConvoke" | "harmonizeTap" | "declareCompanion" | "companionToHand" | "discoverChoice" | "graveyardPaidCastChoice" | "cascadeChoice" | "rippleChoice" | "freeCastWindowChoice" | "chooseTopOrBottom" | "chooseMutateMergeSide" | "cipherEncode" | "chooseLegend" | "chooseBattleProtector" | "setAutoPass" | "cancelAutoPass" | "setPhaseStops" | "setPriorityPassingMode" | "setPriorityYield" | "setMayTriggerAutoChoice" | "setTriggerOrderTemplate" | "assignCombatDamage" | "assignBlockerDamage" | "distributeAmong" | "chooseCounterMoveDistribution" | "chooseCountersToRemove" | "submitPayAmount" | "retargetSpell" | "learnDecision" | "selectCategoryPermanents" | "chooseKeptCreatures" | "chooseKeptPermanents" | "chooseX" | "submitPhyrexianChoices" | "chooseManaColor" | "payManaAbilityMana" | "castPreparedCopy" | "chooseSpecializeColor" | "castParadigmCopy" | "passParadigmOffer" | "grantDebugPermission" | "revokeDebugPermission" | "concede" | "declareShortcut" | "respondToShortcut" | "declineShortcut" | "precastCopyShortcut" | "endContinuousEffect" | "unAction" | "debug";
 
 export type InteractionRoleCode = "source" | "candidate" | "partner" | "attackTarget" | "target" | "paymentMode" | "abilityIndex" | "attacker" | "bandCount" | "blocker" | "blocked" | "untap" | "exert" | "enlistTarget" | "enlist" | "opponent" | "assistPlayer" | "assist" | "genericMana" | "mulligan" | "serumPowder" | "handCard" | "selected" | "counterSource" | "counterType" | "amount" | "coinFlipIndex" | "sideboardIndex" | "faceUpExile" | "optionIndex" | "triggerIndex" | "crewMember" | "stationCrew" | "x" | "mainCard" | "sideboardCard" | "playFirst" | "option" | "candidateIndex" | "cardName" | "pileA" | "pile" | "modeIndex" | "pay" | "face" | "castCost" | "permanentType" | "returnCreature" | "permissionSource" | "accept" | "spliceCard" | "splice" | "choice" | "costBranch" | "costBranchIndex" | "pair" | "dungeon" | "roomIndex" | "door" | "operation" | "convokeMana" | "harmonizeCreature" | "harmonize" | "companion" | "castChoice" | "castCard" | "placement" | "mergeSide" | "encodeCreature" | "encode" | "defender" | "protector" | "assignmentMode" | "damageTarget" | "damageAmount" | "trampleDamage" | "controllerDamage" | "destination" | "discardCard" | "learn" | "category" | "kept" | "phyrexianPayment" | "manaChoice" | "count" | "manaPayment" | "producedMana" | "color" | "player" | "castingVariant" | "mode" | "modeCost" | "castingCost" | "voteOption" | "voteCandidate";
 
@@ -81,7 +81,7 @@ export type InteractionRelationSourceConstraint = "atMostOne" | "engineValidated
 
 export type InteractionDamageAssignmentMode = "normal" | "asThoughUnblocked";
 
-export type InteractionShortcutCountSpec = { "type": "fixed", "data": { min: number, max: number, suggested: number, } } | { "type": "untilLethal" };
+export type InteractionShortcutCountSpec = { "type": "fixed", "data": { min: number, max: number, suggested: number, } } | { "type": "untilLethal" } | { "type": "withoutEnd" };
 
 export type InteractionShortcutPreviewFamily = "mana" | "life" | "damage" | "mill" | "counters" | "tokens" | "cards" | "casts" | "combats" | "turns" | "triggers";
 
@@ -99,8 +99,9 @@ export type InteractionShortcutPreview = { count: number, entries: Array<Interac
  * second point would state the split over choices the reader cannot identify.
  *
  * The amounts come from whichever producer minted the element. In the offer's published list
- * (`loop_shortcut_preview`) they are the canonical even split of `count`, remainder on the
- * earliest ids, empty exactly when that first point holds no candidate. In a preview of a
+ * (`loop_shortcut_preview`) they are the offer's suggested declaration cut at `count` when
+ * the offer publishes one, else the canonical even split of `count`, remainder on the
+ * earliest ids; empty exactly when that first point holds no candidate. In a preview of a
  * player's own declaration (`declared_shortcut_preview`) they are the amounts that player
  * authored — positive parts summing to `count` over a duplicate-free subset of those ids,
  * enforced by the declaration ingress rather than by this type — and never empty: that
@@ -108,23 +109,21 @@ export type InteractionShortcutPreview = { count: number, entries: Array<Interac
  * responder's view of a declaration (`declared_sequence_preview`) they are the segment
  * LENGTHS the declared count partitions into over the iterations that decision's
  * announcements start at: successive differences summing to `count`, one per published id,
- * never empty — and NOT necessarily positive, since a step starting exactly at the count
- * takes a zero-length segment.
+ * never empty and each positive, because a step starting at or past the count is never
+ * reached and is not stated.
  *
  * CR 119.3: `entries` follow this allocation ONLY when the period's life map names
  * exactly one losing seat that this allocation itself announces and the slot's announced
  * magnitude is the whole of that seat's per-period loss, which is what makes it positive —
- * per-seat life magnitudes are then this split multiplied by that rate, and they still
- * total the period. On every other offer a non-empty allocation still ships beside entries
- * folded from the raw period, because the allocation states the declaration and the
- * entries state what the engine can attribute. On the RESPOND side that separation goes one
- * step further: a declaration whose partition is stated and whose magnitudes are not ships
- * this allocation beside an EMPTY `entries`, rather than withholding the whole element
+ * per-seat life magnitudes are then each seat's RESOLVING announcements multiplied by that
+ * rate (CR 603.3d: its part, plus the trigger already in flight when that aims at it, less
+ * the last announcement, which never resolves), and they still total the period. On every
+ * other offer a non-empty allocation still ships beside entries folded from the raw period,
+ * because the allocation states the declaration and the entries state what the engine can
+ * attribute. On the RESPOND side that separation goes one step further: a declaration whose
+ * partition is stated and whose magnitudes are not ships this allocation beside an EMPTY
+ * `entries`, rather than withholding the whole element
  * (`game::interaction::declared_sequence_preview`).
- *
- * The magnitudes are this declaration's arithmetic. On a drive whose first cycle resolves
- * a target announced before the drive begins, the realized split is shifted one cycle at
- * each boundary while the total stays exact.
  */
 allocation?: Array<AmountAssignment>, };
 

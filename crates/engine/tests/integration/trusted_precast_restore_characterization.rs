@@ -37,7 +37,9 @@ fn trusted_json_at_priority(state: &GameState) -> (String, u128, u32) {
         "checkpoint must carry a real nonzero RNG cursor"
     );
     let mut expected_rng = exported.rng.clone();
-    let expected_next_rng_output = expected_rng.next_u32();
+    let expected_next_rng_output = expected_rng
+        .draw(engine::types::game_state::RandomDraw::Outcome)
+        .next_u32();
 
     let json = serde_json::to_string(&TrustedGameStateEnvelope::capture(exported))
         .expect("trusted game state serializes to JSON");
@@ -179,7 +181,9 @@ fn assert_rng_restored(restored: &GameState, expected_pos: u128, expected_next: 
     );
     let mut restored_rng = restored.rng.clone();
     assert_eq!(
-        restored_rng.next_u32(),
+        restored_rng
+            .draw(engine::types::game_state::RandomDraw::Outcome)
+            .next_u32(),
         expected_next,
         "the next random output after restore must match the pre-cast stream"
     );
@@ -218,6 +222,7 @@ fn resolved_grizzly_bears_restore_returns_to_the_precast_priority_boundary() {
         .act(GameAction::ActivateAbility {
             source_id: forest_a,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("tap Forest A and float green before the spell checkpoint");
     assert!(runner.state().objects[&forest_a].tapped);

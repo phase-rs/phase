@@ -1,0 +1,53 @@
+---
+source: crates/phase-parser/src/parser/oracle_effect/mod.rs
+assertion_line: 24910
+expression: def
+---
+{
+  "kind": "Spell",
+  "effect": {
+    "type": "Draw",
+    "count": {
+      "type": "Fixed",
+      "value": 1
+    },
+    "target": {
+      "type": "Controller"
+    }
+  },
+  "cost": null,
+  "sub_ability": null,
+  "duration": null,
+  "description": null,
+  "target_prompt": null,
+  "condition": {
+    "type": "QuantityCheck",
+    "lhs": {
+      "type": "Ref",
+      "qty": {
+        "type": "ObjectCount",
+        "filter": {
+          "type": "Typed",
+          "type_filters": [
+            "Creature"
+          ],
+          "controller": "You",
+          "properties": [
+            {
+              "type": "InZone",
+              "zone": "Battlefield"
+            }
+          ]
+        }
+      }
+    },
+    "comparator": "GE",
+    "rhs": {
+      "type": "Fixed",
+      "value": 1
+    }
+  },
+  "optional_targeting": false,
+  "optional": false,
+  "forward_result": false
+}

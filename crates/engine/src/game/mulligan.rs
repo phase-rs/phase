@@ -5,6 +5,7 @@ use crate::types::actions::MulliganChoice;
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::format::{DealOrder, FreeRevealMulligan, GameFormat, ZoneScope};
+use crate::types::game_state::RandomDraw;
 use crate::types::game_state::{
     GameState, MulliganBottomEntry, MulliganDecisionEntry, MulliganDecisionPhase,
     MulliganDeclaration, MulliganDeclarationKind, OpeningHandBottomReason, PendingBeginGameAbility,
@@ -89,7 +90,7 @@ pub fn start_mulligan(state: &mut GameState, events: &mut Vec<GameEvent>) -> Wai
     // Shuffle every player's library.
     let GameState { players, rng, .. } = &mut *state;
     for player in players.iter_mut() {
-        crate::util::im_ext::shuffle_vector(&mut player.library, rng);
+        crate::util::im_ext::shuffle_vector(&mut player.library, rng.draw(RandomDraw::Placement));
     }
 
     let deals: Vec<(PlayerId, usize)> = state
@@ -1014,7 +1015,7 @@ fn shuffle_library_of(state: &mut GameState, player: PlayerId) {
         .iter_mut()
         .find(|p| p.id == holder)
         .expect("player exists");
-    crate::util::im_ext::shuffle_vector(&mut player_data.library, rng);
+    crate::util::im_ext::shuffle_vector(&mut player_data.library, rng.draw(RandomDraw::Placement));
 }
 
 /// The living seats in `seat_order`, starting at the active player, so every
@@ -1115,6 +1116,26 @@ mod tests {
     use crate::types::format::FormatConfig;
     use crate::types::game_state::PlayerDeckPool;
     use crate::types::identifiers::CardId;
+
+    #[test]
+    fn archenemy_commander_duel_grants_free_first_mulligan() {
+        // Commander-style duel grant: a two-seat Archenemy Commander game
+        // is fought with Commander decks, so the free first mulligan
+        // reaches it even though CR 103.5c's seat rule does not.
+        let state = GameState::new(FormatConfig::archenemy_commander(), 2, 42);
+        assert!(free_first_mulligan(&state));
+        assert!(state.format_config.format.grants_free_first_mulligan());
+    }
+
+    #[test]
+    fn two_hg_commander_grants_free_first_mulligan_via_multiplayer_seats() {
+        // CR 103.5c: four seats always grant the free first mulligan, even
+        // though the format answers `false` to the duel-only override (it
+        // never seats a duel — CR 810.1 fixes four seats).
+        let state = GameState::new(FormatConfig::two_headed_giant_commander(), 4, 42);
+        assert!(free_first_mulligan(&state));
+        assert!(!state.format_config.format.grants_free_first_mulligan());
+    }
 
     /// Test helper: decide for `player`, advancing `state.waiting_for` in place.
     /// Mirrors the engine dispatch contract: callers must update `state.waiting_for`

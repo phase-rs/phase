@@ -76,6 +76,7 @@ vi.mock("../../services/pileSource", async (importOriginal) => {
 import { OFFICIAL_MULTIPLAYER_SERVER_URL } from "../../config/multiplayerServer";
 import { ACTIVE_DECK_KEY, STORAGE_KEY_PREFIX } from "../../constants/storage";
 import { MultiplayerPage } from "../MultiplayerPage";
+import { saveActiveGame } from "../../stores/gameStore";
 import { adHocLobbySource, useMultiplayerStore } from "../../stores/multiplayerStore";
 import { LOBBY_PROTOCOL_VERSION, PROTOCOL_VERSION } from "../../adapter/ws-adapter";
 import multiplayerEn from "../../i18n/locales/en/multiplayer.json";
@@ -267,6 +268,29 @@ describe("MultiplayerPage — host-supplied pile, hosting", () => {
     expect(named).toContain("pile=Pile%20A");
     expect(standard).toContain("mode=ai");
     expect(standard).not.toContain("pile=");
+  });
+
+  it("starts an all-AI table locally with each seat's difficulty and deck in the saved snapshot", async () => {
+    vi.mocked(saveActiveGame).mockClear();
+    renderPage();
+    await submitHostSetup(URL_B, {
+      formatConfig: { format: "Dandan", max_players: 3 },
+      aiSeats: [
+        { seatIndex: 2, difficulty: "Hard", deckName: null, deckId: "Random" },
+        { seatIndex: 1, difficulty: "Easy", deckName: null, deckId: "Pinned Deck" },
+      ],
+    });
+    expect(saveActiveGame).toHaveBeenCalledTimes(1);
+    expect(saveActiveGame).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mode: "ai",
+        difficulty: "Easy",
+        aiSeats: [
+          { difficulty: "Easy", deckId: "Pinned Deck", deckName: null },
+          { difficulty: "Hard", deckId: null, deckName: null },
+        ],
+      }),
+    );
   });
 
   it("still sends a player-built host with no active deck to deck-select", async () => {

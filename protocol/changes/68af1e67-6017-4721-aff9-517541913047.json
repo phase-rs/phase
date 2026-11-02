@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "GameState gains pending_combat_phase_skips, the phase-level pending 'skips their next combat phase' effects with their duration (CR 500.11, CR 614.10a, CR 514.2). It replaces the combat-step counters in steps_to_skip; an older peer drops the field on re-encode and desyncs on whether a combat phase is skipped, so it must be refused before it receives the new state"
+}

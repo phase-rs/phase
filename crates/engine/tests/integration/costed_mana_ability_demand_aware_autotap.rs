@@ -198,6 +198,7 @@ fn signet_one_cost_paid_from_only_remaining_float_when_no_spare_source() {
         .act(GameAction::ActivateAbility {
             source_id: dimir,
             ability_index: idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("the Signet `{1}` must be payable from the only floated unit (CR 601.2h)");
 

@@ -34,6 +34,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::RetargetChoice { .. }
         | WaitingFor::DistributeAmong { .. }
         | WaitingFor::MoveCountersDistribution { .. }
+        | WaitingFor::ChooseTokenHost { .. }
         | WaitingFor::RemoveCountersChoice { .. } => DecisionKind::SelectTarget,
         WaitingFor::DeclareAttackers { .. } => DecisionKind::DeclareAttackers,
         WaitingFor::DeclareBlockers { .. } => DecisionKind::DeclareBlockers,
@@ -192,6 +193,8 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::ChooseAnnouncingOpponent { .. }
         | WaitingFor::ChooseGiftRecipient { .. }
         | WaitingFor::ClashCardPlacement { .. }
+        // Host-driven contest: no seat is ever asked to decide.
+        | WaitingFor::PhysicalContest { .. }
         | WaitingFor::VoteChoice { .. }
         | WaitingFor::SeparatePilesChooseOpponent { .. }
         | WaitingFor::SeparatePilesPartition { .. }
@@ -221,6 +224,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::GameOver { .. }
         | WaitingFor::ChooseOneOfBranch { .. }
         | WaitingFor::PayManaAbilityMana { .. }
+        | WaitingFor::ManaAbilityManaPayment { .. }
         // CR 705.1 + CR 614.1a: Krark's Thumb keep choice is a forced
         // mid-resolution selection; route to the ability catch-all.
         | WaitingFor::CoinFlipKeepChoice { .. }
@@ -366,7 +370,8 @@ mod tests {
                 &priority,
                 &GameAction::ActivateAbility {
                     source_id: ObjectId(0),
-                    ability_index: 0
+                    ability_index: 0,
+                    payment_mode: CastPaymentMode::Auto
                 }
             ),
             DecisionKind::ActivateAbility

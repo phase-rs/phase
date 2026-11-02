@@ -119,11 +119,11 @@ fn push_players(out: &mut String, state: &GameState, viewer: PlayerId) {
         }
         // CR 106.4: unspent mana stays in a player's pool until the step or
         // phase ends, so it is mana that player can still spend right now.
-        if !player.mana_pool.mana.is_empty() {
+        if !player.mana_pool.is_empty() {
             facts.push(format!(
                 "{} unspent mana in pool ({})",
-                player.mana_pool.mana.len(),
-                mana_symbols(player.mana_pool.mana.iter().map(|unit| unit.color))
+                player.mana_pool.total(),
+                mana_symbols(player.mana_pool.units().map(|unit| unit.color))
             ));
         }
         facts.push(format!(
@@ -316,12 +316,7 @@ fn push_available_mana(out: &mut String, state: &GameState, viewer: PlayerId) {
     let Some(player) = state.players.iter().find(|player| player.id == viewer) else {
         return;
     };
-    let pool: Vec<ManaType> = player
-        .mana_pool
-        .mana
-        .iter()
-        .map(|unit| unit.color)
-        .collect();
+    let pool: Vec<ManaType> = player.mana_pool.units().map(|unit| unit.color).collect();
 
     let mut total = 0u32;
     let mut sources: Vec<String> = Vec::new();
@@ -675,6 +670,22 @@ mod tests {
         );
         let own = rendered(&state, PlayerId(0));
         assert!(own.contains("Unspent mana in your pool: {R}"), "{own}");
+    }
+
+    #[test]
+    fn floating_mana_lists_every_unit_in_the_order_it_was_added() {
+        use engine::types::mana::ManaUnit;
+        let mut state = GameState::new(FormatConfig::standard(), 2, 3);
+        for color in [ManaType::Red, ManaType::Green, ManaType::Red] {
+            let unit = ManaUnit::new(color, ObjectId(0), false, Vec::new());
+            state.players[0].mana_pool.add(unit);
+        }
+        let own = rendered(&state, PlayerId(0));
+        assert!(own.contains("3 unspent mana in pool ({R}{G}{R})"), "{own}");
+        assert!(
+            own.contains("Unspent mana in your pool: {R}{G}{R}"),
+            "{own}"
+        );
     }
 
     /// A seat that has seen a card in another hand (a reveal) is told so; a

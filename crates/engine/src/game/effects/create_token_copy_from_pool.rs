@@ -22,7 +22,7 @@
 use crate::game::effects::token::{no_token, resolve_token_owner};
 use crate::game::effects::token_copy::drive_copy_token_batches;
 use crate::game::filter::matches_target_filter_against_face;
-use crate::game::game_object::DisplaySource;
+use crate::game::game_object::{DisplayIdentity, DisplaySource};
 use crate::game::printed_cards::{
     copiable_values_from_face, printed_prepare_face, printed_ref_from_face,
 };
@@ -33,8 +33,9 @@ use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::game_state::PendingCopyTokenBatch;
+use crate::types::game_state::RandomDraw;
 use crate::types::mana::ManaCost;
-use crate::types::proposed_event::CopyTokenSpec;
+use crate::types::proposed_event::{CopyTokenSpec, TokenAttackRequest};
 use rand::Rng;
 use std::collections::VecDeque;
 
@@ -100,7 +101,10 @@ pub fn resolve(
             if candidates == 0 {
                 return no_token(state, ability, events);
             }
-            let index = state.rng.random_range(0..candidates);
+            let index = state
+                .rng
+                .draw(RandomDraw::Outcome)
+                .random_range(0..candidates);
             db.faces_in_scan_order()
                 .filter(eligible)
                 .nth(index)
@@ -144,17 +148,22 @@ pub fn resolve(
         count,
         copy: Box::new(CopyTokenSpec {
             values: Box::new(values),
-            display_source: DisplaySource::Card,
-            printed_ref,
-            token_image_ref: None,
-            token_art: None,
+            display: DisplayIdentity {
+                display_source: DisplaySource::Card,
+                printed_ref,
+                token_image_ref: None,
+                token_art: None,
+            },
             extra_keywords: Vec::new(),
             additional_modifications: Vec::new(),
             tapped,
             enters_attacking,
+            attack_request: TokenAttackRequest::Unspecified,
             sacrifice_at: ability.duration.clone(),
             source_id: ability.source_id,
             controller: ability.controller,
+            // Pool-drawn values name no donor object; empty mods are stamp-proof.
+            donor: None,
         }),
     });
 

@@ -139,6 +139,7 @@ fn subgoyf_power_qty() -> QuantityExpr {
                 scope: CountScope::All,
             },
             exclude: SubtypeExclusion::CreatureTypes,
+            restrict: None,
         },
     }
 }

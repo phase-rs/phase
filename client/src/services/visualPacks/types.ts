@@ -17,12 +17,37 @@ export type OperationId = Brand<string, "OperationId">;
 const LOWER_HEX_64 = /^[0-9a-f]{64}$/;
 const LOWER_HEX_32 = /^[0-9a-f]{32}$/;
 const DECIMAL = /^(0|[1-9][0-9]*)$/;
-const PACK_ID = /^(complete|core|curated|deck_library|printing:[a-z0-9]{3,6}|locale:(de|es|fr|it|ja|pt):[a-z0-9]{3,6})$/;
+/**
+ * The UI locales a visual pack may carry a localized rendition for.
+ *
+ * This is NOT `SUPPORTED_LNGS`. A UI locale can be shipped and selectable with
+ * no pack support at all — `pl` has been in that position for a while, and `zh`
+ * joins it once its catalogs ship — and the two lists answer different
+ * questions: "can the player read the interface in this language" versus "does
+ * an installed pack have art/text keyed to this locale".
+ *
+ * It is one list rather than a pattern per call site because the pack-id
+ * grammar and the candidate-key validator must agree; when they drift, one of
+ * them starts throwing on a locale the other accepts. Keep `PACK_ID` below and
+ * this list in lockstep, and consult `isPackedContentLocale` before *building* a
+ * localized key rather than letting the validator reject it.
+ */
+export const PACKED_CONTENT_LOCALES = ["de", "es", "fr", "it", "ja", "pt"] as const;
+export type PackedContentLocale = (typeof PACKED_CONTENT_LOCALES)[number];
+
+const PACKED_LOCALE_PATTERN = PACKED_CONTENT_LOCALES.join("|");
+
+/** Whether an installed pack can carry content for `locale`. */
+export function isPackedContentLocale(locale: string): locale is PackedContentLocale {
+  return (PACKED_CONTENT_LOCALES as readonly string[]).includes(locale);
+}
+
+const PACK_ID = new RegExp(`^(complete|core|curated|deck_library|printing:[a-z0-9]{3,6}|locale:(${PACKED_LOCALE_PATTERN}):[a-z0-9]{3,6})$`);
 const ASSET_KEY = /^asset:v1:(canonical_card|exact_printing|localized_printing|token|card_back|mana_symbol|set_icon):[A-Za-z0-9_-]+$/;
 const CANDIDATE_KEY = /^candidate:v1:(localized_printing|localized_alias|english_printing|english_alias|oracle|oracle_alias|oracle_face|source_printing|name_face|token_reference|token_alias|card_back|mana_symbol|set_icon):([A-Za-z0-9_-]+)$/;
 const CANDIDATE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const CANDIDATE_SET = /^[a-z0-9]{3,6}$/;
-const CANDIDATE_LOCALE = /^(de|es|fr|it|ja|pt)$/;
+const CANDIDATE_LOCALE = new RegExp(`^(${PACKED_LOCALE_PATTERN})$`);
 
 function branded<T extends string>(value: string, pattern: RegExp, name: string): T {
   if (!pattern.test(value)) throw new Error(`invalid ${name}`);

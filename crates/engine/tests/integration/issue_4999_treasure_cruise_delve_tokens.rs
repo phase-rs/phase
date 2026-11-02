@@ -96,10 +96,7 @@ fn delve_eligibility_and_actions_exclude_stale_noncard_graveyard_residents() {
         })
         .is_err());
     assert_eq!(runner.state().objects[&real].zone, Zone::Graveyard);
-    assert!(runner.state().players[P0.0 as usize]
-        .mana_pool
-        .mana
-        .is_empty());
+    assert!(runner.state().players[P0.0 as usize].mana_pool.is_empty());
 
     runner
         .act(GameAction::TapForConvoke {
@@ -115,20 +112,14 @@ fn delve_eligibility_and_actions_exclude_stale_noncard_graveyard_residents() {
             action,
             GameAction::TapForConvoke { object_id, .. } if *object_id == real
         )));
-    assert_eq!(
-        runner.state().players[P0.0 as usize].mana_pool.mana.len(),
-        1
-    );
+    assert_eq!(runner.state().players[P0.0 as usize].mana_pool.total(), 1);
     assert!(runner
         .act(GameAction::TapForConvoke {
             object_id: real,
             mana_type: ManaType::Colorless,
         })
         .is_err());
-    assert_eq!(
-        runner.state().players[P0.0 as usize].mana_pool.mana.len(),
-        1
-    );
+    assert_eq!(runner.state().players[P0.0 as usize].mana_pool.total(), 1);
 }
 
 #[test]
@@ -164,8 +155,7 @@ fn treasure_cruise_delve_driver_exiles_only_cards_and_resolves_without_markers()
     }
     assert!(outcome.state().players[P0.0 as usize]
         .mana_pool
-        .mana
-        .iter()
+        .units()
         .all(|unit| !unit.is_convoke_payment()));
     assert!(matches!(
         outcome.final_waiting_for(),

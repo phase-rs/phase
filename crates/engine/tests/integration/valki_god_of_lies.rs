@@ -22,6 +22,7 @@
 //! node below a non-ChangeZone parent survives the parent→child hand-off
 //! (Kitesail Freebooter's hand reveal, Shire Shirriff's reflexive trigger).
 
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::scenario::{CastOutcome, GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{Effect, EffectKind, TargetRef};
 use engine::types::actions::GameAction;
@@ -1303,10 +1304,7 @@ fn add_pool(runner: &mut GameRunner, player: PlayerId, kinds: &[ManaType]) {
 fn pool_count(runner: &GameRunner, player: PlayerId, kind: ManaType) -> usize {
     runner.state().players[player.0 as usize]
         .mana_pool
-        .mana
-        .iter()
-        .filter(|unit| unit.color == kind)
-        .count()
+        .count_color(kind)
 }
 
 fn put_on_library_top(runner: &mut GameRunner, id: ObjectId, owner: PlayerId) {
@@ -1707,7 +1705,7 @@ fn tibalt_emblem_any_color_mana_casts_opponents_gg_card() {
     assert_eq!(zone(&runner, gg), Zone::Battlefield);
     assert_eq!(runner.state().objects[&gg].controller, P0);
     assert_eq!(
-        runner.state().players[0].mana_pool.mana.len(),
+        runner.state().players[0].mana_pool.total(),
         1,
         "two of the three mana paid the {{G}}{{G}}"
     );
@@ -1995,6 +1993,7 @@ fn tibalt_destroyed_in_response_plus_two_still_feeds_emblem() {
         .act(GameAction::ActivateAbility {
             source_id: tibalt,
             ability_index: TIBALT_PLUS_TWO,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("+2 activation");
     assert_eq!(runner.state().stack.len(), 1, "+2 on the stack");
@@ -2354,6 +2353,7 @@ fn announced_provenance(
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activation is accepted");
     for _ in 0..8 {
@@ -2471,10 +2471,7 @@ fn tibalt_later_copy_effect_exile_does_not_feed_emblem() {
             TargetFilter::SpecificObject { id: tibalt },
             vec![ContinuousModification::CopyValues {
                 values: Box::new(values),
-                display_source: engine::game::game_object::DisplaySource::Card,
-                printed_ref: None,
-                token_image_ref: None,
-                token_art: None,
+                display: Default::default(),
             }],
             None,
         )

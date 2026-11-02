@@ -54,6 +54,14 @@ pub struct AiSession {
     /// `turn_number` + `active_player`, so stale entries from prior turns
     /// never match — no explicit invalidation needed.
     pub projection_cache: Arc<RwLock<HashMap<ProjectionKey, Arc<Projection>>>>,
+    /// Test-only record of every `deadline` argument `get_or_project` has
+    /// received, in call order. Lets a policy test observe the projection
+    /// budget its caller hands over directly, instead of inferring it from
+    /// whether a wall-clock traversal happened to finish inside that budget —
+    /// an inference whose verdict depends on host speed. Shared across clones
+    /// like `projection_cache`.
+    #[cfg(test)]
+    pub(crate) projection_deadline_log: Arc<RwLock<Vec<Deadline>>>,
     /// Reducer-certified fetch selection armed only after this session chose
     /// its corresponding root activation. The engine token contains no clone
     /// or hidden terminal state and rejects any stale prompt.
@@ -150,6 +158,8 @@ impl AiSession {
             pact_proposals: Arc::default(),
             #[cfg(test)]
             policy_registry_override: None,
+            #[cfg(test)]
+            projection_deadline_log: Arc::default(),
         }
     }
 
@@ -239,6 +249,9 @@ impl AiSession {
     /// `projection::projection_deadline(config.execution_mode)` — evaluated
     /// inline at the call, never hoisted into a `let` that spans multiple
     /// projections.
+    ///
+    /// Under `cfg(test)` every `deadline` argument is appended to
+    /// `projection_deadline_log`.
     pub fn get_or_project(
         &self,
         base: &GameState,
@@ -247,6 +260,11 @@ impl AiSession {
         horizon: ProjectionHorizon,
         deadline: Deadline,
     ) -> Result<Arc<Projection>, BailReason> {
+        #[cfg(test)]
+        if let Ok(mut log) = self.projection_deadline_log.write() {
+            log.push(deadline);
+        }
+
         let key = ProjectionKey {
             state_hash: quick_state_hash(base),
             turn_number: base.turn_number,
