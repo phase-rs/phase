@@ -390,6 +390,23 @@ pub(crate) enum RevealChoiceBinding {
     RevealedThisWay,
 }
 
+/// CR 401.4 + CR 701.20e: The position of the ONE library a remainder clause
+/// names. A "put the rest …" instruction can only say top or bottom, so only
+/// those two are expressible here — unlike [`LibraryPosition`], whose
+/// `NthFromTop` / `BeneathTop` / `RandomWithinTop` forms place a single card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+pub(crate) enum RestLibraryPosition {
+    #[default]
+    Bottom,
+    Top,
+}
+
+impl RestLibraryPosition {
+    pub(crate) fn is_bottom(&self) -> bool {
+        matches!(self, Self::Bottom)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum ContinuationAst {
     SearchDestination {
@@ -567,7 +584,10 @@ pub(crate) enum ContinuationAst {
         /// name, so the bottom count is implied rather than stored twice.
         /// Always accompanied by `rest_destination: Some(Zone::Library)`.
         /// `None` for every uniform-remainder form, including the plain
-        /// "... and the rest on the bottom of your library".
+        /// "... and the rest on the bottom of your library". The all-top
+        /// remainder form ("… and the rest on top of your library") instead
+        /// sets this to the dig's own count, which the resolver clamps to the
+        /// actual pile size (see `rest_library_position`).
         ///
         /// Boxed only to keep `clippy::large_enum_variant` satisfied:
         /// `DigFromAmong` is already this enum's largest variant, and an
@@ -579,6 +599,16 @@ pub(crate) enum ContinuationAst {
         /// `Random`; every other accepted form preserves existing behavior.
         #[serde(default)]
         rest_order: DigRestOrder,
+        /// CR 401.4 + CR 701.20e: The library POSITION the same clause names
+        /// for the remainder — `Top` for "… and the rest on top of your
+        /// library in any order" (Diabolic Vision).
+        /// `Zone::Library` alone cannot express that position — the uniform
+        /// rest route defaults to the bottom — so the patch arm turns this into
+        /// the degenerate all-top remainder split the Dig resolver already
+        /// routes (and, for a 2+ card pile, hands to the owner for the CR 401.4
+        /// arrangement). `Bottom` keeps the uniform bottom route.
+        #[serde(default, skip_serializing_if = "RestLibraryPosition::is_bottom")]
+        rest_library_position: RestLibraryPosition,
         /// CR 110.2a: Controller override for the kept cards' battlefield entry
         /// ("... onto the battlefield ... under your control"). `None` leaves
         /// them under their owner's control.

@@ -5788,6 +5788,7 @@ pub(super) fn apply_clause_continuation(
             rest_destination: rest_dest,
             rest_split_top_count: rest_split_top,
             rest_order: continuation_rest_order,
+            rest_library_position,
             enters_under,
             face_down_profile,
             enter_tapped,
@@ -5838,6 +5839,20 @@ pub(super) fn apply_clause_continuation(
                             face_down_profile.is_none() && enters_under.is_none(),
                             "Dig-source face-down from-among with intervening sacrifice \
                              is not yet supported"
+                        );
+                        // CR 401.4: the all-top remainder form ("and the rest on
+                        // top of your library") has no printed card in this
+                        // optional-sacrifice shape, and the PriorLook Digs built
+                        // below carry `count: 0` — they read the looked-at set
+                        // from `private_look_ids`, so there is no count expression
+                        // the top remainder could be clamped from. A release build
+                        // therefore falls back to the library bottom; debug builds
+                        // flag the unsupported shape instead of letting it pass
+                        // silently.
+                        debug_assert!(
+                            rest_library_position == RestLibraryPosition::Bottom,
+                            "all-top remainder with an intervening optional cost is not \
+                             yet supported; see the DigFromAmong patch arm"
                         );
 
                         // 1. Demote the root Dig to look-only (no choice yet).
@@ -5940,6 +5955,7 @@ pub(super) fn apply_clause_continuation(
             };
             let previous = &mut defs[dig_pos];
             if let Effect::Dig {
+                count: dig_count,
                 keep_count,
                 keep_count_expr,
                 up_to,
@@ -6005,7 +6021,31 @@ pub(super) fn apply_clause_continuation(
                 // remainder CLEARS any split a previous continuation set —
                 // the last clause to speak about the remainder owns it
                 // (CR 608.2c, written order).
-                *rest_split_top_count = rest_split_top.map(|boxed| *boxed);
+                //
+                // CR 608.2c: the deterministic "put ALL <filter> from among
+                // them" mass route (`resolve_mass_put_all`) places the
+                // remainder through the uniform bottom route and does not
+                // thread a split. No printed card combines that shape with an
+                // all-top remainder; a release build falls back to the bottom,
+                // and debug builds flag the unsupported combination.
+                debug_assert!(
+                    !(matches!(quantity, PutCount::All | PutCount::AnyNumber)
+                        && rest_library_position == RestLibraryPosition::Top),
+                    "all-top remainder on the mass put-all Dig shape is not yet supported"
+                );
+                // CR 401.4: "… and the rest on top of your library in any
+                // order" (Diabolic Vision) is the degenerate
+                // all-top remainder, which `rest_destination: Some(Library)`
+                // alone cannot express — the uniform route bottoms the pile.
+                // Encode it with the split the Dig resolver already routes:
+                // the dig's own `count` is an upper bound on the remainder
+                // (`count` minus whatever was kept), and
+                // `split_rest_pile_or_park` clamps the top count to the actual
+                // pile, so the whole remainder lands on top and a 2+ card pile
+                // is handed to its owner for the CR 401.4 arrangement.
+                *rest_split_top_count = rest_split_top.map(|boxed| *boxed).or_else(|| {
+                    (rest_library_position == RestLibraryPosition::Top).then(|| dig_count.clone())
+                });
                 *rest_order = continuation_rest_order;
                 *dig_enter_tapped = enter_tapped;
                 *dig_enters_attacking = enters_attacking;
@@ -7467,6 +7507,7 @@ pub(super) fn parse_dig_from_among(
             rest_destination: None,
             rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
+            rest_library_position: RestLibraryPosition::Bottom,
             enters_under,
             face_down_profile,
             enter_tapped,
@@ -7563,10 +7604,11 @@ pub(super) fn parse_dig_from_among(
         // shared rest-anaphor matcher so the rest pile is routed correctly instead of
         // falling through to the `None`→Graveyard default. A genuinely separate
         // "Put the rest ..." sentence still patches via its own PutRest continuation.
-        let (rest_destination, rest_order) = parse_of_them_rest_destination(lower)
-            .map_or((None, DigRestOrder::Preserve), |(destination, order)| {
-                (Some(destination), order)
-            });
+        let (rest_destination, rest_order, rest_library_position) =
+            parse_of_them_rest_destination(lower).map_or(
+                (None, DigRestOrder::Preserve, RestLibraryPosition::Bottom),
+                |(destination, order, position)| (Some(destination), order, position),
+            );
 
         return Some(ContinuationAst::DigFromAmong {
             quantity,
@@ -7575,6 +7617,7 @@ pub(super) fn parse_dig_from_among(
             rest_destination,
             rest_split_top_count: None,
             rest_order,
+            rest_library_position,
             enters_under,
             face_down_profile,
             enter_tapped,
@@ -7629,10 +7672,11 @@ pub(super) fn parse_dig_from_among(
                 PutCount::up(1)
             };
 
-            let (rest_destination, rest_order) = parse_of_them_rest_destination(lower)
-                .map_or((None, DigRestOrder::Preserve), |(destination, order)| {
-                    (Some(destination), order)
-                });
+            let (rest_destination, rest_order, rest_library_position) =
+                parse_of_them_rest_destination(lower).map_or(
+                    (None, DigRestOrder::Preserve, RestLibraryPosition::Bottom),
+                    |(destination, order, position)| (Some(destination), order, position),
+                );
             // CR 401.2 + CR 701.20e: a Telling Time-class clause names both
             // library positions for the remainder rather than one destination
             // for all of it. The split implies the remainder's destination IS
@@ -7652,6 +7696,7 @@ pub(super) fn parse_dig_from_among(
                 rest_destination,
                 rest_split_top_count,
                 rest_order,
+                rest_library_position,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped,
@@ -8034,7 +8079,9 @@ pub(super) fn parse_its_face_down_profile(lower: &str) -> Option<FaceDownProfile
 /// rest" generalizes to any remainder count. Both anaphors point to the same
 /// rest_destination semantics, so they share the same downstream zone
 /// classification.
-fn parse_of_them_rest_destination(lower: &str) -> Option<(Zone, DigRestOrder)> {
+fn parse_of_them_rest_destination(
+    lower: &str,
+) -> Option<(Zone, DigRestOrder, RestLibraryPosition)> {
     let (_, (_, after_rest)) = nom_primitives::split_once_on(lower, " and the rest")
         .or_else(|_| nom_primitives::split_once_on(lower, " and the other"))
         .ok()?;
@@ -8046,6 +8093,16 @@ fn parse_of_them_rest_destination(lower: &str) -> Option<(Zone, DigRestOrder)> {
         // Default: bottom of library ("on the bottom", "in any order", etc.)
         Zone::Library
     };
+    // CR 401.4 + CR 701.20e: "on top of [the/that/their] library" is the one
+    // library rest clause that does not mean the bottom. `Zone::Library` alone
+    // cannot carry the position, so the caller threads it into the remainder
+    // routing (Diabolic Vision's "… and the rest on top of your library").
+    let rest_library_position =
+        if destination == Zone::Library && nom_primitives::scan_contains(after_rest, "on top of") {
+            RestLibraryPosition::Top
+        } else {
+            RestLibraryPosition::Bottom
+        };
     let random = opt(preceded(
         take_until::<_, _, OracleError<'_>>(" in a random order"),
         tag(" in a random order"),
@@ -8060,6 +8117,7 @@ fn parse_of_them_rest_destination(lower: &str) -> Option<(Zone, DigRestOrder)> {
         } else {
             DigRestOrder::Preserve
         },
+        rest_library_position,
     ))
 }
 
@@ -8994,6 +9052,7 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
                 rest_destination: None,
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
+                rest_library_position: RestLibraryPosition::Bottom,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -9019,6 +9078,7 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
                 rest_split_top_count: None,
                 rest_order: parse_put_one_dig_card_on_top(&lower)
                     .expect("continuation guard just matched"),
+                rest_library_position: RestLibraryPosition::Bottom,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -13343,6 +13403,7 @@ mod tests {
                 rest_destination: Some(Zone::Library),
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
+                rest_library_position: RestLibraryPosition::Bottom,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -13371,6 +13432,7 @@ mod tests {
                 rest_destination: Some(Zone::Library),
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
+                rest_library_position: RestLibraryPosition::Bottom,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -13404,6 +13466,7 @@ mod tests {
                 rest_destination: Some(Zone::Library),
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
+                rest_library_position: RestLibraryPosition::Bottom,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -13431,6 +13494,7 @@ mod tests {
                 rest_destination: Some(Zone::Graveyard),
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
+                rest_library_position: RestLibraryPosition::Bottom,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -13458,6 +13522,7 @@ mod tests {
                 rest_destination: Some(Zone::Library),
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
+                rest_library_position: RestLibraryPosition::Bottom,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -13487,6 +13552,7 @@ mod tests {
                     rest_destination: None,
                     rest_split_top_count: None,
                     rest_order: DigRestOrder::Preserve,
+                    rest_library_position: RestLibraryPosition::Bottom,
                     enters_under: None,
                     face_down_profile: None,
                     enter_tapped: false,
@@ -13788,6 +13854,7 @@ mod tests {
                 rest_destination: Some(Zone::Library),
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
+                rest_library_position: RestLibraryPosition::Bottom,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -14072,6 +14139,7 @@ mod tests {
                 rest_destination: None,
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
+                rest_library_position: RestLibraryPosition::Bottom,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -14124,6 +14192,7 @@ mod tests {
                 rest_destination: None,
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
+                rest_library_position: RestLibraryPosition::Bottom,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -14194,6 +14263,7 @@ mod tests {
                 rest_destination: None,
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
+                rest_library_position: RestLibraryPosition::Bottom,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -15330,6 +15400,7 @@ mod tests {
                 rest_destination: None,
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
+                rest_library_position: RestLibraryPosition::Bottom,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,

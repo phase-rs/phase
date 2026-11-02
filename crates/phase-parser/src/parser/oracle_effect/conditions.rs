@@ -31,7 +31,7 @@ use super::parse_effect_chain;
 use super::sequence::parse_dig_from_among;
 use super::subject;
 use super::{parse_effect_clause_inner, scan_contains_phrase, ParseContext};
-use crate::parser::oracle_ir::ast::{parsed_clause, ContinuationAst};
+use crate::parser::oracle_ir::ast::{parsed_clause, ContinuationAst, RestLibraryPosition};
 use crate::parser::oracle_ir::context::TriggerZoneChangeProvenance;
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_ir::effect_chain::{
@@ -6130,6 +6130,7 @@ pub(crate) fn try_parse_dig_instead_alternative(
         rest_destination: alt_rest,
         rest_split_top_count: alt_rest_split_top_count,
         rest_order: alt_rest_order,
+        rest_library_position: alt_rest_library_position,
         enter_tapped: alt_enter_tapped,
         enters_attacking: alt_enters_attacking,
         ..
@@ -6175,12 +6176,13 @@ pub(crate) fn try_parse_dig_instead_alternative(
         //   1. the alternative named its own split      -> use it;
         //   2. the alternative named a UNIFORM remainder
         //      destination ("...put the rest on the bottom
-        //      of your library") -> `None`. An explicit
-        //      one-position instruction is not merely a
-        //      different destination, it positively says
-        //      "all of it goes to one place", which
-        //      overrides the base branch's split instead
-        //      of being contaminated by it;
+        //      of your library") -> `None`, except that a remainder
+        //      it sends to the TOP of the library is the degenerate
+        //      all-top split (CR 401.4) rather than a bottom
+        //      destination. An explicit one-position instruction is
+        //      not merely a different destination, it positively says
+        //      "all of it goes to one place", which overrides the base
+        //      branch's split instead of being contaminated by it;
         //   3. the alternative said nothing about the
         //      remainder             -> inherit the base branch's split,
         //                               exactly as `prev_rest` and
@@ -6191,7 +6193,10 @@ pub(crate) fn try_parse_dig_instead_alternative(
         // already sent uniformly to one position.
         rest_split_top_count: alt_rest_split_top_count.map(|boxed| *boxed).or_else(|| {
             if alt_rest.is_some() {
-                None
+                // CR 401.4: an alternative that puts its remainder on TOP
+                // names the degenerate all-top split, exactly as the same
+                // clause does on the base branch.
+                (alt_rest_library_position == RestLibraryPosition::Top).then(|| prev_count.clone())
             } else {
                 prev_rest_split_top_count.clone()
             }

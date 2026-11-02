@@ -1887,3 +1887,187 @@ fn a_same_player_split_still_shows_its_own_looker_the_pile() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// "… and the rest on top of your library in any order" — the degenerate
+// ALL-TOP remainder (Diabolic Vision).
+// ---------------------------------------------------------------------------
+
+/// Verbatim Oracle text (Diabolic Vision, {2}{U}{U} sorcery).
+const DIABOLIC_VISION_ORACLE: &str = "Look at the top five cards of your library. \
+Put one of them into your hand and the rest on top of your library in any order.";
+
+/// CR 401.4 + CR 701.20e: the same-clause remainder clause names the TOP of
+/// the library. `Zone::Library` alone cannot carry that position, so the parser
+/// must record it as the degenerate all-top split the Dig resolver routes.
+#[test]
+fn diabolic_vision_parses_an_all_top_remainder() {
+    let parsed = engine::parser::oracle::parse_oracle_text(
+        DIABOLIC_VISION_ORACLE,
+        "Diabolic Vision",
+        &[],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let effect = parsed
+        .abilities
+        .first()
+        .map(|a| a.effect.as_ref())
+        .expect("Diabolic Vision must parse to one spell ability");
+    match effect {
+        Effect::Dig {
+            count,
+            destination,
+            keep_count,
+            rest_destination,
+            rest_split_top_count,
+            rest_order,
+            ..
+        } => {
+            assert_eq!(*count, QuantityExpr::Fixed { value: 5 }, "look at top five");
+            assert_eq!(*destination, Some(Zone::Hand), "one goes into your hand");
+            assert_eq!(*keep_count, Some(1), "exactly one is kept");
+            assert_eq!(
+                *rest_destination,
+                Some(Zone::Library),
+                "the remainder returns to the library, not the graveyard"
+            );
+            assert!(
+                rest_split_top_count.is_some(),
+                "the TOP position must be carried as the all-top remainder \
+                 split; `None` would bottom the pile"
+            );
+            assert_eq!(
+                *rest_order,
+                DigRestOrder::Preserve,
+                "\"in any order\" is a player arrangement, not a random one"
+            );
+        }
+        other => panic!("expected Dig, got {other:?}"),
+    }
+}
+
+/// CR 401.4 + CR 701.20e: the whole remainder goes on TOP of the library in the
+/// order its owner submits, with the untouched library suffix left below it.
+/// Reverting the parser lowering bottoms the pile (no prompt, wrong position)
+/// and fails here.
+#[test]
+fn diabolic_vision_puts_the_whole_remainder_on_top_in_the_chosen_order() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mut builder = scenario.add_spell_to_hand_from_oracle(
+        P0,
+        "Diabolic Vision",
+        false,
+        DIABOLIC_VISION_ORACLE,
+    );
+    builder.with_mana_cost(telling_time_cost());
+    let spell_id = builder.id();
+    let mut runner = scenario.build();
+
+    // Five looked-at cards, then two suffix cards appended beneath them.
+    for index in 0..5 {
+        add_library_card(&mut runner, &format!("Lib{index}"));
+    }
+    let suffix = [
+        add_library_card(&mut runner, "Suffix0"),
+        add_library_card(&mut runner, "Suffix1"),
+    ];
+    add_mana(&mut runner, ManaType::Blue, 2);
+
+    let outcome = runner.cast(spell_id).resolve();
+    let looked_at = match outcome.final_waiting_for() {
+        WaitingFor::DigChoice { cards, .. } => cards.clone(),
+        other => panic!("expected the keep prompt first, got {other:?}"),
+    };
+    assert_eq!(looked_at.len(), 5, "the dig looks at the top five");
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![looked_at[0]],
+        })
+        .expect("keeping one looked-at card must be accepted");
+
+    let (pile, top_count) = match &runner.state().waiting_for {
+        WaitingFor::DigRestSplitChoice {
+            cards, top_count, ..
+        } => (cards.clone(), *top_count),
+        other => panic!("expected the all-top remainder prompt, got {other:?}"),
+    };
+    assert_eq!(pile.len(), 4, "look at five, keep one, four remain");
+    assert_eq!(
+        top_count, 4,
+        "the whole remainder goes on top — the partition is forced"
+    );
+
+    // Submit the arrangement reversed so encounter order and chosen order
+    // disagree (CR 401.4 gives the arrangement to the owner).
+    let arrangement: Vec<ObjectId> = pile.iter().rev().copied().collect();
+    runner
+        .act(GameAction::SelectCards {
+            cards: arrangement.clone(),
+        })
+        .expect("a full four-card arrangement must be accepted");
+    runner.advance_until_stack_empty();
+
+    let library: Vec<ObjectId> = runner.state().players[0].library.iter().copied().collect();
+    assert_eq!(library.len(), 6, "the kept card left the library");
+    assert_eq!(
+        &library[..4],
+        arrangement.as_slice(),
+        "the four remainder cards land on TOP in the submitted order"
+    );
+    // The two cards that were never looked at stay beneath the arranged pile,
+    // in their original relative order.
+    assert_eq!(library[4], suffix[0], "untouched suffix card 1 stays below");
+    assert_eq!(library[5], suffix[1], "untouched suffix card 2 stays below");
+}
+
+/// Paired negative: a remainder sent to the BOTTOM is unchanged by the top
+/// lowering. No split prompt is parked, and the untouched suffix stays on top.
+#[test]
+fn a_bottom_remainder_is_unchanged_by_the_top_lowering() {
+    // Verbatim Impulse ({1}{U} instant) — the printed same-shape card whose
+    // remainder goes to the bottom.
+    const IMPULSE_ORACLE: &str = "Look at the top four cards of your library. \
+Put one of them into your hand and the rest on the bottom of your library in any order.";
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mut builder = scenario.add_spell_to_hand_from_oracle(P0, "Impulse", false, IMPULSE_ORACLE);
+    builder.with_mana_cost(telling_time_cost());
+    let spell_id = builder.id();
+    let mut runner = scenario.build();
+
+    // Four looked-at cards, then the suffix card appended beneath them.
+    for index in 0..4 {
+        add_library_card(&mut runner, &format!("Lib{index}"));
+    }
+    let suffix = add_library_card(&mut runner, "Suffix");
+    add_mana(&mut runner, ManaType::Blue, 2);
+
+    let outcome = runner.cast(spell_id).resolve();
+    let looked_at = match outcome.final_waiting_for() {
+        WaitingFor::DigChoice { cards, .. } => cards.clone(),
+        other => panic!("expected the keep prompt first, got {other:?}"),
+    };
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![looked_at[0]],
+        })
+        .expect("keeping one looked-at card must be accepted");
+    runner.advance_until_stack_empty();
+
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::DigRestSplitChoice { .. }
+        ),
+        "a bottom remainder is routed immediately, never through the all-top split prompt"
+    );
+    let library: Vec<ObjectId> = runner.state().players[0].library.iter().copied().collect();
+    assert_eq!(library.len(), 4, "three remainder cards plus the suffix");
+    assert_eq!(
+        library[0], suffix,
+        "the untouched suffix stays on top; the remainder went to the bottom"
+    );
+}
