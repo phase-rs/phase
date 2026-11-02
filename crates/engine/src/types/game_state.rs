@@ -5543,7 +5543,7 @@ pub struct PendingPlayerScopeSacrificeChoice {
 
 /// CR 101.4: If players make choices for one instruction, they choose in
 /// APNAP order before the simultaneous action happens.
-/// CR 400.3 + CR 701.3: Per-player untargeted return choices for one
+/// CR 400.3: Per-player untargeted return choices for one
 /// simultaneous instruction such as "each player returns a permanent they
 /// control to its owner's hand." No chosen permanent moves until every player
 /// has chosen; the whole selection is then delivered as one batch.
