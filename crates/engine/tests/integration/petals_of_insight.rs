@@ -183,7 +183,9 @@ fn petals_of_insight_accept_puts_cards_on_bottom_and_bounces_to_hand() {
     // Submit reverse order (top_c, top_b, top_a) to verify choice is honored.
     let reverse_order: Vec<ObjectId> = cards.iter().rev().copied().collect();
     runner
-        .act(GameAction::SelectCards { cards: reverse_order })
+        .act(GameAction::SelectCards {
+            cards: reverse_order,
+        })
         .expect("submit bottom order");
 
     // Stack must be empty and game waiting for priority.
