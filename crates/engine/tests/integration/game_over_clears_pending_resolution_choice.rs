@@ -75,9 +75,8 @@ const DEMONIC_TUTOR: &str =
     "Search your library for a card, put that card into your hand, then shuffle.";
 const SATYR_WAYFINDER: &str = "When this creature enters, reveal the top four cards of your library. You may put a land card from among them into your hand. Put the rest into your graveyard.";
 const BIRTHING_RITUAL: &str = "At the beginning of your end step, if you control a creature, look at the top seven cards of your library. Then you may sacrifice a creature. If you do, you may put a creature card with mana value X or less from among those cards onto the battlefield, where X is 1 plus the sacrificed creature's mana value. Put the rest on the bottom of your library in a random order.";
-/// Synthetic (no legal printed card has exactly this text): an enters trigger, so
-/// the carrier is a triggered ability with a firing, whose "you may" parks an
-/// `OptionalEffect` frame.
+/// Mer Man's verbatim Oracle text. Its optional ETB trigger supplies a triggered
+/// ability carrier with a firing and an `OptionalEffect` frame.
 const ENTERS_MAY_DRAW: &str = "When this creature enters, you may draw a card.";
 
 // ---------------------------------------------------------------------------
@@ -383,16 +382,17 @@ fn vraskas_scorn_at_its_offer(match_config: Option<MatchConfig>) -> GameRunner {
     runner
 }
 
-/// Cast the synthetic `ENTERS_MAY_DRAW` creature and pass until its enters
-/// trigger asks the "you may".
+/// Cast Mer Man and pass until its enters trigger asks the "you may".
 fn enters_may_draw_at_its_offer(players: u8) -> GameRunner {
     let mut scenario = board(players);
-    scenario.add_basic_land(P0, ManaColor::Blue);
+    for _ in 0..5 {
+        scenario.add_basic_land(P0, ManaColor::Blue);
+    }
     let creature = scenario
-        .add_creature_to_hand_from_oracle(P0, "Test Seer", 1, 1, ENTERS_MAY_DRAW)
+        .add_creature_to_hand_from_oracle(P0, "Mer Man", 3, 3, ENTERS_MAY_DRAW)
         .with_mana_cost(ManaCost::Cost {
             shards: vec![ManaCostShard::Blue],
-            generic: 0,
+            generic: 4,
         })
         .id();
     let mut runner = scenario.build();
@@ -432,6 +432,16 @@ fn sacrifice(count: u32) -> AbilityCost {
 /// "loses 1 life" and a "gain 3 life" payoff that needs the payment. The
 /// `return_result` parameter is added here for
 /// `a_parked_sacrifice_cursor_does_not_outlive_its_return_result_occurrence`.
+/// Birthing Ritual (full Oracle text in `BIRTHING_RITUAL`) supplies the nearest
+/// printed optional sacrifice during resolution: "Then you may sacrifice a
+/// creature. If you do, you may put a creature card with mana value X or less
+/// from among those cards onto the battlefield, where X is 1 plus the sacrificed
+/// creature's mana value." No card in the checked AtomicCards corpus combines a
+/// sacrifice with a {99} alternative. This reduced fixture needs two sacrifices
+/// to park a partly paid cursor, an unaffordable alternative to expose its branch,
+/// and a conditional payoff to exercise the cursor's return-result occurrence.
+/// It tests terminal retirement of that composed state, not a printed card's
+/// complete ability or parser support.
 fn optional_sacrifice_spell(
     payer: TargetFilter,
     count: u32,
@@ -478,6 +488,12 @@ fn optional_sacrifice_spell(
 
 /// Copied from `resolution_optional_payments.rs` ("Graveyard Warden", synthetic):
 /// an optional "exile it instead" replacement on any move to a graveyard.
+/// The nearest global printed replacement is Rest in Peace: "If a card or token
+/// would be put into a graveyard from anywhere, exile it instead." No printed
+/// card in the checked AtomicCards corpus makes that global replacement optional.
+/// Forger's Foundry offers optional exile only for a qualifying resolving spell,
+/// not a sacrificed creature. Optionality here lets the first sacrifice finish
+/// before the second parks, exposing a partly paid cursor for terminal cleanup.
 fn optional_graveyard_exile_replacement() -> ReplacementDefinition {
     ReplacementDefinition::new(ReplacementEvent::Moved)
         .destination_zone(Zone::Graveyard)
@@ -525,9 +541,10 @@ fn decline_index(runner: &GameRunner) -> (PlayerId, usize) {
 /// starts, as the source fixtures do) offers to exile the first fodder instead; P0
 /// declines, the first fodder dies (CR 701.21a), and the second sacrifice is paused
 /// on the Warden's CR 616.1 choice. The cursor is parked at index 1 outside the
-/// resolution stack. `observer` adds a synthetic P0 "Whenever another creature
-/// dies, you gain 1 life." creature. Returns the runner, both fodder and P0's life
-/// before the cast.
+/// resolution stack. `observer` adds Deathgreeter with its verbatim Oracle text:
+/// "Whenever another creature dies, you may gain 1 life." Its trigger must not
+/// reach the stack after the game ends. Returns the runner, both fodder and P0's
+/// life before the cast.
 fn optional_sacrifice_paused_on_its_second_move(
     players: u8,
     observer: bool,
@@ -557,10 +574,10 @@ fn optional_sacrifice_paused_on_its_second_move(
     if observer {
         scenario.add_creature_from_oracle(
             P0,
-            "Death Observer",
+            "Deathgreeter",
             1,
             1,
-            "Whenever another creature dies, you gain 1 life.",
+            "Whenever another creature dies, you may gain 1 life.",
         );
     }
     let mut runner = scenario.build();
