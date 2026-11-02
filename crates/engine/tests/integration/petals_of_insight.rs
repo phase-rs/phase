@@ -184,7 +184,7 @@ fn petals_of_insight_accept_puts_cards_on_bottom_and_bounces_to_hand() {
     let reverse_order: Vec<ObjectId> = cards.iter().rev().copied().collect();
     runner
         .act(GameAction::SelectCards {
-            cards: reverse_order,
+            cards: reverse_order.clone(),
         })
         .expect("submit bottom order");
 
@@ -224,10 +224,9 @@ fn petals_of_insight_accept_puts_cards_on_bottom_and_bounces_to_hand() {
     let len = p0_library.len();
     assert_eq!(len, 6, "all 6 cards remain in library");
     let bottom_ids: Vec<ObjectId> = p0_library.iter().skip(len - 3).copied().collect();
-    assert!(
-        bottom_ids.contains(&top_a) && bottom_ids.contains(&top_b) && bottom_ids.contains(&top_c),
-        "bottom of library must contain the 3 cards, got {:?}",
-        bottom_ids
+    assert_eq!(
+        bottom_ids, reverse_order,
+        "bottom of library must match the submitted order"
     );
 }
 

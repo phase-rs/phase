@@ -17345,7 +17345,7 @@ pub enum WaitingFor {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reveal_until_hit_snapshot: Option<Box<EventObjectSnapshot>>,
     },
-    /// CR 701.20e + CR 608.2c: In a `Dig` resolution (PriorLook source) where
+    /// CR 701.20e + CR 401.4 + CR 608.2d: In a `Dig` resolution (PriorLook source) where
     /// all looked-at cards are put on the bottom of the library "in any order"
     /// (`DigRestOrder::PlayerChoice`), the controller announces the order for
     /// the cards. The response is `GameAction::SelectCards { cards }` carrying
@@ -21085,6 +21085,7 @@ impl WaitingFor {
                 // only lists {identity}, so `apply()` is the real validator.
                 | WaitingFor::RippleBottomOrder { .. }
                 | WaitingFor::RevealUntilBottomOrder { .. }
+                | WaitingFor::DigBottomOrder { .. }
         )
     }
 
