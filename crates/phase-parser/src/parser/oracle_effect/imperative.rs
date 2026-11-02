@@ -19168,23 +19168,13 @@ fn try_parse_subjectless_cant(lower: &str) -> Option<ImperativeFamilyAst> {
         (trimmed, Duration::UntilEndOfTurn)
     };
 
-    // CR 702.18a / 702.11a: "can't be the target [of ...]" granted to the target
-    // for a duration is a Shroud / Hexproof keyword grant (Vines of Vastwood). Map
-    // it to the keyword so the targeting check applies the correct controller scope
-    // (Hexproof leaves the controller able to target), reusing the enforced keyword
-    // path rather than a scope-less rule static.
+    // CR 702.18a + CR 109.5: "can't be the target [of ...]" granted to the target
+    // for a duration (Vines of Vastwood). The opponent-scoped form is scoped from
+    // the granting controller, not Hexproof; see `cant_be_targeted_effect_grant`.
     if let Some(scope) = crate::parser::oracle_keyword::classify_cant_be_targeted(clean) {
-        let keyword = match scope {
-            crate::parser::oracle_keyword::CantBeTargetedScope::AnyPlayer => {
-                crate::types::keywords::Keyword::Shroud
-            }
-            crate::parser::oracle_keyword::CantBeTargetedScope::OpponentsOnly => {
-                crate::types::keywords::Keyword::Hexproof
-            }
-        };
         return Some(ImperativeFamilyAst::GainKeyword(Effect::GenericEffect {
             static_abilities: vec![StaticDefinition::continuous()
-                .modifications(vec![ContinuousModification::AddKeyword { keyword }])],
+                .modifications(vec![super::subject::cant_be_targeted_effect_grant(scope)])],
             duration: Some(duration),
             target: None,
             end_cost: None,
