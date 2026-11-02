@@ -16858,7 +16858,10 @@ fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEf
                 || nom_primitives::parse_number_or_x.parse(trimmed).is_ok()
                 || parse_reveal_until_count(trimmed).is_ok()
         }) {
-            return None;
+            return Some(parsed_clause(Effect::unimplemented(
+                "compound_reveal_until",
+                count_tp.original,
+            )));
         }
     }
 
@@ -16870,13 +16873,16 @@ fn try_parse_reveal_until(tp: TextPair, player: TargetFilter) -> Option<ParsedEf
     // The only recognized trailing suffix on a passive reveal-until clause is an optional
     // inline "and exiles that card" (Indomitable Creativity) followed by terminal
     // punctuation. Any unconsumed tail (such as Thought Dissector's ", whichever comes first")
-    // causes this branch to fail honestly and fall through.
+    // causes this branch to fail closed as unimplemented.
     let (after_inline_exile, inline_exile) =
         opt(tag::<_, _, OracleError<'_>>(" and exiles that card"))
             .parse(remainder)
             .ok()?;
     if !imperative::terminal_punctuation_only(after_inline_exile) {
-        return None;
+        return Some(parsed_clause(Effect::unimplemented(
+            "unconsumed_reveal_until_tail",
+            count_tp.original,
+        )));
     }
     let kept_destination = if inline_exile.is_some() {
         Zone::Exile
@@ -30036,6 +30042,7 @@ fn lower_subject_predicate_ast_body(
                 .is_ok()
                 && scan_contains_phrase(&pred_lower, "top")
                 && scan_contains_phrase(&pred_lower, "library")
+                && !scan_contains_phrase(&pred_lower, "until")
             {
                 // Delegate to nom combinator (input already lowercase from pred_lower).
                 let count = if let Some(after_top) = strip_after(&pred_lower, "top ") {
@@ -36742,6 +36749,10 @@ pub(super) fn def_is_damage_dealer(def: &AbilityDefinition) -> bool {
         intrinsic_continuation_effect(def),
         Effect::DealDamage { .. }
     )
+}
+
+pub(super) fn def_is_draw(def: &AbilityDefinition) -> bool {
+    matches!(intrinsic_continuation_effect(def), Effect::Draw { .. })
 }
 
 /// Mutable counterpart to `def_is_damage_dealer` — the effect to patch when a

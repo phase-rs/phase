@@ -592,27 +592,46 @@ fn parse_reveal_until_all_to_zone_continuation(input: &str) -> OracleResult<'_, 
     .parse(input)
 }
 
+fn parse_reveal_until_put_verb(input: &str) -> OracleResult<'_, &str> {
+    type E<'a> = OracleError<'a>;
+    alt((tag::<_, _, E>("puts "), tag("put "))).parse(input)
+}
+
+fn parse_reveal_until_whole_pile_ref(input: &str) -> OracleResult<'_, &str> {
+    type E<'a> = OracleError<'a>;
+    alt((
+        tag::<_, _, E>("all cards revealed this way"),
+        tag("all cards revealed in this way"),
+        tag("those cards"),
+    ))
+    .parse(input)
+}
+
+fn parse_reveal_until_graveyard_destination(input: &str) -> OracleResult<'_, Zone> {
+    type E<'a> = OracleError<'a>;
+    value(
+        Zone::Graveyard,
+        alt((
+            tag::<_, _, E>(" into your graveyard"),
+            tag(" into their graveyard"),
+            tag(" into their owners' graveyards"),
+            tag(" into its owner's graveyard"),
+        )),
+    )
+    .parse(input)
+}
+
 fn parse_reveal_until_all_to_zone_standard(input: &str) -> OracleResult<'_, ContinuationAst> {
     type E<'a> = OracleError<'a>;
     let (input, _) = opt(alt((tag::<_, _, E>("then "), tag("and ")))).parse(input)?;
-    let (input, _) = alt((tag::<_, _, E>("puts "), tag("put "))).parse(input)?;
+    let (input, _) = parse_reveal_until_put_verb(input)?;
     let (input, _) = alt((
-        tag::<_, _, E>("those cards"),
-        tag("all cards revealed this way"),
-        tag("all cards revealed in this way"),
-        tag("the revealed cards"),
+        tag::<_, _, E>("the revealed cards"),
+        parse_reveal_until_whole_pile_ref,
     ))
     .parse(input)?;
     let (input, destination) = alt((
-        value(
-            Zone::Graveyard,
-            alt((
-                tag::<_, _, E>(" into your graveyard"),
-                tag(" into their graveyard"),
-                tag(" into their owners' graveyards"),
-                tag(" into its owner's graveyard"),
-            )),
-        ),
+        parse_reveal_until_graveyard_destination,
         value(
             Zone::Hand,
             alt((tag::<_, _, E>(" into your hand"), tag(" into their hand"))),
@@ -672,23 +691,9 @@ fn parse_reveal_until_all_to_zone_standard(input: &str) -> OracleResult<'_, Cont
 fn parse_reveal_until_all_to_zone_that_player(input: &str) -> OracleResult<'_, ContinuationAst> {
     type E<'a> = OracleError<'a>;
     let (input, _) = tag::<_, _, E>("that player ").parse(input)?;
-    let (input, _) = alt((tag::<_, _, E>("puts "), tag("put "))).parse(input)?;
-    let (input, _) = alt((
-        tag::<_, _, E>("all cards revealed this way"),
-        tag("all cards revealed in this way"),
-        tag("those cards"),
-    ))
-    .parse(input)?;
-    let (input, destination) = value(
-        Zone::Graveyard,
-        alt((
-            tag::<_, _, E>(" into their graveyard"),
-            tag(" into their owners' graveyards"),
-            tag(" into its owner's graveyard"),
-            tag(" into your graveyard"),
-        )),
-    )
-    .parse(input)?;
+    let (input, _) = parse_reveal_until_put_verb(input)?;
+    let (input, _) = parse_reveal_until_whole_pile_ref(input)?;
+    let (input, destination) = parse_reveal_until_graveyard_destination(input)?;
     let (input, _) = opt(tag(".")).parse(input)?;
     let (input, _) = eof(input)?;
     Ok((
@@ -6733,17 +6738,14 @@ pub(super) fn apply_clause_continuation(
             if let Some(target_idx) = target_idx {
                 // CR 608.2c: instructions are followed in the order written. When
                 // another instruction sits between the reveal and this pile
-                // placement (Goblin Charbelcher's damage), folding the placement
-                // into the reveal would move the pile BEFORE that instruction.
-                // Leave the cards where the reveal found them and emit the
-                // placement as a later chain instruction over the revealed set.
-                // Scoped to an intervening damage instruction: damage is the
-                // replaceable event whose replacement effects (CR 615.5) act on the
-                // revealed cards before the placement.
-                let intervening_damage = defs[target_idx + 1..]
+                // placement (Goblin Charbelcher's damage, an intervening Draw clause,
+                // etc.), folding the placement into the reveal would move the pile
+                // BEFORE that instruction. Leave the cards where the reveal found them
+                // and emit the placement as a later chain instruction over the revealed set.
+                let intervening_order_dependent = defs[target_idx + 1..]
                     .iter()
-                    .any(super::def_is_damage_dealer);
-                if intervening_damage && defs[target_idx].sub_ability.is_none() {
+                    .any(|d| super::def_is_damage_dealer(d) || super::def_is_draw(d));
+                if intervening_order_dependent && defs[target_idx].sub_ability.is_none() {
                     if let Effect::RevealUntil {
                         matched_disposition,
                         ..

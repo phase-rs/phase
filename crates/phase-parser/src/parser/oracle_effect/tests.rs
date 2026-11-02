@@ -45485,8 +45485,8 @@ fn reveal_until_nascent_metamorph_does_not_fold_across_intervening_instruction()
 /// Compound stopping conditions ("until an artifact card or X cards are revealed,
 /// whichever comes first") cannot be represented by RevealUntil (which accepts only
 /// a single stopping filter/count and would drop the "or X cards" second condition).
-/// The passive reveal-until parser must reject this compound condition, preserving
-/// the baseline RevealTop fallback without swallowing the conditional follow-up.
+/// The passive reveal-until parser must reject this compound condition, failing closed
+/// as Effect::Unimplemented rather than falling into a partial RevealTop execution.
 #[test]
 fn reveal_until_passive_compound_stopping_rejected_thought_dissector() {
     let parsed = crate::parser::oracle::parse_oracle_text(
@@ -45516,27 +45516,63 @@ fn reveal_until_passive_compound_stopping_rejected_thought_dissector() {
         "compound reveal-until must not be accepted by single-condition RevealUntil"
     );
 
-    // Must preserve baseline RevealTop { count: 1, player: Opponent }
+    // Fail closed: must return Effect::Unimplemented for the unsupported compound stopping condition
     assert!(
-        matches!(
-            &*ability.effect,
-            Effect::RevealTop {
-                count: 1,
-                player: TargetFilter::Typed(TypedFilter {
-                    controller: Some(ControllerRef::Opponent),
-                    ..
-                }),
-            }
-        ),
-        "expected baseline fallback RevealTop {{ count: 1, player: Opponent }}, got {:?}",
+        matches!(&*ability.effect, Effect::Unimplemented { .. }),
+        "expected Effect::Unimplemented for compound reveal-until, got {:?}",
         ability.effect
     );
+}
 
-    // Coverage honesty: must not report any swallowed clauses (e.g. Swallow:Condition_If)
+/// CR 608.2c / CR 701.20a: An intervening instruction (such as Draw) between RevealUntil
+/// and whole-pile placement must preserve the placement as a separate SequentialSibling
+/// instruction rather than folding it into RevealUntil.
+#[test]
+fn reveal_until_all_to_zone_does_not_fold_across_intervening_draw() {
+    let def = parse_effect_chain(
+        "Reveal cards from the top of your library until you reveal a land card. That player draws a card. Put the revealed cards into your graveyard.",
+        AbilityKind::Spell,
+    );
+    let Effect::RevealUntil {
+        matched_disposition,
+        ..
+    } = &*def.effect
+    else {
+        panic!("expected RevealUntil, got {:?}", def.effect);
+    };
+    assert_eq!(
+        *matched_disposition,
+        RevealUntilDisposition::RevealOnly,
+        "RevealUntil must retain RevealOnly disposition when intervening instruction exists"
+    );
+
+    let draw = def
+        .sub_ability
+        .as_ref()
+        .expect("expected chained draw sub-ability");
     assert!(
-        parsed.parse_warnings.is_empty(),
-        "expected no parse warnings, got {:?}",
-        parsed.parse_warnings
+        matches!(&*draw.effect, Effect::Draw { .. }),
+        "expected Draw effect, got {:?}",
+        draw.effect
+    );
+
+    let placement = draw
+        .sub_ability
+        .as_ref()
+        .expect("expected sequential sibling placement sub-ability");
+    assert_eq!(placement.sub_link, SubAbilityLink::SequentialSibling);
+    assert!(
+        matches!(
+            &*placement.effect,
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Library),
+                destination: Zone::Graveyard,
+                target: TargetFilter::LastRevealed,
+                ..
+            }
+        ),
+        "expected ChangeZoneAll placement, got {:?}",
+        placement.effect
     );
 }
 
