@@ -186,6 +186,7 @@ function asDeckPayload(deck: HostingDeck): DeckListData {
     ...(deck.sticker_sheets?.length ? { sticker_sheets: deck.sticker_sheets } : {}),
     ...(deck.signature_spell?.length ? { signature_spell: deck.signature_spell } : {}),
     ...(deck.bracket_tier ? { bracket_tier: deck.bracket_tier } : {}),
+    ...(deck.printings !== undefined ? { printings: deck.printings } : {}),
   };
 }
 
