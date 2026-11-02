@@ -11283,6 +11283,22 @@ fn self_return_origin_zone_tracking_follows_optional_and_otherwise_links() {
     stamp_self_return_origin_in_ability(&mut root, Zone::Graveyard);
     assert_eq!(origin_of(root.sub_ability.as_deref()), Some(Zone::Exile));
 
+    // An explicit origin naming another zone is not a return of the source
+    // from where it is, so the walk leaves it as parsed.
+    let mut root = self_move(Zone::Hand);
+    if let Effect::ChangeZone { origin, .. } = root.effect.as_mut() {
+        *origin = Some(Zone::Exile);
+    }
+    stamp_self_return_origin_in_ability(&mut root, Zone::Graveyard);
+    assert!(matches!(
+        root.effect.as_ref(),
+        Effect::ChangeZone {
+            origin: Some(Zone::Exile),
+            target: TargetFilter::TriggeringSource,
+            ..
+        }
+    ));
+
     // A move into a hidden zone ends the walk (CR 400.7j: public zones only).
     let mut root = self_move(Zone::Library);
     root.sub_ability = Some(Box::new(self_move(Zone::Battlefield)));

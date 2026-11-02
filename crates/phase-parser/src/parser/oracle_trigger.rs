@@ -512,11 +512,11 @@ fn stamp_self_return_origin_in_effect(effect: &mut Effect, here: Option<Zone>) -
             TargetFilter::SelfRef | TargetFilter::TriggeringSource
         ) =>
         {
+            // An explicit origin naming another zone is not a return of the
+            // source from where it is; leave it as parsed.
             if let (Some(here), Zone::Battlefield | Zone::Hand) = (here, *destination) {
-                if origin.is_none() {
+                if origin.is_none_or(|zone| zone == here) {
                     *origin = Some(here);
-                }
-                if matches!(target, TargetFilter::TriggeringSource) {
                     *target = TargetFilter::SelfRef;
                 }
             }
