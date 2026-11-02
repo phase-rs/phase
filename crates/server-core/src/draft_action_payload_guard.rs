@@ -187,6 +187,7 @@ mod tests {
                     seat: 0,
                     main_deck: vec!["Plains".into()],
                     commanders: vec![],
+                    companion: None,
                     printings: vec![row.clone(); count],
                 },
             };
@@ -773,6 +774,7 @@ mod tests {
             main_deck: vec!["Forest".to_string()],
             commanders: Vec::new(),
             companion: Some("Yorion\nSky Nomad".to_string()),
+            printings: Vec::new(),
         };
         let err = guard_draft_action_payload(&action).unwrap_err();
         assert!(err.contains("SubmitDeck.companion"));

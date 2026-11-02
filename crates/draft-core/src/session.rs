@@ -2766,6 +2766,7 @@ mod tests {
             seat: 0,
             main_deck: vec![name.into(); 40],
             commanders: Vec::new(),
+            companion: None,
             printings: set
                 .into_iter()
                 .map(|set| DeckPrinting {
@@ -2804,6 +2805,7 @@ mod tests {
                     seat: 0,
                     main_deck,
                     commanders,
+                    companion: None,
                     printings
                 },
                 "accepted resubmission replaces names and printings, including empty clearing"

@@ -1477,6 +1477,7 @@ mod tests {
                     seat: 7,
                     main_deck: vec!["Plains".into(); 40],
                     commanders: vec![],
+                    companion: None,
                     printings: vec![],
                 },
                 None,

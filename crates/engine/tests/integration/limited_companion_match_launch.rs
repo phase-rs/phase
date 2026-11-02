@@ -1116,6 +1116,7 @@ fn limited_companion_state_roundtrip_preserves_companion_declaration() {
     state.players[P0.0 as usize].companion = Some(engine::types::player::CompanionInfo {
         card: lurrus_companion(),
         used: false,
+        printing: Default::default(),
     });
 
     let serialized = serde_json::to_string(&state).expect("state must serialize");
