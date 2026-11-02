@@ -2477,6 +2477,17 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         );
     }
 
+    // CR 701.20e: the private-look ledger names exactly which library cards the
+    // looker saw; a viewer without the looker's private access must not learn
+    // those ids (the `DigSource::PriorLook` window stays open across the
+    // `OptionalEffectChoice` and `DigBottomOrder` prompts).
+    if !state
+        .private_look_player
+        .is_some_and(&can_view_private_for_player)
+    {
+        filtered.private_look_ids.clear();
+    }
+
     // CR 701.20e: the looked-at cards are known only to the looking player, so
     // every other viewer gets placeholder ids (same shape as `ScryChoice`).
     if let WaitingFor::DigBottomOrder {

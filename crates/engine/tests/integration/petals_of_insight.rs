@@ -11,7 +11,8 @@
 //! - CR 608.2m: As the final step of resolving an instant or sorcery, if it was not moved
 //!   by an effect (e.g. self-bounce), it is placed into its owner's graveyard.
 
-use engine::game::scenario::{GameRunner, GameScenario, P0};
+use engine::game::filter_state_for_viewer;
+use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{DigRestOrder, DigSource, Effect, QuantityExpr, TargetFilter};
 use engine::types::actions::GameAction;
@@ -227,6 +228,55 @@ fn petals_of_insight_accept_puts_cards_on_bottom_and_bounces_to_hand() {
     assert_eq!(
         bottom_ids, reverse_order,
         "bottom of library must match the submitted order"
+    );
+}
+
+/// CR 701.20e: while the bottom-order prompt is open, only the looking player
+/// may learn which library cards were looked at. The opponent's serialized
+/// projection carries neither the private-look ledger nor the prompt's ids.
+#[test]
+fn petals_of_insight_bottom_order_prompt_hides_looked_at_ids_from_opponent() {
+    let (mut runner, spell, looked, _) = setup_scenario();
+    let _ = runner.cast(spell).commit().stop_at_optional().resolve();
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("accept optional effect");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::DigBottomOrder { player: P0, .. }
+        ),
+        "reach guard: must be at the bottom-order prompt, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        runner.state().private_look_ids,
+        looked.to_vec(),
+        "reach guard: the private-look ledger is live during the prompt"
+    );
+
+    let own = filter_state_for_viewer(runner.state(), P0);
+    assert_eq!(own.private_look_ids, looked.to_vec());
+    assert!(matches!(
+        &own.waiting_for,
+        WaitingFor::DigBottomOrder { cards, .. } if *cards == looked.to_vec()
+    ));
+
+    let opponent = filter_state_for_viewer(runner.state(), P1);
+    assert!(
+        opponent.private_look_ids.is_empty(),
+        "opponent must not receive the looked-at ids, got {:?}",
+        opponent.private_look_ids
+    );
+    assert!(matches!(
+        &opponent.waiting_for,
+        WaitingFor::DigBottomOrder { cards, .. } if *cards == vec![ObjectId(0); 3]
+    ));
+    let wire = serde_json::to_value(&opponent).expect("projection serializes");
+    assert!(
+        wire.get("private_look_ids").is_none(),
+        "serialized opponent projection must omit private_look_ids, got {:?}",
+        wire.get("private_look_ids")
     );
 }
 

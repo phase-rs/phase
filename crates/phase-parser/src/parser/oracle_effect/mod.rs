@@ -21080,7 +21080,24 @@ fn refine_put_at_library_position(
                 }
             }
             match cardinality {
-                LibraryPlacementCardinality::Unstated => {}
+                // CR 401.4 + CR 608.2c: "those cards" (a tracked set the chain
+                // already named) placed "in any order" is ordered by the player
+                // following the instruction, not each card's owner. A bare
+                // pronoun partition ("any number of them") is not a named set
+                // and keeps its owner-arranged base shape.
+                LibraryPlacementCardinality::Unstated => {
+                    if orders_in_any_order
+                        && matches!(
+                            *target,
+                            TargetFilter::TrackedSet { .. }
+                                | TargetFilter::TrackedSetFiltered { .. }
+                        )
+                    {
+                        if let Some(follower) = follower {
+                            *arranger = Some(follower.clone());
+                        }
+                    }
+                }
                 LibraryPlacementCardinality::Exact(count_expr) => *count = count_expr,
                 // CR 601.2c + CR 115.1: the announced targets, rather than the
                 // effect's default count, define a targeted placement's size.
@@ -21106,25 +21123,6 @@ fn refine_put_at_library_position(
                                 filter: target.clone(),
                             },
                         });
-                    }
-                }
-            }
-            // CR 401.4 + CR 608.2c: For anaphoric references ("those cards", "them",
-            // "the exiled cards") placed on the bottom of a library "in any order",
-            // the controller of the instruction arranges the order — not each card's
-            // owner. This applies when the cardinality is Unstated but the target is
-            // an anaphoric reference to a tracked set (TrackedSet, TrackedSetFiltered)
-            // or ParentTarget (for reflexive triggers).
-            if orders_in_any_order {
-                let is_anaphoric_target = matches!(
-                    *target,
-                    TargetFilter::TrackedSet { .. }
-                        | TargetFilter::TrackedSetFiltered { .. }
-                        | TargetFilter::ParentTarget
-                );
-                if is_anaphoric_target {
-                    if let Some(follower) = follower {
-                        *arranger = Some(follower.clone());
                     }
                 }
             }

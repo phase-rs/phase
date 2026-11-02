@@ -3373,13 +3373,12 @@ pub(super) fn handle_resolution_choice(
                 order
                     .iter()
                     .map(|&obj_id| {
-                        let request = crate::game::zone_pipeline::ZoneMoveRequest::effect(
+                        crate::game::zone_pipeline::ZoneMoveRequest::effect(
                             obj_id,
                             Zone::Library,
                             source_id,
                         )
-                        .at_library_position(crate::types::ability::LibraryPosition::Bottom);
-                        request
+                        .at_library_position(crate::types::ability::LibraryPosition::Bottom)
                     })
                     .collect(),
                 Some(
