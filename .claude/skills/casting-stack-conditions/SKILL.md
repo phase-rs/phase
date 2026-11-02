@@ -69,7 +69,7 @@ CastSpell action
        └─ >1 → WaitingFor::TargetSelection
   │
   ▼
-9. pay_and_push()
+9. pay_and_push_with_lock()
    ├─ X in cost → WaitingFor::ManaPayment
    ├─ pay_mana_cost() — shared mana payment building block (see below)
    ├─ Move card to Zone::Stack
@@ -80,7 +80,7 @@ CastSpell action
 10. Return WaitingFor::Priority
 ```
 
-Key functions: `handle_cast_spell()`, `pay_and_push()`, `pay_mana_cost()`, `pay_ability_cost()`, `handle_activate_ability()`, `handle_select_targets()`, `handle_cancel_cast()`, `build_resolved_from_def()`
+Key functions: `handle_cast_spell()`, `pay_and_push_with_lock()`, `pay_mana_cost()`, `pay_ability_cost()`, `handle_activate_ability()`, `handle_select_targets()`, `handle_cancel_cast()`, `build_resolved_from_def()`
 
 ---
 
@@ -126,7 +126,7 @@ wrong layer.
 Three composable helpers handle all ability cost payment:
 
 ### `pay_mana_cost(state, player, source_id, cost, events)`
-Shared mana payment pipeline: `SpellMeta` → `auto_tap_lands()` → `can_pay_for_spell()` → `pay_cost_with_demand()`. Used by both `pay_and_push()` (spell casting) and `pay_ability_cost()` (activated abilities).
+Shared mana payment pipeline: `SpellMeta` → `auto_tap_lands()` → `can_pay_for_spell()` → `pay_cost_with_demand()`. Used by both `pay_and_push_with_lock()` (spell casting) and `pay_ability_cost()` (activated abilities).
 
 ### `pay_ability_cost(state, player, source_id, cost, events)`
 Dispatches over `AbilityCost` enum:
@@ -413,7 +413,7 @@ if let Some((_, rest)) = nom_on_lower(text, lower, tag("you may ")) {
 
 ```bash
 rg -q "fn handle_cast_spell" crates/engine/src/game/casting.rs && \
-rg -q "fn pay_and_push" crates/engine/src/game/casting_costs.rs && \
+rg -q "fn pay_and_push_with_lock" crates/engine/src/game/casting_costs.rs && \
 rg -q "fn pay_mana_cost" crates/engine/src/game/casting.rs && \
 rg -q "fn pay_ability_cost" crates/engine/src/game/costs.rs && \
 rg -q "fn requires_untapped" crates/engine/src/game/casting.rs && \
@@ -432,7 +432,7 @@ rg -q "fn resolve_ability_chain" crates/engine/src/game/effects/mod.rs && \
 rg -q "struct PendingCast" crates/engine/src/types/game_state.rs && \
 rg -q "struct StackEntry" crates/engine/src/types/game_state.rs && \
 rg -q "enum StackEntryKind" crates/engine/src/types/game_state.rs && \
-rg -q "enum TriggerCondition" crates/engine/src/types/ability.rs && \
+rg -q "enum TriggerCondition" crates/phase-ast/src/types/ability.rs && \
 rg -q "enum WaitingFor" crates/engine/src/types/game_state.rs && \
 echo "✓ casting-stack-conditions skill references valid" || \
 echo "✗ STALE — update skill references"

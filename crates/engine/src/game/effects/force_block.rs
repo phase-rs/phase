@@ -1,3 +1,4 @@
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::targeting::resolved_object_ids_for_filter;
 use crate::types::ability::{
     ContinuousModification, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter,
@@ -113,6 +114,7 @@ pub fn resolve(
             TransientContinuousEffectBindings {
                 affected_recipient: Some(recipient),
                 duration_subject: None,
+                granting_object: None,
             },
         );
     }

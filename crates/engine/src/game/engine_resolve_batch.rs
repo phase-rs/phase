@@ -11,7 +11,7 @@ use crate::types::player::PlayerId;
 
 use super::engine::{
     apply_action_boundary_with_stack_limit, install_stack_resolution_session,
-    resume_stack_resolution_session_runner, take_and_restore_stack_resolution_session,
+    resume_stack_resolution_session_runner, take_and_restore_stack_resolution_session, EngineError,
     PublicFinalizeMode,
 };
 use super::public_state::{bump_state_revision, finalize_display_state};
@@ -206,7 +206,7 @@ fn bounded_restored_stack_automation_log_tail(entries: &[GameLogEntry]) -> Vec<G
 pub fn resolve_all_ready_prefix(
     state: &mut GameState,
     requester: PlayerId,
-) -> ResolveAllFastForwardResult {
+) -> Result<ResolveAllFastForwardResult, EngineError> {
     resolve_all_ready_prefix_with(state, requester, ResolveAllContinuation::AutoPassRemainder)
 }
 
@@ -242,7 +242,35 @@ pub fn resolve_all_ready_prefix_with(
     state: &mut GameState,
     requester: PlayerId,
     continuation: ResolveAllContinuation,
-) -> ResolveAllFastForwardResult {
+) -> Result<ResolveAllFastForwardResult, EngineError> {
+    // A rejected public batch must leave the game exactly as its caller found
+    // it. Prefix progress made by earlier iterations is not committed if a
+    // later iteration proves a life change unrepresentable.
+    //
+    // The frame also owns the lifecycle observations emitted by accepted inner
+    // boundaries: they are held until this whole public call succeeds, so a
+    // later rejection can retract them instead of stranding them in an
+    // enclosing prospective parent.
+    let lifecycle = super::lifecycle::enter_action_frame();
+    let entry = state.clone();
+    match resolve_all_ready_prefix_with_inner(state, requester, continuation) {
+        Ok(result) => {
+            lifecycle.commit_into_parent();
+            Ok(result)
+        }
+        Err(error) => {
+            *state = entry;
+            lifecycle.discard();
+            Err(error)
+        }
+    }
+}
+
+fn resolve_all_ready_prefix_with_inner(
+    state: &mut GameState,
+    requester: PlayerId,
+    continuation: ResolveAllContinuation,
+) -> Result<ResolveAllFastForwardResult, EngineError> {
     let total = state.stack.len() as u32;
     let mut events = Vec::new();
     let mut log_entries = Vec::new();
@@ -256,14 +284,14 @@ pub fn resolve_all_ready_prefix_with(
             finalize_display_state(state);
             interaction::ensure_interaction_authority(state);
         }
-        return ResolveAllFastForwardResult {
+        return Ok(ResolveAllFastForwardResult {
             events,
             waiting_for: state.waiting_for.clone(),
             log_entries,
             items_resolved,
             total,
             recorded_actions,
-        };
+        });
     };
 
     // Ready is deliberately inert. Materialize the saved priority checkpoint
@@ -283,11 +311,22 @@ pub fn resolve_all_ready_prefix_with(
         // resolution. Suspend the whole clone-local map: an UntilStackEmpty
         // entry could otherwise run beyond this proof's one-entry limit.
         let suspended_auto_passes = std::mem::take(&mut proof.auto_pass);
+        // Each proof owns its own frame: a proof this loop later refuses must not
+        // leave its observations behind, even though its apply call succeeded.
+        let proof_lifecycle = super::lifecycle::enter_action_frame();
         let materialized = materialize_one_consented_resolution(&mut proof, &run);
         proof.auto_pass = suspended_auto_passes;
-        let Some((boundary, mut actions)) = materialized else {
-            proof_stopped = true;
-            break;
+        let (boundary, mut actions) = match materialized {
+            Ok(Some(materialized)) => materialized,
+            Ok(None) => {
+                proof_lifecycle.discard();
+                proof_stopped = true;
+                break;
+            }
+            Err(error) => {
+                proof_lifecycle.discard();
+                return Err(error);
+            }
         };
 
         // CR 117.5 + CR 704.3 + CR 603.3b: do not collapse across any new
@@ -300,10 +339,12 @@ pub fn resolve_all_ready_prefix_with(
             || !stack::priority_checkpoint_is_settled(&proof)
             || !consent_authorization_matches(&proof, &run)
         {
+            proof_lifecycle.discard();
             proof_stopped = true;
             break;
         }
 
+        proof_lifecycle.commit_into_parent();
         items_resolved += 1;
         events.extend(boundary.events);
         log_entries.extend(boundary.log_entries);
@@ -339,7 +380,7 @@ pub fn resolve_all_ready_prefix_with(
             total,
             recorded_actions,
         };
-        super::engine::resume_auto_pass_after_resolve_all(state, &mut resumed);
+        super::engine::resume_auto_pass_after_resolve_all(state, &mut resumed)?;
         events = resumed.events;
         log_entries = resumed.log_entries;
         items_resolved = resumed.items_resolved;
@@ -348,14 +389,14 @@ pub fn resolve_all_ready_prefix_with(
     finalize_display_state(state);
     interaction::ensure_interaction_authority(state);
 
-    ResolveAllFastForwardResult {
+    Ok(ResolveAllFastForwardResult {
         events,
         waiting_for: state.waiting_for.clone(),
         log_entries,
         items_resolved,
         total,
         recorded_actions,
-    }
+    })
 }
 
 /// Whether `requester` may hand the current `WaitingFor::ResolveAllReady`
@@ -524,23 +565,45 @@ pub fn recover_orphaned_resolve_all(_: &mut GameState) -> Option<ResolveAllFastF
 /// Explicitly resumes coherent persisted stack automation through the ordinary
 /// runner, or repairs an incoherent saved authorization without resolving a
 /// stack entry.
-pub fn resume_restored_stack_automation(state: &mut GameState) -> RestoredStackAutomationResume {
-    let result = match classify_restored_stack_automation(state) {
-        RestoredStackAutomation::None => RestoredStackAutomationResult::Noop(
-            ActionResult::applied(Vec::new(), state.waiting_for.clone()),
-        ),
-        RestoredStackAutomation::ActiveSession => {
-            RestoredStackAutomationResult::Progressed(resume_stack_resolution_session_runner(state))
+pub fn resume_restored_stack_automation(
+    state: &mut GameState,
+) -> Result<RestoredStackAutomationResume, EngineError> {
+    // A rejected resume must not leave a half-repaired or half-resolved
+    // persisted state behind: the caller re-enters from its decode boundary.
+    // The public frame also holds the lifecycle observations of the resumed
+    // runner until the whole resume succeeds, so a rejection discards them.
+    let lifecycle = super::lifecycle::enter_action_frame();
+    let entry = state.clone();
+    let completed = (|| -> Result<RestoredStackAutomationResult, EngineError> {
+        Ok(match classify_restored_stack_automation(state) {
+            RestoredStackAutomation::None => RestoredStackAutomationResult::Noop(
+                ActionResult::applied(Vec::new(), state.waiting_for.clone()),
+            ),
+            RestoredStackAutomation::ActiveSession => RestoredStackAutomationResult::Progressed(
+                resume_stack_resolution_session_runner(state)?,
+            ),
+            RestoredStackAutomation::LegacyResolveAllReady => {
+                materialize_restored_legacy_ready_session(state);
+                RestoredStackAutomationResult::Progressed(resume_stack_resolution_session_runner(
+                    state,
+                )?)
+            }
+            RestoredStackAutomation::Repair => RestoredStackAutomationResult::ZeroResolutionRepair(
+                repair_restored_stack_automation(state),
+            ),
+        })
+    })();
+    match completed {
+        Ok(completed) => {
+            lifecycle.commit_into_parent();
+            Ok(RestoredStackAutomationResume::from_completed(completed))
         }
-        RestoredStackAutomation::LegacyResolveAllReady => {
-            materialize_restored_legacy_ready_session(state);
-            RestoredStackAutomationResult::Progressed(resume_stack_resolution_session_runner(state))
+        Err(error) => {
+            *state = entry;
+            lifecycle.discard();
+            Err(error)
         }
-        RestoredStackAutomation::Repair => RestoredStackAutomationResult::ZeroResolutionRepair(
-            repair_restored_stack_automation(state),
-        ),
-    };
-    RestoredStackAutomationResume::from_completed(result)
+    }
 }
 
 fn restored_stack_resolution_session_is_coherent(
@@ -708,34 +771,41 @@ fn consent_authorization_matches(state: &GameState, run: &ResolveAllConsentRun) 
 /// Performs exactly one actual priority cycle on a proof clone. Every seeded
 /// pass is recorded in application order so replay can submit the same normal
 /// `PassPriority` actions without a hidden batch-only transition.
+type MaterializedConsentedResolution = (
+    crate::types::game_state::ActionResult,
+    Vec<(PlayerId, GameAction)>,
+);
+
 fn materialize_one_consented_resolution(
     state: &mut GameState,
     run: &ResolveAllConsentRun,
-) -> Option<(
-    crate::types::game_state::ActionResult,
-    Vec<(PlayerId, GameAction)>,
-)> {
+) -> Result<Option<MaterializedConsentedResolution>, EngineError> {
     let WaitingFor::Priority { player } = &state.waiting_for else {
-        return None;
+        return Ok(None);
     };
     let player = *player;
     if !consent_authorization_matches(state, run) {
-        return None;
+        return Ok(None);
     }
     let actor = turn_control::authorized_submitter_for_player(state, player);
     let mut recorded = Vec::new();
-    seed_remaining_consented_priority_passes(state, player, &mut recorded)?;
-    let boundary = apply_action_boundary_with_stack_limit(
+    if seed_remaining_consented_priority_passes(state, player, &mut recorded).is_none() {
+        return Ok(None);
+    }
+    let boundary = match apply_action_boundary_with_stack_limit(
         state,
         actor,
         player,
         GameAction::PassPriority,
         PublicFinalizeMode::DeferredDisplay,
         Some(1),
-    )
-    .ok()?;
+    ) {
+        Ok(boundary) => boundary,
+        Err(error @ EngineError::LifeChangeUnrepresentable { .. }) => return Err(error),
+        Err(_) => return Ok(None),
+    };
     recorded.insert(0, (actor, GameAction::PassPriority));
-    Some((boundary, recorded))
+    Ok(Some((boundary, recorded)))
 }
 
 fn seed_remaining_consented_priority_passes(
@@ -768,10 +838,18 @@ pub fn resolve_all_fast_forward<F>(
     requester: PlayerId,
     max_resolutions: u32,
     mut choose_non_requester_action: F,
-) -> ResolveAllFastForwardResult
+) -> Result<ResolveAllFastForwardResult, EngineError>
 where
     F: FnMut(&GameState, PlayerId) -> ResolveAllCallbackDecision,
 {
+    // An unrepresentable life change rejects the public batch atomically.
+    // Non-representability is the only failure that escalates out of the
+    // per-boundary stop policy; every other engine error keeps the established
+    // greatest-safe-prefix stop below. The public frame owns the lifecycle
+    // observations of every accepted inner boundary, so a later rejection
+    // retracts the whole batch's observations along with its state.
+    let lifecycle = super::lifecycle::enter_action_frame();
+    let entry = state.clone();
     let total = state.stack.len();
     let resolution_cap = if max_resolutions == 0 {
         u32::MAX
@@ -859,15 +937,21 @@ where
         let stack_resolution_limit =
             matches!(action, GameAction::PassPriority).then_some(remaining_resolution_cap);
         let action_for_record = action.clone();
-        let Ok(boundary) = apply_action_boundary_with_stack_limit(
+        let boundary = match apply_action_boundary_with_stack_limit(
             state,
             actor,
             semantic_owner,
             action,
             mode,
             stack_resolution_limit,
-        ) else {
-            break;
+        ) {
+            Ok(boundary) => boundary,
+            Err(error @ EngineError::LifeChangeUnrepresentable { .. }) => {
+                *state = entry;
+                lifecycle.discard();
+                return Err(error);
+            }
+            Err(_) => break,
         };
         // `actor` holds priority right now (per `WaitingFor::Priority`), so a
         // legal replay must submit its action before any of the seeded
@@ -907,14 +991,15 @@ where
         finalize_display_state(state);
     }
 
-    ResolveAllFastForwardResult {
+    lifecycle.commit_into_parent();
+    Ok(ResolveAllFastForwardResult {
         events,
         waiting_for: state.waiting_for.clone(),
         log_entries,
         items_resolved,
         total: total as u32,
         recorded_actions,
-    }
+    })
 }
 
 fn seed_remaining_priority_cycle_passes<F>(
@@ -990,8 +1075,9 @@ mod tests {
 
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, CopyRetargetPermission, Effect,
-        ManaContribution, ManaProduction, QuantityExpr, ResolvedAbility, TargetFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, CopyRetargetPermission,
+        DelayedTriggerCondition, Effect, ManaContribution, ManaProduction, QuantityExpr,
+        ResolvedAbility, TargetFilter,
     };
     use crate::types::actions::{ResolveAllConsentDecision, ResolveAllScope};
     use crate::types::card_type::{CardType, CoreType};
@@ -1024,6 +1110,72 @@ mod tests {
                 )),
             },
         }
+    }
+
+    fn delayed_trigger_entry(id: u64, controller: PlayerId) -> StackEntry {
+        let object_id = ObjectId(id);
+        StackEntry {
+            id: object_id,
+            source_id: object_id,
+            controller,
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: object_id,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::CreateDelayedTrigger {
+                        condition: DelayedTriggerCondition::AtNextPhase { phase: Phase::End },
+                        effect: Box::new(AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp)),
+                        uses_tracked_set: false,
+                    },
+                    vec![],
+                    object_id,
+                    controller,
+                )),
+            },
+        }
+    }
+
+    fn life_gain_entry(id: u64, controller: PlayerId, amount: u32) -> StackEntry {
+        let object_id = ObjectId(id);
+        StackEntry {
+            id: object_id,
+            source_id: object_id,
+            controller,
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: object_id,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed {
+                            value: amount as i32,
+                        },
+                        player: TargetFilter::Controller,
+                    },
+                    vec![],
+                    object_id,
+                    controller,
+                )),
+            },
+        }
+    }
+
+    fn life_batch_entries(amount: u32) -> Vec<StackEntry> {
+        // Stack entries are stored bottom-to-top: the delayed-trigger install is
+        // the first successful item, followed by the representability boundary.
+        vec![
+            life_gain_entry(22, PlayerId(0), amount),
+            delayed_trigger_entry(21, PlayerId(0)),
+        ]
+    }
+
+    fn active_restored_state(stack: Vec<StackEntry>) -> GameState {
+        let mut state = priority_state(PlayerId(0), stack);
+        super::super::engine::install_stack_resolution_session(
+            &mut state,
+            [PlayerId(0), PlayerId(1)].into_iter().collect(),
+            StackResolutionBudget::Unlimited,
+            StackResolutionPolicy::Committed,
+            Default::default(),
+        );
+        state
     }
 
     fn draw_entry(id: u64, controller: PlayerId) -> StackEntry {
@@ -1134,7 +1286,8 @@ mod tests {
         let mut state = priority_state(PlayerId(0), vec![self_copy_entry(1, PlayerId(0))]);
         state.priority_passes.insert(PlayerId(1));
 
-        let result = resolve_all_fast_forward(&mut state, PlayerId(0), 1, stop_callback);
+        let result = resolve_all_fast_forward(&mut state, PlayerId(0), 1, stop_callback)
+            .expect("the fixture's fast-forward is representable");
 
         assert_eq!(result.items_resolved, 1);
         assert_eq!(result.total, 1);
@@ -1157,7 +1310,8 @@ mod tests {
         let mut state = priority_state(PlayerId(0), vec![no_op_entry(1, PlayerId(0))]);
         state.priority_passes.insert(PlayerId(1));
 
-        let result = resolve_all_fast_forward(&mut state, PlayerId(0), 0, stop_callback);
+        let result = resolve_all_fast_forward(&mut state, PlayerId(0), 0, stop_callback)
+            .expect("the fixture's fast-forward is representable");
 
         assert_eq!(result.items_resolved, 1);
         assert!(state.stack.is_empty());
@@ -1171,7 +1325,8 @@ mod tests {
         let result = resolve_all_fast_forward(&mut state, PlayerId(0), 0, |_, _| {
             calls.set(calls.get() + 1);
             ResolveAllCallbackDecision::Action(GameAction::PassPriority)
-        });
+        })
+        .expect("the fixture's fast-forward is representable");
 
         assert_eq!(calls.get(), 1);
         assert_eq!(result.items_resolved, 1);
@@ -1216,7 +1371,8 @@ mod tests {
                 "callback should be for the opposing team representative, not active teammate"
             );
             ResolveAllCallbackDecision::Action(GameAction::PassPriority)
-        });
+        })
+        .expect("the fixture's fast-forward is representable");
 
         assert_eq!(calls.get(), 1);
         assert_eq!(result.items_resolved, 1);
@@ -1243,7 +1399,8 @@ mod tests {
                     scope: PhaseStopScope::AllTurns,
                 }],
             })
-        });
+        })
+        .expect("the fixture's fast-forward is representable");
 
         assert_eq!(calls.get(), 2);
         assert_eq!(result.items_resolved, 0);
@@ -1259,7 +1416,8 @@ mod tests {
         );
         state.priority_passes.insert(PlayerId(1));
 
-        let result = resolve_all_fast_forward(&mut state, PlayerId(0), 1, stop_callback);
+        let result = resolve_all_fast_forward(&mut state, PlayerId(0), 1, stop_callback)
+            .expect("the fixture's fast-forward is representable");
 
         assert_eq!(result.items_resolved, 1);
         assert_eq!(state.stack.len(), 1);
@@ -1273,7 +1431,8 @@ mod tests {
         state.priority_player = PlayerId(0);
         state.priority_passes.insert(PlayerId(0));
 
-        let result = resolve_all_fast_forward(&mut state, PlayerId(0), 0, stop_callback);
+        let result = resolve_all_fast_forward(&mut state, PlayerId(0), 0, stop_callback)
+            .expect("the fixture's fast-forward is representable");
 
         assert_eq!(result.items_resolved, 1);
         assert!(state.stack.is_empty());
@@ -1283,7 +1442,8 @@ mod tests {
     fn stops_when_callback_stops_for_non_requester() {
         let mut state = priority_state(PlayerId(1), vec![no_op_entry(1, PlayerId(1))]);
 
-        let result = resolve_all_fast_forward(&mut state, PlayerId(0), 0, stop_callback);
+        let result = resolve_all_fast_forward(&mut state, PlayerId(0), 0, stop_callback)
+            .expect("the fixture's fast-forward is representable");
 
         assert_eq!(result.items_resolved, 0);
         assert_eq!(state.stack.len(), 1);
@@ -1307,7 +1467,8 @@ mod tests {
                 contract,
                 action: GameAction::PassPriority,
             }
-        });
+        })
+        .expect("the fixture's fast-forward is representable");
 
         assert_eq!(result.items_resolved, 1);
         assert!(state.stack.is_empty());
@@ -1326,7 +1487,8 @@ mod tests {
                     scope: PhaseStopScope::AllTurns,
                 }],
             })
-        });
+        })
+        .expect("the fixture's fast-forward is representable");
 
         assert_eq!(calls.get(), 1);
         assert_eq!(result.items_resolved, 0);
@@ -1353,7 +1515,8 @@ mod tests {
             );
             assert!(!callback_state.objects[&land_id].has_mana_ability);
             ResolveAllCallbackDecision::Stop
-        });
+        })
+        .expect("the fixture's fast-forward is representable");
 
         assert_eq!(result.items_resolved, 1);
         assert!(!state.objects[&land_id].has_mana_ability);
@@ -1370,7 +1533,8 @@ mod tests {
         state.objects.get_mut(&land_id).unwrap().tapped = true;
         mark_public_state_all_dirty(&mut state);
 
-        let result = resolve_all_fast_forward(&mut state, PlayerId(0), 0, stop_callback);
+        let result = resolve_all_fast_forward(&mut state, PlayerId(0), 0, stop_callback)
+            .expect("the fixture's fast-forward is representable");
 
         assert_eq!(result.items_resolved, 1);
         assert_eq!(state.public_state_dirty, PublicStateDirty::default());
@@ -1429,7 +1593,8 @@ mod tests {
         let mut state =
             ready_state_with_active_player(PlayerId(1), vec![no_op_entry(1, PlayerId(0))]);
 
-        let result = resolve_all_ready_prefix(&mut state, PlayerId(0));
+        let result = resolve_all_ready_prefix(&mut state, PlayerId(0))
+            .expect("the fixture's Resolve All prefix is representable");
 
         assert_eq!(result.items_resolved, 1);
         assert!(state.stack.is_empty());
@@ -1498,6 +1663,7 @@ mod tests {
             player: PlayerId(0),
         };
         let (boundary, _) = materialize_one_consented_resolution(&mut proof, &run)
+            .expect("the fixture's consent run is representable")
             .expect("a full consent run materializes one ordinary priority cycle");
         assert_eq!(stack_resolved_count(&boundary.events), 1);
         assert_eq!(proof.stack.len(), 2);
@@ -1509,7 +1675,8 @@ mod tests {
             &mut state,
             PlayerId(0),
             ResolveAllContinuation::StopAtPriority,
-        );
+        )
+        .expect("the fixture's Resolve All prefix is representable");
 
         assert_eq!(
             result.items_resolved,
@@ -1533,6 +1700,175 @@ mod tests {
         );
     }
 
+    fn assert_no_delayed_installation(
+        parent: super::super::lifecycle::ActionLifecycleGuard,
+        label: &str,
+    ) {
+        let facts = parent
+            .take_outer_facts()
+            .expect("the test owns the outer prospective frame");
+        assert_eq!(
+            facts.delayed_installations().count(),
+            0,
+            "{label}: a rejected public call must not merge accepted-prefix facts"
+        );
+    }
+
+    fn assert_delayed_installation_merged(
+        parent: super::super::lifecycle::ActionLifecycleGuard,
+        label: &str,
+    ) {
+        let facts = parent
+            .take_outer_facts()
+            .expect("the test owns the outer prospective frame");
+        assert_eq!(
+            facts
+                .delayed_installations()
+                .map(|(_, source, controller)| (source, controller))
+                .collect::<Vec<_>>(),
+            vec![(ObjectId(21), PlayerId(0))],
+            "{label}: the representable public call must merge its real delayed-trigger install"
+        );
+    }
+
+    #[test]
+    fn ready_prefix_rejects_a_later_overflow_and_discards_prefix_lifecycle_facts() {
+        let mut state = ready_state(life_batch_entries(2));
+        state.players[0].life_gained_this_turn = u32::MAX - 1;
+        let entry = state.clone();
+        let parent = super::super::lifecycle::enter_action_frame();
+
+        let error = resolve_all_ready_prefix_with(
+            &mut state,
+            PlayerId(0),
+            ResolveAllContinuation::StopAtPriority,
+        )
+        .expect_err("the later gain must reject after the earlier delayed trigger installed");
+
+        assert!(matches!(
+            error,
+            EngineError::LifeChangeUnrepresentable {
+                player: PlayerId(0)
+            }
+        ));
+        assert_eq!(
+            state, entry,
+            "the rejected call restores its full Ready entry state, including revision, journal, RNG, consent, and session"
+        );
+        assert_no_delayed_installation(parent, "Ready-prefix overflow");
+    }
+
+    #[test]
+    fn ready_prefix_merges_lifecycle_facts_for_a_representable_pair() {
+        let mut state = ready_state(life_batch_entries(2));
+        state.players[0].life_gained_this_turn = u32::MAX - 3;
+        let parent = super::super::lifecycle::enter_action_frame();
+
+        let result = resolve_all_ready_prefix_with(
+            &mut state,
+            PlayerId(0),
+            ResolveAllContinuation::StopAtPriority,
+        )
+        .expect("the adjacent counter value is representable");
+
+        assert_eq!(result.items_resolved, 2);
+        assert_eq!(state.players[0].life_gained_this_turn, u32::MAX - 1);
+        assert_delayed_installation_merged(parent, "Ready-prefix control");
+    }
+
+    #[test]
+    fn fast_forward_rejects_a_later_overflow_and_discards_prefix_lifecycle_facts() {
+        let mut state = priority_state(PlayerId(0), life_batch_entries(2));
+        state.players[0].life_gained_this_turn = u32::MAX - 1;
+        let entry = state.clone();
+        let parent = super::super::lifecycle::enter_action_frame();
+
+        let error = resolve_all_fast_forward(&mut state, PlayerId(0), 0, |_, _| {
+            ResolveAllCallbackDecision::Action(GameAction::PassPriority)
+        })
+        .expect_err("the later gain must reject after the earlier delayed trigger installed");
+
+        assert!(matches!(
+            error,
+            EngineError::LifeChangeUnrepresentable {
+                player: PlayerId(0)
+            }
+        ));
+        assert_eq!(
+            state, entry,
+            "the rejected call restores its full public entry state, including revision, journal, RNG, and stack"
+        );
+        assert_no_delayed_installation(parent, "fast-forward overflow");
+    }
+
+    #[test]
+    fn fast_forward_merges_lifecycle_facts_for_a_representable_pair() {
+        let mut state = priority_state(PlayerId(0), life_batch_entries(2));
+        state.players[0].life_gained_this_turn = u32::MAX - 3;
+        let parent = super::super::lifecycle::enter_action_frame();
+
+        let result = resolve_all_fast_forward(&mut state, PlayerId(0), 0, |_, _| {
+            ResolveAllCallbackDecision::Action(GameAction::PassPriority)
+        })
+        .expect("the adjacent counter value is representable");
+
+        assert_eq!(result.items_resolved, 2);
+        assert_eq!(state.players[0].life_gained_this_turn, u32::MAX - 1);
+        assert_delayed_installation_merged(parent, "fast-forward control");
+    }
+
+    #[test]
+    fn restored_resume_rolls_back_after_later_overflow_for_active_and_legacy_states() {
+        for legacy in [false, true] {
+            let make_state = || {
+                if legacy {
+                    ready_state(life_batch_entries(2))
+                } else {
+                    active_restored_state(life_batch_entries(2))
+                }
+            };
+            let expected_class = if legacy {
+                RestoredStackAutomation::LegacyResolveAllReady
+            } else {
+                RestoredStackAutomation::ActiveSession
+            };
+
+            let mut rejected = make_state();
+            assert_eq!(
+                classify_restored_stack_automation(&rejected),
+                expected_class
+            );
+            rejected.players[0].life_gained_this_turn = u32::MAX - 1;
+            let entry = rejected.clone();
+            let parent = super::super::lifecycle::enter_action_frame();
+            let error = resume_restored_stack_automation(&mut rejected)
+                .expect_err("the resumed runner must reject the later counter overflow");
+
+            assert!(matches!(
+                error,
+                EngineError::LifeChangeUnrepresentable {
+                    player: PlayerId(0)
+                }
+            ));
+            assert_eq!(
+                rejected, entry,
+                "legacy={legacy}: restore-resume must restore the whole pre-materialization state"
+            );
+            assert_no_delayed_installation(parent, "restored-resume overflow");
+
+            let mut control = make_state();
+            control.players[0].life_gained_this_turn = u32::MAX - 3;
+            let parent = super::super::lifecycle::enter_action_frame();
+            resume_restored_stack_automation(&mut control)
+                .expect("the adjacent counter value is representable");
+            assert!(
+                control.stack.is_empty(),
+                "legacy={legacy}: both entries resolve"
+            );
+            assert_delayed_installation_merged(parent, "restored-resume control");
+        }
+    }
+
     #[test]
     fn ready_consent_honors_its_saved_resolution_cap() {
         let mut state = ready_state(vec![
@@ -1545,7 +1881,8 @@ mod tests {
             .expect("Ready retains its frozen run")
             .max_resolutions = StackResolutionBudget::from_legacy_max_resolutions(1);
 
-        let result = resolve_all_ready_prefix(&mut state, PlayerId(0));
+        let result = resolve_all_ready_prefix(&mut state, PlayerId(0))
+            .expect("the fixture's Resolve All prefix is representable");
 
         assert_eq!(result.items_resolved, 1);
         assert_eq!(state.stack.len(), 1);
@@ -1557,7 +1894,8 @@ mod tests {
     fn changed_controller_invalidates_ready_consent_without_resolving() {
         let mut state = ready_state(vec![no_op_entry(1, PlayerId(0))]);
         state.turn_decision_controller = Some(PlayerId(1));
-        let result = resolve_all_ready_prefix(&mut state, PlayerId(0));
+        let result = resolve_all_ready_prefix(&mut state, PlayerId(0))
+            .expect("the fixture's Resolve All prefix is representable");
 
         assert_eq!(result.items_resolved, 0);
         assert_eq!(state.stack.len(), 1);
@@ -1576,7 +1914,8 @@ mod tests {
         };
         state.auto_pass.insert(PlayerId(0), retained);
 
-        let result = resolve_all_ready_prefix(&mut state, PlayerId(0));
+        let result = resolve_all_ready_prefix(&mut state, PlayerId(0))
+            .expect("the fixture's Resolve All prefix is representable");
 
         assert_eq!(result.items_resolved, 0);
         assert_eq!(state.stack.len(), 2);
@@ -1601,7 +1940,8 @@ mod tests {
             &mut state,
             PlayerId(0),
             ResolveAllContinuation::StopAtPriority,
-        );
+        )
+        .expect("the fixture's fast-forward is representable");
 
         assert_eq!(result.items_resolved, 0);
         assert_eq!(state.stack.len(), 2);
@@ -1618,7 +1958,8 @@ mod tests {
         };
         state.auto_pass.insert(PlayerId(0), retained);
 
-        let result = resolve_all_ready_prefix(&mut state, PlayerId(0));
+        let result = resolve_all_ready_prefix(&mut state, PlayerId(0))
+            .expect("the fixture's Resolve All prefix is representable");
 
         assert_eq!(result.items_resolved, 0);
         assert_eq!(state.stack.len(), 1);
@@ -1638,7 +1979,8 @@ mod tests {
         };
         state.auto_pass.insert(PlayerId(0), retained);
 
-        let result = resolve_all_ready_prefix(&mut state, PlayerId(0));
+        let result = resolve_all_ready_prefix(&mut state, PlayerId(0))
+            .expect("the fixture's Resolve All prefix is representable");
 
         assert_eq!(result.items_resolved, 0);
         assert_eq!(state.stack.len(), 2);

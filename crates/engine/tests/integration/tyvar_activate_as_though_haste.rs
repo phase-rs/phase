@@ -73,6 +73,7 @@ fn summoning_sick_mana_creature_taps_with_tyvar_static() {
         .act(GameAction::ActivateAbility {
             source_id: dork_id,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating the mana ability must succeed with Tyvar's static in play");
 
@@ -124,6 +125,7 @@ fn summoning_sick_land_creature_taps_with_tyvar_static() {
         .act(GameAction::ActivateAbility {
             source_id: arbor_id,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("Dryad Arbor must tap for {G} with Tyvar's static in play");
     assert_eq!(
@@ -153,6 +155,7 @@ fn summoning_sick_tap_draw_ability_activates_with_tyvar_static() {
             .act(GameAction::ActivateAbility {
                 source_id: drawer_id,
                 ability_index: 0,
+                payment_mode: engine::types::game_state::CastPaymentMode::Auto
             })
             .is_err(),
         "a summoning-sick {{T}}: draw ability must be rejected without Tyvar",

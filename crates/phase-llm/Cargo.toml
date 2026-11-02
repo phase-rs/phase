@@ -25,6 +25,10 @@ serde_json = "1"
 # artifacts, and the runtime rule it verifies needs no parser, because only one
 # spelling is accepted.
 url = "2"
+# The engine's scenario builder, for tests that need real permanents with real
+# abilities (a mana artifact the engine itself would tap). Test-only; the
+# production dependency above stays feature-free.
+engine = { path = "../engine", package = "phase-engine", features = ["test-support"] }
 
 [features]
 default = []

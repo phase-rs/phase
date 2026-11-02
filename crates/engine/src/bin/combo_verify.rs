@@ -127,7 +127,7 @@ fn main() {
 /// non-gated row is not yet driven on today's in-place loop model).
 fn deferral_label(b: DeferralBucket) -> &'static str {
     match b {
-        DeferralBucket::ObjectReentry => "object re-entry (fresh ObjectId each cycle)",
+        DeferralBucket::ObjectReentry => "new object each cycle (token mint or leave-and-return)",
         DeferralBucket::ExtraTurnOrCombat => "extra-turn / extra-combat re-entry",
         DeferralBucket::ColorConverting => "color-converting per-color net-progress",
         DeferralBucket::Other => "no bespoke driver on today's in-place loop model",

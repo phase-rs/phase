@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Full terminal deliveries carry an optional recipient-filtered final view (CurrentTerminalDelivery.final_view) for crash-safe cleanup and recovery. A previous Full peer drops the defaulted field and loses the retained terminal view, so the exact-match handshake must refuse it. P2P terminal cleanup now also waits for a new terminal_result_receipt after each eligible guest durably commits its exact recipient-bound result; older peers cannot participate in this receipt handshake, so this changes P2P wire semantics and terminal retention behavior."
+}

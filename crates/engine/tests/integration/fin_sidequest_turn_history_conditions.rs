@@ -1640,24 +1640,26 @@ const FUMBLE: &str = "Return target creature to its owner's hand. Gain control o
 ///
 /// The coverage-level honesty is pinned in
 /// `attach_plural_anaphor_coverage_honesty.rs`; this row is the runtime
-/// companion proving that the two MODELLED clauses in front of the refusal
-/// still resolve through the real cast pipeline, and that the refused clause
-/// contributes nothing.
+/// companion proving that the modelled bounce and the MODELLED control-gain
+/// clause resolve through the real cast pipeline, while the refused plural
+/// attach clause contributes nothing. The control-gain clause ("all Auras and
+/// Equipment that were attached to it") now lowers to `GainControlAll` with a
+/// `FilterProp::AttachedTo { DeclaredTarget { slot: 0 } }` referent (D2).
 ///
-/// MEASURED RUNTIME OUTCOME: the bounce and the control change resolve; nothing
-/// is newly attached; the host-less Aura leaves play via the unattached-Aura
-/// state-based action (CR 704.5m) and the Equipment stays on the battlefield,
-/// merely unattached (CR 704.5n).
+/// MEASURED RUNTIME OUTCOME: the bounce resolves; the control-gain instruction
+/// resolves before any state-based action, so the Equipment's controller becomes
+/// the caster; nothing is newly attached; the host-less Aura leaves play via the
+/// unattached-Aura state-based action (CR 704.5m) and the Equipment stays on the
+/// battlefield, merely unattached (CR 704.5n).
 #[test]
 fn fumble_plural_attachment_anaphor_is_unsupported() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let victim = scenario.add_creature(P1, "Fumble Target", 2, 2).id();
     let other = scenario.add_creature(P0, "Other Bear", 2, 2).id();
-    // An Aura the caster does NOT control (the control change is observable) and
-    // an Equipment the caster does not control. The Equipment survives the
-    // bounce (CR 704.5n), so the control-change and "nothing newly attached"
-    // assertions stay meaningful after the host leaves.
+    // An Aura and an Equipment the caster does NOT control. The Equipment
+    // survives the bounce (CR 704.5n), so the "control unchanged" and "nothing
+    // newly attached" assertions stay meaningful after the host leaves.
     let aura = scenario
         .add_enchantment_from_oracle(
             P1,
@@ -1701,7 +1703,44 @@ fn fumble_plural_attachment_anaphor_is_unsupported() {
         outcome.final_waiting_for()
     );
 
-    // Reach-guards: the bounce and the control change both resolved.
+    // Positive reach guard: the control-gain clause parsed to the MODELLED
+    // `GainControlAll` over exactly the attachments of declared slot 0 (not a
+    // battlefield-wide steal).
+    fn chain_has_gain_control_all(def: &engine::types::ability::AbilityDefinition) -> bool {
+        matches!(&*def.effect, Effect::GainControlAll { .. })
+            || def
+                .sub_ability
+                .as_deref()
+                .is_some_and(chain_has_gain_control_all)
+    }
+    let parsed = parse_oracle_text(FUMBLE, "Fumble", &[], &["Sorcery".to_string()], &[]);
+    assert!(
+        parsed.abilities.iter().any(chain_has_gain_control_all),
+        "the control-gain clause must lower to GainControlAll: {:?}",
+        parsed.abilities
+    );
+    // Walk the whole chain: the gap node would sit in a sub_ability, so a
+    // head-only test would pass even if the clause still carried it.
+    fn chain_has_attached_to_gap(def: &engine::types::ability::AbilityDefinition) -> bool {
+        matches!(
+            &*def.effect,
+            Effect::Unimplemented { name, .. } if name == "attached_to_qualifier"
+        ) || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(chain_has_attached_to_gap)
+    }
+    assert!(
+        parsed
+            .abilities
+            .iter()
+            .all(|def| !chain_has_attached_to_gap(def)),
+        "the modelled clause must not keep the old gap in any chain node: {:?}",
+        parsed.abilities
+    );
+
+    // The bounce resolved; the modelled control-gain clause moved the
+    // Equipment controller to the caster (asserted below).
     assert_eq!(
         outcome.zone_of(victim),
         Zone::Hand,
@@ -1710,7 +1749,7 @@ fn fumble_plural_attachment_anaphor_is_unsupported() {
     assert_eq!(
         runner.state().objects[&equipment].controller,
         P0,
-        "control of the attached Equipment is gained"
+        "the modelled control-gain clause gives the caster control of the Equipment (D2)"
     );
 
     // The refused clause contributes nothing: nothing was NEWLY attached. The

@@ -29,6 +29,7 @@ use std::sync::Arc;
 
 use engine::game::ability_utils::build_resolved_from_def;
 use engine::game::effects::resolve_ability_chain;
+use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::layers::evaluate_layers;
 use engine::game::scenario::GameRunner;
 use engine::game::zone_pipeline::{move_object_for_test, ZoneMoveRequest};
@@ -78,6 +79,7 @@ fn koh_grant_statics() -> Vec<StaticDefinition> {
             ContinuousModification::GrantAllActivatedAbilitiesOf {
                 source: pinned_chosen_card_source(),
                 cap: None,
+                kind: None,
             },
             ContinuousModification::GrantAllTriggeredAbilitiesOf {
                 source: pinned_chosen_card_source(),

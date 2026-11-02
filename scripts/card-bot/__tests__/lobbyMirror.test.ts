@@ -77,6 +77,10 @@ describe("syncLobbyPosts", () => {
   let failNextEdit: number;
   /** Message ids a moderator deleted: their edits answer "gone". */
   let deleted: Set<string>;
+  /** Message ids the mirror removed, in order. */
+  let removed: string[];
+  /** How many of the next `delete` calls reject. */
+  let failNextDelete: number;
   let clock: number;
   let errors: ReturnType<typeof spyOn>;
   let logs: ReturnType<typeof spyOn>;
@@ -99,6 +103,14 @@ describe("syncLobbyPosts", () => {
       }
       edits.push({ channelId, messageId, body });
       return deleted.has(messageId) ? "gone" : "edited";
+    },
+    async delete(channelId, messageId) {
+      if (failNextDelete > 0) {
+        failNextDelete--;
+        throw new Error("discord down");
+      }
+      expect(channelId).toBe(CHANNEL);
+      removed.push(messageId);
     },
   };
 
@@ -130,6 +142,8 @@ describe("syncLobbyPosts", () => {
     edits = [];
     failNextEdit = 0;
     deleted = new Set();
+    removed = [];
+    failNextDelete = 0;
     clock = SETTLED;
     errors = spyOn(console, "error").mockImplementation(() => {});
     logs = spyOn(console, "log").mockImplementation(() => {});
@@ -185,8 +199,9 @@ describe("syncLobbyPosts", () => {
     clock = (CREATED_S + 600) * 1000 + LOBBY_SETTLE_MS;
     await syncLobbyPosts(d);
     expect(creates.map((c) => c.nonce)).toEqual([`rAB12CD${CREATED_S}`, `rAB12CD${CREATED_S + 600}`]);
-    // The first listing left the lobby, so its post is closed.
-    expect(edited()).toEqual(["m-1: Standard · RELEASE"]);
+    // The first listing left the lobby, so its post is removed.
+    expect(removed).toEqual(["m-1"]);
+    expect(edits).toEqual([]);
     expect(d.posts.open("release").map((p) => p.messageId)).toEqual(["m-2"]);
   });
 
@@ -282,7 +297,7 @@ describe("syncLobbyPosts", () => {
       expect((edits[1].body as { components: unknown[] }).components).toEqual([]);
     });
 
-    test("a room that leaves the lobby gets the closed post, once", async () => {
+    test("a room that leaves the lobby has its post removed, once", async () => {
       listings.release = listed(game());
       const d = deps();
       await syncLobbyPosts(d);
@@ -290,36 +305,52 @@ describe("syncLobbyPosts", () => {
       listings.release = listed();
       await syncLobbyPosts(d);
       await syncLobbyPosts(d);
-      expect(edited()).toEqual(["m-1: Standard · RELEASE"]);
-      expect(edits[0].body).toMatchObject({ components: [] });
-      expect((edits[0].body as { embeds: { description: string }[] }).embeds[0].description).toEndWith("No longer open.");
+      expect(removed).toEqual(["m-1"]);
+      expect(edits).toEqual([]);
       expect(d.posts.open("release")).toEqual([]);
       expect(creates).toHaveLength(1);
     });
 
-    test("a room still listed but no longer eligible is closed", async () => {
+    test("a room still listed but no longer eligible has its post removed", async () => {
       listings.release = listed(game());
       const d = deps();
       await syncLobbyPosts(d);
       listings.release = listed(game({ has_password: true }));
       await syncLobbyPosts(d);
-      expect(edited()).toEqual(["m-1: Standard · RELEASE"]);
+      expect(removed).toEqual(["m-1"]);
+      expect(edits).toEqual([]);
     });
 
-    test("a failed edit leaves the post open and is retried on the next pass", async () => {
+    test("a failed removal leaves the post open and is retried on the next pass", async () => {
       listings.release = listed(game());
       const d = deps();
       await syncLobbyPosts(d);
 
       listings.release = listed();
-      failNextEdit = 1;
+      failNextDelete = 1;
       await syncLobbyPosts(d);
-      expect(edits).toEqual([]);
+      expect(removed).toEqual([]);
       expect(d.posts.open("release")).toHaveLength(1);
 
       await syncLobbyPosts(d);
-      expect(edited()).toEqual(["m-1: Standard · RELEASE"]);
+      expect(removed).toEqual(["m-1"]);
       expect(d.posts.open("release")).toEqual([]);
+    });
+
+    test("a failed seat-change edit keeps the old seats and is retried on the next pass", async () => {
+      listings.release = listed(game({ max_players: 3 }));
+      const d = deps();
+      await syncLobbyPosts(d);
+
+      listings.release = listed(game({ current_players: 2, max_players: 3 }));
+      failNextEdit = 1;
+      await syncLobbyPosts(d);
+      expect(edits).toEqual([]);
+      expect(d.posts.open("release").map((p) => p.room.current)).toEqual([1]);
+
+      await syncLobbyPosts(d);
+      expect(edited()).toEqual(["m-1: Standard · 2/3 · RELEASE"]);
+      expect(d.posts.open("release").map((p) => p.room.current)).toEqual([2]);
     });
 
     test("a deleted post is closed, and its still-listed room is neither edited nor reposted", async () => {

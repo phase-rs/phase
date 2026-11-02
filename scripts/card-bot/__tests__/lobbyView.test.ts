@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { BUILD_ENDPOINTS, BUILDS } from "../config";
 import { ButtonStyle, ComponentType } from "../discord";
 import { BUILD_COLORS } from "../lfgView";
-import { escapeMarkdown, type LobbyRoom, renderLobbyPost, renderLobbyPostClosed } from "../lobbyView";
+import { escapeMarkdown, type LobbyRoom, renderLobbyPost } from "../lobbyView";
 
 function room(overrides: Partial<LobbyRoom> = {}): LobbyRoom {
   return {
@@ -77,21 +77,6 @@ describe("renderLobbyPost", () => {
   test("an unknown format shows its key; no format shows Game", () => {
     expect(renderLobbyPost("release", room({ format: "NewFormat" })).embeds[0].title).toBe("NewFormat · 2/4 · RELEASE");
     expect(renderLobbyPost("release", room({ format: null })).embeds[0].title).toBe("Game · 2/4 · RELEASE");
-  });
-});
-
-describe("renderLobbyPostClosed", () => {
-  test("says the room is no longer open, keeps the build labelling and has no Join button", () => {
-    for (const build of BUILDS) {
-      const post = renderLobbyPostClosed(build, room({ name: "_pod_" }));
-      expect(post.embeds[0].title).toBe(`Commander · ${build.toUpperCase()}`);
-      expect(post.embeds[0].color).toBe(BUILD_COLORS[build]);
-      expect(post.components).toEqual([]);
-      expect(post.allowed_mentions).toEqual({ parse: [] });
-    }
-    expect(renderLobbyPostClosed("release", room({ name: "_pod_" })).embeds[0].description).toBe(
-      "\\_pod\\_\nSite: release (phase-rs.dev)\nNo longer open.",
-    );
   });
 });
 

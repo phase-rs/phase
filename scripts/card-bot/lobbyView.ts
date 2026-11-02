@@ -63,19 +63,3 @@ export function renderLobbyPost(build: Build, room: LobbyRoom): LobbyPost {
     allowed_mentions: { parse: [] },
   };
 }
-
-/** The post once its room has left the lobby. The lobby cannot say whether the
- *  game started or was abandoned, so the post says only that it is no longer open. */
-export function renderLobbyPostClosed(build: Build, room: LobbyRoom): LobbyPost {
-  return {
-    embeds: [
-      {
-        title: `${formatLabel(room.format)} · ${buildTag(build)}`,
-        description: [escapeMarkdown(room.name), siteLine(build), "No longer open."].join("\n"),
-        color: BUILD_COLORS[build],
-      },
-    ],
-    components: [],
-    allowed_mentions: { parse: [] },
-  };
-}

@@ -1,6 +1,6 @@
 // Lobby mirror: posts each build's public web-lobby rooms in a Discord channel,
-// edits a post as its seats change, and edits it to "no longer open" once the
-// room leaves the lobby (posts are never deleted). Polls the build's lobby
+// edits a post as its seats change, and deletes it once the room leaves the
+// lobby, so the channel shows only live rooms. Polls the build's lobby
 // Worker `GET /games` (the listing the lobby's `LobbyUpdate` carries) rather
 // than subscribing over WebSocket, which would count the bot as a player online.
 // A listing is identified by (build, code, created_at): a reused code
@@ -11,7 +11,7 @@ import { Database } from "bun:sqlite";
 
 import { type Build, BUILD_ENDPOINTS, BUILDS } from "./config";
 import type { MessageApi } from "./discord";
-import { type LobbyRoom, renderLobbyPost, renderLobbyPostClosed } from "./lobbyView";
+import { type LobbyRoom, renderLobbyPost } from "./lobbyView";
 import { type FetchFn, isFiniteNumber, isRecord, REQUEST_TIMEOUT_MS } from "./servers";
 
 export const LOBBY_POLL_INTERVAL_MS = 30_000;
@@ -114,7 +114,7 @@ CREATE TABLE IF NOT EXISTS lobby_post (
 );
 `;
 
-/** A post that still shows its room as open. */
+/** A post not yet deleted or found gone. */
 export interface OpenPost {
   messageId: string;
   /** What the post shows (its `shown` JSON). */
@@ -122,8 +122,8 @@ export interface OpenPost {
 }
 
 /** The mirror's posts: one row per posted listing. `shown` is the JSON of the
- *  `LobbyRoom` the post last rendered; `closed_ms` is set once the post says the
- *  room is no longer open. */
+ *  `LobbyRoom` the post last rendered; `closed_ms` is set once the post is
+ *  deleted (its room left the lobby) or found already gone. */
 export class LobbyPostStore {
   private readonly db: Database;
 
@@ -173,7 +173,7 @@ export class LobbyPostStore {
       .run({ build, code: room.code, createdAt: room.createdAt, shown: JSON.stringify(room) });
   }
 
-  /** The post says the room is no longer open, or is gone; it is not edited again. */
+  /** The post was deleted, or is gone; it is not touched again. */
   close(build: Build, code: string, createdAt: number, now: number): void {
     this.db
       .query(
@@ -218,8 +218,9 @@ export interface LobbyMirrorDeps {
   now: () => number;
 }
 
-/** One mirror pass: new posts, then edits of the open ones, then pruning. Builds
- *  are independent; an unreadable build's posts and rows are left unchanged. */
+/** One mirror pass: new posts, then edits or removal of the open ones, then
+ *  pruning. Builds are independent; an unreadable build's posts and rows are
+ *  left unchanged. */
 export async function syncLobbyPosts(deps: LobbyMirrorDeps): Promise<void> {
   for (const build of BUILDS) await syncBuild(deps, build);
 }
@@ -261,10 +262,10 @@ async function syncBuild(deps: LobbyMirrorDeps, build: Build): Promise<void> {
     const row = rows.find((r) => eligible(r) && r.game_code === shown.code && r.created_at === shown.createdAt);
     try {
       if (row === undefined) {
-        // The room left the lobby; a post deleted meanwhile ("gone") is closed too.
-        await deps.messages.edit(deps.channelId, messageId, renderLobbyPostClosed(build, shown));
+        // The room left the lobby: remove its post (one already deleted counts).
+        await deps.messages.delete(deps.channelId, messageId);
         deps.posts.close(build, shown.code, shown.createdAt, deps.now());
-        console.log(`[lobby-mirror] closed ${build} room ${shown.code}`);
+        console.log(`[lobby-mirror] removed ${build} room ${shown.code}'s post`);
         continue;
       }
       const room = toRoom(row);
@@ -278,7 +279,7 @@ async function syncBuild(deps: LobbyMirrorDeps, build: Build): Promise<void> {
         deps.posts.reshown(build, room);
       }
     } catch (err) {
-      console.error(`[lobby-mirror] editing ${build} room ${shown.code} failed; retrying on the next pass:`, err);
+      console.error(`[lobby-mirror] updating ${build} room ${shown.code}'s post failed; retrying on the next pass:`, err);
     }
   }
 

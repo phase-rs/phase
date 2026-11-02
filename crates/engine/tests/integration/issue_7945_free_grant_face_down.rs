@@ -51,7 +51,7 @@ fn is_face_down(runner: &GameRunner, object: ObjectId) -> bool {
 }
 
 fn pool_size(runner: &GameRunner, player: usize) -> usize {
-    runner.state().players[player].mana_pool.mana.len()
+    runner.state().players[player].mana_pool.total()
 }
 
 /// The dangerous state from the live report: the doomed creature carries
@@ -120,6 +120,7 @@ fn a_free_granted_disguise_card_casts_face_up_and_free() {
         .act(GameAction::ActivateAbility {
             source_id: walker,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating the {T}+sacrifice ability must succeed");
     drive_activation(&mut runner, walker, smuggler);

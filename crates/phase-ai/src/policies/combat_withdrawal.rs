@@ -1,8 +1,8 @@
 //! Prioritizes combat withdrawals that prevent a controller's certain creature loss.
 
 use engine::ai_support::{
-    combat_withdrawal_fact_for_current_target, current_target_selection_targets,
-    CombatWithdrawalFact,
+    activation_may_yield_combat_withdrawal, combat_withdrawal_fact_for_current_target,
+    current_target_selection_targets, CombatWithdrawalFact,
 };
 use engine::game::combat_damage::CombatImpact;
 use engine::game::engine::apply_as_current_for_simulation;
@@ -46,10 +46,31 @@ impl TacticalPolicy for CombatWithdrawalPolicy {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only witness: how many times `priority_verdict` cloned the state to
+    /// simulate an activation on this thread. A local witness, not an engine
+    /// perf counter.
+    static PRIORITY_VERDICT_SIMULATIONS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Judge an activation at priority by simulating it and reading the exact
+/// combat-withdrawal facts of the target selection it opens.
+///
+/// The simulation (a state clone plus one reducer apply) is skipped when
+/// [`activation_may_yield_combat_withdrawal`] proves the activation cannot open
+/// an exact withdrawal prompt. The verdict returned in that case is the one the
+/// simulation would have produced: a failed apply and an empty fact list both
+/// yield the neutral `combat_withdrawal_na`.
 fn priority_verdict(ctx: &PolicyContext<'_>) -> PolicyVerdict {
     let Some(actor) = ctx.candidate.metadata.semantic_owner else {
         return PolicyVerdict::neutral(PolicyReason::new("combat_withdrawal_na"));
     };
+    if !activation_may_yield_combat_withdrawal(ctx.state, &ctx.candidate.action) {
+        return PolicyVerdict::neutral(PolicyReason::new("combat_withdrawal_na"));
+    }
+    #[cfg(test)]
+    PRIORITY_VERDICT_SIMULATIONS.with(|count| count.set(count.get() + 1));
     let mut simulated = ctx.state.clone();
     if apply_as_current_for_simulation(&mut simulated, ctx.candidate.action.clone()).is_err() {
         return PolicyVerdict::neutral(PolicyReason::new("combat_withdrawal_na"));
@@ -381,6 +402,7 @@ mod tests {
                 GameAction::ActivateAbility {
                     source_id: source,
                     ability_index: 0,
+                    payment_mode: engine::types::game_state::CastPaymentMode::Auto,
                 },
             );
             match expected_reason {
@@ -395,6 +417,73 @@ mod tests {
                 )),
             }
         }
+    }
+
+    /// Read the thread-local simulation witness.
+    fn priority_simulations() -> u32 {
+        PRIORITY_VERDICT_SIMULATIONS.with(std::cell::Cell::get)
+    }
+
+    /// An activation whose source carries no remove-from-combat effect gets the
+    /// neutral verdict without a simulation, while a real withdrawal activation
+    /// on the same board still simulates and keeps its verdict.
+    #[test]
+    fn priority_activation_without_removal_effect_skips_the_simulation() {
+        let draw = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: engine::types::ability::QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        let (mut state, source, _, _) = combat_state(1, 3);
+        let source_object = state.objects.get_mut(&source).expect("source exists");
+        source_object.abilities = Arc::new(vec![draw.clone()]);
+        source_object.base_abilities = Arc::new(vec![draw]);
+        state.waiting_for = WaitingFor::Priority { player: AI };
+        state.priority_player = AI;
+        state.layers_dirty = engine::types::game_state::LayersDirty::Clean;
+        let activation = GameAction::ActivateAbility {
+            source_id: source,
+            ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        };
+
+        let before = priority_simulations();
+        let result = verdict(&state, activation.clone());
+        assert!(matches!(
+            result,
+            PolicyVerdict::Score { delta: 0.0, reason } if reason.kind == "combat_withdrawal_na"
+        ));
+        assert_eq!(
+            priority_simulations(),
+            before,
+            "a non-withdrawal activation must not clone and simulate"
+        );
+
+        // Positive reach-guard: the same board with a real withdrawal ability
+        // reaches the simulation and keeps the verdict it had before.
+        let removal = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::RemoveFromCombat {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+        );
+        let source_object = state.objects.get_mut(&source).expect("source exists");
+        source_object.abilities = Arc::new(vec![removal.clone()]);
+        source_object.base_abilities = Arc::new(vec![removal]);
+        state.layers_dirty = engine::types::game_state::LayersDirty::Clean;
+        let before = priority_simulations();
+        let result = verdict(&state, activation);
+        assert!(matches!(
+            result,
+            PolicyVerdict::Reject { reason } if reason.kind == "combat_withdrawal_futile_activation"
+        ));
+        assert_eq!(
+            priority_simulations(),
+            before + 1,
+            "a withdrawal activation still simulates exactly once"
+        );
     }
 
     #[test]

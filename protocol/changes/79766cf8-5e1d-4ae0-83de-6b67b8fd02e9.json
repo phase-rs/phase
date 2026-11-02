@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "AbilityCost::Reveal and PayCostKind::Reveal gain optional shared_quality (CR 701.20a, Illuminated Folio 'two cards that share a color'). Serialized in GameState abilities and WaitingFor::PayCost, omitted when absent and defaulted on read, so an older peer silently drops the constraint and would accept a reveal whose cards share no quality."
+}

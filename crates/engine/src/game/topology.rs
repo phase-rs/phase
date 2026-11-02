@@ -1,5 +1,4 @@
 use crate::types::format::FormatTopology;
-use crate::types::format::GameFormat;
 use crate::types::game_state::GameState;
 use crate::types::player::PlayerId;
 use std::collections::BTreeSet;
@@ -21,13 +20,39 @@ pub(crate) fn team_id(state: &GameState, player: PlayerId) -> TeamId {
     }
 }
 
+/// Which seats an APNAP or team walk admits. Live rules walks admit only
+/// players still in the game (CR 800.4a); `IncludingDeparted` exists for
+/// restore-time reconstruction of a population fixed before players left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SeatAdmission {
+    Living,
+    IncludingDeparted,
+}
+
+impl SeatAdmission {
+    fn admits(self, state: &GameState, player: PlayerId) -> bool {
+        match self {
+            SeatAdmission::Living => super::players::is_alive(state, player),
+            SeatAdmission::IncludingDeparted => true,
+        }
+    }
+}
+
 pub(crate) fn team_members(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
+    team_members_admitting(state, player, SeatAdmission::Living)
+}
+
+fn team_members_admitting(
+    state: &GameState,
+    player: PlayerId,
+    admission: SeatAdmission,
+) -> Vec<PlayerId> {
     match state.format_config.topology() {
         FormatTopology::IndividualSeats => state
             .seat_order
             .iter()
             .copied()
-            .filter(|&id| id == player && super::players::is_alive(state, id))
+            .filter(|&id| id == player && admission.admits(state, id))
             .collect(),
         FormatTopology::FixedTeams { team_count, .. } => {
             let team = team_id(state, player);
@@ -39,7 +64,7 @@ pub(crate) fn team_members(state: &GameState, player: PlayerId) -> Vec<PlayerId>
                 .players
                 .iter()
                 .map(|player| player.id)
-                .filter(|&id| team_id(state, id) == team && super::players::is_alive(state, id))
+                .filter(|&id| team_id(state, id) == team && admission.admits(state, id))
                 .collect()
         }
         FormatTopology::OneVsMany { archenemy, .. } => {
@@ -48,14 +73,14 @@ pub(crate) fn team_members(state: &GameState, player: PlayerId) -> Vec<PlayerId>
                     .seat_order
                     .iter()
                     .copied()
-                    .filter(|&id| id == archenemy && super::players::is_alive(state, id))
+                    .filter(|&id| id == archenemy && admission.admits(state, id))
                     .collect()
             } else {
                 state
                     .seat_order
                     .iter()
                     .copied()
-                    .filter(|&id| id != archenemy && super::players::is_alive(state, id))
+                    .filter(|&id| id != archenemy && admission.admits(state, id))
                     .collect()
             }
         }
@@ -91,13 +116,43 @@ pub(crate) fn archenemy(state: &GameState) -> Option<PlayerId> {
 
 /// CR 810.4 / CR 810.8 / CR 810.9 / CR 810.10: Two-Headed Giant shares life,
 /// poison, and team loss. Default Archenemy uses shared turns (CR 805) but not
-/// these shared-resource rules.
+/// these shared-resource rules. Only the 2HG game-over branch still reads the
+/// whole bundle at once — life, poison, and loss each have their own
+/// per-player predicate below, because Archenemy Commander shares life
+/// (CR 904.13b) while keeping poison individual (CR 904.13c).
 pub(crate) fn has_two_headed_giant_shared_resources(state: &GameState) -> bool {
-    matches!(state.format_config.format, GameFormat::TwoHeadedGiant)
+    state.format_config.format.is_two_headed_giant_family()
 }
 
-pub(crate) fn shared_resource_members(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
-    if has_two_headed_giant_shared_resources(state) {
+/// Whether `player`'s life total is a shared team total: the 2HG family
+/// (CR 810.4 / CR 810.8 / CR 810.9) plus Archenemy Commander heroes
+/// (CR 904.13b applies CR 810.8/CR 810.9 to the opposing team). The
+/// Archenemy Commander archenemy and every default-Archenemy seat read
+/// their own life (CR 904.5 / CR 904.13b). Team loss rides with shared
+/// life — CR 810.8a in 2HG, CR 810.8a-via-904.13b for the heroes — so
+/// the elimination cascade and the can't-lose teammate folds gate on
+/// this predicate too.
+pub(crate) fn has_shared_life(state: &GameState, player: PlayerId) -> bool {
+    if state.format_config.format.is_two_headed_giant_family() {
+        return true;
+    }
+    if state.format_config.format == crate::types::format::GameFormat::ArchenemyCommander {
+        return Some(player) != archenemy(state);
+    }
+    false
+}
+
+/// Whether `player`'s poison total is shared with their team (CR 810.10):
+/// the 2HG family only. Archenemy Commander explicitly keeps poison
+/// individual — the archenemy loses at 10+ and each hero loses at 10+
+/// (CR 904.13c) — so it answers false here while answering true for
+/// life above.
+pub(crate) fn has_shared_poison(state: &GameState, _player: PlayerId) -> bool {
+    state.format_config.format.is_two_headed_giant_family()
+}
+
+pub(crate) fn shared_life_members(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
+    if has_shared_life(state, player) {
         team_members(state, player)
     } else if super::players::is_alive(state, player) {
         vec![player]
@@ -106,8 +161,27 @@ pub(crate) fn shared_resource_members(state: &GameState, player: PlayerId) -> Ve
     }
 }
 
-pub(crate) fn shared_resource_dedup_key(state: &GameState, player: PlayerId) -> TeamId {
-    if has_two_headed_giant_shared_resources(state) {
+pub(crate) fn shared_poison_members(state: &GameState, player: PlayerId) -> Vec<PlayerId> {
+    if has_shared_poison(state, player) {
+        team_members(state, player)
+    } else if super::players::is_alive(state, player) {
+        vec![player]
+    } else {
+        Vec::new()
+    }
+}
+
+pub(crate) fn shared_life_dedup_key(state: &GameState, player: PlayerId) -> TeamId {
+    if has_shared_life(state, player) {
+        team_id(state, player)
+    } else if Some(player) == archenemy(state)
+        && state.format_config.format == crate::types::format::GameFormat::ArchenemyCommander
+    {
+        // CR 904.13b: the Archenemy Commander archenemy reads their own
+        // life, but `TeamId(player.0)` collides with the heroes' shared
+        // `TeamId(1)` key from seat 1 and drops one side from the fold.
+        // `team_id` assigns the archenemy side `TeamId(0)`, distinct by
+        // construction in this two-sided topology.
         team_id(state, player)
     } else {
         TeamId(player.0)
@@ -121,6 +195,14 @@ pub(crate) fn apnap_choice_groups(state: &GameState) -> Vec<Vec<PlayerId>> {
 pub(crate) fn apnap_choice_groups_from(
     state: &GameState,
     start_player: PlayerId,
+) -> Vec<Vec<PlayerId>> {
+    apnap_choice_groups_admitting(state, start_player, SeatAdmission::Living)
+}
+
+fn apnap_choice_groups_admitting(
+    state: &GameState,
+    start_player: PlayerId,
+    admission: SeatAdmission,
 ) -> Vec<Vec<PlayerId>> {
     let seat_order = &state.seat_order;
     let len = seat_order.len();
@@ -139,7 +221,9 @@ pub(crate) fn apnap_choice_groups_from(
                 let idx =
                     super::players::turn_order_index(start_idx, offset, len, state.turn_direction);
                 let candidate = seat_order[idx];
-                super::players::is_alive(state, candidate).then_some(vec![candidate])
+                admission
+                    .admits(state, candidate)
+                    .then_some(vec![candidate])
             })
             .collect();
     }
@@ -154,12 +238,12 @@ pub(crate) fn apnap_choice_groups_from(
         // CR 101.4 + CR 103.1: APNAP follows the current turn-order direction.
         let idx = super::players::turn_order_index(start_idx, offset, len, state.turn_direction);
         let candidate = seat_order[idx];
-        if !super::players::is_alive(state, candidate) {
+        if !admission.admits(state, candidate) {
             continue;
         }
         let key = team_dedup_key(state, candidate);
         if seen.insert(key) {
-            groups.push(team_members(state, candidate));
+            groups.push(team_members_admitting(state, candidate, admission));
         }
     }
     groups
@@ -167,6 +251,20 @@ pub(crate) fn apnap_choice_groups_from(
 
 pub(crate) fn apnap_order_from(state: &GameState, start_player: PlayerId) -> Vec<PlayerId> {
     apnap_choice_groups_from(state, start_player)
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
+/// APNAP order from `start_player` over the given seat admission, following
+/// the current turn-order direction (CR 101.4 + CR 103.1) and, under the
+/// shared team turns option, team order (CR 805.6).
+pub(crate) fn apnap_order_admitting(
+    state: &GameState,
+    start_player: PlayerId,
+    admission: SeatAdmission,
+) -> Vec<PlayerId> {
+    apnap_choice_groups_admitting(state, start_player, admission)
         .into_iter()
         .flatten()
         .collect()
@@ -314,6 +412,67 @@ mod tests {
             canonical_priority_representatives(&state, [PlayerId(0), PlayerId(1)]),
             [PlayerId(1)].into_iter().collect(),
             "a frozen session re-canonicalizes an eliminated teammate to its living team seat"
+        );
+    }
+
+    #[test]
+    fn two_hg_commander_shares_resources_and_seats_two_teams_of_two() {
+        let state = GameState::new(FormatConfig::two_headed_giant_commander(), 4, 42);
+
+        // CR 810.4 / CR 810.8 / CR 810.9 / CR 810.10 via the 2HG family.
+        assert!(has_two_headed_giant_shared_resources(&state));
+        assert_eq!(
+            team_members(&state, PlayerId(0)),
+            vec![PlayerId(0), PlayerId(1)]
+        );
+        assert_eq!(
+            team_members(&state, PlayerId(2)),
+            vec![PlayerId(2), PlayerId(3)]
+        );
+        assert_eq!(teammates(&state, PlayerId(0)), vec![PlayerId(1)]);
+        assert_eq!(teammates(&state, PlayerId(3)), vec![PlayerId(2)]);
+        // 60 shared per team, 30 per seat.
+        assert_eq!(state.players[0].life, 30);
+        assert_eq!(
+            crate::game::players::team_life_total(&state, PlayerId(0)),
+            60
+        );
+        assert_eq!(
+            crate::game::players::team_life_total(&state, PlayerId(3)),
+            60
+        );
+    }
+
+    #[test]
+    fn archenemy_commander_shares_life_but_not_poison() {
+        let state = GameState::new(FormatConfig::archenemy_commander(), 4, 42);
+
+        // CR 904.13b: heroes share life; the archenemy does not.
+        assert!(!has_shared_life(&state, PlayerId(0)));
+        assert!(has_shared_life(&state, PlayerId(1)));
+        assert!(has_shared_life(&state, PlayerId(3)));
+        // CR 904.13c: nobody shares poison.
+        for seat in 0..4 {
+            assert!(!has_shared_poison(&state, PlayerId(seat)));
+        }
+        assert_eq!(
+            shared_life_members(&state, PlayerId(1)),
+            vec![PlayerId(1), PlayerId(2), PlayerId(3)]
+        );
+        assert_eq!(
+            shared_poison_members(&state, PlayerId(1)),
+            vec![PlayerId(1)]
+        );
+        // 60 for the archenemy, 20 per hero seat at 4 seats, team 60.
+        assert_eq!(state.players[0].life, 60);
+        assert_eq!(state.players[1].life, 20);
+        assert_eq!(
+            crate::game::players::team_life_total(&state, PlayerId(1)),
+            60
+        );
+        assert_eq!(
+            crate::game::players::team_life_total(&state, PlayerId(0)),
+            60
         );
     }
 

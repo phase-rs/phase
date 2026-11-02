@@ -33,7 +33,7 @@ use engine::game::ability_utils::build_resolved_from_def;
 use engine::game::effects::resolve_ability_chain;
 use engine::game::zones::create_object;
 use engine::parser::oracle_effect::parse_effect_chain;
-use engine::types::ability::{AbilityKind, ResolvedAbility};
+use engine::types::ability::{AbilityKind, Effect, ResolvedAbility};
 use engine::types::card_type::CoreType;
 use engine::types::format::FormatConfig;
 use engine::types::game_state::GameState;
@@ -300,8 +300,13 @@ fn strongarm_tactics_all_players_gated_by_own_discard() {
     );
 }
 
+/// The discard-only dispatcher above does not take a non-discard "who didn't"
+/// clause, and the clause is not misparsed into a dropped `ChangeZone`. Its
+/// restriction ("who didn't put a card onto the battlefield this way") is
+/// not modelled, so CR 608.2c keeps it an honest `unbound_subject` gap rather
+/// than a draw for every other player (issue #9213).
 #[test]
-fn non_discard_who_didnt_clause_still_draws_a_card() {
+fn non_discard_who_didnt_clause_is_an_honest_gap_not_a_dropped_change_zone() {
     let mut state = GameState::new(FormatConfig::standard(), 2, 42);
     let source = create_object(
         &mut state,
@@ -315,16 +320,19 @@ fn non_discard_who_didnt_clause_still_draws_a_card() {
     let text = "each other player who didn't put a card onto the battlefield \
         this way draws a card.";
     let def = parse_effect_chain(text, AbilityKind::Spell);
+    assert!(
+        matches!(
+            &*def.effect,
+            Effect::Unimplemented { name, .. } if name == "unbound_subject"
+        ),
+        "the unmodelled relative clause is a gap, not a ChangeZone or an \
+         unrestricted draw: {:?}",
+        def.effect
+    );
     let ability = build_resolved_from_def(&def, source, PlayerId(0));
 
     let hand_before = hand_size(&state, PlayerId(1));
     let mut events = Vec::new();
     resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
-
-    assert_eq!(
-        hand_size(&state, PlayerId(1)),
-        hand_before + 1,
-        "the non-discard decline-tail clause must still resolve as a Draw, \
-         not be misparsed into a dropped ChangeZone effect"
-    );
+    assert_eq!(hand_size(&state, PlayerId(1)), hand_before);
 }

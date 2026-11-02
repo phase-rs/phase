@@ -241,6 +241,7 @@ fn zemo_boast_payable_at_fifteen_symbols() {
         .act(GameAction::ActivateAbility {
             source_id: zemo,
             ability_index: idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("Boast is payable with 15 black symbols");
     match &runner.state().waiting_for {
@@ -265,6 +266,7 @@ fn zemo_boast_unpayable_at_fourteen_symbols() {
     let result = runner.act(GameAction::ActivateAbility {
         source_id: zemo,
         ability_index: idx,
+        payment_mode: engine::types::game_state::CastPaymentMode::Auto,
     });
     assert!(
         result.is_err(),
@@ -290,6 +292,7 @@ fn zemo_boast_rejects_subset_below_threshold() {
         .act(GameAction::ActivateAbility {
             source_id: zemo,
             ability_index: idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("payable: 17 symbols available");
     // Choose four {B}{B}{B} (12) + the {B}{B} (2) = 14 symbols — one short.
@@ -318,6 +321,7 @@ fn zemo_boast_caps_cast_choice_at_three() {
         .act(GameAction::ActivateAbility {
             source_id: zemo,
             ability_index: idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("payable");
     // Pay the cost by exiling all five graveyard cards.
@@ -368,6 +372,7 @@ fn zemo_boast_casts_three_copies_for_free() {
         .act(GameAction::ActivateAbility {
             source_id: zemo,
             ability_index: idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("payable");
     runner
@@ -419,6 +424,7 @@ fn zemo_boast_binds_cost_exiled_set_across_intervening_set() {
         .act(GameAction::ActivateAbility {
             source_id: zemo,
             ability_index: idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("payable");
     runner
@@ -487,6 +493,7 @@ fn zemo_boast_tracks_only_cards_delivered_to_exile_after_replacement_choices() {
         .act(GameAction::ActivateAbility {
             source_id: zemo,
             ability_index: idx,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("Boast is payable");
     let result = runner
@@ -523,6 +530,23 @@ fn zemo_boast_tracks_only_cards_delivered_to_exile_after_replacement_choices() {
     );
 }
 
+fn contains_unimplemented(def: &AbilityDefinition) -> bool {
+    let mut nested = false;
+    def.effect.for_each_nested_definition(&mut |_, inner| {
+        nested = nested || contains_unimplemented(inner)
+    });
+    matches!(*def.effect, Effect::Unimplemented { .. })
+        || nested
+        || def
+            .sub_ability
+            .as_deref()
+            .is_some_and(contains_unimplemented)
+        || def
+            .else_ability
+            .as_deref()
+            .is_some_and(contains_unimplemented)
+}
+
 /// Regression guard for the `fold_cast_copy_of_card_defs` broadening (PR-4b/Zemo).
 /// Extending the fold's copy-half match to `CopySpell { TrackedSet(0) }` (for
 /// Zemo's "Copy those exiled cards") must NOT fuse the legacy "copy the exiled
@@ -550,13 +574,46 @@ fn copy_then_conditional_cast_idiom_not_fused_away() {
         ),
         (
             "Spellweaver Helix",
-            "Imprint — When this artifact enters, you may exile two target sorcery cards from a single graveyard.\nWhenever a player casts a card, if it has the same name as one of the cards exiled with this artifact, you may copy the other. If you do, you may cast the copy without paying its mana cost.",
+            // The "if it has the same name as one of the cards exiled with this artifact" guard is
+            // not modelled (it fails closed); it is irrelevant to the copy/cast idiom under test.
+            "Imprint — When this artifact enters, you may exile two target sorcery cards from a single graveyard.\nWhenever a player casts a card, you may copy the other. If you do, you may cast the copy without paying its mana cost.",
             vec!["Artifact".to_string()],
             Vec::<String>::new(),
         ),
     ];
     for (name, oracle, types, subs) in &cards {
         let parsed = parse_oracle_text(oracle, name, &[], types, subs);
+        // Reach-guard: every ability and trigger parsed, so the swallow check below is not
+        // vacuously satisfied by a fail-closed unit.
+        let roots: Vec<&AbilityDefinition> = parsed
+            .abilities
+            .iter()
+            .chain(parsed.triggers.iter().filter_map(|t| t.execute.as_deref()))
+            .collect();
+        let mut chain: Vec<&AbilityDefinition> = Vec::new();
+        for root in &roots {
+            let mut node = Some(*root);
+            while let Some(def) = node {
+                chain.push(def);
+                node = def.sub_ability.as_deref();
+            }
+        }
+        assert!(
+            chain
+                .iter()
+                .any(|d| matches!(*d.effect, Effect::CopySpell { .. })),
+            "{name}: fixture must keep the CopySpell node, else the check is vacuous"
+        );
+        assert!(
+            chain
+                .iter()
+                .any(|d| matches!(*d.effect, Effect::CastFromZone { .. }) && d.condition.is_some()),
+            "{name}: fixture must keep the conditional CastFromZone sub-ability"
+        );
+        assert!(
+            !roots.iter().copied().any(contains_unimplemented),
+            "{name}: fixture must parse with zero Effect::Unimplemented"
+        );
         let swallowed: Vec<_> = parsed
             .parse_warnings
             .iter()

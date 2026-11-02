@@ -2643,23 +2643,12 @@ export class P2PDraftHost {
   }
 
   /**
-   * Partition a completed Commander pod's seats into the ones a human will
-   * actually pilot and the ones the engine must.
-   *
-   * A seat is a LIVE HUMAN iff `!is_bot && connected`; everything else — a bot,
-   * or a human who dropped before the launch — is ENGINE-PILOTED. This is the
-   * single authority for that classification.
-   *
-   * `is_bot` is load bearing and `connected` alone would be wrong: the engine
-   * reports `connected` as `true` UNCONDITIONALLY for bot seats
-   * (`draft-core/src/view.rs`, `DraftSeat::Bot => true`), so a `connected`-only
-   * test classifies every bot as a live human and dispatches launches into the
-   * void.
-   *
-   * Seat 0 (the host) is always live: humans read `get_or(i, true)` over
-   * `connected_seats`, which starts all-true at pod size, and the engine's
-   * `apply_set_seat_connected` rejects bot seats — every client-side
-   * `setSeatConnected(x, false)` site is guest-keyed, so the host never flips.
+   * Provisional deck-preparation split from the captured view. Bot kind binds
+   * deck provenance; connectivity does not bind the eventual recipient set.
+   * `sendCommanderLaunches` finalizes that set against current transports.
+   * `is_bot` is load-bearing: the engine reports `connected: true` unconditionally
+   * for bot seats (`draft-core/src/view.rs`, `DraftSeat::Bot => true`), so a
+   * `connected`-only test would prepare bots as live humans.
    */
   private commanderSeatPlan(view: DraftPlayerView): {
     liveHumanSeats: number[];
@@ -2682,15 +2671,9 @@ export class P2PDraftHost {
    * all) BEFORE any guest is invited into it: a guest that joins early takes
    * the first waiting seat and the mutation then kicks it.
    *
-   * `view` MUST be the freshest published view, read at call time rather than
-   * taken from a captured closure. There is a real stale-view window this does
-   * not close: `handleGuestDisconnect` deletes the `guestSessions` entry
-   * synchronously while the engine's `connected` flag flips only inside the
-   * detached mutation and reaches the store later still. A launch dispatched
-   * against a view captured inside that window classifies the departed seat
-   * LIVE, `sendToSeat` then silently no-ops for it (no session), the seat gets
-   * no engine pilot either, and the game never fills. Reading the view at call
-   * time is the caller's responsibility.
+   * `view` binds seat identities and deck provenance for this attempt. Its
+   * connectivity can lag transport callbacks or change during these awaits;
+   * `sendCommanderLaunches` reclassifies participation using both deck arrays.
    *
    * Modelled on `dispatchMatchLaunch`: `exportDraftSession()` is called EXACTLY
    * ONCE and threaded through, so every deck is synthesized exactly once. That
@@ -2732,41 +2715,92 @@ export class P2PDraftHost {
   }
 
   /**
-   * CR 903.13a: put one `draft_commander_launch` on every seat a human will
-   * pilot, from decks `commanderSeatDecks` already computed.
+   * CR 903.13a: finalize transport participation using the prepared decks, then invite.
+   * Every engine seat is installed BEFORE any invitation: a guest invited early
+   * takes the first waiting game seat, and a later `SetKind` on that index kicks it.
+   * Engine assignments are latched for this attempt, including reconnects
+   * during installation. Each missing candidate is removed once, so rescans
+   * after assignment awaits are bounded by the pod size.
    *
-   * The recipient set is exactly `decks.liveSeatDecks` and INCLUDES the local
-   * seat — the host is always pod seat 0, and `sendToSeat`'s seat-0 arm turns
-   * that send into a local `commanderLaunch` event, which is the ONLY path by
-   * which the host learns of its own launch.
-   *
-   * Takes no `localSeat`: `liveSeatDecks` already carries every live seat's own
-   * deck, the local seat's being the same object as `hostDeck`, so this list is
-   * the single authority for both the recipients and their decks. Re-running
-   * `commanderSeatPlan` here would create a second authority that a view drifting
-   * between the two calls could disagree with, yielding a recipient with no deck.
+   * Capture current endpoints and enqueue all remote invitations in one turn.
+   * Drops after dispatch are ordinary post-invitation failures; rejected sends
+   * fail the attempt rather than silently leaving a WaitingHuman hole.
+   * A guest whose connection has closed but whose disconnect `DraftPeerSession`
+   * has not yet reported is still deliverable here; its rejected send fails the
+   * whole attempt (the host cancels and relaunches) instead of installing an
+   * engine pilot.
    */
-  sendCommanderLaunches(
+  async sendCommanderLaunches(
     view: DraftPlayerView,
     gameId: string,
     roomCode: string,
     decks: CommanderSeatDecks,
-  ): void {
-    for (const { seat, deck } of decks.liveSeatDecks) {
-      this.sendToSeat(seat, {
-        type: "draft_commander_launch",
-        launch: {
-          gameId,
-          roomCode,
-          localDeck: deck,
-          playerCount: view.seats.length,
-          // CR 903.13f(3): carry the host's own value through. The view's field
-          // is optional while the wire's is required-nullable, so `?? null` is
-          // the required narrowing — NOT `?? []`, which would assert "the draft
-          // contained zero sets" where the host already knows the answer.
-          draftSetCodes: view.draft_set_codes ?? null,
-        },
-      });
+    installEngineSeat: (seat: number, deck: DraftDeckPayload) => Promise<void>,
+    signal: AbortSignal,
+  ): Promise<void> {
+    signal.throwIfAborted();
+    const candidates = new Map<number, DraftDeckPayload>();
+    let engineSeats: Array<{ seat: number; deck: DraftDeckPayload }> = [];
+    for (const entry of [...decks.liveSeatDecks, ...decks.engineSeatDecks]) {
+      // The host is always pod seat 0 and occupies game seat 0 itself: it is
+      // never installed as an engine seat nor sent over the wire. Its launch is
+      // the local emit below (`sendToSeat`'s seat-0 arm), which is the ONLY path
+      // by which the host learns of its own launch. Seat 0 is always live: the
+      // engine's `apply_set_seat_connected` rejects bot seats and every
+      // client-side `setSeatConnected(x, false)` site is guest-keyed.
+      if (entry.seat === 0) continue;
+      if (this.isBotSeatFromView(view, entry.seat) || !this.deliverableSession(entry.seat)) {
+        engineSeats.push(entry);
+      } else {
+        candidates.set(entry.seat, entry.deck);
+      }
+    }
+
+    const endpoints: Array<{ deck: DraftDeckPayload; session: DraftPeerSession }> = [];
+    for (;;) {
+      for (const { seat, deck } of engineSeats) {
+        await installEngineSeat(seat, deck);
+        signal.throwIfAborted();
+      }
+      engineSeats = [];
+      endpoints.length = 0;
+      for (const [seat, deck] of candidates) {
+        const session = this.deliverableSession(seat);
+        if (!session) {
+          candidates.delete(seat);
+          engineSeats.push({ seat, deck });
+        } else {
+          endpoints.push({ deck, session });
+        }
+      }
+      if (engineSeats.length === 0) break;
+    }
+
+    signal.throwIfAborted();
+    const launchFor = (deck: DraftDeckPayload): DraftP2PMessage => ({
+      type: "draft_commander_launch",
+      launch: {
+        gameId,
+        roomCode,
+        localDeck: deck,
+        playerCount: view.seats.length,
+        // CR 903.13f(3): carry the host's own value through. The view's field
+        // is optional while the wire's is required-nullable, so `?? null` is
+        // the required narrowing — NOT `?? []`, which would assert "the draft
+        // contained zero sets" where the host already knows the answer.
+        draftSetCodes: view.draft_set_codes ?? null,
+      },
+    });
+    const sends = endpoints.map(({ deck, session }) => session.send(launchFor(deck)));
+    const hostDeck =
+      decks.liveSeatDecks.find(({ seat }) => seat === 0)?.deck ??
+      decks.engineSeatDecks.find(({ seat }) => seat === 0)?.deck;
+    if (!hostDeck) throw new Error("Seat 0 has no prepared Commander deck");
+    this.sendToSeat(0, launchFor(hostDeck));
+    const results = await Promise.allSettled(sends);
+    signal.throwIfAborted();
+    for (const result of results) {
+      if (result.status === "rejected") throw result.reason;
     }
   }
 
@@ -3471,6 +3505,12 @@ export class P2PDraftHost {
     this.emit({ type: "bo3GameStarted", matchId, gameNumber: state.gameNumber });
   }
 
+  /** Single delivery-eligibility authority shared by the Commander finalizer and sendToSeat. */
+  private deliverableSession(seat: number): DraftPeerSession | undefined {
+    const session = this.guestSessions.get(seat);
+    return session && !this.disconnectedSeats.has(seat) ? session : undefined;
+  }
+
   private sendToSeat(seat: number, msg: DraftP2PMessage): void {
     if (seat === 0) {
       // Host is seat 0 — emit event directly instead of sending over network
@@ -3520,8 +3560,8 @@ export class P2PDraftHost {
       }
       return;
     }
-    const session = this.guestSessions.get(seat);
-    if (session && !this.disconnectedSeats.has(seat)) {
+    const session = this.deliverableSession(seat);
+    if (session) {
       session.send(msg);
     }
   }

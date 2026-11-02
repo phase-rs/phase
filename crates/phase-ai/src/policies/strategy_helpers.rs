@@ -828,12 +828,30 @@ pub(crate) fn can_pay_ward_cost(
         WardCost::PayLifeEqualToPower => {
             ctx.state.players[ctx.ai_player.0 as usize].life > warded.power.unwrap_or(0).max(0)
         }
-        WardCost::DiscardCard => {
+        // CR 702.21a + CR 701.9a + CR 118.3: the cost can be paid only if the
+        // hand holds `count` cards (other than the spell being cast, which is on
+        // the stack when the ward trigger resolves — CR 601.2a) that match the
+        // card-type filter, evaluated from the ward source as the engine's
+        // payment-time eligibility does. Random selection (CR 701.9b) changes
+        // which eligible card goes, not how many must exist.
+        WardCost::Discard {
+            count,
+            filter,
+            selection: _,
+        } => {
             let source_id = ctx.source_object().map(|source| source.id);
-            ctx.state.players[ctx.ai_player.0 as usize]
+            let fctx = FilterContext::from_source(ctx.state, warded.id);
+            let eligible = ctx.state.players[ctx.ai_player.0 as usize]
                 .hand
                 .iter()
-                .any(|&id| Some(id) != source_id)
+                .filter(|&&id| Some(id) != source_id)
+                .filter(|&&id| {
+                    filter
+                        .as_ref()
+                        .is_none_or(|f| matches_target_filter(ctx.state, id, f, &fctx))
+                })
+                .count();
+            eligible as u32 >= *count
         }
         WardCost::Sacrifice { count, filter } => {
             let Some(source) = ctx.source_object() else {

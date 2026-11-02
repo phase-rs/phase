@@ -4,6 +4,7 @@
 // `/servers` (the directory, whose rows the Worker attests against each server's
 // own `/info`) — so the bot makes no per-server HTTP call.
 
+import { DIRECTORY_VERSION } from "../../client/src/generated/protocol-versions.ts";
 import { BUILD_ENDPOINTS, BUILDS, type Build } from "./config";
 
 /** lobby-broker LOBBY_PROTOCOL_VERSION entry 10 ("Requested room codes",
@@ -11,9 +12,9 @@ import { BUILD_ENDPOINTS, BUILDS, type Build } from "./config";
  *  honors CreateGameWithSettings.requested_code. */
 export const REQUESTED_CODE_LOBBY_PROTOCOL = 10;
 
-/** Mirrors `lobby_broker::directory::DIRECTORY_VERSION` (and the client's
- *  serverDirectory.ts constant); pinned by __tests__/servers.test.ts. */
-export const DIRECTORY_VERSION = 1;
+/** Prepare standalone source runs/tests with:
+ *  `bun scripts/protocol-versions.mjs generate` from the repository root. */
+export { DIRECTORY_VERSION };
 
 /** Discord's cap on a string choice value — a server URL is offered as one. */
 const MAX_CHOICE_VALUE_LENGTH = 100;

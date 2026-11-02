@@ -49,7 +49,7 @@ function row(overrides: Partial<DirectoryRow> & { url: string }): DirectoryRow {
   };
 }
 
-function body(servers: unknown[], directoryVersion = DIRECTORY_VERSION) {
+function body(servers: unknown[], directoryVersion: number = DIRECTORY_VERSION) {
   return { directory_version: directoryVersion, servers };
 }
 

@@ -17,9 +17,17 @@ import {
   DiscordHttpError,
   type ThreadApi,
 } from "../discord";
+import { FORMATS, type LfgFormat } from "../formats";
 import { handleInteraction } from "../index";
 import { type CreateResult, GAME_THREAD_MAX_MS, LfgStore } from "../lfg";
-import { closeThreads, type LfgDeps, lfgAutocomplete, lfgCommand, lfgComponent } from "../lfgInteractions";
+import {
+  closeThreads,
+  type LfgDeps,
+  lfgAutocomplete,
+  lfgCommand,
+  lfgComponent,
+  suggestFormats,
+} from "../lfgInteractions";
 import { customId, type LfgAction } from "../lfgView";
 import { DIRECTORY_VERSION, type DirectoryServer, type FetchFn, ServerCache } from "../servers";
 
@@ -529,6 +537,76 @@ describe("game threads", () => {
   });
 });
 
+describe("/lfg format autocomplete", () => {
+  const ask = async (typed: string, d: LfgDeps) =>
+    (
+      await body(
+        lfgAutocomplete(
+          { ...command([opt("format", typed, true)]), type: InteractionType.APPLICATION_COMMAND_AUTOCOMPLETE },
+          d,
+        ),
+      )
+    ).data.choices ?? [];
+  const synthetic: LfgFormat[] = Array.from({ length: 30 }, (_, n) => {
+    const id = String(n).padStart(2, "0");
+    return { format: `F${id}`, label: `Fmt ${id}`, min_players: 2, max_players: 2 };
+  });
+
+  test("an empty query lists the registry's first entries, at most 25", async () => {
+    const choices = await ask("", deps(await cache()));
+    expect(choices.length).toBeGreaterThan(0);
+    expect(choices).toEqual(
+      FORMATS.slice(0, 25).map((f) => ({ name: f.label, value: f.format })),
+    );
+  });
+
+  test("a registry past the cap is capped, and every entry stays reachable by typing", () => {
+    expect(suggestFormats("", synthetic).map((c) => c.value)).toEqual(synthetic.slice(0, 25).map((f) => f.format));
+    expect(suggestFormats("Fmt 29", synthetic)).toEqual([{ name: "Fmt 29", value: "F29" }]);
+    expect(suggestFormats("fmt", synthetic)).toHaveLength(25);
+  });
+
+  test("prefix matches precede contains matches, case-insensitively and trimmed", async () => {
+    const d = deps(await cache());
+    const com = (await ask("com", d)).map((c) => c.value);
+    expect(com.slice(0, 2)).toEqual(["Commander", "CommanderDraft"]);
+    expect(com).toContain("DuelCommander");
+    expect(com.indexOf("DuelCommander")).toBeGreaterThan(com.indexOf("CommanderDraft"));
+    expect((await ask("  DUEL ", d)).map((c) => c.value)).toEqual(["DuelCommander"]);
+    expect((await ask("zzz-no-such-format", d))).toEqual([]);
+  });
+
+  test("a query matches the key as well as the label", async () => {
+    const d = deps(await cache());
+    expect((await ask("HistoricBrawl", d)).map((c) => c.value)).toEqual(["HistoricBrawl"]);
+    expect((await ask("tiny", d)).map((c) => c.value)).toEqual(["TinyLeaders"]);
+  });
+
+  test("every registry format is reachable by typing its label", async () => {
+    const d = deps(await cache());
+    expect(FORMATS.length).toBeGreaterThan(0);
+    for (const f of FORMATS) {
+      const choices = await ask(f.label, d);
+      expect(choices.length).toBeGreaterThan(0);
+      expect(choices.some((c) => c.value === f.format)).toBe(true);
+    }
+  });
+
+  test("a chosen value posts, while a typed label that is not a key is refused with no row", async () => {
+    const d = deps(await cache());
+    const created = spyCreates(d);
+    const [choice] = await ask("duel", d);
+    expect(choice.value).toBe("DuelCommander");
+    const posted = await body(lfgCommand(command([opt("format", choice.value)]), d));
+    expect(buttonLabels(posted)).toEqual(["Join", "Leave", "Start"]);
+    expect(created()).toHaveLength(1);
+    const refused = await body(lfgCommand(command([opt("format", "Duel Commander")]), d));
+    expect(refused.data.flags).toBe(MessageFlags.EPHEMERAL);
+    expect(refused.data.content).toBe("Unknown format. Pick one from the suggestions.");
+    expect(created()).toHaveLength(1);
+  });
+});
+
 describe("/lfg server autocomplete", () => {
   test("offers eligible servers only, filtered by the typed text, value = row url", async () => {
     const d = deps(
@@ -792,6 +870,28 @@ describe("Discord REST helpers", () => {
       expect(JSON.parse(String(calls[0].init.body))).toEqual({ content: "hi" });
 
       expect(await botMessageApi("secret").edit("c-1", "m-7", { content: "hi" })).toBe("gone");
+      expect(calls).toHaveLength(2);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test("botMessageApi.delete deletes the message with bot auth, and treats an already-deleted one (404) as done", async () => {
+    const calls: { url: string; init: RequestInit }[] = [];
+    const statuses = [204, 404];
+    const spy = stubGlobalFetch(async (input, init) => {
+      calls.push({ url: String(input), init: init ?? {} });
+      const status = statuses.shift();
+      return new Response(status === 404 ? JSON.stringify({ message: "Unknown Message" }) : null, { status });
+    });
+    try {
+      await botMessageApi("secret").delete("c-1", "m-7");
+      expect(calls[0].url).toBe("https://discord.com/api/v10/channels/c-1/messages/m-7");
+      expect(calls[0].init.method).toBe("DELETE");
+      expect(new Headers(calls[0].init.headers).get("Authorization")).toBe("Bot secret");
+      expect(calls[0].init.body).toBeUndefined();
+
+      await botMessageApi("secret").delete("c-1", "m-7");
       expect(calls).toHaveLength(2);
     } finally {
       spy.mockRestore();

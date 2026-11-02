@@ -40,6 +40,7 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
+use engine::types::game_state::CastPaymentMode;
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
@@ -148,6 +149,7 @@ fn a_nested_library_exile_leg_is_paid_after_the_first_tier_tap() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("a nested composite activation cost must be payable");
 
@@ -243,6 +245,7 @@ fn a_composite_without_a_library_leg_keeps_its_stored_order() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("a tap-only composite activation cost must be payable");
 

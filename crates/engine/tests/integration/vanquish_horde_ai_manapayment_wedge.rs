@@ -52,7 +52,8 @@ fn gunzip(gz: &[u8]) -> String {
     flate2::read::GzDecoder::new(gz)
         .read_to_string(&mut json)
         .expect("fixture .json.gz must inflate to UTF-8 JSON");
-    json
+    // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+    engine::types::game_state::record_captured_onsets_json(&json)
 }
 
 /// Load the capture through the real production restore chokepoint
@@ -122,8 +123,7 @@ fn assert_capture_is_the_reported_wedge(state: &GameState) {
         .expect("seat 2 is in the capture");
     let white_available = stuck_player
         .mana_pool
-        .mana
-        .iter()
+        .units()
         .filter(|unit| unit.color == ManaType::White && unit.restrictions.is_empty())
         .count();
     assert!(

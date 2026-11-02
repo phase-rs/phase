@@ -83,6 +83,7 @@ fn top_ability_does_not_follow_new_object_after_key_untaps_it() {
         .act(GameAction::ActivateAbility {
             source_id: top,
             ability_index: 1,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("Top's first draw activation must be accepted");
     let first_incarnation = runner.state().objects[&top].incarnation;
@@ -101,6 +102,7 @@ fn top_ability_does_not_follow_new_object_after_key_untaps_it() {
         .act(GameAction::ActivateAbility {
             source_id: key,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("Key's untap activation must be accepted");
     if matches!(
@@ -144,6 +146,7 @@ fn top_ability_does_not_follow_new_object_after_key_untaps_it() {
         .act(GameAction::ActivateAbility {
             source_id: top,
             ability_index: 1,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("Top's second draw activation must be accepted");
     assert_eq!(

@@ -387,3 +387,19 @@ describe("isCustomFormatRulesShape", () => {
     ).toBe(false);
   });
 });
+
+describe("removed experimental-dungeons key", () => {
+  it("still validates a blob persisting the removed key", () => {
+    // Saves and broker frames written before the flag was deleted still
+    // carry it. The guard names required fields but never rejects unknown
+    // ones, so the stale key — true or false — must not fail validation.
+    for (const stale of [true, false]) {
+      expect(
+        isFormatConfigShape({
+          ...builtInConfig(),
+          allow_experimental_dungeons: stale,
+        }),
+      ).toBe(true);
+    }
+  });
+});

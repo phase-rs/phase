@@ -181,6 +181,27 @@ describe("ProliferateModal (via CardChoiceModal)", () => {
     });
   });
 
+  it("renders no ChooseObjects modal for a single pick", () => {
+    // CR 608.2d: a single pick (`max: 1`) is answered on the board through
+    // TargetingOverlay, so the list modal must not render for it.
+    setUpWaitingFor({
+      type: "ChooseObjectsSelection",
+      data: { player: 0, eligible: [{ Object: 42 }, { Player: 1 }], min: 1, max: 1 },
+    });
+    const { container } = render(<CardChoiceModal />);
+    expect(screen.queryByText("Choose Permanents")).toBeNull();
+    expect(container).toBeEmptyDOMElement();
+    cleanup();
+
+    // Paired positive: the identical payload as a multi-pick keeps the modal.
+    setUpWaitingFor({
+      type: "ChooseObjectsSelection",
+      data: { player: 0, eligible: [{ Object: 42 }, { Player: 1 }], min: 1, max: 2 },
+    });
+    render(<CardChoiceModal />);
+    expect(screen.getByText("Choose Permanents")).toBeInTheDocument();
+  });
+
   it("can replace a default target when the exact minimum equals the maximum", () => {
     const eligible: TargetRef[] = [{ Object: 42 }, { Object: 43 }, { Object: 44 }];
     setUpWaitingFor({

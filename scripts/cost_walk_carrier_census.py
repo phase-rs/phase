@@ -59,9 +59,7 @@ INLINE_BRANCH_CARRIERS = frozenset(
         "Vote",
         "SeparateIntoPiles",
         "RevealFromHand",
-        "FlipCoin",
         "FlipCoins",
-        "FlipCoinUntilLose",
         "RollDie",
         "ChooseOneOf",
     }

@@ -830,8 +830,14 @@ fn commander_eligibility_rule_from_source_format_covers_every_builtin() {
         (GameFormat::HistoricBrawl, Some(BrawlColorIdentity)),
         (GameFormat::FreeForAll, None),
         (GameFormat::TwoHeadedGiant, None),
+        // CR 903.3, unchanged by CR 810 seating.
+        (GameFormat::TwoHeadedGiantCommander, Some(Standard)),
         (GameFormat::Archenemy, None),
+        // CR 904.13a + CR 903.3.
+        (GameFormat::ArchenemyCommander, Some(Standard)),
         (GameFormat::Planechase, None),
+        // CR 903.3, unchanged by CR 901 planar seating.
+        (GameFormat::PlanechaseCommander, Some(Standard)),
         (GameFormat::Momir, None),
         // CR 903.13g: Commander Draft games follow Commander's rules, and
         // CR 903.13f routes deck construction through CR 903.5, so CR 903.3's
@@ -841,6 +847,7 @@ fn commander_eligibility_rule_from_source_format_covers_every_builtin() {
         (GameFormat::CommanderDraft, Some(Standard)),
         (GameFormat::Freeform, None),
         (GameFormat::FreeformCommander, Some(FreeformAnyCastableCard)),
+        (GameFormat::Dandan, None),
     ];
     // This table had NO length assertion at all, despite its name. Ordered
     // equality against the enum is what makes the name true and keeps it true:
@@ -897,12 +904,19 @@ fn game_format_serialization_is_byte_identical_to_old_derive_for_builtins() {
         (GameFormat::HistoricBrawl, "HistoricBrawl"),
         (GameFormat::FreeForAll, "FreeForAll"),
         (GameFormat::TwoHeadedGiant, "TwoHeadedGiant"),
+        (
+            GameFormat::TwoHeadedGiantCommander,
+            "TwoHeadedGiantCommander",
+        ),
         (GameFormat::Archenemy, "Archenemy"),
+        (GameFormat::ArchenemyCommander, "ArchenemyCommander"),
         (GameFormat::Planechase, "Planechase"),
+        (GameFormat::PlanechaseCommander, "PlanechaseCommander"),
         (GameFormat::Momir, "Momir"),
         (GameFormat::CommanderDraft, "CommanderDraft"),
         (GameFormat::Freeform, "Freeform"),
         (GameFormat::FreeformCommander, "FreeformCommander"),
+        (GameFormat::Dandan, "Dandan"),
     ];
     // Replaces `assert_eq!(expectations.len(), 22)`, which could not fail:
     // 22 == 22 holds however the enum grows, and it did — `CommanderDraft`'s
@@ -1340,9 +1354,9 @@ fn companion_candidates_returns_empty_for_custom_format_without_panicking() {
 // representations of the same state with nothing cross-checking them. Phase
 // 1c builds that resolver (FormatConfig::for_custom_rules), so the boundary
 // now accepts a Custom payload exactly when it equals what the resolver
-// derives from the payload's own custom_rules (allow_debug_actions excepted,
-// being a session capability rather than a format rule), and rejects
-// anything else. Each value below is constructed directly in Rust (bypassing
+// derives from the payload's own custom_rules (allow_debug_actions
+// excepted, being a session capability rather than a format rule), and
+// rejects anything else. Each value below is constructed directly in Rust (bypassing
 // Deserialize, which has no reason to reject it going the other way) and
 // round-tripped through `serde_json` — the only way to exercise
 // FormatConfig's real Deserialize impl without hand-guessing its full field
@@ -1523,6 +1537,28 @@ fn format_config_deserialization_ignores_allow_debug_actions_in_the_custom_equal
             .unwrap_or_else(|error| panic!("allow_debug_actions={allow_debug_actions}: {error}"));
         assert_eq!(back, config);
         assert_eq!(back.allow_debug_actions, allow_debug_actions);
+    }
+}
+
+#[test]
+fn format_config_deserialization_ignores_the_removed_experimental_dungeons_key() {
+    // Back-compat: saves, replays, and persisted setups written before the
+    // per-session experimental-dungeons flag was removed still carry the
+    // `allow_experimental_dungeons` key. The derived `Deserialize` impl sets
+    // no `deny_unknown_fields`, so the stale key must be ignored — not
+    // rejected — and the pool must come from the format alone. Both stale
+    // values must load; a `true` on a non-freeform config must NOT smuggle
+    // the Wilderness into its pool.
+    for stale_value in [true, false] {
+        let mut json = serde_json::to_value(FormatConfig::standard()).unwrap();
+        json.as_object_mut().unwrap().insert(
+            "allow_experimental_dungeons".to_string(),
+            serde_json::Value::Bool(stale_value),
+        );
+        let back = serde_json::from_value::<FormatConfig>(json)
+            .unwrap_or_else(|error| panic!("stale flag={stale_value}: {error}"));
+        assert_eq!(back, FormatConfig::standard());
+        assert!(!back.format.offers_baldurs_gate_wilderness());
     }
 }
 
@@ -2372,6 +2408,25 @@ fn from_lobby_config_rejects_momir_source() {
         error.to_string().contains("auxiliary deck or component"),
         "expected the auxiliary-deck-component rejection, got: {error}"
     );
+}
+
+#[test]
+fn from_lobby_config_rejects_dandan_source() {
+    // CR 400.1: Dandân's shared library and graveyard are keyed on
+    // GameFormat::Dandan itself and have no StructuralRules field. Its config
+    // sets `command_zone: false`, so without
+    // has_unrepresentable_auxiliary_deck_component it would save as a plain
+    // format with the zones per-player.
+    let error = CustomFormatDef::from_lobby_config("Dan".to_string(), &FormatConfig::dandan())
+        .expect_err("Dandan must not be saveable as a custom format");
+    assert!(
+        error.to_string().contains("auxiliary deck or component"),
+        "expected the auxiliary-deck-component rejection, got: {error}"
+    );
+    // Reach-guard: an ordinary format saves, so the refusal above is the
+    // predicate and not a blanket refusal.
+    CustomFormatDef::from_lobby_config("Std".to_string(), &FormatConfig::standard())
+        .expect("Standard must be saveable as a custom format");
 }
 
 #[test]

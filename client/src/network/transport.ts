@@ -56,6 +56,14 @@ export interface PeerTransportFactory {
   create(id?: string, options?: TransportPeerOptions): TransportPeer;
 }
 
+export type PeerTransportSelectionContext = Readonly<{
+  role: "host" | "guest";
+  hostPeerId: string;
+}>;
+
+/** A synchronous, selection-only callback; it must not allocate session resources. */
+export type PeerTransportSelector = (context: PeerTransportSelectionContext) => PeerTransportFactory;
+
 const peerJsFactory: PeerTransportFactory = {
   create(id, options) {
     const peer = id === undefined
@@ -67,6 +75,46 @@ const peerJsFactory: PeerTransportFactory = {
 
 /** Current default; future backends can be selected behind this seam. */
 export const peerTransportFactory: PeerTransportFactory = peerJsFactory;
+
+let peerTransportSelector: PeerTransportSelector | undefined;
+let peerTransportSelectorInstalled = false;
+let peerTransportSelectionLocked = false;
+
+/**
+ * Install the bootstrap transport selector once, before ordinary selection.
+ * This module-lifetime setting can only be changed after a full reload, including during HMR.
+ */
+export function installPeerTransportSelector(selector: PeerTransportSelector): void {
+  if (peerTransportSelectionLocked) {
+    throw new Error("Peer transport selection is already locked");
+  }
+  if (peerTransportSelectorInstalled) {
+    throw new Error("Peer transport selector is already installed");
+  }
+  if (typeof selector !== "function") {
+    throw new TypeError("Peer transport selector must be a function");
+  }
+  peerTransportSelector = selector;
+  peerTransportSelectorInstalled = true;
+}
+
+/** Resolve one operation's factory while synchronously locking bootstrap configuration. */
+export function selectPeerTransportFactory(
+  context: PeerTransportSelectionContext,
+  explicitFactory?: PeerTransportFactory,
+): PeerTransportFactory {
+  if (explicitFactory !== undefined) return explicitFactory;
+
+  peerTransportSelectionLocked = true;
+  const selector = peerTransportSelector;
+  const factory = selector
+    ? selector(Object.freeze({ role: context.role, hostPeerId: context.hostPeerId }))
+    : peerJsFactory;
+  if (!factory || typeof factory.create !== "function") {
+    throw new TypeError("Peer transport selector must return a peer transport factory");
+  }
+  return factory;
+}
 
 export function createPeer(
   id?: string,

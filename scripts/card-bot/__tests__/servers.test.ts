@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
-import { join } from "node:path";
+import { loadProtocolVersions } from "../../protocol-versions.mjs";
 
 import { BUILD_ENDPOINTS, type Build } from "../config";
 import {
@@ -131,7 +131,8 @@ describe("ServerCache.refresh", () => {
         throw new DOMException("The operation timed out.", "TimeoutError");
       }],
       ["200 with a non-JSON body", () => new Response("<html>not json</html>")],
-      ["wrong directory_version", envelope([row()], 2)],
+      ["newer directory_version", envelope([row()], DIRECTORY_VERSION + 1)],
+      ["older directory_version", envelope([row()], DIRECTORY_VERSION - 1)],
       ["absent directory_version", () => Response.json({ servers: [row()] })],
       ["bare array (pre-envelope shape)", () => Response.json([row()])],
       ["servers not an array", envelope({ url: "wss://a.example/ws" })],
@@ -193,7 +194,7 @@ describe("ServerCache.refresh", () => {
   test("an entry is exactly the last refresh (a server that left stops being offered)", async () => {
     let servers = [row()];
     const cache = new ServerCache(
-      stubFetch({ release: { health: healthOk, servers: () => Response.json({ directory_version: 1, servers }) } }),
+      stubFetch({ release: { health: healthOk, servers: () => Response.json({ directory_version: DIRECTORY_VERSION, servers }) } }),
     );
     await cache.refresh();
     expect(cache.get("release")!.servers).toHaveLength(1);
@@ -207,11 +208,6 @@ describe("ServerCache.refresh", () => {
   });
 });
 
-test("DIRECTORY_VERSION equals lobby_broker::directory::DIRECTORY_VERSION", async () => {
-  const rust = await Bun.file(
-    join(import.meta.dir, "../../../crates/lobby-broker/src/directory.rs"),
-  ).text();
-  const matches = [...rust.matchAll(/pub const DIRECTORY_VERSION: u32 = (\d+);/g)];
-  expect(matches).toHaveLength(1);
-  expect(DIRECTORY_VERSION).toBe(Number(matches[0][1]));
+test("DIRECTORY_VERSION is owned by the protocol registry", () => {
+  expect(DIRECTORY_VERSION).toBe(loadProtocolVersions().directory);
 });

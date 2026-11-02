@@ -734,3 +734,88 @@ fn a_free_cast_bound_the_window_cannot_represent_is_refused_not_fabricated() {
         );
     }
 }
+
+/// CR 608.2g: a spell cast during the resolution is cast "except no player
+/// receives priority after it's cast". When the window's last chosen spell
+/// needs a target, answering that target finishes Invoke Calamity — it is
+/// exiled — before its caster gets priority with the spell on the stack.
+#[test]
+fn a_targeted_last_cast_finishes_invoke_calamity_before_priority() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let invoke_id = scenario
+        .add_spell_to_hand_from_oracle(P0, "Invoke Calamity", true, INVOKE_CALAMITY_TEXT)
+        .with_mana_cost(ManaCost::generic(1))
+        .id();
+    let shock = scenario
+        .add_spell_to_graveyard(P0, "Graveyard Shock", true)
+        .with_mana_cost(ManaCost::generic(2))
+        .from_oracle_text("This spell deals 2 damage to target player.")
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(
+            ManaType::Colorless,
+            ObjectId(0),
+            false,
+            vec![],
+        )],
+    );
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&invoke_id].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: invoke_id,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("casting Invoke Calamity must succeed");
+    for _ in 0..6 {
+        match runner.state().waiting_for {
+            WaitingFor::Priority { .. }
+                if runner.state().stack.iter().any(|e| e.id == invoke_id) =>
+            {
+                runner.act(GameAction::PassPriority).expect("pass");
+            }
+            WaitingFor::OptionalEffectChoice { .. } => {
+                runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("accept the free casts");
+            }
+            _ => break,
+        }
+    }
+    runner
+        .act(GameAction::FreeCastWindowChoice {
+            selection: Some(shock),
+        })
+        .expect("choosing the Shock must succeed");
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Player(P1)),
+        })
+        .expect("targeting P1 must succeed");
+
+    assert_eq!(
+        runner.state().objects[&invoke_id].zone,
+        Zone::Exile,
+        "Invoke Calamity finished resolving before priority"
+    );
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .map(|e| e.id)
+            .collect::<Vec<_>>(),
+        vec![shock]
+    );
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P0 }
+    ));
+    runner.advance_until_stack_empty();
+    assert_eq!(runner.state().players[1].life, 18);
+    assert_eq!(runner.state().objects[&shock].zone, Zone::Exile);
+}

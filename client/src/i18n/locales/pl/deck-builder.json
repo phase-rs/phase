@@ -278,7 +278,9 @@
     "dataVersion": "Dane: {{version}}",
     "aboutBrackets": "O poziomach ↗",
     "estimatedChip": "Szacowany: B{{tier}}",
-    "estimatedChipFull": "Szacowany poziom: B{{tier}} {{label}}"
+    "estimatedChipFull": "Szacowany poziom: B{{tier}} {{label}}",
+    "manualChip": "B{{tier}}",
+    "manualChipFull": "Zadeklarowany poziom: B{{tier}} {{label}}"
   },
   "bracketPicker": {
     "ariaLabel": "Poziom talii",

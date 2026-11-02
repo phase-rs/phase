@@ -14,7 +14,7 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard};
 use engine::types::phase::Phase;
@@ -78,6 +78,7 @@ fn thought_lash_activation_exiles_the_top_card_of_your_library() {
         .act(GameAction::ActivateAbility {
             source_id: lash,
             ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activation with a nonempty library must be accepted");
     runner.advance_until_stack_empty();
@@ -111,6 +112,7 @@ fn thought_lash_cannot_be_activated_with_an_empty_library() {
     let result = runner.act(GameAction::ActivateAbility {
         source_id: lash,
         ability_index: index,
+        payment_mode: CastPaymentMode::Auto,
     });
 
     assert!(
@@ -180,6 +182,7 @@ fn phyrexian_devourer_counts_the_exiled_cards_mana_value() {
         .act(GameAction::ActivateAbility {
             source_id: devourer,
             ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activation must be accepted with a nonempty library");
     runner.advance_until_stack_empty();
@@ -278,6 +281,7 @@ fn a_direct_activation_affects_the_card_its_own_cost_exiled() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("a deterministic library-exile activation must be accepted");
     runner.advance_until_stack_empty();
@@ -381,6 +385,7 @@ fn a_targetful_activation_affects_the_card_its_own_cost_exiled() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("a targetful library-exile activation must be accepted");
 
@@ -517,6 +522,7 @@ fn a_replacement_paused_library_exile_cost_still_publishes_its_requested_count()
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("a two-card library-exile activation must be accepted");
 
@@ -627,6 +633,7 @@ fn a_paused_activation_cost_that_settles_in_exile_keeps_its_source_link() {
         .act(GameAction::ActivateAbility {
             source_id: lash,
             ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activation must be accepted");
 

@@ -322,6 +322,52 @@ describe("lookupJoinTargetOver", () => {
       expect(result.info.format_config).toBeNull();
     }
   });
+
+  it("keeps a format_config carrying the removed experimental flag", async () => {
+    const ws = new MockWebSocket();
+    const promise = lookupJoinTargetOver(makePhaseSocket(ws), "ABC123");
+    ws.deliver(
+      JSON.stringify({
+        type: "JoinTargetInfo",
+        data: {
+          game_code: "ABC123",
+          is_p2p: false,
+          player_count: 2,
+          filled_seats: 1,
+          match_config: { match_type: "Bo1" },
+          // Minted before the experimental-dungeons flag was removed: every
+          // field of today's schema plus the stale key.
+          format_config: {
+            format: "Commander",
+            starting_life: 40,
+            min_players: 2,
+            max_players: 6,
+            deck_size: { type: "Exactly", data: 100 },
+            singleton: true,
+            command_zone: true,
+            commander_damage_threshold: 21,
+            range_of_influence: null,
+            team_based: false,
+            uses_commander: true,
+            supplies_fixed_deck: false,
+            sideboard_policy: { type: "Forbidden" },
+            default_deck_copy_limit: { type: "UpTo", data: 1 },
+            allow_debug_actions: false,
+            allow_experimental_dungeons: true,
+          },
+        },
+      }),
+    );
+    const result = await promise;
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("unreachable: reach guard above");
+    // Kept (not dropped to null) with the stale key ignored.
+    expect(result.info.format_config).toEqual(
+      expect.objectContaining({
+        format: "Commander",
+      }),
+    );
+  });
 });
 
 describe("subscribeLobbyOver", () => {

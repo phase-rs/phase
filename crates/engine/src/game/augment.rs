@@ -9,7 +9,6 @@ use crate::types::ability::{
     AbilityDefinition, AbilityKind, CombineSource, CopiableValues, Effect, EffectError, EffectKind,
     ResolvedAbility, TargetFilter, TargetRef, TriggerDefinition,
 };
-use crate::types::card::{PrintedCardRef, TokenImageRef};
 use crate::types::card_type::{CardType, Supertype};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingContinuation, WaitingFor};
@@ -19,7 +18,7 @@ use crate::types::mana::ManaColor;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
-use super::game_object::{DisplaySource, MergeKind};
+use super::game_object::{DisplayIdentity, MergeKind};
 use super::printed_cards;
 use super::sba::move_to_graveyard_via_pipeline;
 use super::zones;
@@ -76,7 +75,7 @@ pub fn resolve_combine_host(
         }
         _ => {
             let mut continuation = ability.clone();
-            continuation.targets.clear();
+            continuation.clear_targets();
             continuation.effect = Effect::CombineHost {
                 source: CombineSource::SpecificObject { id: augment_id },
                 host: Box::new(TargetFilter::ParentTarget),
@@ -143,7 +142,7 @@ pub fn resolve_choose_augment_and_combine(
         }
         _ => {
             let mut continuation = ability.clone();
-            continuation.targets.clear();
+            continuation.clear_targets();
             continuation.effect = Effect::CombineHost {
                 source: CombineSource::ParentTarget,
                 host: Box::new(frozen_host),
@@ -254,16 +253,8 @@ fn resolve_candidates(
     let mut candidates = Vec::new();
     for zone in zones_to_search {
         let ids: Vec<ObjectId> = match zone {
-            Zone::Library => state.players[player.0 as usize]
-                .library
-                .iter()
-                .copied()
-                .collect(),
-            Zone::Graveyard => state.players[player.0 as usize]
-                .graveyard
-                .iter()
-                .copied()
-                .collect(),
+            Zone::Library => state.library_of(player).iter().copied().collect(),
+            Zone::Graveyard => state.graveyard_of(player).iter().copied().collect(),
             Zone::Hand => state.players[player.0 as usize]
                 .hand
                 .iter()
@@ -307,9 +298,7 @@ fn combine_card_with_host(
         zones::absorb_component(state, augment_id, Some(zone));
     }
 
-    let Some((values, display_source, printed_ref, token_image_ref)) =
-        merged_copiable_values(state, augment_id, host_id)
-    else {
+    let Some((values, display)) = merged_copiable_values(state, augment_id, host_id) else {
         return;
     };
     remove_merge_layer_effect(state, host_id);
@@ -331,15 +320,7 @@ fn combine_card_with_host(
         }
     }
 
-    install_merge_layer_effect(
-        state,
-        host_id,
-        controller,
-        values,
-        display_source,
-        printed_ref,
-        token_image_ref,
-    );
+    install_merge_layer_effect(state, host_id, controller, values, display);
     events.push(GameEvent::Augmented {
         merged_id: host_id,
         augmenting_id: augment_id,
@@ -351,12 +332,7 @@ fn merged_copiable_values(
     state: &GameState,
     augment_id: ObjectId,
     host_id: ObjectId,
-) -> Option<(
-    CopiableValues,
-    DisplaySource,
-    Option<PrintedCardRef>,
-    Option<TokenImageRef>,
-)> {
+) -> Option<(CopiableValues, DisplayIdentity)> {
     let augment = state.objects.get(&augment_id)?;
     let host = state.objects.get(&host_id)?;
     let host_values = crate::game::layers::compute_current_copiable_values(state, host_id)
@@ -402,15 +378,13 @@ fn merged_copiable_values(
         // An augment merge is a Host+Augment creature, never a Room — augment
         // is an Un-set mechanic with no Comprehensive Rules entry to cite.
         room_halves: None,
+        // CR 722.2b: the merged object's prepare spell, if any, follows its
+        // host's copiable values, as the loyalty characteristic does above.
+        prepare_face: host_values.prepare_face.clone(),
         name_origin: Default::default(),
     };
 
-    Some((
-        values,
-        host.display_source,
-        host.printed_ref.clone(),
-        host.token_image_ref.clone(),
-    ))
+    Some((values, host.display_identity()))
 }
 
 type MergedAbilitySets = (
@@ -544,6 +518,46 @@ fn push_unique_colors(into: &mut Vec<ManaColor>, extra: &[ManaColor]) {
     for color in extra {
         if !into.contains(color) {
             into.push(*color);
+        }
+    }
+}
+
+#[cfg(test)]
+mod dandan_read_sweep_tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::format::FormatConfig;
+    use crate::types::identifiers::CardId;
+
+    /// CR 400.1: an augment search over the controller's library and graveyard
+    /// reads the shared pile for the non-canonical seat, and the seat's own
+    /// zones otherwise.
+    #[test]
+    fn candidates_read_the_storage_authority() {
+        for (format, shared) in [
+            (FormatConfig::dandan(), true),
+            (FormatConfig::standard(), false),
+        ] {
+            let mut state = GameState::new(format, 2, 1);
+            let p1 = PlayerId(1);
+            let library = create_object(&mut state, CardId(1), p1, "Library".into(), Zone::Library);
+            let graveyard = create_object(
+                &mut state,
+                CardId(2),
+                p1,
+                "Graveyard".into(),
+                Zone::Graveyard,
+            );
+
+            let found = resolve_candidates(
+                &state,
+                p1,
+                &[Zone::Library, Zone::Graveyard],
+                &TargetFilter::Any,
+            );
+
+            assert_eq!(found, vec![library, graveyard], "shared={shared}");
+            assert_eq!(state.players[1].library.is_empty(), shared);
         }
     }
 }
