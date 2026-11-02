@@ -146,17 +146,18 @@ pub fn resolve(
             // the object was bound and then became a new object (CR 400.7), so the
             // copy has no legal source and resolves as a clean no-op through the
             // empty-source path below, which still emits `EffectResolved`.
-            match ability.cost_paid_object.as_ref() {
-                None => {
-                    return Err(EffectError::MissingParam(
-                        "CopyTokenOf requires a cost-paid object".to_string(),
-                    ));
-                }
-                Some(snapshot) => snapshot
-                    .live_object_id(state)
-                    .map(|id| vec![id])
-                    .unwrap_or_default(),
+            //
+            // CR 608.2c + CR 701.68c: an earlier instruction of this resolution
+            // can bind the referent instead of a cost ("the blighted creature"),
+            // so the read goes through the shared ladder. Absence stays an error
+            // for either binder: a chain whose producer can produce nothing is
+            // gated at that producer, so only a chain with no producer reaches it.
+            if ability.cost_paid_object.is_none() && ability.effect_context_object.is_none() {
+                return Err(EffectError::MissingParam(
+                    "CopyTokenOf requires a cost-paid object".to_string(),
+                ));
             }
+            crate::game::effects::resolved_effect_object_ids(state, ability, target_filter)
         } else if matches!(
             target_filter,
             TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }

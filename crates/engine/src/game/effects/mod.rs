@@ -16494,9 +16494,10 @@ fn optional_pay_cost_affordability_is_decidable(cost: &AbilityCost) -> bool {
 /// prompt at all. Each arm below proves infeasibility through its authoritative
 /// typed state: a missing chosen counter kind, no removable matching counter,
 /// an exact `ParentTarget` hand-off that records no produced object, a
-/// self-referent or event-referent move whose object can no longer move, or a
-/// reveal of a library top that would reveal no card. Suppressing the prompt
-/// lets the effect resolve as its defined no-op instead.
+/// self-referent or event-referent move whose object can no longer move, a
+/// reveal of a library top that would reveal no card, or a blight with no
+/// creature that can take the counters. Suppressing the prompt lets the effect
+/// resolve as its defined no-op instead.
 fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -> bool {
     match &ability.effect {
         Effect::PutSticker { .. } => stickers::optional_is_infeasible(state, ability),
@@ -16534,6 +16535,11 @@ fn optional_effect_is_infeasible(state: &GameState, ability: &ResolvedAbility) -
         Effect::Discard { .. } => {
             let effective = hydrate_event_context_targets(state, ability);
             discard::optional_discard_is_infeasible(state, effective.as_ref())
+        }
+        // CR 701.68b + CR 608.2d: a player unable to put the counters can't choose to blight.
+        Effect::BlightEffect { .. } => {
+            let effective = hydrate_event_context_targets(state, ability);
+            blight::optional_blight_is_infeasible(state, effective.as_ref())
         }
         // CR 608.2d + CR 122.1: an optional exact counter-removal selection
         // cannot be accepted unless every required permanent is selectable.
