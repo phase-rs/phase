@@ -15036,6 +15036,26 @@ fn apply_non_priority_pass_action(
                         "X={value} cannot pay the activation cost"
                     )));
                 }
+                // CR 601.6 + CR 601.2b + CR 202.3e: X is announced as part of
+                // the spell's proposal, and the announced spell must still be
+                // one its caster may cast. The proposal check let the cast
+                // begin because some X could evade a quality prohibition
+                // (CR 601.3a — Void Winnower and an even mana value); an X that
+                // gives the spell the prohibited quality is not a legal
+                // announcement.
+                if trial.activation_ability_index.is_none()
+                    && casting::announced_spell_is_prohibited(
+                        state,
+                        player,
+                        trial.object_id,
+                        value,
+                        trial.casting_variant == CastingVariant::Fuse,
+                    )
+                {
+                    return Err(EngineError::InvalidAction(format!(
+                        "X={value} gives this spell a quality a static ability prevents you from casting"
+                    )));
+                }
                 if pending.deferred_target_selection {
                     // CR 601.2c: A chosen X that determines target count must
                     // have a legal target assignment before it is locked into
