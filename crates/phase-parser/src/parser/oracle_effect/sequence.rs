@@ -9115,9 +9115,10 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
         // destination has no rest-pile reading), so it parses as its own
         // instruction (Game Preserve: "put those cards onto the battlefield").
         Effect::Dig { .. }
-            if (nom_primitives::scan_contains(&lower, "put them back")
-                || nom_primitives::scan_contains(&lower, "put the rest")
-                || nom_primitives::scan_contains(&lower, "put those cards"))
+            if !nom_primitives::scan_contains(&lower, "you may")
+                && (nom_primitives::scan_contains(&lower, "put them back")
+                    || nom_primitives::scan_contains(&lower, "put the rest")
+                    || nom_primitives::scan_contains(&lower, "put those cards"))
                 && !nom_primitives::scan_contains(&lower, "onto the battlefield") =>
         {
             let destination = if nom_primitives::scan_contains(&lower, "into your graveyard")
@@ -15144,6 +15145,82 @@ mod tests {
             }
             _ => unreachable!(),
         }
+    }
+
+    #[test]
+    fn test_petals_of_insight_parse() {
+        use super::super::parse_effect_chain;
+        let def = parse_effect_chain(
+            "Look at the top three cards of your library. You may put those cards on the bottom of your library in any order. If you do, return ~ to its owner's hand. Otherwise, draw three cards.",
+            AbilityKind::Spell,
+        );
+        let Effect::Dig {
+            count,
+            keep_count,
+            destination,
+            rest_destination,
+            source,
+            ..
+        } = def.effect.as_ref()
+        else {
+            panic!("root must be Dig, got {:?}", def.effect);
+        };
+        assert_eq!(*count, QuantityExpr::Fixed { value: 3 });
+        assert_eq!(*keep_count, Some(0), "pure peek keeps 0 cards");
+        assert_eq!(*destination, None);
+        assert_eq!(*rest_destination, None);
+        assert_eq!(*source, DigSource::Library);
+
+        let sub = def
+            .sub_ability
+            .as_deref()
+            .expect("must have sub_ability for optional bottom placement");
+        assert!(sub.optional, "must be optional choice");
+        let Effect::Dig {
+            count: sub_count,
+            keep_count: sub_keep,
+            rest_destination: sub_rest,
+            source: sub_src,
+            ..
+        } = sub.effect.as_ref()
+        else {
+            panic!(
+                "sub_ability effect must be PriorLook Dig, got {:?}",
+                sub.effect
+            );
+        };
+        assert_eq!(*sub_count, QuantityExpr::Fixed { value: 0 });
+        assert_eq!(*sub_keep, Some(0));
+        assert_eq!(*sub_rest, Some(Zone::Library));
+        assert_eq!(*sub_src, DigSource::PriorLook);
+
+        let if_you_do = sub
+            .sub_ability
+            .as_deref()
+            .expect("must have if-you-do sub_ability");
+        assert_eq!(
+            if_you_do.condition,
+            Some(AbilityCondition::effect_performed())
+        );
+        let Effect::Bounce { target, .. } = if_you_do.effect.as_ref() else {
+            panic!(
+                "if_you_do effect must be Bounce, got {:?}",
+                if_you_do.effect
+            );
+        };
+        assert_eq!(*target, TargetFilter::SelfRef);
+
+        let otherwise = if_you_do
+            .else_ability
+            .as_deref()
+            .expect("must have otherwise else_ability");
+        let Effect::Draw {
+            count: draw_count, ..
+        } = otherwise.effect.as_ref()
+        else {
+            panic!("otherwise effect must be Draw, got {:?}", otherwise.effect);
+        };
+        assert_eq!(*draw_count, QuantityExpr::Fixed { value: 3 });
     }
 
     #[test]
