@@ -4154,6 +4154,7 @@ fn classify_attach_host_authority(filter: &TargetFilter) -> AttachHostAuthority 
         | TargetFilter::LastZoneChanged
         | TargetFilter::PostReplacementDamageSource
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::AttachedTo => AttachHostAuthority::EventContext,
 
         TargetFilter::ParentTarget => AttachHostAuthority::Pronoun,

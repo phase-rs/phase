@@ -971,6 +971,7 @@ pub(crate) fn filter_domain(filter: &TargetFilter) -> FilterDomain {
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::OriginalSource
