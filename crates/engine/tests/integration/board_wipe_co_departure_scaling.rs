@@ -93,8 +93,8 @@ fn wrath_resolves_only_observers_that_left_with_a_trigger() {
         "only Zulaport Cutthroat left with a trigger, so it is the only co-departed \
          observer resolved, once for each other departure"
     );
-    assert!(
-        counters.index_builds >= 1,
-        "the co-departure arm must have run for the wipe's departures"
+    assert_eq!(
+        counters.index_builds, 1,
+        "the co-departure index must be built once per collection pass"
     );
 }
