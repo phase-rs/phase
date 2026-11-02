@@ -61,13 +61,13 @@ describe("RetargetChoiceModal (via CardChoiceModal)", () => {
     setUp({
       player: 0,
       scope: { type: "All" },
-      current_targets: [opp2, opp1, opp2],
+      current_targets: [opp2, opp1, opp1],
       slots: [
         { path: [{ CoinFlipBranch: { result: "Won" } }], slot: 0 },
         { path: [{ CoinFlipBranch: { result: "Lost" } }], slot: 0 },
         { path: ["SubAbility"], slot: 0 },
       ],
-      slot_pools: [[opp2], [opp1, opp2], [opp2]],
+      slot_pools: [[opp2], [opp1, opp2], [opp1]],
       legal_new_targets: [opp1, opp2],
     });
     render(<CardChoiceModal />);
@@ -84,7 +84,10 @@ describe("RetargetChoiceModal (via CardChoiceModal)", () => {
     expect(screen.getByRole("button", { name: /^Opp 1/ })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /^Opp 2/ }));
     fireEvent.click(screen.getByRole("button", { name: /^Target 3/ }));
-    expect(screen.queryByRole("button", { name: /^Opp 1/ })).not.toBeInTheDocument();
+    // Target 3's OWN pool is `[opp1]`, unlike Target 1's `[opp2]`: a modal
+    // that read Target 1's pool here would offer Opp 2 and hide Opp 1.
+    expect(screen.getByRole("button", { name: /^Opp 1/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Opp 2/ })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
     expect(dispatchMock).toHaveBeenCalledWith({
       type: "RetargetSpell",
