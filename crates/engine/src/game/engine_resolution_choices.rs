@@ -3357,7 +3357,6 @@ pub(super) fn handle_resolution_choice(
             },
             GameAction::SelectCards { cards: order },
         ) => {
-            let _ = player;
             if order.len() != cards.len()
                 || order.iter().collect::<std::collections::HashSet<_>>().len() != order.len()
                 || !order.iter().all(|id| cards.contains(id))
