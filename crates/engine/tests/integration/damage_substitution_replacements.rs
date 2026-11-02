@@ -28,13 +28,14 @@ use engine::types::game_state::{
     CastPaymentMode, CastingVariant, ReplacementCandidateSummary, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
-use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::{Player, PlayerId};
 use engine::types::zones::Zone;
 
 use super::rules::run_combat;
+
+const P2: PlayerId = PlayerId(2);
 
 const BOLT: &str = "Lightning Bolt deals 3 damage to any target.";
 const STOMP: &str = "Damage can't be prevented this turn. Stomp deals 2 damage to any target.";
@@ -45,6 +46,10 @@ const SHAKE: &str =
 const PYROCLASM: &str = "Pyroclasm deals 2 damage to each creature.";
 const FLAME_SLASH: &str = "Flame Slash deals 4 damage to target creature.";
 const HYMN: &str = "Kicker {W} (You may pay an additional {W} as you cast this spell.)\nHurloon Battle Hymn deals 4 damage to target creature or planeswalker. If this spell was kicked, you gain 4 life.";
+const AARDVARK_SLOTH: &str =
+    "Lifelink (Damage dealt by this creature also causes you to gain that much life.)";
+const TANNUK: &str = "Landfall — Whenever a land you control enters, Tannuk deals 1 damage to each opponent. If this is the second time this ability has resolved this turn, draw a card.";
+const EXPLORATION: &str = "You may play an additional land on each of your turns.";
 const NIBELHEIM: &str = "Choose target creature you control. It deals damage equal to its power to each other creature. If this spell was cast from a graveyard, discard your hand and draw four cards.\nFlashback {5}{R}{R} (You may cast this card from your graveyard for its flashback cost. Then exile it.)";
 const NEW_WAY_FORWARD: &str = "The next time a source of your choice would deal damage to you this turn, prevent that damage. When damage is prevented this way, New Way Forward deals that much damage to that source's controller and you draw that many cards.";
 const MENDING_HANDS: &str =
@@ -1269,6 +1274,45 @@ fn a_gated_tail_behind_remaining_recipients_reads_the_cast() {
     }
 }
 
+/// Tannuk, Memorial Ensign: "If this is the second time this ability has resolved this turn,
+/// draw a card." follows the damage to each opponent, from a chain parked behind the remaining
+/// opponent (CR 608.2c). The first landfall is the paired guard that the tail reads the count.
+#[test]
+fn a_gated_tail_behind_remaining_recipients_reads_the_resolution_count() {
+    let mut scenario = GameScenario::new_n_player(3, 11);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P0, "Tannuk, Memorial Ensign", 2, 4, TANNUK);
+    scenario.add_enchantment_from_oracle(P0, "Exploration", EXPLORATION);
+    let bubble = force_bubble(&mut scenario, P1);
+    furnace(&mut scenario);
+    scenario.with_library_top(P0, &["One", "Two", "Three"]);
+    let plains = scenario.add_land_to_hand(P0, "Plains").id();
+    let island = scenario.add_land_to_hand(P0, "Island").id();
+    let mut runner = scenario.build();
+
+    for (landfall, land, expected_draws) in [(1, plains, 0), (2, island, 1)] {
+        let card_id = runner.state().objects[&land].card_id;
+        let mut events = runner
+            .act(GameAction::PlayLand {
+                object_id: land,
+                card_id,
+            })
+            .expect("play land")
+            .events;
+        settle(&mut runner, &mut Vec::new(), &mut events);
+
+        assert_prompt_is_replacement_choice(&runner);
+        assert_eq!(life(&runner, P2), 22 - 2 * landfall);
+        choose_source(&mut runner, &mut events, bubble);
+
+        assert_eq!(counters(&runner, bubble, &depletion()), landfall as u32);
+        assert_eq!(life(&runner, P1), 20);
+        assert_eq!(life(&runner, P2), 20 - 2 * landfall);
+        assert_eq!(draws(&events), expected_draws);
+        assert_at_rest(&runner);
+    }
+}
+
 /// CR 120.8: "If a source would deal 0 damage, it does not deal damage at all." Urza's Armor
 /// first leaves a ping at 0, so Nefarious Lich has no event to replace and nothing to lose by.
 #[test]
@@ -1742,8 +1786,7 @@ fn lifelink_has_nothing_to_gain_from_replaced_damage() {
     let mut scenario = scenario();
     let hydra = phytohydra(&mut scenario, P1);
     let attacker = scenario
-        .add_creature(P0, "Vampire", 3, 3)
-        .with_keyword(Keyword::Lifelink)
+        .add_creature_from_oracle(P0, "Aardvark Sloth", 3, 3, AARDVARK_SLOTH)
         .id();
     let mut runner = scenario.build();
     run_combat(&mut runner, vec![attacker], vec![(hydra, attacker)]);

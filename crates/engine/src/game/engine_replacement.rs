@@ -3763,7 +3763,7 @@ pub(super) fn apply_post_replacement_effect(
         && matches!(
             &*effect_def.effect,
             Effect::Sacrifice {
-                target: TargetFilter::Typed(_) | TargetFilter::Any,
+                target: TargetFilter::Typed(_),
                 ..
             } | Effect::ChangeZone {
                 target: TargetFilter::Typed(_),
