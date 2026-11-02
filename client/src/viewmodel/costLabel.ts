@@ -225,6 +225,7 @@ function formatQuantityRef(ref: { type: string; [key: string]: unknown }): strin
     case "PermanentsLeftBattlefieldThisTurn": return "permanents that left the battlefield this turn";
     case "NonlandPermanentsLeftBattlefieldThisTurn": return "nonland permanents that left this turn";
     case "CrimesCommittedThisTurn": return "crimes committed this turn";
+    case "EnergyPaidOrLostThisTurn": return "energy paid or lost this turn";
     // Counter / property references
     case "BasicLandTypeCount": return "basic land types you control";
     case "PartySize": return "your party's size";

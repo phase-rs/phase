@@ -15688,6 +15688,7 @@ fn quantity_ref_reads_chain_local_result(reference: &QuantityRef) -> bool {
         | QuantityRef::EnteredThisTurn { .. }
         | QuantityRef::SacrificedThisTurn { .. }
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
@@ -24107,6 +24108,7 @@ fn parent_population_amount_is_plain(amount: &QuantityExpr) -> bool {
             | QuantityRef::EnteredThisTurn { .. }
             | QuantityRef::SacrificedThisTurn { .. }
             | QuantityRef::CrimesCommittedThisTurn
+            | QuantityRef::EnergyPaidOrLostThisTurn
             | QuantityRef::BendTypesThisTurn
             | QuantityRef::LifeGainedThisTurn { .. }
             | QuantityRef::CardsDrawnThisTurn { .. }

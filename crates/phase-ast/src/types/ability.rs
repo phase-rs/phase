@@ -9348,6 +9348,7 @@ pub fn quantity_ref_grammar_any(
         | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
@@ -10176,6 +10177,7 @@ fn rewrite_quantity_ref_filter_props<C>(
         | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::LifeGainedThisTurn { .. }
         | QuantityRef::CardsDrawnThisTurn { .. }
@@ -12347,6 +12349,7 @@ fn quantity_ref_has_unsupported_selected_ref(qty: &QuantityRef) -> bool {
         | QuantityRef::Devotion { .. }
         | QuantityRef::VoteCount { .. }
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::TurnsTaken
         | QuantityRef::EventContextSourceCostX
@@ -13695,6 +13698,13 @@ pub enum QuantityRef {
     },
     /// CR 700.13: Number of crimes the controller has committed this turn.
     CrimesCommittedThisTurn,
+    /// CR 107.14 + CR 122.1: Number of energy counters the controller has paid
+    /// or lost this turn. Reads `Player::energy_paid_or_lost_this_turn`, bumped
+    /// on every energy decrement (cost payment or any other removal) and reset
+    /// at turn start. Backs "for each {E} you've paid or lost this turn"
+    /// (Blaster Hulk). Controller-scoped, mirroring the bare
+    /// `CrimesCommittedThisTurn` per-turn accumulator sibling.
+    EnergyPaidOrLostThisTurn,
     /// CR 701.65b / 701.66b / 701.67c / 702.189b: count of distinct bend types
     /// (air/earth/water/fire) the controller has performed this turn — these are
     /// the "whenever a player [airbends/earthbends/waterbends/firebends]" trigger
@@ -14186,6 +14196,7 @@ impl QuantityRef {
             | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
             | QuantityRef::EnteredThisTurn { .. }
             | QuantityRef::CrimesCommittedThisTurn
+            | QuantityRef::EnergyPaidOrLostThisTurn
             | QuantityRef::BendTypesThisTurn
             | QuantityRef::TurnsTaken
             | QuantityRef::ZoneChangeCountThisTurn { .. }
@@ -14343,6 +14354,7 @@ impl QuantityRef {
             | QuantityRef::EventContextSourceCostX
             | QuantityRef::EventContextSourceModesChosen
             | QuantityRef::CrimesCommittedThisTurn
+            | QuantityRef::EnergyPaidOrLostThisTurn
             | QuantityRef::BendTypesThisTurn
             | QuantityRef::LifeGainedThisTurn { .. }
             | QuantityRef::CardsDrawnThisTurn { .. }
@@ -14454,6 +14466,7 @@ impl QuantityRef {
             | QuantityRef::SpellsCastBeforeTriggeringSpell { .. }
             | QuantityRef::EnteredThisTurn { .. }
             | QuantityRef::CrimesCommittedThisTurn
+            | QuantityRef::EnergyPaidOrLostThisTurn
             | QuantityRef::BendTypesThisTurn
             | QuantityRef::TurnsTaken
             | QuantityRef::ZoneChangeCountThisTurn { .. }
@@ -15327,6 +15340,7 @@ pub fn quantity_ref_object_scope_read(qty: &QuantityRef) -> ObjectScopeRead {
         | QuantityRef::PreviousEffectCount | QuantityRef::UnspentMana { .. }
         | QuantityRef::EventContextAmount | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::BendTypesThisTurn | QuantityRef::TurnsTaken | QuantityRef::NotedNumber
         | QuantityRef::ChosenNumber | QuantityRef::DescendedThisTurn | QuantityRef::SpellsCastLastTurn
         | QuantityRef::DungeonsCompleted | QuantityRef::CostXPaid | QuantityRef::KickerCount
@@ -27537,6 +27551,7 @@ pub fn quantity_ref_recipient_read(qty: &QuantityRef) -> RecipientRead {
         | QuantityRef::EventContextSourceCostX
         | QuantityRef::EventContextSourceModesChosen
         | QuantityRef::CrimesCommittedThisTurn
+        | QuantityRef::EnergyPaidOrLostThisTurn
         | QuantityRef::BendTypesThisTurn
         | QuantityRef::TurnsTaken
         | QuantityRef::ChosenNumber

@@ -6487,6 +6487,68 @@ fn static_this_spell_cost_less_for_each_creature_that_attacked_this_turn() {
     );
 }
 
+/// CR 107.14 + CR 601.2f: Blaster Hulk's reduction counts the energy the
+/// controller paid or lost this turn. Regression for issue #7899: the clause
+/// fell through to the type-phrase fallback and became an `ObjectCount` over an
+/// empty filter (every object), so the spell cost only {R}{R}.
+#[test]
+fn static_this_spell_cost_less_for_each_energy_paid_or_lost_this_turn() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "This spell costs {1} less to cast for each {E} (energy counter) you've paid or lost this turn.\nHaste\nWhenever this creature attacks, you get {E}{E}, then you may pay eight {E}. When you do, this creature deals 8 damage divided as you choose among up to eight targets.",
+        "Blaster Hulk",
+        &[],
+        &["Artifact".to_string(), "Creature".to_string()],
+        &["Pirate".to_string()],
+    );
+    let reductions: Vec<_> = parsed
+        .statics
+        .iter()
+        .filter(|def| matches!(def.mode, StaticMode::ModifyCost { .. }))
+        .collect();
+    assert_eq!(reductions.len(), 1, "statics = {:?}", parsed.statics);
+    let def = reductions[0];
+    assert!(
+        matches!(
+            def.mode,
+            StaticMode::ModifyCost {
+                mode: CostModifyMode::Reduce,
+                amount: ManaCost::Cost { generic: 1, .. },
+                spell_filter: None,
+                dynamic_count: Some(QuantityRef::EnergyPaidOrLostThisTurn),
+                ..
+            }
+        ),
+        "got {:?}",
+        def.mode
+    );
+    assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
+    assert_eq!(
+        def.active_zones,
+        crate::types::zones::self_spell_cost_mod_active_zones()
+    );
+}
+
+/// CR 601.2f: a "for each" count the parser cannot read must leave the cost
+/// modifier unparsed. It must not fall back to an `ObjectCount` over an empty
+/// filter (every object in the game), which made these spells nearly free
+/// (issue #7899 class: Lumbering Megasloth, Astral Confrontation).
+#[test]
+fn static_cost_reduction_with_unreadable_for_each_count_fails_closed() {
+    for line in [
+        "This spell costs {1} less to cast for each counter among players and permanents.",
+        "This spell costs {1} less to cast for each opponent you're attacking.",
+    ] {
+        let def = parse_static_line(line);
+        assert!(
+            !matches!(
+                def.as_ref().map(|def| &def.mode),
+                Some(StaticMode::ModifyCost { .. })
+            ),
+            "{line}: unreadable count must not yield a cost modifier, got {def:?}"
+        );
+    }
+}
+
 #[test]
 fn static_this_spell_cost_less_for_each_creature_you_attacked_with_this_turn() {
     let def = parse_static_line(

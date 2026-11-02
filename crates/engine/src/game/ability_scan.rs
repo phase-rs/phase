@@ -2913,6 +2913,14 @@ fn scan_quantity_ref(x: &QuantityRef, mode: ScanMode) -> Axes {
             acc
         }
         QuantityRef::CrimesCommittedThisTurn => Axes::NONE,
+        // CR 107.14 + CR 122.1: controller energy-spent journal; a projected
+        // per-turn resource tracker like `LifeLostThisTurn`.
+        QuantityRef::EnergyPaidOrLostThisTurn => Axes {
+            event: false,
+            sibling: false,
+            projected: true,
+            history: HistoryReads::NONE,
+        },
         // Controller turn-accumulator: no event/sibling/projected axis (mirrors
         // CrimesCommittedThisTurn / DescendedThisTurn).
         QuantityRef::BendTypesThisTurn => {
