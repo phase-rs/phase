@@ -5930,8 +5930,7 @@ fn collect_pending_triggers_with_collection(
                     for m in matched {
                         // Mirror session eligibility without recording firing limits
                         // or replay witnesses for the deferred batched candidate.
-                        if session.batched_candidates
-                            == BatchedCandidatePolicy::DeferUntilSettled
+                        if session.batched_candidates == BatchedCandidatePolicy::DeferUntilSettled
                             && m.batched
                         {
                             continue;
