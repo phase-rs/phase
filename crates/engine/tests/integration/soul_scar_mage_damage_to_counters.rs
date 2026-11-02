@@ -20,6 +20,7 @@ use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
 
 const SOUL_SCAR_ORACLE: &str = "If a source you control would deal noncombat damage to a \
 creature an opponent controls, put that many -1/-1 counters on that creature instead.";
@@ -566,13 +567,13 @@ fn filtered_sources_each_ask_their_counter_order() {
 
 /// Answer each CR 616.1 prompt P1 is asked with Doubling Season first,
 /// checking before every answer that the instruction written after the damage
-/// ("Draw a card.") has not run: the damage instruction is unfinished while any
-/// recipient still awaits its counter order (CR 608.2c). Returns the number of
-/// prompts answered.
+/// has not run (`tail_ran` is false): the damage instruction is unfinished
+/// while any recipient still awaits its counter order (CR 608.2c). Returns the
+/// number of prompts answered.
 fn answer_season_first_while_the_tail_waits(
     runner: &mut engine::game::scenario::GameRunner,
     season: ObjectId,
-    hand_while_unfinished: usize,
+    tail_ran: impl Fn(&engine::game::scenario::GameRunner) -> bool,
 ) -> usize {
     let mut answered = 0usize;
     for _ in 0..16 {
@@ -581,10 +582,10 @@ fn answer_season_first_while_the_tail_waits(
                 player, candidates, ..
             } => {
                 assert_eq!(player, P1, "the affected creature's controller orders");
-                assert_eq!(
-                    runner.state().players[0].hand.len(),
-                    hand_while_unfinished,
-                    "the trailing draw ran while prompt {} of the damage instruction was open",
+                assert!(
+                    !tail_ran(runner),
+                    "the trailing instruction ran while prompt {} of the damage instruction \
+                     was open",
                     answered + 1
                 );
                 let index = candidates
@@ -606,11 +607,27 @@ fn answer_season_first_while_the_tail_waits(
     answered
 }
 
-/// CR 608.2c + CR 616.1g: pausing the sweep behind the first creature's
-/// counter prompt keeps the rest of the sweep, and the instruction after it
-/// ("Draw a card.") follows the WHOLE damage instruction: it has not run while
-/// the second creature's counter order is still open, and runs exactly once
-/// after the last answer.
+fn blood_tokens(runner: &engine::game::scenario::GameRunner, controller: PlayerId) -> usize {
+    runner
+        .state()
+        .battlefield
+        .iter()
+        .map(|id| &runner.state().objects[id])
+        .filter(|obj| obj.is_token && obj.name == "Blood" && obj.controller == controller)
+        .count()
+}
+
+const VAMPIRES_VENGEANCE: &str = "Vampires' Vengeance deals 2 damage to each non-Vampire \
+creature. Create a Blood token. (It's an artifact with \"{1}, {T}, Discard a card, Sacrifice \
+this token: Draw a card.\")";
+
+/// CR 608.2c + CR 616.1g: Vampires' Vengeance under Soul-Scar Mage, against
+/// P1's walls and Vizier of Remedies with Doubling Season. Each of P1's three
+/// creatures orders its counter replacements; pausing the sweep behind the
+/// first prompt keeps the rest of the sweep, and "Create a Blood token."
+/// follows the WHOLE damage instruction: no Blood exists while a later
+/// creature's counter order is still open, and exactly one exists after the
+/// last answer.
 #[test]
 fn sweep_tail_runs_once_after_the_counter_prompts() {
     let mut scenario = GameScenario::new();
@@ -622,36 +639,31 @@ fn sweep_tail_runs_once_after_the_counter_prompts() {
         .add_enchantment_from_oracle(P1, "Doubling Season", DOUBLING_SEASON)
         .id();
     scenario.add_creature_from_oracle(P1, "Vizier of Remedies", 2, 1, VIZIER);
-    scenario.with_library_top(P0, &["L1", "L2", "L3"]);
     let sweep = scenario
-        .add_spell_to_hand_from_oracle(
-            P0,
-            "Wall Sweep",
-            false,
-            "Wall Sweep deals 2 damage to each creature your opponents control with power 0. \
-             Draw a card.",
-        )
+        .add_spell_to_hand_from_oracle(P0, "Vampires' Vengeance", false, VAMPIRES_VENGEANCE)
+        .with_mana_cost(engine::types::mana::ManaCost::zero())
         .id();
 
     let mut runner = scenario.build();
     give_priority(&mut runner, P0);
-    let hand_before = runner.state().players[0].hand.len();
     runner.cast(sweep).commit();
-    let answered = answer_season_first_while_the_tail_waits(&mut runner, season, hand_before - 1);
+    let answered =
+        answer_season_first_while_the_tail_waits(&mut runner, season, |r| blood_tokens(r, P0) > 0);
 
-    assert_eq!(answered, 2, "one ordering prompt per creature");
+    assert_eq!(answered, 3, "one ordering prompt per opposing creature");
     assert_eq!(minus_counters(&runner, first), 3);
     assert_eq!(minus_counters(&runner, second), 3);
     assert_eq!(
-        runner.state().players[0].hand.len(),
-        hand_before - 1 + 1,
-        "the spell left the hand and the trailing draw ran once"
+        blood_tokens(&runner, P0),
+        1,
+        "the trailing Blood is created once"
     );
 }
 
-/// CR 608.2c + CR 616.1g: the targeted form ("deals 2 damage to each of two
-/// target creatures", `Effect::DealDamage` with two targets) keeps the same
-/// order: the draw waits for the second target's counter order.
+/// CR 608.2c + CR 616.1g: the targeted form (`Effect::DealDamage` with two
+/// targets) keeps the same order. No printed card follows "deals 2 damage to
+/// each of two target creatures" (Swelter) with another instruction, so the
+/// test card adds a draw to Swelter's clause.
 #[test]
 fn targeted_damage_tail_waits_for_every_counter_prompt() {
     let mut scenario = GameScenario::new();
@@ -667,34 +679,37 @@ fn targeted_damage_tail_waits_for_every_counter_prompt() {
     let spell = scenario
         .add_spell_to_hand_from_oracle(
             P0,
-            "Twin Scorch",
+            "Swelter and Draw",
             false,
-            "Twin Scorch deals 2 damage to each of two target creatures. Draw a card.",
+            "Swelter and Draw deals 2 damage to each of two target creatures. Draw a card.",
         )
         .with_mana_cost(engine::types::mana::ManaCost::zero())
         .id();
 
     let mut runner = scenario.build();
     give_priority(&mut runner, P0);
-    let hand_before = runner.state().players[0].hand.len();
+    let hand_unfinished = runner.state().players[0].hand.len() - 1;
     runner.cast(spell).target_objects(&[first, second]).commit();
-    let answered = answer_season_first_while_the_tail_waits(&mut runner, season, hand_before - 1);
+    let answered = answer_season_first_while_the_tail_waits(&mut runner, season, |r| {
+        r.state().players[0].hand.len() > hand_unfinished
+    });
 
     assert_eq!(answered, 2, "one ordering prompt per target");
     assert_eq!(minus_counters(&runner, first), 3);
     assert_eq!(minus_counters(&runner, second), 3);
     assert_eq!(
         runner.state().players[0].hand.len(),
-        hand_before,
+        hand_unfinished + 1,
         "the trailing draw ran once"
     );
 }
 
 /// CR 608.2c + CR 616.1g + CR 120.1: the same whole-instruction order for the
 /// multi-source shapes — targeted sources each dealing their power
-/// (`EachDealsDamageEqualToPower`) and filter-selected sources
-/// (`EachSourceDealsDamage`). The draw waits for the second source's counter
-/// order and runs once.
+/// (`EachDealsDamageEqualToPower`, Allies at Last's clause) and filter-selected
+/// sources (`EachSourceDealsDamage`). No printed card follows either clause
+/// with another instruction, so each test card adds a draw. The draw waits for
+/// the second source's counter order and runs once.
 #[test]
 fn multi_source_tail_waits_for_every_counter_prompt() {
     for targeted in [true, false] {
@@ -708,12 +723,12 @@ fn multi_source_tail_waits_for_every_counter_prompt() {
              opponent controls. Draw a card."
         };
         let spell = scenario
-            .add_spell_to_hand_from_oracle(P0, "Bird Volley", false, text)
+            .add_spell_to_hand_from_oracle(P0, "Allies and Draw", false, text)
             .with_mana_cost(engine::types::mana::ManaCost::zero())
             .id();
         let mut runner = scenario.build();
         give_priority(&mut runner, P0);
-        let hand_before = runner.state().players[0].hand.len();
+        let hand_unfinished = runner.state().players[0].hand.len() - 1;
         if targeted {
             runner
                 .cast(spell)
@@ -723,14 +738,105 @@ fn multi_source_tail_waits_for_every_counter_prompt() {
             runner.cast(spell).target_object(wall).commit();
         }
 
-        let answered =
-            answer_season_first_while_the_tail_waits(&mut runner, season, hand_before - 1);
+        let answered = answer_season_first_while_the_tail_waits(&mut runner, season, |r| {
+            r.state().players[0].hand.len() > hand_unfinished
+        });
         assert_eq!(answered, 2, "targeted={targeted}: one prompt per source");
         assert_eq!(minus_counters(&runner, wall), 5 + 3, "targeted={targeted}");
         assert_eq!(
             runner.state().players[0].hand.len(),
-            hand_before,
+            hand_unfinished + 1,
             "targeted={targeted}: the trailing draw ran once"
+        );
+    }
+}
+
+const VIGOR: &str = "Trample\nIf damage would be dealt to another creature you control, \
+prevent that damage. Put a +1/+1 counter on that creature for each 1 damage prevented this \
+way.\nWhen Vigor is put into a graveyard from anywhere, shuffle it into its owner's library.";
+const LIGHTNING_HELIX: &str = "Lightning Helix deals 3 damage to any target and you gain 3 life.";
+
+/// CR 616.1 + CR 608.2c: Lightning Helix at a creature P1 controls beside
+/// Vigor. Soul-Scar Mage's substitution and Vigor's prevention both apply, so
+/// P1 orders them, and the damage instruction waits on that choice. "You gain
+/// 3 life" is the next instruction: it has not happened while the choice is
+/// open, and it happens exactly once (+3) after it, whichever applies first.
+#[test]
+fn replacement_order_choice_runs_the_tail_once() {
+    for vigor_first in [true, false] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let mage = scenario
+            .add_creature_from_oracle(P0, "Soul-Scar Mage", 1, 2, SOUL_SCAR_ORACLE)
+            .id();
+        let vigor = scenario
+            .add_creature_from_oracle(P1, "Vigor", 6, 6, VIGOR)
+            .id();
+        let ogre = scenario.add_creature(P1, "Hill Ogre", 4, 4).id();
+        let helix = scenario
+            .add_spell_to_hand_from_oracle(P0, "Lightning Helix", true, LIGHTNING_HELIX)
+            .with_mana_cost(engine::types::mana::ManaCost::zero())
+            .id();
+
+        let mut runner = scenario.build();
+        give_priority(&mut runner, P0);
+        let life_before = runner.life(P0);
+        runner.cast(helix).target_object(ogre).commit();
+        for _ in 0..8 {
+            if matches!(
+                runner.state().waiting_for,
+                WaitingFor::ReplacementChoice { .. }
+            ) {
+                break;
+            }
+            runner.act(GameAction::PassPriority).expect("pass priority");
+        }
+        let WaitingFor::ReplacementChoice {
+            player, candidates, ..
+        } = runner.state().waiting_for.clone()
+        else {
+            panic!(
+                "expected the CR 616.1 ordering choice, got {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(player, P1, "the affected object's controller chooses");
+        assert_eq!(
+            runner.life(P0),
+            life_before,
+            "vigor_first={vigor_first}: the life gain waits for the damage instruction"
+        );
+        let first = if vigor_first { vigor } else { mage };
+        let index = candidates
+            .iter()
+            .position(|c| c.source_id == first)
+            .expect("both replacements are offered");
+        runner
+            .act(GameAction::ChooseReplacement { index })
+            .expect("choose replacement order");
+        runner.advance_until_stack_empty();
+
+        assert_eq!(
+            runner.life(P0),
+            life_before + 3,
+            "vigor_first={vigor_first}: you gain 3 life exactly once"
+        );
+        let ogre_obj = &runner.state().objects[&ogre];
+        assert_eq!(ogre_obj.damage_marked, 0);
+        let (plus, minus) = if vigor_first { (3, 0) } else { (0, 3) };
+        assert_eq!(
+            ogre_obj
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            plus,
+            "vigor_first={vigor_first}"
+        );
+        assert_eq!(
+            minus_counters(&runner, ogre),
+            minus,
+            "vigor_first={vigor_first}"
         );
     }
 }

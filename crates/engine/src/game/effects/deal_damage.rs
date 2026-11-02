@@ -1235,12 +1235,29 @@ fn pause_behind_continuation_prompt(state: &GameState, has_remaining: bool) -> b
     has_remaining && !matches!(state.waiting_for, WaitingFor::Priority { .. })
 }
 
+/// CR 608.2c: who owns the parent's next instruction (`sub_ability`) after a
+/// damage instruction returns. Every pause that stashes remaining work stashes
+/// the tail at the end of that same chain — remaining recipients first, then
+/// the tail — so the stash is its ONE owner and `resolve_ability_chain` must
+/// not place it again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DamageTail {
+    /// The instruction completed, or paused without stashing anything (its
+    /// last recipient's replacement continuation is still open): the chain
+    /// driver places the tail.
+    Caller,
+    /// The instruction paused and stashed its remaining work followed by the
+    /// tail.
+    Stashed,
+}
+
 /// CR 608.2c: the damage instructions that deal damage to, or from, several
 /// objects or players one event at a time and can therefore pause between two
-/// of their events. When one of them pauses behind a recipient's replacement
-/// continuation, `resolve_ability_chain` places the parent's next instruction
-/// outside the whole child stack, after the paused continuation and the
-/// remaining recipients this module stashes.
+/// of their events. Resolved through [`resolve_instruction`] so the chain
+/// driver learns whether the tail was stashed. When one of them returns
+/// [`DamageTail::Caller`] with child work pending (its last recipient's
+/// substitute raised a prompt), `resolve_ability_chain` places the tail
+/// outside the whole child stack.
 pub(crate) fn is_multi_event_damage_instruction(effect: &Effect) -> bool {
     matches!(
         effect,
@@ -1252,18 +1269,25 @@ pub(crate) fn is_multi_event_damage_instruction(effect: &Effect) -> bool {
     )
 }
 
-/// The ability whose remaining recipients a pause stashes. On a `NeedsChoice`
-/// pause the stash also carries the parent's `sub_ability` tail. On a
-/// [`pause_behind_continuation_prompt`] pause the effect returns with a prompt
-/// open, and `resolve_ability_chain` places that tail itself, outside the whole
-/// child stack (see [`is_multi_event_damage_instruction`]) — stashing it here
-/// too would run it twice.
-fn pause_stash_owner(ability: &ResolvedAbility, result: &DamageResult) -> ResolvedAbility {
-    let mut owner = ability.clone();
-    if matches!(result, DamageResult::Applied(_)) {
-        owner.sub_ability = None;
+/// CR 608.2c: resolve one [`is_multi_event_damage_instruction`] effect,
+/// reporting who owns the parent's tail.
+pub(crate) fn resolve_instruction(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<DamageTail, EffectError> {
+    match &ability.effect {
+        Effect::DealDamage { .. } => resolve_damage(state, ability, events),
+        Effect::DamageAll { .. } => resolve_all_damage(state, ability, events),
+        Effect::DamageEachPlayer { .. } => resolve_each_player_damage(state, ability, events),
+        Effect::EachDealsDamageEqualToPower { .. } => {
+            resolve_each_deals_power_damage(state, ability, events)
+        }
+        Effect::EachSourceDealsDamage { .. } => resolve_each_source_damage(state, ability, events),
+        _ => Err(EffectError::MissingParam(
+            "multi-event damage instruction".to_string(),
+        )),
     }
-    owner
 }
 
 /// CR 120.3 + CR 616.1e: Build a linked sub_ability chain from a sequence of
@@ -1467,6 +1491,14 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    resolve_damage(state, ability, events).map(|_| ())
+}
+
+fn resolve_damage(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<DamageTail, EffectError> {
     let (num_dmg, damage_source, target_filter): (u32, Option<DamageSource>, &TargetFilter) =
         match &ability.effect {
             Effect::DealDamage {
@@ -1498,7 +1530,7 @@ pub fn resolve(
     // CR 120.3: Determine damage source.
     let Some(mut ctx) = single_damage_source(state, ability, damage_source) else {
         no_damage_source_resolved(ability, events);
-        return Ok(());
+        return Ok(DamageTail::Caller);
     };
 
     // CR 120.4a + CR 608.2c: attach the active excess-redirect rider parsed onto
@@ -1529,14 +1561,13 @@ pub fn resolve(
             match apply_damage_to_target(state, &ctx, target.clone(), *amount, false, events)? {
                 DamageResult::Applied(_)
                     if !pause_behind_continuation_prompt(state, i + 1 < distribution.len()) => {}
-                result => {
+                _ => {
                     // CR 120.3 + CR 616.1e: Remaining distributed targets must resume
                     // after the replacement choice resolves. Stash each as a chained
                     // DealDamage continuation keyed to the same damage-source id.
                     let remaining = distribution[i + 1..].iter().map(|(t, a)| (t.clone(), *a));
-                    let owner = pause_stash_owner(ability, &result);
-                    stash_remaining_damage_chain(state, &owner, ctx.source_id, remaining);
-                    return Ok(());
+                    stash_remaining_damage_chain(state, ability, ctx.source_id, remaining);
+                    return Ok(DamageTail::Stashed);
                 }
             }
         }
@@ -1548,15 +1579,14 @@ pub fn resolve(
                         state,
                         i + 1 < effective_targets.len(),
                     ) => {}
-                result => {
+                _ => {
                     // CR 120.3 + CR 616.1e: Remaining targets must resume after the
                     // replacement choice resolves.
                     let remaining = effective_targets[i + 1..]
                         .iter()
                         .map(|t| (t.clone(), num_dmg));
-                    let owner = pause_stash_owner(ability, &result);
-                    stash_remaining_damage_chain(state, &owner, ctx.source_id, remaining);
-                    return Ok(());
+                    stash_remaining_damage_chain(state, ability, ctx.source_id, remaining);
+                    return Ok(DamageTail::Stashed);
                 }
             }
         }
@@ -1568,7 +1598,7 @@ pub fn resolve(
         subject: None,
     });
 
-    Ok(())
+    Ok(DamageTail::Caller)
 }
 
 /// CR 120.3 + CR 120.4b: Resume applying a damage event that already completed
@@ -1951,7 +1981,7 @@ fn resolve_each_target_power_damage(
     ability: &ResolvedAbility,
     target_filter: &TargetFilter,
     events: &mut Vec<GameEvent>,
-) -> Result<(), EffectError> {
+) -> Result<DamageTail, EffectError> {
     let amount = match &ability.effect {
         Effect::DealDamage { amount, .. } => amount,
         _ => return Err(EffectError::MissingParam("DealDamage amount".to_string())),
@@ -1965,7 +1995,7 @@ fn resolve_each_target_power_damage(
             source_id: ability.source_id,
             subject: None,
         });
-        return Ok(());
+        return Ok(DamageTail::Caller);
     };
     let source_ids = source_ids.as_slice();
 
@@ -2044,9 +2074,8 @@ fn resolve_each_target_power_damage(
                                 .iter()
                                 .skip(idx + 1)
                                 .map(|(src, _, amt)| (*src, recipient.clone(), *amt));
-                            let owner = pause_stash_owner(ability, &DamageResult::Applied(0));
-                            stash_remaining_each_source_damage(state, &owner, remaining);
-                            return Ok(());
+                            stash_remaining_each_source_damage(state, ability, remaining);
+                            return Ok(DamageTail::Stashed);
                         }
                     }
                 }
@@ -2069,14 +2098,14 @@ fn resolve_each_target_power_damage(
                     .skip(idx + 1)
                     .map(|(src, _, amt)| (*src, recipient.clone(), *amt));
                 stash_remaining_each_source_damage(state, ability, remaining);
-                return Ok(());
+                return Ok(DamageTail::Stashed);
             }
         }
     }
 
     // --- Phase C: Apply survivors + record per-source identity (CR 120.3). ---
     if !apply_batch_survivors(state, ability, &survivors, events) {
-        return Ok(());
+        return Ok(DamageTail::Stashed);
     }
 
     events.push(GameEvent::EffectResolved {
@@ -2085,7 +2114,7 @@ fn resolve_each_target_power_damage(
         subject: None,
     });
 
-    Ok(())
+    Ok(DamageTail::Caller)
 }
 
 /// Apply each surviving post-replacement `Damage` event with its source's own
@@ -2150,6 +2179,14 @@ pub fn resolve_all(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    resolve_all_damage(state, ability, events).map(|_| ())
+}
+
+fn resolve_all_damage(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<DamageTail, EffectError> {
     let (amount, target_filter, player_filter, damage_source): (
         &QuantityExpr,
         TargetFilter,
@@ -2221,7 +2258,7 @@ pub fn resolve_all(
             Some(source_ctx) => Some(source_ctx),
             None => {
                 no_damage_source_resolved(ability, events);
-                return Ok(());
+                return Ok(DamageTail::Caller);
             }
         }
     } else {
@@ -2312,17 +2349,16 @@ pub fn resolve_all(
         match apply_damage_to_target(state, &ctx, target.clone(), *num_dmg, false, events)? {
             DamageResult::Applied(_)
                 if !pause_behind_continuation_prompt(state, i + 1 < recipient_amounts.len()) => {}
-            result => {
+            _ => {
                 // CR 120.3 + CR 616.1e: Remaining batch recipients must resume after
                 // the replacement choice resolves — chain them as DealDamage
                 // continuations keyed to the same damage-source id.
                 let remaining = recipient_amounts[i + 1..].iter().cloned();
-                let owner = pause_stash_owner(ability, &result);
-                stash_remaining_damage_chain(state, &owner, ctx.source_id, remaining);
+                stash_remaining_damage_chain(state, ability, ctx.source_id, remaining);
                 // Tag the stashed chain with the parent `EffectKind::DamageAll` so the
                 // drain re-emits the parent event the non-pause tail fires.
                 mark_pending_continuation_parent(state, EffectKind::DamageAll);
-                return Ok(());
+                return Ok(DamageTail::Stashed);
             }
         }
     }
@@ -2333,7 +2369,7 @@ pub fn resolve_all(
         subject: None,
     });
 
-    Ok(())
+    Ok(DamageTail::Caller)
 }
 
 /// CR 120.3: Collect non-eliminated players matching the filter for simultaneous
@@ -2623,6 +2659,14 @@ pub fn resolve_each_player(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    resolve_each_player_damage(state, ability, events).map(|_| ())
+}
+
+fn resolve_each_player_damage(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<DamageTail, EffectError> {
     let (amount_expr, player_filter) = match &ability.effect {
         Effect::DamageEachPlayer {
             amount,
@@ -2961,12 +3005,11 @@ pub fn resolve_each_player(
         {
             break;
         }
-        let owner = pause_stash_owner(ability, &result);
-        stash_remaining_damage_chain(state, &owner, ctx.source_id, remaining);
+        stash_remaining_damage_chain(state, ability, ctx.source_id, remaining);
         // Tag the stashed chain with the parent `EffectKind::DamageEachPlayer`
         // so the drain re-emits the parent event the non-pause tail fires.
         mark_pending_continuation_parent(state, EffectKind::DamageEachPlayer);
-        return Ok(());
+        return Ok(DamageTail::Stashed);
     }
 
     events.push(GameEvent::EffectResolved {
@@ -2975,7 +3018,7 @@ pub fn resolve_each_player(
         subject: None,
     });
 
-    Ok(())
+    Ok(DamageTail::Caller)
 }
 
 /// CR 120.1 + CR 120.3: "Up to two target creatures you control each deal damage
@@ -2999,6 +3042,14 @@ pub fn resolve_each_deals_equal_to_power(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    resolve_each_deals_power_damage(state, ability, events).map(|_| ())
+}
+
+fn resolve_each_deals_power_damage(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<DamageTail, EffectError> {
     if !matches!(ability.effect, Effect::EachDealsDamageEqualToPower { .. }) {
         return Err(EffectError::MissingParam(
             "EachDealsDamageEqualToPower".to_string(),
@@ -3025,7 +3076,7 @@ pub fn resolve_each_deals_equal_to_power(
             source_id: ability.source_id,
             subject: None,
         });
-        return Ok(());
+        return Ok(DamageTail::Caller);
     };
 
     for (i, &source_id) in source_ids.iter().enumerate() {
@@ -3055,16 +3106,20 @@ pub fn resolve_each_deals_equal_to_power(
                         .iter()
                         .any(|&next| object_power_with_lki(state, next) > 0),
                 ) => {}
-            result => {
+            _ => {
                 // CR 120.3 + CR 616.1e: This source's damage paused for a
                 // replacement choice. Each remaining source deals its own power
                 // from its own object, so stash one continuation node per
                 // remaining source (each carrying its own `source_id`), then the
                 // parent sub_ability tail.
-                let owner = pause_stash_owner(ability, &result);
-                stash_remaining_each_deals_chain(state, &owner, &source_ids[i + 1..], recipient_id);
+                stash_remaining_each_deals_chain(
+                    state,
+                    ability,
+                    &source_ids[i + 1..],
+                    recipient_id,
+                );
                 mark_pending_continuation_parent(state, EffectKind::EachDealsDamageEqualToPower);
-                return Ok(());
+                return Ok(DamageTail::Stashed);
             }
         }
     }
@@ -3075,7 +3130,7 @@ pub fn resolve_each_deals_equal_to_power(
         subject: None,
     });
 
-    Ok(())
+    Ok(DamageTail::Caller)
 }
 
 /// CR 120.1 + CR 120.3 + CR 608.2: Each object matching `sources` (evaluated at
@@ -3095,6 +3150,14 @@ pub fn resolve_each_source_deals_damage(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    resolve_each_source_damage(state, ability, events).map(|_| ())
+}
+
+fn resolve_each_source_damage(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<DamageTail, EffectError> {
     let (sources, amount, recipient) = match &ability.effect {
         Effect::EachSourceDealsDamage {
             sources,
@@ -3245,7 +3308,7 @@ pub fn resolve_each_source_deals_damage(
     // continuations and the remaining raw entries are stashed as `DealDamage`
     // continuations (they still need the full replacement pipeline).
     let mut replaced: Vec<(DamageContext, ProposedEvent)> = Vec::new();
-    let mut phase_b_pause: Option<(usize, WaitingFor, ResolvedAbility)> = None;
+    let mut phase_b_pause: Option<(usize, WaitingFor)> = None;
     for (i, (_src, ctx, target, dmg)) in entries.iter().enumerate() {
         let Some(proposed) = pre_replacement_damage_gate(state, ctx, target, *dmg, false, events)
         else {
@@ -3272,8 +3335,7 @@ pub fn resolve_each_source_deals_damage(
                         // settled; with sources left, pause Phase B behind it
                         // exactly as for a `NeedsChoice`.
                         if pause_behind_continuation_prompt(state, i + 1 < entries.len()) {
-                            let owner = pause_stash_owner(ability, &DamageResult::Applied(0));
-                            phase_b_pause = Some((i, waiting_for, owner));
+                            phase_b_pause = Some((i, waiting_for));
                             break;
                         }
                     }
@@ -3288,14 +3350,13 @@ pub fn resolve_each_source_deals_damage(
                 phase_b_pause = Some((
                     i,
                     replacement::replacement_choice_waiting_for(player, state),
-                    ability.clone(),
                 ));
                 break;
             }
         }
     }
 
-    if let Some((pause_at, waiting_for, owner)) = phase_b_pause {
+    if let Some((pause_at, waiting_for)) = phase_b_pause {
         state.waiting_for = waiting_for;
         // Source `pause_at` is either mid-Phase-B (replacement choice in flight
         // via `waiting_for`; `handle_replacement_choice` will call
@@ -3308,9 +3369,9 @@ pub fn resolve_each_source_deals_damage(
         let raw_remaining = entries[pause_at + 1..]
             .iter()
             .map(|(src, _ctx, t, a)| (*src, t.clone(), *a));
-        stash_each_source_combined_continuation(state, &owner, &replaced, raw_remaining);
+        stash_each_source_combined_continuation(state, ability, &replaced, raw_remaining);
         mark_pending_continuation_parent(state, EffectKind::EachSourceDealsDamage);
-        return Ok(());
+        return Ok(DamageTail::Stashed);
     }
 
     // Phase C — apply all already-replaced damage events. If any source's
@@ -3331,7 +3392,7 @@ pub fn resolve_each_source_deals_damage(
                     .collect();
                 stash_remaining_post_replacement_damage(state, ability, &remaining_refs);
                 mark_pending_continuation_parent(state, EffectKind::EachSourceDealsDamage);
-                return Ok(());
+                return Ok(DamageTail::Stashed);
             }
         }
     }
@@ -3342,7 +3403,7 @@ pub fn resolve_each_source_deals_damage(
         subject: None,
     });
 
-    Ok(())
+    Ok(DamageTail::Caller)
 }
 
 /// CR 208.3 + CR 113.7a: A creature's power from current state, falling back to

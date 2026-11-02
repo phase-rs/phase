@@ -24955,8 +24955,7 @@ mod tests {
             // swallowing "(It can't be blocked except by ...)" into the keyword.
             (
                 "Duskwalker",
-                "If this creature was kicked, it enters with two +1/+1 counters on it and with fear. \
-                 (It can't be blocked except by artifact creatures and/or black creatures.)",
+                "If this creature was kicked, it enters with two +1/+1 counters on it and with fear.                  (It can't be blocked except by artifact creatures and/or black creatures.)",
                 Keyword::Fear,
             ),
         ] {
@@ -25051,8 +25050,7 @@ mod tests {
         // the scan at the period keeps it out.
         assert_eq!(
             parse_enters_with_keyword_riders(
-                "it enters with two +1/+1 counters on it and with flying. \
-                 exile it and with trample."
+                "it enters with two +1/+1 counters on it and with flying.                  exile it and with trample."
             ),
             vec![Keyword::Flying],
             "a later sentence's \" and with \" must not be attached to this replacement"
@@ -25063,8 +25061,7 @@ mod tests {
         // which fails if the candidate bound reads through the period.
         assert_eq!(
             parse_enters_with_keyword_riders(
-                "it enters with two +1/+1 counters on it and with flying. \
-                 when this creature dies, exile it and with trample it fights."
+                "it enters with two +1/+1 counters on it and with flying.                  when this creature dies, exile it and with trample it fights."
             ),
             vec![Keyword::Flying],
             "the candidate bound must not read through the period into a later sentence"
