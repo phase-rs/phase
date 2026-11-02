@@ -749,7 +749,8 @@ fn thundermaw_worldgorger_loop_is_drawn() {
         p0_cards: &["Thundermaw Hellkite"],
         ..PLAIN
     };
-    let Some(run) = run(board, LoopDetectionMode::Interactive, Drive::Pass, 300) else {
+    // A few beats past where the draw lands, since each beat the cover refuses re-confirms the loop.
+    let Some(run) = run(board, LoopDetectionMode::Interactive, Drive::Pass, 24) else {
         return;
     };
     assert_eq!(run.terminal, Terminal::GameOver(None));

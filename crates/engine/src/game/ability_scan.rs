@@ -7895,33 +7895,69 @@ mod tests {
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
 
-    /// CR 118.12: under the loop firewall a fixed mana payment reads no object and spends
-    /// projected mana; a sacrifice payment still chooses among the board, and the CR 603.3b scan
-    /// stays fail-closed.
+    /// The parsed abilities of a printed creature card from its verbatim Oracle text.
+    fn printed_creature(name: &str, oracle: &str) -> crate::parser::oracle::ParsedAbilities {
+        crate::parser::parse_oracle_text(oracle, name, &[], &["Creature".to_string()], &[])
+    }
+
+    /// The `PayCost` in the first trigger of a printed creature card.
+    fn printed_trigger_payment(name: &str, oracle: &str) -> Effect {
+        let parsed = printed_creature(name, oracle);
+        let mut def = parsed.triggers[0].execute.as_deref();
+        while let Some(ability) = def {
+            if matches!(*ability.effect, Effect::PayCost { .. }) {
+                return (*ability.effect).clone();
+            }
+            def = ability.sub_ability.as_deref();
+        }
+        panic!("{name}'s trigger pays a cost");
+    }
+
+    /// CR 118.12: under the loop firewall Hellkite Charger's "you may pay {5}{R}{R}" reads no
+    /// object and spends projected mana; Caesar, Legion's Emperor's "you may sacrifice another
+    /// creature" still chooses among the board, and the CR 603.3b scan stays fail-closed.
     #[test]
     fn a_fixed_mana_payment_alone_is_relieved_under_the_loop_firewall() {
-        let pay = |cost, mode| {
-            scan_effect(
-                &Effect::PayCost {
-                    cost,
-                    scale: None,
-                    payer: TargetFilter::Controller,
-                },
-                mode,
+        let charger = || {
+            printed_trigger_payment(
+                "Hellkite Charger",
+                "Flying, haste\nWhenever this creature attacks, you may pay {5}{R}{R}. If you \
+                 do, untap all attacking creatures and after this phase, there is an additional \
+                 combat phase.",
             )
         };
-        let mana = || AbilityCost::Mana {
-            cost: ManaCost::generic(7),
-        };
-        let relieved = pay(mana(), ScanMode::LoopFirewall);
+        assert!(
+            matches!(
+                charger(),
+                Effect::PayCost {
+                    cost: AbilityCost::Mana { .. },
+                    scale: None,
+                    ..
+                }
+            ),
+            "reach: Hellkite Charger pays a fixed mana cost"
+        );
+        let relieved = scan_effect(&charger(), ScanMode::LoopFirewall);
         assert!(!relieved.sibling && !relieved.event && relieved.projected);
-        assert!(pay(mana(), ScanMode::Conservative).sibling);
-        use crate::types::ability::{SacrificeCost, SacrificeRequirement};
-        let sacrifice = AbilityCost::Sacrifice(SacrificeCost::new(
-            TargetFilter::Typed(TypedFilter::creature()),
-            SacrificeRequirement::Count { count: 1 },
-        ));
-        assert!(pay(sacrifice, ScanMode::LoopFirewall).sibling);
+        assert!(scan_effect(&charger(), ScanMode::Conservative).sibling);
+        let caesar = printed_trigger_payment(
+            "Caesar, Legion's Emperor",
+            "Whenever you attack, you may sacrifice another creature. When you do, choose two \
+             —\n• Create two 1/1 red and white Soldier creature tokens with haste that are \
+             tapped and attacking.\n• You draw a card and you lose 1 life.\n• Caesar deals \
+             damage equal to the number of creature tokens you control to target opponent.",
+        );
+        assert!(
+            matches!(
+                caesar,
+                Effect::PayCost {
+                    cost: AbilityCost::Sacrifice(_),
+                    ..
+                }
+            ),
+            "reach: Caesar pays a sacrifice"
+        );
+        assert!(scan_effect(&caesar, ScanMode::LoopFirewall).sibling);
     }
 
     /// CR 732.2a: Worldgorger Dragon's "exile all other permanents you control" reads what its
@@ -7957,64 +7993,109 @@ mod tests {
         assert!(fail_closed(scan_effect(&face_down, ScanMode::LoopFirewall)));
     }
 
-    /// CR 601.2f + CR 602.2b: a cost reduction reads what its count reads; one gated by a
-    /// condition no walker descends reads everything, and an ability with none reads nothing.
+    /// CR 601.2f + CR 602.2b: Battlefield Butcher's cost reduction reads what its count reads;
+    /// Human Torch, Johnny Storm's Power-up, gated by a condition no walker descends, reads
+    /// everything.
     #[test]
     fn a_cost_reduction_reads_its_count_and_a_gated_one_reads_everything() {
-        use crate::types::ability::{CostReduction, ParsedCondition, PlayerScope};
-        use crate::types::statics::CostModifyMode;
-        let ability = |cost_reduction| {
-            let mut def = AbilityDefinition::new(
-                AbilityKind::Activated,
-                Effect::GainLife {
-                    amount: QuantityExpr::Fixed { value: 1 },
-                    player: TargetFilter::Controller,
-                },
-            );
-            def.cost_reduction = cost_reduction;
-            ability_definition_history(&def)
+        let butcher = || {
+            printed_creature(
+                "Battlefield Butcher",
+                "{5}, {T}: Each opponent loses 2 life. This ability costs {1} less to activate \
+                 for each creature card in your graveyard.",
+            )
+            .abilities
+            .remove(0)
         };
-        let reduction = |condition| CostReduction {
-            mode: CostModifyMode::Reduce,
-            amount_per: 1,
-            count: QuantityExpr::Ref {
-                qty: QuantityRef::CardsDiscardedThisTurn {
-                    player: PlayerScope::Controller,
-                },
-            },
-            condition,
+        let reduction = butcher()
+            .cost_reduction
+            .expect("reach: Butcher's reduction");
+        assert!(reduction.condition.is_none(), "reach: Butcher's is ungated");
+        assert_eq!(ability_definition_history(&butcher()), HistoryReads::NONE);
+        // No printed activated ability's reduction counts a per-turn history, so Butcher's
+        // reduction is given Hollow One's count.
+        let StaticMode::ModifyCost {
+            dynamic_count: Some(discarded),
+            ..
+        } = hollow_one().mode
+        else {
+            panic!("reach: Hollow One counts its discards");
         };
-        assert_eq!(ability(None), HistoryReads::NONE);
+        let mut counted = butcher();
+        counted
+            .cost_reduction
+            .as_mut()
+            .expect("Butcher's reduction")
+            .count = QuantityExpr::Ref { qty: discarded };
         assert_eq!(
-            ability(Some(reduction(None))),
+            ability_definition_history(&counted),
             HistoryReads::of(HistoryMember::CardsDiscardedThisTurnByPlayer)
         );
-        assert_eq!(
-            ability(Some(reduction(Some(
-                ParsedCondition::SourceEnteredThisTurn
-            )))),
-            HistoryReads::ALL
+        let torch = printed_creature(
+            "Human Torch, Johnny Storm",
+            "Flying\nWhenever you draw a card, if you control another Hero, Human Torch deals 1 \
+             damage to target opponent.\nPower-up — {6}{R}: Put three +1/+1 counters on Human \
+             Torch. (Activate each power-up ability only once. Reduce the cost by his mana cost \
+             if he entered this turn.)",
+        )
+        .abilities
+        .into_iter()
+        .find(|ability| ability.cost_reduction.is_some())
+        .expect("reach: the Power-up's reduction");
+        assert!(
+            torch
+                .cost_reduction
+                .as_ref()
+                .is_some_and(|reduction| reduction.condition.is_some()),
+            "reach: the Power-up's reduction is gated"
         );
+        assert_eq!(ability_definition_history(&torch), HistoryReads::ALL);
+    }
+
+    /// Hollow One's "This spell costs {2} less to cast for each card you've cycled or discarded
+    /// this turn." static.
+    fn hollow_one() -> StaticDefinition {
+        printed_creature(
+            "Hollow One",
+            "This spell costs {2} less to cast for each card you've cycled or discarded this \
+             turn.\nCycling {2} ({2}, Discard this card: Draw a card.)",
+        )
+        .statics
+        .remove(0)
     }
 
     /// CR 601.2f: a cost-modifying static reads its spell filter and dynamic count, as a
-    /// continuous one reads its own fields; a fixed reduction reads nothing.
+    /// continuous one reads its own fields; Heroic Return's fixed {2} reads nothing.
     #[test]
     fn a_cost_modifying_static_reads_its_count() {
-        use crate::types::statics::CostModifyMode;
-        let modify = |dynamic_count| {
-            static_definition_history(&StaticDefinition::new(StaticMode::ModifyCost {
-                mode: CostModifyMode::Reduce,
-                amount: ManaCost::generic(2),
-                spell_filter: None,
-                dynamic_count,
-                reach: Default::default(),
-            }))
-        };
-        assert_eq!(modify(None), HistoryReads::NONE);
+        let heroic_return = crate::parser::parse_oracle_text(
+            "This spell costs {2} less to cast if a creature is attacking you.\nReturn target \
+             creature card from your graveyard to the battlefield. If a Hero enters this way, it \
+             enters with two additional +1/+1 counters on it.",
+            "Heroic Return",
+            &[],
+            &["Sorcery".to_string()],
+            &[],
+        )
+        .statics
+        .remove(0);
+        assert!(
+            matches!(
+                heroic_return.mode,
+                StaticMode::ModifyCost {
+                    dynamic_count: None,
+                    ..
+                }
+            ),
+            "reach: Heroic Return's reduction is fixed"
+        );
         assert_eq!(
-            modify(Some(QuantityRef::TurnsTaken)),
-            HistoryReads::of(HistoryMember::PlayerTurnsTaken)
+            static_definition_history(&heroic_return),
+            HistoryReads::NONE
+        );
+        assert_eq!(
+            static_definition_history(&hollow_one()),
+            HistoryReads::of(HistoryMember::CardsDiscardedThisTurnByPlayer)
         );
     }
 

@@ -3726,7 +3726,7 @@ pub fn trigger_definition_functions_in_zone(def: &TriggerDefinition, zone: Zone)
 ///
 /// It takes neither a `&GameState` nor a class member, because its proof is
 /// zone/event-key disjointness against sets its caller supplies. Its one consult sits inside
-/// `certify_instructed_opponent_library_departure`, which runs on both projected and
+/// `certify_instructed_library_departure`, which runs on both projected and
 /// unprojected frames, so binding this proof to a frame would make its verdict depend on which
 /// caller asked.
 ///

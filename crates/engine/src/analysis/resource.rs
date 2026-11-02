@@ -5918,9 +5918,9 @@ pub(crate) fn turn_cycle_covers(prior: &GameState, current: &GameState, caster: 
 }
 
 /// CR 121.1 + CR 401.2: `current` with the cards the caster drew since `prior` put back where
-/// `prior`'s library held them. `None` unless it drew, the drawn cards match the top of `prior`'s
-/// library by content (all its proposer's view knows of a library), and `current`'s library is
-/// `prior`'s less every card that left it.
+/// `prior`'s library held them. `None` unless it drew, the drawn cards are the top of `prior`'s
+/// library, a card `prior` shows standing in for a shown top card of equal content, and
+/// `current`'s library is `prior`'s less every card that left it.
 fn library_departures_restored(
     prior: &GameState,
     current: &GameState,
@@ -5942,15 +5942,23 @@ fn library_departures_restored(
     if drawn.is_empty() {
         return None;
     }
-    let mut top: Vec<&GameObject> = before
+    let top: Vec<ObjectId> = before.iter().take(drawn.len()).copied().collect();
+    // CR 401.2: a hidden card is known only by where it lies, so only a shown card is matched by
+    // content.
+    let shown = |id: &ObjectId| {
+        crate::game::visibility::interaction_object_identity_is_visible(prior, *id)
+            .then(|| prior.objects.get(id))
+            .flatten()
+    };
+    let mut open: Vec<&GameObject> = top
         .iter()
-        .take(drawn.len())
-        .filter_map(|id| prior.objects.get(id))
+        .filter(|id| !drawn.contains(id))
+        .filter_map(shown)
         .collect();
-    for id in &drawn {
-        let card = prior.objects.get(id)?;
-        let at = top.iter().position(|top| object_content_eq(top, card))?;
-        top.swap_remove(at);
+    for id in drawn.iter().filter(|id| !top.contains(id)) {
+        let card = shown(id)?;
+        let at = open.iter().position(|top| object_content_eq(top, card))?;
+        open.swap_remove(at);
     }
     let kept = |id: &&ObjectId| !departed.contains(id);
     if !before.iter().filter(kept).eq(after.iter()) {
@@ -26972,46 +26980,66 @@ mod tests {
         assert!(!library_departures_cover(&prior, &current, caster));
     }
 
-    /// A frame whose battlefield creature gets +X/+0, X the cards its controller discarded this
-    /// turn, which `discarded` of them.
-    fn discard_read_frame(discarded: u32) -> GameState {
+    /// CR 401.2: in the caster's hidden view its library cards are known only by where they lie,
+    /// so a draw from below the top is refused.
+    #[test]
+    fn a_hidden_draw_is_put_back_only_from_the_top() {
+        use crate::game::visibility::{
+            interaction_object_identity_is_visible, proposer_hidden_view,
+        };
+        let caster = PlayerId(0);
+        let hidden = |drawn| {
+            let (prior, current) = in_step_draw(drawn);
+            (
+                proposer_hidden_view(&prior, caster),
+                proposer_hidden_view(&current, caster),
+            )
+        };
+        let (prior, current) = hidden(0);
+        assert!(
+            !interaction_object_identity_is_visible(&prior, prior.library_of(caster)[1]),
+            "reach: the library is hidden"
+        );
+        assert!(library_departures_restored(&prior, &current, caster).is_some());
+        for drawn in [1, 2] {
+            let (prior, current) = hidden(drawn);
+            assert!(
+                library_departures_restored(&prior, &current, caster).is_none(),
+                "card {drawn}"
+            );
+        }
+    }
+
+    /// Moraug, Fury of Akoum ("Each creature you control gets +1/+0 for each time it has attacked
+    /// this turn.") on the battlefield, declared as an attacker `attacks` times this turn.
+    fn moraug_frame(attacks: usize) -> GameState {
         use crate::game::zones::create_object;
-        use crate::types::ability::{ContinuousModification, PlayerScope};
         let mut state = GameState::new_two_player(42);
-        let id = create_object(
+        let moraug = create_object(
             &mut state,
             CardId(5),
             PlayerId(0),
-            "Reader".into(),
+            "Moraug, Fury of Akoum".into(),
             Zone::Battlefield,
         );
-        state
-            .objects
-            .get_mut(&id)
-            .expect("reader")
-            .static_definitions = vec![StaticDefinition::continuous()
-            .affected(TargetFilter::SelfRef)
-            .modifications(vec![ContinuousModification::AddDynamicPower {
-                value: QuantityExpr::Ref {
-                    qty: QuantityRef::CardsDiscardedThisTurn {
-                        player: PlayerScope::Controller,
-                    },
-                },
-            }])]
+        let object = state.objects.get_mut(&moraug).expect("Moraug");
+        object.static_definitions = vec![crate::parser::oracle_static::parse_static_line(
+            "Each creature you control gets +1/+0 for each time it has attacked this turn.",
+        )
+        .expect("Moraug's static parses")]
         .into();
-        if discarded > 0 {
-            state
-                .cards_discarded_this_turn_by_player
-                .insert(PlayerId(0), discarded);
-        }
+        let record = object.snapshot_for_attack_declaration(moraug);
+        state
+            .attacker_declarations_this_turn
+            .extend(std::iter::repeat_n(record, attacks));
         state
     }
 
-    /// CR 732.2a + CR 613.4c: history a static reads is covered by the growth-read arm only when
-    /// it grew, and repeats only when it grows alike in both pairs.
+    /// CR 732.2a + CR 613.4c + CR 508.1a: the attack count Moraug's static reads is covered by the
+    /// growth-read arm only when it grew, and repeats only when it grows alike in both pairs.
     #[test]
     fn a_growth_read_repeats_only_at_a_constant_rise() {
-        let frames = [0, 1, 2, 4].map(discard_read_frame);
+        let frames = [0, 1, 2, 4].map(moraug_frame);
         assert!(
             !history_covers(&frames[0], &frames[1]),
             "reach: the static reads it"
@@ -27026,35 +27054,48 @@ mod tests {
         ]));
     }
 
-    /// CR 603.2c: a batched record of a move this turn already made is stale; one naming a move
-    /// not yet made, or another turn's, is not.
+    /// CR 603.2c: Bess, Soul Nourisher's batched record of a move this turn already made is stale;
+    /// one naming a move not yet made, or another turn's, is not.
     #[test]
     fn batched_zone_change_records_grow_stale_only_for_moves_already_made() {
         use crate::game::zones::create_object;
         use crate::types::game_state::ZoneChangeRecord;
-        use crate::types::triggers::TriggerMode;
         let mut prior = GameState::new_two_player(42);
         prior.turn_number = 3;
-        let observer = create_object(
+        let bess = create_object(
             &mut prior,
             CardId(1),
             PlayerId(0),
-            "Observer".into(),
+            "Bess, Soul Nourisher".into(),
             Zone::Battlefield,
         );
-        let object = prior.objects.get_mut(&observer).expect("observer");
-        object
-            .trigger_definitions
-            .push(crate::types::ability::TriggerDefinition::new(
-                TriggerMode::ChangesZone,
-            ));
+        let entered = create_object(
+            &mut prior,
+            CardId(2),
+            PlayerId(0),
+            "Soldier".into(),
+            Zone::Battlefield,
+        );
+        let trigger = crate::parser::parse_oracle_text(
+            "Whenever one or more other creatures you control with base power and toughness 1/1 \
+             enter, put a +1/+1 counter on Bess.",
+            "Bess, Soul Nourisher",
+            &[],
+            &["Creature".to_string()],
+            &["Human".to_string(), "Citizen".to_string()],
+        )
+        .triggers
+        .remove(0);
+        assert!(trigger.batched, "reach: Bess's trigger is batched");
+        let object = prior.objects.get_mut(&bess).expect("Bess");
+        object.trigger_definitions.push(trigger);
         let definition = object.trigger_definition_ref(&object.trigger_definitions[0]);
         prior
             .zone_changes_this_turn
             .push_back(ZoneChangeRecord::test_minimal(
-                observer,
-                Some(Zone::Battlefield),
-                Zone::Graveyard,
+                entered,
+                None,
+                Zone::Battlefield,
             ));
         let with = |index: usize, turn: u32| {
             let mut current = prior.clone();

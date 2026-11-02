@@ -27,7 +27,7 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::visibility::filter_state_for_viewer;
 use engine::game::zones::{add_to_zone, remove_from_zone};
-use engine::game::{play_trace_view, NamedSpan, NamingCause, PeriodReach, SpanSource};
+use engine::game::{play_trace_view, EntryKind, NamedSpan, NamingCause, PeriodReach, SpanSource};
 use engine::types::ability::{
     AbilityKind, CastingPermission, ChosenAttribute, ContinuousModification,
     DelayedTriggerCondition, Effect, ResolvedAbility, TargetRef,
@@ -318,6 +318,41 @@ fn an_altar_loop_growing_foods_is_offered() {
         .count();
     assert_eq!(foods, 1, "reach: Gravecrawler's entry made a Food");
     assert_eq!(road(state), Some(OfferRoad::RecordedPeriod));
+}
+
+/// CR 121.1 + CR 732.2a: Phyrexian Altar ("Sacrifice a creature: Add one mana of any color.")
+/// recurring Gravecrawler beside Samwise Gamgee ("Whenever another nontoken creature you control
+/// enters, create a Food token.") and Moldervine Reclamation ("Whenever a creature you control
+/// dies, you gain 1 life and draw a card.") grows a Food and draws P0 a card each cycle, so the
+/// cover puts the draw back beside the Food.
+#[test]
+fn an_altar_loop_growing_foods_and_drawing_passes_the_cover() {
+    let Some(db) = shared_card_db() else { return };
+    let (mut runner, altar, gravecrawler) = altar_board(Some("Samwise Gamgee"), db);
+    place(runner.state_mut(), P0, "Moldervine Reclamation", db);
+    let counts = |state: &GameState| {
+        let foods = state
+            .battlefield
+            .iter()
+            .filter(|id| state.objects[id].name == "Food")
+            .count();
+        let p0 = &state.players[0];
+        (foods, p0.library.len(), p0.hand.len())
+    };
+    for cycle in 0..3 {
+        let (foods, library, hand) = counts(runner.state());
+        altar_cycle(&mut runner, altar, gravecrawler);
+        assert_eq!(
+            counts(runner.state()),
+            (foods + 1, library - 1, hand + 1),
+            "reach: cycle {cycle}"
+        );
+    }
+    let verdict = latest_verdict(runner.state());
+    assert!(
+        !matches!(verdict, Err(OfferRefusal::Cover(_))),
+        "{verdict:?}"
+    );
 }
 
 /// Kiki-Jiki copying Deceiver Exarch, three cycles after the first: three priority frames.
@@ -2369,6 +2404,42 @@ fn a_bounded_offer_or_proposal_on_the_ring_road_with_a_period_is_refused_on_relo
     let offered = bounded_recorded_offer_with_period(db);
     assert_refused_on_reload(&on_the_ring_road(&offered));
     assert_refused_on_reload(&on_the_ring_road(&proposed(offered, 3)));
+}
+
+/// Whether `seat` has a play in the trace at `state`.
+fn plays_in_trace(state: &GameState, seat: PlayerId) -> bool {
+    play_trace_view(state).is_some_and(|view| {
+        view.entries
+            .iter()
+            .any(|entry| entry.seat == seat && matches!(entry.kind, EntryKind::Play { .. }))
+    })
+}
+
+/// CR 732.2a: a proposal refused when it is taken is declined, so the proposer's plays leave the
+/// trace. The Altar–Zulaport proposal, its count raised past what a take may drive after the
+/// declaration, is refused once P1 accepts.
+#[test]
+fn a_proposal_refused_at_its_take_leaves_the_proposers_plays_out_of_the_trace() {
+    let Some(db) = shared_card_db() else { return };
+    let mut proposal = proposed(bounded_recorded_offer_with_period(db), 3);
+    assert!(
+        plays_in_trace(&proposal, P0),
+        "reach: P0's plays made the period"
+    );
+    let WaitingFor::RespondToShortcut {
+        proposal: shortcut, ..
+    } = &mut proposal.waiting_for
+    else {
+        unreachable!("`proposed` asserted the proposal")
+    };
+    shortcut.count = IterationCount::Fixed(u32::MAX);
+    let before = lives(&proposal);
+    let mut runner = GameRunner::from_state(proposal);
+    accept(&mut runner);
+    let state = runner.state();
+    assert_eq!(lives(state), before, "reach: the take is refused");
+    assert_eq!(state.waiting_for, WaitingFor::Priority { player: P0 });
+    assert!(!plays_in_trace(state, P0));
 }
 
 /// CR 704.5a + CR 800.4a + CR 104.2a: on four seats the Zulaport drain drops P1 and P2 together at
@@ -7183,7 +7254,13 @@ fn an_altar_of_the_brood_period_resolved_all_is_offered() {
                 scope,
             },
         );
-        if let WaitingFor::ResolveAllConsent { epoch, .. } = runner.state().waiting_for {
+        if scope == ResolveAllScope::Shared {
+            let WaitingFor::ResolveAllConsent { epoch, .. } = runner.state().waiting_for else {
+                panic!(
+                    "a shared Resolve All asks P1: {:?}",
+                    runner.state().waiting_for
+                );
+            };
             act(
                 &mut runner,
                 GameAction::RespondResolveAllConsent {

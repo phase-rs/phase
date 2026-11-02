@@ -5858,6 +5858,8 @@ fn apply_confirmed_shortcut(
                 .is_err()
             })
     {
+        // CR 732.2a: the refused shortcut is declined, so the proposer's plays leave the trace.
+        super::play_trace::discard_seat(state, proposal.proposer);
         priority::reset_priority(state);
         // CR 800.4a: priority passes to the next player in turn order still in the game.
         // The departed proposer may have been the active player (elimination does not advance
