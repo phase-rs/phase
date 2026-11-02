@@ -191,6 +191,11 @@ pub(crate) enum DeferredTriggerBatchOrigin {
     #[default]
     Ordinary,
     StateBasedActionChoice,
+    /// CR 117.5 + CR 603.3b: a priority boundary's own batch, queued from
+    /// collection until its pass settles to `Priority` (the same pass, or a
+    /// later one behind a wait that is not SBA-owned). It never selects the
+    /// `Any` answer scope.
+    PriorityBoundary,
 }
 
 fn deferred_trigger_batch_origin_is_ordinary(origin: &DeferredTriggerBatchOrigin) -> bool {
@@ -434,24 +439,38 @@ pub type DeferredTrigger = PendingTriggerContext;
 impl PendingTriggerContext {
     pub fn single(pending: PendingTrigger) -> Self {
         let trigger_events = pending.trigger_event.iter().cloned().collect();
+        // CR 603.2d: reflexive/delayed triggers (including GotchaSaid) are not
+        // triggered abilities the object has; trigger doublers do not apply.
+        let firing = if matches!(pending.trigger_event, Some(GameEvent::GotchaSaid { .. })) {
+            TriggerFiring::LegacyDelayed
+        } else {
+            TriggerFiring::Ordinary
+        };
         Self {
             pending,
             trigger_events,
             duration_events: Vec::new(),
             dispatch_origin: PendingTriggerDispatchOrigin::Normal,
             batch_origin: DeferredTriggerBatchOrigin::Ordinary,
-            firing: TriggerFiring::Ordinary,
+            firing,
         }
     }
 
     fn batched(pending: PendingTrigger, trigger_events: Vec<GameEvent>) -> Self {
+        // CR 603.2d: reflexive/delayed triggers (including GotchaSaid) are not
+        // triggered abilities the object has; trigger doublers do not apply.
+        let firing = if matches!(pending.trigger_event, Some(GameEvent::GotchaSaid { .. })) {
+            TriggerFiring::LegacyDelayed
+        } else {
+            TriggerFiring::Ordinary
+        };
         Self {
             pending,
             trigger_events,
             duration_events: Vec::new(),
             dispatch_origin: PendingTriggerDispatchOrigin::Normal,
             batch_origin: DeferredTriggerBatchOrigin::Ordinary,
-            firing: TriggerFiring::Ordinary,
+            firing,
         }
     }
 
@@ -4040,7 +4059,41 @@ fn ward_becomes_target_suppressed(
     })
 }
 
-fn inline_tap_mana_trigger_abilities(
+/// CR 605.1b: Whether `event`, the production of the triggered mana ability `ability`, triggers
+/// `ability`'s own trigger again with nothing on it that could stop the retrigger.
+pub(super) fn mana_production_retriggers_itself_mandatorily(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    event: &GameEvent,
+) -> bool {
+    let Some(own) = ability.trigger_definition_ref.as_ref() else {
+        return false;
+    };
+    super::trigger_index::ensure_ready(state);
+    let candidates = super::trigger_index::candidates_for_event(state, event);
+    let state = &*state;
+    inline_tap_mana_trigger_abilities(state, event, candidates)
+        .into_iter()
+        .find(|(definition_ref, _)| definition_ref == own)
+        .is_some_and(|(definition_ref, retrigger)| {
+            let Some(object) = state.objects.get(&definition_ref.source.object_id) else {
+                return false;
+            };
+            super::functioning_abilities::active_trigger_definitions(state, object)
+                .find(|active| active.definition_ref == definition_ref)
+                .is_some_and(|active| {
+                    // CR 104.4b: an intervening-if (CR 603.4), a "may" (CR 603.5), an effect
+                    // condition or a trigger limit can stop the retrigger, so only a trigger
+                    // with none of them is a mandatory loop.
+                    !retrigger.optional
+                        && retrigger.condition.is_none()
+                        && active.definition.condition.is_none()
+                        && active.definition.constraint.is_none()
+                })
+        })
+}
+
+pub(super) fn inline_tap_mana_trigger_abilities(
     state: &GameState,
     tap_event: &GameEvent,
     candidate_ids: impl IntoIterator<Item = ObjectId>,
@@ -5143,7 +5196,7 @@ fn collect_latched_batched_zone_triggers(
         record_matched_batched_zone_change_replay(state, &matched);
         let trigger_context =
             PendingTriggerContext::batched(matched.pending, matched.trigger_events);
-        if !pending_trigger_is_auto_inert_noop(state, &trigger_context) {
+        if !drop_auto_inert_noop_trigger(state, &trigger_context) {
             pending.push(trigger_context);
         }
     }
@@ -5208,7 +5261,7 @@ impl BulkMemberTriggerCollection {
 }
 
 /// CR 603.8: the state-trigger definitions functioning on `obj`. The single
-/// authority shared by `check_state_triggers` and `has_active_state_triggers`.
+/// authority shared by `collect_state_triggers` and `has_active_state_triggers`.
 fn active_state_trigger_definitions<'a>(
     state: &'a GameState,
     obj: &'a GameObject,
@@ -5218,7 +5271,7 @@ fn active_state_trigger_definitions<'a>(
 }
 
 /// CR 603.8: whether any battlefield permanent has a functioning state trigger,
-/// i.e. whether `check_state_triggers` has anything to check.
+/// i.e. whether `collect_state_triggers` has anything to check.
 pub(crate) fn has_active_state_triggers(state: &GameState) -> bool {
     state
         .battlefield
@@ -5429,7 +5482,7 @@ fn collect_pending_triggers_with_collection(
                 registered_this_event.insert((obj_id, matched.trig_idx));
                 let trigger_context =
                     PendingTriggerContext::batched(matched.pending, matched.trigger_events);
-                if pending_trigger_is_auto_inert_noop(state, &trigger_context) {
+                if drop_auto_inert_noop_trigger(state, &trigger_context) {
                     continue;
                 }
                 pending.push(trigger_context);
@@ -7406,11 +7459,11 @@ fn filter_auto_inert_noop_triggers(
 ) -> Vec<PendingTriggerContext> {
     pending
         .into_iter()
-        .filter(|ctx| !pending_trigger_is_auto_inert_noop(state, ctx))
+        .filter(|ctx| !drop_auto_inert_noop_trigger(state, ctx))
         .collect()
 }
 
-fn pending_trigger_is_auto_inert_noop(state: &mut GameState, ctx: &PendingTriggerContext) -> bool {
+fn drop_auto_inert_noop_trigger(state: &mut GameState, ctx: &PendingTriggerContext) -> bool {
     let pending = &ctx.pending;
     if !pending.ability.optional {
         return false;
@@ -7427,7 +7480,12 @@ fn pending_trigger_is_auto_inert_noop(state: &mut GameState, ctx: &PendingTrigge
         origin,
     };
     match state.may_trigger_auto_choice_for_live_prompt(&key) {
-        Some(AutoMayChoice::Decline) => true,
+        Some(AutoMayChoice::Decline) => {
+            // CR 603.5: the remembered decline is the controller's optional choice.
+            state.record_loop_decision(crate::game::play_trace::AnswerOptionality::Optional);
+            true
+        }
+        // CR 603.3d: no legal target means no choice was offered, so nothing is recorded.
         Some(AutoMayChoice::Accept) => pending_trigger_has_no_legal_resolution_targets(state, ctx),
         None => false,
     }
@@ -7669,9 +7727,8 @@ fn ring_level_four_ability(source_id: ObjectId, controller: PlayerId) -> Resolve
 /// CR 603.3b: Process triggered abilities waiting to be put on the stack.
 pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
     // CR 603.3 + CR 603.3b + CR 608.2n: while an instant or sorcery owes its final
-    // part (a copy entry's replayed enters event, CR 614.12a, among others), what
-    // triggers waits in the queue for the resolution's batch instead of being put
-    // on the stack now.
+    // part, what triggers waits in the queue for the resolution's batch instead
+    // of being put on the stack now.
     if super::stack::resolving_spell_owes_final_part(state) {
         collect_triggers_into_deferred(state, events);
         return;
@@ -8404,7 +8461,7 @@ fn record_submitted_trigger_order(
         PinnedDecision, ReplayMode,
     };
 
-    if submitted_order_was_identity {
+    if submitted_order_was_identity || saved_orders_bypassed() {
         return;
     }
     let Some(sources) = group_allcopies_sources(triggers) else {
@@ -8551,6 +8608,31 @@ fn normalize_deferred_trigger_order(state: &GameState, pending: &mut [PendingTri
     });
 }
 
+thread_local! {
+    static SAVED_ORDERS_BYPASSED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether an every-order replay is running, so no saved order applies or is saved.
+fn saved_orders_bypassed() -> bool {
+    SAVED_ORDERS_BYPASSED.with(std::cell::Cell::get)
+}
+
+/// CR 603.3b: while held, every ordering point is asked rather than answered by a saved order.
+#[must_use]
+pub(crate) struct SavedOrdersBypass(bool);
+
+impl SavedOrdersBypass {
+    pub(crate) fn enter() -> Self {
+        SavedOrdersBypass(SAVED_ORDERS_BYPASSED.with(|f| f.replace(true)))
+    }
+}
+
+impl Drop for SavedOrdersBypass {
+    fn drop(&mut self) {
+        SAVED_ORDERS_BYPASSED.with(|f| f.set(self.0));
+    }
+}
+
 /// CR 603.3b gate 3rd arm: try to auto-order `group` from a saved template instead of
 /// re-prompting. Returns `true` iff a template covered the group (caller marks it
 /// `ordered`); `false` ⇒ fall through to the normal prompt. Two tiers, consulted
@@ -8596,6 +8678,9 @@ fn apply_trigger_order_template(
     }
 
     // Persistent consult: an `AllCopies` template may auto-order a fresh batch.
+    if saved_orders_bypassed() {
+        return false;
+    }
     let Some(persistent_sources) = group_allcopies_sources(&group.triggers) else {
         return false;
     };
@@ -8713,7 +8798,9 @@ fn begin_trigger_ordering(
             g.ordered = true;
         } else if apply_trigger_order_template(state, g) {
             // CR 603.3b: an ephemeral (coverage-only) or persistent (permute-once)
-            // template covered this order-dependent group ⇒ no re-prompt.
+            // template covered this order-dependent group ⇒ no re-prompt, but the
+            // order is still the controller's choice.
+            state.record_trigger_order();
             g.ordered = true;
         }
     }
@@ -9034,6 +9121,64 @@ pub(crate) fn collect_triggers_into_deferred(state: &mut GameState, events: &[Ga
     state.deferred_triggers.extend(pending);
 }
 
+/// CR 117.5 + CR 603.3b: the boundary's queued batch waits behind `origin`'s
+/// wait; every `PriorityBoundary` context belongs to the boundary being built.
+pub(crate) fn stamp_priority_boundary_batch(
+    state: &mut GameState,
+    origin: DeferredTriggerBatchOrigin,
+) {
+    for context in &mut state.deferred_triggers {
+        if matches!(
+            context.batch_origin,
+            DeferredTriggerBatchOrigin::PriorityBoundary
+        ) {
+            context.batch_origin = origin;
+        }
+    }
+}
+
+/// Stamp `origin` on every queued context from `first` on.
+pub(crate) fn stamp_deferred_triggers_from(
+    state: &mut GameState,
+    first: usize,
+    origin: DeferredTriggerBatchOrigin,
+) {
+    for context in &mut state.deferred_triggers[first..] {
+        context.batch_origin = origin;
+    }
+}
+
+/// CR 117.5 + CR 603.3b: take the parked `PriorityBoundary` partition out of
+/// the queue in order. Ownership is consumed, so a context that pauses again
+/// during placement re-parks as an ordinary tail.
+pub(crate) fn take_priority_boundary_batch(state: &mut GameState) -> Vec<PendingTriggerContext> {
+    let (mut parked, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut state.deferred_triggers)
+        .into_iter()
+        .partition(|context| {
+            matches!(
+                context.batch_origin,
+                DeferredTriggerBatchOrigin::PriorityBoundary
+            )
+        });
+    state.deferred_triggers = rest;
+    for context in &mut parked {
+        context.batch_origin = DeferredTriggerBatchOrigin::Ordinary;
+    }
+    parked
+}
+
+/// CR 603.7: [`collect_unclaimed_delayed_triggers_into_deferred`], returning the
+/// contexts it matched instead of leaving them queued; the claims stay published.
+pub(crate) fn collect_unclaimed_delayed_trigger_contexts(
+    state: &mut GameState,
+    buffer: &[GameEvent],
+    unclaimed: &UnclaimedTriggerEvents,
+) -> Vec<PendingTriggerContext> {
+    let first_new_context = state.deferred_triggers.len();
+    collect_unclaimed_delayed_triggers_into_deferred(state, buffer, unclaimed);
+    state.deferred_triggers.split_off(first_new_context)
+}
+
 /// CR 800.4d: a triggered ability that would be controlled by a player who has
 /// left the game isn't put on the stack. Retires each such context as
 /// `Eliminated` and returns the rest in their order.
@@ -9168,20 +9313,20 @@ pub(crate) fn collect_unclaimed_triggers_into_deferred(
     collect_unclaimed_delayed_triggers_into_deferred(state, events, &delayed);
 }
 
-/// Collect a completed SBA batch that paused on an SBA-owned player choice.
+/// Collect `events`' triggers into the queue stamped `origin`: a priority
+/// boundary's own batch, or an SBA batch parked behind a choice.
 ///
 /// The marker is a narrow scheduling ownership record, not a general queue
-/// heuristic: only the priority pipeline calls this after it has observed the
-/// closed set of commander-zone, legend, and battle-protector SBA choices.
-pub(crate) fn collect_sba_choice_triggers_into_deferred(
+/// heuristic: `StateBasedActionChoice` is stamped only for the closed set of
+/// commander-zone, legend, and battle-protector SBA choices.
+pub(crate) fn collect_parked_triggers_into_deferred(
     state: &mut GameState,
     events: &[GameEvent],
+    origin: DeferredTriggerBatchOrigin,
 ) {
     let first_new_context = state.deferred_triggers.len();
     collect_triggers_into_deferred(state, events);
-    for context in &mut state.deferred_triggers[first_new_context..] {
-        context.batch_origin = DeferredTriggerBatchOrigin::StateBasedActionChoice;
-    }
+    stamp_deferred_triggers_from(state, first_new_context, origin);
 }
 
 /// True when this pipeline entry resumes a completed SBA batch that was parked
@@ -9227,14 +9372,7 @@ pub(crate) fn take_sba_choice_trigger_batch(
     preexisting_len: usize,
 ) -> Vec<PendingTriggerContext> {
     // The boundary is only meaningful while the pre-answer prefix is still
-    // intact. It is, for two structural reasons, both of which a future edit
-    // could silently break:
-    //   * the only other drain in this pipeline pass
-    //     (`drain_deferred_triggers_after_stack_object_announcement`) sits in
-    //     the `if` arm whose `else if` contains this call, so the two are
-    //     mutually exclusive; and
-    //   * the exile-return `split_off` removes a SUFFIX, from an index captured
-    //     later in the pass than this boundary, so it cannot touch the prefix.
+    // intact.
     // Assert rather than trust: a shrunk queue means indices no longer identify
     // the pre-answer contexts, and misclassifying an answer-generated context as
     // pre-existing would strand it (the regression this signature exists to
@@ -11553,8 +11691,8 @@ fn claim_resumed_triggered_mana_events(
 /// accepted children ahead of the prior simultaneous tail, run that tail, and
 /// resume the suspended mana frame exactly once.
 ///
-/// [`TriggeredManaReadiness::Pending`] means "no carrier, or the carrier is
-/// still live": the handler returns its own unmodified result.
+/// [`TriggeredManaReadiness::Pending`] means "no carrier, the carrier is still
+/// live, or the game has ended": the handler returns its own unmodified result.
 /// [`TriggeredManaReadiness::Resumed`] carries the resumed mana frame's
 /// authoritative wait, which the handler must install and return.
 pub(crate) fn finish_accepted_triggered_mana_action(
@@ -11562,6 +11700,11 @@ pub(crate) fn finish_accepted_triggered_mana_action(
     events: &mut Vec<GameEvent>,
     event_start: usize,
 ) -> Result<TriggeredManaReadiness, super::engine::EngineError> {
+    // CR 104.1: a game that ended during this action ends immediately, so the suspended frame never resumes.
+    if state.game_end.is_some() {
+        state.pending_triggered_mana_resume = None;
+        return Ok(TriggeredManaReadiness::Pending);
+    }
     if state.pending_triggered_mana_resume.is_none() {
         return Ok(TriggeredManaReadiness::Pending);
     }
@@ -11683,8 +11826,8 @@ pub(crate) fn finish_accepted_triggered_mana_action(
 
 /// What one sidecar-aware handler's readiness hook concluded.
 pub(crate) enum TriggeredManaReadiness {
-    /// No carrier, or the carrier is still live after this action. The handler
-    /// returns its own unmodified result.
+    /// No carrier, the carrier is still live after this action, or the game has
+    /// ended. The handler returns its own unmodified result.
     Pending,
     /// The fixed point terminated and the suspended mana frame resumed exactly
     /// once to `wait`.
@@ -11825,52 +11968,25 @@ pub(crate) fn resolution_frame_is_live_off_priority(state: &GameState) -> bool {
 
 /// Which deferred-trigger drain, if any, a post-action seam owns.
 ///
-/// Every variant still goes through `resolution_completion_can_settle`, so the
-/// complete carrier census is shared; the policy decides only whether this seam
-/// drains at all and whether a `Spell` entry may remain on the stack while it
-/// does. Replacing the two historic booleans — `engine_priority`'s
-/// `skip_deferred_trigger_drain` and this module's `allow_spell_on_stack` —
-/// with one enum keeps those two independent axes from being recombined
-/// accidentally at a new seam.
+/// The gate distinguishes only `Skip`: both draining variants admit the same
+/// queue behind the shared carrier census, and differ only in whether
+/// `engine_priority`'s pass may select its announced-cast batch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum DeferredTriggerDrainPolicy {
     /// This seam owns no drain. Its caller has already drained the batch, or it
     /// is a mid-continuation owner that must not.
     Skip,
-    /// CR 603.3b + issue #1793: drain only once no `Spell` entry remains on the
-    /// stack, so parked observers cannot offer ordering mid-resolution.
-    ResolutionSafe,
-    /// CR 601.2h + CR 602.2b + CR 603.3: a passive announced stack object may
-    /// still be on the stack; its cost/cast observers, the settled batch a
-    /// direct mana root converges into, and the batch of a resolution whose
-    /// CR 608.2n final part just ran, drain above it.
-    SettledPriority,
+    /// An ordinary post-action seam; its pass may select the announced-cast batch.
+    AdmitsAnnouncedCasts,
+    /// A seam that settles an already-announced batch; its pass never selects
+    /// the announced-cast batch.
+    ExcludesAnnouncedCasts,
 }
 
-impl DeferredTriggerDrainPolicy {
-    fn allows_spell_on_stack(self) -> bool {
-        match self {
-            DeferredTriggerDrainPolicy::Skip | DeferredTriggerDrainPolicy::ResolutionSafe => false,
-            DeferredTriggerDrainPolicy::SettledPriority => true,
-        }
-    }
-
-    /// CR 608.2n + CR 117.5 + CR 603.3: the policy for a pass in which a paused
-    /// instant or sorcery's final part ran. Its resolution is over, so the batch
-    /// it completes is settled and drains above a spell still on the stack, like
-    /// `SettledPriority`; a seam that owns no drain keeps owning none.
-    pub(super) fn after_spell_final_part(self) -> Self {
-        match self {
-            DeferredTriggerDrainPolicy::Skip => DeferredTriggerDrainPolicy::Skip,
-            DeferredTriggerDrainPolicy::ResolutionSafe
-            | DeferredTriggerDrainPolicy::SettledPriority => {
-                DeferredTriggerDrainPolicy::SettledPriority
-            }
-        }
-    }
-}
-
-fn can_drain_deferred_triggers(state: &GameState, policy: DeferredTriggerDrainPolicy) -> bool {
+pub(super) fn can_drain_deferred_triggers(
+    state: &GameState,
+    policy: DeferredTriggerDrainPolicy,
+) -> bool {
     if matches!(policy, DeferredTriggerDrainPolicy::Skip) {
         return false;
     }
@@ -11885,20 +12001,8 @@ fn can_drain_deferred_triggers(state: &GameState, policy: DeferredTriggerDrainPo
     if super::stack::resolving_spell_owes_final_part(state) {
         return false;
     }
-    // CR 603.3b + issue #1793: observer triggers parked during a spell's
-    // resolution must wait until that spell leaves the stack — draining while
-    // a `Spell` entry remains would offer ordering mid player_scope iteration.
-    // A completed resolution's batch is admitted through `after_spell_final_part`;
-    // a resolution still under way keeps a live continuation or frame, which
-    // `resolution_completion_can_settle` refuses under every policy.
-    if !policy.allows_spell_on_stack()
-        && state
-            .stack
-            .iter()
-            .any(|entry| matches!(entry.kind, StackEntryKind::Spell { .. }))
-    {
-        return false;
-    }
+    // CR 405.5 + CR 608.1: a spell waiting below has not begun to resolve, so it
+    // does not hold the batch.
     true
 }
 
@@ -11907,9 +12011,7 @@ fn can_drain_deferred_triggers(state: &GameState, policy: DeferredTriggerDrainPo
 /// finished (a parked context triggered by the casting of a spell still on the
 /// stack, such as a cast copy latched when its announcement completed), so the
 /// post-action boundary must put the whole queue, together with the action's
-/// fresh observers, on the stack as one batch above those spells: the
-/// post-announcement drain, not the resolution-safe one that holds observers
-/// until a resolving spell leaves the stack (issue #1793).
+/// fresh observers, on the stack as one batch above those spells.
 pub(super) fn deferred_triggers_hold_announced_casts(state: &GameState) -> bool {
     state.resolving_stack_entry.is_none()
         && state.resolution_stack.is_empty()
@@ -11927,22 +12029,7 @@ pub(super) fn deferred_triggers_hold_announced_casts(state: &GameState) -> bool 
 }
 
 pub(crate) fn should_drain_deferred_triggers_now(state: &GameState) -> bool {
-    can_drain_deferred_triggers(state, DeferredTriggerDrainPolicy::ResolutionSafe)
-}
-
-/// Policy-parameterized form of [`drain_deferred_trigger_queue`] for the shared
-/// post-action pipeline core, whose drain slot is owned by its caller's policy
-/// rather than by a fixed boundary.
-pub(super) fn drain_deferred_trigger_queue_with_policy(
-    state: &mut GameState,
-    events_out: &mut Vec<GameEvent>,
-    policy: DeferredTriggerDrainPolicy,
-) -> Option<crate::types::game_state::WaitingFor> {
-    if !can_drain_deferred_triggers(state, policy) {
-        return None;
-    }
-
-    drain_deferred_trigger_queue_unchecked(state, events_out)
+    can_drain_deferred_triggers(state, DeferredTriggerDrainPolicy::AdmitsAnnouncedCasts)
 }
 
 /// CR 113.2c + CR 603.2 + CR 603.3b: Drain the deferred-trigger queue after
@@ -11972,8 +12059,8 @@ pub(crate) fn drain_deferred_trigger_queue(
 /// spell or ability announcement was paused go on the stack at the first
 /// priority point after that stack object is fully announced, even though that
 /// spell or ability itself is still on the stack. Resolution-time callers must
-/// keep using `drain_deferred_trigger_queue`, whose spell-on-stack guard
-/// prevents mid-resolution drains.
+/// keep using `drain_deferred_trigger_queue`, whose gate refuses a resolution
+/// under way.
 pub(crate) fn drain_deferred_triggers_after_stack_object_announcement(
     state: &mut GameState,
     events_out: &mut Vec<GameEvent>,
@@ -12012,22 +12099,22 @@ pub(crate) fn drain_deferred_triggers_after_stack_object_announcement(
     // The live discriminator for this placement is
     // `casting_costs::tests::cost_paid_multi_sacrifice_kicker_paused_under_observes`:
     // restoring the `state.waiting_for.has_pending_cast()` read fails it.
-    if state.pending_cast.is_some() {
+    if !stack_object_announcement_drain_allowed(state) {
         return None;
     }
+    drain_deferred_trigger_queue_unchecked(state, events_out)
+}
+
+/// CR 603.3b: whether the post-announcement boundary may place the queue.
+pub(crate) fn stack_object_announcement_drain_allowed(state: &GameState) -> bool {
     // CR 603.3b + CR 608.2g: terminal Ripple settlement owns this exact
     // post-announcement boundary. It must first collect the current final
     // cast's SpellCast event with earlier accepted casts, then drain one batch.
     // Callers that finalize an announcement before that reducer seam therefore
     // leave the queue intact while the typed marker is live.
-    if state.pending_resolution_completion.is_some() {
-        return None;
-    }
-    if !can_drain_deferred_triggers(state, DeferredTriggerDrainPolicy::SettledPriority) {
-        return None;
-    }
-
-    drain_deferred_trigger_queue_unchecked(state, events_out)
+    state.pending_cast.is_none()
+        && state.pending_resolution_completion.is_none()
+        && can_drain_deferred_triggers(state, DeferredTriggerDrainPolicy::ExcludesAnnouncedCasts)
 }
 
 /// CR 601.2h + CR 603.3b: After a triggered ability finishes construction
@@ -13132,14 +13219,13 @@ fn trigger_cause_matches(
     }
 }
 
-/// CR 603.8: Check state triggers for all permanents on the battlefield.
-/// State triggers fire when a game-state condition is true, rather than in response
-/// to events. A state trigger doesn't trigger again until its ability has resolved,
-/// been countered, or otherwise left the stack.
-///
-/// CR 702.26b: Phased-out permanents are treated as though they don't exist
-/// — their state triggers don't fire.
-pub fn check_state_triggers(state: &mut GameState) {
+/// CR 603.8: the state triggers whose condition is true now, as batch contexts
+/// for the priority boundary's single placement; `waiting` is the batch already
+/// gathered for that placement.
+pub(crate) fn collect_state_triggers(
+    state: &GameState,
+    waiting: &[PendingTriggerContext],
+) -> Vec<PendingTriggerContext> {
     // CR 702.26b: phased-out gating is owned by `active_trigger_definitions`
     // below; we iterate the full battlefield and let the helper drop phased-
     // out permanents rather than re-filtering here.
@@ -13181,14 +13267,19 @@ pub fn check_state_triggers(state: &mut GameState) {
             // holds it back too, as before.) The ref's source pins the source
             // incarnation, so a pending trigger of an object that left the
             // battlefield never suppresses the new object it became (CR 400.7).
-            let already_on_stack = state.stack.iter().any(|entry| {
+            // An instance that triggered but still waits to be put on the stack
+            // holds it back the same way.
+            let this_ability = Some(definition_ref);
+            let already_triggered = state.stack.iter().any(|entry| {
                 matches!(
                     &entry.kind,
                     StackEntryKind::TriggeredAbility { ability, .. }
-                        if ability.trigger_definition_ref.as_ref() == Some(definition_ref)
+                        if ability.trigger_definition_ref.as_ref() == this_ability
                 )
-            });
-            if already_on_stack {
+            }) || waiting.iter().chain(&state.deferred_triggers).any(
+                |context| context.pending.ability.trigger_definition_ref.as_ref() == this_ability,
+            );
+            if already_triggered {
                 continue;
             }
 
@@ -13264,18 +13355,10 @@ pub fn check_state_triggers(state: &mut GameState) {
         }
     }
 
-    if pending.is_empty() {
-        return;
-    }
-
-    // CR 603.3b + CR 101.4 + CR 805.6/805.7: Full APNAP stack-placement order
-    // for state triggers, ranking shared-turn teams as the APNAP actors.
-    pending.sort_by_key(|t| (trigger_apnap_rank(state, t.controller), t.timestamp));
-
-    let mut events_out = Vec::new();
-    for trigger in pending {
-        push_pending_trigger_to_stack(state, trigger, &mut events_out);
-    }
+    pending
+        .into_iter()
+        .map(PendingTriggerContext::single)
+        .collect()
 }
 
 /// CR 603.7: Check if any delayed triggers should fire based on recent events.
@@ -13349,16 +13432,15 @@ pub(crate) fn collect_delayed_trigger_contexts_into_deferred(
     state.deferred_triggers.extend(pending);
 }
 
-/// Delayed counterpart to [`collect_sba_choice_triggers_into_deferred`].
-pub(crate) fn collect_sba_choice_delayed_triggers_into_deferred(
+/// Delayed counterpart to [`collect_parked_triggers_into_deferred`].
+pub(crate) fn collect_parked_delayed_triggers_into_deferred(
     state: &mut GameState,
     events: &[GameEvent],
+    origin: DeferredTriggerBatchOrigin,
 ) {
     let first_new_context = state.deferred_triggers.len();
     collect_delayed_triggers_into_deferred(state, events);
-    for context in &mut state.deferred_triggers[first_new_context..] {
-        context.batch_origin = DeferredTriggerBatchOrigin::StateBasedActionChoice;
-    }
+    stamp_deferred_triggers_from(state, first_new_context, origin);
 }
 
 pub(crate) fn trigger_event_occurrence(events: &[GameEvent], event_index: usize) -> usize {
@@ -22279,6 +22361,40 @@ pub mod tests {
             None,
             "a state trigger without an intervening \"if\" stacks no recheck"
         );
+    }
+
+    /// CR 603.8: Emperor Crocodile's state trigger waiting in the boundary's batch or in the
+    /// deferred queue holds back a second instance; a waiting trigger of another ability does not.
+    #[test]
+    fn a_waiting_state_trigger_does_not_trigger_again() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::game::scenario_db::GameScenarioDbExt;
+
+        let mut sc = GameScenario::new();
+        sc.add_real_card(
+            P0,
+            "Emperor Crocodile",
+            Zone::Battlefield,
+            crate::test_support::shared_card_db(),
+        );
+        let mut state = sc.state;
+        crate::game::layers::flush_layers(&mut state);
+        let first = collect_state_triggers(&state, &[]);
+        assert_eq!(
+            first.len(),
+            1,
+            "reach: the Crocodile's state trigger is true"
+        );
+        let mut other = first[0].clone();
+        other.pending.ability.trigger_definition_ref = None;
+
+        assert!(collect_state_triggers(&state, &first).is_empty());
+        assert_eq!(collect_state_triggers(&state, &[other.clone()]).len(), 1);
+
+        state.deferred_triggers = first.clone();
+        assert!(collect_state_triggers(&state, &[]).is_empty());
+        state.deferred_triggers = vec![other];
+        assert_eq!(collect_state_triggers(&state, &[]).len(), 1);
     }
 
     #[test]
@@ -44395,50 +44511,30 @@ pub mod tests {
         ));
     }
 
-    /// CR 608.2n + CR 117.5 + CR 603.3 + issue #1793: once a resolution's final
-    /// part has run, its batch may drain above a spell still on the stack; a
-    /// resolution still under way (a live continuation) stays refused even
-    /// under that admitting policy, and a seam that owns no drain keeps none.
+    /// CR 608.2n + CR 405.5 + issue #1793: a batch waits while the resolving
+    /// sorcery owes its final part or a continuation is live, and drains above a
+    /// spell below once neither holds.
     #[test]
     fn a_finished_spells_batch_may_drain_above_a_spell_but_not_mid_resolution() {
         use crate::types::game_state::PendingContinuation;
 
-        let mut state = setup();
-        state.deferred_triggers = vec![
-            make_draw_pending_trigger(&mut state, "Watcher A", PlayerId(0)),
-            make_draw_pending_trigger(&mut state, "Watcher B", PlayerId(0)),
-        ];
-        let below_card = CardId(state.next_object_id);
-        let below = create_object(
-            &mut state,
-            below_card,
-            PlayerId(0),
-            "Spell Below".to_string(),
-            Zone::Stack,
-        );
-        state.stack.push_back(crate::types::game_state::StackEntry {
-            id: below,
-            source_id: below,
-            controller: PlayerId(0),
-            kind: StackEntryKind::Spell {
-                card_id: CardId(below.0),
-                ability: None,
-                casting_variant: crate::types::game_state::CastingVariant::Normal,
-                actual_mana_spent: 0,
-            },
-        });
+        let mut state = drain_policy_fixture(true);
+        let spell = install_resolving_sorcery_carrier(&mut state);
+        state.resolving_spell_final_part =
+            Some(crate::types::game_state::OwedSpellFinalPart { spell });
         state.waiting_for = WaitingFor::Priority {
             player: PlayerId(0),
         };
+        assert!(
+            !can_drain_deferred_triggers(&state, DeferredTriggerDrainPolicy::AdmitsAnnouncedCasts),
+            "an owed final part holds the batch"
+        );
 
-        assert!(!can_drain_deferred_triggers(
-            &state,
-            DeferredTriggerDrainPolicy::ResolutionSafe
-        ));
-        assert!(can_drain_deferred_triggers(
-            &state,
-            DeferredTriggerDrainPolicy::ResolutionSafe.after_spell_final_part()
-        ));
+        state.resolving_spell_final_part = None;
+        assert!(
+            can_drain_deferred_triggers(&state, DeferredTriggerDrainPolicy::AdmitsAnnouncedCasts),
+            "the finished resolution's batch drains above the spell below"
+        );
 
         state.park_ability_continuation(PendingContinuation::new(
             Box::new(ResolvedAbility::new(
@@ -44452,18 +44548,9 @@ pub mod tests {
             )),
             &state,
         ));
-        assert!(!can_drain_deferred_triggers(
-            &state,
-            DeferredTriggerDrainPolicy::ResolutionSafe.after_spell_final_part()
-        ));
-
-        assert_eq!(
-            DeferredTriggerDrainPolicy::Skip.after_spell_final_part(),
-            DeferredTriggerDrainPolicy::Skip
-        );
-        assert_eq!(
-            DeferredTriggerDrainPolicy::SettledPriority.after_spell_final_part(),
-            DeferredTriggerDrainPolicy::SettledPriority
+        assert!(
+            !can_drain_deferred_triggers(&state, DeferredTriggerDrainPolicy::AdmitsAnnouncedCasts),
+            "a live continuation holds the batch"
         );
     }
 
@@ -45463,102 +45550,77 @@ pub mod tests {
         state
     }
 
-    /// Plan v23 Step 5, "replace the existing two drain booleans inside the
-    /// shared core with private `DeferredTriggerDrainPolicy`".
-    ///
-    /// `engine_priority`'s `skip_deferred_trigger_drain` and this module's
-    /// `allow_spell_on_stack` were two independent axes carried as two
-    /// unrelated booleans. The enum has to keep them independent — collapsing
-    /// them (making `Skip` drain, or letting `ResolutionSafe` tolerate a
-    /// `Spell` entry) flips exactly one assertion below — while leaving the
-    /// shared carrier census in `resolution_completion_can_settle` in front of
-    /// every variant.
+    /// `Skip` owns no drain; the draining policies hold a resolution under way
+    /// and admit a batch above a spell that has not begun to resolve.
     #[test]
-    fn deferred_trigger_drain_policy_separates_the_skip_and_spell_on_stack_axes() {
-        // Positive reach guard: with no spell on the stack, the resolution-safe
-        // policy really drains this batch.
-        let mut state = drain_policy_fixture(false);
-        let mut events = Vec::new();
-        assert!(
-            matches!(
-                drain_deferred_trigger_queue_with_policy(
-                    &mut state,
-                    &mut events,
-                    DeferredTriggerDrainPolicy::ResolutionSafe,
-                ),
-                Some(WaitingFor::OrderTriggers { .. })
-            ),
-            "positive reach guard: ResolutionSafe drains an unobstructed batch"
-        );
-        assert!(state.deferred_triggers.is_empty());
+    fn deferred_trigger_drain_policy_holds_a_resolution_under_way_not_a_spell_below() {
+        use crate::types::game_state::PendingContinuation;
 
-        // `Skip` owns no drain at all, and leaves the queue exactly as it found it.
-        let mut state = drain_policy_fixture(false);
-        let mut events = Vec::new();
+        // Positive reach guard: with no spell on the stack, a draining policy
+        // really admits this batch.
+        let state = drain_policy_fixture(false);
+        assert_eq!(state.deferred_triggers.len(), 2);
         assert!(
-            drain_deferred_trigger_queue_with_policy(
-                &mut state,
-                &mut events,
-                DeferredTriggerDrainPolicy::Skip,
-            )
-            .is_none(),
+            can_drain_deferred_triggers(&state, DeferredTriggerDrainPolicy::AdmitsAnnouncedCasts),
+            "positive reach guard: AdmitsAnnouncedCasts drains an unobstructed batch"
+        );
+
+        // `Skip` owns no drain at all.
+        assert!(
+            !can_drain_deferred_triggers(&state, DeferredTriggerDrainPolicy::Skip),
             "Skip must not drain even when every other gate is open"
         );
-        assert_eq!(
-            state.deferred_triggers.len(),
-            2,
-            "Skip must leave the queue intact for its owning caller"
-        );
-        assert!(events.is_empty());
 
-        // CR 603.3b + issue #1793: a `Spell` entry blocks the resolution-safe
-        // policy and only the resolution-safe policy.
+        // CR 405.5: a spell below has not begun to resolve.
         let mut state = drain_policy_fixture(true);
-        let mut events = Vec::new();
-        assert!(
-            drain_deferred_trigger_queue_with_policy(
-                &mut state,
-                &mut events,
-                DeferredTriggerDrainPolicy::ResolutionSafe,
-            )
-            .is_none(),
-            "ResolutionSafe must refuse to order observers above a spell on the stack"
-        );
-        assert_eq!(state.deferred_triggers.len(), 2);
+        for policy in [
+            DeferredTriggerDrainPolicy::AdmitsAnnouncedCasts,
+            DeferredTriggerDrainPolicy::ExcludesAnnouncedCasts,
+        ] {
+            assert!(
+                can_drain_deferred_triggers(&state, policy),
+                "{policy:?} drains above the passive spell"
+            );
+        }
 
-        // CR 601.2h + CR 602.2b: the post-announcement policy drains the same
-        // batch above the same spell.
-        let mut state = drain_policy_fixture(true);
-        let mut events = Vec::new();
-        assert!(
-            matches!(
-                drain_deferred_trigger_queue_with_policy(
-                    &mut state,
-                    &mut events,
-                    DeferredTriggerDrainPolicy::SettledPriority,
-                ),
-                Some(WaitingFor::OrderTriggers { .. })
-            ),
-            "SettledPriority drains above the passive announced spell"
-        );
+        // CR 608.2 + issue #1793: a resolution under way holds the batch.
+        state.park_ability_continuation(PendingContinuation::new(
+            Box::new(ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                ObjectId(9999),
+                PlayerId(0),
+            )),
+            &state,
+        ));
+        for policy in [
+            DeferredTriggerDrainPolicy::AdmitsAnnouncedCasts,
+            DeferredTriggerDrainPolicy::ExcludesAnnouncedCasts,
+        ] {
+            assert!(
+                !can_drain_deferred_triggers(&state, policy),
+                "{policy:?} must hold a resolution under way"
+            );
+        }
 
         // Every policy still runs behind the shared carrier census: a live
         // triggered-mana sidecar rejects both draining variants.
         for policy in [
-            DeferredTriggerDrainPolicy::ResolutionSafe,
-            DeferredTriggerDrainPolicy::SettledPriority,
+            DeferredTriggerDrainPolicy::AdmitsAnnouncedCasts,
+            DeferredTriggerDrainPolicy::ExcludesAnnouncedCasts,
         ] {
             let mut state = drain_policy_fixture(false);
             let node = crate::types::resolved_commands::RulesExecutionNodeRef::TriggeredMana(
                 crate::types::resolved_commands::SettlementNodeOrdinal(3),
             );
             state.pending_triggered_mana_resume = Some(triggered_mana_sidecar(&mut state, node));
-            let mut events = Vec::new();
             assert!(
-                drain_deferred_trigger_queue_with_policy(&mut state, &mut events, policy).is_none(),
+                !can_drain_deferred_triggers(&state, policy),
                 "{policy:?} must still consult resolution_completion_can_settle"
             );
-            assert_eq!(state.deferred_triggers.len(), 2);
         }
     }
 

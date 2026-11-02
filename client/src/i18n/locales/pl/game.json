@@ -1,5 +1,10 @@
 {
-  "playerLatency": {"host":"Host","waiting":"Oczekiwanie","value":"{{ms}} ms","description":"Opóźnienie w obie strony do hosta. Brak odpowiedzi nie rozłącza gry."},
+  "playerLatency": {
+    "host": "Host",
+    "waiting": "Oczekiwanie",
+    "value": "{{ms}} ms",
+    "description": "Opóźnienie w obie strony do hosta. Brak odpowiedzi nie rozłącza gry."
+  },
   "abilityBlock": {
     "badge": "Zablokowana",
     "cantBeActivated": "Tej zdolności nie można aktywować",
@@ -27,6 +32,7 @@
     "shorten": "Shorten it",
     "decline": "Decline the shortcut",
     "untilLethal": "Repeat until the game ends.",
+    "withoutEnd": "Repeat without end. If every player accepts, the game is a draw.",
     "fixedCount_one": "Repeat at most once.",
     "fixedCount_other": "Repeat at most {{count}} times.",
     "convokeInfo_one": "Auto-taps up to 1 creature for convoke each iteration.",
@@ -1552,6 +1558,7 @@
     "effectZone": {
       "titleSacrifice": "Poświęć",
       "titleTopdeck": "Połóż na bibliotekę",
+      "titleBottomdeck": "Połóż na bibliotekę",
       "titleBattlefield": "Połóż na pole bitwy",
       "titleHand": "Zwróć",
       "titleExile": "Wygnaj",
@@ -1571,6 +1578,12 @@
       "subtitleTopdeckUpTo_other": "Wybierz do {{count}} kart, aby położyć na wierzchu swojej biblioteki",
       "subtitleTopdeckRange_one": "Wybierz {{min}}-{{count}} kartę, aby położyć na wierzchu swojej biblioteki",
       "subtitleTopdeckRange_other": "Wybierz {{min}}-{{count}} kart, aby położyć na wierzchu swojej biblioteki",
+      "subtitleBottomdeckExact_one": "Wybierz {{count}} kartę, aby położyć na spodzie swojej biblioteki",
+      "subtitleBottomdeckExact_other": "Wybierz {{count}} kart, aby położyć na spodzie swojej biblioteki",
+      "subtitleBottomdeckUpTo_one": "Wybierz do {{count}} karty, aby położyć na spodzie swojej biblioteki",
+      "subtitleBottomdeckUpTo_other": "Wybierz do {{count}} kart, aby położyć na spodzie swojej biblioteki",
+      "subtitleBottomdeckRange_one": "Wybierz {{min}}-{{count}} kartę, aby położyć na spodzie swojej biblioteki",
+      "subtitleBottomdeckRange_other": "Wybierz {{min}}-{{count}} kart, aby położyć na spodzie swojej biblioteki",
       "subtitleBattlefieldExact_one": "Wybierz {{count}} kartę, aby położyć na pole bitwy",
       "subtitleBattlefieldExact_other": "Wybierz {{count}} kart, aby położyć na pole bitwy",
       "subtitleBattlefieldUpTo_one": "Wybierz do {{count}} karty, aby położyć na pole bitwy",
@@ -1616,14 +1629,17 @@
       "labelSkip": "Pomiń",
       "labelDecline": "Odmów",
       "labelPutOnTop": "Połóż na wierzch ({{order}})",
+      "labelPutOnBottom": "Połóż na spodzie ({{order}})",
       "labelConfirm": "Potwierdź ({{selected}}/{{count}})",
       "labelTop": "Wierzch ({{selected}}/{{count}})",
+      "labelBottom": "Spód ({{selected}}/{{count}})",
       "labelPut": "Połóż ({{selected}}/{{count}})",
       "labelReturn": "Zwróć ({{selected}}/{{count}})",
       "labelExile": "Wygnaj ({{selected}}/{{count}})",
       "labelAttach": "Attach ({{selected}}/{{count}})",
       "labelCast": "Rzuć ({{selected}}/{{count}})",
       "orderTop": "Wierzch",
+      "orderBottom": "Spód",
       "orderSecond": "2.",
       "orderThird": "3.",
       "orderFourth": "4.",
@@ -2902,6 +2918,36 @@
       "winner": "{{name}} wygrywa zawody.",
       "tie": "Remis – nic się nie dzieje.",
       "cancelled": "Zawody anulowano – nic się nie dzieje."
+    }
+  },
+  "unActions": {
+    "menu": {
+      "title": "Un-Actions",
+      "open": "Open Un-actions menu",
+      "close": "Close Un-actions menu",
+      "TouchFace": "Touch your face",
+      "TouchTable": "Slap the table",
+      "Laugh": "Laugh out loud",
+      "FlickCards": "Flick your cards",
+      "saysWord": "Say a word…",
+      "saysNumber": "Say a number…",
+      "wordPlaceholder": "A word",
+      "numberPlaceholder": "A number",
+      "say": "Say it!"
+    },
+    "gotcha": {
+      "button": "Gotcha!"
+    },
+    "sayPhrase": {
+      "title": "Say it to stop the effect",
+      "say": "Say “{{phrase}}”",
+      "stayQuiet": "Stay quiet"
+    },
+    "fx": {
+      "touchFace": "*smack*",
+      "touchTable": "SLAP!",
+      "laugh": "HA HA HA!",
+      "flickCards": "thwip thwip!"
     }
   }
 }

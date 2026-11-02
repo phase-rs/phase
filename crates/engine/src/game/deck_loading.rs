@@ -592,7 +592,7 @@ pub fn momir_emblem_ability() -> crate::types::ability::AbilityDefinition {
     };
     use crate::types::mana::{ManaCost, ManaCostShard};
 
-    // CR 707.2 + CR 202.3 + CR 701.9a (analogous): random copy of a creature card
+    // CR 707.2 + CR 202.3 + CR 701.9b (analogous): random copy of a creature card
     // whose mana value equals the X paid.
     let effect = Effect::CreateTokenCopyFromPool {
         owner: TargetFilter::Controller,

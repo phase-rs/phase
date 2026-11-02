@@ -1403,9 +1403,9 @@ describe("ServerDraftAdapter", () => {
         JSON.stringify({ type: "ActionFailed", data: { message: "action persistence failed" } }),
       );
       await expect(action).rejects.toMatchObject({
-        code: "WS_ERROR",
+        code: "REQUEST_FAILED",
         message: "action persistence failed",
-        recoverable: false,
+        recoverable: true,
       });
 
       const preview = adapter.previewManaPayment({ type: "PassPriority" }, 0);
@@ -1424,9 +1424,9 @@ describe("ServerDraftAdapter", () => {
         JSON.stringify({ type: "ManaPaymentPreviewFailed", data: { request_id: sent.data.request_id, message: "preview lookup failed" } }),
       );
       await expect(preview).rejects.toMatchObject({
-        code: "WS_ERROR",
+        code: "REQUEST_FAILED",
         message: "preview lookup failed",
-        recoverable: false,
+        recoverable: true,
       });
     });
 
@@ -1660,6 +1660,30 @@ describe("ServerDraftAdapter game-command correlation", () => {
         socket.dispatchSynthetic("message", JSON.stringify({ type: "ActionNoOp", command_id: id }));
         await expect(outcome()).resolves.toEqual({ resolvedWith: { events: [], log_entries: [] } });
         expect(events).toHaveBeenCalledWith({ type: "actionPendingChanged", pending: false });
+      } finally {
+        seat.dispose();
+      }
+    });
+
+    it("settles a withheld command as applied only on its own id and surfaces the reason", async () => {
+      const { seat, socket } = await seatInMatch(CORRELATED_HELLO);
+      try {
+        const events = vi.fn();
+        seat.onEvent(events);
+        const outcome = trackRejection(seat.submitAction(keep, 0));
+        const id = sentCommandId(socket);
+        if (typeof id !== "number") throw new Error("Expected a numeric command ID");
+        const withheld = (commandId: number) => socket.dispatchSynthetic("message", JSON.stringify({
+          type: "StateWithheld",
+          command_id: commandId,
+          data: { full_key: FULL_KEY, state_revision: 6, withheld: { type: "StateUpdate" }, reason: "too large to deliver" },
+        }));
+        withheld(id + 1);
+        expect(await outcome()).toBe("never settled");
+        withheld(id);
+        await expect(outcome()).resolves.toEqual({ resolvedWith: { events: [], log_entries: [] } });
+        expect(events).toHaveBeenCalledWith({ type: "actionPendingChanged", pending: false });
+        expect(events).toHaveBeenCalledWith({ type: "error", message: "too large to deliver" });
       } finally {
         seat.dispose();
       }

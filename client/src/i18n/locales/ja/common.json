@@ -179,6 +179,7 @@
       "exportedTo": "{{path}}にエクスポートしました。",
       "exportRequested": "エクスポートを要求しました — {{filename}}。",
       "exportFailed": "ゲーム状態をエクスポートできませんでした。",
+      "exportFailedDetail": "ゲーム状態をエクスポートできませんでした。{{detail}}",
       "replayExported": "リプレイを{{filename}}として保存しました。",
       "replayExportUnavailable": "このゲームのリプレイ記録はありません。",
       "replayExportFailed": "リプレイをエクスポートできませんでした。"

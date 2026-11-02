@@ -29,6 +29,7 @@
 //! ("resolve_trigger", "apply_damage") here is out of scope; this is a
 //! structural legality pipeline, not a rules engine.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
@@ -265,15 +266,81 @@ impl SimulationFilter {
             if before == Some(after) {
                 return true;
             }
-            !matches!(
-                crate::game::casting_costs::post_origin_auto_payment_verdict(&mut sim, &pending,),
-                Some(false)
-            )
+            match crate::game::casting_costs::post_origin_auto_payment_verdict(&mut sim, &pending) {
+                // CR 601.2g-i: the Auto payer alone can't pay after targeting.
+                // Offer the cast only if the real reducer, from the same
+                // announcement, actually completes it (mana abilities the Auto
+                // payer doesn't activate included); no witness keeps the refusal.
+                Some(false) => {
+                    targeted_cast_offer_witnessed(state, actor, semantic_owner, &candidate.action)
+                }
+                Some(true) | None => true,
+            }
         })
     }
 }
 
 type SpellRootProvenance = (ObjectId, Option<CastingPermissionIndex>);
+
+thread_local! {
+    /// Reducer applications the targeted-cast offer witness may still spend in
+    /// the current filter pass; `None` outside a pass.
+    static OFFER_WITNESS_POOL: Cell<Option<usize>> = const { Cell::new(None) };
+}
+
+/// Scopes one filter pass's shared offer-witness pool: however many casts
+/// qualify, one pass spends at most the AI's own per-decision payment ceiling.
+struct OfferWitnessPoolGuard {
+    previous: Option<usize>,
+}
+
+impl OfferWitnessPoolGuard {
+    fn enter() -> Self {
+        let previous = OFFER_WITNESS_POOL.with(|pool| {
+            pool.replace(Some(
+                super::payment_continuation::PAYMENT_CONTINUATION_MAX_REDUCER_ATTEMPTS,
+            ))
+        });
+        Self { previous }
+    }
+}
+
+impl Drop for OfferWitnessPoolGuard {
+    fn drop(&mut self) {
+        OFFER_WITNESS_POOL.with(|pool| pool.set(self.previous));
+    }
+}
+
+/// CR 601.2a-i: whether the bounded reducer witness completes this targeted
+/// Auto cast. Each run gets at most the per-cast bound, and within a filter
+/// pass at most what the pass's pool has left; the pool is debited by the
+/// applications actually spent. Exhaustion is never a completion.
+fn targeted_cast_offer_witnessed(
+    state: &GameState,
+    actor: PlayerId,
+    semantic_owner: PlayerId,
+    action: &GameAction,
+) -> bool {
+    use super::payment_continuation::{
+        witness_targeted_cast_offer, TargetedCastVerdict, TARGETED_CAST_OFFER_MAX_REDUCER_ATTEMPTS,
+    };
+    let pool = OFFER_WITNESS_POOL.with(Cell::get);
+    let allowance = pool.map_or(TARGETED_CAST_OFFER_MAX_REDUCER_ATTEMPTS, |remaining| {
+        remaining.min(TARGETED_CAST_OFFER_MAX_REDUCER_ATTEMPTS)
+    });
+    let witness = {
+        let _phase = crate::game::perf_counters::LegalityClonePhaseGuard::enter(
+            crate::game::perf_counters::LegalityClonePhase::TargetedOfferWitness,
+        );
+        witness_targeted_cast_offer(state, actor, semantic_owner, action, allowance)
+    };
+    if let Some(remaining) = pool {
+        OFFER_WITNESS_POOL.with(|cell| cell.set(Some(remaining - witness.reducer_attempts)));
+    }
+    #[cfg(feature = "test-support")]
+    crate::game::perf_counters::record_targeted_offer_witness(&witness);
+    witness.verdict == TargetedCastVerdict::Completed
+}
 
 fn pending_spell_root_provenance(state: &GameState) -> Option<SpellRootProvenance> {
     state
@@ -504,6 +571,7 @@ impl FilterPipeline {
         let poison = LegalityPoisonGates::compute(state);
         let mut memo: HashMap<LegalityKey, bool> = HashMap::new();
         let mut interner = FingerprintInterner::default();
+        let _offer_witness_pool = OfferWitnessPoolGuard::enter();
         candidates
             .into_iter()
             .filter(|c| {

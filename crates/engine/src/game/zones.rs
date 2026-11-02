@@ -776,25 +776,6 @@ pub(crate) fn apply_zone_exit_cleanup(
         state
             .top_of_library_cast_permissions_used
             .remove(&object_id);
-
-        // PR-7 Phase 4c (B5 defuse): CR 104.4b / CR 110.1 / CR 700.4 — an enabling
-        // permanent leaving the battlefield revokes the revocable-∞ capability it
-        // enabled (every-enabler: `interactive_loop_bridge` Path C). Gated on a
-        // non-empty enabler map so Off/On games (which never populate it — only the
-        // Interactive B5 arm does) pay nothing and stay byte-identical. Whole-
-        // capability clear per controller whose enabler set contains this object:
-        // `clear_unbounded_loop` drops SIX maps, incl. the accepted-collapse stash.
-        if !state.unbounded_loop_enablers.is_empty() {
-            let revoked: Vec<PlayerId> = state
-                .unbounded_loop_enablers
-                .iter()
-                .filter(|(_, ids)| ids.contains(&object_id))
-                .map(|(c, _)| *c)
-                .collect();
-            for controller in revoked {
-                state.clear_unbounded_loop(controller);
-            }
-        }
     }
 }
 
@@ -1536,12 +1517,12 @@ pub fn move_to_zone(
 /// WHY a parameter rather than a transient `obj.transformed` marker: CR 712.8a
 /// (the `obj_mut.transformed && obj_mut.back_face.is_some()` guard in
 /// `zones::apply_zone_exit_cleanup`) reverts a transformed permanent to its front face on any
-/// non-battlefield zone exit, and the post-move transform itself (the CR
-/// 712.14a `transform_permanent` call in
+/// non-battlefield zone exit, and the post-move face swap itself (the CR
+/// 712.14a `enter_back_face_up` call in
 /// `zone_pipeline::deliver_replaced_zone_change`) executes the same
 /// face swap when the object reaches the battlefield. A pre-move transient
 /// `transformed` flag would survive into that authoritative swap and
-/// double-corrupt the face (CR 712.8a exit revert + post-move transform both
+/// double-corrupt the face (CR 712.8a exit revert + post-move face swap both
 /// mutating `back_face`/the live face). The parameter carries the intent without
 /// touching object state. (The `modal_back_face` revert, also in
 /// `zones::apply_zone_exit_cleanup`, is a SEPARATE MDFC mechanism and is not implicated.)
@@ -1555,7 +1536,7 @@ pub fn move_to_zone(
 /// A3 (no post-move re-assert): unlike the face-down entry profile's
 /// re-assertion authority (`apply_face_down_entry_profile` in zone_pipeline.rs),
 /// a transformed entry needs no analogous re-assert after the move.
-/// The `transform_permanent` call in `zone_pipeline::deliver_replaced_zone_change`
+/// The `enter_back_face_up` call in `zone_pipeline::deliver_replaced_zone_change`
 /// is the SINGLE authoritative post-move face swap and already runs on `to == Zone::Battlefield`, so the
 /// guard here only gates eligibility — it never mutates the face.
 ///
@@ -2004,29 +1985,25 @@ pub(crate) fn move_to_zone_with_entry_flags(
         crate::game::layers::mark_layers_full_if_top_of_library_static_live(state);
     }
 
-    // CR 702.145c + CR 702.145f: Daybound/Nightbound permanents entering under
-    // the opposite day/night designation transform immediately. Runs after
-    // battlefield-entry bookkeeping but before the ZoneChanged event is emitted
-    // so the record reflects the face the object entered with. Skipped when
-    // day/night is uninitialized.
+    // CR 702.145b: a daybound permanent entering at night enters transformed;
+    // CR 702.145f: a nightbound permanent back face up during the day transforms.
+    // Runs after battlefield-entry bookkeeping but before the ZoneChanged event
+    // is emitted so the record reflects the face the object entered with.
+    // Skipped when day/night is uninitialized.
     if to == Zone::Battlefield {
         if let Some(designation) = state.day_night {
-            let needs_transform =
-                state
-                    .objects
-                    .get(&object_id)
-                    .is_some_and(|obj| match designation {
-                        crate::types::game_state::DayNight::Night => {
-                            obj.has_keyword(&crate::types::keywords::Keyword::Daybound)
-                                && !obj.transformed
-                        }
-                        crate::types::game_state::DayNight::Day => {
-                            obj.has_keyword(&crate::types::keywords::Keyword::Nightbound)
-                                && obj.transformed
-                        }
-                    });
-            if needs_transform {
-                let _ = super::transform::transform_permanent(state, object_id, events);
+            use crate::types::game_state::DayNight;
+            use crate::types::keywords::Keyword;
+            if let Some(obj) = state.objects.get(&object_id) {
+                match designation {
+                    DayNight::Night if obj.has_keyword(&Keyword::Daybound) && !obj.transformed => {
+                        let _ = super::transform::enter_back_face_up(state, object_id);
+                    }
+                    DayNight::Day if obj.has_keyword(&Keyword::Nightbound) && obj.transformed => {
+                        let _ = super::transform::transform_permanent(state, object_id, events);
+                    }
+                    DayNight::Night | DayNight::Day => {}
+                }
             }
         }
     }

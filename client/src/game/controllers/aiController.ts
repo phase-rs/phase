@@ -160,6 +160,12 @@ async function llmActionProposal(
   // question to pose) is not the provider failing: the heuristic plays it, and
   // it does not count toward giving the seat's provider up.
   if (built?.errorKind?.kind === "unsupportedDecision") return null;
+  // If the engine recognized a standing decision (e.g. PassPriority with no new
+  // information), return the authorized proposal immediately without contacting
+  // the provider or charging an attempt.
+  if (built?.proposal) {
+    return built.proposal;
+  }
   // From here the provider is in play, so an outcome without a proposal counts.
   onAttempt();
   if (!built?.request || !built.fingerprint) {

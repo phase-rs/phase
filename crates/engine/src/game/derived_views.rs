@@ -1823,25 +1823,14 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     // repeated indefinitely — a CR-732.1b-SHAPED capability, which is the same sense the rest of
     // this crate cites CR 732.1b in. `∞` renders that live mark honestly.
     //
-    // WHAT THIS PROJECTION DOES **NOT** CLAIM: that the mark is REVOCABLE for this class. The
-    // zone-exit defuse (`zones::apply_zone_exit_cleanup`) is gated on a NON-EMPTY
-    // `unbounded_loop_enablers`, and the only production writer of that map is the Interactive
-    // Path-C arm (`engine.rs`'s `register_unbounded_loop_enablers` call).
-    // `materialize_object_growth_shortcut` never registers enablers, so for the OBJECT-GROWTH class
-    // — which is exactly the token and counter families this projection displays — the defuse gate
-    // never matches and is INERT. `engine_resolution_choices.rs` documents that gap in those words
-    // and tracks it as a pre-existing deferred follow-up; it is not introduced here.
-    //
-    // CONSEQUENCE, STATED RATHER THAN BURIED: because that defuse is inert for this class, an
+    // CONSEQUENCE, STATED RATHER THAN BURIED: an
     // enabler leaving the battlefield between accept and boundary leaves a STALE `∞` in the STORE.
-    // The store is deliberately NOT filtered (the defuse and the boundary both read it), so the
+    // The store is deliberately NOT filtered (the boundary reads it), so the
     // live-authority check lives HERE, at the projection: `object_growth_backing` drops a row whose
     // whole registered display set has left the battlefield, exactly as the pile and counter loops
     // already drop individual departed members. That is a DISPLAY revocation only — it never
     // touches `pending_unbounded_materialization`, so the growth the table accepted still lands.
-    // Registering enablers instead would route this through `clear_unbounded_loop`, a SIX-map wipe
-    // that also destroys the accepted collapse stash and its CR 732.2c bound; see
-    // `types::game_state::clear_unbounded_loop`. What ends the MARK for this class is still the
+    // What ends the MARK for this class is still the
     // boundary, below.
     //
     // And hiding it is strictly worse on display coherence, which is what the old "the badge is a
@@ -1888,10 +1877,7 @@ pub fn derive_views(state: &GameState, viewer: Option<PlayerId>) -> DerivedViews
     // (CR 732.2c — the shortcut is already taken), never remove one.
     // Naming WHO reads the schedule is a claim every future consumer can break; naming what the
     // schedule may not DO is not. The stores are not filtered either:
-    // `unbounded_resources` keeps the mark until the boundary applies the growth. (`unbounded_loop_enablers` is held in
-    // lockstep with it as an ENGINE-STATE invariant required by no CR — but see the inertness note
-    // above: for the object-growth class that map is EMPTY, so the lockstep is vacuously satisfied
-    // here and is load-bearing only for the Interactive Path-C class that populates it.)
+    // `unbounded_resources` keeps the mark until the boundary applies the growth.
     //
     // What ends each `∞` is the boundary, never this projection:
     // `clear_collapsed_materializations` drops the collapsed axes once the growth is applied, and
@@ -2471,10 +2457,7 @@ fn attribution_player(axis: ResourceAxis, controller: PlayerId) -> PlayerId {
 /// `bridge_drift_on_cease_to_exist_fails_open`.
 ///
 /// Read-only: recomputed from live state on every `derive_views` call, nothing is stored,
-/// so nothing can go stale. Deliberately not a `clear_unbounded_loop` from the zone-exit
-/// defuse — that call drops six maps including `pending_unbounded_materialization` and its
-/// CR 732.2c bound, i.e. it would cancel growth the table has already unanimously accepted
-/// ("the shortcut is taken" the moment the last player accepts). Revoking the BADGE is a
+/// so nothing can go stale. Revoking the BADGE is a
 /// display decision; revoking the agreed GROWTH is not ours to make here.
 fn object_growth_backing(
     state: &GameState,

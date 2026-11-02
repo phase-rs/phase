@@ -677,4 +677,29 @@ describe("LLM-driven AI seats", () => {
     consoleWarn.mockRestore();
     controller.dispose();
   });
+
+  it("dispatches an engine-recognized standing pass proposal without consulting the provider", async () => {
+    bindSeatToProvider();
+    const standingProposal = proposal(PASS, "standing-pass-token");
+    const buildLlmDecisionRequest = vi.fn(async () => ({
+      proposal: standingProposal,
+      reasoning: "Standing pass: no new information since previous pass decision",
+    }));
+    storeState.adapter = {
+      getAiActionProposal: vi.fn(),
+      buildLlmDecisionRequest,
+      getAiActionProposalFromLlmResponse: vi.fn(),
+    };
+
+    const controller = createAIController({
+      seats: [{ playerId: 1, difficulty: "Medium", llmSeatIndex: 0 }],
+    });
+    controller.start();
+    await runOnce();
+
+    expect(buildLlmDecisionRequest).toHaveBeenCalled();
+    expect(llmMocks.executeLlmRequest).not.toHaveBeenCalled();
+    expect(dispatchMocks.dispatchAiActionProposal).toHaveBeenCalledWith(standingProposal);
+    controller.dispose();
+  });
 });

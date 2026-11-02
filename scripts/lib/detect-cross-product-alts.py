@@ -4,7 +4,7 @@
 Family (D) of the parser combinator gate (scripts/check-parser-combinators.sh).
 A flat `alt` whose `tag("...")` arms share a long common *prefix AND suffix* is
 a cross product that should be factored into per-axis `alt`/`opt` calls — see
-crates/engine/src/parser/oracle_nom/PATTERNS.md section 8b.
+crates/phase-parser/src/parser/oracle_nom/PATTERNS.md section 8b.
 
 This is a multi-line structural check (the bash gate's line-regex families can't
 see across an `alt` block), so it lives here and is invoked per changed file.

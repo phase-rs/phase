@@ -1,5 +1,6 @@
+pub use phase_ast::types::player::*;
+
 use std::collections::{HashMap, HashSet};
-use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
@@ -55,28 +56,6 @@ impl PlayerStatus {
     }
 }
 
-/// CR 122.1b: Named player counter types tracked by the engine.
-/// Poison counters route to the dedicated `poison_counters` field due to SBA rules (CR 704.5c).
-/// Energy counters are excluded — they use the dedicated `energy` field and `GainEnergy` effect.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub enum PlayerCounterKind {
-    Poison,
-    Experience,
-    Rad,
-    Ticket,
-}
-
-impl fmt::Display for PlayerCounterKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Poison => write!(f, "poison"),
-            Self::Experience => write!(f, "experience"),
-            Self::Rad => write!(f, "rad"),
-            Self::Ticket => write!(f, "ticket"),
-        }
-    }
-}
-
 /// CR 702.139: Tracks a declared companion outside the game.
 /// The companion is not a `GameObject` until it moves to hand.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,12 +65,6 @@ pub struct CompanionInfo {
     /// CR 702.139c: Whether the companion has been put into hand this game (once per game).
     pub used: bool,
 }
-
-#[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-)]
-#[serde(transparent)]
-pub struct PlayerId(pub u8);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Player {

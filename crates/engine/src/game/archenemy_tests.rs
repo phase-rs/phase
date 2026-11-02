@@ -416,7 +416,7 @@ fn nonongoing_scheme_turns_down_on_resolution() {
     });
     let mut events = Vec::new();
     let mut any = false;
-    check_scheme_abandon_sba(&mut state, &mut events, &mut any);
+    check_scheme_abandon_sba(&mut state, &mut events, &mut any, &[]);
     assert!(
         !any,
         "no abandon while the scheme's ability is on the stack"
@@ -431,7 +431,7 @@ fn nonongoing_scheme_turns_down_on_resolution() {
     state.stack.clear();
     let mut events2 = Vec::new();
     let mut any2 = false;
-    check_scheme_abandon_sba(&mut state, &mut events2, &mut any2);
+    check_scheme_abandon_sba(&mut state, &mut events2, &mut any2, &[]);
     assert!(any2, "turn down once the ability leaves the stack");
     assert!(
         state.objects.get(&scheme_id).unwrap().face_down,
@@ -508,7 +508,7 @@ fn deferred_scheme_trigger_blocks_abandon() {
     // The abandon SBA must do nothing while the trigger is waiting (CR 904.10).
     let mut events2 = Vec::new();
     let mut any = false;
-    check_scheme_abandon_sba(&mut state, &mut events2, &mut any);
+    check_scheme_abandon_sba(&mut state, &mut events2, &mut any, &[]);
     assert!(
         !any,
         "no abandon while a scheme trigger is waiting to be put on the stack"
@@ -539,7 +539,7 @@ fn ongoing_scheme_not_abandoned_by_sba() {
 
     let mut events = Vec::new();
     let mut any = false;
-    check_scheme_abandon_sba(&mut state, &mut events, &mut any);
+    check_scheme_abandon_sba(&mut state, &mut events, &mut any, &[]);
     assert!(!any, "ongoing scheme must not be abandoned by the SBA");
     assert!(
         state.command_zone.contains(&scheme_id),
@@ -759,7 +759,7 @@ fn archenemy_none_skips_abandon_sba() {
 
     let mut events = Vec::new();
     let mut any = false;
-    check_scheme_abandon_sba(&mut state, &mut events, &mut any);
+    check_scheme_abandon_sba(&mut state, &mut events, &mut any, &[]);
     assert!(!any, "no abandon SBA work when archenemy is None");
     assert!(
         state.command_zone.contains(&scheme_id),

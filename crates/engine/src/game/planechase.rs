@@ -540,19 +540,16 @@ pub fn check_phenomenon_planeswalk_sba(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     any_performed: &mut bool,
+    waiting: &[crate::game::triggers::PendingTriggerContext],
 ) -> Option<PlaneswalkResolution> {
     let controller = state.planar_controller?;
     if !active_is_phenomenon(state) {
         return None;
     }
     let phenomenon_id = active_plane(state)?;
-    // CR 704.6f: do not planeswalk while the phenomenon's own triggered ability
-    // is still on the stack.
-    let has_ability_on_stack = state
-        .stack
-        .iter()
-        .any(|entry| entry.source_id == phenomenon_id);
-    if has_ability_on_stack {
+    // CR 704.6f: do not planeswalk while a triggered ability of the phenomenon
+    // has triggered but not yet left the stack.
+    if crate::game::sba::is_source_of_ability_not_yet_left_stack(state, waiting, phenomenon_id) {
         return None;
     }
     let resolution = resolve_planeswalk_via_replacements(

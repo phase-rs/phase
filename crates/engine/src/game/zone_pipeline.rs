@@ -4202,11 +4202,11 @@ pub(crate) fn deliver_replaced_zone_change(
                 );
             }
         }
-        // CR 712.14a: Apply transformation if entering the battlefield transformed.
+        // CR 712.14a: A permanent put onto the battlefield transformed enters back face up.
         if should_transform && to == Zone::Battlefield {
             if let Some(obj) = state.objects.get(&object_id) {
                 if obj.back_face.is_some() && !obj.transformed {
-                    let _ = crate::game::transform::transform_permanent(state, object_id, events);
+                    let _ = crate::game::transform::enter_back_face_up(state, object_id);
                 }
             }
         }
@@ -7173,7 +7173,7 @@ mod effect_driven_transformed_entry_tests {
     /// CR 712.14a CONTROL: a DFC with a PERMANENT front face (Creature) and a
     /// PERMANENT back face (Land) instructed to enter transformed still lands in
     /// Battlefield and ends up transformed. Passes before and after the fix — the
-    /// entry-face rewrite must not be front-regressive, and `transform_permanent`
+    /// entry-face rewrite must not be front-regressive, and `enter_back_face_up`
     /// must still fire after the guarded entry.
     #[test]
     fn mdfc_permanent_front_transformed_entry_still_lands() {

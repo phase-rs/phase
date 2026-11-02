@@ -36,7 +36,7 @@ SKILL = Path(".claude/skills/oracle-parser/SKILL.md")
 
 # Files the gate reads. Copying the parser tree wholesale keeps the fixture
 # honest: the table under test is the real one, not a hand-written stand-in.
-TREE = [Path("crates/engine/src/parser"), SKILL]
+TREE = [Path("crates/phase-parser/src/parser"), SKILL]
 
 
 def _shell() -> str:
@@ -253,7 +253,7 @@ class SkillDocGate(unittest.TestCase):
     @gate
     def test_retired_symbol_returning_is_caught(self, g: Gate) -> None:
         """Invariant (4)'s non-vacuity guard: a dead name that comes back."""
-        f = Path("crates/engine/src/parser/oracle_util.rs")
+        f = Path("crates/phase-parser/src/parser/oracle_util.rs")
         g.write(f, g.read(f) + "\npub fn parse_keyword_from_oracle() {}\n")
         self.assertEqual(
             g.run().returncode, 1, "a retired symbol returning must be caught"
@@ -266,7 +266,7 @@ class SkillDocGate(unittest.TestCase):
         Unanchored, `grep -rq "fn $dead"` matched `parse_keyword_from_oracle_v2`
         and redded a tree that was not stale.
         """
-        f = Path("crates/engine/src/parser/oracle_util.rs")
+        f = Path("crates/phase-parser/src/parser/oracle_util.rs")
         g.write(f, g.read(f) + "\npub fn parse_keyword_from_oracle_v2() {}\n")
         self.assertEqual(
             g.run().returncode,
@@ -395,8 +395,8 @@ class SkillDocGate(unittest.TestCase):
         """
         script = g.root / "scripts" / SCRIPT.name
         source = script.read_text(encoding="utf-8")
-        row = "fn peel_clause\\b\tcrates/engine/src/parser/clause_shell.rs"
-        escaped = "fn peel_clause\\(\tcrates/engine/src/parser/clause_shell.rs"
+        row = "fn peel_clause\\b\tcrates/phase-parser/src/parser/clause_shell.rs"
+        escaped = "fn peel_clause\\(\tcrates/phase-parser/src/parser/clause_shell.rs"
         self.assertIn(row, source, "anchor row moved; update this fixture")
         script.write_text(
             source.replace(row, escaped), encoding="utf-8", newline="\n"
@@ -429,7 +429,7 @@ class SkillDocGate(unittest.TestCase):
         whatever invariant (1) does, so the test would pass with (1) removed
         entirely. Asserting on stderr pins which invariant fired.
         """
-        missing = "crates/engine/src/parser/oracle_nom/PATTERNS.md"
+        missing = "crates/phase-parser/src/parser/oracle_nom/PATTERNS.md"
         self.assertNotIn(
             missing,
             [rel for _, rel in g.rows()],

@@ -198,6 +198,8 @@ export function PreferencesModal({
   const setPriorityAlertVisual = usePreferencesStore((s) => s.setPriorityAlertVisual);
   const setPriorityAlertSound = usePreferencesStore((s) => s.setPriorityAlertSound);
   const setPriorityAlertTitle = usePreferencesStore((s) => s.setPriorityAlertTitle);
+  const unCardActionsEnabled = usePreferencesStore((s) => s.unCardActionsEnabled);
+  const setUnCardActionsEnabled = usePreferencesStore((s) => s.setUnCardActionsEnabled);
   const experimentalTournamentsEnabled = usePreferencesStore((s) => s.experimentalTournamentsEnabled);
   const boardBackground = usePreferencesStore((s) => s.boardBackground);
   const vfxQuality = usePreferencesStore((s) => s.vfxQuality);
@@ -463,6 +465,17 @@ export function PreferencesModal({
                       {t("gameplay.priorityAlertsDescription", {
                         seconds: ESCALATE_AFTER_MS / 1000,
                       })}
+                    </p>
+                  </SettingGroup>
+
+                  <SettingGroup label={t("gameplay.unCardActions")}>
+                    <ToggleChip
+                      pressed={unCardActionsEnabled}
+                      onToggle={setUnCardActionsEnabled}
+                      label={t("gameplay.unCardActionsToggle")}
+                    />
+                    <p className="mt-2 text-xs leading-relaxed text-slate-400">
+                      {t("gameplay.unCardActionsDescription")}
                     </p>
                   </SettingGroup>
 

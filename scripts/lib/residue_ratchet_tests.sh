@@ -27,7 +27,7 @@ expect_out() { if [[ "$OUT" == *"$2"* ]]; then ok "$1"; else fail "$1 (missing $
 new_fixture() {
     FIXTURE="$(mktemp -d "${TMPDIR:-/tmp}/residue-ratchet.XXXXXX")"
     FIXTURES+=("$FIXTURE")
-    mkdir -p "$FIXTURE/scripts/lib" "$FIXTURE/crates/engine/src/parser" "$FIXTURE/crates/engine/src/game"
+    mkdir -p "$FIXTURE/scripts/lib" "$FIXTURE/crates/phase-parser/src/parser" "$FIXTURE/crates/engine/src/game"
     cp "$REPO_ROOT/scripts/check-parser-combinators.sh" "$FIXTURE/scripts/"
     cp "$REPO_ROOT/scripts/zone_authority_census.py" "$FIXTURE/scripts/"
     cp "$REPO_ROOT/scripts/lib/detect-residue-discards.py" \
@@ -38,7 +38,7 @@ new_fixture() {
        "$REPO_ROOT/scripts/lib/added-lines.py" \
        "$REPO_ROOT/scripts/lib/added_lines_tests.py" "$FIXTURE/scripts/lib/"
     cp "$REPO_ROOT/crates/engine/src/game/mod.rs" "$FIXTURE/crates/engine/src/game/"
-    cat > "$FIXTURE/crates/engine/src/parser/oracle.rs" <<'EOF'
+    cat > "$FIXTURE/crates/phase-parser/src/parser/oracle.rs" <<'EOF'
 fn parse_oracle_ir() {
 }
 fn is_semicolon_keyword_line() {
@@ -46,8 +46,8 @@ fn is_semicolon_keyword_line() {
 fn is_spell_resolution_instruction_line() {
 }
 EOF
-    printf 'fn f() { let (v, _) = parse_target(input); }\n' > "$FIXTURE/crates/engine/src/parser/probe.rs"
-    printf '# fixture reviewed ceiling\ncrates/engine/src/parser/probe.rs 1\n' > "$FIXTURE/scripts/residue-ratchet.txt"
+    printf 'fn f() { let (v, _) = parse_target(input); }\n' > "$FIXTURE/crates/phase-parser/src/parser/probe.rs"
+    printf '# fixture reviewed ceiling\ncrates/phase-parser/src/parser/probe.rs 1\n' > "$FIXTURE/scripts/residue-ratchet.txt"
     git -C "$FIXTURE" init -q
     git -C "$FIXTURE" config commit.gpgsign false
     git -C "$FIXTURE" config tag.gpgsign false
@@ -71,7 +71,7 @@ run_cached() {
 }
 ledger() { cat > "$FIXTURE/scripts/residue-ratchet.txt"; }
 add_discard() {
-    printf 'fn added() { let (v, _) = parse_target_with_ctx(input, ctx); }\n' >> "$FIXTURE/crates/engine/src/parser/probe.rs"
+    printf 'fn added() { let (v, _) = parse_target_with_ctx(input, ctx); }\n' >> "$FIXTURE/crates/phase-parser/src/parser/probe.rs"
 }
 printf 'driving real Gate H under %s (%s)\n' "$BASH_BIN" "$("$BASH_BIN" -c 'echo "$BASH_VERSION"')"
 
@@ -94,26 +94,26 @@ expect_out 'A cannot-answer wording survives' 'Gate A CANNOT ANSWER: nothing was
 add_discard
 run_gate
 expect_rc 'introduced production discard fails' 1
-expect_out 'growth names file and line' 'crates/engine/src/parser/probe.rs:2: binding parse_target_with_ctx'
+expect_out 'growth names file and line' 'crates/phase-parser/src/parser/probe.rs:2: binding parse_target_with_ctx'
 expect_out 'growth names actual and ceiling' 'actual 2, ceiling 1'
 printf 'SMOKE introduced discard: exit %s\n%s\n' "$RC" "$OUT"
-printf 'fn f() { let (v, _) = parse_target(input); }\n' > "$FIXTURE/crates/engine/src/parser/probe.rs"
+printf 'fn f() { let (v, _) = parse_target(input); }\n' > "$FIXTURE/crates/phase-parser/src/parser/probe.rs"
 run_gate
 expect_rc 'removing introduced discard passes again' 0
 printf 'SMOKE removed discard: exit %s\n%s\n' "$RC" "$OUT"
-printf 'fn nom() { let (rest, _) = parse_target_demonstrative_subject(input)?; }\n' >> "$FIXTURE/crates/engine/src/parser/probe.rs"
+printf 'fn nom() { let (rest, _) = parse_target_demonstrative_subject(input)?; }\n' >> "$FIXTURE/crates/phase-parser/src/parser/probe.rs"
 run_gate
 expect_rc 'nom second-component unit discard passes' 0
 
 # Explicit closure return types must not hide a helper-result discard.
 new_fixture
-printf "fn added() { let (filter, _) = ctx.with_player_antecedents(|s| -> (TargetFilter, &'a str) { parse_target_with_ctx(input, s) },); }\n" >> "$FIXTURE/crates/engine/src/parser/probe.rs"
+printf "fn added() { let (filter, _) = ctx.with_player_antecedents(|s| -> (TargetFilter, &'a str) { parse_target_with_ctx(input, s) },); }\n" >> "$FIXTURE/crates/phase-parser/src/parser/probe.rs"
 run_gate
 expect_rc 'annotated closure discard fails' 1
-expect_out 'annotated closure growth names file and line' 'crates/engine/src/parser/probe.rs:2: binding parse_target_with_ctx'
+expect_out 'annotated closure growth names file and line' 'crates/phase-parser/src/parser/probe.rs:2: binding parse_target_with_ctx'
 expect_out 'annotated closure growth exceeds ceiling' 'actual 2, ceiling 1'
 printf 'SMOKE annotated closure discard: exit %s\n%s\n' "$RC" "$OUT"
-printf 'fn f() { let (v, _) = parse_target(input); }\n' > "$FIXTURE/crates/engine/src/parser/probe.rs"
+printf 'fn f() { let (v, _) = parse_target(input); }\n' > "$FIXTURE/crates/phase-parser/src/parser/probe.rs"
 run_gate
 expect_rc 'removing annotated closure discard passes' 0
 expect_out 'annotated closure removal restores ceiling' 'residue: 1 legacy obligations, ceiling 1'
@@ -121,13 +121,13 @@ printf 'SMOKE removed annotated closure discard: exit %s\n%s\n' "$RC" "$OUT"
 
 # Compound receivers must not hide a helper-result discard.
 new_fixture
-printf 'fn added() { let (filter, _) = contexts[0].with_player_antecedents(|s| parse_target_with_ctx(input, s)); }\n' >> "$FIXTURE/crates/engine/src/parser/probe.rs"
+printf 'fn added() { let (filter, _) = contexts[0].with_player_antecedents(|s| parse_target_with_ctx(input, s)); }\n' >> "$FIXTURE/crates/phase-parser/src/parser/probe.rs"
 run_gate
 expect_rc 'indexed receiver discard fails' 1
-expect_out 'indexed receiver growth names file and line' 'crates/engine/src/parser/probe.rs:2: binding parse_target_with_ctx'
+expect_out 'indexed receiver growth names file and line' 'crates/phase-parser/src/parser/probe.rs:2: binding parse_target_with_ctx'
 expect_out 'indexed receiver growth exceeds ceiling' 'actual 2, ceiling 1'
 printf 'SMOKE indexed receiver discard: exit %s\n%s\n' "$RC" "$OUT"
-printf 'fn f() { let (v, _) = parse_target(input); }\n' > "$FIXTURE/crates/engine/src/parser/probe.rs"
+printf 'fn f() { let (v, _) = parse_target(input); }\n' > "$FIXTURE/crates/phase-parser/src/parser/probe.rs"
 run_gate
 expect_rc 'removing indexed receiver discard passes' 0
 expect_out 'indexed receiver removal restores ceiling' 'residue: 1 legacy obligations, ceiling 1'
@@ -135,13 +135,13 @@ printf 'SMOKE removed indexed receiver discard: exit %s\n%s\n' "$RC" "$OUT"
 
 # Compound receiver projections discard the helper's remainder too.
 new_fixture
-printf 'fn added() { let f = contexts[0].with_player_antecedents(|s| parse_target_with_ctx(input, s)).0; }\n' >> "$FIXTURE/crates/engine/src/parser/probe.rs"
+printf 'fn added() { let f = contexts[0].with_player_antecedents(|s| parse_target_with_ctx(input, s)).0; }\n' >> "$FIXTURE/crates/phase-parser/src/parser/probe.rs"
 run_gate
 expect_rc 'indexed receiver projection fails' 1
-expect_out 'indexed receiver projection names file and line' 'crates/engine/src/parser/probe.rs:2: projection parse_target_with_ctx'
+expect_out 'indexed receiver projection names file and line' 'crates/phase-parser/src/parser/probe.rs:2: projection parse_target_with_ctx'
 expect_out 'indexed receiver projection exceeds ceiling' 'actual 2, ceiling 1'
 printf 'SMOKE indexed receiver projection: exit %s\n%s\n' "$RC" "$OUT"
-printf 'fn f() { let (v, _) = parse_target(input); }\n' > "$FIXTURE/crates/engine/src/parser/probe.rs"
+printf 'fn f() { let (v, _) = parse_target(input); }\n' > "$FIXTURE/crates/phase-parser/src/parser/probe.rs"
 run_gate
 expect_rc 'removing indexed receiver projection passes' 0
 expect_out 'indexed receiver projection removal restores ceiling' 'residue: 1 legacy obligations, ceiling 1'
@@ -149,13 +149,13 @@ printf 'SMOKE removed indexed receiver projection: exit %s\n%s\n' "$RC" "$OUT"
 
 # Generic wrapper and receiver calls must retain helper-result discard origins.
 new_fixture
-printf 'fn added() { let (f, _) = Self::get_context::<Vec<(A, B)>>().with_player_scope::<fn() -> T>(scope, |s| parse_target_with_ctx(input, s)); }\n' >> "$FIXTURE/crates/engine/src/parser/probe.rs"
+printf 'fn added() { let (f, _) = Self::get_context::<Vec<(A, B)>>().with_player_scope::<fn() -> T>(scope, |s| parse_target_with_ctx(input, s)); }\n' >> "$FIXTURE/crates/phase-parser/src/parser/probe.rs"
 run_gate
 expect_rc 'turbofish wrapper discard fails' 1
-expect_out 'turbofish wrapper growth names file and line' 'crates/engine/src/parser/probe.rs:2: binding parse_target_with_ctx'
+expect_out 'turbofish wrapper growth names file and line' 'crates/phase-parser/src/parser/probe.rs:2: binding parse_target_with_ctx'
 expect_out 'turbofish wrapper growth exceeds ceiling' 'actual 2, ceiling 1'
 printf 'SMOKE turbofish wrapper discard: exit %s\n%s\n' "$RC" "$OUT"
-printf 'fn f() { let (v, _) = parse_target(input); }\n' > "$FIXTURE/crates/engine/src/parser/probe.rs"
+printf 'fn f() { let (v, _) = parse_target(input); }\n' > "$FIXTURE/crates/phase-parser/src/parser/probe.rs"
 run_gate
 expect_rc 'removing turbofish wrapper discard passes' 0
 expect_out 'turbofish wrapper removal restores ceiling' 'residue: 1 legacy obligations, ceiling 1'
@@ -163,38 +163,38 @@ printf 'SMOKE removed turbofish wrapper discard: exit %s\n%s\n' "$RC" "$OUT"
 
 # Per-file ceilings and strict ledger parsing, including disappeared files.
 ledger <<'EOF'
-crates/engine/src/parser/probe.rs 3
+crates/phase-parser/src/parser/probe.rs 3
 EOF
 run_gate
 expect_rc 'below ceiling passes' 0
-expect_out 'tightening suggestion is exact' 'crates/engine/src/parser/probe.rs 3 -> 1'
+expect_out 'tightening suggestion is exact' 'crates/phase-parser/src/parser/probe.rs 3 -> 1'
 ledger <<'EOF'
-crates/engine/src/parser/probe.rs 1
-crates/engine/src/parser/retired.rs 2
+crates/phase-parser/src/parser/probe.rs 1
+crates/phase-parser/src/parser/retired.rs 2
 EOF
 run_gate
 expect_rc 'deleted file is zero not a failure' 0
-expect_out 'deleted row suggests removal' 'crates/engine/src/parser/retired.rs 2 -> 0 (entry can be deleted)'
+expect_out 'deleted row suggests removal' 'crates/phase-parser/src/parser/retired.rs 2 -> 0 (entry can be deleted)'
 ledger <<'EOF'
 # comments and blanks
 
-crates\engine\src\parser\probe.rs 1
+crates\phase-parser\src\parser\probe.rs 1
 EOF
 run_gate
 expect_rc 'comments blanks and normalized separators pass' 0
 for rows in '3 1' '1 3' '1 1'; do
     set -- $rows
-    printf 'crates/engine/src/parser/missing.rs %s\ncrates/engine/src/parser/missing.rs %s\n' "$1" "$2" | ledger
+    printf 'crates/phase-parser/src/parser/missing.rs %s\ncrates/phase-parser/src/parser/missing.rs %s\n' "$1" "$2" | ledger
     run_gate
     expect_rc "duplicate missing-file rows $rows fail" 1
-    expect_out 'duplicate path is actionable' "duplicate ledger entry for 'crates/engine/src/parser/missing.rs'"
+    expect_out 'duplicate path is actionable' "duplicate ledger entry for 'crates/phase-parser/src/parser/missing.rs'"
 done
 for row in \
-    'crates/engine/src/parser/probe.rs many' \
-    'crates/engine/src/parser/probe.rs -1' \
-    'crates/engine/src/parser/probe.rs 1 extra' \
-    '/crates/engine/src/parser/probe.rs 1' \
-    'crates/engine/src/parser/../probe.rs 1' \
+    'crates/phase-parser/src/parser/probe.rs many' \
+    'crates/phase-parser/src/parser/probe.rs -1' \
+    'crates/phase-parser/src/parser/probe.rs 1 extra' \
+    '/crates/phase-parser/src/parser/probe.rs 1' \
+    'crates/phase-parser/src/parser/../probe.rs 1' \
     'crates/engine/src/game/probe.rs 1'; do
     printf '%s\n' "$row" | ledger
     run_gate
@@ -204,18 +204,18 @@ ledger < /dev/null
 run_gate
 expect_rc 'nonzero file without ledger row fails' 1
 expect_out 'unledgered file is named' 'probe.rs: actual 1, ceiling 0 (no ledger entry)'
-printf 'fn f() { let (v, rest) = parse_target(input); consume(rest); }\n' > "$FIXTURE/crates/engine/src/parser/probe.rs"
+printf 'fn f() { let (v, rest) = parse_target(input); consume(rest); }\n' > "$FIXTURE/crates/phase-parser/src/parser/probe.rs"
 run_gate
 expect_rc 'zero obligations with an empty ledger passes' 0
 expect_out 'zero-hit scan reports files' 'residue: 0 legacy obligations, ceiling 0; files scanned 2'
 OUT="$(python3 -B "$FIXTURE/scripts/lib/detect-residue-discards.py" --list --root "$FIXTURE" 2>&1)"; RC=$?
 expect_rc 'zero-hit list is a real successful scan' 0
 expect_out 'zero-hit list reports snapshot and scan count' 'TOTAL 0 obligations; files scanned 2; snapshot worktree'
-rm -rf "$FIXTURE/crates/engine/src/parser"
+rm -rf "$FIXTURE/crates/phase-parser/src/parser"
 OUT="$(python3 -B "$FIXTURE/scripts/lib/detect-residue-discards.py" --check 2>&1)"; RC=$?
 expect_rc 'detector rejects missing parser root' 1
 expect_out 'missing-root error is explicit' 'missing parser root'
-mkdir -p "$FIXTURE/crates/engine/src/parser"
+mkdir -p "$FIXTURE/crates/phase-parser/src/parser"
 OUT="$(python3 -B "$FIXTURE/scripts/lib/detect-residue-discards.py" --check 2>&1)"; RC=$?
 expect_rc 'detector rejects empty parser root' 1
 expect_out 'empty-root error is explicit' 'empty parser scope'
@@ -224,12 +224,12 @@ expect_out 'empty-root error is explicit' 'empty parser scope'
 # make an unrelated staged snapshot fail. Worktree/index tooling is not swapped.
 new_fixture
 add_discard
-git -C "$FIXTURE" add crates/engine/src/parser/probe.rs
-printf 'fn f() { let (v, _) = parse_target(input); }\n' > "$FIXTURE/crates/engine/src/parser/probe.rs"
+git -C "$FIXTURE" add crates/phase-parser/src/parser/probe.rs
+printf 'fn f() { let (v, _) = parse_target(input); }\n' > "$FIXTURE/crates/phase-parser/src/parser/probe.rs"
 run_cached
 expect_rc 'unstaged fix cannot hide indexed violation' 1
 expect_out 'indexed violation retains original line' 'probe.rs:2: binding parse_target_with_ctx'
-git -C "$FIXTURE" add crates/engine/src/parser/probe.rs
+git -C "$FIXTURE" add crates/phase-parser/src/parser/probe.rs
 add_discard
 run_cached
 expect_rc 'unstaged violation cannot poison clean index' 0
@@ -237,42 +237,42 @@ expect_out 'index snapshot named' 'snapshot index)'
 rm "$FIXTURE/scripts/residue-ratchet.txt"
 run_cached
 expect_rc 'unstaged ledger deletion cannot poison clean index' 0
-printf 'crates/engine/src/parser/probe.rs 1\n' > "$FIXTURE/scripts/residue-ratchet.txt"
-rm "$FIXTURE/crates/engine/src/parser/probe.rs"
+printf 'crates/phase-parser/src/parser/probe.rs 1\n' > "$FIXTURE/scripts/residue-ratchet.txt"
+rm "$FIXTURE/crates/phase-parser/src/parser/probe.rs"
 run_cached
 expect_rc 'unstaged source deletion cannot poison clean index' 0
-printf 'let (v, _) = parse_target(input);\n' > "$FIXTURE/crates/engine/src/parser/unstaged.rs"
+printf 'let (v, _) = parse_target(input);\n' > "$FIXTURE/crates/phase-parser/src/parser/unstaged.rs"
 run_cached
 expect_rc 'unstaged new source is not part of indexed snapshot' 0
-rm "$FIXTURE/crates/engine/src/parser/unstaged.rs"
-printf 'fn f() { let (v, _) = parse_target(input); }\n' > "$FIXTURE/crates/engine/src/parser/probe.rs"
+rm "$FIXTURE/crates/phase-parser/src/parser/unstaged.rs"
+printf 'fn f() { let (v, _) = parse_target(input); }\n' > "$FIXTURE/crates/phase-parser/src/parser/probe.rs"
 ledger <<'EOF'
-crates/engine/src/parser/probe.rs 0
+crates/phase-parser/src/parser/probe.rs 0
 EOF
 git -C "$FIXTURE" add scripts/residue-ratchet.txt
 ledger <<'EOF'
-crates/engine/src/parser/probe.rs 1
+crates/phase-parser/src/parser/probe.rs 1
 EOF
 run_cached
 expect_rc 'unstaged ledger increase cannot loosen indexed ceiling' 1
 git -C "$FIXTURE" add scripts/residue-ratchet.txt
-printf 'let (v, _) = parse_target(input);\n' > "$FIXTURE/crates/engine/src/parser/new.rs"
-git -C "$FIXTURE" add crates/engine/src/parser/new.rs
+printf 'let (v, _) = parse_target(input);\n' > "$FIXTURE/crates/phase-parser/src/parser/new.rs"
+git -C "$FIXTURE" add crates/phase-parser/src/parser/new.rs
 run_cached
 expect_rc 'indexed new source without row fails' 1
-printf 'crates/engine/src/parser/new.rs 1\n' >> "$FIXTURE/scripts/residue-ratchet.txt"
+printf 'crates/phase-parser/src/parser/new.rs 1\n' >> "$FIXTURE/scripts/residue-ratchet.txt"
 git -C "$FIXTURE" add scripts/residue-ratchet.txt
 run_cached
 expect_rc 'indexed source and indexed ledger addition pass' 0
 printf 'PRE-COMMIT staged source and ledger gate: exit %s\n%s\n' "$RC" "$OUT"
-rm "$FIXTURE/crates/engine/src/parser/new.rs"
-git -C "$FIXTURE" add -u crates/engine/src/parser/new.rs
+rm "$FIXTURE/crates/phase-parser/src/parser/new.rs"
+git -C "$FIXTURE" add -u crates/phase-parser/src/parser/new.rs
 run_cached
 expect_rc 'indexed source deletion passes as zero' 0
-expect_out 'indexed deletion tightens row' 'crates/engine/src/parser/new.rs 1 -> 0'
+expect_out 'indexed deletion tightens row' 'crates/phase-parser/src/parser/new.rs 1 -> 0'
 rm "$FIXTURE/scripts/residue-ratchet.txt"
 git -C "$FIXTURE" add -u scripts/residue-ratchet.txt
-printf 'crates/engine/src/parser/probe.rs 1\n' > "$FIXTURE/scripts/residue-ratchet.txt"
+printf 'crates/phase-parser/src/parser/probe.rs 1\n' > "$FIXTURE/scripts/residue-ratchet.txt"
 run_cached
 expect_rc 'unstaged ledger cannot replace indexed deletion' 1
 expect_out 'missing indexed ledger is identified' 'scripts/residue-ratchet.txt'
@@ -280,21 +280,21 @@ expect_out 'missing indexed ledger is identified' 'scripts/residue-ratchet.txt'
 # Precise-capture `use<'a>` bounds are valid Rust, not import items. Exercise
 # source classification and module discovery through both real snapshot paths.
 new_fixture
-cat > "$FIXTURE/crates/engine/src/parser/capture.rs" <<'EOF'
+cat > "$FIXTURE/crates/phase-parser/src/parser/capture.rs" <<'EOF'
 fn keep<'a>(i: &'a str) -> impl Fn() -> &'a str + use<'a> { move || i }
 EOF
-printf 'fn consumed(i: &str) { let (v, rest) = parse_target(i); consume(rest); }\n' >> "$FIXTURE/crates/engine/src/parser/probe.rs"
+printf 'fn consumed(i: &str) { let (v, rest) = parse_target(i); consume(rest); }\n' >> "$FIXTURE/crates/phase-parser/src/parser/probe.rs"
 run_gate
 expect_rc 'precise capture and consumed remainder pass worktree gate' 0
 expect_out 'precise capture worktree preserves witness' 'residue: 1 legacy obligations, ceiling 1'
 printf 'PRECISE-CAPTURE worktree gate: exit %s\n%s\n' "$RC" "$OUT"
-git -C "$FIXTURE" add crates/engine/src/parser/probe.rs crates/engine/src/parser/capture.rs
+git -C "$FIXTURE" add crates/phase-parser/src/parser/probe.rs crates/phase-parser/src/parser/capture.rs
 run_cached
 expect_rc 'precise capture and consumed remainder pass index gate' 0
 expect_out 'precise capture index preserves witness' 'snapshot index)'
 printf 'PRECISE-CAPTURE staged-index gate: exit %s\n%s\n' "$RC" "$OUT"
 add_discard
-git -C "$FIXTURE" add crates/engine/src/parser/probe.rs
+git -C "$FIXTURE" add crates/phase-parser/src/parser/probe.rs
 run_cached
 expect_rc 'precise capture cannot hide an indexed discard' 1
 expect_out 'precise capture indexed growth names source' 'probe.rs:3: binding parse_target_with_ctx'
@@ -384,24 +384,24 @@ for form in let-else or-pattern trailing-comma-drop qualified-drop any-default s
             actual=2
             ;;
     esac
-    printf '%s\n' "$discarded" >> "$FIXTURE/crates/engine/src/parser/probe.rs"
+    printf '%s\n' "$discarded" >> "$FIXTURE/crates/phase-parser/src/parser/probe.rs"
     run_gate
     expect_rc "$form introduced discard fails worktree H" 1
     expect_out "$form worktree growth is counted" "actual $actual, ceiling 1"
     printf 'SMOKE %s worktree added: exit %s\n%s\n' "$form" "$RC" "$OUT"
-    printf 'fn f() { let (v, _) = parse_target(input); }\n%s\n' "$consumed" > "$FIXTURE/crates/engine/src/parser/probe.rs"
+    printf 'fn f() { let (v, _) = parse_target(input); }\n%s\n' "$consumed" > "$FIXTURE/crates/phase-parser/src/parser/probe.rs"
     run_gate
     expect_rc "$form removing discard passes worktree H" 0
     expect_out "$form consumed worktree returns to baseline" 'residue: 1 legacy obligations, ceiling 1'
     printf 'SMOKE %s worktree removed: exit %s\n%s\n' "$form" "$RC" "$OUT"
-    printf 'fn f() { let (v, _) = parse_target(input); }\n%s\n' "$discarded" > "$FIXTURE/crates/engine/src/parser/probe.rs"
-    git -C "$FIXTURE" add crates/engine/src/parser/probe.rs
-    printf 'fn f() { let (v, _) = parse_target(input); }\n%s\n' "$consumed" > "$FIXTURE/crates/engine/src/parser/probe.rs"
+    printf 'fn f() { let (v, _) = parse_target(input); }\n%s\n' "$discarded" > "$FIXTURE/crates/phase-parser/src/parser/probe.rs"
+    git -C "$FIXTURE" add crates/phase-parser/src/parser/probe.rs
+    printf 'fn f() { let (v, _) = parse_target(input); }\n%s\n' "$consumed" > "$FIXTURE/crates/phase-parser/src/parser/probe.rs"
     run_cached
     expect_rc "$form indexed discard fails despite consumed worktree" 1
     expect_out "$form index growth is counted" "actual $actual, ceiling 1"
     printf 'SMOKE %s staged-index added: exit %s\n%s\n' "$form" "$RC" "$OUT"
-    git -C "$FIXTURE" add crates/engine/src/parser/probe.rs
+    git -C "$FIXTURE" add crates/phase-parser/src/parser/probe.rs
     run_cached
     expect_rc "$form removing indexed discard passes H" 0
     expect_out "$form consumed index returns to baseline" 'residue: 1 legacy obligations, ceiling 1'
@@ -413,29 +413,29 @@ done
 # test filenames and a test-only outlined child remain negative controls.
 for name in contests.rs latest_tests_helper.rs; do
     new_fixture
-    printf '#[cfg(test)]\nmod support;\n' > "$FIXTURE/crates/engine/src/parser/mod.rs"
+    printf '#[cfg(test)]\nmod support;\n' > "$FIXTURE/crates/phase-parser/src/parser/mod.rs"
     for excluded in tests.rs foo_tests.rs support.rs; do
-        printf 'fn hidden() { let (v, _) = parse_target(input); }\n' > "$FIXTURE/crates/engine/src/parser/$excluded"
+        printf 'fn hidden() { let (v, _) = parse_target(input); }\n' > "$FIXTURE/crates/phase-parser/src/parser/$excluded"
     done
     consumed='fn f() { let (v, rest) = parse_target(input); consume(rest); }'
     discarded='fn f() { let (v, _) = parse_target(input); }'
-    printf '%s\n' "$consumed" > "$FIXTURE/crates/engine/src/parser/$name"
+    printf '%s\n' "$consumed" > "$FIXTURE/crates/phase-parser/src/parser/$name"
     run_gate
     expect_rc "$name consumed result and test-file controls pass worktree" 0
-    printf '%s\n' "$discarded" > "$FIXTURE/crates/engine/src/parser/$name"
+    printf '%s\n' "$discarded" > "$FIXTURE/crates/phase-parser/src/parser/$name"
     run_gate
     expect_rc "$name production discard fails worktree" 1
     expect_out "$name unledgered production growth is named" "$name: actual 1, ceiling 0 (no ledger entry)"
     printf 'SMOKE %s worktree added: exit %s\n%s\n' "$name" "$RC" "$OUT"
-    git -C "$FIXTURE" add crates/engine/src/parser
-    printf '%s\n' "$consumed" > "$FIXTURE/crates/engine/src/parser/$name"
+    git -C "$FIXTURE" add crates/phase-parser/src/parser
+    printf '%s\n' "$consumed" > "$FIXTURE/crates/phase-parser/src/parser/$name"
     run_cached
     expect_rc "$name indexed discard fails despite consumed worktree" 1
     expect_out "$name indexed production growth is named" "$name: actual 1, ceiling 0 (no ledger entry)"
     printf 'SMOKE %s staged-index added: exit %s\n%s\n' "$name" "$RC" "$OUT"
     run_gate
     expect_rc "$name removing discard passes worktree" 0
-    git -C "$FIXTURE" add "crates/engine/src/parser/$name"
+    git -C "$FIXTURE" add "crates/phase-parser/src/parser/$name"
     run_cached
     expect_rc "$name removing indexed discard passes" 0
     expect_out "$name consumed index returns to baseline" 'residue: 1 legacy obligations, ceiling 1'
@@ -447,18 +447,18 @@ done
 # in both snapshots; a production #[path] reference to it brings it back.
 for owner in tests unit_tests; do
     new_fixture
-    printf '#[cfg(test)]\nmod %s;\n' "$owner" > "$FIXTURE/crates/engine/src/parser/mod.rs"
-    printf 'mod support;\n' > "$FIXTURE/crates/engine/src/parser/$owner.rs"
-    mkdir -p "$FIXTURE/crates/engine/src/parser/$owner"
-    printf 'fn hidden() { let _parsed = parse_target(input); }\n' > "$FIXTURE/crates/engine/src/parser/$owner/support.rs"
+    printf '#[cfg(test)]\nmod %s;\n' "$owner" > "$FIXTURE/crates/phase-parser/src/parser/mod.rs"
+    printf 'mod support;\n' > "$FIXTURE/crates/phase-parser/src/parser/$owner.rs"
+    mkdir -p "$FIXTURE/crates/phase-parser/src/parser/$owner"
+    printf 'fn hidden() { let _parsed = parse_target(input); }\n' > "$FIXTURE/crates/phase-parser/src/parser/$owner/support.rs"
     run_gate
     expect_rc "$owner child stays test-only in worktree" 0
     expect_out "$owner child is not counted in worktree" 'residue: 1 legacy obligations, ceiling 1'
-    git -C "$FIXTURE" add crates/engine/src/parser
+    git -C "$FIXTURE" add crates/phase-parser/src/parser
     run_cached
     expect_rc "$owner child stays test-only in index" 0
     expect_out "$owner child is not counted in index" 'residue: 1 legacy obligations, ceiling 1'
-    printf '#[cfg(test)]\nmod %s;\n#[path = "%s/support.rs"]\nmod shared;\n' "$owner" "$owner" > "$FIXTURE/crates/engine/src/parser/mod.rs"
+    printf '#[cfg(test)]\nmod %s;\n#[path = "%s/support.rs"]\nmod shared;\n' "$owner" "$owner" > "$FIXTURE/crates/phase-parser/src/parser/mod.rs"
     run_gate
     expect_rc "$owner child reached by production path counts" 1
     expect_out "$owner production path names the child" "$owner/support.rs: actual 1, ceiling 0 (no ledger entry)"
