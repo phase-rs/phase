@@ -873,6 +873,7 @@ mod shared_invariant_tests {
         let action = GameAction::ActivateAbility {
             source_id: ObjectId(1),
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         };
         let cand = candidate(action, TacticalClass::Ability);
         let decision = priority_decision(vec![cand.clone()]);

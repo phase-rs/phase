@@ -507,6 +507,7 @@ fn rod_cannot_cast_a_card_that_left_exile_and_was_exiled_again() {
         .act(GameAction::ActivateAbility {
             source_id: rod,
             ability_index: idx,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activating Rod is accepted");
     for _ in 0..8 {

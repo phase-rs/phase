@@ -472,7 +472,8 @@ fn no_legal_blockers_auto_submit_without_a_turn_boundary_preference() {
     let waiting_for = state.waiting_for.clone();
     let mut result = ActionResult::applied(Vec::new(), waiting_for);
 
-    assert!(run_auto_pass_loop(&mut state, &mut result));
+    assert!(run_auto_pass_loop(&mut state, &mut result)
+        .expect("the fixture's auto-pass drive is representable"));
     assert!(result.events.iter().any(|event| matches!(
         event,
         GameEvent::BlockersDeclared { assignments } if assignments.is_empty()
@@ -506,7 +507,8 @@ fn blockers_auto_submit_when_all_attackers_left_play() {
     let waiting_for = state.waiting_for.clone();
     let mut result = ActionResult::applied(Vec::new(), waiting_for);
 
-    assert!(run_auto_pass_loop(&mut state, &mut result));
+    assert!(run_auto_pass_loop(&mut state, &mut result)
+        .expect("the fixture's auto-pass drive is representable"));
     assert!(result.events.iter().any(|event| matches!(
         event,
         GameEvent::BlockersDeclared { assignments } if assignments.is_empty()
@@ -632,6 +634,7 @@ fn insect_token_effect() -> Effect {
         owner: TargetFilter::Controller,
         attach_to: None,
         enters_attacking: false,
+        attack_destination: crate::types::ability::TokenAttackDestination::ControllerChooses,
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
@@ -724,7 +727,8 @@ fn turn_boundary_session_resumes_after_opponent_stack_entry_resolves() {
     );
 
     let mut paused = ActionResult::applied(Vec::new(), state.waiting_for.clone());
-    let advanced_before_response = run_auto_pass_loop(&mut state, &mut paused);
+    let advanced_before_response = run_auto_pass_loop(&mut state, &mut paused)
+        .expect("the fixture's auto-pass drive is representable");
 
     assert!(
         !advanced_before_response,
@@ -846,6 +850,7 @@ fn begin_combat_phase_stop_interrupts_auto_pass_with_usable_priority() {
         GameAction::ActivateAbility {
             source_id: artifact,
             ability_index: 0,
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
         },
     )
     .expect("a non-mana activated ability is legal in the stopped BeginCombat window");
@@ -1055,7 +1060,8 @@ fn declare_blockers_opponents_turns_stop_pauses_empty_blocker_submit() {
     );
 
     let mut result = ActionResult::applied(Vec::new(), waiting_for);
-    run_auto_pass_loop(&mut state, &mut result);
+    run_auto_pass_loop(&mut state, &mut result)
+        .expect("the fixture's auto-pass drive is representable");
 
     assert!(
         matches!(
@@ -1128,7 +1134,8 @@ fn declare_blockers_own_turn_stop_does_not_pause_on_opponents_turn() {
     );
 
     let mut result = ActionResult::applied(Vec::new(), waiting_for);
-    run_auto_pass_loop(&mut state, &mut result);
+    run_auto_pass_loop(&mut state, &mut result)
+        .expect("the fixture's auto-pass drive is representable");
 
     assert!(
         !matches!(result.waiting_for, WaitingFor::DeclareBlockers { .. }),
@@ -1172,7 +1179,8 @@ fn declare_attackers_own_turn_stop_pauses_empty_attacker_submit() {
     );
 
     let mut result = ActionResult::applied(Vec::new(), waiting_for);
-    run_auto_pass_loop(&mut state, &mut result);
+    run_auto_pass_loop(&mut state, &mut result)
+        .expect("the fixture's auto-pass drive is representable");
 
     assert!(
         matches!(
@@ -1229,7 +1237,8 @@ fn declare_attackers_opponents_turns_stop_does_not_pause_on_own_turn() {
     );
 
     let mut result = ActionResult::applied(Vec::new(), waiting_for);
-    run_auto_pass_loop(&mut state, &mut result);
+    run_auto_pass_loop(&mut state, &mut result)
+        .expect("the fixture's auto-pass drive is representable");
 
     assert!(
         !matches!(result.waiting_for, WaitingFor::DeclareAttackers { .. }),
@@ -1331,7 +1340,8 @@ fn fenced_session_stops_before_passing_when_the_top_entry_changes() {
     state.stack.back_mut().unwrap().source_id = ObjectId(19_902);
 
     let mut result = ActionResult::applied(Vec::new(), state.waiting_for.clone());
-    run_auto_pass_loop(&mut state, &mut result);
+    run_auto_pass_loop(&mut state, &mut result)
+        .expect("the fixture's auto-pass drive is representable");
 
     assert!(
         state.stack_resolution_session.is_none(),
@@ -1379,7 +1389,8 @@ fn fenced_session_with_an_empty_stack_preserves_the_current_priority_window() {
     state.stack.clear();
 
     let mut result = ActionResult::applied(Vec::new(), state.waiting_for.clone());
-    run_auto_pass_loop(&mut state, &mut result);
+    run_auto_pass_loop(&mut state, &mut result)
+        .expect("the fixture's auto-pass drive is representable");
 
     assert!(state.stack_resolution_session.is_none());
     assert!(result.events.is_empty());
@@ -1414,7 +1425,8 @@ fn fenced_session_with_a_new_top_entry_preserves_the_current_priority_window() {
     push_simple_stack_entry(&mut state, 19_904, PlayerId(1));
 
     let mut result = ActionResult::applied(Vec::new(), state.waiting_for.clone());
-    run_auto_pass_loop(&mut state, &mut result);
+    run_auto_pass_loop(&mut state, &mut result)
+        .expect("the fixture's auto-pass drive is representable");
 
     assert!(state.stack_resolution_session.is_none());
     assert!(
@@ -1451,7 +1463,8 @@ fn fenced_session_budget_caps_the_resolver_before_a_natural_batch_can_escape() {
     state.objects.remove(&priority_action);
 
     let mut result = ActionResult::applied(Vec::new(), state.waiting_for.clone());
-    run_auto_pass_loop(&mut state, &mut result);
+    run_auto_pass_loop(&mut state, &mut result)
+        .expect("the fixture's auto-pass drive is representable");
 
     assert_eq!(state.stack.len(), 1, "the one-entry budget is exact");
     assert_eq!(
@@ -1500,7 +1513,8 @@ fn fenced_session_caps_a_natural_token_batch_at_its_matching_prefix() {
     }
 
     let mut result = ActionResult::applied(Vec::new(), state.waiting_for.clone());
-    run_auto_pass_loop(&mut state, &mut result);
+    run_auto_pass_loop(&mut state, &mut result)
+        .expect("the fixture's auto-pass drive is representable");
 
     assert_eq!(
         state.stack.len(),
@@ -1549,7 +1563,8 @@ fn fenced_session_stops_after_the_matching_top_when_a_lower_entry_changes() {
     state.stack.get_mut(1).unwrap().source_id = ObjectId(29_906);
 
     let mut result = ActionResult::applied(Vec::new(), state.waiting_for.clone());
-    run_auto_pass_loop(&mut state, &mut result);
+    run_auto_pass_loop(&mut state, &mut result)
+        .expect("the fixture's auto-pass drive is representable");
 
     assert_eq!(
         result
@@ -1669,7 +1684,8 @@ fn nonrepresentative_cancel_does_not_resurrect_at_session_teardown() {
     // session teardown path after P1's out-of-turn preference cancellation.
     push_simple_stack_entry(&mut state, 19_909, PlayerId(2));
     let mut result = ActionResult::applied(Vec::new(), state.waiting_for.clone());
-    run_auto_pass_loop(&mut state, &mut result);
+    run_auto_pass_loop(&mut state, &mut result)
+        .expect("the fixture's auto-pass drive is representable");
 
     assert!(state.stack_resolution_session.is_none());
     assert!(
@@ -1724,6 +1740,7 @@ fn nonrepresentative_deliberate_action_does_not_resurrect_at_session_teardown() 
         GameAction::ActivateAbility {
             source_id: p1_action,
             ability_index: 0,
+            payment_mode: crate::types::game_state::CastPaymentMode::Auto,
         },
     )
     .unwrap();
@@ -1925,7 +1942,8 @@ fn fenced_session_uses_the_captured_entry_when_its_source_id_is_reused() {
     state.objects.insert(source_id, reused_source);
 
     let mut result = ActionResult::applied(Vec::new(), state.waiting_for.clone());
-    run_auto_pass_loop(&mut state, &mut result);
+    run_auto_pass_loop(&mut state, &mut result)
+        .expect("the fixture's auto-pass drive is representable");
 
     assert!(state.stack.is_empty());
     assert!(result
@@ -2026,7 +2044,8 @@ fn two_hg_session_uses_team_representatives_in_the_live_runner() {
 
     state.objects.remove(&priority_action);
     let mut result = ActionResult::applied(Vec::new(), state.waiting_for.clone());
-    run_auto_pass_loop(&mut state, &mut result);
+    run_auto_pass_loop(&mut state, &mut result)
+        .expect("the fixture's auto-pass drive is representable");
 
     assert!(state.stack.is_empty());
     assert!(state.stack_resolution_session.is_none());
@@ -2596,6 +2615,102 @@ fn committed_session_is_unchanged_by_the_standing_pass() {
     ));
 }
 
+/// P0's own spell "return a land you control to its owner's hand" (chosen as it
+/// resolves) alone on the stack, with P0's Forest — a mana source P0 can
+/// activate now — untapped or tapped.
+fn own_bounce_of_your_land(forest_tapped: bool) -> GameState {
+    let mut scenario = crate::game::scenario::GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let forest = scenario.add_basic_land(PlayerId(0), ManaColor::Green);
+    let mut state = scenario.build().state().clone();
+    state.objects.get_mut(&forest).unwrap().tapped = forest_tapped;
+    let source = ObjectId(30_501);
+    push_spell(
+        &mut state,
+        source,
+        PlayerId(0),
+        ResolvedAbility::new(
+            Effect::Bounce {
+                target: TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::land()
+                        .controller(crate::types::ability::ControllerRef::You),
+                ),
+                destination: None,
+                selection: crate::types::ability::BounceSelection::AtResolution,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        ),
+    );
+    state
+}
+
+/// CR 117.1d + CR 605.3a: an own top that can move one of the player's
+/// activatable mana sources off the battlefield is `Held`, not a standing pass,
+/// so a rechecking session pauses an unverified representative's live window
+/// and authorizes no skipped window over it.
+#[test]
+fn recheck_session_pauses_an_own_top_held_for_a_removable_mana_source() {
+    // The look-ahead: with an own inert entry above the bounce, the skipped
+    // window over the bounce is authorized only when nothing can be lost.
+    for (forest_tapped, limit) in [(false, 1), (true, 2)] {
+        let mut state = own_bounce_of_your_land(forest_tapped);
+        push_simple_stack_entry(&mut state, 30_502, PlayerId(0));
+        install_recheck_session(&mut state, &[PlayerId(1)]);
+        assert_eq!(
+            stack_resolution_session_authorized_limit(&state),
+            Some(limit),
+            "Forest tapped: {forest_tapped}"
+        );
+    }
+
+    let mut held = own_bounce_of_your_land(false);
+    install_recheck_session(&mut held, &[PlayerId(1)]);
+    assert!(matches!(
+        stack_resolution_session_priority_decision(
+            &mut held,
+            PlayerId(0),
+            StackResolutionSessionPassKind::Automatic,
+        ),
+        StackResolutionSessionPriorityDecision::PauseRetained
+    ));
+
+    // Control: with the Forest tapped nothing can be lost, so the own-object
+    // standing pass authorizes the window again.
+    let mut granted = own_bounce_of_your_land(true);
+    install_recheck_session(&mut granted, &[PlayerId(1)]);
+    assert!(matches!(
+        stack_resolution_session_priority_decision(
+            &mut granted,
+            PlayerId(0),
+            StackResolutionSessionPassKind::Automatic,
+        ),
+        StackResolutionSessionPriorityDecision::Resolve { limit: 1 }
+    ));
+}
+
+/// CR 117.1d + CR 605.3a: a turn-boundary session breaks on an own top that is
+/// `Held` for a removable mana source, and keeps passing own tops otherwise.
+#[test]
+fn until_end_of_turn_breaks_on_an_own_top_held_for_a_removable_mana_source() {
+    for (forest_tapped, expect_break) in [(false, true), (true, false)] {
+        let mut state = own_bounce_of_your_land(forest_tapped);
+        state.auto_pass.insert(
+            PlayerId(0),
+            AutoPassMode::UntilTurnBoundary {
+                until: TurnBoundary::EndOfCurrentTurn,
+            },
+        );
+        let decision = priority_auto_pass_decision(&state, PlayerId(0));
+        if expect_break {
+            assert!(is_break(&decision), "untapped Forest: the window is held");
+        } else {
+            assert!(is_pass(&decision), "tapped Forest: own top passes");
+        }
+    }
+}
+
 #[test]
 fn until_stack_empty_non_requester_own_stack_shortcut_does_not_hide_action() {
     let mut state = priority_state();
@@ -2614,7 +2729,8 @@ fn until_stack_empty_non_requester_own_stack_shortcut_does_not_hide_action() {
     );
 
     let mut result = ActionResult::applied(Vec::new(), state.waiting_for.clone());
-    run_auto_pass_loop(&mut state, &mut result);
+    run_auto_pass_loop(&mut state, &mut result)
+        .expect("the fixture's auto-pass drive is representable");
 
     assert_eq!(state.stack.len(), 1);
     assert!(matches!(
@@ -2900,7 +3016,8 @@ fn empty_attacker_set_auto_submits_without_any_auto_pass_mode() {
     );
 
     let mut result = ActionResult::applied(Vec::new(), waiting_for);
-    let advanced = run_auto_pass_loop(&mut state, &mut result);
+    let advanced = run_auto_pass_loop(&mut state, &mut result)
+        .expect("the fixture's auto-pass drive is representable");
 
     assert!(
         advanced,
@@ -2910,5 +3027,41 @@ fn empty_attacker_set_auto_submits_without_any_auto_pass_mode() {
         !matches!(result.waiting_for, WaitingFor::DeclareAttackers { .. }),
         "CR 508.1a: the forced empty declaration must be submitted, not re-offered; got {:?}",
         result.waiting_for
+    );
+}
+
+/// A legacy `UntilStackEmpty` ends when the stack is empty, and a Resolve-All session
+/// that ends on that same pass restores its baseline before that end rule runs, so the
+/// completed preference is finished rather than restored.
+#[test]
+fn a_session_ending_pass_finishes_a_completed_baseline_until_stack_empty() {
+    let mut state = priority_state();
+    push_simple_stack_entry(&mut state, 19_960, PlayerId(0));
+    state.auto_pass.insert(
+        PlayerId(1),
+        AutoPassMode::UntilStackEmpty {
+            initial_stack_len: 1,
+            policy: StackResolutionPolicy::Committed,
+        },
+    );
+
+    let result = apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilStackEmpty,
+        },
+    );
+
+    assert!(result.is_ok(), "reach guard: {result:?}");
+    assert!(state.stack.is_empty(), "reach guard: the entry resolved");
+    assert!(
+        state.stack_resolution_session.is_none(),
+        "reach guard: the session ended on this pass"
+    );
+    assert!(
+        state.auto_pass.is_empty(),
+        "the completed baseline preference must not survive the session's end: {:?}",
+        state.auto_pass
     );
 }

@@ -64,6 +64,7 @@ use draft_core::view::{DraftPlayerView, SharedStackPileView, SharedStackView};
 use engine::database::CardDatabase;
 use phase_ai::config::AiDifficulty;
 use phase_ai::draft_eval;
+use phase_ai::draft_guide::{self, PoolProfile};
 use phase_ai::winston_eval::{
     draft_progress, valuate_turn, CardContext, ColorPassTally, DraftCardFacts, OpponentRead,
     WinstonStrategy, WinstonTurn,
@@ -75,6 +76,17 @@ use rand::Rng;
 /// pick-and-pass bot: one authority for "which colours is this pile of cards
 /// in", one convention for when it has seen enough to answer.
 const MIN_POOL_COLOR_SAMPLE: usize = 3;
+
+/// Whether a bot's pick is adjusted by the built-in draft guides
+/// ([`phase_ai::draft_guide`]). A guide only changes picks of cards from the sets
+/// it covers, and only for the difficulties that run the evaluation scorer
+/// (Medium and above); VeryEasy and Easy keep their random / rarity pick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PickEnhancement {
+    #[default]
+    Off,
+    DraftGuides,
+}
 
 /// Select a card index from the pack for a bot to pick.
 ///
@@ -93,6 +105,7 @@ pub fn bot_pick(
     difficulty: AiDifficulty,
     prior_picks: &[DraftCardInstance],
     card_db: Option<&CardDatabase>,
+    enhancement: PickEnhancement,
     rng: &mut impl Rng,
 ) -> usize {
     if pack.is_empty() {
@@ -103,10 +116,10 @@ pub fn bot_pick(
         AiDifficulty::VeryEasy => rng.random_range(0..pack.len()),
         AiDifficulty::Easy => pick_by_rarity(pack),
         AiDifficulty::Medium | AiDifficulty::Hard => {
-            pick_by_evaluation(pack, prior_picks, card_db, false)
+            pick_by_evaluation(pack, prior_picks, card_db, enhancement, false)
         }
         AiDifficulty::VeryHard | AiDifficulty::CEDH => {
-            pick_by_evaluation(pack, prior_picks, card_db, true)
+            pick_by_evaluation(pack, prior_picks, card_db, enhancement, true)
         }
     }
 }
@@ -126,6 +139,7 @@ pub fn bot_picks(
     difficulty: AiDifficulty,
     prior_picks: &[DraftCardInstance],
     card_db: Option<&CardDatabase>,
+    enhancement: PickEnhancement,
     rng: &mut impl Rng,
 ) -> Vec<usize> {
     // Candidates carry their original index so the caller can map back to
@@ -140,7 +154,14 @@ pub fn bot_picks(
     let mut picked = Vec::with_capacity(count.min(candidates.len()));
 
     for _ in 0..count.min(pack.len()) {
-        let position = bot_pick(&candidates, difficulty, prior_picks, card_db, rng);
+        let position = bot_pick(
+            &candidates,
+            difficulty,
+            prior_picks,
+            card_db,
+            enhancement,
+            rng,
+        );
         candidates.swap_remove(position);
         picked.push(original_indices.swap_remove(position));
     }
@@ -196,6 +217,7 @@ fn pick_by_evaluation(
     pack: &[DraftCardInstance],
     prior_picks: &[DraftCardInstance],
     card_db: Option<&CardDatabase>,
+    enhancement: PickEnhancement,
     strict: bool,
 ) -> usize {
     let card_db = match card_db {
@@ -210,6 +232,11 @@ fn pick_by_evaluation(
     let on_color_bonus: f64 = if strict { 6.0 } else { 4.0 };
     let off_color_penalty: f64 = if strict { -2.0 } else { 0.0 };
 
+    let guide_pool = match enhancement {
+        PickEnhancement::Off => None,
+        PickEnhancement::DraftGuides => Some(pool_profile(prior_picks, card_db)),
+    };
+
     pack.iter()
         .enumerate()
         .max_by(|(_, a), (_, b)| {
@@ -220,6 +247,7 @@ fn pick_by_evaluation(
                 pick_number,
                 on_color_bonus,
                 off_color_penalty,
+                guide_pool.as_ref(),
             );
             let score_b = eval_score(
                 b,
@@ -228,6 +256,7 @@ fn pick_by_evaluation(
                 pick_number,
                 on_color_bonus,
                 off_color_penalty,
+                guide_pool.as_ref(),
             );
             score_a
                 .partial_cmp(&score_b)
@@ -246,6 +275,7 @@ fn eval_score(
     pick_number: u8,
     on_color_bonus: f64,
     off_color_penalty: f64,
+    guide_pool: Option<&PoolProfile>,
 ) -> f64 {
     let base = card_quality(card, Some(card_db));
 
@@ -261,7 +291,35 @@ fn eval_score(
 
     let curve = curve_bonus(card.cmc, pick_number) as f64;
 
-    base + color_bonus + curve
+    base + color_bonus + curve + guide_bonus(card, card_db, guide_pool)
+}
+
+/// The built-in draft guide's adjustment for `card`, or zero when enhancements
+/// are off, no guide covers the card's set, or the card face is unknown.
+fn guide_bonus(
+    card: &DraftCardInstance,
+    card_db: &CardDatabase,
+    guide_pool: Option<&PoolProfile>,
+) -> f64 {
+    let Some(pool) = guide_pool else {
+        return 0.0;
+    };
+    let (Some(guide), Some(face)) = (
+        draft_guide::guide_for_set(&card.set_code),
+        card_db.get_face_by_name(&card.name),
+    ) else {
+        return 0.0;
+    };
+    guide.bonus(&card.set_code, &card.colors, face, pool)
+}
+
+/// What the bot's pool already holds, for the guide's pool-aware terms.
+fn pool_profile(prior_picks: &[DraftCardInstance], card_db: &CardDatabase) -> PoolProfile {
+    let mut pool = PoolProfile::default();
+    for pick in prior_picks {
+        pool.add(card_db.get_face_by_name(&pick.name));
+    }
+    pool
 }
 
 /// Intrinsic card quality: the engine-data evaluator ([`draft_eval::evaluate_draft_card`])
@@ -686,7 +744,14 @@ mod tests {
         let mut rng = ChaCha20Rng::seed_from_u64(1);
         for _ in 0..200 {
             assert_eq!(
-                bot_pick(&pack, AiDifficulty::Medium, &prior, None, &mut rng),
+                bot_pick(
+                    &pack,
+                    AiDifficulty::Medium,
+                    &prior,
+                    None,
+                    PickEnhancement::Off,
+                    &mut rng
+                ),
                 0,
                 "the on-color card must win, every time"
             );
@@ -698,7 +763,14 @@ mod tests {
         let short = vec![colored("Prior W1", &["W"]), colored("Prior W2", &["W"])];
         assert!(color_preference(&short).is_empty());
         assert_eq!(
-            bot_pick(&pack, AiDifficulty::Medium, &short, None, &mut rng),
+            bot_pick(
+                &pack,
+                AiDifficulty::Medium,
+                &short,
+                None,
+                PickEnhancement::Off,
+                &mut rng
+            ),
             1
         );
     }
@@ -864,6 +936,102 @@ mod tests {
         }
     }
 
+    // ── The draft-guide enhancement, joined to the production pick ───────────
+
+    /// Skullclamp (a name the Mirrodin-block guide rates highest) beside an
+    /// unlisted removal spell, printed in `set_code`. Removal outranks a
+    /// colourless one-mana equipment on the base heuristic; the guide flips it.
+    fn guide_contest(set_code: &str) -> (CardDatabase, Vec<DraftCardInstance>) {
+        let skullclamp = CardFace {
+            mana_cost: ManaCost::generic(1),
+            card_type: CardType {
+                core_types: vec![CoreType::Artifact],
+                subtypes: vec!["Equipment".to_string()],
+                ..Default::default()
+            },
+            ..named_face("Skullclamp", vec![CoreType::Artifact])
+        };
+        let removal = CardFace {
+            mana_cost: ManaCost::generic(2),
+            abilities: vec![destroy_ability()],
+            ..named_face("Unlisted Removal", vec![CoreType::Instant])
+        };
+        let entries: serde_json::Map<String, serde_json::Value> = [skullclamp, removal]
+            .into_iter()
+            .map(|face| {
+                (
+                    face.name.to_lowercase(),
+                    serde_json::to_value(&face).expect("a face serializes"),
+                )
+            })
+            .collect();
+        let db = CardDatabase::from_json_str(&serde_json::Value::Object(entries).to_string())
+            .expect("the fixture export loads");
+
+        let printed = |name: &str, id: &str, cmc: u8| DraftCardInstance {
+            instance_id: id.to_string(),
+            name: name.to_string(),
+            set_code: set_code.to_string(),
+            collector_number: "1".to_string(),
+            rarity: "common".to_string(),
+            colors: Vec::new(),
+            cmc,
+            type_line: String::new(),
+            draft_effect: None,
+        };
+        (
+            db,
+            vec![
+                printed("Unlisted Removal", "removal", 2),
+                printed("Skullclamp", "clamp", 1),
+            ],
+        )
+    }
+
+    fn pick_name(
+        pack: &[DraftCardInstance],
+        db: &CardDatabase,
+        enhancement: PickEnhancement,
+    ) -> String {
+        let mut rng = ChaCha20Rng::seed_from_u64(1);
+        let index = bot_pick(
+            pack,
+            AiDifficulty::Medium,
+            &[],
+            Some(db),
+            enhancement,
+            &mut rng,
+        );
+        pack[index].name.clone()
+    }
+
+    #[test]
+    fn draft_guides_change_the_production_pick_in_a_guided_set() {
+        for set_code in ["MRD", "DST", "5DN"] {
+            let (db, pack) = guide_contest(set_code);
+            assert_eq!(
+                pick_name(&pack, &db, PickEnhancement::Off),
+                "Unlisted Removal",
+                "{set_code}: the base heuristic prefers the removal spell",
+            );
+            assert_eq!(
+                pick_name(&pack, &db, PickEnhancement::DraftGuides),
+                "Skullclamp",
+                "{set_code}: the guide's top-rated card wins when enabled",
+            );
+        }
+    }
+
+    #[test]
+    fn draft_guides_do_nothing_outside_the_sets_they_cover() {
+        // Cube cards are all printed as set "CUBE", which no guide covers.
+        let (db, pack) = guide_contest("CUBE");
+        assert_eq!(
+            pick_name(&pack, &db, PickEnhancement::DraftGuides),
+            pick_name(&pack, &db, PickEnhancement::Off),
+        );
+    }
+
     fn fixture_card(name: &str, id: &str) -> DraftCardInstance {
         fixture_instance(name, id.to_string())
     }
@@ -896,6 +1064,9 @@ mod tests {
 
     fn winston_session(pod_size: u8, rng_seed: u64, bot_seats: &[u8]) -> DraftSession {
         let config = DraftConfig {
+            flow: draft_core::types::DraftFlow::LegacyBarrier,
+            selection_policy: draft_core::types::DraftSelectionPolicy::default(),
+            clock_policy: draft_core::types::DraftClockPolicy::default(),
             source: DraftSource::single_set("TST".to_string()),
             set_code: "TST".to_string(),
             kind: DraftKind::Winston,
@@ -1711,31 +1882,74 @@ mod tests {
         let cards = pack(14);
         let mut rng = ChaCha20Rng::seed_from_u64(42);
 
-        let picked = bot_picks(&cards, 2, AiDifficulty::Medium, &[], None, &mut rng);
+        let picked = bot_picks(
+            &cards,
+            2,
+            AiDifficulty::Medium,
+            &[],
+            None,
+            PickEnhancement::Off,
+            &mut rng,
+        );
         assert_eq!(picked.len(), 2);
         assert_ne!(picked[0], picked[1], "a bot cannot draft one card twice");
         assert!(picked.iter().all(|index| *index < cards.len()));
 
         // Clamped: a count larger than the pack yields every index exactly once.
         let small = pack(1);
-        let clamped = bot_picks(&small, 2, AiDifficulty::Medium, &[], None, &mut rng);
+        let clamped = bot_picks(
+            &small,
+            2,
+            AiDifficulty::Medium,
+            &[],
+            None,
+            PickEnhancement::Off,
+            &mut rng,
+        );
         assert_eq!(clamped, vec![0]);
 
         // Degenerate counts.
-        assert!(bot_picks(&cards, 0, AiDifficulty::Medium, &[], None, &mut rng).is_empty());
-        assert!(bot_picks(&[], 2, AiDifficulty::Medium, &[], None, &mut rng).is_empty());
+        assert!(bot_picks(
+            &cards,
+            0,
+            AiDifficulty::Medium,
+            &[],
+            None,
+            PickEnhancement::Off,
+            &mut rng
+        )
+        .is_empty());
+        assert!(bot_picks(
+            &[],
+            2,
+            AiDifficulty::Medium,
+            &[],
+            None,
+            PickEnhancement::Off,
+            &mut rng
+        )
+        .is_empty());
 
         // The single-card case must still agree with `bot_pick` itself, since
         // that is the path every existing kind takes.
         let mut rng_a = ChaCha20Rng::seed_from_u64(7);
         let mut rng_b = ChaCha20Rng::seed_from_u64(7);
         assert_eq!(
-            bot_picks(&cards, 1, AiDifficulty::Medium, &[], None, &mut rng_a),
+            bot_picks(
+                &cards,
+                1,
+                AiDifficulty::Medium,
+                &[],
+                None,
+                PickEnhancement::Off,
+                &mut rng_a
+            ),
             vec![bot_pick(
                 &cards,
                 AiDifficulty::Medium,
                 &[],
                 None,
+                PickEnhancement::Off,
                 &mut rng_b
             )]
         );

@@ -384,6 +384,7 @@ fn activated_reader_reads_its_cast_cost_pile_after_its_source_leaves() {
         .act(GameAction::ActivateAbility {
             source_id: keeper,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate the reader");
     assert_eq!(runner.state().stack.len(), 1);
@@ -573,6 +574,7 @@ fn cancelled_activation_keeps_the_permanents_cast_cost_pile() {
         .act(GameAction::ActivateAbility {
             source_id: keeper,
             ability_index: 1,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate {1}: Tap target creature.");
     // Reach guard: CR 601.2c + CR 602.2b — targets precede costs, so the
@@ -923,11 +925,9 @@ fn cancelled_gorex_cast_pile_does_not_reach_the_next_cast() {
     runner.cast(gorex).decline_optional().resolve();
     // Reach guard: the recast resolved into a permanent that attacks.
     assert_eq!(zone(&runner, gorex), Zone::Battlefield);
-    // Reach guard for the pile check: A is still in exile, so an empty pile
-    // means the link ended. Today the cancel leaves A in exile, a known CR 733.1
-    // gap (this PR's Known gaps); the phase that returns cancelled cost
-    // payments changes this line.
-    assert_eq!(zone(&runner, a), Zone::Exile);
+    // CR 733.1: the cancel reverses the cast and cancels its payments, so A is
+    // back in the graveyard and no cost link survives for the recast.
+    assert_eq!(zone(&runner, a), Zone::Graveyard);
     assert!(
         linked_pile(&runner, gorex).is_empty(),
         "CR 733.1: the cancelled cast's cost link does not reach the recast permanent"

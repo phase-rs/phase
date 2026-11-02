@@ -1,12 +1,14 @@
 use crate::game::filter::{
-    matches_target_filter, matches_target_filter_in_owner_zone, FilterContext,
+    matches_target_filter, matches_target_filter_in_owner_zone, objects_have_common_quality_value,
+    FilterContext,
 };
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::static_abilities::prohibition_scope_matches_player;
 use crate::types::ability::{
     Effect, EffectError, EffectKind, LibraryPosition, ParentTargetMissingReason, QuantityExpr,
-    ResolvedAbility, SearchOrderingHint, SearchSelectionConstraint, SharedQuality, SubAbilityLink,
-    TargetFilter, TargetRef,
+    ResolvedAbility, SearchOrderingHint, SearchSelectionConstraint, SharedQuality,
+    SharedQualityRelation, SubAbilityLink, TargetFilter, TargetRef,
 };
 use crate::types::card_type::is_land_subtype;
 use crate::types::events::{GameEvent, PlayerActionKind};
@@ -158,6 +160,20 @@ fn library_search_top_limit(state: &GameState, searcher_id: PlayerId) -> Option<
         .min()
 }
 
+/// CR 701.23a + CR 608.2d: Each found card must be a distinct object from
+/// the offered search pool. Empty selections are structurally valid; callers
+/// separately enforce count policy, printed constraints, and scoped liveness.
+/// Borrows the selections without allocating or changing their delivery order.
+pub(crate) fn selection_is_distinct_subset(
+    chosen: &[crate::types::identifiers::ObjectId],
+    offered: &[crate::types::identifiers::ObjectId],
+) -> bool {
+    chosen
+        .iter()
+        .enumerate()
+        .all(|(index, id)| offered.contains(id) && !chosen[..index].contains(id))
+}
+
 /// CR 608.2c: Validate a chosen card-id set against the search-selection
 /// constraint propagated from `Effect::SearchLibrary.selection_constraint`.
 /// Centralized here so the resolver, the engine submission guard, and the AI
@@ -170,9 +186,20 @@ pub fn selection_satisfies_constraint(
 ) -> bool {
     match constraint {
         SearchSelectionConstraint::None => true,
-        SearchSelectionConstraint::DistinctQualities { qualities } => qualities
-            .iter()
-            .all(|quality| selection_has_distinct_quality(state, chosen, quality)),
+        SearchSelectionConstraint::SharesQualities {
+            qualities,
+            relation,
+        } => qualities.iter().all(|quality| match relation {
+            SharedQualityRelation::DoesNotShare => {
+                selection_has_distinct_quality(state, chosen, quality)
+            }
+            // CR 608.2d + CR 701.23a: "cards that share a <quality>" — the chosen
+            // set must have a value in common (CR 205.3i land types for Myriad
+            // Landscape); one or zero cards is a legal partial find (CR 701.23b).
+            SharedQualityRelation::Shares => {
+                objects_have_common_quality_value(state, chosen, quality)
+            }
+        }),
         SearchSelectionConstraint::TotalManaValue { comparator, value } => {
             let mut total = 0;
             for id in chosen {
@@ -388,6 +415,7 @@ pub(crate) struct PreparedEffectiveSearch {
 /// continuation path places the complete selected set on top and no later
 /// instruction destroys that order.
 pub(crate) fn search_ordering_hint(
+    state: &GameState,
     ability: &ResolvedAbility,
     selection_limit: usize,
 ) -> SearchOrderingHint {
@@ -395,6 +423,7 @@ pub(crate) fn search_ordering_hint(
         return SearchOrderingHint::Unordered;
     };
     let outcomes = search_ordering_outcomes(
+        state,
         continuation,
         SearchDisposition {
             selected_targets_bound: true,
@@ -468,45 +497,53 @@ fn known_shuffle_player(ability: &ResolvedAbility, target: &TargetFilter) -> Opt
 }
 
 fn search_ordering_outcomes(
+    state: &GameState,
     current: &ResolvedAbility,
     incoming: SearchDisposition,
 ) -> Vec<SearchDisposition> {
     if current.condition.is_some() {
-        let mut outcomes = search_ordering_after_condition(current, incoming);
-        outcomes.extend(condition_false_search_ordering_outcomes(current, incoming));
+        let mut outcomes = search_ordering_after_condition(state, current, incoming);
+        outcomes.extend(condition_false_search_ordering_outcomes(
+            state, current, incoming,
+        ));
         return outcomes;
     }
-    search_ordering_after_condition(current, incoming)
+    search_ordering_after_condition(state, current, incoming)
 }
 
 fn search_ordering_after_condition(
+    state: &GameState,
     current: &ResolvedAbility,
     incoming: SearchDisposition,
 ) -> Vec<SearchDisposition> {
     if current.optional {
-        let mut outcomes = search_ordering_after_optional(current, incoming);
-        outcomes.extend(optional_decline_search_ordering_outcomes(current, incoming));
+        let mut outcomes = search_ordering_after_optional(state, current, incoming);
+        outcomes.extend(optional_decline_search_ordering_outcomes(
+            state, current, incoming,
+        ));
         if current.optional_for.is_some() {
             outcomes.push(incoming);
         }
         return outcomes;
     }
-    search_ordering_after_optional(current, incoming)
+    search_ordering_after_optional(state, current, incoming)
 }
 
 fn search_ordering_after_optional(
+    state: &GameState,
     current: &ResolvedAbility,
     incoming: SearchDisposition,
 ) -> Vec<SearchDisposition> {
     if current.unless_pay.is_some() {
-        let mut outcomes = executed_search_ordering_outcomes(current, incoming);
+        let mut outcomes = executed_search_ordering_outcomes(state, current, incoming);
         outcomes.push(incoming);
         return outcomes;
     }
-    executed_search_ordering_outcomes(current, incoming)
+    executed_search_ordering_outcomes(state, current, incoming)
 }
 
 fn executed_search_ordering_outcomes(
+    state: &GameState,
     current: &ResolvedAbility,
     mut disposition: SearchDisposition,
 ) -> Vec<SearchDisposition> {
@@ -521,6 +558,7 @@ fn executed_search_ordering_outcomes(
             target,
             count,
             position,
+            arranger: _,
         } if disposition.selected_targets_bound => {
             let places_all_selected = match count {
                 QuantityExpr::Fixed { value: 0 } => true,
@@ -562,40 +600,43 @@ fn executed_search_ordering_outcomes(
         _ => {}
     }
 
-    continue_search_ordering(current.sub_ability.as_deref(), disposition)
+    continue_search_ordering(state, current.sub_ability.as_deref(), disposition)
 }
 
 fn condition_false_search_ordering_outcomes(
+    state: &GameState,
     current: &ResolvedAbility,
     incoming: SearchDisposition,
 ) -> Vec<SearchDisposition> {
     if let Some(branch) = current.else_ability.as_deref() {
-        return continue_search_ordering(Some(branch), incoming);
+        return continue_search_ordering(state, Some(branch), incoming);
     }
     if let Some(sub) = current.sub_ability.as_deref() {
         if super::sub_outlives_false_parent_gate(sub)
             || (sub.sub_link == SubAbilityLink::SequentialSibling && sub.condition.is_none())
         {
-            return continue_search_ordering(Some(sub), incoming);
+            return continue_search_ordering(state, Some(sub), incoming);
         }
     }
     vec![incoming]
 }
 
 fn optional_decline_search_ordering_outcomes(
+    state: &GameState,
     current: &ResolvedAbility,
     mut incoming: SearchDisposition,
 ) -> Vec<SearchDisposition> {
-    let Some(branch) = super::optional_decline_branch(current) else {
+    let Some(branch) = super::optional_decline_branch(state, current) else {
         return vec![incoming];
     };
     incoming.selected_targets_bound = incoming.selected_targets_bound
         && super::can_inherit_parent_targets(&branch)
         && super::effect_refs_parent_target(&branch.effect);
-    search_ordering_outcomes(&branch, incoming)
+    search_ordering_outcomes(state, &branch, incoming)
 }
 
 fn continue_search_ordering(
+    state: &GameState,
     next: Option<&ResolvedAbility>,
     mut disposition: SearchDisposition,
 ) -> Vec<SearchDisposition> {
@@ -604,7 +645,7 @@ fn continue_search_ordering(
     };
     disposition.selected_targets_bound =
         disposition.selected_targets_bound && super::can_inherit_parent_targets(next);
-    search_ordering_outcomes(next, disposition)
+    search_ordering_outcomes(state, next, disposition)
 }
 
 /// CR 701.23a + CR 701.23i: compute one effective search from immutable game
@@ -746,7 +787,7 @@ pub(crate) fn prepare_effective_search(
         })
         .transpose()
         .map_err(|error| EffectError::InvalidParam(error.to_string()))?;
-    let hidden_event = has_hidden_view.then(|| GameEvent::HiddenSearchViewed {
+    let hidden_event = has_hidden_view.then_some(GameEvent::HiddenSearchViewed {
         searcher,
         cards: viewed_cards,
         audience: learned_audience,
@@ -764,7 +805,7 @@ pub(crate) fn prepare_effective_search(
         split,
         active_search,
         hidden_event,
-        ordering_hint: search_ordering_hint(ability, count),
+        ordering_hint: search_ordering_hint(state, ability, count),
         decision: ActiveSearchDecisionControl {
             searcher,
             searched_zone_owner,
@@ -877,6 +918,65 @@ mod tests {
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
+    #[test]
+    fn distinct_subset_accepts_only_distinct_offered_objects_without_reordering() {
+        let mut state = GameState::new_two_player(42);
+        let a = add_library_creature(&mut state, 1, PlayerId(0), "Same name");
+        let b = add_library_creature(&mut state, 2, PlayerId(0), "Same name");
+        let c = add_library_creature(&mut state, 3, PlayerId(0), "Third");
+        let foreign = add_library_creature(&mut state, 4, PlayerId(1), "Same name");
+        let offered = [a, b, c];
+        assert!(selection_is_distinct_subset(&[], &[]));
+        assert!(selection_is_distinct_subset(&[], &offered));
+        let chosen = [c, a, b];
+        assert!(selection_is_distinct_subset(&chosen, &offered));
+        for invalid in [vec![a, a], vec![a, b, a], vec![a, foreign]] {
+            assert!(!selection_is_distinct_subset(&invalid, &offered));
+        }
+        assert!(!selection_is_distinct_subset(&[a], &[]));
+    }
+
+    /// Supplemental typed producer, not a real-card support claim.
+    #[test]
+    fn ordinary_submission_retains_printed_constraint_after_structural_validation() {
+        use crate::game::engine::{apply_as_current, EngineError};
+        use crate::types::actions::GameAction;
+        let mut state = GameState::new_two_player(42);
+        let a = add_library_creature_with_cmc(&mut state, 1, PlayerId(0), "Small", 2);
+        let b = add_library_creature_with_cmc(&mut state, 2, PlayerId(0), "Mid", 4);
+        let c = add_library_creature_with_cmc(&mut state, 3, PlayerId(0), "Large", 5);
+        let mut search = make_search_ability(TargetFilter::Any, 2);
+        let Effect::SearchLibrary {
+            selection_constraint,
+            ..
+        } = &mut search.effect
+        else {
+            unreachable!()
+        };
+        *selection_constraint = SearchSelectionConstraint::TotalManaValue {
+            comparator: Comparator::LE,
+            value: 6,
+        };
+        resolve(&mut state, &search, &mut Vec::new()).unwrap();
+        let WaitingFor::SearchChoice { cards, .. } = &state.waiting_for else {
+            panic!("typed producer must prompt")
+        };
+        assert!(selection_is_distinct_subset(&[a, c], cards));
+        let before = serde_json::to_value(&state).unwrap();
+        // CR 608.2c: structural legality does not override a printed set constraint.
+        assert!(matches!(
+            apply_as_current(&mut state, GameAction::SelectCards { cards: vec![a, c] }),
+            Err(EngineError::InvalidAction(_))
+        ));
+        assert_eq!(serde_json::to_value(&state).unwrap(), before);
+        apply_as_current(&mut state, GameAction::SelectCards { cards: vec![a, b] }).unwrap();
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert!(state.active_library_searches.is_empty());
+        assert!([a, b, c]
+            .iter()
+            .all(|id| state.objects[id].zone == Zone::Library));
+    }
+
     /// CR 701.23a + CR 701.23b + CR 608.2c: Completion without candidates
     /// publishes a missing object even when the synchronous search has a split destination.
     #[test]
@@ -972,11 +1072,13 @@ mod tests {
 
     #[test]
     fn ordering_hint_accepts_fixed_one_for_a_one_card_search() {
+        let state = GameState::new_two_player(42);
         let top = ResolvedAbility::new(
             Effect::PutAtLibraryPosition {
                 target: TargetFilter::Any,
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
+                arranger: None,
             },
             vec![],
             ObjectId(100),
@@ -985,18 +1087,20 @@ mod tests {
         let search = make_search_ability(TargetFilter::Any, 1).sub_ability(top);
 
         assert_eq!(
-            search_ordering_hint(&search, 1),
+            search_ordering_hint(&state, &search, 1),
             SearchOrderingHint::OrderedToLibraryTop
         );
     }
 
     #[test]
     fn ordering_hint_accepts_fixed_two_for_a_two_card_search() {
+        let state = GameState::new_two_player(42);
         let top = ResolvedAbility::new(
             Effect::PutAtLibraryPosition {
                 target: TargetFilter::Any,
                 count: QuantityExpr::Fixed { value: 2 },
                 position: LibraryPosition::Top,
+                arranger: None,
             },
             vec![],
             ObjectId(100),
@@ -1005,18 +1109,20 @@ mod tests {
         let search = make_search_ability(TargetFilter::Any, 2).sub_ability(top);
 
         assert_eq!(
-            search_ordering_hint(&search, 2),
+            search_ordering_hint(&state, &search, 2),
             SearchOrderingHint::OrderedToLibraryTop
         );
     }
 
     #[test]
     fn ordering_hint_rejects_fixed_one_for_a_two_card_search() {
+        let state = GameState::new_two_player(42);
         let top = ResolvedAbility::new(
             Effect::PutAtLibraryPosition {
                 target: TargetFilter::Any,
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
+                arranger: None,
             },
             vec![],
             ObjectId(100),
@@ -1025,18 +1131,20 @@ mod tests {
         let search = make_search_ability(TargetFilter::Any, 2).sub_ability(top);
 
         assert_eq!(
-            search_ordering_hint(&search, 2),
+            search_ordering_hint(&state, &search, 2),
             SearchOrderingHint::Unordered
         );
     }
 
     #[test]
     fn ordering_hint_requires_every_branch_to_order_selected_cards_on_top() {
+        let state = GameState::new_two_player(42);
         let bottom = ResolvedAbility::new(
             Effect::PutAtLibraryPosition {
                 target: TargetFilter::Any,
                 count: QuantityExpr::Fixed { value: 0 },
                 position: LibraryPosition::Bottom,
+                arranger: None,
             },
             vec![],
             ObjectId(100),
@@ -1047,6 +1155,7 @@ mod tests {
                 target: TargetFilter::Any,
                 count: QuantityExpr::Fixed { value: 0 },
                 position: LibraryPosition::Top,
+                arranger: None,
             },
             vec![],
             ObjectId(100),
@@ -1057,18 +1166,20 @@ mod tests {
         let search = make_search_ability(TargetFilter::Any, 2).sub_ability(conditional_top);
 
         assert_eq!(
-            search_ordering_hint(&search, 2),
+            search_ordering_hint(&state, &search, 2),
             SearchOrderingHint::Unordered
         );
     }
 
     #[test]
     fn ordering_hint_accepts_when_every_branch_orders_selected_cards_on_top() {
+        let state = GameState::new_two_player(42);
         let else_top = ResolvedAbility::new(
             Effect::PutAtLibraryPosition {
                 target: TargetFilter::Any,
                 count: QuantityExpr::Fixed { value: 0 },
                 position: LibraryPosition::Top,
+                arranger: None,
             },
             vec![],
             ObjectId(100),
@@ -1080,13 +1191,14 @@ mod tests {
         let search = make_search_ability(TargetFilter::Any, 2).sub_ability(conditional_top);
 
         assert_eq!(
-            search_ordering_hint(&search, 2),
+            search_ordering_hint(&state, &search, 2),
             SearchOrderingHint::OrderedToLibraryTop
         );
     }
 
     #[test]
     fn ordering_hint_preserves_top_order_across_unrelated_optional_instruction() {
+        let state = GameState::new_two_player(42);
         let mut optional_life = ResolvedAbility::new(
             Effect::GainLife {
                 amount: QuantityExpr::Fixed { value: 1 },
@@ -1102,6 +1214,7 @@ mod tests {
                 target: TargetFilter::Any,
                 count: QuantityExpr::Fixed { value: 0 },
                 position: LibraryPosition::Top,
+                arranger: None,
             },
             vec![],
             ObjectId(100),
@@ -1111,18 +1224,20 @@ mod tests {
         let search = make_search_ability(TargetFilter::Any, 2).sub_ability(top);
 
         assert_eq!(
-            search_ordering_hint(&search, 2),
+            search_ordering_hint(&state, &search, 2),
             SearchOrderingHint::OrderedToLibraryTop
         );
     }
 
     #[test]
     fn ordering_hint_is_unordered_when_unless_payment_skips_ordering_chain() {
+        let state = GameState::new_two_player(42);
         let mut top = ResolvedAbility::new(
             Effect::PutAtLibraryPosition {
                 target: TargetFilter::Any,
                 count: QuantityExpr::Fixed { value: 0 },
                 position: LibraryPosition::Top,
+                arranger: None,
             },
             vec![],
             ObjectId(100),
@@ -1148,18 +1263,20 @@ mod tests {
         let search = make_search_ability(TargetFilter::Any, 2).sub_ability(guarded);
 
         assert_eq!(
-            search_ordering_hint(&search, 2),
+            search_ordering_hint(&state, &search, 2),
             SearchOrderingHint::Unordered
         );
     }
 
     #[test]
     fn ordering_hint_accounts_for_optional_decline_after_condition_succeeds() {
+        let state = GameState::new_two_player(42);
         let else_top = ResolvedAbility::new(
             Effect::PutAtLibraryPosition {
                 target: TargetFilter::Any,
                 count: QuantityExpr::Fixed { value: 0 },
                 position: LibraryPosition::Top,
+                arranger: None,
             },
             vec![],
             ObjectId(100),
@@ -1173,18 +1290,20 @@ mod tests {
             make_search_ability(TargetFilter::Any, 2).sub_ability(conditional_optional_top);
 
         assert_eq!(
-            search_ordering_hint(&search, 2),
+            search_ordering_hint(&state, &search, 2),
             SearchOrderingHint::Unordered
         );
     }
 
     #[test]
     fn ordering_hint_requires_optional_else_to_inherit_selected_targets() {
+        let state = GameState::new_two_player(42);
         let top = ResolvedAbility::new(
             Effect::PutAtLibraryPosition {
                 target: TargetFilter::Any,
                 count: QuantityExpr::Fixed { value: 0 },
                 position: LibraryPosition::Top,
+                arranger: None,
             },
             vec![],
             ObjectId(100),
@@ -1205,18 +1324,20 @@ mod tests {
         let search = make_search_ability(TargetFilter::Any, 2).sub_ability(optional);
 
         assert_eq!(
-            search_ordering_hint(&search, 2),
+            search_ordering_hint(&state, &search, 2),
             SearchOrderingHint::Unordered
         );
     }
 
     #[test]
     fn ordering_hint_tracks_selected_cards_final_linear_placement() {
+        let state = GameState::new_two_player(42);
         let bottom = ResolvedAbility::new(
             Effect::PutAtLibraryPosition {
                 target: TargetFilter::Any,
                 count: QuantityExpr::Fixed { value: 0 },
                 position: LibraryPosition::Bottom,
+                arranger: None,
             },
             vec![],
             ObjectId(100),
@@ -1227,6 +1348,7 @@ mod tests {
                 target: TargetFilter::Any,
                 count: QuantityExpr::Fixed { value: 0 },
                 position: LibraryPosition::Top,
+                arranger: None,
             },
             vec![],
             ObjectId(100),
@@ -1236,13 +1358,14 @@ mod tests {
         let search = make_search_ability(TargetFilter::Any, 2).sub_ability(top);
 
         assert_eq!(
-            search_ordering_hint(&search, 2),
+            search_ordering_hint(&state, &search, 2),
             SearchOrderingHint::Unordered
         );
     }
 
     #[test]
     fn ordering_hint_is_unordered_when_later_shuffle_destroys_top_order() {
+        let state = GameState::new_two_player(42);
         let shuffle = ResolvedAbility::new(
             Effect::Shuffle {
                 target: TargetFilter::Controller,
@@ -1256,6 +1379,7 @@ mod tests {
                 target: TargetFilter::Any,
                 count: QuantityExpr::Fixed { value: 0 },
                 position: LibraryPosition::Top,
+                arranger: None,
             },
             vec![],
             ObjectId(100),
@@ -1265,13 +1389,14 @@ mod tests {
         let search = make_search_ability(TargetFilter::Any, 2).sub_ability(top);
 
         assert_eq!(
-            search_ordering_hint(&search, 2),
+            search_ordering_hint(&state, &search, 2),
             SearchOrderingHint::Unordered
         );
     }
 
     #[test]
     fn ordering_hint_preserves_top_order_when_later_shuffle_targets_other_player() {
+        let state = GameState::new_two_player(42);
         let shuffle = ResolvedAbility::new(
             Effect::Shuffle {
                 target: TargetFilter::Opponent,
@@ -1285,6 +1410,7 @@ mod tests {
                 target: TargetFilter::Any,
                 count: QuantityExpr::Fixed { value: 0 },
                 position: LibraryPosition::Top,
+                arranger: None,
             },
             vec![],
             ObjectId(100),
@@ -1294,9 +1420,74 @@ mod tests {
         let search = make_search_ability(TargetFilter::Any, 2).sub_ability(top);
 
         assert_eq!(
-            search_ordering_hint(&search, 2),
+            search_ordering_hint(&state, &search, 2),
             SearchOrderingHint::OrderedToLibraryTop
         );
+    }
+
+    #[test]
+    fn ordering_hint_preserves_no_continuation_and_nested_search_outcomes() {
+        let state = GameState::new_two_player(42);
+        let search = make_search_ability(TargetFilter::Any, 2);
+        assert_eq!(
+            search_ordering_hint(&state, &search, 2),
+            SearchOrderingHint::Unordered
+        );
+        let top = ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::ParentTarget,
+                count: QuantityExpr::Fixed { value: 0 },
+                position: LibraryPosition::Top,
+                arranger: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        assert_eq!(
+            search_ordering_hint(&state, &search.clone().sub_ability(top.clone()), 2),
+            SearchOrderingHint::OrderedToLibraryTop
+        );
+        let nested = top.sub_ability(make_search_ability(TargetFilter::Any, 1));
+        assert_eq!(
+            search_ordering_hint(&state, &search.sub_ability(nested), 2),
+            SearchOrderingHint::Unordered
+        );
+    }
+
+    #[test]
+    fn ordering_hint_preserves_tracked_set_shuffle_but_not_searched_library_shuffle() {
+        let state = GameState::new_two_player(42);
+        let top = ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::ParentTarget,
+                count: QuantityExpr::Fixed { value: 0 },
+                position: LibraryPosition::Top,
+                arranger: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        for (target, expected) in [
+            (
+                TargetFilter::TrackedSet {
+                    id: crate::types::identifiers::TrackedSetId(0),
+                },
+                SearchOrderingHint::OrderedToLibraryTop,
+            ),
+            (TargetFilter::Controller, SearchOrderingHint::Unordered),
+        ] {
+            let shuffle = ResolvedAbility::new(
+                Effect::Shuffle { target },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            );
+            let search = make_search_ability(TargetFilter::Any, 2)
+                .sub_ability(top.clone().sub_ability(shuffle));
+            assert_eq!(search_ordering_hint(&state, &search, 2), expected);
+        }
     }
 
     fn add_library_creature(
@@ -2015,6 +2206,7 @@ mod tests {
                 target: TargetFilter::Any,
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
+                arranger: None,
             },
             vec![],
             ObjectId(100),
@@ -2720,8 +2912,9 @@ mod tests {
         state.objects.get_mut(&bear).unwrap().power = Some(2);
         state.objects.get_mut(&hound).unwrap().power = Some(2);
         state.objects.get_mut(&drake).unwrap().power = Some(3);
-        let constraint = SearchSelectionConstraint::DistinctQualities {
+        let constraint = SearchSelectionConstraint::SharesQualities {
             qualities: vec![SharedQuality::Power],
+            relation: SharedQualityRelation::DoesNotShare,
         };
 
         assert!(selection_satisfies_constraint(
@@ -2761,13 +2954,14 @@ mod tests {
             obj.mana_cost = crate::types::mana::ManaCost::generic(3);
             obj.card_types.core_types = vec![CoreType::Sorcery];
         }
-        let constraint = SearchSelectionConstraint::DistinctQualities {
+        let constraint = SearchSelectionConstraint::SharesQualities {
             qualities: vec![
                 SharedQuality::ManaValue,
                 SharedQuality::Power,
                 SharedQuality::Toughness,
                 SharedQuality::CardType,
             ],
+            relation: SharedQualityRelation::DoesNotShare,
         };
 
         assert!(selection_satisfies_constraint(
@@ -2807,18 +3001,135 @@ mod tests {
             .unwrap()
             .card_types
             .core_types = vec![CoreType::Instant];
-        let constraint = SearchSelectionConstraint::DistinctQualities {
+        let constraint = SearchSelectionConstraint::SharesQualities {
             qualities: vec![
                 SharedQuality::Power,
                 SharedQuality::Toughness,
                 SharedQuality::CardType,
             ],
+            relation: SharedQualityRelation::DoesNotShare,
         };
 
         assert!(selection_satisfies_constraint(
             &state,
             &[creature, instant],
             &constraint
+        ));
+    }
+
+    /// Library land card named `name` carrying the given land subtypes.
+    fn add_typed_library_land(
+        state: &mut GameState,
+        card_id: u64,
+        name: &str,
+        subtypes: &[&str],
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(card_id),
+            PlayerId(0),
+            name.to_string(),
+            Zone::Library,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        obj.card_types.subtypes = subtypes.iter().map(|s| s.to_string()).collect();
+        id
+    }
+
+    /// CR 608.2d + CR 701.23a + CR 205.3i: `Shares` requires one value common to
+    /// the WHOLE chosen set; `DoesNotShare` (the control) is pairwise distinct.
+    #[test]
+    fn shares_qualities_requires_a_value_common_to_every_chosen_card() {
+        let mut state = GameState::new_two_player(42);
+        let forest_a = add_typed_library_land(&mut state, 1, "Forest", &["Forest"]);
+        let forest_b = add_typed_library_land(&mut state, 2, "Forest", &["Forest"]);
+        let island = add_typed_library_land(&mut state, 3, "Island", &["Island"]);
+        let forest_island =
+            add_typed_library_land(&mut state, 4, "Forest Island", &["Forest", "Island"]);
+        let island_swamp =
+            add_typed_library_land(&mut state, 5, "Island Swamp", &["Island", "Swamp"]);
+        let swamp_forest =
+            add_typed_library_land(&mut state, 6, "Swamp Forest", &["Swamp", "Forest"]);
+        let shares = |qualities: Vec<SharedQuality>| SearchSelectionConstraint::SharesQualities {
+            qualities,
+            relation: SharedQualityRelation::Shares,
+        };
+        let does_not_share =
+            |qualities: Vec<SharedQuality>| SearchSelectionConstraint::SharesQualities {
+                qualities,
+                relation: SharedQualityRelation::DoesNotShare,
+            };
+        let land_type = shares(vec![SharedQuality::LandType]);
+
+        // Positive reach guards: a shared land type is accepted.
+        assert!(selection_satisfies_constraint(
+            &state,
+            &[forest_a, forest_b],
+            &land_type
+        ));
+        assert!(selection_satisfies_constraint(
+            &state,
+            &[forest_island, island],
+            &land_type
+        ));
+        // No land type in common.
+        assert!(!selection_satisfies_constraint(
+            &state,
+            &[forest_a, island],
+            &land_type
+        ));
+        // Pairwise overlap is not enough: each pair of the three cards shares a
+        // land type, but no land type is common to all three.
+        assert!(selection_satisfies_constraint(
+            &state,
+            &[forest_island, island_swamp],
+            &land_type
+        ));
+        assert!(!selection_satisfies_constraint(
+            &state,
+            &[forest_island, island_swamp, swamp_forest],
+            &land_type
+        ));
+        // Below two cards the restriction is vacuous (CR 701.23b partial find).
+        assert!(selection_satisfies_constraint(&state, &[], &land_type));
+        assert!(selection_satisfies_constraint(
+            &state,
+            &[island],
+            &land_type
+        ));
+        // With two or more ids, a missing object fails the group.
+        assert!(!selection_satisfies_constraint(
+            &state,
+            &[forest_a, ObjectId(9_999)],
+            &land_type
+        ));
+
+        // `DoesNotShare` control on the same objects gives the opposite answer
+        // where the two readings differ.
+        let distinct_land_type = does_not_share(vec![SharedQuality::LandType]);
+        assert!(selection_satisfies_constraint(
+            &state,
+            &[forest_a, island],
+            &distinct_land_type
+        ));
+        assert!(!selection_satisfies_constraint(
+            &state,
+            &[forest_a, forest_b],
+            &distinct_land_type
+        ));
+
+        // Two qualities: every listed quality needs its own common value.
+        let land_type_and_name = shares(vec![SharedQuality::LandType, SharedQuality::Name]);
+        assert!(selection_satisfies_constraint(
+            &state,
+            &[forest_a, forest_b],
+            &land_type_and_name
+        ));
+        assert!(!selection_satisfies_constraint(
+            &state,
+            &[forest_island, island_swamp],
+            &land_type_and_name
         ));
     }
 

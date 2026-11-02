@@ -1,6 +1,7 @@
 //! Final authority for exact object-status transitions.
 
 use crate::game::game_object::GameObject;
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::resolved_commands::{

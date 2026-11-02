@@ -168,6 +168,7 @@ fn x_mana_count_two_pays_once_and_draws_announced_x() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .unwrap();
     choose_x_and_finish_mana(&mut runner, 4);
@@ -261,6 +262,7 @@ fn x_mana_count_zero_acknowledgment_keeps_announced_x() {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .unwrap();
         choose_x_and_finish_mana(&mut runner, x);
@@ -334,6 +336,7 @@ fn x_mana_repeated_count_keeps_the_payer_after_source_sacrifice() {
                 .act(GameAction::ActivateAbility {
                     source_id: source,
                     ability_index: 0,
+                    payment_mode: CastPaymentMode::Auto,
                 })
                 .unwrap();
             choose_x_and_finish_mana(&mut runner, 4);
@@ -409,6 +412,7 @@ fn x_mana_targeted_count_keeps_target_and_records_crime_once() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .unwrap();
     assert!(matches!(
@@ -505,6 +509,7 @@ fn x_mana_count_plus_tap_refuses_before_any_sacrifice() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .unwrap();
     assert!(matches!(
@@ -571,6 +576,7 @@ fn x_mana_replacement_pause_restores_payer_and_announced_x() {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .unwrap();
         choose_x_and_finish_mana(&mut runner, 4);
@@ -711,6 +717,7 @@ fn x_mana_unsupported_siblings_refuse_before_count_payment() {
         let started = runner.act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         });
         if overlaps_count_leg {
             assert!(started.is_err(), "{label}");
@@ -769,6 +776,7 @@ fn x_mana_nested_zero_and_positive_counts_each_pay_once() {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .unwrap();
         choose_x_and_finish_mana(&mut runner, 4);
@@ -870,6 +878,7 @@ fn x_mana_count_two_after_costed_mana_source_pays_once() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .unwrap();
     assert!(matches!(
@@ -1042,6 +1051,7 @@ fn x_mana_count_preserves_announced_modal_choice() {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .unwrap();
         let mut selected_mode = false;
@@ -1128,6 +1138,7 @@ fn x_mana_pure_unresolved_one_of_keeps_its_existing_choice() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .unwrap();
     choose_x_and_finish_mana(&mut runner, 4);
@@ -1210,6 +1221,7 @@ fn x_mana_count_two_at_zero_still_pays_two_and_ignores_cast_x() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .unwrap();
     choose_x_and_finish_mana(&mut runner, 0);
@@ -1276,6 +1288,7 @@ fn x_mana_two_activations_on_one_source_keep_independent_announcements() {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .unwrap();
         choose_x_and_finish_mana(&mut runner, x);
@@ -1351,6 +1364,7 @@ fn x_mana_distinct_creature_and_land_counts_resume_in_both_orders() {
                 .act(GameAction::ActivateAbility {
                     source_id: source,
                     ability_index: 0,
+                    payment_mode: CastPaymentMode::Auto,
                 })
                 .unwrap();
             choose_x_and_finish_mana(&mut runner, 4);
@@ -1436,6 +1450,7 @@ fn x_mana_target_and_crime_survive_optional_replacement_restore() {
             .act(GameAction::ActivateAbility {
                 source_id: source,
                 ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
             })
             .unwrap();
         assert!(matches!(
@@ -1630,6 +1645,7 @@ fn x_mana_mixed_requirement_life_tap_and_exile_shapes_refuse_atomically() {
                 let started = runner.act(GameAction::ActivateAbility {
                     source_id: source,
                     ability_index: 0,
+                    payment_mode: CastPaymentMode::Auto,
                 });
                 if overlaps_count_leg {
                     assert!(started.is_err(), "{label}/{reversed}/{nested}");
@@ -1707,6 +1723,7 @@ fn run_targeted_tap_creatures_sibling(bulk: bool) {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .unwrap();
     runner.act(GameAction::ChooseX { value: 1 }).unwrap();
@@ -1841,6 +1858,7 @@ fn run_modal_symbolic_counter_sibling(targeted: bool, x: u32) {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .unwrap();
     assert!(matches!(
@@ -1973,6 +1991,7 @@ fn x_mana_modal_count_only_pays_after_mode_x_and_optional_target() {
                 .act(GameAction::ActivateAbility {
                     source_id: source,
                     ability_index: 0,
+                    payment_mode: CastPaymentMode::Auto,
                 })
                 .unwrap();
             assert!(matches!(

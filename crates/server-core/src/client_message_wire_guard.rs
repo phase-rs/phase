@@ -198,7 +198,7 @@ pub fn guard_client_message_before_dispatch(
         }),
         ClientMessage::Emote { emote } => guard_emote(emote),
         ClientMessage::SpectatorJoin { game_code } => guard_spectator_join(game_code),
-        ClientMessage::Ping { .. } => Ok(()),
+        ClientMessage::Ping { .. } | ClientMessage::ResyncState => Ok(()),
         ClientMessage::UpdateLobbyMetadata {
             game_code,
             current_players,
@@ -376,6 +376,7 @@ pub fn wire_rejection_message(msg: &ClientMessage, reason: String) -> ServerMess
         | ClientMessage::Reconnect { .. }
         | ClientMessage::AbandonGame
         | ClientMessage::ExportAuthoritativeState
+        | ClientMessage::ResyncState
         | ClientMessage::SubscribeLobby
         | ClientMessage::UnsubscribeLobby
         | ClientMessage::CreateGameWithSettings { .. }
@@ -571,6 +572,7 @@ pub fn guard_broker_projection_inbound(msg: &ClientMessage) -> Result<(), String
         | ClientMessage::PreviewInteraction { .. }
         | ClientMessage::PreviewManaPayment { .. }
         | ClientMessage::ExportAuthoritativeState
+        | ClientMessage::ResyncState
         | ClientMessage::Reconnect { .. }
         | ClientMessage::AbandonGame
         | ClientMessage::Concede

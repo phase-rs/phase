@@ -3,6 +3,8 @@ import { act } from "react";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
+const testPreparationEpoch = { current: 0, invalidate() { this.current += 1; } };
+
 // Same WebStorage shadowing workaround as HostSetup.test.tsx.
 const localStorageItems = vi.hoisted(() => {
   const items = new Map<string, string>();
@@ -42,7 +44,7 @@ vi.mock("../../../services/engineRuntime", async () => ({
 
 vi.mock("../../../services/aiDeckCatalog", async () => ({
   ...(await vi.importActual<typeof import("../../../services/aiDeckCatalog")>("../../../services/aiDeckCatalog")),
-  useAiDeckCatalog: () => ({ candidates: [], loading: false, error: null }),
+  useAiDeckCatalog: () => ({ candidates: [], allCandidates: [], loading: false, error: null }),
 }));
 
 const compat = vi.hoisted(() => ({ evaluateDeckCompatibility: vi.fn() }));
@@ -76,7 +78,7 @@ function rememberWithAiSeat(format: "Dandan" | "Standard") {
 }
 
 function renderHostSetup(onHost = vi.fn().mockResolvedValue(false)) {
-  render(<HostSetup onHost={onHost} onBack={vi.fn()} connectionMode="server" onConnectionModeChange={vi.fn()} />);
+  render(<HostSetup preparationEpoch={testPreparationEpoch} onHost={onHost} onBack={vi.fn()} connectionMode="server" onConnectionModeChange={vi.fn()} />);
   return onHost;
 }
 

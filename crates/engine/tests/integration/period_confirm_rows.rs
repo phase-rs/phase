@@ -55,6 +55,7 @@ use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
 use crate::food_chain_board::{self, BoardCMember};
+use crate::loop_period_remade_token_source::{markers, take_recorded};
 use crate::play_trace::{
     ability, activate, altar_board, cast, chooses_color, is_offer, names, place, settle,
 };
@@ -118,6 +119,7 @@ fn a_control_changed_kiki_copy_survives_its_delayed_sacrifice() {
         GameAction::ActivateAbility {
             source_id: kiki,
             ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
         },
     );
     resolve_stack(&mut runner, bears);
@@ -1199,6 +1201,7 @@ pub(crate) fn grand_architect_pili_pala(
         let untapped = runner.act(GameAction::ActivateAbility {
             source_id: pili,
             ability_index: untap,
+            payment_mode: CastPaymentMode::Auto,
         });
         if untapped.is_err() {
             break;
@@ -2382,7 +2385,10 @@ fn a_bounded_offer_or_proposal_on_the_ring_road_with_a_period_is_refused_on_relo
 }
 
 /// CR 704.5a + CR 800.4a + CR 104.2a: on four seats the Zulaport drain drops P1 and P2 together at
-/// the repetition both reach 0, and P3 at its own; a take stops at exactly what it declared.
+/// the repetition both reach 0, and P3 at its own; a take stops at exactly what it declared. Each
+/// repetition casts Gravecrawler from the graveyard (Walking Corpse is the Zombie) and sacrifices
+/// it to Phyrexian Altar, and Zulaport Cutthroat makes each opponent lose 1: from [5, 5, 7] P1 and
+/// P2 leave in repetition 5 of six, which the take's record elides but for their departures.
 #[test]
 fn an_altar_zulaport_period_on_four_seats_drops_each_seat_at_its_crossing() {
     let Some(db) = shared_card_db() else { return };
@@ -2394,13 +2400,14 @@ fn an_altar_zulaport_period_on_four_seats_drops_each_seat_at_its_crossing() {
     assert_eq!(lives(&offered)[1..], [5, 5, 7]);
 
     let mut runner = GameRunner::from_state(offered.clone());
-    let events = take(&mut runner, 6);
+    let result = take_recorded(runner.state_mut(), 6);
+    let events = &result.events;
     let six = runner.state();
     assert_eq!(eliminated(six), [P1, P2]);
     assert_eq!(six.players[3].life, 1);
     assert_eq!(six.waiting_for, WaitingFor::Priority { player: P0 });
-    assert_eq!(eliminations(&events), [P1, P2]);
-    let logged = resolve_log_entries(&events, &offered, six)
+    assert_eq!(eliminations(events), [P1, P2]);
+    let logged = resolve_log_entries(events, &offered, six)
         .iter()
         .filter(|entry| {
             entry.segments.iter().any(
@@ -2409,6 +2416,55 @@ fn an_altar_zulaport_period_on_four_seats_drops_each_seat_at_its_crossing() {
         })
         .count();
     assert_eq!(logged, 2);
+    assert_eq!(markers(events), [(P0, 1), (P0, 6)]);
+    let sixth = events
+        .iter()
+        .position(|event| {
+            *event
+                == GameEvent::ShortcutRepetition {
+                    controller: P0,
+                    repetition: 6,
+                }
+        })
+        .expect("marker 6");
+    for seat in [P1, P2] {
+        for departure in [
+            GameEvent::PlayerLost { player_id: seat },
+            GameEvent::PlayerEliminated { player_id: seat },
+        ] {
+            assert!(
+                events[..sixth].contains(&departure),
+                "{departure:?} before marker 6"
+            );
+        }
+    }
+    let line = |wanted: &str| {
+        result
+            .log_entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| {
+                entry
+                    .segments
+                    .iter()
+                    .any(|segment| matches!(segment, LogSegment::Text(text) if text == wanted))
+            })
+            .map(|(index, entry)| (index, entry.segments.last().cloned()))
+            .collect::<Vec<_>>()
+    };
+    let eliminated_lines = line(" is eliminated");
+    let marker_lines = line(" repeats the loop — repetition ");
+    assert_eq!(eliminated_lines.len(), 2);
+    assert_eq!(
+        marker_lines
+            .iter()
+            .map(|(_, last)| last.clone())
+            .collect::<Vec<_>>(),
+        [Some(LogSegment::Number(1)), Some(LogSegment::Number(6))]
+    );
+    assert!(eliminated_lines
+        .iter()
+        .all(|(index, _)| *index < marker_lines[1].0));
 
     let seven = taken(&offered, 7);
     assert_eq!(seven.waiting_for, WaitingFor::GameOver { winner: Some(P0) });
@@ -3240,10 +3296,12 @@ fn najeela_step(runner: &mut GameRunner) {
                 Some(myr) => GameAction::ActivateAbility {
                     source_id: myr,
                     ability_index: ability(state, myr, true),
+                    payment_mode: CastPaymentMode::Auto,
                 },
                 None if state.players[0].mana_pool.total() >= 5 => GameAction::ActivateAbility {
                     source_id: najeela,
                     ability_index: ability(state, najeela, false),
+                    payment_mode: CastPaymentMode::Auto,
                 },
                 None => GameAction::PassPriority,
             }
@@ -3508,9 +3566,9 @@ fn hand_term(state: &GameState) -> u32 {
     (8 - state.players[0].hand.len()) as u32
 }
 
-/// CR 504.1 + CR 704.5b: one draw a repetition, and a draw from an empty library loses.
+/// CR 504.1 + CR 704.5b: one draw a repetition, so the caster survives one per card left.
 fn library_term(state: &GameState) -> u32 {
-    state.players[0].library.len() as u32 + 1
+    state.players[0].library.len() as u32
 }
 
 /// CR 500.7 + CR 732.2a: Time Warp on its caster, returned each turn by Archaeomancer through
@@ -3688,10 +3746,10 @@ fn an_archaeomancer_time_warp_period_with_carpet_of_flowers_is_offered_and_taken
     }
 }
 
-/// CR 704.5b + CR 732.2a: with four cards in its library the caster's library binds the count, and
-/// a take decks the caster at its last draw step.
+/// CR 504.1 + CR 704.5b: when the library binds, the offer stops at the caster's last card, because
+/// a further repetition would lose the game by drawing from an empty library.
 #[test]
-fn an_archaeomancer_time_warp_take_decks_its_caster_when_the_library_binds() {
+fn an_archaeomancer_time_warp_take_stops_at_its_casters_last_card_when_the_library_binds() {
     let db = shared_card_db().expect("card db");
     let mut runner = warp_board(4, &[], LoopDetectionMode::Interactive, db);
     let turn = runner.state().turn_number;
@@ -3706,17 +3764,23 @@ fn an_archaeomancer_time_warp_take_decks_its_caster_when_the_library_binds() {
     );
     assert_eq!(n, library_term(&state));
     let events = take(&mut runner, n);
+    let after = runner.state();
+    assert!(eliminated(after).is_empty());
+    assert!(after.players[0].library.is_empty());
     assert_eq!(
-        runner.state().waiting_for,
-        WaitingFor::GameOver { winner: Some(P1) }
+        after.players[0].turns_taken,
+        state.players[0].turns_taken + n
     );
-    assert!(events.contains(&GameEvent::GameOver { winner: Some(P1) }));
+    assert!(!matches!(after.waiting_for, WaitingFor::GameOver { .. }));
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, GameEvent::GameOver { .. })));
 }
 
-/// CR 704.5b + CR 800.4a: on three seats the same take decks its caster at its last draw step and
-/// ends there, and the game goes on for the other two.
+/// CR 504.1 + CR 704.5b: on three seats the offer also stops at the caster's last card, because a
+/// further repetition would lose the game by drawing from an empty library.
 #[test]
-fn an_archaeomancer_time_warp_take_on_three_seats_decks_its_caster_and_the_game_goes_on() {
+fn an_archaeomancer_time_warp_take_on_three_seats_stops_at_its_casters_last_card() {
     let db = shared_card_db().expect("card db");
     let mut scenario = GameScenario::new_n_player(3, 42);
     scenario.with_library_top(P2, &["Island"; 25]);
@@ -3734,40 +3798,14 @@ fn an_archaeomancer_time_warp_take_on_three_seats_decks_its_caster_and_the_game_
     assert_eq!(n, library_term(&state));
     let events = take(&mut runner, n);
     let after = runner.state();
-    assert_eq!(eliminated(after), [P0]);
-    assert_eq!(eliminations(&events), [P0]);
-    let departure = events
-        .iter()
-        .position(|event| matches!(event, GameEvent::PlayerEliminated { .. }))
-        .expect("reach: the take emits the elimination");
-    let departure_turn = events[..departure]
-        .iter()
-        .rev()
-        .find_map(|event| match event {
-            GameEvent::TurnStarted {
-                player_id,
-                turn_number,
-            } => Some((*player_id, *turn_number)),
-            _ => None,
-        });
-    assert_eq!(departure_turn.map(|(seat, _)| seat), Some(P0));
-    assert_eq!(
-        (Some(after.turn_number), after.phase),
-        (departure_turn.map(|(_, turn)| turn), Phase::Draw)
-    );
-    assert!(!events[departure..]
-        .iter()
-        .any(|event| matches!(event, GameEvent::PriorityPassed { .. })));
+    assert!(eliminated(after).is_empty());
+    assert!(eliminations(&events).is_empty());
+    assert!(after.players[0].library.is_empty());
     assert_eq!(
         after.players[0].turns_taken,
         state.players[0].turns_taken + n
     );
-    assert_eq!(after.waiting_for, WaitingFor::Priority { player: P1 });
-    warp_until(&mut runner, |state| state.active_player == P2);
-    assert!(!matches!(
-        runner.state().waiting_for,
-        WaitingFor::GameOver { .. }
-    ));
+    assert!(!matches!(after.waiting_for, WaitingFor::GameOver { .. }));
 }
 
 /// Drives the Time Warp board declining every offer until `turns` turns pass or the game ends; the
@@ -4345,6 +4383,7 @@ fn assault_action(state: &GameState, drive: &mut AssaultDrive) -> GameAction {
                 GameAction::ActivateAbility {
                     source_id: sources[0],
                     ability_index: ability(state, sources[0], true),
+                    payment_mode: CastPaymentMode::Auto,
                 }
             } else {
                 drive.activated_at = Some(combats);
@@ -4352,6 +4391,7 @@ fn assault_action(state: &GameState, drive: &mut AssaultDrive) -> GameAction {
                 GameAction::ActivateAbility {
                     source_id: drive.assault,
                     ability_index: ability(state, drive.assault, false),
+                    payment_mode: CastPaymentMode::Auto,
                 }
             }
         }
@@ -5740,6 +5780,7 @@ fn in_step_activation(
     let activation = GameAction::ActivateAbility {
         source_id: source,
         ability_index: index,
+        payment_mode: CastPaymentMode::Auto,
     };
     if trial.act(activation).is_err() {
         let pass = match &runner.state().waiting_for {
@@ -6478,6 +6519,7 @@ fn a_period_fed_by_an_each_opponent_drain_is_offered_inside_its_step() {
                         GameAction::ActivateAbility {
                             source_id: ogre,
                             ability_index,
+                            payment_mode: CastPaymentMode::Auto,
                         },
                     );
                 } else {

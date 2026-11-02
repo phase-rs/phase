@@ -566,6 +566,416 @@ fn attachment_views_publish_the_whole_subtree_whatever_is_pickable() {
     );
 }
 
+/// Glacian, Powerstone Engineer's verbatim Oracle text (MTGJSON / Scryfall).
+const GLACIAN: &str = "{T}, Tap X untapped artifacts you control: Look at the top X cards of \
+                       your library. Put one of those cards into your hand and the rest into \
+                       your graveyard.\nPartner (You can have two commanders if both have \
+                       partner.)";
+/// Bonesplitter's verbatim Oracle text: an artifact Equipment (CR 301.5).
+const BONESPLITTER: &str = "Equipped creature gets +2/+0.\nEquip {1}";
+/// Spellbook's verbatim Oracle text: a plain artifact.
+const SPELLBOOK: &str = "You have no maximum hand size.";
+
+struct GlacianBoard {
+    glacian: ObjectId,
+    host: ObjectId,
+    bonesplitter: ObjectId,
+    spellbooks: Vec<ObjectId>,
+    top: ObjectId,
+    second: ObjectId,
+    deep: ObjectId,
+}
+
+/// Glacian on a board where Bonesplitter is attached to a creature and
+/// `plain_artifacts` unattached Spellbooks sit beside it, activated through
+/// production dispatch so the tap-X cost prompt is the live decision.
+fn glacian_board(plain_artifacts: usize) -> (engine::game::scenario::GameRunner, GlacianBoard) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let glacian = scenario
+        .add_creature_from_oracle(P0, "Glacian, Powerstone Engineer", 3, 6, GLACIAN)
+        .id();
+    let host = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let bonesplitter = scenario
+        .add_artifact_from_oracle(P0, "Bonesplitter", BONESPLITTER)
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let spellbooks = (0..plain_artifacts)
+        .map(|_| {
+            scenario
+                .add_artifact_from_oracle(P0, "Spellbook", SPELLBOOK)
+                .id()
+        })
+        .collect::<Vec<_>>();
+    // Each call places its card on top, so the last call is the top card.
+    let deep = scenario.add_card_to_library_top(P0, "Deep Card");
+    let second = scenario.add_card_to_library_top(P0, "Second Card");
+    let top = scenario.add_card_to_library_top(P0, "Top Card");
+    let mut runner = scenario.build();
+    let library = &runner
+        .state()
+        .players
+        .iter()
+        .find(|player| player.id == P0)
+        .expect("P0 exists")
+        .library;
+    assert_eq!(
+        library.iter().take(3).copied().collect::<Vec<_>>(),
+        vec![top, second, deep],
+        "fixture guard: P0's library begins top, second, deep"
+    );
+    attach_and_assert_linked(runner.state_mut(), bonesplitter, host);
+
+    let ability_index = runner.state().objects[&glacian]
+        .abilities
+        .iter()
+        .position(|ability| ability.kind == AbilityKind::Activated)
+        .expect("reach guard: Glacian's Oracle text parses to an activated ability");
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: glacian,
+            ability_index,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("activating Glacian surfaces its tap-X cost prompt");
+    bind(runner.state_mut(), "glacian-tap-x");
+
+    (
+        runner,
+        GlacianBoard {
+            glacian,
+            host,
+            bonesplitter,
+            spellbooks,
+            top,
+            second,
+            deep,
+        },
+    )
+}
+
+/// Asserts the live decision is Glacian's tap-X prompt with the given bounds
+/// and that the host creature — not an artifact — is not offered.
+fn assert_glacian_tap_x_prompt(state: &GameState, board: &GlacianBoard, count: usize) {
+    let WaitingFor::PayCost {
+        player,
+        kind:
+            engine::types::game_state::PayCostKind::TapCreatures {
+                mode: engine::types::ability::TapCreaturesSelectionMode::VariableX,
+            },
+        choices,
+        count: published_count,
+        min_count,
+        ..
+    } = &state.waiting_for
+    else {
+        panic!(
+            "reach guard: expected Glacian's tap-X PayCost prompt, got {:?}",
+            state.waiting_for
+        );
+    };
+    assert_eq!(*player, P0);
+    assert_eq!(
+        (*published_count, *min_count),
+        (count, 0),
+        "CR 107.3a: X ranges from zero to the number of eligible artifacts"
+    );
+    assert!(
+        choices.contains(&board.bonesplitter)
+            && board.spellbooks.iter().all(|id| choices.contains(id)),
+        "every untapped artifact, attached or not, is payable: {choices:?}"
+    );
+    assert!(
+        !choices.contains(&board.host),
+        "the equipped creature is not an artifact and is not payable"
+    );
+}
+
+/// The `Select` schema opportunity carrying the live decision.
+fn select_opportunity(
+    view: &engine::types::interaction::ViewerInteraction,
+) -> &engine::types::interaction::InteractionOpportunity {
+    view.opportunities
+        .iter()
+        .find(|opportunity| {
+            matches!(
+                opportunity.response,
+                InteractionOpportunityResponse::Schema {
+                    spec: InteractionResponseSpec::Select { .. },
+                    ..
+                }
+            )
+        })
+        .expect("the decision publishes a Select schema")
+}
+
+fn chosen_x_on_stack(state: &GameState, source: ObjectId) -> Option<u32> {
+    state
+        .stack
+        .iter()
+        .find_map(|entry| match &entry.kind {
+            engine::types::game_state::StackEntryKind::ActivatedAbility { source_id, ability }
+                if *source_id == source =>
+            {
+                Some(ability.chosen_x)
+            }
+            _ => None,
+        })
+        .expect("Glacian's ability is on the stack")
+}
+
+/// "Tap X untapped artifacts" lets the controller choose X (CR 107.3a), so the
+/// cost prompt is a multi-pick decision. An attached Equipment is one of its
+/// candidates; clicking it on the host's fan must not submit it as the whole
+/// answer. The engine therefore publishes no fan pick for it, and the
+/// Equipment is still payable alongside the other artifacts the player picks.
+#[test]
+fn glacian_tap_x_artifacts_leaves_an_attached_equipment_on_the_multi_pick_surface() {
+    let (mut runner, board) = glacian_board(2);
+    assert_glacian_tap_x_prompt(runner.state(), &board, 3);
+
+    let view = priority_view(runner.state());
+    let opportunity = select_opportunity(&view);
+    assert!(
+        matches!(
+            opportunity.response,
+            InteractionOpportunityResponse::Schema {
+                spec: InteractionResponseSpec::Select {
+                    constraint: engine::types::interaction::SelectionConstraint::Count {
+                        min: 0,
+                        max: 3
+                    },
+                    ..
+                },
+                ..
+            }
+        ),
+        "reach guard: the prompt is a multi-pick count selection, got {:?}",
+        opportunity.response
+    );
+    let bonesplitter_choice = schema_choice_id_for_object(&view, board.bonesplitter);
+    let spellbook_choice = schema_choice_id_for_object(&view, board.spellbooks[0]);
+    let membership = view
+        .attachment_views
+        .get(&board.host.0)
+        .expect("reach guard: the host publishes its attachment membership");
+    let bonesplitter_card = membership
+        .cards
+        .iter()
+        .find(|card| card.object_id == board.bonesplitter.0)
+        .expect("reach guard: the attached Equipment is a member of the host's view");
+
+    assert!(
+        view.attachment_fans.is_empty(),
+        "a multi-pick decision publishes no one-step fan pick: {:?}",
+        view.attachment_fans
+    );
+    assert!(
+        bonesplitter_card.submission.is_none(),
+        "the attached Equipment carries no submission that would finalize X = 1: {:?}",
+        bonesplitter_card.submission
+    );
+
+    submit_interaction(
+        runner.state_mut(),
+        P0,
+        InteractionSubmission {
+            interaction_id: opportunity.interaction_id.clone(),
+            response: InteractionResponse::Select {
+                choice_ids: vec![bonesplitter_choice, spellbook_choice],
+            },
+        },
+    )
+    .expect("the attached Equipment is payable inside a multi-pick answer");
+    let state = runner.state();
+    assert!(
+        state.objects[&board.bonesplitter].tapped && state.objects[&board.spellbooks[0]].tapped,
+        "both chosen artifacts are tapped to pay the cost"
+    );
+    assert!(
+        !state.objects[&board.spellbooks[1]].tapped,
+        "the unchosen artifact stays untapped"
+    );
+    assert_eq!(
+        chosen_x_on_stack(state, board.glacian),
+        Some(2),
+        "CR 107.3a: X is the number of artifacts tapped"
+    );
+
+    runner.resolve_top();
+    let WaitingFor::DigChoice {
+        cards, keep_count, ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "X = 2 looks at two cards and asks which to keep, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(cards, &vec![board.top, board.second]);
+    assert_eq!(*keep_count, 1);
+    assert!(
+        !cards.contains(&board.deep),
+        "a third card is not looked at"
+    );
+}
+
+/// When the attached Equipment is the only eligible artifact, the decision
+/// admits a single pick, so the host's fan still answers it in one step.
+#[test]
+fn glacian_with_only_the_attached_equipment_eligible_keeps_its_one_step_fan_pick() {
+    let (mut runner, board) = glacian_board(0);
+    assert_glacian_tap_x_prompt(runner.state(), &board, 1);
+
+    let view = priority_view(runner.state());
+    let fan = view
+        .attachment_fans
+        .get(&board.host.0)
+        .expect("a single-pick decision keeps its fan under the host");
+    assert_eq!(fan.children.len(), 1);
+    assert_eq!(fan.children[0].object_id, board.bonesplitter.0);
+    let submission = fan.children[0].submission.clone();
+    assert_eq!(
+        submission.response,
+        InteractionResponse::Select {
+            choice_ids: vec![schema_choice_id_for_object(&view, board.bonesplitter)],
+        }
+    );
+
+    submit_interaction(runner.state_mut(), P0, submission)
+        .expect("the fan's one-step pick pays the cost");
+    assert!(runner.state().objects[&board.bonesplitter].tapped);
+    assert_eq!(
+        chosen_x_on_stack(runner.state(), board.glacian),
+        Some(1),
+        "CR 107.3a: X is the number of artifacts tapped"
+    );
+}
+
+/// The single-pick gate reads the decision's cardinality, not its family: an
+/// aggregate selection and a multi-target sequence publish no fan pick, while
+/// a sequence that admits exactly one target still does.
+#[test]
+fn aggregate_and_multi_target_decisions_publish_no_attachment_fan_pick() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let host = scenario.add_creature(P0, "Gate Host", 2, 2).id();
+    let attached = scenario.add_creature(P0, "Gate Attached", 1, 1).id();
+    let other = scenario.add_creature(P0, "Gate Other", 1, 1).id();
+    let vehicle = scenario.add_creature(P0, "Gate Vehicle", 3, 3).id();
+    let bonesplitter = scenario
+        .add_artifact_from_oracle(P0, "Bonesplitter", BONESPLITTER)
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let counter = CounterType::Generic("gate".to_string());
+    scenario.with_counter(bonesplitter, counter.clone(), 1);
+    scenario.with_counter(other, counter, 1);
+    let mut runner = scenario.build();
+    attach_and_assert_linked(runner.state_mut(), attached, host);
+    attach_and_assert_linked(runner.state_mut(), bonesplitter, other);
+
+    // CR 702.122a: crew taps any number of creatures whose total power meets
+    // the threshold, so its selection is an aggregate, never a single pick.
+    {
+        let state = runner.state_mut();
+        state.waiting_for = WaitingFor::CrewVehicle {
+            player: P0,
+            vehicle_id: vehicle,
+            crew_power: 2,
+            eligible_creatures: vec![attached, other],
+            contributions: vec![1, 1],
+        };
+        bind(state, "gate-crew");
+    }
+    let view = priority_view(runner.state());
+    assert!(
+        matches!(
+            select_opportunity(&view).response,
+            InteractionOpportunityResponse::Schema {
+                spec: InteractionResponseSpec::Select {
+                    constraint: engine::types::interaction::SelectionConstraint::Aggregate { .. },
+                    ..
+                },
+                ..
+            }
+        ),
+        "reach guard: crew publishes an aggregate selection"
+    );
+    schema_choice_id_for_object(&view, attached);
+    assert!(
+        view.attachment_fans.is_empty(),
+        "an aggregate selection publishes no fan pick: {:?}",
+        view.attachment_fans
+    );
+
+    let multi_target = |max_targets: usize| WaitingFor::MultiTargetSelection {
+        player: P0,
+        legal_targets: vec![attached, other],
+        min_targets: 0,
+        max_targets,
+        pending_ability: gain_life_effect(host),
+    };
+    {
+        let state = runner.state_mut();
+        state.waiting_for = multi_target(2);
+        bind(state, "gate-multi-target-two");
+    }
+    let view = priority_view(runner.state());
+    schema_choice_id_for_object(&view, attached);
+    assert!(
+        view.attachment_fans.is_empty(),
+        "a sequence admitting two targets publishes no fan pick: {:?}",
+        view.attachment_fans
+    );
+
+    {
+        let state = runner.state_mut();
+        state.waiting_for = multi_target(1);
+        bind(state, "gate-multi-target-one");
+    }
+    let view = priority_view(runner.state());
+    let fan = view
+        .attachment_fans
+        .get(&host.0)
+        .expect("a sequence admitting one target keeps its fan under the host");
+    assert_eq!(fan.children.len(), 1);
+    assert_eq!(fan.children[0].object_id, attached.0);
+    assert_eq!(
+        fan.children[0].submission.response,
+        InteractionResponse::Sequence {
+            choice_ids: vec![schema_choice_id_for_object(&view, attached)],
+        }
+    );
+
+    // CR 701.34a: proliferate chooses any number of permanents and/or players
+    // that have a counter.
+    {
+        let state = runner.state_mut();
+        state.waiting_for = WaitingFor::ProliferateChoice {
+            player: P0,
+            eligible: vec![TargetRef::Object(bonesplitter), TargetRef::Object(other)],
+        };
+        bind(state, "gate-proliferate");
+    }
+    let view = priority_view(runner.state());
+    assert!(
+        view.opportunities.iter().any(|opportunity| matches!(
+            opportunity.response,
+            InteractionOpportunityResponse::Schema {
+                spec: InteractionResponseSpec::Sequence { max: 2, .. },
+                ..
+            }
+        )),
+        "reach guard: proliferate publishes a two-pick sequence"
+    );
+    schema_choice_id_for_object(&view, bonesplitter);
+    assert!(
+        view.attachment_fans.is_empty(),
+        "proliferate publishes no fan pick: {:?}",
+        view.attachment_fans
+    );
+}
+
 /// Membership answers a different question than the fan does, and must not
 /// inherit its authorization gate: an attached permanent is an object in play
 /// (CR 301.5 / CR 303.4), so it stays visible while another player holds the
@@ -1475,6 +1885,7 @@ fn exact_player_and_number_schema_siblings_are_self_describing() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("the real activation reaches its amount prompt");
     assert!(matches!(
@@ -1526,6 +1937,7 @@ fn zone_opponent_chooser_exact_choices_surface_distinct_opponents_and_action_cod
                 chooser: Chooser::Opponent.into(),
                 candidate_source: ZoneChoiceCandidateSource::Legacy,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: false,
                 selection: CardSelectionMode::Chosen,
                 constraint: None,
@@ -1584,6 +1996,7 @@ fn mana_group_schema_exposes_engine_authored_symbols() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("the real mana ability reaches its color prompt");
     assert!(matches!(
@@ -2710,6 +3123,7 @@ fn from_among_counter_cost_projects_and_submits_typed_amount_assignments() {
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("the activated ability reaches its from-among payment");
     assert!(matches!(
@@ -3007,6 +3421,7 @@ fn loop_shortcut_zero_deliverable_capacity_is_rejected_not_clamped() {
             predicted_winner: Some(P0),
             certificate: engine::analysis::loop_check::LoopCertificate {
                 unbounded: Vec::new(),
+                rising: Vec::new(),
                 win_kind: Some(engine::analysis::loop_check::WinKind::LethalDamage),
                 win_kind_at: None,
                 mandatory: false,
@@ -3020,6 +3435,7 @@ fn loop_shortcut_zero_deliverable_capacity_is_rejected_not_clamped() {
             },
             declaration: None,
             road: engine::analysis::loop_check::OfferRoad::Ring,
+            counted_take: Default::default(),
             period: Default::default(),
         };
         bind(&mut state, "loop-zero-bound");
@@ -3071,6 +3487,7 @@ fn loop_shortcut_narrowed_capacity_bounds_the_picker() {
         predicted_winner: Some(P0),
         certificate: engine::analysis::loop_check::LoopCertificate {
             unbounded: Vec::new(),
+            rising: Vec::new(),
             win_kind: Some(engine::analysis::loop_check::WinKind::LethalDamage),
             win_kind_at: None,
             mandatory: false,
@@ -3087,6 +3504,7 @@ fn loop_shortcut_narrowed_capacity_bounds_the_picker() {
         },
         declaration: None,
         road: engine::analysis::loop_check::OfferRoad::Ring,
+        counted_take: Default::default(),
         period: Default::default(),
     };
     bind(&mut state, "loop-narrowed-bound");
@@ -3126,6 +3544,7 @@ fn loop_shortcut_number_schema_accepts_a_fixed_count_above_one() {
         predicted_winner: Some(P0),
         certificate: engine::analysis::loop_check::LoopCertificate {
             unbounded: Vec::new(),
+            rising: Vec::new(),
             win_kind: Some(engine::analysis::loop_check::WinKind::LethalDamage),
             win_kind_at: None,
             mandatory: false,
@@ -3139,6 +3558,7 @@ fn loop_shortcut_number_schema_accepts_a_fixed_count_above_one() {
         },
         declaration: None,
         road: engine::analysis::loop_check::OfferRoad::Ring,
+        counted_take: Default::default(),
         period: Default::default(),
     };
     bind(&mut state, "loop-count");
@@ -3215,6 +3635,7 @@ fn preview_offer_with_points(
         predicted_winner: Some(P0),
         certificate: engine::analysis::loop_check::LoopCertificate {
             unbounded: Vec::new(),
+            rising: Vec::new(),
             win_kind: Some(engine::analysis::loop_check::WinKind::Advantage),
             win_kind_at: None,
             mandatory: false,
@@ -3244,6 +3665,7 @@ fn preview_offer_with_points(
         },
         declaration: None,
         road: engine::analysis::loop_check::OfferRoad::Ring,
+        counted_take: Default::default(),
         period: Default::default(),
     };
     bind(&mut state, "loop-preview");
@@ -3937,6 +4359,7 @@ fn respond_window_on(
             predicted_winner: Some(P0),
             count: count.clone(),
             unbounded: Vec::new(),
+            rising: Vec::new(),
             win_kind: Some(engine::analysis::loop_check::WinKind::Advantage),
             win_kind_at: None,
             template: Some(DecisionTemplate {
@@ -3951,7 +4374,9 @@ fn respond_window_on(
             per_cycle: per_cycle.map(engine::analysis::resource::PeriodSignature::EveryRepetition),
             shortened_by: None,
             published_declaration: None,
+            leading_aims: Vec::new(),
             road: engine::analysis::loop_check::OfferRoad::Ring,
+            counted_take: Default::default(),
             period: Default::default(),
         },
     };
@@ -4887,7 +5312,7 @@ fn a_multi_subject_schedule_states_the_head_its_drive_announces() {
         // A one-step schedule partitions the whole declared count, and nothing at all when the
         // proposal names no count.
         let partition = match &count {
-            IterationCount::UntilLethal => None,
+            IterationCount::UntilLethal | IterationCount::WithoutEnd => None,
             IterationCount::Fixed(n) => Some(vec![*n]),
         };
         for ((shape, tailed), (_, single)) in shapes(&TAILED).into_iter().zip(shapes(&HEAD)) {
@@ -4925,57 +5350,63 @@ fn a_multi_subject_schedule_states_the_head_its_drive_announces() {
     }
 }
 
-/// **CR 732.2a — a step announced at the declared count itself takes a ZERO-length segment.**
+/// **CR 732.2a — a step the declared count never reaches is not stated.**
 ///
-/// The partition is successive differences with the last running to the count, so a step whose
-/// start IS the count is declared for no iteration. Its segment is stated as zero rather than
-/// dropped: the allocation is read back against that decision's own published ids, and a
-/// partition one entry short of them is not the one the proposer declared. This is the one shape
-/// whose published amounts are not all positive, which is what the `allocation` field doc — and
-/// through it the client's mirror — has to stay true to.
+/// The partition is successive differences with the last running to the count, over the steps
+/// the count reaches. A step starting AT the count or past it announces at no repetition the
+/// declaration takes, so neither its subject nor a segment is published: the statement is the
+/// announcement sequence the drive performs, and every published amount is positive.
 ///
 /// # Discrimination
 ///
-/// Treat a zero-length segment as unstatable ⇒ the decision is skipped and the reach-guard
-/// fails. Drop zeros from the partition ⇒ it is one entry short of the published ids, the
-/// length check withholds the element, and the `expect` fails.
+/// State the uncut schedule ⇒ the at-count board publishes two subjects with a zero segment and
+/// the past-count board publishes no statement at all, so the seat and amount equalities fail.
+/// The paired positive one repetition later reaches both steps, so the cut is by the count and
+/// not by the step.
 #[test]
-fn a_step_announced_at_the_declared_count_takes_a_zero_length_segment() {
+fn a_step_the_declared_count_never_reaches_is_not_stated() {
     const COUNT: u32 = 3;
-    const STARTS: [u32; 2] = [0, COUNT];
 
-    let reply = respond_reply_of(&respond_window(
-        IterationCount::Fixed(COUNT),
-        Some(respond_period(&[(R_DRAINED, -5)], Vec::new())),
-        vec![piecewise_pin(
-            preview_slot(ChoicePoint::AnnouncedTarget, 0),
-            &STARTS,
-            &seat_subjects(&[R_FIRST, R_SECOND]),
-        )],
-    ));
+    let reply_at = |count: u32, starts: &[u32]| {
+        respond_reply_of(&respond_window(
+            IterationCount::Fixed(count),
+            Some(respond_period(&[(R_DRAINED, -5)], Vec::new())),
+            vec![piecewise_pin(
+                preview_slot(ChoicePoint::AnnouncedTarget, 0),
+                starts,
+                &seat_subjects(&[R_FIRST, R_SECOND]),
+            )],
+        ))
+    };
+    let stated = |reply: &RespondReply| {
+        assert_eq!(
+            reply.points.len(),
+            1,
+            "reach-guard: the reached step still publishes the decision"
+        );
+        let element = reply
+            .declared
+            .as_ref()
+            .expect("the reached steps' partition is stated");
+        (
+            respond_seats_of(reply, &reply.points[0].candidate_ids),
+            declared_amounts(element),
+            element.count,
+        )
+    };
+
+    for starts in [[0, COUNT], [0, COUNT + 2]] {
+        assert_eq!(
+            stated(&reply_at(COUNT, &starts)),
+            (vec![R_FIRST.0], vec![COUNT], COUNT),
+            "a step starting at {} is never reached by a count of {COUNT}",
+            starts[1]
+        );
+    }
     assert_eq!(
-        reply.points.len(),
-        1,
-        "reach-guard: a legal zero-repetition step stays statable, so the decision publishes"
-    );
-    let element = reply
-        .declared
-        .as_ref()
-        .expect("and its partition is stated over the point's published ids");
-    assert_eq!(
-        declared_amounts(element),
-        vec![COUNT, 0],
-        "the second step is announced at the count, so it is declared for no iteration"
-    );
-    assert_eq!(
-        element.allocation.len(),
-        reply.points[0].candidate_ids.len(),
-        "one amount per announced subject — a dropped zero would leave the partition short of \
-         the ids it is stated over"
-    );
-    assert_eq!(
-        element.count, COUNT,
-        "and the segments still total the declared count"
+        stated(&reply_at(COUNT + 1, &[0, COUNT])),
+        (vec![R_FIRST.0, R_SECOND.0], vec![COUNT, 1], COUNT + 1),
+        "paired positive: one repetition later the second step is reached and stated"
     );
 }
 
@@ -6525,6 +6956,7 @@ fn loop_shortcut_schema_and_materializer_cover_every_decision_point_kind() {
         predicted_winner: Some(P0),
         certificate: engine::analysis::loop_check::LoopCertificate {
             unbounded: Vec::new(),
+            rising: Vec::new(),
             win_kind: Some(engine::analysis::loop_check::WinKind::Advantage),
             win_kind_at: None,
             mandatory: false,
@@ -6532,6 +6964,8 @@ fn loop_shortcut_schema_and_materializer_cover_every_decision_point_kind() {
             per_cycle: None,
         },
         schema: ShortcutDecisionSchema {
+            suggested_declaration: None,
+            leading_aims: Vec::new(),
             iteration_count: IterationCount::Fixed(2),
             // This producer measured no CR 704 threshold — `Default` carries the absence and
             // a capacity at the global cap.
@@ -6581,6 +7015,7 @@ fn loop_shortcut_schema_and_materializer_cover_every_decision_point_kind() {
         },
         declaration: None,
         road: engine::analysis::loop_check::OfferRoad::Ring,
+        counted_take: Default::default(),
         period: Default::default(),
     };
     bind(runner.state_mut(), "loop-point-kinds");
@@ -6760,6 +7195,7 @@ fn loop_shortcut_human_ingress_emits_the_target_class_spelling_for_a_submitted_s
         predicted_winner: Some(P0),
         certificate: engine::analysis::loop_check::LoopCertificate {
             unbounded: Vec::new(),
+            rising: Vec::new(),
             win_kind: Some(engine::analysis::loop_check::WinKind::Advantage),
             win_kind_at: None,
             mandatory: false,
@@ -6767,6 +7203,8 @@ fn loop_shortcut_human_ingress_emits_the_target_class_spelling_for_a_submitted_s
             per_cycle: None,
         },
         schema: ShortcutDecisionSchema {
+            suggested_declaration: None,
+            leading_aims: Vec::new(),
             iteration_count: IterationCount::Fixed(2),
             measured_repetition_bound: None,
             deliverable_capacity: ShortcutDecisionSchema::default().deliverable_capacity,
@@ -6784,6 +7222,7 @@ fn loop_shortcut_human_ingress_emits_the_target_class_spelling_for_a_submitted_s
         },
         declaration: None,
         road: engine::analysis::loop_check::OfferRoad::Ring,
+        counted_take: Default::default(),
         period: Default::default(),
     };
     bind(runner.state_mut(), "r2f-human-seat-pin");
@@ -7673,6 +8112,7 @@ fn fellwar_stone_activation_uses_opponents_command_tower_colors() {
         .act(GameAction::ActivateAbility {
             source_id: stone,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate parsed Fellwar Stone mana ability");
     match &runner.state().waiting_for {
@@ -7753,6 +8193,7 @@ fn exotic_orchard_activation_uses_opponents_command_tower_colors() {
         .act(GameAction::ActivateAbility {
             source_id: orchard,
             ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activate parsed Exotic Orchard mana ability");
     match &runner.state().waiting_for {
@@ -8089,6 +8530,7 @@ fn stage_sequenced_offer(
         predicted_winner: Some(P0),
         certificate: engine::analysis::loop_check::LoopCertificate {
             unbounded: Vec::new(),
+            rising: Vec::new(),
             win_kind: Some(engine::analysis::loop_check::WinKind::Advantage),
             win_kind_at: None,
             mandatory: false,
@@ -8096,6 +8538,8 @@ fn stage_sequenced_offer(
             per_cycle: None,
         },
         schema: ShortcutDecisionSchema {
+            suggested_declaration: None,
+            leading_aims: Vec::new(),
             iteration_count,
             // The pair a producer publishes: `None` is an offer that measured nothing, which is
             // what keeps `handle_declare_shortcut`'s `UntilLethal` arm reachable below.
@@ -8114,6 +8558,7 @@ fn stage_sequenced_offer(
         },
         declaration: None,
         road: engine::analysis::loop_check::OfferRoad::Ring,
+        counted_take: Default::default(),
         period: Default::default(),
     };
     bind(runner.state_mut(), label);
@@ -8907,8 +9352,10 @@ pub(crate) fn f4_offer_board() -> (GameState, PlayerId) {
     flate2::read::GzDecoder::new(gz)
         .read_to_string(&mut json)
         .expect("the tracked fixture inflates to UTF-8 JSON");
-    let envelope: serde_json::Value =
+    let mut envelope: serde_json::Value =
         serde_json::from_str(&json).expect("the dump envelope parses as JSON");
+    // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+    engine::types::game_state::record_captured_onsets(&mut envelope);
     let mut state = serde_json::from_value::<engine::types::game_state::PersistedGameState>(
         envelope["gameState"].clone(),
     )
@@ -8973,8 +9420,10 @@ fn untargeted_offer_board() -> (GameState, PlayerId) {
     flate2::read::GzDecoder::new(gz)
         .read_to_string(&mut json)
         .expect("the tracked fixture inflates to UTF-8 JSON");
-    let envelope: serde_json::Value =
+    let mut envelope: serde_json::Value =
         serde_json::from_str(&json).expect("the dump envelope parses as JSON");
+    // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+    engine::types::game_state::record_captured_onsets(&mut envelope);
     let mut state = serde_json::from_value::<engine::types::game_state::PersistedGameState>(
         envelope["gameState"].clone(),
     )
@@ -9204,7 +9653,7 @@ fn every_published_shortcut_element_round_trips_byte_equal() {
     let points = shortcut_points(&view);
     let point = f4_allocation_point(&points);
     let (count_spec, published) = f4_published(&view);
-    let InteractionShortcutCountSpec::Fixed { min, .. } = count_spec else {
+    let InteractionShortcutCountSpec::Fixed { .. } = count_spec else {
         panic!("the F4 offer publishes a Fixed count window, got {count_spec:?}");
     };
 
@@ -9216,6 +9665,11 @@ fn every_published_shortcut_element_round_trips_byte_equal() {
         !published.is_empty(),
         "reach-guard: the offer must publish elements, else this row compares nothing"
     );
+    assert!(
+        published.iter().any(|element| element.allocation.len() > 1),
+        "paired positive: some element spreads its count over more than one announced segment, \
+         which is what makes the allocation observable"
+    );
 
     for element in &published {
         assert!(
@@ -9223,14 +9677,6 @@ fn every_published_shortcut_element_round_trips_byte_equal() {
             "paired positive: every compared element must state magnitudes, else a byte-equality \
              between two empty elements satisfies this row; element {element:?}"
         );
-        if element.count > min {
-            assert!(
-                element.allocation.len() > 1,
-                "paired positive: above the window FLOOR an element spreads its count over more \
-                 than one announced segment, which is what makes the allocation observable; \
-                 element {element:?}"
-            );
-        }
         let preview = f4_preview(
             &state,
             proposer,
@@ -9267,18 +9713,19 @@ fn an_authored_split_is_previewed_per_declared_seat() {
     let interaction_id = view.opportunities[0].interaction_id.clone();
     let points = shortcut_points(&view);
     let point = f4_allocation_point(&points);
-    let (count_spec, published) = f4_published(&view);
-    // CR 732.2a: every declaration below is made at the offer's own published SUGGESTION — the
-    // count this offer's own declaration may legally specify. The window's `max` is what SOME
-    // legal declaration may specify, which is a different declaration; this row's claim is not
-    // about which count is legal.
-    let InteractionShortcutCountSpec::Fixed { suggested, .. } = count_spec else {
+    let (count_spec, _published) = f4_published(&view);
+    // CR 732.2a: every declaration below is made at the count the offer's published declaration
+    // is stamped with — a count it drives. The window's `max` is what SOME legal declaration may
+    // specify, which is a different declaration; this row's claim is not about which count is
+    // legal.
+    let InteractionShortcutCountSpec::Fixed { .. } = count_spec else {
         panic!("the F4 offer publishes a Fixed count window, got {count_spec:?}");
     };
+    let own = crate::fantastic_four_bounded_loop::published_declaration_count(&state);
     assert!(
-        point.candidate_ids.len() > 1 && suggested > 2,
+        point.candidate_ids.len() > 1 && own > 2,
         "reach-guard: an UNEQUAL split over MORE THAN ONE announced candidate is what makes a \
-         per-seat attribution observable at all; candidates={} suggested={suggested}",
+         per-seat attribution observable at all; candidates={} own={own}",
         point.candidate_ids.len()
     );
 
@@ -9287,7 +9734,7 @@ fn an_authored_split_is_previewed_per_declared_seat() {
             &state,
             proposer,
             &interaction_id,
-            suggested,
+            own,
             f4_pins(&points, allocation),
         );
         assert_eq!(
@@ -9300,7 +9747,7 @@ fn an_authored_split_is_previewed_per_declared_seat() {
             .shortcut_preview
             .expect("a confirmable authored declaration carries its previewed element");
         assert_eq!(
-            element.count, suggested,
+            element.count, own,
             "the element states the count it was declared at"
         );
         assert_eq!(
@@ -9333,24 +9780,24 @@ fn an_authored_split_is_previewed_per_declared_seat() {
             .collect()
     };
 
-    let canonical = published
-        .iter()
-        .find(|element| element.count == suggested)
-        .expect("the producer seeds its element set with the window's suggestion")
-        .clone();
+    // The control is an authored single-segment element at the same count: the entries CR 119.3
+    // does not re-attribute scale with the count alone.
+    let control = element(&[(0, own)]);
     assert!(
-        invariant(&canonical)
+        invariant(&control)
             .iter()
             .any(|entry| entry.player.is_some()),
         "reach-guard: the control needs a SEAT-KEYED entry no allocation may move, else \
          'identical across shapes' is a claim about whole-game entries only; got {:?}",
-        canonical.entries
+        control.entries
     );
 
-    let unequal = element(&[(0, suggested - 1), (1, 1)]);
-    let reordered = element(&[(1, suggested - 1), (0, 1)]);
-    let first_only = element(&[(0, suggested)]);
-    let second_only = element(&[(1, suggested)]);
+    // The final segment holds two announcements: its last one never resolves (CR 603.3d), so a
+    // one-announcement tail would charge its seat nothing.
+    let unequal = element(&[(0, own - 2), (1, 2)]);
+    let reordered = element(&[(1, own - 2), (0, 2)]);
+    let first_only = &control;
+    let second_only = element(&[(1, own)]);
 
     assert_ne!(
         reordered.entries, unequal.entries,
@@ -9359,12 +9806,12 @@ fn an_authored_split_is_previewed_per_declared_seat() {
          pairing would have produced the in-order element's entries here"
     );
     assert_eq!(
-        life_seats(&first_only).len(),
+        life_seats(first_only).len(),
         1,
         "a single-segment declaration charges a single seat"
     );
     assert_ne!(
-        life_seats(&first_only),
+        life_seats(first_only),
         life_seats(&second_only),
         "CR 601.2c: a subset naming the SECOND announced candidate charges the SECOND seat. A \
          positional pairing returns the first seat for both"
@@ -9380,14 +9827,13 @@ fn an_authored_split_is_previewed_per_declared_seat() {
     for (name, element) in [
         ("unequal", &unequal),
         ("reordered", &reordered),
-        ("first-only", &first_only),
         ("second-only", &second_only),
     ] {
         assert_eq!(
             invariant(element),
-            invariant(&canonical),
+            invariant(&control),
             "control: the entries CR 119.3 does not re-attribute are identical across the \
-             canonical and every authored shape; {name} moved one"
+             single-segment control and every other authored shape; {name} moved one"
         );
     }
 }
@@ -9412,7 +9858,7 @@ fn an_unpartitioned_pin_states_no_magnitude_and_accept_suggested_states_the_offe
     let interaction_id = view.opportunities[0].interaction_id.clone();
     let points = shortcut_points(&view);
     let point = f4_allocation_point(&points);
-    let (count_spec, _published) = f4_published(&view);
+    let (count_spec, published) = f4_published(&view);
     let InteractionShortcutCountSpec::Fixed {
         min,
         max,
@@ -9432,16 +9878,17 @@ fn an_unpartitioned_pin_states_no_magnitude_and_accept_suggested_states_the_offe
     );
 
     // ── LEG 1's PAIRED POSITIVE: the same declaration WITH its partition stated.
-    // CR 732.2a: every declaration below is made at the offer's own published SUGGESTION — the
-    // count this offer's own declaration may legally specify. The window's `max` is what SOME
-    // legal declaration may specify, which is a different declaration; this row's claim is not
-    // about which count is legal.
+    // CR 732.2a: every declaration below is made at the count the offer's published declaration
+    // is stamped with — a count it drives. The window's `max` is what SOME legal declaration may
+    // specify, which is a different declaration; this row's claim is not about which count is
+    // legal.
+    let own = crate::fantastic_four_bounded_loop::published_declaration_count(&state);
     let partitioned = f4_preview(
         &state,
         proposer,
         &interaction_id,
-        suggested,
-        f4_pins(&points, &[(0, suggested)]),
+        own,
+        f4_pins(&points, &[(0, own)]),
     );
     assert_eq!(partitioned.status, InteractionPreviewStatus::Confirmable);
     assert!(
@@ -9453,7 +9900,7 @@ fn an_unpartitioned_pin_states_no_magnitude_and_accept_suggested_states_the_offe
     );
 
     // ── LEG 1: the same pin, its partition cleared.
-    let unpartitioned: Vec<InteractionShortcutPin> = f4_pins(&points, &[(0, suggested)])
+    let unpartitioned: Vec<InteractionShortcutPin> = f4_pins(&points, &[(0, own)])
         .into_iter()
         .map(|mut pin| {
             if pin.group == point.group {
@@ -9462,7 +9909,7 @@ fn an_unpartitioned_pin_states_no_magnitude_and_accept_suggested_states_the_offe
             pin
         })
         .collect();
-    let preview = f4_preview(&state, proposer, &interaction_id, suggested, unpartitioned);
+    let preview = f4_preview(&state, proposer, &interaction_id, own, unpartitioned);
     assert_eq!(
         preview.status,
         InteractionPreviewStatus::Confirmable,
@@ -9488,7 +9935,15 @@ fn an_unpartitioned_pin_states_no_magnitude_and_accept_suggested_states_the_offe
             interaction_id: interaction_id.clone(),
             response: InteractionResponse::Shortcut {
                 decision: InteractionShortcutDecision::AcceptSuggested,
-                pins: f4_pins(&points, &[(0, suggested - 1), (1, 1)]),
+                pins: f4_pins(
+                    &points,
+                    &indexed(
+                        &point,
+                        &element_at(&published, suggested)
+                            .expect("the suggested count is published")
+                            .allocation,
+                    ),
+                ),
             },
         },
     );
@@ -10021,15 +10476,16 @@ fn a_refused_shortcut_declaration_carries_no_previewed_magnitude() {
     let points = shortcut_points(&view);
     let point = f4_allocation_point(&points);
     let (count_spec, _published) = f4_published(&view);
-    // CR 732.2a: every declaration below is made at the offer's own published SUGGESTION — the
-    // count this offer's own declaration may legally specify. The window's `max` is what SOME
-    // legal declaration may specify, which is a different declaration; this row's claim is not
-    // about which count is legal.
-    let InteractionShortcutCountSpec::Fixed { suggested, .. } = count_spec else {
+    // CR 732.2a: every declaration below is made at the count the offer's published declaration
+    // is stamped with — a count it drives. The window's `max` is what SOME legal declaration may
+    // specify, which is a different declaration; this row's claim is not about which count is
+    // legal.
+    let InteractionShortcutCountSpec::Fixed { .. } = count_spec else {
         panic!("the F4 offer publishes a Fixed count window, got {count_spec:?}");
     };
+    let own = crate::fantastic_four_bounded_loop::published_declaration_count(&state);
     assert!(
-        point.candidate_ids.len() > 1 && suggested > 2,
+        point.candidate_ids.len() > 1 && own > 2,
         "reach-guard: the duplicate-id and subset shapes need more than one announced candidate"
     );
 
@@ -10039,8 +10495,8 @@ fn a_refused_shortcut_declaration_carries_no_previewed_magnitude() {
         &state,
         proposer,
         &interaction_id,
-        suggested,
-        f4_pins(&points, &[(0, suggested - 1), (1, 1)]),
+        own,
+        f4_pins(&points, &[(0, own - 1), (1, 1)]),
     );
     assert_eq!(legal.status, InteractionPreviewStatus::Confirmable);
     assert!(
@@ -10054,17 +10510,17 @@ fn a_refused_shortcut_declaration_carries_no_previewed_magnitude() {
     let refusals: Vec<(&str, Vec<InteractionShortcutPin>, InteractionReasonCode)> = vec![
         (
             "sum below the declared count",
-            f4_pins(&points, &[(0, suggested - 1)]),
+            f4_pins(&points, &[(0, own - 1)]),
             InteractionReasonCode::ConstraintUnsatisfied,
         ),
         (
             "a zero segment",
-            f4_pins(&points, &[(0, suggested), (1, 0)]),
+            f4_pins(&points, &[(0, own), (1, 0)]),
             InteractionReasonCode::ConstraintUnsatisfied,
         ),
         (
             "a duplicate choice id",
-            f4_pins(&points, &[(0, suggested - 1), (0, 1)]),
+            f4_pins(&points, &[(0, own - 1), (0, 1)]),
             InteractionReasonCode::ConstraintUnsatisfied,
         ),
         (
@@ -10079,7 +10535,7 @@ fn a_refused_shortcut_declaration_carries_no_previewed_magnitude() {
                             choice_ids: vec![unknown_id.clone()],
                             amounts: vec![AmountAssignment {
                                 choice_id: unknown_id.clone(),
-                                amount: suggested,
+                                amount: own,
                             }],
                         }
                     } else {
@@ -10096,7 +10552,7 @@ fn a_refused_shortcut_declaration_carries_no_previewed_magnitude() {
     ];
 
     for (name, pins, reason) in refusals {
-        let preview = f4_preview(&state, proposer, &interaction_id, suggested, pins);
+        let preview = f4_preview(&state, proposer, &interaction_id, own, pins);
         assert_eq!(
             preview.status,
             InteractionPreviewStatus::Rejected { reason },
@@ -10207,17 +10663,18 @@ fn both_preview_entry_points_answer_with_the_same_shortcut_element() {
     let interaction_id = view.opportunities[0].interaction_id.clone();
     let points = shortcut_points(&view);
     let (count_spec, _published) = f4_published(&view);
-    // CR 732.2a: every declaration below is made at the offer's own published SUGGESTION — the
-    // count this offer's own declaration may legally specify. The window's `max` is what SOME
-    // legal declaration may specify, which is a different declaration; this row's claim is not
-    // about which count is legal.
-    let InteractionShortcutCountSpec::Fixed { suggested, .. } = count_spec else {
+    // CR 732.2a: every declaration below is made at the count the offer's published declaration
+    // is stamped with — a count it drives. The window's `max` is what SOME legal declaration may
+    // specify, which is a different declaration; this row's claim is not about which count is
+    // legal.
+    let InteractionShortcutCountSpec::Fixed { .. } = count_spec else {
         panic!("the F4 offer publishes a Fixed count window, got {count_spec:?}");
     };
+    let own = crate::fantastic_four_bounded_loop::published_declaration_count(&state);
     let request = f4_request(
         &interaction_id,
-        suggested,
-        f4_pins(&points, &[(0, suggested - 1), (1, 1)]),
+        own,
+        f4_pins(&points, &[(0, own - 1), (1, 1)]),
     );
 
     let answered = preview_interaction(&state, proposer, &request);
@@ -10255,27 +10712,28 @@ fn the_shortcut_preview_payload_is_additive_on_the_wire() {
     let interaction_id = view.opportunities[0].interaction_id.clone();
     let points = shortcut_points(&view);
     let (count_spec, _published) = f4_published(&view);
-    // CR 732.2a: every declaration below is made at the offer's own published SUGGESTION — the
-    // count this offer's own declaration may legally specify. The window's `max` is what SOME
-    // legal declaration may specify, which is a different declaration; this row's claim is not
-    // about which count is legal.
-    let InteractionShortcutCountSpec::Fixed { suggested, .. } = count_spec else {
+    // CR 732.2a: every declaration below is made at the count the offer's published declaration
+    // is stamped with — a count it drives. The window's `max` is what SOME legal declaration may
+    // specify, which is a different declaration; this row's claim is not about which count is
+    // legal.
+    let InteractionShortcutCountSpec::Fixed { .. } = count_spec else {
         panic!("the F4 offer publishes a Fixed count window, got {count_spec:?}");
     };
+    let own = crate::fantastic_four_bounded_loop::published_declaration_count(&state);
 
     let populated = f4_preview(
         &state,
         proposer,
         &interaction_id,
-        suggested,
-        f4_pins(&points, &[(0, suggested - 1), (1, 1)]),
+        own,
+        f4_pins(&points, &[(0, own - 1), (1, 1)]),
     );
     let refused = f4_preview(
         &state,
         proposer,
         &interaction_id,
-        suggested,
-        f4_pins(&points, &[(0, suggested - 1)]),
+        own,
+        f4_pins(&points, &[(0, own - 1)]),
     );
     assert!(matches!(
         refused.status,
@@ -10743,13 +11201,16 @@ fn p10_row_7_a_restored_multi_entry_ranking_still_loads_and_still_drives_head_on
             predicted_winner: Some(P0),
             count: IterationCount::Fixed(3),
             unbounded: Vec::new(),
+            rising: Vec::new(),
             win_kind: Some(engine::analysis::loop_check::WinKind::Advantage),
             win_kind_at: None,
             template: Some(declared),
             per_cycle: None,
             shortened_by: None,
             published_declaration: None,
+            leading_aims: Vec::new(),
             road: engine::analysis::loop_check::OfferRoad::Ring,
+            counted_take: Default::default(),
             period: Default::default(),
         },
     };

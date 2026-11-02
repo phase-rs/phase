@@ -119,6 +119,10 @@
   },
   "setSelector": {
     "botDifficulty": "Bot Difficulty",
+    "pickEnhancements": {
+      "label": "Use built-in AI with draft pick enhancements",
+      "hint": "Bots follow a written pick-order guide for formats that have one (currently Mirrodin, Darksteel and Fifth Dawn). Applies at Medium difficulty and above."
+    },
     "difficultyLevels": {
       "VeryEasy": "Very Easy",
       "Easy": "Easy",
@@ -132,6 +136,12 @@
     "packOrder": "Pack Order",
     "candidateSets": "Candidate Sets",
     "clearPacks": "Clear",
+    "randomSet": "Random Set",
+    "randomSetHint": "Fill every pack from one randomly chosen set",
+    "randomPacks": "Random Packs",
+    "randomPacksHint": "Give each pack its own randomly chosen set",
+    "randomCandidates": "Random Sets",
+    "randomCandidatesHint": "Choose distinct candidate sets at random",
     "emptyPacks_one": "Pick a set for each pack. A draft opens {{count}} pack by default — repeat a set or mix several.",
     "emptyPacks_other": "Pick a set for each pack. A draft opens {{count}} packs by default — repeat a set or mix several to draft a block.",
     "emptyPacksFixed_one": "Sealed opens exactly {{count}} pack. Pick a set for it.",
@@ -156,6 +166,7 @@
     "startSealed": "Start Sealed"
   },
   "pack": {
+    "label": "Draft pack",
     "confirmPick": "Confirm Pick",
     "selected": "Selected",
     "draftEffects": "Draft effects:",

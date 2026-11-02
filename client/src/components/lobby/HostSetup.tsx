@@ -10,8 +10,8 @@ import type {
   LoopDetectionMode,
   MatchType,
 } from "../../adapter/types";
-import { AI_DIFFICULTIES } from "../../constants/ai";
-import { FORMAT_REGISTRY, formatSuppliesDeck } from "../../data/formatRegistry";
+import { AI_DIFFICULTIES, isAiDifficulty } from "../../constants/ai";
+import { FORMAT_REGISTRY, formatSuppliesDeck, isPlanechaseFamilyFormat } from "../../data/formatRegistry";
 import {
   directoryLobbySources,
   FORMAT_DEFAULTS,
@@ -31,12 +31,17 @@ import type { HostSeed } from "../../pages/multiplayerPageState";
 import { DEFAULT_MULTIPLAYER_SERVER_URL } from "../../config/multiplayerServer";
 import { useAiDeckCatalog } from "../../services/aiDeckCatalog";
 import {
-  candidatePassesFilters,
   cedhSeatProblem,
   pickAiSeatDecks,
+  resolveBracketDrawBase,
+  resolveEffectiveAiRandomPool,
   type CedhSeatProblem,
-  restrictAiPoolByBracket,
 } from "../../services/aiRandomPool";
+import {
+  summarizePoolSelection,
+  withCatalogSavedNames,
+} from "../../services/randomPoolSelection";
+import { usePoolFolderIndex } from "../../hooks/usePoolFolderIndex";
 import { CEDH_DIFFICULTY } from "../../services/cedhLock";
 import { AI_DECK_RANDOM, usePreferencesStore, type AiDeckSelection } from "../../stores/preferencesStore";
 import { bestOfThreeCeilingForFormat } from "../../services/engineRuntime";
@@ -48,12 +53,13 @@ import {
 } from "../../services/customFormats";
 import { getHostAdapter } from "../../adapter/wasm-adapter";
 import { isFormatConfigShape } from "../../adapter/format-config-shape";
-import { expandParsedDeck } from "../../services/deckParser";
+import { captureSubmissionArtPreferences, submitParsedDeck } from "../../services/deckSubmission";
 import { bracketToEngineTier } from "../../types/bracketEstimate";
 import { AiDeckPicker } from "../menu/AiDeckPicker";
+import { RandomPoolTree } from "../menu/RandomPoolTree";
 import { menuButtonClass } from "../menu/buttonStyles";
 import { PileSourceChoice } from "../menu/PileSourceChoice";
-import { DEFAULT_PILE_CHOICE, suppliedAiDeckChoice, type PileChoice } from "../../services/pileSource";
+import { DEFAULT_PILE_CHOICE, pileSourceParam, suppliedAiDeckChoice, type PileChoice } from "../../services/pileSource";
 import { ConnectionModeSwitch } from "./ConnectionModeSwitch";
 import { IntegerField } from "../ui/IntegerField";
 import { MenuSelect, type MenuSelectGroup } from "../ui/MenuSelect";
@@ -71,6 +77,8 @@ interface HostSetupProps {
    */
   onHost: (settings: HostSettings, serverUrl: string | null) => void | Promise<boolean>;
   onBack: () => void;
+  /** Parent-owned epoch: capture before AI preparation; invalidate delegated work on source changes. */
+  preparationEpoch: Readonly<{ current: number; invalidate: () => void }>;
   connectionMode: ConnectionMode;
   /** Host Game owns this choice; browsing and joining use either transport. */
   onConnectionModeChange: (mode: ConnectionMode) => void;
@@ -343,13 +351,14 @@ export function cappedMatchType(selected: MatchType, ceiling: MatchType | null):
 export function HostSetup({
   onHost,
   onBack,
+  preparationEpoch,
   connectionMode,
   onConnectionModeChange,
   hostDisabled = false,
   hostDisabledReason,
   seed,
 }: HostSetupProps) {
-  const { t } = useTranslation(["multiplayer", "menu"]);
+  const { t } = useTranslation(["multiplayer", "menu", "common"]);
   // Player name is edited in `PlayerIdentityBanner` above this form (see
   // MultiplayerPage). We read it here only to submit it and to seed the
   // room-name placeholder — this form itself intentionally has no
@@ -498,6 +507,11 @@ export function HostSetup({
   const [aiSeats, setAiSeats] = useState<AiSeatConfig[]>(remembered?.aiSeats ?? []);
   const [startWhenFull, setStartWhenFull] = useState(remembered?.startWhenFull ?? true);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const preparationAttempt = useRef(0);
+  useEffect(() => {
+    setIsSubmitting(false);
+    return () => { preparationAttempt.current += 1; };
+  }, [seed, connectionMode]);
 
   // ── Axis A: saved custom formats (client-persisted) ────────────────────
   // `savedCustomFormatId` is what identifies WHICH saved definition is active:
@@ -534,7 +548,22 @@ export function HostSetup({
   const aiArchetypeFilter = usePreferencesStore((s) => s.aiArchetypeFilter);
   const aiCoverageFloor = usePreferencesStore((s) => s.aiCoverageFloor);
   const aiBracketFilter = usePreferencesStore((s) => s.aiBracketFilter);
+  const aiPoolSelection = usePreferencesStore((s) => s.aiPoolSelection);
+  // Reactive folder revision: the preview memos below resolve through this
+  // index so a deck moved between folders recomputes instead of serving
+  // stale membership.
+  const poolFolderIndex = usePoolFolderIndex();
   const [pile, setPile] = useState<PileChoice>(DEFAULT_PILE_CHOICE);
+  const handlePileChange = (next: PileChoice) => {
+    // Legality refreshes allocate a new choice for the SAME source. Only a
+    // source change abandons both local AI and delegated page preparation.
+    if (pileSourceParam(next.source) !== pileSourceParam(pile.source)) {
+      preparationAttempt.current += 1;
+      setIsSubmitting(false);
+      preparationEpoch.invalidate();
+    }
+    setPile(next);
+  };
   // A pile is picked for one format; any format change returns to the default pile.
   const [pileFormat, setPileFormat] = useState(formatConfig.format);
   if (pileFormat !== formatConfig.format) {
@@ -544,27 +573,74 @@ export function HostSetup({
   // No AI seats in a Discord game: its seats are promised to the Discord
   // players, and an all-AI table would never register the requested code.
   const aiSeatsSupported =
-    seed === undefined && !formatConfig.team_based && formatConfig.format !== "Planechase";
+    seed === undefined && !formatConfig.team_based && !isPlanechaseFamilyFormat(formatConfig.format);
   const effectiveAiSeats = aiSeatsSupported ? aiSeats : [];
   // A remembered config can carry a CEDH seat; the table is then cEDH and its
   // Random pool is restricted to bracket 5 (Commander formats only).
   const hostCedh = effectiveAiSeats.some((s) => s.difficulty === CEDH_DIFFICULTY);
+  // Same layering as game start (`pickAiSeatDecks`): bracket with catalog
+  // fallback, then the folder/deck curation (falling back when it matches
+  // nothing), then the archetype + coverage soft preferences (falling back to
+  // the curated pool) — resolved through the shared authority so the seat
+  // pickers preview what Random seats can actually draw.
   const aiRandomPool = useMemo(
     () =>
-      restrictAiPoolByBracket(aiDeckCatalog.candidates, {
-        bracketFilter: aiBracketFilter,
-        cedhMode: hostCedh,
-        selectedFormat: formatConfig.format,
-      }).filter((d) => candidatePassesFilters(d, aiArchetypeFilter, aiCoverageFloor)),
+      resolveEffectiveAiRandomPool(
+        withCatalogSavedNames(aiDeckCatalog.candidates),
+        {
+          bracketFilter: aiBracketFilter,
+          cedhMode: hostCedh,
+          selectedFormat: formatConfig.format,
+          poolSelection: aiPoolSelection,
+          archetypeFilter: aiArchetypeFilter,
+          coverageFloor: aiCoverageFloor,
+        },
+        poolFolderIndex,
+      ),
     [
       aiDeckCatalog.candidates,
       aiBracketFilter,
       hostCedh,
       formatConfig.format,
+      aiPoolSelection,
       aiArchetypeFilter,
       aiCoverageFloor,
+      poolFolderIndex,
     ],
   );
+  // The tree lists the full legal catalog (the curation is format-global),
+  // but reports playable counts against the draw base — the same base
+  // `pickAiSeatDecks` draws from — so a selection the bracket filter empties
+  // warns instead of silently falling back.
+  const poolTreeItems = useMemo(
+    () => withCatalogSavedNames(aiDeckCatalog.candidates),
+    [aiDeckCatalog.candidates],
+  );
+  // Group toggles clear overrides against the complete raw universe: the
+  // curation is format-global, so an override on a currently-unlisted deck
+  // must not survive a folder-wide unselect.
+  const poolToggleItems = useMemo(
+    () => withCatalogSavedNames(aiDeckCatalog.allCandidates),
+    [aiDeckCatalog.allCandidates],
+  );
+  const poolBaseIds = useMemo(
+    () =>
+      new Set(
+        resolveBracketDrawBase(aiDeckCatalog.candidates, {
+          bracketFilter: aiBracketFilter,
+          cedhMode: hostCedh,
+          selectedFormat: formatConfig.format,
+        }).map((candidate) => candidate.id),
+      ),
+    [aiDeckCatalog.candidates, aiBracketFilter, hostCedh, formatConfig.format],
+  );
+  // Decks are selected but none survive the bracket restriction, so Random
+  // seats silently fall back to the full bracket pool. Say so next to the
+  // seats (the tree warns too) — the "Random (N)" count alone hides the why.
+  const poolConflictForHost = useMemo(() => {
+    const summary = summarizePoolSelection(poolTreeItems, aiPoolSelection, poolBaseIds, poolFolderIndex);
+    return summary.selected > 0 && summary.playable === 0 && summary.baseSize > 0 ? summary : null;
+  }, [poolTreeItems, aiPoolSelection, poolBaseIds, poolFolderIndex]);
   // A cEDH table with an AI seat no bracket-5 deck can serve (a Random seat over
   // an empty bracket-5 pool, or a seat pinned to a non-bracket-5 deck) would be
   // refused by the engine's bracket gate, so block hosting.
@@ -792,7 +868,8 @@ export function HostSetup({
    *  from the single-player pool preferences, pinned seats keep their pick. The
    *  seat's `deckId` stays the user's selection (Random remains Random) so the
    *  all-AI local start can still apply its own Random draw and cEDH fail-fast. */
-  const resolveCatalogAiSeats = (): AiSeatConfig[] => {
+  const resolveCatalogAiSeats = async (): Promise<AiSeatConfig[]> => {
+    const snapshot = captureSubmissionArtPreferences();
     const ordered = [...effectiveAiSeats].sort((a, b) => a.seatIndex - b.seatIndex);
     const requestedDeckIds = ordered.map((seat) => seat.deckId ?? AI_DECK_RANDOM);
     const picks = pickAiSeatDecks({
@@ -803,15 +880,16 @@ export function HostSetup({
       bracketFilter: aiBracketFilter,
       cedhMode: hostCedh,
       selectedFormat: formatConfig.format,
+      poolSelection: aiPoolSelection,
     });
-    return ordered.map((seat, i) => ({
+    return Promise.all(ordered.map(async (seat, i) => ({
       ...seat,
       deckId: requestedDeckIds[i],
       deck: {
         type: "DeckList" as const,
-        data: { ...expandParsedDeck(picks[i].deck), bracket_tier: bracketToEngineTier(picks[i].bracket) },
+        data: { ...await submitParsedDeck(picks[i].deck, snapshot), bracket_tier: bracketToEngineTier(picks[i].bracket) },
       },
-    }));
+    })));
   };
 
   const handleHost = async () => {
@@ -820,56 +898,46 @@ export function HostSetup({
     // (valid) selection. `submitDisabled` already blocks the button; this is
     // the belt-and-braces guard for a programmatic form submit.
     if (isResolvingFormat) return;
+    const attempt = ++preparationAttempt.current;
+    const parentAttempt = preparationEpoch.current;
     setIsSubmitting(true);
-    // `finalConfig` is the submission payload — `max_players` here is the
-    // user's chosen count, not the format ceiling. Do NOT mirror this
-    // into the store: the store tracks the format's invariants (so the
-    // deck picker can filter), and overwriting `max_players` there would
-    // collapse the picker on re-entry. The live mirror effect above
-    // keeps the store in sync with the format itself.
-    const finalConfig = { ...formatConfig, max_players: playerCount };
-    // Resolve every seat to a concrete catalog deck here: the server's own
-    // Random draws from a different (starter-deck) pool, so Random must not
-    // reach it. Supplied-deck formats submit the empty supplied deck instead.
-    const submittedAiSeats: AiSeatConfig[] = suppliesDeck
-      ? effectiveAiSeats.map((seat) => ({ ...seat, deck: suppliedAiDeckChoice().choice }))
-      : resolveCatalogAiSeats();
-    const trimmedRoomName = roomName.trim();
-    // Default to the placeholder value when the field is blank so the
-    // lobby title matches what the user was shown. Falls back to null
-    // (server uses host name) only if the user has no display name set.
-    const resolvedRoomName =
-      trimmedRoomName.length > 0
-        ? trimmedRoomName
-        : displayName
-          ? `${displayName}'s table`
-          : null;
-    // Remember the chosen settings so the next host session restores them
-    // instead of resetting to defaults. Persist the format's own config (with
-    // its true `max_players` ceiling), not `finalConfig` — the latter's
-    // `max_players` is the chosen player count and would cap the slider on
-    // restore. Room name and password are intentionally not persisted. A
-    // Discord game's pinned, private settings must not become the defaults.
-    if (!seed) {
-      rememberHostConfig({
-        format: selectedFormat,
-        formatConfig,
-        // Persisted so rehydration can resolve WHICH saved definition this was —
-        // `selectedFormat` is "Custom:0" for every Axis-A save and cannot.
-        savedCustomFormatId,
-        playerCount,
-        matchType,
-        loopDetection,
-        isPublic,
-        startWhenFull,
-        // Ranked rating updates aren't implemented in the engine — the room is
-        // always casual. The transport field is retained for protocol parity.
-        ranked: false,
-        aiSeats: effectiveAiSeats,
-      });
-    }
     try {
-      const ok = await onHost(
+      // The submission uses the chosen count; persistence keeps the format ceiling.
+      const finalConfig = { ...formatConfig, max_players: playerCount };
+      // Resolve Random locally: the server uses a different starter-deck pool.
+      // The batch captures one art authority, while remembered seats stay selections.
+      const submittedAiSeats: AiSeatConfig[] = suppliesDeck
+        ? effectiveAiSeats.map((seat) => ({ ...seat, deck: suppliedAiDeckChoice().choice }))
+        : await resolveCatalogAiSeats();
+      // A newer page action can supersede this still-mounted form.
+      // Fence both remembered selections and delegation into a new page attempt.
+      if (attempt !== preparationAttempt.current || parentAttempt !== preparationEpoch.current) return;
+      const trimmedRoomName = roomName.trim();
+      const resolvedRoomName =
+        trimmedRoomName.length > 0
+          ? trimmedRoomName
+          : displayName
+            ? `${displayName}'s table`
+            : null;
+      // A Discord game's pinned private settings must not become the defaults.
+      // Room name and password are intentionally not persisted.
+      if (!seed) {
+        rememberHostConfig({
+          format: selectedFormat,
+          formatConfig,
+          // Every Axis-A save uses Custom:0; this identifies the saved definition.
+          savedCustomFormatId,
+          playerCount,
+          matchType,
+          loopDetection,
+          isPublic,
+          startWhenFull,
+          // Ranked rating updates are not implemented; transport retains the field.
+          ranked: false,
+          aiSeats: effectiveAiSeats,
+        });
+      }
+      await onHost(
         {
           displayName,
           public: isPublic,
@@ -891,12 +959,13 @@ export function HostSetup({
         // a flow that can route through deck-select before it runs.
         isP2P ? null : selected,
       );
-      if (ok !== false) return;
     } catch {
       // The parent surfaces the specific failure as a toast/dialog.
-    }
-    if (hostingStatus === "idle") {
-      setIsSubmitting(false);
+    } finally {
+      // Every exit releases its own latch, including parent-epoch cancellation,
+      // rejection and successful delegation. Never release a successor's latch;
+      // the store's hostingStatus independently gates an opened/connecting room.
+      if (attempt === preparationAttempt.current) setIsSubmitting(false);
     }
   };
 
@@ -1108,7 +1177,7 @@ export function HostSetup({
               <PileSourceChoice
                 format={formatConfig.format}
                 value={pile.source}
-                onChange={setPile}
+                onChange={handlePileChange}
               />
             </div>
 
@@ -1443,7 +1512,9 @@ export function HostSetup({
                             ariaLabel={t("menu:aiDifficulty.label")}
                             label={
                               difficultyMenuItems.find((item) => item.value === aiSeat.difficulty)?.label ??
-                              t(`menu:aiDifficulty.levels.${aiSeat.difficulty}`)
+                              (isAiDifficulty(aiSeat.difficulty)
+                                ? t(`menu:aiDifficulty.levels.${aiSeat.difficulty}`)
+                                : t("menu:aiDifficulty.label"))
                             }
                             selectedValue={aiSeat.difficulty}
                             items={difficultyMenuItems}
@@ -1475,6 +1546,16 @@ export function HostSetup({
                   {t(CEDH_SEAT_PROBLEM_KEYS[cedhSeatProblemForHost])}
                 </p>
               )}
+              {poolConflictForHost !== null && (
+                <p role="status" className="mt-3 text-xs text-amber-300">
+                  {t("hostSetup.poolBracketConflict", { selected: poolConflictForHost.selected, total: poolConflictForHost.baseSize })}
+                </p>
+              )}
+            </div>
+          )}
+          {effectiveAiSeats.length > 0 && !suppliesDeck && !aiDeckCatalog.loading && (
+            <div className="surface-card rounded-panel border border-hairline p-4">
+              <RandomPoolTree pool="ai" items={poolTreeItems} allItems={poolToggleItems} baseIds={poolBaseIds} />
             </div>
           )}
 
@@ -1499,7 +1580,11 @@ export function HostSetup({
           </button>
           <button
             type="button"
-            onClick={onBack}
+            onClick={() => {
+              preparationAttempt.current += 1;
+              setIsSubmitting(false);
+              onBack();
+            }}
             className={`${menuButtonClass({ tone: "neutral", size: "sm" })} w-full`}
           >
             {t("hostSetup.back")}

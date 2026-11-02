@@ -90,6 +90,14 @@ fn perpetual_target_object_ids(
         return state.last_created_token_ids.clone();
     }
 
+    // Digital-only Alchemy: a plural "those cards perpetually gain …" rider names
+    // every member of the set the preceding instruction published (Circadian
+    // Struggle's sought cards), not the first one the singular
+    // `resolved_targets` path would pick.
+    if let TargetFilter::TrackedSet { id } = target {
+        return crate::game::quantity::tracked_set_object_ids(state, *id);
+    }
+
     if !ability.targets.is_empty() {
         let propagated = super::effect_object_targets(target, &ability.targets);
         if !propagated.is_empty()
@@ -1288,6 +1296,7 @@ mod tests {
                 chooser: Chooser::Controller.into(),
                 candidate_source: crate::types::ability::ZoneChoiceCandidateSource::Legacy,
                 reciprocal_role: None,
+                gather_role: None,
                 up_to: false,
                 selection: CardSelectionMode::Chosen,
                 constraint: None,

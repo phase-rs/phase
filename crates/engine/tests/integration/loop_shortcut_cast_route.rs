@@ -16,6 +16,7 @@ use engine::analysis::loop_check::ShortcutResponse;
 use engine::analysis::resource::ResourceAxis;
 use engine::game::engine::apply;
 use engine::game::functioning_abilities::active_trigger_definitions;
+use engine::game::perf_counters::cast_undo_record_snapshot;
 use engine::game::scenario::GameRunner;
 use engine::game::zones::create_object;
 use engine::types::ability::TriggerDefinition;
@@ -110,8 +111,7 @@ fn graft_cast_trigger(state: &mut GameState, name: &str) -> ObjectId {
         .objects
         .get_mut(&host)
         .expect("the just-created graft host is in `objects`")
-        .trigger_definitions
-        .push(TriggerDefinition::new(TriggerMode::SpellCast));
+        .push_printed_trigger(TriggerDefinition::new(TriggerMode::SpellCast));
     // Positional read-back (`Definitions<T>` exposes no `iter()`): prove the graft actually landed,
     // so a row that later reads `Batched` is a route failure rather than a fixture failure.
     let entries = &state
@@ -445,5 +445,61 @@ fn mana_engine_with_cast_trigger_registers_nothing() {
          replay to be a better version OF, and scheduling one buys uncapped cubic replay cost \
          plus a spurious CR 500.5 collapse prompt for a loop with nothing to collapse; observed \
          {observed:?}"
+    );
+}
+
+/// CR 732.2a + CR 733.1: a confirmed take's drive installs no per-cast reversal, so the cast-undo
+/// work an accept records is flat in N; a live cast after the take records again.
+#[test]
+fn confirmed_take_cast_undo_work_is_flat_in_n() {
+    let before_offer = cast_undo_record_snapshot();
+    let state = offer_state(true);
+    assert!(
+        cast_undo_record_snapshot().since(before_offer).values > 0,
+        "reach-guard: the live convoke recast records cast-undo values on this board"
+    );
+    let offered = saprolings(&state);
+    let take = |n: u32| {
+        let mut taken = state.clone();
+        let before = cast_undo_record_snapshot();
+        declare_and_accept_all(&mut taken, P0, n);
+        let work = cast_undo_record_snapshot().since(before).values;
+        assert_performed(&taken, offered, n);
+        (taken, work)
+    };
+    let (_, at_1) = take(1);
+    let (state, at_2) = take(2);
+    assert_eq!(
+        at_1, at_2,
+        "the drive's cycles record no cast inverse, so accept-time cast-undo work is flat in N"
+    );
+    let wire = serde_json::to_value(&state).expect("the taken state serializes");
+    assert!(
+        wire.get("spell_cast_reversal").is_none(),
+        "no cast reversal survives the take"
+    );
+
+    let fodder = state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| {
+            state
+                .objects
+                .get(id)
+                .is_some_and(|o| o.controller == P0 && o.name == "Saproling" && !o.tapped)
+        })
+        .min()
+        .expect("reach-guard: an untapped P0 Saproling remains to convoke the recast");
+    let mut runner = GameRunner::from_state(state);
+    let before_recast = cast_undo_record_snapshot();
+    runner
+        .cast(SPROUT)
+        .accept_optional()
+        .convoke_with(&[fodder])
+        .commit();
+    assert!(
+        cast_undo_record_snapshot().since(before_recast).values > 0,
+        "the take's scope ends with its drive: a live cast afterwards records its cast inverse"
     );
 }

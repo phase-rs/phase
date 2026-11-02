@@ -560,6 +560,7 @@ fn sacrifice_to_bombardment(runner: &mut GameRunner, bombardment: ObjectId, vict
         .act(GameAction::ActivateAbility {
             source_id: bombardment,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activating Goblin Bombardment must succeed");
     let mut sacrificed = false;
@@ -2812,6 +2813,7 @@ fn frost_titan_pili_pala_window_after_island_bounced() -> Option<(TitanTaxBoard,
         .act(GameAction::ActivateAbility {
             source_id: pili,
             ability_index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("P1 activates Pili-Pala at the unless-payment prompt");
     let state = board.runner.state();
@@ -3270,4 +3272,164 @@ fn frost_titan_pili_pala_payment_window_blanks_hidden_mana_source() {
         raw_window_payment.as_slice(),
         "the authoritative prompt still carries the full payment vector"
     );
+}
+
+/// Activate `source`'s activated ability, answering its target prompt with
+/// `target` and paying from the pool, ending at priority with the ability on
+/// top of the stack. Returns the ability's stack entry id.
+fn activate_with_target(runner: &mut GameRunner, source: ObjectId, target: TargetRef) -> ObjectId {
+    let ability_index = runner.state().objects[&source]
+        .abilities
+        .iter()
+        .position(|ability| matches!(ability.kind, AbilityKind::Activated))
+        .expect("the source has an activated ability");
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: source,
+            ability_index,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the activation is accepted");
+    for _ in 0..8 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::Priority { .. } => break,
+            WaitingFor::TargetSelection { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(target.clone()),
+                    })
+                    .expect("the declared target is accepted");
+            }
+            WaitingFor::ManaPayment { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("the pool pays the activation");
+            }
+            other => panic!("unexpected waiting_for while activating: {other:?}"),
+        }
+    }
+    let entry = runner
+        .state()
+        .stack
+        .back()
+        .expect("the ability is on the stack");
+    assert!(
+        matches!(entry.kind, StackEntryKind::ActivatedAbility { source_id, .. } if source_id == source),
+        "reach: the activation is on top of the stack"
+    );
+    entry.id
+}
+
+/// V-2's board: Prodigal Pyromancer's and Prodigal Sorcerer's `{T}` abilities
+/// are each countered by P1's Stifle; P1's Boomerang then returns Pyromancer to
+/// its owner's hand. Returns (runner, pyromancer, sorcerer, pyromancer's
+/// ability entry, sorcerer's ability entry) at P0's priority on an empty stack,
+/// in the same step.
+fn pingers_stifled_then_one_bounced() -> Option<(GameRunner, ObjectId, ObjectId, ObjectId, ObjectId)>
+{
+    let db = load_db()?;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let pyromancer = scenario.add_real_card(P0, "Prodigal Pyromancer", Zone::Battlefield, db);
+    let sorcerer = scenario.add_real_card(P0, "Prodigal Sorcerer", Zone::Battlefield, db);
+    let stifle_a = scenario.add_real_card(P1, "Stifle", Zone::Hand, db);
+    let stifle_b = scenario.add_real_card(P1, "Stifle", Zone::Hand, db);
+    let boomerang = scenario.add_real_card(P1, "Boomerang", Zone::Hand, db);
+    let mut runner = scenario.build();
+    engine::game::rehydrate_game_from_card_db(runner.state_mut(), db);
+    fund(&mut runner, P1, &[(ManaType::Blue, 4)]);
+
+    let pyromancer_ability = activate_with_target(&mut runner, pyromancer, TargetRef::Player(P1));
+    let sorcerer_ability = activate_with_target(&mut runner, sorcerer, TargetRef::Player(P1));
+    runner.act(GameAction::PassPriority).expect("P0 passes");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { player } if player == P1),
+        "reach: P1 has priority with both abilities on the stack"
+    );
+    commit_cast(
+        &mut runner,
+        stifle_a,
+        Some(TargetRef::Object(pyromancer_ability)),
+    );
+    commit_cast(
+        &mut runner,
+        stifle_b,
+        Some(TargetRef::Object(sorcerer_ability)),
+    );
+    settle(&mut runner);
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P0 passes on the empty stack");
+    commit_cast(&mut runner, boomerang, Some(TargetRef::Object(pyromancer)));
+    settle(&mut runner);
+    Some((
+        runner,
+        pyromancer,
+        sorcerer,
+        pyromancer_ability,
+        sorcerer_ability,
+    ))
+}
+
+/// V-2 (CR 400.2 + CR 400.7): a departed activated ability names its source
+/// (`StackEntry::source_id`) and carries that source's ability. Once the source
+/// is hidden from a viewer (here: returned to its owner's hand after its ability
+/// was countered), the record is dropped from that viewer's projection, as a
+/// departed spell keyed by a hidden id is. A departed activation of a public
+/// source is kept for every viewer, the owner keeps both, and authoritative
+/// state keeps both (CR 608.2h).
+#[test]
+fn departed_activation_of_a_hidden_source_is_dropped_for_viewers_who_cannot_see_it() {
+    let Some((runner, pyromancer, sorcerer, pyromancer_ability, sorcerer_ability)) =
+        pingers_stifled_then_one_bounced()
+    else {
+        return;
+    };
+    let raw = runner.state().clone();
+    assert_eq!(
+        raw.objects[&pyromancer].zone,
+        Zone::Hand,
+        "reach-guard: bounced"
+    );
+    assert_eq!(
+        raw.objects[&sorcerer].zone,
+        Zone::Battlefield,
+        "reach-guard: still public"
+    );
+    for entry in [pyromancer_ability, sorcerer_ability] {
+        assert!(
+            raw.departed_activated_abilities.contains_key(&entry),
+            "reach-guard: raw state records the countered activation {entry:?}"
+        );
+    }
+    let p1 = filter_state_for_viewer(&raw, P1);
+    let spectator = filter_state_for_unseated_viewer(&raw);
+    for (label, view) in [("P1", &p1), ("spectator", &spectator)] {
+        assert_eq!(
+            view.objects[&pyromancer].name, HIDDEN,
+            "reach-guard ({label}): the bounced source is hidden"
+        );
+        assert!(
+            !view
+                .departed_activated_abilities
+                .contains_key(&pyromancer_ability),
+            "{label}: the departed activation still names the hidden source"
+        );
+        assert!(
+            view.departed_activated_abilities
+                .contains_key(&sorcerer_ability),
+            "{label}: a departed activation of a public source is kept"
+        );
+    }
+    let p0 = filter_state_for_viewer(&raw, P0);
+    assert_eq!(
+        p0.objects[&pyromancer].name, "Prodigal Pyromancer",
+        "owner sees own hand"
+    );
+    for entry in [pyromancer_ability, sorcerer_ability] {
+        assert!(
+            p0.departed_activated_abilities.contains_key(&entry),
+            "P0 owner keeps {entry:?}"
+        );
+    }
 }

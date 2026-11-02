@@ -1,11 +1,14 @@
 use crate::game::quantity::resolve_quantity;
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, SkipScope};
+use crate::types::ability::{
+    Effect, EffectError, EffectKind, ResolvedAbility, SkipScope, StepSkipTarget,
+};
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, PendingCombatPhaseSkip};
 
 /// CR 614.10a: "Skip your next N [step] steps." — increments the per-player
 /// step-skip counter for the named step. The turn system consumes the counter
-/// only when that step would otherwise occur.
+/// only when that step would otherwise occur. "Skips their next combat phase"
+/// arms one phase-level skip per occurrence instead.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -44,17 +47,31 @@ pub fn resolve(
             }
             state.combat_phase_skip_next_turn[idx].pending += 1;
         }
-        // CR 614.10a: occurrence-scoped skip — increment the per-player step
-        // counter; the turn system consumes it when the step would occur.
         SkipScope::NextOccurrence => {
             let n =
                 resolve_quantity(state, count, ability.controller, ability.source_id).max(0) as u32;
             if n > 0 {
-                if idx >= state.steps_to_skip.len() {
-                    state.steps_to_skip.resize_with(idx + 1, Default::default);
-                }
-                for step in step.constituent_steps() {
-                    *state.steps_to_skip[idx].entry(*step).or_default() += n;
+                match step {
+                    // CR 614.10a: occurrence-scoped skip — increment the per-player
+                    // step counter; the turn system consumes it when the step would
+                    // occur.
+                    StepSkipTarget::Step(step) => {
+                        if idx >= state.steps_to_skip.len() {
+                            state.steps_to_skip.resize_with(idx + 1, Default::default);
+                        }
+                        *state.steps_to_skip[idx].entry(*step).or_default() += n;
+                    }
+                    // CR 500.11 + CR 614.10: a whole phase is skipped as one unit,
+                    // so it is pending at phase level, keeping the effect's duration
+                    // (CR 514.2: Moment of Silence's "this turn").
+                    StepSkipTarget::CombatPhase => {
+                        state.pending_combat_phase_skips.extend((0..n).map(|_| {
+                            PendingCombatPhaseSkip {
+                                player,
+                                duration: ability.duration.clone(),
+                            }
+                        }));
+                    }
                 }
             }
         }
@@ -72,9 +89,7 @@ pub fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{
-        AbilityKind, QuantityExpr, SpellContext, StepSkipTarget, TargetFilter,
-    };
+    use crate::types::ability::{AbilityKind, Duration, QuantityExpr, SpellContext, TargetFilter};
     use crate::types::game_state::CombatPhaseSkipState;
     use crate::types::identifiers::ObjectId;
     use crate::types::phase::Phase;
@@ -108,6 +123,7 @@ mod tests {
             source_id: ObjectId(1),
             cast_occurrence: None,
             source_incarnation: None,
+            announced_source_incarnation: None,
             trigger_source: None,
             trigger_definition_ref: None,
             delayed_origin: None,
@@ -162,12 +178,14 @@ mod tests {
             replacement_applied: Default::default(),
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
             target_reads: Default::default(),
+            entry_onset: crate::types::ability::ContinuousEffectOnset::WhenFollowed,
             sibling_condition: crate::types::ability::SiblingCondition::Dependent,
             modal: None,
             mode_abilities: vec![],
             parent_target_missing_reason: None,
             activation_cost_reduction: None,
             activation_record: None,
+            control_change_instruction: None,
         }
     }
 
@@ -192,38 +210,53 @@ mod tests {
         )));
     }
 
-    /// CR 500.11: Skipping a phase means all steps within that phase are skipped.
-    /// Cards: Stonehorn Dignitary, Blinding Angel, Revenant Patriarch, Moment of
-    /// Silence.
+    /// CR 500.11 + CR 614.10: a whole combat phase is pending as one phase-level
+    /// skip, never as step counters a combat in progress could use up.
     #[test]
-    fn skip_combat_phase_expands_to_all_five_combat_steps() {
+    fn skip_combat_phase_arms_one_phase_level_skip_per_occurrence() {
         let mut state = GameState::default();
         let mut events = Vec::new();
         let ability = make_ability(
             StepSkipTarget::CombatPhase,
-            QuantityExpr::Fixed { value: 1 },
+            QuantityExpr::Fixed { value: 2 },
         );
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        // CR 500.11: all five combat steps must be in steps_to_skip.
-        let skips = &state.steps_to_skip[0];
-        assert_eq!(skips.get(&Phase::BeginCombat), Some(&1), "BeginCombat");
+        let unlimited = PendingCombatPhaseSkip {
+            player: PlayerId(0),
+            duration: None,
+        };
         assert_eq!(
-            skips.get(&Phase::DeclareAttackers),
-            Some(&1),
-            "DeclareAttackers"
+            state.pending_combat_phase_skips,
+            vec![unlimited.clone(), unlimited]
         );
+        assert!(
+            state.steps_to_skip.iter().all(|skips| skips.is_empty()),
+            "a phase skip must not write step counters"
+        );
+    }
+
+    /// CR 514.2: the skip keeps the effect's duration so cleanup can end it.
+    #[test]
+    fn skip_combat_phase_carries_the_effect_duration() {
+        let mut state = GameState::default();
+        let mut events = Vec::new();
+        let mut ability = make_ability(
+            StepSkipTarget::CombatPhase,
+            QuantityExpr::Fixed { value: 1 },
+        );
+        ability.duration = Some(Duration::UntilEndOfTurn);
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
         assert_eq!(
-            skips.get(&Phase::DeclareBlockers),
-            Some(&1),
-            "DeclareBlockers"
+            state.pending_combat_phase_skips,
+            vec![PendingCombatPhaseSkip {
+                player: PlayerId(0),
+                duration: Some(Duration::UntilEndOfTurn),
+            }]
         );
-        assert_eq!(skips.get(&Phase::CombatDamage), Some(&1), "CombatDamage");
-        assert_eq!(skips.get(&Phase::EndCombat), Some(&1), "EndCombat");
-        // Non-combat steps must not be touched.
-        assert!(skips.get(&Phase::Untap).is_none(), "Untap must not be set");
-        assert!(skips.get(&Phase::Draw).is_none(), "Draw must not be set");
     }
 
     /// CR 614.10 + CR 614.10a: an `AllOfNextTurn` combat skip arms one pending

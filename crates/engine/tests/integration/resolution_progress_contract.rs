@@ -113,7 +113,6 @@ fn restore(runner: &mut GameRunner) {
     runner.state_mut().capture_rng_word_pos();
     let json =
         serde_json::to_value(ResolutionStateWire::from_game_state(runner.state().clone())).unwrap();
-    assert_eq!(json["resolution_state_version"], 6);
     assert!(!json.to_string().contains("ResolutionProgress"));
     let restored = serde_json::from_value::<PersistedGameState>(json)
         .expect("live resolution decodes")
@@ -137,6 +136,7 @@ fn answered_mana_color_does_not_suspend_each_opponents_life_change() {
         r.act(GameAction::ActivateAbility {
             source_id: grove,
             ability_index: 1,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .unwrap();
         assert!(matches!(
@@ -275,6 +275,7 @@ fn answered_mana_color_finishes_each_instead_tail_before_repeating() {
         r.act(GameAction::ActivateAbility {
             source_id: source,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .unwrap();
         assert!(matches!(

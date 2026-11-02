@@ -57,6 +57,7 @@ fn mana_produced_by_activating(
         .act(engine::types::actions::GameAction::ActivateAbility {
             source_id: source,
             ability_index: index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .is_err()
     {

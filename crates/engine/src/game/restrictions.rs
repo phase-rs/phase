@@ -1,4 +1,5 @@
-use crate::game::game_object::GameObject;
+use crate::game::cost_payability::AbilityCostPayability;
+use crate::game::game_object::{CastOrigin, GameObject};
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, ActivationRestriction, CastingPermission, CastingRestriction,
     CommanderOwnership, ControllerRef, FilterProp, ParsedCondition, QuantityExpr,
@@ -155,7 +156,9 @@ pub fn flash_timing_cost(
         match &option.cost {
             None => Some(ManaCost::NoCost),
             Some(AbilityCost::Mana { cost }) => Some(cost.clone()),
-            Some(cost) if cost.is_payable(state, player, obj.id) => Some(ManaCost::NoCost),
+            Some(cost) if cost.is_payable_for_spell(state, player, obj.id) => {
+                Some(ManaCost::NoCost)
+            }
             Some(_) => None,
         }
     })
@@ -578,67 +581,6 @@ pub(crate) fn battlefield_entry_matches_filter(
         TargetFilter::And { filters } => filters.iter().all(|inner| {
             battlefield_entry_matches_filter(record, inner, player, all_creature_types, source_id)
         }),
-        _ => false,
-    }
-}
-
-/// CR 403.3 + CR 608.2h: can [`battlefield_entry_matches_filter`] actually answer this filter
-/// against a `BattlefieldEntryRecord`?
-///
-/// The record is an entry-time snapshot carrying only `object_id / name / core_types / subtypes /
-/// supertypes / colors / keywords / controller` (`types::game_state::BattlefieldEntryRecord`). Every other
-/// characteristic a `FilterProp` can name is live-object state the snapshot never captured, so the
-/// matcher fails closed at the `FilterProp` match's fail-closed arm inside
-/// `battlefield_entry_matches_filter`'s `TargetFilter::Typed` case, and at the fail-closed
-/// `_ => false` arm that closes out that function's outer `match`, and the whole tally reads
-/// a silent constant 0 — but see the `Or` exception documented beside that function's
-/// `TargetFilter::Or` arm: an `Or` with one unsupported leaf yields a SILENT PARTIAL COUNT
-/// instead. Measured: 100
-/// `FilterProp` variants exist (`types::ability::FilterProp`); the matcher answers 4.
-///
-/// This is an ALLOW-LIST, deliberately not an exhaustive `match`. A `FilterProp` added later is
-/// absent from the list and therefore defaults to "not evaluable" — the conservative side, which
-/// yields an honest `Effect::Unimplemented` at the parser guard and an honest `Unhandled` in the
-/// coverage classifier. A deny-list would need exhaustiveness; a positive allow-list does not.
-/// The list (this function's own `TargetFilter::Typed` arm, below) must name exactly the props
-/// the matcher answers; the binder is
-/// `ledger_guard_agrees_with_matcher` (test, below).
-///
-/// Upgrade path, ascending cost: `HasSupertype` and `Named` are answerable from `record.supertypes`
-/// / `record.name` TODAY — one matcher arm plus one line here. `FaceDown` (Tunnel Tipster),
-/// `Token`/`NonToken` and `Tapped` need a new snapshot field on `BattlefieldEntryRecord`.
-///
-/// `TypedFilter::type_filters` is intentionally NOT screened: `entry_type_filter_matches` is
-/// exhaustive; `Instant`/`Sorcery` answer `false` per CR 403.3, whose negation is correctly
-/// `true` for every permanent.
-pub(crate) fn ledger_filter_is_evaluable(filter: &TargetFilter) -> bool {
-    match filter {
-        TargetFilter::Any => true,
-        TargetFilter::Typed(typed) => {
-            // CR 109.5: `entry_controller_matches` answers only these two.
-            typed
-                .controller
-                .as_ref()
-                .is_none_or(|c| matches!(c, ControllerRef::You | ControllerRef::Opponent))
-                && typed.properties.iter().all(|prop| {
-                    matches!(
-                        prop,
-                        FilterProp::HasColor { .. }
-                            | FilterProp::InZone { .. }
-                            | FilterProp::WithKeyword { .. }
-                            | FilterProp::Another
-                    )
-                })
-        }
-        // CR 608.2i: mirrors the monotone connectives (the `TargetFilter::Or` and
-        // `TargetFilter::And` arms) of `battlefield_entry_matches_filter`; every leaf must be
-        // answerable, otherwise the composite silently drops one.
-        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-            filters.iter().all(ledger_filter_is_evaluable)
-        }
-        // Everything else is the fail-closed `_ => false` arm that closes out
-        // `battlefield_entry_matches_filter`'s outer `match`, including the anti-monotone
-        // `TargetFilter::Not`.
         _ => false,
     }
 }
@@ -1323,6 +1265,100 @@ fn casting_restriction_applies(
         // CR 601.2b / CR 601.2h: "Spend only ... on X" restricts how the cost is paid,
         // never when. Always satisfied here; enforced in the mana-payment path.
         CastingRestriction::SpendOnlyOnX { .. } => true,
+        // CR 601.3 + CR 113.6f: the cast's ORIGIN zone must be one the object
+        // may be cast from. Consulted at announcement, where the object still
+        // occupies its origin — unless an in-flight pending cast (CR 601.2a has
+        // already moved it to the stack) records it. The persisted post-finalize
+        // origin is deliberately NOT consulted: at a NEW announcement it can only
+        // describe a PREVIOUS cast of this object, and a stale graveyard stamp
+        // must not admit a later hand cast. The origin zone's owner is the
+        // object's owner (CR 400.3).
+        CastingRestriction::OnlyFromZones { .. } => {
+            let origin = state.objects.get(&source_id).map(|obj| CastOrigin {
+                zone: super::casting::pending_cast_origin_zone_for(state, source_id)
+                    .unwrap_or(obj.zone),
+                zone_owner: obj.owner,
+            });
+            restriction_permits_cast_origin(restriction, player, origin)
+        }
+    }
+}
+
+/// CR 601.3 + CR 113.6f: whether an object's own casting restrictions permit
+/// `caster` to cast it from `origin`. The single answer to the cast-origin
+/// question, shared by the announcement check ([`check_casting_restrictions`])
+/// and the CR 707.12 cast-a-copy routes, which create the copy in the
+/// original's zone and cast it from there without announcing through the cast
+/// pipeline.
+///
+/// `origin: None` means the caller can't establish the origin. A restriction on
+/// the origin then refuses (fail closed); every other restriction is
+/// origin-independent and permits.
+pub(crate) fn restrictions_permit_cast_origin(
+    restrictions: &[CastingRestriction],
+    caster: PlayerId,
+    origin: Option<CastOrigin>,
+) -> bool {
+    restrictions
+        .iter()
+        .all(|restriction| restriction_permits_cast_origin(restriction, caster, origin))
+}
+
+fn restriction_permits_cast_origin(
+    restriction: &CastingRestriction,
+    caster: PlayerId,
+    origin: Option<CastOrigin>,
+) -> bool {
+    match restriction {
+        CastingRestriction::OnlyFromZones { zones, pool } => origin.is_some_and(|origin| {
+            zones.contains(&origin.zone) && cast_origin_in_pool(origin, *pool, caster)
+        }),
+        // Timing, condition and payment restrictions say nothing about origin.
+        CastingRestriction::AsSorcery
+        | CastingRestriction::DuringCombat
+        | CastingRestriction::DuringOpponentsTurn
+        | CastingRestriction::DuringYourTurn
+        | CastingRestriction::DuringYourUpkeep
+        | CastingRestriction::DuringOpponentsUpkeep
+        | CastingRestriction::DuringAnyUpkeep
+        | CastingRestriction::DuringYourEndStep
+        | CastingRestriction::DuringOpponentsEndStep
+        | CastingRestriction::DeclareAttackersStep
+        | CastingRestriction::DeclareBlockersStep
+        | CastingRestriction::BeforeAttackersDeclared
+        | CastingRestriction::BeforeBlockersDeclared
+        | CastingRestriction::AfterBlockersDeclared
+        | CastingRestriction::BeforeCombatDamage
+        | CastingRestriction::AfterCombat
+        | CastingRestriction::RequiresCondition { .. }
+        | CastingRestriction::CantSpendMana
+        | CastingRestriction::SpendOnlyOnX { .. } => true,
+    }
+}
+
+/// CR 109.5 + CR 400.1: whether `origin` lies in the graveyard pool an
+/// `OnlyFromZones` restriction names. "Your graveyard" is the caster's
+/// (CR 109.5: the would-be controller's), and each player has their own
+/// graveyard (CR 400.1), so an `OwnGraveyard` pool admits a graveyard origin
+/// only when the caster owns it. The pool says nothing about other zones.
+fn cast_origin_in_pool(
+    origin: CastOrigin,
+    pool: crate::types::statics::GraveyardPermissionPool,
+    caster: PlayerId,
+) -> bool {
+    use crate::types::statics::GraveyardPermissionPool;
+    match (origin.zone, pool) {
+        (Zone::Graveyard, GraveyardPermissionPool::OwnGraveyard) => origin.zone_owner == caster,
+        (Zone::Graveyard, GraveyardPermissionPool::AnyGraveyard)
+        | (
+            Zone::Library
+            | Zone::Hand
+            | Zone::Battlefield
+            | Zone::Stack
+            | Zone::Exile
+            | Zone::Command,
+            GraveyardPermissionPool::OwnGraveyard | GraveyardPermissionPool::AnyGraveyard,
+        ) => true,
     }
 }
 
@@ -1839,9 +1875,9 @@ fn evaluate_condition_for_granter(
         ParsedCondition::IsOpponentsTurn => {
             super::players::is_opponent(state, player, state.active_player)
         }
-        // CR 503.1: The game is currently in the upkeep step. Player scope, if
-        // any, is composed by the caller via `And([IsOpponentsTurn, ..])`.
-        ParsedCondition::IsDuringUpkeep => state.phase == Phase::Upkeep,
+        // CR 500.1 + CR 602.5: the game is in one of the named steps; player
+        // scope, if any, is composed by the caller via `And`.
+        ParsedCondition::CurrentPhaseIs { phases } => phases.contains(&state.phase),
         // CR 601.3d + CR 608.2c: "if it targets a [filter]" — gates a casting
         // permission on the chosen targets of the in-flight spell. Read from
         // `state.pending_cast.ability.targets` when targets have been committed.
@@ -2582,12 +2618,76 @@ mod tests {
     use crate::game::game_object::{PhaseOutCause, PhaseStatus};
     use crate::game::zones::create_object;
     use crate::parser::oracle_condition::parse_restriction_condition;
-    use crate::types::ability::{AbilityKind, Effect, ParsedCondition, QuantityExpr};
+    use crate::types::ability::{
+        ledger_filter_is_evaluable, AbilityKind, Effect, ParsedCondition, QuantityExpr,
+    };
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
     use crate::types::game_state::{ArrivalIdentity, WaitingFor, ZoneChangeRecord};
     use crate::types::identifiers::CardId;
     use crate::types::zones::Zone;
+
+    /// CR 109.5 + CR 400.1: the shared cast-origin predicate's whole matrix —
+    /// caster vs the origin zone's owner, each pool, a graveyard vs a shared
+    /// zone, a zone outside the list, and an unknown origin. Every caller (the
+    /// announcement check and both CR 707.12 copy routes) reaches the
+    /// ownership question only through this predicate.
+    #[test]
+    fn only_from_zones_origin_matrix() {
+        use crate::types::statics::GraveyardPermissionPool::{AnyGraveyard, OwnGraveyard};
+        let only = |zones: Vec<Zone>, pool| vec![CastingRestriction::OnlyFromZones { zones, pool }];
+        let at = |zone, owner| {
+            Some(CastOrigin {
+                zone,
+                zone_owner: PlayerId(owner),
+            })
+        };
+        let me = PlayerId(0);
+        let graveyard = only(vec![Zone::Graveyard], OwnGraveyard);
+        assert!(restrictions_permit_cast_origin(
+            &graveyard,
+            me,
+            at(Zone::Graveyard, 0)
+        ));
+        assert!(
+            !restrictions_permit_cast_origin(&graveyard, me, at(Zone::Graveyard, 1)),
+            "another player's graveyard is not \"your graveyard\""
+        );
+        assert!(!restrictions_permit_cast_origin(
+            &graveyard,
+            me,
+            at(Zone::Hand, 0)
+        ));
+        assert!(!restrictions_permit_cast_origin(
+            &graveyard,
+            me,
+            at(Zone::Exile, 0)
+        ));
+        assert!(
+            !restrictions_permit_cast_origin(&graveyard, me, None),
+            "an unknown origin fails closed"
+        );
+        let any = only(vec![Zone::Graveyard], AnyGraveyard);
+        assert!(restrictions_permit_cast_origin(
+            &any,
+            me,
+            at(Zone::Graveyard, 1)
+        ));
+        let with_exile = only(vec![Zone::Graveyard, Zone::Exile], OwnGraveyard);
+        assert!(
+            restrictions_permit_cast_origin(&with_exile, me, at(Zone::Exile, 1)),
+            "exile is shared, so the graveyard pool doesn't scope it"
+        );
+        assert!(!restrictions_permit_cast_origin(
+            &with_exile,
+            me,
+            at(Zone::Graveyard, 1)
+        ));
+        assert!(
+            restrictions_permit_cast_origin(&[CastingRestriction::AsSorcery], me, None),
+            "an origin-independent restriction permits any origin"
+        );
+    }
 
     #[test]
     fn cards_left_your_graveyard_counts_the_departure_owner() {
@@ -3798,7 +3898,7 @@ mod tests {
         state.phase = Phase::Upkeep;
         assert!(allowed(&state), "opponent's upkeep must permit activation");
 
-        // Opponent's turn, non-upkeep step -> denied (IsDuringUpkeep false).
+        // Opponent's turn, non-upkeep step -> denied (CurrentPhaseIs false).
         state.phase = Phase::PreCombatMain;
         assert!(
             !allowed(&state),

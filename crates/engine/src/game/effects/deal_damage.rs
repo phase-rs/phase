@@ -6,27 +6,28 @@ use crate::game::effects::{append_to_pending_continuation, mark_pending_continua
 use crate::game::filter;
 use crate::game::keywords;
 use crate::game::quantity::{
-    quantity_expr_uses_recipient, resolve_quantity_with_targets,
-    resolve_quantity_with_targets_and_recipient, resolve_quantity_with_targets_slice,
+    resolve_quantity_with_targets, resolve_quantity_with_targets_and_recipient,
+    resolve_quantity_with_targets_slice,
 };
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
-    DamageContextSnapshot, DamageSource, EachDamageRecipient, Effect, EffectError, EffectKind,
-    ExcessRecipient, PlayerFilter, QuantityExpr, ResolvedAbility, TargetDamageSourceBinding,
+    names_resolution_chosen_recipient, quantity_expr_uses_recipient, DamageContextSnapshot,
+    DamageSource, EachDamageRecipient, Effect, EffectError, EffectKind, ExcessRecipient,
+    PlayerFilter, QuantityExpr, ResolvedAbility, TargetChoiceTiming, TargetDamageSourceBinding,
     TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{DamageRecord, GameState};
+use crate::types::game_state::{DamageRecord, GameState, TriggerSourceRead};
 use crate::types::identifiers::ObjectId;
-use crate::types::keywords::KeywordKind;
+use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::player::{PlayerCounterKind, PlayerId};
 use crate::types::proposed_event::ProposedEvent;
 
 /// Source attributes needed for damage application (CR 120.3).
 /// Read from the source object before the mutable damage phase to avoid borrow conflicts.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct DamageContext {
     pub(crate) source_id: ObjectId,
     /// CR 400.7: The source incarnation observed before the damage event is
@@ -52,6 +53,10 @@ pub(crate) struct DamageContext {
     /// replacement pause+resume (the bonus is threaded through the snapshot and
     /// `PendingReplacement`). `0` on every ordinary damage leg.
     pub(crate) lifelink_bonus: u32,
+    /// CR 702.16 + CR 608.2h: Source name projection, used for
+    /// `ProtectionTarget::ChosenCardName`. Set from captured LKI name when
+    /// the source has departed its observed zone (e.g. Clone in graveyard or ceased token).
+    pub(crate) source_name: Option<String>,
 }
 
 /// A player-recipient filter's outcome; `NoReferent` must not fall through to the
@@ -75,6 +80,23 @@ fn player_context_target(
         return Some(
             match super::resolve_player_for_context_ref(state, ability, target_filter) {
                 Some(player) => PlayerRecipient::Bound(TargetRef::Player(player)),
+                None => PlayerRecipient::NoReferent,
+            },
+        );
+    }
+    if matches!(target_filter, TargetFilter::AttackedPlayerOrPlaneswalker) {
+        // CR 506.3 + CR 608.2h: "the player or planeswalker it's attacking" is read from
+        // combat at resolution by the single combat authority. No referent (a battle, a
+        // creature that is no longer attacking, a planeswalker that is gone) is dealt
+        // nothing: it must not fall through to the node's targets, nor to a controller
+        // via `bound_player_context_target`'s `resolve_player_for_context_ref` tail.
+        return Some(
+            match crate::game::combat::resolve_attacked_player_or_planeswalker(
+                state,
+                ability.source_id,
+                ability.trigger_source.as_ref(),
+            ) {
+                Some(recipient) => PlayerRecipient::Bound(recipient),
                 None => PlayerRecipient::NoReferent,
             },
         );
@@ -399,6 +421,7 @@ impl DamageContext {
             // CR 702.15b: set only on a redirect leg; from_source rebuilds the base
             // context, so the resume restores the bonus from the parked record.
             lifelink_bonus: 0,
+            source_name: Some(obj.name.clone()),
         })
     }
 
@@ -419,6 +442,7 @@ impl DamageContext {
             // CR 120.4a: no excess redirect on the source-gone fallback path.
             excess_recipient: None,
             lifelink_bonus: 0,
+            source_name: None,
         }
     }
 }
@@ -440,6 +464,7 @@ impl From<DamageContextSnapshot> for DamageContext {
             // CR 702.15b: restore the deferred lifelink bonus so a redirect leg
             // resumed from a snapshot still gains the combined total.
             lifelink_bonus: snapshot.lifelink_bonus,
+            source_name: None,
         }
     }
 }
@@ -530,14 +555,17 @@ pub(crate) fn pre_replacement_damage_gate(
         }
     }
 
-    // CR 702.16b + CR 702.16e: Protection prevents damage from sources with the matching quality.
-    // Emits DamagePrevented so "when damage is prevented" triggers can fire.
+    // CR 702.16b + CR 702.16e + CR 608.2h: Protection prevents damage from sources
+    // with the matching quality. Emits DamagePrevented so "when damage is prevented"
+    // triggers can fire.
     if let TargetRef::Object(target_obj_id) = target {
-        if let (Some(target_obj), Some(source_obj)) = (
-            state.objects.get(target_obj_id),
-            state.objects.get(&ctx.source_id),
-        ) {
-            if keywords::protection_prevents_from(target_obj, source_obj) {
+        if let Some(target_obj) = state.objects.get(target_obj_id) {
+            let source_obj = state.objects.get(&ctx.source_id);
+            if keywords::protection_prevents_from_with_source_name(
+                target_obj,
+                source_obj,
+                ctx.source_name.as_deref(),
+            ) {
                 events.push(GameEvent::DamagePrevented {
                     source_id: ctx.source_id,
                     target: target.clone(),
@@ -548,15 +576,16 @@ pub(crate) fn pre_replacement_damage_gate(
         }
     }
 
-    // CR 702.16e + CR 615.1: "All damage that would be dealt to [a player with
+    // CR 702.16e + CR 615.1 + CR 608.2h: "All damage that would be dealt to [a player with
     // protection from the damage source] is prevented." Mirror the object-
     // protection gate above for player targets. Emits DamagePrevented so
     // prevention-triggered abilities still observe the event.
     if let TargetRef::Player(player_id) = target {
-        if crate::game::static_abilities::player_protection_from(
+        if crate::game::static_abilities::player_protection_from_with_source_name(
             state,
             *player_id,
             Some(ctx.source_id),
+            ctx.source_name.as_deref(),
         ) {
             events.push(GameEvent::DamagePrevented {
                 source_id: ctx.source_id,
@@ -1035,7 +1064,7 @@ pub(crate) fn apply_damage_after_replacement(
                 let redirect_ctx = DamageContext {
                     excess_recipient: None,
                     lifelink_bonus: primary_amount,
-                    ..*ctx
+                    ..ctx.clone()
                 };
                 redirected = true;
                 // Route through the same non-combat single-target pipeline the
@@ -1196,9 +1225,7 @@ fn stash_remaining_damage_chain(
     damage_source_id: ObjectId,
     remaining: impl IntoIterator<Item = (TargetRef, u32)>,
 ) {
-    let controller = ability.controller;
-    let mut iter = remaining.into_iter();
-    let Some((first_target, first_amount)) = iter.next() else {
+    let Some(mut head) = remaining_damage_chain(ability, damage_source_id, remaining) else {
         // No remaining batch work — still forward the parent's sub_ability so the
         // downstream chain resumes after the pending replacement choice resolves.
         if let Some(sub) = ability.sub_ability.as_ref() {
@@ -1209,17 +1236,33 @@ fn stash_remaining_damage_chain(
         }
         return;
     };
-
-    let mut head =
-        build_remaining_damage_node(damage_source_id, controller, first_target, first_amount);
-    for (target, amount) in iter {
-        let node = build_remaining_damage_node(damage_source_id, controller, target, amount);
-        append_to_sub_chain(&mut head, node);
-    }
     if let Some(sub) = ability.sub_ability.as_ref() {
         append_to_sub_chain(&mut head, cast_tail_with_parent_targets(sub, ability));
     }
     append_to_pending_continuation(state, Some(Box::new(head)));
+}
+
+/// CR 113.7a + CR 608.2h: Link the remaining (target, amount) recipients into a
+/// `sub_ability` chain. Every node keeps the parent's latched trigger source so a
+/// departed source is still evaluated by its last known information.
+fn remaining_damage_chain(
+    ability: &ResolvedAbility,
+    damage_source_id: ObjectId,
+    remaining: impl IntoIterator<Item = (TargetRef, u32)>,
+) -> Option<ResolvedAbility> {
+    let node = |target, amount| {
+        let mut node =
+            build_remaining_damage_node(damage_source_id, ability.controller, target, amount);
+        node.trigger_source = ability.trigger_source.clone();
+        node
+    };
+    let mut iter = remaining.into_iter();
+    let (first_target, first_amount) = iter.next()?;
+    let mut head = node(first_target, first_amount);
+    for (target, amount) in iter {
+        append_to_sub_chain(&mut head, node(target, amount));
+    }
+    Some(head)
 }
 
 /// CR 608.2c + CR 616.1e: Clone a damage effect's `sub_ability` tail for a
@@ -1514,6 +1557,74 @@ pub fn resolve_post_replacement(
     Ok(())
 }
 
+/// CR 608.2h + CR 702.16 + CR 113.7a: Single authority for resolving the
+/// `DamageContext` of an ability's damage source.
+///
+/// Builds the damage source projection from `ability.trigger_source`:
+/// - When `TriggerSourceRead::ExactLive`, uses the current live object;
+/// - Otherwise (`TriggerSourceRead::Latched`), uses the captured LKI name and characteristics,
+///   so a non-token Clone in the graveyard or a token that ceased to exist retains its
+///   battlefield last-known name.
+///
+/// When absent (e.g. non-triggered abilities), falls back to `DamageContext::from_source` /
+/// `DamageContext::fallback`.
+fn damage_context_from_ability(state: &GameState, ability: &ResolvedAbility) -> DamageContext {
+    let source_read = ability
+        .trigger_source
+        .as_ref()
+        .map(|source| source.source_read(state));
+
+    match source_read {
+        Some(TriggerSourceRead::ExactLive(obj)) => {
+            let mut ctx = DamageContext::from_source(state, obj.id)
+                .unwrap_or_else(|| DamageContext::fallback(obj.id, obj.controller));
+            ctx.source_name = Some(obj.name.clone());
+            ctx
+        }
+        Some(TriggerSourceRead::Latched(latched)) => {
+            // CR 608.2h + CR 400.7: the captured observation, not the object now
+            // occupying the id, supplies the source's characteristics. Prefer
+            // the exact-incarnation exit snapshot over the trigger-time snapshot.
+            let lki = crate::game::filter::exit_lki_for_incarnation(
+                state,
+                latched.identity.reference.object_id,
+                latched.identity.reference.incarnation,
+            )
+            .unwrap_or(&latched.lki);
+            // allow-raw-authority: reading characteristic snapshot from departed-source LKI
+            let has_keyword = |kind: KeywordKind| lki.keywords.iter().any(|k| k.kind() == kind);
+            let mut ctx = DamageContext::fallback(ability.source_id, lki.controller);
+            ctx.source_incarnation = Some(latched.identity.reference.incarnation);
+            ctx.source_name = Some(lki.name.clone());
+            ctx.source_is_creature = lki.card_types.contains(&CoreType::Creature);
+            ctx.has_deathtouch = has_keyword(KeywordKind::Deathtouch);
+            ctx.has_lifelink = has_keyword(KeywordKind::Lifelink);
+            ctx.has_wither = has_keyword(KeywordKind::Wither);
+            ctx.has_infect = has_keyword(KeywordKind::Infect);
+            ctx.combat_damage_poison = lki
+                .keywords
+                .iter()
+                .map(|k| match k {
+                    Keyword::Toxic(n) => *n,
+                    _ => 0,
+                })
+                .sum();
+            ctx
+        }
+        None => {
+            let mut ctx = DamageContext::from_source(state, ability.source_id)
+                .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller));
+            if ctx.source_name.is_none() {
+                ctx.source_name = state
+                    .objects
+                    .get(&ability.source_id)
+                    .map(|o| o.name.clone());
+            }
+            ctx
+        }
+    }
+}
+
 /// CR 120.2b: the object that deals a single-source `DealDamage` node's damage,
 /// or `None` where no object deals it.
 fn single_damage_source(
@@ -1538,10 +1649,7 @@ fn single_damage_source(
                 .and_then(|id| DamageContext::from_source(state, id))
                 .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller)),
         ),
-        None => Some(
-            DamageContext::from_source(state, ability.source_id)
-                .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller)),
-        ),
+        None => Some(damage_context_from_ability(state, ability)),
         // CR 120.1: multi-source per-power damage is dispatched to
         // `resolve_each_target_power_damage` (each source has its own
         // `DamageContext`) before a single source is asked for.
@@ -1607,6 +1715,108 @@ pub(super) fn damage_recipients(state: &GameState, ability: &ResolvedAbility) ->
         target_filter,
         matches!(damage_source, Some(DamageSource::Target)),
     )
+}
+
+/// CR 608.2d: is this `DealDamage` node still waiting to learn whom it damages —
+/// a described recipient ([`names_resolution_chosen_recipient`]) timed for
+/// resolution, with nothing bound to it yet and no division announced?
+pub(crate) fn awaits_resolution_recipient_choice(ability: &ResolvedAbility) -> bool {
+    matches!(
+        &ability.effect,
+        Effect::DealDamage {
+            damage_source: None,
+            target,
+            ..
+        } if names_resolution_chosen_recipient(target)
+    ) && ability.target_choice_timing == TargetChoiceTiming::Resolution
+        && ability.targets.is_empty()
+        && ability.distribution.is_none()
+}
+
+/// CR 115.10a + CR 608.2d: the creatures and players the controller may choose
+/// among for a described damage recipient — objects in battlefield order, then
+/// players in seat order.
+///
+/// A plain scan of the live population, never targeting legality (`can_target`):
+/// this is a choice, not a target, so hexproof, shroud and "can't be the target
+/// of" do not restrict who is offered. Protection does not either; it prevents
+/// the damage itself (CR 702.16e), not the choice. A player who has left the
+/// game is not offered (CR 800.4), by the same existence authority every
+/// non-targeting seat choice uses.
+pub(crate) fn resolution_recipient_candidates(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Vec<TargetRef> {
+    let Effect::DealDamage { target, .. } = &ability.effect else {
+        return Vec::new();
+    };
+    let resolved = super::resolved_object_filter(state, ability, target);
+    let objects = super::resolved_battlefield_population_ids(state, ability, target)
+        .into_iter()
+        .map(TargetRef::Object);
+    let players = state
+        .players
+        .iter()
+        .map(|player| player.id)
+        .filter(|&player| {
+            crate::game::players::player_exists_for_choice(state, player)
+                && filter::player_matches_target_filter_in_state(
+                    state,
+                    &resolved,
+                    player,
+                    Some(ability.controller),
+                    Some(ability.source_id),
+                )
+        })
+        .map(TargetRef::Player);
+    objects.chain(players).collect()
+}
+
+/// Marks `ability` as parked on its own recipient prompt: its recipient filter
+/// becomes the exact pool the prompt offers, one bound-referent leg per
+/// candidate. The prompt (`WaitingFor::ChooseObjectsSelection`) is shared with
+/// the tracked-set producers, so the parked node's own shape is what tells
+/// [`parked_recipient_pool`] that an answer belongs to it. A pool filter fails
+/// [`names_resolution_chosen_recipient`] by shape (its legs are bound referents,
+/// not a described population), so the parked node never prompts a second time.
+pub(crate) fn bind_recipient_pool(ability: &mut ResolvedAbility, pool: &[TargetRef]) {
+    let Effect::DealDamage { target, .. } = &mut ability.effect else {
+        return;
+    };
+    *target = TargetFilter::Or {
+        filters: pool
+            .iter()
+            .map(|candidate| match candidate {
+                TargetRef::Object(id) => TargetFilter::SpecificObject { id: *id },
+                TargetRef::Player(player) => TargetFilter::SpecificPlayer { id: *player },
+            })
+            .collect(),
+    };
+}
+
+/// The pool a node parked by [`bind_recipient_pool`] is waiting on, or `None` for
+/// any other node. A pool is at least two bound referents (zero and one
+/// candidate never prompt) and nothing is chosen yet.
+pub(crate) fn parked_recipient_pool(ability: &ResolvedAbility) -> Option<Vec<TargetRef>> {
+    let Effect::DealDamage {
+        target: TargetFilter::Or { filters },
+        ..
+    } = &ability.effect
+    else {
+        return None;
+    };
+    if !ability.targets.is_empty() {
+        return None;
+    }
+    let pool = filters
+        .iter()
+        .map(|leg| match leg {
+            TargetFilter::SpecificObject { id } => Some(TargetRef::Object(*id)),
+            TargetFilter::SpecificPlayer { id } => Some(TargetRef::Player(*id)),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    (pool.len() >= 2).then_some(pool)
 }
 
 /// CR 120.1: a multi-source damage node's `(recipient, sources)`, or `None`
@@ -1938,7 +2148,7 @@ pub fn resolve_all(
         None
     };
     let mut ctx = filter::FilterContext::from_ability(ability);
-    if let Some(source_ctx) = target_source_ctx {
+    if let Some(ref source_ctx) = target_source_ctx {
         ctx.source_id = source_ctx.source_id;
     }
     let matching_objects: Vec<_> = state
@@ -1983,8 +2193,7 @@ pub fn resolve_all(
             .and_then(crate::game::targeting::extract_source_from_event)
             .and_then(|id| DamageContext::from_source(state, id))
             .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller)),
-        None => DamageContext::from_source(state, ability.source_id)
-            .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller)),
+        None => damage_context_from_ability(state, ability),
         // CR 120.1: `EachTarget` (multi-source per-power) is only produced by the
         // parser for the single-recipient `DealDamage` shape; the batch
         // `DamageAll` form is never constructed with it.
@@ -2067,8 +2276,16 @@ fn collect_matching_players(
                     // The generic predicate authority is used here; ability-target
                     // anchors are resolved by the player_scope driver, not by this
                     // damage-population helper.
-                    PlayerFilter::AllExcept { ref exclude } => {
-                        !crate::game::effects::matches_player_scope(
+                    PlayerFilter::AllExcept {
+                        ref exclude,
+                        relation,
+                    } => {
+                        crate::game::players::matches_relation(
+                            state,
+                            p.id,
+                            source_controller,
+                            relation,
+                        ) && !crate::game::effects::matches_player_scope(
                             state,
                             p.id,
                             exclude,
@@ -2336,8 +2553,20 @@ pub fn resolve_each_player(
         }
     };
 
-    let ctx = DamageContext::from_source(state, ability.source_id)
-        .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller));
+    let ctx = damage_context_from_ability(state, ability);
+
+    // CR 115.1 + CR 608.2c + CR 109.4 (R3): resolve an `AllExcept`
+    // exclusion through the shared `players_for_filter` authority once,
+    // ahead of recipient selection, and reuse the result per player —
+    // recursive unions, declared-target fallback, and parent-object
+    // anchors included. No ability-blind fallback and no duplicate
+    // TargetPlayer/AllExcept reading beside the authority.
+    let excluded: Vec<PlayerId> = match &player_filter {
+        PlayerFilter::AllExcept { exclude, .. } => {
+            crate::game::effects::speed_effects::players_for_filter(state, exclude, ability)
+        }
+        _ => Vec::new(),
+    };
 
     // Collect matching player IDs first to avoid borrow issues.
     let player_ids: Vec<PlayerId> = state
@@ -2348,15 +2577,16 @@ pub fn resolve_each_player(
                 && match &player_filter {
                     PlayerFilter::Controller => p.id == ability.controller,
                     PlayerFilter::All => true,
-                    // CR 608.2c + CR 109.4: all players except the anchor's set.
-                    PlayerFilter::AllExcept { exclude } => {
-                        !crate::game::effects::matches_player_scope(
+                    // CR 608.2c + CR 109.4: players matching the base
+                    // `relation` except the anchor's set, resolved once
+                    // through the shared authority above.
+                    PlayerFilter::AllExcept { relation, .. } => {
+                        crate::game::players::matches_relation(
                             state,
                             p.id,
-                            exclude,
                             ability.controller,
-                            ability.source_id,
-                        )
+                            *relation,
+                        ) && !excluded.contains(&p.id)
                     }
                     // CR 102.1 + CR 608.2c: the union of the members, answered
                     // member by member by the generic predicate authority.
@@ -2787,7 +3017,7 @@ pub fn resolve_each_source_deals_damage(
     // UNLESS the amount reads the per-source `BatchSource` scope (CR 120.1:
     // "deals damage equal to its power" resolves per source object, never
     // against the ability source).
-    let per_source = crate::game::quantity::quantity_expr_contains_scope(
+    let per_source = crate::types::ability::quantity_expr_contains_scope(
         amount,
         crate::types::ability::ObjectScope::BatchSource,
     );
@@ -2879,7 +3109,7 @@ pub fn resolve_each_source_deals_damage(
         match recipient {
             EachDamageRecipient::Shared(_) => {
                 for recip in &shared_recipients {
-                    entries.push((source_id, ctx, recip.clone(), amt));
+                    entries.push((source_id, ctx.clone(), recip.clone(), amt));
                 }
             }
             // CR 109.4 + CR 120.3a: each source deals to the player that
@@ -2930,7 +3160,7 @@ pub fn resolve_each_source_deals_damage(
         };
         match replacement::replace_event(state, proposed, events) {
             ReplacementResult::Execute(event) => {
-                replaced.push((*ctx, event));
+                replaced.push((ctx.clone(), event));
             }
             ReplacementResult::Prevented => {
                 // CR 615.5: fire any prevention rider (e.g. Phyrexian Hydra
@@ -7797,6 +8027,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: iron_fist,
                 ability_index,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             })
             .expect("activation announced");
 
@@ -7904,6 +8135,7 @@ mod tests {
                 .act(GameAction::ActivateAbility {
                     source_id: red_hulk,
                     ability_index,
+                    payment_mode: crate::types::game_state::CastPaymentMode::Auto,
                 })
                 .expect("activation announced");
             let WaitingFor::TargetSelection { target_slots, .. } = &runner.state().waiting_for
@@ -8002,5 +8234,400 @@ mod tests {
             assert_eq!(damage_recipients(&state, &root), Vec::<TargetRef>::new());
             assert_eq!(damage_sources(&state, &root), illegal_sources);
         }
+    }
+
+    // CR 115.10a + CR 608.2d: the resolution-time recipient chooser — the shape
+    // the parser and the resolver share, the candidate scan, and the pool marker
+    // a parked prompt carries.
+
+    fn described_creature() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::creature())
+    }
+
+    fn described_planeswalker() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::new(TypeFilter::Planeswalker))
+    }
+
+    fn creature_or_player() -> TargetFilter {
+        TargetFilter::Or {
+            filters: vec![described_creature(), TargetFilter::Player],
+        }
+    }
+
+    fn opponent_only() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+    }
+
+    /// A described-recipient damage node timed for resolution with nothing bound.
+    fn recipient_node(target: TargetFilter) -> ResolvedAbility {
+        let mut ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target,
+                damage_source: None,
+                excess: None,
+            },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        );
+        ability.target_choice_timing = TargetChoiceTiming::Resolution;
+        ability
+    }
+
+    fn battlefield_creature(state: &mut GameState, owner: PlayerId, name: &str) -> ObjectId {
+        let card_id = CardId(state.next_object_id);
+        let id = create_object(state, card_id, owner, name.to_string(), Zone::Battlefield);
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        id
+    }
+
+    /// Only a described population of battlefield objects, alone or beside
+    /// players, is chosen at resolution. Each determined or non-population shape
+    /// stays out, and the Comet shape is the paired positive.
+    #[test]
+    fn a_resolution_chosen_recipient_is_a_described_population() {
+        let described = [
+            creature_or_player(),
+            described_creature(),
+            TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Another]),
+            ),
+            TargetFilter::Or {
+                filters: vec![described_creature(), described_planeswalker()],
+            },
+        ];
+        for filter in &described {
+            assert!(names_resolution_chosen_recipient(filter), "{filter:?}");
+        }
+
+        let determined = [
+            // Matches everything, or names no object population.
+            TargetFilter::Any,
+            TargetFilter::Player,
+            opponent_only(),
+            TargetFilter::Typed(TypedFilter::default()),
+            // Context references are bound, never chosen.
+            TargetFilter::Controller,
+            TargetFilter::SelfRef,
+            TargetFilter::ParentTarget,
+            // CR 303.4b + CR 301.5f: an Aura's own host is determined.
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::EnchantedBy])),
+            // A determined anaphor beside a planeswalker ("the player or
+            // planeswalker it's attacking").
+            TargetFilter::Or {
+                filters: vec![TargetFilter::ParentTarget, described_planeswalker()],
+            },
+            // A player-only leg is not "a creature or player".
+            TargetFilter::Or {
+                filters: vec![described_creature(), opponent_only()],
+            },
+            // The parked pool is bound referents, not a description, so a parked
+            // node never prompts a second time.
+            TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::SpecificObject { id: ObjectId(1) },
+                    TargetFilter::SpecificPlayer { id: PlayerId(1) },
+                ],
+            },
+        ];
+        for filter in &determined {
+            assert!(!names_resolution_chosen_recipient(filter), "{filter:?}");
+        }
+    }
+
+    /// A node awaits its recipient only while nothing is chosen: not once timed
+    /// for the stack, bound, divided, sourced by a targets-positional referent,
+    /// aimed at a determined recipient, or parked on its own pool.
+    #[test]
+    fn a_node_awaits_a_recipient_only_while_nothing_is_chosen() {
+        let comet = recipient_node(creature_or_player());
+        assert!(
+            awaits_resolution_recipient_choice(&comet),
+            "the Comet shape"
+        );
+
+        let mut stack_timed = comet.clone();
+        stack_timed.target_choice_timing = TargetChoiceTiming::Stack;
+        let mut bound = comet.clone();
+        bound.set_unpinned_targets(vec![TargetRef::Player(PlayerId(1))]);
+        let mut divided = comet.clone();
+        divided.distribution = Some(vec![(TargetRef::Player(PlayerId(1)), 3)]);
+        let mut sourced = comet.clone();
+        if let Effect::DealDamage { damage_source, .. } = &mut sourced.effect {
+            *damage_source = Some(DamageSource::Target);
+        }
+        let mut parked = comet.clone();
+        bind_recipient_pool(
+            &mut parked,
+            &[
+                TargetRef::Object(ObjectId(1)),
+                TargetRef::Player(PlayerId(1)),
+            ],
+        );
+        for (name, node) in [
+            ("stack-timed", stack_timed),
+            ("already bound", bound),
+            ("divided", divided),
+            ("targets-positional damage source", sourced),
+            (
+                "context-reference recipient",
+                recipient_node(TargetFilter::ParentTarget),
+            ),
+            (
+                "parent-target leg",
+                recipient_node(TargetFilter::Or {
+                    filters: vec![TargetFilter::ParentTarget, described_planeswalker()],
+                }),
+            ),
+            ("parked on its own pool", parked),
+        ] {
+            assert!(!awaits_resolution_recipient_choice(&node), "{name}");
+        }
+    }
+
+    /// The candidates are objects in battlefield order, then every player who is
+    /// still in the game; a non-creature permanent is not a creature. An
+    /// object-only description offers no player.
+    #[test]
+    fn the_recipient_candidates_are_the_live_creatures_then_the_players() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let opposing = battlefield_creature(&mut state, PlayerId(1), "Opposing Ogre");
+        let own = battlefield_creature(&mut state, PlayerId(0), "Own Bear");
+        let card_id = CardId(state.next_object_id);
+        create_object(
+            &mut state,
+            card_id,
+            PlayerId(0),
+            "Idol".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = recipient_node(creature_or_player());
+        assert_eq!(
+            resolution_recipient_candidates(&state, &ability),
+            vec![
+                TargetRef::Object(opposing),
+                TargetRef::Object(own),
+                TargetRef::Player(PlayerId(0)),
+                TargetRef::Player(PlayerId(1)),
+                TargetRef::Player(PlayerId(2)),
+            ],
+            "a three-player game lists both opponents; the artifact is not a creature"
+        );
+
+        let own_creatures = recipient_node(TargetFilter::Typed(
+            TypedFilter::creature().controller(ControllerRef::You),
+        ));
+        assert_eq!(
+            resolution_recipient_candidates(&state, &own_creatures),
+            vec![TargetRef::Object(own)],
+            "an object-only description offers no player"
+        );
+
+        state.players[2].is_eliminated = true;
+        assert_eq!(
+            resolution_recipient_candidates(&state, &ability),
+            vec![
+                TargetRef::Object(opposing),
+                TargetRef::Object(own),
+                TargetRef::Player(PlayerId(0)),
+                TargetRef::Player(PlayerId(1)),
+            ],
+            "CR 800.4: a player who has left the game is not offered"
+        );
+    }
+
+    /// The marker round-trips the exact pool, and only a node still waiting on at
+    /// least two bound referents carries it.
+    #[test]
+    fn a_parked_pool_names_exactly_the_candidates_it_offered() {
+        let pool = vec![
+            TargetRef::Object(ObjectId(1)),
+            TargetRef::Object(ObjectId(2)),
+            TargetRef::Player(PlayerId(1)),
+        ];
+        let mut node = recipient_node(creature_or_player());
+        assert_eq!(parked_recipient_pool(&node), None, "an unparked node");
+
+        bind_recipient_pool(&mut node, &pool);
+        assert_eq!(parked_recipient_pool(&node), Some(pool.clone()));
+
+        let mut chosen = node.clone();
+        chosen.set_unpinned_targets(vec![pool[0].clone()]);
+        assert_eq!(parked_recipient_pool(&chosen), None, "a pick ends the wait");
+
+        let mut single = recipient_node(creature_or_player());
+        bind_recipient_pool(&mut single, &pool[..1]);
+        assert_eq!(
+            parked_recipient_pool(&single),
+            None,
+            "one candidate never prompts"
+        );
+    }
+
+    /// CR 608.2d: "a player can't choose an impossible option". An optional
+    /// described recipient with nothing to choose is infeasible; the same node is
+    /// feasible once a creature exists.
+    #[test]
+    fn an_optional_described_recipient_is_infeasible_without_a_candidate() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let creature_only = recipient_node(described_creature());
+        assert!(
+            crate::game::effects::optional_effect_is_infeasible(&state, &creature_only),
+            "no creature to choose"
+        );
+        battlefield_creature(&mut state, PlayerId(1), "Opposing Ogre");
+        assert!(
+            !crate::game::effects::optional_effect_is_infeasible(&state, &creature_only),
+            "paired positive: a creature exists"
+        );
+
+        let empty_state = GameState::new(FormatConfig::standard(), 2, 42);
+        let mut stack_timed = recipient_node(described_creature());
+        stack_timed.target_choice_timing = TargetChoiceTiming::Stack;
+        assert!(
+            !crate::game::effects::optional_effect_is_infeasible(&empty_state, &stack_timed),
+            "a stack-timed recipient is announced, not chosen here"
+        );
+    }
+}
+
+#[cfg(test)]
+mod attacked_referent_recipient_tests {
+    use super::*;
+    use crate::game::combat::{AttackTarget, AttackerInfo};
+    use crate::game::zones::create_object;
+    use crate::types::ability::{Effect, QuantityExpr};
+    use crate::types::card_type::CoreType;
+    use crate::types::identifiers::CardId;
+    use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
+
+    /// CR 506.3 + CR 608.2h: no referent is `NoReferent`, so the recipient list is empty
+    /// even when the node carries propagated targets; with a referent it is exactly that.
+    #[test]
+    fn attacked_referent_recipient_binds_or_deals_nothing() {
+        let mut state = GameState::new_two_player(42);
+        let mut spawn = |card: u64, controller: PlayerId| {
+            let id = create_object(
+                &mut state,
+                CardId(card),
+                controller,
+                format!("Creature {card}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+            id
+        };
+        let attacker = spawn(1, PlayerId(0));
+        let bystander = spawn(2, PlayerId(1));
+        let ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![TargetRef::Object(bystander)],
+            attacker,
+            PlayerId(0),
+        );
+        let referent = TargetFilter::AttackedPlayerOrPlaneswalker;
+
+        assert!(matches!(
+            player_context_target(&state, &ability, &referent),
+            Some(PlayerRecipient::NoReferent)
+        ));
+        assert_eq!(
+            resolve_effect_recipients(&state, &ability, &referent, false),
+            vec![]
+        );
+        // Positive control: a propagating filter on the same node reaches the target.
+        assert_eq!(
+            resolve_effect_recipients(&state, &ability, &TargetFilter::ParentTarget, false),
+            vec![TargetRef::Object(bystander)]
+        );
+
+        state
+            .combat
+            .get_or_insert_with(Default::default)
+            .attackers
+            .push(AttackerInfo::new(
+                attacker,
+                AttackTarget::Player(PlayerId(1)),
+                PlayerId(1),
+            ));
+        assert!(matches!(
+            player_context_target(&state, &ability, &referent),
+            Some(PlayerRecipient::Bound(TargetRef::Player(PlayerId(1))))
+        ));
+        assert_eq!(
+            resolve_effect_recipients(&state, &ability, &referent, false),
+            vec![TargetRef::Player(PlayerId(1))]
+        );
+    }
+
+    /// CR 113.7a + CR 608.2h: continuation nodes built for the recipients left after a
+    /// replacement pause keep the latched trigger source, so a departed source (a
+    /// ceased token) is still read by its last known name on resume.
+    #[test]
+    fn remaining_damage_chain_nodes_keep_latched_trigger_source() {
+        let mut state = GameState::new_two_player(42);
+        let token = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Goblin".to_string(),
+            Zone::Battlefield,
+        );
+        let latched =
+            crate::game::triggers::trigger_source_context_for_latch(&state, &state.objects[&token]);
+        state.objects.remove(&token);
+
+        let mut ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Any,
+                damage_source: None,
+                excess: None,
+            },
+            vec![],
+            token,
+            PlayerId(1),
+        );
+        ability.trigger_source = Some(latched);
+
+        let head = remaining_damage_chain(
+            &ability,
+            token,
+            [
+                (TargetRef::Player(PlayerId(0)), 1),
+                (TargetRef::Player(PlayerId(1)), 2),
+                (TargetRef::Player(PlayerId(0)), 3),
+            ],
+        )
+        .expect("three remaining recipients");
+
+        let mut count = 0;
+        let mut node = Some(&head);
+        while let Some(n) = node {
+            count += 1;
+            let ctx = damage_context_from_ability(&state, n);
+            assert_eq!(ctx.source_name.as_deref(), Some("Goblin"));
+            node = n.sub_ability.as_deref();
+        }
+        assert_eq!(count, 3, "positive guard: every recipient node was visited");
     }
 }

@@ -20,15 +20,15 @@ use crate::types::ability::{
     PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
     ReplacementCondition, ReplacementDefinition, RuntimeHandler, SacrificeCost,
     SearchSelectionConstraint, StaticCondition, StaticDefinition, TapStateChange,
-    TargetChoiceTiming, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
-    UnlessPayModifier,
+    TargetChoiceTiming, TargetFilter, TokenAttackDestination, TriggerCondition, TriggerDefinition,
+    TypeFilter, TypedFilter, UnlessPayModifier,
 };
 use crate::types::card::{CardFace, CardLayout, CleaveVariant};
 use crate::types::card_type::{CardType, CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::format::DeckCopyLimit;
 use crate::types::keywords::{
-    BloodthirstValue, BuybackCost, CyclingCost, EchoCost, Keyword, PartnerType,
+    BloodthirstValue, BuybackCost, CyclingCost, EchoCost, EntwineCost, Keyword, PartnerType,
 };
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use crate::types::phase::Phase;
@@ -862,6 +862,7 @@ fn build_mobilize_trigger(qty: &QuantityExpr) -> TriggerDefinition {
         owner: TargetFilter::Controller,
         attach_to: None,
         enters_attacking: true,
+        attack_destination: TokenAttackDestination::ControllerChooses,
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
@@ -1021,6 +1022,7 @@ fn synthesize_etb_token_attach_keyword(
         owner: TargetFilter::Controller,
         attach_to: None,
         enters_attacking: false,
+        attack_destination: TokenAttackDestination::ControllerChooses,
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
@@ -2258,7 +2260,7 @@ pub(crate) fn scavenge_ability_for_keyword(keyword: &Keyword) -> Option<AbilityD
 /// (seam 4: activated-ability-on-grant). The runtime activated-ability gather
 /// (`activated_ability_definitions` in `casting.rs`) calls this for each keyword
 /// in a graveyard card's *effective* keyword set so a keyword granted by a
-/// static (e.g. Encore/Scavenge granted to a graveyard card) surfaces its
+/// static (e.g. Encore/Scavenge/Unearth granted to a graveyard card) surfaces its
 /// activatable ability — the `AddKeyword` layer seam installs only the keyword
 /// and triggers, never activated abilities. Returns `None` for keywords whose
 /// behavior is not a graveyard activated ability. Extend this match as new
@@ -2268,6 +2270,9 @@ pub(crate) fn graveyard_activated_ability_for_keyword(
 ) -> Option<AbilityDefinition> {
     crate::database::encore::encore_ability_for_keyword(keyword)
         .or_else(|| scavenge_ability_for_keyword(keyword))
+        // CR 702.84a: Unearth functions while the card is in a graveyard
+        // (Dregscape Sliver, Sedris, Mishra and Solemn Doomguide grant it there).
+        .or_else(|| crate::database::unearth::unearth_ability_for_keyword(keyword))
 }
 
 /// CR 702.107a: Synthesize the Outlast activated ability from a `Keyword::Outlast(cost)`.
@@ -2998,9 +3003,15 @@ pub fn synthesize_entwine(face: &mut CardFace) {
         None => return,
     };
 
+    // Convert EntwineCost to AbilityCost
+    let ability_cost = match cost {
+        EntwineCost::Mana(mc) => AbilityCost::Mana { cost: mc },
+        EntwineCost::NonMana(ac) => ac,
+    };
+
     // Set entwine_cost on the face's modal choice + allow all-mode selection
     if let Some(ref mut modal) = face.modal {
-        modal.entwine_cost = Some(cost);
+        modal.entwine_cost = Some(Box::new(ability_cost));
         // CR 702.42a: "You may choose all modes" — raise max_choices to allow it
         modal.max_choices = modal.mode_count;
     }
@@ -3340,6 +3351,7 @@ fn offspring_etb_copy_trigger_for_ordinal(origin_ordinal: u32) -> TriggerDefinit
             owner: TargetFilter::Controller,
             source_filter: None,
             enters_attacking: false,
+            attack_destination: TokenAttackDestination::ControllerChooses,
             tapped: false,
             count: QuantityExpr::Fixed { value: 1 },
             extra_keywords: vec![],
@@ -3538,6 +3550,7 @@ fn install_etb_copy_on_additional_cost(face: &mut CardFace, spec: EtbCopyOnAddit
             owner: TargetFilter::Controller,
             source_filter: None,
             enters_attacking: false,
+            attack_destination: TokenAttackDestination::ControllerChooses,
             tapped: false,
             count: spec.count,
             extra_keywords: vec![],
@@ -3760,6 +3773,7 @@ fn build_fabricate_trigger(n: u32) -> TriggerDefinition {
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: TokenAttackDestination::ControllerChooses,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
@@ -4373,6 +4387,7 @@ fn build_afterlife_trigger(count: u32) -> TriggerDefinition {
         owner: TargetFilter::Controller,
         attach_to: None,
         enters_attacking: false,
+        attack_destination: TokenAttackDestination::ControllerChooses,
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
@@ -5044,6 +5059,7 @@ fn build_double_team_trigger() -> TriggerDefinition {
             owner: TargetFilter::Controller,
             source_filter: None,
             enters_attacking: true,
+            attack_destination: TokenAttackDestination::ControllerChooses,
             tapped: true,
             count: QuantityExpr::Fixed { value: 1 },
             extra_keywords: vec![],
@@ -9293,6 +9309,7 @@ pub fn synthesize_read_ahead(face: &mut CardFace) {
         // chapter number"; the chosen value is persisted on the entering Saga
         // so the `PutCounter` sub-ability can read it via `ChosenNumber`.
         Effect::Choose {
+            chooser: crate::types::ability::ControllerRef::You,
             choice_type: ChoiceType::NumberRange {
                 min: 1,
                 // CR 702.155b: the Saga states its own upper bound (the final
@@ -9997,6 +10014,7 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
         protector_replacement.execute = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Choose {
+                chooser: crate::types::ability::ControllerRef::You,
                 choice_type: ChoiceType::opponent(),
                 persist: true,
                 selection: crate::types::ability::TargetSelectionMode::Chosen,
@@ -10128,6 +10146,7 @@ pub fn synthesize_tribute_intrinsics(face: &mut CardFace) {
     let choose_stage = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Choose {
+            chooser: crate::types::ability::ControllerRef::You,
             choice_type: ChoiceType::opponent(),
             persist: true,
             selection: crate::types::ability::TargetSelectionMode::Chosen,
@@ -14550,6 +14569,7 @@ mod provoke_runtime_tests {
     use crate::game::ability_utils::build_resolved_from_def_with_targets;
     use crate::game::combat::{AttackTarget, AttackerInfo, CombatState};
     use crate::game::effects::resolve_ability_chain;
+    use crate::game::game_object::ObjectIncarnationRefExt;
     use crate::game::zones::create_object;
     use crate::types::ability::{ContinuousModification, EffectKind, TargetRef};
     use crate::types::events::GameEvent;

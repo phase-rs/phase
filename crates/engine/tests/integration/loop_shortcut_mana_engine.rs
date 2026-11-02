@@ -92,6 +92,7 @@ fn tap_untapped_land(runner: &mut GameRunner, player: PlayerId) {
         .act(GameAction::ActivateAbility {
             source_id: land,
             ability_index: mana_idx,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("tap land for mana");
 }
@@ -138,6 +139,7 @@ fn activate_and_settle(runner: &mut GameRunner, source: ObjectId, ability_index:
         .act(GameAction::ActivateAbility {
             source_id: source,
             ability_index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activation is legal");
     for _ in 0..60 {
@@ -395,6 +397,7 @@ fn mana_engine_interruptibility_defused_opponent_responds_no_grant() {
         .act(GameAction::ActivateAbility {
             source_id: rig.basalt,
             ability_index: untap_idx,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("untap activation is legal");
     // P0 passes ⇒ P1 gets priority with the untap on the stack (the real response window).
@@ -727,6 +730,7 @@ fn cond_a_nontargeted_opponent_depletion_noops_at_exhaustion_not_abort() {
     let res = runner.act(GameAction::ActivateAbility {
         source_id: pyro,
         ability_index: dmg_idx,
+        payment_mode: CastPaymentMode::Auto,
     });
     assert!(
         res.is_ok(),

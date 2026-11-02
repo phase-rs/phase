@@ -14,11 +14,12 @@
 //! win?" It is called by analysis code and the corpus test harness on a *driven*
 //! `GameRunner`.
 //!
-//! [`live_mandatory_loop_winner`] couples that classifier into the live reducer
+//! [`live_mandatory_loop_winner`] is the live reducer's winner test
 //! (`game::engine::reconcile_terminal_result`, CR 732.2a / CR 704.5a): at an
 //! all-mandatory cascade whose board has returned identical modulo monotone resources
-//! (and the volatile stack id, see `resource::project_out_resources`) while exactly
-//! one opponent's life drains without bound, it shortcuts to the forced loss instead
+//! (and the volatile stack id, see `resource::project_out_resources`), or covers that board
+//! by growth, while every living player but one loses life or gains poison each cycle, it
+//! shortcuts to the forced loss instead
 //! of halting on the resource ceiling. PR-3 (Option C) scans a persisted bounded ring
 //! of post-resolution snapshots (`GameState::loop_detect_ring`), maintained at the
 //! post-pipeline frame of `game::engine::pass_priority_once_with_pipeline` (after
@@ -28,31 +29,26 @@
 //! frontend default), which runs `reconcile_terminal_result` after every beat. Note
 //! `run_auto_pass_loop` does NOT call `reconcile_terminal_result` inside its internal
 //! iterations, so its net-progress grind still runs to the natural CR 704.5a death;
-//! the per-beat drive is the accelerated path. So `detect_loop` IS now reached from
-//! the reducer via that
-//! helper. The strict CR 104.4b / CR 732.4 mandatory-DRAW path (a repeat with no net
-//! progress) and the `emit_resolution_halt` runaway backstop are unchanged — the live
-//! win path is strictly additive and fires only when life strictly advances toward a
-//! single determinate opponent loss.
+//! the per-beat drive is the accelerated path.
 //!
 //! # The detection rule (CR 732.2a — the shortcut, not the draw)
 //!
-//! A confirmed net-progress loop is exactly the pair of conditions PR-0 built:
+//! A confirmed net-progress loop is the pair of conditions:
 //!
 //! 1. **Same board** — [`loop_states_equal_modulo_resources`] holds between the
 //!    state at the start of a cycle and the state at the end (controller, zone,
 //!    tap-state, attachments, object count, stack, phase, priority all identical;
-//!    only the monotone resources may differ). This is the *complement* of the
-//!    strict CR 104.4b equality the live draw path uses.
+//!    only the monotone resources may differ) — the *complement* of the strict CR 104.4b
+//!    equality the live draw path uses — or the object-growth or counter-growth cover
+//!    admits the pair.
 //! 2. **Net progress** — the per-cycle [`ResourceVector::delta`] satisfies
-//!    [`ResourceVector::is_net_progress`] (≥1 axis strictly increased and no
-//!    *consumed* axis — mana, life — went net-negative).
+//!    `ResourceVector::net_progress_for` for the loop's controller (≥1 axis grows without
+//!    bound, no mana color falls, and the controller's own life does not fall).
 //!
 //! When both hold, the loop is repeatable without bound (CR 732.2a: a shortcut
 //! that "repeats a specified number of times"), and [`detect_loop`] returns a
 //! [`LoopCertificate`] naming the unbounded axes ([`ResourceVector::unbounded_components`])
-//! and the derived [`WinKind`]. When either fails, it returns `None` — the
-//! soundness guarantee: no certificate for a non-loop or a non-progressing cycle.
+//! and the derived [`WinKind`]. When either fails, it returns `None`.
 
 use crate::analysis::decision_template::{DecisionTemplate, IterationCount};
 use crate::analysis::resource::{
@@ -108,14 +104,9 @@ pub enum WinKind {
     Advantage,
 }
 
-/// A sound certificate that a candidate cycle is an infinite net-progress loop.
-///
-/// Produced only by [`detect_loop`] when the board is identical modulo resources
-/// **and** the per-cycle resource delta is net-progress. It is an *analysis*
-/// value — never stored on `GameState`; PR-3 acts on an equivalent live signal. PR-7
-/// Phase 3 serializes a certificate into `WaitingFor::LoopShortcut` for the interactive
-/// shortcut offer, so it gains `Serialize`/`Deserialize` (every field is public board
-/// state).
+/// A confirmed loop cycle — its unbounded axes, win kind and breakability — as
+/// [`detect_loop`] and `game::engine`'s offer producers mint it; `WaitingFor::LoopShortcut`
+/// carries it to the players.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopCertificate {
     /// The resource axes that grew (or, for a mill loop, shrank) each cycle — the
@@ -123,6 +114,9 @@ pub struct LoopCertificate {
     /// Non-empty on every certificate but a counted offer's, whose take repeats nothing without
     /// bound.
     pub unbounded: Vec<ResourceAxis>,
+    /// The subset of `unbounded` the loop drives up, from the same `ResourceVector` derivation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rising: Vec<ResourceAxis>,
     /// The classified win condition, derived from `unbounded`, or for a counted offer from what
     /// its counting replay performed; `None` when that take does not end the game with its
     /// proposer the winner.
@@ -144,16 +138,15 @@ pub struct LoopCertificate {
     /// the caller (which drives the actions) supplies it.
     pub mandatory: bool,
     /// CR 110.1: non-recycled per-cycle remainder of battlefield permanents (the "+1
-    /// untapped" seed). EMPTY for every certificate this phase produces (both detection
-    /// paths require an identical battlefield); wired now so an object-growth path
-    /// populates it with no further change. NOT a `ResourceAxis` — concrete permanents.
+    /// untapped" seed), as `board_delta` measures it between the cycle's two boards; empty
+    /// when the battlefield recurred exactly. NOT a `ResourceAxis` — concrete permanents.
     pub residual_board_delta: BoardDelta,
     /// CR 732.2a: the measured resource signature of ONE repetition, published only by a
     /// producer that bounded the repetitions (the threshold authority's offer, or the counting
     /// replay's).
     /// `None` for every other offer, and for every save written before this field existed
-    /// — in which case a drive falls back to the recurrence disjunct, i.e. exactly shipped
-    /// behaviour. `skip_serializing_if` keeps the existing payload byte-identical.
+    /// — in which case a drive falls back to the recurrence disjunct. `skip_serializing_if`
+    /// omits it when `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub per_cycle: Option<crate::analysis::resource::PeriodSignature>,
 }
@@ -174,6 +167,69 @@ impl LoopCertificate {
 pub enum OfferRoad {
     Ring,
     RecordedPeriod,
+}
+
+/// CR 732.2a: whether a counted take of an offer performs, or why none does.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CountedTake {
+    /// A declared or shortened count drives that many repetitions.
+    #[default]
+    Performs,
+    /// No count above zero is taken, for this cause.
+    Unperformable(UnperformableCause),
+}
+
+/// Why no counted take of an offer performs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UnperformableCause {
+    /// CR 732.2c: each repetition makes a game choice no declaration of the offer contains.
+    UncontainedChoice,
+    /// The period recurs only where the ring drain's cycle delimiter does not fire.
+    UndelimitedCover,
+}
+
+impl CountedTake {
+    pub fn is_performs(&self) -> bool {
+        *self == Self::Performs
+    }
+
+    /// The cause that refuses `cycles` repetitions, if one does; zero repetitions drive nothing.
+    pub fn refusal(self, cycles: u32) -> Option<UnperformableCause> {
+        match self {
+            Self::Performs => None,
+            Self::Unperformable(cause) => (cycles > 0).then_some(cause),
+        }
+    }
+
+    /// This take, naming the choice when `profile` holds a game choice no template-less
+    /// declaration contains.
+    pub(crate) fn naming_the_choice(
+        self,
+        profile: &crate::types::game_state::LoopDecisionProfile,
+    ) -> Self {
+        use crate::types::game_state::LoopDecision;
+        let holds_choice = profile.holds_unproven_option()
+            || profile.members.iter().any(|member| match member {
+                LoopDecision::Continuing | LoopDecision::Optional | LoopDecision::Decision => true,
+                LoopDecision::Outs | LoopDecision::Random | LoopDecision::Unproven(_) => false,
+            });
+        if holds_choice {
+            Self::Unperformable(UnperformableCause::UncontainedChoice)
+        } else {
+            self
+        }
+    }
+}
+
+impl UnperformableCause {
+    pub fn reason(self) -> &'static str {
+        match self {
+            Self::UncontainedChoice => {
+                "CR 732.2a: the proposal contains no choice its repetitions make"
+            }
+            Self::UndelimitedCover => "this engine will not take a counted repetition of this loop",
+        }
+    }
 }
 
 /// CR 732.2a: the log/display summary a `WaitingFor::RespondToShortcut` carries to each
@@ -197,11 +253,13 @@ pub struct ShortcutProposal {
     /// The determinate winner measured when the offer was created. `None` represents an
     /// advantage-only object-growth offer, which may be materialized but cannot be crowned.
     pub predicted_winner: Option<PlayerId>,
-    /// CR 732.1b: how many times to repeat before stopping. Phase 3 only ever proposes
-    /// [`IterationCount::UntilLethal`] (a determinate CR 704.5a drain).
+    /// CR 732.1b: how many times to repeat before stopping.
     pub count: IterationCount,
     /// The confirmed unbounded axes (from the certificate) — display only.
     pub unbounded: Vec<ResourceAxis>,
+    /// The certificate's `rising`, copied at the mint.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rising: Vec<ResourceAxis>,
     /// How the loop wins (from the certificate) — display only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub win_kind: Option<WinKind>,
@@ -210,9 +268,8 @@ pub struct ShortcutProposal {
     pub win_kind_at: Option<u32>,
     /// PR-7 Phase 4b: an optional CR 732.2a decision template pinning the loop's
     /// free choices for `IterationCount::Fixed(N)` finite materialization. `None`
-    /// for a choice-free drain (every existing offer/test) or an `UntilLethal`
-    /// proposal, which never reads this field. Absent from `On`/`Off` serialized
-    /// streams (skip-if-none), so this is a byte-preserving addition.
+    /// for a choice-free drain or an `UntilLethal`
+    /// proposal, which never reads this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<DecisionTemplate>,
     /// CR 732.2a: copied verbatim off the confirmed certificate so the drive reads ONE
@@ -238,6 +295,9 @@ pub struct ShortcutProposal {
     pub shortened_by: Option<PlayerId>,
     /// The producer that minted the offer this proposal was declared against, copied off it.
     pub road: OfferRoad,
+    /// The counted take of the offer this proposal was declared against, copied off it.
+    #[serde(default, skip_serializing_if = "CountedTake::is_performs")]
+    pub counted_take: CountedTake,
     /// CR 732.2a: the confirmed period of the offer this proposal was declared against, copied
     /// off it; stripped for every viewer.
     #[serde(
@@ -245,6 +305,10 @@ pub struct ShortcutProposal {
         skip_serializing_if = "crate::game::period_confirm::ConfirmedPeriod::is_empty"
     )]
     pub period: crate::game::period_confirm::ConfirmedPeriod,
+    /// CR 603.3d + CR 601.2c: the offer's `ShortcutDecisionSchema::leading_aims`, copied at declare
+    /// so a responder's preview splits the declaration by the lead the proposer's preview used.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub leading_aims: Vec<(crate::analysis::decision_template::DecisionSlot, PlayerId)>,
     /// CR 732.2a: the declaration the offer PUBLISHED — `game::engine::build_bounded_declaration`'s
     /// validated output, copied off the offer at declare — beside `template`, the declaration the
     /// drive replays. The two differ wherever the declarer overrode the published aim, and
@@ -267,13 +331,20 @@ impl ShortcutProposal {
     /// return type rather than an error: the empty range's floor sits above its ceiling, and
     /// `contains` refuses every place against it, zero included.
     pub fn shortening_places(&self) -> std::ops::RangeInclusive<u32> {
-        match self.count {
+        let places = match self.count {
             IterationCount::Fixed(iterations) => iterations
                 .checked_sub(1)
                 .map_or(std::ops::RangeInclusive::new(1, 0), |last| 0..=last),
             // CR 704.5a: the drain runs until a player loses, so the proposal names no count
             // and no place is past its end.
             IterationCount::UntilLethal => 0..=u32::MAX,
+            // CR 732.2b: a proposal with no ending point has no place past its end.
+            IterationCount::WithoutEnd => 0..=u32::MAX,
+        };
+        // CR 732.2a: a counted take that performs no repetition leaves place 0 the only place.
+        match self.counted_take.refusal(1) {
+            Some(_) => *places.start()..=0,
+            None => places,
         }
     }
 }
@@ -305,8 +376,10 @@ pub enum ShortcutResponse {
 ///
 /// Returns `Some(LoopCertificate)` iff **both**:
 /// 1. [`loop_states_equal_modulo_resources`] holds between `cycle_start` and
-///    `cycle_end` (same board, resources may differ), and
-/// 2. `delta.is_net_progress()` holds (≥1 axis up, no consumed axis net-negative).
+///    `cycle_end` (same board, resources may differ), or the object-growth or counter-growth
+///    cover admits the pair, and
+/// 2. `delta.net_progress_for(controller)` holds (≥1 axis grows without bound, no mana color
+///    falls, and the controller's own life does not fall).
 ///
 /// Otherwise returns `None`. The `controller` and `mandatory` flags are both
 /// caller-supplied facts the detector cannot infer from two states alone:
@@ -326,9 +399,8 @@ pub fn detect_loop(
     // CR 732.2a: the board must have returned to an identical configuration
     // modulo the monotone resources — OR covered it by pure inert object growth
     // (PR-7 Phase 4a offline object-growth cover; the residual `board_delta` below
-    // lights up with the grown permanents when this arm fires). Constant-depth
-    // short-circuits, so behavior for every existing (non-growth) cycle is
-    // byte-unchanged. This is the OFFLINE classifier only — no live/reducer path.
+    // lights up with the grown permanents when this arm fires). This is the OFFLINE
+    // classifier only — no live/reducer path.
     if !(loop_states_equal_modulo_resources(cycle_start, cycle_end)
         || crate::analysis::resource::loop_states_cover_modulo_object_growth(
             cycle_start,
@@ -367,20 +439,12 @@ pub fn detect_loop(
     let win_kind = Some(classify_win_kind(controller, delta, Some(cycle_end)));
     Some(LoopCertificate {
         unbounded,
+        rising: delta.rising_unbounded_axes_for(controller),
         win_kind,
         win_kind_at: None,
         mandatory,
-        // Empty by construction of the `:162` equal-board gate
-        // (`loop_states_equal_modulo_resources` guarantees `cycle_start`/`cycle_end`
-        // battlefields are equal, so `added`/`removed` are []). This is the SINGLE
-        // population seam: it calls `board_delta` rather than hard-coding
-        // `BoardDelta::default()` so that when a future object-growth path relaxes the
-        // `:162` gate, the residual lights up with no further edit (fail-loud), instead
-        // of a silent default that never fires until someone remembers to swap it. A
-        // computed-empty `BoardDelta` compares equal to `BoardDelta::default()`, so the
-        // derived-`PartialEq` certificate equalities in `corpus_tests.rs` stay intact.
-        // Invariant pinned by `residual_empty_for_constant_depth` (T12). (No CR
-        // annotation: this is an invariant/plumbing comment, not rule-implementing code.)
+        // Computed rather than defaulted, so a growth cover's added permanents appear in the
+        // residual and an exact recurrence's residual is empty.
         residual_board_delta: crate::analysis::resource::board_delta(cycle_start, cycle_end),
         // CR 732.2a: `detect_loop` states no CR 704 repetition bound, so it publishes no
         // per-period signature either. Only the bounded-cycle offer does.
@@ -388,17 +452,15 @@ pub fn detect_loop(
     })
 }
 
-/// CR 732.2a + CR 704.5a: the LIVE coupling of [`detect_loop`] into the reducer.
+/// CR 732.2a + CR 704.5a: the reducer's winner test over a ring frame and the live board.
 ///
-/// At an all-mandatory auto-pass cascade whose board has returned identical (modulo
-/// monotone resources AND the volatile stack id, see
-/// [`crate::analysis::resource::project_out_resources`]), decide whether the loop
-/// forces a single determinate opponent life-loss and, if so, name the winner.
-/// Returns `None` unless the outcome is unambiguous (the soundness guarantee: the
-/// reducer only shortcuts to a WIN it can prove).
+/// Given a ring frame whose board `cycle_end` repeats (modulo monotone resources AND the
+/// volatile stack id, see [`crate::analysis::resource::project_out_resources`]) or covers by
+/// growth, decide whether every living player but one loses life or gains poison each cycle
+/// toward a determinate loss and, if so, name the one who does not.
+/// Returns `None` unless the outcome is unambiguous.
 ///
-/// The caller guarantees `mandatory == true` (every iteration in the auto-pass loop
-/// is mandatory by construction) and passes the LIVE (raw) reducer state as
+/// The caller passes the LIVE (raw) reducer state as
 /// `cycle_end` so the SBA-layer can't-lose/can't-win firewall sees real
 /// `transient_continuous_effects` and is not perturbed by `normalize_for_loop`'s
 /// `layers_dirty = full()`. `cycle_start` is a prior NORMALIZED window snapshot; the
@@ -490,9 +552,7 @@ pub(crate) fn live_mandatory_loop_winner(
     // early-returns `None` before this recurrence gate is ever consulted. Adding the
     // disjunct here would be dead code today AND a soundness hazard tomorrow (it
     // would be the seam a future counter-growth loop that ALSO carries a life-faller
-    // could ride into a GameOver). Left fail-closed by design; the counter-growth
-    // cover only ever routes through the offline `detect_loop` cert and the live
-    // Path-C revocable capability mark, neither of which can end the game.
+    // could ride into a GameOver).
     if !(loop_states_equal_modulo_resources(cycle_start, cycle_end)
         || loop_states_cover_modulo_growth(cycle_start, cycle_end))
     {
@@ -530,7 +590,7 @@ pub(crate) fn live_mandatory_loop_winner(
     // terminal and no post-CR-800.4a continuation is ever modeled. The seam adds the
     // complementary per-frame pairwise-equality check ([`fallers_lives_pairwise_equal`]).
     // `fallers.len() == 1` needs no gate: the sole opponent's elimination IS the
-    // terminal event (2p behavior byte-preserved).
+    // terminal event.
     if fallers.len() >= 2 {
         let first = delta.life.get(&fallers[0]).copied().unwrap_or(0);
         if fallers
@@ -579,11 +639,10 @@ pub(crate) fn live_mandatory_loop_winner(
 /// absolute life before the extrapolated win — a net-delta check cannot see it.
 /// Per-resolution granularity IS SBA granularity here, but NOT because ring frames are
 /// consecutive resolutions — they are not, and never were. The shipped CR 603.3b
-/// `OrderTriggers` exemption already retains the ring across a non-sampling beat (dump D
-/// measured 35 such beats in one drive), and `WaitingFor::is_forced_cascade_window`
-/// extends that to every forced pre-priority window (CR 603.3d / CR 603.5 + CR 608.2 /
-/// CR 903.9a / CR 704.5j / CR 310.11 / CR 703.1 + CR 117.3a). The invariant this guard
-/// actually needs is weaker and true:
+/// `OrderTriggers` exemption already retains the ring across a non-sampling beat, and
+/// `WaitingFor::is_forced_cascade_window` extends that to every forced pre-priority window
+/// (CR 603.3d / CR 603.5 + CR 608.2 / CR 903.9a / CR 704.5j / CR 310.11 / CR 703.1 +
+/// CR 117.3a). The invariant this guard actually needs is weaker:
 /// **every point at which CR 704.5a could fire is either sampled or clears the ring.**
 /// CR 704.3 fixes those points: SBAs are checked whenever a player would get priority,
 /// and every such point arrives as `WaitingFor::Priority`, which is deliberately not a
@@ -620,9 +679,10 @@ pub(crate) fn live_mandatory_loop_winner(
 ///   `GameState::invalidate_loop_ring_on_unobserved_life_move`, called from
 ///   `game::combat_damage::apply_combat_damage`.
 ///
-/// So requiring `life[winner]` non-decreasing across the matched window (prior frame →
-/// every subsequent ring frame → the live state) is exactly right. Winner draw-from-empty
-/// is correctly unreachable (a non-faller never crosses a loss SBA).
+/// So the guard requires `life[winner]` non-decreasing across the matched window (prior
+/// frame → every subsequent ring frame → the live state). A winner never draws from an
+/// empty library here: `live_mandatory_loop_winner` refuses a cycle in which any living
+/// player's library shrinks.
 pub(crate) fn winner_life_never_dips(frames: &[&GameState], winner: PlayerId) -> bool {
     let mut prev: Option<i32> = None;
     for frame in frames {
@@ -743,6 +803,88 @@ mod tests {
 
     fn pid(n: u8) -> PlayerId {
         PlayerId(n)
+    }
+
+    /// CR 732.2c: a target, card, may or several-option choice is one no template-less
+    /// declaration contains.
+    #[test]
+    fn naming_the_choice_names_every_member_that_stands_for_a_game_choice() {
+        use crate::analysis::decision_template::ChoicePoint;
+        use crate::types::game_state::{LoopDecision as D, LoopDecisionProfile};
+        let named = CountedTake::Unperformable(UnperformableCause::UncontainedChoice);
+        for (members, expected) in [
+            (vec![D::Continuing], named),
+            (vec![D::Optional], named),
+            (vec![D::Decision], named),
+            (vec![D::Unproven(ChoicePoint::AnnouncedTarget)], named),
+            (vec![D::Unproven(ChoicePoint::ResolutionSet)], named),
+            (vec![D::Outs, D::Decision], named),
+            (vec![D::Outs], CountedTake::Performs),
+            (vec![D::Random], CountedTake::Performs),
+            (vec![D::Outs, D::Random], CountedTake::Performs),
+            (
+                vec![D::Unproven(ChoicePoint::TriggerOrder)],
+                CountedTake::Performs,
+            ),
+            (vec![], CountedTake::Performs),
+        ] {
+            let profile = LoopDecisionProfile {
+                members: members.iter().copied().collect(),
+            };
+            assert_eq!(
+                CountedTake::Performs.naming_the_choice(&profile),
+                expected,
+                "{members:?}"
+            );
+        }
+    }
+
+    /// CR 732.2c: a choice named before the every-option proof stays named, and the period
+    /// unforced, under each of its outcomes.
+    #[test]
+    fn a_profile_naming_a_choice_names_one_under_every_proof() {
+        use crate::analysis::decision_template::ChoicePoint;
+        use crate::game::period_confirm::OptionProof;
+        use crate::types::game_state::{LoopDecision as D, LoopDecisionProfile};
+        let members = [
+            D::Optional,
+            D::Outs,
+            D::Decision,
+            D::Random,
+            D::Unproven(ChoicePoint::AnnouncedTarget),
+            D::Unproven(ChoicePoint::ResolutionSet),
+            D::Unproven(ChoicePoint::TriggerOrder),
+        ];
+        let mut named = 0;
+        for mask in 0u32..(1 << members.len()) {
+            let raw = LoopDecisionProfile {
+                members: members
+                    .iter()
+                    .enumerate()
+                    .filter(|&(bit, _)| mask & (1 << bit) != 0)
+                    .map(|(_, member)| *member)
+                    .collect(),
+            };
+            if CountedTake::Performs.naming_the_choice(&raw).is_performs() {
+                continue;
+            }
+            named += 1;
+            for proof in [
+                OptionProof::Continues,
+                OptionProof::Ends,
+                OptionProof::Undecided,
+            ] {
+                let resolved = raw.clone().with_option_proof(|| proof);
+                assert!(!resolved.is_forced(), "{raw:?} {proof:?}");
+                assert!(
+                    !CountedTake::Performs
+                        .naming_the_choice(&resolved)
+                        .is_performs(),
+                    "{raw:?} {proof:?} -> {resolved:?}"
+                );
+            }
+        }
+        assert!(named > 0, "reach: some member set names a choice");
     }
 
     // The CR 704.3 partition `winner_life_never_dips` rests on — `Priority` DISJOINT from
@@ -1082,6 +1224,10 @@ mod tests {
                 ResourceAxis::DamageDealt(pid(1)),
                 ResourceAxis::Life(pid(0)),
             ],
+            rising: vec![
+                ResourceAxis::DamageDealt(pid(1)),
+                ResourceAxis::Life(pid(0)),
+            ],
             win_kind: Some(WinKind::LethalDamage),
             win_kind_at: None,
             mandatory: true,
@@ -1099,11 +1245,9 @@ mod tests {
         )]));
     }
 
-    /// T12 (B4 invariant, Drift Correction 2): a real `detect_loop` certificate over the
-    /// equal-board frames its `:162` gate guarantees carries an EMPTY residual. Proves
+    /// A real `detect_loop` certificate over equal-board frames carries an EMPTY residual:
     /// the `board_delta` population seam returns empty on identical battlefields (a diff
-    /// that wrongly reported the recycled objects would fail this), keeping the wired
-    /// field honest until an object-growth detection path exists.
+    /// that wrongly reported the recycled objects would fail this).
     #[test]
     fn residual_empty_for_constant_depth() {
         let mut start = GameState::new_two_player(7);
@@ -1362,9 +1506,8 @@ mod tests {
 
     /// U6 SOUNDNESS: a single faller with THREE living players is NOT an all-opponent
     /// drain — a bystander (P2, life delta 0) survives, so `nonfallers = {P0, P2}`
-    /// (len 2 ≠ 1) ⇒ None. The MP-general predicate correctly refuses to name a winner
-    /// while a non-draining opponent is alive. Revert: an "any-faller-wins" rewrite
-    /// that ignores bystanders flips this to `Some(P0)`.
+    /// (len 2 ≠ 1) ⇒ None. Revert: an "any-faller-wins" rewrite that ignores bystanders
+    /// flips this to `Some(P0)`.
     #[test]
     fn live_winner_three_player_is_none() {
         let mut end = GameState::new_two_player(7);
@@ -1378,22 +1521,20 @@ mod tests {
         assert_eq!(
             live_mandatory_loop_winner(&start, &end, &delta),
             None,
-            "a determinate single-loser outcome is unambiguous only in 2-player"
+            "a bystander that does not fall leaves two non-fallers, so there is no single winner"
         );
     }
 
     /// MP COMMANDER SAFETY (the load-bearing firewall): a 4-player table with a single
     /// faller (P1 drains, P0 gains) while P2 and P3 sit STATIC must NOT name a winner.
     /// This is the partial-net-progress drain — only one opponent is draining, the other
-    /// two are untouched and alive — so a forced single-loser outcome is NOT determinate
-    /// (CR 104.2a is unambiguous only at two living players). The `living.len() != 2`
-    /// early-return is what holds the line; commander infinites that drain just one pod
-    /// member must not hand the game to P0 while the rest of the table is alive.
+    /// two are untouched and alive — so `nonfallers` holds three players and the
+    /// `nonfallers.len() != 1` gate returns `None`.
     ///
-    /// REVERT-FAIL: delete the `living.len() != 2` gate in `live_mandatory_loop_winner`
-    /// WITHOUT adding an all-opponents-fall predicate ⇒ the single-faller path names
-    /// `Some(P0)` while P2/P3 live ⇒ this assertion flips. (Strengthens the 3-player
-    /// `live_winner_three_player_is_none` to the 4-player commander count.)
+    /// REVERT-FAIL: delete the `nonfallers.len() != 1` gate in `live_mandatory_loop_winner`
+    /// ⇒ the single-faller path names `Some(P0)` while P2/P3 live ⇒ this assertion flips.
+    /// (Strengthens the 3-player `live_winner_three_player_is_none` to the 4-player
+    /// commander count.)
     #[test]
     fn mp_partial_net_progress_drain_no_premature_gameover() {
         let mut end = GameState::new_two_player(7);
@@ -1439,10 +1580,7 @@ mod tests {
 
     /// U7 (CR 704.5a + CR 704.5c): opponent P1 both loses life AND accrues poison — the
     /// SAME player is doomed by either clock, so P1 is a SINGLE faller and P0 is the sole
-    /// non-faller winner. This REPLACES the former over-conservative aggregate-poison
-    /// firewall (which refused any poison gain because poison was unattributable per
-    /// victim); per-victim attribution now correctly names the winner.
-    /// INTENDED BEHAVIOR CHANGE (not a regression): the prior assertion was `None`.
+    /// non-faller winner.
     /// Revert-probe: drop the `|| delta.poison > 0` faller term (G-7) ⇒ P1 is no longer a
     /// faller ⇒ nonfallers = {P0, P1} ⇒ None.
     #[test]
@@ -1502,8 +1640,7 @@ mod tests {
         );
     }
 
-    /// U8: PR-3 wins ONLY on the CR 704.5a life axis — a pure opponent mill (no
-    /// life faller) is not shortcut here ⇒ None (decking live-shortcut deferred).
+    /// A pure opponent mill (no life or poison faller) is not shortcut here ⇒ None.
     #[test]
     fn live_winner_pure_mill_is_none() {
         let end = GameState::new_two_player(7);
@@ -1569,9 +1706,7 @@ mod tests {
         );
     }
 
-    /// U-draw: a net-zero cycle (every axis zero) has no life faller ⇒ None. The
-    /// modulo path can never hijack a true mandatory-draw (structural complement of
-    /// the strict CR 104.4b block, which runs first and returns).
+    /// A net-zero cycle (every axis zero) has no life faller ⇒ None.
     #[test]
     fn live_winner_net_zero_is_none() {
         let end = GameState::new_two_player(7);

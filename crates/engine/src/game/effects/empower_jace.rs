@@ -18,7 +18,8 @@ use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaColor;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{
-    EtbTapState, ProposedEvent, TokenCharacteristics, TokenHostRequest, TokenSpec,
+    EtbTapState, ProposedEvent, TokenAttackRequest, TokenCharacteristics, TokenHostRequest,
+    TokenSpec,
 };
 use std::collections::HashSet;
 
@@ -55,6 +56,7 @@ pub fn resolve(
         copy: None,
         enter_tapped: EtbTapState::Unspecified,
         count: 1,
+        appended: Vec::new(),
         applied: HashSet::new(),
     };
     let owed = || PendingCounterPostAction::ContinueEmpowerJaceAfterTokenCreation {
@@ -116,6 +118,7 @@ fn jace_token_spec(controller: PlayerId, source_id: ObjectId) -> TokenSpec {
         enter_with_counters: vec![],
         tapped: false,
         enters_attacking: false,
+        attack_request: TokenAttackRequest::Unspecified,
         attach_to: TokenHostRequest::NotRequested,
         sacrifice_at: None,
         source_id,

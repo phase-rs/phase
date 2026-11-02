@@ -305,6 +305,7 @@ fn candidate_draws_structurally(ctx: &PolicyContext<'_>) -> bool {
         | GameAction::SetPriorityYield { .. }
         | GameAction::SetMayTriggerAutoChoice { .. }
         | GameAction::SetReplacementAutoChoice { .. }
+        | GameAction::UnAction { .. }
         | GameAction::SetTriggerOrderTemplate { .. }
         | GameAction::AssignCombatDamage { .. }
         | GameAction::AssignBlockerDamage { .. }

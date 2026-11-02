@@ -2,8 +2,7 @@
 //! be legally taken based on the current game state and the predictable results."
 //! A [`DecisionTemplate`] captures that sequence so it can be replayed verbatim when a
 //! simultaneous-trigger group recurs (CR 603.3b ordering) or driven across loop
-//! iterations as a predictable shortcut (CR 732.2a). PURELY ADDITIVE / offline —
-//! never called from the reducer in this phase.
+//! iterations as a predictable shortcut (CR 732.2a).
 
 use crate::types::game_state::{GameState, WaitingFor, YieldTarget};
 use crate::types::identifiers::ObjectId;
@@ -39,12 +38,7 @@ pub type IterationIndex = u32;
 /// `LoopChoice` entry in `GameState::decision_templates` survives the CR 603.3b batch
 /// boundary — `GameState::clear_ephemeral_trigger_order_templates`' retain predicate is
 /// scoped to `TriggerOrdering` — so it is the vehicle a later episode's declaration can
-/// ride, and it is still POPULATED BY PHASE 4 AND BY NOTHING TODAY. PINNED BY A SHIPPED
-/// ROW: `fantastic_four_bounded_loop::r3b_driven_a_loop_choice_carrier_survives_a_whole_
-/// accepted_f4_drive` plants the `(kind × ephemerality)` cells on the real 4-player board
-/// and drives a whole accepted CR 732.2a shortcut through `apply()` — the `LoopChoice`
-/// cell survives (`3 → 2`) while the `TriggerOrdering` ephemeral cell beside it does not.
-/// `loop_shortcut_ranking::r3b_*` is the seam-level statement of the same predicate.
+/// ride, and nothing populates one today.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum DecisionKind {
     TriggerOrdering,
@@ -135,6 +129,25 @@ pub struct DecisionTemplate {
     pub decisions: Vec<PinnedDecision>,
     pub replay: ReplayMode,
     pub key: DecisionGroupKey,
+}
+
+impl DecisionTemplate {
+    /// CR 732.2a: this template as a declaration of `count` states it — a `Piecewise` segment
+    /// starting at or past `count` names no repetition the count reaches, so it is dropped.
+    pub(crate) fn cut_schedules_at(&mut self, count: &IterationCount) {
+        let IterationCount::Fixed(count) = *count else {
+            return;
+        };
+        for decision in &mut self.decisions {
+            if let PinnedDecision::Targets { targets, .. } = decision {
+                for pin in targets {
+                    if let TargetPin::Scheduled(TargetSchedule::Piecewise(steps)) = pin {
+                        steps.retain(|(start, _)| *start < count);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// CR 732.2a: WHICH CHOICE a [`DecisionSlot`] names, typed rather than numbered. One
@@ -357,7 +370,9 @@ pub enum PinnedDecision {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShortcutDecisionSchema {
     /// CR 732.1b: the proposed repeat mode. `UntilLethal` for a determinate CR 704.5a /
-    /// CR 704.5c drain; `Fixed(n)` seeds the frontend count picker for an optional loop.
+    /// CR 704.5c drain; `Fixed(n)` seeds the frontend count picker for an optional loop, and is
+    /// the count [`ShortcutDecisionSchema::suggestion`] drives — the count roles are stated on
+    /// [`ShortcutDecisionSchema::suggested_declaration`].
     pub iteration_count: IterationCount,
     /// CR 732.2a: the repetition bound this offer's producer MEASURED — the CR 704 threshold
     /// crossing, for a turn-cycle period the cleanup hand bound (CR 514.1), or the repetitions
@@ -369,7 +384,7 @@ pub struct ShortcutDecisionSchema {
     /// taken" quantifies existentially over declarations, so the maximum is the reduction that
     /// answers it. `None` means the producer measured none: no axis of the period consumes any
     /// living seat, so the board licenses no threshold rather than one that happens to be
-    /// large. This is what the rules say about the loop; it wears no implementation ceiling.
+    /// large. It wears no implementation ceiling.
     ///
     /// Read by [`ShortcutDecisionSchema::is_bounded`] — the one question it answers — and by
     /// nothing that publishes or enforces a count, which
@@ -387,11 +402,9 @@ pub struct ShortcutDecisionSchema {
     /// runs to a million), so this budget is ours, not the game's — the same labelling ground
     /// the declare handler's budget arm states.
     ///
-    /// The single authority for how HIGH a count may go, and only for that: a proposal
-    /// exceeding it contains a conditional action (an in-proposal CR 704.5a / CR 704.5c /
-    /// CR 104.3c / CR 121.4 elimination would decide what happens next), which CR 732.2a
-    /// forbids — so the declared-count check in `game::engine` rejects a `Fixed(n)` above it,
-    /// and `game::interaction` publishes it as the count picker's ceiling. Whether a given
+    /// The single authority for how HIGH a count may go, and only for that: the declared-count
+    /// check in `game::engine` rejects a `Fixed(n)` above it, and `game::interaction` publishes
+    /// it as the count picker's ceiling. Whether a given
     /// declaration may legally specify a count at or below it is [`declaration_conforms`]'
     /// question, not this field's. `IterationCount` above is the *suggestion*; this is the
     /// *ceiling*, and they are deliberately separate fields.
@@ -404,6 +417,27 @@ pub struct ShortcutDecisionSchema {
     /// re-deriving it (display-layer purity). Sum of each `ConvokeTaps.tappable.len()`.
     #[serde(default)]
     pub convoke_tappable_count: usize,
+    /// CR 732.2a: the declaration this offer SUGGESTS, where it drives further than the
+    /// published one. The three count roles:
+    ///
+    /// * the published declaration (`WaitingFor::LoopShortcut.declaration`) is the OBSERVATION
+    ///   the charge model reads; its `replay` stamp is its OWN count — how far it drives, clamped
+    ///   to [`ShortcutDecisionSchema::deliverable_capacity`] — and it is validated at that count;
+    /// * this declaration is the witness `game::engine::bounded_offer_tail` builds, stamped and
+    ///   validated at [`ShortcutDecisionSchema::iteration_count`]: the most repetitions of it the
+    ///   proposer survives (its whole cascade, or one short of the proposer's own crossing —
+    ///   CR 704.5a / CR 704.5b / CR 704.5c), capped at the capacity. Published only when that count exceeds the own
+    ///   count and the witness conforms there;
+    /// * [`ShortcutDecisionSchema::iteration_count`] is this declaration's count when one is
+    ///   published, else the published declaration's own count.
+    #[serde(default)]
+    pub suggested_declaration: Option<DecisionTemplate>,
+    /// CR 603.3d + CR 601.2c: when the top stack entry at the offer is a published target slot's
+    /// trigger, the seat it latched — the aim its first repetition resolves. A
+    /// snapshot for `game::interaction`, which reads no `GameState`; the engine's own seams
+    /// re-read it off the board they ask about (`game::engine::leading_announcement_aims`).
+    #[serde(default)]
+    pub leading_aims: Vec<(DecisionSlot, PlayerId)>,
 }
 
 /// A schema deserialized from a pre-bound snapshot carries no capacity. The
@@ -433,11 +467,22 @@ impl Default for ShortcutDecisionSchema {
             deliverable_capacity: default_deliverable_capacity(),
             points: Vec::new(),
             convoke_tappable_count: 0,
+            suggested_declaration: None,
+            leading_aims: Vec::new(),
         }
     }
 }
 
 impl ShortcutDecisionSchema {
+    /// CR 732.2a: the declaration a declarer who overrides nothing takes — the suggested
+    /// declaration, else `published`.
+    pub fn suggestion<'a>(
+        &'a self,
+        published: Option<&'a DecisionTemplate>,
+    ) -> Option<&'a DecisionTemplate> {
+        self.suggested_declaration.as_ref().or(published)
+    }
+
     /// CR 732.2a: `true` iff this offer's producer MEASURED a CR 704.5a / CR 704.5c /
     /// CR 104.3c repetition threshold inside the loop. A producer that measured none
     /// publishes the absence, so an unnarrowed offer is NOT bounded in this sense.
@@ -543,7 +588,8 @@ impl std::fmt::Display for RankingError {
 /// entry because a game event removed the head would be the conditional action CR 732.2a bars.
 /// CR 732.2c therefore makes a longer ranking a proposal certifying a choice nobody takes, and
 /// `validate_pins` refuses one at DECLARE time. The type still admits one — a save written
-/// before that rule can carry it — so the defensive walks over the whole list stay correct.
+/// before that rule can carry it — so the redaction walk and the wire length bound read the
+/// whole list.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(try_from = "Vec<AnnouncementSubject>")]
 pub struct Ranking(Vec<AnnouncementSubject>);
@@ -649,14 +695,8 @@ pub enum ReplayMode {
     Scheduled { count: IterationCount },
 }
 
-/// CR 732.2a "a loop that repeats a specified number of times". **Phase 1 ships ONLY
-/// `Fixed`** (reviewer G7): nothing in Phase 1 reads the count — [`resolve`] takes an
-/// explicit `iteration` index, and the count-driven loop that consumes it is Phase 3 /
-/// Part A. The count-terminated variants (`UntilLethal` → CR 704.5a "a player with 0 or
-/// less life loses"; `UntilResource(ResourceAxis, i64)`) are deferred to the phase that
-/// adds their driver, so the shipped surface stays minimal and fully tested. The enum is
-/// kept (rather than a bare `u32` field on `Scheduled`) so Phase 3 adds those variants
-/// without a field-type change at any `Scheduled` construction site.
+/// CR 732.2a "a loop that repeats a specified number of times": the repetitions a shortcut
+/// proposal names — a count, until a player is at 0 or less life, or without end.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum IterationCount {
     Fixed(u32),
@@ -665,6 +705,9 @@ pub enum IterationCount {
     /// The terminating condition is the SBA, not a caller-supplied count. (`UntilResource`
     /// stays deferred to Phase 4/B5.)
     UntilLethal,
+    /// CR 104.4b + CR 732.4: repeat a loop whose in-loop actions are all mandatory with no
+    /// ending point; once every player accepts, the game is a draw.
+    WithoutEnd,
 }
 
 /// CR 732.2a "predictable results / no conditional actions": deterministic,
@@ -1119,16 +1162,14 @@ fn evaluate_schedule(
             .ok_or_else(|| ReplayFailure::ScheduleExhausted { slot: slot.clone() })?,
     };
     match ranking.head() {
-        // CR 608.2b: a pinned TARGET object must still be a live battlefield object — this
-        // is exactly the pre-parameterization `Constant` behaviour, unchanged.
+        // CR 608.2b: a pinned TARGET object must still be a live battlefield object.
         AnnouncementSubject::Object(src) => resolve_source(src, state).map(ConcreteTarget::Object),
         // CR 601.2c + CR 115.1: a ranked seat is a TARGET, so it is judged by
         // `targeting::player_is_legal_target` (existence + CR 702.11c hexproof /
         // CR 702.18a shroud / CR 702.16b protection) rather than by existence alone. Its two
         // trailing arguments describe THE ABILITY INSTANCE that would name the seat, not a
         // target object — hence `resolve_ability_instance` (which admits the command zone —
-        // CR 114.4 / CR 113.6p) and NOT `resolve_source` (battlefield-only, and correctly so
-        // for a pin).
+        // CR 114.4 / CR 113.6p) and NOT `resolve_source` (battlefield-only).
         //
         // A `None` ANYWHERE in this chain falls through to the `ok_or_else` below: with no
         // live ability instance the engine cannot certify that the object it would ask the
@@ -1138,8 +1179,7 @@ fn evaluate_schedule(
         // just means the table plays the loop out manually. (CR 732.2b is the RESPONDER rule
         // — each OTHER player accepting or shortening a proposal that already exists — so it
         // cannot govern a proposer that publishes nothing.) Announcing a target we cannot
-        // certify is not
-        // free. This is the fail-closed branch, not an oversight.
+        // certify is not free.
         AnnouncementSubject::Seat(p) => resolve_ability_instance(&slot.source, state)
             .and_then(|src_id| state.objects.get(&src_id).map(|o| (src_id, o.controller)))
             .filter(|(src_id, ctrl)| {
@@ -1190,8 +1230,7 @@ fn schedule_announces_every_declared_subject(schedule: &TargetSchedule) -> bool 
 /// CR 732.2a firewall: a `Scheduled` template may auto-drive a shortcut only if every
 /// free choice in the cycle is pinned (TOTAL COVERAGE).
 ///
-/// THIS IS WHERE THE NO-CONDITIONAL-ACTIONS CLAUSE IS SATISFIED, AND IT IS SATISFIED BY
-/// CONSTRUCTION. CR 732.2a requires a proposal describe "the predictable results of the sequence of
+/// CR 732.2a requires a proposal describe "the predictable results of the sequence of
 /// choices" and says it "can't include conditional actions, where the outcome of a game event
 /// determines the next action a player takes". Pins fix every free choice BEFORE the offer is made,
 /// so the sequence the table accepts is the sequence that runs. The two companion gates are
@@ -1616,9 +1655,9 @@ pub struct AimContext<'a> {
 /// CR 732.2a + CR 102.1: why a declared aim is not a choice this sequence can contain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AimViolation {
-    /// At `repetition` the declaration names `seat`, whom the cascade taken under that same
-    /// declaration removes at `departure` — strictly earlier, so CR 102.1 leaves nobody for the
-    /// choice to name and CR 732.2a's "may be legally taken" is not met.
+    /// At `repetition` the declaration's aim at `seat` resolves, and the cascade taken under that
+    /// same declaration removes `seat` at `departure` — strictly earlier, so CR 102.1 leaves
+    /// nobody for the choice to name and CR 732.2a's "may be legally taken" is not met.
     AimsAtDepartedSeat {
         repetition: u32,
         seat: PlayerId,
@@ -1647,12 +1686,13 @@ pub enum AimViolation {
 /// takes. A departure BEFORE it is not: the choice cannot be made, which is the conditional
 /// action CR 732.2a forbids.
 ///
-/// Repetitions are counted from 1 and read at iteration index `repetition - 1` with no announced
-/// lead ([`crate::analysis::resource::AnnouncedLead::None`]), the convention
-/// `truncate_to_declared_seats` shares. The consumption seam's re-derivation instead states which
-/// charged slots lead on the board the drive starts from, because it is matched against the
-/// departures a drive realizes; this conjunct decides which declarations may be specified and
-/// states none.
+/// Repetitions are counted from 1 and read at iteration index `repetition - 1`, the convention
+/// `truncate_to_declared_seats` shares. The board's own lead
+/// (`game::engine::leading_announcement_aims`, the same one the consumption seam reads) decides
+/// where an aim LANDS: a slot whose trigger is on top of the stack resolves its declared aim at
+/// `repetition` one repetition later (CR 603.3d + CR 601.2c), and CR 608.2b re-checks the target
+/// there, so the seat must survive to that landing — or, for an aim the count never resolves, to
+/// the count's last repetition.
 ///
 /// Monotone in `validated_range`: a shorter range walks a prefix of the repetitions and the
 /// cascade does not depend on the range, so a CR 732.2b shortening can never turn a conforming
@@ -1676,6 +1716,7 @@ pub fn aims_survive_the_crossings(
     };
     // The reduction consumed no living seat, so it measured no threshold and no aim can outlive
     // one. The two absences answer alike; they are kept apart because their grounds differ.
+    let leading = crate::game::engine::leading_announcement_aims(state, aim.proposer);
     let Some(cascade) = per_cycle.elimination_cascade(
         state,
         aim.proposer,
@@ -1683,7 +1724,7 @@ pub fn aims_survive_the_crossings(
         aim.published,
         points,
         crate::analysis::resource::ChargeBound::Attributable,
-        crate::analysis::resource::AnnouncedLead::None,
+        crate::analysis::resource::AnnouncedLead::LeadingRepetition(&leading),
     ) else {
         return Ok(());
     };
@@ -1705,19 +1746,23 @@ pub fn aims_survive_the_crossings(
             continue;
         };
         for decision in &decisions {
-            let ConcreteDecision::Targets { targets, .. } = decision else {
+            let ConcreteDecision::Targets { targets, slot } = decision else {
                 continue;
             };
+            let lead = crate::analysis::resource::AnnouncedLead::LeadingRepetition(&leading)
+                .repetitions(slot);
             for target in targets {
                 // CR 400.7 + CR 608.2b: an object aim is not a seat, and its identity is re-bound
                 // per index by the drive's own `resolve`.
                 let ConcreteTarget::Player(seat) = target else {
                     continue;
                 };
+                let landing = repetition + lead;
                 if let Some(&departure) = departures.get(seat) {
-                    if departure < repetition {
+                    // CR 608.2b: the target is re-checked where it resolves.
+                    if departure < landing.min(validated_range) {
                         return Err(AimViolation::AimsAtDepartedSeat {
-                            repetition,
+                            repetition: landing,
                             seat: *seat,
                             departure,
                         });
@@ -1853,6 +1898,8 @@ mod tests {
     #[test]
     fn shortcut_decision_schema_round_trips_and_defaults() {
         let schema = ShortcutDecisionSchema {
+            suggested_declaration: None,
+            leading_aims: Vec::new(),
             iteration_count: IterationCount::UntilLethal,
             // BOTH published answers, each deliberately distinct from its own default: a
             // round-trip carrying a default would pass even if that field were dropped from
@@ -1894,6 +1941,8 @@ mod tests {
         assert_eq!(
             ShortcutDecisionSchema::default(),
             ShortcutDecisionSchema {
+                suggested_declaration: None,
+                leading_aims: Vec::new(),
                 iteration_count: IterationCount::Fixed(0),
                 measured_repetition_bound: None,
                 deliverable_capacity: crate::game::engine::MAX_SHORTCUT_CYCLES,
@@ -3468,6 +3517,8 @@ mod tests {
         );
 
         let schema = ShortcutDecisionSchema {
+            suggested_declaration: None,
+            leading_aims: Vec::new(),
             iteration_count: IterationCount::Fixed(1),
             measured_repetition_bound: Some(1),
             deliverable_capacity: 1,

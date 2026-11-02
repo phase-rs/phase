@@ -1,7 +1,8 @@
 use crate::types::ability::{AggregateFunction, ControllerRef, PlayerRelation, SeatDirection};
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::GameState;
-use crate::types::game_state::LinkedExileSnapshot;
+use crate::types::game_state::StackEntry;
+use crate::types::game_state::{LinkedExileSnapshot, TriggerSourceContext};
 use crate::types::identifiers::ObjectId;
 use crate::types::phase::TurnDirection;
 use crate::types::player::PlayerId;
@@ -145,6 +146,50 @@ pub fn next_player_in_turn_order(state: &GameState, current: PlayerId) -> Player
     match state.turn_direction {
         TurnDirection::Normal => next_player(state, current),
         TurnDirection::Reversed => previous_player(state, current),
+    }
+}
+
+/// CR 800.4g + CR 800.4h: an object requires a choice of a player who has left
+/// the game. The controller of the object — read now, live while it is on the
+/// stack and last-known once it has left (`stack::resolving_object_controller`),
+/// never the CR 112.2 default while the spell is on the stack — chooses another
+/// player to make it; a controller who has left is a player a rule requires to
+/// choose, so the next player in turn order after them elects instead
+/// (CR 800.4h). "Another player" is any player other than the one who left —
+/// every player still in the game, in APNAP order, the elector included
+/// (CR 102.1). The second sentence of CR 800.4g does not apply to either
+/// caller: the original choice was the one the object's instructions give its
+/// controller (CR 608.2c + CR 608.2d), made by whoever controlled it when the
+/// choice was to be made — not by an opponent of the controller. A later change
+/// of control (a thief leaving, CR 800.4a) makes another player the object's
+/// controller; it does not turn that controller's own choice into an opponent's
+/// choice, and the new controller is the player its instructions now name
+/// (CR 608.2c).
+pub(crate) struct SubstituteChooserElection {
+    pub elector: PlayerId,
+    pub candidates: Vec<PlayerId>,
+}
+
+/// The election of a substitute chooser for a choice that `object` — the
+/// resolution carrier — requires of a player who has left (see
+/// [`SubstituteChooserElection`]).
+pub(crate) fn substitute_chooser_election(
+    state: &GameState,
+    object: &StackEntry,
+) -> SubstituteChooserElection {
+    let controller = super::stack::resolving_object_controller(state, object);
+    let elector = if is_alive(state, controller) {
+        controller
+    } else {
+        next_player_in_turn_order(state, controller)
+    };
+    let candidates = apnap_order(state)
+        .into_iter()
+        .filter(|&player| is_alive(state, player))
+        .collect();
+    SubstituteChooserElection {
+        elector,
+        candidates,
     }
 }
 
@@ -351,7 +396,8 @@ pub fn apnap_order_from(
 /// because `TrackedBySource` links are pruned immediately on battlefield exit per
 /// CR 400.7. Outside that look-back path, fall back to the exile-link store's
 /// links of the incarnation this read is made for. The final linked-exile LKI
-/// fallback is incarnation-bounded the same way (CR 400.7).
+/// fallback is incarnation-bounded the same way (CR 400.7). A record with a
+/// trigger source context reads `linked_exile_pile`.
 pub fn linked_exile_cards_for_source(
     state: &GameState,
     source_id: ObjectId,
@@ -363,8 +409,14 @@ pub fn linked_exile_cards_for_source(
         ..
     }) = state.current_trigger_event.as_ref()
     {
-        if *object_id == source_id && !record.linked_exile_snapshot.is_empty() {
-            return record.linked_exile_snapshot.clone();
+        if *object_id == source_id {
+            let linked = match record.trigger_source_context() {
+                Some(source) => linked_exile_pile(state, source),
+                None => record.linked_exile_snapshot.clone(),
+            };
+            if !linked.is_empty() {
+                return linked;
+            }
         }
     }
 
@@ -388,6 +440,35 @@ pub fn linked_exile_cards_for_source(
     crate::game::exile_links::lki_snapshots_for_reader(state, source_id, reader)
         .cloned()
         .collect()
+}
+
+/// CR 607.2a + CR 400.7: The cards linked to a trigger bound to `source`: its
+/// latched snapshot plus the linked-exile LKI recorded for that incarnation
+/// (its departure pile and what it exiled after departing).
+pub fn linked_exile_pile(
+    state: &GameState,
+    source: &TriggerSourceContext,
+) -> Vec<LinkedExileSnapshot> {
+    let bound = source.identity.reference;
+    let mut pile = source.linked_exile_snapshot.clone();
+    // `departed`, not `admits`: an entry whose successor is this incarnation
+    // belongs to an earlier departure, a different object.
+    let later = state
+        .linked_exile_lki
+        .get(&bound.object_id)
+        .into_iter()
+        .flatten()
+        .filter(|lki| lki.departed == bound.incarnation)
+        .flat_map(|lki| &lki.snapshot);
+    for snap in later {
+        if !pile
+            .iter()
+            .any(|p| p.exiled_id == snap.exiled_id && p.incarnation == snap.incarnation)
+        {
+            pile.push(snap.clone());
+        }
+    }
+    pile
 }
 
 /// CR 406.6 + CR 607.1: Returns true if `player` owns at least one card currently
@@ -428,7 +509,7 @@ where
 {
     let mut seen = std::collections::BTreeSet::new();
     let team_totals = players.into_iter().filter_map(|pid| {
-        let key = super::topology::shared_resource_dedup_key(state, pid);
+        let key = super::topology::shared_life_dedup_key(state, pid);
         seen.insert(key).then(|| team_life_total(state, pid))
     });
     match aggregate {
@@ -449,7 +530,7 @@ where
 /// source of truth (CR 810.9: life loss/gain still happens to "each player
 /// individually") — this is a pure derived sum, not a separate stored pool.
 pub fn team_life_total(state: &GameState, player: PlayerId) -> i32 {
-    super::topology::shared_resource_members(state, player)
+    super::topology::shared_life_members(state, player)
         .into_iter()
         .filter_map(|member| state.players.iter().find(|p| p.id == member))
         .map(|p| p.life)
@@ -459,9 +540,10 @@ pub fn team_life_total(state: &GameState, player: PlayerId) -> i32 {
 /// CR 810.10 + CR 810.10a: A player's team's shared poison-counter total.
 /// Mirrors `team_life_total` — a pure derived sum over `Player::poison_counters`
 /// for the player and their (living) teammates. Non-team formats degenerate
-/// to the player's own count.
+/// to the player's own count, as does Archenemy Commander for every seat:
+/// CR 904.13c keeps poison individual even though life is shared.
 pub fn team_poison_total(state: &GameState, player: PlayerId) -> u32 {
-    super::topology::shared_resource_members(state, player)
+    super::topology::shared_poison_members(state, player)
         .into_iter()
         .filter_map(|member| state.players.iter().find(|p| p.id == member))
         .map(|p| p.poison_counters)
@@ -507,7 +589,7 @@ mod tests {
     use crate::game::zones::{create_object, move_to_zone};
     use crate::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter};
     use crate::types::format::FormatConfig;
-    use crate::types::game_state::{LinkedExileLki, StackEntry, StackEntryKind};
+    use crate::types::game_state::{CastingVariant, LinkedExileLki, StackEntry, StackEntryKind};
     use crate::types::identifiers::CardId;
 
     fn make_state(player_count: u8, config: FormatConfig) -> GameState {
@@ -563,6 +645,102 @@ mod tests {
             apnap_order(&state),
             vec![PlayerId(0), PlayerId(3), PlayerId(2), PlayerId(1)],
             "CR 101.4: APNAP follows the reversed turn order",
+        );
+    }
+
+    /// CR 800.4g + CR 800.4h: a living controller elects the substitute
+    /// chooser; a departed controller's election passes to the next player in
+    /// turn order after them, in the current turn direction. The candidates are
+    /// every player still in the game in APNAP order, the elector included.
+    /// The controller is the object's (CR 113.8: an ability's, fixed at
+    /// activation; CR 613.1b: a spell's live controller on the stack, not its
+    /// CR 112.2 default).
+    ///
+    /// REVERT-FAILING: the stolen-spell case names P0 when the election reads
+    /// the entry's default controller.
+    #[test]
+    fn substitute_chooser_election_names_the_controller_or_the_next_player() {
+        let mut state = make_state(4, FormatConfig::free_for_all());
+        state.active_player = PlayerId(0);
+        // An activated ability of P1's (no object row): its controller is P1.
+        let ability_id = ObjectId(900);
+        assert!(!state.objects.contains_key(&ability_id));
+        let ability = StackEntry {
+            id: ability_id,
+            source_id: ability_id,
+            controller: PlayerId(1),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: ability_id,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                    vec![],
+                    ability_id,
+                    PlayerId(1),
+                )),
+            },
+        };
+
+        // A spell P0 cast, controlled on the stack by P2 (CR 613.1b).
+        let stolen = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Stolen Spell".to_string(),
+            Zone::Stack,
+        );
+        state.objects.get_mut(&stolen).unwrap().controller = PlayerId(2);
+        let spell = StackEntry {
+            id: stolen,
+            source_id: stolen,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: None,
+                casting_variant: CastingVariant::Normal,
+                actual_mana_spent: 0,
+            },
+        };
+        assert_eq!(
+            substitute_chooser_election(&state, &spell).elector,
+            PlayerId(2),
+            "the spell's controller now elects, not its caster"
+        );
+
+        let living = substitute_chooser_election(&state, &ability);
+        assert_eq!(living.elector, PlayerId(1), "a living controller elects");
+        assert_eq!(
+            living.candidates,
+            vec![PlayerId(0), PlayerId(1), PlayerId(2), PlayerId(3)],
+            "every player in the game, in APNAP order"
+        );
+
+        eliminate(&mut state, PlayerId(1));
+        let departed = substitute_chooser_election(&state, &ability);
+        assert_eq!(
+            departed.elector,
+            PlayerId(2),
+            "CR 800.4h: the next player in turn order after the departed controller"
+        );
+        assert_eq!(
+            departed.candidates,
+            vec![PlayerId(0), PlayerId(2), PlayerId(3)],
+            "CR 102.1: a departed player is not a candidate"
+        );
+
+        state.turn_direction = TurnDirection::Reversed;
+        let reversed = substitute_chooser_election(&state, &ability);
+        assert_eq!(
+            reversed.elector,
+            PlayerId(0),
+            "CR 800.4h: the next player in the reversed turn order"
+        );
+        assert_eq!(
+            reversed.candidates,
+            vec![PlayerId(0), PlayerId(3), PlayerId(2)],
+            "APNAP follows the reversed turn order"
         );
     }
 
@@ -1061,6 +1239,62 @@ mod tests {
         );
     }
 
+    /// CR 904.13b + CR 810.9d: in Archenemy Commander the archenemy's
+    /// dedup key must stay distinct from the heroes' shared key even when
+    /// the archenemy sits in seat 1 — a bare `TeamId(player.0)` key
+    /// collides with the heroes' shared `TeamId(1)` and drops one side
+    /// from the fold (a Repay-in-Kind Min over archenemy-at-10 plus
+    /// heroes-sharing-60 would read 60 instead of 10).
+    #[test]
+    fn aggregate_over_teams_archenemy_commander_seat_one_keeps_sides_distinct() {
+        let mut config = FormatConfig::archenemy_commander();
+        config.archenemy_player = Some(PlayerId(1));
+        let mut state = GameState::new(config, 4, 0);
+        state.players[1].life = 10;
+        state.players[0].life = 20;
+        state.players[2].life = 20;
+        state.players[3].life = 20;
+        let all = vec![PlayerId(0), PlayerId(1), PlayerId(2), PlayerId(3)];
+        assert_eq!(
+            aggregate_over_teams(&state, all.clone(), AggregateFunction::Min),
+            10,
+            "seat-1 archenemy's 10 must survive the fold, not collapse into the heroes' 60"
+        );
+        assert_eq!(
+            aggregate_over_teams(&state, all.clone(), AggregateFunction::Max),
+            60
+        );
+        assert_eq!(
+            aggregate_over_teams(&state, all, AggregateFunction::Sum),
+            70,
+            "both sides' totals must be counted exactly once"
+        );
+    }
+
+    /// Default Archenemy keeps per-seat keys: every seat reads its own
+    /// life, so a seat-1 archenemy at 40 beside 20-life heroes folds as
+    /// four distinct totals. Pins the non-Commander side of the seat-1
+    /// key fix.
+    #[test]
+    fn aggregate_over_teams_default_archenemy_seat_one_stays_per_seat() {
+        let mut config = FormatConfig::archenemy();
+        config.archenemy_player = Some(PlayerId(1));
+        let mut state = GameState::new(config, 4, 0);
+        state.players[1].life = 40;
+        state.players[0].life = 20;
+        state.players[2].life = 20;
+        state.players[3].life = 20;
+        let all = vec![PlayerId(0), PlayerId(1), PlayerId(2), PlayerId(3)];
+        assert_eq!(
+            aggregate_over_teams(&state, all.clone(), AggregateFunction::Min),
+            20
+        );
+        assert_eq!(
+            aggregate_over_teams(&state, all, AggregateFunction::Sum),
+            100
+        );
+    }
+
     // --- linked-exile LKI incarnation bounds (CR 400.7 + CR 113.7a) ---
 
     /// The incarnation the source had when it left the battlefield.
@@ -1142,6 +1376,105 @@ mod tests {
             .iter()
             .map(|snapshot| snapshot.exiled_id)
             .collect()
+    }
+
+    /// CR 607.2a + CR 400.7: the pile is the snapshot plus the bound
+    /// incarnation's later exiles, deduplicated, never an earlier departure's.
+    #[test]
+    fn linked_exile_pile_reads_only_the_bound_incarnation() {
+        let (mut state, source, card) = departed_pile(Some(DEPARTED + 1));
+        let other = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(1),
+            "Other".into(),
+            Zone::Exile,
+        );
+        let later = create_object(
+            &mut state,
+            CardId(6),
+            PlayerId(1),
+            "Later".into(),
+            Zone::Exile,
+        );
+        let snap = |id| LinkedExileSnapshot {
+            exiled_id: id,
+            owner: PlayerId(1),
+            mana_value: 0,
+            incarnation: 0,
+        };
+        let entries = state.linked_exile_lki.get_mut(&source).unwrap();
+        entries.push(LinkedExileLki {
+            departed: DEPARTED,
+            successor: DEPARTED,
+            snapshot: vec![snap(later)],
+        });
+        entries.push(LinkedExileLki {
+            departed: DEPARTED - 1,
+            successor: DEPARTED,
+            snapshot: vec![snap(other)],
+        });
+        let mut context = state.objects[&source]
+            .snapshot_for_zone_change(source, Some(Zone::Battlefield), Zone::Graveyard)
+            .trigger_source_context
+            .expect("context");
+        context.identity.reference.incarnation = DEPARTED;
+        context.linked_exile_snapshot = vec![snap(card)];
+        let ids: Vec<ObjectId> = linked_exile_pile(&state, &context)
+            .iter()
+            .map(|s| s.exiled_id)
+            .collect();
+        assert_eq!(ids, vec![card, later]);
+    }
+
+    /// CR 603.10a + CR 607.2a: a leaves record carrying a trigger source context
+    /// also reads what the bound incarnation exiled after departing.
+    #[test]
+    fn record_branch_reads_the_bound_incarnations_later_exiles() {
+        let (mut state, source, card) = departed_pile(Some(DEPARTED + 1));
+        let later = create_object(
+            &mut state,
+            CardId(6),
+            PlayerId(1),
+            "Later".into(),
+            Zone::Exile,
+        );
+        let snap = |id| LinkedExileSnapshot {
+            exiled_id: id,
+            owner: PlayerId(1),
+            mana_value: 0,
+            incarnation: 0,
+        };
+        state
+            .linked_exile_lki
+            .get_mut(&source)
+            .unwrap()
+            .push(LinkedExileLki {
+                departed: DEPARTED,
+                successor: DEPARTED,
+                snapshot: vec![snap(later)],
+            });
+        let mut record = state.objects[&source].snapshot_for_zone_change(
+            source,
+            Some(Zone::Battlefield),
+            Zone::Graveyard,
+        );
+        record.linked_exile_snapshot = vec![snap(card)];
+        record.sync_trigger_source_context();
+        record
+            .trigger_source_context
+            .as_mut()
+            .unwrap()
+            .identity
+            .reference
+            .incarnation = DEPARTED;
+        state.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: source,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(record),
+        });
+        assert_eq!(linked_ids(&state, source), vec![card, later]);
     }
 
     /// CR 113.7a + CR 400.7: a departure entry admits exactly the object that

@@ -177,6 +177,8 @@ const EXPECTED: &[(&str, &str)] = &[
     ("engine/tests/fixtures/dina_conqueror_4p.json.gz", "OFFER@19 bounded=true threshold=Some(36) unbounded=[Life(PlayerId(0)), Life(PlayerId(1)), Life(PlayerId(2)), Life(PlayerId(3))] road=Ring"),
     ("engine/tests/fixtures/dina_conqueror_phase5_no_offer_4p.json.gz", "OFFER@21 bounded=true threshold=Some(34) unbounded=[Life(PlayerId(0)), Life(PlayerId(1)), Life(PlayerId(2)), Life(PlayerId(3))] road=Ring"),
     ("engine/tests/fixtures/dina_noff_turn5_4p.json.gz", "OFFER@21 bounded=true threshold=Some(31) unbounded=[Life(PlayerId(0)), Life(PlayerId(1)), Life(PlayerId(2)), Life(PlayerId(3))] road=Ring"),
+    ("engine/tests/fixtures/exquisite_blood_tenacity_alternating_offer_4p.json.gz", "OFFER@restore bounded=true threshold=Some(8) unbounded=[Life(PlayerId(0)), Life(PlayerId(1))] road=Ring"),
+    ("engine/tests/fixtures/exquisite_blood_tenacity_three_opponents_4p.json.gz", "OFFER@restore bounded=true threshold=Some(10) unbounded=[Life(PlayerId(0)), Life(PlayerId(3))] road=Ring"),
     ("engine/tests/fixtures/f4_user_mode1_no_offer_4p.json.gz", "OFFER@37 bounded=true threshold=Some(87) unbounded=[LibraryDelta(PlayerId(0)), Counter(Plus1Plus1, Creature), TokensCreated, Life(PlayerId(1))] road=Ring"),
     ("engine/tests/fixtures/f4_user_mode2_accept_commits_nothing_4p.json.gz", "OFFER@39 bounded=true threshold=Some(84) unbounded=[LibraryDelta(PlayerId(0)), Counter(Plus1Plus1, Creature), TokensCreated, Life(PlayerId(1))] road=Ring"),
     ("engine/tests/fixtures/fantastic_four_bounded_loop_4p.json.gz", "OFFER@39 bounded=true threshold=Some(88) unbounded=[LibraryDelta(PlayerId(0)), Counter(Plus1Plus1, Creature), TokensCreated, Life(PlayerId(1))] road=Ring"),
@@ -206,4 +208,6 @@ const EXPECTED: &[(&str, &str)] = &[
     ("engine/tests/integration/fixtures/zurs_weirding_nested_dispatching_pre_7485.json.gz", "RESTOREERR OwnerlessPostReplacementDispatch"),
     ("phase-ai/fixtures/scenarios/galvanic-blast-manapayment-turn4.json.gz", "BUDGET Priority"),
     ("phase-ai/fixtures/scenarios/invisible-woman-cosmic-crucible-mana.json.gz", "BUDGET Priority"),
+    ("phase-ai/fixtures/scenarios/judged-cryptbreaker-draw-step.json.gz", "BUDGET Priority"),
+    ("phase-ai/fixtures/scenarios/judged-karns-bastion-upkeep.json.gz", "BUDGET Priority"),
 ];

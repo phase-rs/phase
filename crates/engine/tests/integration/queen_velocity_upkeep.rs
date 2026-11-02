@@ -134,6 +134,7 @@ fn opponent_can_activate_any_player_abilities_only_during_either_upkeep() {
                             .act(GameAction::ActivateAbility {
                                 source_id: source,
                                 ability_index: index,
+                                payment_mode: engine::types::game_state::CastPaymentMode::Auto
                             })
                             .is_err(),
                         "{name} must reject P1's activation during {phase:?}"

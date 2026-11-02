@@ -119,6 +119,10 @@
   },
   "setSelector": {
     "botDifficulty": "Difficoltà bot",
+    "pickEnhancements": {
+      "label": "Usa l'IA integrata con miglioramenti alle scelte del draft",
+      "hint": "I bot seguono una guida scritta sull'ordine di scelta per i formati che ne hanno una (al momento Mirrodin, Darksteel e Fifth Dawn). Si applica dalla difficoltà media in su."
+    },
     "difficultyLevels": {
       "VeryEasy": "Molto facile",
       "Easy": "Facile",
@@ -132,6 +136,12 @@
     "packOrder": "Ordine delle buste",
     "candidateSets": "Set candidati",
     "clearPacks": "Svuota",
+    "randomSet": "Set casuale",
+    "randomSetHint": "Riempi tutte le buste con un set scelto a caso",
+    "randomPacks": "Buste casuali",
+    "randomPacksHint": "Assegna a ogni busta un proprio set scelto a caso",
+    "randomCandidates": "Set casuali",
+    "randomCandidatesHint": "Scegli a caso set candidati distinti",
     "emptyPacks_one": "Scegli un set per ogni busta. Un draft apre {{count}} busta per impostazione predefinita: ripeti un set o mescolane più di uno.",
     "emptyPacks_other": "Scegli un set per ogni busta. Un draft apre {{count}} buste per impostazione predefinita: ripeti un set o mescolane più di uno per draftare un blocco.",
     "emptyPacksFixed_one": "Il sealed apre esattamente {{count}} busta. Scegli un set per essa.",
@@ -156,6 +166,7 @@
     "startSealed": "Inizia sealed"
   },
   "pack": {
+    "label": "Busta del draft",
     "confirmPick": "Conferma scelta",
     "selected": "Selezionata",
     "draftEffects": "Effetti del draft:",

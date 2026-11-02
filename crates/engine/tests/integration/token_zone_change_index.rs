@@ -34,9 +34,9 @@
 //! global one is dominated by the ordinary-move `TurnRecordIndexMismatch` invariant in `zones.rs`
 //! and panics before any assertion here.
 //!
-//! **Filter trap:** `cargo test --test integration <bare_fn_name> -- --exact` runs ZERO tests and
+//! **Filter trap:** `cargo test --test integration_5 <bare_fn_name> -- --exact` runs ZERO tests and
 //! exits `0`. The module path is mandatory:
-//! `cargo test -p phase-engine --test integration token_zone_change_index::<fn> -- --exact`.
+//! `cargo test -p phase-engine --test integration_5 token_zone_change_index::<fn> -- --exact`.
 //! Always check the `N passed` count — a vacuous filter reports `ok. 0 passed`.
 //!
 //! MEASURED at this tip: `second_same_turn_token_batch_still_triggers`,
@@ -119,6 +119,7 @@ fn mint_token_batch(state: &mut GameState, source: ObjectId, count: i32) -> Vec<
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
             supertypes: Vec::new(),
             static_abilities: Vec::new(),
             enter_with_counters: Vec::new(),
@@ -604,6 +605,7 @@ fn suppressed_liminal_copy_token_entry_is_recorded_once() {
         .act(engine::types::actions::GameAction::ActivateAbility {
             source_id: vizier,
             ability_index: embalm_index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate Embalm");
 
@@ -985,6 +987,7 @@ fn drive_embalm_copy(
         .act(GameAction::ActivateAbility {
             source_id: vizier,
             ability_index: embalm_index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("activate Embalm");
 
@@ -1953,6 +1956,7 @@ fn copy_token_effect(additional_modifications: Vec<ContinuousModification>) -> E
         owner: TargetFilter::Controller,
         source_filter: None,
         enters_attacking: false,
+        attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
         tapped: false,
         count: QuantityExpr::Fixed { value: 1 },
         extra_keywords: Vec::new(),
@@ -2526,6 +2530,7 @@ fn spec_token_effect(types: Vec<String>, attach_to: Option<TargetFilter>, name: 
         owner: TargetFilter::Controller,
         attach_to,
         enters_attacking: false,
+        attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
         supertypes: Vec::new(),
         static_abilities: Vec::new(),
         enter_with_counters: vec![(CounterType::Plus1Plus1, QuantityExpr::Fixed { value: 1 })],

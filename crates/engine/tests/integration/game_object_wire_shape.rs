@@ -139,7 +139,8 @@ fn gunzip(bytes: &[u8]) -> String {
     flate2::read::GzDecoder::new(bytes)
         .read_to_string(&mut json)
         .expect("fixture .json.gz inflates to UTF-8 JSON");
-    json
+    // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+    engine::types::game_state::record_captured_onsets_json(&json)
 }
 
 fn seat_zero_projection() -> GameState {
@@ -235,6 +236,41 @@ fn non_default_values_still_serialize() {
         objects += 1;
     }
     assert!(objects > 0, "the projection yields battlefield objects");
+}
+
+/// CR 606.3 + CR 101.1: a permanent's extra loyalty-activation grant is runtime-only state
+/// (`#[serde(skip)]`), so it never reaches the wire and a `GameObject` serializes to the
+/// same bytes it did before the field existed. The sibling activation count is the
+/// reach-guard: the instrument does see a skip-if-zero loyalty field at a non-zero value, so
+/// the grant's absence is the field's attribute and not a blind spot of the walk. Switching
+/// the field to the sibling's attributes, or to a plain serialized field, fails the key
+/// assertion. The restored object holds 0, which pins that a reload drops the grant together
+/// with the count it extends.
+#[test]
+fn per_permanent_loyalty_grant_never_reaches_the_wire() {
+    let projection = seat_zero_projection();
+    let mut object = projection
+        .objects
+        .values()
+        .find(|object| object.zone == Zone::Battlefield)
+        .expect("the projection yields a battlefield object")
+        .clone();
+    object.loyalty_activations_this_turn = 1;
+    object.extra_loyalty_activations_this_turn = 2;
+
+    let keys = wire_keys(&object);
+    assert!(
+        keys.contains("loyalty_activations_this_turn"),
+        "reach-guard: the walk sees a non-zero skip-if-zero loyalty field"
+    );
+    assert!(
+        !keys.contains("extra_loyalty_activations_this_turn"),
+        "the per-permanent grant must not be serialized"
+    );
+
+    let json = serde_json::to_string(&object).expect("the object serializes");
+    let restored: GameObject = serde_json::from_str(&json).expect("the object deserializes");
+    assert_eq!(restored.extra_loyalty_activations_this_turn, 0);
 }
 
 fn collect_gz(dir: &Path, out: &mut Vec<PathBuf>) {
