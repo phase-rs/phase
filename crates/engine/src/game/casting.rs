@@ -35442,7 +35442,23 @@ fn cant_cast_filter_matches_for(
             ChosenAttribute::CardName(n) => {
                 crate::game::filter::card_names_match(n, &spell_obj.name)
             }
-            _ => false,
+            ChosenAttribute::Color(_)
+            | ChosenAttribute::CreatureType(_)
+            | ChosenAttribute::BasicLandType(_)
+            | ChosenAttribute::CardType(_)
+            | ChosenAttribute::OddOrEven(_)
+            | ChosenAttribute::Number(_)
+            | ChosenAttribute::RevealedNumber(_)
+            | ChosenAttribute::Player(_)
+            | ChosenAttribute::TwoColors(_)
+            | ChosenAttribute::TributeOutcome(_)
+            | ChosenAttribute::Keyword(_)
+            | ChosenAttribute::Label(_)
+            | ChosenAttribute::Card(_)
+            | ChosenAttribute::Counter(_)
+            | ChosenAttribute::Direction(_)
+            | ChosenAttribute::CopiableSnapshot(_)
+            | ChosenAttribute::NotedManaSpent(_) => false,
         }),
         // Everything else — including IsChosenColor / IsChosenCardType properties —
         // flows through the shared source-aware typed-filter conjunction.
