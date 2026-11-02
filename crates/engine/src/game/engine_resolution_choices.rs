@@ -15860,6 +15860,50 @@ mod random_result_resolution_context_tests {
         state.resolution_stack.validate(&state.waiting_for).unwrap();
     }
 
+    /// Composed fixture: no printed card has this coin/continuation/context shape.
+    /// Box of Free-Range Goblins and Boing! anchor the die payload; Krark's Thumb
+    /// supplies the real keep prompt, answered through its production choice handler.
+    #[test]
+    fn coin_keep_continuation_drain_preserves_its_settled_die_result() {
+        let (mut state, source, _, mut ambient) = fixture(Boundary::Coin, gain(2));
+        let coin = state.take_active_coin_flip_frame().unwrap().unwrap();
+        state
+            .active_ability_continuation_frame_mut()
+            .unwrap()
+            .pending
+            .chain = Box::new(ResolvedAbility::new(
+            Effect::RollDie {
+                count: QuantityExpr::Fixed { value: 1 },
+                sides: 1,
+                modifier: None,
+                results: vec![DieResultBranch {
+                    min: 1,
+                    max: 1,
+                    effect: Box::new(gain(1)),
+                }],
+            },
+            vec![],
+            source,
+            P0,
+        ));
+        state.push_coin_flip_frame(coin);
+        ambient.die_result = Some(11);
+        install(&mut state, &ambient);
+        let before = state.players[0].life;
+        let mut events = vec![];
+
+        resume(&mut state, Boundary::Coin, &mut events).unwrap();
+
+        assert_eq!(state.players[0].life, before + 3);
+        // CR 706.2 + CR 608.2c: the post-modifier result of a die settled by the coin's
+        // drain survives context restoration for the continuation.
+        assert_eq!(state.die_result_this_resolution, Some(1));
+        assert_scope(&state, &ambient);
+        assert!(state.resolution_stack.is_empty());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        state.resolution_stack.validate(&state.waiting_for).unwrap();
+    }
+
     #[test]
     fn random_resolution_repark_retains_empty_owned_and_legacy_authority() {
         for boundary in [Boundary::Coin, Boundary::DieKeep, Boundary::DieDrain] {

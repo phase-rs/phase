@@ -129,9 +129,9 @@ pub fn build_resolved_from_def_with_targets_and_chain_root(
 ///
 /// Fresh coin-keep, pre-roll replacement-ordering, and post-roll die suspensions
 /// retain their owning scope, including explicit emptiness; legacy missing scope
-/// is not reconstructed. A die roll started by a coin's continuation drain still
-/// loses its published per-survivor result at the drain's whole-snapshot restore
-/// (pre-existing, unchanged).
+/// is not reconstructed. The continuation drain re-stamps a die result settled
+/// inside it after restoring the caller's trigger context; when no die settles,
+/// the caller's die value is restored unchanged.
 ///
 /// This policy is dice/coin-only. Sibling branch builders in `vote.rs`,
 /// `reveal_from_hand.rs`, and `exile_top_card_contest.rs` are untouched.
