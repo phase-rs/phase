@@ -1,7 +1,6 @@
-//! CR 701.21a + CR 601.2h + CR 602.2b + CR 122.2 + CR 113.7a: Ior Ruin
-//! Expedition — the cost clause names the enchantment and then says "it", so
-//! the sacrifice leg is paid with the enchantment itself and no other permanent
-//! is ever offered.
+//! CR 701.21a + CR 601.2h + CR 602.2b + CR 113.7a: Ior Ruin Expedition — the
+//! cost clause names the enchantment and then says "it", so the sacrifice leg
+//! is paid with the enchantment itself and no other permanent is ever offered.
 //!
 //! The class this pins is named by predicate, not by count: printed cost legs
 //! whose object phrase is the bare pronoun `it` (`\b(sacrifice|exile)\s+it\b`
