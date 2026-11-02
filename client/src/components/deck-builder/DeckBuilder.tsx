@@ -107,7 +107,7 @@ export function DeckBuilder({
     handleSetCompanion,
     handleRemoveCompanion,
   } = useDeckBuilder({ format, onFormatChange, initialDeckName, searchFilters });
-  const { t } = useTranslation("deck-builder");
+  const { t } = useTranslation(["deck-builder", "common"]);
 
   // Deck-first: the main canvas shows the deck unless a search is active, in
   // which case it shows the results grid (cleared via "Back to deck").

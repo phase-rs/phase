@@ -123,6 +123,7 @@ fn fallback_retarget_action_is_legal() {
     // A directly parked prompt: no pending cast, so `fallback_action`'s
     // cancel-cast escape cannot fire before the `RetargetChoice` arm.
     runner.state_mut().waiting_for = WaitingFor::RetargetChoice {
+        keep_is_distinct: Vec::new(),
         player: P0,
         stack_entry_index: 0,
         scope: RetargetScope::Single,
@@ -156,7 +157,7 @@ fn fallback_retarget_action_is_legal() {
     assert_ne!(
         action,
         Some(GameAction::RetargetSpell {
-            new_targets: vec![TargetRef::Object(victim)],
+            new_targets: vec![Some(TargetRef::Object(victim))],
         }),
         "CR 115.7a: the fallback must propose ANOTHER legal target, not the \
          shrouded current target, got {action:?}"
@@ -281,6 +282,7 @@ fn fallback_multi_role_retarget_action_is_slot_legal() {
     // candidates_are_slot_legal` fixture: slot 0 (recipient, opponent-only)
     // admits only P1; slot 1 (count source, any player) admits both.
     runner.state_mut().waiting_for = WaitingFor::RetargetChoice {
+        keep_is_distinct: Vec::new(),
         player: P0,
         stack_entry_index: 0,
         scope: RetargetScope::Single,
@@ -315,7 +317,7 @@ fn fallback_multi_role_retarget_action_is_slot_legal() {
     assert_eq!(
         action,
         Some(GameAction::RetargetSpell {
-            new_targets: vec![TargetRef::Player(P1)],
+            new_targets: vec![Some(TargetRef::Player(P1))],
         }),
         "CR 115.7a: the fallback must not propose a pool member legal only for \
          another slot"
@@ -435,6 +437,7 @@ fn park_multi_role_retarget(
         .cloned()
         .collect();
     runner.state_mut().waiting_for = WaitingFor::RetargetChoice {
+        keep_is_distinct: Vec::new(),
         player: P0,
         stack_entry_index: 0,
         scope: RetargetScope::Single,
@@ -502,7 +505,7 @@ fn fallback_multi_role_retarget_admits_a_legal_slot_change() {
     assert_eq!(
         action,
         Some(GameAction::RetargetSpell {
-            new_targets: vec![TargetRef::Player(P2)],
+            new_targets: vec![Some(TargetRef::Player(P2))],
         }),
         "CR 115.7a: the fallback must propose the slot-0-legal CHANGE, and must not \
          propose the pool member legal only for the count-source slot"

@@ -17,7 +17,7 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -168,6 +168,7 @@ fn words_of_war_activation_prompts_for_a_target() {
         .act(GameAction::ActivateAbility {
             source_id: words,
             ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activation accepted");
     assert!(
@@ -286,6 +287,7 @@ fn words_of_war_fizzles_when_target_illegal_on_resolution() {
         .act(GameAction::ActivateAbility {
             source_id: words,
             ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
         })
         .expect("activation accepted");
     for _ in 0..8 {

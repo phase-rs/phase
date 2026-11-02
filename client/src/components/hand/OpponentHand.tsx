@@ -22,11 +22,10 @@ import {
 
 interface OpponentHandProps {
   playerId?: PlayerId;
-  showCards?: boolean;
   layout?: "default" | "split";
 }
 
-export function OpponentHand({ playerId, showCards = false, layout = "default" }: OpponentHandProps) {
+export function OpponentHand({ playerId, layout = "default" }: OpponentHandProps) {
   const myId = usePerspectivePlayerId();
   const isCompactHeight = useIsCompactHeight();
   const focusedOpponent = useUiStore((s) => s.focusedOpponent);
@@ -76,7 +75,9 @@ export function OpponentHand({ playerId, showCards = false, layout = "default" }
       <AnimatePresence>
         {opponent.hand.map((id, i) => {
           const obj = objects ? objects[id] : null;
-          const showFace = showCards || (obj?.display_visible_to_viewer ?? false);
+          // The engine owns hidden-card disclosure (including the sandbox
+          // "Show AI Hand" reveal); render a face only when it says so.
+          const showFace = obj?.display_visible_to_viewer ?? false;
           const arcOffset = fan.arc(i);
 
           return (

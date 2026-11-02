@@ -30,6 +30,12 @@ runs:
           mtgjson_download AtomicCards.json data/mtgjson/AtomicCards.json
         fi
 
+    # Shared with ci.yml's card-data-gate so both derive the same `cardgen-`
+    # key; replaces hashFiles, which intermittently hung to its 120 s limit.
+    - name: Derive card-data cache key
+      id: cardgen-key
+      uses: ./.github/actions/cardgen-cache-key
+
     - name: Restore generated card data
       id: cardgen-cache
       uses: actions/cache@v4
@@ -37,4 +43,4 @@ runs:
         path: |
           data/card-data.json
           data/card-names.json
-        key: cardgen-${{ hashFiles('data/mtgjson/AtomicCards.json', 'crates/engine/src/**/*.rs', 'crates/engine/data/**', 'crates/engine/build.rs', 'crates/engine/Cargo.toml', 'Cargo.lock') }}
+        key: cardgen-${{ steps.cardgen-key.outputs.hash }}

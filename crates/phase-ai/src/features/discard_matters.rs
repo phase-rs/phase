@@ -3,7 +3,7 @@
 //!
 //! Parser AST verification — VERIFIED against engine source:
 //! - `Effect::Discard { count, target, .. }` at
-//!   `crates/engine/src/types/ability.rs:11384` — the rich enabler form
+//!   `crates/phase-ast/src/types/ability.rs` — the rich enabler form
 //!   (`QuantityExpr` count, `CardSelectionMode`, unless-filter).
 //! - `Effect::DiscardCard { count, target }` at `ability.rs:10311` — the older
 //!   simple enabler form (`u32` count). BOTH are live in the resolver
@@ -13,7 +13,7 @@
 //!   class (Wild Mongrel / Anje / flashback) spells its discard as a COST, not
 //!   an effect, so the source predicate reads both axes. Nesting is resolved
 //!   through the engine's `AbilityDefinition::cost_categories()` authority.
-//! - `TriggerMode::Discarded` at `crates/engine/src/types/triggers.rs:321` and
+//! - `TriggerMode::Discarded` at `crates/phase-ast/src/types/triggers.rs` and
 //!   `TriggerMode::DiscardedAll` at `triggers.rs:322` (CR 701.9) — the payoffs.
 //! - `TriggerDefinition.valid_target` — used to keep only YOUR-discard engines,
 //!   excluding the "whenever an opponent discards" punisher shape.

@@ -93,10 +93,7 @@ fn resolve_mode_one_to_search(
         "the creature-or-land search must offer both library cards, got {cards:?}"
     );
     assert!(
-        runner.state().players[P0.0 as usize]
-            .mana_pool
-            .mana
-            .is_empty(),
+        runner.state().players[P0.0 as usize].mana_pool.is_empty(),
         "casting Archdruid's Charm must spend its exact {{G}}{{G}}{{G}} cost"
     );
 }

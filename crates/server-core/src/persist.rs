@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use engine::types::game_state::{PersistedGameState, PlayerDeckPool};
+use engine::types::resolution::PersistedEntryOnsetRecord;
 use phase_ai::config::AiDifficulty;
 use serde::{Deserialize, Serialize};
 
@@ -71,6 +72,36 @@ pub struct PersistedSession {
     /// or anywhere else.
     #[serde(default, skip_serializing)]
     pub deck_pools: Vec<PlayerDeckPool>,
+}
+
+impl PersistedSession {
+    /// Decodes one persisted Full session row: its payload and its detached
+    /// `deck_pools_json` column. The single row-decode authority; the restore
+    /// reader (`load_active_full_sessions`) and the tests that model it call
+    /// this rather than pairing two `serde_json` decodes themselves.
+    ///
+    /// The pools are lifted out of `state` before the payload is written, so
+    /// the payload's own decode never walks them. They pass the engine's onset
+    /// admission here instead (CR 611.2e,
+    /// `PersistedEntryOnsetRecord::admit_detached_carrier`), against the record
+    /// read from the payload before its decode stamps an admitted unrecorded
+    /// state `Recorded`. The payload decodes first, so its own refusals keep
+    /// their message precedence, as they do inside the engine's admission.
+    pub fn decode_row(session_state_json: &str, deck_pools_json: &str) -> Result<Self, String> {
+        let payload: serde_json::Value =
+            serde_json::from_str(session_state_json).map_err(|error| error.to_string())?;
+        let onset_record = payload
+            .get("state")
+            .ok_or_else(|| "persisted session has no state".to_string())
+            .and_then(PersistedEntryOnsetRecord::of_persisted_state);
+        let mut persisted: Self =
+            serde_json::from_value(payload).map_err(|error| error.to_string())?;
+        let pools: serde_json::Value =
+            serde_json::from_str(deck_pools_json).map_err(|error| error.to_string())?;
+        onset_record?.admit_detached_carrier(&pools)?;
+        persisted.deck_pools = serde_json::from_value(pools).map_err(|error| error.to_string())?;
+        Ok(persisted)
+    }
 }
 
 /// Lobby metadata persisted alongside a waiting game.

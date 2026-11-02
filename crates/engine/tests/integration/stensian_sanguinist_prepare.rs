@@ -20,7 +20,9 @@
 
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
-use engine::types::ability::{DelayedTriggerCondition, Effect, TargetFilter, TargetRef};
+use engine::types::ability::{
+    DelayedTriggerCondition, Effect, EffectScope, TargetFilter, TargetRef,
+};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::WaitingFor;
@@ -113,7 +115,8 @@ fn stensian_sanguinist_becomes_prepared_on_combat_damage() {
             && matches!(
                 dt.ability.effect,
                 Effect::BecomePrepared {
-                    target: TargetFilter::SelfRef
+                    target: TargetFilter::SelfRef,
+                    scope: EffectScope::Single,
                 }
             )
             && dt.source_id == stensian
@@ -196,15 +199,14 @@ fn stensian_sanguinist_becomes_prepared_on_combat_damage() {
             .iter_mut()
             .find(|p| p.id == P0)
             .unwrap()
-            .mana_pool
-            .mana;
-        pool.push(engine::types::mana::ManaUnit::new(
+            .mana_pool;
+        pool.add(engine::types::mana::ManaUnit::new(
             engine::types::mana::ManaType::Black,
             engine::types::identifiers::ObjectId(0),
             false,
             vec![],
         ));
-        pool.push(engine::types::mana::ManaUnit::new(
+        pool.add(engine::types::mana::ManaUnit::new(
             engine::types::mana::ManaType::Black,
             engine::types::identifiers::ObjectId(0),
             false,

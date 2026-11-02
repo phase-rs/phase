@@ -789,7 +789,7 @@ fn redirect_retargets_mirror_strikes_declared_damage_source_slot() {
     assert!(legal_new_targets.contains(&TargetRef::Object(attacker_b)));
     runner
         .act(GameAction::RetargetSpell {
-            new_targets: vec![TargetRef::Object(attacker_b)],
+            new_targets: vec![Some(TargetRef::Object(attacker_b))],
         })
         .expect("Redirect writes the alternate source into Mirror Strike's slot");
     runner.advance_until_stack_empty();

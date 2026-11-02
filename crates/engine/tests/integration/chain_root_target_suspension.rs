@@ -31,9 +31,9 @@
 
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, ControllerRef, DieResultBranch, Effect, ObjectScope,
-    QuantityExpr, QuantityRef, ResolvedAbility, TargetChoiceTiming, TargetFilter, TargetRef,
-    TypeFilter, TypedFilter, VoteSubject, VoteTally, VoteVisibility, VoterScope,
+    AbilityDefinition, AbilityKind, CoinFlipRun, ControllerRef, DieResultBranch, Effect,
+    ObjectScope, QuantityExpr, QuantityRef, ResolvedAbility, TargetChoiceTiming, TargetFilter,
+    TargetRef, TypeFilter, TypedFilter, VoteSubject, VoteTally, VoteVisibility, VoterScope,
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
@@ -205,7 +205,8 @@ fn chain_root_targets_survive_a_real_coin_flip_keep_choice_suspension() {
 
     let ability = with_chain_root(
         ResolvedAbility::new(
-            Effect::FlipCoin {
+            Effect::FlipCoins {
+                flips: CoinFlipRun::single(),
                 win_effect: Some(Box::new(counter_gated_branch())),
                 lose_effect: Some(Box::new(counter_gated_branch())),
                 flipper: TargetFilter::Controller,

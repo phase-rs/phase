@@ -2970,10 +2970,10 @@ fn chimera_retarget_of_a_two_mode_grift_offers_every_modes_targets() {
     // `Filtered(creature)` position) must be refused.
     let hostile = commit.act(GameAction::RetargetSpell {
         new_targets: vec![
-            TargetRef::Object(a3),
-            TargetRef::Object(c2),
-            TargetRef::Object(a1),
-            TargetRef::Object(a2),
+            Some(TargetRef::Object(a3)),
+            Some(TargetRef::Object(c2)),
+            Some(TargetRef::Object(a1)),
+            Some(TargetRef::Object(a2)),
         ],
     });
     assert!(
@@ -2986,10 +2986,10 @@ fn chimera_retarget_of_a_two_mode_grift_offers_every_modes_targets() {
     commit
         .act(GameAction::RetargetSpell {
             new_targets: vec![
-                TargetRef::Object(c1),
-                TargetRef::Object(c2),
-                TargetRef::Object(a3),
-                TargetRef::Object(a2),
+                Some(TargetRef::Object(c1)),
+                Some(TargetRef::Object(c2)),
+                Some(TargetRef::Object(a3)),
+                Some(TargetRef::Object(a2)),
             ],
         })
         .expect("a full cross-mode reassignment offered by the union must be accepted");

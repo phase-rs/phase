@@ -129,6 +129,14 @@ impl FrameVec {
         self.frames.iter()
     }
 
+    /// In-place content traversal, for loop normalization (CR 104.4b), which
+    /// rewrites identities inside the trigger events parked frames retain. It
+    /// yields frames, never a [`FrameSlot`], and can't add, remove or reorder
+    /// one, so it widens no addressing.
+    pub(super) fn iter_mut(&mut self) -> std::slice::IterMut<'_, ResolutionFrame> {
+        self.frames.iter_mut()
+    }
+
     pub(super) fn last(&self) -> Option<&ResolutionFrame> {
         self.frames.last()
     }

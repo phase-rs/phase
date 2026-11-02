@@ -61,6 +61,11 @@ fn added_to_turn_in_progress(
             .current_trigger_event
             .as_ref()
             .and_then(|event| extract_player_from_event(event, state)),
+        // CR 608.2b + CR 608.2c: "that player" names the declared player, which
+        // gets nothing once it is illegal or was never announced.
+        ExtraPhaseRecipient::TargetedPlayer(filter) if filter.names_one_player() => {
+            super::resolve_player_for_context_ref(state, ability, filter)
+        }
         ExtraPhaseRecipient::TargetedPlayer(_) => {
             // CR 115.1 + CR 608.2b: the embedded recipient filter assigned
             // this instruction its own player slot at announcement and the
@@ -306,12 +311,17 @@ mod tests {
             source_id: ObjectId(1),
             cast_occurrence: None,
             source_incarnation: None,
+            announced_source_incarnation: None,
             trigger_source: None,
             trigger_definition_ref: None,
+            delayed_origin: None,
             force_block_attacker: None,
             target_incarnations: Vec::new(),
-            selected_target_incarnations: Vec::new(),
+            target_pins: Vec::new(),
+            legacy_selected_target_incarnations: Vec::new(),
+            chosen_target_slots: Default::default(),
             illegal_target_slots: Vec::new(),
+            unjudged_target_slots: Vec::new(),
             illegal_local_target_slots: Vec::new(),
             targets: vec![],
             kind: AbilityKind::Spell,
@@ -356,12 +366,14 @@ mod tests {
             replacement_applied: Default::default(),
             sub_link: crate::types::ability::SubAbilityLink::ContinuationStep,
             target_reads: Default::default(),
+            entry_onset: crate::types::ability::ContinuousEffectOnset::WhenFollowed,
             sibling_condition: crate::types::ability::SiblingCondition::Dependent,
             modal: None,
             mode_abilities: vec![],
             parent_target_missing_reason: None,
             activation_cost_reduction: None,
             activation_record: None,
+            control_change_instruction: None,
         }
     }
 
@@ -687,6 +699,7 @@ mod tests {
                 amount: 5,
                 is_combat: true,
                 excess: 0,
+                source_incarnation: None,
             }),
             ..Default::default()
         };

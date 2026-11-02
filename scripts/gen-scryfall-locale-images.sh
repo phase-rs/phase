@@ -24,18 +24,55 @@ FALLBACK_MARKER="$OUTPUT_DIR/scryfall-images.$SCHEMA_VERSION.fallback.json"
 # Scryfall rejects `lang:pl` outright ("Unknown language `pl`"), so `pl` — which
 # IS in the frontend's SUPPORTED_LNGS — can never have localized card data from
 # either source. Its chrome is translated; its cards stay English.
+#
+# `zh` covers the printings Wizards actually produced in Simplified Chinese. That
+# run ended at Bloomburrow (official announcement, 2024-02-23), so no set from
+# 2024-08 onward carries any Chinese in MTGJSON's foreignData or at Scryfall —
+# measured, not assumed: 2025 and 2026 sets are 0%. The same-card fallback can
+# reuse available historical Chinese artwork for later English printings;
+# cards without a Chinese printing retain English artwork. Traditional
+# (`Chinese Traditional`) is deliberately NOT mapped: no Traditional UI
+# catalog ships, so its chrome would stay English over Chinese cards.
 LOCALE_MAP='{
   "German": "de",
   "Spanish": "es",
   "French": "fr",
   "Italian": "it",
   "Japanese": "ja",
-  "Portuguese (Brazil)": "pt"
+  "Portuguese (Brazil)": "pt",
+  "Chinese Simplified": "zh"
 }'
 
 echo "=== Scryfall Locale Image Map Generation ==="
 
 CODES=$(jq -r '.[]' <<< "$LOCALE_MAP" | sort)
+
+# The Rust side cannot read this map and this side cannot read the Rust map, so
+# the lockstep contract the comment above declares has to be asserted rather than
+# trusted. Without this, adding a locale here and not there ships localized art
+# with English card text for the same card — the two halves come from different
+# files, so nothing downstream notices.
+#
+# The expected set is written out literally (not derived from LOCALE_MAP, which
+# would make the check vacuous) and mirrored by
+# `locale_code_covers_exactly_the_shipped_card_content_locales` in
+# crates/engine/src/bin/oracle_gen.rs. Both must be updated together with the
+# map itself; that is the point.
+EXPECTED_CODES='de
+es
+fr
+it
+ja
+pt
+zh'
+if [ "$CODES" != "$EXPECTED_CODES" ]; then
+  echo "ERROR: LOCALE_MAP codes do not match the shipped card-content locales." >&2
+  echo "  expected: $(tr '\n' ' ' <<< "$EXPECTED_CODES")" >&2
+  echo "  actual  : $(tr '\n' ' ' <<< "$CODES")" >&2
+  echo "  Update this check and locale_code() in crates/engine/src/bin/oracle_gen.rs" >&2
+  echo "  together, or the text and art halves drift apart." >&2
+  exit 1
+fi
 
 validate_locale_map() {
   jq -e '

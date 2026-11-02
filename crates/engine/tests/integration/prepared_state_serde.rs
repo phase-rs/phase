@@ -31,7 +31,7 @@ fn marker_state_fixture() -> (GameState, MarkerObjectIds) {
     state.objects.insert(ids.prepared, prepared);
 
     let mut bestow = marker_object(ids.bestow, "Bestow Object");
-    bestow.bestow_form = Some(BestowFormState);
+    bestow.bestow_form = Some(BestowFormState::default());
     state.objects.insert(ids.bestow, bestow);
 
     let mut mutate = marker_object(ids.mutate, "Mutate Object");
@@ -238,4 +238,126 @@ fn invalid_unit_marker_wire_value_fails_closed() {
         serde_json::from_value::<GameState>(serialized).is_err(),
         "a present non-boolean, non-null marker value must be rejected"
     );
+}
+
+fn bestow_form_of(state: &GameState, id: ObjectId) -> Option<BestowFormState> {
+    state
+        .objects
+        .get(&id)
+        .expect("bestow object exists")
+        .bestow_form
+        .clone()
+}
+
+/// CR 205.1a + CR 702.103b: the bestow form carries the creature subtypes it
+/// removed. An empty payload keeps the legacy bool wire shape; a non-empty one
+/// round-trips as an object.
+#[test]
+fn bestow_form_payload_wire_shapes_round_trip() {
+    let (mut state, ids) = marker_state_fixture();
+    let payload = BestowFormState {
+        removed_creature_subtypes: vec!["Insect".into(), "Monk".into()],
+    };
+    state
+        .objects
+        .get_mut(&ids.bestow)
+        .expect("bestow object exists")
+        .bestow_form = Some(payload.clone());
+
+    let serialized = serde_json::to_value(&state).expect("marker state serializes");
+    let wire = object_json(&serialized, ids.bestow)
+        .get("bestow_form")
+        .expect("bestow_form is serialized");
+    assert_eq!(
+        wire.get("removed_creature_subtypes"),
+        Some(&serde_json::json!(["Insect", "Monk"])),
+        "a non-empty payload serializes as the struct object"
+    );
+
+    let restored =
+        serde_json::from_value::<GameState>(serialized).expect("payload state deserializes");
+    assert_eq!(bestow_form_of(&restored, ids.bestow), Some(payload));
+}
+
+#[test]
+fn bestow_form_legacy_and_false_wire_shapes_restore_empty_payload_or_none() {
+    let (state, ids) = marker_state_fixture();
+    for (wire, expected) in [
+        (Value::Null, Some(BestowFormState::default())),
+        (Value::Bool(true), Some(BestowFormState::default())),
+        (Value::Bool(false), None),
+    ] {
+        let mut serialized = serde_json::to_value(&state).expect("marker state serializes");
+        object_json_mut(&mut serialized, ids.bestow).insert("bestow_form".into(), wire.clone());
+        let restored = serde_json::from_value::<GameState>(serialized)
+            .unwrap_or_else(|e| panic!("bestow_form {wire} deserializes: {e}"));
+        assert_eq!(
+            bestow_form_of(&restored, ids.bestow),
+            expected,
+            "wire {wire}"
+        );
+    }
+
+    let mut absent = serde_json::to_value(&state).expect("marker state serializes");
+    object_json_mut(&mut absent, ids.bestow).remove("bestow_form");
+    let restored = serde_json::from_value::<GameState>(absent).expect("absent field deserializes");
+    assert_eq!(bestow_form_of(&restored, ids.bestow), None);
+}
+
+#[test]
+fn populated_bestow_wire_requires_versioned_peer() {
+    let (mut state, ids) = marker_state_fixture();
+    let satyr_id = ObjectId(10_006);
+    let mut satyr = marker_object(satyr_id, "Satyr payload neighbor");
+    satyr.bestow_form = Some(BestowFormState {
+        removed_creature_subtypes: vec!["Satyr".into()],
+    });
+    state.objects.insert(satyr_id, satyr);
+    state.objects.get_mut(&ids.bestow).unwrap().bestow_form = Some(BestowFormState {
+        removed_creature_subtypes: vec!["Insect".into(), "Monk".into()],
+    });
+    let serialized = serde_json::to_value(&state).expect("full GameState serializes");
+    let wire = object_json(&serialized, ids.bestow)["bestow_form"].clone();
+    assert_eq!(
+        wire,
+        serde_json::json!({ "removed_creature_subtypes": ["Insect", "Monk"] })
+    );
+    // The pre-payload production adapter used precisely Option<bool>.
+    assert!(serde_json::from_value::<Option<bool>>(wire).is_err());
+    for (wire, expected) in [
+        (Value::Bool(true), Some(true)),
+        (Value::Bool(false), Some(false)),
+        (Value::Null, None),
+    ] {
+        assert_eq!(
+            serde_json::from_value::<Option<bool>>(wire).unwrap(),
+            expected
+        );
+    }
+    let restored: GameState =
+        serde_json::from_value(serialized.clone()).expect("current populated sibling decodes");
+    assert_fixture_reachable(&restored, ids);
+    assert_marker_isolation(&restored, ids);
+    assert!(restored.objects[&ids.signature].signature_spell.is_some());
+    for (id, expected) in [
+        (ids.bestow, vec!["Insect", "Monk"]),
+        (satyr_id, vec!["Satyr"]),
+    ] {
+        assert_eq!(restored.objects[&id].id, id);
+        assert_eq!(
+            restored.objects[&id]
+                .bestow_form
+                .as_ref()
+                .unwrap()
+                .removed_creature_subtypes,
+            expected
+        );
+    }
+    assert_eq!(restored.objects[&satyr_id].name, "Satyr payload neighbor");
+    let mut invalid = serialized;
+    object_json_mut(&mut invalid, ids.bestow).insert(
+        "bestow_form".into(),
+        Value::String("not-a-bestow-form".into()),
+    );
+    assert!(serde_json::from_value::<GameState>(invalid).is_err());
 }

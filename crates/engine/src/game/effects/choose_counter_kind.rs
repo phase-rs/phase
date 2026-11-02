@@ -19,6 +19,7 @@ use crate::types::ability::{
 };
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
+use crate::types::game_state::RandomDraw;
 use crate::types::game_state::{GameState, WaitingFor};
 
 /// CR 608.2d + CR 122.1: Resolve `Effect::ChooseCounterKind`.
@@ -126,7 +127,7 @@ pub fn resolve(
     if matches!(chooser, CounterKindChooser::Random) {
         use rand::seq::IndexedRandom; // rand 0.9: `choose` on `[T]`
         let drawn = kinds
-            .choose(&mut state.rng)
+            .choose(state.rng.draw(RandomDraw::Outcome))
             .expect("non-empty: the zero-kind branch returned above")
             .as_str()
             .into_owned();
@@ -654,6 +655,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: host,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             })
             .expect("activate the Caves chapter ability");
 
@@ -746,6 +748,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: host,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             })
             .expect("activate the Caves chapter ability");
 
@@ -857,6 +860,7 @@ mod tests {
             .act(GameAction::ActivateAbility {
                 source_id: host,
                 ability_index: 0,
+                payment_mode: crate::types::game_state::CastPaymentMode::Auto,
             })
             .expect("activate the Caves chapter ability");
 

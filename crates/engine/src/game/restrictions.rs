@@ -1,3 +1,4 @@
+use crate::game::cost_payability::AbilityCostPayability;
 use crate::game::game_object::GameObject;
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, ActivationRestriction, CastingPermission, CastingRestriction,
@@ -155,7 +156,9 @@ pub fn flash_timing_cost(
         match &option.cost {
             None => Some(ManaCost::NoCost),
             Some(AbilityCost::Mana { cost }) => Some(cost.clone()),
-            Some(cost) if cost.is_payable(state, player, obj.id) => Some(ManaCost::NoCost),
+            Some(cost) if cost.is_payable_for_spell(state, player, obj.id) => {
+                Some(ManaCost::NoCost)
+            }
             Some(_) => None,
         }
     })
@@ -281,6 +284,13 @@ pub(crate) fn spell_cast_record_for(
         // history record carries provenance so own-cast exclusion (CR 601.2i)
         // can identify a permanent's own pending cast positionally.
         spell_object_id: Some(obj.id),
+        // CR 722.3d + CR 601.2i: capture the prepare-spell designation the
+        // spell has as it becomes cast (the CR 722.3c linked copy's marker), so
+        // `FilterProp::PrepareSpell` and its negation are exact on the history
+        // record after the spell leaves the stack. Unconditional on zone: the
+        // live candidate seam projects the linked copy while it still waits in
+        // exile, and that object can only be cast as a prepare spell.
+        prepared_copy_source: obj.prepared_copy_source,
     }
 }
 
@@ -430,7 +440,7 @@ pub fn record_battlefield_entry(
     }
 
     let record = battlefield_entry_record_for(obj);
-    state.battlefield_entries_this_turn.push(record);
+    state.battlefield_entries_this_turn.push_back(record);
 }
 
 fn entry_controller_matches(
@@ -571,67 +581,6 @@ pub(crate) fn battlefield_entry_matches_filter(
         TargetFilter::And { filters } => filters.iter().all(|inner| {
             battlefield_entry_matches_filter(record, inner, player, all_creature_types, source_id)
         }),
-        _ => false,
-    }
-}
-
-/// CR 403.3 + CR 608.2h: can [`battlefield_entry_matches_filter`] actually answer this filter
-/// against a `BattlefieldEntryRecord`?
-///
-/// The record is an entry-time snapshot carrying only `object_id / name / core_types / subtypes /
-/// supertypes / colors / keywords / controller` (`types::game_state::BattlefieldEntryRecord`). Every other
-/// characteristic a `FilterProp` can name is live-object state the snapshot never captured, so the
-/// matcher fails closed at the `FilterProp` match's fail-closed arm inside
-/// `battlefield_entry_matches_filter`'s `TargetFilter::Typed` case, and at the fail-closed
-/// `_ => false` arm that closes out that function's outer `match`, and the whole tally reads
-/// a silent constant 0 — but see the `Or` exception documented beside that function's
-/// `TargetFilter::Or` arm: an `Or` with one unsupported leaf yields a SILENT PARTIAL COUNT
-/// instead. Measured: 100
-/// `FilterProp` variants exist (`types::ability::FilterProp`); the matcher answers 4.
-///
-/// This is an ALLOW-LIST, deliberately not an exhaustive `match`. A `FilterProp` added later is
-/// absent from the list and therefore defaults to "not evaluable" — the conservative side, which
-/// yields an honest `Effect::Unimplemented` at the parser guard and an honest `Unhandled` in the
-/// coverage classifier. A deny-list would need exhaustiveness; a positive allow-list does not.
-/// The list (this function's own `TargetFilter::Typed` arm, below) must name exactly the props
-/// the matcher answers; the binder is
-/// `ledger_guard_agrees_with_matcher` (test, below).
-///
-/// Upgrade path, ascending cost: `HasSupertype` and `Named` are answerable from `record.supertypes`
-/// / `record.name` TODAY — one matcher arm plus one line here. `FaceDown` (Tunnel Tipster),
-/// `Token`/`NonToken` and `Tapped` need a new snapshot field on `BattlefieldEntryRecord`.
-///
-/// `TypedFilter::type_filters` is intentionally NOT screened: `entry_type_filter_matches` is
-/// exhaustive; `Instant`/`Sorcery` answer `false` per CR 403.3, whose negation is correctly
-/// `true` for every permanent.
-pub(crate) fn ledger_filter_is_evaluable(filter: &TargetFilter) -> bool {
-    match filter {
-        TargetFilter::Any => true,
-        TargetFilter::Typed(typed) => {
-            // CR 109.5: `entry_controller_matches` answers only these two.
-            typed
-                .controller
-                .as_ref()
-                .is_none_or(|c| matches!(c, ControllerRef::You | ControllerRef::Opponent))
-                && typed.properties.iter().all(|prop| {
-                    matches!(
-                        prop,
-                        FilterProp::HasColor { .. }
-                            | FilterProp::InZone { .. }
-                            | FilterProp::WithKeyword { .. }
-                            | FilterProp::Another
-                    )
-                })
-        }
-        // CR 608.2i: mirrors the monotone connectives (the `TargetFilter::Or` and
-        // `TargetFilter::And` arms) of `battlefield_entry_matches_filter`; every leaf must be
-        // answerable, otherwise the composite silently drops one.
-        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-            filters.iter().all(ledger_filter_is_evaluable)
-        }
-        // Everything else is the fail-closed `_ => false` arm that closes out
-        // `battlefield_entry_matches_filter`'s outer `match`, including the anti-monotone
-        // `TargetFilter::Not`.
         _ => false,
     }
 }
@@ -879,10 +828,7 @@ pub(crate) fn tap_permanent_for_cost(
     )
     .map_err(|error| EngineError::InvalidAction(error.to_string()))?
     {
-        events.push(GameEvent::PermanentTapped {
-            object_id: id,
-            caused_by: None,
-        });
+        events.push(GameEvent::permanent_tapped(state, id, None));
     }
     Ok(())
 }
@@ -922,6 +868,31 @@ fn effective_activation_limit(
         return 1; // No tag → default once-per-turn
     };
     activation_limit_from_statics(state, player, source_id, tag.keyword_str(), gates)
+}
+
+/// CR 606.3 + CR 611.3a: The loyalty-activation cap's static term — the max
+/// `new_limit` over `ModifyActivationLimit { keyword: "loyalty" }` statics
+/// (Oath of Teferi class) whose controller is `player` and whose affected
+/// filter matches the planeswalker `source_id`. Base limit 1; max semantics
+/// (multiple Oaths do not stack, per the card's ruling). Read live at
+/// activation time — nothing is latched. Fills `None` gates via the O(1)
+/// presence index.
+pub(crate) fn loyalty_activation_cap_from_statics(
+    state: &crate::types::game_state::GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    gates: Option<&ActivationRestrictionStaticGates>,
+) -> u32 {
+    match gates {
+        Some(gates) => activation_limit_from_statics(state, player, source_id, "loyalty", gates),
+        None => activation_limit_from_statics(
+            state,
+            player,
+            source_id,
+            "loyalty",
+            &ActivationRestrictionStaticGates::compute(state),
+        ),
+    }
 }
 
 /// CR 602.5b: Scan the battlefield for `ModifyActivationLimit` statics that
@@ -1810,9 +1781,9 @@ fn evaluate_condition_for_granter(
         ParsedCondition::IsOpponentsTurn => {
             super::players::is_opponent(state, player, state.active_player)
         }
-        // CR 503.1: The game is currently in the upkeep step. Player scope, if
-        // any, is composed by the caller via `And([IsOpponentsTurn, ..])`.
-        ParsedCondition::IsDuringUpkeep => state.phase == Phase::Upkeep,
+        // CR 500.1 + CR 602.5: the game is in one of the named steps; player
+        // scope, if any, is composed by the caller via `And`.
+        ParsedCondition::CurrentPhaseIs { phases } => phases.contains(&state.phase),
         // CR 601.3d + CR 608.2c: "if it targets a [filter]" — gates a casting
         // permission on the chosen targets of the in-flight spell. Read from
         // `state.pending_cast.ability.targets` when targets have been committed.
@@ -2553,12 +2524,41 @@ mod tests {
     use crate::game::game_object::{PhaseOutCause, PhaseStatus};
     use crate::game::zones::create_object;
     use crate::parser::oracle_condition::parse_restriction_condition;
-    use crate::types::ability::{AbilityKind, Effect, ParsedCondition, QuantityExpr};
+    use crate::types::ability::{
+        ledger_filter_is_evaluable, AbilityKind, Effect, ParsedCondition, QuantityExpr,
+    };
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
-    use crate::types::game_state::WaitingFor;
+    use crate::types::game_state::{ArrivalIdentity, WaitingFor, ZoneChangeRecord};
     use crate::types::identifiers::CardId;
     use crate::types::zones::Zone;
+
+    #[test]
+    fn cards_left_your_graveyard_counts_the_departure_owner() {
+        let mut state = crate::types::game_state::GameState::new(
+            crate::types::format::FormatConfig::dandan(),
+            2,
+            42,
+        );
+        let mut record =
+            ZoneChangeRecord::test_minimal(ObjectId(1), Some(Zone::Graveyard), Zone::Battlefield);
+        record.owner = PlayerId(0);
+        record.controller = PlayerId(0);
+        record.arrival = ArrivalIdentity {
+            owner: PlayerId(1),
+            controller: PlayerId(1),
+        };
+        state.zone_changes_this_turn.push_back(record);
+        let condition = ParsedCondition::CardsLeftYourGraveyardThisTurnAtLeast { count: 1 };
+        assert!(
+            evaluate_condition(&state, PlayerId(0), ObjectId(9), &condition),
+            "the card left the departure owner's graveyard"
+        );
+        assert!(
+            !evaluate_condition(&state, PlayerId(1), ObjectId(9), &condition),
+            "the installed owner's graveyard lost nothing"
+        );
+    }
 
     /// Two-step pattern: parse condition text, then evaluate.
     /// Returns `true` for unrecognized conditions (matching prior permissive behavior).
@@ -3304,7 +3304,7 @@ mod tests {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
         state
             .battlefield_entries_this_turn
-            .push(BattlefieldEntryRecord {
+            .push_back(BattlefieldEntryRecord {
                 object_id: ObjectId(99),
                 name: "Green Creature".to_string(),
                 core_types: vec![CoreType::Creature],
@@ -3373,7 +3373,7 @@ mod tests {
                 for _ in 0..*count {
                     state
                         .battlefield_entries_this_turn
-                        .push(BattlefieldEntryRecord {
+                        .push_back(BattlefieldEntryRecord {
                             object_id: ObjectId(next_id),
                             name: "Bear".to_string(),
                             core_types: vec![CoreType::Creature],
@@ -3742,7 +3742,7 @@ mod tests {
         state.phase = Phase::Upkeep;
         assert!(allowed(&state), "opponent's upkeep must permit activation");
 
-        // Opponent's turn, non-upkeep step -> denied (IsDuringUpkeep false).
+        // Opponent's turn, non-upkeep step -> denied (CurrentPhaseIs false).
         state.phase = Phase::PreCombatMain;
         assert!(
             !allowed(&state),
@@ -3980,6 +3980,7 @@ mod tests {
                 cast_variant: crate::types::game_state::CastingVariant::Normal,
                 was_kicked: false,
                 spell_object_id: None,
+                prepared_copy_source: None,
             }]),
         );
 
@@ -4017,6 +4018,7 @@ mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    prepared_copy_source: None,
                 },
                 crate::types::game_state::SpellCastRecord {
                     name: String::new(),
@@ -4032,6 +4034,7 @@ mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    prepared_copy_source: None,
                 },
                 crate::types::game_state::SpellCastRecord {
                     name: String::new(),
@@ -4047,6 +4050,7 @@ mod tests {
                     cast_variant: crate::types::game_state::CastingVariant::Normal,
                     was_kicked: false,
                     spell_object_id: None,
+                    prepared_copy_source: None,
                 },
             ]),
         );

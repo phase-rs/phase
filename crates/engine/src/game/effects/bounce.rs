@@ -610,7 +610,7 @@ pub(super) fn start_player_scope_choices(
     after_scope: Option<Box<ResolvedAbility>>,
     events: &mut Vec<GameEvent>,
     depth: u32,
-) -> Result<(), EffectError> {
+) -> Result<super::ResolutionProgress, EffectError> {
     match collect_scoped_bounce_choices(
         state,
         template,
@@ -620,19 +620,20 @@ pub(super) fn start_player_scope_choices(
         events,
     ) {
         // The unscoped tail runs once, after the whole simultaneous return.
-        PendingPlayerScopeBounceOutcome::Completed { .. } => {
-            if let Some(after_scope) = after_scope {
-                super::resolve_ability_chain(state, &after_scope, events, depth + 1)?;
+        PendingPlayerScopeBounceOutcome::Completed { .. } => match after_scope {
+            Some(after_scope) => {
+                super::resolve_ability_chain_step(state, &after_scope, events, depth + 1)
             }
-        }
+            None => Ok(super::ResolutionProgress::Complete),
+        },
         // A prompt or replacement pause resumes the tail through the
         // continuation queue once the batch has been delivered.
         PendingPlayerScopeBounceOutcome::WaitingForNextChoice
         | PendingPlayerScopeBounceOutcome::PausedForReplacement => {
             super::append_to_pending_continuation(state, after_scope);
+            Ok(super::ResolutionProgress::Waiting)
         }
     }
-    Ok(())
 }
 
 /// CR 101.4: record `player`'s answer and continue the APNAP walk.
@@ -656,7 +657,7 @@ pub(crate) fn advance_pending_player_scope_bounce_choice(
     )
 }
 
-/// CR 400.7 + CR 611.2c: Mass-bounce — return every battlefield permanent
+/// CR 400.7: Mass-bounce — return every battlefield permanent
 /// matching the filter to its owner's hand (default) or to the destination
 /// zone if `Effect::BounceAll.destination` is set.
 ///
@@ -686,7 +687,7 @@ pub fn resolve_all(
         _ => (TargetFilter::None, Zone::Hand, None),
     };
 
-    // CR 701.3 + CR 611.2c: A `TargetFilter::None` lands here when the parser
+    // A `TargetFilter::None` lands here when the parser
     // didn't supply a class filter. Default to "all creatures" — the
     // historically dominant mass-bounce shape — to match `destroy::resolve_all`.
     let effective_filter = if matches!(target_filter, TargetFilter::None) {
@@ -725,11 +726,12 @@ pub fn resolve_all(
         ability
             .targets
             .iter()
-            .filter_map(|target| match target {
+            .enumerate()
+            .filter_map(|(position, target)| match target {
                 TargetRef::Object(id)
                     if state.battlefield.contains(id)
                         && ability.target_pin_is_current(*id, state)
-                        && ability.selected_target_pin_is_current(*id, state)
+                        && ability.target_occurrence_is_current(position, state)
                         && crate::game::filter::matches_target_filter(
                             state,
                             *id,
@@ -1394,7 +1396,7 @@ mod tests {
         assert!(!state.players[0].graveyard.contains(&rancor_id));
     }
 
-    /// CR 400.7 + CR 611.2c: Mass-bounce iterates every battlefield permanent
+    /// CR 400.7: Mass-bounce iterates every battlefield permanent
     /// matching the filter. Mixed match/no-match population: only matching
     /// permanents move to their owners' hands; non-matching permanents stay.
     #[test]

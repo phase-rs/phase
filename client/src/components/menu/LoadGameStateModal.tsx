@@ -21,7 +21,7 @@ interface LoadGameStateModalProps {
 }
 
 export function LoadGameStateModal({ open, onClose, onLoaded }: LoadGameStateModalProps) {
-  const { t } = useTranslation("menu");
+  const { t } = useTranslation(["menu", "common"]);
   const [tab, setTab] = useState<LoadTab>("paste");
   const [pasteText, setPasteText] = useState("");
   const [error, setError] = useState<string | null>(null);

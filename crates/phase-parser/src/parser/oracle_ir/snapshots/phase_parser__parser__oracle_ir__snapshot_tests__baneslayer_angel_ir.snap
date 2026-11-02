@@ -1,0 +1,38 @@
+---
+source: crates/phase-parser/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&ir"
+---
+{
+  "items": [
+    {
+      "id": 0,
+      "source": {
+        "id": {
+          "item": 0,
+          "ordinal": 0
+        },
+        "span": {
+          "first_line": 0,
+          "last_line": 0,
+          "start_byte": 0,
+          "end_byte": 71,
+          "precision": "Exact",
+          "ordinal_within_span": 0
+        },
+        "fragment": "Flying, first strike, lifelink, protection from Demons and from Dragons"
+      },
+      "node": {
+        "Unsupported": {
+          "unsupported": {
+            "category": "Unknown",
+            "fragment": "Flying, first strike, lifelink, protection from Demons and from Dragons",
+            "description": "Flying, first strike, lifelink, protection from Demons and from Dragons"
+          },
+          "min_x_value": 0
+        }
+      }
+    }
+  ],
+  "source_text": "Flying, first strike, lifelink, protection from Demons and from Dragons",
+  "card_name": "Baneslayer Angel"
+}

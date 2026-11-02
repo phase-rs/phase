@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { parseWebSocketUrl } from "../multiplayerServer";
+import { parseWebSocketUrl, serverHttpOrigin } from "../multiplayerServer";
 
 // DEFAULT_MULTIPLAYER_SERVER_URL is resolved once at module load, so every case
 // sets window.__PHASE_CONFIG__ first and then imports a fresh copy.
@@ -121,5 +121,27 @@ describe("parseWebSocketUrl", () => {
     ["a fragment that looks like a path", "wss://play.example.com/ws#/room/1"],
   ])("rejects %s", (_label, value) => {
     expect(parseWebSocketUrl(value)).toBeNull();
+  });
+});
+
+describe("serverHttpOrigin", () => {
+  it.each([
+    ["wss://phase.example/ws", "https://phase.example"],
+    ["ws://192.168.1.5:9374/ws", "http://192.168.1.5:9374"],
+    // Path and query are dropped: only the origin is served beside the API.
+    ["wss://h.example:8443/a/b?x=1", "https://h.example:8443"],
+  ])("maps %s to %s", (webSocketUrl, origin) => {
+    expect(serverHttpOrigin(webSocketUrl)).toBe(origin);
+  });
+
+  // Every refusal is `parseWebSocketUrl`'s: there is no second validator.
+  it.each([
+    ["no server", null],
+    ["an http address", "https://phase.example"],
+    ["an empty string", ""],
+    ["a scheme with no host", "wss://"],
+    ["a fragment", "wss://h/ws#x"],
+  ])("returns undefined for %s", (_label, webSocketUrl) => {
+    expect(serverHttpOrigin(webSocketUrl)).toBeUndefined();
   });
 });

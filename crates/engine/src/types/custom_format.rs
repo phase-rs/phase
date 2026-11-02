@@ -224,6 +224,11 @@ impl CommanderEligibilityRule {
             // CR 903.13f routes its deck construction through CR 903.5 — so
             // CR 903.3's commander eligibility test applies unchanged.
             GameFormat::Commander
+            | GameFormat::TwoHeadedGiantCommander
+            | GameFormat::ArchenemyCommander
+            // CR 903.3's commander eligibility test applies unchanged —
+            // planar doesn't change eligibility.
+            | GameFormat::PlanechaseCommander
             | GameFormat::DuelCommander
             | GameFormat::PauperCommander
             | GameFormat::CommanderDraft => Ok(Some(Self::Standard)),
@@ -545,8 +550,8 @@ impl CustomFormatDef {
     /// state, not a format rule (and the only format that sets it is
     /// rejected below anyway), and `supplies_fixed_deck` is always `false`
     /// for every custom format — no custom-format use case for an
-    /// engine-supplied fixed deck exists, and the only built-in that sets it
-    /// (Momir) is likewise rejected below.
+    /// engine-supplied fixed deck exists, and the built-ins that set it
+    /// (Momir and Dandân) are likewise rejected below.
     pub fn from_lobby_config(
         name: String,
         config: &FormatConfig,

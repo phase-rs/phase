@@ -1,17 +1,43 @@
-import { lazy, Suspense, useCallback, useEffect, useState, type ReactNode } from "react";
+import { Component, Suspense, type ComponentProps, useCallback, useEffect, useState, type ReactNode } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
 import { getPlayerId } from "../../hooks/usePlayerId";
+import { reportBoundaryError } from "../../services/telemetryEvents";
 import { getOpponentDisplayName } from "../../stores/multiplayerStore";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 import { useUiStore } from "../../stores/uiStore";
 import type { DiceRollPayload } from "../../stores/uiStore";
+import type { Coin3D as Coin3DImpl } from "./dice3d/Coin3D.tsx";
+import type { Dice3D as Dice3DImpl } from "./dice3d/Dice3D.tsx";
+import { loadCoin3DModule, loadDice3DModule } from "./dice3d/loaders";
+import { safeLazy, warnOnce } from "./dice3d/safeLazy";
 
 // Code-split the WebGL renderer: `three` only loads when a die is actually
-// rolled, keeping it out of the main bundle.
-const Dice3D = lazy(() => import("./dice3d/Dice3D.tsx").then((m) => ({ default: m.Dice3D })));
-const Coin3D = lazy(() => import("./dice3d/Coin3D.tsx").then((m) => ({ default: m.Coin3D })));
+// rolled, keeping it out of the main bundle. The roll is cosmetic, so a chunk
+// that is missing after a deploy degrades to the static face (`safeLazy`)
+// instead of throwing into the app-level ErrorBoundary and unmounting the game.
+const Dice3D = safeLazy(
+  "Dice3D",
+  loadDice3DModule,
+  (m) => m.Dice3D,
+  function StaticDice3D({ result, onSettle }: Dice3DFallbackProps) {
+    return <SettledPlaceholder label={String(result)} onSettle={onSettle} />;
+  },
+);
+const Coin3D = safeLazy(
+  "Coin3D",
+  loadCoin3DModule,
+  (m) => m.Coin3D,
+  function StaticCoin3D({ face, labels, onSettle }: Coin3DFallbackProps) {
+    return <SettledPlaceholder label={labels?.[face] ?? face} onSettle={onSettle} />;
+  },
+);
+
+// Prop types come from the real components (type-only imports are erased, so
+// `three` stays out of the main bundle).
+type Dice3DFallbackProps = ComponentProps<typeof Dice3DImpl>;
+type Coin3DFallbackProps = ComponentProps<typeof Coin3DImpl>;
 
 const DIE_SIZE = 132;
 
@@ -79,8 +105,10 @@ export function DiceRollOverlay() {
   // fallback while the chunk downloads. Skipped where we'd never animate.
   useEffect(() => {
     if (shouldReduceMotion || !hasWebGL()) return;
-    void import("./dice3d/Dice3D.tsx");
-    void import("./dice3d/Coin3D.tsx");
+    // Best-effort warm-up: a failed prefetch must not become an unhandled
+    // rejection; the render path degrades on its own.
+    void loadDice3DModule().catch(() => {});
+    void loadCoin3DModule().catch(() => {});
   }, [shouldReduceMotion]);
 
   // CR 103.1 contest holds for input, so its hint reads "tap to continue"; an
@@ -114,11 +142,15 @@ export function DiceRollOverlay() {
           />
           {/* Keyed by payload identity so each roll the FIFO advances to gets a
               fresh component instance (resets settle state, re-runs the 3D mount). */}
-          <DiceRollContent
+          <DiceRollBoundary
             key={diceRollKey(diceRoll)}
-            payload={diceRoll}
-            animate={!shouldReduceMotion && hasWebGL()}
-          />
+            fallback={<DiceRollContent payload={diceRoll} animate={false} />}
+          >
+            <DiceRollContent
+              payload={diceRoll}
+              animate={!shouldReduceMotion && hasWebGL()}
+            />
+          </DiceRollBoundary>
           <motion.span
             className="pointer-events-none absolute bottom-8 text-xs font-medium uppercase tracking-[0.2em] text-slate-400/70"
             initial={{ opacity: 0 }}
@@ -131,6 +163,34 @@ export function DiceRollOverlay() {
       )}
     </AnimatePresence>
   );
+}
+
+/**
+ * Keeps a failure inside the cosmetic dice/coin render local rather than letting
+ * it reach the app-level ErrorBoundary, which would unmount the whole game
+ * route. The animation is dropped but the engine's result is not: `fallback`
+ * re-renders the same payload statically (first-player caption, turn order,
+ * coin outcome). The error is still reported to telemetry like any other
+ * caught render error, so a real WebGL crash does not go unseen.
+ */
+class DiceRollBoundary extends Component<
+  { children: ReactNode; fallback: ReactNode },
+  { failed: boolean }
+> {
+  state = { failed: false };
+
+  static getDerivedStateFromError(): { failed: boolean } {
+    return { failed: true };
+  }
+
+  componentDidCatch(error: Error): void {
+    reportBoundaryError(error);
+    warnOnce("DiceRollBoundary", "dice roll render failed; showing the static result.", error);
+  }
+
+  render(): ReactNode {
+    return this.state.failed ? this.props.fallback : this.props.children;
+  }
 }
 
 /** Stable identity for a payload so the FIFO advancing from one roll to the next
@@ -582,4 +642,13 @@ function DiePlaceholder({ label }: { label: string }) {
       {label}
     </div>
   );
+}
+
+/** The static stand-in used as a `safeLazy` fallback: shows the result and
+ *  reports settled on mount, since there is no 3D animation to wait for. */
+function SettledPlaceholder({ label, onSettle }: { label: string; onSettle?: () => void }) {
+  useEffect(() => {
+    onSettle?.();
+  }, [onSettle]);
+  return <DiePlaceholder label={label} />;
 }

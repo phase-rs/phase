@@ -2,10 +2,15 @@ import type { GameFormat, TokenImageRef } from "../adapter/types";
 import { formatMetadata } from "../data/formatRegistry";
 import type { CardImageSource, ImageRungs } from "./visualPacks/types.ts";
 
+/** How a face is printed, as emitted per face by `scripts/gen-scryfall-images.sh`. */
+type FaceOrientation = "landscape" | "portrait";
+
 interface ScryfallImageFace {
   small?: string | null;
   normal?: string | null;
   art_crop?: string | null;
+  /** Absent in data generated before the field existed; see `isSidewaysFace`. */
+  orientation?: FaceOrientation;
 }
 
 interface ScryfallDataEntry {
@@ -157,7 +162,8 @@ function isScryfallImageFace(value: unknown): value is ScryfallImageFace {
   const face = value as ScryfallImageFace;
   return (face.small === undefined || face.small === null || typeof face.small === "string")
     && (face.normal === undefined || face.normal === null || typeof face.normal === "string")
-    && (face.art_crop === undefined || face.art_crop === null || typeof face.art_crop === "string");
+    && (face.art_crop === undefined || face.art_crop === null || typeof face.art_crop === "string")
+    && (face.orientation === undefined || face.orientation === "landscape" || face.orientation === "portrait");
 }
 
 function isScryfallDataEntry(value: unknown): value is ScryfallDataEntry {
@@ -506,11 +512,15 @@ export function resolveFaceIndexSync(
   return idx >= 0 ? idx : null;
 }
 
-export function isCardImageRotatedSync(oracleId: string, cardName: string): boolean {
+export function isCardImageRotatedSync(
+  oracleId: string,
+  cardName: string,
+  faceIndex = 0,
+): boolean {
   if (!scryfallDataResolved) return false;
   const entry = scryfallDataResolved[oracleId.toLowerCase()]
     ?? lookupEntryByName(cardName);
-  return isSidewaysLayout(entry?.layout);
+  return entry ? isSidewaysFace(entry, faceIndex) : false;
 }
 
 /** Kamigawa-style flip cards (Scryfall `layout: "flip"`) print both halves in a
@@ -681,8 +691,18 @@ function remoteImageSource(src: string, size: ImageSize): { source: CardImageSou
   return { source: { kind: "remote", src, rungs }, rungs };
 }
 
-function isSidewaysLayout(layout: string | undefined): boolean {
-  return layout === "split";
+/** Whether face `faceIndex` of a card is printed landscape, so its image must
+ * be turned to read. The generator decides this per face: Scryfall `split`
+ * layouts (split cards, Rooms) are rotated as a whole image, and a battle's
+ * front face is landscape while its back face is an ordinary portrait card.
+ * The face lookup mirrors `resolveImageUrl` so orientation always describes the
+ * image actually shown. Data generated before `orientation` existed (served
+ * until the next regenerate) falls back to the layout, which covers only split
+ * layouts and leaves every other face upright. */
+function isSidewaysFace(entry: ScryfallDataEntry, faceIndex: number): boolean {
+  const orientation = (entry.faces[faceIndex] ?? entry.faces[0])?.orientation;
+  if (orientation) return orientation === "landscape";
+  return entry.layout === "split";
 }
 
 function isFlipLayout(layout: string | undefined): boolean {
@@ -1043,7 +1063,7 @@ function resolveImageAsset(
   const remote = remoteImageSource(src, size);
   return {
     src,
-    isRotated: isSidewaysLayout(entry.layout),
+    isRotated: isSidewaysFace(entry, faceIndex),
     ...remote,
     semantic: {
       oracleId: entry.oracle_id.toLowerCase(),

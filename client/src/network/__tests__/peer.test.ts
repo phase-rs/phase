@@ -91,6 +91,67 @@ describe("P2P Protocol - validateMessage", () => {
 });
 
 describe("PeerSession", () => {
+  it("delivers claimed state acknowledgements while preserving the game FIFO", async () => {
+    vi.useFakeTimers();
+    const acknowledged: number[] = [];
+    const { conn, session } = createTestSession({ onStateAck: (msg) => { acknowledged.push(msg.revision); return true; } });
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const received: string[] = [];
+    session.onMessage(async (msg) => {
+      received.push(msg.type);
+      if (msg.type === "action") await blocked;
+    });
+    const action = conn.simulateData({ type: "action", senderPlayerId: 1, action: { type: "PassPriority" } });
+    const acknowledgement = conn.simulateData({ type: "state_ack", revision: 8 });
+    const later = conn.simulateData({ type: "concede" });
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      expect(acknowledged).toEqual([8]);
+      expect(received).toEqual(["action"]);
+      release();
+      await Promise.all([action, acknowledgement, later]);
+      expect(received).toEqual(["action", "concede"]);
+    } finally {
+      release();
+      await Promise.all([action, acknowledgement, later]);
+      session.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it("retains ordinary dispatch for an unclaimed state acknowledgement", async () => {
+    const { conn, session } = createTestSession({ onStateAck: () => false });
+    const received: P2PMessage[] = [];
+    session.onMessage((msg) => { received.push(msg); });
+    try {
+      await conn.simulateData({ type: "state_ack", revision: 8 });
+      expect(received).toEqual([{ type: "state_ack", revision: 8 }]);
+    } finally {
+      session.close();
+    }
+  });
+
+  it("sends a one-shot serializable payload without re-reading it for diagnostics", async () => {
+    const { conn, session } = createTestSession();
+    let serialized = false;
+    const payload = Object.assign({ type: "concede" as const }, {
+      toJSON() {
+        if (serialized) throw new Error("Payload was already consumed by wire encoding");
+        serialized = true;
+        return { type: "concede" };
+      },
+    });
+    try {
+      await expect(session.send(payload)).resolves.toBe(true);
+      expect(await conn.getSentMessages()).toEqual([{ type: "concede" }]);
+      expect(conn.open).toBe(true);
+    } finally {
+      conn.open = false;
+      session.close();
+    }
+  });
+
   it("reports a dropped send and bypasses encoding when connection is not open", async () => {
     const { conn, session } = createTestSession();
     conn.open = false;
@@ -641,4 +702,32 @@ it("coalesces route changes during an in-flight probe and shares the refreshed e
   conn.simulateClose();
   expect(getDiagnosticHistory().slice(-1)[0]).toMatchObject({ kind: "disconnect", candidates: { localType: "relay", relayProtocol: "tcp" } });
   session.close();
+});
+
+it("retains RTC transitions and native channel loss evidence before PeerJS reports closure", () => {
+  const pc = Object.assign(new EventTarget(), { connectionState: "connected", iceConnectionState: "completed" });
+  const channel = Object.assign(new EventTarget(), { readyState: "open", bufferedAmount: 65536 });
+  const conn = Object.assign(new FakeDataConnection(), { peerConnection: pc, dataChannel: channel });
+  const session = createPeerSession(conn as never);
+  const diagnosticId = getDiagnosticSources().peers.slice(-1)[0].diagnosticId;
+  try {
+    pc.connectionState = "disconnected";
+    pc.dispatchEvent(new Event("connectionstatechange"));
+    pc.iceConnectionState = "failed";
+    pc.dispatchEvent(new Event("iceconnectionstatechange"));
+    channel.dispatchEvent(new Event("error"));
+    channel.readyState = "closed";
+    channel.dispatchEvent(new Event("close"));
+    const transitions = getDiagnosticHistory().filter((entry) => entry.kind === "transport-transition" && entry.diagnosticId === diagnosticId);
+    expect(transitions).toMatchObject([
+      { event: "connectionstatechange", transport: { connectionState: "disconnected", bufferedBytes: 65536 } },
+      { event: "iceconnectionstatechange", transport: { iceState: "failed" } },
+      { event: "error", transport: { channelError: "data-channel-error", bufferedBytes: 65536 } },
+      { event: "close", transport: { channelState: "closed", bufferedBytes: 65536 } },
+    ]);
+    conn.simulateClose();
+    expect(getDiagnosticHistory().filter((entry) => entry.kind === "disconnect" && entry.diagnosticId === diagnosticId)).toHaveLength(1);
+  } finally {
+    session.close();
+  }
 });

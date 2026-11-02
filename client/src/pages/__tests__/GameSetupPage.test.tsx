@@ -24,6 +24,7 @@ import { MemoryRouter, Route, Routes, useLocation } from "react-router";
 
 import { ACTIVE_DECK_KEY, STORAGE_KEY_PREFIX } from "../../constants/storage";
 import { usePreferencesStore } from "../../stores/preferencesStore";
+import { deckSupplyForFormat } from "../../services/engineRuntime";
 import { GameSetupPage } from "../GameSetupPage";
 
 // ── Mock heavy sub-components and services ─────────────────────────────────
@@ -36,8 +37,10 @@ vi.mock("../../hooks/useCardImage", () => ({
   useCardImage: () => ({ src: null, isLoading: false }),
 }));
 
+const compat = vi.hoisted(() => ({ evaluateDeckCompatibility: vi.fn() }));
 vi.mock("../../services/deckCompatibility", () => ({
   evaluateDeckCompatibilityBatch: vi.fn().mockResolvedValue({}),
+  evaluateDeckCompatibility: compat.evaluateDeckCompatibility,
 }));
 
 vi.mock("../../hooks/useBracketEstimate", () => ({
@@ -53,6 +56,8 @@ vi.mock("../../services/engineRuntime", async () => ({
     "../../services/engineRuntime",
   )),
   bestOfThreeCeilingForFormat: vi.fn(async (format: string) => (format === "Dandan" ? "Bo1" : "Bo3")),
+  deckSupplyForFormat: vi.fn(async (format: string) =>
+    format === "Dandan" ? "HostPile" : format === "Momir" ? "EngineFixed" : "PlayerBuilt"),
 }));
 
 vi.mock("../../audio/useAudioContext", () => ({
@@ -64,9 +69,14 @@ vi.mock("../../services/aiDeckCatalog", async () => {
     await vi.importActual<typeof import("../../services/aiDeckCatalog")>(
       "../../services/aiDeckCatalog",
     );
+  // Stable identity like the real hook's state result: GameSetupPage derives
+  // its settled catalog from this in an effect, and a fresh literal every
+  // render would churn that effect. The factory runs once per file, so this
+  // single object is shared across renders.
+  const stubCatalogResult = { candidates: [], allCandidates: [], loading: false, error: null };
   return {
     ...actual,
-    useAiDeckCatalog: () => ({ candidates: [], loading: false, error: null }),
+    useAiDeckCatalog: () => stubCatalogResult,
   };
 });
 
@@ -192,6 +202,13 @@ describe("GameSetupPage — cEDH bracket warning chip", () => {
     expect(screen.getByText(/AI matches are not supported/i)).toBeInTheDocument();
   });
 
+  it("accepts Planechase Commander on the setup page and explains the AI limitation", async () => {
+    renderGameSetupPage("/game-setup?format=PlanechaseCommander");
+
+    expect(await screen.findByText("Planechase Commander")).toBeInTheDocument();
+    expect(screen.getByText(/AI matches are not supported/i)).toBeInTheDocument();
+  });
+
   it("restores a Two-Headed Giant setup preference", async () => {
     act(() => {
       usePreferencesStore.setState({
@@ -295,6 +312,84 @@ describe("GameSetupPage — cEDH bracket warning chip", () => {
       const search = await startMatchAndReadSearch();
       expect(search).toContain("format=Momir");
       expect(search).toContain("match=bo3");
+    });
+  });
+
+  describe("host-supplied pile", () => {
+    async function start(): Promise<string> {
+      const user = userEvent.setup();
+      await user.click(await screen.findByRole("button", { name: /^Start Match/ }));
+      return (await screen.findByTestId("game-route")).textContent ?? "";
+    }
+
+    async function pickFormat(label: string) {
+      const user = userEvent.setup();
+      await user.click(screen.getByRole("button", { name: /Format/i, expanded: false }));
+      await user.click(await screen.findByRole("button", { name: new RegExp(`^${label}`) }));
+      await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    }
+
+    beforeEach(() => {
+      compat.evaluateDeckCompatibility.mockReset();
+      seedDeck("Pile A");
+    });
+
+    it("the default pile starts Dandan with no saved deck and no pile on the URL", async () => {
+      localStorage.removeItem(STORAGE_KEY_PREFIX + "Pile A");
+      renderGameSetupPage("/game-setup?format=Dandan");
+      expect(await screen.findByRole("combobox", { name: "Pile" })).toHaveValue("");
+      expect(screen.getByRole("button", { name: /^Start Match/ })).toBeEnabled();
+      const search = await start();
+      expect(search).toContain("format=Dandan");
+      expect(search).not.toContain("pile=");
+    });
+
+    it("a named pile the engine refuses blocks Start", async () => {
+      compat.evaluateDeckCompatibility.mockResolvedValue({
+        selected_format_compatible: false,
+        selected_format_reasons: ["Dandân deck must have exactly 80 cards (found 100)"],
+      });
+      renderGameSetupPage("/game-setup?format=Dandan");
+      await userEvent.setup().selectOptions(await screen.findByRole("combobox", { name: "Pile" }), "Pile A");
+      expect(await screen.findByText(/exactly 80 cards/)).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /^Start Match/ })).toBeDisabled();
+    });
+
+    it("a named pile the engine accepts rides the URL", async () => {
+      compat.evaluateDeckCompatibility.mockResolvedValue({ selected_format_compatible: true, selected_format_reasons: [] });
+      renderGameSetupPage("/game-setup?format=Dandan");
+      await userEvent.setup().selectOptions(await screen.findByRole("combobox", { name: "Pile" }), "Pile A");
+      await waitFor(() => expect(screen.getByRole("button", { name: /^Start Match/ })).toBeEnabled());
+      expect(await start()).toContain("pile=Pile%20A");
+    });
+
+    it("changing format drops a named pile", async () => {
+      compat.evaluateDeckCompatibility.mockResolvedValue({ selected_format_compatible: true, selected_format_reasons: [] });
+      renderGameSetupPage("/game-setup?format=Dandan");
+      await userEvent.setup().selectOptions(await screen.findByRole("combobox", { name: "Pile" }), "Pile A");
+      await waitFor(() => expect(screen.getByRole("combobox", { name: "Pile" })).toHaveValue("Pile A"));
+      await pickFormat("Momir");
+      await pickFormat("Dand");
+      expect(await screen.findByRole("combobox", { name: "Pile" })).toHaveValue("");
+      expect(await start()).not.toContain("pile=");
+    });
+
+    it("Momir offers no pile and starts without one", async () => {
+      renderGameSetupPage("/game-setup?format=Momir");
+      await waitFor(() => expect(deckSupplyForFormat).toHaveBeenCalledWith("Momir"));
+      await act(async () => {});
+      expect(screen.queryByRole("combobox", { name: "Pile" })).toBeNull();
+      const search = await start();
+      expect(search).toContain("format=Momir");
+      expect(search).not.toContain("pile=");
+    });
+
+    it("Standard offers no pile", async () => {
+      setActiveDeck("Pile A");
+      renderGameSetupPage("/game-setup?format=Standard");
+      await waitFor(() => expect(deckSupplyForFormat).toHaveBeenCalledWith("Standard"));
+      await act(async () => {});
+      expect(screen.queryByRole("combobox", { name: "Pile" })).toBeNull();
     });
   });
 });

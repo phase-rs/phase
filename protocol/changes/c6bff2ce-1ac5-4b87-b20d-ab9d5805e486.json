@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "TakebackResolved carries a typed resolution in place of approved; P2P adds request_takeback / respond_takeback / cancel_takeback and takeback_requested / takeback_resolved / request_rejected frames; TakebackRequested and takeback_requested carry the voter set"
+}

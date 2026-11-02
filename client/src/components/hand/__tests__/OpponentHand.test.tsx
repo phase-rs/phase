@@ -83,7 +83,18 @@ describe("OpponentHand", () => {
   });
 
   it("uses explicit playerId instead of focusedOpponent", () => {
-    render(<OpponentHand playerId={2} showCards />);
+    const state = createGameState();
+    useGameStore.setState({
+      gameState: {
+        ...state,
+        objects: {
+          ...state.objects,
+          11: { ...state.objects[11], display_visible_to_viewer: true },
+          22: { ...state.objects[22], display_visible_to_viewer: true },
+        },
+      },
+    });
+    render(<OpponentHand playerId={2} />);
 
     expect(screen.getByAltText("Explicit Opponent Card")).toBeInTheDocument();
     expect(screen.queryByAltText("Focused Opponent Card")).toBeNull();
@@ -154,7 +165,7 @@ describe("OpponentHand", () => {
     );
   });
 
-  it("shows a card when Rust projects its display visibility, without showCards", () => {
+  it("shows a card when Rust projects its display visibility", () => {
     const state = createGameState();
     useGameStore.setState({
       gameState: {

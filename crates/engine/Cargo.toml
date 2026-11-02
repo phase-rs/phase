@@ -12,12 +12,12 @@ documentation = "https://github.com/phase-rs/phase"
 name = "engine"
 
 [features]
-cli = ["tracing-subscriber"]
+cli = ["tracing-subscriber", "phase-parser/cli"]
 audit = []
 forge = []
 proptest = ["dep:proptest"]
 # Exposes raw zone placement for test crates; never enabled by production consumers.
-test-support = []
+test-support = ["phase-ast/test-support", "phase-parser/test-support"]
 # Generates only the self-contained interaction DTO contract. Production
 # consumers do not enable this feature and continue to use the existing action
 # transport until the explicit adapter cutover.
@@ -28,6 +28,8 @@ interaction-bindings = ["dep:ts-rs"]
 combo-verify = ["test-support"]
 
 [dependencies]
+phase-ast = { path = "../phase-ast" }
+phase-parser = { path = "../phase-parser" }
 serde = { workspace = true }
 serde_ignored = "0.1"
 tracing = { workspace = true }
@@ -122,12 +124,6 @@ name = "resolution-face-census"
 path = "src/bin/resolution_face_census.rs"
 required-features = ["test-support"]
 
-[build-dependencies]
-# build.rs converts data/known-tokens.toml → JSON in OUT_DIR so the runtime
-# embed avoids the ~1s-per-process debug-mode toml_edit parse (see build.rs).
-toml = "0.8"
-serde_json = "1"
-
 [dev-dependencies]
 flate2 = "1"
 # Test-only. `game_state_stack_high_water.rs` queries the running thread's real
@@ -141,3 +137,22 @@ insta = { version = "1", features = ["json"] }
 assert_matches = "1.5"
 pretty_assertions = "1"
 syn = { version = "2", features = ["full"] }
+
+# The engine integration suite is a fixed set of test targets. `tests/integration/main.rs` is
+# the auto-discovered `integration` target (autotests stays on); these are the other shard
+# roots. `no_top_level_test_binaries` enforces one registration per file.
+[[test]]
+name = "integration_2"
+path = "tests/integration/shard_2.rs"
+
+[[test]]
+name = "integration_3"
+path = "tests/integration/shard_3.rs"
+
+[[test]]
+name = "integration_4"
+path = "tests/integration/shard_4.rs"
+
+[[test]]
+name = "integration_5"
+path = "tests/integration/shard_5.rs"

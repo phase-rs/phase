@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::ops::ControlFlow;
 
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::static_abilities::prohibition_scope_matches_player;
@@ -262,7 +263,13 @@ pub fn resolve(
             // round-trip; it falls through to the mandatory path below and
             // resolves as a zero-count draw.
             if max > 0 {
-                let drawing_player = super::resolve_player_for_context_ref(state, ability, target);
+                let Some(drawing_player) =
+                    super::resolve_player_for_context_ref(state, ability, target)
+                else {
+                    // CR 608.2b + CR 608.2c: a missing player draws nothing, the zero result a zero-card draw hands on.
+                    state.last_effect_count = Some(0);
+                    return Ok(());
+                };
                 // CR 121.3: "if an effect says that a player can't draw cards
                 // and another effect offers that player the choice to draw a
                 // card, that player can't choose to do so." CR 121.3a extends
@@ -331,7 +338,13 @@ pub fn resolve(
             // like Swans of Bryn Argoll.
             super::resolve_player_for_context_ref(state, ability, target),
         ),
-        _ => (1, ability.controller),
+        _ => (1, Some(ability.controller)),
+    };
+    // CR 608.2b: a declared player whose target was illegal draws nothing.
+    let Some(drawing_player) = drawing_player else {
+        // CR 608.2b + CR 608.2c: as above.
+        state.last_effect_count = Some(0);
+        return Ok(());
     };
 
     // CR 121.2: Route through the draw-sequence stack so a multi-card draw
@@ -431,7 +444,7 @@ fn prompt_up_to_draw_count(
             controller: ability.controller,
             source_id: ability.source_id,
             branches,
-            parent_targets: ability.targets.clone(),
+            parent_occurrences: crate::types::game_state::ParentTargetOccurrences::of(ability),
             context: ability.context.clone(),
             // CR 608.2c: the trailing instructions of this chain ("…, then
             // discard a card") are parked by `resolve_ability_chain`'s generic
@@ -439,6 +452,9 @@ fn prompt_up_to_draw_count(
             // `waits_for_resolution_choice`. Handing them over here as well
             // would run the tail twice.
             continuation: None,
+            // CR 608.2 (run boon-blockers-20261010): synthetic draw-amount
+            // branches carry no trigger-event context — None is a no-op.
+            trigger_context: None,
             // CR 614.5 + CR 616.1f: a replacement effect "gets only one
             // opportunity to affect an event". Carry the already-applied keys
             // into the branch so the answered draw cannot re-invoke a
@@ -899,7 +915,7 @@ pub(crate) fn plan_simultaneous_draw(
             if ability.starting_with.is_some()
                 || count.peel_up_to().1
                 || !super::scoped_library_search::has_no_resolution_riders(ability)
-                || super::resolve_player_for_context_ref(state, ability, target) != *player
+                || super::resolve_player_for_context_ref(state, ability, target) != Some(*player)
             {
                 return None;
             }

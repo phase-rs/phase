@@ -9,9 +9,11 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::game::combat::{AttackTarget, CombatParticipation};
 use crate::game::game_object::AttachTarget;
+#[cfg(feature = "test-support")]
+use crate::game::perf_counters;
 use crate::game::triggers::{ConsumedTriggerEventOccurrence, PendingTriggerContext};
 
-use super::ability::{ContinuousModification, TriggerDefinitionRef};
+use super::ability::{ChosenAttribute, ContinuousModification, TriggerDefinitionRef};
 use super::card::TokenImageRef;
 use super::card_type::CoreType;
 use super::counter::CounterType;
@@ -20,13 +22,14 @@ use super::game_state::{
     TransientContinuousEffect, ZoneChangeRecord,
 };
 use super::identifiers::{
-    DelayedTriggerInstanceId, DelayedTriggerToken, ObjectId, ObjectIncarnationRef, TriggerFiring,
-    LEGACY_INCARNATION,
+    DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken, ObjectId,
+    ObjectIncarnationRef, TriggerFiring, LEGACY_INCARNATION,
 };
 use super::mana::{ManaPipId, ManaUnit};
 use super::player::{PlayerCounterKind, PlayerId};
 use super::proposed_event::{CopyTokenSpec, TokenSpec};
 use super::resolution::{FrameKind, ResolutionFrame, ResolutionStackError};
+use super::stickers::StickerLocator;
 use super::zones::Zone;
 
 /// Globally ordered identity of a resolved command.
@@ -341,8 +344,9 @@ pub struct ResolvedContinuousEffectCommand {
     pub cause: RulesExecutionNodeRef,
 }
 
-/// Exact records selected at one settled CR 611.2b state-duration boundary.
-/// Replay consumes these operands without rechecking their expired conditions.
+/// Exact records selected at one settled CR 611.2b state-duration boundary, or
+/// a single-cast grant its cast used up. Replay consumes these
+/// operands without rechecking their expired conditions.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolvedContinuousEffectRetirementCommand {
@@ -422,8 +426,12 @@ pub enum ResolvedContinuousEffectRetirementInvariantError {
     EmptyBatch,
     #[error("continuous-effect retirement repeats operand id {0}")]
     DuplicateOperandId(u64),
-    #[error("continuous-effect retirement operand {0} is not a state duration")]
-    NotStateDuration(u64),
+    /// CR 611.2b: only a state duration, or a used single-cast grant,
+    /// ends outside its stated duration.
+    #[error(
+        "continuous-effect retirement operand {0} is neither a state duration nor a single-cast grant"
+    )]
+    NotRetirable(u64),
     #[error("continuous-effect retirement operand {0} is not installed")]
     MissingEffect(u64),
     #[error("continuous-effect retirement id {0} has multiple installed records")]
@@ -447,14 +455,33 @@ impl ResolvedContinuousEffectRetirementCommand {
                     ResolvedContinuousEffectRetirementInvariantError::DuplicateOperandId(effect.id),
                 );
             }
-            if !effect.duration.is_for_as_long_as() {
+            if !effect.duration.is_for_as_long_as() && !grants_single_cast(effect) {
                 return Err(
-                    ResolvedContinuousEffectRetirementInvariantError::NotStateDuration(effect.id),
+                    ResolvedContinuousEffectRetirementInvariantError::NotRetirable(effect.id),
                 );
             }
         }
         Ok(())
     }
+}
+
+/// An effect whose Oracle wording grants ONE cast ("you may cast a creature
+/// spell from your graveyard this turn") ends with the cast it authorized,
+/// before its stated duration runs out.
+fn grants_single_cast(effect: &TransientContinuousEffect) -> bool {
+    effect.modifications.iter().any(|modification| {
+        matches!(
+            modification,
+            ContinuousModification::GrantStaticAbility { definition }
+                if matches!(
+                    definition.mode,
+                    super::statics::StaticMode::GraveyardCastPermission {
+                        cast_limit: super::statics::PermissionCastLimit::Single,
+                        ..
+                    }
+                )
+        )
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -526,6 +553,8 @@ pub enum ResolvedCombatMembershipEdit {
     Attack {
         resulting_defending_player: PlayerId,
         resulting_attack_target: AttackTarget,
+        #[serde(default)]
+        resulting_attack_target_identity: Option<ObjectIncarnationRef>,
     },
     /// CR 509.1g + CR 506.3e: the object became a blocking creature for the
     /// recorded attacker, which becomes blocked per CR 509.1h.
@@ -548,6 +577,13 @@ pub enum ResolvedCombatMembershipEdit {
     Remove {
         expected_participation: CombatParticipation,
     },
+    /// CR 506.4 + CR 506.4c + CR 506.4d + CR 506.4e: the object, a planeswalker or
+    /// battle whose characteristics changed, stopped being attacked. Only its
+    /// incoming attacked relations end: the listed attackers (in declaration
+    /// order) stay attacking creatures, attacking nothing, and the object keeps
+    /// any role of its own. The applier requires the same attackers still attack
+    /// this exact object before retiring their edges.
+    RetireAttacked { expected_attacked_by: Vec<ObjectId> },
 }
 
 /// Typed failure while applying one already-resolved combat-membership edit.
@@ -586,6 +622,14 @@ pub enum ResolvedCombatMembershipReplayInvariantError {
         object: ObjectId,
         expected: Box<CombatParticipation>,
         found: Box<CombatParticipation>,
+    },
+    #[error(
+        "combat-membership attacked-relation retirement mismatch for {object:?}: expected attackers {expected:?}, found {found:?}"
+    )]
+    RetiredAttackMismatch {
+        object: ObjectId,
+        expected: Vec<ObjectId>,
+        found: Vec<ObjectId>,
     },
 }
 
@@ -816,6 +860,15 @@ pub struct ResolvedTokenCreationCommand {
     /// CR 614.1: the post-replacement tapped state the token actually entered
     /// with, not the spec's pre-replacement request.
     pub resulting_tapped: bool,
+    /// CR 614.12a + CR 400.7: the entrant's as-enters answers (entry-payment
+    /// latches, self `choose` latches) as they rode the entry event. The
+    /// applier installs them onto the materialized object before its
+    /// entry-record snapshot, mirroring the live fold; without them a replayed
+    /// copy of a payment creature has no latch and its CDA reads 0. `default`
+    /// keeps pre-change journals parsing; `skip_serializing_if` keeps the
+    /// empty case byte-identical on the wire.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entry_choices: Vec<ChosenAttribute>,
     /// The `next_object_id` high-water after this token's id was drawn, so a
     /// replay resuming from a shorter prefix cannot hand the same id out twice.
     pub resulting_next_object_id: u64,
@@ -923,7 +976,7 @@ pub struct ResolvedInformationCommand {
 /// One exact constrained-trigger ledger fact.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ResolvedTriggerLedgerEdit {
-    /// CR 603.2c: This trigger occurrence has used its one-per-turn fact.
+    /// CR 603.2: This trigger occurrence has used its once-each-turn trigger limit.
     OncePerTurn,
     /// CR 603.2c: This trigger occurrence has used its one-per-game fact.
     OncePerGame,
@@ -931,6 +984,8 @@ pub enum ResolvedTriggerLedgerEdit {
     OncePerOpponentPerTurn { opponent: PlayerId },
     /// Increment from the captured prior count for MaxTimesPerTurn.
     MaxTimesPerTurn { expected_old: u32 },
+    /// CR 603.2h: this player took this ability's indicated action this turn.
+    IndicatedActionTaken { player: PlayerId },
 }
 
 /// A named once-per-turn permission slot consumed by a completed play or cast.
@@ -1038,12 +1093,20 @@ pub struct ResolvedLibraryShuffleCommand {
     pub cause: RulesExecutionNodeRef,
 }
 
+/// CR 613.7k: one retained sticker's renewal, in prior relative timestamp order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetainedStickerTimestamp {
+    pub locator: StickerLocator,
+    pub prior_timestamp: u64,
+    pub timestamp: u64,
+}
+
 /// One exact transition of an object occurrence between zone containers.
 ///
 /// CR 400.7: the command binds the source occurrence and its resulting
 /// incarnation, so replay neither selects a new object nor creates a new
-/// incarnation. CR 613.7d: battlefield-entry timestamps are captured by the
-/// ordinary path and installed exactly on replay.
+/// incarnation. CR 613.7d + CR 613.7k: object-entry and retained-sticker
+/// timestamps are captured by the ordinary path and installed exactly on replay.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedZoneChangeCommand {
     pub object: ObjectIncarnationRef,
@@ -1054,14 +1117,69 @@ pub struct ResolvedZoneChangeCommand {
     pub destination_position: usize,
     pub owner: PlayerId,
     /// The owner the object had before this transition rebound it to `owner`
-    /// (Hand entry from a shared zone under `HandEntryOwnership::ReceiverOwns`);
-    /// `None` when ownership is unchanged.
+    /// (Hand entry from a shared zone, or a land play, under
+    /// `EntryOwnership::ActorOwns`); `None` when ownership is unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rebound_from: Option<PlayerId>,
     pub entry_timestamp: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_sticker_timestamps: Option<Vec<RetainedStickerTimestamp>>,
     pub turn_zone_change_index: usize,
     pub zone_change_record: ZoneChangeRecord,
     pub cause: RulesExecutionNodeRef,
+}
+
+impl ResolvedZoneChangeCommand {
+    /// CR 613.7d + CR 613.7k: the structural authority for the timestamp
+    /// operands. A battlefield entry carries its entry timestamp; retained
+    /// sticker rows follow a recorded entry timestamp on a real move into a
+    /// zone that retains stickers, with unique locators, non-decreasing prior
+    /// stamps and strictly increasing installed stamps after the object's. A
+    /// real public nonbattlefield move with a scalar and no rows stays
+    /// loadable; the live prestate decides whether rows were required.
+    pub fn validate_timestamp_operands(
+        &self,
+    ) -> Result<(), ResolvedZoneChangeReplayInvariantError> {
+        if self.to == Zone::Battlefield && self.entry_timestamp.is_none() {
+            return Err(ResolvedZoneChangeReplayInvariantError::MissingBattlefieldEntryTimestamp);
+        }
+        let retains = crate::game::stickers::zone_retains_stickers(self.to);
+        match &self.retained_sticker_timestamps {
+            Some(rows) => {
+                let mismatch =
+                    || ResolvedZoneChangeReplayInvariantError::RetainedStickerMetadataMismatch {
+                        recorded: self.retained_sticker_timestamps.clone(),
+                    };
+                let Some(entry_timestamp) = self.entry_timestamp else {
+                    return Err(mismatch());
+                };
+                if rows.is_empty() || self.from == self.to || !retains {
+                    return Err(mismatch());
+                }
+                let mut locators = HashSet::new();
+                let mut prior_floor = 0;
+                let mut installed_floor = entry_timestamp;
+                for row in rows {
+                    if !locators.insert(&row.locator)
+                        || row.prior_timestamp < prior_floor
+                        || row.timestamp <= installed_floor
+                    {
+                        return Err(mismatch());
+                    }
+                    prior_floor = row.prior_timestamp;
+                    installed_floor = row.timestamp;
+                }
+                Ok(())
+            }
+            None if self.to != Zone::Battlefield
+                && self.entry_timestamp.is_some()
+                && (self.from == self.to || !retains) =>
+            {
+                Err(ResolvedZoneChangeReplayInvariantError::UnexpectedNonbattlefieldTimestamp)
+            }
+            None => Ok(()),
+        }
+    }
 }
 
 /// Typed failure while applying one already-resolved zone transition.
@@ -1086,8 +1204,18 @@ pub enum ResolvedZoneChangeReplayInvariantError {
     RecordedTurnMismatch { expected: u32, found: u32 },
     #[error("zone-change battlefield entry is missing its timestamp")]
     MissingBattlefieldEntryTimestamp,
-    #[error("zone-change nonbattlefield entry unexpectedly has a timestamp")]
+    /// CR 613.7d + CR 613.7k: a nonbattlefield move carries an entry timestamp
+    /// only when it renews retained stickers.
+    #[error(
+        "zone-change entry timestamp is unexpected for a hidden, same-zone or unstickered nonbattlefield move"
+    )]
     UnexpectedNonbattlefieldTimestamp,
+    /// CR 613.7k: recorded retained timestamps disagree with the operand or the
+    /// source's stickers.
+    #[error("zone-change retained sticker timestamp metadata mismatch: {recorded:?}")]
+    RetainedStickerMetadataMismatch {
+        recorded: Option<Vec<RetainedStickerTimestamp>>,
+    },
     #[error("zone-change installed incarnation mismatch: expected {expected}, found {found}")]
     ResultingIncarnationMismatch { expected: u64, found: u64 },
 }
@@ -1255,6 +1383,10 @@ pub struct ResolvedStackPushCommand {
     pub origin: ResolvedStackPushOrigin,
     /// Zero-based index the entry occupies after the push (CR 405.2).
     pub resulting_position: usize,
+    /// CR 601.2a + CR 707.10: the identity minted for a spell put onto the
+    /// stack, stamped on its object. `None` for abilities and legacy journals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spell_announcement: Option<crate::types::game_state::SpellAnnouncement>,
     pub cause: RulesExecutionNodeRef,
 }
 
@@ -1937,7 +2069,8 @@ pub enum RulesExecutionNodeKind {
 ///
 /// bundle_parent lets a triggered mana ability remain selectable with its
 /// causing activation while retaining its own distinct causal node.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(not(feature = "test-support"), derive(Clone))]
 pub struct SettlementNode {
     pub ordinal: SettlementNodeOrdinal,
     pub identity: RulesExecutionNodeRef,
@@ -1956,8 +2089,38 @@ pub struct SettlementNode {
     pub journal_ordinals: Vec<ResolvedCommandOrdinal>,
 }
 
+#[cfg(feature = "test-support")]
+impl Clone for SettlementNode {
+    fn clone(&self) -> Self {
+        crate::game::perf_counters::record_history_entry_copied();
+        let Self {
+            ordinal,
+            identity,
+            kind,
+            caused_by,
+            depends_on,
+            bundle_parent,
+            produced_pips,
+            spent_pips,
+            journal_ordinals,
+        } = self;
+        Self {
+            ordinal: *ordinal,
+            identity: *identity,
+            kind: kind.clone(),
+            caused_by: *caused_by,
+            depends_on: depends_on.clone(),
+            bundle_parent: *bundle_parent,
+            produced_pips: produced_pips.clone(),
+            spent_pips: spent_pips.clone(),
+            journal_ordinals: journal_ordinals.clone(),
+        }
+    }
+}
+
 /// One command slot assigned to a journal node.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(not(feature = "test-support"), derive(Clone))]
 pub struct ResolvedCommandJournalEntry {
     pub ordinal: ResolvedCommandOrdinal,
     pub node: RulesExecutionNodeRef,
@@ -1967,11 +2130,41 @@ pub struct ResolvedCommandJournalEntry {
     pub command: Option<ResolvedRulesCommand>,
 }
 
+#[cfg(feature = "test-support")]
+impl Clone for ResolvedCommandJournalEntry {
+    fn clone(&self) -> Self {
+        crate::game::perf_counters::record_history_entry_copied();
+        let Self {
+            ordinal,
+            node,
+            command,
+        } = self;
+        Self {
+            ordinal: *ordinal,
+            node: *node,
+            command: command.clone(),
+        }
+    }
+}
+
 /// Exact stamped mana created by one node.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(not(feature = "test-support"), derive(Clone))]
 pub struct ProducedManaUnit {
     pub unit: ManaUnit,
     pub producer: RulesExecutionNodeRef,
+}
+
+#[cfg(feature = "test-support")]
+impl Clone for ProducedManaUnit {
+    fn clone(&self) -> Self {
+        crate::game::perf_counters::record_history_entry_copied();
+        let Self { unit, producer } = self;
+        Self {
+            unit: unit.clone(),
+            producer: *producer,
+        }
+    }
 }
 
 impl PartialEq for ProducedManaUnit {
@@ -1985,12 +2178,32 @@ impl PartialEq for ProducedManaUnit {
 impl Eq for ProducedManaUnit {}
 
 /// Exact mana unit consumed for one cost component, in consumption order.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(not(feature = "test-support"), derive(Clone))]
 pub struct SpentManaUnit {
     pub unit: ManaUnit,
     pub producer: RulesExecutionNodeRef,
     pub payment: RulesExecutionNodeRef,
     pub recipient: ManaPaymentRecipient,
+}
+
+#[cfg(feature = "test-support")]
+impl Clone for SpentManaUnit {
+    fn clone(&self) -> Self {
+        crate::game::perf_counters::record_history_entry_copied();
+        let Self {
+            unit,
+            producer,
+            payment,
+            recipient,
+        } = self;
+        Self {
+            unit: unit.clone(),
+            producer: *producer,
+            payment: *payment,
+            recipient: recipient.clone(),
+        }
+    }
 }
 
 impl PartialEq for SpentManaUnit {
@@ -2042,10 +2255,82 @@ impl std::error::Error for ResolvedRulesJournalError {}
 pub struct ResolvedRulesJournal {
     next_command_ordinal: u64,
     next_settlement_node_ordinal: u64,
-    entries: Vec<ResolvedCommandJournalEntry>,
-    nodes: Vec<SettlementNode>,
-    produced_mana: Vec<ProducedManaUnit>,
-    spent_mana: Vec<SpentManaUnit>,
+    entries: im::Vector<ResolvedCommandJournalEntry>,
+    nodes: im::Vector<SettlementNode>,
+    produced_mana: im::Vector<ProducedManaUnit>,
+    spent_mana: im::Vector<SpentManaUnit>,
+    index: JournalIndex,
+}
+
+/// Where each keyed record sits in the journal's vectors. A function of those vectors, kept by the
+/// journal's own appenders and rebuilt on load; never serialized.
+#[derive(Debug, Clone, PartialEq, Default)]
+struct JournalIndex {
+    nodes: im::HashMap<RulesExecutionNodeRef, usize>,
+    produced: im::HashMap<ManaPipId, usize>,
+    spent: im::HashMap<ManaPipId, usize>,
+    latest_producer: im::HashMap<ObjectId, usize>,
+    delayed_by_token: im::HashMap<DelayedTriggerToken, im::Vector<usize>>,
+    delayed_by_instance: im::HashMap<DelayedTriggerInstanceId, im::Vector<usize>>,
+    player_leave_moves: im::HashSet<PlayerLeaveMove>,
+}
+
+/// CR 800.4a: a zone change caused by a player leaving the game. A log event carries no
+/// incarnation, so the turn zone-change index tells repeated identical moves apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PlayerLeaveMove {
+    pub object_id: ObjectId,
+    pub from: Zone,
+    pub to: Zone,
+    pub turn_zone_change_index: usize,
+}
+
+impl JournalIndex {
+    fn record_entry(&mut self, position: usize, entry: &ResolvedCommandJournalEntry) {
+        self.record_delayed_install(position, entry);
+        if let Some(ResolvedRulesCommand::ZoneChange(command)) = &entry.command {
+            if matches!(command.cause, RulesExecutionNodeRef::PlayerLeave(_)) {
+                self.player_leave_moves.insert(PlayerLeaveMove {
+                    object_id: command.object.object_id,
+                    from: command.from,
+                    to: command.to,
+                    turn_zone_change_index: command.turn_zone_change_index,
+                });
+            }
+        }
+    }
+
+    fn record_delayed_install(&mut self, position: usize, entry: &ResolvedCommandJournalEntry) {
+        if let Some(origin) = delayed_install_origin(entry) {
+            self.delayed_by_token
+                .entry(origin.token)
+                .or_default()
+                .push_back(position);
+            self.delayed_by_instance
+                .entry(origin.instance)
+                .or_default()
+                .push_back(position);
+        }
+    }
+}
+
+/// CR 603.7: the origin of the delayed-trigger install an entry records, if it records one.
+fn delayed_install_origin(entry: &ResolvedCommandJournalEntry) -> Option<DelayedTriggerOrigin> {
+    match &entry.command {
+        Some(ResolvedRulesCommand::DelayedTriggerInstall(command)) => {
+            command.trigger.provenance.origin()
+        }
+        _ => None,
+    }
+}
+
+/// Counts one keyed journal read, and the record it found if any.
+#[cfg(feature = "test-support")]
+fn meter_keyed_read(found: bool) {
+    perf_counters::record_journal_keyed_read();
+    if found {
+        perf_counters::record_journal_record_examined();
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -2053,13 +2338,13 @@ struct ResolvedRulesJournalWire {
     next_command_ordinal: u64,
     next_settlement_node_ordinal: u64,
     #[serde(default)]
-    entries: Vec<ResolvedCommandJournalEntry>,
+    entries: im::Vector<ResolvedCommandJournalEntry>,
     #[serde(default)]
-    nodes: Vec<SettlementNode>,
+    nodes: im::Vector<SettlementNode>,
     #[serde(default)]
-    produced_mana: Vec<ProducedManaUnit>,
+    produced_mana: im::Vector<ProducedManaUnit>,
     #[serde(default)]
-    spent_mana: Vec<SpentManaUnit>,
+    spent_mana: im::Vector<SpentManaUnit>,
 }
 
 impl Serialize for ResolvedRulesJournal {
@@ -2085,14 +2370,16 @@ impl<'de> Deserialize<'de> for ResolvedRulesJournal {
         D: Deserializer<'de>,
     {
         let wire = ResolvedRulesJournalWire::deserialize(deserializer)?;
-        let journal = Self {
+        let mut journal = Self {
             next_command_ordinal: wire.next_command_ordinal,
             next_settlement_node_ordinal: wire.next_settlement_node_ordinal,
             entries: wire.entries,
             nodes: wire.nodes,
             produced_mana: wire.produced_mana,
             spent_mana: wire.spent_mana,
+            index: JournalIndex::default(),
         };
+        journal.rebuild_index();
         journal
             .validate_serialized_authority()
             .map_err(serde::de::Error::custom)?;
@@ -2101,37 +2388,87 @@ impl<'de> Deserialize<'de> for ResolvedRulesJournal {
 }
 
 impl ResolvedRulesJournal {
-    pub fn entries(&self) -> &[ResolvedCommandJournalEntry] {
+    pub fn entries(&self) -> &im::Vector<ResolvedCommandJournalEntry> {
         &self.entries
     }
 
-    pub fn nodes(&self) -> &[SettlementNode] {
+    pub fn nodes(&self) -> &im::Vector<SettlementNode> {
         &self.nodes
     }
 
-    pub fn produced_mana(&self) -> &[ProducedManaUnit] {
+    pub fn produced_mana(&self) -> &im::Vector<ProducedManaUnit> {
         &self.produced_mana
     }
 
-    pub fn spent_mana(&self) -> &[SpentManaUnit] {
+    pub fn spent_mana(&self) -> &im::Vector<SpentManaUnit> {
         &self.spent_mana
     }
 
+    /// The entries from `start` on; empty when `start` is past the end, as it is once a turn
+    /// boundary has truncated the journal under a caller's earlier length.
+    pub fn entries_since(&self, start: usize) -> im::Vector<ResolvedCommandJournalEntry> {
+        self.entries.skip(start.min(self.entries.len()))
+    }
+
+    /// CR 800.4a: whether this turn's journal records `key` as caused by a player leaving.
+    pub fn records_player_leave_move(&self, key: &PlayerLeaveMove) -> bool {
+        self.index.player_leave_moves.contains(key)
+    }
+
     pub fn has_produced_pip(&self, pip: ManaPipId) -> bool {
-        self.produced_mana
-            .iter()
-            .any(|record| record.unit.pip_id == pip)
+        let found = self.index.produced.contains_key(&pip);
+        #[cfg(feature = "test-support")]
+        meter_keyed_read(found);
+        found
     }
 
     pub fn latest_mana_producer_for_source(
         &self,
-        source_id: super::identifiers::ObjectId,
+        source_id: ObjectId,
     ) -> Option<RulesExecutionNodeRef> {
-        self.produced_mana
-            .iter()
-            .rev()
-            .find(|record| record.unit.source_id == source_id)
-            .map(|record| record.producer)
+        let producer = self
+            .index
+            .latest_producer
+            .get(&source_id)
+            .map(|&position| self.produced_mana[position].producer);
+        #[cfg(feature = "test-support")]
+        meter_keyed_read(producer.is_some());
+        producer
+    }
+
+    pub fn contains_node(&self, node: RulesExecutionNodeRef) -> bool {
+        self.node_index(node).is_ok()
+    }
+
+    /// CR 603.7: the origins of the recorded delayed-trigger installs sharing `token` or
+    /// `instance`, in journal order.
+    pub(crate) fn delayed_install_origins_sharing(
+        &self,
+        token: DelayedTriggerToken,
+        instance: DelayedTriggerInstanceId,
+    ) -> Vec<DelayedTriggerOrigin> {
+        let mut positions: Vec<usize> = self
+            .index
+            .delayed_by_token
+            .get(&token)
+            .into_iter()
+            .chain(self.index.delayed_by_instance.get(&instance))
+            .flatten()
+            .copied()
+            .collect();
+        positions.sort_unstable();
+        positions.dedup();
+        #[cfg(feature = "test-support")]
+        {
+            perf_counters::record_journal_keyed_read();
+            for _ in &positions {
+                perf_counters::record_journal_record_examined();
+            }
+        }
+        positions
+            .into_iter()
+            .filter_map(|position| delayed_install_origin(&self.entries[position]))
+            .collect()
     }
 
     pub fn next_command_ordinal(&self) -> ResolvedCommandOrdinal {
@@ -2149,12 +2486,12 @@ impl ResolvedRulesJournal {
         let command = self.allocate_command();
         let ordinal = self.allocate_node();
         let identity = RulesExecutionNodeRef::Proposal(command);
-        self.entries.push(ResolvedCommandJournalEntry {
+        self.entries.push_back(ResolvedCommandJournalEntry {
             ordinal: command,
             node: identity,
             command: None,
         });
-        self.nodes.push(SettlementNode {
+        self.push_node(SettlementNode {
             ordinal,
             identity,
             kind: RulesExecutionNodeKind::Proposal,
@@ -2185,12 +2522,12 @@ impl ResolvedRulesJournal {
         let command = self.allocate_command();
         let ordinal = self.allocate_node();
         let identity = RulesExecutionNodeRef::PlayerLeave(command);
-        self.entries.push(ResolvedCommandJournalEntry {
+        self.entries.push_back(ResolvedCommandJournalEntry {
             ordinal: command,
             node: identity,
             command: None,
         });
-        self.nodes.push(SettlementNode {
+        self.push_node(SettlementNode {
             ordinal,
             identity,
             kind: RulesExecutionNodeKind::PlayerLeave,
@@ -2242,15 +2579,15 @@ impl ResolvedRulesJournal {
     ) -> Result<(), ResolvedRulesJournalError> {
         Self::require_stamped(unit.pip_id)?;
         let node_index = self.node_index(producer)?;
-        if self
-            .produced_mana
-            .iter()
-            .any(|record| record.unit.pip_id == unit.pip_id)
-        {
+        if self.has_produced_pip(unit.pip_id) {
             return Err(ResolvedRulesJournalError::DuplicateProducedPip(unit.pip_id));
         }
         self.nodes[node_index].produced_pips.push(unit.pip_id);
-        self.produced_mana.push(ProducedManaUnit { unit, producer });
+        let position = self.produced_mana.len();
+        self.index.produced.insert(unit.pip_id, position);
+        self.index.latest_producer.insert(unit.source_id, position);
+        self.produced_mana
+            .push_back(ProducedManaUnit { unit, producer });
         Ok(())
     }
 
@@ -2282,11 +2619,14 @@ impl ResolvedRulesJournal {
             if !seen.insert(unit.pip_id) || self.spent_pip_exists(unit.pip_id) {
                 return Err(ResolvedRulesJournalError::DuplicateSpentPip(unit.pip_id));
             }
-            let Some(produced) = self
-                .produced_mana
-                .iter()
-                .find(|record| record.unit.pip_id == unit.pip_id)
-            else {
+            let produced = self
+                .index
+                .produced
+                .get(&unit.pip_id)
+                .map(|&position| &self.produced_mana[position]);
+            #[cfg(feature = "test-support")]
+            meter_keyed_read(produced.is_some());
+            let Some(produced) = produced else {
                 return Err(ResolvedRulesJournalError::UnknownProducedPip(unit.pip_id));
             };
             if !dependencies.contains(&produced.producer) {
@@ -2306,6 +2646,11 @@ impl ResolvedRulesJournal {
         let payment_index = self.node_index(payment)?;
         self.nodes[payment_index].depends_on = dependencies;
         self.nodes[payment_index].spent_pips = spent.iter().map(|unit| unit.pip_id).collect();
+        for (offset, unit) in spent.iter().enumerate() {
+            self.index
+                .spent
+                .insert(unit.pip_id, self.spent_mana.len() + offset);
+        }
         self.spent_mana.extend(
             spent
                 .iter()
@@ -2339,10 +2684,15 @@ impl ResolvedRulesJournal {
         let units = spent
             .iter()
             .map(|unit| {
-                let producer = self
-                    .spent_mana
-                    .iter()
-                    .find(|record| record.payment == payment && record.unit.pip_id == unit.pip_id)
+                let record = self
+                    .index
+                    .spent
+                    .get(&unit.pip_id)
+                    .map(|&position| &self.spent_mana[position])
+                    .filter(|record| record.payment == payment);
+                #[cfg(feature = "test-support")]
+                meter_keyed_read(record.is_some());
+                let producer = record
                     .expect("recorded spent mana must retain its producer")
                     .producer;
                 ResolvedManaSpentUnit {
@@ -2617,12 +2967,12 @@ impl ResolvedRulesJournal {
         let command = self.allocate_command();
         let ordinal = self.allocate_node();
         let identity = identity_for(ordinal);
-        self.entries.push(ResolvedCommandJournalEntry {
+        self.entries.push_back(ResolvedCommandJournalEntry {
             ordinal: command,
             node: identity,
             command: None,
         });
-        self.nodes.push(SettlementNode {
+        self.push_node(SettlementNode {
             ordinal,
             identity,
             kind,
@@ -2644,11 +2994,13 @@ impl ResolvedRulesJournal {
         self.ensure_command_capacity()?;
         let node_index = self.node_index(node)?;
         let ordinal = self.allocate_command();
-        self.entries.push(ResolvedCommandJournalEntry {
+        let entry = ResolvedCommandJournalEntry {
             ordinal,
             node,
             command: Some(command),
-        });
+        };
+        self.index.record_entry(self.entries.len(), &entry);
+        self.entries.push_back(entry);
         self.nodes[node_index].journal_ordinals.push(ordinal);
         Ok(ordinal)
     }
@@ -2685,10 +3037,10 @@ impl ResolvedRulesJournal {
         &self,
         identity: RulesExecutionNodeRef,
     ) -> Result<usize, ResolvedRulesJournalError> {
-        self.nodes
-            .iter()
-            .position(|node| node.identity == identity)
-            .ok_or(ResolvedRulesJournalError::UnknownNode(identity))
+        let position = self.index.nodes.get(&identity).copied();
+        #[cfg(feature = "test-support")]
+        meter_keyed_read(position.is_some());
+        position.ok_or(ResolvedRulesJournalError::UnknownNode(identity))
     }
 
     fn bundle_owner(
@@ -2700,9 +3052,41 @@ impl ResolvedRulesJournal {
     }
 
     fn spent_pip_exists(&self, pip: ManaPipId) -> bool {
-        self.spent_mana
-            .iter()
-            .any(|record| record.unit.pip_id == pip)
+        let found = self.index.spent.contains_key(&pip);
+        #[cfg(feature = "test-support")]
+        meter_keyed_read(found);
+        found
+    }
+
+    fn push_node(&mut self, node: SettlementNode) {
+        self.index
+            .nodes
+            .entry(node.identity)
+            .or_insert(self.nodes.len());
+        self.nodes.push_back(node);
+    }
+
+    /// Rebuilds the lookup index from the vectors. A repeated key keeps its first position, as the
+    /// forward scans it answers for would; `validate_serialized_authority` rejects the repeats a
+    /// valid journal cannot hold.
+    fn rebuild_index(&mut self) {
+        let mut index = JournalIndex::default();
+        for (position, node) in self.nodes.iter().enumerate() {
+            index.nodes.entry(node.identity).or_insert(position);
+        }
+        for (position, record) in self.produced_mana.iter().enumerate() {
+            index.produced.entry(record.unit.pip_id).or_insert(position);
+            index
+                .latest_producer
+                .insert(record.unit.source_id, position);
+        }
+        for (position, record) in self.spent_mana.iter().enumerate() {
+            index.spent.entry(record.unit.pip_id).or_insert(position);
+        }
+        for (position, entry) in self.entries.iter().enumerate() {
+            index.record_entry(position, entry);
+        }
+        self.index = index;
     }
 
     fn require_stamped(pip: ManaPipId) -> Result<(), ResolvedRulesJournalError> {
@@ -3151,6 +3535,30 @@ impl ResolvedRulesJournal {
                     ));
                 }
                 match &command.edit {
+                    ResolvedCombatMembershipEdit::Attack {
+                        resulting_attack_target,
+                        resulting_attack_target_identity: Some(pin),
+                        ..
+                    } if pin.incarnation == LEGACY_INCARNATION
+                        || match resulting_attack_target {
+                            AttackTarget::Planeswalker(id) | AttackTarget::Battle(id) => {
+                                *id != pin.object_id
+                            }
+                            AttackTarget::Player(_) => true,
+                        } =>
+                    {
+                        return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                            "combat-membership attack has incoherent permanent identity"
+                                .to_string(),
+                        ));
+                    }
+                    ResolvedCombatMembershipEdit::Remove {
+                        expected_participation,
+                    } if !expected_participation.is_coherent(command.object.object_id) => {
+                        return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                            "combat-membership removal has incoherent attack authority".to_string(),
+                        ));
+                    }
                     // CR 509.1a: a creature is chosen to block an attacking
                     // creature, which is never itself.
                     ResolvedCombatMembershipEdit::Block {
@@ -3169,10 +3577,19 @@ impl ResolvedRulesJournal {
                             "combat-membership removal prunes no combat role".to_string(),
                         ));
                     }
+                    // CR 506.4: a retirement that ends no relation never happened.
+                    ResolvedCombatMembershipEdit::RetireAttacked {
+                        expected_attacked_by,
+                    } if expected_attacked_by.is_empty() => {
+                        return Err(ResolvedRulesJournalError::InvalidSerializedAuthority(
+                            "combat-membership retirement ends no attacked relation".to_string(),
+                        ));
+                    }
                     ResolvedCombatMembershipEdit::Attack { .. }
                     | ResolvedCombatMembershipEdit::Block { .. }
                     | ResolvedCombatMembershipEdit::MarkBlocked
-                    | ResolvedCombatMembershipEdit::Remove { .. } => {}
+                    | ResolvedCombatMembershipEdit::Remove { .. }
+                    | ResolvedCombatMembershipEdit::RetireAttacked { .. } => {}
                 }
             }
             ResolvedRulesCommand::ControllerOverride(command) => {
@@ -3426,23 +3843,31 @@ fn zone_change_command_is_invalid(command: &ResolvedZoneChangeCommand) -> bool {
     let record = &command.zone_change_record;
     let changes_incarnation = command.from != command.to;
     command.object.incarnation == LEGACY_INCARNATION
-        || command.owner != record.owner
+        || command.owner != record.arrival.owner
+        || record.owner != command.rebound_from.unwrap_or(command.owner)
         || record.object_id != command.object.object_id
         || record.from_zone != Some(command.from)
         || record.to_zone != command.to
         || record.turn_zone_change_index != command.turn_zone_change_index
         || (changes_incarnation && command.resulting_incarnation <= command.object.incarnation)
         || (!changes_incarnation && command.resulting_incarnation != command.object.incarnation)
-        || (command.to == Zone::Battlefield) != command.entry_timestamp.is_some()
+        || command.validate_timestamp_operands().is_err()
         || (command.to == Zone::Battlefield
             && record.entered_incarnation != Some(command.resulting_incarnation))
         || (command.to != Zone::Battlefield && record.entered_incarnation.is_some())
         || command.rebound_from.is_some_and(|previous| {
-            // The rebind is a Hand entry out of one of the two zones a format
-            // can share, and it changes the owner.
+            // The rebind changes the owner and is a Hand entry out of one of the
+            // two zones a format can share, or a land play (CR 305.1) from a zone
+            // a land can be played from.
             previous == command.owner
-                || command.to != Zone::Hand
-                || !matches!(command.from, Zone::Library | Zone::Graveyard)
+                || !matches!(
+                    (command.from, command.to),
+                    (Zone::Library | Zone::Graveyard, Zone::Hand)
+                        | (
+                            Zone::Library | Zone::Graveyard | Zone::Exile,
+                            Zone::Battlefield
+                        )
+                )
         })
 }
 
@@ -3785,7 +4210,7 @@ mod tests {
         let mut duplicate_spend = journal.clone();
         let mut duplicate_entry = duplicate_spend.entries[3].clone();
         duplicate_entry.ordinal = ResolvedCommandOrdinal(4);
-        duplicate_spend.entries.push(duplicate_entry);
+        duplicate_spend.entries.push_back(duplicate_entry);
         duplicate_spend.nodes[1]
             .journal_ordinals
             .push(ResolvedCommandOrdinal(4));
@@ -4113,6 +4538,7 @@ mod tests {
             source_zone: crate::types::zones::Zone::Battlefield,
             ability_tag: None,
             is_loyalty_ability: false,
+            activation_cost: crate::types::events::BoundActivationCost::Unknown,
             targets: vec![crate::types::game_state::ActivationTargetFact::Player(
                 PlayerId(1),
             )],
@@ -4186,5 +4612,210 @@ mod tests {
             serde_json::from_value::<ResolvedRulesJournal>(wire).is_err(),
             "a record for another source"
         );
+    }
+
+    #[test]
+    fn entries_since_past_the_end_is_empty() {
+        let mut journal = ResolvedRulesJournal::default();
+        journal.begin_proposal().unwrap();
+        journal.begin_proposal().unwrap();
+        let len = journal.entries().len();
+        assert!(len >= 2, "reach: the proposals journaled their entries");
+        assert_eq!(&journal.entries_since(0), journal.entries());
+        assert_eq!(
+            journal.entries_since(1),
+            journal.entries().iter().skip(1).cloned().collect()
+        );
+        assert!(journal.entries_since(len).is_empty());
+        assert!(journal.entries_since(len + 1).is_empty());
+    }
+
+    /// Every indexed read against the linear scan it replaces, on `journal`'s own records and
+    /// on one absent key of each kind.
+    fn assert_index_answers_as_the_scan(label: &str, journal: &ResolvedRulesJournal) {
+        for (position, node) in journal.nodes().iter().enumerate() {
+            let first = journal
+                .nodes()
+                .iter()
+                .position(|candidate| candidate.identity == node.identity);
+            if first == Some(position) {
+                assert_eq!(journal.node_index(node.identity).ok(), first, "{label}");
+                assert!(journal.contains_node(node.identity), "{label}");
+            }
+        }
+        for record in journal.produced_mana() {
+            let pip = record.unit.pip_id;
+            assert_eq!(
+                journal.index.produced.get(&pip).copied(),
+                journal
+                    .produced_mana()
+                    .iter()
+                    .position(|candidate| candidate.unit.pip_id == pip),
+                "{label}"
+            );
+            assert!(journal.has_produced_pip(pip), "{label}");
+            let source = record.unit.source_id;
+            assert_eq!(
+                journal.latest_mana_producer_for_source(source),
+                journal
+                    .produced_mana()
+                    .iter()
+                    .rev()
+                    .find(|candidate| candidate.unit.source_id == source)
+                    .map(|candidate| candidate.producer),
+                "{label}"
+            );
+        }
+        for record in journal.spent_mana() {
+            let pip = record.unit.pip_id;
+            assert_eq!(
+                journal.index.spent.get(&pip).copied(),
+                journal
+                    .spent_mana()
+                    .iter()
+                    .position(|candidate| candidate.unit.pip_id == pip),
+                "{label}"
+            );
+            assert!(journal.spent_pip_exists(pip), "{label}");
+        }
+        let installs: Vec<DelayedTriggerOrigin> = journal
+            .entries()
+            .iter()
+            .filter_map(delayed_install_origin)
+            .collect();
+        for origin in &installs {
+            assert_eq!(
+                journal.delayed_install_origins_sharing(origin.token, origin.instance),
+                installs
+                    .iter()
+                    .filter(|candidate| candidate.token == origin.token
+                        || candidate.instance == origin.instance)
+                    .copied()
+                    .collect::<Vec<_>>(),
+                "{label}"
+            );
+        }
+
+        let absent_node = RulesExecutionNodeRef::Proposal(ResolvedCommandOrdinal(u64::MAX));
+        assert!(journal.node_index(absent_node).is_err(), "{label}");
+        assert!(!journal.contains_node(absent_node), "{label}");
+        assert!(!journal.has_produced_pip(ManaPipId(u64::MAX)), "{label}");
+        assert!(!journal.spent_pip_exists(ManaPipId(u64::MAX)), "{label}");
+        assert_eq!(
+            journal.latest_mana_producer_for_source(ObjectId(u64::MAX)),
+            None,
+            "{label}"
+        );
+        assert!(
+            journal
+                .delayed_install_origins_sharing(
+                    DelayedTriggerToken(u64::MAX),
+                    DelayedTriggerInstanceId(u64::MAX)
+                )
+                .is_empty(),
+            "{label}"
+        );
+    }
+
+    #[test]
+    fn journal_index_answers_as_the_scan_on_a_rebound_cast() {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::game::scenario_db::GameScenarioDbExt;
+        use crate::types::game_state::GameState;
+        use crate::types::phase::Phase;
+        use crate::types::zones::Zone;
+
+        let db = crate::test_support::shared_card_db();
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let strike = scenario.add_real_card(P0, "Distortion Strike", Zone::Hand, db);
+        scenario.add_real_card(P0, "Island", Zone::Battlefield, db);
+        let bears = scenario.add_real_card(P0, "Grizzly Bears", Zone::Battlefield, db);
+        let mut runner = scenario.build();
+        runner.cast(strike).target_object(bears).resolve();
+
+        let live = runner.state();
+        let journal = &live.resolved_rules_journal;
+        assert!(
+            !journal.nodes().is_empty()
+                && !journal.produced_mana().is_empty()
+                && !journal.spent_mana().is_empty()
+                && journal
+                    .entries()
+                    .iter()
+                    .any(|entry| delayed_install_origin(entry).is_some()),
+            "reach: the cast journals a node, produced and spent mana, and rebound's delayed \
+             trigger ({} nodes, {} produced, {} spent)",
+            journal.nodes().len(),
+            journal.produced_mana().len(),
+            journal.spent_mana().len()
+        );
+        assert_index_answers_as_the_scan("live", journal);
+
+        let reloaded: GameState =
+            serde_json::from_str(&serde_json::to_string(live).unwrap()).expect("the state reloads");
+        assert_index_answers_as_the_scan("reloaded", &reloaded.resolved_rules_journal);
+    }
+
+    /// A hidden-origin Library → Exile move of one object under `cause`.
+    fn sweep_move(
+        cause: RulesExecutionNodeRef,
+        incarnation: u64,
+        turn_zone_change_index: usize,
+    ) -> ResolvedZoneChangeCommand {
+        let owner = PlayerId(1);
+        let mut record =
+            ZoneChangeRecord::test_minimal(ObjectId(5), Some(Zone::Library), Zone::Exile);
+        record.owner = owner;
+        record.arrival.owner = owner;
+        record.turn_zone_change_index = turn_zone_change_index;
+        ResolvedZoneChangeCommand {
+            object: ObjectIncarnationRef::of(ObjectId(5), incarnation),
+            resulting_incarnation: incarnation + 1,
+            from: Zone::Library,
+            to: Zone::Exile,
+            destination_position: 0,
+            owner,
+            rebound_from: None,
+            entry_timestamp: None,
+            retained_sticker_timestamps: None,
+            turn_zone_change_index,
+            zone_change_record: record,
+            cause,
+        }
+    }
+
+    /// CR 800.4a: the index holds exactly the zone changes a player leaving caused, survives a
+    /// reload, and starts empty.
+    #[test]
+    fn player_leave_move_index_tracks_leave_caused_zone_changes() {
+        let key = |turn_zone_change_index| PlayerLeaveMove {
+            object_id: ObjectId(5),
+            from: Zone::Library,
+            to: Zone::Exile,
+            turn_zone_change_index,
+        };
+        let mut journal = ResolvedRulesJournal::default();
+        let leave = journal.begin_player_leave().unwrap();
+        journal.record_zone_change(sweep_move(leave, 1, 0)).unwrap();
+        let proposal = journal.begin_proposal().unwrap();
+        journal
+            .record_zone_change(sweep_move(proposal, 2, 1))
+            .unwrap();
+        let assert_leave_only = |label: &str, journal: &ResolvedRulesJournal| {
+            assert!(
+                journal.records_player_leave_move(&key(0)),
+                "{label}: the leave-caused move is indexed"
+            );
+            assert!(
+                !journal.records_player_leave_move(&key(1)),
+                "{label}: the proposal-caused move is not"
+            );
+        };
+        assert_leave_only("live", &journal);
+        let reloaded: ResolvedRulesJournal =
+            serde_json::from_value(serde_json::to_value(&journal).unwrap()).unwrap();
+        assert_leave_only("reloaded", &reloaded);
+        assert!(!ResolvedRulesJournal::default().records_player_leave_move(&key(0)));
     }
 }

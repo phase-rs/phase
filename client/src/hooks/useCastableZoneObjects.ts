@@ -2,7 +2,7 @@ import { useMemo } from "react";
 
 import type { GameObject, PlayerId } from "../adapter/types.ts";
 import { useGameStore } from "../stores/gameStore.ts";
-import { collectObjectActions, isManaObjectAction } from "../viewmodel/cardActionChoice.ts";
+import { zoneSurfaceActionsForObject } from "../viewmodel/cardActionChoice.ts";
 import { resolvePileSeat } from "../viewmodel/gameStateView.ts";
 
 /**
@@ -53,9 +53,7 @@ export function useCastableZoneObjects(
         // Keep only cards the engine surfaces a genuine cast/play affordance
         // for. A lone mana-payment tap (delve/convoke) is excluded — see the
         // doc comment above.
-        return collectObjectActions(legalActionsByObject, obj.id).some(
-          (action) => !isManaObjectAction(action, obj),
-        );
+        return zoneSurfaceActionsForObject(legalActionsByObject, obj, obj.id).length > 0;
       });
   }, [zoneObjectIds, objects, legalActionsByObject]);
 }

@@ -391,7 +391,7 @@ pub fn apply_pile_effect(
         for &object_id in chosen.iter() {
             let mut chain =
                 sub_effect_as_resolved(chosen_pile_effect, source_id, source_controller);
-            chain.targets = vec![crate::types::ability::TargetRef::Object(object_id)];
+            chain.set_unpinned_targets(vec![crate::types::ability::TargetRef::Object(object_id)]);
             super::resolve_ability_chain(state, &chain, events, 1)?;
         }
     }
@@ -436,7 +436,7 @@ pub fn apply_unchosen_pile_effect(
         for &object_id in unchosen.iter() {
             let mut chain =
                 sub_effect_as_resolved(unchosen_pile_effect, source_id, source_controller);
-            chain.targets = vec![crate::types::ability::TargetRef::Object(object_id)];
+            chain.set_unpinned_targets(vec![crate::types::ability::TargetRef::Object(object_id)]);
             super::resolve_ability_chain(state, &chain, events, 1)?;
         }
     }
@@ -476,6 +476,8 @@ fn sub_effect_as_resolved(
     resolved.starting_with = def.starting_with.clone();
     resolved.target_selection_mode = def.target_selection_mode;
     resolved.sub_link = def.sub_link;
+    // CR 611.2e: carry the parser-stamped onset like every other def → resolved copy.
+    resolved.entry_onset = def.entry_onset;
     resolved
 }
 

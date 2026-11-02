@@ -123,7 +123,8 @@ fn state_with_draw_replacement() -> (GameState, ObjectId, ObjectId, AbilityDefin
     );
     resolved.source_incarnation = Some(3);
     resolved.target_incarnations = vec![ObjectIncarnationRef::of(target, 7)];
-    resolved.selected_target_incarnations = vec![ObjectIncarnationRef::of(target, 7)];
+    // CR 400.7 + CR 601.2c: positional occurrence pins, aligned with `targets`.
+    resolved.target_pins = vec![Some(ObjectIncarnationRef::of(target, 7)), None];
     let entry = state.resolving_stack_entry.as_mut().unwrap();
     entry.source_id = source;
     *entry.ability_mut().unwrap() = resolved;
@@ -175,8 +176,8 @@ fn assert_draw_replacement_carriers(
             vec![ObjectIncarnationRef::of(target, 7)]
         );
         assert_eq!(
-            ability.selected_target_incarnations,
-            vec![ObjectIncarnationRef::of(target, 7)]
+            ability.target_pins,
+            vec![Some(ObjectIncarnationRef::of(target, 7)), None]
         );
         let Effect::CreateDrawReplacement { replacement_effect } = &ability.effect else {
             panic!("resolved carrier must reach the replacement")
