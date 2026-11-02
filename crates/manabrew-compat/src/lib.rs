@@ -1164,8 +1164,8 @@ static UNSUPPORTED_PROTOCOL_CAPABILITIES: [UnsupportedCapability; 95] = [
     UnsupportedCapability {
         code: "local.secret-agenda-unsupported",
         area: "actions",
-        reason: "CR 702.106a: GameAction::ChooseSecretAgendaNames answers a pre-game secret prompt for conspiracy cards, and the protocol has no pre-game prompt family or conspiracy support.",
-        suggested_protocol_extension: "A prompt point before the first turn, as proposed on local.companion-unsupported, carrying a card-name entry whose answer is private to the chooser.",
+        reason: "CR 702.106a: an agenda may name any card, and the protocol has no text-answer family, so WaitingFor::SecretAgendaChoice is served as a ChooseFromSelection over GameState::all_card_names. Two cases remain refused under this code. A host that never loaded the card database has an empty name universe, so the prompt would have no legal answer and fails closed instead. GameAction::ChooseSecretAgendaNames carries the names themselves and is answered only through that prompt, so it has no ChooseAction entry.",
+        suggested_protocol_extension: "The text-answer family proposed on local.named-choice-unsupported would replace the card-name universe on the wire with a typed answer.",
     },
     UnsupportedCapability {
         code: "local.end-continuous-effect-unsupported",
@@ -1830,8 +1830,24 @@ fn build_prompt_input(
         WaitingFor::CombatTaxPayment { .. } => {
             unsupported_prompt(waiting_for, "local.pay-combat-cost-unsupported")
         }
-        WaitingFor::SecretAgendaChoice { .. } => {
-            unsupported_prompt(waiting_for, "local.secret-agenda-unsupported")
+        // CR 702.106a + CR 702.106f: the interaction projection publishes this
+        // choice as typed text, a shape no prompt family carries. The legal
+        // answers are still a finite list — the reducer accepts only a known card
+        // name — so the whole list is the option set. Double agenda's "two
+        // different cards" stays with the reducer, which also treats two
+        // spellings of one name as the same card.
+        WaitingFor::SecretAgendaChoice { name_count, .. } => {
+            let names = &prepared.state.all_card_names;
+            if names.is_empty() {
+                return unsupported_prompt(waiting_for, "local.secret-agenda-unsupported");
+            }
+            let name_count = usize::from(*name_count);
+            Ok(PromptInput::ChooseFromSelection(ChooseFromSelectionInput {
+                presentation: presentation("Secretly choose a card name for your agenda"),
+                options: names.iter().cloned().map(selection_option).collect(),
+                min_total: name_count,
+                max_total: name_count,
+            }))
         }
         _ => interaction_prompt(prepared, card_lookup),
     }
@@ -2529,6 +2545,21 @@ pub fn translate_response(
                     }),
                 }
             }
+            // CR 702.106a: the prompt's options are `all_card_names`, in order, so
+            // each index names a card outright. The count and the distinct-names
+            // rule are the reducer's, as they are for every other submission.
+            WaitingFor::SecretAgendaChoice { .. } => Ok(GameAction::ChooseSecretAgendaNames {
+                names: chosen_indices
+                    .iter()
+                    .map(|index| {
+                        state.all_card_names.get(*index).cloned().ok_or(
+                            AdapterError::IllegalResponseForPrompt {
+                                response_kind: "chooseFromSelection",
+                            },
+                        )
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            }),
             _ => interaction_selection_action(state, context.deciding_player, &chosen_indices),
         },
         UpstreamPromptOutput::ChooseColor(ChooseColorOutput::ColorDecision { chosen_colors }) => {
@@ -2978,7 +3009,7 @@ pub fn convert_available_action(
         GameAction::DeclareCompanion { .. } | GameAction::CompanionToHand => {
             AvailableActionConversion::Unsupported("local.companion-unsupported")
         }
-        // CR 702.106a: conspiracies have no Manabrew counterpart.
+        // CR 702.106a: answered only through the agenda's own selection prompt.
         GameAction::ChooseSecretAgendaNames { .. } => {
             AvailableActionConversion::Unsupported("local.secret-agenda-unsupported")
         }
@@ -4907,7 +4938,8 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
-    use engine::game::conspiracy::start_with_conspiracy;
+    use engine::game::conspiracy::{pending_agenda_choice, start_with_conspiracy};
+    use engine::game::engine::apply_as_current;
     use engine::game::game_object::BackFaceData;
     use engine::game::interaction::bind_interaction_authority;
     use engine::game::zones::create_object;
@@ -6359,24 +6391,154 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn secret_agenda_prompt_is_explicitly_unsupported() {
-        let result = build_prompt(
-            &prepared_for(WaitingFor::SecretAgendaChoice {
-                player: PlayerId(0),
-                object_id: ObjectId(1),
-                name_count: 1,
-            }),
-            &lookup,
+    const AGENDA_CARD_NAMES: [&str; 3] = ["Grizzly Bears", "Lightning Bolt", "Opt"];
+
+    /// A two-player game paused on `name_count` secret names for a face-down
+    /// conspiracy `PlayerId(0)` owns, with the card database's names loaded.
+    fn agenda_state(name_count: u8) -> (GameState, ObjectId) {
+        let mut state = GameState::new_two_player(7);
+        state.all_card_names = AGENDA_CARD_NAMES
+            .iter()
+            .map(|name| name.to_string())
+            .collect::<Vec<_>>()
+            .into();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Brago's Favor".to_string(),
+            Zone::Exile,
         );
+        let object = state.objects.get_mut(&id).unwrap();
+        object.card_types.core_types.push(CoreType::Conspiracy);
+        object.agenda_name_count = name_count;
+        state.exile.retain(|object| *object != id);
+        start_with_conspiracy(&mut state, id, true);
+        state.waiting_for = pending_agenda_choice(&state).expect("the agenda is unnamed");
+        (state, id)
+    }
+
+    fn agenda_selection(state: &GameState, chosen_indices: Vec<usize>) -> Result<GameAction> {
+        let prepared = prepare_snapshot_with_prompt_id(state, PlayerId(0), "game-a", 42).unwrap();
+        translate_response(
+            42,
+            PromptOutput::ChooseFromSelection(ChooseFromSelectionOutput::SelectionDecision {
+                chosen_indices,
+            }),
+            &prepared.prompt_context(),
+            state,
+        )
+    }
+
+    #[test]
+    fn secret_agenda_prompt_offers_every_card_name_for_the_required_count() {
+        for name_count in [1u8, 2] {
+            let (state, _) = agenda_state(name_count);
+            let prepared =
+                prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
+            let prompt = build_prompt(&prepared, &lookup).unwrap();
+            let PromptInput::Upstream(UpstreamPromptInput::ChooseFromSelection(input)) =
+                prompt.input
+            else {
+                panic!("an agenda is a selection over card names");
+            };
+
+            assert_eq!(
+                input
+                    .options
+                    .iter()
+                    .map(|option| option.label.as_str())
+                    .collect::<Vec<_>>(),
+                AGENDA_CARD_NAMES,
+            );
+            assert!(input.options.iter().all(|option| !option.can_repeat));
+            assert_eq!(
+                (input.min_total, input.max_total),
+                (usize::from(name_count), usize::from(name_count)),
+            );
+        }
+    }
+
+    /// The prompt is the chooser's alone: the opponent has no prompt to read the
+    /// name universe or the count from.
+    #[test]
+    fn secret_agenda_prompt_is_served_only_to_the_chooser() {
+        let (state, _) = agenda_state(1);
+        let opponent = prepare_snapshot_with_prompt_id(&state, PlayerId(1), "game-a", 42).unwrap();
 
         assert!(matches!(
-            result,
+            build_prompt(&opponent, &lookup),
+            Err(AdapterError::NoAuthorizedPrompt { .. })
+        ));
+    }
+
+    /// With no name universe the prompt could not be answered, so it is refused
+    /// rather than served with no legal selection.
+    #[test]
+    fn secret_agenda_prompt_without_card_names_fails_closed() {
+        let (mut state, _) = agenda_state(1);
+        state.all_card_names = Vec::new().into();
+        let prepared = prepare_snapshot_with_prompt_id(&state, PlayerId(0), "game-a", 42).unwrap();
+
+        assert!(matches!(
+            build_prompt(&prepared, &lookup),
             Err(AdapterError::UnsupportedPrompt {
                 code: "local.secret-agenda-unsupported",
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn secret_agenda_selection_records_the_chosen_names_through_the_engine() {
+        let (mut state, id) = agenda_state(2);
+
+        let action = agenda_selection(&state, vec![2, 0]).unwrap();
+        assert_eq!(
+            action,
+            GameAction::ChooseSecretAgendaNames {
+                names: vec!["Opt".to_string(), "Grizzly Bears".to_string()],
+            }
+        );
+
+        apply_as_current(&mut state, action).unwrap();
+        assert_eq!(
+            state.objects[&id].secret_chosen_names,
+            vec!["Opt".to_string(), "Grizzly Bears".to_string()],
+        );
+        assert!(!matches!(
+            state.waiting_for,
+            WaitingFor::SecretAgendaChoice { .. }
+        ));
+    }
+
+    #[test]
+    fn secret_agenda_selection_outside_the_options_is_illegal() {
+        let (state, _) = agenda_state(1);
+
+        assert!(matches!(
+            agenda_selection(&state, vec![AGENDA_CARD_NAMES.len()]),
+            Err(AdapterError::IllegalResponseForPrompt {
+                response_kind: "chooseFromSelection"
+            })
+        ));
+    }
+
+    /// CR 702.106f: the adapter leaves "two different cards" and the name count to
+    /// the reducer, which is what refuses each of these.
+    #[test]
+    fn secret_agenda_reducer_rejects_a_repeated_name_and_a_short_answer() {
+        for chosen_indices in [vec![1, 1], vec![1]] {
+            let (mut state, id) = agenda_state(2);
+
+            let action = agenda_selection(&state, chosen_indices).unwrap();
+            assert!(apply_as_current(&mut state, action).is_err());
+            assert!(state.objects[&id].secret_chosen_names.is_empty());
+            assert!(matches!(
+                state.waiting_for,
+                WaitingFor::SecretAgendaChoice { .. }
+            ));
+        }
     }
 
     /// The generic path: a waiting state with no bespoke arm is now prompted
