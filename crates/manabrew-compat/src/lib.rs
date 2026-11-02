@@ -3194,8 +3194,13 @@ fn object_vec_from_slice<L: CardTextLookup>(
 /// `filter_state_for_viewer` conceals by rewriting the object in place — name
 /// becomes `"Hidden Card"` and `face_down` is set — rather than by removing it,
 /// which is what lets `ZoneDto::count` stay truthful.
+///
+/// CR 702.106a: a face-down conspiracy in the command zone is the one case where
+/// `face_down` says nothing about the viewer. Its controller may look at it, so
+/// the filter projects its identity for them and renames it only for everyone
+/// else, which leaves the name as the sole verdict for that zone.
 fn is_concealed(object: &GameObject) -> bool {
-    object.name == HIDDEN_CARD_NAME || object.face_down
+    object.name == HIDDEN_CARD_NAME || (object.face_down && object.zone != Zone::Command)
 }
 
 const HIDDEN_CARD_NAME: &str = "Hidden Card";
@@ -4902,6 +4907,7 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
+    use engine::game::conspiracy::start_with_conspiracy;
     use engine::game::game_object::BackFaceData;
     use engine::game::interaction::bind_interaction_authority;
     use engine::game::zones::create_object;
@@ -4909,6 +4915,7 @@ mod tests {
         CounterTriggerFilter, Effect, EffectKind, ResolvedAbility, TargetFilter, TriggerDefinition,
     };
     use engine::types::card::LayoutKind;
+    use engine::types::card_type::CoreType;
     use engine::types::counter::CounterType;
     use engine::types::game_state::{
         MulliganDecisionEntry, MulliganDecisionPhase, OutsideGameChoiceEntry,
@@ -5485,6 +5492,44 @@ mod tests {
         assert_eq!(entry["damage"], 2);
         assert_eq!(entry["counters"]["P1P1"], 3);
         assert_eq!(entry["isFaceDown"], true);
+    }
+
+    /// CR 702.106a: the controller may look at their face-down conspiracy, so
+    /// only the opponent's entry is a card back. `face_down` is true on both.
+    #[test]
+    fn face_down_conspiracy_is_identified_only_for_its_controller() {
+        let mut state = GameState::new_two_player(7);
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Brago's Favor".to_string(),
+            Zone::Exile,
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Conspiracy);
+        state.exile.retain(|object| *object != id);
+        start_with_conspiracy(&mut state, id, true);
+
+        let controller_view = zones_of(&state, PlayerId(0));
+        let controller_entry = &find_zone(&controller_view, "command", "player-0")["cards"][0];
+        assert_eq!(controller_entry["visibility"], "visible");
+        assert_eq!(controller_entry["identity"]["name"], "Brago's Favor");
+        assert_eq!(controller_entry["types"][0], "Conspiracy");
+        assert_eq!(controller_entry["isFaceDown"], true);
+
+        let opponent_view = zones_of(&state, PlayerId(1));
+        let opponent_entry = &find_zone(&opponent_view, "command", "player-0")["cards"][0];
+        assert_eq!(opponent_entry["visibility"], "visible");
+        assert_eq!(opponent_entry["identity"]["name"], "");
+        assert_eq!(opponent_entry["text"], "");
+        assert_eq!(opponent_entry["types"], serde_json::json!([]));
+        assert_eq!(opponent_entry["isFaceDown"], true);
     }
 
     /// Counter keys are the engine's serialization form ("P1P1"), not the
