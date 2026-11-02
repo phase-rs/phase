@@ -350,3 +350,62 @@ fn petals_of_insight_decline_draws_three_cards_and_goes_to_graveyard() {
     );
     assert_eq!(p0_library.len(), 3, "3 cards remain in library");
 }
+
+/// CR 401.4 + CR 701.20e: "in any order" is only a choice when there is more
+/// than one card to order. With a single card in the library, accepting the
+/// bottom placement must NOT pause for a `DigBottomOrder` prompt — there is no
+/// permutation to announce — while the accepted "If you do" branch still
+/// returns Petals of Insight to its owner's hand.
+#[test]
+fn petals_of_insight_single_looked_at_card_needs_no_bottom_order_prompt() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Petals of Insight", false, PETALS_OF_INSIGHT_ORACLE)
+        .with_mana_cost(petals_cost())
+        .id();
+    for _ in 0..5 {
+        scenario.add_basic_land(P0, ManaColor::Blue);
+    }
+    let only_card = scenario.add_card_to_library_top(P0, "Only Card");
+    let mut runner = scenario.build();
+
+    let stopped = runner.cast(spell).commit().stop_at_optional().resolve();
+    assert!(
+        matches!(
+            stopped.final_waiting_for(),
+            WaitingFor::OptionalEffectChoice { player: P0, .. }
+        ),
+        "CR 608.2c: must pause for the optional bottom placement, got {:?}",
+        stopped.final_waiting_for()
+    );
+
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("accept optional effect");
+
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "a single card has no order to announce, so resolution must not pause \
+         for DigBottomOrder; got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(runner.state().stack.is_empty(), "stack must be empty");
+
+    // Positive guard: the "If you do" branch ran, so the placement resolved.
+    assert_eq!(
+        runner.state().objects[&spell].zone,
+        Zone::Hand,
+        "the accepted placement must still resolve the 'If you do' bounce"
+    );
+
+    let library = &runner.state().players[P0.0 as usize].library;
+    assert_eq!(library.len(), 1, "the single card remains in the library");
+    assert_eq!(library[0], only_card, "the single card is the library");
+    assert_eq!(
+        runner.state().objects[&only_card].zone,
+        Zone::Library,
+        "the placed card must still be in the library"
+    );
+}
