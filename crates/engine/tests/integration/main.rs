@@ -16,6 +16,7 @@ mod agent_frank_horrigan_attacked_this_turn_indestructible;
 mod ancient_brass_dragon_roll_d20;
 mod ancient_bronze_dragon_roll_d20;
 mod ancient_copper_dragon_roll_d20;
+mod animation_where_x_expression;
 mod announced_x_effect_counts;
 mod archnemesis_you_attack_enchanted_player;
 mod attack_qualifier_stack_conditions;
