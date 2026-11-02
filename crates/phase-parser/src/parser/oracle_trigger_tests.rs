@@ -39905,7 +39905,8 @@ fn stack_object_target_is_a_chosen_object_boundary_for_the_event_source_lift() {
 
 /// CR 700.4 + CR 603.10a: Hook Horror's "it" / "that card" is the creature card
 /// that died, the trigger's event object — no exile-until loop or stack target
-/// precedes it, so the lift still applies. The "Molting Exoskeleton — " ability
+/// precedes it, so the lift still applies, and the self-return stamp then binds
+/// the return to the source in its graveyard (CR 603.6). The "Molting Exoskeleton — " ability
 /// word is left off: `parse_trigger_lines` does not strip it (the full Oracle
 /// pipeline does), and with it the line lowers without the lift.
 #[test]
@@ -39926,12 +39927,13 @@ fn hook_horror_dying_card_stays_lifted_to_the_trigger_event() {
         matches!(
             &*ret.effect,
             Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
                 destination: Zone::Battlefield,
-                target: TargetFilter::TriggeringSource,
+                target: TargetFilter::SelfRef,
                 ..
             }
         ),
-        "\"return it\" names the dying card (TriggeringSource), got {:?}",
+        "\"return it\" names the dying card, found in the graveyard the dies event put it in          (CR 603.6 self-return stamp), got {:?}",
         ret.effect
     );
 }
