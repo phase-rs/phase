@@ -5119,8 +5119,9 @@ pub(super) fn parse_choose_ast(
             // "a/an <object> you control" may declare Resolution only at a chain head.
             // Stripped optional quantifiers and exact counts fail the a/an gate.
             // Peeled actor scopes and random selections are not controller choices.
-            // Later bare choices keep Stack; the engine supports other mid-chain
-            // Resolution TargetOnly nodes, including modal composition.
+            // Later chain chunks keep Stack. A compound continuation's or a modal mode's
+            // bare choice may still be Resolution mid-chain; the engine's TargetOnly
+            // exemption keeps later announced targets.
             if ctx.clause_opponent_may_scope.is_some() {
                 // The accepting-player timing fallback also retimes described
                 // objects. TargetOnly cannot prompt that chooser, so override

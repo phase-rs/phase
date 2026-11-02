@@ -631,9 +631,10 @@ pub struct ParseContext {
     /// the target parser, with chosen selection and no peeled actor scope,
     /// printed target, context reference, or player target. The chunk loop strips
     /// optional quantifiers; those chunks and exact counts fail the a/an gate.
-    /// Later bare choices keep pre-existing `Stack` timing, although the engine
-    /// supports mid-chain `Resolution` `TargetOnly` nodes from other producers
-    /// and modal composition. Partial and quantified choices leave this unset.
+    /// Later chain chunks keep `Stack`. A compound continuation's or a modal mode's
+    /// bare choice may still be `Resolution` mid-chain; the engine's `TargetOnly`
+    /// exemption keeps later announced targets.
+    /// Partial and quantified choices leave this unset.
     /// Peeled opponent-may choices explicitly declare `Stack` so the
     /// accepting-player timing fallback cannot reintroduce `Resolution`.
     ///
