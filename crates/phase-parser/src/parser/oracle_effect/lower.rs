@@ -3755,6 +3755,7 @@ pub(super) fn resolve_prior_look_library_bottom_anaphors(defs: &mut [AbilityDefi
                 keep_count: Some(0),
                 destination: None,
                 rest_destination: None,
+                reveal: false,
                 source,
                 ..
             } if source.is_library()
@@ -3766,6 +3767,7 @@ pub(super) fn resolve_prior_look_library_bottom_anaphors(defs: &mut [AbilityDefi
         if let Effect::PutAtLibraryPosition {
             position: LibraryPosition::Bottom,
             target,
+            arranger,
             ..
         } = &*defs[i].effect
         {
@@ -3773,6 +3775,11 @@ pub(super) fn resolve_prior_look_library_bottom_anaphors(defs: &mut [AbilityDefi
                 target,
                 TargetFilter::TrackedSet { .. } | TargetFilter::ParentTarget
             ) {
+                let rest_order = if arranger.is_some() {
+                    DigRestOrder::PlayerChoice
+                } else {
+                    DigRestOrder::Preserve
+                };
                 *defs[i].effect = Effect::Dig {
                     player: TargetFilter::Controller,
                     count: QuantityExpr::Fixed { value: 0 },
@@ -3783,7 +3790,7 @@ pub(super) fn resolve_prior_look_library_bottom_anaphors(defs: &mut [AbilityDefi
                     destination: None,
                     rest_destination: Some(Zone::Library),
                     rest_split_top_count: None,
-                    rest_order: DigRestOrder::Preserve,
+                    rest_order,
                     reveal: false,
                     enter_tapped: false,
                     enters_attacking: false,

@@ -748,7 +748,7 @@ fn parse_put_rest_on_bottom_line(input: &str) -> OracleResult<'_, DigRestOrder> 
         .parse(input)?;
     let (input, rest_order) = opt(alt((
         value(DigRestOrder::Random, tag(" in a random order")),
-        value(DigRestOrder::Preserve, tag(" in any order")),
+        value(DigRestOrder::PlayerChoice, tag(" in any order")),
     )))
     .parse(input)?;
     let (input, _) = opt(tag(".")).parse(input)?;
@@ -8053,10 +8053,13 @@ fn parse_of_them_rest_destination(lower: &str) -> Option<(Zone, DigRestOrder)> {
     .parse(after_rest)
     .ok()
     .is_some_and(|(_, matched)| matched.is_some());
+    let player_choice = nom_primitives::scan_contains(after_rest, " in any order");
     Some((
         destination,
         if random {
             DigRestOrder::Random
+        } else if player_choice {
+            DigRestOrder::PlayerChoice
         } else {
             DigRestOrder::Preserve
         },
@@ -9131,7 +9134,17 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
             };
             let rest_order = parse_put_rest_on_bottom_line(&lower)
                 .map(|(_, order)| order)
-                .unwrap_or(DigRestOrder::Preserve);
+                .unwrap_or_else(|_| {
+                    // CR 401.4: "put those cards on the bottom ... in any order" also
+                    // indicates player-chosen order, not just "put the rest on the bottom".
+                    if destination == Zone::Library
+                        && nom_primitives::scan_contains(&lower, "in any order")
+                    {
+                        DigRestOrder::PlayerChoice
+                    } else {
+                        DigRestOrder::Preserve
+                    }
+                });
             Some(ContinuationAst::PutRest {
                 destination,
                 reorder_all: false,
@@ -13315,7 +13328,7 @@ mod tests {
             Some(ContinuationAst::PutRest {
                 destination: Zone::Library,
                 reorder_all: false,
-                rest_order: DigRestOrder::Preserve,
+                rest_order: DigRestOrder::PlayerChoice,
             })
         );
     }

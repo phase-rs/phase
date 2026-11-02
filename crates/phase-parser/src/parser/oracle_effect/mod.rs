@@ -21090,6 +21090,25 @@ fn refine_put_at_library_position(
                     }
                 }
             }
+            // CR 401.4 + CR 608.2c: For anaphoric references ("those cards", "them",
+            // "the exiled cards") placed on the bottom of a library "in any order",
+            // the controller of the instruction arranges the order — not each card's
+            // owner. This applies when the cardinality is Unstated but the target is
+            // an anaphoric reference to a tracked set (TrackedSet, TrackedSetFiltered)
+            // or ParentTarget (for reflexive triggers).
+            if orders_in_any_order {
+                let is_anaphoric_target = matches!(
+                    *target,
+                    TargetFilter::TrackedSet { .. }
+                        | TargetFilter::TrackedSetFiltered { .. }
+                        | TargetFilter::ParentTarget
+                );
+                if is_anaphoric_target {
+                    if let Some(follower) = follower {
+                        *arranger = Some(follower.clone());
+                    }
+                }
+            }
         }
     }
     placement_target_set

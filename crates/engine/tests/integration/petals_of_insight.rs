@@ -107,7 +107,7 @@ fn petals_of_insight_ast_shape() {
             assert_eq!(*source, DigSource::PriorLook);
             assert_eq!(*keep_count, Some(0));
             assert_eq!(*rest_destination, Some(Zone::Library));
-            assert_eq!(*rest_order, DigRestOrder::Preserve);
+            assert_eq!(*rest_order, DigRestOrder::PlayerChoice);
         }
         other => panic!("expected PriorLook Dig, got {:?}", other),
     }
