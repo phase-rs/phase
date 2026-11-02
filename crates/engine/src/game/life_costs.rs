@@ -27,7 +27,9 @@
 //! - **CR 119.4b** — Players can always pay 0 life, even under a pay-life prohibition.
 //! - **CR 119.8** — "A cost that involves having that player pay life can't be paid."
 
-use crate::game::effects::life::{try_apply_life_loss, LifeChangeError, ReplacementDeferred};
+use crate::game::effects::life::{
+    try_apply_life_loss, PlayerResourceChangeError, ReplacementDeferred,
+};
 use crate::game::static_abilities::{player_cant_pay_life_as_cost, player_has_cant_lose_life};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
@@ -194,8 +196,8 @@ pub fn pay_life_as_cost(
     // existing unpayable variant.
     match try_apply_life_loss(state, player, amount, events) {
         Ok(_) => PayLifeCostResult::Paid { amount },
-        Err(LifeChangeError::Unrepresentable(_)) => PayLifeCostResult::InsufficientLife,
-        Err(LifeChangeError::Deferred(ReplacementDeferred::ReplacementChoice)) => {
+        Err(PlayerResourceChangeError::Unrepresentable(_)) => PayLifeCostResult::InsufficientLife,
+        Err(PlayerResourceChangeError::Deferred(ReplacementDeferred::ReplacementChoice)) => {
             let WaitingFor::ReplacementChoice {
                 player: choice_player,
                 ..
@@ -208,9 +210,9 @@ pub fn pay_life_as_cost(
                 choice_player: *choice_player,
             }
         }
-        Err(LifeChangeError::Deferred(ReplacementDeferred::SubstitutionContinuation {
-            ..
-        })) => PayLifeCostResult::PaidWithDeferredSubstitution { amount },
+        Err(PlayerResourceChangeError::Deferred(
+            ReplacementDeferred::SubstitutionContinuation { .. },
+        )) => PayLifeCostResult::PaidWithDeferredSubstitution { amount },
     }
 }
 
@@ -454,7 +456,7 @@ mod tests {
             .collect();
         assert_eq!(life_changes, vec![(PlayerId(0), -2)]);
         assert_eq!(
-            state.ingress_life_window, None,
+            state.ingress_player_resource_window, None,
             "the ingress window must be closed after the call"
         );
 
@@ -539,7 +541,7 @@ mod tests {
             "no resource change may be announced for an unrepresentable payment: {events:?}"
         );
         assert_eq!(
-            state.ingress_life_window, None,
+            state.ingress_player_resource_window, None,
             "the ingress window must be closed after the call"
         );
     }
@@ -784,7 +786,7 @@ mod tests {
             events.is_empty(),
             "no events for a refused payment: {events:?}"
         );
-        assert_eq!(state.ingress_life_window, None);
+        assert_eq!(state.ingress_player_resource_window, None);
         // Reach guard: an affordable payment on the same board reaches the
         // replacements and parks their ordering choice.
         let result = pay_life_as_cost(&mut state, PlayerId(0), 3, &mut events);

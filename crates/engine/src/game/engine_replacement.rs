@@ -31,7 +31,8 @@ use super::effects::destroy::apply_destroy_after_replacement;
 use super::effects::draw::{apply_draw_after_replacement, settle_draw_instruction};
 use super::effects::life::{
     drain_pending_life_total_assignment, settle_life_gain_after_choice,
-    settle_life_loss_after_choice, within_ingress_life_window, LifeChangeUnrepresentable,
+    settle_life_loss_after_choice, within_ingress_player_resource_window,
+    PlayerResourceChangeUnrepresentable,
 };
 use super::effects::mill::apply_mill_after_replacement;
 use super::effects::scry::apply_scry_after_replacement;
@@ -198,12 +199,12 @@ pub(super) fn handle_replacement_choice(
         pending.unrepresentable_life_change == UnrepresentablePolicy::Reject
     });
     let waiting_for = if parked_for_rejection {
-        let (inner, window) = within_ingress_life_window(state, |state| {
+        let (inner, window) = within_ingress_player_resource_window(state, |state| {
             handle_replacement_choice_inner(state, index, events)
         });
         let waiting_for = inner?;
         if let Some(player) = window.failed_player {
-            return Err(LifeChangeUnrepresentable { player }.into());
+            return Err(PlayerResourceChangeUnrepresentable { player }.into());
         }
         waiting_for
     } else {
@@ -390,7 +391,7 @@ fn handle_replacement_choice_inner(
     // The player-resource policy the parked record was stamped with, captured
     // with the file's other `parked_*` reads before `continue_replacement`
     // consumes it.
-    let parked_life_policy = state
+    let parked_player_resource_policy = state
         .pending_replacement
         .as_ref()
         .map(|pending| pending.unrepresentable_life_change)
@@ -678,7 +679,7 @@ fn handle_replacement_choice_inner(
                         player_id,
                         counter_kind,
                         count,
-                        parked_life_policy,
+                        parked_player_resource_policy,
                         events,
                     )?,
                     CounterPlacement::Energy { player_id, .. } => {
@@ -686,7 +687,7 @@ fn handle_replacement_choice_inner(
                             state,
                             player_id,
                             count,
-                            parked_life_policy,
+                            parked_player_resource_policy,
                             events,
                         )?
                     }
@@ -906,7 +907,12 @@ fn handle_replacement_choice_inner(
                 // answer reaches is held to it by `handle_replacement_choice`'s
                 // ingress window.
                 gain @ ProposedEvent::LifeGain { .. } => {
-                    settle_life_gain_after_choice(state, gain, parked_life_policy, events)?;
+                    settle_life_gain_after_choice(
+                        state,
+                        gain,
+                        parked_player_resource_policy,
+                        events,
+                    )?;
                 }
                 // CR 119.3: Life loss accepted after replacement choice.
                 loss @ ProposedEvent::LifeLoss { player_id, .. } => {
@@ -914,8 +920,12 @@ fn handle_replacement_choice_inner(
                     // the phase-transition drain, so this is the only place
                     // its cause can still be named (a mana burn would
                     // otherwise land as an unexplained life change).
-                    let actual =
-                        settle_life_loss_after_choice(state, loss, parked_life_policy, events)?;
+                    let actual = settle_life_loss_after_choice(
+                        state,
+                        loss,
+                        parked_player_resource_policy,
+                        events,
+                    )?;
                     crate::game::turns::note_empty_pool_life_loss_resolved(
                         state, player_id, actual, events,
                     );

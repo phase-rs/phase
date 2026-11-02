@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use super::life::{self, LifeChangeUnrepresentable};
+use super::life::{self, PlayerResourceChangeUnrepresentable};
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
@@ -53,7 +53,7 @@ pub(crate) fn try_add_energy_with_replacement(
     player_id: PlayerId,
     amount: u32,
     events: &mut Vec<GameEvent>,
-) -> Result<bool, LifeChangeUnrepresentable> {
+) -> Result<bool, PlayerResourceChangeUnrepresentable> {
     life::within_rejecting_ingress_window(state, |state, policy| {
         add_energy_core(state, actor, player_id, amount, policy, events)
     })
@@ -69,7 +69,7 @@ fn add_energy_core(
     amount: u32,
     policy: UnrepresentablePolicy,
     events: &mut Vec<GameEvent>,
-) -> Result<bool, LifeChangeUnrepresentable> {
+) -> Result<bool, PlayerResourceChangeUnrepresentable> {
     if amount == 0 {
         return Ok(true);
     }
@@ -114,7 +114,7 @@ pub(crate) fn apply_energy_addition(
     amount: u32,
     policy: UnrepresentablePolicy,
     events: &mut Vec<GameEvent>,
-) -> Result<(), LifeChangeUnrepresentable> {
+) -> Result<(), PlayerResourceChangeUnrepresentable> {
     if let Some(settled) = life::settle_quantity_overflow(state, player_id, policy, "energy gain") {
         return settled.map(|_| ());
     }
@@ -122,7 +122,7 @@ pub(crate) fn apply_energy_addition(
         return Ok(());
     }
     let edit = i32::try_from(amount)
-        .map_err(|_| LifeChangeUnrepresentable { player: player_id })
+        .map_err(|_| PlayerResourceChangeUnrepresentable { player: player_id })
         .and_then(|delta| {
             life::apply_final_player_resource_edit(
                 state,

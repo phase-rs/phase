@@ -2138,7 +2138,7 @@ pub(crate) fn apply_batched_life(
     // gain itself is always representable; the `Unrepresentable` arm stays as the shared ingress
     // routing and would reject the action through its rollback. A deferral stays ignored — the
     // firewall excludes life replacements, so none can be pending here.
-    if let Err(effects::life::LifeChangeError::Unrepresentable(unrepresentable)) =
+    if let Err(effects::life::PlayerResourceChangeError::Unrepresentable(unrepresentable)) =
         crate::game::effects::life::try_apply_life_gain(
             state,
             player,

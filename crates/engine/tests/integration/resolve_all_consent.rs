@@ -290,7 +290,7 @@ fn resolve_all_rejects_unrepresentable_energy_and_restores_the_batch_entry() {
     assert!(
         matches!(
             error,
-            engine::game::engine::EngineError::LifeChangeUnrepresentable { player } if player == P0
+            engine::game::engine::EngineError::PlayerResourceChangeUnrepresentable { player } if player == P0
         ),
         "expected the typed unrepresentable rejection, got {error:?}"
     );
@@ -312,7 +312,7 @@ fn resolve_all_rejects_unrepresentable_energy_and_restores_the_batch_entry() {
     assert!(
         matches!(
             error,
-            engine::game::engine::EngineError::LifeChangeUnrepresentable { player } if player == P0
+            engine::game::engine::EngineError::PlayerResourceChangeUnrepresentable { player } if player == P0
         ),
         "expected the typed unrepresentable rejection, got {error:?}"
     );

@@ -71,7 +71,7 @@ pub enum OfferRefusal {
     /// The replayed play or answer settled a player-counter or energy change the engine cannot
     /// represent. This is an engine limit, not a rules outcome: the replay propagates it so the
     /// public shortcut entry can reject the take instead of silently stopping the repetition.
-    LifeChangeUnrepresentable { player: PlayerId },
+    PlayerResourceChangeUnrepresentable { player: PlayerId },
 }
 
 /// One recorded play or answer of a period, as the replay makes it.
@@ -504,9 +504,9 @@ fn step(
     events.extend(
         apply(replay, seat, action)
             .map_err(|error| match error {
-                crate::game::engine::EngineError::LifeChangeUnrepresentable { player } => {
-                    OfferRefusal::LifeChangeUnrepresentable { player }
-                }
+                crate::game::engine::EngineError::PlayerResourceChangeUnrepresentable {
+                    player,
+                } => OfferRefusal::PlayerResourceChangeUnrepresentable { player },
                 _ => rejected,
             })?
             .events,
@@ -2529,7 +2529,7 @@ mod tests {
         .expect_err("the impossible energy gain must refuse the replay");
         assert_eq!(
             refusal,
-            OfferRefusal::LifeChangeUnrepresentable {
+            OfferRefusal::PlayerResourceChangeUnrepresentable {
                 player: PlayerId(0)
             }
         );

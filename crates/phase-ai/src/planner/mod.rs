@@ -4724,7 +4724,7 @@ pub(crate) mod tests {
     /// `luminescent_rain_one_below_the_cap_applies_the_named_type_and_saturates`
     /// in the engine's `life_total_saturation` tests). A player's energy keeps
     /// the engine's checked edit, so an energy total past `u32::MAX` is refused
-    /// with `EngineError::LifeChangeUnrepresentable`, the error the engine's
+    /// with `EngineError::PlayerResourceChangeUnrepresentable`, the error the engine's
     /// energy and player-counter edits report. No printed card chooses a
     /// creature type and gives energy
     /// or a player counter for each permanent of that type.
@@ -5036,7 +5036,7 @@ pub(crate) mod tests {
     /// maximum), controlling one creature of each of five types
     /// (`energy_rain_prompt_rejecting`). Each of those types would give 2
     /// energy, a total outside that range, so its apply returns
-    /// `EngineError::LifeChangeUnrepresentable`; every other type gives no
+    /// `EngineError::PlayerResourceChangeUnrepresentable`; every other type gives no
     /// energy and applies. The five fill the Medium root beam, and
     /// the root search's simulation of the first of them fails, so the decision
     /// is scored again with every type simulated before anything is selected. The AI
@@ -5109,7 +5109,7 @@ pub(crate) mod tests {
     /// one creature of each type in `controlled`, resolved up to its
     /// creature-type prompt offering every CR 205.3m type. Asserts the fixture:
     /// each controlled type passes the structural check and its apply returns
-    /// `EngineError::LifeChangeUnrepresentable` (2 more energy is outside that
+    /// `EngineError::PlayerResourceChangeUnrepresentable` (2 more energy is outside that
     /// range; CR 107.14 + CR 122.1: each {E} is an energy counter put on the
     /// player, and the rules set no maximum); the same answer gives P0 {E}{E}
     /// from no energy, so the refusal is that gain's; and a type P0 controls no
@@ -5148,7 +5148,7 @@ pub(crate) mod tests {
             assert!(
                 matches!(
                     applied,
-                    Err(EngineError::LifeChangeUnrepresentable { player }) if player == P0
+                    Err(EngineError::PlayerResourceChangeUnrepresentable { player }) if player == P0
                 ),
                 "{subtype}: 2 more energy is outside the engine's range, got {applied:?}"
             );

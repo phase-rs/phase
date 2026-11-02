@@ -25,7 +25,7 @@ use super::effects::attach::{attach_to as attach_object_to, attach_to_player};
 use super::effects::change_zone::shuffle_library;
 use super::effects::energy::try_add_energy_with_replacement;
 use super::effects::life::{
-    try_apply_life_gain, try_apply_life_loss, LifeChangeError, ReplacementDeferred,
+    try_apply_life_gain, try_apply_life_loss, PlayerResourceChangeError, ReplacementDeferred,
 };
 use super::effects::player_counter::{
     try_add_player_counter_with_replacement, PlayerCounterAdditionOutcome,
@@ -857,20 +857,20 @@ fn apply_debug_life_change(
         }
         // CR 616.1: the authority installed the replacement-order prompt; its
         // resume path owns the event's triggers and SBAs.
-        Err(LifeChangeError::Deferred(ReplacementDeferred::ReplacementChoice)) => {}
+        Err(PlayerResourceChangeError::Deferred(ReplacementDeferred::ReplacementChoice)) => {}
         // CR 614.6 + CR 603.7: the substitute is paused on its own prompt. Queue
         // (never dispatch) ordinary and delayed triggers for the resume's drain;
         // no SBAs mid-resolution.
-        Err(LifeChangeError::Deferred(ReplacementDeferred::SubstitutionContinuation {
-            ..
-        })) => {
+        Err(PlayerResourceChangeError::Deferred(
+            ReplacementDeferred::SubstitutionContinuation { .. },
+        )) => {
             super::triggers::collect_triggers_into_deferred(state, &events[event_start..]);
             super::triggers::collect_delayed_trigger_contexts_into_deferred(
                 state,
                 &events[event_start..],
             );
         }
-        Err(LifeChangeError::Unrepresentable(unrepresentable)) => {
+        Err(PlayerResourceChangeError::Unrepresentable(unrepresentable)) => {
             return Err(unrepresentable.into());
         }
     }
@@ -3934,7 +3934,7 @@ mod tests {
             assert!(
                 matches!(
                     error,
-                    EngineError::LifeChangeUnrepresentable { player } if player == P0
+                    EngineError::PlayerResourceChangeUnrepresentable { player } if player == P0
                 ),
                 "expected the typed unrepresentable rejection for P0, got {error:?}"
             );
@@ -5152,7 +5152,7 @@ mod tests {
             assert!(
                 matches!(
                     error,
-                    EngineError::LifeChangeUnrepresentable { player: failed } if *failed == player
+                    EngineError::PlayerResourceChangeUnrepresentable { player: failed } if *failed == player
                 ),
                 "expected the typed unrepresentable rejection for {player:?}, got {error:?}"
             );

@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use super::life::{self, LifeChangeUnrepresentable};
+use super::life::{self, PlayerResourceChangeUnrepresentable};
 use crate::game::{quantity, replacement};
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetRef};
 use crate::types::events::GameEvent;
@@ -77,7 +77,7 @@ pub(crate) fn try_add_player_counter_with_replacement(
     counter_kind: PlayerCounterKind,
     count: u32,
     events: &mut Vec<GameEvent>,
-) -> Result<PlayerCounterAdditionOutcome, LifeChangeUnrepresentable> {
+) -> Result<PlayerCounterAdditionOutcome, PlayerResourceChangeUnrepresentable> {
     life::within_rejecting_ingress_window(state, |state, policy| {
         add_player_counter_core(state, actor, player_id, counter_kind, count, policy, events)
     })
@@ -93,7 +93,7 @@ fn add_player_counter_core(
     count: u32,
     policy: UnrepresentablePolicy,
     events: &mut Vec<GameEvent>,
-) -> Result<PlayerCounterAdditionOutcome, LifeChangeUnrepresentable> {
+) -> Result<PlayerCounterAdditionOutcome, PlayerResourceChangeUnrepresentable> {
     if count == 0 {
         return Ok(PlayerCounterAdditionOutcome::Applied);
     }
@@ -277,7 +277,7 @@ pub fn apply_player_counter_addition(
     amount: u32,
     policy: UnrepresentablePolicy,
     events: &mut Vec<GameEvent>,
-) -> Result<(), LifeChangeUnrepresentable> {
+) -> Result<(), PlayerResourceChangeUnrepresentable> {
     if let Some(settled) =
         life::settle_quantity_overflow(state, player_id, policy, "player counter gain")
     {
@@ -287,7 +287,7 @@ pub fn apply_player_counter_addition(
         return Ok(());
     }
     let edit = i32::try_from(amount)
-        .map_err(|_| LifeChangeUnrepresentable { player: player_id })
+        .map_err(|_| PlayerResourceChangeUnrepresentable { player: player_id })
         .and_then(|delta| {
             life::apply_final_player_resource_edit(
                 state,

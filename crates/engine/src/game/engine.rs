@@ -135,7 +135,7 @@ pub enum EngineError {
     /// boundary rejects the whole action and restores its pre-action snapshot
     /// rather than silently skipping the change.
     #[error("Player-resource change is not representable for player {player:?}")]
-    LifeChangeUnrepresentable { player: PlayerId },
+    PlayerResourceChangeUnrepresentable { player: PlayerId },
 }
 
 /// Converts an engine error into stable client-facing metadata without ever
@@ -154,7 +154,9 @@ pub(crate) fn action_rejection_for_engine_error(
         | EngineError::SpellCastReversed { .. } => ActionRejectionCode::ActionNotAllowed,
         // Representability is an engine limit, not a distinct client action
         // class: expose the existing safe code without the diagnostic payload.
-        EngineError::LifeChangeUnrepresentable { .. } => ActionRejectionCode::InvalidAction,
+        EngineError::PlayerResourceChangeUnrepresentable { .. } => {
+            ActionRejectionCode::InvalidAction
+        }
     };
     ActionRejection::from_code(code, related_object_ids)
 }
@@ -1411,10 +1413,10 @@ impl ProspectiveSimulationOutcome {
 /// under a life change, failed inside the boundary.
 fn close_ingress_window(
     state: &mut GameState,
-    prior: &mut Option<crate::types::game_state::IngressLifeWindow>,
+    prior: &mut Option<crate::types::game_state::IngressPlayerResourceWindow>,
 ) -> Option<PlayerId> {
-    let window = state.ingress_life_window.take();
-    state.ingress_life_window = prior.take();
+    let window = state.ingress_player_resource_window.take();
+    state.ingress_player_resource_window = prior.take();
     window.and_then(|window| window.failed_player)
 }
 
@@ -1423,9 +1425,9 @@ fn close_ingress_window(
 /// first failure;
 /// the enclosing action boundary turns it into a rejection and restores its
 /// pre-action snapshot.
-fn boundary_life_change_failure(state: &GameState) -> Option<PlayerId> {
+fn boundary_player_resource_failure(state: &GameState) -> Option<PlayerId> {
     state
-        .ingress_life_window
+        .ingress_player_resource_window
         .and_then(|window| window.failed_player)
 }
 
@@ -1578,7 +1580,8 @@ fn apply_action_boundary_core(
     // player-counter or energy settlement, on its own or nested under a life change, records a
     // failure here instead of silently treating the change as zero, so the boundary rejects the
     // whole action atomically.
-    state.ingress_life_window = Some(crate::types::game_state::IngressLifeWindow::default());
+    state.ingress_player_resource_window =
+        Some(crate::types::game_state::IngressPlayerResourceWindow::default());
     // CR 601.2c + CR 602.2b + CR 603.2: the live announcement's trigger
     // carrier is held by `announcement_triggers` for this action. The boundary
     // snapshot above still holds it on its `PendingCast`, so every restore path
@@ -1612,21 +1615,21 @@ fn apply_action_boundary_core(
                     journal_start,
                     None,
                 ) {
-                    let failure = boundary_life_change_failure(state);
+                    let failure = boundary_player_resource_failure(state);
                     lifecycle.discard();
                     *state = cast_undo_boundary.restore(boundary_snapshot);
                     return Err(failure.map_or(error, |player| {
-                        EngineError::LifeChangeUnrepresentable { player }
+                        EngineError::PlayerResourceChangeUnrepresentable { player }
                     }));
                 }
             }
             if boundary_snapshot.spell_cast_reversal.is_none() {
-                let failure = boundary_life_change_failure(state);
+                let failure = boundary_player_resource_failure(state);
                 lifecycle.discard();
                 *state = cast_undo_boundary.restore(boundary_snapshot);
                 return Err(failure.map_or_else(
                     || EngineError::ActionNotAllowed("Cannot pay required additional cost".into()),
-                    |player| EngineError::LifeChangeUnrepresentable { player },
+                    |player| EngineError::PlayerResourceChangeUnrepresentable { player },
                 ));
             }
             let settlement = (|| {
@@ -1647,11 +1650,11 @@ fn apply_action_boundary_core(
             let (events, waiting) = match settlement {
                 Ok(settled) => settled,
                 Err(error) => {
-                    let failure = boundary_life_change_failure(state);
+                    let failure = boundary_player_resource_failure(state);
                     lifecycle.discard();
                     *state = cast_undo_boundary.restore(boundary_snapshot);
                     return Err(failure.map_or(error, |player| {
-                        EngineError::LifeChangeUnrepresentable { player }
+                        EngineError::PlayerResourceChangeUnrepresentable { player }
                     }));
                 }
             };
@@ -1660,14 +1663,12 @@ fn apply_action_boundary_core(
             ActionResult::applied(events, waiting)
         }
         Err(err) => {
-            let failure = boundary_life_change_failure(state);
+            let failure = boundary_player_resource_failure(state);
             lifecycle.discard();
             *state = cast_undo_boundary.restore(boundary_snapshot);
-            return Err(
-                failure.map_or(err, |player| EngineError::LifeChangeUnrepresentable {
-                    player,
-                }),
-            );
+            return Err(failure.map_or(err, |player| {
+                EngineError::PlayerResourceChangeUnrepresentable { player }
+            }));
         }
     };
     // CR 602.2b + CR 601.2h: an activation whose elected total cannot be paid is
@@ -1678,10 +1679,10 @@ fn apply_action_boundary_core(
     // `finish_action_boundary` then runs no auto-pass, resolves no log entries
     // and discards the lifecycle frame for a reversed result.
     if !result.disposition.is_applied() {
-        if let Some(player) = boundary_life_change_failure(state) {
+        if let Some(player) = boundary_player_resource_failure(state) {
             lifecycle.discard();
             *state = cast_undo_boundary.restore(boundary_snapshot);
-            return Err(EngineError::LifeChangeUnrepresentable { player });
+            return Err(EngineError::PlayerResourceChangeUnrepresentable { player });
         }
         let reversal = result.waiting_for.clone();
         *state = boundary_snapshot.as_ref().clone();
@@ -1734,14 +1735,12 @@ fn apply_action_boundary_core(
         }
         Ok(None) => false,
         Err(err) => {
-            let failure = boundary_life_change_failure(state);
+            let failure = boundary_player_resource_failure(state);
             lifecycle.discard();
             *state = cast_undo_boundary.restore(boundary_snapshot);
-            return Err(
-                failure.map_or(err, |player| EngineError::LifeChangeUnrepresentable {
-                    player,
-                }),
-            );
+            return Err(failure.map_or(err, |player| {
+                EngineError::PlayerResourceChangeUnrepresentable { player }
+            }));
         }
     };
     let realized_token_entry =
@@ -1759,14 +1758,12 @@ fn apply_action_boundary_core(
         || owed_spell_final_part_is_due
     {
         if let Err(err) = run_boundary_convergence_pipeline(state, &mut result, scan_from) {
-            let failure = boundary_life_change_failure(state);
+            let failure = boundary_player_resource_failure(state);
             lifecycle.discard();
             *state = cast_undo_boundary.restore(boundary_snapshot);
-            return Err(
-                failure.map_or(err, |player| EngineError::LifeChangeUnrepresentable {
-                    player,
-                }),
-            );
+            return Err(failure.map_or(err, |player| {
+                EngineError::PlayerResourceChangeUnrepresentable { player }
+            }));
         }
     }
     // CR 603.2 + CR 603.3: events this action emitted while the announcement
@@ -1778,14 +1775,14 @@ fn apply_action_boundary_core(
     let reducer_wait = std::mem::replace(&mut state.waiting_for, result.waiting_for.clone());
     super::announcement_triggers::end_action(state, &result.events);
     result.waiting_for = std::mem::replace(&mut state.waiting_for, reducer_wait);
-    if let Some(player) = boundary_life_change_failure(state) {
+    if let Some(player) = boundary_player_resource_failure(state) {
         lifecycle.discard();
         *state = cast_undo_boundary.restore(boundary_snapshot);
-        return Err(EngineError::LifeChangeUnrepresentable { player });
+        return Err(EngineError::PlayerResourceChangeUnrepresentable { player });
     }
     // Do not carry the core's window into finalization: that pass owns its own
     // scope over convergence, auto-pass, and re-convergence.
-    state.ingress_life_window = None;
+    state.ingress_player_resource_window = None;
     Ok(RawActionApplication {
         result,
         journal_start,
@@ -2326,21 +2323,20 @@ fn finish_action_boundary_with_lifecycle(
     // Finalization owns the remainder of the action (convergence, auto-pass,
     // reconvergence), so it needs its own ingress window: the core boundary
     // closed its window before handing the raw application over.
-    let mut prior_window = state.ingress_life_window.take();
-    state.ingress_life_window = Some(crate::types::game_state::IngressLifeWindow::default());
+    let mut prior_window = state.ingress_player_resource_window.take();
+    state.ingress_player_resource_window =
+        Some(crate::types::game_state::IngressPlayerResourceWindow::default());
     if let Err(err) = reconcile_terminal_result_completing_resolution(
         state,
         &mut result,
         reconcile_terminal_result,
     ) {
-        let life_failure = close_ingress_window(state, &mut prior_window);
+        let player_resource_failure = close_ingress_window(state, &mut prior_window);
         lifecycle.discard();
         *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
-        return Err(
-            life_failure.map_or(err, |player| EngineError::LifeChangeUnrepresentable {
-                player,
-            }),
-        );
+        return Err(player_resource_failure.map_or(err, |player| {
+            EngineError::PlayerResourceChangeUnrepresentable { player }
+        }));
     }
     bump_state_revision(state);
     sync_waiting_for(state, &result.waiting_for);
@@ -2362,11 +2358,11 @@ fn finish_action_boundary_with_lifecycle(
         match run_auto_pass_loop(state, &mut result) {
             Ok(advanced) => advanced,
             Err(error) => {
-                let life_failure = close_ingress_window(state, &mut prior_window);
+                let player_resource_failure = close_ingress_window(state, &mut prior_window);
                 lifecycle.discard();
                 *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
-                return Err(life_failure.map_or(error, |player| {
-                    EngineError::LifeChangeUnrepresentable { player }
+                return Err(player_resource_failure.map_or(error, |player| {
+                    EngineError::PlayerResourceChangeUnrepresentable { player }
                 }));
             }
         }
@@ -2379,14 +2375,12 @@ fn finish_action_boundary_with_lifecycle(
     };
     if let Err(err) = reconcile_terminal_result_completing_resolution(state, &mut result, reconcile)
     {
-        let life_failure = close_ingress_window(state, &mut prior_window);
+        let player_resource_failure = close_ingress_window(state, &mut prior_window);
         lifecycle.discard();
         *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
-        return Err(
-            life_failure.map_or(err, |player| EngineError::LifeChangeUnrepresentable {
-                player,
-            }),
-        );
+        return Err(player_resource_failure.map_or(err, |player| {
+            EngineError::PlayerResourceChangeUnrepresentable { player }
+        }));
     }
     if matches!(result.waiting_for, WaitingFor::GameOver { .. }) {
         take_and_restore_stack_resolution_session(state);
@@ -2425,17 +2419,17 @@ fn finish_action_boundary_with_lifecycle(
         )
         .is_err()
         {
-            let life_failure = close_ingress_window(state, &mut prior_window);
+            let player_resource_failure = close_ingress_window(state, &mut prior_window);
             lifecycle.discard();
             *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
-            return Err(life_failure.map_or_else(
+            return Err(player_resource_failure.map_or_else(
                 || {
                     EngineError::InvalidAction(
                         "Unable to allocate interaction authority for the resulting decision"
                             .to_string(),
                     )
                 },
-                |player| EngineError::LifeChangeUnrepresentable { player },
+                |player| EngineError::PlayerResourceChangeUnrepresentable { player },
             ));
         }
     }
@@ -2467,19 +2461,17 @@ fn finish_action_boundary_with_lifecycle(
         Ok::<_, EngineError>(())
     })();
     if let Err(error) = recording {
-        let life_failure = close_ingress_window(state, &mut prior_window);
+        let player_resource_failure = close_ingress_window(state, &mut prior_window);
         lifecycle.discard();
         *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
-        return Err(
-            life_failure.map_or(error, |player| EngineError::LifeChangeUnrepresentable {
-                player,
-            }),
-        );
+        return Err(player_resource_failure.map_or(error, |player| {
+            EngineError::PlayerResourceChangeUnrepresentable { player }
+        }));
     }
     if let Some(player) = close_ingress_window(state, &mut prior_window) {
         lifecycle.discard();
         *state = std::sync::Arc::unwrap_or_clone(boundary_snapshot);
-        return Err(EngineError::LifeChangeUnrepresentable { player });
+        return Err(EngineError::PlayerResourceChangeUnrepresentable { player });
     }
     #[cfg(debug_assertions)]
     super::perf_counters::outside_take_cost(|| debug_assert_runtime_resolution_invariants(state));
@@ -6072,8 +6064,8 @@ fn apply_until_lethal_shortcut(
                 &mut Vec::new(),
             ) {
                 Ok(()) => w,
-                Err(OfferRefusal::LifeChangeUnrepresentable { player }) => {
-                    return Err(EngineError::LifeChangeUnrepresentable { player });
+                Err(OfferRefusal::PlayerResourceChangeUnrepresentable { player }) => {
+                    return Err(EngineError::PlayerResourceChangeUnrepresentable { player });
                 }
                 Err(_) => {
                     until_lethal_fallback(state, result, committed, proposal.proposer);
@@ -6529,8 +6521,8 @@ fn drive_one_shortcut_cycle(
         // CR 732.2a: the driven beat runs on a private work clone, but its life-ingress marker
         // belongs to the enclosing public Accept action. A low-level life settle may record the
         // failure while returning `Ok`; do not let a later `Abort`/fallback discard that marker.
-        if let Some(player) = boundary_life_change_failure(&work) {
-            return Err(EngineError::LifeChangeUnrepresentable { player });
+        if let Some(player) = boundary_player_resource_failure(&work) {
+            return Err(EngineError::PlayerResourceChangeUnrepresentable { player });
         }
         match pipeline {
             // Cross-lethal: COMMIT + STOP. The GameOver event + transition are already in
@@ -6625,8 +6617,8 @@ fn drive_one_shortcut_cycle(
                 // player-counter or energy change (a life change saturates instead) in this
                 // work clone without returning an error. Preserve it at the same
                 // public-cycle seam before an ordinary injector refusal maps to `Abort`.
-                if let Some(player) = boundary_life_change_failure(&work) {
-                    return Err(EngineError::LifeChangeUnrepresentable { player });
+                if let Some(player) = boundary_player_resource_failure(&work) {
+                    return Err(EngineError::PlayerResourceChangeUnrepresentable { player });
                 }
                 match answer {
                     Ok(mut answer_events) => {
@@ -6656,7 +6648,9 @@ fn drive_one_shortcut_cycle(
                     Err(RecastAbort) => return Ok(CycleOutcome::Abort),
                 }
             }
-            Err(error @ EngineError::LifeChangeUnrepresentable { .. }) => return Err(error),
+            Err(error @ EngineError::PlayerResourceChangeUnrepresentable { .. }) => {
+                return Err(error)
+            }
             Err(_) => return Ok(CycleOutcome::Abort), // engine error ⇒ abort to manual
         }
     }
@@ -8935,10 +8929,10 @@ pub(crate) fn drive_persistent_axis_collapse(
             &mut cycle_events,
         ) {
             Ok(()) => true,
-            Err(OfferRefusal::LifeChangeUnrepresentable { player }) => {
+            Err(OfferRefusal::PlayerResourceChangeUnrepresentable { player }) => {
                 *state = snapshot;
                 events.truncate(committed_events);
-                return Err(EngineError::LifeChangeUnrepresentable { player });
+                return Err(EngineError::PlayerResourceChangeUnrepresentable { player });
             }
             Err(_) => false,
         };
@@ -8980,10 +8974,10 @@ pub(crate) fn drive_persistent_axis_collapse(
                         delivered += 1;
                         commit_repetition(events, controller, delivered, &mut cycle_events);
                     }
-                    Err(OfferRefusal::LifeChangeUnrepresentable { player }) => {
+                    Err(OfferRefusal::PlayerResourceChangeUnrepresentable { player }) => {
                         *state = snapshot;
                         events.truncate(committed_events);
-                        return Err(EngineError::LifeChangeUnrepresentable { player });
+                        return Err(EngineError::PlayerResourceChangeUnrepresentable { player });
                     }
                     Err(_) => {
                         events.append(&mut cycle_events);
@@ -11010,8 +11004,9 @@ pub(crate) fn resume_stack_resolution_session_runner(
     // This seam bypasses `finish_action_boundary`, so it owns its own life
     // window. A representability failure rejects the whole restore-resume and
     // restores its entry state; it is never reported as unchanged progress.
-    let prior_window = state.ingress_life_window.take();
-    state.ingress_life_window = Some(crate::types::game_state::IngressLifeWindow::default());
+    let prior_window = state.ingress_player_resource_window.take();
+    state.ingress_player_resource_window =
+        Some(crate::types::game_state::IngressPlayerResourceWindow::default());
     let outcome = (|| -> Result<ActionResult, EngineError> {
         let mut result = ActionResult::applied(Vec::new(), state.waiting_for.clone());
         reconcile_terminal_result_completing_resolution(
@@ -11045,23 +11040,21 @@ pub(crate) fn resume_stack_resolution_session_runner(
         debug_assert_runtime_resolution_invariants(state);
         Ok(result)
     })();
-    let window = state.ingress_life_window.take();
-    state.ingress_life_window = prior_window;
-    let life_failure = window.and_then(|window| window.failed_player);
+    let window = state.ingress_player_resource_window.take();
+    state.ingress_player_resource_window = prior_window;
+    let player_resource_failure = window.and_then(|window| window.failed_player);
     match outcome {
-        Ok(result) if life_failure.is_none() => Ok(result),
+        Ok(result) if player_resource_failure.is_none() => Ok(result),
         Ok(_) => {
-            let player = life_failure.expect("the failure predicate just proved Some");
+            let player = player_resource_failure.expect("the failure predicate just proved Some");
             *state = boundary_snapshot;
-            Err(EngineError::LifeChangeUnrepresentable { player })
+            Err(EngineError::PlayerResourceChangeUnrepresentable { player })
         }
         Err(error) => {
             *state = boundary_snapshot;
-            Err(
-                life_failure.map_or(error, |player| EngineError::LifeChangeUnrepresentable {
-                    player,
-                }),
-            )
+            Err(player_resource_failure.map_or(error, |player| {
+                EngineError::PlayerResourceChangeUnrepresentable { player }
+            }))
         }
     }
 }
@@ -11478,8 +11471,10 @@ fn run_auto_pass_loop(
                         // iteration's events or starting the next one: the
                         // action boundary restores its snapshot, so none of
                         // these events may escape into the result.
-                        if let Some(player) = boundary_life_change_failure(state) {
-                            return Err(EngineError::LifeChangeUnrepresentable { player });
+                        if let Some(player) = boundary_player_resource_failure(state) {
+                            return Err(EngineError::PlayerResourceChangeUnrepresentable {
+                                player,
+                            });
                         }
                         advanced = true;
                         let stack_empty_or_grew =
@@ -11579,10 +11574,15 @@ fn run_auto_pass_loop(
                         // A typed representability failure outranks the
                         // established restore-and-stop policy: the whole action
                         // is rejected, not merely this drive.
-                        if let Some(player) = boundary_life_change_failure(state) {
-                            return Err(EngineError::LifeChangeUnrepresentable { player });
+                        if let Some(player) = boundary_player_resource_failure(state) {
+                            return Err(EngineError::PlayerResourceChangeUnrepresentable {
+                                player,
+                            });
                         }
-                        if matches!(error, EngineError::LifeChangeUnrepresentable { .. }) {
+                        if matches!(
+                            error,
+                            EngineError::PlayerResourceChangeUnrepresentable { .. }
+                        ) {
                             return Err(error);
                         }
                         if let Some((checkpoint, event_start)) = checkpoint {
@@ -11659,8 +11659,8 @@ fn run_auto_pass_loop(
             _ => break,
         }
     }
-    if let Some(player) = boundary_life_change_failure(state) {
-        return Err(EngineError::LifeChangeUnrepresentable { player });
+    if let Some(player) = boundary_player_resource_failure(state) {
+        return Err(EngineError::PlayerResourceChangeUnrepresentable { player });
     }
     Ok(advanced)
 }
@@ -11679,8 +11679,9 @@ pub(crate) fn resume_auto_pass_after_resolve_all(
     // window: an unrepresentable player-counter or energy change settled by its
     // drive (a life change saturates instead) must reject the resume rather
     // than be reported as a successful (or unchanged) outcome.
-    let prior_window = state.ingress_life_window.take();
-    state.ingress_life_window = Some(crate::types::game_state::IngressLifeWindow::default());
+    let prior_window = state.ingress_player_resource_window.take();
+    state.ingress_player_resource_window =
+        Some(crate::types::game_state::IngressPlayerResourceWindow::default());
     let outcome = (|| -> Result<(), EngineError> {
         let mut result = ActionResult::applied(Vec::new(), state.waiting_for.clone());
         // CR 704.3: mirror the ordinary action-boundary reconciliation on both
@@ -11714,25 +11715,23 @@ pub(crate) fn resume_auto_pass_after_resolve_all(
         batch.waiting_for = state.waiting_for.clone();
         Ok(())
     })();
-    let window = state.ingress_life_window.take();
-    state.ingress_life_window = prior_window;
-    let life_failure = window.and_then(|window| window.failed_player);
+    let window = state.ingress_player_resource_window.take();
+    state.ingress_player_resource_window = prior_window;
+    let player_resource_failure = window.and_then(|window| window.failed_player);
     match outcome {
-        Ok(()) if life_failure.is_none() => Ok(()),
+        Ok(()) if player_resource_failure.is_none() => Ok(()),
         Ok(()) => {
-            let player = life_failure.expect("the failure predicate just proved Some");
+            let player = player_resource_failure.expect("the failure predicate just proved Some");
             *state = before;
             *batch = batch_before;
-            Err(EngineError::LifeChangeUnrepresentable { player })
+            Err(EngineError::PlayerResourceChangeUnrepresentable { player })
         }
         Err(error) => {
             *state = before;
             *batch = batch_before;
-            Err(
-                life_failure.map_or(error, |player| EngineError::LifeChangeUnrepresentable {
-                    player,
-                }),
-            )
+            Err(player_resource_failure.map_or(error, |player| {
+                EngineError::PlayerResourceChangeUnrepresentable { player }
+            }))
         }
     }
 }
@@ -23536,7 +23535,7 @@ mod stage2_injector_tests {
                 },
             ) {
                 Ok(_) => {}
-                Err(error @ EngineError::LifeChangeUnrepresentable { player: P0 }) => {
+                Err(error @ EngineError::PlayerResourceChangeUnrepresentable { player: P0 }) => {
                     assert_eq!(hostile, entry, "the final public Accept restores its entry");
                     rejection = Some(error);
                     break;

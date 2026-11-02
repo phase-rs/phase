@@ -284,7 +284,7 @@ pub(crate) fn structurally_valid_tap_for_convoke_payment(
 ///
 /// The verdict is the submission guard's, not the apply's: an admitted answer
 /// can still fail later in the action, as an energy gain the engine cannot
-/// represent does (`EngineError::LifeChangeUnrepresentable`).
+/// represent does (`EngineError::PlayerResourceChangeUnrepresentable`).
 ///
 /// This is load-bearing for creature-type prompts: each of the several hundred
 /// enumerated answers (one per known creature type) paid a full `GameState`

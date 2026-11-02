@@ -1259,7 +1259,9 @@ fn public_recorded_period_replay_rejects_later_energy_overflow_atomically() {
             response: ShortcutResponse::Accept,
         }) {
             Ok(_) => {}
-            Err(engine::game::engine::EngineError::LifeChangeUnrepresentable { player }) => {
+            Err(engine::game::engine::EngineError::PlayerResourceChangeUnrepresentable {
+                player,
+            }) => {
                 assert_eq!(player, P0, "the attendant's overflowing energy is rejected");
                 assert_eq!(
                     hostile.state(),

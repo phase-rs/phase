@@ -22961,7 +22961,7 @@ declare_game_state! {
     /// settlement inside it that is unrepresentable is recorded here and the
     /// ingress caller rejects. Transient — never serialized.
     #[serde(skip)]
-    pub(crate) ingress_life_window: Option<IngressLifeWindow>,
+    pub(crate) ingress_player_resource_window: Option<IngressPlayerResourceWindow>,
     /// A replacement's computed player-counter or energy quantity overflowed
     /// while the current event was being replaced (see
     /// `ReplacementQuantityOverflow`). Recorded by the player/energy counter
@@ -28656,11 +28656,11 @@ impl UnrepresentablePolicy {
 }
 
 /// State of the transient action-ingress window (see
-/// `GameState::ingress_life_window`): the first player whose player-counter or energy
+/// `GameState::ingress_player_resource_window`): the first player whose player-counter or energy
 /// settlement inside the window, on its own or nested under a life change, proved
 /// unrepresentable, if any.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct IngressLifeWindow {
+pub(crate) struct IngressPlayerResourceWindow {
     pub(crate) failed_player: Option<PlayerId>,
 }
 
@@ -28702,7 +28702,7 @@ impl PendingReplacement {
     /// `predecessor_policy`) was being answered keeps the ingress stamp. Copies
     /// `Reject` onto a record still at the default and never downgrades a
     /// `Reject` already on it.
-    pub(crate) fn inherit_unrepresentable_life_change(
+    pub(crate) fn inherit_unrepresentable_player_resource_change(
         &mut self,
         predecessor_policy: UnrepresentablePolicy,
     ) {
@@ -32611,7 +32611,7 @@ impl GameState {
             active_graveyard_permission_latch: None,
             active_paid_resolution_offer_tail: None,
             active_spend_only_on_x_count: None,
-            ingress_life_window: None,
+            ingress_player_resource_window: None,
             replacement_quantity_overflow: None,
             active_auto_tap_row_policy: None,
             battlefield: im::Vector::new(),
@@ -34401,7 +34401,7 @@ impl GameState {
         self.exiled_from_hand_this_resolution = 0;
         self.die_result_this_resolution = None;
         self.consumed_before_priority_trigger_events.clear();
-        self.ingress_life_window = None;
+        self.ingress_player_resource_window = None;
         self.replacement_quantity_overflow = None;
     }
 
@@ -34409,8 +34409,8 @@ impl GameState {
     /// right now must be stamped with: `Reject`
     /// while an action-ingress window is open (the event belongs to that public
     /// action), otherwise legacy/outside-boundary compatibility behavior.
-    pub(crate) fn ingress_life_policy(&self) -> UnrepresentablePolicy {
-        if self.ingress_life_window.is_some() {
+    pub(crate) fn ingress_player_resource_policy(&self) -> UnrepresentablePolicy {
+        if self.ingress_player_resource_window.is_some() {
             UnrepresentablePolicy::Reject
         } else {
             UnrepresentablePolicy::IgnoreImpossible
@@ -36401,7 +36401,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         active_graveyard_permission_latch: _,
         active_paid_resolution_offer_tail: _,
         active_spend_only_on_x_count: _,
-        ingress_life_window: _,
+        ingress_player_resource_window: _,
         replacement_quantity_overflow: _,
         active_auto_tap_row_policy: _,
         battlefield: _,
@@ -55736,36 +55736,36 @@ mod tests {
     /// The ingress life window lives only inside one synchronous action: it is
     /// never serialized, and the per-action reset closes it.
     #[test]
-    fn ingress_life_window_is_skipped_by_serde_and_cleared_per_action() {
+    fn ingress_player_resource_window_is_skipped_by_serde_and_cleared_per_action() {
         let mut state = GameState::new_two_player(7);
-        state.ingress_life_window = Some(IngressLifeWindow {
+        state.ingress_player_resource_window = Some(IngressPlayerResourceWindow {
             failed_player: Some(PlayerId(1)),
         });
         assert_eq!(
-            state.ingress_life_policy(),
+            state.ingress_player_resource_policy(),
             UnrepresentablePolicy::Reject,
             "reach guard: an open window selects the rejecting stamp"
         );
 
         let serialized = serde_json::to_string(&state).expect("state must serialize");
         assert!(
-            !serialized.contains("ingress_life_window"),
-            "ingress_life_window must be skipped by serde: {serialized}"
+            !serialized.contains("ingress_player_resource_window"),
+            "ingress_player_resource_window must be skipped by serde: {serialized}"
         );
         let deserialized: GameState =
             serde_json::from_str(&serialized).expect("state must deserialize");
         assert_eq!(
-            deserialized.ingress_life_window, None,
-            "deserialized ingress_life_window must be None"
+            deserialized.ingress_player_resource_window, None,
+            "deserialized ingress_player_resource_window must be None"
         );
 
         state.clear_player_action_transients();
         assert_eq!(
-            state.ingress_life_window, None,
+            state.ingress_player_resource_window, None,
             "the per-action reset must close the window"
         );
         assert_eq!(
-            state.ingress_life_policy(),
+            state.ingress_player_resource_policy(),
             UnrepresentablePolicy::IgnoreImpossible
         );
     }
@@ -55874,21 +55874,25 @@ mod tests {
     /// CR 616.1f: a re-parked record copies a `Reject` stamp from its
     /// predecessor and never downgrades one it already carries.
     #[test]
-    fn inherit_unrepresentable_life_change_copies_reject_and_never_downgrades() {
+    fn inherit_unrepresentable_player_resource_change_copies_reject_and_never_downgrades() {
         let mut reparked = pending_life_gain_replacement(UnrepresentablePolicy::IgnoreImpossible);
-        reparked.inherit_unrepresentable_life_change(UnrepresentablePolicy::IgnoreImpossible);
+        reparked.inherit_unrepresentable_player_resource_change(
+            UnrepresentablePolicy::IgnoreImpossible,
+        );
         assert_eq!(
             reparked.unrepresentable_life_change,
             UnrepresentablePolicy::IgnoreImpossible,
             "an ordinary predecessor leaves the default record ordinary"
         );
-        reparked.inherit_unrepresentable_life_change(UnrepresentablePolicy::Reject);
+        reparked.inherit_unrepresentable_player_resource_change(UnrepresentablePolicy::Reject);
         assert_eq!(
             reparked.unrepresentable_life_change,
             UnrepresentablePolicy::Reject,
             "a rejecting predecessor stamps the default record"
         );
-        reparked.inherit_unrepresentable_life_change(UnrepresentablePolicy::IgnoreImpossible);
+        reparked.inherit_unrepresentable_player_resource_change(
+            UnrepresentablePolicy::IgnoreImpossible,
+        );
         assert_eq!(
             reparked.unrepresentable_life_change,
             UnrepresentablePolicy::Reject,

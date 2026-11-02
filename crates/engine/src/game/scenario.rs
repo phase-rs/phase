@@ -4034,7 +4034,7 @@ fn drive_resolution(
                     // An unrepresentable player-resource change is an engine limit, not an
                     // unhandled prompt: the driver must report it rather than
                     // silently stop with a partially resolved effect.
-                    Err(error @ EngineError::LifeChangeUnrepresentable { .. }) => {
+                    Err(error @ EngineError::PlayerResourceChangeUnrepresentable { .. }) => {
                         return Err(error);
                     }
                     Err(_) => {

@@ -801,7 +801,7 @@ fn materialize_one_consented_resolution(
         Some(1),
     ) {
         Ok(boundary) => boundary,
-        Err(error @ EngineError::LifeChangeUnrepresentable { .. }) => return Err(error),
+        Err(error @ EngineError::PlayerResourceChangeUnrepresentable { .. }) => return Err(error),
         Err(_) => return Ok(None),
     };
     recorded.insert(0, (actor, GameAction::PassPriority));
@@ -946,7 +946,7 @@ where
             stack_resolution_limit,
         ) {
             Ok(boundary) => boundary,
-            Err(error @ EngineError::LifeChangeUnrepresentable { .. }) => {
+            Err(error @ EngineError::PlayerResourceChangeUnrepresentable { .. }) => {
                 *state = entry;
                 lifecycle.discard();
                 return Err(error);
@@ -1794,7 +1794,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            EngineError::LifeChangeUnrepresentable {
+            EngineError::PlayerResourceChangeUnrepresentable {
                 player: PlayerId(0)
             }
         ));
@@ -1853,7 +1853,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            EngineError::LifeChangeUnrepresentable {
+            EngineError::PlayerResourceChangeUnrepresentable {
                 player: PlayerId(0)
             }
         ));
@@ -1954,7 +1954,7 @@ mod tests {
 
             assert!(matches!(
                 error,
-                EngineError::LifeChangeUnrepresentable {
+                EngineError::PlayerResourceChangeUnrepresentable {
                     player: PlayerId(0)
                 }
             ));
