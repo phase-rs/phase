@@ -4154,9 +4154,9 @@ fn object_growth_offer_schema_has_live_convoke_taps() {
         );
     };
     // CR 732.2a + CR 732.2c: the object-growth mint overwrites the win-kind seed with the budget
-    // and measures no threshold, so this offer's suggestion and capacity coincide — the frontend
-    // echoes this value verbatim and the accepted count caps the CR 500.5 collapse prompt, so a
-    // smaller seed would cap it too.
+    // and measures no threshold, so this offer's suggestion and capacity coincide — the frontend's
+    // count picker opens on this value and the accepted count caps the CR 500.5 collapse prompt,
+    // so a smaller seed would cap a controller who accepts the suggestion.
     assert_eq!(
         schema.iteration_count,
         IterationCount::Fixed(schema.deliverable_capacity)
