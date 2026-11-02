@@ -35183,7 +35183,8 @@ pub enum ActivationManaPaymentRestriction {
 }
 
 /// Structured spell-casting restrictions parsed from Oracle text.
-/// These describe when — and, for `CantSpendMana`, how — a spell may be cast.
+/// These describe when — and, for `CantSpendMana`, how; for `OnlyFromZones`,
+/// from where — a spell may be cast.
 /// Runtime enforcement can be added independently of parsing/export support.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
@@ -35224,6 +35225,24 @@ pub enum CastingRestriction {
     /// Parameterized over the allowed mana colors for paying {X}.
     SpendOnlyOnX {
         colors: Vec<ManaColor>,
+    },
+    /// CR 601.3 + CR 113.6f: "You may cast this card from your graveyard, but
+    /// not from anywhere else." (Haakon, Stromgald Scourge) — restricts WHERE
+    /// the spell may be cast from: a cast whose origin zone is not in `zones`
+    /// is prohibited, whatever permission would otherwise allow it (CR 101.2).
+    /// CR 113.6f makes the restriction function in every zone, so it rides the
+    /// object's own restrictions rather than a battlefield static.
+    ///
+    /// CR 109.5 + CR 400.1: `pool` keeps whose graveyard the permission names.
+    /// "Your graveyard" is the would-be controller's, so `OwnGraveyard` admits
+    /// a graveyard origin only when the caster owns that graveyard: an opponent
+    /// casting the card from its owner's graveyard (Tinybones, the Pickpocket)
+    /// is casting it from "anywhere else". Origins in shared zones (exile)
+    /// aren't scoped by it.
+    OnlyFromZones {
+        zones: Vec<Zone>,
+        #[serde(default)]
+        pool: super::statics::GraveyardPermissionPool,
     },
 }
 

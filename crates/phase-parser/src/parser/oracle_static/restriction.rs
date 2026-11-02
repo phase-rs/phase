@@ -2550,6 +2550,105 @@ fn parse_cast_permission_zone_tail(input: &str) -> OracleResult<'_, Vec<Zone>> {
     .parse(input)
 }
 
+/// CR 113.6f + CR 601.3: the rider closing a card's own cast permission that
+/// confines every cast of the card to the zones that permission names.
+const EXCLUSIVE_CAST_PERMISSION_RIDER: &str = ", but not from anywhere else";
+
+/// CR 601.3 + CR 113.6f + CR 101.2: "You may cast this card from <zones>, but
+/// not from anywhere else." (Haakon, Stromgald Scourge).
+///
+/// One sentence, two rules: the card's own permission, lowered by the single
+/// permission authority [`try_parse_graveyard_cast_permission`], and a
+/// prohibition on every other origin. CR 113.6f makes that prohibition function
+/// in every zone (hand, library, exile, command), so it rides the object's own
+/// [`CastingRestriction`]s rather than a static, which functions only where its
+/// source is.
+///
+/// Fails closed: the head must lower to the card's OWN, unlimited, rider-free,
+/// duration-free cast permission ([`own_unlimited_cast_permission_zones`]).
+/// Any other head returns `None`, and the line keeps the permission parser's
+/// refusal of the residual rider.
+pub(crate) fn try_parse_exclusive_own_cast_permission(
+    text: &str,
+    lower: &str,
+) -> Option<(StaticDefinition, crate::types::ability::CastingRestriction)> {
+    let (head, after) = super::oracle_nom::bridge::split_once_on_lower(
+        text,
+        lower,
+        EXCLUSIVE_CAST_PERMISSION_RIDER,
+    )?;
+    if !is_punctuation_only(after) {
+        return None;
+    }
+    let head = format!("{head}.");
+    let head_lower = head.to_lowercase();
+    // CR 611.2a: `try_parse_graveyard_cast_permission` consumes and DISCARDS a
+    // leading duration ("Until end of turn, you may cast …"), because
+    // `StaticDefinition` has nowhere to store it. Here that would make a timed
+    // permission and its restriction permanent, so a duration-headed sentence
+    // declines before the lossy parser sees it.
+    let duration_head = {
+        use crate::parser::oracle_nom::duration::parse_duration;
+        terminated(parse_duration, tag::<_, _, OracleError<'_>>(", "))
+            .parse(head_lower.as_str())
+            .is_ok()
+    };
+    if duration_head {
+        return None;
+    }
+    let def = try_parse_graveyard_cast_permission(&head, &head_lower)?;
+    let (zones, pool) = own_unlimited_cast_permission_zones(&def)?;
+    Some((
+        def.description(text.to_string()),
+        crate::types::ability::CastingRestriction::OnlyFromZones { zones, pool },
+    ))
+}
+
+/// CR 601.3 + CR 113.6f: the zones of a card's OWN unlimited, rider-free cast
+/// permission ("You may cast this card from your graveyard [or from exile]"),
+/// with the permission's graveyard pool (CR 109.5: "your graveyard" is the
+/// caster's), or `None` for any other permission. The pool travels with the
+/// zones so the restriction keeps "your", not only "graveyard". The mode is
+/// destructured without `..`
+/// so a new permission rider must be classified here before it compiles: a
+/// rider the exclusivity clause does not account for must refuse, not ride
+/// along unexamined.
+fn own_unlimited_cast_permission_zones(
+    def: &StaticDefinition,
+) -> Option<(Vec<Zone>, GraveyardPermissionPool)> {
+    let StaticMode::GraveyardCastPermission {
+        frequency,
+        play_mode,
+        graveyard_destination_replacement,
+        extra_cost,
+        enters_with_counter,
+        required_cast_keyword,
+        pool,
+        cast_limit,
+        mana_spend_permission,
+        enters_modifications,
+    } = &def.mode
+    else {
+        return None;
+    };
+    let own_unlimited = *frequency == CastFrequency::Unlimited
+        && *play_mode == CardPlayMode::Cast
+        && graveyard_destination_replacement.is_none()
+        && extra_cost.is_none()
+        && enters_with_counter.is_none()
+        && required_cast_keyword.is_none()
+        && *pool == GraveyardPermissionPool::OwnGraveyard
+        && *cast_limit == PermissionCastLimit::Unlimited
+        && mana_spend_permission.is_none()
+        && enters_modifications.is_empty()
+        && def.affected == Some(TargetFilter::SelfRef)
+        && def.condition.is_none()
+        && def.per_player_condition.is_none()
+        && def.modifications.is_empty()
+        && !def.active_zones.is_empty();
+    own_unlimited.then(|| (def.active_zones.clone(), *pool))
+}
+
 /// CR 601.2f: Outcome of matching the "by <cost> in addition to … other costs"
 /// ADDITIONAL-cost rider on a cast-from-zone permission. A plain `Option` would
 /// conflate two structurally distinct outcomes — "no rider present" and "rider
