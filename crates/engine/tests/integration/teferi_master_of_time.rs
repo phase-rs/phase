@@ -10,7 +10,7 @@
 //! nonempty stack. The CR 606.3 once-per-permanent-per-turn cap is untouched:
 //! a second activation in the same turn is still refused.
 //!
-//! Every test below uses Teferi's verbatim Oracle text.
+//! Every card below uses verbatim Oracle text (Scryfall-verified).
 
 use engine::ai_support::legal_actions;
 use engine::game::layers::evaluate_layers;
@@ -31,9 +31,10 @@ use engine::types::zones::Zone;
 /// Teferi, Master of Time (verbatim Oracle text, Scryfall-verified).
 const TEFERI_MASTER_OF_TIME: &str = "You may activate loyalty abilities of Teferi on any player's turn any time you could cast an instant.\n+1: Draw a card, then discard a card.\n\u{2212}3: Target creature you don't control phases out. (Treat it and anything attached to it as though they don't exist until its controller's next turn.)\n\u{2212}10: Take two extra turns after this one.";
 
-/// Synthetic control planeswalker with one printed, untargeted loyalty
-/// ability — no timing permission, so CR 606.3 timing applies.
-const CONTROL_WALKER: &str = "+1: You gain 1 life.";
+/// Ajani Goldmane (verbatim Oracle text, Scryfall-verified) — the control
+/// planeswalker: a single untargeted [+1] and no timing permission, so CR
+/// 606.3 timing applies unless the emblem grants otherwise.
+const AJANI_GOLDMANE: &str = "+1: You gain 2 life.\n\u{2212}1: Put a +1/+1 counter on each creature you control. Those creatures gain vigilance until end of turn.\n\u{2212}6: Create a white Avatar creature token. It has \"This token's power and toughness are each equal to your life total.\"";
 
 /// Teferi, Temporal Archmage (verbatim Oracle text, Scryfall-verified) — the
 /// second printed parent of the emblem, whose [−10] creates it through the
@@ -54,7 +55,7 @@ fn board() -> (GameScenario, ObjectId, ObjectId) {
         )
         .id();
     let control = s
-        .add_planeswalker_from_oracle(P0, "Control Walker", "Chandra", 3, CONTROL_WALKER)
+        .add_planeswalker_from_oracle(P0, "Ajani Goldmane", "Ajani", 4, AJANI_GOLDMANE)
         .id();
     (s, teferi, control)
 }
@@ -305,7 +306,7 @@ fn emblem_board() -> (GameScenario, ObjectId, ObjectId) {
         )
         .id();
     let control = s
-        .add_planeswalker_from_oracle(P0, "Control Walker", "Chandra", 3, CONTROL_WALKER)
+        .add_planeswalker_from_oracle(P0, "Ajani Goldmane", "Ajani", 4, AJANI_GOLDMANE)
         .id();
     (s, archmage, control)
 }
@@ -392,7 +393,7 @@ fn temporal_archmage_emblem_grants_loyalty_timing_on_opponents_turn() {
     );
     r.act(activation(control, idx))
         .expect("control [+1] accepted on the opponent's turn under the emblem");
-    assert_eq!(loyalty(&r, control), Some(4), "loyalty cost +1 paid");
+    assert_eq!(loyalty(&r, control), Some(5), "loyalty cost +1 paid");
 }
 
 /// T6 (control): without the emblem, the same window refuses the control
