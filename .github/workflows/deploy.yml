@@ -350,6 +350,15 @@ jobs:
     needs: [deploy-gate, preview-inputs]
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # Data files built from inputs outside the repository. combo-table.json
+      # comes from a pinned Commander Spellbook snapshot that CI does not hold, so
+      # a missing one is warned and skipped instead of failing the job. Keep this
+      # list aligned with phase-server's best-effort data files.
+      # draft-pools.json is still required here because this job publishes its
+      # content-addressed copy (built by preview-inputs) before the mutable
+      # manifest loop.
+      BEST_EFFORT_DATA_FILES: "combo-table.json"
     permissions:
       actions: write
       contents: read
@@ -514,8 +523,18 @@ jobs:
           npx wrangler r2 object put "phase-rs-data/staging/$DRAFT_POOLS_FILENAME" --file "$BRDIR/draft-pools.br" --remote --content-type application/json --content-encoding br --cache-control "public, max-age=31536000, immutable"
 
           # Mutable shared JSONs. Loop over the manifest.
+          is_best_effort() {
+            case " $BEST_EFFORT_DATA_FILES " in
+              *" $1 "*) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
           while IFS= read -r f; do
             if [ ! -f "client/public/$f" ]; then
+              if is_best_effort "$f"; then
+                echo "::warning::Best-effort data file client/public/$f was not generated; skipping upload"
+                continue
+              fi
               echo "::error::Expected data file client/public/$f was not generated"
               exit 1
             fi
@@ -533,13 +552,20 @@ jobs:
       - name: Verify R2 uploads landed
         # Wrangler v4 silently writes to a local emulator unless --remote is
         # passed. Fail the deploy if any file the frontend will fetch is not
-        # actually reachable. Reads from data-files.json — same source as upload.
+        # actually reachable, except a BEST_EFFORT_DATA_FILES entry this run did
+        # not build. Reads from data-files.json — same source as upload.
         env:
           CARD_DATA_FILENAME: ${{ needs.preview-inputs.outputs.card_data_filename }}
           DRAFT_POOLS_FILENAME: draft-pools-${{ needs.preview-inputs.outputs.draft_pools_hash16 }}.json
         run: |
           BASE="https://data.phase-rs.dev/staging"
           fail=0
+          is_best_effort() {
+            case " $BEST_EFFORT_DATA_FILES " in
+              *" $1 "*) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
           check() {
             local f="$1"
             local status
@@ -558,7 +584,13 @@ jobs:
           }
           check "$CARD_DATA_FILENAME"
           check "$DRAFT_POOLS_FILENAME"
-          while IFS= read -r f; do check "$f"; done < <(jq -r '.[]' data-files.json)
+          while IFS= read -r f; do
+            if is_best_effort "$f" && [ ! -f "client/public/$f" ]; then
+              echo "::warning::Best-effort data file client/public/$f was not uploaded in this run; skipping verification"
+              continue
+            fi
+            check "$f"
+          done < <(jq -r '.[]' data-files.json)
           # Prove the brotli round-trip end-to-end on one small file: --compressed
           # requests + decodes br, jq confirms it decoded to valid JSON. The 200
           # checks above pass regardless of encoding; this is the real proof.
