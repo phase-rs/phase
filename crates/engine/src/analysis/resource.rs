@@ -5918,11 +5918,10 @@ pub(crate) fn turn_cycle_covers(prior: &GameState, current: &GameState, caster: 
 }
 
 /// CR 121.1 + CR 401.2: `current` with the cards the caster drew since `prior` put back where
-/// `prior`'s library held them. CR 701.17a: a drawn card lay within the leading run of cards that
-/// left the library, since it was the top card only once the cards above it had left. `None`
-/// unless it drew, the drawn cards lie in that run, a card `prior` shows standing in for a shown
-/// card of that run of equal content, and `current`'s library is `prior`'s less every card that
-/// left it.
+/// `prior`'s library held them, or `None` unless it drew and `current`'s library is `prior`'s less
+/// every card that left it. CR 121.1 + CR 701.17a: draws and mills take the top card, so every card
+/// that left lay among as many of `prior`'s top cards as left, save a shown drawn card standing in
+/// for a shown top card of equal content that stayed in the library.
 fn library_departures_restored(
     prior: &GameState,
     current: &GameState,
@@ -5944,12 +5943,7 @@ fn library_departures_restored(
     if drawn.is_empty() {
         return None;
     }
-    let reach = before
-        .iter()
-        .take_while(|id| departed.contains(id))
-        .count()
-        .max(drawn.len());
-    let top: Vec<ObjectId> = before.iter().take(reach).copied().collect();
+    let top: Vec<ObjectId> = before.iter().take(departed.len()).copied().collect();
     // CR 401.2: a hidden card is known only by where it lies, so only a shown card is matched by
     // content.
     let shown = |id: &ObjectId| {
@@ -5959,11 +5953,11 @@ fn library_departures_restored(
     };
     let mut open: Vec<&GameObject> = top
         .iter()
-        .filter(|id| !drawn.contains(id))
+        .filter(|id| !departed.contains(id))
         .filter_map(shown)
         .collect();
-    for id in drawn.iter().filter(|id| !top.contains(id)) {
-        let card = shown(id)?;
+    for id in departed.iter().filter(|id| !top.contains(id)) {
+        let card = drawn.contains(id).then(|| shown(id)).flatten()?;
         let at = open.iter().position(|top| object_content_eq(top, card))?;
         open.swap_remove(at);
     }
@@ -27050,6 +27044,40 @@ mod tests {
             !departures(&[0, 3], 2),
             "below a card that stayed, with a card below the draw gone too"
         );
+    }
+
+    /// CR 121.1 + CR 701.17a: on the caster's shown Island, Swamp, Island, Swamp, a drawn Swamp
+    /// stands in only for a top card that stayed in the library, and a card milled from below a
+    /// card that stayed is refused.
+    #[test]
+    fn a_card_that_left_never_stands_in_for_a_shown_draw() {
+        use crate::game::visibility::interaction_object_identity_is_visible;
+        use crate::game::zones::{add_to_zone, create_object, remove_from_zone};
+        let caster = PlayerId(0);
+        let mut prior = GameState::new_two_player(42);
+        prior.active_player = caster;
+        for (card, name) in [(5, "Island"), (6, "Swamp"), (5, "Island"), (6, "Swamp")] {
+            create_object(&mut prior, CardId(card), caster, name.into(), Zone::Library);
+        }
+        let library = prior.library_of(caster).clone();
+        let departures = |milled: &[usize], drawn: usize| {
+            let mut current = prior.clone();
+            let moves = milled.iter().map(|at| (*at, Zone::Graveyard));
+            for (at, zone) in moves.chain([(drawn, Zone::Hand)]) {
+                let card = library[at];
+                remove_from_zone(&mut current, card, Zone::Library, caster);
+                add_to_zone(&mut current, card, zone, caster);
+                current.objects.get_mut(&card).expect("departed card").zone = zone;
+            }
+            library_departures_restored(&prior, &current, caster).is_some()
+        };
+        assert!(
+            interaction_object_identity_is_visible(&prior, library[3]),
+            "reach: the library is shown"
+        );
+        assert!(departures(&[0], 3), "the Swamp under the milled Island");
+        assert!(!departures(&[0, 1], 3), "only milled cards above the Swamp");
+        assert!(!departures(&[3], 0), "a mill from below a card that stayed");
     }
 
     /// Moraug, Fury of Akoum ("Each creature you control gets +1/+0 for each time it has attacked
