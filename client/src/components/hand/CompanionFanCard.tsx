@@ -30,7 +30,8 @@ interface CompanionFanCardProps {
 // hover lift + flick-up gesture) for visual continuity with the castable
 // graveyard/exile wings, but is standalone because a companion is not a battle-
 // field/zone object: it is a name-only `CompanionInfo` with no `ObjectId` and no
-// printed mana cost, so it images BY NAME, renders no mana pips, and carries no
+// printed mana cost, so it images by name unless the engine sends the owner's
+// printing (CR 702.139a), renders no mana pips, and carries no
 // `data-object-id`/`data-card-hover` (keeping it out of the reorder DOM sweep).
 // Both its click and flick-up dispatch the GLOBAL `CompanionToHand` special
 // action — its {3} activation cost is not the card's printed cost — and only
@@ -49,7 +50,13 @@ const CompanionFanCard = memo(function CompanionFanCard({
   const { t } = useTranslation("game");
   const setDragging = useUiStore((s) => s.setDragging);
   const cardName = companion.card.card.name;
-  const { src, rungs, advanceFailedSource } = useCardImage(cardName, { size: "normal" });
+  const { src, rungs, advanceFailedSource } = useCardImage(cardName, {
+    size: "normal",
+    // The hook admits an owner printing only with the face's Oracle id, so the
+    // name-only companion relies on the id the engine mirrored on the face.
+    oracleId: companion.card.card.scryfall_oracle_id ?? undefined,
+    ownerPrinting: companion.printing,
+  });
   // Suppress dragSnapToOrigin only when the flick actually activated, so a
   // short/sideways drag springs back into the fan instead of flying off.
   const playedRef = useRef(false);

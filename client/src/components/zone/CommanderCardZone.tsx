@@ -97,6 +97,7 @@ function CommanderCard({
     tokenImageRef: imageProps.tokenImageRef,
     oracleId: imageProps.oracleId,
     faceName: imageProps.faceName,
+    ownerPrinting: imageProps.ownerPrinting,
   });
   const { handlers: hoverHandlers, firedRef } = useCardHover(commander.id);
   const tax = commander.commander_tax ?? 0;
