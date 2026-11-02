@@ -1759,19 +1759,22 @@ fn touch(runner: &mut GameRunner, actor: engine::types::player::PlayerId, object
     un_action(runner, actor, UnAction::TouchObject { object_id });
 }
 
-/// P0 controls Vile Bile and a vanilla Grizzly Bears; both players opted in; the
-/// table is at priority in P0's main phase.
-fn vile_bile_scenario() -> (GameRunner, ObjectId, ObjectId) {
+/// P0 controls two Vile Biles and a vanilla Grizzly Bears; both players opted
+/// in; the table is at priority in P0's main phase.
+fn vile_bile_scenario() -> (GameRunner, ObjectId, ObjectId, ObjectId) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let bile = scenario
+        .add_creature_from_oracle(P0, "Vile Bile", 2, 2, VILE_BILE)
+        .id();
+    let other_bile = scenario
         .add_creature_from_oracle(P0, "Vile Bile", 2, 2, VILE_BILE)
         .id();
     let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
     let mut runner = scenario.build();
     un_action(&mut runner, P0, UnAction::SetEnabled { enabled: true });
     un_action(&mut runner, P1, UnAction::SetEnabled { enabled: true });
-    (runner, bile, bears)
+    (runner, bile, other_bile, bears)
 }
 
 #[test]
@@ -1792,21 +1795,31 @@ fn vile_bile_parses_to_a_touch_trigger_on_itself() {
 
 #[test]
 fn each_touch_of_vile_bile_makes_the_touching_player_lose_two_life() {
-    let (mut runner, bile, bears) = vile_bile_scenario();
+    let (mut runner, bile, other_bile, bears) = vile_bile_scenario();
+    let mut expected_touchable = vec![bile, other_bile];
+    expected_touchable.sort();
     assert_eq!(
         runner.state().un_actions.touchable,
-        vec![bile],
-        "only Vile Bile responds to a touch"
+        expected_touchable,
+        "only the Vile Biles respond to a touch, not {bears:?}"
     );
-    assert_ne!(bile, bears);
 
-    // Two separate touches by the opponent: two instances, two triggers.
+    // Two separate touches by the opponent on one Vile Bile: two instances, two
+    // triggers — and only from the creature that was touched.
     touch(&mut runner, P1, bile);
     touch(&mut runner, P1, bile);
     assert_eq!(
         runner.state().stack.len(),
         2,
-        "each touch triggers Vile Bile once"
+        "each touch triggers the touched Vile Bile once; the other one is untouched"
+    );
+    assert!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .all(|entry| entry.source_id == bile),
+        "both triggers come from the touched Vile Bile"
     );
     assert_eq!(runner.life(P1), 20, "the triggers wait on the stack");
     runner.resolve_top();

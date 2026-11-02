@@ -507,13 +507,13 @@ pub(crate) fn place_parked_touch_triggers(
     let WaitingFor::Priority { .. } = state.waiting_for else {
         return Ok(());
     };
-    // CR 104.1: once the game has ended nothing more triggers.
     let touch_parked = state.deferred_triggers.iter().any(|context| {
         context
             .trigger_events
             .iter()
             .any(|event| matches!(event, GameEvent::ObjectTouched { .. }))
     });
+    // CR 104.1: once the game has ended nothing more triggers.
     if state.game_end.is_some()
         || !touch_parked
         || !super::triggers::should_drain_deferred_triggers_now(state)
