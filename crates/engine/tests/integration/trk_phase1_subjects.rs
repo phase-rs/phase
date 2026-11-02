@@ -635,22 +635,18 @@ fn defiant_no_creatures_and_illegal_target() {
         let target = illegal.then(|| scenario.add_creature(P0, "Grizzly Bears", 2, 2).id());
         let mut runner = scenario.build();
         cast_to_trigger(&mut runner, source);
-        let legal = optional_object_slot(&runner);
         if let Some(id) = target {
+            let legal = optional_object_slot(&runner);
             assert!(legal.contains(&TargetRef::Object(id)));
-        } else {
-            assert!(legal.is_empty());
-        }
-        runner
-            .act(GameAction::ChooseTarget {
-                target: target.map(TargetRef::Object),
-            })
-            .unwrap();
-        assert_eq!(runner.state().stack.len(), 1);
-        if let Some(id) = target {
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(id)),
+                })
+                .unwrap();
+            assert_eq!(runner.state().stack.len(), 1);
             engine::game::zones::move_to_zone(runner.state_mut(), id, Zone::Exile, &mut vec![]);
+            runner.advance_until_stack_empty();
         }
-        runner.advance_until_stack_empty();
         finished(&runner);
         assert_eq!(runner.state().objects[&source].is_phased_out(), !illegal);
     }
@@ -963,12 +959,19 @@ fn scientists_third_chapter_distinct_owners_and_no_picks() {
                 target: pick.then_some(TargetRef::Object(first)),
             })
             .unwrap();
-        assert!(optional_object_slot(&runner).contains(&TargetRef::Object(second)));
-        runner
-            .act(GameAction::ChooseTarget {
-                target: pick.then_some(TargetRef::Object(second)),
-            })
-            .unwrap();
+        if pick {
+            assert!(optional_object_slot(&runner).contains(&TargetRef::Object(second)));
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(second)),
+                })
+                .unwrap();
+        }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert_eq!(runner.state().stack.len(), 1);
         let mut events = Vec::new();
         for _ in 0..3 {
             events.extend(runner.act(GameAction::PassPriority).unwrap().events);
@@ -1087,11 +1090,6 @@ fn unification_second_chapter_accepts_each_zone_and_declines() {
             runner.advance_until_stack_empty();
             // The deployed full Defiant emits its own real ETB, proving the
             // chapter continuation finished and handed control to that trigger.
-            assert!(optional_object_slot(&runner).is_empty());
-            runner
-                .act(GameAction::ChooseTarget { target: None })
-                .unwrap();
-            runner.advance_until_stack_empty();
             assert_eq!(runner.state().objects[&selected].zone, Zone::Battlefield);
             assert!(runner.state().objects[&selected].is_phased_out());
             let untouched = if zone == Zone::Hand { grave } else { hand };
@@ -1154,11 +1152,18 @@ fn worf_decline_and_empty_opponent_keep_unselected_creatures() {
                 target: Some(TargetRef::Object(selected)),
             })
             .unwrap();
-        let legal = optional_object_slot(&runner);
-        assert_eq!(legal.contains(&TargetRef::Object(unselected)), !empty);
-        runner
-            .act(GameAction::ChooseTarget { target: None })
-            .unwrap();
+        if !empty {
+            let legal = optional_object_slot(&runner);
+            assert!(legal.contains(&TargetRef::Object(unselected)));
+            runner
+                .act(GameAction::ChooseTarget { target: None })
+                .unwrap();
+        }
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        assert_eq!(runner.state().stack.len(), 1);
         runner.advance_until_stack_empty();
         finished(&runner);
         assert_eq!(runner.state().objects[&selected].controller, P0);
@@ -1225,10 +1230,6 @@ fn two_worfs_do_not_broaden_the_selected_population() {
             .act(GameAction::ChooseTarget {
                 target: Some(TargetRef::Object(selected[index])),
             })
-            .unwrap();
-        assert!(optional_object_slot(&runner).is_empty());
-        runner
-            .act(GameAction::ChooseTarget { target: None })
             .unwrap();
         runner.advance_until_stack_empty();
         finished(&runner);
