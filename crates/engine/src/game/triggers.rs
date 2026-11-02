@@ -11426,8 +11426,8 @@ pub(crate) fn collect_mana_action_trigger_batch(
 ///
 /// The collected state records what observing bound (`ActivationObservers`):
 /// any admitted trigger, counted at match time — before an auto-inert context
-/// (a remembered decline) is pruned, since admission alone may have spent a
-/// "triggers only once each turn" limit. A bound observation revokes any undo
+/// (a remembered accept with no legal target) is pruned, since admission alone
+/// may have spent a "triggers only once each turn" limit. A bound observation revokes any undo
 /// already recorded for this source (CR 605.3b; a replacement-paused
 /// activation reaches this boundary only on resume), and
 /// `mana_sources::record_undoable_mana_tap` never records one for it.
