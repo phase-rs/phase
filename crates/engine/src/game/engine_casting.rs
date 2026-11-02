@@ -31,6 +31,31 @@ pub(super) struct CastStartBoundary {
     from_action_boundary: CastUndoLists,
 }
 
+/// CR 601.2h + CR 733.1: how one admitted action of an incomplete cast
+/// enters the cast's reversal record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CastUndoAction {
+    /// An ordinary casting action. Its journal may show part of the total
+    /// cost being paid (CR 601.2h).
+    Casting,
+    /// CR 733.1: the player reverses a mana ability they activated while
+    /// casting. Mana abilities are activated before costs are paid
+    /// (CR 601.2g), so reversing one pays no cost: it never begins the
+    /// cast's inverse, and folds into one an earlier payment began.
+    ManaAbilityReversal,
+}
+
+impl CastUndoAction {
+    /// The role of `action`. A new action that reverses a mana ability
+    /// belongs in the reversal arm.
+    pub(super) fn of(action: &crate::types::actions::GameAction) -> Self {
+        match action {
+            crate::types::actions::GameAction::UntapLandForMana { .. } => Self::ManaAbilityReversal,
+            _ => Self::Casting,
+        }
+    }
+}
+
 /// Which serialization a cast-undo capture produces.
 #[derive(Clone, Copy)]
 enum CastUndoForm {
@@ -382,18 +407,27 @@ fn cast_has_library_barrier(state: &GameState, journal_start: usize) -> bool {
 /// is retained in the casting descriptor or written into a save. Only members
 /// that can differ from the boundary are serialized (`CastUndoMembers`); the
 /// stored inverse is the one the complete-state comparison (`cast_undo_value`)
-/// yields.
+/// yields. A mana-ability reversal records only into an inverse an earlier
+/// payment began.
 pub(super) fn record_spell_cast_undo(
     state: &mut GameState,
     before: &GameState,
     action_start: usize,
     cast_start: Option<&CastStartBoundary>,
+    role: CastUndoAction,
 ) -> Result<(), EngineError> {
     if state.spell_cast_reversal.is_none() {
         return Ok(());
     }
     let action_start = cast_start.map_or(action_start, |boundary| boundary.journal_start);
-    note_spell_cost_mutations(state, action_start);
+    match role {
+        CastUndoAction::Casting => note_spell_cost_mutations(state, action_start),
+        CastUndoAction::ManaAbilityReversal => {
+            // CR 733.1: reversing a mana ability is no payment (CR 601.2h), so it is
+            // never evidence of a cost mutation. After a real payment it is still
+            // recorded below, folded into that payment's inverse.
+        }
+    }
     let root = state.spell_cast_reversal.as_ref().unwrap();
     if !root.cost_mutations {
         return Ok(());
@@ -2027,7 +2061,14 @@ mod tests {
         now.players[0].life -= 3;
         conceal(&mut now, x);
         with_descriptor(&mut now, x, Some(Vec::new()));
-        record_spell_cast_undo(&mut now, &action_boundary, 0, Some(&boundary)).expect("recorded");
+        record_spell_cast_undo(
+            &mut now,
+            &action_boundary,
+            0,
+            Some(&boundary),
+            CastUndoAction::Casting,
+        )
+        .expect("recorded");
 
         CastStartFlow {
             boundary_lists: boundary.from_action_boundary,
@@ -2096,13 +2137,15 @@ mod tests {
         s1.players[0].life -= 2;
         conceal(&mut s1, x);
         with_descriptor(&mut s1, x, Some(Vec::new()));
-        record_spell_cast_undo(&mut s1, &pre, 0, None).expect("first action recorded");
+        record_spell_cast_undo(&mut s1, &pre, 0, None, CastUndoAction::Casting)
+            .expect("first action recorded");
         let first = s1.spell_cast_reversal.clone().expect("descriptor");
         assert!(holds_printing_of(&first.undo, x), "reach: s1 concealed X");
 
         let mut s2 = s1.clone();
         s2.players[1].life -= 2;
-        record_spell_cast_undo(&mut s2, &s1, 0, None).expect("second action recorded");
+        record_spell_cast_undo(&mut s2, &s1, 0, None, CastUndoAction::Casting)
+            .expect("second action recorded");
         let folded = s2.spell_cast_reversal.clone().expect("descriptor");
 
         let expected = direct(&pre, &s2);
@@ -2122,7 +2165,8 @@ mod tests {
         let mut state = before.clone();
         state.players[0].life -= 2;
         with_descriptor(&mut state, x, None);
-        record_spell_cast_undo(&mut state, &before, 0, None).expect("recorded");
+        record_spell_cast_undo(&mut state, &before, 0, None, CastUndoAction::Casting)
+            .expect("recorded");
         let reversal = state.spell_cast_reversal.clone().expect("descriptor");
         assert!(
             !reversal.undo.is_empty(),
