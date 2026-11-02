@@ -26075,6 +26075,25 @@ pub fn extract_target_filter_from_effect(effect: &Effect) -> Option<&TargetFilte
     if matches!(effect, Effect::UnattachAll { .. }) {
         return None;
     }
+    // CR 115.1a + CR 119.5: "Each player's life total becomes …" (Repay in
+    // Kind, Biorhythm, Worldfire) is not a targeted spell — its text never uses
+    // the phrase "target [something]". `AllPlayers` is the resolution-time
+    // population `resolve_set_life_total` iterates in APNAP order, not a
+    // declared target. Surfacing it here would mint a required slot whose legal
+    // candidates are every player, so `build_target_slots_for_announcement`
+    // rejected the cast with "No legal targets available" before it could ever
+    // be announced (phase-rs/phase#10455). Mirrors the `UnattachAll` and
+    // `Sacrifice` carve-outs above; the single-player forms ("your" →
+    // `Controller`, "target player's" → `Player`) keep their slots untouched.
+    if matches!(
+        effect,
+        Effect::SetLifeTotal {
+            target: TargetFilter::AllPlayers,
+            ..
+        }
+    ) {
+        return None;
+    }
     // CR 115.1 + Whitemane Lion ruling: A `Bounce` whose Oracle text omitted
     // the word "target" ("return a creature you control to its owner's hand")
     // is NOT a targeted effect — the controller chooses an eligible permanent
