@@ -260,6 +260,7 @@ dependencies = [
  "nom",
  "petgraph",
  "phase-ast",
+ "phase-parser",
  "rand",
  "rand_chacha",
  "rustc-hash",
@@ -274,6 +275,20 @@ dependencies = [
  "toml",
  "tracing",
  "web-time",
+]
+
+[[package]]
+name = "phase-parser"
+version = "0.119.0"
+dependencies = [
+ "nom",
+ "phase-ast",
+ "serde",
+ "serde_json",
+ "sha2",
+ "strum",
+ "thiserror",
+ "tracing",
 ]
 
 [[package]]

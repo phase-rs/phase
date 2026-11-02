@@ -86,6 +86,18 @@ pub enum PaymentContinuationUnsupported {
 pub struct AcceptedPaymentSuccessor {
     pub action: GameAction,
     pub state: GameState,
+    pub step: PaymentContinuationStep,
+}
+
+/// What the accepted edge's own reducer step did to the payment root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaymentContinuationStep {
+    /// CR 601.2h–i / CR 602.2b: this step paid the total cost and finalized
+    /// the announced root.
+    Finalizes,
+    /// The same root is still being paid after this step; a later action
+    /// finalizes it.
+    Continues,
 }
 
 /// The completedness of one decision-wide payment proof.
@@ -575,6 +587,7 @@ fn witness_payment_continuations_inner(
                 successors[index] = Some(AcceptedPaymentSuccessor {
                     action: action.clone(),
                     state: successor,
+                    step: PaymentContinuationStep::Finalizes,
                 });
                 if let SearchPolicy::AnyRoot { .. } = policy {
                     return (
@@ -653,6 +666,7 @@ fn witness_payment_continuations_inner(
                 successors[node.root_index] = Some(AcceptedPaymentSuccessor {
                     action: node.root_action,
                     state: node.root_successor,
+                    step: PaymentContinuationStep::Continues,
                 });
                 if let SearchPolicy::AnyRoot { .. } = policy {
                     return (

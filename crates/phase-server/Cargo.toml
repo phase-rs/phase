@@ -15,6 +15,7 @@ lobby-broker = { path = "../lobby-broker" }
 engine = { path = "../engine", package = "phase-engine" }
 phase-ai = { path = "../phase-ai" }
 seat-reducer = { path = "../seat-reducer" }
+state-codec = { path = "../state-codec" }
 draft-core = { path = "../draft-core" }
 rand = "0.9"
 axum = { version = "0.8", features = ["ws"] }
@@ -44,7 +45,6 @@ ngrok = { version = "0.18", optional = true }
 ngrok = ["dep:ngrok"]
 
 [dev-dependencies]
-state-codec = { path = "../state-codec" }
 tokio-tungstenite = "0.29"
 tokio = { version = "1", features = ["test-util"] }
 # GameScenario/GameRunner (bandwidth_budget_tests) sit behind the engine's `test-support` feature.

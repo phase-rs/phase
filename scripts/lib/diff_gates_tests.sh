@@ -88,8 +88,10 @@ printf 'driving the real diff gates under %s (%s)\n' "$BASH_BIN" "$("$BASH_BIN" 
 # --- check-parser-combinators.sh: family (A) -------------------------------
 # Gates G and H run first on every invocation: G needs its three router
 # contexts in oracle.rs, H its detector, seam suite and an (empty) ledger, and
-# the detector's import reads game/mod.rs.
+# the detector's import reads game/mod.rs. $1, when given, is where oracle.rs
+# starts (default: Gate G's path).
 parser_fixture() {
+    local oracle="${1:-crates/phase-parser/src/parser/oracle.rs}"
     new_fixture check-parser-combinators.sh
     cp "$REPO_ROOT/scripts/zone_authority_census.py" "$FIXTURE/scripts/"
     cp "$REPO_ROOT/scripts/lib/detect-residue-discards.py" \
@@ -98,7 +100,7 @@ parser_fixture() {
        "$REPO_ROOT/scripts/lib/detect_cross_product_alts_tests.py" "$FIXTURE/scripts/lib/"
     mkdir -p "$FIXTURE/crates/engine/src/game"
     cp "$REPO_ROOT/crates/engine/src/game/mod.rs" "$FIXTURE/crates/engine/src/game/"
-    put crates/engine/src/parser/oracle.rs \
+    put "$oracle" \
         'fn parse_oracle_ir() {' '}' \
         'fn is_semicolon_keyword_line() {' '}' \
         'fn is_spell_resolution_instruction_line() {' '}'
@@ -204,6 +206,30 @@ run_gate
 expect_rc 'parser: a line moved into phase-ast text_grammar.rs passes' 0
 expect_out 'parser: phase-ast text_grammar.rs was scanned' 'Gate A: scanned 2 file(s)'
 
+# The parser's crate (crates/phase-parser) holds the parser after the move, and
+# its path is in scope beside the old one: a whole-file rename is a move, a line
+# planted at the new path is listed, and the crate's lib.rs stays outside the
+# gate's view.
+parser_fixture crates/engine/src/parser/oracle.rs
+printf '%s\n' "$P_FROZEN" >> "$FIXTURE/crates/engine/src/parser/oracle.rs"
+commit_base
+move crates/engine/src/parser/oracle.rs crates/phase-parser/src/parser/oracle.rs
+commit 'rename into phase-parser'
+run_gate
+expect_rc 'parser: whole-file rename of oracle.rs into phase-parser passes' 0
+expect_out 'parser: the phase-parser rename reaches Gate A PASS' 'Gate A PASS head='
+printf '%s\n' "$P_PLANTED" >> "$FIXTURE/crates/phase-parser/src/parser/oracle.rs"
+commit planted
+run_gate
+expect_rc 'parser: phase-parser rename plus a planted line fails' 1
+expect_listed 'parser: only the line planted in phase-parser oracle.rs is listed' "  crates/phase-parser/src/parser/oracle.rs:
+    $P_PLANTED"
+put crates/phase-parser/src/lib.rs "$P_PLANTED"
+commit 'plant in the phase-parser lib.rs'
+run_gate
+expect_listed 'parser: a line planted in phase-parser lib.rs is not listed' "  crates/phase-parser/src/parser/oracle.rs:
+    $P_PLANTED"
+
 # --- check-engine-authorities.sh: family (A) -------------------------------
 # Sections (B0)-(D) are full-tree censuses of the real engine. Here they are
 # stubs that pass, so section (A), the diff-based one, decides the exit.
@@ -283,6 +309,23 @@ commit 'move into phase-ast'
 run_gate
 expect_rc 'authority: a line moved into an existing phase-ast file passes' 0
 
+# crates/phase-parser/src is in the gate's scope beside crates/engine/src: the
+# parser move's whole-file renames are moves, and a line planted in phase-parser
+# is listed.
+authority_fixture
+put crates/engine/src/parser/oracle.rs 'use super::*;' "$A_FROZEN" 'fn other() {}'
+commit_base
+move crates/engine/src/parser/oracle.rs crates/phase-parser/src/parser/oracle.rs
+commit 'rename into phase-parser'
+run_gate
+expect_rc 'authority: whole-file rename into phase-parser passes' 0
+printf '%s\n' "$A_PLANTED" >> "$FIXTURE/crates/phase-parser/src/parser/oracle.rs"
+commit planted
+run_gate
+expect_rc 'authority: a line planted in phase-parser fails' 1
+expect_listed 'authority: only the line planted in phase-parser is listed' "  crates/phase-parser/src/parser/oracle.rs:
+    $A_PLANTED"
+
 # --- check-test-card-data-load.sh -------------------------------------------
 C_FROZEN='    let db = CardDatabase::from_export(Path::new("../../client/public/card-data.json"));'
 C_PLANTED='    let raw = std::fs::read_to_string("../../client/public/card-data.json");'
@@ -346,17 +389,32 @@ commit 'move into phase-ast'
 run_gate
 expect_rc 'card-data: a load moved into an existing phase-ast file passes' 0
 
+# crates/phase-parser/src is in the gate's scope: the parser move's whole-file
+# renames are moves, and a load planted in phase-parser is listed.
+new_fixture check-test-card-data-load.sh
+put crates/engine/src/parser/oracle.rs 'fn load() {' "$C_FROZEN" '}'
+commit_base
+move crates/engine/src/parser/oracle.rs crates/phase-parser/src/parser/oracle.rs
+commit 'rename into phase-parser'
+run_gate
+expect_rc 'card-data: whole-file rename into phase-parser passes' 0
+put crates/phase-parser/src/parser/oracle.rs 'fn load() {' "$C_FROZEN" '}' 'fn load_raw() {' "$C_PLANTED" '}'
+commit planted
+run_gate
+expect_rc 'card-data: a load planted in phase-parser fails' 1
+expect_listed 'card-data: only the load planted in phase-parser is listed, at its line' "  crates/phase-parser/src/parser/oracle.rs:5:$C_PLANTED"
+
 # --- check-legacy-quantity-callsites.sh ---------------------------------------
 # Its embedded seam check reads five hardcoded seam files and requires each
 # named function to exist, so the fixture holds a stub of each.
 legacy_fixture() {
     new_fixture check-legacy-quantity-callsites.sh
-    put crates/engine/src/parser/oracle_effect/imperative.rs 'fn try_parse_roll_die_with_modifier() {}'
-    put crates/engine/src/parser/oracle_effect/lower.rs 'fn parse_dynamic_counter_suffix_body() {}'
-    put crates/engine/src/parser/oracle_effect/mod.rs \
+    put crates/phase-parser/src/parser/oracle_effect/imperative.rs 'fn try_parse_roll_die_with_modifier() {}'
+    put crates/phase-parser/src/parser/oracle_effect/lower.rs 'fn parse_dynamic_counter_suffix_body() {}'
+    put crates/phase-parser/src/parser/oracle_effect/mod.rs \
         'fn try_parse_gain_energy() {}' 'fn parse_dynamic_energy_unless_cost() {}' 'fn parse_where_x_is() {}'
-    put crates/engine/src/parser/oracle_effect/search.rs 'fn parse_highest_mana_value_library_suffix() {}'
-    put crates/engine/src/parser/oracle_replacement.rs 'fn parse_enters_with_where_x_suffix() {}'
+    put crates/phase-parser/src/parser/oracle_effect/search.rs 'fn parse_highest_mana_value_library_suffix() {}'
+    put crates/phase-parser/src/parser/oracle_replacement.rs 'fn parse_enters_with_where_x_suffix() {}'
 }
 L_FROZEN='fn amount(t: &str) -> Option<QuantityRef> { parse_quantity_ref(t) }'
 L_PLANTED='fn each(t: &str) -> Option<QuantityExpr> { parse_for_each_clause(t) }'
@@ -373,6 +431,23 @@ commit planted
 run_gate
 expect_rc 'legacy-quantity: rename plus a planted call fails' 1
 expect_listed 'legacy-quantity: only the planted call is listed' "  crates/engine/src/parser/oracle_cost/mod.rs:
+    +$L_PLANTED"
+
+# crates/phase-parser/src/parser is in the gate's scope beside the old path: the
+# parser move's whole-file renames are moves, and a call planted at the new path
+# is listed.
+legacy_fixture
+put crates/engine/src/parser/oracle_cost.rs 'use super::*;' "$L_FROZEN"
+commit_base
+move crates/engine/src/parser/oracle_cost.rs crates/phase-parser/src/parser/oracle_cost.rs
+commit 'rename into phase-parser'
+run_gate
+expect_rc 'legacy-quantity: whole-file rename into phase-parser passes' 0
+printf '%s\n' "$L_PLANTED" >> "$FIXTURE/crates/phase-parser/src/parser/oracle_cost.rs"
+commit planted
+run_gate
+expect_rc 'legacy-quantity: a call planted in phase-parser fails' 1
+expect_listed 'legacy-quantity: only the call planted in phase-parser is listed' "  crates/phase-parser/src/parser/oracle_cost.rs:
     +$L_PLANTED"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

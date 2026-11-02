@@ -1188,10 +1188,19 @@ fn parse_artifact_subtype_enchant_leg(input: &str) -> OracleResult<'_, TypeFilte
 }
 
 /// CR 205.4a + CR 702.5a: An Enchant type leg may carry a supertype adjective
-/// such as "snow land", "basic land", or "legendary creature". Reuse the
-/// shared target-phrase supertype recognizer so Aura legality gets the same
-/// `HasSupertype` property as ordinary target phrases.
+/// such as "snow land", "basic land", or "legendary creature", or a
+/// tapped-status adjective ("Enchant tapped creature", Entangling Vines). Reuse the
+/// shared property and supertype recognizers so Aura legality gets the same
+/// properties as ordinary target phrases.
 pub fn parse_enchant_qualified_type_leg(input: &str) -> OracleResult<'_, TypedFilter> {
+    let (input, status) = opt(map_opt(
+        terminated(parse_property_filter, space1),
+        |prop| match prop {
+            FilterProp::Tapped | FilterProp::Untapped => Some(prop),
+            _ => None,
+        },
+    ))
+    .parse(input)?;
     let (input, supertype) = opt(parse_supertype_prefix).parse(input)?;
     let (input, excluded_subtype) = opt(parse_enchant_negated_subtype_prefix).parse(input)?;
     let (input, type_filter) = parse_enchant_type_leg(input)?;
@@ -1199,9 +1208,9 @@ pub fn parse_enchant_qualified_type_leg(input: &str) -> OracleResult<'_, TypedFi
     if let Some(excluded) = excluded_subtype {
         typed = typed.with_type(excluded);
     }
-    let properties = supertype
-        .map(|value| FilterProp::HasSupertype { value })
+    let properties = status
         .into_iter()
+        .chain(supertype.map(|value| FilterProp::HasSupertype { value }))
         .collect();
     Ok((input, typed.properties(properties)))
 }

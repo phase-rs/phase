@@ -83,10 +83,8 @@ pub(crate) fn probe_resolution(
     a: &ResolvedAbility,
     budget: &mut ProbeBudget,
 ) -> ResolutionProbe {
-    // CR 732.2a: BUDGET-EXCEEDED ⇒ `Prompted`. Cost is a COVERAGE knob, never a
-    // soundness knob — an unaffordable probe degrades to honest-red (no
-    // certificate, no offer), never to a wrong certificate and never to an
-    // unbounded stall. Same shape as the `is_empty ⇒ Prompted` arm below.
+    // CR 732.2a: BUDGET-EXCEEDED ⇒ `Prompted`, the answer a real prompt gets. Same shape as
+    // the `is_empty ⇒ Prompted` arm below.
     if !budget.try_charge_one() {
         return ResolutionProbe::Prompted;
     }
@@ -120,10 +118,6 @@ pub(crate) fn probe_resolution(
     // a non-priority `waiting_for` on entry is itself a reason to refuse rather than a
     // baseline to compare against. The discriminant test is KEPT alongside, so a board
     // that entered at priority and left at a different variant still refuses.
-    //
-    // Strictly stronger than the struck form on every input, so it can only ever cost
-    // COVERAGE (a missed offer), never soundness — the same direction as the
-    // budget-exceeded and empty-derivation arms around it.
     if !matches!(work.waiting_for, WaitingFor::Priority { .. })
         || std::mem::discriminant(&work.waiting_for) != std::mem::discriminant(&state.waiting_for)
     {

@@ -37,7 +37,9 @@
     "approve": "Approuver",
     "decline": "Refuser",
     "cancel": "Annuler la demande",
-    "declinedToast": "Demande de reprise refusée"
+    "declinedToast": "Demande de reprise refusée",
+    "cancelledToast": "Demande de reprise annulée",
+    "withdrawnToast": "Demande de reprise retirée : un joueur a quitté la partie"
   },
   "connectionDot": {
     "connected": "Connecté",
@@ -353,7 +355,7 @@
     "gameInProgressTitle": "Partie en cours",
     "gameInProgressBody": "Terminez ou quittez votre partie en cours, puis rouvrez le lien."
   },
-  "p2pStateWithheld": "L'état de la partie après cette action est trop volumineux pour être envoyé, ce plateau n'est donc pas à jour. Les parties pair-à-pair n'ont pas de reprise ; le plateau se mettra à jour lorsqu'un état ultérieur sera assez petit pour être envoyé.",
+  "p2pStateWithheld": "L'état de la partie après cette action est trop volumineux pour être envoyé, ce plateau n'est donc pas à jour. Un joueur peut demander une reprise de la dernière action depuis le menu de la partie pour continuer (pour une boucle, exécutez-la avec un nombre plus petit).",
   "terminalRecovery": {
     "finalViewsUnpublished": "La concession a atteint un état final Full, mais les vues finales natives n’ont pas pu être publiées.",
     "concedeUnreconciled": "Impossible de rapprocher le résultat de la concession ; le siège reste verrouillé.",

@@ -37,8 +37,12 @@ use super::ability::{
 use super::actions::{DebugCardCreationKind, GameAction, ResolveAllScope};
 use super::attribution::ObjectAttribution;
 use super::card::{CardFace, PrintedCardRef, TokenImageRef};
+use super::card_printing::{DeckPrintingRecord, SharedPrinting};
 use super::card_type::{CoreType, Supertype};
 use super::counter::{counter_map_serde, CounterMatch, CounterType};
+use super::display_only::{
+    reported_rules_projection, DisplayOnly, OmittedDisplayData, ReportedRulesProjection,
+};
 use super::events::{
     EventAttachmentSnapshot, EventCombatSnapshot, EventObjectHistorySnapshot,
     EventObjectRelationSnapshot, EventObjectSnapshot, GameEvent, PlayerActionKind, Targeter,
@@ -670,6 +674,16 @@ pub struct TriggerSourceContext {
     pub card_id: CardId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub printed_ref: Option<PrintedCardRef>,
+    /// The observed object's printing, latched beside `lki` and `printed_ref` at the same observation
+    /// (`GameObject::snapshot_for_zone_change`). Display-only: CR 203.1 + CR 206.1, a printing has no
+    /// effect on game play, so no rules or AI path reads it. A departed source's stack row discloses it
+    /// only while it discloses `lki.name` (`derived_views::stack_row_source`). It is never cleared in
+    /// place: it is dropped with the whole context when the source is hidden from a viewer
+    /// (`visibility::redact_zone_change_record`). Deliberately not written by the `Debug` impl below
+    /// (that impl does not destructure, so a new field is not a compile error there). Absent from the
+    /// wire when empty.
+    #[serde(default, skip_serializing_if = "DisplayOnly::is_none")]
+    pub printing: DisplayOnly<Option<SharedPrinting>>,
     #[serde(default)]
     pub is_token: bool,
     #[serde(default)]
@@ -7459,8 +7473,8 @@ pub enum BatchCompletion {
         player: PlayerId,
         source_id: ObjectId,
     },
-    /// CR 610.3 + CR 614.1c: An "exile until ~ leaves" return (Banisher Priest /
-    /// Fiend Hunter / Oblivion Ring class) routed its exiled cards back to the
+    /// CR 610.3 + CR 614.1c: An "exile until ~ leaves" return (Banisher Priest
+    /// class) routed its exiled cards back to the
     /// battlefield through the simultaneous-move batch so the delivery tail seeds
     /// enters-with-counters statics. A returned creature can pause on an
     /// as-enters / aura-host choice; defer the exile-link bookkeeping cleanup
@@ -8494,10 +8508,26 @@ impl ActivationResidual {
     }
 }
 
+/// CR 601.2g + CR 601.2h: a spell sacrifice cost whose zone move waits for the
+/// payment commit, after mana abilities.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DeferredSacrificeSelection {
-    pub object_id: ObjectId,
-    pub filter: TargetFilter,
+#[serde(tag = "type")]
+pub enum DeferredSpellSacrifice {
+    Selected {
+        object_id: ObjectId,
+        filter: TargetFilter,
+    },
+    /// CR 701.21a: "sacrifice all <filter>"; membership is read at the commit.
+    All { filter: TargetFilter },
+}
+
+impl DeferredSpellSacrifice {
+    pub fn selected_object(&self) -> Option<ObjectId> {
+        match self {
+            Self::Selected { object_id, .. } => Some(*object_id),
+            Self::All { .. } => None,
+        }
+    }
 }
 
 /// Stable identity of a permission in a spell object's `casting_permissions`
@@ -8564,7 +8594,19 @@ impl ActivationPhyrexianIntent {
 }
 
 /// CR 601.2 + CR 733.1: an incomplete spell's durable reversal boundary.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+///
+/// Two inverse-edit lists are recorded at the same capture points from the same typed
+/// states. `undo` (the restoration list) inverts the exact serialization, display-only
+/// data included; it is the only list cancellation applies, so a cancelled cast returns
+/// every value, printing included. `comparison_undo` inverts the rules projection
+/// (`display_only::rules_projection`) of the same states and is the descriptor's identity:
+/// CR 104.4b: loop detection compares whole game states, and CR 203.1 + CR 206.1 give a
+/// printing no effect on game play, so two reversals that differ only in display-only data
+/// are equal.
+/// The fragments are already-serialized JSON: a rules projection of a state that still
+/// holds this descriptor cannot see a printing inside them, so every whole-state capture
+/// removes the descriptor first.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct SpellCastReversal {
     pub object_id: ObjectId,
     pub player: PlayerId,
@@ -8574,11 +8616,62 @@ pub(crate) struct SpellCastReversal {
     /// the descriptor stores inverse edits for changed members.
     #[serde(default)]
     pub undo: Vec<SpellCastUndo>,
+    /// The comparison list. `None` only for a descriptor saved before the list
+    /// existed; such a descriptor keeps none until its reversal ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comparison_undo: Option<Vec<SpellCastUndo>>,
     #[serde(default)]
     pub cost_mutations: bool,
     #[serde(default)]
     pub library_undo_forbidden: bool,
 }
+
+impl SpellCastReversal {
+    /// CR 601.2a + CR 733.1: the descriptor of a newly announced spell, with no
+    /// edits yet and a comparison list from the start.
+    pub(crate) fn announced(object_id: ObjectId, player: PlayerId, journal_start: usize) -> Self {
+        Self {
+            object_id,
+            player,
+            journal_start,
+            undo: Vec::new(),
+            comparison_undo: Some(Vec::new()),
+            cost_mutations: false,
+            library_undo_forbidden: false,
+        }
+    }
+}
+
+/// CR 104.4b + CR 203.1 + CR 206.1: every field but the two lists, then the comparison
+/// lists when both descriptors have one and the restoration lists when neither has one.
+/// A descriptor with a comparison list never equals one without, so the relation is an
+/// equivalence: no pair crosses the two classes, and inside each class it is equality of
+/// a tuple of `Eq` values.
+impl PartialEq for SpellCastReversal {
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            object_id,
+            player,
+            journal_start,
+            undo,
+            comparison_undo,
+            cost_mutations,
+            library_undo_forbidden,
+        } = self;
+        *object_id == other.object_id
+            && *player == other.player
+            && *journal_start == other.journal_start
+            && *cost_mutations == other.cost_mutations
+            && *library_undo_forbidden == other.library_undo_forbidden
+            && match (comparison_undo, &other.comparison_undo) {
+                (Some(mine), Some(theirs)) => mine == theirs,
+                (None, None) => *undo == other.undo,
+                (Some(_), None) | (None, Some(_)) => false,
+            }
+    }
+}
+
+impl Eq for SpellCastReversal {}
 
 /// CR 733.1: inverse edits captured at the existing action boundary. Paths
 /// address serialized state fields; applying them restores values, never
@@ -8684,10 +8777,15 @@ pub struct PendingCast {
     pub activation_cost_snapshot: Option<Box<crate::types::casting_costs::ActivationCostSnapshot>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation_cost: Option<AbilityCost>,
-    /// CR 601.2h: Random cost elements are paid after every nonrandom element.
-    /// Presence also reserves this many hand cards through the mana window.
+    /// CR 601.2h: A hand discard paid at the payment commit, after mana
+    /// abilities; see `DeferredHandDiscardCost` for what each kind reserves.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub deferred_random_discard_cost: Option<DeferredRandomDiscardCost>,
+    pub deferred_hand_discard_cost: Option<DeferredHandDiscardCost>,
+    /// CR 601.2h: Set only on a cast suspended by a commit-time prompt (hand discard or
+    /// sacrifice arrangement); the prompt's continuation finishes the cast from what the
+    /// commit decided.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepaid_finalization: Option<Box<PrepaidSpellFinalization>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation_ability_index: Option<usize>,
     /// CR 606.3: Loyalty activation history is recorded only after the loyalty
@@ -8808,7 +8906,7 @@ pub struct PendingCast {
     /// for sacrifice, but whose actual zone move is deferred until the final
     /// payment commit so mana abilities can be activated first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub deferred_sacrificed_permanents: Vec<DeferredSacrificeSelection>,
+    pub deferred_sacrificed_permanents: Vec<DeferredSpellSacrifice>,
     /// CR 118.3a: Player-directed pin hints recorded during
     /// `WaitingFor::ManaPayment`. Each id names a pool `ManaUnit` the caster
     /// prefers to spend first; pins are priority hints, not removals — the unit
@@ -9013,6 +9111,16 @@ pub enum PendingCostMoveCompletion {
         /// `None` when the first pass had not reached the pre-payment checks.
         pre_payment_checks: Option<Box<FinalizePrePaymentChecks>>,
     },
+}
+
+/// CR 601.2h: What a spell's payment commit decided before its mana was spent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrepaidSpellFinalization {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phyrexian_choices: Option<Vec<ShardChoice>>,
+    /// `None` when the commit had not reached the pre-payment checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_payment_checks: Option<Box<FinalizePrePaymentChecks>>,
 }
 
 /// CR 601.2a-b + CR 614.1c: Pre-payment determinations of one cast finalization,
@@ -9619,11 +9727,24 @@ pub struct RandomDiscardCostPick {
     pub snapshot: CostPaidObjectSnapshot,
 }
 
-/// The single supported random hand-discard leaf, reserved while every
-/// nonrandom component of the same cost is paid.
+/// A hand-discard cost leaf paid at the payment commit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DeferredRandomDiscardCost {
-    pub count: usize,
+#[serde(tag = "type")]
+pub enum DeferredHandDiscardCost {
+    /// CR 701.9b: `count` cards at random; the count stays reserved through the mana window.
+    Random { count: usize },
+    /// CR 601.2g + CR 601.2h: "discard your hand" — the hand as it stands when the cost is paid.
+    WholeHand,
+}
+
+impl DeferredHandDiscardCost {
+    /// Hand cards the mana window must leave in hand; `None` reserves nothing.
+    pub fn reserved_count(&self) -> Option<usize> {
+        match self {
+            Self::Random { count } => Some(*count),
+            Self::WholeHand => None,
+        }
+    }
 }
 
 impl PendingCast {
@@ -9645,7 +9766,8 @@ impl PendingCast {
             cost_reduction_election: None,
             activation_cost_snapshot: None,
             activation_cost: None,
-            deferred_random_discard_cost: None,
+            deferred_hand_discard_cost: None,
+            prepaid_finalization: None,
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: Vec::new(),
@@ -9976,6 +10098,21 @@ impl GameState {
             .unwrap_or_default()
     }
 
+    fn is_current_library_fact(&self, fact: &ProductKnowledgeFact) -> bool {
+        fact.zone == Zone::Library
+            && fact.library_epoch == Some(self.library_knowledge_epoch(fact.owner))
+    }
+
+    /// Whether some player learned a card of `owner`'s library since its last reorder.
+    pub(crate) fn has_current_library_fact(&self, owner: PlayerId) -> bool {
+        let holder = self.shared_zone_holder(Zone::Library);
+        let owner = holder.unwrap_or(owner);
+        self.product_knowledge_state
+            .facts
+            .iter()
+            .any(|fact| holder.unwrap_or(fact.owner) == owner && self.is_current_library_fact(fact))
+    }
+
     pub(crate) fn library_knowledge_boundary_generation(&self, owner: PlayerId) -> u64 {
         let owner = self.zone_storage_seat(Zone::Library, owner);
         self.product_knowledge_state
@@ -9988,15 +10125,8 @@ impl GameState {
     /// Removes an epoch once no current library fact relies on it, keeping
     /// equivalent product-knowledge states equal and serialized identically.
     fn canonicalize_library_knowledge_epoch(&mut self, owner: PlayerId) {
-        let holder = self.shared_zone_holder(Zone::Library);
-        let owner = holder.unwrap_or(owner);
-        let current_epoch = self.library_knowledge_epoch(owner);
-        let has_live_library_fact = self.product_knowledge_state.facts.iter().any(|fact| {
-            holder.unwrap_or(fact.owner) == owner
-                && fact.zone == Zone::Library
-                && fact.library_epoch == Some(current_epoch)
-        });
-        if !has_live_library_fact {
+        let owner = self.zone_storage_seat(Zone::Library, owner);
+        if !self.has_current_library_fact(owner) {
             if let Some(epoch) = self
                 .product_knowledge_state
                 .library_epochs
@@ -10602,6 +10732,35 @@ fn visit_mana_ability_resume_events(
 }
 
 impl ManaAbilityResume {
+    /// CR 601.2g-h: Whether this mana ability was activated while paying a
+    /// cast's or activation's cost, so finishing it returns to that payment
+    /// and the announcement's `GameState::pending_cast` is still live.
+    /// Narrower than `withholds_priority`, which also counts special actions
+    /// (they carry no `PendingCast`). Exhaustive so a new root is classified.
+    pub fn resumes_pending_cast(&self) -> bool {
+        match self {
+            ManaAbilityResume::ManaPayment { .. }
+            | ManaAbilityResume::ManaSourceSelection { .. }
+            | ManaAbilityResume::PhyrexianCastPayment { .. }
+            | ManaAbilityResume::FinalizePendingManaPayment { .. } => true,
+            // CR 605.3a: re-enters the outer mana ability, whose own chain
+            // decides whether the cast's payment lies beneath it.
+            ManaAbilityResume::ManaAbilityManaPayment {
+                pending_mana_ability,
+            } => pending_mana_ability.resumes_pending_cast(),
+            ManaAbilityResume::Priority
+            | ManaAbilityResume::CompanionToHand { .. }
+            | ManaAbilityResume::PlanarDieRoll { .. }
+            | ManaAbilityResume::TurnFaceUp { .. }
+            | ManaAbilityResume::EndContinuousEffect { .. }
+            | ManaAbilityResume::RoomUnlock { .. }
+            | ManaAbilityResume::Foretell { .. }
+            | ManaAbilityResume::UnlessPayment { .. }
+            | ManaAbilityResume::CombatTaxPayment { .. }
+            | ManaAbilityResume::EffectPayCost { .. } => false,
+        }
+    }
+
     /// CR 601.2g + CR 605.3b: Whether resuming this root continues an automatic
     /// payment that suspended while auto-tap was paying it, rather than opening
     /// a prompt or starting a fresh payment. Exhaustive so a new root has to be
@@ -11026,6 +11185,18 @@ impl PendingManaAbility {
         })
     }
 
+    /// CR 601.2g-h + CR 605.3a: whether finishing this activation, or any
+    /// activation suspended beneath it at a payment window, returns to a cast's
+    /// or activation's cost payment (so `GameState::pending_cast` is live).
+    /// `ManaAbilityResume::resumes_pending_cast` walks the suspended chain.
+    pub(crate) fn resumes_pending_cast(&self) -> bool {
+        self.resume.resumes_pending_cast()
+            || self
+                .cost_move_resume
+                .as_ref()
+                .is_some_and(ManaAbilityResume::resumes_pending_cast)
+    }
+
     /// How many activations are suspended beneath this one. With its source this identifies the
     /// activation for as long as it stands begun: whatever is begun meanwhile stands above it.
     pub(crate) fn chain_place(&self) -> usize {
@@ -11385,6 +11556,11 @@ pub struct PlayerDeckPool {
     /// compatibility with saved states and test fixtures that omit the field.
     #[serde(default)]
     pub bracket_tier: CommanderBracketTier,
+    /// CR 203.1 + CR 206.1: the owner's printing record for this seat (display-only),
+    /// filled at load and never written after it. Redacted with the lists it annotates
+    /// (`visibility.rs`, CR 400.2 + CR 100.4).
+    #[serde(default, skip_serializing_if = "DisplayOnly::is_none")]
+    pub printings: DisplayOnly<Option<Arc<DeckPrintingRecord>>>,
 }
 
 impl PlayerDeckPool {
@@ -11409,6 +11585,7 @@ impl PlayerDeckPool {
             registered_scheme_deck,
             current_scheme_deck,
             bracket_tier,
+            printings,
         } = self;
         // Named rather than written inline: `clippy::type_complexity` rejects the
         // inline array-of-pairs type, and the alias is the lint's own suggested remedy.
@@ -11431,8 +11608,15 @@ impl PlayerDeckPool {
             (registered_scheme_deck, &other.registered_scheme_deck),
             (current_scheme_deck, &other.current_scheme_deck),
         ];
+        // Identity of the retained printing record: the same allocation, or none on both sides.
+        let printings_shared = match (printings.get(), other.printings.get()) {
+            (Some(mine), Some(theirs)) => Arc::ptr_eq(mine, theirs),
+            (None, None) => true,
+            (Some(_), None) | (None, Some(_)) => false,
+        };
         *player == other.player
             && *bracket_tier == other.bracket_tier
+            && printings_shared
             && lists
                 .into_iter()
                 .all(|(mine, theirs)| Arc::ptr_eq(mine, theirs))
@@ -13146,6 +13330,18 @@ fn visit_persisted_journal_zone_change_trigger_records(
 /// current turn and the ledger position together, but historical payloads may
 /// omit either field and deserialize them as zero.
 ///
+/// Records and ledger rows are compared by [`PersistedZoneChangeFingerprint`]:
+/// the rules projection of the typed `ZoneChangeRecord` (decoded through its own
+/// compatibility decoding, without its two occurrence stamps). CR 203.1 +
+/// CR 206.1: a printing has no effect on game play, so a display-only
+/// difference neither splits one occurrence into two nor selects between two
+/// rules-identical occurrences, while the loaded state keeps every original
+/// value because reconciliation only inserts the two stamps. Display-free
+/// records keep today's raw-JSON comparison at the fast paths and among two or
+/// more rules-identical candidates, so every binding that is unique today stays
+/// unique; a display-free record whose only rules-identical row differs from it
+/// in raw form now binds to that row.
+///
 /// This runs against serialized `ResolutionStateWire` input before either v1
 /// legacy fields or v2/v3 typed frames materialize into runtime state. The
 /// caller passes any v1-only live roots; typed frames are part of the canonical
@@ -13220,7 +13416,7 @@ pub(crate) fn reconcile_persisted_zone_change_occurrences(
 
     reindex_persisted_batched_zone_change_trigger_keys(state, turn_number, &old_to_current_index)?;
 
-    let mut seen = HashMap::<(u32, usize), serde_json::Value>::new();
+    let mut seen = HashMap::<(u32, usize), OccurrenceClaim>::new();
     visit_persisted_live_zone_changed_records(state, additional_live_event_roots, &mut |record| {
         reconcile_persisted_zone_changed_record(record, turn_number, &occurrences, &mut seen)
     })?;
@@ -13265,10 +13461,110 @@ fn reindex_persisted_batched_zone_change_trigger_keys(
     Ok(())
 }
 
+/// Load errors of the persisted zone-change reconciliation; the texts are matched by tests.
+const ZONE_CHANGE_NO_OCCURRENCE: &str = "current-turn ZoneChanged record has no ledger occurrence";
+const ZONE_CHANGE_AMBIGUOUS_OCCURRENCE: &str =
+    "ZoneChanged record ambiguously matches multiple ledger occurrences";
+const ZONE_CHANGE_CONFLICTING_CLAIMS: &str =
+    "ZoneChanged occurrence key is shared by conflicting records";
+
 #[derive(Debug)]
 struct PersistedZoneChangeOccurrence {
     index: usize,
-    fingerprint: serde_json::Value,
+    fingerprint: PersistedZoneChangeFingerprint,
+}
+
+/// CR 400.7 + CR 603.2c: the identity that binds a persisted `ZoneChanged`
+/// record to its ledger occurrence. CR 203.1 + CR 206.1: display-only data
+/// takes no part in it.
+#[derive(Debug)]
+struct PersistedZoneChangeFingerprint {
+    /// The rules projection of the typed record decoded without the two
+    /// occurrence stamps. The projection holds both stamp keys at the constant
+    /// serde defaults on every side, so it needs no further stripping.
+    rules: serde_json::Value,
+    raw: RawZoneChangeFingerprint,
+}
+
+/// The raw half of the two-source rule.
+#[derive(Debug)]
+enum RawZoneChangeFingerprint {
+    /// The typed record carries no display data: today's raw comparison (the raw
+    /// map without the two stamps) still decides between display-free records.
+    DisplayFree(serde_json::Value),
+    /// The typed record carries display data: raw comparison is disabled for it.
+    DisplayBearing,
+}
+
+impl PersistedZoneChangeFingerprint {
+    /// Whether two fingerprints name one occurrence. Two display-free records
+    /// compare in raw form (today's relation); any pair with display data
+    /// compares the rules projection. Raw equality implies rules equality (the
+    /// typed fingerprint is a function of the raw one), so this is finer than
+    /// the rules relation only between two display-free records.
+    fn same_occurrence(&self, other: &Self) -> bool {
+        match (&self.raw, &other.raw) {
+            (
+                RawZoneChangeFingerprint::DisplayFree(a),
+                RawZoneChangeFingerprint::DisplayFree(b),
+            ) => a == b,
+            (
+                RawZoneChangeFingerprint::DisplayFree(_),
+                RawZoneChangeFingerprint::DisplayBearing,
+            )
+            | (
+                RawZoneChangeFingerprint::DisplayBearing,
+                RawZoneChangeFingerprint::DisplayFree(_),
+            )
+            | (
+                RawZoneChangeFingerprint::DisplayBearing,
+                RawZoneChangeFingerprint::DisplayBearing,
+            ) => self.rules == other.rules,
+        }
+    }
+}
+
+/// CR 603.2c: every live record that names one occurrence key must be that
+/// occurrence: all of them agree in the rules projection, and the display-free
+/// ones also agree in raw form (today's comparison among display-free records).
+/// This is the pairwise relation of [`PersistedZoneChangeFingerprint::same_occurrence`]
+/// applied to the whole group, so the verdict does not depend on visiting order.
+struct OccurrenceClaim {
+    rules: serde_json::Value,
+    /// The raw form of the first display-free record of this key, if any.
+    display_free_raw: Option<serde_json::Value>,
+}
+
+impl OccurrenceClaim {
+    fn of(fingerprint: PersistedZoneChangeFingerprint) -> Self {
+        let display_free_raw = match fingerprint.raw {
+            RawZoneChangeFingerprint::DisplayFree(raw) => Some(raw),
+            RawZoneChangeFingerprint::DisplayBearing => None,
+        };
+        Self {
+            rules: fingerprint.rules,
+            display_free_raw,
+        }
+    }
+
+    fn admit(&mut self, fingerprint: PersistedZoneChangeFingerprint) -> Result<(), String> {
+        if self.rules != fingerprint.rules {
+            return Err(ZONE_CHANGE_CONFLICTING_CLAIMS.to_string());
+        }
+        match (fingerprint.raw, &self.display_free_raw) {
+            (RawZoneChangeFingerprint::DisplayBearing, _) => Ok(()),
+            (RawZoneChangeFingerprint::DisplayFree(raw), None) => {
+                self.display_free_raw = Some(raw);
+                Ok(())
+            }
+            (RawZoneChangeFingerprint::DisplayFree(raw), Some(claimed)) if raw == *claimed => {
+                Ok(())
+            }
+            (RawZoneChangeFingerprint::DisplayFree(_), Some(_)) => {
+                Err(ZONE_CHANGE_CONFLICTING_CLAIMS.to_string())
+            }
+        }
+    }
 }
 
 fn persisted_turn_number(
@@ -13288,26 +13584,57 @@ fn json_usize(value: &serde_json::Value) -> Option<usize> {
     value.as_u64().and_then(|value| usize::try_from(value).ok())
 }
 
+/// The persisted record without its two occurrence stamps: the raw half of the
+/// fingerprint, and the typed decode's input.
+fn without_occurrence_stamps(
+    record: &serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut stamp_free = record.clone();
+    stamp_free.remove("turn_zone_change_index");
+    stamp_free.remove("recorded_turn_number");
+    stamp_free
+}
+
+/// CR 400.7 + CR 603.2c + CR 203.1 + CR 206.1: decodes the persisted record
+/// through `ZoneChangeRecord`'s own compatibility decoding and fingerprints its
+/// rules projection. The decode input omits the two occurrence stamps, which
+/// reconciliation itself rewrites and which today's loader reads as absent when
+/// invalid, so they take their serde defaults on every side.
 fn zone_change_fingerprint(
     record: &serde_json::Map<String, serde_json::Value>,
-) -> Result<serde_json::Value, String> {
+) -> Result<PersistedZoneChangeFingerprint, String> {
     if !record.contains_key("object_id")
         || !record.contains_key("from_zone")
         || !record.contains_key("to_zone")
     {
         return Err("ZoneChanged record is missing its zone-change shape".to_string());
     }
-    let mut fingerprint = record.clone();
-    fingerprint.remove("turn_zone_change_index");
-    fingerprint.remove("recorded_turn_number");
-    Ok(serde_json::Value::Object(fingerprint))
+    let stamp_free = without_occurrence_stamps(record);
+    let typed = ZoneChangeRecord::deserialize(&stamp_free).map_err(|error| {
+        format!("ZoneChanged record does not decode as a zone-change record: {error}")
+    })?;
+    let ReportedRulesProjection {
+        value: rules,
+        omitted,
+    } = reported_rules_projection(&typed)
+        .map_err(|error| format!("ZoneChanged record has no rules projection: {error}"))?;
+    if !rules.is_object() {
+        return Err("ZoneChanged record's rules projection is not an object".to_string());
+    }
+    let raw = match omitted {
+        OmittedDisplayData::Nothing => {
+            RawZoneChangeFingerprint::DisplayFree(serde_json::Value::Object(stamp_free))
+        }
+        OmittedDisplayData::NonEmpty => RawZoneChangeFingerprint::DisplayBearing,
+    };
+    Ok(PersistedZoneChangeFingerprint { rules, raw })
 }
 
 fn reconcile_persisted_zone_changed_record(
     record: &mut serde_json::Value,
     current_turn: u32,
     occurrences: &[PersistedZoneChangeOccurrence],
-    seen: &mut HashMap<(u32, usize), serde_json::Value>,
+    seen: &mut HashMap<(u32, usize), OccurrenceClaim>,
 ) -> Result<(), String> {
     let record = record
         .as_object_mut()
@@ -13336,7 +13663,7 @@ fn reconcile_persisted_zone_changed_record(
             if let Some(index) = index {
                 if occurrences
                     .get(index)
-                    .is_some_and(|occurrence| occurrence.fingerprint == fingerprint)
+                    .is_some_and(|occurrence| occurrence.fingerprint.same_occurrence(&fingerprint))
                 {
                     (turn, index)
                 } else {
@@ -13363,7 +13690,7 @@ fn reconcile_persisted_zone_changed_record(
         // zero/current stamps remain strict below.
         None if !occurrences
             .iter()
-            .any(|occurrence| occurrence.fingerprint == fingerprint) =>
+            .any(|occurrence| occurrence.fingerprint.same_occurrence(&fingerprint)) =>
         {
             return Ok(())
         }
@@ -13378,11 +13705,10 @@ fn reconcile_persisted_zone_changed_record(
 
     match seen.entry((recorded_turn, index)) {
         std::collections::hash_map::Entry::Vacant(entry) => {
-            entry.insert(fingerprint);
+            entry.insert(OccurrenceClaim::of(fingerprint));
         }
-        std::collections::hash_map::Entry::Occupied(entry) if *entry.get() == fingerprint => {}
-        std::collections::hash_map::Entry::Occupied(_) => {
-            return Err("ZoneChanged occurrence key is shared by conflicting records".to_string());
+        std::collections::hash_map::Entry::Occupied(mut entry) => {
+            entry.get_mut().admit(fingerprint)?;
         }
     }
     Ok(())
@@ -13391,22 +13717,33 @@ fn reconcile_persisted_zone_changed_record(
 /// A coherent pair can remain as-is even when two historical ledger rows are
 /// byte-identical: persistence cannot distinguish copied carriers of one
 /// occurrence from a lost second occurrence. Only a record that needs a new
-/// binding must identify exactly one ledger row.
+/// binding must identify exactly one ledger row, by the two-source rule:
+///
+/// - (a) the candidates are the ledger occurrences whose rules projection equals
+///   the record's (CR 203.1 + CR 206.1: display data never discriminates);
+/// - (b) exactly one candidate binds (CR 400.7 + CR 603.2c: one occurrence per
+///   record);
+/// - (c) two or more candidates fall back to today's raw comparison, only when
+///   the record and every candidate are display-free (a display-bearing member
+///   disables the fallback, so a printing never chooses);
+/// - (d) no candidate is an error. Raw equality implies rules equality (the typed
+///   fingerprint is a function of the raw one), so the raw fallback the rule
+///   would permit for an all-display-free set cannot find a row either, and both
+///   branches give this error; it is returned directly.
 fn reconcile_current_turn_zone_changed_record(
     record: &mut serde_json::Map<String, serde_json::Value>,
     current_turn: u32,
-    fingerprint: &serde_json::Value,
+    fingerprint: &PersistedZoneChangeFingerprint,
     occurrences: &[PersistedZoneChangeOccurrence],
 ) -> Result<(u32, usize), String> {
     let candidates = occurrences
         .iter()
-        .filter(|occurrence| occurrence.fingerprint == *fingerprint)
+        .filter(|occurrence| occurrence.fingerprint.rules == fingerprint.rules)
         .collect::<Vec<_>>();
-    let [occurrence] = candidates.as_slice() else {
-        return Err(match candidates.len() {
-            0 => "current-turn ZoneChanged record has no ledger occurrence".to_string(),
-            _ => "ZoneChanged record ambiguously matches multiple ledger occurrences".to_string(),
-        });
+    let occurrence = match candidates.as_slice() {
+        [] => return Err(ZONE_CHANGE_NO_OCCURRENCE.to_string()),
+        [one] => *one,
+        several => legacy_raw_occurrence(fingerprint, several)?,
     };
     record.insert(
         "recorded_turn_number".to_string(),
@@ -13417,6 +13754,41 @@ fn reconcile_current_turn_zone_changed_record(
         serde_json::Value::from(occurrence.index),
     );
     Ok((current_turn, occurrence.index))
+}
+
+/// Rule (c) of the two-source rule: among two or more rules-identical candidates,
+/// today's raw comparison decides, but only when the record and every candidate
+/// are display-free. A display-bearing record or member disables the fallback
+/// (it is not merely excluded), so a printing never selects between rules-identical
+/// occurrences (CR 203.1 + CR 206.1).
+///
+/// Genuine pre-stamp saves predate display carriers and cannot contain printing
+/// data. Hand-authored or mixed newer data can still reach this boundary, so the
+/// display-free guard remains necessary and fails closed.
+fn legacy_raw_occurrence<'a>(
+    fingerprint: &PersistedZoneChangeFingerprint,
+    candidates: &[&'a PersistedZoneChangeOccurrence],
+) -> Result<&'a PersistedZoneChangeOccurrence, String> {
+    let RawZoneChangeFingerprint::DisplayFree(record_raw) = &fingerprint.raw else {
+        return Err(ZONE_CHANGE_AMBIGUOUS_OCCURRENCE.to_string());
+    };
+    let mut raw_matches = Vec::new();
+    for candidate in candidates {
+        match &candidate.fingerprint.raw {
+            RawZoneChangeFingerprint::DisplayBearing => {
+                return Err(ZONE_CHANGE_AMBIGUOUS_OCCURRENCE.to_string());
+            }
+            RawZoneChangeFingerprint::DisplayFree(raw) if raw == record_raw => {
+                raw_matches.push(*candidate);
+            }
+            RawZoneChangeFingerprint::DisplayFree(_) => {}
+        }
+    }
+    match raw_matches.as_slice() {
+        [one] => Ok(one),
+        [] => Err(ZONE_CHANGE_NO_OCCURRENCE.to_string()),
+        _ => Err(ZONE_CHANGE_AMBIGUOUS_OCCURRENCE.to_string()),
+    }
 }
 
 /// Visits `ZoneChanged` records in live event carriers only. The occurrence
@@ -18388,6 +18760,12 @@ pub enum WaitingFor {
         declaration: Option<crate::analysis::decision_template::DecisionTemplate>,
         /// The producer that minted this offer; `game::engine`'s route authority reads it.
         road: crate::analysis::loop_check::OfferRoad,
+        /// Whether a counted take of this offer performs.
+        #[serde(
+            default,
+            skip_serializing_if = "crate::analysis::loop_check::CountedTake::is_performs"
+        )]
+        counted_take: crate::analysis::loop_check::CountedTake,
         /// CR 732.2a: the period the confirmer replayed for this offer; empty for an offer no
         /// period was confirmed for. Stripped for every viewer.
         #[serde(
@@ -18723,6 +19101,11 @@ pub enum WaitingFor {
     TopOrBottomChoice {
         player: PlayerId,
         object_id: ObjectId,
+        /// CR 401.7: where `ChooseTopOrBottom { top: true }` places the object.
+        /// `Top` for a plain "top or bottom" choice; `NthFromTop` for "second
+        /// from the top or on the bottom". `top: false` is always the bottom.
+        #[serde(default, skip_serializing_if = "LibraryPosition::is_top")]
+        top_position: LibraryPosition,
     },
     /// CR 701.36a: Choose a creature token you control to create a copy of.
     PopulateChoice {
@@ -20868,6 +21251,8 @@ impl WaitingFor {
     /// * [`WaitingFor::BattleProtectorChoice`] — CR 310.11 ("its controller chooses an
     ///   appropriate player to be its protector ... This is a state-based action")
     ///   + CR 704.5x, likewise answered inside the CR 704.3 fixpoint.
+    /// * [`WaitingFor::RevealChoice`] with `optional: false` and exactly one eligible
+    ///   card — CR 608.2d, a mid-resolution choice with a single legal option.
     ///
     /// Those SBA members (the commander-zone, legend and battle-protector choices) are
     /// the COMPLETE set of player-choice pauses `game::sba` opens inside the SBA
@@ -20957,9 +21342,15 @@ impl WaitingFor {
     /// the ring-clearing behaviour, so a newly added variant defaults to the safe side
     /// without anyone remembering to update this list.
     pub fn is_forced_cascade_window(&self) -> bool {
-        matches!(
-            self,
-            WaitingFor::OrderTriggers { .. }
+        self.is_forced_one_option_choice()
+            // CR 608.2d: a reveal choice the chooser cannot decline is no stop.
+            || matches!(
+                self,
+                WaitingFor::RevealChoice { optional: false, cards, .. } if cards.len() >= 2
+            )
+            || matches!(
+                self,
+                WaitingFor::OrderTriggers { .. }
                 | WaitingFor::TriggerTargetSelection { .. }
                 | WaitingFor::OptionalEffectChoice { .. }
                 | WaitingFor::CommanderZoneChoice { .. }
@@ -20982,7 +21373,51 @@ impl WaitingFor {
                 // CR 514.1 + CR 514.3: discarding to maximum hand size is the cleanup
                 // step's turn-based action, and no player normally gets priority there.
                 | WaitingFor::DiscardToHandSize { .. }
-        )
+            )
+    }
+
+    /// CR 608.2d + CR 732.4: a non-optional choice with one eligible card is no player decision.
+    pub fn is_forced_one_option_choice(&self) -> bool {
+        self.forced_one_option_answer().is_some()
+    }
+
+    /// CR 603.3b + CR 601.2c + CR 608.2d: the decision point the every-option proof enumerates at this prompt.
+    pub(crate) fn option_point(&self) -> Option<crate::analysis::decision_template::ChoicePoint> {
+        use crate::analysis::decision_template::ChoicePoint;
+        match self {
+            WaitingFor::OrderTriggers { .. } => Some(ChoicePoint::TriggerOrder),
+            WaitingFor::TriggerTargetSelection {
+                target_slots,
+                selection,
+                ..
+            } if target_slots
+                .get(selection.current_slot)
+                .is_some_and(|slot| !slot.optional)
+                && selection.current_legal_targets.len() >= 2 =>
+            {
+                Some(ChoicePoint::AnnouncedTarget)
+            }
+            WaitingFor::RevealChoice {
+                optional: false,
+                cards,
+                ..
+            } if cards.len() >= 2 => Some(ChoicePoint::ResolutionSet),
+            _ => None,
+        }
+    }
+
+    /// CR 608.2d: the only answer a forced one-option choice has.
+    pub(crate) fn forced_one_option_answer(&self) -> Option<crate::types::actions::GameAction> {
+        match self {
+            WaitingFor::RevealChoice {
+                cards,
+                optional: false,
+                ..
+            } if cards.len() == 1 => Some(crate::types::actions::GameAction::SelectCards {
+                cards: cards.clone(),
+            }),
+            _ => None,
+        }
     }
 
     /// Look-at-top-N states whose legal selections cannot be captured by the
@@ -21521,8 +21956,7 @@ pub enum LoopDetectionMode {
     /// mandatory lethal drain it OFFERS the interactive loop-shortcut + runs the APNAP
     /// accept-or-shorten window for an OPTIONAL winning drain, and adds the CR 732.4
     /// all-mandatory net-progress no-loss DRAW. A mandatory winning drain still
-    /// auto-wins exactly as `On` does. Opt-in / default stays `Off`. (Phase 4 reuses
-    /// this same mode for B5's non-winning hold — one serialized-enum add, not two.)
+    /// auto-wins exactly as `On` does. Opt-in / default stays `Off`.
     Interactive,
 }
 
@@ -22542,6 +22976,251 @@ impl<'de> Deserialize<'de> for PendingLiminalEntryResume {
 pub struct LoopDetectSample {
     pub normalized: GameState,
     pub live: GameState,
+    /// The answered-decision tally when this beat was sampled.
+    pub tally: LoopDecisionTally,
+    /// The play trace's length when this beat was sampled; `live` carries no trace.
+    pub trace_at: Option<usize>,
+}
+
+/// CR 608.1 + CR 732.2a: a loop window kept across beats whose stack fell below its start depth,
+/// until a beat returns to that depth; only the top resolves, so a window whose depth only falls
+/// is a finite drain and is never admitted.
+#[derive(Debug, Clone)]
+pub struct HeldLoopWindow {
+    pub start_depth: usize,
+    pub samples: std::collections::VecDeque<std::sync::Arc<LoopDetectSample>>,
+}
+
+/// CR 104.4b: something a loop period holds that keeps it from being declared a draw.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LoopDecision {
+    /// CR 603.5 + CR 616.1e: a declinable choice was answered, prompted or remembered.
+    Optional,
+    /// CR 104.4b: some player held a priority action that could stop the loop.
+    Outs,
+    /// CR 603.3b: a choice was made at this point, prompted or saved, that no proof has yet read.
+    Unproven(crate::analysis::decision_template::ChoicePoint),
+    /// CR 603.3b + CR 616.1: a choice among several options was made, prompted or remembered.
+    Decision,
+    /// CR 104.4b + CR 732.2a: a target or card choice every option of which continues the loop, so the period is offered.
+    Continuing,
+    /// CR 104.4b: randomness drawn inside the window keeps the period from repeating exactly, so it is offered, never declared.
+    Random,
+}
+
+/// Answered loop decisions so far; monotone, so only the difference between two reads means
+/// anything.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LoopDecisionTally {
+    pub optional: u64,
+    pub decision: u64,
+    pub trigger_order: u64,
+    pub announced_target: u64,
+    pub resolution_set: u64,
+}
+
+impl LoopDecisionTally {
+    /// Whether a choice the every-option proof reads was made since `first`.
+    pub(crate) fn provable_moved_since(&self, first: &Self) -> bool {
+        self.trigger_order != first.trigger_order
+            || self.announced_target != first.announced_target
+            || self.resolution_set != first.resolution_set
+    }
+}
+
+/// CR 732.5: whether some living player held a meaningful priority action at a sampled beat.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PriorityOut {
+    #[default]
+    Absent,
+    Held,
+}
+
+impl PriorityOut {
+    /// The out verdict at `state`, which must be a live state: normalization never decides it.
+    pub(crate) fn at(state: &GameState) -> Self {
+        if crate::game::engine::no_living_player_has_meaningful_priority_action(state) {
+            Self::Absent
+        } else {
+            Self::Held
+        }
+    }
+}
+
+/// What a sampled beat contributes to its period's [`LoopDecisionProfile`].
+pub trait LoopDecisionMark {
+    fn tally(&self) -> LoopDecisionTally;
+    fn out(&self) -> PriorityOut;
+    fn rng_position(&self) -> u128;
+}
+
+/// A beat's marks with the out verdict already taken.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LoopDecisionMarks {
+    pub tally: LoopDecisionTally,
+    pub out: PriorityOut,
+    pub rng_position: u128,
+}
+
+impl LoopDecisionMark for LoopDecisionMarks {
+    fn tally(&self) -> LoopDecisionTally {
+        self.tally
+    }
+
+    fn out(&self) -> PriorityOut {
+        self.out
+    }
+
+    fn rng_position(&self) -> u128 {
+        self.rng_position
+    }
+}
+
+impl LoopDecisionMark for LoopDetectSample {
+    fn tally(&self) -> LoopDecisionTally {
+        self.tally
+    }
+
+    fn out(&self) -> PriorityOut {
+        PriorityOut::at(&self.live)
+    }
+
+    fn rng_position(&self) -> u128 {
+        self.live.rng.get_word_pos()
+    }
+}
+
+/// CR 104.4b + CR 732.4: what a loop period holds besides its mandatory actions; only a period
+/// with none is a draw.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LoopDecisionProfile {
+    pub members: BTreeSet<LoopDecision>,
+}
+
+impl LoopDecisionProfile {
+    /// The profile of the period from the window's first mark to `current`. `Outs` is not read
+    /// for an Optional period: Optional is never declared or offered, and the out verdict
+    /// enumerates every living player's priority actions.
+    pub fn of_window<'a, M: LoopDecisionMark + 'a>(
+        window: impl IntoIterator<Item = &'a M>,
+        current: &LoopDecisionMarks,
+    ) -> Self {
+        let mut window = window.into_iter().peekable();
+        let first = window.peek().map_or(current.tally, |first| first.tally());
+        let first_rng = window
+            .peek()
+            .map_or(current.rng_position, |first| first.rng_position());
+        let mut members = BTreeSet::new();
+        if current.rng_position != first_rng {
+            members.insert(LoopDecision::Random);
+        }
+        if current.tally.optional != first.optional {
+            members.insert(LoopDecision::Optional);
+        }
+        if current.tally.decision != first.decision {
+            members.insert(LoopDecision::Decision);
+        }
+        use crate::analysis::decision_template::ChoicePoint;
+        for (point, now, then) in [
+            (
+                ChoicePoint::TriggerOrder,
+                current.tally.trigger_order,
+                first.trigger_order,
+            ),
+            (
+                ChoicePoint::AnnouncedTarget,
+                current.tally.announced_target,
+                first.announced_target,
+            ),
+            (
+                ChoicePoint::ResolutionSet,
+                current.tally.resolution_set,
+                first.resolution_set,
+            ),
+        ] {
+            if now != then {
+                members.insert(LoopDecision::Unproven(point));
+            }
+        }
+        if !members.contains(&LoopDecision::Optional)
+            && (current.out == PriorityOut::Held
+                || window.any(|marks| marks.out() == PriorityOut::Held))
+        {
+            members.insert(LoopDecision::Outs);
+        }
+        Self { members }
+    }
+
+    /// CR 732.4: the period holds only mandatory actions.
+    pub fn is_forced(&self) -> bool {
+        self.members.is_empty()
+    }
+
+    /// CR 732.2a + CR 732.5: the period is offered: its members are all outs, choices proven to
+    /// continue, or randomness.
+    pub fn is_offered(&self) -> bool {
+        !self.members.is_empty()
+            && self.members.iter().all(|member| {
+                matches!(
+                    member,
+                    LoopDecision::Outs | LoopDecision::Continuing | LoopDecision::Random
+                )
+            })
+    }
+
+    /// Whether the period holds a target or card choice no proof has yet read.
+    pub(crate) fn holds_unproven_option(&self) -> bool {
+        use crate::analysis::decision_template::ChoicePoint;
+        self.members.iter().any(|member| {
+            matches!(
+                member,
+                LoopDecision::Unproven(ChoicePoint::AnnouncedTarget | ChoicePoint::ResolutionSet)
+            )
+        })
+    }
+
+    /// CR 603.3b + CR 104.4b: the profile with its unproven choices read by one `proof`, asked
+    /// only when the period holds one: when every option continues the loop an order is no
+    /// choice and a target or card choice is `Continuing`; an optional action when some option
+    /// ends it, and a decision while unproven.
+    pub(crate) fn with_option_proof(
+        mut self,
+        proof: impl FnOnce() -> crate::game::period_confirm::OptionProof,
+    ) -> Self {
+        use crate::analysis::decision_template::ChoicePoint;
+        use crate::game::period_confirm::OptionProof;
+        let unproven: Vec<ChoicePoint> = self
+            .members
+            .iter()
+            .filter_map(|member| match member {
+                LoopDecision::Unproven(point) => Some(*point),
+                _ => None,
+            })
+            .collect();
+        if unproven.is_empty() {
+            return self;
+        }
+        self.members
+            .retain(|member| !matches!(member, LoopDecision::Unproven(_)));
+        match proof() {
+            OptionProof::Continues => {
+                if unproven
+                    .iter()
+                    .any(|&point| point != ChoicePoint::TriggerOrder)
+                {
+                    self.members.insert(LoopDecision::Continuing);
+                }
+            }
+            OptionProof::Ends => {
+                self.members.insert(LoopDecision::Optional);
+                self.members.remove(&LoopDecision::Outs);
+            }
+            OptionProof::Undecided => {
+                self.members.insert(LoopDecision::Decision);
+            }
+        }
+        self
+    }
 }
 
 /// CR 601.2h + CR 608.2c: authoritative descriptor for a resolution-time
@@ -23270,6 +23949,10 @@ declare_game_state! {
     /// dedup on semantically-identical positions is unaffected.
     #[serde(skip, default)]
     pub loop_detect_ring: std::collections::VecDeque<std::sync::Arc<LoopDetectSample>>,
+    /// The window held across shrinking beats; transient like `loop_detect_ring`, so never
+    /// persisted or compared.
+    #[serde(skip, default)]
+    pub loop_detect_held: Option<Box<HeldLoopWindow>>,
     /// CR 603.5 + CR 608.2b + CR 732.2a: the answers given to published decision SLOTS
     /// during the window `loop_detect_ring` is sampling, so the CR 732.2a declaration can
     /// pin the choice each iteration actually made instead of guessing one. Both published
@@ -23334,6 +24017,11 @@ declare_game_state! {
             >,
         >,
     >,
+    /// CR 104.4b: every loop decision answered so far, in every mode; written only by
+    /// [`GameState::record_loop_decision`] and [`GameState::record_trigger_order`]. Live-only:
+    /// never persisted or compared.
+    #[serde(skip, default)]
+    pub(crate) loop_decision_tally: LoopDecisionTally,
     /// CR 732.2a: every play and answer of the current step, and the spans carried past earlier
     /// steps. Live-only, like
     /// `loop_answer_journal`: never persisted, compared, or shown to a viewer.
@@ -23866,20 +24554,6 @@ declare_game_state! {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub unbounded_rising: BTreeMap<PlayerId, BTreeSet<ResourceAxis>>,
 
-    /// CR 104.4b / CR 732.2a: for each controller with a marked revocable-∞ capability
-    /// (`unbounded_resources`), the set of battlefield permanents whose presence enables the
-    /// loop (the stable recurring board: `battlefield_ids(prior) ∩ battlefield_ids(state)`).
-    /// Populated ONLY by the Interactive B5 bridge arm (`interactive_loop_bridge` Path C);
-    /// the `apply_zone_exit_cleanup` defuse hook clears the whole capability when ANY member
-    /// leaves the battlefield (CR 110.1 / CR 700.4).
-    ///
-    /// INTENTIONALLY EXCLUDED from `PartialEq`, `normalize_for_loop`, and `loop_fingerprint`
-    /// (same family as `unbounded_resources`): revocation annotation, not rules state for
-    /// equality — a populated live state must still compare equal to the empty-enabler ring
-    /// snapshots, or loop detection yields false negatives.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub unbounded_loop_enablers: BTreeMap<PlayerId, BTreeSet<ObjectId>>,
-
     /// CR 732.2a display state: for the winning controller of an accepted
     /// object-growth loop shortcut, the set of that controller's *tapped*
     /// fodder-class members (CR 110.1 permanents) forming the visible "∞ pile".
@@ -23887,11 +24561,11 @@ declare_game_state! {
     /// and projected to `DerivedViews::unbounded_pile`; the frontend renders ∞
     /// (vs ×N) on any battlefield group whose members are all pile members.
     /// Written ONLY by `register_unbounded_loop_pile`; cleared (in lockstep with
-    /// `unbounded_resources` / `unbounded_loop_enablers`) by `clear_unbounded_loop`.
+    /// `unbounded_resources`) by `clear_unbounded_loop`.
     ///
     /// INTENTIONALLY EXCLUDED from `PartialEq`, `normalize_for_loop`, and
-    /// `loop_fingerprint` (same family as `unbounded_resources` /
-    /// `unbounded_loop_enablers`): display state, not rules state for equality —
+    /// `loop_fingerprint` (same family as `unbounded_resources`): display state, not rules
+    /// state for equality —
     /// a populated live state must still compare equal to the empty-pile ring
     /// snapshots, or CR 104.4b/CR 732.2a loop detection yields false negatives.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -23949,7 +24623,7 @@ declare_game_state! {
     ///
     /// INTENTIONALLY EXCLUDED from `PartialEq`, `normalize_for_loop`, and
     /// `loop_fingerprint` (same unbounded family as `unbounded_resources` /
-    /// `unbounded_loop_enablers` / `unbounded_loop_pile`): deferred-materialization
+    /// `unbounded_loop_pile`): deferred-materialization
     /// annotation, not rules state for equality — a populated live state must still
     /// compare equal to the empty ring snapshots, or CR 104.4b loop detection
     /// yields false negatives.
@@ -24489,6 +25163,14 @@ declare_game_state! {
     #[serde(default)]
     #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
     pub players_who_created_token_this_turn: HashSet<PlayerId>,
+    /// CR 705.3: Players who have flipped one or more coins this turn. Written
+    /// by the single flip seam (`effects::flip_coin`) when a set of flips
+    /// begins, for every player regardless of which statics are active, so a
+    /// flip made before Edgar, King of Figaro arrived still spends that
+    /// player's "first time … each turn" window. Cleared at turn start.
+    #[serde(default)]
+    #[serde(serialize_with = "crate::types::deterministic_serde::hash_set")]
+    pub players_who_flipped_coins_this_turn: HashSet<PlayerId>,
     /// CR 111.2: Token creation snapshots this turn, preserving creation-time
     /// characteristics for filtered "tokens you created this turn" quantities.
     #[serde(default, skip_serializing_if = "im::Vector::is_empty")]
@@ -24816,6 +25498,10 @@ declare_game_state! {
     pub pending_die_roll_instruction: Option<Box<PendingDieRollInstruction>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub may_trigger_auto_choices: Vec<MayTriggerAutoChoiceRecord>,
+    /// Opt-in Un-card actions (Gotcha windows, say-it prompts). See
+    /// [`crate::types::un_actions`].
+    #[serde(default, skip_serializing_if = "super::un_actions::UnActionState::is_default")]
+    pub un_actions: Box<super::un_actions::UnActionState>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub replacement_auto_choices: Vec<ReplacementAutoChoiceRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -25875,6 +26561,9 @@ const LEGACY_EXPLOIT_EVENT_EVIDENCE_ERROR: &str =
 const LEGACY_DEFERRED_SPELL_DELIVERY_ERROR: &str =
     "legacy deferred_spell_delivery snapshot cannot prove which on-resolution hooks already ran; restore a save taken after the spell's free-cast window closed";
 
+const LEGACY_DEFERRED_RANDOM_DISCARD_COST_ERROR: &str =
+    "legacy deferred_random_discard_cost snapshot owes a random discard this build cannot read; restore a save taken outside the spell's or ability's cost payment";
+
 const SERIALIZED_TRIGGER_DEFINITION_CORE_FIELDS: &[&str] = &[
     "execute",
     "valid_card",
@@ -25974,6 +26663,32 @@ fn reject_legacy_deferred_spell_delivery(value: &serde_json::Value) -> Result<()
     match state.get("deferred_spell_delivery") {
         None | Some(serde_json::Value::Null) => Ok(()),
         Some(_) => Err(LEGACY_DEFERRED_SPELL_DELIVERY_ERROR.to_string()),
+    }
+}
+
+/// CR 601.2h: a pending cast written before `deferred_hand_discard_cost` owed
+/// its random discard under this key; decoding past it would finish the cast
+/// without the discard. Every `PendingCast` site can carry it, so the whole value is walked.
+fn reject_legacy_deferred_random_discard_cost(value: &serde_json::Value) -> Result<(), String> {
+    match value {
+        serde_json::Value::Object(object) => {
+            if object
+                .get("deferred_random_discard_cost")
+                .is_some_and(|cost| !cost.is_null())
+            {
+                return Err(LEGACY_DEFERRED_RANDOM_DISCARD_COST_ERROR.to_string());
+            }
+            object
+                .values()
+                .try_for_each(reject_legacy_deferred_random_discard_cost)
+        }
+        serde_json::Value::Array(values) => values
+            .iter()
+            .try_for_each(reject_legacy_deferred_random_discard_cost),
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_) => Ok(()),
     }
 }
 
@@ -27342,6 +28057,7 @@ impl GameStateDecode {
         reject_legacy_exploit_event_evidence(&value)?;
         reject_legacy_raw_prompt_authority(&value)?;
         reject_legacy_deferred_spell_delivery(&value)?;
+        reject_legacy_deferred_random_discard_cost(&value)?;
         if !matches!(mode, GameStateDecodeMode::DirectCurrentRaw) {
             migrate_legacy_delayed_trigger_provenance(&mut value)?;
             migrate_legacy_trigger_firing_carriers(
@@ -27403,6 +28119,7 @@ impl GameStateDecode {
         reject_legacy_exploit_event_evidence(value)?;
         reject_legacy_raw_prompt_authority(value)?;
         reject_legacy_deferred_spell_delivery(value)?;
+        reject_legacy_deferred_random_discard_cost(value)?;
         if matches!(
             mode,
             GameStateDecodeMode::ResolutionWireV1 | GameStateDecodeMode::ResolutionWireV2
@@ -29314,6 +30031,116 @@ impl GameState {
             || self.pending_discard_for_cost.is_some()
             || self.waiting_for.is_mana_ability_continuation()
             || self.pending_triggered_mana_resume.is_some()
+    }
+
+    /// CR 601.2: The cast or activation announcement currently in flight, if
+    /// any, read from whichever typed [`PendingCastOwner`] holds it, provided
+    /// that owner is eligible at the current prompt (see
+    /// [`Self::pending_cast_owner_active_at_prompt`]). A bare
+    /// `GameState::pending_cast` left outside every carrier prompt, or a
+    /// lingering permission, is not an active announcement.
+    pub(crate) fn active_cast_announcement(&self) -> Option<&PendingCast> {
+        PendingCastOwner::ALL
+            .into_iter()
+            .filter(|owner| self.pending_cast_owner_active_at_prompt(*owner))
+            .find_map(|owner| self.pending_cast_at(owner))
+    }
+
+    /// Whether `owner`'s `PendingCast` belongs to the announcement the current
+    /// prompt is continuing.
+    fn pending_cast_owner_active_at_prompt(&self, owner: PendingCastOwner) -> bool {
+        match owner {
+            // The prompt embeds the announcement itself.
+            PendingCastOwner::Prompt => true,
+            PendingCastOwner::External => self.prompt_continues_external_pending_cast(),
+            // CR 616.1 + CR 601.2h: a typed cost root holds the announcement
+            // only while its paused cost waits behind the child prompt it
+            // opened (the replacement choice); it never survives to priority.
+            PendingCastOwner::DeferredLifeCost
+            | PendingCastOwner::CostMove
+            | PendingCastOwner::DiscardForCost => self.cost_root_child_prompt_open(),
+        }
+    }
+
+    /// Whether the current prompt continues the announcement carried in the
+    /// external `GameState::pending_cast`: the `ManaPayment` family, Assist
+    /// (CR 702.132a), `DistributeAmong` (CR 601.2d), a nested mana ability's
+    /// continuation prompt whose activation returns to the cast's payment
+    /// (CR 601.2g + CR 605.3b), or a mana ability's paused cost parked in a
+    /// typed root whose activation chain returns to that payment.
+    fn prompt_continues_external_pending_cast(&self) -> bool {
+        self.waiting_for.has_pending_cast()
+            || matches!(
+                self.waiting_for,
+                WaitingFor::DistributeAmong { .. }
+                    | WaitingFor::AssistChoosePlayer { .. }
+                    | WaitingFor::AssistPayment { .. }
+            )
+            || self
+                .waiting_for
+                .continued_mana_ability()
+                .is_some_and(PendingManaAbility::resumes_pending_cast)
+            || (self.cost_root_child_prompt_open() && self.parked_mana_cost_resumes_pending_cast())
+    }
+
+    /// A typed cost root parks behind the prompt its paused cost opened; once
+    /// the game is back at priority (or over) no such child prompt is open.
+    fn cost_root_child_prompt_open(&self) -> bool {
+        !matches!(
+            self.waiting_for,
+            WaitingFor::Priority { .. } | WaitingFor::GameOver { .. }
+        )
+    }
+
+    /// CR 601.2g + CR 605.3b + CR 616.1: whether a mana ability whose own cost
+    /// paused (a replacement-aware sacrifice, collect evidence, or life
+    /// payment) returns, through its retained activation chain and its
+    /// cost-cursor parents, to a cast's or activation's cost payment, so the
+    /// external `pending_cast` is still that announcement.
+    fn parked_mana_cost_resumes_pending_cast(&self) -> bool {
+        let cost_move = self
+            .pending_cost_move_resume
+            .as_ref()
+            .is_some_and(|resume| match resume {
+                PendingCostMoveResume::ManaAbilityPayment { pending, cursor } => {
+                    pending.resumes_pending_cast()
+                        || std::iter::successors(cursor.parent.as_deref(), |parent| {
+                            parent.cursor.parent.as_deref()
+                        })
+                        .any(|parent| parent.pending.resumes_pending_cast())
+                }
+                PendingCostMoveResume::CollectEvidencePayment { resume, .. } => {
+                    match resume.as_ref() {
+                        CollectEvidenceResume::ManaAbility {
+                            pending_mana_ability,
+                        } => pending_mana_ability.resumes_pending_cast(),
+                        CollectEvidenceResume::Casting { .. }
+                        | CollectEvidenceResume::Effect { .. } => false,
+                    }
+                }
+                PendingCostMoveResume::Cast { .. }
+                | PendingCostMoveResume::SacrificeForCost { .. }
+                | PendingCostMoveResume::CounterCostRemovalPayment { .. }
+                | PendingCostMoveResume::ActivationMillPayment { .. }
+                | PendingCostMoveResume::WardSacrificePayment { .. }
+                | PendingCostMoveResume::ReplacementMayCost { .. }
+                | PendingCostMoveResume::Foretell { .. }
+                | PendingCostMoveResume::UnlessBouncePayment { .. }
+                | PendingCostMoveResume::LoyaltyActivation { .. }
+                | PendingCostMoveResume::CounterAdditionUnlessPayment { .. }
+                | PendingCostMoveResume::RandomDiscardUnlessPayment(..)
+                | PendingCostMoveResume::TurnFaceUpCostMove { .. } => false,
+            });
+        let deferred_life = self
+            .pending_deferred_life_cost_resume
+            .as_ref()
+            .is_some_and(|resume| match resume {
+                DeferredLifeCostResume::ManaRoot { resume, .. } => resume.resumes_pending_cast(),
+                DeferredLifeCostResume::Cast { .. }
+                | DeferredLifeCostResume::PayAmount { .. }
+                | DeferredLifeCostResume::TurnFaceUp { .. } => false,
+            });
+        cost_move || deferred_life
     }
 
     /// Returns the active continuation only when its typed frame is the stack
@@ -32780,7 +33607,9 @@ impl GameState {
             static_source_index: StaticSourceIndex::default(),
             static_mode_presence: crate::types::statics::StaticModePresence::all_present(),
             loop_detect_ring: std::collections::VecDeque::new(),
+            loop_detect_held: None,
             loop_answer_journal: None,
+            loop_decision_tally: LoopDecisionTally::default(),
             play_trace: None,
             precast_shortcut_runtime: PrecastShortcutRuntime::default(),
             life_safety_probe: Box::default(),
@@ -32906,6 +33735,7 @@ impl GameState {
             attacker_declarations_this_turn: Vec::new(),
             creatures_blocked_this_turn: HashSet::new(),
             players_who_created_token_this_turn: HashSet::new(),
+            players_who_flipped_coins_this_turn: HashSet::new(),
             created_tokens_this_turn: im::Vector::new(),
             counter_added_this_turn: im::Vector::new(),
             players_who_discarded_card_this_turn: HashSet::new(),
@@ -32956,6 +33786,7 @@ impl GameState {
             pending_search_found_batch: None,
             pending_die_roll_instruction: None,
             may_trigger_auto_choices: Vec::new(),
+            un_actions: Default::default(),
             replacement_auto_choices: Vec::new(),
             replacement_auto_choice_tail: None,
             decision_templates: Vec::new(),
@@ -33074,7 +33905,6 @@ impl GameState {
             debug_infinite_mana: BTreeSet::new(),
             unbounded_resources: BTreeMap::new(),
             unbounded_rising: BTreeMap::new(),
-            unbounded_loop_enablers: BTreeMap::new(),
             unbounded_loop_pile: BTreeMap::new(),
             unbounded_counter_targets: BTreeMap::new(),
             pending_unbounded_materialization: BTreeMap::new(),
@@ -34182,6 +35012,9 @@ impl GameState {
     /// times can compare equal on everything a mandatory action could change.
     pub(crate) fn normalize_for_loop(&self) -> GameState {
         let mut clone = self.clone();
+        // apply() resets these at the start of every player action, so a position compares as
+        // the next action starts from it.
+        clone.clear_player_action_transients();
         clone.state_revision = 0;
         clone.next_timestamp = 0;
         clone.next_object_id = 0;
@@ -34223,6 +35056,7 @@ impl GameState {
         // the live ring → recursive/quadratic growth. Cleared ⇒ every stored snapshot
         // has clone depth 1. Does not affect any comparison (the ring is eq-excluded).
         clone.loop_detect_ring.clear();
+        clone.loop_detect_held = None;
         // CR 603.5: the "may"-answer journal belongs to the LIVE window, not to a stored
         // position sample. Cleared with the ring, on this same receiver.
         clone.loop_answer_journal = None;
@@ -34241,6 +35075,30 @@ impl GameState {
             .product_knowledge_state
             .zone_change_library_knowledge_stamps
             .clear();
+        let unknown: Vec<PlayerId> = clone
+            .players
+            .iter()
+            .map(|player| player.id)
+            .filter(|&id| !clone.has_current_library_fact(id))
+            .collect();
+        for player in clone.players.iter_mut() {
+            if unknown.contains(&player.id) {
+                // CR 701.24a: a library no current knowledge fact names compares as its cards, in no order.
+                player.library.sort();
+            }
+        }
+        // CR 701.20a + CR 104.4b: revealed-card knowledge is disclosure history, not game position.
+        // A current library fact stays at the cleared epoch, so normalizing the clone again keeps the same order.
+        let facts = std::mem::take(&mut clone.product_knowledge_state.facts);
+        clone.product_knowledge_state.facts = facts
+            .into_iter()
+            .filter(|fact| clone.is_current_library_fact(fact))
+            .map(|fact| ProductKnowledgeFact {
+                library_epoch: Some(0),
+                ..fact
+            })
+            .collect();
+        clone.product_knowledge_state.library_epochs.clear();
         // Private shortcut capabilities are live interaction state, never part
         // of a CR 104.4b position sample.
         clone.precast_shortcut_runtime = PrecastShortcutRuntime::default();
@@ -34557,10 +35415,8 @@ impl GameState {
         self.for_each_trigger_event_carrier_mut(&mut |event| record_event(event));
 
         // CR 608.2c: the departure snapshots the frame's live tracked-set
-        // anaphor reads — the resolved set's origins (`chain_tracked_set_id`,
-        // else the latest non-empty set, mirroring
-        // `targeting::resolve_tracked_set_id`; inlined because types cannot
-        // depend on game) — are retained alongside carrier references, or
+        // anaphor reads — the resolved set's origins
+        // (`targeting::resolve_tracked_set_id`) — are retained alongside carrier references, or
         // normalization would degrade origin reads the unnormalized states
         // agree on. Every other set is an append-only record whose superseded
         // stamps are history, not position: each blink cycle appends a fresh
@@ -34568,14 +35424,7 @@ impl GameState {
         // accumulate incarnations across periods and refuse artefactually.
         // (Fresh sets' origins stay compared through the origins field,
         // converged below the window by the cover arms.)
-        let resolved_set = self.chain_tracked_set_id.or_else(|| {
-            self.tracked_object_sets
-                .iter()
-                .filter(|(_, members)| !members.is_empty())
-                .max_by_key(|(id, _)| id.0)
-                .map(|(id, _)| *id)
-        });
-        if let Some(set) = resolved_set {
+        if let Some(set) = crate::game::targeting::resolve_tracked_set_id(self) {
             if let Some(members) = self.tracked_set_member_origins.get(&set) {
                 for (member, origin) in members.iter() {
                     referenced_lki.insert(ObjectIncarnationRef::of(
@@ -34715,13 +35564,19 @@ impl GameState {
     }
 
     /// See `normalize_for_loop`. Per object, rank-based over the retained
-    /// `lki_by_incarnation` and `lki_copiable_values_by_incarnation` keys,
-    /// the incarnations trigger events name (`ZoneChanged` entries and stamped
-    /// `PermanentTapped` taps), and the incarnations the resolved set's member
-    /// origins name — so two positions minted at different times compare
-    /// equal while which incarnation each live reference names, and whether a
-    /// snapshot sits behind it, is preserved. Non-resolved origins name
-    /// append-only history and remap by union rank below the window.
+    /// `lki_copiable_values_by_incarnation` keys, the incarnations trigger
+    /// events name (`ZoneChanged` entries and every incarnation inside their
+    /// records, stamped `PermanentTapped` taps), the may-trigger origins and
+    /// stored answers, the turn and combat block-history pairs (CR 509.1g), and
+    /// the live incarnation of every object those or a tracked-set origin
+    /// (CR 608.2c) name. Ranks count down from the
+    /// highest member, so the live incarnation anchors them: two positions
+    /// minted at different times compare equal, while which incarnation each
+    /// carrier names, relative to the live one, and whether a snapshot sits
+    /// behind it, is preserved. The live incarnation is rewritten through the
+    /// same map, so normalizing a normalized state is a fixed point. Kept
+    /// snapshots no carrier reads rank among themselves, and tracked-set
+    /// origins are renamed by their read class rather than ranked.
     fn canonicalize_lki_incarnations_for_loop(&mut self) {
         fn named_incarnation(event: &mut GameEvent) -> Option<(ObjectId, &mut u64)> {
             match event {
@@ -34791,6 +35646,9 @@ impl GameState {
                 | GameEvent::SagaChapterAbilityResolved { .. }
                 | GameEvent::ObjectIntensified { .. }
                 | GameEvent::Evolved { .. }
+                | GameEvent::UnTellPerformed { .. }
+                | GameEvent::PhraseSaid { .. }
+                | GameEvent::GotchaSaid { .. }
                 | GameEvent::CounterRemoved { .. }
                 | GameEvent::TokenCreated { .. }
                 | GameEvent::ObjectConjured { .. }
@@ -34883,70 +35741,407 @@ impl GameState {
                 | GameEvent::DebugPermissionRevoked { .. } => None,
             }
         }
+        // Every incarnation inside a `ZoneChanged` record except `entered_incarnation`,
+        // which `named_incarnation` owns. Destructured without `..` so a new
+        // incarnation-bearing field must decide here whether it is ranked.
+        fn record_incarnations(event: &mut GameEvent, f: &mut impl FnMut(ObjectId, &mut u64)) {
+            let GameEvent::ZoneChanged { record, .. } = event else {
+                return;
+            };
+            let ZoneChangeRecord {
+                object_id: _,
+                name: _,
+                core_types: _,
+                subtypes: _,
+                supertypes: _,
+                keywords: _,
+                trigger_definitions: _,
+                trigger_source_context,
+                power: _,
+                toughness: _,
+                base_power: _,
+                base_toughness: _,
+                colors: _,
+                mana_value: _,
+                controller: _,
+                owner: _,
+                arrival: _,
+                from_zone: _,
+                cast_from_zone: _,
+                played_from_zone: _,
+                to_zone: _,
+                attachments,
+                linked_exile_snapshot,
+                is_token: _,
+                combat_status: _,
+                block_pairs,
+                co_departed: _,
+                entered_incarnation: _,
+                attached_to: _,
+                turn_zone_change_index: _,
+                recorded_turn_number: _,
+                is_suspected: _,
+                was_prepared: _,
+                departure: _,
+            } = &mut **record;
+            attachment_incarnations(attachments, f);
+            linked_exile_incarnations(linked_exile_snapshot, f);
+            block_pair_incarnations(block_pairs, f);
+            let Some(TriggerSourceContext {
+                identity,
+                lki,
+                card_id: _,
+                printed_ref: _,
+                printing: _,
+                is_token: _,
+                face_down: _,
+                mana_cost: _,
+                transformed: _,
+                is_renowned: _,
+                is_saddled: _,
+                echo_due: _,
+                harnessed: _,
+                saddled_by: _,
+                convoked_creatures: _,
+                case_state: _,
+                class_level: _,
+                trigger_entries: _,
+                timestamp: _,
+                entered_battlefield_turn: _,
+                paired_with: _,
+                pair_controller: _,
+                attached_to: _,
+                attachments,
+                linked_exile_snapshot,
+                cards_exiled_this_turn: _,
+                combat_status: _,
+                cast_from_zone: _,
+                played_from_zone: _,
+                entered_via_ability_source: _,
+                cast_controller: _,
+                phase_status: _,
+                cast_variant_paid: _,
+                cast_timing_permission: _,
+                cost_x_paid: _,
+                cast_spell_keywords: _,
+                mana_spent_to_cast: _,
+                colors_spent_to_cast: _,
+                mana_spent_to_cast_amount: _,
+                mana_spent_source_snapshots,
+                kickers_paid: _,
+                additional_cost_payment_count: _,
+                additional_cost_payments: _,
+                cast_cost_paid_object,
+                granting_object,
+            }) = trigger_source_context.as_mut()
+            else {
+                return;
+            };
+            let ObjectIdentityBinding {
+                reference,
+                expected_zone: _,
+            } = identity;
+            f(reference.object_id, &mut reference.incarnation);
+            lki_incarnations(lki, f);
+            attachment_incarnations(attachments, f);
+            linked_exile_incarnations(linked_exile_snapshot, f);
+            for ManaSpentSourceSnapshot { source_id: _, lki } in mana_spent_source_snapshots {
+                lki_incarnations(lki, f);
+            }
+            if let Some(CostPaidObjectSnapshot {
+                object_id,
+                lki,
+                incarnation,
+            }) = cast_cost_paid_object
+            {
+                f(*object_id, incarnation);
+                lki_incarnations(lki, f);
+            }
+            if let Some(granting) = granting_object {
+                f(granting.object_id, &mut granting.incarnation);
+            }
+        }
+        fn lki_incarnations(lki: &mut LKISnapshot, f: &mut impl FnMut(ObjectId, &mut u64)) {
+            let LKISnapshot {
+                name: _,
+                token_image_ref: _,
+                power: _,
+                toughness: _,
+                base_power: _,
+                base_toughness: _,
+                mana_value: _,
+                controller: _,
+                owner: _,
+                card_types: _,
+                subtypes: _,
+                supertypes: _,
+                keywords: _,
+                colors: _,
+                chosen_attributes: _,
+                counters: _,
+                tapped: _,
+                is_suspected: _,
+                was_prepared: _,
+                attachments,
+                intensity: _,
+            } = lki;
+            attachment_incarnations(attachments, f);
+        }
+        fn attachment_incarnations(
+            attachments: &mut [AttachmentSnapshot],
+            f: &mut impl FnMut(ObjectId, &mut u64),
+        ) {
+            for AttachmentSnapshot {
+                object_id: _,
+                identity,
+                controller: _,
+                kind: _,
+            } in attachments
+            {
+                if let Some(reference) = identity {
+                    f(reference.object_id, &mut reference.incarnation);
+                }
+            }
+        }
+        fn block_pair_incarnations(
+            pairs: &mut [BlockHistoryPair],
+            f: &mut impl FnMut(ObjectId, &mut u64),
+        ) {
+            for BlockHistoryPair { blocker, attacker } in pairs {
+                f(blocker.object_id, &mut blocker.incarnation);
+                f(attacker.object_id, &mut attacker.incarnation);
+            }
+        }
+        fn linked_exile_incarnations(
+            snapshots: &mut [LinkedExileSnapshot],
+            f: &mut impl FnMut(ObjectId, &mut u64),
+        ) {
+            for LinkedExileSnapshot {
+                exiled_id,
+                owner: _,
+                mana_value: _,
+                incarnation,
+            } in snapshots
+            {
+                f(*exiled_id, incarnation);
+            }
+        }
+        // The may-trigger origins on every ability that can still resolve, and the
+        // stored exact-instance answers, so a stored answer keeps naming the same
+        // incarnation and grant generation as the trigger it answers (CR 603.5).
+        fn may_trigger_origins(
+            state: &mut GameState,
+            f: &mut impl FnMut(&mut TriggerDefinitionRef),
+        ) {
+            for entry in state
+                .stack
+                .iter_mut()
+                .chain(state.resolving_stack_entry.iter_mut())
+            {
+                if let Some(ability) = entry.ability_mut() {
+                    ability.for_each_may_trigger_origin_mut(f);
+                }
+            }
+            let ordering = state
+                .pending_trigger_order
+                .iter_mut()
+                .flat_map(|order| order.groups.iter_mut())
+                .flat_map(|group| group.triggers.iter_mut())
+                .map(|context| &mut context.pending);
+            for pending in state
+                .pending_trigger
+                .as_deref_mut()
+                .into_iter()
+                .chain(
+                    state
+                        .deferred_triggers
+                        .iter_mut()
+                        .map(|deferred| &mut deferred.pending),
+                )
+                .chain(ordering)
+            {
+                if let Some(MayTriggerOrigin::Definition { definition_ref }) =
+                    pending.may_trigger_origin.as_mut()
+                {
+                    f(definition_ref);
+                }
+                pending.ability.for_each_may_trigger_origin_mut(f);
+            }
+            for record in state.may_trigger_auto_choices.iter_mut() {
+                if let MayTriggerAutoChoiceSelector::ExactInstance {
+                    origin: MayTriggerOrigin::Definition { definition_ref },
+                    ..
+                } = &mut record.selector
+                {
+                    f(definition_ref);
+                }
+            }
+        }
+        fn above(members: &HashMap<ObjectId, Vec<u64>>, object_id: ObjectId, value: u64) -> u64 {
+            let members = &members[&object_id];
+            let rank = members
+                .binary_search(&value)
+                .expect("every ranked value was collected first");
+            (members.len() - 1 - rank) as u64
+        }
         let mut present: std::collections::HashMap<ObjectId, Vec<u64>> =
             std::collections::HashMap::new();
-        for (object_id, history) in self.lki_by_incarnation.iter() {
-            present
-                .entry(*object_id)
-                .or_default()
-                .extend(history.keys().copied());
-        }
         for (object_id, history) in self.lki_copiable_values_by_incarnation.iter() {
             present
                 .entry(*object_id)
                 .or_default()
                 .extend(history.keys().copied());
         }
+        let mut carrier_read: HashSet<ObjectIncarnationRef> = HashSet::new();
         self.for_each_trigger_event_carrier_mut(&mut |event| {
             if let Some((object_id, incarnation)) = named_incarnation(event) {
                 present.entry(object_id).or_default().push(*incarnation);
+                carrier_read.insert(ObjectIncarnationRef::of(object_id, *incarnation));
             }
+            record_incarnations(event, &mut |object_id, incarnation| {
+                present.entry(object_id).or_default().push(*incarnation);
+            });
         });
-        // CR 608.2c + CR 608.2h: only the RESOLVED set's origins join the
-        // identity pool (mirrors `retain_carrier_referenced_lki`:
-        // `chain_tracked_set_id`, else the latest non-empty set — inlined
-        // because types cannot depend on game). Reads through normalized
-        // origins go through the resolved set alone, so only its stamps need
-        // exact ranks: a missing departure there takes its own rank instead
-        // of aliasing a retained snapshot's rank, which would change what the
-        // normalized state reads. Every other set is append-only history
-        // whose superseded stamps converge structurally below the window via
-        // the union-rank path — pooling them would let a missing older-set
-        // stamp consume a dense rank and shift the surviving snapshot's rank,
-        // artefactually refusing cover across blink periods.
-        let resolved_set = self.chain_tracked_set_id.or_else(|| {
-            self.tracked_object_sets
+        let mut grants: HashMap<ObjectId, Vec<u64>> = HashMap::new();
+        may_trigger_origins(self, &mut |definition_ref| {
+            definition_ref.for_each_incarnation_mut(&mut |object_id, incarnation| {
+                present.entry(object_id).or_default().push(*incarnation);
+            });
+            definition_ref.for_each_grant_generation_mut(&mut |object_id, generation| {
+                grants.entry(object_id).or_default().push(*generation);
+            });
+        });
+        let block_history = self.creature_blocked_attackers_this_turn.iter().chain(
+            self.combat
                 .iter()
-                .filter(|(_, members)| !members.is_empty())
-                .max_by_key(|(id, _)| id.0)
-                .map(|(id, _)| *id)
-        });
-        if let Some(set) = resolved_set {
-            if let Some(members) = self.tracked_set_member_origins.get(&set) {
-                for (member, origin) in members.iter() {
-                    present
-                        .entry(*member)
-                        .or_default()
-                        .push(origin.departure_incarnation);
-                }
+                .flat_map(|combat| combat.creature_blocked_attackers_this_combat.iter()),
+        );
+        for mut pair in block_history.copied() {
+            block_pair_incarnations(
+                std::slice::from_mut(&mut pair),
+                &mut |object_id, incarnation| {
+                    present.entry(object_id).or_default().push(*incarnation);
+                },
+            );
+        }
+        for (object_id, generations) in grants.iter_mut() {
+            if let Some(object) = self.objects.get(object_id) {
+                generations.extend(
+                    object
+                        .trigger_occurrence_state
+                        .active_grants()
+                        .map(|(_, instance)| instance.0),
+                );
+            }
+            generations.sort_unstable();
+            generations.dedup();
+        }
+        // An origin can name its member's live incarnation, so that incarnation is ranked.
+        for member in self
+            .tracked_set_member_origins
+            .values()
+            .flat_map(|members| members.keys())
+        {
+            if self.objects.contains_key(member) {
+                present.entry(*member).or_default();
             }
         }
-        for incarnations in present.values_mut() {
+        for (object_id, incarnations) in present.iter_mut() {
+            // An object named only by last known information may no longer exist.
+            if let Some(object) = self.objects.get(object_id) {
+                incarnations.push(object.incarnation);
+            }
             incarnations.sort_unstable();
             incarnations.dedup();
         }
+        // CR 400.7 + CR 104.4b: which incarnation a record names, relative to the live object, is position; when it was minted is not.
         let canonical = |object_id: ObjectId, incarnation: u64| {
-            let rank = present[&object_id]
-                .binary_search(&incarnation)
-                .expect("every incarnation was collected above");
-            rank as u64 + 1
+            u64::MAX - 1 - 2 * above(&present, object_id, incarnation)
         };
+        let read_by_carrier = |object_id: ObjectId, incarnation: u64| {
+            carrier_read.contains(&ObjectIncarnationRef::of(object_id, incarnation))
+        };
+        let mut unpooled: HashMap<ObjectId, Vec<u64>> = HashMap::new();
+        for (object_id, history) in self.lki_by_incarnation.iter() {
+            let keys = unpooled.entry(*object_id).or_default();
+            keys.extend(
+                history
+                    .keys()
+                    .copied()
+                    .filter(|key| !read_by_carrier(*object_id, *key)),
+            );
+            keys.sort_unstable();
+        }
+        // Kept keys no carrier reads rank among themselves, so pooled values cannot move them.
+        let key_name = |object_id: ObjectId, incarnation: u64| {
+            if read_by_carrier(object_id, incarnation) {
+                canonical(object_id, incarnation)
+            } else {
+                u64::MAX - 2 * above(&unpooled, object_id, incarnation)
+            }
+        };
+        const UNANCHORED_ORIGIN: u64 = 0;
+        let resolved = crate::game::targeting::resolve_tracked_set_id(self);
+        let resolved_origins = resolved.and_then(|set| self.tracked_set_member_origins.get(&set));
+        let snapshot = |member: ObjectId, incarnation: u64| {
+            self.lki_by_incarnation
+                .get(&member)
+                .is_some_and(|history| history.contains_key(&incarnation))
+                .then(|| key_name(member, incarnation))
+        };
+        // CR 608.2c + CR 608.2h + CR 400.7: an origin is renamed by its read class: the kept
+        // snapshot it selects, the live incarnation a recording departure would key next, or
+        // `UNANCHORED_ORIGIN`, read by `departed_from` alone; an otherwise unanchored superseded
+        // origin reads what the resolved set reads for its member.
+        let live_anchored = |member: ObjectId, origin: &TrackedMemberOrigin| {
+            let incarnation = origin.departure_incarnation;
+            (crate::game::quantity::zone_departure_records_lki(origin.departed_from)
+                && self
+                    .objects
+                    .get(&member)
+                    .is_some_and(|object| object.incarnation == incarnation))
+            .then(|| canonical(member, incarnation))
+        };
+        let read_class = |set: TrackedSetId, member: ObjectId, origin: &TrackedMemberOrigin| {
+            snapshot(member, origin.departure_incarnation)
+                .or_else(|| live_anchored(member, origin))
+                .or_else(|| {
+                    (Some(set) != resolved)
+                        .then(|| resolved_origins.and_then(|origins| origins.get(&member)))
+                        .flatten()
+                        .and_then(|resolved| {
+                            snapshot(member, resolved.departure_incarnation)
+                                .or_else(|| live_anchored(member, resolved))
+                        })
+                })
+                .unwrap_or(UNANCHORED_ORIGIN)
+        };
+        let origins: im::HashMap<TrackedSetId, im::HashMap<ObjectId, TrackedMemberOrigin>> = self
+            .tracked_set_member_origins
+            .iter()
+            .map(|(set, members)| {
+                let members = members
+                    .iter()
+                    .map(|(member, origin)| {
+                        let departure_incarnation = read_class(*set, *member, origin);
+                        (
+                            *member,
+                            TrackedMemberOrigin {
+                                departure_incarnation,
+                                ..*origin
+                            },
+                        )
+                    })
+                    .collect();
+                (*set, members)
+            })
+            .collect();
         self.lki_by_incarnation = std::mem::take(&mut self.lki_by_incarnation)
             .into_iter()
             .map(|(object_id, history)| {
                 let history = history
                     .into_iter()
-                    .map(|(incarnation, snapshot)| (canonical(object_id, incarnation), snapshot))
+                    .map(|(incarnation, snapshot)| (key_name(object_id, incarnation), snapshot))
                     .collect();
                 (object_id, history)
             })
@@ -34966,41 +36161,60 @@ impl GameState {
             if let Some((object_id, incarnation)) = named_incarnation(event) {
                 *incarnation = canonical(object_id, *incarnation);
             }
+            record_incarnations(event, &mut |object_id, incarnation| {
+                *incarnation = canonical(object_id, *incarnation);
+            });
+            if let GameEvent::ZoneChanged { record, .. } = event {
+                record.turn_zone_change_index = 0;
+                if let Some(context) = record.trigger_source_context.as_mut() {
+                    context.timestamp = 0;
+                }
+            }
         });
-        // CR 608.2c: remap origin-named incarnations. A pooled incarnation
-        // (history, carrier, or resolved-set origin) takes its exact rank, so
-        // two positions minted at different times keep reading the same
-        // snapshots through structurally identical origins. A non-resolved
-        // origin names append-only history and remaps by union rank — the rank
-        // it WOULD have — so a superseded older-set stamp remaps exactly like
-        // the live stamp naming the same departure on the other side and the
-        // origins field converges below the window. Total on both paths: the
-        // `binary_search` hit is the exact rank, the miss its insertion point.
-        let remap_origin = |member: ObjectId, incarnation: u64| {
-            present
-                .get(&member)
-                .map(
-                    |incarnations| match incarnations.binary_search(&incarnation) {
-                        Ok(rank) => rank as u64 + 1,
-                        Err(would_be) => would_be as u64 + 1,
-                    },
-                )
-                .unwrap_or(1)
+        let rank_block_history = |pairs: HashSet<BlockHistoryPair>| -> HashSet<BlockHistoryPair> {
+            pairs
+                .into_iter()
+                .map(|mut pair| {
+                    block_pair_incarnations(
+                        std::slice::from_mut(&mut pair),
+                        &mut |object_id, incarnation| {
+                            *incarnation = canonical(object_id, *incarnation);
+                        },
+                    );
+                    pair
+                })
+                .collect()
         };
-        self.tracked_set_member_origins = std::mem::take(&mut self.tracked_set_member_origins)
-            .into_iter()
-            .map(|(set_id, members)| {
-                let members = members
-                    .into_iter()
-                    .map(|(member, mut origin)| {
-                        origin.departure_incarnation =
-                            remap_origin(member, origin.departure_incarnation);
-                        (member, origin)
-                    })
-                    .collect();
-                (set_id, members)
-            })
-            .collect();
+        self.creature_blocked_attackers_this_turn = rank_block_history(std::mem::take(
+            &mut self.creature_blocked_attackers_this_turn,
+        ));
+        if let Some(combat) = self.combat.as_mut() {
+            combat.creature_blocked_attackers_this_combat = rank_block_history(std::mem::take(
+                &mut combat.creature_blocked_attackers_this_combat,
+            ));
+        }
+        // CR 613.1f + CR 104.4b: a grant generation, relative to the recipient's current grants, is position too.
+        may_trigger_origins(self, &mut |definition_ref| {
+            definition_ref.for_each_incarnation_mut(&mut |object_id, incarnation| {
+                *incarnation = canonical(object_id, *incarnation);
+            });
+            definition_ref.for_each_grant_generation_mut(&mut |object_id, generation| {
+                *generation = u64::MAX - above(&grants, object_id, *generation);
+            });
+        });
+        for (object_id, object) in self.objects.iter_mut() {
+            if present.contains_key(object_id) {
+                object.incarnation = canonical(*object_id, object.incarnation);
+            }
+            if grants.contains_key(object_id) {
+                object
+                    .trigger_occurrence_state
+                    .for_each_active_grant_generation_mut(|generation| {
+                        *generation = u64::MAX - above(&grants, *object_id, *generation);
+                    });
+            }
+        }
+        self.tracked_set_member_origins = origins;
     }
 
     /// The spell announcements named by `BecomesTarget` targeters on every
@@ -35260,9 +36474,7 @@ impl GameState {
         // no route (strict equality, growth cover, or `ring_delta_signature`'s
         // bounded offer) certifies a period across it.
         if !self.is_loop_comparable() {
-            self.loop_detect_ring.clear();
-            // CR 603.5: the answers belong to the window the ring just lost.
-            self.loop_answer_journal = None;
+            self.clear_loop_detect_window();
             return;
         }
         if self.loop_detect_ring.len() == LOOP_DETECT_RING_CAP {
@@ -35293,8 +36505,131 @@ impl GameState {
             });
             self.loop_detect_live_sample()
         };
-        let snapshot = std::sync::Arc::new(LoopDetectSample { normalized, live });
+        let snapshot = std::sync::Arc::new(LoopDetectSample {
+            normalized,
+            live,
+            tally: self.loop_decision_tally,
+            trace_at: crate::game::play_trace::current_entries(self).map(|entries| entries.len()),
+        });
+        if let Some(held) = self.loop_detect_held.as_mut() {
+            if held.samples.len() == LOOP_DETECT_RING_CAP {
+                held.samples.pop_front();
+            }
+            held.samples.push_back(snapshot);
+            // CR 732.2a: a beat back at the held window's depth shows the window recurring;
+            // a beat below it stays in the held window only.
+            if self.stack.len() >= held.start_depth {
+                if let Some(held) = self.loop_detect_held.take() {
+                    self.loop_detect_ring = held.samples;
+                }
+            }
+            return;
+        }
         self.loop_detect_ring.push_back(snapshot);
+    }
+
+    /// The depth the open loop window started at: the held window's, else the ring's first
+    /// sample's; `None` when no window is open.
+    pub(crate) fn loop_window_start_depth(&self) -> Option<usize> {
+        self.loop_detect_held
+            .as_ref()
+            .map(|held| held.start_depth)
+            .or_else(|| {
+                self.loop_detect_ring
+                    .front()
+                    .map(|sample| sample.live.stack.len())
+            })
+    }
+
+    /// Ends the loop window: its ring, its held window and its answers (CR 603.5).
+    pub(crate) fn clear_loop_detect_window(&mut self) {
+        self.loop_detect_ring.clear();
+        self.loop_detect_held = None;
+        self.loop_answer_journal = None;
+    }
+
+    /// CR 608.1 + CR 732.2a: a beat at the active player's priority after a resolution, in a
+    /// window that started at depth `start`. At or above `start` it is sampled; below it the
+    /// window is held and the beat is sampled only into it, so a window whose depth only falls
+    /// never reaches the ring.
+    pub(crate) fn record_shrinking_beat(&mut self, start: usize) {
+        if self.stack.len() >= start {
+            self.record_loop_detect_sample();
+            return;
+        }
+        if self.loop_detect_held.is_none() {
+            self.loop_detect_held = Some(Box::new(HeldLoopWindow {
+                start_depth: start,
+                samples: std::mem::take(&mut self.loop_detect_ring),
+            }));
+        }
+        // The window continues, so the visible ring is emptied without ending it.
+        self.loop_detect_ring.clear();
+        self.record_loop_detect_sample();
+    }
+
+    /// CR 603.3b: one chosen trigger order, prompted or applied from a saved order.
+    pub(crate) fn record_trigger_order(&mut self) {
+        self.loop_decision_tally.trigger_order += 1;
+    }
+
+    /// CR 104.4b: one answered loop decision at the prompt's decision point `point`, counted
+    /// where the every-option proof reads it when the answer could not be declined.
+    pub(crate) fn record_point_answer(
+        &mut self,
+        answer: crate::game::play_trace::AnswerOptionality,
+        point: Option<crate::analysis::decision_template::ChoicePoint>,
+    ) {
+        use crate::analysis::decision_template::ChoicePoint;
+        use crate::game::play_trace::AnswerOptionality;
+        let Some(point) = point else {
+            return self.record_loop_decision(answer);
+        };
+        let provable = match point {
+            ChoicePoint::TriggerOrder => return self.record_trigger_order(),
+            ChoicePoint::AnnouncedTarget => &mut self.loop_decision_tally.announced_target,
+            ChoicePoint::ResolutionSet => &mut self.loop_decision_tally.resolution_set,
+            ChoicePoint::MayGate
+            | ChoicePoint::TapCost
+            | ChoicePoint::ProliferateSet
+            | ChoicePoint::ManaColor
+            | ChoicePoint::ConvokeTaps
+            | ChoicePoint::Mode
+            | ChoicePoint::UnlessBreak => return self.record_loop_decision(answer),
+        };
+        match answer {
+            AnswerOptionality::Mandatory => *provable += 1,
+            AnswerOptionality::Optional => self.record_loop_decision(answer),
+        }
+    }
+
+    /// CR 104.4b: one answered loop decision — `Optional` for a declinable choice (CR 603.5,
+    /// CR 616.1e), `Mandatory` for a choice among several options (CR 616.1).
+    pub(crate) fn record_loop_decision(
+        &mut self,
+        answer: crate::game::play_trace::AnswerOptionality,
+    ) {
+        use crate::game::play_trace::AnswerOptionality;
+        let count = match answer {
+            AnswerOptionality::Optional => &mut self.loop_decision_tally.optional,
+            AnswerOptionality::Mandatory => &mut self.loop_decision_tally.decision,
+        };
+        *count += 1;
+    }
+
+    /// This beat's decision marks: the tally so far, and whether any living player holds a
+    /// meaningful priority action here (CR 732.5).
+    pub(crate) fn loop_decision_marks(&self) -> LoopDecisionMarks {
+        self.loop_decision_marks_with(PriorityOut::at(self))
+    }
+
+    /// This beat's decision marks with the out verdict `out` already taken.
+    pub(crate) fn loop_decision_marks_with(&self, out: PriorityOut) -> LoopDecisionMarks {
+        LoopDecisionMarks {
+            tally: self.loop_decision_tally,
+            out,
+            rng_position: self.rng.get_word_pos(),
+        }
     }
 
     /// CR 732.2a: the un-normalized half of a [`LoopDetectSample`] — this beat exactly as
@@ -35311,6 +36646,7 @@ impl GameState {
     pub(crate) fn loop_detect_live_sample(&self) -> GameState {
         let mut clone = self.clone();
         clone.loop_detect_ring.clear();
+        clone.loop_detect_held = None;
         clone.loop_answer_journal = None;
         clone.play_trace = None;
         clone
@@ -35363,9 +36699,7 @@ impl GameState {
                 .zip(lives_before)
                 .any(|(p, &before)| p.life != before)
         {
-            self.loop_detect_ring.clear();
-            // CR 603.5: the answers belong to the window the ring just lost.
-            self.loop_answer_journal = None;
+            self.clear_loop_detect_window();
         }
     }
 
@@ -35501,22 +36835,6 @@ impl GameState {
                 self.unbounded_rising.remove(&controller);
             }
         }
-    }
-
-    /// Single write authority for `unbounded_loop_enablers` (an engine bookkeeping map; no CR
-    /// mandates it) —
-    /// only the Interactive B5 bridge arm (`interactive_loop_bridge` Path C) calls
-    /// this. Overwrites (idempotent re-registration each re-detection beat with the
-    /// same stable board). A no-op for an empty set (nothing to defuse on later).
-    pub fn register_unbounded_loop_enablers(
-        &mut self,
-        controller: PlayerId,
-        enablers: BTreeSet<ObjectId>,
-    ) {
-        if enablers.is_empty() {
-            return;
-        }
-        self.unbounded_loop_enablers.insert(controller, enablers);
     }
 
     /// CR 732.2a / CR 110.1: single write authority for `unbounded_loop_pile` —
@@ -35702,7 +37020,7 @@ impl GameState {
     /// than the paper procedure, never fewer.
     ///
     /// While it is pending, the `∞` HUD rows, the ∞ object pile and the ∞ counter pills all keep
-    /// projecting, because the marks and their enablers are still live. This set says nothing
+    /// projecting, because the marks are still live. This set says nothing
     /// about them — it names what the boundary will REMOVE, not what the display may show.
     ///
     /// No item kind names a `Mana(_)` axis. Note the two axis classes end their `∞` by
@@ -35710,12 +37028,6 @@ impl GameState {
     /// boundary applies the growth; a `Mana(_)` is already materialized in the pool
     /// (`mana_payment::refill_infinite_mana` re-tops it off this very store) and its `∞` ends at
     /// the CR 500.5 step/phase end instead.
-    ///
-    /// Removing at the boundary rather than filtering the store meanwhile is load-bearing:
-    /// the store keeps `unbounded_resources` and `unbounded_loop_enablers` in lockstep — an
-    /// ENGINE-STATE invariant required by no CR, held for exactly one consumer:
-    /// `zones::apply_zone_exit_cleanup` reads the enabler map to defuse a capability whose
-    /// enabler leaves between accept and boundary.
     ///
     /// FAIL-CLOSED: only an axis some REGISTERED item actually collapses is returned, so an
     /// ∞ axis with no registration (a mana engine registers nothing) is never removed here —
@@ -35751,7 +37063,6 @@ impl GameState {
     /// added when multiple producers coexist on one controller.
     pub fn clear_unbounded_loop(&mut self, controller: PlayerId) {
         self.unbounded_resources.remove(&controller);
-        self.unbounded_loop_enablers.remove(&controller); // keep the maps in lockstep
         self.unbounded_loop_pile.remove(&controller);
         self.unbounded_counter_targets.remove(&controller); // display-only counter analog of the pile
         self.pending_unbounded_materialization.remove(&controller);
@@ -35773,9 +37084,7 @@ impl GameState {
     /// PRESERVES any coexisting NON-collapsed axis (a debug `SetInfiniteMana` `Mana(_)`
     /// axis, or a second uncollapsed loop). The `Tokens` / `Counters` / `Life` items never name a
     /// `Mana(_)` axis, so a collapse preserves mana by construction.
-    /// Drops `unbounded_resources[controller]`
-    /// (and its `unbounded_loop_enablers` entry in engine-state lockstep, mirroring
-    /// `clear_unbounded_mana_loop`) only when its axis set becomes empty. Always removes
+    /// Drops `unbounded_resources[controller]` only when its axis set becomes empty. Always removes
     /// the whole `pending_unbounded_materialization` list (owned by `take_` at the submit
     /// site). Leaves `clear_unbounded_mana_loop` / `clear_unbounded_loop` untouched.
     pub fn clear_collapsed_materializations(
@@ -35837,7 +37146,6 @@ impl GameState {
             axes.retain(|a| !axes_to_remove.contains(a));
             if axes.is_empty() {
                 self.unbounded_resources.remove(&controller);
-                self.unbounded_loop_enablers.remove(&controller); // engine-state lockstep
             }
         }
         self.pending_unbounded_materialization.remove(&controller);
@@ -35847,42 +37155,30 @@ impl GameState {
 
     /// CR 500.5 + CR 106.4: end a loop-backed ∞-mana capability at a step/phase boundary — an
     /// AXIS-SCOPED clear, not the whole-player `clear_unbounded_loop`. Removes every
-    /// `ResourceAxis::Mana(_)` axis from `unbounded_resources`. If that empties the player's axis
-    /// set, drop the player key AND its `unbounded_loop_enablers` entry IN LOCKSTEP (an engine-state
-    /// invariant, not a rules requirement):
-    /// enablers track the PRESENCE of any unbounded axis, and the `zones.rs` defuse hook
-    /// (`apply_zone_exit_cleanup`) whole-clears a controller's capability when ANY
-    /// enabler leaves. Leaving enablers orphaned (no backing axis) is a landmine — a later
-    /// `SetInfiniteMana` re-marks that controller, then the stale enabler leaving mis-fires
-    /// `clear_unbounded_loop`, silently killing the debug toggle. If a coexisting NON-Mana axis
-    /// remains (e.g. a Path-C `{Mana, Counter}` cover, or a `TokensCreated` loop mid-collapse),
-    /// KEEP the enablers — they still back the surviving axis. Mana carries no
+    /// `ResourceAxis::Mana(_)` axis from `unbounded_resources`, dropping the player key once its
+    /// axis set is empty. Mana carries no
     /// `unbounded_loop_pile` / `pending_unbounded_materialization` (a mana engine reproduces no
-    /// fodder), so — unlike `clear_unbounded_token_loop` — this touches only the axis + enabler maps.
+    /// fodder), so — unlike `clear_unbounded_token_loop` — this touches only the axis map.
     pub fn clear_unbounded_mana_loop(&mut self, controller: PlayerId) {
         if let Some(axes) = self.unbounded_resources.get_mut(&controller) {
             axes.retain(|a| !matches!(a, ResourceAxis::Mana(_)));
             if axes.is_empty() {
                 self.unbounded_resources.remove(&controller);
-                self.unbounded_loop_enablers.remove(&controller); // engine-state lockstep-iff-empty
             }
         }
         self.retain_marked_rising(controller);
     }
 }
 
-/// PR-3 (Option C): max retained CR 732.2a loop-detection snapshots. A determinate
-/// drain has period ≤ 2; 16 covers ≥ 8 cycles and any loop whose repeating phase
-/// begins within a 16-resolution preamble. A longer-period/longer-preamble loop
-/// simply falls back to the natural CR 704.5a SBA death (fail-safe — never a wrong
-/// win). Kept small because the live `GameState` carries it through every clone.
+/// Max retained CR 732.2a loop-detection snapshots: `record_loop_detect_sample` evicts the
+/// oldest at this cap, so a ring scan compares only periods that recur within the retained
+/// samples. Kept small because the live `GameState` carries it through every clone.
 const LOOP_DETECT_RING_CAP: usize = 16;
 
 /// CR 104.4b confirmation between two states that have BOTH already been
 /// `normalize_for_loop`d. Reuses `PartialEq` for the non-object fields and
 /// supplements its `objects.len()`-only object check with per-object content
-/// equality. Only a true match permits a draw, so the cheap `loop_fingerprint`
-/// can never cause a wrongful draw.
+/// equality.
 pub(crate) fn loop_states_equal(a: &GameState, b: &GameState) -> bool {
     a.is_loop_comparable()
         && b.is_loop_comparable()
@@ -35954,11 +37250,6 @@ pub(crate) fn objects_content_eq(a: &ObjectMap, b: &ObjectMap) -> bool {
 /// grepping the consult symbols (`object_content_eq`, `objects_content_eq`,
 /// `fodder_content_eq`, `loop_states_equal`) to their enclosing `fn` and reading that call's
 /// frames; a feed list written here would be falsified by the next call site added.
-///
-/// Strictness here is FAIL-SAFE for the shared 2p CR 104.4b path: a stricter
-/// equality can only SUPPRESS a wrongful draw, and every compared field represents
-/// REAL accumulated progress, so two states differing in it are correctly NOT a
-/// repeat.
 pub(crate) fn object_content_eq(x: &GameObject, y: &GameObject) -> bool {
     x.controller == y.controller
         && x.zone == y.zone
@@ -36005,7 +37296,7 @@ pub(crate) fn object_content_eq(x: &GameObject, y: &GameObject) -> bool {
         && x.exiled_by == y.exiled_by // CR 406.6 + CR 607.2b exiling player
         && x.saddled_by == y.saddled_by // CR 702.171c saddle set
         // #6865: a cast occurrence is resolution-semantic provenance while the
-        // spell remains on the stack. Comparing it is fail-safe for loop detection.
+        // spell remains on the stack.
         && x.cast_occurrence == y.cast_occurrence
         && x.spell_announcement == y.spell_announcement
         // Horde-deck-token provenance: compare fail-closed so a token mid-reveal
@@ -36121,6 +37412,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         static_source_index: _,
         static_mode_presence: _,
         loop_detect_ring: _,
+        loop_detect_held: _,
         // CR 603.5 + CR 732.2a "may"-answer journal: EXCLUDED from `impl PartialEq for
         // GameState` for `loop_detect_ring`'s reason — transient derived state rebuilt
         // from play, and comparing it would split two semantically-identical positions
@@ -36128,6 +37420,8 @@ fn _gamestate_partition_is_total(s: &GameState) {
         // covering pair: `project_out_resources` opens with `normalize_for_loop`, which
         // is one of the ring-clear sites this field follows, so the projection clears it.
         loop_answer_journal: _,
+        // A monotone counter: comparing it would split every recurring position.
+        loop_decision_tally: _,
         play_trace: _,
         precast_shortcut_runtime: _,
         life_safety_probe: _,
@@ -36200,7 +37494,6 @@ fn _gamestate_partition_is_total(s: &GameState) {
         debug_infinite_mana: _,
         unbounded_resources: _,
         unbounded_rising: _,
-        unbounded_loop_enablers: _,
         unbounded_loop_pile: _,
         unbounded_counter_targets: _,
         pending_unbounded_materialization: _,
@@ -36269,6 +37562,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         attacker_declarations_this_turn: _,
         creatures_blocked_this_turn: _,
         players_who_created_token_this_turn: _,
+        players_who_flipped_coins_this_turn: _,
         created_tokens_this_turn: _,
         counter_added_this_turn: _,
         players_who_discarded_card_this_turn: _,
@@ -36306,6 +37600,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         resolution_coin_flip: _,
         repeat_process_requested: _,
         may_trigger_auto_choices: _,
+        un_actions: _,
         replacement_auto_choices: _,
         replacement_auto_choice_tail: _,
         decision_templates: _,
@@ -36676,6 +37971,7 @@ impl PartialEq for GameState {
             && self.attacker_declarations_this_turn == other.attacker_declarations_this_turn
             && self.creatures_blocked_this_turn == other.creatures_blocked_this_turn
             && self.players_who_created_token_this_turn == other.players_who_created_token_this_turn
+            && self.players_who_flipped_coins_this_turn == other.players_who_flipped_coins_this_turn
             && self.created_tokens_this_turn == other.created_tokens_this_turn
             && self.counter_added_this_turn == other.counter_added_this_turn
             && self.players_who_discarded_card_this_turn
@@ -36708,9 +38004,6 @@ impl PartialEq for GameState {
             && self.spell_cast_reversal == other.spell_cast_reversal
             && self.pending_resolution_completion == other.pending_resolution_completion
             && self.resolving_spell_final_part == other.resolving_spell_final_part
-            // CR 104.4b: volatile resolution-scoped flip result. A flip already
-            // advances `state.rng`, so iterations differ regardless; comparing
-            // this field never masks a real repeat (safe to include).
             && self.resolution_coin_flip == other.resolution_coin_flip
             && self.pending_player_scope_sacrifice_choice
                 == other.pending_player_scope_sacrifice_choice
@@ -36736,6 +38029,7 @@ impl PartialEq for GameState {
             && self.replacement_auto_choices == other.replacement_auto_choices
             && self.replacement_auto_choice_tail == other.replacement_auto_choice_tail
             && self.may_trigger_auto_choices == other.may_trigger_auto_choices
+            && self.un_actions == other.un_actions
             && self.decision_templates == other.decision_templates
             && self.priority_yields == other.priority_yields
             && self.pending_begin_game_abilities == other.pending_begin_game_abilities
@@ -37074,6 +38368,74 @@ fn default_pile_source_battlefield() -> PileSource {
 mod forced_cascade_window_tests {
     use super::*;
 
+    fn reveal_choice(cards: Vec<ObjectId>, optional: bool) -> WaitingFor {
+        WaitingFor::RevealChoice {
+            player: PlayerId(0),
+            cards,
+            filter: crate::types::ability::default_target_filter_any(),
+            optional,
+            decline_runs_continuation: false,
+        }
+    }
+
+    /// CR 603.3b + CR 601.2c + CR 608.2d: a trigger order, a required target with several legal
+    /// targets and a card choice among several that cannot be declined are decision points; a
+    /// choice with one option, or one that may be declined, is not.
+    #[test]
+    fn option_point_names_only_a_choice_among_several_options() {
+        use crate::analysis::decision_template::ChoicePoint;
+        let targets = |legal: u64, optional: bool| {
+            let legal: Vec<TargetRef> = (20..20 + legal)
+                .map(|id| TargetRef::Object(ObjectId(id)))
+                .collect();
+            WaitingFor::TriggerTargetSelection {
+                player: PlayerId(0),
+                trigger_controller: None,
+                trigger_event: None,
+                trigger_events: Vec::new(),
+                target_slots: vec![TargetSelectionSlot {
+                    legal_targets: legal.clone(),
+                    optional,
+                    chooser: None,
+                    effect_kind: EffectKind::NoOp,
+                    effect_detail: TargetEffectDetail::None,
+                }],
+                mode_labels: Vec::new(),
+                target_constraints: Vec::new(),
+                selection: TargetSelectionProgress {
+                    current_slot: 0,
+                    selected_slots: Vec::new(),
+                    current_legal_targets: legal,
+                },
+                source_id: None,
+                description: None,
+            }
+        };
+        let order = WaitingFor::OrderTriggers {
+            player: PlayerId(0),
+            triggers: Vec::new(),
+        };
+        assert_eq!(order.option_point(), Some(ChoicePoint::TriggerOrder));
+        assert_eq!(
+            targets(2, false).option_point(),
+            Some(ChoicePoint::AnnouncedTarget)
+        );
+        assert_eq!(targets(1, false).option_point(), None);
+        assert_eq!(targets(2, true).option_point(), None);
+        assert_eq!(
+            reveal_choice(vec![ObjectId(13), ObjectId(14)], false).option_point(),
+            Some(ChoicePoint::ResolutionSet)
+        );
+        assert_eq!(
+            reveal_choice(vec![ObjectId(13)], false).option_point(),
+            None
+        );
+        assert_eq!(
+            reveal_choice(vec![ObjectId(13), ObjectId(14)], true).option_point(),
+            None
+        );
+    }
+
     fn certificate() -> crate::analysis::loop_check::LoopCertificate {
         crate::analysis::loop_check::LoopCertificate {
             unbounded: vec![crate::analysis::resource::ResourceAxis::Life(PlayerId(1))],
@@ -37089,7 +38451,7 @@ mod forced_cascade_window_tests {
     /// CR 603.3b / CR 603.3d / CR 603.5 + CR 608.2d / CR 903.9a / CR 704.5j /
     /// CR 310.11 / CR 703.1 + CR 117.3a: the membership matrix for
     /// [`WaitingFor::is_forced_cascade_window`], asserted in BOTH directions —
-    /// thirteen members and nine non-members, each named.
+    /// every member and every load-bearing non-member, each named.
     ///
     /// The class is defined by "no player has priority here", and each half of the
     /// matrix pins a different consequence:
@@ -37137,8 +38499,8 @@ mod forced_cascade_window_tests {
     /// `true` or always `false`) fails one of the two loops. REVERT-PROBE: adding
     /// `Priority{..}` to the `matches!` flips the `Priority` rows here AND breaks
     /// the sampler invariant; adding `RedistributeLifeTotals` or
-    /// `AssignCombatDamage` flips its row here; dropping ANY of the thirteen members
-    /// — SBA or turn-based — flips that member's TRUE row here (each was observed to
+    /// `AssignCombatDamage` flips its row here; dropping ANY member — SBA,
+    /// turn-based or the single-option reveal — flips that member's TRUE row here (each was observed to
     /// panic individually).
     ///
     /// This row owns the RULES invariant only. Runtime WIRING — that the sampler and
@@ -37277,9 +38639,25 @@ mod forced_cascade_window_tests {
                     cards: vec![ObjectId(10)],
                 },
             ),
+            (
+                "RevealChoice, non-optional with one eligible card (CR 608.2d — one legal option)",
+                reveal_choice(vec![ObjectId(13)], false),
+            ),
+            (
+                "RevealChoice, non-optional with two cards (CR 608.2d — the ring survives the choice)",
+                reveal_choice(vec![ObjectId(13), ObjectId(14)], false),
+            ),
         ];
 
         let not_forced: Vec<(&str, WaitingFor)> = vec![
+            (
+                "RevealChoice, optional with one card — declining is a real choice",
+                reveal_choice(vec![ObjectId(13)], true),
+            ),
+            (
+                "RevealChoice, non-optional with no card — not a single-option choice",
+                reveal_choice(Vec::new(), false),
+            ),
             (
                 "ResolutionOptionalPaymentChoice — a Phyrexian branch can MOVE LIFE",
                 WaitingFor::ResolutionOptionalPaymentChoice {
@@ -37362,6 +38740,7 @@ mod forced_cascade_window_tests {
                     schema: Default::default(),
                     declaration: None,
                     road: crate::analysis::loop_check::OfferRoad::Ring,
+                    counted_take: Default::default(),
                     period: Default::default(),
                 },
             ),
@@ -37384,6 +38763,7 @@ mod forced_cascade_window_tests {
                         published_declaration: None,
                         leading_aims: Vec::new(),
                         road: crate::analysis::loop_check::OfferRoad::Ring,
+                        counted_take: Default::default(),
                         period: Default::default(),
                     },
                 },
@@ -37402,6 +38782,292 @@ mod forced_cascade_window_tests {
         }
         for (why, wf) in &not_forced {
             assert!(!wf.is_forced_cascade_window(), "{why} must NOT be a member");
+        }
+    }
+}
+
+#[cfg(test)]
+mod loop_decision_profile_tests {
+    use super::*;
+    use LoopDecision::{Decision, Optional, Outs, Random};
+    use PriorityOut::{Absent, Held};
+
+    fn marks(optional: u64, decision: u64, out: PriorityOut) -> LoopDecisionMarks {
+        LoopDecisionMarks {
+            tally: LoopDecisionTally {
+                optional,
+                decision,
+                ..Default::default()
+            },
+            out,
+            rng_position: 0,
+        }
+    }
+
+    fn members(window: &[LoopDecisionMarks], current: LoopDecisionMarks) -> Vec<LoopDecision> {
+        LoopDecisionProfile::of_window(window, &current)
+            .members
+            .into_iter()
+            .collect()
+    }
+
+    /// CR 104.4b + CR 732.4: a period is forced only with no answered choice since its first
+    /// mark and no out at any of its marks.
+    #[test]
+    fn the_profile_names_each_non_mandatory_member_of_the_period() {
+        let base = marks(2, 3, Absent);
+        assert_eq!(members(&[base], base), vec![]);
+        assert_eq!(members(&[], marks(5, 5, Absent)), vec![]);
+        assert_eq!(members(&[base], marks(3, 3, Absent)), vec![Optional]);
+        assert_eq!(members(&[base], marks(2, 4, Absent)), vec![Decision]);
+        assert_eq!(members(&[base, marks(2, 3, Held)], base), vec![Outs]);
+        assert_eq!(members(&[base], marks(2, 3, Held)), vec![Outs]);
+        assert_eq!(
+            members(&[base, marks(3, 3, Absent)], marks(3, 3, Absent)),
+            vec![Optional],
+            "the window's first mark is the baseline"
+        );
+        assert_eq!(
+            members(&[marks(3, 3, Absent)], marks(4, 5, Held)),
+            vec![Optional, Decision]
+        );
+        assert_eq!(
+            members(&[base, marks(2, 3, Held)], marks(2, 4, Absent)),
+            vec![Outs, Decision]
+        );
+        let drawn = |out| LoopDecisionMarks {
+            rng_position: 8,
+            ..marks(2, 3, out)
+        };
+        assert_eq!(members(&[base], drawn(Absent)), vec![Random]);
+        assert_eq!(members(&[drawn(Absent)], drawn(Absent)), vec![]);
+        assert_eq!(members(&[base], drawn(Held)), vec![Outs, Random]);
+    }
+
+    /// CR 104.4b: randomness drawn before the window's first beat is no member of its period.
+    #[test]
+    fn randomness_drawn_before_the_window_is_not_a_member() {
+        use crate::game::effects::change_zone::shuffle_library;
+        let mut state = GameState::new_two_player(7);
+        for card in [71, 72] {
+            crate::game::zones::create_object(
+                &mut state,
+                crate::types::identifiers::CardId(card),
+                PlayerId(0),
+                "Library Card".to_string(),
+                Zone::Library,
+            );
+        }
+        let mut events = Vec::new();
+        shuffle_library(&mut state, PlayerId(0), &mut events);
+        let sample = LoopDetectSample {
+            normalized: state.normalize_for_loop(),
+            live: state.clone(),
+            tally: state.loop_decision_tally,
+            trace_at: None,
+        };
+        let read = |state: &GameState| -> Vec<LoopDecision> {
+            LoopDecisionProfile::of_window([&sample], &state.loop_decision_marks_with(Absent))
+                .members
+                .into_iter()
+                .collect()
+        };
+        assert!(
+            state.rng.get_word_pos() > 0,
+            "reach: the shuffle drew before the window"
+        );
+        assert_eq!(read(&state), vec![]);
+        shuffle_library(&mut state, PlayerId(0), &mut events);
+        assert_eq!(read(&state), vec![Random]);
+    }
+
+    /// CR 732.2a + CR 732.5: a period is offered when every non-mandatory member is an out or a
+    /// choice proven to continue.
+    #[test]
+    fn is_offered_names_a_period_of_outs_and_continuing_choices() {
+        use crate::analysis::decision_template::ChoicePoint;
+        use LoopDecision::Continuing;
+        let profile = |members: &[LoopDecision]| LoopDecisionProfile {
+            members: members.iter().copied().collect(),
+        };
+        assert!(profile(&[Outs]).is_offered());
+        assert!(profile(&[Continuing]).is_offered());
+        assert!(profile(&[Outs, Continuing]).is_offered());
+        assert!(!profile(&[]).is_offered());
+        assert!(!profile(&[Optional]).is_offered());
+        assert!(!profile(&[Outs, Decision]).is_offered());
+        assert!(!profile(&[Continuing, Decision]).is_offered());
+        assert!(!profile(&[Outs, LoopDecision::Unproven(ChoicePoint::TriggerOrder)]).is_offered());
+        assert!(profile(&[Random]).is_offered());
+        assert!(profile(&[Outs, Random]).is_offered());
+        assert!(profile(&[Continuing, Random]).is_offered());
+        assert!(!profile(&[Optional, Random]).is_offered());
+        assert!(!profile(&[Decision, Random]).is_offered());
+        assert!(!profile(&[Random]).is_forced());
+    }
+
+    /// A period asks the witness its holds replay first only when it holds an unproven target or
+    /// card choice.
+    #[test]
+    fn holds_unproven_option_names_a_target_or_card_choice() {
+        use crate::analysis::decision_template::ChoicePoint::{
+            AnnouncedTarget, ResolutionSet, TriggerOrder,
+        };
+        use LoopDecision::Unproven;
+        let profile = |members: &[LoopDecision]| LoopDecisionProfile {
+            members: members.iter().copied().collect(),
+        };
+        assert!(!profile(&[Unproven(TriggerOrder)]).holds_unproven_option());
+        assert!(!profile(&[Unproven(TriggerOrder), Outs]).holds_unproven_option());
+        assert!(profile(&[Unproven(AnnouncedTarget)]).holds_unproven_option());
+        assert!(profile(&[Unproven(ResolutionSet)]).holds_unproven_option());
+        assert!(
+            profile(&[Unproven(TriggerOrder), Unproven(AnnouncedTarget)]).holds_unproven_option()
+        );
+    }
+
+    /// CR 104.4b + CR 732.2a: a target or card choice is `Continuing` when every option continues,
+    /// Optional over an out when some option ends the loop, and a Decision unproven; one proof
+    /// reads every unproven point, an order beside it included.
+    #[test]
+    fn target_and_card_choices_are_read_by_one_proof() {
+        use crate::analysis::decision_template::ChoicePoint::{
+            AnnouncedTarget, ResolutionSet, TriggerOrder,
+        };
+        use crate::game::period_confirm::OptionProof;
+        use LoopDecision::{Continuing, Unproven};
+        let at = |trigger_order, announced_target, resolution_set, out| LoopDecisionMarks {
+            tally: LoopDecisionTally {
+                trigger_order,
+                announced_target,
+                resolution_set,
+                ..Default::default()
+            },
+            out,
+            rng_position: 0,
+        };
+        let none = at(0, 0, 0, Absent);
+        assert_eq!(
+            members(&[none], at(0, 1, 0, Absent)),
+            vec![Unproven(AnnouncedTarget)]
+        );
+        assert_eq!(
+            members(&[none], at(0, 0, 1, Absent)),
+            vec![Unproven(ResolutionSet)]
+        );
+        assert_eq!(
+            members(&[none], at(1, 1, 1, Absent)),
+            vec![
+                Unproven(AnnouncedTarget),
+                Unproven(TriggerOrder),
+                Unproven(ResolutionSet)
+            ]
+        );
+        let read = |current: LoopDecisionMarks, proof: OptionProof| {
+            let asked = std::cell::Cell::new(0);
+            let read: Vec<LoopDecision> = LoopDecisionProfile::of_window(&[none], &current)
+                .with_option_proof(|| {
+                    asked.set(asked.get() + 1);
+                    proof
+                })
+                .members
+                .into_iter()
+                .collect();
+            assert_eq!(asked.get(), 1, "{current:?} {proof:?}");
+            read
+        };
+        for current in [
+            at(0, 1, 0, Absent),
+            at(0, 0, 1, Absent),
+            at(1, 1, 0, Absent),
+        ] {
+            assert_eq!(read(current, OptionProof::Continues), vec![Continuing]);
+            assert_eq!(read(current, OptionProof::Ends), vec![Optional]);
+            assert_eq!(read(current, OptionProof::Undecided), vec![Decision]);
+        }
+        assert_eq!(
+            read(at(0, 1, 0, Held), OptionProof::Continues),
+            vec![Outs, Continuing]
+        );
+        assert_eq!(read(at(1, 1, 0, Held), OptionProof::Ends), vec![Optional]);
+        assert_eq!(read(at(1, 0, 0, Absent), OptionProof::Continues), vec![]);
+    }
+
+    /// CR 603.3b + CR 104.4b: a trigger order is no member when every order continues, Optional
+    /// over an out when some order ends the loop, and a Decision unproven; it alone asks the proof.
+    #[test]
+    fn a_trigger_order_is_read_by_its_every_order_proof() {
+        use crate::game::period_confirm::OptionProof;
+        let ordered = LoopDecisionMarks {
+            tally: LoopDecisionTally {
+                trigger_order: 1,
+                ..Default::default()
+            },
+            out: Absent,
+            rng_position: 0,
+        };
+        let read = |first: LoopDecisionMarks, proof: OptionProof| -> Vec<LoopDecision> {
+            LoopDecisionProfile::of_window(&[first], &ordered)
+                .with_option_proof(|| proof)
+                .members
+                .into_iter()
+                .collect()
+        };
+        let none = marks(0, 0, Absent);
+        let held = marks(0, 0, Held);
+        assert_eq!(
+            members(&[none], ordered),
+            vec![LoopDecision::Unproven(
+                crate::analysis::decision_template::ChoicePoint::TriggerOrder
+            )]
+        );
+        assert_eq!(read(none, OptionProof::Continues), vec![]);
+        assert_eq!(read(none, OptionProof::Ends), vec![Optional]);
+        assert_eq!(read(none, OptionProof::Undecided), vec![Decision]);
+        assert_eq!(read(held, OptionProof::Continues), vec![Outs]);
+        assert_eq!(read(held, OptionProof::Ends), vec![Optional]);
+        let unasked = LoopDecisionProfile::of_window(&[none], &marks(0, 1, Absent))
+            .with_option_proof(|| unreachable!("no trigger order was made"));
+        assert_eq!(
+            unasked.members.into_iter().collect::<Vec<_>>(),
+            vec![Decision]
+        );
+    }
+
+    struct CountedReads {
+        marks: LoopDecisionMarks,
+        reads: std::cell::Cell<u32>,
+    }
+
+    impl LoopDecisionMark for CountedReads {
+        fn tally(&self) -> LoopDecisionTally {
+            self.marks.tally
+        }
+
+        fn out(&self) -> PriorityOut {
+            self.reads.set(self.reads.get() + 1);
+            self.marks.out
+        }
+
+        fn rng_position(&self) -> u128 {
+            self.marks.rng_position
+        }
+    }
+
+    /// The out verdict is not read for an Optional period, and is read for a Decision one.
+    #[test]
+    fn the_out_verdict_is_read_unless_the_period_is_optional() {
+        for (current, reads, expected) in [
+            (marks(3, 3, Absent), 0, vec![Optional]),
+            (marks(2, 4, Absent), 1, vec![Outs, Decision]),
+        ] {
+            let first = CountedReads {
+                marks: marks(2, 3, Held),
+                reads: std::cell::Cell::new(0),
+            };
+            let profile = LoopDecisionProfile::of_window([&first], &current);
+            assert_eq!(profile.members.into_iter().collect::<Vec<_>>(), expected);
+            assert_eq!(first.reads.get(), reads, "{expected:?}");
         }
     }
 }
@@ -37966,6 +39632,7 @@ mod tests {
         TriggerBaseSetInstanceRef, TriggerDefinitionOccurrenceRef, TriggerEntry,
         TriggerGrantInstanceRef,
     };
+    use crate::types::card_printing::CardPrinting;
     use crate::types::deterministic_serde::test_support::ReverseBuildHasher;
     use crate::types::identifiers::{
         CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken,
@@ -38165,6 +39832,34 @@ mod tests {
             ..pool.clone()
         };
         assert!(!other_seat.shares_storage_with(&pool));
+    }
+
+    /// The retained printing record is part of storage identity: a clone shares it, an
+    /// equal fresh allocation does not (the display-only wrapper keeps the pools equal),
+    /// and a record against none never shares.
+    #[test]
+    fn deck_pool_storage_identity_covers_the_printing_record() {
+        use crate::types::card_printing::DeckPrintingRecord;
+        let record = || Arc::new(DeckPrintingRecord::new(Vec::new(), Vec::new()));
+        let pool = PlayerDeckPool {
+            player: PlayerId(1),
+            printings: DisplayOnly::new(Some(record())),
+            ..Default::default()
+        };
+        let mut copy = pool.clone();
+        assert!(copy.shares_storage_with(&pool));
+
+        copy.printings = DisplayOnly::new(Some(record()));
+        assert_eq!(copy, pool);
+        assert!(!copy.shares_storage_with(&pool));
+        assert!(!pool.shares_storage_with(&copy));
+
+        let without = PlayerDeckPool {
+            printings: DisplayOnly::new(None),
+            ..pool.clone()
+        };
+        assert!(!without.shares_storage_with(&pool));
+        assert!(!pool.shares_storage_with(&without));
     }
 
     /// CR 602.1a + CR 602.2b: the record's bound activation cost survives
@@ -40006,6 +41701,106 @@ mod tests {
         assert_eq!(tree, once, "idempotent: every carrier already has its road");
     }
 
+    /// A carrier saved without a counted take decodes as one that performs, one that performs is
+    /// saved without the field, and one that does not round-trips; the ring road still refuses a
+    /// confirmed period whatever take rides beside it.
+    #[test]
+    fn a_counted_take_decodes_to_performs_and_rides_its_carriers() {
+        use crate::analysis::loop_check::{
+            CountedTake, OfferRoad, ShortcutProposal, UnperformableCause,
+        };
+        use std::io::Read;
+        let unperformable = CountedTake::Unperformable(UnperformableCause::UndelimitedCover);
+
+        let mut json = String::new();
+        flate2::read::GzDecoder::new(
+            &include_bytes!("../../tests/fixtures/weird_drain_4p.json.gz")[..],
+        )
+        .read_to_string(&mut json)
+        .expect("the dump inflates");
+        let mut envelope: serde_json::Value = serde_json::from_str(&json).expect("the dump parses");
+        // Committed pre-onset capture; onset-independent test (see record_captured_onsets).
+        record_captured_onsets(&mut envelope);
+        let mut board = envelope.get("gameState").unwrap_or(&envelope).clone();
+        assert!(board["waiting_for"]["data"].get("counted_take").is_none());
+        let restored = serde_json::from_value::<PersistedGameState>(board.clone())
+            .expect("the dump deserializes")
+            .into_game_state()
+            .expect("the dump restores");
+        let offer = serde_json::to_value(&restored.waiting_for).expect("the offer encodes");
+        assert_eq!(offer["data"]["road"], "Ring", "reach: a ring-road offer");
+        assert!(
+            offer["data"].get("counted_take").is_none(),
+            "an offer saved without the field performs and is saved without it"
+        );
+
+        let mut carried = offer.clone();
+        carried["data"]["counted_take"] = serde_json::to_value(unperformable).unwrap();
+        let decoded = serde_json::from_value::<WaitingFor>(carried.clone()).unwrap();
+        assert_ne!(decoded, restored.waiting_for);
+        assert_eq!(serde_json::to_value(&decoded).unwrap(), carried);
+
+        let proposal = |counted_take| ShortcutProposal {
+            proposer: PlayerId(0),
+            predicted_winner: None,
+            count: crate::analysis::decision_template::IterationCount::WithoutEnd,
+            unbounded: Vec::new(),
+            rising: Vec::new(),
+            win_kind: None,
+            win_kind_at: None,
+            template: None,
+            per_cycle: None,
+            shortened_by: None,
+            published_declaration: None,
+            leading_aims: Vec::new(),
+            road: OfferRoad::Ring,
+            counted_take,
+            period: Default::default(),
+        };
+        let proposed = serde_json::to_value(proposal(unperformable)).unwrap();
+        assert_eq!(
+            serde_json::from_value::<ShortcutProposal>(proposed.clone()).unwrap(),
+            proposal(unperformable)
+        );
+        let mut saved_without = proposed;
+        saved_without
+            .as_object_mut()
+            .unwrap()
+            .remove("counted_take")
+            .expect("reach: the take that does not perform was saved");
+        assert_eq!(
+            serde_json::from_value::<ShortcutProposal>(saved_without).unwrap(),
+            proposal(CountedTake::Performs)
+        );
+        assert!(serde_json::to_value(proposal(CountedTake::Performs))
+            .unwrap()
+            .get("counted_take")
+            .is_none());
+
+        let mut with_period = |period: serde_json::Value| {
+            board["waiting_for"] = carried.clone();
+            board["waiting_for"]["data"]["period"] = period;
+            serde_json::from_value::<PersistedGameState>(board.clone())
+                .map(drop)
+                .map_err(|error| error.to_string())
+        };
+        with_period(serde_json::json!({ "items": [] }))
+            .expect("reach: the offer restores with no period");
+        assert!(with_period(serde_json::json!({
+            "items": [{
+                "seat": PlayerId(0),
+                "action": crate::types::actions::GameAction::PassPriority,
+                "play": null,
+                "mandatory_answer": false,
+                "next_object_id": 0,
+                "minted_since": 0,
+                "cost_move": null,
+            }],
+        }))
+        .expect_err("a ring offer carrying a confirmed period fails the load")
+        .contains("ring road carries a confirmed period"));
+    }
+
     /// The committed restore-time offers predate the stamp and decode to the road that minted them.
     #[test]
     fn committed_restore_offers_decode_to_their_minting_road() {
@@ -41302,6 +43097,367 @@ mod tests {
             assert_eq!(
                 restored_deferred_zone_change_keys(&restored),
                 vec![(19, 0), (19, 1)]
+            );
+        }
+    }
+
+    type PersistedRecord = serde_json::Map<String, serde_json::Value>;
+
+    /// The serialized zone-change record of a battlefield-to-graveyard object, optionally
+    /// carrying a printing in its trigger-source context. Every call builds the same object, so
+    /// two records differ only in what the caller edits.
+    fn printed_zone_change_record(printing: Option<&str>) -> PersistedRecord {
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            crate::types::identifiers::CardId(9_401),
+            PlayerId(0),
+            "Doomed Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .expect("fixture object exists")
+            .printing = DisplayOnly::new(printing.map(|tag| {
+            SharedPrinting::new(CardPrinting {
+                set_code: tag.to_string(),
+                collector_number: "7".to_string(),
+            })
+        }));
+        let record = state.objects[&id].snapshot_for_zone_change(
+            id,
+            Some(Zone::Battlefield),
+            Zone::Graveyard,
+        );
+        match serde_json::to_value(&record).expect("record serializes") {
+            serde_json::Value::Object(map) => map,
+            other => panic!("a zone-change record serializes as an object, got {other}"),
+        }
+    }
+
+    fn fingerprint_of(record: &PersistedRecord) -> PersistedZoneChangeFingerprint {
+        zone_change_fingerprint(record).expect("fixture record fingerprints")
+    }
+
+    /// The raw half, present only for a display-free fingerprint.
+    fn raw_of(fingerprint: &PersistedZoneChangeFingerprint) -> Option<&serde_json::Value> {
+        match &fingerprint.raw {
+            RawZoneChangeFingerprint::DisplayFree(raw) => Some(raw),
+            RawZoneChangeFingerprint::DisplayBearing => None,
+        }
+    }
+
+    fn edited(
+        mut record: PersistedRecord,
+        edit: impl FnOnce(&mut PersistedRecord),
+    ) -> PersistedRecord {
+        edit(&mut record);
+        record
+    }
+
+    #[test]
+    fn zone_change_fingerprint_is_the_typed_rules_projection() {
+        let spaa = printed_zone_change_record(Some("SPAA"));
+        // Reach: the serialized record holds the printing exactly once.
+        assert_eq!(
+            serde_json::to_string(&spaa)
+                .expect("record text")
+                .matches("SPAA")
+                .count(),
+            1
+        );
+        let bearing = fingerprint_of(&spaa);
+        assert!(!bearing.rules.to_string().contains("SPAA"));
+        assert!(raw_of(&bearing).is_none());
+
+        // A printing neither splits nor decides: any printing, or none, is the same rules value.
+        let other_printing = fingerprint_of(&printed_zone_change_record(Some("SQQQ")));
+        let free = fingerprint_of(&printed_zone_change_record(None));
+        assert_eq!(bearing.rules, other_printing.rules);
+        assert_eq!(bearing.rules, free.rules);
+        assert!(raw_of(&other_printing).is_none());
+        assert!(raw_of(&free).is_some());
+
+        // Legacy aliases collapse in the rules projection and stay apart in raw form.
+        let plain = printed_zone_change_record(None);
+        let aliases = [
+            (
+                "base_power null vs omitted",
+                edited(plain.clone(), |m| {
+                    m.insert("base_power".to_string(), serde_json::Value::Null);
+                }),
+                edited(plain.clone(), |m| {
+                    m.remove("base_power");
+                }),
+            ),
+            (
+                "ignored unknown key",
+                plain.clone(),
+                edited(plain.clone(), |m| {
+                    m.insert("zz_probe_unknown".to_string(), serde_json::json!(1));
+                }),
+            ),
+            (
+                "arrival omitted",
+                plain.clone(),
+                edited(plain.clone(), |m| {
+                    m.remove("arrival");
+                }),
+            ),
+        ];
+        for (label, a, b) in &aliases {
+            let (a, b) = (fingerprint_of(a), fingerprint_of(b));
+            assert_eq!(
+                a.rules, b.rules,
+                "{label}: typed decoding collapses the pair"
+            );
+            assert!(
+                raw_of(&a).is_some() && raw_of(&b).is_some(),
+                "{label}: display-free"
+            );
+            assert_ne!(raw_of(&a), raw_of(&b), "{label}: raw JSON still differs");
+        }
+
+        // A rules difference still separates.
+        let stronger = fingerprint_of(&edited(plain.clone(), |m| {
+            m.insert("power".to_string(), serde_json::json!(9));
+        }));
+        assert_ne!(stronger.rules, free.rules);
+
+        // The occurrence stamps take no part, valid or not: an invalid stamp reads as absent.
+        let stamp_free = edited(plain.clone(), |m| {
+            m.remove("recorded_turn_number");
+            m.remove("turn_zone_change_index");
+        });
+        let reference = fingerprint_of(&stamp_free);
+        let stamp_edits: [(&str, Vec<(&str, serde_json::Value)>); 5] = [
+            (
+                "valid stamps",
+                vec![
+                    ("recorded_turn_number", serde_json::json!(19)),
+                    ("turn_zone_change_index", serde_json::json!(4)),
+                ],
+            ),
+            (
+                "null index",
+                vec![("turn_zone_change_index", serde_json::Value::Null)],
+            ),
+            (
+                "string turn and negative index",
+                vec![
+                    ("recorded_turn_number", serde_json::json!("x")),
+                    ("turn_zone_change_index", serde_json::json!(-1)),
+                ],
+            ),
+            (
+                "null turn",
+                vec![("recorded_turn_number", serde_json::Value::Null)],
+            ),
+            (
+                "negative turn",
+                vec![("recorded_turn_number", serde_json::json!(-5))],
+            ),
+        ];
+        for (label, entries) in stamp_edits {
+            let record = edited(plain.clone(), |m| {
+                for (key, value) in entries {
+                    m.insert(key.to_string(), value);
+                }
+            });
+            let fingerprint = fingerprint_of(&record);
+            assert_eq!(fingerprint.rules, reference.rules, "{label}");
+            assert_eq!(raw_of(&fingerprint), raw_of(&reference), "{label}");
+        }
+
+        // An undecodable record is a load error naming the record; the shape guard is unchanged.
+        let undecodable = edited(plain.clone(), |m| {
+            m.insert("mana_value".to_string(), serde_json::json!("x"));
+        });
+        let error = zone_change_fingerprint(&undecodable).expect_err("undecodable record");
+        assert!(
+            error.contains("does not decode as a zone-change record"),
+            "{error}"
+        );
+        let shapeless = edited(plain, |m| {
+            m.remove("to_zone");
+        });
+        let error = zone_change_fingerprint(&shapeless).expect_err("shapeless record");
+        assert!(error.contains("missing its zone-change shape"), "{error}");
+    }
+
+    #[test]
+    fn occurrence_claims_do_not_depend_on_visiting_order() {
+        fn member(name: &str) -> PersistedZoneChangeFingerprint {
+            let plain = printed_zone_change_record(None);
+            fingerprint_of(&match name {
+                // Display-free, raw form a.
+                "A" => plain,
+                // Display-free alias of A: typed-equal, raw-unequal.
+                "A'" => edited(plain, |m| {
+                    m.insert("zz_probe_unknown".to_string(), serde_json::json!(1));
+                }),
+                "P" => printed_zone_change_record(Some("SPAA")),
+                "Q" => printed_zone_change_record(Some("SQQQ")),
+                // Rules-different.
+                "R" => edited(plain, |m| {
+                    m.insert("power".to_string(), serde_json::json!(9));
+                }),
+                other => panic!("unknown fixture member {other}"),
+            })
+        }
+        fn permutations(items: &[&'static str]) -> Vec<Vec<&'static str>> {
+            if items.len() <= 1 {
+                return vec![items.to_vec()];
+            }
+            let mut all = Vec::new();
+            for (position, item) in items.iter().enumerate() {
+                let mut rest = items.to_vec();
+                rest.remove(position);
+                for mut tail in permutations(&rest) {
+                    tail.insert(0, *item);
+                    all.push(tail);
+                }
+            }
+            all
+        }
+
+        // The pairwise relation: display-free pairs compare raw, any pair with display data
+        // compares the rules projection.
+        for (a, b, expected) in [
+            ("A", "A", true),
+            ("A", "A'", false),
+            ("A", "P", true),
+            ("P", "A", true),
+            ("P", "Q", true),
+            ("A", "R", false),
+            ("P", "R", false),
+        ] {
+            assert_eq!(member(a).same_occurrence(&member(b)), expected, "{a} ~ {b}");
+        }
+
+        // The group verdict is the pairwise relation applied to the whole group, in any order.
+        let groups: [(&[&'static str], bool); 6] = [
+            (&["A", "P"], true),
+            (&["P", "Q"], true),
+            (&["A", "A", "P"], true),
+            (&["A", "A'"], false),
+            (&["A", "A'", "P"], false),
+            (&["A", "R"], false),
+        ];
+        for (group, coherent) in groups {
+            for order in permutations(group) {
+                let mut claim = OccurrenceClaim::of(member(order[0]));
+                let admitted = order
+                    .iter()
+                    .skip(1)
+                    .try_fold((), |(), name| claim.admit(member(name)));
+                assert_eq!(admitted.is_ok(), coherent, "group {order:?}");
+                if let Err(error) = admitted {
+                    assert_eq!(error, ZONE_CHANGE_CONFLICTING_CLAIMS);
+                }
+            }
+        }
+    }
+
+    /// Runs the production reconciliation on a hand-built persisted state whose ledger holds
+    /// `ledger` and whose `deferred_entry_events` carrier holds `live`. Records keep their
+    /// serialized `(0, 0)` stamps, which request a new binding.
+    fn reconcile_fixture(
+        ledger: Vec<PersistedRecord>,
+        live: Vec<PersistedRecord>,
+    ) -> (Result<(), String>, serde_json::Value) {
+        let mut state = serde_json::json!({
+            "turn_number": 19,
+            "zone_changes_this_turn": ledger
+                .into_iter()
+                .map(serde_json::Value::Object)
+                .collect::<Vec<_>>(),
+            "deferred_entry_events": live
+                .into_iter()
+                .map(|record| serde_json::json!({"ZoneChanged": {"record": record}}))
+                .collect::<Vec<_>>(),
+        });
+        let result = reconcile_persisted_zone_change_occurrences(&mut state, &[]);
+        (result, state)
+    }
+
+    fn live_stamps(state: &serde_json::Value) -> Vec<(u64, u64)> {
+        state["deferred_entry_events"]
+            .as_array()
+            .expect("carrier is an array")
+            .iter()
+            .map(|event| {
+                let record = &event["ZoneChanged"]["record"];
+                (
+                    record["recorded_turn_number"]
+                        .as_u64()
+                        .expect("bound record has a turn stamp"),
+                    record["turn_zone_change_index"]
+                        .as_u64()
+                        .expect("bound record has an index stamp"),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn two_source_rule_binds_only_without_display_data() {
+        let plain = printed_zone_change_record(None);
+        let alias = edited(plain.clone(), |m| {
+            m.insert("zz_probe_unknown".to_string(), serde_json::json!(1));
+        });
+        let spaa = printed_zone_change_record(Some("SPAA"));
+        let sqqq = printed_zone_change_record(Some("SQQQ"));
+        let stronger = edited(plain.clone(), |m| {
+            m.insert("power".to_string(), serde_json::json!(9));
+        });
+
+        // (b) one typed candidate binds, display data or not, and the stamps are inserted.
+        let (result, state) = reconcile_fixture(vec![spaa.clone()], vec![sqqq.clone()]);
+        result.expect("a printing-only difference keeps one occurrence");
+        assert_eq!(live_stamps(&state), vec![(19, 0)]);
+        let (result, state) = reconcile_fixture(vec![alias.clone()], vec![plain.clone()]);
+        result.expect("a display-free legacy alias with a single typed candidate binds");
+        assert_eq!(live_stamps(&state), vec![(19, 0)]);
+
+        // (c) two display-free candidates: today's raw rule decides.
+        let (result, state) =
+            reconcile_fixture(vec![alias.clone(), plain.clone()], vec![plain.clone()]);
+        result.expect("exactly one raw match binds");
+        assert_eq!(live_stamps(&state), vec![(19, 1)]);
+        let (result, _) =
+            reconcile_fixture(vec![plain.clone(), plain.clone()], vec![plain.clone()]);
+        assert_eq!(
+            result.expect_err("raw-identical rows are ambiguous"),
+            ZONE_CHANGE_AMBIGUOUS_OCCURRENCE
+        );
+        // Reach: the alias row really was a distinct raw candidate in the binding case.
+        assert_ne!(alias, plain);
+
+        // (c) a display-bearing member, or a display-bearing record, disables the fallback.
+        let (result, _) = reconcile_fixture(vec![plain.clone(), spaa.clone()], vec![plain.clone()]);
+        assert_eq!(
+            result.expect_err("a display-bearing member disables the raw fallback"),
+            ZONE_CHANGE_AMBIGUOUS_OCCURRENCE
+        );
+        let (result, _) = reconcile_fixture(vec![plain.clone(), alias.clone()], vec![spaa.clone()]);
+        assert_eq!(
+            result.expect_err("a display-bearing record disables the raw fallback"),
+            ZONE_CHANGE_AMBIGUOUS_OCCURRENCE
+        );
+        let (result, _) = reconcile_fixture(vec![spaa.clone(), sqqq], vec![spaa.clone()]);
+        assert_eq!(
+            result.expect_err("a printing never chooses between rules-identical rows"),
+            ZONE_CHANGE_AMBIGUOUS_OCCURRENCE
+        );
+
+        // (d) no typed candidate is today's error, with a display-bearing or display-free ledger.
+        for ledger in [spaa, plain] {
+            let (result, _) = reconcile_fixture(vec![ledger], vec![stronger.clone()]);
+            assert_eq!(
+                result.expect_err("a rules difference has no candidate"),
+                ZONE_CHANGE_NO_OCCURRENCE
             );
         }
     }
@@ -47030,6 +49186,492 @@ mod tests {
         );
     }
 
+    fn draw_one(source: ObjectId) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        )
+    }
+
+    fn push_trigger(
+        state: &mut GameState,
+        source: ObjectId,
+        ability: ResolvedAbility,
+        event: Option<GameEvent>,
+    ) {
+        let id = ObjectId(100 + state.stack.len() as u64);
+        state.stack.push_back(StackEntry {
+            id,
+            source_id: source,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: source,
+                ability: Box::new(ability),
+                condition: None,
+                trigger_event: event,
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
+    }
+
+    /// An object live at `live`, and one stack trigger per `named` incarnation whose
+    /// `ZoneChanged` record names the object at that incarnation in every incarnation
+    /// carrier the record holds.
+    fn records_naming(live: u64, named: &[u64]) -> (GameState, ObjectId) {
+        let mut state = GameState::new_two_player(7);
+        let x = create_object(
+            &mut state,
+            CardId(60),
+            PlayerId(0),
+            "Named Object".to_string(),
+            Zone::Battlefield,
+        );
+        for &incarnation in named {
+            state.objects.get_mut(&x).unwrap().incarnation = incarnation;
+            let mut record = state.objects.get(&x).unwrap().snapshot_for_zone_change(
+                x,
+                Some(Zone::Battlefield),
+                Zone::Graveyard,
+            );
+            let reference = ObjectIncarnationRef::of(x, incarnation);
+            let attachment = AttachmentSnapshot {
+                object_id: x,
+                identity: Some(reference),
+                controller: PlayerId(0),
+                kind: crate::types::ability::AttachmentKind::Aura,
+            };
+            let linked = LinkedExileSnapshot {
+                exiled_id: x,
+                owner: PlayerId(0),
+                mana_value: 0,
+                incarnation,
+            };
+            record.attachments = vec![attachment.clone()];
+            record.linked_exile_snapshot = vec![linked.clone()];
+            record.block_pairs = vec![BlockHistoryPair {
+                blocker: reference,
+                attacker: reference,
+            }];
+            let context = record.trigger_source_context.as_mut().unwrap();
+            assert_eq!(context.identity.reference, reference);
+            context.attachments = vec![attachment.clone()];
+            context.linked_exile_snapshot = vec![linked];
+            context.lki.attachments = vec![attachment];
+            context.cast_cost_paid_object = Some(CostPaidObjectSnapshot {
+                object_id: x,
+                lki: context.lki.clone(),
+                incarnation,
+            });
+            context.mana_spent_source_snapshots = vec![ManaSpentSourceSnapshot {
+                source_id: x,
+                lki: context.lki.clone(),
+            }];
+            context.granting_object = Some(reference);
+            let event = GameEvent::ZoneChanged {
+                object_id: x,
+                from: Some(Zone::Battlefield),
+                to: Zone::Graveyard,
+                record: Box::new(record),
+            };
+            push_trigger(&mut state, x, draw_one(x), Some(event));
+        }
+        state.objects.get_mut(&x).unwrap().incarnation = live;
+        (state, x)
+    }
+
+    fn normalized_equal(a: &GameState, b: &GameState) -> bool {
+        loop_states_equal(&a.normalize_for_loop(), &b.normalize_for_loop())
+    }
+
+    /// CR 701.20a + CR 104.4b: disclosure history is not position.
+    #[test]
+    fn normalize_for_loop_clears_disclosure_history() {
+        let (state, x) = records_naming(1, &[]);
+        let mut disclosed = state.clone();
+        disclosed
+            .product_knowledge_state
+            .facts
+            .push(ProductKnowledgeFact {
+                viewer: PlayerId(1),
+                owner: PlayerId(0),
+                zone: Zone::Hand,
+                identity: ObjectIncarnationRef::of(x, 1),
+                library_epoch: None,
+            });
+        disclosed.product_knowledge_state.library_epochs.push(1);
+        assert_ne!(state, disclosed, "reach guard: the raw positions differ");
+        assert!(normalized_equal(&state, &disclosed));
+        let mut tapped = disclosed.clone();
+        tapped.objects.get_mut(&x).unwrap().tapped = true;
+        assert!(
+            !normalized_equal(&state, &tapped),
+            "control: tapping still differs"
+        );
+    }
+
+    fn library_cards(state: &mut GameState, owner: PlayerId, count: u64) -> Vec<ObjectId> {
+        (1..=count)
+            .map(|card| {
+                create_object(
+                    state,
+                    CardId(card),
+                    owner,
+                    format!("Library Card {card}"),
+                    Zone::Library,
+                )
+            })
+            .collect()
+    }
+
+    /// CR 701.24a: a library no player knows compares as its cards, in no order.
+    #[test]
+    fn normalize_for_loop_compares_a_library_no_player_knows_by_its_cards() {
+        let mut state = GameState::new_two_player(7);
+        let cards = library_cards(&mut state, PlayerId(0), 3);
+        let mut reordered = state.clone();
+        reordered.players[0].library = cards.iter().rev().copied().collect();
+        assert_ne!(state, reordered, "reach: the raw libraries differ");
+        assert!(normalized_equal(&state, &reordered));
+        let mut replaced = reordered.clone();
+        replaced.players[0].library = im::vector![cards[2], cards[1], cards[1]];
+        assert!(
+            !normalized_equal(&state, &replaced),
+            "control: a library of other cards still differs"
+        );
+    }
+
+    /// CR 701.24a + CR 400.1: a library a player knows keeps its order, a shared pile included.
+    #[test]
+    fn normalize_for_loop_keeps_the_order_of_a_library_a_player_knows() {
+        for (format, shared) in [
+            (FormatConfig::standard(), false),
+            (FormatConfig::dandan(), true),
+        ] {
+            let mut state = GameState::new(format, 2, 7);
+            let owner = PlayerId(1);
+            let cards = library_cards(&mut state, owner, 2);
+            state.remember_card_identities([PlayerId(0)], &[cards[0]]);
+            let mut reordered = state.clone();
+            *reordered.library_of_mut(owner) = cards.iter().rev().copied().collect();
+            assert!(
+                reordered.viewer_knows_card_identity(PlayerId(0), cards[0]),
+                "reach: shared={shared}: the fact is current"
+            );
+            assert_eq!(
+                state.zone_storage_seat(Zone::Library, owner) != owner,
+                shared,
+                "reach: in the shared pile the card's owner does not store it"
+            );
+            assert!(!normalized_equal(&state, &reordered), "shared={shared}");
+        }
+    }
+
+    /// CR 701.24a: normalizing a normalized position keeps a known library's order.
+    #[test]
+    fn normalize_for_loop_twice_keeps_a_known_library_order() {
+        let mut state = GameState::new_two_player(7);
+        let cards = library_cards(&mut state, PlayerId(0), 2);
+        let (a, b) = (cards[0], cards[1]);
+        state.players[0].library = im::vector![b, a];
+        state.remember_card_identities([PlayerId(0)], &[b]);
+        let once = state.normalize_for_loop();
+        let twice = once.normalize_for_loop();
+        assert!(loop_states_equal(&once, &twice));
+        assert_eq!(twice.players[0].library, im::vector![b, a]);
+    }
+
+    /// CR 400.7 + CR 104.4b: every incarnation a zone-change record names is ranked,
+    /// so a position minted later compares equal to the earlier one.
+    #[test]
+    fn normalize_for_loop_ranks_every_incarnation_a_zone_change_record_names() {
+        let (early, _) = records_naming(3, &[2]);
+        let (late, _) = records_naming(8, &[7]);
+        assert_ne!(early, late, "reach guard: the raw positions differ");
+        assert!(normalized_equal(&early, &late));
+    }
+
+    /// CR 400.7: ranking keeps which incarnation each record names.
+    #[test]
+    fn normalize_for_loop_keeps_which_incarnation_each_record_names() {
+        let (ascending, _) = records_naming(6, &[3, 5]);
+        let (descending, _) = records_naming(6, &[5, 3]);
+        assert!(!normalized_equal(&ascending, &descending));
+        let (shifted, _) = records_naming(9, &[6, 8]);
+        assert!(
+            normalized_equal(&ascending, &shifted),
+            "control: same order, later mint"
+        );
+    }
+
+    /// CR 400.7: a record naming a stale incarnation is not the record naming the live one.
+    #[test]
+    fn normalize_for_loop_anchors_record_incarnations_on_the_live_object() {
+        let (stale, _) = records_naming(3, &[2]);
+        let (live, _) = records_naming(2, &[2]);
+        assert!(!normalized_equal(&stale, &live));
+        assert!(
+            normalized_equal(&stale, &stale.clone()),
+            "control: identical twins"
+        );
+    }
+
+    /// An object live at `live` that both block-history sets record blocking itself at `named`.
+    fn block_history_naming(live: u64, named: u64) -> GameState {
+        let (mut state, x) = records_naming(live, &[]);
+        let reference = ObjectIncarnationRef::of(x, named);
+        let pair = BlockHistoryPair {
+            blocker: reference,
+            attacker: reference,
+        };
+        state.creature_blocked_attackers_this_turn.insert(pair);
+        state.combat = Some(CombatState {
+            creature_blocked_attackers_this_combat: HashSet::from([pair]),
+            ..CombatState::default()
+        });
+        state
+    }
+
+    /// CR 509.1g + CR 400.7: block-history pairs are ranked, so a later mint compares equal.
+    #[test]
+    fn normalize_for_loop_ranks_block_history_incarnations() {
+        let early = block_history_naming(3, 2);
+        let late = block_history_naming(8, 7);
+        assert_ne!(early, late, "reach guard: the raw positions differ");
+        assert!(normalized_equal(&early, &late));
+    }
+
+    /// CR 509.1g + CR 400.7: a pair naming a stale incarnation is not the pair naming the live one.
+    #[test]
+    fn normalize_for_loop_anchors_block_history_on_the_live_object() {
+        let stale = block_history_naming(3, 2);
+        let live = block_history_naming(2, 2);
+        assert!(!normalized_equal(&stale, &live));
+        assert!(
+            normalized_equal(&stale, &stale.clone()),
+            "control: identical twins"
+        );
+    }
+
+    /// CR 400.7 + CR 104.4b: zone-change allocation order is history.
+    #[test]
+    fn normalize_for_loop_zeroes_zone_change_allocation_history() {
+        let (early, _) = records_naming(3, &[2]);
+        let mut later = early.clone();
+        let StackEntryKind::TriggeredAbility {
+            trigger_event: Some(GameEvent::ZoneChanged { record, .. }),
+            ..
+        } = &mut later.stack[0].kind
+        else {
+            unreachable!("the fixture's trigger carries a zone change");
+        };
+        record.turn_zone_change_index += 4;
+        record.trigger_source_context.as_mut().unwrap().timestamp += 10;
+        assert_ne!(early, later, "reach guard: the raw positions differ");
+        assert!(normalized_equal(&early, &later));
+    }
+
+    /// Ring frames are normalized again on every compare, so normalization must be a
+    /// fixed point on its own output.
+    #[test]
+    fn normalize_for_loop_is_idempotent_on_ranked_incarnations() {
+        for named in [&[2][..], &[2, 3][..]] {
+            let (state, _) = records_naming(3, named);
+            let once = state.normalize_for_loop();
+            assert!(
+                loop_states_equal(&once.normalize_for_loop(), &once),
+                "normalizing a normalized state naming {named:?} changed it"
+            );
+        }
+    }
+
+    /// CR 603.5 + CR 400.7: a stored exact-instance answer is ranked with the trigger it
+    /// answers wherever that trigger waits, an expanded grant's provider and generation
+    /// included, so a stale stored answer stays distinct from a current one.
+    #[test]
+    fn normalize_for_loop_ranks_stored_answers_with_their_trigger() {
+        use crate::game::triggers::{PendingTrigger, PendingTriggerContext};
+        use crate::types::ability::{
+            TriggerDefinitionRef, TriggerGrantInstanceRef, TriggerGrantProducerKey,
+            TriggerProducerOrigin,
+        };
+        #[derive(Debug, Clone, Copy)]
+        enum Carrier {
+            Stack,
+            Resolving,
+            Pending,
+            PendingAbility,
+            Deferred,
+            Ordering,
+            SubAbility,
+            ElseAbility,
+        }
+        let answered = |carrier: Carrier,
+                        expanded: bool,
+                        live: u64,
+                        trigger: (u64, u64),
+                        stored: (u64, u64),
+                        current: u64| {
+            let (mut state, x) = records_naming(live, &[]);
+            let grants = &mut state.objects.get_mut(&x).unwrap().trigger_occurrence_state;
+            for _ in 1..current {
+                grants.allocate_trigger_grant_instance().unwrap();
+            }
+            let current_grant = grants
+                .grant_instance_for(TriggerGrantProducerKey::Granted {
+                    origin: TriggerProducerOrigin::Static {
+                        source: ObjectIncarnationRef::of(x, live),
+                        definition_index: 0,
+                        modification_index: 0,
+                    },
+                    output_index: 0,
+                })
+                .unwrap();
+            assert_eq!(current_grant, TriggerGrantInstanceRef(current));
+            let origin = |(incarnation, grant): (u64, u64)| {
+                let printed = TriggerDefinitionOccurrenceRef::Printed {
+                    base_set: TriggerBaseSetInstanceRef::INITIAL,
+                    printed_index: 0,
+                };
+                let occurrence = if expanded {
+                    TriggerDefinitionOccurrenceRef::ExpandedGrant {
+                        grant_instance: TriggerGrantInstanceRef(grant),
+                        provider: Box::new(TriggerDefinitionRef {
+                            source: ObjectIncarnationRef::of(x, incarnation),
+                            occurrence: printed,
+                        }),
+                        provider_output_index: 0,
+                    }
+                } else {
+                    printed
+                };
+                MayTriggerOrigin::Definition {
+                    definition_ref: TriggerDefinitionRef {
+                        source: ObjectIncarnationRef::of(x, incarnation),
+                        occurrence,
+                    },
+                }
+            };
+            let with_origin = || {
+                let mut ability = draw_one(x);
+                ability.may_trigger_origin = Some(origin(trigger));
+                ability
+            };
+            let pending = |ability: ResolvedAbility, origin: Option<MayTriggerOrigin>| {
+                let mut pending =
+                    PendingTrigger::ordinary(x, PlayerId(0), None, Box::new(ability), 0);
+                pending.may_trigger_origin = origin;
+                pending
+            };
+            match carrier {
+                Carrier::Stack => push_trigger(&mut state, x, with_origin(), None),
+                Carrier::Resolving => {
+                    push_trigger(&mut state, x, with_origin(), None);
+                    state.resolving_stack_entry = state.stack.pop_back();
+                }
+                Carrier::Pending => {
+                    state.pending_trigger =
+                        Some(Box::new(pending(draw_one(x), Some(origin(trigger)))));
+                }
+                Carrier::PendingAbility => {
+                    state.pending_trigger = Some(Box::new(pending(with_origin(), None)));
+                }
+                Carrier::Deferred => {
+                    state
+                        .deferred_triggers
+                        .push(PendingTriggerContext::single(pending(
+                            draw_one(x),
+                            Some(origin(trigger)),
+                        )))
+                }
+                Carrier::Ordering => {
+                    state.pending_trigger_order = Some(PendingTriggerOrder {
+                        groups: vec![TriggerOrderGroup {
+                            controller: PlayerId(0),
+                            triggers: vec![PendingTriggerContext::single(pending(
+                                draw_one(x),
+                                Some(origin(trigger)),
+                            ))],
+                            ordered: false,
+                        }],
+                        resume_after_ordering: None,
+                    });
+                }
+                Carrier::SubAbility => {
+                    let mut ability = draw_one(x);
+                    ability.sub_ability = Some(Box::new(with_origin()));
+                    push_trigger(&mut state, x, ability, None);
+                }
+                Carrier::ElseAbility => {
+                    let mut ability = draw_one(x);
+                    ability.else_ability = Some(Box::new(with_origin()));
+                    push_trigger(&mut state, x, ability, None);
+                }
+            }
+            state
+                .may_trigger_auto_choices
+                .push(MayTriggerAutoChoiceRecord {
+                    selector: MayTriggerAutoChoiceSelector::ExactInstance {
+                        player: PlayerId(0),
+                        source_id: x,
+                        origin: origin(stored),
+                    },
+                    choice: AutoMayChoice::Accept,
+                });
+            state
+        };
+        for carrier in [
+            Carrier::Stack,
+            Carrier::Resolving,
+            Carrier::Pending,
+            Carrier::PendingAbility,
+            Carrier::Deferred,
+            Carrier::Ordering,
+            Carrier::SubAbility,
+            Carrier::ElseAbility,
+        ] {
+            for expanded in [false, true] {
+                let early = answered(carrier, expanded, 6, (5, 5), (5, 5), 5);
+                let late = answered(carrier, expanded, 10, (9, 9), (9, 9), 9);
+                assert_ne!(
+                    early, late,
+                    "reach guard for {carrier:?} expanded={expanded}: raw positions differ"
+                );
+                assert!(
+                    normalized_equal(&early, &late),
+                    "{carrier:?} expanded={expanded}"
+                );
+                assert!(
+                    !normalized_equal(&early, &answered(carrier, expanded, 6, (5, 5), (3, 3), 5)),
+                    "{carrier:?} expanded={expanded}: a stale stored answer is a different position"
+                );
+            }
+            let early = answered(carrier, true, 6, (5, 5), (5, 5), 5);
+            assert!(
+                !normalized_equal(&early, &answered(carrier, true, 6, (5, 5), (5, 4), 5)),
+                "{carrier:?}: an answer stored for a stale grant is a different position"
+            );
+            let superseded = answered(carrier, true, 6, (5, 5), (5, 5), 6);
+            assert!(
+                !normalized_equal(&early, &superseded),
+                "{carrier:?}: a grant the recipient no longer holds is a different position"
+            );
+            let once = superseded.normalize_for_loop();
+            assert!(
+                loop_states_equal(&once.normalize_for_loop(), &once),
+                "{carrier:?}: normalizing ranked grant generations again changed them"
+            );
+        }
+    }
+
     /// Maintainer round 4, finding 1. CR 104.4b + CR 400.7: LKI retention and
     /// identity canonicalization share one carrier traversal that reaches every
     /// parked frame, not only the active one. A tapped incarnation named only in
@@ -47498,6 +50140,76 @@ mod tests {
             crate::analysis::resource::ring_delta_signature(&ring).is_none(),
             "no shortcut is certified across an unsettled beat"
         );
+    }
+
+    /// CR 732.2a: the end of a loop window drops its held window, so a later beat at the held
+    /// depth starts a new window instead of admitting the stale one.
+    #[test]
+    fn a_window_end_drops_the_held_window() {
+        let mut state = GameState::new_two_player(7);
+        for id in [1, 2] {
+            state.stack.push_back(triggered_entry(
+                ObjectId(1000 + id),
+                ObjectId(id),
+                PlayerId(0),
+                None,
+                None,
+            ));
+        }
+        state.record_loop_detect_sample();
+        state.record_loop_detect_sample();
+        state.stack.pop_back();
+        state.record_shrinking_beat(2);
+        assert!(
+            state.loop_detect_held.is_some(),
+            "reach: the shrinking beat holds the window"
+        );
+        state.clear_loop_detect_window();
+        state.stack.push_back(triggered_entry(
+            ObjectId(1003),
+            ObjectId(3),
+            PlayerId(0),
+            None,
+            None,
+        ));
+        state.record_loop_detect_sample();
+        assert_eq!(state.loop_detect_ring.len(), 1);
+        assert!(state.loop_detect_held.is_none());
+    }
+
+    /// CR 732.2a: a beat sampled below a held window's start depth stays in the held window and
+    /// never reaches the ring.
+    #[test]
+    fn a_beat_below_the_held_depth_stays_out_of_the_ring() {
+        let mut state = GameState::new_two_player(7);
+        for id in [1, 2] {
+            state.stack.push_back(triggered_entry(
+                ObjectId(1000 + id),
+                ObjectId(id),
+                PlayerId(0),
+                None,
+                None,
+            ));
+        }
+        state.record_loop_detect_sample();
+        state.stack.pop_back();
+        state.record_shrinking_beat(2);
+        let held = state
+            .loop_detect_held
+            .as_ref()
+            .expect("reach: the shrinking beat holds the window")
+            .samples
+            .len();
+        state.record_loop_detect_sample();
+        assert_eq!(
+            state
+                .loop_detect_held
+                .as_ref()
+                .map(|held| held.samples.len()),
+            Some(held + 1),
+            "reach: the below-depth beat is sampled into the held window"
+        );
+        assert!(state.loop_detect_ring.is_empty());
     }
 
     /// CR 104.4b (issue #6877): two states differing only in the
@@ -48014,41 +50726,8 @@ mod tests {
         assert!(rising(&state).is_empty());
     }
 
-    /// PR-7 Phase 4c (B5, R3): sibling of `unbounded_resources_excluded_from_loop_equality`
-    /// — the new `unbounded_loop_enablers` field follows the identical exclusion-by-omission
-    /// discipline (never appears in the `impl PartialEq` `&&` chain).
-    ///
-    /// REVERT-PROBE: add `&& self.unbounded_loop_enablers == other.unbounded_loop_enablers`
-    /// to the manual `impl PartialEq for GameState` → all three assertions below fail.
-    #[test]
-    fn unbounded_loop_enablers_excluded_from_loop_equality() {
-        use crate::analysis::resource::loop_states_equal_modulo_resources;
-
-        let a = GameState::new_two_player(7);
-        let mut b = a.clone();
-        b.register_unbounded_loop_enablers(PlayerId(0), BTreeSet::from([ObjectId(1)]));
-        // Sanity: the populated field really does differ between the two states.
-        assert_ne!(
-            a.unbounded_loop_enablers, b.unbounded_loop_enablers,
-            "fixture must actually differ in unbounded_loop_enablers"
-        );
-
-        assert!(
-            a == b,
-            "manual PartialEq must exclude unbounded_loop_enablers (revocation annotation)"
-        );
-        assert!(
-            loop_states_equal(&a, &b),
-            "loop_states_equal (CR 104.4b/732.2a) must exclude unbounded_loop_enablers"
-        );
-        assert!(
-            loop_states_equal_modulo_resources(&a, &b),
-            "the PR-0/PR-2 modulo path must exclude unbounded_loop_enablers"
-        );
-    }
-
     /// PR-7 DESIGN STEP 4 (∞-pile display): sibling of
-    /// `unbounded_loop_enablers_excluded_from_loop_equality` — the new
+    /// `unbounded_resources_excluded_from_loop_equality` — the new
     /// `unbounded_loop_pile` field follows the identical exclusion-by-omission
     /// discipline (never appears in the `impl PartialEq` `&&` chain).
     ///
@@ -48255,28 +50934,22 @@ mod tests {
         );
     }
 
-    /// PR-7 Phase 4c (B5 defuse): `clear_unbounded_loop` must remove ALL SIX per-controller
-    /// maps in lockstep — `unbounded_resources` / `unbounded_loop_enablers` /
-    /// `unbounded_loop_pile` / `unbounded_counter_targets` /
-    /// `pending_unbounded_materialization` / `pending_materialization_count`. The `zones.rs`
-    /// defuse hook relies on a single call revoking the whole capability.
+    /// `clear_unbounded_loop` must remove ALL FIVE per-controller maps in lockstep —
+    /// `unbounded_resources` / `unbounded_loop_pile` / `unbounded_counter_targets` /
+    /// `pending_unbounded_materialization` / `pending_materialization_count`.
     ///
     /// The last two are why this call is NOT a display clear and must never be wired to an
     /// object-growth mark: dropping the stash and its CR 732.2c bound cancels growth every
     /// player already accepted. Anything that only wants to stop RENDERING an ∞ belongs at
     /// the projection (`derived_views::object_growth_backing`), not here.
-    ///
-    /// (Renamed from `..._removes_both_maps_in_lockstep`: the old name said TWO and the old
-    /// body asserted THREE, while the function has cleared six since the stash landed.)
     #[test]
-    fn clear_unbounded_loop_removes_all_six_maps_in_lockstep() {
+    fn clear_unbounded_loop_removes_all_five_maps_in_lockstep() {
         let mut state = GameState::new_two_player(7);
         state.mark_unbounded_loop(
             PlayerId(0),
             &[crate::analysis::resource::ResourceAxis::Life(PlayerId(0))],
             &[crate::analysis::resource::ResourceAxis::Life(PlayerId(0))],
         );
-        state.register_unbounded_loop_enablers(PlayerId(0), BTreeSet::from([ObjectId(1)]));
         state.register_unbounded_loop_pile(PlayerId(0), BTreeSet::from([ObjectId(1)]));
         state.register_unbounded_counter_targets(
             PlayerId(0),
@@ -48291,7 +50964,6 @@ mod tests {
         );
         state.pending_materialization_count.insert(PlayerId(0), 7);
         assert!(state.unbounded_resources.contains_key(&PlayerId(0)));
-        assert!(state.unbounded_loop_enablers.contains_key(&PlayerId(0)));
         assert!(state.unbounded_loop_pile.contains_key(&PlayerId(0)));
         assert!(state.unbounded_counter_targets.contains_key(&PlayerId(0)));
         assert!(state
@@ -48306,10 +50978,6 @@ mod tests {
         assert!(
             !state.unbounded_resources.contains_key(&PlayerId(0)),
             "clear_unbounded_loop must remove the unbounded_resources entry"
-        );
-        assert!(
-            !state.unbounded_loop_enablers.contains_key(&PlayerId(0)),
-            "clear_unbounded_loop must remove the unbounded_loop_enablers entry"
         );
         assert!(
             !state.unbounded_loop_pile.contains_key(&PlayerId(0)),
@@ -48552,18 +51220,6 @@ mod tests {
         );
     }
 
-    /// `register_unbounded_loop_enablers` is a no-op for an empty set — no entry to
-    /// defuse on later (mirrors `mark_unbounded_loop`'s idempotent set-union contract).
-    #[test]
-    fn register_unbounded_loop_enablers_empty_set_is_noop() {
-        let mut state = GameState::new_two_player(7);
-        state.register_unbounded_loop_enablers(PlayerId(0), BTreeSet::new());
-        assert!(
-            !state.unbounded_loop_enablers.contains_key(&PlayerId(0)),
-            "an empty enabler set must not create an entry"
-        );
-    }
-
     /// T-C (CR 500.5 mana boundary drain): `clear_unbounded_mana_loop` is AXIS-SCOPED —
     /// it removes ONLY the `Mana(_)` axes and PRESERVES any coexisting non-Mana axis
     /// (e.g. a `TokensCreated` loop mid-collapse) together with its token-associated
@@ -48665,93 +51321,6 @@ mod tests {
         assert!(
             !state.unbounded_resources.contains_key(&PlayerId(0)),
             "with Mana the only axis, the player key must be dropped entirely"
-        );
-    }
-
-    /// T-E (blocker #1, CR 110.1 enabler lockstep-iff-empty): when clearing the Mana
-    /// axis empties the player's axis set, `clear_unbounded_mana_loop` must ALSO drop
-    /// the `unbounded_loop_enablers` entry in lockstep — an orphaned enabler (no backing
-    /// axis) is a landmine: a later `SetInfiniteMana` re-marks the controller, then the
-    /// stale enabler leaving the battlefield mis-fires the `zones.rs` defuse hook
-    /// (`clear_unbounded_loop`), silently killing the debug toggle. But when a coexisting
-    /// NON-Mana axis survives (a Path-C `{Mana, Counter}` cover), the enablers still back
-    /// that axis and MUST be preserved. MEASURED: PROBE_LOCKSTEP_A/B.
-    ///
-    /// REVERT-PROBE (discriminating): drop the `unbounded_loop_enablers.remove(&controller)`
-    /// line → case (a) leaves the enabler entry orphaned → assertion (a2) FLIPS.
-    #[test]
-    fn clear_unbounded_mana_loop_drops_enablers_in_lockstep() {
-        use crate::analysis::resource::{CounterClass, ObjectClass, ResourceAxis};
-        use crate::types::mana::ManaType;
-
-        // Case (a): mana-only → clearing the Mana axis empties the set → axis AND
-        // enablers both drop.
-        let mut a = GameState::new_two_player(7);
-        a.mark_unbounded_loop(
-            PlayerId(0),
-            &[ResourceAxis::Mana(ManaType::Colorless)],
-            &[ResourceAxis::Mana(ManaType::Colorless)],
-        );
-        a.register_unbounded_loop_enablers(PlayerId(0), BTreeSet::from([ObjectId(7)]));
-        // Non-vacuity: the enabler entry really exists pre-clear.
-        assert!(
-            a.unbounded_loop_enablers.contains_key(&PlayerId(0)),
-            "case (a) precondition: P0 has an enabler entry"
-        );
-
-        a.clear_unbounded_mana_loop(PlayerId(0));
-
-        assert!(
-            !a.unbounded_resources.contains_key(&PlayerId(0)),
-            "case (a1): the lone Mana axis is cleared, dropping the player key"
-        );
-        assert!(
-            !a.unbounded_loop_enablers.contains_key(&PlayerId(0)),
-            "case (a2) DISCRIMINATOR: enablers drop in lockstep when the last axis goes (CR 110.1)"
-        );
-
-        // Case (b): mixed `{Mana, Counter}` cover → the Counter axis survives → the
-        // enablers still back it and MUST be preserved.
-        let mut b = GameState::new_two_player(7);
-        b.mark_unbounded_loop(
-            PlayerId(0),
-            &[
-                ResourceAxis::Mana(ManaType::Colorless),
-                ResourceAxis::Counter(CounterClass::Plus1Plus1, ObjectClass::Creature),
-            ],
-            &[
-                ResourceAxis::Mana(ManaType::Colorless),
-                ResourceAxis::Counter(CounterClass::Plus1Plus1, ObjectClass::Creature),
-            ],
-        );
-        b.register_unbounded_loop_enablers(PlayerId(0), BTreeSet::from([ObjectId(7)]));
-        // Non-vacuity: both axes + the enabler entry exist pre-clear.
-        assert_eq!(
-            b.unbounded_resources.get(&PlayerId(0)),
-            Some(&BTreeSet::from([
-                ResourceAxis::Mana(ManaType::Colorless),
-                ResourceAxis::Counter(CounterClass::Plus1Plus1, ObjectClass::Creature),
-            ])),
-            "case (b) precondition: P0 holds both a Mana axis and a Counter axis"
-        );
-        assert!(
-            b.unbounded_loop_enablers.contains_key(&PlayerId(0)),
-            "case (b) precondition: P0 has an enabler entry"
-        );
-
-        b.clear_unbounded_mana_loop(PlayerId(0));
-
-        assert_eq!(
-            b.unbounded_resources.get(&PlayerId(0)),
-            Some(&BTreeSet::from([ResourceAxis::Counter(
-                CounterClass::Plus1Plus1,
-                ObjectClass::Creature
-            )])),
-            "case (b1): the coexisting Counter axis survives the mana-axis clear"
-        );
-        assert!(
-            b.unbounded_loop_enablers.contains_key(&PlayerId(0)),
-            "case (b2): enablers are PRESERVED — they still back the surviving Counter axis"
         );
     }
 
@@ -50111,7 +52680,8 @@ mod tests {
                 cost_reduction_election: None,
                 activation_cost_snapshot: None,
                 activation_cost: None,
-                deferred_random_discard_cost: None,
+                deferred_hand_discard_cost: None,
+                prepaid_finalization: None,
                 activation_ability_index: None,
                 pending_loyalty_activation_player: None,
                 target_constraints: vec![],
@@ -50661,7 +53231,8 @@ mod tests {
             cost_reduction_election: None,
             activation_cost_snapshot: None,
             activation_cost: None,
-            deferred_random_discard_cost: None,
+            deferred_hand_discard_cost: None,
+            prepaid_finalization: None,
             activation_ability_index: None,
             pending_loyalty_activation_player: None,
             target_constraints: vec![],
@@ -56996,5 +59567,117 @@ mod replacement_subtree_boundary_tests {
             boundary.is_retired(&state.resolution_stack),
             "the subtree retires with the nested child"
         );
+    }
+}
+
+/// CR 104.4b + CR 203.1 + CR 206.1: the casting reversal's identity is its
+/// comparison list; a descriptor saved without one compares by its restoration
+/// list and never equals one that has a comparison list.
+#[cfg(test)]
+mod spell_cast_reversal_equality {
+    use super::{SpellCastReversal, SpellCastUndo};
+    use crate::types::identifiers::ObjectId;
+    use crate::types::player::PlayerId;
+    use std::sync::Arc;
+
+    fn edits(tag: &str) -> Vec<SpellCastUndo> {
+        vec![SpellCastUndo::Value {
+            path: vec!["players".into(), "0".into(), tag.into()],
+            before: Some(serde_json::json!(tag)),
+        }]
+    }
+
+    fn descriptor(
+        comparison_undo: Option<Vec<SpellCastUndo>>,
+        undo: Vec<SpellCastUndo>,
+        journal_start: usize,
+    ) -> SpellCastReversal {
+        SpellCastReversal {
+            comparison_undo,
+            undo,
+            ..SpellCastReversal::announced(ObjectId(1), PlayerId(0), journal_start)
+        }
+    }
+
+    /// Seven separately constructed descriptors in five equality classes:
+    /// {W1, W2}, {W3}, {L1, L2}, {L3}, {S}.
+    fn descriptors() -> [(&'static str, SpellCastReversal); 7] {
+        [
+            ("W1", descriptor(Some(edits("x")), edits("u"), 3)),
+            ("W2", descriptor(Some(edits("x")), edits("v"), 3)),
+            ("W3", descriptor(Some(edits("y")), edits("u"), 3)),
+            ("L1", descriptor(None, edits("u"), 3)),
+            ("L2", descriptor(None, edits("u"), 3)),
+            ("L3", descriptor(None, edits("v"), 3)),
+            ("S", descriptor(Some(edits("x")), edits("u"), 4)),
+        ]
+    }
+
+    fn class(name: &str) -> u8 {
+        match name {
+            "W1" | "W2" => 0,
+            "W3" => 1,
+            "L1" | "L2" => 2,
+            "L3" => 3,
+            "S" => 4,
+            other => panic!("unknown descriptor {other}"),
+        }
+    }
+
+    #[test]
+    fn spell_cast_reversal_equality_is_an_equivalence() {
+        let set = descriptors();
+        // Reach: both the with-list and the without-list class are populated.
+        assert!(set.iter().any(|(_, d)| d.comparison_undo.is_some()));
+        assert!(set.iter().any(|(_, d)| d.comparison_undo.is_none()));
+
+        for (name_a, a) in &set {
+            assert!(a == a, "{name_a} is reflexive");
+            for (name_b, b) in &set {
+                let expected = class(name_a) == class(name_b);
+                assert_eq!(a == b, expected, "{name_a} == {name_b}");
+                assert_eq!(a == b, b == a, "{name_a}, {name_b} is symmetric");
+                for (name_c, c) in &set {
+                    if a == b && b == c {
+                        assert!(a == c, "{name_a} == {name_b} == {name_c} is transitive");
+                    }
+                }
+            }
+        }
+
+        let by_name = |name: &str| {
+            set.iter()
+                .find(|(candidate, _)| *candidate == name)
+                .map(|(_, d)| d.clone())
+                .expect("fixture exists")
+        };
+        // Differing restoration lists are ignored while a comparison list decides.
+        assert!(by_name("W1") == by_name("W2"));
+        assert!(by_name("W1") != by_name("W3"));
+        // Without comparison lists the restoration lists decide, as before.
+        assert!(by_name("L1") == by_name("L2"));
+        assert!(by_name("L1") != by_name("L3"));
+        // A descriptor with a comparison list never equals one without, whatever
+        // their restoration lists.
+        assert!(by_name("W1") != by_name("L1"));
+        assert!(by_name("L1") != by_name("W1"));
+        // Every other field still separates descriptors.
+        assert!(by_name("S") != by_name("W1"));
+    }
+
+    #[test]
+    fn the_same_verdicts_hold_through_optional_arcs() {
+        let set = descriptors();
+        for (name_a, a) in &set {
+            for (name_b, b) in &set {
+                let left = Some(Arc::new(a.clone()));
+                let right = Some(Arc::new(b.clone()));
+                assert_eq!(
+                    left == right,
+                    class(name_a) == class(name_b),
+                    "Some(Arc({name_a})) == Some(Arc({name_b}))"
+                );
+            }
+        }
     }
 }
