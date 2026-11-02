@@ -168,11 +168,21 @@ pub(crate) struct ReflexiveParentIr {
     /// How the parent instruction is printed and offered.
     pub(crate) parent: ReflexiveParent,
     /// The connector between the parent instruction and its dependent body.
-    pub(crate) connector: AbilityCondition,
+    pub(crate) connector: ReflexiveConnector,
     /// The reflexive body that follows the connector.
     pub(crate) effect_chain: EffectChainIr,
     /// CR 700.2b: modal metadata when the reflexive body is a mode choice.
     pub(crate) modal: Option<ModalIr>,
+}
+
+/// CR 603.12: what makes a reflexive body trigger.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) enum ReflexiveConnector {
+    /// "When you do" — the body is the parent's gated sub-ability.
+    Condition(AbilityCondition),
+    /// "When <event> this way" ("When you remove a counter this way") — the
+    /// body triggers on that event occurring during the parent's resolution.
+    Event(Box<TriggerDefinition>),
 }
 
 /// CR 603.12: the two printed forms a reflexive parent can take.

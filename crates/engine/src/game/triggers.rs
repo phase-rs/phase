@@ -12632,6 +12632,7 @@ pub fn latched_doubler_scope_plan(filter: &TargetFilter) -> Option<LatchedScopeP
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
@@ -14502,6 +14503,7 @@ fn filter_binding_diverges(filter: &TargetFilter) -> bool {
         // same dual path `ObjectScope::EventSource` / `EventTarget` and
         // `PlayerScope::DefendingPlayer` are adjudicated non-divergent under.
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
         | TargetFilter::TriggeringSpellController
@@ -14955,6 +14957,9 @@ fn parity_source_binding_diverges(parity: &crate::types::ability::ParitySource) 
         ParitySource::LastNamedChoice => true,
         // A printed parity is a literal — nothing to bind.
         ParitySource::Fixed { .. } => false,
+        // CR 607.2d: the source's persisted choice reads the same source state
+        // at fire time and at resolution, as the other chosen-attribute reads do.
+        ParitySource::SourceChosen => false,
     }
 }
 
@@ -15362,6 +15367,11 @@ fn delayed_trigger_to_context(
         }),
         _ => None,
     };
+    // CR 603.3c + CR 700.2b: a modal delayed or reflexive trigger ("When you
+    // remove a counter this way, choose one —") has its mode chosen as it is put
+    // on the stack, exactly as a printed modal trigger does.
+    let modal = trigger.ability.modal.clone();
+    let mode_abilities = trigger.ability.mode_abilities.clone();
     let mut context = PendingTriggerContext::delayed(
         PendingTrigger {
             source_id: trigger.source_id,
@@ -15372,8 +15382,8 @@ fn delayed_trigger_to_context(
             target_constraints: Vec::new(),
             distribute: None,
             trigger_event: Some(trigger_event),
-            modal: None,
-            mode_abilities: vec![],
+            modal,
+            mode_abilities,
             description: None,
             may_trigger_origin: None,
             subject_match_count,
