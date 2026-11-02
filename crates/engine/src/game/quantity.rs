@@ -2011,6 +2011,54 @@ pub fn resolve_quantity_with_spell(
     )
 }
 
+/// CR 601.2f: bind a population's `CastingSpell` referent ("the same name as
+/// that spell") to the spell whose cost is being determined. With no such spell
+/// the referent names nothing. CR 601.2a: that spell is already on the stack, so
+/// it is never itself a member of the counted population even while its object
+/// storage still lists its origin zone ("The spell being cast doesn't reduce its
+/// own cost" — Locket of Yesterdays ruling).
+fn bind_casting_spell_referent(
+    filter: &TargetFilter,
+    spell: Option<ObjectId>,
+) -> std::borrow::Cow<'_, TargetFilter> {
+    if !crate::game::filter::filter_operands_contain(filter, &|node| {
+        matches!(node, TargetFilter::CastingSpell)
+    }) {
+        return std::borrow::Cow::Borrowed(filter);
+    }
+    let mut bound = filter.clone();
+    let mut referenced = false;
+    let mut complete = true;
+    crate::types::ability::rewrite_filter_props::<()>(
+        &mut bound,
+        &mut |node, _, _| {
+            if matches!(node, TargetFilter::CastingSpell) {
+                referenced = true;
+                *node = spell.map_or(TargetFilter::None, |id| TargetFilter::SpecificObject { id });
+            }
+        },
+        &mut |_| {},
+        &mut |_| {},
+        &mut complete,
+        false,
+        None,
+    );
+    if !referenced {
+        return std::borrow::Cow::Borrowed(filter);
+    }
+    std::borrow::Cow::Owned(match spell {
+        Some(id) => TargetFilter::And {
+            filters: vec![
+                bound,
+                TargetFilter::Not {
+                    filter: Box::new(TargetFilter::SpecificObject { id }),
+                },
+            ],
+        },
+        None => bound,
+    })
+}
+
 /// The explicit object scope, if any, from the exhaustive reference classifier.
 pub(crate) fn quantity_ref_object_scope(qty: &QuantityRef) -> Option<ObjectScope> {
     match quantity_ref_object_scope_read(qty) {
@@ -4481,7 +4529,7 @@ fn target_filter_matches_population_semantics(
     }
 }
 
-fn tracked_set_object_ids(
+pub(crate) fn tracked_set_object_ids(
     state: &GameState,
     id: crate::types::identifiers::TrackedSetId,
 ) -> Vec<ObjectId> {
@@ -5018,7 +5066,13 @@ fn resolve_ref(
             // the filter's zone, with `OtherThanTriggerObject` exclusion applied
             // — shared with the "for each [object]" iteration so count and
             // members stay in lockstep.
-            object_count_matching_ids(state, filter, &filter_ctx, source_id).len(),
+            object_count_matching_ids(
+                state,
+                &bind_casting_spell_referent(filter, ctx.spell),
+                &filter_ctx,
+                source_id,
+            )
+            .len(),
         ),
         // CR 201.2 + CR 603.4: Count of objects matching `filter`,
         // deduplicated by the listed `qualities`. Each object contributes a

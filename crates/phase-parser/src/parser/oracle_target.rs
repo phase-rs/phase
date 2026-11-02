@@ -3130,9 +3130,79 @@ fn match_and_or_connector(lower: &str) -> Option<usize> {
     .map(|(tail, _)| lower.len() - tail.len())
 }
 
+/// CR 508.1k / CR 509.1g / CR 509.1h: consume a run of status adjectives at `pos`. An "X or
+/// Y" pair ("attacking or blocking creature") is one property disjunction: an
+/// attacking creature OR a blocking creature, not both.
+fn consume_status_prefix_run(
+    lower: &str,
+    pos: &mut usize,
+    properties: &mut Vec<FilterProp>,
+    disjunction_ranges: &mut Vec<(usize, usize)>,
+) {
+    while let Some((prop, consumed)) = parse_combat_status_prefix(&lower[*pos..]) {
+        let disjunction_start = properties.len();
+        properties.push(prop);
+        *pos += consumed;
+        if let Ok((after_or, _)) = tag::<_, _, OracleError<'_>>("or ").parse(&lower[*pos..]) {
+            if let Some((next_prop, next_consumed)) = parse_combat_status_prefix(after_or) {
+                properties.push(next_prop);
+                disjunction_ranges.push((disjunction_start, 2));
+                *pos += "or ".len() + next_consumed;
+            }
+        }
+    }
+}
+
 /// Context-aware variant of `parse_type_phrase_folding`. Enables relative-player scope
 /// resolution via `ctx.relative_player_scope`.
 pub fn parse_type_phrase_folding_with_ctx<'a>(
+    text: &'a str,
+    ctx: &mut ParseContext,
+) -> (TargetFilter, &'a str) {
+    let (mut filter, rest) = parse_type_phrase_folding_unbound(text, ctx);
+    exclude_parent_target_from_its_controllers_others(&mut filter);
+    (filter, rest)
+}
+
+/// CR 608.2c + CR 109.4: "<target> …. Each other creature that player
+/// controls …" — a population controlled by the parent target's controller is
+/// the target's fellow objects, so its "other" excludes that target, not the
+/// ability's source (Craterous Stomp, Mark for Death, Flames of the Raze-Boar).
+pub(crate) fn exclude_parent_target_from_its_controllers_others(filter: &mut TargetFilter) {
+    rewrite_other_as_parent_target_exclusion(filter, &|typed| {
+        typed.controller == Some(ControllerRef::ParentTargetController)
+    });
+}
+
+/// CR 608.2c: rewrite every typed leg's "other" (`Another`) to "other than the
+/// parent target" — for a population whose "other" names the chain's target
+/// rather than the ability's source.
+pub(crate) fn exclude_parent_target_from_others(filter: &mut TargetFilter) {
+    rewrite_other_as_parent_target_exclusion(filter, &|_| true);
+}
+
+fn rewrite_other_as_parent_target_exclusion(
+    filter: &mut TargetFilter,
+    applies: &dyn Fn(&TypedFilter) -> bool,
+) {
+    match filter {
+        TargetFilter::Typed(typed) if applies(typed) => {
+            for prop in &mut typed.properties {
+                if matches!(prop, FilterProp::Another) {
+                    *prop = FilterProp::DistinctFrom {
+                        reference: Box::new(TargetFilter::ParentTarget),
+                    };
+                }
+            }
+        }
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => filters
+            .iter_mut()
+            .for_each(|leg| rewrite_other_as_parent_target_exclusion(leg, applies)),
+        _ => {}
+    }
+}
+
+fn parse_type_phrase_folding_unbound<'a>(
     text: &'a str,
     ctx: &mut ParseContext,
 ) -> (TargetFilter, &'a str) {
@@ -3243,37 +3313,15 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
         }
     }
 
-    // GAP B (DEFERRED — strict-failure tag, DynQty subgroup D follow-up): the leading
-    // adjective handlers here run as a fixed positional cascade (combat-status →
-    // enchanted/equipped → modified → renowned → goaded → historic → … → nontoken at
-    // ~:2310). A phrase whose adjectives appear in a different order — notably "nontoken
-    // attacking creature" (Sophina, Spearsage Deserter) — is only partly stripped:
-    // "nontoken" leads, so THIS combat-status loop never sees "attacking"; by the time
-    // "nontoken " is consumed further down, the combat-status loop has already passed, so
-    // "attacking creature" fails the type parse and `parse_for_each_clause` returns None
-    // (NO false lift — Sophina's Investigate stays bare and coverage stays honestly RED).
-    // The fix is to collapse this cascade into a single order-free many0-style property
-    // loop, but that is the hottest shared parser path (high CI-regression blast radius)
-    // and is out of scope here. Tripwire: the Sophina branch of
-    // `object_for_each_investigate_is_lifted` asserts the bare-Investigate state and
-    // FLIPS to fail when this gap is closed.
-    //
-    // CR 509.1h: Consume combat status prefixes (unblocked, attacking, blocking).
-    // Handles "or" compound as a property disjunction: "attacking or blocking
-    // creature" means attacking creature OR blocking creature, not both.
-    while let Some((prop, consumed)) = parse_combat_status_prefix(&lower[pos..]) {
-        let disjunction_start = properties.len();
-        properties.push(prop);
-        pos += consumed;
-        // Check for "or " followed by another combat status prefix
-        if let Ok((after_or, _)) = tag::<_, _, OracleError<'_>>("or ").parse(&lower[pos..]) {
-            if let Some((next_prop, next_consumed)) = parse_combat_status_prefix(after_or) {
-                properties.push(next_prop);
-                property_disjunction_ranges.push((disjunction_start, 2));
-                pos += "or ".len() + next_consumed;
-            }
-        }
-    }
+    // CR 508.1k / CR 509.1g / CR 509.1h: Consume combat status prefixes (unblocked,
+    // attacking, blocking). A status run after a `non-` or other adjective
+    // prefix is consumed again once those are (see below).
+    consume_status_prefix_run(
+        &lower,
+        &mut pos,
+        &mut properties,
+        &mut property_disjunction_ranges,
+    );
 
     // CR 205.4a: Parse supertype prefix: "legendary", "basic", "snow"
     // Must come BEFORE color prefix so "legendary white creature" works:
@@ -3527,6 +3575,18 @@ pub fn parse_type_phrase_folding_with_ctx<'a>(
             pos += lower[pos..].len() - rest.len();
         }
     }
+
+    // CR 508.1k / CR 509.1g / CR 509.1h: A combat-status run can also follow a `non-`
+    // negation or adjective prefix ("nonartifact attacking creature" — Broken
+    // Visage; "nontoken attacking creature" — Sophina, Spearsage Deserter; "a
+    // goaded attacking or blocking creature" — Baeloth Barrityl). The run above
+    // only fires when the status word leads the phrase.
+    consume_status_prefix_run(
+        &lower,
+        &mut pos,
+        &mut properties,
+        &mut property_disjunction_ranges,
+    );
 
     let mut adjective_type_filters: Vec<TypeFilter> = Vec::new();
 
@@ -7497,8 +7557,13 @@ pub(crate) fn parse_mana_value_suffix(
         return Some((prop, text.len() - after.len()));
     }
 
-    if let Ok((after, _)) = (
-        parse_suffix_subject_head,
+    // CR 202.3: "with" / "without mana value of the chosen quality". The
+    // negated form matches objects whose mana value lacks that parity.
+    if let Ok((after, (negated, _, _))) = (
+        alt((
+            value(false, parse_suffix_subject_head),
+            value(true, tag::<_, _, OracleError<'_>>("without ")),
+        )),
         tag::<_, _, OracleError<'_>>("mana value of "),
         alt((
             tag::<_, _, OracleError<'_>>("the chosen quality"),
@@ -7507,12 +7572,17 @@ pub(crate) fn parse_mana_value_suffix(
     )
         .parse(trimmed)
     {
-        return Some((
-            FilterProp::ManaValueParity {
-                parity: ParitySource::LastNamedChoice,
-            },
-            text.len() - after.len(),
-        ));
+        let parity = FilterProp::ManaValueParity {
+            parity: ParitySource::LastNamedChoice,
+        };
+        let prop = if negated {
+            FilterProp::Not {
+                prop: Box::new(parity),
+            }
+        } else {
+            parity
+        };
+        return Some((prop, text.len() - after.len()));
     }
 
     // Branch order in this function is: superlative -> relative ("the same /
@@ -8975,6 +9045,11 @@ pub(crate) fn parse_shared_quality_reference<'a>(
         }
     }
 
+    // "one or more <objects>" names the same existential reference population
+    // as "a <object>" ("share a color with one or more permanents you control").
+    let input = tag::<_, _, OracleError<'_>>("one or more ")
+        .parse(input)
+        .map_or(input, |(rest, _)| rest);
     let (filter, rest) = parse_target_disjunction(input);
     if matches!(filter, TargetFilter::Any) {
         return Err(nom::Err::Error(nom::error::Error::new(
@@ -9220,6 +9295,10 @@ pub(crate) fn parse_shared_quality_clause<'a>(
 ) -> nom::IResult<&'a str, FilterProp, OracleError<'a>> {
     type Vbe<'a> = OracleError<'a>;
     let (rest, _) = tag::<_, _, Vbe>("that ").parse(input)?;
+    // "that each share …" distributes the relation over each member of a
+    // plural head ("X cards that each share a color with …") — the same
+    // per-object predicate as "that shares".
+    let (rest, _) = opt(tag::<_, _, Vbe>("each ")).parse(rest)?;
     let (rest, relation) = alt((
         value(
             SharedQualityRelation::DoesNotShare,
@@ -10348,6 +10427,7 @@ fn narrow_population_for_exclusion(
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController

@@ -156,6 +156,11 @@ pub(crate) enum LinkedChoiceKind {
     /// exists, so a resolution-scoped choice with no durable reader stays
     /// non-persisted.
     PersistedPlayer { choosers: Vec<OracleItemId> },
+    /// CR 607.2d: A persisted as-enters "choose odd or even" producer linked to
+    /// the card's statics and replacements that read "the chosen quality".
+    /// Each `reader` has its `ManaValueParity` rebound from the resolution's
+    /// last named choice to the source's persisted choice.
+    PersistedParity { readers: Vec<OracleItemId> },
     /// CR 607.2d + CR 707.2c + CR 614.12a: An as-enters permanent-object choice
     /// gap (`chooser` — an Unimplemented ability whose Oracle text is
     /// "As … enters, choose <permanent>") linked to a
