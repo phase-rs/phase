@@ -3771,10 +3771,7 @@ pub(super) fn resolve_prior_look_library_bottom_anaphors(defs: &mut [AbilityDefi
             ..
         } = &*defs[i].effect
         {
-            if matches!(
-                target,
-                TargetFilter::TrackedSet { .. } | TargetFilter::ParentTarget
-            ) {
+            if matches!(target, TargetFilter::TrackedSet { .. }) {
                 let rest_order = if arranger.is_some() {
                     DigRestOrder::PlayerChoice
                 } else {

@@ -8053,7 +8053,7 @@ fn parse_of_them_rest_destination(lower: &str) -> Option<(Zone, DigRestOrder)> {
     .parse(after_rest)
     .ok()
     .is_some_and(|(_, matched)| matched.is_some());
-    let player_choice = nom_primitives::scan_contains(after_rest, " in any order");
+    let player_choice = nom_primitives::scan_contains(after_rest, "in any order");
     Some((
         destination,
         if random {
@@ -13220,7 +13220,7 @@ mod tests {
             Some(ContinuationAst::PutRest {
                 destination: Zone::Library,
                 reorder_all: false,
-                rest_order: DigRestOrder::Preserve,
+                rest_order: DigRestOrder::PlayerChoice,
             })
         );
     }
@@ -13352,7 +13352,7 @@ mod tests {
                 destination: Some(Zone::Hand),
                 rest_destination: Some(Zone::Library),
                 rest_split_top_count: None,
-                rest_order: DigRestOrder::Preserve,
+                rest_order: DigRestOrder::PlayerChoice,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -13380,7 +13380,7 @@ mod tests {
                 destination: Some(Zone::Hand),
                 rest_destination: Some(Zone::Library),
                 rest_split_top_count: None,
-                rest_order: DigRestOrder::Preserve,
+                rest_order: DigRestOrder::PlayerChoice,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -13440,7 +13440,7 @@ mod tests {
                 destination: Some(Zone::Hand),
                 rest_destination: Some(Zone::Graveyard),
                 rest_split_top_count: None,
-                rest_order: DigRestOrder::Preserve,
+                rest_order: DigRestOrder::PlayerChoice,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,
@@ -13467,7 +13467,7 @@ mod tests {
                 destination: Some(Zone::Hand),
                 rest_destination: Some(Zone::Library),
                 rest_split_top_count: None,
-                rest_order: DigRestOrder::Preserve,
+                rest_order: DigRestOrder::PlayerChoice,
                 enters_under: None,
                 face_down_profile: None,
                 enter_tapped: false,

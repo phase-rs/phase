@@ -235,6 +235,7 @@ fn human_response_model(waiting_for: &WaitingFor, semantic_owner: PlayerId) -> H
         | WaitingFor::ScryChoice { .. }
         | WaitingFor::RippleBottomOrder { .. }
         | WaitingFor::RevealUntilBottomOrder { .. }
+        | WaitingFor::DigBottomOrder { .. }
         | WaitingFor::ArrangePlanarDeckTopChoice { .. }
         | WaitingFor::DigChoice { .. }
         | WaitingFor::DigRestSplitChoice { .. }
@@ -534,6 +535,7 @@ fn classify_waiting_for(waiting_for: &WaitingFor) -> WaitingClassification {
         | WaitingFor::ScryChoice { .. }
         | WaitingFor::RippleBottomOrder { .. }
         | WaitingFor::RevealUntilBottomOrder { .. }
+        | WaitingFor::DigBottomOrder { .. }
         | WaitingFor::ArrangePlanarDeckTopChoice { .. }
         | WaitingFor::DigChoice { .. }
         | WaitingFor::DigRestSplitChoice { .. }
@@ -4386,7 +4388,8 @@ fn selection_projection(
         WaitingFor::DigRestSplitChoice { cards, .. } => cards.len(),
         WaitingFor::SeparatePilesPartition { eligible, .. } => eligible.len(),
         WaitingFor::RippleBottomOrder { cards, .. }
-        | WaitingFor::RevealUntilBottomOrder { cards, .. } => cards.len(),
+        | WaitingFor::RevealUntilBottomOrder { cards, .. }
+        | WaitingFor::DigBottomOrder { cards, .. } => cards.len(),
         _ => 0,
     };
     if candidate_count > MAX_INTERACTION_LIST_LEN {
@@ -4704,6 +4707,9 @@ fn selection_projection(
             cards, source_id, ..
         }
         | WaitingFor::RevealUntilBottomOrder {
+            cards, source_id, ..
+        }
+        | WaitingFor::DigBottomOrder {
             cards, source_id, ..
         } => Some(SelectionProjection {
             object_ids: cards.clone(),

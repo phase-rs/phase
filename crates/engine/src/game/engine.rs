@@ -12251,6 +12251,7 @@ fn apply_action(
             }
             | WaitingFor::RippleBottomOrder { .. }
             | WaitingFor::RevealUntilBottomOrder { .. }
+            | WaitingFor::DigBottomOrder { .. }
     ) {
         state.revealed_cards.clear();
     }

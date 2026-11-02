@@ -1295,7 +1295,8 @@ pub fn candidate_actions_broad_with_probe(
         // them in any order (CR 401.4). `bounded_select_card_permutations` yields
         // bounded permutations (identity, reverse, and variants up to output cap).
         WaitingFor::RippleBottomOrder { player, cards, .. }
-        | WaitingFor::RevealUntilBottomOrder { player, cards, .. } => {
+        | WaitingFor::RevealUntilBottomOrder { player, cards, .. }
+        | WaitingFor::DigBottomOrder { player, cards, .. } => {
             bounded_select_card_permutations(*player, cards)
         }
         WaitingFor::ArrangePlanarDeckTopChoice {

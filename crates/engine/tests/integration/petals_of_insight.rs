@@ -173,6 +173,19 @@ fn petals_of_insight_accept_puts_cards_on_bottom_and_bounces_to_hand() {
         .act(GameAction::DecideOptionalEffect { accept: true })
         .expect("accept optional effect");
 
+    // CR 701.20e + CR 401.4: with 3 cards "in any order", the player must
+    // announce a permutation. The test submits the reverse of the looked-at
+    // order to verify the choice is respected.
+    let cards = match &runner.state().waiting_for {
+        WaitingFor::DigBottomOrder { cards, .. } => cards.clone(),
+        other => panic!("expected DigBottomOrder prompt, got {:?}", other),
+    };
+    // Submit reverse order (top_c, top_b, top_a) to verify choice is honored.
+    let reverse_order: Vec<ObjectId> = cards.iter().rev().copied().collect();
+    runner
+        .act(GameAction::SelectCards { cards: reverse_order })
+        .expect("submit bottom order");
+
     // Stack must be empty and game waiting for priority.
     assert!(
         matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),

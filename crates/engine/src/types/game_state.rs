@@ -17067,6 +17067,18 @@ pub enum WaitingFor {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reveal_until_hit_snapshot: Option<Box<EventObjectSnapshot>>,
     },
+    /// CR 701.20e + CR 608.2c: In a `Dig` resolution (PriorLook source) where
+    /// all looked-at cards are put on the bottom of the library "in any order"
+    /// (`DigRestOrder::PlayerChoice`), the controller announces the order for
+    /// the cards. The response is `GameAction::SelectCards { cards }` carrying
+    /// a permutation of `cards`; the engine places them on the library bottom in
+    /// that submitted order. Raised only when 2+ cards are bottomed — a single
+    /// card has no ordering choice.
+    DigBottomOrder {
+        player: PlayerId,
+        source_id: ObjectId,
+        cards: Vec<ObjectId>,
+    },
     /// CR 901.15 + CR 701.22a analogue: Arrange the top N cards of the planar
     /// deck — put exactly `keep_on_top` on top in the submitted order and the
     /// rest on the bottom in any order (Susan Foreman).
@@ -19716,6 +19728,7 @@ impl WaitingFor {
             WaitingFor::RippleRevealChoice { .. } => "RippleRevealChoice",
             WaitingFor::RippleBottomOrder { .. } => "RippleBottomOrder",
             WaitingFor::RevealUntilBottomOrder { .. } => "RevealUntilBottomOrder",
+            WaitingFor::DigBottomOrder { .. } => "DigBottomOrder",
             WaitingFor::ArrangePlanarDeckTopChoice { .. } => "ArrangePlanarDeckTopChoice",
             WaitingFor::RedistributeLifeTotals { .. } => "RedistributeLifeTotals",
             WaitingFor::CoinFlipKeepChoice { .. } => "CoinFlipKeepChoice",
@@ -19884,6 +19897,7 @@ impl WaitingFor {
             | WaitingFor::RippleRevealChoice { player, .. }
             | WaitingFor::RippleBottomOrder { player, .. }
             | WaitingFor::RevealUntilBottomOrder { player, .. }
+            | WaitingFor::DigBottomOrder { player, .. }
             | WaitingFor::ArrangePlanarDeckTopChoice { player, .. }
             | WaitingFor::RedistributeLifeTotals { player, .. }
             | WaitingFor::CoinFlipKeepChoice { player, .. }
@@ -20248,6 +20262,7 @@ impl WaitingFor {
             | WaitingFor::RippleRevealChoice { .. }
             | WaitingFor::RippleBottomOrder { .. }
             | WaitingFor::RevealUntilBottomOrder { .. }
+            | WaitingFor::DigBottomOrder { .. }
             | WaitingFor::ArrangePlanarDeckTopChoice { .. }
             | WaitingFor::RedistributeLifeTotals { .. }
             | WaitingFor::CoinFlipKeepChoice { .. }
@@ -20452,6 +20467,7 @@ impl WaitingFor {
             | WaitingFor::RippleRevealChoice { .. }
             | WaitingFor::RippleBottomOrder { .. }
             | WaitingFor::RevealUntilBottomOrder { .. }
+            | WaitingFor::DigBottomOrder { .. }
             | WaitingFor::ArrangePlanarDeckTopChoice { .. }
             | WaitingFor::RedistributeLifeTotals { .. }
             | WaitingFor::CoinFlipKeepChoice { .. }
@@ -26765,6 +26781,7 @@ fn visit_waiting_for_chains<'a>(
         | WaitingFor::RippleRevealChoice { .. }
         | WaitingFor::RippleBottomOrder { .. }
         | WaitingFor::RevealUntilBottomOrder { .. }
+        | WaitingFor::DigBottomOrder { .. }
         | WaitingFor::ArrangePlanarDeckTopChoice { .. }
         | WaitingFor::RedistributeLifeTotals { .. }
         | WaitingFor::CoinFlipKeepChoice { .. }
