@@ -3423,9 +3423,11 @@ pub(crate) fn can_pay_unless_composite(
         payer,
         ability.source_id,
         cost,
+        // CR 614.17b: an unless-payment offer is a fresh choice to pay.
         &PaymentScope::Resolution {
             ability,
             cost_move_root: ResolutionCostMoveRoot::EffectPayCost,
+            origin: ResolutionPaymentOrigin::FreshChoice,
         },
     ) {
         return false;
@@ -4253,6 +4255,7 @@ mod tests {
         let scope = PaymentScope::Resolution {
             ability: &ability,
             cost_move_root: ResolutionCostMoveRoot::EffectPayCost,
+            origin: ResolutionPaymentOrigin::FreshChoice,
         };
         assert!(
             !can_pay(&state, P0, ObjectId(100), &cost, &scope),
