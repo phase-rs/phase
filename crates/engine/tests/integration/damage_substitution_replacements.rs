@@ -28,6 +28,7 @@ use engine::types::game_state::{
     CastPaymentMode, CastingVariant, ReplacementCandidateSummary, WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
+use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::{Player, PlayerId};
@@ -1780,19 +1781,32 @@ fn two_recipients_are_each_replaced() {
     assert_at_rest(&runner);
 }
 
-/// CR 120.3f: lifelink gains for damage dealt, and a replaced event deals none (CR 614.6).
+/// CR 120.3f: lifelink gains for damage dealt, and a replaced event deals none (CR 614.6). The
+/// unreplaced game is the reach guard: the same attacker gains 3 from the same 3 damage.
 #[test]
 fn lifelink_has_nothing_to_gain_from_replaced_damage() {
-    let mut scenario = scenario();
-    let hydra = phytohydra(&mut scenario, P1);
-    let attacker = scenario
-        .add_creature_from_oracle(P0, "Aardvark Sloth", 3, 3, AARDVARK_SLOTH)
-        .id();
-    let mut runner = scenario.build();
-    run_combat(&mut runner, vec![attacker], vec![(hydra, attacker)]);
+    for replaced in [true, false] {
+        let mut scenario = scenario();
+        let blocker = if replaced {
+            phytohydra(&mut scenario, P1)
+        } else {
+            scenario.add_creature(P1, "Bear", 2, 9).id()
+        };
+        let attacker = scenario
+            .add_creature(P0, "Aardvark Sloth", 3, 3)
+            .from_oracle_text_with_keywords(&["Lifelink"], AARDVARK_SLOTH)
+            .id();
+        let mut runner = scenario.build();
+        assert!(runner.state().objects[&attacker].has_keyword(&Keyword::Lifelink));
+        run_combat(&mut runner, vec![attacker], vec![(blocker, attacker)]);
 
-    assert_eq!(plus_counters(&runner, hydra), 3);
-    assert_eq!(life(&runner, P0), 20);
+        assert_eq!(
+            plus_counters(&runner, blocker),
+            if replaced { 3 } else { 0 }
+        );
+        assert_eq!(damage(&runner, blocker), if replaced { 0 } else { 3 });
+        assert_eq!(life(&runner, P0), if replaced { 20 } else { 23 });
+    }
 }
 
 /// Force Bubble under Furnace of Rath in combat takes one legal order (CR 510.2, CR 616.1),
