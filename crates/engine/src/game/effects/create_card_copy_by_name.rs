@@ -9,13 +9,25 @@ use crate::types::zones::Zone;
 
 /// The zone the copy is staged in until a following cast moves it to the stack.
 ///
-/// BOUNDARY (CR 707.13 + CR 400.11): the rule creates this copy *outside the
-/// game*, and outside the game is not a zone. The engine has no zone-less object
-/// location yet — every `GameObject` carries a `Zone`, and the casting pipeline's
-/// CR 601.2a origin (`cast_from_zone`, the move to the stack) is keyed on that
-/// zone — so the copy is staged in exile for the remainder of this resolution.
-/// This is the one place that staging is decided; an outside-the-game location
-/// replaces this constant, not the effect's shape.
+/// CR 707.13 creates this copy *outside the game* (CR 400.11: outside the game
+/// is not a zone). Every `GameObject` carries a `Zone` and the casting pipeline's
+/// CR 601.2a origin is keyed on it, so the copy is staged in exile for the rest
+/// of this resolution — and that staging is observationally equivalent to
+/// "outside the game":
+///
+/// - The copy is CREATED in the staging zone (`zones::create_object`), never
+///   moved there, so no zone-change event is emitted and no "whenever a card is
+///   put into exile" ability can trigger on it.
+/// - The only instruction that runs between creation and the end of the
+///   resolution is the same-chain "you may cast the copy"; no player receives
+///   priority mid-resolution, so nothing else can look at exile in between.
+/// - CR 704.5e: "If a copy of a card is in any zone other than the stack or the
+///   battlefield, it ceases to exist." An uncast copy is therefore gone at the
+///   first state-based check, before any player gets priority, so no later
+///   effect can count or interact with it.
+///
+/// Pinned by The War Doctor tests in
+/// `tests/integration/create_card_copy_with_chosen_name.rs`.
 const STAGING_ZONE: Zone = Zone::Exile;
 
 /// CR 707.13: create a copy of a card defined by NAME (Garth One-Eye).

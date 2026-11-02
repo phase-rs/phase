@@ -37,6 +37,7 @@ use engine::types::ability::{
 };
 use engine::types::actions::{CastChoice, GameAction};
 use engine::types::card::CardFace;
+use engine::types::counter::CounterType;
 use engine::types::game_state::{CastOfferKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
@@ -320,6 +321,15 @@ fn garth_on_the_battlefield() -> (GameRunner, ObjectId) {
 /// when the test exercises the cast. With an empty pool the copy is uncastable,
 /// so declining is the only outcome the engine can reach.
 fn garth_with_mana(green: usize) -> (GameRunner, ObjectId) {
+    let (runner, garth, _) = garth_scenario(green, |_| None);
+    (runner, garth)
+}
+
+/// Garth plus whatever `extra` adds to the same scenario (its id, if any).
+fn garth_scenario(
+    green: usize,
+    extra: impl FnOnce(&mut GameScenario) -> Option<ObjectId>,
+) -> (GameRunner, ObjectId, Option<ObjectId>) {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     if green > 0 {
@@ -335,9 +345,10 @@ fn garth_with_mana(green: usize) -> (GameRunner, ObjectId) {
         card.from_oracle_text(GARTH_FIXTURE);
         card.id()
     };
+    let extra_id = extra(&mut scenario);
     let mut runner = scenario.build();
     runner.state_mut().card_face_registry = fixture_registry();
-    (runner, garth)
+    (runner, garth, extra_id)
 }
 
 /// Activate the {T} ability and let it resolve up to the name prompt.
@@ -532,5 +543,155 @@ fn a_name_already_chosen_leaves_the_domain() {
         offered.len(),
         2,
         "the other two are still legal: {offered:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CR 707.13 + CR 704.5e: the exile staging of the copy is not observable.
+//
+// The rule creates the copy outside the game; the engine stages it in exile for
+// the rest of the resolution (`STAGING_ZONE`). That is only sound if nothing can
+// tell the difference: the copy must be CREATED there (no zone change, so no
+// "put into exile" trigger), and an uncast copy must be gone at the first
+// state-based check (CR 704.5e). The War Doctor is the observer (Oracle text
+// from Scryfall): "Whenever one or more other permanents phase out and whenever
+// one or more other cards are put into exile from anywhere, put a time counter
+// on The War Doctor."
+// ---------------------------------------------------------------------------
+
+const THE_WAR_DOCTOR: &str = "Whenever one or more other permanents phase out and whenever one or more other cards are put into exile from anywhere, put a time counter on The War Doctor.
+Whenever The War Doctor attacks, it deals damage equal to the number of time counters on it to any target. If a creature dealt damage this way would die this turn, exile it instead.";
+
+fn add_war_doctor(scenario: &mut GameScenario) -> ObjectId {
+    let mut card = scenario.add_creature(P0, "The War Doctor", 3, 5);
+    card.from_oracle_text(THE_WAR_DOCTOR);
+    card.id()
+}
+
+fn time_counters(runner: &GameRunner, id: ObjectId) -> u32 {
+    runner.state().objects[&id]
+        .counters
+        .get(&CounterType::Time)
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Reach-guard for the two negatives below: The War Doctor really does see a
+/// card put into exile, so its silence there is evidence, not a dead trigger.
+#[test]
+fn the_war_doctor_sees_a_real_exile() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let doctor = add_war_doctor(&mut scenario);
+    let exiler = {
+        let mut card = scenario.add_creature(P0, "Exiler", 1, 1);
+        card.from_oracle_text("{T}: Exile the top card of your library.");
+        card.id()
+    };
+    scenario.add_card_to_library_top(P0, "Lightning Bolt");
+    let mut runner = scenario.build();
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: exiler,
+            ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        })
+        .expect("the exile ability is activatable");
+    runner.advance_until_stack_empty();
+
+    assert_eq!(
+        time_counters(&runner, doctor),
+        1,
+        "a card put into exile triggers The War Doctor"
+    );
+}
+
+/// CR 707.13 + CR 704.5e: declining the cast leaves no trace — no "put into
+/// exile" trigger, and the copy has ceased to exist by the time a player gets
+/// priority, so nothing that counts cards in exile can see it.
+#[test]
+fn a_declined_copy_is_never_put_into_exile_and_is_gone_at_once() {
+    let (mut runner, garth, doctor) = garth_scenario(0, |s| Some(add_war_doctor(s)));
+    let doctor = doctor.expect("The War Doctor is on the battlefield");
+    let exile_before = runner.state().exile.len();
+    activate_to_the_prompt(&mut runner, garth);
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "Grizzly Bears".to_string(),
+        })
+        .expect("a printed name is a legal answer");
+    // Reach-guard: the copy exists before the decision.
+    let copy = runner
+        .state()
+        .last_created_token_ids
+        .first()
+        .copied()
+        .expect("the copy was created");
+    assert!(runner.state().objects.contains_key(&copy));
+
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: false })
+        .expect("declining the optional cast is legal");
+
+    // Immediately: the resolution ended, the first state-based check ran.
+    assert!(
+        !runner.state().objects.contains_key(&copy),
+        "CR 704.5e: the uncast copy ceased to exist"
+    );
+    assert_eq!(
+        runner.state().exile.len(),
+        exile_before,
+        "nothing that counts cards in exile can see the copy"
+    );
+
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        time_counters(&runner, doctor),
+        0,
+        "creating the copy is not putting a card into exile"
+    );
+}
+
+/// The cast branch: the copy goes from its staging straight to the stack, and
+/// still no "put into exile" trigger fires.
+#[test]
+fn a_cast_copy_is_never_put_into_exile() {
+    let (mut runner, garth, doctor) = garth_scenario(3, |s| Some(add_war_doctor(s)));
+    let doctor = doctor.expect("The War Doctor is on the battlefield");
+    activate_to_the_prompt(&mut runner, garth);
+    runner
+        .act(GameAction::ChooseOption {
+            choice: "Grizzly Bears".to_string(),
+        })
+        .expect("a printed name is a legal answer");
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .expect("accepting the cast is legal");
+    runner
+        .act(GameAction::GraveyardPaidCastChoice {
+            choice: CastChoice::Cast,
+        })
+        .expect("taking the offered cast is legal");
+    for _ in 0..8 {
+        if !matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }) {
+            break;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("pay {1}{G} from the pool");
+    }
+    // Reach-guard: the copy really was cast.
+    assert!(
+        runner.stack_names().contains(&"Grizzly Bears".to_string()),
+        "the copy is on the stack: {:?}",
+        runner.stack_names()
+    );
+
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        time_counters(&runner, doctor),
+        0,
+        "creating and casting the copy puts no card into exile"
     );
 }
