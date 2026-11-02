@@ -16609,30 +16609,25 @@ fn split_reveal_filter_disjuncts(filter_text: &str) -> Option<Vec<&str>> {
 }
 
 /// CR 608.2c / CR 701.20a: Check whether a disjunct in a reveal-until filter list
-/// represents a separate counted stopping condition (e.g. Thought Dissector: "until an
-/// artifact card or X cards are revealed", where the second disjunct is "X" / "X cards")
-/// rather than a card filter (e.g. "until a creature or a land card is revealed",
-/// where "a land" is an article-prefixed filter for a land card).
+/// opens with its own count threshold (Thought Dissector: "until an artifact card or
+/// X cards are revealed" — "X cards"; "until a land card or two creature cards are
+/// revealed" — "two creature"). A single `RevealUntil` carries one count, so a
+/// disjunct that leads with a quantity cannot be folded into the card filter.
+/// Article-prefixed disjuncts ("a land", "an artifact") are plain card filters.
 fn is_reveal_until_count_disjunct(disjunct: &str) -> bool {
-    let trimmed = disjunct.trim();
-    let base = trimmed
-        .strip_suffix(" cards")
-        .or_else(|| trimmed.strip_suffix(" card"))
-        .unwrap_or(trimmed)
-        .trim();
-    if base.is_empty() || base == "a" || base == "an" {
-        return false;
-    }
-    // A genuine counted condition consists entirely of a quantity expression
-    // (a number literal, variable "x", or demonstrative "that many") with no
-    // remaining card filter noun. Article words ("a", "an") prefix card
-    // filters ("a land") and never appear as standalone counts.
-    all_consuming(nom_primitives::parse_number_or_x)
-        .parse(base)
-        .is_ok()
-        || all_consuming(nom_quantity::parse_that_much_or_many)
-            .parse(base)
-            .is_ok()
+    let count_token = alt((
+        value((), nom_primitives::parse_number_or_x),
+        value((), nom_quantity::parse_that_much_or_many),
+    ));
+    preceded(
+        not(nom_primitives::parse_article),
+        terminated(
+            count_token,
+            peek(alt((value((), eof), value((), tag(" "))))),
+        ),
+    )
+    .parse(disjunct.trim())
+    .is_ok()
 }
 
 /// Build a [`TargetFilter`] from a single disjunct fragment of a reveal-until
