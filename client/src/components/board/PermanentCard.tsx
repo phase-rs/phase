@@ -1,12 +1,18 @@
 import { motion, useReducedMotion } from "framer-motion";
 import type React from "react";
-import { memo, useCallback, useId, useMemo, useRef } from "react";
+import { memo, useCallback, useEffect, useId, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
 
 import type { GameObject, Keyword, ObjectId } from "../../adapter/types.ts";
 import { cardImageLookup, tokenFiltersForObject } from "../../services/cardImageLookup.ts";
 import { useCanActForWaitingState, usePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
+import {
+  pointerLeftTouchable,
+  pointerOverTouchable,
+  retainCapturedTouchTracking,
+  UN_TOUCH_ATTRIBUTE,
+} from "../../game/unTouch.ts";
 import { ArtCropCard } from "../card/ArtCropCard.tsx";
 import { CardImage } from "../card/CardImage.tsx";
 import { PTBox } from "./PTBox.tsx";
@@ -451,7 +457,10 @@ export const PermanentCard = memo(function PermanentCard({
   // Un-card touch (Vile Bile): the engine lists the objects whose touch
   // abilities function (`un_actions.touchable`). An opted-in player's pointer
   // entering one is a touch — each entry one instance — and any pointer type
-  // counts, since a finger on the screen touches the card too.
+  // counts, since a finger on the screen touches the card too. A pointer
+  // captured elsewhere (a long press that began on another card, or a finger)
+  // gets no enter event here; the shared tracker in game/unTouch.ts hit-tests
+  // those moves against `UN_TOUCH_ATTRIBUTE` and counts each entry once.
   const spectator = useSpectatorMode();
   const reportsTouch = useGameStore((s) => {
     const unActions = s.gameState?.un_actions;
@@ -459,13 +468,9 @@ export const PermanentCard = memo(function PermanentCard({
       && (unActions?.enabled_players?.includes(playerId) ?? false)
       && (unActions?.touchable?.includes(objectId) ?? false);
   });
+  useEffect(() => (reportsTouch ? retainCapturedTouchTracking() : undefined), [reportsTouch]);
   const handlePointerEnter = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
-    if (reportsTouch) {
-      void dispatchAction({
-        type: "UnAction",
-        data: { action: { type: "TouchObject", data: { object_id: objectId } } },
-      });
-    }
+    if (reportsTouch) pointerOverTouchable(event.pointerId, objectId);
     if (isMobile || event.pointerType === "touch") return;
     hoverObject(objectId); inspectObject(objectId);
   }, [hoverObject, inspectObject, isMobile, objectId, reportsTouch]);
@@ -477,11 +482,12 @@ export const PermanentCard = memo(function PermanentCard({
   const cancelLongPress = longPressHandlers.onPointerLeave;
   const handlePointerLeave = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
     cancelLongPress(event);
+    pointerLeftTouchable(event.pointerId, objectId);
     if (isMobile || event.pointerType === "touch") return;
     const nextObjectId = objectIdFromRelatedTarget(event.relatedTarget);
     hoverObject(nextObjectId);
     inspectObject(nextObjectId);
-  }, [cancelLongPress, hoverObject, inspectObject, isMobile]);
+  }, [cancelLongPress, hoverObject, inspectObject, isMobile, objectId]);
 
   const controllerIdentity = useGameStore(
     (s) => obj && s.gameState?.players?.find((p) => p.id === obj.controller)?.commander_color_identity,
@@ -829,6 +835,7 @@ export const PermanentCard = memo(function PermanentCard({
       ref={cardRef}
       data-object-id={objectId}
       data-permanent-card={objectId}
+      {...(reportsTouch ? { [UN_TOUCH_ATTRIBUTE]: objectId } : {})}
       data-grouped-ids={coveredIds && coveredIds.length > 1 ? coveredIds.join(" ") : undefined}
       data-card-hover
       layoutId={`permanent-${objectId}`}
