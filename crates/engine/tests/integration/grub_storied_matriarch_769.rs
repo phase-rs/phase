@@ -52,32 +52,32 @@ const TORCHMASTER_ORACLE: &str = "At the beginning of combat on your turn, you m
 fn board<T>(
     phase: Phase,
     stage: impl FnOnce(&mut GameScenario, &'static CardDatabase) -> T,
-) -> Option<(GameRunner, T)> {
-    let db = load_db()?;
+) -> (GameRunner, T) {
+    let db = load_db().expect("card db");
     let mut scenario = GameScenario::new();
     scenario.at_phase(phase);
     scenario.with_library_top(P0, &["Top One", "Top Two", "Top Three"]);
     scenario.with_library_top(P1, &["Top One", "Top Two", "Top Three"]);
     let staged = stage(&mut scenario, db);
-    Some((scenario.build(), staged))
+    (scenario.build(), staged)
 }
 
 /// A board with the real card on its front face, able to attack this turn.
 fn grub_board<T>(
     phase: Phase,
     stage: impl FnOnce(&mut GameScenario, &'static CardDatabase) -> T,
-) -> Option<(GameRunner, ObjectId, T)> {
+) -> (GameRunner, ObjectId, T) {
     let (mut runner, (grub, staged)) = board(phase, |scenario, db| {
         let grub = scenario.add_real_card(P0, MATRIARCH, Zone::Battlefield, db);
         (grub, stage(scenario, db))
-    })?;
+    });
     runner
         .state_mut()
         .objects
         .get_mut(&grub)
         .expect("Grub exists")
         .summoning_sick = false;
-    Some((runner, grub, staged))
+    (runner, grub, staged)
 }
 
 /// Setup only: puts a staged Grub on her back face without paying for it.
@@ -241,14 +241,12 @@ fn auntie_from_oracle_text_creates_the_copy() {
 /// token follows the choice and copies neither the counter nor the wrong body.
 #[test]
 fn auntie_copies_the_blighted_creature_as_a_tapped_attacking_token() {
-    let Some((mut runner, grub, (bear, elf))) = grub_board(Phase::BeginCombat, |scenario, _| {
+    let (mut runner, grub, (bear, elf)) = grub_board(Phase::BeginCombat, |scenario, _| {
         (
             scenario.add_creature(P0, "Bear", 2, 2).id(),
             scenario.add_creature(P0, "Elf", 3, 3).id(),
         )
-    }) else {
-        return;
-    };
+    });
     flip(&mut runner, grub);
 
     attack_with(&mut runner, &[grub]);
@@ -286,11 +284,9 @@ fn auntie_copies_the_blighted_creature_as_a_tapped_attacking_token() {
 /// isn't.
 #[test]
 fn auntie_token_is_sacrificed_at_the_end_step() {
-    let Some((mut runner, grub, bear)) = grub_board(Phase::BeginCombat, |scenario, _| {
+    let (mut runner, grub, bear) = grub_board(Phase::BeginCombat, |scenario, _| {
         scenario.add_creature(P0, "Bear", 2, 2).id()
-    }) else {
-        return;
-    };
+    });
     flip(&mut runner, grub);
 
     attack_with(&mut runner, &[grub]);
@@ -317,11 +313,9 @@ fn auntie_token_is_sacrificed_at_the_end_step() {
 /// so a creature the counter kills still provides the copy.
 #[test]
 fn auntie_copies_a_creature_the_blight_kills() {
-    let Some((mut runner, grub, elf)) = grub_board(Phase::BeginCombat, |scenario, _| {
+    let (mut runner, grub, elf) = grub_board(Phase::BeginCombat, |scenario, _| {
         scenario.add_creature(P0, "Elf", 1, 1).id()
-    }) else {
-        return;
-    };
+    });
     flip(&mut runner, grub);
 
     attack_with(&mut runner, &[grub]);
@@ -341,11 +335,9 @@ fn auntie_copies_a_creature_the_blight_kills() {
 
 #[test]
 fn declining_the_blight_makes_no_token() {
-    let Some((mut runner, grub, bear)) = grub_board(Phase::BeginCombat, |scenario, _| {
+    let (mut runner, grub, bear) = grub_board(Phase::BeginCombat, |scenario, _| {
         scenario.add_creature(P0, "Bear", 2, 2).id()
-    }) else {
-        return;
-    };
+    });
     flip(&mut runner, grub);
 
     attack_with(&mut runner, &[grub]);
@@ -365,11 +357,9 @@ fn declining_the_blight_makes_no_token() {
 /// shows, and the token outlives her.
 #[test]
 fn auntie_blighting_herself_leaves_a_token_auntie() {
-    let Some((mut runner, grub, bear)) = grub_board(Phase::BeginCombat, |scenario, _| {
+    let (mut runner, grub, bear) = grub_board(Phase::BeginCombat, |scenario, _| {
         scenario.add_creature(P0, "Bear", 2, 2).id()
-    }) else {
-        return;
-    };
+    });
     flip(&mut runner, grub);
 
     attack_with(&mut runner, &[grub]);
@@ -394,13 +384,11 @@ fn auntie_blighting_herself_leaves_a_token_auntie() {
 /// ordering pause, and the rider still has its referent.
 #[test]
 fn auntie_with_doublers_makes_two_tokens_of_the_creature_with_four_counters() {
-    let Some((mut runner, grub, big)) = grub_board(Phase::BeginCombat, |scenario, db| {
+    let (mut runner, grub, big) = grub_board(Phase::BeginCombat, |scenario, db| {
         scenario.add_real_card(P0, "Doubling Season", Zone::Battlefield, db);
         scenario.add_real_card(P0, "Vorinclex, Monstrous Raider", Zone::Battlefield, db);
         scenario.add_creature(P0, "Big", 6, 6).id()
-    }) else {
-        return;
-    };
+    });
     flip(&mut runner, grub);
 
     attack_with(&mut runner, &[grub]);
@@ -422,14 +410,14 @@ fn auntie_with_doublers_makes_two_tokens_of_the_creature_with_four_counters() {
 /// Blights the Bear with Vizier of Remedies and Doubling Season out, whose counter
 /// clauses don't commute, and applies `first` at the CR 616.1 pause. The blight
 /// choice is answered before that pause, so the rider resumes on its binding.
-fn blight_bear_applying_first(first: &str) -> Option<(GameRunner, ObjectId)> {
+fn blight_bear_applying_first(first: &str) -> (GameRunner, ObjectId) {
     let (mut runner, grub, (vizier, bear)) = grub_board(Phase::BeginCombat, |scenario, db| {
         scenario.add_real_card(P0, "Doubling Season", Zone::Battlefield, db);
         (
             scenario.add_real_card(P0, "Vizier of Remedies", Zone::Battlefield, db),
             scenario.add_creature(P0, "Bear", 2, 2).id(),
         )
-    })?;
+    });
     flip(&mut runner, grub);
 
     attack_with(&mut runner, &[grub]);
@@ -460,7 +448,7 @@ fn blight_bear_applying_first(first: &str) -> Option<(GameRunner, ObjectId)> {
     runner
         .act(GameAction::ChooseReplacement { index })
         .expect("choosing a replacement must succeed");
-    Some((runner, bear))
+    (runner, bear)
 }
 
 /// CR 701.68c: the rider copies the chosen creature whatever the counters came to.
@@ -485,9 +473,7 @@ fn assert_two_attacking_bear_tokens(runner: &GameRunner) {
 /// not what happened to the counter, so the tokens still come in.
 #[test]
 fn auntie_ordering_vizier_first_places_no_counter_and_still_makes_tokens() {
-    let Some((runner, bear)) = blight_bear_applying_first("Vizier of Remedies") else {
-        return;
-    };
+    let (runner, bear) = blight_bear_applying_first("Vizier of Remedies");
 
     assert_two_attacking_bear_tokens(&runner);
     assert_eq!(minus_counters(&runner, bear), 0, "1 minus 1, doubled");
@@ -496,9 +482,7 @@ fn auntie_ordering_vizier_first_places_no_counter_and_still_makes_tokens() {
 /// CR 616.1: Doubling Season first makes 1 into 2, and Vizier takes one away.
 #[test]
 fn auntie_ordering_doubling_season_first_places_one_counter_and_makes_tokens() {
-    let Some((runner, bear)) = blight_bear_applying_first("Doubling Season") else {
-        return;
-    };
+    let (runner, bear) = blight_bear_applying_first("Doubling Season");
 
     assert_two_attacking_bear_tokens(&runner);
     assert_eq!(minus_counters(&runner, bear), 1, "1 doubled, minus 1");
@@ -509,12 +493,10 @@ fn auntie_ordering_doubling_season_first_places_one_counter_and_makes_tokens() {
 /// never absent on an accepted blight.
 #[test]
 fn auntie_with_no_creature_left_cannot_blight() {
-    let Some((mut runner, grub, bolt)) = grub_board(Phase::BeginCombat, |scenario, db| {
+    let (mut runner, grub, bolt) = grub_board(Phase::BeginCombat, |scenario, db| {
         scenario.add_basic_land(P0, ManaColor::Red);
         scenario.add_real_card(P0, "Lightning Bolt", Zone::Hand, db)
-    }) else {
-        return;
-    };
+    });
     flip(&mut runner, grub);
 
     attack_with(&mut runner, &[grub]);
@@ -546,12 +528,10 @@ fn auntie_with_no_creature_left_cannot_blight() {
 /// creatures, enchantments, or lands." so Grub can't blight at all.
 #[test]
 fn auntie_cannot_blight_under_solemnity() {
-    let Some((mut runner, grub, bear)) = grub_board(Phase::BeginCombat, |scenario, db| {
+    let (mut runner, grub, bear) = grub_board(Phase::BeginCombat, |scenario, db| {
         scenario.add_real_card(P0, SOLEMNITY, Zone::Battlefield, db);
         scenario.add_creature(P0, "Bear", 2, 2).id()
-    }) else {
-        return;
-    };
+    });
     flip(&mut runner, grub);
 
     attack_with(&mut runner, &[grub]);
@@ -572,18 +552,14 @@ fn auntie_cannot_blight_under_solemnity() {
 /// it is not a creature the player can put the counter on.
 #[test]
 fn blight_does_not_offer_a_creature_that_cannot_take_the_counter() {
-    let Some((mut runner, grub, (bear, keepers))) =
-        grub_board(Phase::BeginCombat, |scenario, _| {
-            (
-                scenario.add_creature(P0, "Bear", 2, 2).id(),
-                scenario
-                    .add_creature_from_oracle(P0, "Melira's Keepers", 4, 4, KEEPERS_ORACLE)
-                    .id(),
-            )
-        })
-    else {
-        return;
-    };
+    let (mut runner, grub, (bear, keepers)) = grub_board(Phase::BeginCombat, |scenario, _| {
+        (
+            scenario.add_creature(P0, "Bear", 2, 2).id(),
+            scenario
+                .add_creature_from_oracle(P0, "Melira's Keepers", 4, 4, KEEPERS_ORACLE)
+                .id(),
+        )
+    });
     flip(&mut runner, grub);
 
     attack_with(&mut runner, &[grub]);
@@ -602,12 +578,10 @@ fn blight_does_not_offer_a_creature_that_cannot_take_the_counter() {
 /// lost with no prompt.
 #[test]
 fn gutsplitter_gang_that_cannot_blight_loses_three_life() {
-    let Some((mut runner, ())) = board(Phase::Upkeep, |scenario, db| {
+    let (mut runner, ()) = board(Phase::Upkeep, |scenario, db| {
         scenario.add_creature_from_oracle(P0, "Gutsplitter Gang", 6, 6, GANG_ORACLE);
         scenario.add_real_card(P0, SOLEMNITY, Zone::Battlefield, db);
-    }) else {
-        return;
-    };
+    });
 
     runner.advance_to_phase(Phase::PreCombatMain);
     assert_eq!(runner.state().phase, Phase::PreCombatMain);
@@ -638,18 +612,14 @@ fn scuzzback_scrounger_that_cannot_blight_makes_no_treasure() {
         }
     };
 
-    let Some((mut able, scrounger)) = board(Phase::Upkeep, stage(false)) else {
-        return;
-    };
+    let (mut able, scrounger) = board(Phase::Upkeep, stage(false));
     able.advance_to_phase(Phase::PreCombatMain);
     both_pass(&mut able);
     blight(&mut able, &[scrounger], scrounger);
     assert_settled(&able);
     assert_eq!(tokens(&able).len(), 1, "blighting makes the Treasure");
 
-    let Some((mut unable, _)) = board(Phase::Upkeep, stage(true)) else {
-        return;
-    };
+    let (mut unable, _) = board(Phase::Upkeep, stage(true));
     unable.advance_to_phase(Phase::PreCombatMain);
     assert_eq!(
         unable.state().stack.len(),
@@ -681,9 +651,7 @@ fn warren_torchmaster_that_cannot_blight_grants_no_haste() {
         }
     };
 
-    let Some((mut able, (torchmaster, bear))) = board(Phase::PreCombatMain, stage(false)) else {
-        return;
-    };
+    let (mut able, (torchmaster, bear)) = board(Phase::PreCombatMain, stage(false));
     able.advance_to_phase(Phase::BeginCombat);
     both_pass(&mut able);
     blight(&mut able, &[torchmaster, bear], torchmaster);
@@ -696,9 +664,7 @@ fn warren_torchmaster_that_cannot_blight_grants_no_haste() {
         able.state().waiting_for
     );
 
-    let Some((mut unable, (torchmaster, bear))) = board(Phase::PreCombatMain, stage(true)) else {
-        return;
-    };
+    let (mut unable, (torchmaster, bear)) = board(Phase::PreCombatMain, stage(true));
     unable.advance_to_phase(Phase::BeginCombat);
     assert_eq!(
         unable.state().stack.len(),
@@ -718,16 +684,14 @@ fn warren_torchmaster_that_cannot_blight_grants_no_haste() {
 /// one bound by a cost.
 #[test]
 fn nexus_of_becoming_copies_the_card_exiled_this_way() {
-    let Some((mut runner, (goblin, bears))) = board(Phase::PreCombatMain, |scenario, db| {
+    let (mut runner, (goblin, bears)) = board(Phase::PreCombatMain, |scenario, db| {
         scenario.add_artifact_from_oracle(P0, "Nexus of Becoming", NEXUS_ORACLE);
         scenario.add_land_to_library_top(P0, "Forest");
         (
             scenario.add_real_card(P0, GOBLIN, Zone::Hand, db),
             scenario.add_real_card(P0, "Grizzly Bears", Zone::Hand, db),
         )
-    }) else {
-        return;
-    };
+    });
 
     runner.advance_to_phase(Phase::BeginCombat);
     both_pass(&mut runner);
@@ -764,13 +728,11 @@ fn nexus_of_becoming_copies_the_card_exiled_this_way() {
 /// referent still reaches the copy.
 #[test]
 fn nexus_of_becoming_copies_the_only_eligible_card() {
-    let Some((mut runner, goblin)) = board(Phase::PreCombatMain, |scenario, db| {
+    let (mut runner, goblin) = board(Phase::PreCombatMain, |scenario, db| {
         scenario.add_artifact_from_oracle(P0, "Nexus of Becoming", NEXUS_ORACLE);
         scenario.add_land_to_library_top(P0, "Forest");
         scenario.add_real_card(P0, GOBLIN, Zone::Hand, db)
-    }) else {
-        return;
-    };
+    });
 
     runner.advance_to_phase(Phase::BeginCombat);
     both_pass(&mut runner);
@@ -786,13 +748,11 @@ fn nexus_of_becoming_copies_the_only_eligible_card() {
 /// "If you do" stays closed when the Nexus is declined with a legal card in hand.
 #[test]
 fn nexus_of_becoming_declined_makes_no_token() {
-    let Some((mut runner, goblin)) = board(Phase::PreCombatMain, |scenario, db| {
+    let (mut runner, goblin) = board(Phase::PreCombatMain, |scenario, db| {
         scenario.add_artifact_from_oracle(P0, "Nexus of Becoming", NEXUS_ORACLE);
         scenario.add_land_to_library_top(P0, "Forest");
         scenario.add_real_card(P0, GOBLIN, Zone::Hand, db)
-    }) else {
-        return;
-    };
+    });
 
     runner.advance_to_phase(Phase::BeginCombat);
     both_pass(&mut runner);
@@ -807,13 +767,11 @@ fn nexus_of_becoming_declined_makes_no_token() {
 /// so "If you do" stays closed and the accept isn't refused.
 #[test]
 fn nexus_accept_with_no_eligible_card_makes_no_token() {
-    let Some((mut runner, ())) = board(Phase::PreCombatMain, |scenario, _| {
+    let (mut runner, ()) = board(Phase::PreCombatMain, |scenario, _| {
         scenario.add_artifact_from_oracle(P0, "Nexus of Becoming", NEXUS_ORACLE);
         scenario.add_land_to_library_top(P0, "Forest");
         scenario.add_land_to_hand(P0, "Plains");
-    }) else {
-        return;
-    };
+    });
 
     runner.advance_to_phase(Phase::BeginCombat);
     both_pass(&mut runner);
@@ -827,7 +785,7 @@ fn nexus_accept_with_no_eligible_card_makes_no_token() {
 /// of "enters or transforms into".
 #[test]
 fn matriarch_returns_a_goblin_when_cast() {
-    let Some((mut runner, (grub, goblin))) = board(Phase::PreCombatMain, |scenario, db| {
+    let (mut runner, (grub, goblin)) = board(Phase::PreCombatMain, |scenario, db| {
         for _ in 0..3 {
             scenario.add_basic_land(P0, ManaColor::Black);
         }
@@ -835,9 +793,7 @@ fn matriarch_returns_a_goblin_when_cast() {
             scenario.add_real_card(P0, MATRIARCH, Zone::Hand, db),
             scenario.add_real_card(P0, GOBLIN, Zone::Graveyard, db),
         )
-    }) else {
-        return;
-    };
+    });
 
     runner.cast(grub).commit();
     both_pass(&mut runner);
@@ -853,12 +809,10 @@ fn matriarch_returns_a_goblin_when_cast() {
 /// Auntie transforms her into the Matriarch through her own first-main trigger.
 #[test]
 fn matriarch_returns_a_goblin_when_auntie_transforms_into_her() {
-    let Some((mut runner, grub, goblin)) = grub_board(Phase::Upkeep, |scenario, db| {
+    let (mut runner, grub, goblin) = grub_board(Phase::Upkeep, |scenario, db| {
         scenario.add_basic_land(P0, ManaColor::Black);
         scenario.add_real_card(P0, GOBLIN, Zone::Graveyard, db)
-    }) else {
-        return;
-    };
+    });
     flip(&mut runner, grub);
 
     runner.advance_to_phase(Phase::PreCombatMain);
@@ -881,12 +835,10 @@ fn matriarch_returns_a_goblin_when_auntie_transforms_into_her() {
 /// Auntie leaves the graveyard alone.
 #[test]
 fn transforming_into_auntie_does_not_return_a_goblin() {
-    let Some((mut runner, grub, goblin)) = grub_board(Phase::Upkeep, |scenario, db| {
+    let (mut runner, grub, goblin) = grub_board(Phase::Upkeep, |scenario, db| {
         scenario.add_basic_land(P0, ManaColor::Red);
         scenario.add_real_card(P0, GOBLIN, Zone::Graveyard, db)
-    }) else {
-        return;
-    };
+    });
 
     runner.advance_to_phase(Phase::PreCombatMain);
     both_pass(&mut runner);

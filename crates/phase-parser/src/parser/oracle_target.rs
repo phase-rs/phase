@@ -9126,9 +9126,14 @@ fn parse_cost_paid_object_reference<'a>(
             ),
             |i| parse_exile_cost_paid_object(i, ctx),
             // CR 701.68c: "the blighted creature" is the object chosen when blighting.
+            // A possessive ("the blighted creature's controller") names something else.
             value(
                 (),
-                (tag("the "), |i| parse_word_bounded(i, "blighted creature")),
+                (
+                    tag("the "),
+                    |i| parse_word_bounded(i, "blighted creature"),
+                    not(tag("'")),
+                ),
             ),
         )),
     )
@@ -16496,6 +16501,13 @@ mod tests {
             plural,
             TargetFilter::CostPaidObject,
             "the referent is one object, so the plural must not bind it"
+        );
+
+        let (possessive, _) = parse_target("the blighted creature's controller");
+        assert_ne!(
+            possessive,
+            TargetFilter::CostPaidObject,
+            "a possessive names another object, so it must reach the possessive arms"
         );
     }
 
