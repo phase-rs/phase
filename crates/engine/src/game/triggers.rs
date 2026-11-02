@@ -658,6 +658,7 @@ enum TriggerCollectionOperation {
 struct TriggerCollectionSession {
     overlay: TriggerCollectionOverlay,
     operation_journal: Option<Vec<TriggerCollectionOperation>>,
+    skip_batched: bool,
     /// How many matched triggers this session admitted (`record_match`),
     /// counted before any context is pruned as an auto-inert no-op.
     admitted_matches: usize,
@@ -672,6 +673,7 @@ impl TriggerCollectionSession {
         Self {
             overlay,
             operation_journal: None,
+            skip_batched: false,
             admitted_matches: 0,
             bulk_member_sources: None,
         }
@@ -685,6 +687,7 @@ impl TriggerCollectionSession {
         Self {
             overlay,
             operation_journal: Some(operation_journal),
+            skip_batched: false,
             admitted_matches: 0,
             bulk_member_sources: None,
         }
@@ -717,6 +720,11 @@ impl TriggerCollectionSession {
         matched: &MatchedTrigger,
         event: &GameEvent,
     ) -> bool {
+        // CR 603.2c: a parked partial entry batch must not spend firing limits
+        // or record replay witnesses for triggers left to the settled scan.
+        if self.skip_batched && matched.batched {
+            return false;
+        }
         if !matched_trigger_constraint_allows_admission(state, matched, event) {
             return false;
         }
@@ -9443,7 +9451,7 @@ pub(crate) fn park_observer_triggers_if_paused(
     events: &mut Vec<GameEvent>,
     slice_start: usize,
 ) {
-    park_observer_triggers_if_paused_matching(state, events, slice_start, |_| true);
+    park_observer_triggers_if_paused_matching(state, events, slice_start, false, |_| true);
 }
 
 /// CR 603.2 + CR 603.6a + CR 616.1f: Preserve observers of completed battlefield
@@ -9451,12 +9459,16 @@ pub(crate) fn park_observer_triggers_if_paused(
 /// The replacement handler's inner discard collectors already own `Discarded`
 /// events; queued-context witnesses deduplicate only zone changes. Restricting
 /// this outer pass to entries prevents collecting those discard observers twice.
+/// CR 603.2c: Leave "one or more" triggers to the settled scan rather than
+/// splitting one batch across successive replacement answers. The non-final
+/// entrant may still be missed by that scan; this preserves the pre-existing
+/// limitation instead of introducing an additional firing.
 pub(crate) fn park_entry_observer_triggers_if_paused(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     slice_start: usize,
 ) {
-    park_observer_triggers_if_paused_matching(state, events, slice_start, |event| {
+    park_observer_triggers_if_paused_matching(state, events, slice_start, true, |event| {
         matches!(
             event,
             GameEvent::ZoneChanged {
@@ -9471,6 +9483,7 @@ fn park_observer_triggers_if_paused_matching(
     state: &mut GameState,
     events: &mut Vec<GameEvent>,
     slice_start: usize,
+    skip_batched: bool,
     keep: impl Fn(&GameEvent) -> bool,
 ) {
     if triggered_mana_sidecar_owns_local_collection(state) {
@@ -9499,7 +9512,25 @@ fn park_observer_triggers_if_paused_matching(
     candidates.retain(keep);
     let trigger_events = paused_observer_trigger_events(state, candidates);
     if !trigger_events.is_empty() {
-        collect_triggers_into_deferred(state, &trigger_events);
+        let mut session = TriggerCollectionSession {
+            skip_batched,
+            ..TriggerCollectionSession::new(TriggerCollectionOverlay::default())
+        };
+        let mut contexts = collect_pending_triggers_with_collection(
+            state,
+            &trigger_events,
+            LogicalZoneTriggerCollection::Ordinary,
+            &mut session,
+        );
+        if skip_batched {
+            contexts.retain(|ctx| {
+                !ctx.pending
+                    .ability
+                    .triggered_definition()
+                    .is_some_and(fires_once_per_batch)
+            });
+        }
+        state.deferred_triggers.extend(contexts);
     }
 }
 
