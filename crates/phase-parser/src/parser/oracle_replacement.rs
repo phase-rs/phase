@@ -34395,6 +34395,9 @@ mod snapshot_tests {
 
     #[test]
     fn oneshot_draw_replacement_rejects_targets_outside_head_slot() {
+        // Synthetic texts: no printed card has either shape. The nearest printed
+        // card is Words of War ("~ deals 2 damage to any target instead"); the
+        // riders only exercise the head-slot guard.
         // Reach-guard: the same shape with an untargeted rider parses.
         assert!(parse_oneshot_draw_replacement(
             "the next time you would draw a card this turn, ~ deals 2 damage to any target and you gain 2 life instead",
