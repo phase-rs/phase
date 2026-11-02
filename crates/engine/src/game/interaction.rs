@@ -928,7 +928,17 @@ pub(crate) fn semantic_owner_for_actor(state: &GameState, actor: PlayerId) -> Op
 /// Not [`GameAction::is_submitter_scoped`], whose near-identical list answers a
 /// different question — whether an action may skip the seat check. The two
 /// lists may diverge.
-pub(crate) fn action_preserves_interaction(action: &GameAction) -> bool {
+pub(crate) fn action_preserves_interaction(state: &GameState, action: &GameAction) -> bool {
+    // A touch outside a priority boundary only parks its triggers; the decision
+    // being made stays exactly as it was.
+    if matches!(
+        action,
+        GameAction::UnAction {
+            action: crate::types::un_actions::UnAction::TouchObject { .. }
+        }
+    ) {
+        return !matches!(state.waiting_for, WaitingFor::Priority { .. });
+    }
     matches!(
         action,
         GameAction::SetPhaseStops { .. }

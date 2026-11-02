@@ -34663,6 +34663,7 @@ impl GameState {
                 | GameEvent::UnTellPerformed { .. }
                 | GameEvent::PhraseSaid { .. }
                 | GameEvent::GotchaSaid { .. }
+                | GameEvent::ObjectTouched { .. }
                 | GameEvent::CounterRemoved { .. }
                 | GameEvent::TokenCreated { .. }
                 | GameEvent::ObjectConjured { .. }

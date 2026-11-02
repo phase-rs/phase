@@ -15,6 +15,7 @@ import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useFlightVeil } from "../../hooks/useFlightVeil.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
+import { useSpectatorMode } from "../../hooks/useSpectatorMode.ts";
 import { isUnbounded, pillsOf, useCounterDisplay } from "../../hooks/useCounterDisplay.ts";
 import { useAnimationStore } from "../../stores/animationStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
@@ -446,10 +447,28 @@ export const PermanentCard = memo(function PermanentCard({
   // deliver honest pointer events: a remote-desktop session advertises no
   // hover-capable input while sending `pointerType: "mouse"`. See useCardHover
   // for why this is a denylist on "touch" rather than a "mouse" allowlist.
+  //
+  // Un-card touch (Vile Bile): the engine lists the objects whose touch
+  // abilities function (`un_actions.touchable`). An opted-in player's pointer
+  // entering one is a touch — each entry one instance — and any pointer type
+  // counts, since a finger on the screen touches the card too.
+  const spectator = useSpectatorMode();
+  const reportsTouch = useGameStore((s) => {
+    const unActions = s.gameState?.un_actions;
+    return !spectator
+      && (unActions?.enabled_players?.includes(playerId) ?? false)
+      && (unActions?.touchable?.includes(objectId) ?? false);
+  });
   const handlePointerEnter = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (reportsTouch) {
+      void dispatchAction({
+        type: "UnAction",
+        data: { action: { type: "TouchObject", data: { object_id: objectId } } },
+      });
+    }
     if (isMobile || event.pointerType === "touch") return;
     hoverObject(objectId); inspectObject(objectId);
-  }, [hoverObject, inspectObject, isMobile, objectId]);
+  }, [hoverObject, inspectObject, isMobile, objectId, reportsTouch]);
 
   // Composes with useLongPress's own `onPointerLeave` instead of replacing it —
   // this handler wins the key collision in the spread below, so dropping the

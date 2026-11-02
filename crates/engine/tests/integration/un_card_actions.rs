@@ -9,7 +9,9 @@
 use engine::game::engine::{apply, EngineError};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::parse_oracle_text;
-use engine::types::ability::{AbilityCost, Effect, StaticDefinition, TargetRef, TriggerDefinition};
+use engine::types::ability::{
+    AbilityCost, Effect, StaticDefinition, TargetFilter, TargetRef, TriggerDefinition,
+};
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
 use engine::types::game_state::WaitingFor;
@@ -1743,4 +1745,213 @@ fn infernal_spawn_of_evil_cannot_be_activated_without_the_un_actions_opt_in() {
     );
     assert_eq!(runner.life(P1), 20, "no damage was dealt");
     assert_settled(&runner, "Infernal Spawn opted out");
+}
+
+// --- Touch (Vile Bile) -------------------------------------------------------
+
+/// Vile Bile (Unhinged), verbatim Oracle text. Printed 2½/2½; the engine has no
+/// half-point power or toughness, so the fixture body is 2/2 — the touch
+/// ability is what these tests exercise.
+const VILE_BILE: &str =
+    "Whenever a player's skin or fingernail touches this creature, that player loses 2 life.";
+
+fn touch(runner: &mut GameRunner, actor: engine::types::player::PlayerId, object_id: ObjectId) {
+    un_action(runner, actor, UnAction::TouchObject { object_id });
+}
+
+/// P0 controls Vile Bile and a vanilla Grizzly Bears; both players opted in; the
+/// table is at priority in P0's main phase.
+fn vile_bile_scenario() -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bile = scenario
+        .add_creature_from_oracle(P0, "Vile Bile", 2, 2, VILE_BILE)
+        .id();
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let mut runner = scenario.build();
+    un_action(&mut runner, P0, UnAction::SetEnabled { enabled: true });
+    un_action(&mut runner, P1, UnAction::SetEnabled { enabled: true });
+    (runner, bile, bears)
+}
+
+#[test]
+fn vile_bile_parses_to_a_touch_trigger_on_itself() {
+    let parsed = parse("Vile Bile", VILE_BILE, &["Creature"]);
+    assert_eq!(parsed.triggers.len(), 1, "{parsed:#?}");
+    let trigger = &parsed.triggers[0];
+    assert_eq!(trigger.mode, TriggerMode::Touched);
+    assert_eq!(trigger.valid_card, Some(TargetFilter::SelfRef));
+    assert_eq!(trigger.valid_target, Some(TargetFilter::Player));
+    assert_eq!(trigger.trigger_zones, vec![Zone::Battlefield]);
+    let execute = trigger.execute.as_ref().expect("the trigger has an effect");
+    assert!(
+        matches!(&*execute.effect, Effect::LoseLife { .. }),
+        "{execute:#?}"
+    );
+}
+
+#[test]
+fn each_touch_of_vile_bile_makes_the_touching_player_lose_two_life() {
+    let (mut runner, bile, bears) = vile_bile_scenario();
+    assert_eq!(
+        runner.state().un_actions.touchable,
+        vec![bile],
+        "only Vile Bile responds to a touch"
+    );
+    assert_ne!(bile, bears);
+
+    // Two separate touches by the opponent: two instances, two triggers.
+    touch(&mut runner, P1, bile);
+    touch(&mut runner, P1, bile);
+    assert_eq!(
+        runner.state().stack.len(),
+        2,
+        "each touch triggers Vile Bile once"
+    );
+    assert_eq!(runner.life(P1), 20, "the triggers wait on the stack");
+    runner.resolve_top();
+    runner.resolve_top();
+    assert_eq!(runner.life(P1), 16, "that player loses 2 life per touch");
+    assert_eq!(runner.life(P0), 20, "the controller is untouched");
+    assert_settled(&runner, "after both touches resolve");
+
+    // "a player" includes Vile Bile's own controller.
+    touch(&mut runner, P0, bile);
+    assert_eq!(runner.state().stack.len(), 1);
+    runner.resolve_top();
+    assert_eq!(runner.life(P0), 18);
+    assert_eq!(runner.life(P1), 16);
+}
+
+#[test]
+fn a_touch_needs_an_opted_in_player_and_an_object_that_responds() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bile = scenario
+        .add_creature_from_oracle(P0, "Vile Bile", 2, 2, VILE_BILE)
+        .id();
+    let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let bile_in_hand = scenario
+        .add_creature_to_hand_from_oracle(P0, "Vile Bile", 2, 2, VILE_BILE)
+        .id();
+    let mut runner = scenario.build();
+    assert!(
+        runner.state().un_actions.touchable.is_empty(),
+        "nothing is touchable until a player opts in"
+    );
+
+    let rejected = apply(
+        runner.state_mut(),
+        P1,
+        GameAction::UnAction {
+            action: UnAction::TouchObject { object_id: bile },
+        },
+    );
+    assert!(
+        matches!(rejected, Err(EngineError::InvalidAction(_))),
+        "a player who did not opt in cannot touch: {rejected:?}"
+    );
+
+    un_action(&mut runner, P1, UnAction::SetEnabled { enabled: true });
+    assert_eq!(
+        runner.state().un_actions.touchable,
+        vec![bile],
+        "the copy in hand has no functioning ability (CR 113.6) and the Bears have none"
+    );
+    for object_id in [bears, bile_in_hand] {
+        let rejected = apply(
+            runner.state_mut(),
+            P1,
+            GameAction::UnAction {
+                action: UnAction::TouchObject { object_id },
+            },
+        );
+        assert!(
+            matches!(rejected, Err(EngineError::InvalidAction(_))),
+            "touching {object_id:?} does nothing: {rejected:?}"
+        );
+    }
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(runner.life(P1), 20);
+
+    // Positive control: the opted-in player touching the battlefield copy works.
+    touch(&mut runner, P1, bile);
+    runner.resolve_top();
+    assert_eq!(runner.life(P1), 18);
+}
+
+/// P0 touches Vile Bile while P1 decides whether to say the Rod's phrase; P1
+/// then answers with `pay`. Either answer hands priority back, and the touch's
+/// trigger must be on the stack by then.
+fn touch_vile_bile_during_the_rods_unless_prompt(pay: bool) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let rod = scenario
+        .add_artifact_from_oracle(P0, "Rod of Spanking", ROD)
+        .id();
+    let bile = scenario
+        .add_creature_from_oracle(P0, "Vile Bile", 2, 2, VILE_BILE)
+        .id();
+    scenario.with_mana_pool(P0, generic_mana(2));
+    let mut runner = scenario.build();
+    un_action(&mut runner, P0, UnAction::SetEnabled { enabled: true });
+    un_action(&mut runner, P1, UnAction::SetEnabled { enabled: true });
+    spank_p1(&mut runner, rod);
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::UnlessPayment { .. }),
+        "reach guard: P1's spoken-payment decision is pending, got {:?}",
+        runner.state().waiting_for
+    );
+    engine::game::interaction::bind_interaction_authority(
+        runner.state_mut(),
+        engine::types::interaction::InteractionSessionId("un-touch".to_string()),
+    )
+    .expect("the interaction authority binds");
+    let slots_before = runner.state().active_interaction_slots.clone();
+    let waiting_before = runner.state().waiting_for.clone();
+    let stack_before = runner.state().stack.len();
+
+    // P0 touches Vile Bile while P1 is deciding.
+    touch(&mut runner, P0, bile);
+    assert_eq!(runner.state().waiting_for, waiting_before);
+    assert_eq!(
+        runner.state().active_interaction_slots,
+        slots_before,
+        "a touch does not rebind the open interaction"
+    );
+    assert_eq!(
+        runner.state().stack.len(),
+        stack_before,
+        "CR 603.3: the trigger waits until a player would receive priority"
+    );
+    assert_eq!(runner.life(P0), 20);
+
+    runner
+        .act(GameAction::PayUnlessCost { pay })
+        .expect("P1's payment answer is still accepted after the touch");
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "the Rod finished resolving, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "Vile Bile's trigger went on the stack when priority came back"
+    );
+    runner.resolve_top();
+    assert_eq!(runner.life(P0), 18, "the touching player lost 2 life");
+    assert_settled(&runner, "after the parked touch trigger resolves");
+}
+
+#[test]
+fn a_touch_during_a_decision_triggers_once_a_player_would_receive_priority() {
+    // Declining runs the Rod's untap, whose own priority pass places the queue.
+    touch_vile_bile_during_the_rods_unless_prompt(false);
+}
+
+#[test]
+fn a_touch_during_a_decision_triggers_when_a_paid_answer_returns_priority() {
+    // Saying the phrase ends the Rod's resolution with no further instruction.
+    touch_vile_bile_during_the_rods_unless_prompt(true);
 }

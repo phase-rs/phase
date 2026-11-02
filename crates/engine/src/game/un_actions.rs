@@ -304,11 +304,39 @@ fn offer_is_still_valid(state: &GameState, offer: &GotchaOffer) -> bool {
         && offer.returns.is_current(state)
 }
 
+/// Whether `object_id` has a functioning `TriggerMode::Touched` ability in its
+/// current zone — something happens when a player touches it.
+fn responds_to_touch(state: &GameState, object_id: ObjectId) -> bool {
+    state.objects.get(&object_id).is_some_and(|obj| {
+        super::functioning_abilities::active_trigger_definitions(state, obj)
+            .map(|active| active.definition)
+            .any(|def| {
+                def.mode == TriggerMode::Touched
+                    && super::triggers::trigger_definition_functions_in_zone(def, obj.zone)
+            })
+    })
+}
+
 /// Recompute the Un-actions menu: the gesture kinds that some functioning Gotcha
-/// ability anywhere in the game responds to. Empty (and free) unless a player
-/// opted in. Called after every action, since a Gotcha card can reach a
-/// graveyard at any time.
+/// ability anywhere in the game responds to, and the objects whose touch
+/// abilities function. Empty (and free) unless a player opted in. Called after
+/// every action, since a Gotcha card can reach a graveyard at any time.
 pub fn refresh_menu(state: &mut GameState) {
+    let touchable = if state.un_actions.enabled_players.is_empty() {
+        Vec::new()
+    } else {
+        let mut ids: Vec<ObjectId> = state
+            .objects
+            .keys()
+            .copied()
+            .filter(|&id| responds_to_touch(state, id))
+            .collect();
+        ids.sort();
+        ids
+    };
+    if state.un_actions.touchable != touchable {
+        state.un_actions.touchable = touchable;
+    }
     let menu = if state.un_actions.enabled_players.is_empty() {
         Vec::new()
     } else {
@@ -369,6 +397,7 @@ pub fn apply_un_action(
             record_tell(state, actor, &tell);
             Ok(ActionResult::applied(events, state.waiting_for.clone()))
         }
+        UnAction::TouchObject { object_id } => touch_object(state, actor, object_id),
         UnAction::SayGotcha { source_id, returns } => {
             // CR 102.1, CR 800.4: an eliminated player has left the game and
             // cannot take game actions.
@@ -413,4 +442,94 @@ pub fn apply_un_action(
             Ok(ActionResult::applied(events, settled))
         }
     }
+}
+
+/// `actor` touched `object_id` (the client reports the player's cursor entering
+/// the card). The touch is an event like any other: abilities that trigger on it
+/// (`TriggerMode::Touched`) trigger the moment it happens (CR 603.2). At a
+/// priority boundary they go on the stack at once through the ordinary trigger
+/// pipeline; during any other decision they wait until a player would next
+/// receive priority (CR 603.3), and the pending decision stays untouched.
+fn touch_object(
+    state: &mut GameState,
+    actor: PlayerId,
+    object_id: ObjectId,
+) -> Result<ActionResult, EngineError> {
+    // CR 102.1, CR 800.4: an eliminated player has left the game.
+    if !super::players::is_alive(state, actor) {
+        return Err(EngineError::InvalidAction(
+            "Player has left the game".to_string(),
+        ));
+    }
+    if !state.un_actions.is_enabled(actor) {
+        return Err(EngineError::InvalidAction(
+            "Player has not opted in to Un-card actions".to_string(),
+        ));
+    }
+    // CR 104.1: once the game has ended nothing more triggers.
+    if state.game_end.is_some() {
+        return Err(EngineError::InvalidAction("The game is over".to_string()));
+    }
+    if !responds_to_touch(state, object_id) {
+        return Err(EngineError::InvalidAction(
+            "Nothing happens when that object is touched".to_string(),
+        ));
+    }
+    let mut events = vec![GameEvent::ObjectTouched {
+        player: actor,
+        object_id,
+    }];
+    let waiting_for = state.waiting_for.clone();
+    if matches!(waiting_for, WaitingFor::Priority { .. }) {
+        let settled = super::engine_priority::run_post_action_pipeline_from_settled_priority(
+            state,
+            &mut events,
+            0,
+            &waiting_for,
+        )?;
+        state.waiting_for = settled.clone();
+        Ok(ActionResult::applied(events, settled))
+    } else {
+        super::engine_priority::park_triggers_until_priority(state, &events);
+        Ok(ActionResult::applied(events, waiting_for))
+    }
+}
+
+/// CR 603.3: a touch made while a decision was pending parked its triggers until
+/// a player would next receive priority. Most answers put the deferred queue on
+/// the stack in their own priority pass, but an answer that hands priority back
+/// without one (a paid unless-cost with nothing after it) leaves the queue
+/// parked. Put it on the stack now, before any player acts on that priority.
+pub(crate) fn place_parked_touch_triggers(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    let WaitingFor::Priority { .. } = state.waiting_for else {
+        return Ok(());
+    };
+    // CR 104.1: once the game has ended nothing more triggers.
+    let touch_parked = state.deferred_triggers.iter().any(|context| {
+        context
+            .trigger_events
+            .iter()
+            .any(|event| matches!(event, GameEvent::ObjectTouched { .. }))
+    });
+    if state.game_end.is_some()
+        || !touch_parked
+        || !super::triggers::should_drain_deferred_triggers_now(state)
+    {
+        return Ok(());
+    }
+    // A fresh event buffer: this pass places only the parked queue and must not
+    // rescan the action's already-collected events for delayed triggers.
+    let mut placed = Vec::new();
+    let waiting_for = state.waiting_for.clone();
+    state.waiting_for = super::engine_priority::run_post_action_pipeline_from_settled_priority(
+        state,
+        &mut placed,
+        0,
+        &waiting_for,
+    )?;
+    events.extend(placed);
+    Ok(())
 }

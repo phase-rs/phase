@@ -18292,6 +18292,12 @@ fn try_parse_special_trigger_pattern(lower: &str) -> Option<(TriggerMode, Trigge
         return Some(result);
     }
 
+    // Un-card touch (no CR entry): "Whenever a player's skin or fingernail
+    // touches ~" (Vile Bile).
+    if let Some(result) = super::oracle_un::try_parse_touch_trigger(lower) {
+        return Some(result);
+    }
+
     if matches!(
         lower,
         "whenever day becomes night or night becomes day"

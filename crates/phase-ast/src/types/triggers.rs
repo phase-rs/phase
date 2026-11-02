@@ -493,6 +493,11 @@ pub enum TriggerMode {
     /// "Gotcha!" — the "When you do" reflexive trigger. The watched condition lives
     /// in `TriggerDefinition::gotcha_condition`.
     GotchaSaid,
+    /// Un-card touch (no CR entry): fires when a player touches an object —
+    /// "Whenever a player's skin or fingernail touches this creature" (Vile Bile).
+    /// The touched object is matched by `valid_card`, the touching player by
+    /// `valid_target`; the player is the event's triggering player ("that player").
+    Touched,
     /// CR 701.44: Triggers when a creature explores.
     Explored,
     /// CR 702.110: Exploit trigger — when a creature exploits another creature.
@@ -830,6 +835,7 @@ impl FromStr for TriggerMode {
             "Evolve" => TriggerMode::Evolve,
             "Evolved" => TriggerMode::Evolved,
             "GotchaSaid" => TriggerMode::GotchaSaid,
+            "Touched" => TriggerMode::Touched,
             "ExcessDamage" => TriggerMode::ExcessDamage,
             "ExcessDamageAll" => TriggerMode::ExcessDamageAll,
             "Exerted" => TriggerMode::Exerted,
@@ -1276,6 +1282,7 @@ mod tests {
             "Evolve",
             "Evolved",
             "GotchaSaid",
+            "Touched",
             "ExcessDamage",
             "ExcessDamageAll",
             "Exerted",

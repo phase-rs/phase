@@ -641,6 +641,62 @@ describe("PermanentCard", () => {
     expect(host.style.zIndex).toBe("80");
   });
 
+  describe("Un-card touch (Vile Bile)", () => {
+    const touchAction: GameAction = {
+      type: "UnAction",
+      data: { action: { type: "TouchObject", data: { object_id: 1 } } },
+    };
+
+    function setUnActions(enabledPlayers: number[], touchable: number[]) {
+      const gameState = makeState();
+      gameState.un_actions = { enabled_players: enabledPlayers, touchable };
+      useGameStore.setState({ gameState, waitingFor: gameState.waiting_for });
+    }
+
+    it("reports one touch per pointer entry on an engine-listed touchable object", () => {
+      setUnActions([0], [1]);
+      const { container } = renderPermanent();
+      const host = container.querySelector('[data-object-id="1"]') as HTMLElement;
+
+      fireEvent.pointerEnter(host, { pointerType: "mouse" });
+      fireEvent.pointerLeave(host, { pointerType: "mouse" });
+      fireEvent.pointerEnter(host, { pointerType: "mouse" });
+
+      const touches = vi.mocked(dispatchAction).mock.calls.filter(
+        ([action]) => action.type === "UnAction",
+      );
+      expect(touches).toEqual([[touchAction], [touchAction]]);
+    });
+
+    it("counts a finger on a touchscreen as a touch", () => {
+      setUnActions([0], [1]);
+      const { container } = renderPermanent();
+      fireEvent.pointerEnter(container.querySelector('[data-object-id="1"]') as HTMLElement, {
+        pointerType: "touch",
+      });
+      expect(dispatchAction).toHaveBeenCalledWith(touchAction);
+    });
+
+    it("reports nothing for an object the engine does not list or a player who did not opt in", () => {
+      setUnActions([0], [2]);
+      const first = renderPermanent();
+      fireEvent.pointerEnter(first.container.querySelector('[data-object-id="1"]') as HTMLElement, {
+        pointerType: "mouse",
+      });
+      first.unmount();
+
+      setUnActions([1], [1]);
+      const second = renderPermanent();
+      fireEvent.pointerEnter(second.container.querySelector('[data-object-id="1"]') as HTMLElement, {
+        pointerType: "mouse",
+      });
+
+      expect(
+        vi.mocked(dispatchAction).mock.calls.filter(([action]) => action.type === "UnAction"),
+      ).toEqual([]);
+    });
+  });
+
   it("does not recursively render cyclic attachment graphs", () => {
     const gameState = makeState();
     gameState.objects[1].attached_to = { type: "Object", data: 2 };
