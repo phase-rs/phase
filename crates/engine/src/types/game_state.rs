@@ -20149,46 +20149,6 @@ impl WaitingFor {
         }
     }
 
-    /// The `PendingManaAbility` this prompt is continuing, if it is a step of a
-    /// mana ability's activation (CR 605.3b). Single authority for which
-    /// prompts embed one; kept in lockstep with `is_mana_ability_continuation`.
-    pub fn pending_mana_ability_ref(&self) -> Option<&PendingManaAbility> {
-        match self {
-            WaitingFor::ChooseManaColor {
-                context: ManaChoiceContext::ManaAbility(pending),
-                ..
-            }
-            | WaitingFor::PayCost {
-                resume:
-                    CostResume::ManaAbility {
-                        mana_ability: pending,
-                    },
-                ..
-            }
-            | WaitingFor::PayManaAbilityMana {
-                pending_mana_ability: pending,
-                ..
-            }
-            | WaitingFor::ManaAbilityManaPayment {
-                pending_mana_ability: pending,
-                ..
-            }
-            | WaitingFor::PayAmountChoice {
-                pending_mana_ability: Some(pending),
-                ..
-            } => Some(pending),
-            WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_ref() {
-                CollectEvidenceResume::ManaAbility {
-                    pending_mana_ability,
-                } => Some(pending_mana_ability),
-                CollectEvidenceResume::Casting { .. } | CollectEvidenceResume::Effect { .. } => {
-                    None
-                }
-            },
-            _ => None,
-        }
-    }
-
     /// Mutable variant of `pending_cast_ref()` for call sites that need to
     /// annotate in-flight cast metadata (for example rollback markers).
     pub fn pending_cast_mut(&mut self) -> Option<&mut PendingCast> {
@@ -29356,7 +29316,7 @@ impl GameState {
     /// [`Self::pending_cast_owner_active_at_prompt`]). A bare
     /// `GameState::pending_cast` left outside every carrier prompt, or a
     /// lingering permission, is not an active announcement.
-    pub fn active_cast_announcement(&self) -> Option<&PendingCast> {
+    pub(crate) fn active_cast_announcement(&self) -> Option<&PendingCast> {
         PendingCastOwner::ALL
             .into_iter()
             .filter(|owner| self.pending_cast_owner_active_at_prompt(*owner))
@@ -29395,7 +29355,7 @@ impl GameState {
             )
             || self
                 .waiting_for
-                .pending_mana_ability_ref()
+                .continued_mana_ability()
                 .is_some_and(PendingManaAbility::resumes_pending_cast)
             || (self.cost_root_child_prompt_open() && self.parked_mana_cost_resumes_pending_cast())
     }

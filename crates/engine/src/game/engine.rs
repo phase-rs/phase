@@ -12189,9 +12189,12 @@ fn ripple_resolution_cast_in_flight(state: &GameState) -> bool {
     if state.revealed_cards.is_empty() {
         return false;
     }
-    // CR 601.2: resolved through the typed carrier authority — inline prompts,
-    // the `ManaPayment` family, `DistributeAmong`, and a nested mana ability
-    // (CR 605.3b) whose `resume` returns to the cast's payment. A bare
+    // CR 601.2 + CR 616.1: resolved through the typed `PendingCastOwner`
+    // custody — the prompt's inline cast; the cast-bearing cost-move, discard
+    // and deferred-life roots behind their replacement choice; and the external
+    // `pending_cast` behind the `ManaPayment` family, Assist, `DistributeAmong`,
+    // or a mana ability (CR 605.3b) — prompted or with its own cost parked —
+    // whose activation chain returns to the cast's payment. A bare
     // `state.pending_cast` outside those carriers is not an active announcement.
     let active_cast = state.active_cast_announcement();
     let permission_index = match (active_cast, &state.waiting_for) {

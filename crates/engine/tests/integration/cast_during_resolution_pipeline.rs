@@ -2088,9 +2088,10 @@ fn ripple_free_cast_keeps_reveal_through_mana_ability_color_choice() {
     );
 }
 
-/// CR 701.20a + CR 601.2i: canceling the free cast mid-payment ends the
-/// announcement; the pile (with the un-cast hit) goes to the bottom and the
-/// reveal is gone by the following ordinary action.
+/// CR 701.20a + CR 702.60a: canceling the free cast mid-payment ends the
+/// announcement, so the hit is a revealed card "not cast this way" and goes to
+/// the bottom with the pile; the reveal is no longer necessary and is gone by
+/// the following ordinary action.
 #[test]
 fn ripple_free_cast_canceled_at_payment_does_not_retain_reveal() {
     let Some(db) = shared_card_db() else {
