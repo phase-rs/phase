@@ -2093,6 +2093,7 @@ fn fifo_snapshots_continue_through_review_and_tournament() {
                 seat,
                 main_deck: vec!["Forest".into(); 40],
                 commanders: Vec::new(),
+                printings: Vec::new(),
             },
             None,
             2700,
@@ -2838,6 +2839,7 @@ fn legacy_upgrade_preserves_retained_clocks_and_known_missing_fields() {
                 seat,
                 main_deck: vec!["Forest".into(); 40],
                 commanders: Vec::new(),
+                printings: Vec::new(),
             },
             None,
         )
@@ -3405,7 +3407,8 @@ fn legacy_draft_wire_shapes_remain_unchanged() {
         serde_json::to_string(&DraftAction::SubmitDeck {
             seat: 1,
             main_deck: vec!["Forest".into()],
-            commanders: Vec::new()
+            commanders: Vec::new(),
+            printings: Vec::new()
         })
         .unwrap(),
         r#"{"type":"SubmitDeck","data":{"seat":1,"main_deck":["Forest"],"commanders":[]}}"#
@@ -4404,6 +4407,7 @@ fn fifo_only_actions_are_classified_once() {
                 seat: 0,
                 main_deck: vec![],
                 commanders: vec![],
+                printings: Vec::new(),
             },
             false,
         ),

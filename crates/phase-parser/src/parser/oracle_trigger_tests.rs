@@ -42014,3 +42014,24 @@ fn stack_spell_copy_cast_indicated_action_strict_fails() {
         cast.effect
     );
 }
+
+// CR 122.1 + CR 603.2: an active-voice "you remove a <kind> counter" trigger
+// fires only for that kind, so the kind lives in `counter_filter` (the field
+// `match_counter_removed` reads), not only in the description. Watcher of Hours
+// is the nearest printed card; its "while it's exiled" rider is dropped here
+// because this arm declines that rider.
+#[test]
+fn trigger_you_remove_typed_counter_filters_on_its_kind() {
+    let def = parse_trigger_line(
+        "Whenever you remove a time counter from this card, surveil 1.",
+        "Watcher of Hours",
+    );
+    assert_eq!(def.mode, TriggerMode::CounterRemoved);
+    assert_eq!(
+        def.counter_filter,
+        Some(crate::types::ability::CounterTriggerFilter {
+            counter_type: CounterType::Time,
+            threshold: None,
+        })
+    );
+}

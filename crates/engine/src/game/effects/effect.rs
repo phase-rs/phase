@@ -1022,6 +1022,7 @@ fn binds_as_player(filter: &TargetFilter) -> bool {
         | TargetFilter::AffectedObjectOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::AttackedPlayerOrPlaneswalker
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController

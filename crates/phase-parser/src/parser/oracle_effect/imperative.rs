@@ -1594,7 +1594,15 @@ pub(super) fn parse_all_sacrifice<'a>(
 /// composites are walked so a disjunctive class ("creature or planeswalker")
 /// excludes the source on every leg its type could match. Other shapes are left
 /// untouched — the callers' filters are typal by construction.
+///
+/// CR 608.2c: over the parent target's controller's objects, "other" excludes
+/// that target instead — the same reading the type-phrase grammar applies.
 pub(super) fn add_another_to_filter_recursive(filter: &mut TargetFilter) {
+    add_another_to_legs(filter);
+    crate::parser::oracle_target::exclude_parent_target_from_its_controllers_others(filter);
+}
+
+fn add_another_to_legs(filter: &mut TargetFilter) {
     match filter {
         TargetFilter::Typed(typed) if !typed.properties.contains(&FilterProp::Another) => {
             typed.properties.push(FilterProp::Another);
@@ -1602,7 +1610,7 @@ pub(super) fn add_another_to_filter_recursive(filter: &mut TargetFilter) {
         TargetFilter::Typed(_) => {}
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
             for leg in filters {
-                add_another_to_filter_recursive(leg);
+                add_another_to_legs(leg);
             }
         }
         _ => {}
@@ -3657,6 +3665,16 @@ pub(super) fn parse_search_and_creation_ast(
         return Some(ast);
     }
     if let Some((_, _)) = nom_on_lower(text, lower, |input| value((), tag("seek ")).parse(input)) {
+        // CR 608.2c: a ", then <clause>" tail the chain splitter left attached
+        // (a subject-led instruction: "…, then nonland cards in your hand
+        // perpetually gain …") is a separate instruction the seek filter can't
+        // hold; refuse rather than drop it.
+        if take_until::<_, _, OracleError<'_>>(", then ")
+            .parse(lower)
+            .is_ok()
+        {
+            return None;
+        }
         let details = super::parse_seek_details(lower, ctx);
         return Some(SearchCreationImperativeAst::Seek {
             filter: details.filter,
@@ -13872,6 +13890,7 @@ fn is_player_axis_filter(filter: &TargetFilter) -> bool {
         | TargetFilter::ExiledBySource
         | TargetFilter::ExiledCardByIndex { .. }
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetSlot { .. }
@@ -18181,6 +18200,22 @@ fn rebind_costpaid_scope_to_recipient(expr: QuantityExpr) -> QuantityExpr {
     }
 }
 
+/// CR 122.1 + CR 608.2d: the " or remove one from it" tail of a single-counter
+/// placement — the removal leg reuses the placement's kind ("one") and object
+/// ("it").
+fn is_remove_one_from_same_object(remainder: &str) -> bool {
+    let remainder = remainder.to_ascii_lowercase();
+    let parsed = (
+        tag::<_, _, OracleError<'_>>(" or remove one from "),
+        alt((tag("~"), nom_primitives::parse_object_recipient_pronoun)),
+        opt(tag(".")),
+        eof,
+    )
+        .parse(remainder.as_str())
+        .is_ok();
+    parsed
+}
+
 /// CR 122.1 + CR 608.2d (Clockspinning sentence 2): recognize the three forms
 /// of the "choose a counter, then adjust it" clause and return the operation set
 /// the controller may choose among:
@@ -18394,6 +18429,23 @@ pub(super) fn parse_zone_counter_ast<'a>(
                 remainder,
                 multi_target,
             )) => {
+                // CR 122.1 + CR 608.2d: "put a <kind> counter on it or remove one
+                // from it" — the controller adds or removes one of the printed
+                // kind on the ability's own source (Immard, the Stormcleaver).
+                // `ChooseCounterAdjustment` announces no target slot of its own,
+                // so a targeted object ("target Saga you control") is refused
+                // here and stays an honest gap.
+                if matches!(count, QuantityExpr::Fixed { value: 1 })
+                    && multi_target.is_none()
+                    && matches!(target, TargetFilter::SelfRef)
+                    && is_remove_one_from_same_object(remainder)
+                {
+                    return Some(Ok(ZoneCounterImperativeAst::ChooseCounterAdjustment {
+                        adjustment: CounterAdjustment::AddOrRemove,
+                        counter_type: Some(counter_type),
+                        target,
+                    }));
+                }
                 // CR 608.2c: quantity/target owners must consume every counter suffix.
                 if !terminal_punctuation_only(remainder) {
                     return Some(Err(text));
@@ -18446,6 +18498,8 @@ pub(super) fn parse_zone_counter_ast<'a>(
     if let Some(adjustment) = try_parse_choose_counter_adjustment(lower) {
         return Some(Ok(ZoneCounterImperativeAst::ChooseCounterAdjustment {
             adjustment,
+            counter_type: None,
+            target: TargetFilter::ParentTarget,
         }));
     }
     if let Ok((after_remove, _)) = tag::<_, _, OracleError<'_>>("remove ").parse(lower) {
@@ -18665,12 +18719,16 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
         // CR 122.1 + CR 608.2d: the kind/op choice happens at resolution; the
         // target arrives via the parent `TargetOnly` chain, so this effect carries
         // no target slot. `count` is one per the printed "another"/"that counter".
-        ZoneCounterImperativeAst::ChooseCounterAdjustment { adjustment } => {
-            Effect::ChooseCounterAdjustment {
-                adjustment,
-                count: QuantityExpr::Fixed { value: 1 },
-            }
-        }
+        ZoneCounterImperativeAst::ChooseCounterAdjustment {
+            adjustment,
+            counter_type,
+            target,
+        } => Effect::ChooseCounterAdjustment {
+            adjustment,
+            count: QuantityExpr::Fixed { value: 1 },
+            counter_type,
+            target,
+        },
         ZoneCounterImperativeAst::MoveCounters {
             source,
             counter_type,

@@ -12,16 +12,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
     filter_contains_filter_prop, graveyard_destination_rider, is_graveyard_exile_rider_subability,
-    retarget_chosen_card_type_to_creature_type, AbilityCondition, AbilityCost, AbilityDefinition,
-    AbilityKind, AbilityTag, ActivationManaPaymentRestriction, ActivationRestriction,
-    AdditionalCost, CardPlayMode, CastFromZoneDriver, CastManaSpentMetric, CastTimingPermission,
-    CastingPermission, CastingRestriction, ChoiceType, ChosenSubtypeKind, ContinuousModification,
-    ControllerRef, CostReduction, CounterSourceRider, DamageRedirectTarget,
+    rebind_chosen_parity_to_source, retarget_chosen_card_type_to_creature_type, AbilityCondition,
+    AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, ActivationManaPaymentRestriction,
+    ActivationRestriction, AdditionalCost, CardPlayMode, CastFromZoneDriver, CastManaSpentMetric,
+    CastTimingPermission, CastingPermission, CastingRestriction, ChoiceType, ChosenSubtypeKind,
+    ContinuousModification, ControllerRef, CostReduction, CounterSourceRider, DamageRedirectTarget,
     DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp, GuardReading,
-    ManaProduction, ModalChoice, ParsedCondition, PermissionGrantee, PlayerFilter, QuantityExpr,
-    QuantityRef, ReplacementDefinition, ReplacementMode, ResolutionCastWindow, SolveCondition,
-    SpellCastingOption, StaticCondition, StaticDefinition, TapStateChange, TargetFilter,
-    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnloweredGuard, VoteSubject,
+    ManaProduction, ModalChoice, ParitySource, ParsedCondition, PermissionGrantee, PlayerFilter,
+    QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode, ResolutionCastWindow,
+    SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition, TapStateChange,
+    TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnloweredGuard,
+    VoteSubject,
 };
 use crate::types::ability_visit::{
     granter_symbols, visit_ability_def_scoped, DefinitionNode, ResolutionScope,
@@ -1677,6 +1678,7 @@ fn detect_document_relations(items: &[OracleItemIr], types: &[String]) -> Vec<Do
     detect_linked_choice_constrained_card_type_static(items, &mut relations);
     detect_linked_choice_type_statics(items, types, &mut relations);
     detect_linked_choice_persisted_player(items, &mut relations);
+    detect_linked_choice_persisted_parity(items, &mut relations);
     detect_linked_choice_copy_chosen_host(items, &mut relations);
     detect_etb_exile_ltb_return(items, &mut relations);
     detect_active_player_punisher(items, &mut relations);
@@ -3111,6 +3113,97 @@ fn apply_linked_choice_persisted_player(
                 if let Some(execute) = result.triggers[pos].execute.as_mut() {
                     persist_player_choice_in_ability(execute);
                 }
+            }
+        }
+    }
+}
+
+// --- CR 607.2d: persisted odd/even choice → source-bound parity readers ---
+
+/// CR 607.2d: A permanent that persists an "As ~ enters, choose odd or even"
+/// choice links its statics, replacements and triggers that read "the chosen
+/// quality" to that choice (Ashling's Prerogative; Gollum, Riddle Master). Without the link those readers would
+/// consult the last odd/even choice any resolution named, which a static ability
+/// or replacement has no resolution of its own to supply.
+fn detect_linked_choice_persisted_parity(
+    items: &[OracleItemIr],
+    relations: &mut Vec<DocumentRelationIr>,
+) {
+    let has_persisted_chooser = items.iter().any(|item| {
+        item_replacement(item)
+            .and_then(|replacement| replacement.execute.as_deref())
+            .is_some_and(|execute| {
+                matches!(
+                    &*execute.effect,
+                    Effect::Choose {
+                        choice_type: ChoiceType::OddOrEven,
+                        persist: true,
+                        ..
+                    }
+                )
+            })
+    });
+    if !has_persisted_chooser {
+        return;
+    }
+    let reads_named_parity = |filter: &TargetFilter| {
+        target_filter_uses_filter_prop(filter, &|prop| {
+            matches!(
+                prop,
+                FilterProp::ManaValueParity {
+                    parity: ParitySource::LastNamedChoice
+                }
+            )
+        })
+    };
+    let readers: Vec<OracleItemId> = items
+        .iter()
+        .filter(|item| {
+            item_static(item)
+                .and_then(|def| def.affected.as_ref())
+                .is_some_and(reads_named_parity)
+                || item_replacement(item)
+                    .and_then(|def| def.valid_card.as_ref())
+                    .is_some_and(reads_named_parity)
+                || item_trigger(item)
+                    .is_some_and(|def| def.valid_card.as_ref().is_some_and(reads_named_parity))
+        })
+        .map(|item| item.id)
+        .collect();
+    if !readers.is_empty() {
+        relations.push(DocumentRelationIr::LinkedChoice(
+            LinkedChoiceKind::PersistedParity { readers },
+        ));
+    }
+}
+
+/// Rebind each linked reader's parity to the source's persisted choice, by id.
+fn apply_linked_choice_persisted_parity(
+    result: &mut ParsedAbilities,
+    relations: &[DocumentRelationIr],
+    static_ids: &[OracleItemId],
+    replacement_ids: &[OracleItemId],
+    trigger_ids: &[OracleItemId],
+) {
+    for relation in relations {
+        let DocumentRelationIr::LinkedChoice(LinkedChoiceKind::PersistedParity { readers }) =
+            relation
+        else {
+            continue;
+        };
+        for id in readers {
+            if let Some(filter) =
+                position_of(static_ids, *id).and_then(|pos| result.statics[pos].affected.as_mut())
+            {
+                rebind_chosen_parity_to_source(filter);
+            } else if let Some(filter) = position_of(replacement_ids, *id)
+                .and_then(|pos| result.replacements[pos].valid_card.as_mut())
+            {
+                rebind_chosen_parity_to_source(filter);
+            } else if let Some(filter) = position_of(trigger_ids, *id)
+                .and_then(|pos| result.triggers[pos].valid_card.as_mut())
+            {
+                rebind_chosen_parity_to_source(filter);
             }
         }
     }
@@ -4584,6 +4677,13 @@ pub(crate) fn lower_oracle_ir(ir: &mut OracleDocIr) -> ParsedAbilities {
     // actually reads.
     deliver_coordinated_graveyard_permission(&mut result);
     apply_linked_choice_persisted_player(&mut result, &ir.relations, &ability_ids, &trigger_ids);
+    apply_linked_choice_persisted_parity(
+        &mut result,
+        &ir.relations,
+        &static_ids,
+        &replacement_ids,
+        &trigger_ids,
+    );
 
     // Architectural rule: the parser must never silently discard Oracle text. Run
     // the swallow audit against the parsed result so any unrepresented clause

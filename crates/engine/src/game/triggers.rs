@@ -339,18 +339,21 @@ fn ward_cost_to_ability_cost(ward_cost: &WardCost) -> AbilityCost {
         WardCost::Waterbend(mana_cost) => AbilityCost::Mana {
             cost: mana_cost.clone(),
         },
-        // CR 702.21a: Compound ward cost — use the first mana component as
-        // the unless cost. Full compound cost resolution deferred to ward
-        // cost payment integration.
-        WardCost::Compound(costs) => {
-            if let Some(first) = costs.first() {
-                ward_cost_to_ability_cost(first)
-            } else {
-                AbilityCost::Mana {
-                    cost: crate::types::mana::ManaCost::zero(),
-                }
-            }
-        }
+        // CR 702.21a + CR 118.3: A compound ward cost ("Ward—{2}, Pay 2 life.")
+        // is one cost paid in full or not at all, so every leg joins the
+        // AND-composed `Composite` — never only the first leg. The
+        // unless-payment handler pays the whole composite through the single
+        // payment authority and falls through to the ward counter when any
+        // part is unpayable.
+        WardCost::Compound(costs) => match costs.as_slice() {
+            [] => AbilityCost::Mana {
+                cost: crate::types::mana::ManaCost::zero(),
+            },
+            [only] => ward_cost_to_ability_cost(only),
+            legs => AbilityCost::Composite {
+                costs: legs.iter().map(ward_cost_to_ability_cost).collect(),
+            },
+        },
         WardCost::GetPlayerCounters {
             counter_kind,
             count,
@@ -12629,6 +12632,7 @@ pub fn latched_doubler_scope_plan(filter: &TargetFilter) -> Option<LatchedScopeP
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
@@ -14499,6 +14503,7 @@ fn filter_binding_diverges(filter: &TargetFilter) -> bool {
         // same dual path `ObjectScope::EventSource` / `EventTarget` and
         // `PlayerScope::DefendingPlayer` are adjudicated non-divergent under.
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
         | TargetFilter::TriggeringSpellController
@@ -14952,6 +14957,9 @@ fn parity_source_binding_diverges(parity: &crate::types::ability::ParitySource) 
         ParitySource::LastNamedChoice => true,
         // A printed parity is a literal — nothing to bind.
         ParitySource::Fixed { .. } => false,
+        // CR 607.2d: the source's persisted choice reads the same source state
+        // at fire time and at resolution, as the other chosen-attribute reads do.
+        ParitySource::SourceChosen => false,
     }
 }
 
@@ -15359,6 +15367,11 @@ fn delayed_trigger_to_context(
         }),
         _ => None,
     };
+    // CR 603.3c + CR 700.2b: a modal delayed or reflexive trigger ("When you
+    // remove a counter this way, choose one —") has its mode chosen as it is put
+    // on the stack, exactly as a printed modal trigger does.
+    let modal = trigger.ability.modal.clone();
+    let mode_abilities = trigger.ability.mode_abilities.clone();
     let mut context = PendingTriggerContext::delayed(
         PendingTrigger {
             source_id: trigger.source_id,
@@ -15369,8 +15382,8 @@ fn delayed_trigger_to_context(
             target_constraints: Vec::new(),
             distribute: None,
             trigger_event: Some(trigger_event),
-            modal: None,
-            mode_abilities: vec![],
+            modal,
+            mode_abilities,
             description: None,
             may_trigger_origin: None,
             subject_match_count,
@@ -34043,6 +34056,26 @@ pub mod tests {
         let waterbend = WardCost::Waterbend(ManaCost::generic(4));
         let result = ward_cost_to_ability_cost(&waterbend);
         assert!(matches!(result, AbilityCost::Mana { cost } if cost == ManaCost::generic(4)));
+
+        // CR 702.21a + CR 118.3: a compound ward cost joins every leg into the
+        // AND-composed `Composite` (Captain Howler, Sea Scourge: "Ward—{2},
+        // Pay 2 life.") — never only the first leg.
+        let compound = WardCost::Compound(vec![
+            WardCost::Mana(ManaCost::generic(2)),
+            WardCost::PayLife(2),
+        ]);
+        let result = ward_cost_to_ability_cost(&compound);
+        let AbilityCost::Composite { costs } = result else {
+            panic!("a compound ward cost must become a Composite, got {result:?}");
+        };
+        assert_eq!(costs.len(), 2);
+        assert!(matches!(&costs[0], AbilityCost::Mana { cost } if *cost == ManaCost::generic(2)));
+        assert!(matches!(
+            &costs[1],
+            AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: 2 }
+            }
+        ));
 
         // Get player counters (The Serpent Society: "Ward—Get five poison counters.")
         let poison = WardCost::GetPlayerCounters {

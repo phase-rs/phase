@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::game::bracket_estimate::CommanderBracketTier;
+use crate::types::card_printing::DeckPrinting;
 
 /// A deck specified as card name strings — the wire format used by clients
 /// and the starter deck module. Distinct from `PlayerDeckPayload` which
@@ -37,6 +38,17 @@ pub struct DeckData {
     /// preserving backward compatibility with older wire payloads.
     #[serde(default)]
     pub bracket_tier: CommanderBracketTier,
+    /// The owner's explicit printing choices for this list's cards, keyed by section and
+    /// name. Display-only (CR 203.1 + CR 206.1): no deck validator, format gate or
+    /// bracket estimator reads it. Absent from the wire when empty, so a name-only deck
+    /// serializes unchanged; decoded by `deserialize_deck_printings`: readable malformed
+    /// annotations are dropped; codec errors propagate.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "crate::types::card_printing::deserialize_deck_printings"
+    )]
+    pub printings: Vec<DeckPrinting>,
 }
 
 /// A named starter deck with its card list.

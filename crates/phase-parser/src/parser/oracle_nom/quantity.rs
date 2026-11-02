@@ -9,7 +9,7 @@ use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until, take_while1};
 use nom::character::complete::satisfy;
 use nom::combinator::{all_consuming, eof, map, map_opt, map_res, not, opt, peek, value, verify};
-use nom::multi::{many0, separated_list1};
+use nom::multi::{many0, many1, separated_list1};
 use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
@@ -3148,6 +3148,7 @@ fn filter_is_population_anchored(filter: &TargetFilter) -> bool {
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
@@ -3289,6 +3290,7 @@ pub fn objects_filter_zone_is_unambiguous(filter: &TargetFilter) -> bool {
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
@@ -5595,6 +5597,217 @@ fn parse_for_each_unspent_mana(input: &str) -> OracleResult<'_, QuantityRef> {
     Ok((rest, QuantityRef::UnspentMana { color }))
 }
 
+/// CR 109.4 + CR 108.3 + CR 400.1: "<population> and each <population>" —
+/// coordinated object populations in one "for each" phrase (Machinist's
+/// Dismissal: "for each artifact you control and each artifact card in your
+/// hand"), as ONE population: an `ObjectCount` over an `Or` of the legs'
+/// population filters. For consumers that hold only a `QuantityRef` (a cost
+/// modifier's `dynamic_count`); expression consumers sum the legs instead.
+/// Fails unless there are at least two legs and every leg is an object
+/// population.
+pub(crate) fn parse_for_each_population_union(input: &str) -> OracleResult<'_, QuantityRef> {
+    let antecedents = PlayerAntecedents::for_each_iteration_unscoped();
+    let single = |i| parse_for_each_clause_ref_with_they_controller(i, &antecedents);
+    let (rest, first) = single(input)?;
+    let (rest, legs) = many1(preceded(tag(" and each "), single)).parse(rest)?;
+    let filters = std::iter::once(&first)
+        .chain(legs.iter())
+        .map(population_count_filter)
+        .collect::<Option<Vec<TargetFilter>>>()
+        .ok_or_else(|| oracle_err(input))?;
+    // CR 400.1: an object is in one zone at a time, so legs over disjoint zones
+    // never share an object and one union count equals the per-leg sum. Legs
+    // that share a zone ("each artifact you control and each creature you
+    // control") would count a shared object once instead of once per leg, so
+    // they decline. A leg with no zone constraint ranges over the battlefield.
+    let mut seen_zones: Vec<Zone> = Vec::new();
+    for filter in &filters {
+        let mut zones = filter.population_zones();
+        if zones.is_empty() {
+            zones.push(Zone::Battlefield);
+        }
+        if zones.iter().any(|zone| seen_zones.contains(zone)) {
+            return Err(oracle_err(input));
+        }
+        seen_zones.extend(zones);
+    }
+    Ok((
+        rest,
+        QuantityRef::ObjectCount {
+            filter: TargetFilter::Or { filters },
+        },
+    ))
+}
+
+/// CR 400.1 + CR 108.3: The object population a single count ranges over, as a
+/// filter. A zone count scoped to "your <zone>" ranges over cards you own in
+/// that zone (CR 400.3: a card in a hand, library, or graveyard is in its
+/// owner's zone). Counts that are not a population of objects return `None`.
+fn population_count_filter(qty: &QuantityRef) -> Option<TargetFilter> {
+    match qty {
+        QuantityRef::ObjectCount { filter } => Some(filter.clone()),
+        QuantityRef::ZoneCardCount {
+            zone,
+            card_types,
+            filter,
+            scope,
+        } => {
+            let mut properties = vec![FilterProp::InZone { zone: zone.zone() }];
+            match scope {
+                CountScope::Controller | CountScope::Owner => {
+                    properties.push(FilterProp::Owned {
+                        controller: ControllerRef::You,
+                    });
+                }
+                CountScope::All => {}
+                CountScope::ScopedPlayer
+                | CountScope::SourceChosenPlayer
+                | CountScope::Opponents => {
+                    return None;
+                }
+            }
+            let type_filter = match card_types.as_slice() {
+                [] => TypeFilter::Card,
+                [single] => single.clone(),
+                many => TypeFilter::AnyOf(many.to_vec()),
+            };
+            let population =
+                TargetFilter::Typed(TypedFilter::new(type_filter).properties(properties));
+            Some(match filter {
+                Some(qualifier) => TargetFilter::And {
+                    filters: vec![population, qualifier.clone()],
+                },
+                None => population,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// CR 601.2f + CR 201.2a: "card[s] with the same name as that spell in <zone>"
+/// in a spell cost modifier, where "that spell" is the spell whose total cost
+/// is being determined (Locket of Yesterdays). The name reference is the
+/// `CastingSpell` referent the cost-modifier quantity binds at evaluation.
+pub(crate) fn parse_cards_named_like_cost_modified_spell(
+    input: &str,
+) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = alt((tag("cards"), tag("card"))).parse(input)?;
+    let (rest, _) = tag(" with the same name as that spell in ").parse(rest)?;
+    let (rest, (zone, scope)) = parse_scoped_zone_ref(rest)?;
+    let population = population_count_filter(&QuantityRef::ZoneCardCount {
+        zone,
+        card_types: Vec::new(),
+        filter: None,
+        scope,
+    })
+    .ok_or_else(|| oracle_err(input))?;
+    let TargetFilter::Typed(mut typed) = population else {
+        return Err(oracle_err(input));
+    };
+    typed.properties.push(FilterProp::SharesQuality {
+        quality: SharedQuality::Name,
+        reference: Some(Box::new(TargetFilter::CastingSpell)),
+        relation: Default::default(),
+    });
+    Ok((
+        rest,
+        QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(typed),
+        },
+    ))
+}
+
+/// CR 108.3 + CR 400.1 + CR 715.2a: "card[s] you own in <zone> [and in
+/// <zone>]* [that's <card description list>]" — one population of owned cards
+/// spread over coordinated zones, optionally restricted by a disjunctive card
+/// description shared by every zone (Sailors' Bane: "card you own in exile and
+/// in your graveyard that's an instant card, a sorcery card, or a card that has
+/// an Adventure"). Each card is counted once whichever listed zone holds it.
+fn parse_for_each_owned_cards_in_zones(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = alt((tag("cards"), tag("card"))).parse(input)?;
+    let (rest, _) = tag(" you own ").parse(rest)?;
+    let (rest, zones) = separated_list1(tag(" and "), parse_owned_zone_phrase).parse(rest)?;
+    let (rest, description) = opt(preceded(
+        alt((tag(" that's "), tag(" that is "))),
+        separated_list1(
+            alt((tag(", or "), tag(", "), tag(" or "))),
+            parse_card_description,
+        ),
+    ))
+    .parse(rest)?;
+    let zone_prop = match zones.as_slice() {
+        [zone] => FilterProp::InZone { zone: *zone },
+        _ => FilterProp::InAnyZone { zones },
+    };
+    let population = TargetFilter::Typed(TypedFilter::card().properties(vec![
+        FilterProp::Owned {
+            controller: ControllerRef::You,
+        },
+        zone_prop,
+    ]));
+    let filter = match description {
+        None => population,
+        Some(mut descriptions) => {
+            let qualifier = if descriptions.len() == 1 {
+                descriptions.remove(0)
+            } else {
+                TargetFilter::Or {
+                    filters: descriptions,
+                }
+            };
+            TargetFilter::And {
+                filters: vec![population, qualifier],
+            }
+        }
+    };
+    Ok((rest, QuantityRef::ObjectCount { filter }))
+}
+
+/// CR 400.1: "in exile" / "in your <zone>" — one leg of an owned-cards zone list.
+fn parse_owned_zone_phrase(input: &str) -> OracleResult<'_, Zone> {
+    preceded(
+        tag("in "),
+        alt((
+            value(Zone::Exile, tag("exile")),
+            map(preceded(tag("your "), parse_zone_ref_singular), |zone| {
+                zone.zone()
+            }),
+        )),
+    )
+    .parse(input)
+}
+
+/// CR 205.2a + CR 715.2a: One item of a card description list — "an instant
+/// card" or "a card <relative clause>" ("a card that has an Adventure"). The
+/// relative clause reads through the shared `parse_that_clause_suffix`
+/// property authority.
+fn parse_card_description(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (rest, _) = parse_article(input)?;
+    alt((
+        map(terminated(parse_type_filter_word, tag(" card")), |tf| {
+            TargetFilter::Typed(TypedFilter::new(tf))
+        }),
+        parse_card_with_relative_clause,
+    ))
+    .parse(rest)
+}
+
+/// CR 715.2a: "card <relative clause>" ("card that has an Adventure").
+fn parse_card_with_relative_clause(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (after_card, _) = tag("card").parse(input)?;
+    // The shared property authority reads lowercase text; an ASCII fold keeps
+    // byte offsets aligned with the original-case remainder.
+    let (properties, consumed) = crate::parser::oracle_target::parse_that_clause_suffix(
+        &after_card.to_ascii_lowercase(),
+        None,
+    )
+    .ok_or_else(|| oracle_err(after_card))?;
+    Ok((
+        &after_card[consumed..],
+        TargetFilter::Typed(TypedFilter::card().properties(properties)),
+    ))
+}
+
 fn parse_for_each_clause_ref_with_they_controller<'a>(
     input: &'a str,
     antecedents: &PlayerAntecedents,
@@ -5642,7 +5855,12 @@ fn parse_for_each_clause_ref_with_they_controller<'a>(
                 parse_distinct_card_types_among,
                 parse_shared_card_types_with,
             )),
-            parse_foretold_cards_owned_in_exile,
+            // CR 108.3: owned-card populations; nested to keep the outer `alt`
+            // within nom's tuple arity (21 items).
+            alt((
+                parse_foretold_cards_owned_in_exile,
+                parse_for_each_owned_cards_in_zones,
+            )),
             parse_zone_card_count,
             parse_for_each_attached_to_source,
             // CR 201.2: "for each differently named <type>" — distinct-by-name

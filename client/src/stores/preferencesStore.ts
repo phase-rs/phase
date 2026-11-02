@@ -326,6 +326,7 @@ function buildDefaultPreferences(): PreferencesState {
     draftDoubleClickConfirmPick: true,
     cardPreviewHoverDelayMs: 0,
     showCardPreviewFooter: true,
+    showOwnerPrintings: true,
     stackDockSide: "right",
     logDockSide: "right",
     opponentHudDensity: "comfortable",
@@ -442,6 +443,8 @@ interface PreferencesState {
   /** Whether desktop hover previews show the informational footer beneath the
    *  card art (name, legal activated abilities, and keyboard hints). */
   showCardPreviewFooter: boolean;
+  /** The viewer's display choice, not an owner's submitted printing. */
+  showOwnerPrintings: boolean;
   /** Screen edge the stack panel docks to and collapses toward. */
   stackDockSide: StackDockSide;
   /** Screen edge the game-log panel docks to. */
@@ -548,6 +551,7 @@ interface PreferencesActions {
   setDraftDoubleClickConfirmPick: (enabled: boolean) => void;
   setCardPreviewHoverDelayMs: (ms: number) => void;
   setShowCardPreviewFooter: (show: boolean) => void;
+  setShowOwnerPrintings: (show: boolean) => void;
   setAiSeatDifficulty: (index: number, difficulty: AIDifficulty) => void;
   setAiSeatDeckId: (index: number, id: AiDeckSelection) => void;
   /** Grow or shrink `aiSeats` to `count` slots. New slots inherit defaults;
@@ -729,6 +733,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
           ),
         }),
       setShowCardPreviewFooter: (show) => set({ showCardPreviewFooter: show }),
+      setShowOwnerPrintings: (show) => set({ showOwnerPrintings: show }),
       setAiSeatDifficulty: (index, difficulty) =>
         set((state) => {
           if (index < 0 || index >= state.aiSeats.length) return state;
@@ -881,7 +886,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
     }),
     {
       name: "phase-preferences",
-      version: 40,
+      version: 41,
       // v0 → v1: flat aiDifficulty + aiDeckName become aiSeats[0].
       // v1 → v2: discrete animationSpeed/combatPacing enums become numeric
       //          animationSpeedMultiplier/combatPacingMultiplier.
@@ -977,10 +982,12 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       // v38 → v39: Add humanPoolSelection/aiPoolSelection. Absent keys fall
       //          through the shallow merge to include-all; present-but-malformed
       //          blobs normalize below (and in `merge` for current-version blobs).
-      // v39 → v40: iOS devices and Android phones default to "classic" card animations.
-      //          Their stores persisted v36's "webgl" default, which almost no
-      //          one chose, so they move to "classic" once; picking New again
-      //          afterwards sticks.
+      // v39 → v40: iOS devices and Android phones default to "classic" card
+      //          animations. Their stores persisted v36's "webgl" default,
+      //          which almost no one chose, so they move to "classic" once;
+      //          picking New again afterwards sticks.
+      // v40 → v41: Add showOwnerPrintings; absent fields default to true via
+      //          the shallow merge, while a saved false remains authoritative.
       migrate: (persisted: unknown, version: number) => {
         if (!persisted || typeof persisted !== "object") return persisted;
         let migrated = persisted as Record<string, unknown>;

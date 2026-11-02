@@ -16,9 +16,7 @@ use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::primitives::parse_keyword_name;
 use super::super::oracle_nom::target::controller_phrase_among;
 use super::super::oracle_target::{parse_target, parse_target_with_ctx, parse_type_phrase_folding};
-use super::super::oracle_util::{
-    contains_possessive, parse_count_expr, parse_ordinal, parse_subtype, TextPair,
-};
+use super::super::oracle_util::{contains_possessive, parse_count_expr, parse_subtype, TextPair};
 use super::imperative::CHOOSER_DOMAIN_CONTROLLERS;
 use super::{apply_where_x_to_filter, release_iteration_destination, strip_trailing_where_x};
 use crate::parser::oracle_ir::ast::*;
@@ -276,19 +274,9 @@ fn parse_search_result_library_position_restatement(
     .parse(input)?;
     alt((
         value(LibraryPosition::Top, tag("on top")),
-        map_opt(
-            terminated(
-                take_until::<_, _, OracleError<'_>>(" from the top"),
-                tag(" from the top"),
-            ),
-            |ordinal_text| {
-                parse_ordinal(ordinal_text).and_then(|(n, rest)| {
-                    rest.trim()
-                        .is_empty()
-                        .then_some(LibraryPosition::NthFromTop { n })
-                })
-            },
-        ),
+        map(nom_primitives::parse_nth_from_top, |n| {
+            LibraryPosition::NthFromTop { n }
+        }),
     ))
     .parse(input)
 }
@@ -9122,11 +9110,15 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
             })
         }
         // "put the rest on the bottom" / "put those cards into your graveyard"
-        // after Dig — sets rest_destination on the preceding Dig effect.
+        // after Dig — sets rest_destination on the preceding Dig effect. A move
+        // of the revealed cards onto the battlefield is not a rest pile (its
+        // destination has no rest-pile reading), so it parses as its own
+        // instruction (Game Preserve: "put those cards onto the battlefield").
         Effect::Dig { .. }
-            if nom_primitives::scan_contains(&lower, "put them back")
+            if (nom_primitives::scan_contains(&lower, "put them back")
                 || nom_primitives::scan_contains(&lower, "put the rest")
-                || nom_primitives::scan_contains(&lower, "put those cards") =>
+                || nom_primitives::scan_contains(&lower, "put those cards"))
+                && !nom_primitives::scan_contains(&lower, "onto the battlefield") =>
         {
             let destination = if nom_primitives::scan_contains(&lower, "into your graveyard")
                 || nom_primitives::scan_contains(&lower, "into their graveyard")
@@ -9858,7 +9850,7 @@ pub(super) fn source_token_toughness_value() -> PtValue {
     })
 }
 
-pub(super) fn parse_token_source_power_toughness_followup(
+pub(crate) fn parse_token_source_power_toughness_followup(
     text: &str,
 ) -> Option<(PtValue, PtValue)> {
     let lower = text.trim().to_ascii_lowercase();
