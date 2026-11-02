@@ -11284,11 +11284,12 @@ fn self_return_origin_zone_tracking_follows_optional_and_otherwise_links() {
     assert_eq!(origin_of(root.sub_ability.as_deref()), Some(Zone::Exile));
 
     // An explicit origin naming another zone is not a return of the source
-    // from where it is, so the walk leaves it as parsed.
+    // from where it is, so the walk leaves it as parsed and stops tracking.
     let mut root = self_move(Zone::Hand);
     if let Effect::ChangeZone { origin, .. } = root.effect.as_mut() {
         *origin = Some(Zone::Exile);
     }
+    root.sub_ability = Some(Box::new(self_move(Zone::Battlefield)));
     stamp_self_return_origin_in_ability(&mut root, Zone::Graveyard);
     assert!(matches!(
         root.effect.as_ref(),
@@ -11298,6 +11299,21 @@ fn self_return_origin_zone_tracking_follows_optional_and_otherwise_links() {
             ..
         }
     ));
+    assert_eq!(origin_of(root.sub_ability.as_deref()), None);
+
+    // Another zone-moving instruction naming the source (here a bounce) moves
+    // it somewhere the walk does not model, so a later return is unstamped.
+    let mut root = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Bounce {
+            target: TargetFilter::SelfRef,
+            destination: None,
+            selection: BounceSelection::Targeted,
+        },
+    );
+    root.sub_ability = Some(Box::new(self_move(Zone::Battlefield)));
+    stamp_self_return_origin_in_ability(&mut root, Zone::Graveyard);
+    assert_eq!(origin_of(root.sub_ability.as_deref()), None);
 
     // A move into a hidden zone ends the walk (CR 400.7j: public zones only).
     let mut root = self_move(Zone::Library);
@@ -39926,7 +39942,7 @@ fn stack_object_target_is_a_chosen_object_boundary_for_the_event_source_lift() {
 /// word is left off: `parse_trigger_lines` does not strip it (the full Oracle
 /// pipeline does), and with it the line lowers without the lift.
 #[test]
-fn hook_horror_dying_card_stays_lifted_to_the_trigger_event() {
+fn hook_horror_dying_card_returns_as_self_from_its_graveyard() {
     let triggers = parse_trigger_lines(
         "When Hook Horror dies, it perpetually gets -1/-1. Then if that card's toughness is 1 or greater, return it to the battlefield under its owner's control.",
         "Hook Horror",
@@ -39949,7 +39965,7 @@ fn hook_horror_dying_card_stays_lifted_to_the_trigger_event() {
                 ..
             }
         ),
-        "\"return it\" names the dying card, found in the graveyard the dies event put it in          (CR 603.6 self-return stamp), got {:?}",
+        "\"return it\" names the dying card in the graveyard the dies event put it in, got {:?}",
         ret.effect
     );
 }

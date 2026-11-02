@@ -461,8 +461,8 @@ enum SourceMove {
 /// instruction that hands a chosen or newly produced object to the next one
 /// (`introduces_chosen_object_target`, CR 608.2c): a later return then names
 /// that object, never the source (Gorex, the Tombshell; Wildgrove Summoner).
-/// A delayed trigger's payload observes its own later event (CR 603.7c), so
-/// the walk does not enter it.
+/// The walk does not enter a delayed trigger's payload, which resolves at a
+/// later time (CR 603.7a + CR 603.7b).
 fn stamp_self_return_origin_in_ability(ability: &mut AbilityDefinition, origin: Zone) {
     for mode in &mut ability.mode_abilities {
         stamp_self_return_origin_in_ability(mode, origin);
@@ -512,18 +512,23 @@ fn stamp_self_return_origin_in_effect(effect: &mut Effect, here: Option<Zone>) -
             TargetFilter::SelfRef | TargetFilter::TriggeringSource
         ) =>
         {
-            // An explicit origin naming another zone is not a return of the
-            // source from where it is; leave it as parsed.
+            // An explicit origin naming another zone is not a move of the
+            // source from where it is; leave it as parsed, and stop tracking.
+            if here.is_some_and(|here| origin.is_some_and(|zone| zone != here)) {
+                return SourceMove::Untracked;
+            }
             if let (Some(here), Zone::Battlefield | Zone::Hand) = (here, *destination) {
-                if origin.is_none_or(|zone| zone == here) {
-                    *origin = Some(here);
-                    *target = TargetFilter::SelfRef;
-                }
+                *origin = Some(here);
+                *target = TargetFilter::SelfRef;
             }
             SourceMove::To(*destination)
         }
-        // CR 603.7c: a delayed trigger observes its own later event. Its
-        // payload cannot inherit the enclosing trigger's source or origin.
+        // CR 603.7a + CR 603.7b: a delayed trigger's payload resolves at a
+        // later time. An event-based one binds the object of its own new event,
+        // not the enclosing trigger's source; a phase-based one ("at the
+        // beginning of the next end step, return it") is deliberately left
+        // unstamped, because where the source will be then is unknown here
+        // (CR 603.7c governs it as it resolves).
         Effect::CreateDelayedTrigger { .. } => SourceMove::Stays,
         Effect::ChooseOneOf { branches, .. } => {
             if let Some(here) = here {
@@ -534,8 +539,56 @@ fn stamp_self_return_origin_in_effect(effect: &mut Effect, here: Option<Zone>) -
             // The chosen branch may have moved the source.
             SourceMove::Untracked
         }
-        _ => SourceMove::Stays,
+        // Any other zone-moving instruction that names the source moves it
+        // somewhere this walk does not model (CR 400.7).
+        _ => {
+            if moves_named_object(effect) && names_zone_change_source(effect) {
+                SourceMove::Untracked
+            } else {
+                SourceMove::Stays
+            }
+        }
     }
+}
+
+/// Whether an instruction other than `ChangeZone` moves the object(s) it names
+/// to another zone (CR 400.7): destroying or sacrificing it, bouncing it,
+/// putting it into a library, discarding it, casting it, or turning it into a
+/// different kind of object.
+fn moves_named_object(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::Destroy { .. }
+            | Effect::DestroyAll { .. }
+            | Effect::Sacrifice { .. }
+            | Effect::ChangeZoneAll { .. }
+            | Effect::Bounce { .. }
+            | Effect::BounceAll { .. }
+            | Effect::Discard { .. }
+            | Effect::DiscardCard { .. }
+            | Effect::ReturnAsAura { .. }
+            | Effect::PutAtLibraryPosition { .. }
+            | Effect::PutOnTopOrBottom { .. }
+            | Effect::Meld { .. }
+            | Effect::ExileHaunting { .. }
+            | Effect::HideawayConceal { .. }
+            | Effect::ExileFaceDownPile { .. }
+            | Effect::CastFromZone { .. }
+            | Effect::Manifest { .. }
+            | Effect::Cloak { .. }
+    )
+}
+
+/// Whether any target slot of `effect` names the trigger's zone-change source.
+fn names_zone_change_source(effect: &mut Effect) -> bool {
+    let mut names = false;
+    crate::parser::oracle_effect::each_target_filter_mut(effect, &mut |filter| {
+        names |= matches!(
+            filter,
+            TargetFilter::SelfRef | TargetFilter::TriggeringSource
+        );
+    });
+    names
 }
 
 /// CR 107.3a + CR 107.3i + CR 601.2f + CR 603.2: In an ETB trigger on a spell
