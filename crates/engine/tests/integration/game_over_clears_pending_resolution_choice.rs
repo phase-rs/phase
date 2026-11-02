@@ -151,6 +151,12 @@ fn assert_no_parked_resolution_work(state: &GameState) {
             "pending_liminal_entry_resume",
             state.pending_liminal_entry_resume.is_some(),
         ),
+        ("liminal_entries", !state.liminal_entries.is_empty()),
+        ("deferred_triggers", !state.deferred_triggers.is_empty()),
+        (
+            "pending_trigger_order",
+            state.pending_trigger_order.is_some(),
+        ),
         ("payment_transaction", state.payment_transaction.is_some()),
         (
             "pending_player_scope_unless_payment",
@@ -1537,4 +1543,168 @@ fn conceding_during_a_reveal_ends_the_reveal() {
     assert_finished_game_retired_its_resolution(&runner, Some(P0));
     // CR 104.1: nothing moves.
     assert_eq!(runner.state().objects[&land].zone, Zone::Library);
+}
+
+const WAR_DOCTOR: &str = "Whenever one or more other permanents phase out and whenever one or more other cards are put into exile from anywhere, put a time counter on The War Doctor.\nWhenever The War Doctor attacks, it deals damage equal to the number of time counters on it to any target. If a creature dealt damage this way would die this turn, exile it instead.";
+const PAINTERS_SERVANT: &str = "As this creature enters, choose a color.\nAll cards that aren't on the battlefield, spells, and permanents are the chosen color in addition to their other colors.";
+const RITE_OF_REPLICATION: &str = "Kicker {5} (You may pay an additional {5} as you cast this spell.)\nCreate a token that's a copy of target creature. If this spell was kicked, create five of those tokens instead.";
+
+fn pact_with_a_deferred_exile_trigger() -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let doctor = scenario
+        .add_creature_from_oracle(P0, "The War Doctor", 3, 5, WAR_DOCTOR)
+        .id();
+    let only_card = scenario
+        .add_spell_to_library_top(P0, "Only Card", true)
+        .id();
+    let pact = scenario
+        .add_spell_to_hand_from_oracle(P0, "Tainted Pact", true, TAINTED_PACT)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 1,
+        })
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![
+            ManaUnit::new(ManaType::Black, ObjectId(0), false, vec![]),
+            ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]),
+        ],
+    );
+    let mut runner = scenario.build();
+    runner.cast(pact).commit();
+    pass_until_prompt(&mut runner);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::OptionalEffectChoice { .. }
+    ));
+    assert_eq!(runner.state().objects[&only_card].zone, Zone::Exile);
+    assert!(runner.state().players[0].library.is_empty());
+    assert!(carrier_is_live(&runner));
+    assert!(
+        !runner.state().deferred_triggers.is_empty(),
+        "reach guard: The War Doctor's exile trigger is queued inside Tainted Pact's resolution"
+    );
+    (runner, doctor, only_card)
+}
+
+/// CR 104.4b + CR 603.3: declining the only exiled card leaves a mandatory
+/// empty-library loop. No player is eliminated; The War Doctor's already queued
+/// trigger must retire even if Tainted Pact has finished its own final part.
+#[test]
+fn a_loop_draw_retires_a_survivors_deferred_trigger() {
+    let (mut runner, doctor, _) = pact_with_a_deferred_exile_trigger();
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: false })
+        .unwrap();
+    assert!(runner
+        .state()
+        .players
+        .iter()
+        .all(|player| !player.is_eliminated));
+    assert!(runner.state().objects[&doctor].counters.is_empty());
+    assert_finished_game_retired_its_resolution(&runner, None);
+}
+
+/// CR 603.3: accepting the card ends the repeat normally, so the same queued
+/// trigger remains available to resolve instead of being discarded.
+#[test]
+fn a_nonterminal_pact_keeps_its_deferred_trigger() {
+    let (mut runner, doctor, card) = pact_with_a_deferred_exile_trigger();
+    runner
+        .act(GameAction::DecideOptionalEffect { accept: true })
+        .unwrap();
+    assert!(runner.state().game_end.is_none());
+    assert_eq!(runner.state().objects[&card].zone, Zone::Hand);
+    assert!(
+        !runner.state().stack.is_empty(),
+        "the deferred trigger is published"
+    );
+    runner.advance_until_stack_empty();
+    assert_eq!(
+        runner.state().objects[&doctor]
+            .counters
+            .get(&engine::types::counter::CounterType::Time),
+        Some(&1)
+    );
+}
+
+fn copying_painter_at_its_entry_choice(players: u8) -> (GameRunner, ObjectId, ObjectId) {
+    let mut scenario = board(players);
+    let painter = scenario
+        .add_creature_from_oracle(P0, "Painter's Servant", 1, 3, PAINTERS_SERVANT)
+        .id();
+    let rite = scenario
+        .add_spell_to_hand_from_oracle(P0, "Rite of Replication", false, RITE_OF_REPLICATION)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+            generic: 2,
+        })
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        (0..4)
+            .map(|_| ManaUnit::new(ManaType::Blue, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner = scenario.build();
+    runner.cast(rite).target_object(painter).commit();
+    pass_until_prompt(&mut runner);
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::NamedChoice { .. }),
+        "got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(carrier_is_live(&runner));
+    assert!(runner.state().pending_liminal_entry_resume.is_some());
+    assert_eq!(runner.state().liminal_entries.len(), 1);
+    let entrant = *runner.state().liminal_entries.keys().next().unwrap();
+    assert!(
+        !runner.state().objects.contains_key(&entrant),
+        "the token is still a detached projection"
+    );
+    (runner, painter, entrant)
+}
+
+/// CR 104.1 + CR 614.12a: the game ends before Painter's Servant's token has
+/// chosen its color, so its detached projection and batch never enter.
+#[test]
+fn conceding_during_a_token_entry_retires_its_detached_projection() {
+    let (mut runner, painter, entrant) = copying_painter_at_its_entry_choice(2);
+    concede(&mut runner, P1);
+    assert!(!runner.state().objects.contains_key(&entrant));
+    assert_eq!(runner.state().objects[&painter].zone, Zone::Battlefield);
+    assert_finished_game_retired_its_resolution(&runner, Some(P0));
+}
+
+/// CR 800.4: a third player's departure does not discard the surviving
+/// controller's pending entry; choosing blue still creates exactly that token.
+#[test]
+fn a_nonterminal_concession_preserves_a_token_entry() {
+    let (mut runner, painter, entrant) = copying_painter_at_its_entry_choice(3);
+    concede(&mut runner, P2);
+    assert!(runner.state().game_end.is_none());
+    assert!(runner.state().liminal_entries.contains_key(&entrant));
+    let WaitingFor::NamedChoice { options, .. } = &runner.state().waiting_for else {
+        panic!("the color choice survives")
+    };
+    let blue = options
+        .iter()
+        .find(|option| option.eq_ignore_ascii_case("blue"))
+        .unwrap()
+        .clone();
+    runner
+        .act(GameAction::ChooseOption { choice: blue })
+        .unwrap();
+    assert!(runner.state().liminal_entries.is_empty());
+    assert!(runner.state().pending_liminal_entry_resume.is_none());
+    assert_eq!(runner.state().objects[&entrant].zone, Zone::Battlefield);
+    assert_eq!(
+        runner.state().objects[&entrant].chosen_color(),
+        Some(ManaColor::Blue)
+    );
+    assert_eq!(runner.state().objects[&painter].zone, Zone::Battlefield);
+    assert!(runner.state().game_end.is_none());
+    assert_round_trips(&runner);
 }
