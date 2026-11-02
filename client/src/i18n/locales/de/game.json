@@ -2403,6 +2403,7 @@
       "discard": "Wirf {{count}} {{cards}} ab",
       "exile": "Schicke {{count}} {{cards}} aus {{zone}} ins Exil",
       "haveOpponentGainLife": "Lass einen Gegner {{amount}} Lebenspunkte dazugewinnen",
+      "haveEachOtherPlayerGainLife": "Lass jeden anderen Spieler {{amount}} Lebenspunkte dazugewinnen",
       "reveal": "Zeige {{count}} {{cards}} aus {{zone}} vor"
     }
   },

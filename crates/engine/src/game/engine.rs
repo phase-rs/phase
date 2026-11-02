@@ -10236,8 +10236,9 @@ fn drain_pending_deferred_life_cost_resume(
                     }
                 }
                 if pending.prepaid_actual_mana_spent.is_some() {
-                    state.pending_cast = Some(pending);
-                    super::casting_costs::finalize_automatic_mana_payment(state, player, events)
+                    super::casting_costs::resume_cast_after_deferred_life_cost(
+                        state, player, *pending, events,
+                    )
                 } else {
                     super::casting_costs::finish_pending_cost_or_cast(
                         state, player, *pending, events,

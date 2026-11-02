@@ -622,6 +622,22 @@ describe("formatAbilityCost — recipient effect-cost", () => {
     expect(options.map((o) => o.label)).toEqual(["Have an opponent gain 3 life", "{2}{G}"]);
   });
 
+  it("labels the each-other-player life-gain cost", () => {
+    expect(
+      formatAbilityCost({
+        type: "EffectCost",
+        effect: {
+          type: "GainLife",
+          amount: { type: "Fixed", value: 6 },
+          player: {
+            type: "PlayerMatching",
+            player: { type: "AllExcept", exclude: { type: "Controller" } },
+          },
+        },
+      }),
+    ).toBe("Have each other player gain 6 life");
+  });
+
   it("keeps the generic label for effect-costs it does not describe", () => {
     expect(
       formatAbilityCost({

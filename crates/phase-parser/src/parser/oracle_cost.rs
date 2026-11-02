@@ -29,9 +29,9 @@ use super::oracle_util::CountWord;
 use super::oracle_util::TextPair;
 use crate::types::ability::{
     AbilityCost, AggregateFunction, AttachmentReferent, BeholdCostAction, ChoiceType, Comparator,
-    ControllerRef, CostReduction, CounterCostSelection, FilterProp, ObjectProperty, PlayerScope,
-    QuantityExpr, QuantityRef, SacrificeCost, SacrificeRequirement, TapCreaturesRequirement,
-    TargetFilter, TypedFilter, EXILE_COST_X, REMOVE_COUNTER_COST_ALL,
+    ControllerRef, CostReduction, CounterCostSelection, FilterProp, ObjectProperty, PlayerFilter,
+    PlayerRelation, PlayerScope, QuantityExpr, QuantityRef, SacrificeCost, SacrificeRequirement,
+    TapCreaturesRequirement, TargetFilter, TypedFilter, EXILE_COST_X, REMOVE_COUNTER_COST_ALL,
     REMOVE_COUNTER_COST_ANY_NUMBER, REMOVE_COUNTER_COST_X,
 };
 use crate::types::counter::parse_counter_match;
@@ -1368,27 +1368,45 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
         }
     }
 
-    // CR 118.3 + CR 119.3 + CR 115.10a: "have an opponent gain N life" — an effect
-    // performed as a cost (Invigorate). The opponent is CHOSEN by the payer during
-    // payment, not targeted. The effect fallback below happens to lower this text to
-    // the same value today, but only incidentally (via subject stripping); this arm
-    // is the explicit, tested authority for the recipient-cost shape that
-    // `AbilityCost::player_recipient_cost` recognizes.
-    if let Some((amount, _)) = nom_on_lower(text, &lower, |i| {
-        let (i, _) = (tag("have "), tag("an opponent ")).parse(i)?;
+    // CR 118.3 + CR 119.3 + CR 115.10a: "have an opponent gain N life" (Invigorate)
+    // and "have each other player gain N life" (Reverent Silence, Skyshroud Cutter)
+    // — an effect performed as a cost. "An opponent" is CHOSEN by the payer during
+    // payment, not targeted; "each other player" (CR 102.3: teammates included)
+    // reaches every player but the payer. This arm is the explicit, tested
+    // authority for the recipient-cost shapes `AbilityCost::player_recipient_cost`
+    // recognizes; the effect fallback below would lower "each other player" to a
+    // per-player scope the cost payer cannot perform.
+    if let Some(((recipient, amount), _)) = nom_on_lower(text, &lower, |i| {
+        let (i, recipient) = preceded(
+            tag("have "),
+            alt((
+                value(
+                    TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                    tag("an opponent "),
+                ),
+                value(
+                    TargetFilter::PlayerMatching {
+                        player: Box::new(PlayerFilter::AllExcept {
+                            exclude: Box::new(PlayerFilter::Controller),
+                            relation: PlayerRelation::All,
+                        }),
+                    },
+                    tag("each other player "),
+                ),
+            )),
+        )
+        .parse(i)?;
         let (i, _) = alt((tag("gains "), tag("gain "))).parse(i)?;
         let (i, amount) = nom_primitives::parse_number(i)?;
         let (i, _) = (tag(" life"), opt(tag(".")), eof).parse(i)?;
-        Ok((i, amount))
+        Ok((i, (recipient, amount)))
     }) {
         return AbilityCost::EffectCost {
             effect: Box::new(crate::types::ability::Effect::GainLife {
                 amount: QuantityExpr::Fixed {
                     value: amount as i32,
                 },
-                player: TargetFilter::Typed(
-                    TypedFilter::default().controller(ControllerRef::Opponent),
-                ),
+                player: recipient,
             }),
         };
     }
@@ -5957,13 +5975,60 @@ mod tests {
         }
     }
 
+    /// CR 118.3 + CR 119.3 + CR 102.3: "have each other player gain N life" is an
+    /// effect-as-cost reaching every player but the payer (Reverent Silence,
+    /// Skyshroud Cutter), teammates included.
+    #[test]
+    fn have_each_other_player_gain_life_cost_parses_to_each_recipient_cost() {
+        let expected = AbilityCost::EffectCost {
+            effect: Box::new(crate::types::ability::Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 6 },
+                player: TargetFilter::PlayerMatching {
+                    player: Box::new(PlayerFilter::AllExcept {
+                        exclude: Box::new(PlayerFilter::Controller),
+                        relation: PlayerRelation::All,
+                    }),
+                },
+            }),
+        };
+        for text in [
+            "have each other player gain 6 life",
+            "Have each other player gain 6 life.",
+            "have each other player gain six life",
+        ] {
+            assert_eq!(parse_oracle_cost(text), expected, "{text}");
+        }
+        match expected.player_recipient_cost() {
+            Some(crate::types::ability::PlayerRecipientCost::GainLife {
+                amount,
+                selection,
+                ..
+            }) => {
+                assert_eq!(amount, &QuantityExpr::Fixed { value: 6 });
+                assert_eq!(
+                    selection,
+                    crate::types::ability::CostRecipientSelection::Each
+                );
+            }
+            None => panic!("expected recipient cost, got {expected:?}"),
+        }
+    }
+
     /// Only the chosen-opponent gain shape is a recipient cost. The positive
     /// case is the reach-guard for every negative in this test.
     #[test]
     fn player_recipient_cost_recognizes_only_chosen_opponent_gain() {
         let cost = parse_oracle_cost("have an opponent gain 3 life");
         match cost.player_recipient_cost() {
-            Some(crate::types::ability::PlayerRecipientCost::GainLife { amount, recipient }) => {
+            Some(crate::types::ability::PlayerRecipientCost::GainLife {
+                amount,
+                recipient,
+                selection,
+            }) => {
+                assert_eq!(
+                    selection,
+                    crate::types::ability::CostRecipientSelection::ChosenOne
+                );
                 assert_eq!(amount, &QuantityExpr::Fixed { value: 3 });
                 assert_eq!(
                     recipient,

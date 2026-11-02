@@ -10056,6 +10056,52 @@ fn spell_casting_option_parses_invigorate_swapped_order_alternative_cost() {
     }
 }
 
+// CR 118.9 + CR 119.3: Reverent Silence prints the same swapped clause order with an
+// "each other player" recipient. The life gain is the alternative COST, recognized
+// by the cost payer's recipient view; the spell ability is only the destroy.
+#[test]
+fn spell_casting_option_parses_reverent_silence_each_other_player_alternative_cost() {
+    let r = parse(
+        "If you control a Forest, rather than pay this spell's mana cost, you may have each other player gain 6 life.
+Destroy all enchantments.",
+        "Reverent Silence",
+        &[],
+        &["Sorcery"],
+        &[],
+    );
+    assert_eq!(
+        r.casting_options.len(),
+        1,
+        "warnings: {:?}",
+        r.parse_warnings
+    );
+    let cost = r.casting_options[0]
+        .cost
+        .as_ref()
+        .expect("alternative cost");
+    match cost.player_recipient_cost() {
+        Some(crate::types::ability::PlayerRecipientCost::GainLife {
+            amount, selection, ..
+        }) => {
+            assert_eq!(
+                amount,
+                &crate::types::ability::QuantityExpr::Fixed { value: 6 }
+            );
+            assert_eq!(
+                selection,
+                crate::types::ability::CostRecipientSelection::Each
+            );
+        }
+        None => panic!("expected a recipient life-gain cost, got {cost:?}"),
+    }
+    assert_eq!(r.abilities.len(), 1);
+    assert!(
+        matches!(*r.abilities[0].effect, Effect::DestroyAll { .. }),
+        "{:?}",
+        r.abilities[0].effect
+    );
+}
+
 #[test]
 fn spell_casting_option_parses_composite_alternative_cost() {
     let r = parse(

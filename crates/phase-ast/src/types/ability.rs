@@ -18669,11 +18669,25 @@ impl<'de> serde::Deserialize<'de> for SacrificeCost {
 /// cost variant, so ability scanners and the wire format are unaffected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlayerRecipientCost<'a> {
-    /// CR 119.3: "have an opponent gain N life" (Invigorate).
+    /// CR 119.3: "have an opponent gain N life" (Invigorate) or "have each other
+    /// player gain N life" (Reverent Silence, Skyshroud Cutter).
     GainLife {
         amount: &'a QuantityExpr,
         recipient: &'a TargetFilter,
+        selection: CostRecipientSelection,
     },
+}
+
+/// CR 118.3 + CR 115.10a: how many of the players matching a recipient
+/// effect-cost's filter the instruction reaches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CostRecipientSelection {
+    /// "have an opponent ...": the payer chooses one matching player while paying
+    /// (CR 115.10a: a choice, not a target).
+    ChosenOne,
+    /// "have each other player ...": every matching player. CR 601.2h: partial
+    /// payments are not allowed, so every one of them must be able to perform it.
+    Each,
 }
 
 /// Cost to activate an ability.
@@ -19729,20 +19743,32 @@ impl AbilityCost {
         let AbilityCost::EffectCost { effect } = self else {
             return None;
         };
-        match effect.as_ref() {
-            Effect::GainLife {
-                amount,
-                player:
-                    recipient @ TargetFilter::Typed(TypedFilter {
-                        type_filters,
-                        controller: Some(ControllerRef::Opponent),
-                        properties,
-                    }),
-            } if type_filters.is_empty() && properties.is_empty() => {
-                Some(PlayerRecipientCost::GainLife { amount, recipient })
+        let Effect::GainLife {
+            amount,
+            player: recipient,
+        } = effect.as_ref()
+        else {
+            return None;
+        };
+        let selection = match recipient {
+            // "an opponent": one opponent, chosen by the payer.
+            TargetFilter::Typed(TypedFilter {
+                type_filters,
+                controller: Some(ControllerRef::Opponent),
+                properties,
+            }) if type_filters.is_empty() && properties.is_empty() => {
+                CostRecipientSelection::ChosenOne
             }
-            _ => None,
-        }
+            // "each <players>": every player the predicate names ("each other
+            // player" = `AllExcept { exclude: Controller }`).
+            TargetFilter::PlayerMatching { .. } => CostRecipientSelection::Each,
+            _ => return None,
+        };
+        Some(PlayerRecipientCost::GainLife {
+            amount,
+            recipient,
+            selection,
+        })
     }
 
     /// CR 118: Classify this cost into one or more `CostCategory` buckets.

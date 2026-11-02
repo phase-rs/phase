@@ -2370,6 +2370,7 @@
       "filteredCard": "{{types}}牌",
       "filteredCards": "{{types}}牌",
       "haveOpponentGainLife": "让一位对手获得{{amount}}点生命",
+      "haveEachOtherPlayerGainLife": "让其他每位玩家获得{{amount}}点生命",
       "nonType": "非{{type}}",
       "orSeparator": " 或 ",
       "reveal": "从{{zone}}展示{{count}}张{{cards}}",

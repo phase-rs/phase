@@ -2441,6 +2441,7 @@
       "discard": "{{count}}{{cards}}を捨てる",
       "exile": "{{zone}}から{{count}}{{cards}}を追放",
       "haveOpponentGainLife": "対戦相手1人に{{amount}}点のライフを得させる",
+      "haveEachOtherPlayerGainLife": "他の各プレイヤーに{{amount}}点のライフを得させる",
       "reveal": "{{zone}}から{{count}}{{cards}}を公開する"
     }
   },

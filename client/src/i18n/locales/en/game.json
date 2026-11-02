@@ -2441,6 +2441,7 @@
       "discard": "Discard {{count}} {{cards}}",
       "exile": "Exile {{count}} {{cards}} from {{zone}}",
       "haveOpponentGainLife": "Have an opponent gain {{amount}} life",
+      "haveEachOtherPlayerGainLife": "Have each other player gain {{amount}} life",
       "reveal": "Reveal {{count}} {{cards}} from {{zone}}"
     }
   },

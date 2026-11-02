@@ -442,8 +442,9 @@ fn v7cd_single_remaining_recipient_auto_binds_without_prompt() {
     assert_eq!(runner.life(P1), p1_before + 3);
 }
 
-/// V8a — CR 119.7 + CR 614.17b doctrine: an opponent who can't gain life is not
-/// a recipient, so the cost isn't offered. Q1 — needs manual verification.
+/// V8a — CR 119.7 + CR 614.17b (Invigorate ruling 2020-08-07): an opponent who
+/// can't gain life is not a recipient, so with no mana window the cost isn't
+/// offered.
 #[test]
 fn v8a_opponent_who_cant_gain_life_is_not_a_recipient() {
     // Positive control: same builder without the lock.
@@ -531,7 +532,7 @@ fn v8c_controller_relative_lock() {
     assert_eq!(runner.life(P1), p1_before + 3);
 }
 
-/// V8d — Q1-dependent forced binding in three-player: P2's Archfiend locks P0
+/// V8d — CR 119.7 forced binding in three-player: P2's Archfiend locks P0
 /// and P1, so P2 is the only recipient.
 #[test]
 fn v8d_three_player_lock_leaves_single_recipient() {
@@ -760,7 +761,7 @@ fn finish_resolution(runner: &mut GameRunner) {
     panic!("stack never emptied");
 }
 
-/// V8e — CR 119.7 (Q1 default, needs manual verification): three players, one
+/// V8e — CR 119.7 (Invigorate ruling 2020-08-07): three players, one
 /// opponent can't gain life → the other is the only recipient and binds
 /// automatically, with no prompt. Positive control without the lock prompts.
 #[test]
@@ -939,7 +940,7 @@ fn v2hg_b_gain_lands_in_the_opposing_team_total() {
 /// V2HG-c — CR 119.7 + CR 810.9g: a can't-gain lock on ONE opposing head locks
 /// the whole opposing team, so nobody can be chosen and the alternative cost is
 /// not offered (in free-for-all the same one-seat lock auto-binds the other seat,
-/// V8e). Positive control without the lock in the same test. Q1-dependent.
+/// V8e). Positive control without the lock in the same test.
 #[test]
 fn v2hg_c_lock_on_one_opposing_head_locks_the_team() {
     // Positive control: no lock → offered and prompted; Forest alone castable.
@@ -1227,4 +1228,267 @@ fn v13_v14_prompt_legal_actions_and_authority() {
     assert_eq!(recipients, [P1, P2].into_iter().collect());
     assert!(actions.contains(&GameAction::CancelCast), "{actions:?}");
     assert_eq!(authorized_submitter(runner.state()), Some(P0));
+}
+
+// ---------------------------------------------------------------------------
+// The cost is paid at the CR 601.2h payment, after the CR 601.2g mana window.
+// ---------------------------------------------------------------------------
+
+const SPHERE_OF_RESISTANCE: &str = "Spells cost {1} more to cast.";
+const ASHNODS_ALTAR: &str = "Sacrifice a creature: Add {C}{C}.";
+
+/// P0 controls a Forest, Ashnod's Altar and Archfiend of Despair (P1 can't gain
+/// life); Sphere of Resistance makes Invigorate's total cost through the
+/// alternative cost {1}, so a mana-ability window precedes its payment.
+fn taxed_archfiend_board() -> (GameRunner, ObjectId, ObjectId, ObjectId, ObjectId) {
+    let Setup {
+        mut scenario,
+        inv,
+        bear,
+    } = setup(GameScenario::new());
+    scenario.add_basic_land(P0, ManaColor::Green);
+    let altar = scenario
+        .add_artifact_from_oracle(P0, "Ashnod's Altar", ASHNODS_ALTAR)
+        .id();
+    let archfiend = scenario
+        .add_creature_from_oracle(P0, "Archfiend of Despair", 6, 6, ARCHFIEND_OF_DESPAIR)
+        .id();
+    scenario.add_artifact_from_oracle(P1, "Sphere of Resistance", SPHERE_OF_RESISTANCE);
+    (scenario.build(), inv, bear, altar, archfiend)
+}
+
+/// Cast Invigorate paying manually, accept the alternative cost, and stop at the
+/// mana-payment window. Panics if the alternative cost is not offered.
+fn to_manual_mana_window(runner: &mut GameRunner, inv: ObjectId, bear: ObjectId) {
+    let card_id = runner.state().objects[&inv].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: inv,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("cast should start");
+    let mut offered = false;
+    for _ in 0..8 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::TargetSelection { .. } => {
+                runner
+                    .act(GameAction::SelectTargets {
+                        targets: vec![TargetRef::Object(bear)],
+                    })
+                    .expect("target selection should succeed");
+            }
+            WaitingFor::OptionalCostChoice { .. } => {
+                offered = true;
+                runner
+                    .act(GameAction::DecideOptionalCost { pay: true })
+                    .expect("accept the alternative cost");
+            }
+            WaitingFor::ManaPayment { .. } => {
+                assert!(offered, "alternative cost must be offered");
+                return;
+            }
+            other => panic!("unexpected prompt before the mana window: {other:?}"),
+        }
+    }
+    panic!("mana-payment window never opened");
+}
+
+/// V19 — CR 601.2g + CR 601.2h + CR 119.7: with a cost increase the cast has a
+/// mana-ability window before the life-gain cost is paid, so Archfiend's lock on
+/// P1 does not hide the alternative cost. Sacrificing Archfiend to Ashnod's Altar
+/// in that window removes the lock; the commit then pays {1} and P1 gains 3. The
+/// gain is not made before the window. Control on the same board: paying the
+/// {1} with Archfiend still out leaves P1 unable to gain life, so the commit is
+/// refused and nothing is paid.
+#[test]
+fn v19_mana_ability_window_removes_the_lock_before_the_gain_is_paid() {
+    let (mut runner, inv, bear, altar, archfiend) = taxed_archfiend_board();
+    let p1_before = runner.life(P1);
+
+    to_manual_mana_window(&mut runner, inv, bear);
+    assert_eq!(
+        runner.life(P1),
+        p1_before,
+        "CR 601.2g: no cost is paid before the mana window"
+    );
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: altar,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("Ashnod's Altar is activatable during payment");
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![archfiend],
+        })
+        .expect("sacrificing Archfiend for mana is legal");
+    assert_eq!(runner.state().objects[&archfiend].zone, Zone::Graveyard);
+    runner
+        .act(GameAction::PassPriority)
+        .expect("the payment commits once the lock is gone");
+    assert_eq!(runner.life(P1), p1_before + 3, "P1 gains 3 at payment");
+    assert!(runner.state().stack.iter().any(|e| e.id == inv));
+    finish_resolution(&mut runner);
+    assert_eq!(power(&runner, bear), Some(6));
+
+    // Control: Archfiend stays; floating {C} pays the {1}, but P1 still can't
+    // gain life when the cost is paid, so the commit is refused.
+    let (mut runner, inv, bear, _altar, archfiend) = taxed_archfiend_board();
+    runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
+        ManaType::Colorless,
+        archfiend,
+        false,
+        vec![],
+    ));
+    let p1_before = runner.life(P1);
+    to_manual_mana_window(&mut runner, inv, bear);
+    assert!(
+        runner.act(GameAction::PassPriority).is_err(),
+        "CR 119.7: the life-gain cost can't be paid while P1 can't gain life"
+    );
+    assert_eq!(runner.life(P1), p1_before);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ManaPayment { .. }
+    ));
+}
+
+/// V20 — CR 601.2g + CR 601.2h: a cost increase alone (no lock) opens the mana
+/// window, and the gain is paid at the commit, not when the alternative cost is
+/// accepted.
+#[test]
+fn v20_taxed_cast_pays_the_gain_at_the_commit() {
+    let Setup {
+        mut scenario,
+        inv,
+        bear,
+    } = setup(GameScenario::new());
+    scenario.add_basic_land(P0, ManaColor::Green);
+    scenario.add_artifact_from_oracle(P1, "Sphere of Resistance", SPHERE_OF_RESISTANCE);
+    let mut runner = scenario.build();
+    runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
+        ManaType::Colorless,
+        inv,
+        false,
+        vec![],
+    ));
+    let p1_before = runner.life(P1);
+    to_manual_mana_window(&mut runner, inv, bear);
+    assert_eq!(runner.life(P1), p1_before, "not paid before the window");
+    runner.act(GameAction::PassPriority).expect("commit");
+    assert_eq!(runner.life(P1), p1_before + 3, "paid at the commit");
+    finish_resolution(&mut runner);
+    assert_eq!(power(&runner, bear), Some(6));
+}
+
+// ---------------------------------------------------------------------------
+// "Have each other player gain N life" (Reverent Silence, Skyshroud Cutter).
+// ---------------------------------------------------------------------------
+
+const REVERENT_SILENCE: &str = "If you control a Forest, rather than pay this spell's mana cost, you may have each other player gain 6 life.\nDestroy all enchantments.";
+const SKYSHROUD_CUTTER: &str = "If you control a Forest, rather than pay this spell's mana cost, you may have each other player gain 5 life.";
+const GLORIOUS_ANTHEM: &str = "Creatures you control get +1/+1.";
+
+/// Reverent Silence ({3}{G}) in P0's hand, a Forest for P0 and Glorious Anthem
+/// under P1.
+fn reverent_silence_board(scenario: &mut GameScenario) -> (ObjectId, ObjectId, ObjectId) {
+    scenario.at_phase(Phase::PreCombatMain);
+    let forest = scenario.add_basic_land(P0, ManaColor::Green);
+    let anthem = scenario
+        .add_enchantment_from_oracle(P1, "Glorious Anthem", GLORIOUS_ANTHEM)
+        .id();
+    let mut builder =
+        scenario.add_spell_to_hand_from_oracle(P0, "Reverent Silence", false, REVERENT_SILENCE);
+    builder.with_mana_cost(ManaCost::Cost {
+        generic: 3,
+        shards: vec![ManaCostShard::Green],
+    });
+    (builder.id(), forest, anthem)
+}
+
+/// V21 — CR 118.9 + CR 119.3: Reverent Silence's alternative cost has every other
+/// player gain 6 life before the spell resolves; no mana is spent and the
+/// enchantments are destroyed.
+#[test]
+fn v21_reverent_silence_each_other_player_gains_six() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    let (silence, forest, anthem) = reverent_silence_board(&mut scenario);
+    let mut runner = scenario.build();
+    let (p0_before, p1_before, p2_before) = (runner.life(P0), runner.life(P1), runner.life(P2));
+
+    let trace = drive_cast_until_on_stack(&mut runner, silence, silence, None);
+    assert!(trace.saw_optional_cost, "alternative cost must be offered");
+    assert_eq!(trace.recipient_prompt, None, "nobody is chosen");
+    assert_eq!(runner.life(P1), p1_before + 6, "P1 gains 6 at payment");
+    assert_eq!(runner.life(P2), p2_before + 6, "P2 gains 6 at payment");
+    assert_eq!(runner.life(P0), p0_before, "the caster gains nothing");
+    assert!(!tapped(&runner, forest), "no mana spent");
+
+    finish_resolution(&mut runner);
+    assert_eq!(runner.state().objects[&anthem].zone, Zone::Graveyard);
+}
+
+/// V22 — CR 119.7 + CR 601.2h: one other player who can't gain life makes the
+/// "each other player" cost unpayable (no partial payment), so with no mana window
+/// a Forest alone can't cast Reverent Silence. Positive control without the lock
+/// on the same builder.
+#[test]
+fn v22_reverent_silence_one_locked_player_makes_the_cost_unpayable() {
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    let (silence, _, _) = reverent_silence_board(&mut scenario);
+    let runner = scenario.build();
+    assert!(can_cast_object_now(runner.state(), P0, silence));
+
+    let mut scenario = GameScenario::new_n_player(3, 42);
+    let (silence, _, _) = reverent_silence_board(&mut scenario);
+    scenario.add_enchantment_from_oracle(P2, "Self Lifelock", SELF_LIFELOCK);
+    let runner = scenario.build();
+    assert!(!can_cast_object_now(runner.state(), P0, silence));
+}
+
+/// V23 — CR 102.3 + CR 810.9: "each other player" includes the caster's teammate
+/// in Two-Headed Giant. With shared team life, the opposing team gains 12 (two
+/// heads) and the caster's team gains 6 (the teammate).
+#[test]
+fn v23_reverent_silence_reaches_the_teammate_in_two_headed_giant() {
+    let mut scenario = GameScenario::new_with_format(FormatConfig::two_headed_giant(), 4, 42);
+    let (silence, _, _) = reverent_silence_board(&mut scenario);
+    let mut runner = scenario.build();
+    let (us_before, them_before) = (
+        team_life_total(runner.state(), P0),
+        team_life_total(runner.state(), P2),
+    );
+    let trace = drive_cast(&mut runner, silence, silence, true, None, None);
+    assert!(trace.saw_optional_cost);
+    assert_eq!(team_life_total(runner.state(), P0), us_before + 6);
+    assert_eq!(team_life_total(runner.state(), P2), them_before + 12);
+}
+
+/// V24 — CR 118.9 + CR 119.3: Skyshroud Cutter's alternative cost has the
+/// opponent gain 5 life, and the creature enters without mana spent.
+#[test]
+fn v24_skyshroud_cutter_each_other_player_gains_five() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let forest = scenario.add_basic_land(P0, ManaColor::Green);
+    let mut builder =
+        scenario.add_creature_to_hand_from_oracle(P0, "Skyshroud Cutter", 2, 2, SKYSHROUD_CUTTER);
+    builder.with_mana_cost(ManaCost::Cost {
+        generic: 3,
+        shards: vec![ManaCostShard::Green],
+    });
+    let cutter = builder.id();
+    let mut runner = scenario.build();
+    let (p0_before, p1_before) = (runner.life(P0), runner.life(P1));
+
+    let trace = drive_cast(&mut runner, cutter, cutter, true, None, None);
+    assert!(trace.saw_optional_cost, "alternative cost must be offered");
+    assert_eq!(runner.life(P1), p1_before + 5);
+    assert_eq!(runner.life(P0), p0_before);
+    assert!(!tapped(&runner, forest), "no mana spent");
+    assert_eq!(runner.state().objects[&cutter].zone, Zone::Battlefield);
 }
