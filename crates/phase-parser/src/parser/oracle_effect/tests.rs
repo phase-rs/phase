@@ -55401,21 +55401,6 @@ fn cast_from_among_the_cards_exiled_this_way_binds_to_exiled_by_source() {
 /// among the nonland cards exiled this way").
 #[test]
 fn cast_from_among_exiled_this_way_keeps_both_a_prefix_and_a_suffix_type_gate() {
-    fn type_leaves(filter: &TargetFilter, out: &mut Vec<TypeFilter>) {
-        fn flatten(tf: &TypeFilter, out: &mut Vec<TypeFilter>) {
-            match tf {
-                TypeFilter::AnyOf(types) => types.iter().for_each(|t| flatten(t, out)),
-                other => out.push(other.clone()),
-            }
-        }
-        match filter {
-            TargetFilter::Typed(tf) => tf.type_filters.iter().for_each(|t| flatten(t, out)),
-            TargetFilter::And { filters } | TargetFilter::Or { filters } => {
-                filters.iter().for_each(|f| type_leaves(f, out))
-            }
-            _ => {}
-        }
-    }
     let e = parse_effect(
         "cast any number of artifact spells from among the instant or sorcery cards exiled this way without paying their mana costs",
     );
@@ -55426,26 +55411,41 @@ fn cast_from_among_exiled_this_way_keeps_both_a_prefix_and_a_suffix_type_gate() 
         target.references_exiled_by_source(),
         "expected the ExiledBySource anaphor in {target:?}"
     );
-    let mut leaves = Vec::new();
-    type_leaves(&target, &mut leaves);
-    for gate in [
-        TypeFilter::Artifact,
-        TypeFilter::Instant,
-        TypeFilter::Sorcery,
-    ] {
-        assert!(
-            leaves.contains(&gate),
-            "expected the {gate:?} gate in {target:?}"
-        );
+    // Every type-filter conjunct of the intersected gate. A `TypedFilter`'s
+    // `type_filters` are conjunctive, and an `And` of typed legs is too; an
+    // `AnyOf` is ONE conjunct (a disjunction), so it is kept whole, never
+    // flattened — flattening would let separate `Instant` and `Sorcery`
+    // conjuncts (an unsatisfiable gate) pass for the printed "instant or sorcery".
+    fn type_conjuncts(filter: &TargetFilter, out: &mut Vec<TypeFilter>) {
+        match filter {
+            TargetFilter::Typed(tf) => out.extend(tf.type_filters.iter().cloned()),
+            TargetFilter::And { filters } => filters.iter().for_each(|f| type_conjuncts(f, out)),
+            _ => {}
+        }
     }
-    let TargetFilter::And { filters } = &target else {
+    let TargetFilter::And { .. } = &target else {
         panic!("the two gates intersect: expected an AND target, got {target:?}");
     };
+    let mut conjuncts = Vec::new();
+    type_conjuncts(&target, &mut conjuncts);
+    let is_instant_or_sorcery = |tf: &TypeFilter| {
+        matches!(tf, TypeFilter::AnyOf(types)
+            if types.len() == 2
+                && types.contains(&TypeFilter::Instant)
+                && types.contains(&TypeFilter::Sorcery))
+    };
+    assert_eq!(
+        conjuncts.len(),
+        2,
+        "exactly the prefix gate and the suffix gate: {target:?}"
+    );
     assert!(
-        filters
-            .iter()
-            .any(|f| matches!(f, TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Artifact))),
-        "the prefix gate is its own conjunct, not one disjunct: {target:?}"
+        conjuncts.contains(&TypeFilter::Artifact),
+        "the prefix gate Artifact is its own conjunct: {target:?}"
+    );
+    assert!(
+        conjuncts.iter().any(is_instant_or_sorcery),
+        "the suffix gate is a single AnyOf(Instant, Sorcery) conjunct: {target:?}"
     );
 }
 
