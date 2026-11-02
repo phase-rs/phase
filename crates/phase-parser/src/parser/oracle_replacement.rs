@@ -19335,9 +19335,13 @@ mod tests {
         }
     }
 
+    /// The card name the damage-substitution probes below are parsed under, so
+    /// their "Szadek" subject normalizes to `~`.
+    const SUBSTITUTION_PROBE: &str = "Szadek, Lord of Secrets";
+
     /// The substitute's first link, for the damage-substitution tests below.
     fn damage_substitute_counter_target(text: &str) -> Option<TargetFilter> {
-        let def = parse_replacement_line(text, "Substitution Probe")?;
+        let def = parse_replacement_line(text, SUBSTITUTION_PROBE)?;
         match &*def.execute?.effect {
             Effect::PutCounter { target, .. } => Some(target.clone()),
             _ => None,
@@ -19398,6 +19402,11 @@ mod tests {
              opponent controls, put that many -1/-1 counters on that creature instead.",
         )
         .is_some());
+        assert!(damage_substitute_counter_target(
+            "If Szadek would deal combat damage to a player, instead put that many \
+             +1/+1 counters on Szadek and that player mills that many cards.",
+        )
+        .is_some());
         for text in [
             // A fixed count is not the replaced amount.
             "If a source you control would deal noncombat damage to a creature an \
@@ -19416,7 +19425,7 @@ mod tests {
             "If Szadek would deal combat damage to a player, instead put that many \
              +1/+1 counters on Szadek and that player discards that many cards.",
         ] {
-            let def = parse_replacement_line(text, "Substitution Probe");
+            let def = parse_replacement_line(text, SUBSTITUTION_PROBE);
             assert!(
                 def.as_ref().is_none_or(|def| def.execute.is_none()),
                 "{text:?} must not claim a substitution, got {def:?}"
