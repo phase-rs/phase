@@ -229,6 +229,19 @@ fn petals_of_insight_accept_puts_cards_on_bottom_and_bounces_to_hand() {
         bottom_ids, reverse_order,
         "bottom of library must match the submitted order"
     );
+
+    // CR 701.20e: the look window ends with the placement it gated — nothing
+    // downstream may still read the finished peek once the cards have moved.
+    assert!(
+        runner.state().private_look_ids.is_empty(),
+        "look window must close after the bottom placement, got {:?}",
+        runner.state().private_look_ids
+    );
+    assert_eq!(
+        runner.state().private_look_player,
+        None,
+        "look window must close after the bottom placement"
+    );
 }
 
 /// CR 701.20e: while the bottom-order prompt is open, only the looking player
