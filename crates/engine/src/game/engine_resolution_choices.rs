@@ -15867,11 +15867,11 @@ mod random_result_resolution_context_tests {
     fn coin_keep_continuation_drain_preserves_its_settled_die_result() {
         let (mut state, source, _, mut ambient) = fixture(Boundary::Coin, gain(2));
         let coin = state.take_active_coin_flip_frame().unwrap().unwrap();
-        state
+        *state
             .active_ability_continuation_frame_mut()
             .unwrap()
             .pending
-            .chain = Box::new(ResolvedAbility::new(
+            .chain = ResolvedAbility::new(
             Effect::RollDie {
                 count: QuantityExpr::Fixed { value: 1 },
                 sides: 1,
@@ -15885,7 +15885,7 @@ mod random_result_resolution_context_tests {
             vec![],
             source,
             P0,
-        ));
+        );
         state.push_coin_flip_frame(coin);
         ambient.die_result = Some(11);
         install(&mut state, &ambient);
