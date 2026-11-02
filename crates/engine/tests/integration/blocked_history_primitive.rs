@@ -5,8 +5,8 @@
 //! which `prune_object_from_combat` empties per CR 506.4 the moment either
 //! creature leaves combat — exactly when a dies-trigger needs the answer. These
 //! tests drive the real engine (`GameScenario`, real `declare_blockers_for_player`
-//! / `place_blocking` / phase machinery), never hand-built `GameState` literals,
-//! so a reverted edit actually reaches them.
+//! / phase machinery), never hand-built `GameState` literals, so a reverted edit
+//! actually reaches them.
 
 use engine::game::combat::{AttackTarget, BlockHistoryPair};
 use engine::game::filter::{

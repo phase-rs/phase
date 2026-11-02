@@ -30,6 +30,7 @@ use engine::game::combat::{
     apply_resolved_combat_membership, AttackTarget, BlockHistoryPair, CombatParticipation,
     DamageAssignment, DamageTarget,
 };
+use engine::game::engine::EngineError;
 use engine::game::game_object::ObjectIncarnationRefExt;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::{ChosenAttribute, TargetRef};
@@ -38,7 +39,7 @@ use engine::types::card_type::CoreType;
 use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::GameState;
-use engine::types::game_state::{LayersDirty, WaitingFor};
+use engine::types::game_state::{CastPaymentMode, LayersDirty, WaitingFor};
 use engine::types::identifiers::{ObjectId, ObjectIncarnationRef, LEGACY_INCARNATION};
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -888,6 +889,18 @@ const DAZZLING_BEAUTY: &str = "Cast this spell only during the declare blockers 
 /// Verbatim Oracle text (Scryfall, 2026-07).
 const MIRROR_MATCH: &str = "Cast this spell only during the declare blockers step.\nFor each creature attacking you or a planeswalker you control, create a token that's a copy of that creature and that's blocking that creature. Exile those tokens at end of combat.";
 
+/// Verbatim Oracle text (MTGJSON, 2026-10). The block-history rows below read
+/// CR 509.4 through these printed cards.
+const SIZZLING_BARRAGE: &str =
+    "Sizzling Barrage deals 4 damage to target creature that blocked this turn.";
+const DEMONIC_STENCH: &str = "Each creature that blocked this turn gets -1/-1 until end of turn. (Then exile this card. You may cast the creature later from exile.)";
+const GIDEONS_TRIUMPH: &str = "Target opponent sacrifices a creature of their choice that attacked or blocked this turn. If you control a Gideon planeswalker, that player sacrifices two of those creatures of their choice instead.";
+const CATHEDRAL_MEMBRANE: &str = "({W/P} can be paid with either {W} or 2 life.)\nDefender\nWhen this creature dies during combat, it deals 6 damage to each creature it blocked this combat.";
+const ROLLING_STONES: &str = "Wall creatures can attack as though they didn't have defender.";
+const ABU_JAFAR: &str = "When this creature dies, destroy all creatures blocking or blocked by it. They can't be regenerated.";
+const MURDER: &str = "Destroy target creature.";
+const SHOCK: &str = "Shock deals 2 damage to any target.";
+
 /// Drive P0's attack into the declare-blockers step and hand priority to P1 so
 /// the defending player can cast during that step (CR 509).
 fn advance_to_declare_blockers_and_give_priority(runner: &mut GameRunner, caster: PlayerId) {
@@ -909,6 +922,186 @@ fn advance_to_declare_blockers_and_give_priority(runner: &mut GameRunner, caster
         acted.expect("combat advance action");
     }
     panic!("did not reach the declare-blockers step");
+}
+
+/// `advance_to_declare_blockers_and_give_priority` for a board with real blocks:
+/// `assignments` goes through `GameAction::DeclareBlockers` before priority is
+/// handed to `caster`. A board with no possible blocker has no declaration to
+/// make, so `assignments` is then empty and the prompt never appears.
+fn declare_blocks_and_give_priority(
+    runner: &mut GameRunner,
+    assignments: &[(ObjectId, ObjectId)],
+    caster: PlayerId,
+) {
+    for _ in 0..20 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::DeclareBlockers { .. } => {
+                runner
+                    .act(GameAction::DeclareBlockers {
+                        assignments: assignments.to_vec(),
+                    })
+                    .expect("the declared blocks are legal");
+            }
+            WaitingFor::Priority { .. } if runner.state().phase == Phase::DeclareBlockers => {
+                advance_to_declare_blockers_and_give_priority(runner, caster);
+                return;
+            }
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("priority pass should advance toward declare blockers");
+            }
+            other => panic!("unexpected waiting state before declare-blockers: {other:?}"),
+        }
+    }
+    panic!("did not reach the declare-blockers step");
+}
+
+/// P0 attacks P1 with `attackers`, P1 declares `assignments`, and P1's Mirror
+/// Match resolves in the declare blockers step. Priority then goes to `caster`.
+///
+/// Returns each attacker's copy token, in `attackers` order. Mirror Match copies
+/// every attacker, so an attacker with a declared blocker has a token as well.
+/// Every token is a reach guard for its caller: it is blocking, its attacker is
+/// blocked, and it was not among the declared blockers.
+fn resolve_mirror_match(
+    runner: &mut GameRunner,
+    mirror_match: ObjectId,
+    attackers: &[ObjectId],
+    assignments: &[(ObjectId, ObjectId)],
+    caster: PlayerId,
+) -> Vec<ObjectId> {
+    runner.advance_to_combat();
+    let attacks: Vec<_> = attackers
+        .iter()
+        .map(|attacker| (*attacker, AttackTarget::Player(P1)))
+        .collect();
+    runner
+        .declare_attackers(&attacks)
+        .expect("declare attackers");
+    declare_blocks_and_give_priority(runner, assignments, P1);
+    runner.cast(mirror_match).resolve();
+    runner.advance_until_stack_empty();
+    advance_to_declare_blockers_and_give_priority(runner, caster);
+
+    let state = runner.state();
+    let combat = state.combat.as_ref().expect("combat is live");
+    attackers
+        .iter()
+        .map(|attacker| {
+            let token = *combat
+                .blocker_assignments
+                .get(attacker)
+                .and_then(|blockers| blockers.last())
+                .expect("Mirror Match must put a copy token in as a blocker");
+            assert!(
+                assignments.iter().all(|(blocker, _)| *blocker != token),
+                "reach guard: the last blocker must be the token, not a declared blocker"
+            );
+            assert!(
+                combat
+                    .blocker_to_attacker
+                    .get(&token)
+                    .is_some_and(|blocked| blocked.contains(attacker)),
+                "CR 509.4: the token is \"blocking\" its attacker"
+            );
+            assert!(
+                attacker_entry(state, *attacker).is_some_and(|(_, _, blocked)| blocked),
+                "CR 509.3c: the token's attacker is a blocked creature"
+            );
+            token
+        })
+        .collect()
+}
+
+/// A cast submitted with no announced targets, for tests whose subject is the
+/// target prompt itself or the engine's refusal to open one.
+fn cast_action(state: &GameState, spell: ObjectId) -> GameAction {
+    GameAction::CastSpell {
+        object_id: spell,
+        card_id: state.objects[&spell].card_id,
+        targets: vec![],
+        payment_mode: CastPaymentMode::Auto,
+    }
+}
+
+/// CR 509.4: a creature put onto the battlefield blocking is "blocking" but never
+/// "blocked", so no history ledger names it. Each ledger has its own assertion,
+/// and each pair ledger is read by blocker object id, so an entry under any
+/// attacker or incarnation fails.
+fn assert_absent_from_block_history(state: &GameState, blocker: ObjectId, when: &str) {
+    assert!(
+        !state.creatures_blocked_this_turn.contains(&blocker),
+        "CR 509.4 ({when}): the per-turn blocked set must not name it"
+    );
+    assert!(
+        !state
+            .creature_blocked_attackers_this_turn
+            .iter()
+            .any(|pair| pair.blocker.object_id == blocker),
+        "CR 509.4 ({when}): the turn-scoped block history must not name it"
+    );
+    assert!(
+        !state
+            .combat
+            .as_ref()
+            .expect("combat is live")
+            .creature_blocked_attackers_this_combat
+            .iter()
+            .any(|pair| pair.blocker.object_id == blocker),
+        "CR 509.4 ({when}): the combat-scoped block history must not name it"
+    );
+}
+
+/// CR 509.1g + CR 400.7: a declared block is in all three history ledgers, with
+/// both sides pinned to their live incarnations.
+fn assert_declared_block_history(
+    state: &GameState,
+    blocker: ObjectId,
+    attacker: ObjectId,
+    when: &str,
+) {
+    let pair = BlockHistoryPair {
+        blocker: ObjectIncarnationRef::from_object(&state.objects[&blocker]),
+        attacker: ObjectIncarnationRef::from_object(&state.objects[&attacker]),
+    };
+    assert!(
+        state.creatures_blocked_this_turn.contains(&blocker),
+        "CR 509.1g ({when}): the per-turn blocked set"
+    );
+    assert!(
+        state.creature_blocked_attackers_this_turn.contains(&pair),
+        "CR 509.1g ({when}): the turn-scoped block history"
+    );
+    assert!(
+        state
+            .combat
+            .as_ref()
+            .expect("combat is live")
+            .creature_blocked_attackers_this_combat
+            .contains(&pair),
+        "CR 509.1g ({when}): the combat-scoped block history"
+    );
+}
+
+fn on_battlefield(state: &GameState, object: ObjectId) -> bool {
+    state
+        .objects
+        .get(&object)
+        .is_some_and(|live| live.zone == Zone::Battlefield)
+}
+
+/// The stack drained and no prompt is pending, so the resolution completed.
+fn assert_resolution_completed(runner: &GameRunner) {
+    assert!(
+        runner.state().stack.is_empty(),
+        "the stack must have drained"
+    );
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::Priority { .. }),
+        "no prompt may remain, got {:?}",
+        runner.state().waiting_for
+    );
 }
 
 /// CR 509.1h via `mark_attacker_blocked`: an attacker made blocked purely by
@@ -992,17 +1185,18 @@ fn become_blocked_journals_a_mark_blocked_edit_and_replays_it() {
     );
 }
 
-/// CR 509.1g + CR 506.3e via `place_blocking`: a token put onto the battlefield
-/// already blocking. Driven through a real Mirror Match cast.
+/// CR 509.4 via `place_blocking`: a token put onto the battlefield already
+/// blocking. Driven through a real Mirror Match cast.
 ///
-/// L3: the authority writes the attacker's sticky `blocked` bit, the blocker
-/// maps, the per-turn blocked set, and the block-history ledgers. Each is
-/// asserted after replay, individually.
+/// L3: the authority writes the attacker's sticky `blocked` bit and the blocker
+/// maps, and no history ledger. Each write is asserted after replay, individually.
 #[test]
 fn place_blocking_journals_a_block_edit_and_replays_every_write() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let attacker = scenario.add_creature(P0, "Charging Ox", 3, 3).id();
+    let second_attacker = scenario.add_creature(P0, "Second Attacker", 2, 2).id();
+    let declared = scenario.add_creature(P1, "Declared Blocker", 2, 2).id();
     let spell = scenario
         .add_spell_to_hand_from_oracle(P1, "Mirror Match", true, MIRROR_MATCH)
         .id();
@@ -1010,9 +1204,12 @@ fn place_blocking_journals_a_block_edit_and_replays_every_write() {
     let mut runner = scenario.build();
     runner.advance_to_combat();
     runner
-        .declare_attackers(&[(attacker, AttackTarget::Player(P1))])
+        .declare_attackers(&[
+            (attacker, AttackTarget::Player(P1)),
+            (second_attacker, AttackTarget::Player(P1)),
+        ])
         .expect("declare attackers");
-    advance_to_declare_blockers_and_give_priority(&mut runner, P1);
+    declare_blocks_and_give_priority(&mut runner, &[(declared, second_attacker)], P1);
 
     let journal_start = runner.state().resolved_rules_journal.entries().len();
     runner.cast(spell).resolve();
@@ -1058,30 +1255,29 @@ fn place_blocking_journals_a_block_edit_and_replays_every_write() {
         "CR 509.1h: the token is the FIRST blocker, so the sticky bit was clear"
     );
 
-    // CR 509.1g + CR 400.7: the live path (`place_blocking`, E6) must already
-    // have written the block-history ledgers before the replay clone is taken
-    // — without this pre-replay guard, deleting the live write is invisible
-    // once the clone below re-derives the same entries from an absent state.
-    let attacker_ref =
-        ObjectIncarnationRef::from_object(state.objects.get(&attacker).expect("attacker is live"));
-    let token_ref =
-        ObjectIncarnationRef::from_object(state.objects.get(&token).expect("token is live"));
-    let recorded_pair = BlockHistoryPair {
-        blocker: token_ref,
-        attacker: attacker_ref,
-    };
-    assert!(
-        combat
-            .creature_blocked_attackers_this_combat
-            .contains(&recorded_pair),
-        "CR 509.1g: the live combat-scoped block-history ledger"
+    // Same-attacker hostile case: the declared block and this attacker's own
+    // copy token share one attacker, and only the declaration is history.
+    let second_blockers = combat
+        .blocker_assignments
+        .get(&second_attacker)
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        second_blockers.len(),
+        2,
+        "reach guard: the declared blocker and the second attacker's copy token"
     );
-    assert!(
-        state
-            .creature_blocked_attackers_this_turn
-            .contains(&recorded_pair),
-        "CR 509.1g: the live turn-scoped block-history ledger"
+    assert_eq!(
+        second_blockers[0], declared,
+        "reach guard: the declaration precedes the token"
     );
+    let second_token = second_blockers[1];
+
+    // CR 509.4: asserted before the replay clone, so a live ledger write and a
+    // replay ledger write each fail at their own assertion.
+    assert_absent_from_block_history(state, token, "live");
+    assert_absent_from_block_history(state, second_token, "live");
+    assert_declared_block_history(state, declared, second_attacker, "live");
 
     // Replay exactness: undo only this family's edit, then reinstall it.
     let mut replay = state.clone();
@@ -1093,14 +1289,7 @@ fn place_blocking_journals_a_block_edit_and_replays_every_write() {
                 info.blocked = false;
             }
         }
-        combat
-            .creature_blocked_attackers_this_combat
-            .retain(|pair| pair.blocker.object_id != token);
     }
-    replay.creatures_blocked_this_turn.remove(&token);
-    replay
-        .creature_blocked_attackers_this_turn
-        .retain(|pair| pair.blocker.object_id != token);
 
     apply_resolved_combat_membership(&mut replay, &commands[0])
         .expect("the recorded block must replay against its predecessor");
@@ -1127,20 +1316,366 @@ fn place_blocking_journals_a_block_edit_and_replays_every_write() {
         Some(&vec![token]),
         "CR 509.1g: the attacker -> blocker forward assignment"
     );
+    assert_absent_from_block_history(&replay, token, "replayed");
+    assert_absent_from_block_history(&replay, second_token, "replayed");
+    assert_declared_block_history(&replay, declared, second_attacker, "replayed");
+}
+
+/// CR 509.4: Sizzling Barrage's "target creature that blocked this turn" reads
+/// declared blockers only. A token blocking the same attacker as a declared
+/// blocker is no more legal than one blocking alone.
+///
+/// The prompt is the subject: with one legal target left, the cast driver would
+/// settle on it and report success, so a `.target_object(token)` negative proves
+/// nothing.
+#[test]
+fn sizzling_barrage_cannot_target_a_token_that_entered_blocking() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let first = scenario.add_creature(P0, "Charging Ox", 3, 3).id();
+    let second = scenario.add_creature(P0, "Second Attacker", 2, 2).id();
+    let third = scenario.add_creature(P0, "Third Attacker", 2, 2).id();
+    let declared_one = scenario.add_creature(P1, "Declared One", 2, 2).id();
+    let declared_two = scenario.add_creature(P1, "Declared Two", 2, 2).id();
+    let bystander = scenario.add_creature(P1, "Bystander", 2, 2).id();
+    let mirror_match = scenario
+        .add_spell_to_hand_from_oracle(P1, "Mirror Match", true, MIRROR_MATCH)
+        .id();
+    let barrage = scenario
+        .add_spell_to_hand_from_oracle(P1, "Sizzling Barrage", true, SIZZLING_BARRAGE)
+        .id();
+    let mut runner = scenario.build();
+
+    let tokens = resolve_mirror_match(
+        &mut runner,
+        mirror_match,
+        &[first, second, third],
+        &[(declared_one, second), (declared_two, third)],
+        P1,
+    );
+
+    let cast = cast_action(runner.state(), barrage);
+    runner
+        .act(cast)
+        .expect("declared blockers are legal targets");
+    let WaitingFor::TargetSelection { target_slots, .. } = &runner.state().waiting_for else {
+        panic!(
+            "two legal targets must open the prompt, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    let legal = &target_slots[0].legal_targets;
+    assert_eq!(legal.len(), 2, "only the declared blockers: {legal:?}");
+    assert!(legal.contains(&TargetRef::Object(declared_one)));
+    assert!(legal.contains(&TargetRef::Object(declared_two)));
+    for token in &tokens {
+        assert!(
+            !legal.contains(&TargetRef::Object(*token)),
+            "CR 509.4: a token that entered blocking never \"blocked\""
+        );
+    }
     assert!(
-        replay.creatures_blocked_this_turn.contains(&token),
-        "CR 509.1a: the per-turn blocked-this-turn set on GameState"
+        !legal.contains(&TargetRef::Object(bystander)),
+        "a creature that took no part in combat is not a target"
+    );
+
+    // CR 509.1g: the declared blocker did block, and 4 damage kills the 2/2.
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Object(declared_one)),
+        })
+        .expect("a declared blocker is a legal target");
+    runner.advance_until_stack_empty();
+    assert_resolution_completed(&runner);
+    assert_eq!(runner.state().objects[&declared_one].zone, Zone::Graveyard);
+}
+
+/// CR 509.4: with only a token blocking, nothing "blocked this turn", so the
+/// spell cannot be cast at all, even though the token is blocking.
+#[test]
+fn sizzling_barrage_has_no_target_when_only_a_token_entered_blocking() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker = scenario.add_creature(P0, "Charging Ox", 3, 3).id();
+    let mirror_match = scenario
+        .add_spell_to_hand_from_oracle(P1, "Mirror Match", true, MIRROR_MATCH)
+        .id();
+    let barrage = scenario
+        .add_spell_to_hand_from_oracle(P1, "Sizzling Barrage", true, SIZZLING_BARRAGE)
+        .id();
+    let mut runner = scenario.build();
+
+    // Reach guards live in the helper: the token is blocking, the attacker blocked.
+    resolve_mirror_match(&mut runner, mirror_match, &[attacker], &[], P1);
+
+    let cast = cast_action(runner.state(), barrage);
+    let result = runner.act(cast);
+    assert!(
+        matches!(
+            &result,
+            Err(EngineError::ActionNotAllowed(message)) if message == "No legal targets available"
+        ),
+        "CR 509.4: a token that entered blocking is not a legal target"
+    );
+}
+
+/// CR 509.4: the same unary read as a mass effect. Demonic Stench shrinks the
+/// declared blocker and skips both tokens, including the one sharing its attacker.
+#[test]
+fn demonic_stench_skips_a_token_that_entered_blocking() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker = scenario.add_creature(P0, "Charging Ox", 3, 3).id();
+    let second = scenario.add_creature(P0, "Second Attacker", 2, 2).id();
+    let declared = scenario.add_creature(P1, "Declared Blocker", 2, 2).id();
+    let mirror_match = scenario
+        .add_spell_to_hand_from_oracle(P1, "Mirror Match", true, MIRROR_MATCH)
+        .id();
+    let stench = scenario
+        .add_spell_to_hand_from_oracle(P1, "Demonic Stench", true, DEMONIC_STENCH)
+        .id();
+    let mut runner = scenario.build();
+
+    let tokens = resolve_mirror_match(
+        &mut runner,
+        mirror_match,
+        &[attacker, second],
+        &[(declared, second)],
+        P1,
+    );
+    let toughness =
+        |runner: &GameRunner, object: ObjectId| runner.state().objects[&object].toughness;
+    assert_eq!(toughness(&runner, tokens[0]), Some(3));
+    assert_eq!(toughness(&runner, tokens[1]), Some(2));
+    assert_eq!(toughness(&runner, declared), Some(2));
+
+    runner.cast(stench).resolve();
+    runner.advance_until_stack_empty();
+    assert_resolution_completed(&runner);
+
+    assert_eq!(
+        toughness(&runner, declared),
+        Some(1),
+        "CR 509.1g: the declared blocker \"blocked this turn\""
+    );
+    assert_eq!(
+        toughness(&runner, tokens[0]),
+        Some(3),
+        "CR 509.4: a token that entered blocking never \"blocked\""
+    );
+    assert_eq!(
+        toughness(&runner, tokens[1]),
+        Some(2),
+        "CR 509.4: sharing an attacker with a declared blocker changes nothing"
+    );
+}
+
+/// CR 509.4: the `AttackedOrBlockedThisTurn` arm through a choice set. Two
+/// declared blockers keep the prompt open, so the offered cards can be read.
+#[test]
+fn gideons_triumph_cannot_sacrifice_a_token_that_entered_blocking() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let first = scenario.add_creature(P0, "Charging Ox", 3, 3).id();
+    let second = scenario.add_creature(P0, "Second Attacker", 2, 2).id();
+    let third = scenario.add_creature(P0, "Third Attacker", 2, 2).id();
+    let declared_one = scenario.add_creature(P1, "Declared One", 2, 2).id();
+    let declared_two = scenario.add_creature(P1, "Declared Two", 2, 2).id();
+    let mirror_match = scenario
+        .add_spell_to_hand_from_oracle(P1, "Mirror Match", true, MIRROR_MATCH)
+        .id();
+    let triumph = scenario
+        .add_spell_to_hand_from_oracle(P0, "Gideon's Triumph", true, GIDEONS_TRIUMPH)
+        .id();
+    let mut runner = scenario.build();
+
+    let tokens = resolve_mirror_match(
+        &mut runner,
+        mirror_match,
+        &[first, second, third],
+        &[(declared_one, second), (declared_two, third)],
+        P0,
+    );
+
+    let outcome = runner.cast(triumph).target_player(P1).resolve();
+    let WaitingFor::EffectZoneChoice { player, cards, .. } = outcome.final_waiting_for() else {
+        panic!(
+            "two legal creatures must open the choice, got {:?}",
+            outcome.final_waiting_for()
+        );
+    };
+    assert_eq!(*player, P1, "the target opponent chooses");
+    assert_eq!(cards.len(), 2, "only the declared blockers: {cards:?}");
+    assert!(cards.contains(&declared_one));
+    assert!(cards.contains(&declared_two));
+    for token in &tokens {
+        assert!(
+            !cards.contains(token),
+            "CR 509.4: a token that entered blocking never \"blocked\""
+        );
+    }
+
+    runner
+        .act(GameAction::SelectCards {
+            cards: vec![declared_one],
+        })
+        .expect("a declared blocker is a legal choice");
+    runner.advance_until_stack_empty();
+    assert_resolution_completed(&runner);
+    assert_eq!(runner.state().objects[&declared_one].zone, Zone::Graveyard);
+    assert!(on_battlefield(runner.state(), declared_two));
+    for token in &tokens {
+        assert!(on_battlefield(runner.state(), *token));
+    }
+}
+
+/// CR 509.4: with one declared blocker there is nothing to choose between, because
+/// neither token is eligible. That blocker is sacrificed with no prompt.
+#[test]
+fn gideons_triumph_takes_the_only_declared_blocker_without_a_prompt() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker = scenario.add_creature(P0, "Charging Ox", 3, 3).id();
+    let second = scenario.add_creature(P0, "Second Attacker", 2, 2).id();
+    let declared = scenario.add_creature(P1, "Declared Blocker", 2, 2).id();
+    let mirror_match = scenario
+        .add_spell_to_hand_from_oracle(P1, "Mirror Match", true, MIRROR_MATCH)
+        .id();
+    let triumph = scenario
+        .add_spell_to_hand_from_oracle(P0, "Gideon's Triumph", true, GIDEONS_TRIUMPH)
+        .id();
+    let mut runner = scenario.build();
+
+    let tokens = resolve_mirror_match(
+        &mut runner,
+        mirror_match,
+        &[attacker, second],
+        &[(declared, second)],
+        P0,
+    );
+
+    runner.cast(triumph).target_player(P1).resolve();
+    runner.advance_until_stack_empty();
+    assert_resolution_completed(&runner);
+    assert_eq!(runner.state().objects[&declared].zone, Zone::Graveyard);
+    for token in &tokens {
+        assert!(
+            on_battlefield(runner.state(), *token),
+            "CR 509.4: a token that entered blocking never \"blocked\""
+        );
+    }
+}
+
+/// CR 509.4: the combat-pair read. A token copy of Cathedral Membrane blocked
+/// nothing, so it deals no damage when it dies, while P1's own Membrane, declared
+/// on another attacker, dies to the same spell and deals 6.
+#[test]
+fn cathedral_membrane_token_copy_never_blocked() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_enchantment_from_oracle(P0, "Rolling Stones", ROLLING_STONES)
+        .id();
+    let membrane = scenario
+        .add_creature_from_oracle(P0, "Cathedral Membrane", 0, 3, CATHEDRAL_MEMBRANE)
+        .with_subtypes(vec!["Phyrexian", "Wall"])
+        .id();
+    let filler = scenario.add_creature(P0, "Sturdy Attacker", 3, 7).id();
+    let declared_membrane = scenario
+        .add_creature_from_oracle(P1, "Cathedral Membrane", 0, 3, CATHEDRAL_MEMBRANE)
+        .with_subtypes(vec!["Phyrexian", "Wall"])
+        .id();
+    let mirror_match = scenario
+        .add_spell_to_hand_from_oracle(P1, "Mirror Match", true, MIRROR_MATCH)
+        .id();
+    let first_murder = scenario
+        .add_spell_to_hand_from_oracle(P1, "Murder", true, MURDER)
+        .id();
+    let second_murder = scenario
+        .add_spell_to_hand_from_oracle(P1, "Murder", true, MURDER)
+        .id();
+    let mut runner = scenario.build();
+
+    let tokens = resolve_mirror_match(
+        &mut runner,
+        mirror_match,
+        &[membrane, filler],
+        &[(declared_membrane, filler)],
+        P1,
+    );
+
+    runner.cast(first_murder).target_object(tokens[0]).resolve();
+    runner.advance_until_stack_empty();
+    assert_resolution_completed(&runner);
+    assert!(
+        !on_battlefield(runner.state(), tokens[0]),
+        "reach guard: the token copy died during combat"
+    );
+    assert_eq!(
+        runner.state().objects[&membrane].damage_marked,
+        0,
+        "CR 509.4: the token copy never \"blocked\" the attacker"
+    );
+    assert!(on_battlefield(runner.state(), membrane));
+
+    advance_to_declare_blockers_and_give_priority(&mut runner, P1);
+    runner
+        .cast(second_murder)
+        .target_object(declared_membrane)
+        .resolve();
+    runner.advance_until_stack_empty();
+    assert_resolution_completed(&runner);
+    assert_eq!(
+        runner.state().objects[&filler].damage_marked,
+        6,
+        "CR 509.1g: the declared Membrane blocked this attacker"
+    );
+}
+
+/// CR 509.4: "blocking" stays true. Abu Ja'far's "blocking or blocked by it" reads
+/// the live pairing, so it destroys a token that is absent from every history
+/// ledger. The token's absence is what proves the pairing alone matched.
+#[test]
+fn abu_jafar_destroys_a_token_that_entered_blocking() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let abu = scenario
+        .add_creature_from_oracle(P0, "Abu Ja'far", 0, 1, ABU_JAFAR)
+        .id();
+    let second = scenario.add_creature(P0, "Second Attacker", 2, 2).id();
+    let declared = scenario.add_creature(P1, "Declared Blocker", 2, 2).id();
+    let mirror_match = scenario
+        .add_spell_to_hand_from_oracle(P1, "Mirror Match", true, MIRROR_MATCH)
+        .id();
+    let shock = scenario
+        .add_spell_to_hand_from_oracle(P1, "Shock", true, SHOCK)
+        .id();
+    let mut runner = scenario.build();
+
+    let tokens = resolve_mirror_match(
+        &mut runner,
+        mirror_match,
+        &[abu, second],
+        &[(declared, second)],
+        P1,
+    );
+    assert_absent_from_block_history(runner.state(), tokens[0], "before Abu dies");
+
+    runner.cast(shock).target_object(abu).resolve();
+    runner.advance_until_stack_empty();
+    assert_resolution_completed(&runner);
+
+    assert_eq!(runner.state().objects[&abu].zone, Zone::Graveyard);
+    assert!(
+        !on_battlefield(runner.state(), tokens[0]),
+        "CR 509.4: the token was \"blocking\" Abu Ja'far when it died"
     );
     assert!(
-        replayed
-            .creature_blocked_attackers_this_combat
-            .contains(&recorded_pair),
-        "CR 509.1g: the combat-scoped block-history ledger"
+        on_battlefield(runner.state(), declared),
+        "a blocker of another attacker is not Abu Ja'far's partner"
     );
     assert!(
-        replay
-            .creature_blocked_attackers_this_turn
-            .contains(&recorded_pair),
-        "CR 509.1g: the turn-scoped block-history ledger"
+        on_battlefield(runner.state(), tokens[1]),
+        "the other attacker's token is not Abu Ja'far's partner"
     );
 }
