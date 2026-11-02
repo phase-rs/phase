@@ -1232,8 +1232,21 @@ export interface UnActionState {
   menu?: UnTellKind[];
 }
 
+/// Mirrors `crates/phase-ast/src/types/un_actions.rs::PhrasePace`: how a spoken
+/// payment must be delivered. `Quickly` carries the engine's window between
+/// repetitions (Toy Boat's "Say \"Toy Boat\" quickly").
+export type PhrasePace =
+  | { type: "Said" }
+  | { type: "Quickly"; max_gap_ms: number };
+
 export type UnlessCost =
-  | { type: "SayPhrase"; phrase: string }
+  | {
+      type: "SayPhrase";
+      phrase: string;
+      pace?: PhrasePace;
+      /// CR 702.24a: one saying per age counter for a cumulative upkeep.
+      repetitions?: number;
+    }
   | { type: "Fixed"; cost: ManaCost }
   | { type: "DynamicGeneric"; quantity: unknown }
   | { type: "PayLife"; amount: number }

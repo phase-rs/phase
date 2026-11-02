@@ -1298,7 +1298,10 @@ fn pay_ability_cost_inner(
         // counter (CR 702.24a), so the payment announces one `PhraseSaid` per
         // repetition. The pace (Toy Boat's "quickly") is a wall-clock property
         // of the saying itself: the client that collects the repetitions enforces
-        // the published window and declines the payment when it lapses.
+        // the published window and declines the payment when it lapses. As with
+        // `types::contest`, the engine never reads a clock — a host that can
+        // observe wall-clock time reports what the human did, so the payment
+        // records exactly the sayings that were reported.
         AbilityCost::SayPhrase {
             phrase,
             repetitions,

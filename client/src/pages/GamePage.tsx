@@ -20,6 +20,7 @@ import type {
   GameFormat,
   MatchConfig,
   ObjectId,
+  PhrasePace,
   SerializedAbilityCost,
   AiDecisionDiagnosticReceipt,
   TakebackEvent,
@@ -3823,7 +3824,7 @@ function formatUnlessCost(
         /** CR 702.24a: how many times it must be said (Toy Boat: one per age counter). */
         repetitions?: number;
         /** Delivery pace; a `Quickly` pace carries the engine's window. */
-        pace?: { type: "Said" } | { type: "Quickly"; max_gap_ms: number };
+        pace?: PhrasePace;
       },
   t: TFunction<"game">,
 ): string {
@@ -3921,10 +3922,18 @@ function SayPhrasePanel({
   const [said, setSaid] = useState(0);
   const settled = useRef(false);
 
-  // CR 118.12a: the pace is part of the payment. Every click re-arms the
-  // engine's window; a window that lapses unanswered is a refusal to pay.
+  // CR 118.12a: the pace is part of the payment. The window times the pause
+  // *between* sayings, so it starts with the first one: a single required
+  // saying has no pause to measure and must never expire before it is made.
+  // After each click the window is re-armed; a window that lapses unanswered is
+  // a refusal to pay.
   useEffect(() => {
-    if (quickWindowMs === undefined || said >= required || settled.current) {
+    if (
+      quickWindowMs === undefined ||
+      said === 0 ||
+      said >= required ||
+      settled.current
+    ) {
       return;
     }
     const timer = setTimeout(() => {
@@ -3961,7 +3970,7 @@ function SayPhrasePanel({
           {effect && (
             <p className="mb-2 text-center text-xs text-gray-400">{effect}</p>
           )}
-          {quickWindowMs !== undefined && (
+          {quickWindowMs !== undefined && required > 1 && (
             <p className="mb-2 text-center text-xs font-semibold text-fuchsia-200">
               {t("unActions.sayPhrase.quickly")}
             </p>
@@ -4010,14 +4019,10 @@ function UnlessPaymentPanel() {
   // Un-card say-it payment (Rod of Spanking's "unless that player says ..."):
   // the "payment" is a spoken phrase, so it gets its own button and gag.
   if (waitingFor.data.cost.type === "SayPhrase") {
-    const sayCost = waitingFor.data.cost as {
-      phrase?: string;
-      repetitions?: number;
-      pace?: { type: "Said" } | { type: "Quickly"; max_gap_ms: number };
-    };
+    const sayCost = waitingFor.data.cost;
     return (
       <SayPhrasePanel
-        phrase={sayCost.phrase ?? ""}
+        phrase={sayCost.phrase}
         repetitions={sayCost.repetitions ?? 1}
         quickWindowMs={
           sayCost.pace?.type === "Quickly" ? sayCost.pace.max_gap_ms : undefined
