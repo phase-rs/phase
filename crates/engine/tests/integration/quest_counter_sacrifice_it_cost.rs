@@ -134,8 +134,8 @@ fn ior_ruin_expedition_counter_cost_still_binds_the_source() {
 /// Verbatim Scryfall Oracle text (WHO).
 const TRENZALORE: &str = "{T}: Add {U}. Put a time counter on Trenzalore Clocktower.\n{1}{U}, {T}, Remove twelve time counters from Trenzalore Clocktower and exile it: Shuffle your graveyard and hand into your library, then draw seven cards. Activate only if you control a Time Lord.";
 
-/// The printed ability whose cost exiles the source (the artifact also has a
-/// mana ability at index 0).
+/// The printed ability whose cost exiles the source (the land also has a mana
+/// ability at index 0).
 fn exile_cost_index(runner: &GameRunner, source: ObjectId) -> usize {
     fn has_self_exile(cost: Option<&AbilityCost>) -> bool {
         match cost {
@@ -170,7 +170,7 @@ fn activating_trenzalore_clocktower_exiles_itself_not_another_permanent() {
         ],
     );
     let tower = scenario
-        .add_artifact_from_oracle(P0, "Trenzalore Clocktower", TRENZALORE)
+        .add_land_from_oracle(P0, "Trenzalore Clocktower", TRENZALORE)
         .id();
     scenario.with_counter(tower, parse_counter_type("time"), 12);
     // The activation restriction needs a Time Lord; a synthetic one keeps the

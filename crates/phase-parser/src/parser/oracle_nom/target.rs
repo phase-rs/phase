@@ -626,8 +626,9 @@ pub fn parse_granting_object_ref(input: &str) -> OracleResult<'_, TargetFilter> 
 /// in the pre-colon cost clause. The effect channel's `it` is bound elsewhere
 /// (`oracle_effect::resolve_it_pronoun`, and the `parent_target_available` gate
 /// on `oracle_target::parse_anaphoric_target_ref`) and is untouched by this
-/// arm; a cost clause that names something else first keeps that referent,
-/// which is why the `behold` shape below is carved out.
+/// arm; a cost clause that names something else first is out of scope, and the
+/// only printed shape in the corpus — `behold … and exile it` — is consumed by
+/// `parse_behold_cost` before any cost-leg split (below).
 ///
 /// Out of scope — `behold <quality> and exile it` (Champion of the Clachan,
 /// Champion of the Path, Champion of the Weird, Champions of the Perfect,
