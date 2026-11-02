@@ -1812,12 +1812,12 @@ fn next_main_with_p0_priority(runner: &mut GameRunner) {
     panic!("the next main phase was never reached");
 }
 
-/// Round 3, verifier board V4: a remembered decline prunes an optional
-/// once-per-turn trigger's context, but its admission still spent the limit
-/// (CR 603.2, CR 603.5). The observation is bound at match time, so the tap is
-/// not undoable even though no context is queued.
+/// Round 3, verifier board V4: a remembered decline does not keep an optional
+/// once-per-turn trigger off the stack (CR 603.5 — the choice is made on
+/// resolution), and its admission spent the limit (CR 603.2). The observation
+/// is bound at match time, so the tap is not undoable.
 #[test]
-fn a_pruned_once_per_turn_observation_still_refuses_undo() {
+fn a_remembered_decline_once_per_turn_observation_still_refuses_undo() {
     let mut scenario = main_phase();
     let watcher = scenario
         .add_creature(P0, "Once Watcher", 1, 3)
@@ -1869,8 +1869,8 @@ fn a_pruned_once_per_turn_observation_still_refuses_undo() {
     );
     assert_eq!(
         triggers_on_stack_from(&runner, watcher),
-        0,
-        "reach: the declined context was pruned"
+        1,
+        "CR 603.5: the remembered decline still puts the trigger on the stack"
     );
     assert!(runner.state().deferred_triggers.is_empty());
     assert!(!undo_tracked(&runner, land), "undo is not offered");
