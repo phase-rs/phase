@@ -3029,3 +3029,39 @@ fn empty_attacker_set_auto_submits_without_any_auto_pass_mode() {
         result.waiting_for
     );
 }
+
+/// A legacy `UntilStackEmpty` ends when the stack is empty, and a Resolve-All session
+/// that ends on that same pass restores its baseline before that end rule runs, so the
+/// completed preference is finished rather than restored.
+#[test]
+fn a_session_ending_pass_finishes_a_completed_baseline_until_stack_empty() {
+    let mut state = priority_state();
+    push_simple_stack_entry(&mut state, 19_960, PlayerId(0));
+    state.auto_pass.insert(
+        PlayerId(1),
+        AutoPassMode::UntilStackEmpty {
+            initial_stack_len: 1,
+            policy: StackResolutionPolicy::Committed,
+        },
+    );
+
+    let result = apply(
+        &mut state,
+        PlayerId(0),
+        GameAction::SetAutoPass {
+            mode: AutoPassRequest::UntilStackEmpty,
+        },
+    );
+
+    assert!(result.is_ok(), "reach guard: {result:?}");
+    assert!(state.stack.is_empty(), "reach guard: the entry resolved");
+    assert!(
+        state.stack_resolution_session.is_none(),
+        "reach guard: the session ended on this pass"
+    );
+    assert!(
+        state.auto_pass.is_empty(),
+        "the completed baseline preference must not survive the session's end: {:?}",
+        state.auto_pass
+    );
+}

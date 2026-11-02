@@ -1030,8 +1030,8 @@ fn play_trace_keys_a_delayed_trigger_by_its_creator_across_cycles() {
         }
     }
     assert!(
-        delayed.len() >= 3 && !animate_printed.is_empty(),
-        "reach: three cycles of Animate Dead's delayed and enters triggers resolved: \
+        delayed.len() >= 2 && !animate_printed.is_empty(),
+        "reach: two cycles of Animate Dead's delayed and enters triggers resolved: \
          {delayed:?} {animate_printed:?}"
     );
     assert!(

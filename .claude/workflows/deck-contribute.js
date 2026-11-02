@@ -436,7 +436,7 @@ function clusterVerifyPrompt(mechanic, cards) {
     `\`git status --short\`, \`git diff\`, and \`git diff --cached\`. Reconcile the exact owned ` +
     `parser paths for this unit using raw \`git diff --no-renames --name-status\`, ` +
     `\`git diff --cached --no-renames --name-status\`, and ` +
-    `\`git ls-files --others --exclude-standard -- crates/engine/src/parser\`. Account for added, ` +
+    `\`git ls-files --others --exclude-standard -- crates/phase-parser/src/parser\`. Account for added, ` +
     `modified, deleted, and both sides of renamed paths (including moves into/out of the parser) ` +
     `from all implementation and fix rounds, not just the initial filesChanged list; inspect new ` +
     `files too, including tests and Markdown excluded by the gate. Stop with passed=false and record the ` +
@@ -447,7 +447,7 @@ function clusterVerifyPrompt(mechanic, cards) {
     `work, or ask its author to fix it for this unit.\n` +
     `Stage only those wholly owned parser files with \`git add -- <OWNED_PARSER_PATHS>\`: replace ` +
     `the placeholder with one explicit repo-relative literal pathspec per file, single-quoted for ` +
-    `the shell, e.g. ':(literal)crates/engine/src/parser/oracle.rs'. Escape embedded apostrophes by ` +
+    `the shell, e.g. ':(literal)crates/phase-parser/src/parser/oracle.rs'. Escape embedded apostrophes by ` +
     `closing the quote, backslash-escaping the apostrophe, and reopening the quote. No directory, ` +
     `glob, broad staging, or JSON.stringify shell quoting. Inspect the cached name-status and diff ` +
     `for those exact paths; require \`git diff --exit-code -- <OWNED_PARSER_PATHS>\` to be empty ` +
@@ -527,7 +527,7 @@ function clusterPrPrompt(mechanic, cards, { impl, verify, partial }) {
     `data/engine-inventory.json is ignored and needs neither staging nor cleanup.\n` +
     `Replace <OWNED_PATHS> in BOTH commands below with the same explicit final reviewed filenames. ` +
     `Use one repo-relative literal Git pathspec per file, single-quoted for the shell, for example ` +
-    `':(literal)crates/engine/src/parser/oracle.rs'; escape any embedded apostrophe by closing ` +
+    `':(literal)crates/phase-parser/src/parser/oracle.rs'; escape any embedded apostrophe by closing ` +
     `the quote, backslash-escaping the apostrophe, and reopening the quote. Do not use ` +
     `JSON.stringify as shell quoting, directory or glob pathspecs, or broad staging.\n` +
     `git add -- <OWNED_PATHS>\n` +

@@ -2062,6 +2062,11 @@ pub enum ParitySource {
     /// CR 608.2c: Reads the most recent odd/even named choice made earlier in
     /// the same resolving instruction sequence.
     LastNamedChoice,
+    /// CR 607.2d: Reads the odd/even quality the source object chose as it
+    /// entered and keeps in its chosen attributes ("As this enchantment enters,
+    /// choose odd or even" read by "… of the chosen quality" — Ashling's
+    /// Prerogative). A source with no such choice matches no parity.
+    SourceChosen,
 }
 
 /// A branch in a d20/d6/d4 result table (CR 706.2).
@@ -7824,7 +7829,10 @@ impl IllegalTargetsDisposition {
     }
 }
 
-/// CR 701.9a: How cards are selected from a zone during an effect or cost.
+/// How cards are selected from a zone during an effect or cost. Modeled on
+/// CR 701.9b (a discard is by default chosen by the affected player, but some
+/// effects require a random discard); other consumers of this enum are only
+/// analogous to that rule.
 ///
 /// Analogous to `TargetSelectionMode` but for cards from a player's hand (or
 /// other non-target zones) rather than spell/ability targets.
@@ -7833,7 +7841,8 @@ pub enum CardSelectionMode {
     /// CR 608.2d: The affected player or controller chooses the card(s).
     #[default]
     Chosen,
-    /// CR 701.9a: The game selects card(s) uniformly at random.
+    /// CR 701.9b: The game selects card(s) uniformly at random (random discard;
+    /// analogous for the other consumers of this enum).
     Random,
 }
 
@@ -8202,6 +8211,12 @@ pub enum TargetFilter {
     /// Matches spells on the stack (not activated/triggered abilities).
     /// CR 115.1a: Used by "becomes the target of a spell" triggers to filter source type.
     StackSpell,
+    /// CR 601.2f: The spell whose total cost is being determined — the "that
+    /// spell" of a cost modifier ("Spells you cast cost {1} less to cast for
+    /// each card with the same name as that spell in your graveyard", Locket of
+    /// Yesterdays). Only a cast-time cost-modifier evaluation carries this
+    /// referent; everywhere else it names no object.
+    CastingSpell,
     /// Matches a specific permanent by ObjectId.
     /// Used for duration-based statics that target a specific object
     /// (e.g., "that permanent loses all abilities for as long as ~").
@@ -8718,6 +8733,7 @@ pub fn filter_contains(filter: &TargetFilter, leaf: &dyn Fn(&TargetFilter) -> bo
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
@@ -9017,6 +9033,7 @@ pub fn filter_grammar_any(
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
@@ -9442,6 +9459,37 @@ pub fn retarget_chosen_card_type_to_creature_type(filter: &mut TargetFilter) -> 
     complete
 }
 
+/// CR 607.2d: Rebinds every `ManaValueParity { LastNamedChoice }` leaf beneath
+/// `filter` to the source's persisted choice. Returns whether any leaf was
+/// rebound; an incomplete bounded walk leaves `filter` untouched and reports
+/// `false`, as [`retarget_chosen_card_type_to_creature_type`] does.
+pub fn rebind_chosen_parity_to_source(filter: &mut TargetFilter) -> bool {
+    let mut rewritten = filter.clone();
+    let mut complete = true;
+    let mut rebound = false;
+    rewrite_filter_props::<()>(
+        &mut rewritten,
+        &mut |_, _, _| {},
+        &mut |prop| {
+            if let FilterProp::ManaValueParity {
+                parity: parity @ ParitySource::LastNamedChoice,
+            } = prop
+            {
+                *parity = ParitySource::SourceChosen;
+                rebound = true;
+            }
+        },
+        &mut |_| {},
+        &mut complete,
+        false,
+        None,
+    );
+    if complete && rebound {
+        *filter = rewritten;
+    }
+    complete && rebound
+}
+
 /// Rewrite every node and property reachable through `filter`, recording any incomplete
 /// bounded population walk in `complete` for the transactional caller.
 pub fn rewrite_filter_props<C>(
@@ -9543,6 +9591,7 @@ pub fn rewrite_filter_props<C>(
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
@@ -10430,6 +10479,7 @@ pub(crate) fn filter_binds_player(
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
@@ -11862,6 +11912,7 @@ fn target_filter_has_unsupported_selected_ref(filter: &TargetFilter, nested: boo
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::SourceChosenPlayer
@@ -18378,6 +18429,8 @@ pub enum SacrificeRequirement {
         comparator: Comparator,
         value: i32,
     },
+    /// CR 701.21a + CR 601.2h: "sacrifice all <filter>" — every eligible permanent the payer controls; a determined set, no selection.
+    All,
 }
 
 impl Default for SacrificeRequirement {
@@ -18394,7 +18447,7 @@ impl SacrificeRequirement {
     pub fn fixed_count(&self) -> Option<u32> {
         match self {
             Self::Count { count } => Some(*count),
-            Self::Aggregate { .. } => None,
+            Self::Aggregate { .. } | Self::All => None,
         }
     }
 
@@ -18598,7 +18651,7 @@ impl serde::Serialize for SacrificeCost {
         st.serialize_field("target", &self.target)?;
         match &self.requirement {
             SacrificeRequirement::Count { count } => st.serialize_field("count", count)?,
-            SacrificeRequirement::Aggregate { .. } => {
+            SacrificeRequirement::Aggregate { .. } | SacrificeRequirement::All => {
                 st.serialize_field("requirement", &self.requirement)?;
             }
         }
@@ -18675,6 +18728,15 @@ pub enum AbilityCost {
     Untap,
     Loyalty {
         amount: i32,
+    },
+    /// Un-card (no CR entry): the "cost" is saying `phrase` aloud — Rod of
+    /// Spanking's "unless that player says \"Thank you, sir. May I have
+    /// another?\"", Impounding Lot-Bot's "you may say \"INCARCERATE!\"". Costs
+    /// no resources; the payer pays by choosing to say it, and only a player who
+    /// opted in to Un-card actions is offered the choice
+    /// (`un_actions::player_can_say_phrases`).
+    SayPhrase {
+        phrase: String,
     },
     Sacrifice(SacrificeCost),
     /// CR 119.4: Pay life as an activation or additional cost. `amount` is a
@@ -18942,6 +19004,8 @@ pub fn is_direct_resolution_optional_payment_branch(cost: &AbilityCost) -> bool 
     use crate::types::ability::{CardSelectionMode, DiscardSelfScope, QuantityExpr};
 
     match cost {
+        // Un-card: "you may say \"...\". If you do" is a direct optional payment.
+        AbilityCost::SayPhrase { .. } => true,
         AbilityCost::Mana { cost } => !cost.has_x(),
         AbilityCost::Discard {
             count: QuantityExpr::Fixed { value },
@@ -19014,6 +19078,7 @@ pub fn supported_at_resolution(cost: &AbilityCost) -> bool {
         | AbilityCost::ManaDynamic { .. }
         | AbilityCost::PayLife { .. }
         | AbilityCost::PayEnergy { .. }
+        | AbilityCost::SayPhrase { .. }
         | AbilityCost::PaySpeed { .. }
         | AbilityCost::TapCreatures { .. }
         | AbilityCost::Composite { .. }
@@ -19164,6 +19229,7 @@ macro_rules! define_ability_cost_quantity_walk {
             AbilityCost::Mana { .. }
             | AbilityCost::Tap
             | AbilityCost::Untap
+            | AbilityCost::SayPhrase { .. }
             | AbilityCost::Loyalty { .. }
             | AbilityCost::Sacrifice(_)
             | AbilityCost::Exile { .. }
@@ -19212,6 +19278,7 @@ impl AbilityCost {
             | AbilityCost::ManaDynamic { .. }
             | AbilityCost::Tap
             | AbilityCost::Untap
+            | AbilityCost::SayPhrase { .. }
             | AbilityCost::Loyalty { .. }
             | AbilityCost::Sacrifice(_)
             | AbilityCost::PayLife { .. }
@@ -19406,6 +19473,7 @@ impl AbilityCost {
             // CR 701.26a/b: tap/untap are status changes, not zone changes.
             | AbilityCost::Tap
             | AbilityCost::Untap
+            | AbilityCost::SayPhrase { .. }
             | AbilityCost::TapCreatures { .. }
             | AbilityCost::Exert
             // CR 701.3d: unattaching leaves the object on the battlefield.
@@ -19474,6 +19542,7 @@ impl AbilityCost {
             // cannot settle it — it must still simulate.
             | AbilityCost::ExileWithAggregate { .. }
             | AbilityCost::TapCreatures { .. }
+            | AbilityCost::SayPhrase { .. }
             | AbilityCost::RemoveCounter { .. }
             | AbilityCost::PayEnergy { .. }
             | AbilityCost::PaySpeed { .. }
@@ -19584,6 +19653,7 @@ impl AbilityCost {
             // `CostNotPayableNow` tells the player.
             AbilityCost::Tap
             | AbilityCost::Untap
+            | AbilityCost::SayPhrase { .. }
             | AbilityCost::Mana { .. }
             | AbilityCost::ManaDynamic { .. }
             | AbilityCost::Loyalty { .. }
@@ -19687,6 +19757,8 @@ impl AbilityCost {
             AbilityCost::ManaDynamic { .. } => vec![CostCategory::ManaOnly],
             AbilityCost::Tap => vec![CostCategory::TapsSelf],
             AbilityCost::Untap => vec![CostCategory::UntapsSelf],
+            // Un-card: saying a phrase pays no resource, so it has no cost category.
+            AbilityCost::SayPhrase { .. } => Vec::new(),
             AbilityCost::Loyalty { .. } => vec![CostCategory::PaysLoyalty],
             AbilityCost::Sacrifice(_) => {
                 vec![CostCategory::SacrificesPermanent]
@@ -19792,6 +19864,7 @@ impl AbilityCost {
             | AbilityCost::ManaDynamic { .. }
             | AbilityCost::Tap
             | AbilityCost::Untap
+            | AbilityCost::SayPhrase { .. }
             | AbilityCost::Loyalty { .. }
             | AbilityCost::Sacrifice(_)
             | AbilityCost::PayLife { .. }
@@ -19851,6 +19924,7 @@ impl AbilityCost {
             | AbilityCost::ManaDynamic { .. }
             | AbilityCost::Tap
             | AbilityCost::Untap
+            | AbilityCost::SayPhrase { .. }
             | AbilityCost::Loyalty { .. }
             | AbilityCost::Sacrifice(_)
 
@@ -19908,6 +19982,7 @@ impl AbilityCost {
             | AbilityCost::ManaDynamic { .. }
             | AbilityCost::Tap
             | AbilityCost::Untap
+            | AbilityCost::SayPhrase { .. }
             | AbilityCost::Loyalty { .. }
             | AbilityCost::PayLife { .. }
             | AbilityCost::Discard { .. }
@@ -20378,6 +20453,13 @@ pub enum LibraryPosition {
     RandomWithinTop {
         n: QuantityExpr,
     },
+}
+
+impl LibraryPosition {
+    /// Serde skip-helper: `Top` is the default and is omitted from JSON.
+    pub fn is_top(&self) -> bool {
+        matches!(self, Self::Top)
+    }
 }
 
 /// CR 701.24a + CR 701.24d: Whether a mass move into a library is the move
@@ -22834,15 +22916,15 @@ pub enum Effect {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         additional_modifications: Vec<ContinuousModification>,
     },
-    /// CR 707.2 + CR 111.1 + CR 701.9a (analogous): Create a token that's a copy
+    /// CR 707.2 + CR 111.1 + CR 701.9b (analogous): Create a token that's a copy
     /// of a creature card chosen from a format-defined pool whose mana value
     /// satisfies `mv <comparator> mv_bound`. The canonical card is the Momir
     /// Basic emblem ("Create a token that's a copy of a creature card with mana
     /// value X chosen at random"). The pool is the engine's creature corpus,
     /// drawn from `GameState::card_db` at resolution time. `selection` chooses how a
     /// candidate is picked from the matching set: `Random` (CR 701.9a is the
-    /// discard keyword action; the random *selection* here is analogous to the
-    /// random-choice idiom) or `Chosen`. Built as a reusable primitive so the
+    /// discard keyword action and CR 701.9b its random-discard rule; the random
+    /// *selection* here is only analogous to the latter) or `Chosen`. Built as a reusable primitive so the
     /// `mv` comparator also expresses "copy a creature card with mana value N or
     /// less" (Oko-style) via `Comparator::LE`.
     CreateTokenCopyFromPool {
@@ -22860,7 +22942,7 @@ pub enum Effect {
         /// CR 202.3: the mana-value bound. For Momir this is `Variable { "X" }`
         /// (the chosen X paid for the ability).
         mv_bound: QuantityExpr,
-        /// CR 701.9a (analogous) / CR 608.2d: how a candidate is selected from
+        /// CR 701.9b (analogous) / CR 608.2d: how a candidate is selected from
         /// the matching set — `Random` (Momir) or `Chosen`.
         selection: CardSelectionMode,
         /// CR 707.10: number of tokens to create. Defaults to one.
@@ -23131,10 +23213,26 @@ pub enum Effect {
     /// counter resolvers and reuses the whole `ChooseOneOfBranch` interactive
     /// surface. This is the choose-ONE-kind sibling of the
     /// `repeat_for: DistinctCounterKindsAmong` for-EACH-kind loop.
+    ///
+    /// A printed kind (`counter_type: Some`) fixes the kind instead of choosing
+    /// among those present: "put a charge counter on it or remove one from it"
+    /// (Immard, the Stormcleaver) may always add one, and may remove one only
+    /// while the object has one of that kind (CR 608.2d).
     ChooseCounterAdjustment {
         adjustment: CounterAdjustment,
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
+        /// CR 122.1: the printed counter kind; `None` chooses among the kinds
+        /// present on the object.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        counter_type: Option<CounterType>,
+        /// The object whose counters change: the inherited parent target
+        /// (Clockspinning) or the ability's own source ("it" — Immard).
+        #[serde(
+            default = "default_target_filter_parent",
+            skip_serializing_if = "is_target_filter_parent_target"
+        )]
+        target: TargetFilter,
     },
     /// CR 701.10a + CR 613.4c: Multiply power/toughness of target creature by
     /// `factor` via a layer-7c continuous modification. `factor: 2` is "double"
@@ -23331,7 +23429,7 @@ pub enum Effect {
         count: QuantityExpr,
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
-        /// CR 701.9a: Random discard (e.g., "discard a card at random").
+        /// CR 701.9b: Random discard (e.g., "discard a card at random").
         #[serde(
             default,
             with = "card_selection_bool_compat",
@@ -25033,7 +25131,8 @@ pub enum Effect {
         #[serde(default = "default_target_filter_controller")]
         player: TargetFilter,
     },
-    /// Put a target on top or bottom of its owner's library.
+    /// Put a target on top or bottom of its owner's library, or (via
+    /// `top_position`) at an Nth-from-the-top slot or the bottom (CR 401.7).
     PutOnTopOrBottom {
         target: TargetFilter,
         /// CR 608.2d: the player directed by the Oracle text chooses top or bottom.
@@ -25045,6 +25144,12 @@ pub enum Effect {
             skip_serializing_if = "is_target_filter_parent_target_owner"
         )]
         chooser: TargetFilter,
+        /// CR 401.7 + CR 608.2d: where the object goes when the chooser picks the
+        /// "top" branch. `Top` (the default) is the plain "top or bottom" choice;
+        /// `NthFromTop { n: 2 }` is "second from the top or on the bottom" (Deem
+        /// Inferior, Trickster's Stratagem). The other branch is always the bottom.
+        #[serde(default, skip_serializing_if = "LibraryPosition::is_top")]
+        top_position: LibraryPosition,
     },
     /// Deliver a gift to an opponent: draw a card, create a token, etc.
     /// Resolves for the opponent of the ability's controller (2-player: the single opponent).
@@ -25517,7 +25622,7 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         player_b: TargetFilter,
     },
-    /// CR 730.1: Set the game's day/night designation.
+    /// CR 731.1: Set the game's day/night designation.
     /// Triggers daybound/nightbound transformations on all relevant permanents.
     SetDayNight {
         to: crate::types::game_state_kinds::DayNight,
@@ -27620,6 +27725,7 @@ pub fn filter_recipient_read(filter: &TargetFilter) -> RecipientRead {
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
@@ -28210,6 +28316,10 @@ fn default_target_filter_parent_target_owner() -> TargetFilter {
     TargetFilter::ParentTargetOwner
 }
 
+fn is_target_filter_parent_target(filter: &TargetFilter) -> bool {
+    matches!(filter, TargetFilter::ParentTarget)
+}
+
 fn is_target_filter_parent_target_owner(filter: &TargetFilter) -> bool {
     matches!(filter, TargetFilter::ParentTargetOwner)
 }
@@ -28576,6 +28686,7 @@ impl TargetFilter {
             | TargetFilter::TriggeringSpellOwner
             | TargetFilter::TriggeringPlayer
             | TargetFilter::TriggeringSource
+            | TargetFilter::CastingSpell
             | TargetFilter::AttackedPlayerOrPlaneswalker
             | TargetFilter::EventTarget
             | TargetFilter::TriggeringSourceController
@@ -28656,6 +28767,7 @@ impl TargetFilter {
             | TargetFilter::TriggeringSpellOwner
             | TargetFilter::TriggeringPlayer
             | TargetFilter::TriggeringSource
+            | TargetFilter::CastingSpell
             | TargetFilter::AttackedPlayerOrPlaneswalker
             | TargetFilter::EventTarget
             | TargetFilter::TriggeringSourceController
@@ -29072,6 +29184,7 @@ impl TargetFilter {
             | TargetFilter::TriggeringSpellOwner
             | TargetFilter::TriggeringPlayer
             | TargetFilter::TriggeringSource
+            | TargetFilter::CastingSpell
             | TargetFilter::EventTarget
             | TargetFilter::TriggeringSourceController
             | TargetFilter::EventTargetController
@@ -32776,6 +32889,9 @@ macro_rules! define_effect_quantity_walk {
                 f(count);
                 visit_library_position(position, f);
             }
+            Effect::PutOnTopOrBottom { top_position, .. } => {
+                visit_library_position(top_position, f);
+            }
             Effect::ChooseDrawnThisTurnPayOrTopdeck {
                 count,
                 life_payment,
@@ -32972,7 +33088,6 @@ macro_rules! define_effect_quantity_walk {
             | Effect::Ripple { .. }
             | Effect::MiracleCast { .. }
             | Effect::MadnessCast { .. }
-            | Effect::PutOnTopOrBottom { .. }
             | Effect::GiftDelivery { .. }
             | Effect::Goad { .. }
             | Effect::GoadAll { .. }
@@ -35068,7 +35183,8 @@ pub enum ActivationManaPaymentRestriction {
 }
 
 /// Structured spell-casting restrictions parsed from Oracle text.
-/// These describe when — and, for `CantSpendMana`, how — a spell may be cast.
+/// These describe when — and, for `CantSpendMana`, how; for `OnlyFromZones`,
+/// from where — a spell may be cast.
 /// Runtime enforcement can be added independently of parsing/export support.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
@@ -35109,6 +35225,24 @@ pub enum CastingRestriction {
     /// Parameterized over the allowed mana colors for paying {X}.
     SpendOnlyOnX {
         colors: Vec<ManaColor>,
+    },
+    /// CR 601.3 + CR 113.6f: "You may cast this card from your graveyard, but
+    /// not from anywhere else." (Haakon, Stromgald Scourge) — restricts WHERE
+    /// the spell may be cast from: a cast whose origin zone is not in `zones`
+    /// is prohibited, whatever permission would otherwise allow it (CR 101.2).
+    /// CR 113.6f makes the restriction function in every zone, so it rides the
+    /// object's own restrictions rather than a battlefield static.
+    ///
+    /// CR 109.5 + CR 400.1: `pool` keeps whose graveyard the permission names.
+    /// "Your graveyard" is the would-be controller's, so `OwnGraveyard` admits
+    /// a graveyard origin only when the caster owns that graveyard: an opponent
+    /// casting the card from its owner's graveyard (Tinybones, the Pickpocket)
+    /// is casting it from "anywhere else". Origins in shared zones (exile)
+    /// aren't scoped by it.
+    OnlyFromZones {
+        zones: Vec<Zone>,
+        #[serde(default)]
+        pool: super::statics::GraveyardPermissionPool,
     },
 }
 
@@ -37164,7 +37298,7 @@ pub enum AbilityCondition {
     /// `AdditionalCostNotPaid` and `SourceDidNotEnterThisTurn`. Used by
     /// "if you don't" / "unless you" / "if it isn't" sub-clause gates.
     Not { condition: Box<AbilityCondition> },
-    /// CR 730.2a: True when it's neither day nor night (day_night is None).
+    /// CR 731.1: True when it's neither day nor night (day_night is None).
     /// Used by Daybound/Nightbound ETB initialization: "If it's neither day nor night,
     /// it becomes day as this creature enters."
     DayNightIsNeither,
@@ -37238,6 +37372,80 @@ pub enum AbilityCondition {
 }
 
 impl AbilityCondition {
+    /// CR 608.2c: whether any quantity this condition compares satisfies `pred`,
+    /// through the `Not` / `ConditionInstead` / `And` / `Or` wrappers. The single
+    /// traversal for "does this gate measure <population>" questions (a gate that
+    /// counts the chain's tracked set consumes it).
+    pub fn any_quantity_expr(&self, pred: &dyn Fn(&QuantityExpr) -> bool) -> bool {
+        match self {
+            AbilityCondition::QuantityCheck { lhs, rhs, .. } => pred(lhs) || pred(rhs),
+            AbilityCondition::QuantityQuality { quantity, .. } => pred(quantity),
+            AbilityCondition::PreviousEffectAmount { rhs, .. } => pred(rhs),
+            AbilityCondition::Not { condition }
+            | AbilityCondition::ConditionInstead { inner: condition } => {
+                condition.any_quantity_expr(pred)
+            }
+            AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+                conditions
+                    .iter()
+                    .any(|condition| condition.any_quantity_expr(pred))
+            }
+            AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
+            | AbilityCondition::TriggerEventTargetExploitedBySource
+            | AbilityCondition::AdditionalCostPaidInstead
+            | AbilityCondition::AlternativeManaCostPaid
+            | AbilityCondition::EventOutcomeWon
+            | AbilityCondition::WhenYouDo
+            | AbilityCondition::SourceEnteredThisTurn
+            | AbilityCondition::HasMaxSpeed
+            | AbilityCondition::IsMonarch
+            | AbilityCondition::IsInitiative
+            | AbilityCondition::HasCityBlessing
+            | AbilityCondition::HasEnduringStory
+            | AbilityCondition::IsRingBearer
+            | AbilityCondition::HasObjectTarget
+            | AbilityCondition::IsYourTurn
+            | AbilityCondition::FirstCombatPhaseOfTurn
+            | AbilityCondition::FirstEndStepOfTurn
+            | AbilityCondition::SourceIsTapped
+            | AbilityCondition::SourceAttachedToCreature
+            | AbilityCondition::DayNightIsNeither
+            | AbilityCondition::AdditionalCostPaid { .. }
+            | AbilityCondition::EffectOutcome { .. }
+            | AbilityCondition::CoinFlipOutcome { .. }
+            | AbilityCondition::ChosenLabelIs { .. }
+            | AbilityCondition::WasCast { .. }
+            | AbilityCondition::CastDuringPhase { .. }
+            | AbilityCondition::CurrentPhaseIs { .. }
+            | AbilityCondition::CastTimingPermission { .. }
+            | AbilityCondition::ManaColorSpent { .. }
+            | AbilityCondition::RevealedHasCardType { .. }
+            | AbilityCondition::ObjectsShareQuality { .. }
+            | AbilityCondition::TargetSharesNameWithOtherExiledThisWay { .. }
+            | AbilityCondition::CastVariantPaid { .. }
+            | AbilityCondition::CastVariantPaidInstead { .. }
+            | AbilityCondition::ControlsCommander { .. }
+            | AbilityCondition::DiscardedCardMatchesFilter { .. }
+            | AbilityCondition::CompletedDungeon { .. }
+            | AbilityCondition::TargetHasKeywordInstead { .. }
+            | AbilityCondition::TargetMatchesFilter { .. }
+            | AbilityCondition::TriggeringSpellTargetsFilter { .. }
+            | AbilityCondition::SourceMatchesFilter { .. }
+            | AbilityCondition::PostReplacementDamageSourceMatchesFilter { .. }
+            | AbilityCondition::ZoneChangeObjectMatchesFilter { .. }
+            | AbilityCondition::ControllerControlsMatching { .. }
+            | AbilityCondition::ControllerControlledMatchingAsCast { .. }
+            | AbilityCondition::WasStartingPlayer { .. }
+            | AbilityCondition::SpellCastWithVariantThisTurn { .. }
+            | AbilityCondition::ZoneChangedThisWay { .. }
+            | AbilityCondition::CostPaidObjectMatchesFilter { .. }
+            | AbilityCondition::DayNightIs { .. }
+            | AbilityCondition::AbilityUseCountThisTurn { .. }
+            | AbilityCondition::SourceLacksKeyword { .. }
+            | AbilityCondition::ScopedPlayerMatches { .. } => false,
+        }
+    }
+
     /// CR 608.2k: does this ability condition read the cost-paid object?
     pub fn references_cost_paid_object(&self) -> bool {
         match self {
@@ -39324,6 +39532,10 @@ pub struct TriggerDefinition {
     /// "Whenever you roll a d20". `None` accepts any die.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub die_sides: Option<u8>,
+    /// Un-card Gotcha: the opponent behavior this ability watches for. `Some`
+    /// only with `TriggerMode::GotchaSaid`; read by `un_actions::open_gotcha_offers`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gotcha_condition: Option<crate::types::un_actions::GotchaCondition>,
     /// CR 700.14: Expend threshold — fires when cumulative mana spent on spells crosses N.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expend_threshold: Option<u32>,
@@ -39648,6 +39860,40 @@ pub struct TriggerDefinitionRef {
 }
 
 impl TriggerDefinitionRef {
+    /// Yields every object incarnation this reference names, an expanded grant's provider
+    /// included (CR 400.7).
+    pub fn for_each_incarnation_mut(&mut self, f: &mut impl FnMut(ObjectId, &mut u64)) {
+        f(self.source.object_id, &mut self.source.incarnation);
+        if let TriggerDefinitionOccurrenceRef::ExpandedGrant { provider, .. } = &mut self.occurrence
+        {
+            provider.for_each_incarnation_mut(f);
+        }
+    }
+
+    /// Yields every layer-6 grant generation this reference names, an expanded grant's provider
+    /// included, keyed by the object whose allocator minted it.
+    pub fn for_each_grant_generation_mut(&mut self, f: &mut impl FnMut(ObjectId, &mut u64)) {
+        let minted_by = self.source.object_id;
+        match &mut self.occurrence {
+            TriggerDefinitionOccurrenceRef::KeywordCompanion { grant_instance, .. }
+            | TriggerDefinitionOccurrenceRef::CopyRetained { grant_instance, .. }
+            | TriggerDefinitionOccurrenceRef::Granted { grant_instance } => {
+                f(minted_by, &mut grant_instance.0);
+            }
+            TriggerDefinitionOccurrenceRef::ExpandedGrant {
+                grant_instance,
+                provider,
+                provider_output_index: _,
+            } => {
+                f(minted_by, &mut grant_instance.0);
+                provider.for_each_grant_generation_mut(f);
+            }
+            TriggerDefinitionOccurrenceRef::Printed { .. }
+            | TriggerDefinitionOccurrenceRef::CopiedValue { .. }
+            | TriggerDefinitionOccurrenceRef::Unmaterialized => {}
+        }
+    }
+
     /// CR 113.2c + CR 603.2 + CR 603.2h: the key under which `def`'s per-definition
     /// limit ledgers (once each turn, once, the first N times each turn, and the
     /// indicated action) are read and written. Every lowered half of one printed
@@ -39957,6 +40203,12 @@ impl TriggerOccurrenceState {
             .iter()
             .map(|active| (&active.producer, active.instance))
     }
+
+    pub fn for_each_active_grant_generation_mut(&mut self, mut f: impl FnMut(&mut u64)) {
+        for active in &mut self.active_grants {
+            f(&mut active.instance.0);
+        }
+    }
 }
 
 /// Converts a payload-free producer key plus its recipient-local generation
@@ -40049,6 +40301,7 @@ impl TriggerDefinition {
             unless_pay: None,
             batched: false,
             die_sides: None,
+            gotcha_condition: None,
             expend_threshold: None,
             attack_target_filter: None,
             player_actions: None,
@@ -46193,6 +46446,7 @@ mod tests {
             unless_pay: None,
             batched: false,
             die_sides: None,
+            gotcha_condition: None,
             expend_threshold: None,
             attack_target_filter: None,
             player_actions: None,
@@ -50218,5 +50472,24 @@ mod created_referent_classification_tests {
             kind: ChooseOneOfKind::Ordinary,
         };
         assert!(ordinary_branch.publishes_created_referent());
+    }
+
+    #[test]
+    fn sacrifice_all_requirement_round_trips_and_legacy_count_decodes() {
+        let cost = SacrificeCost::new(TargetFilter::Any, SacrificeRequirement::All);
+        let json = serde_json::to_value(&cost).expect("serialize");
+        assert_eq!(
+            json,
+            serde_json::json!({"target": {"type": "Any"}, "requirement": {"requirement": "all"}})
+        );
+        assert_eq!(
+            serde_json::from_value::<SacrificeCost>(json).expect("round trip"),
+            cost
+        );
+
+        let legacy: SacrificeCost =
+            serde_json::from_value(serde_json::json!({"target": {"type": "Any"}, "count": 2}))
+                .expect("legacy decode");
+        assert_eq!(legacy.requirement, SacrificeRequirement::Count { count: 2 });
     }
 }

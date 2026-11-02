@@ -15,6 +15,7 @@ import { audioManager } from "../audio/AudioManager";
 import { MAX_UNDO_HISTORY, UNDOABLE_ACTIONS } from "../constants/game";
 import { debugLog } from "./debugLog";
 import { flashCompletedScry, flashInGameRolls } from "./diceContest";
+import { flashUnActionEvents } from "./unActions";
 import i18n from "../i18n";
 import { useAnimationStore } from "../stores/animationStore";
 import { useAppNotificationStore } from "../stores/appToastStore";
@@ -144,7 +145,7 @@ export type BoundGameSession = {
 
 type GameSessionPreferenceAction = Extract<
   GameAction,
-  { type: "SetPhaseStops" } | { type: "SetPriorityPassingMode" }
+  { type: "SetPhaseStops" } | { type: "SetPriorityPassingMode" } | { type: "UnAction" }
 >;
 
 /** Module-level mutex — replaces useRef from the hook version. */
@@ -359,6 +360,7 @@ function queuedLocalActionStillApplies(next: PendingLocalAction): boolean {
     || next.action.type === "CancelAutoPass"
     || next.action.type === "SetMayTriggerAutoChoice"
     || next.action.type === "SetReplacementAutoChoice"
+    || next.action.type === "UnAction"
   ) {
     return true;
   }
@@ -681,6 +683,7 @@ async function processAction(
   if (!skipPresentation) {
     flashInGameRolls(events);
     flashCompletedScry(events);
+    flashUnActionEvents(events);
   }
 
   // 6. Normalize events into animation steps
@@ -1077,6 +1080,7 @@ async function processRemoteUpdateInner(
   if (!skipAnimation) {
     flashInGameRolls(events);
     flashCompletedScry(events);
+    flashUnActionEvents(events);
   }
 
   // 3. Normalize events into animation steps

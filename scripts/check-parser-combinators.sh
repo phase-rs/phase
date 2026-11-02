@@ -77,7 +77,7 @@ BASE_SHA="$(git rev-parse "$BASE")"
 HEAD_SHA="$(git rev-parse HEAD)"
 # When parser code moves to a new location, append that path here and keep the
 # old one listed: the old path's deletions are what exempt the moved lines.
-SCOPE=(crates/engine/src/parser crates/engine/src/types/text_grammar.rs crates/phase-ast/src/types/text_grammar.rs)
+SCOPE=(crates/engine/src/parser crates/engine/src/types/text_grammar.rs crates/phase-ast/src/types/text_grammar.rs crates/phase-parser/src/parser)
 
 # When invoked as a pre-commit hook (GIT_INDEX_FILE is set, or no explicit base
 # was provided and BASE == HEAD), only check staged changes to avoid flagging
@@ -132,7 +132,7 @@ fi
 # so the anchor is exact. Full-line comments are excluded so that prose NAMING a
 # permissive symbol is not miscounted as a call.
 # ---------------------------------------------------------------------------
-ORACLE_RS='crates/engine/src/parser/oracle.rs'
+ORACLE_RS='crates/phase-parser/src/parser/oracle.rs'
 PERMISSIVE_SYMS='parse_granted_keyword_fragment|extract_granted_keyword_list'
 # Pre-rename spellings. These must not come back under any name, in any context.
 LEGACY_SYMS='parse_keyword_from_oracle|extract_keyword_line'
@@ -537,7 +537,7 @@ ERROR: New parser code violates the nom-combinator mandate.
 The parser mandate (CLAUDE.md) requires nom combinators for ALL parsing
 dispatch. Copy-paste-ready patterns for every common shape are in:
 
-    crates/engine/src/parser/oracle_nom/PATTERNS.md
+    crates/phase-parser/src/parser/oracle_nom/PATTERNS.md
 
 EOF
 

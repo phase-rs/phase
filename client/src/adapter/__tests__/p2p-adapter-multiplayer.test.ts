@@ -17,15 +17,24 @@ import { ContestOverlay } from "../../components/contest/ContestOverlay";
 import { useContestStore } from "../../stores/contestStore";
 import { useGameStore } from "../../stores/gameStore";
 import { P2PGuestAdapter, P2PHostAdapter, playerSlotsFromSeatView, type P2PAdapterEvent } from "../p2p-adapter";
-import { AdapterError, AdapterErrorCode, supportsAiDecisionDiagnostics, supportsMatchConcede, type EngineSnapshot, type FormatConfig, type GameAction, type GameEvent, type GameLogEntry, type GameState, type PersistedGameState, type RestoredGameStateResult } from "../types";
+import { AdapterError, AdapterErrorCode, supportsAiDecisionDiagnostics, supportsMatchConcede, supportsTakeback, supportsTurnRewind, type EngineSnapshot, type FormatConfig, type GameAction, type GameEvent, type GameLogEntry, type GameState, type PersistedGameState, type RestoredGameStateResult, type TakebackReply, type TakebackVote } from "../types";
 import { PROTOCOL_VERSION, type WsAdapterEvent } from "../ws-adapter";
 import { FakeDataConnection } from "../../network/__tests__/fakeDataConnection";
 import { PEER_CONNECT_OPTIONS } from "../../network/connection";
 import { WIRE_PROTOCOL_VERSION, encodeWireMessage, type P2PMessage } from "../../network/protocol";
 import { p2pFinalStateCommitment, type P2PTerminalResult } from "../../services/p2pTerminalResult";
 import type { FullTerminalDelivery } from "../../services/fullTerminalResult";
-import { ownsP2PHostLease } from "../../services/p2pSession";
+import { claimP2PHostLease, ownsP2PHostLease } from "../../services/p2pSession";
 import type { PersistedP2PHostSession } from "../../services/gamePersistence";
+import { usePreferencesStore } from "../../stores/preferencesStore";
+import { submitDeckList, type SubmissionDeck } from "../../services/deckSubmission";
+import type { PrintingEntry } from "../../services/scryfall";
+import type * as Scryfall from "../../services/scryfall";
+
+const ownerArt = vi.hoisted(() => ({ face: vi.fn(), printings: vi.fn() }));
+vi.mock("../../services/scryfall", async (original) => ({
+  ...await original<typeof Scryfall>(), getCardPrintings: ownerArt.printings,
+}));
 
 /** `multiplayer:reconnectRejected.hostDisconnectedBeforeSetup`, rendered in English. */
 const HOST_DISCONNECTED_BEFORE_SETUP = "Host disconnected before game setup completed";
@@ -119,6 +128,11 @@ const mocks = vi.hoisted(() => {
     compatible: true,
     reasons: [] as string[],
   }));
+  // The engine's resource bound on a guest deck's printings sidecar: resolves
+  // when in bounds, rejects with the engine's reason on abuse. The host's
+  // admission check is fail-closed, so a mock that did not resolve would kick
+  // every guest in this suite.
+  const checkDeckPrintingsBounds = vi.fn(async (_printings: unknown) => undefined);
   const getViewerSnapshot = vi.fn(async (pid: number) => ({
     state: { filteredFor: pid, players: [] },
     actions: [],
@@ -142,6 +156,7 @@ const mocks = vi.hoisted(() => {
     })),
     checkDeckCompatibility,
     evaluateDeckFormatGate,
+    checkDeckPrintingsBounds,
     getState,
     getLegalActions,
     /**
@@ -255,6 +270,10 @@ const mocks = vi.hoisted(() => {
     releaseHostSession: vi.fn(async (_claimed: boolean) => undefined),
     setAiDecisionDiagnosticsEnabled: vi.fn(),
     subscribeAiDecisionDiagnostics: vi.fn(() => () => {}),
+    requestTakeback: vi.fn(async (_actor: number, _aiPlayers: number[]): Promise<TakebackReply> => ({ status: "recorded" })),
+    respondTakeback: vi.fn(async (_actor: number, _approve: boolean, _aiPlayers: number[]): Promise<TakebackReply> => ({ status: "recorded" })),
+    cancelTakeback: vi.fn(async (_actor: number): Promise<TakebackReply> => ({ status: "recorded" })),
+    pendingTakeback: vi.fn(async (): Promise<TakebackVote | null> => null),
   };
 });
 
@@ -391,10 +410,12 @@ const mockSubmitAiActionProposal = mocks.submitAiActionProposal as unknown as As
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((r) => {
-    resolve = r;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 function debugLogEntry(value: string): GameLogEntry {
@@ -460,6 +481,8 @@ vi.mock("../wasm-adapter", () => {
     previewInteraction: mocks.previewInteraction,
     checkDeckCompatibility: mocks.checkDeckCompatibility,
     evaluateDeckFormatGate: mocks.evaluateDeckFormatGate,
+    checkDeckPrintingsBounds: mocks.checkDeckPrintingsBounds,
+    getCardFaceData: ownerArt.face,
     getState: mocks.getState,
     getLegalActions: mocks.getLegalActions,
     getSnapshot: mocks.getSnapshot,
@@ -478,11 +501,16 @@ vi.mock("../wasm-adapter", () => {
     releaseHostSession: mocks.releaseHostSession,
     setAiDecisionDiagnosticsEnabled: mocks.setAiDecisionDiagnosticsEnabled,
     subscribeAiDecisionDiagnostics: mocks.subscribeAiDecisionDiagnostics,
+    requestTakeback: mocks.requestTakeback,
+    respondTakeback: mocks.respondTakeback,
+    cancelTakeback: mocks.cancelTakeback,
+    pendingTakeback: mocks.pendingTakeback,
     dispose: vi.fn(),
   });
   return {
     WasmAdapter: vi.fn().mockImplementation(createEngine),
     getHostAdapter: vi.fn(createEngine),
+    getSharedAdapter: vi.fn(createEngine),
     createHostSessionOwner: vi.fn(() => Symbol("test-host-session-owner")),
   };
 });
@@ -501,6 +529,10 @@ beforeEach(() => {
   mockSubmitAction.mockClear();
   mockCheckDeckCompatibility.mockClear();
   mockEvaluateDeckFormatGate.mockClear();
+  // `mockReset`, then a resolving default: a pending or rejecting override must
+  // never leak into the next test's admission.
+  mocks.checkDeckPrintingsBounds.mockReset();
+  mocks.checkDeckPrintingsBounds.mockResolvedValue(undefined);
   mockGetViewerSnapshot.mockReset();
   mockGetViewerSnapshot.mockImplementation(async (pid: number) => ({
     state: { filteredFor: pid, players: [] },
@@ -567,6 +599,10 @@ beforeEach(() => {
   // `vi.fn(impl)`, so the reset restores their default implementations.
   mocks.initializeMultiplayerHostGame.mockReset();
   mocks.releaseHostSession.mockReset();
+  mocks.requestTakeback.mockReset();
+  mocks.respondTakeback.mockReset();
+  mocks.cancelTakeback.mockReset();
+  mocks.pendingTakeback.mockReset();
   nativeWebSocketMocks.initializePregame.mockReset();
   nativeWebSocketMocks.waitForPlayerSlots.mockReset();
   nativeWebSocketMocks.waitForGameStarted.mockReset();
@@ -1079,7 +1115,7 @@ const NATIVE_HOST_ATTACHMENT = {
   fullKey: "native-full-key",
 };
 
-const P2P_WITHHELD_REASON = "The game state after this action is too large to send, so this board is out of date. Peer-to-peer games have no takeback; the board updates when a later state is small enough to send.";
+const P2P_WITHHELD_REASON = "The game state after this action is too large to send, so this board is out of date. A player can request a takeback of the last action from the game menu to continue (for a loop, take it with a smaller count).";
 
 const NATIVE_GUEST_ATTACHMENT = {
   playerId: 1,
@@ -3382,6 +3418,302 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
     ]);
   });
 
+  // ── Printings-sidecar resource bound at admission (phase 2, A3/D8) ────────
+  // The ENGINE decides (`checkDeckPrintingsBounds`, mocked here); these tests pin
+  // the adapter's routing of the verdict: where it sits relative to storing,
+  // persisting, the native attach and the start, and that it fails closed.
+
+  /** What a client would put in a guest deck's `printings` (two entries). */
+  const GUEST_PRINTINGS = [
+    { section: "main_deck", name: "Plains", count: 1, printing: { set_code: "M21", collector_number: "1" } },
+    { section: "main_deck", name: "Island", count: 2, printing: { set_code: "M21", collector_number: "2" } },
+  ];
+
+  const sentTypes = (messages: unknown[]) => messages.map((message) => (message as { type?: string }).type);
+
+  it("refuses an abusive guest sidecar through the engine before the seat is taken or the game starts", async () => {
+    mocks.checkDeckPrintingsBounds.mockRejectedValueOnce(
+      new Error("printings must contain at most 2048 entries"),
+    );
+    // No format configured: the bound is not a format rule, unlike `validateGuestDeck`.
+    const { adapter, emitConnection } = makeHost(2);
+    await adapter.initialize();
+
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: ["Plains"], sideboard: [], printings: GUEST_PRINTINGS } },
+    });
+    await flushPromises(20);
+
+    // Reach guard: the engine was asked about the guest's own sidecar (after the
+    // fake connection's wire round trip), so the refusal below is its verdict.
+    expect(mocks.checkDeckPrintingsBounds).toHaveBeenCalledTimes(1);
+    expect(mocks.checkDeckPrintingsBounds).toHaveBeenCalledWith(GUEST_PRINTINGS);
+
+    expect(await guest.getSentMessages()).toContainEqual(
+      expect.objectContaining({
+        type: "kick",
+        reason: "Deck rejected: printings must contain at most 2048 entries",
+      }),
+    );
+    expect(guest.open).toBe(false);
+    expect(adapter.getPlayerSlots().map((slot) => slot.kind.type)).toEqual([
+      "HostHuman",
+      "WaitingHuman",
+    ]);
+    expect(mockInitializeHostGame).not.toHaveBeenCalled();
+    adapter.dispose();
+  });
+
+  it("admits a guest whose sidecar is in bounds, and one with no sidecar", async () => {
+    const { adapter, emitConnection } = makeHost(3);
+    await adapter.initialize();
+
+    const withSidecar = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: ["Plains"], sideboard: [], printings: GUEST_PRINTINGS } },
+    });
+    await flushPromises(20);
+    const withoutSidecar = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: ["Island"], sideboard: [] } },
+    });
+    await flushPromises(20);
+
+    // Reach guards: the engine was asked about each guest, with exactly what each sent.
+    expect(mocks.checkDeckPrintingsBounds.mock.calls).toEqual([[GUEST_PRINTINGS], [undefined]]);
+    for (const guest of [withSidecar, withoutSidecar]) {
+      expect(sentTypes(await guest.getSentMessages())).not.toContain("kick");
+      expect(guest.open).toBe(true);
+    }
+    expect(adapter.getPlayerSlots().map((slot) => slot.kind.type)).toEqual([
+      "HostHuman",
+      "JoinedHuman",
+      "JoinedHuman",
+    ]);
+    adapter.dispose();
+  });
+
+  it.each(["WASM", "native"] as const)("V11 %s host preserves service-selected guest C and an ownerless guest beside host A", async (transport) => {
+    const catalog: PrintingEntry[] = ["aaa", "ccc"].map((set, index) => ({
+      id: set, set, set_name: set, collector_number: index === 0 ? "001" : "003",
+      released_at: "2000-01-01", border_color: "black", frame_effects: [], full_art: false, faces: [],
+    }));
+    ownerArt.face.mockImplementation(async () => ({ scryfall_oracle_id: "island-oracle" }));
+    ownerArt.printings.mockResolvedValue(catalog);
+    const original = usePreferencesStore.getState();
+    usePreferencesStore.setState({ artChain: [], artOverrides: {
+      "island-oracle": { scryfallId: "ccc", setCode: "ccc", collectorNumber: "003" },
+    } });
+    const guest = await submitDeckList({ main_deck: ["Island"], sideboard: [] });
+    expect(guest.printings).toEqual([{ section: "main_deck", name: "Island", count: 1,
+      printing: { set_code: "ccc", collector_number: "003" } }]);
+    usePreferencesStore.setState({ artOverrides: {} });
+    const ownerless = await submitDeckList({ main_deck: ["Island"], sideboard: [] });
+    expect(ownerless).not.toHaveProperty("printings");
+    usePreferencesStore.setState({ artOverrides: {
+      "island-oracle": { scryfallId: "aaa", setCode: "aaa", collectorNumber: "001" },
+    } });
+    const player = await submitDeckList({ main_deck: ["Island"], sideboard: [] });
+    expect(player.printings).toEqual([{ section: "main_deck", name: "Island", count: 1,
+      printing: { set_code: "aaa", collector_number: "001" } }]);
+    ownerArt.face.mockClear();
+    ownerArt.printings.mockClear();
+    mocks.checkDeckPrintingsBounds.mockClear();
+    const { peer, onGuestConnected, emitConnection } = createFakePeer();
+    nativeWebSocketMocks.real = transport === "native";
+    const adapter = new P2PHostAdapter(
+      { player, opponent: { main_deck: [], sideboard: [] }, ai_decks: [] },
+      peer as unknown as Peer, onGuestConnected, 3, undefined, undefined, 5_000, undefined, true,
+      undefined, undefined, transport === "native" ? {} : undefined,
+    );
+    const attach = async (pid: number) => {
+      await vi.waitFor(() => expect(AuditSocket.sockets).toHaveLength(pid + 1));
+      const socket = AuditSocket.sockets[pid];
+      await flushPromises(20);
+      socket.frame("ServerHello", { server_version: "0.0.0-test", build_commit: "testhash", protocol_version: PROTOCOL_VERSION, mode: "Full" });
+      await vi.waitFor(() => expect(socket.sent.length).toBeGreaterThan(0));
+      socket.frame("SessionAttached", { game_code: "ART", player_id: pid, player_token: `art-${pid}`, full_key: { game_code: "ART", generation: 1 } });
+      for (const active of AuditSocket.sockets) active.frame("PlayerSlotsUpdate", { slots: [], full_key: { game_code: "ART", generation: 1 } });
+    };
+    try {
+      const init = adapter.initialize();
+      if (transport === "native") await attach(0);
+      await init;
+      const first = joinGuest(emitConnection, { type: "guest_deck", deckData: { player: guest } });
+      if (transport === "native") await attach(1);
+      await first;
+      const second = joinGuest(emitConnection, { type: "guest_deck", deckData: { player: ownerless } });
+      if (transport === "native") await attach(2);
+      await second;
+      await flushPromises(30);
+      if (transport === "WASM") {
+        await adapter.initializeGame();
+        const [outgoing] = mockInitializeHostGame.mock.calls[0] as unknown as [{
+          player: SubmissionDeck; opponent: SubmissionDeck; ai_decks: SubmissionDeck[];
+        }];
+        expect(outgoing.player).toEqual(player);
+        expect(outgoing.opponent).toEqual(guest);
+        expect(outgoing.ai_decks[0]).toEqual(ownerless);
+        expect(outgoing.ai_decks[0]).not.toHaveProperty("printings");
+      } else {
+        expect(AuditSocket.sockets[0].sent).toContainEqual(expect.objectContaining({
+          type: "CreateGameWithSettings", data: expect.objectContaining({ deck: player }),
+        }));
+        expect(AuditSocket.sockets[1].sent).toContainEqual(expect.objectContaining({
+          type: "JoinGameWithPassword", data: expect.objectContaining({ deck: guest }),
+        }));
+        expect(AuditSocket.sockets[2].sent).toContainEqual(expect.objectContaining({
+          type: "JoinGameWithPassword", data: expect.objectContaining({ deck: ownerless }),
+        }));
+      }
+      expect(mocks.checkDeckPrintingsBounds.mock.calls).toEqual([[guest.printings], [undefined]]);
+      expect(ownerArt.face).not.toHaveBeenCalled();
+      expect(ownerArt.printings).not.toHaveBeenCalled();
+    } finally {
+      adapter.dispose();
+      usePreferencesStore.setState({ artChain: original.artChain, artOverrides: original.artOverrides });
+    }
+  });
+
+  it("fails closed: a failing sidecar check kicks the guest instead of admitting it unchecked", async () => {
+    mocks.checkDeckPrintingsBounds.mockRejectedValueOnce("engine worker unavailable");
+    const { adapter, emitConnection } = makeHost(2);
+    await adapter.initialize();
+
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: ["Plains"], sideboard: [] } },
+    });
+    await flushPromises(20);
+
+    expect(mocks.checkDeckPrintingsBounds).toHaveBeenCalledTimes(1);
+    expect(await guest.getSentMessages()).toContainEqual(
+      expect.objectContaining({
+        type: "kick",
+        reason: "Deck rejected: engine worker unavailable",
+      }),
+    );
+    expect(guest.open).toBe(false);
+    expect(adapter.getPlayerSlots()[1]?.kind.type).toBe("WaitingHuman");
+    adapter.dispose();
+  });
+
+  it("checks a guest sidecar before any native attach, so a native refusal cannot fall back to an unchecked admission", async () => {
+    const { adapter, emitConnection } = makeNativeHost();
+    nativeWebSocketMocks.waitForPlayerSlots.mockResolvedValue([]);
+    nativeWebSocketMocks.initializePregame.mockResolvedValueOnce(NATIVE_HOST_ATTACHMENT);
+    mocks.checkDeckPrintingsBounds.mockRejectedValueOnce(
+      new Error("printings must contain at most 2048 entries"),
+    );
+    await adapter.initialize();
+    // Reach guard: only the host's own attach has happened.
+    expect(nativeWebSocketMocks.initializePregame).toHaveBeenCalledTimes(1);
+
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: ["Plains"], sideboard: [], printings: GUEST_PRINTINGS } },
+    });
+    await flushPromises(20);
+
+    expect(mocks.checkDeckPrintingsBounds).toHaveBeenCalledWith(GUEST_PRINTINGS);
+    // No native "join" was constructed for the refused guest.
+    expect(nativeWebSocketMocks.initializePregame).toHaveBeenCalledTimes(1);
+    expect(await guest.getSentMessages()).toContainEqual(
+      expect.objectContaining({
+        type: "kick",
+        reason: "Deck rejected: printings must contain at most 2048 entries",
+      }),
+    );
+    expect(guest.open).toBe(false);
+    expect(adapter.getPlayerSlots()[1]?.kind.type).toBe("WaitingHuman");
+    adapter.dispose();
+  });
+
+  describe("admission await re-checks host authority and connection closure", () => {
+    /**
+     * A native host whose guest-sidecar check is parked on `check`, with the guest's
+     * `guest_deck` already inside that await (the check mock has been called once),
+     * so an event that lands next lands inside the admission await and not before
+     * the existing pre-check, which would pass vacuously.
+     */
+    async function parkedAdmission() {
+      const { adapter, emitConnection } = makeNativeHost(2, { gameId: "native-game", roomCode: "ABCDE" });
+      nativeWebSocketMocks.waitForPlayerSlots.mockResolvedValue([]);
+      nativeWebSocketMocks.initializePregame
+        .mockResolvedValueOnce(NATIVE_HOST_ATTACHMENT)
+        .mockResolvedValueOnce(NATIVE_GUEST_ATTACHMENT);
+      await adapter.initialize();
+      const check = deferred<undefined>();
+      mocks.checkDeckPrintingsBounds.mockImplementationOnce(() => check.promise);
+      persistenceMocks.saveP2PHostSession.mockClear();
+      const guest = await joinGuest(emitConnection, {
+        type: "guest_deck",
+        deckData: { player: { main_deck: ["Plains"], sideboard: [], printings: GUEST_PRINTINGS } },
+      });
+      await vi.waitFor(() => expect(mocks.checkDeckPrintingsBounds).toHaveBeenCalledTimes(1));
+      const host = adapter as unknown as {
+        authority: { sessionKey: string };
+        guestSessions: Map<number, unknown>;
+        guestDecks: Map<number, unknown>;
+      };
+      return { adapter, guest, check, host };
+    }
+
+    it("attaches and adopts the guest once the check settles with neither event", async () => {
+      const { adapter, guest, check, host } = await parkedAdmission();
+      // Nothing is attached, seated or persisted while the check is parked.
+      expect(nativeWebSocketMocks.initializePregame).toHaveBeenCalledTimes(1);
+      expect(host.guestSessions.has(1)).toBe(false);
+
+      check.resolve(undefined);
+      await flushPromises(20);
+
+      // Reach guard for the negatives below: the native attach and adoption run once
+      // the await settles.
+      expect(nativeWebSocketMocks.initializePregame).toHaveBeenCalledTimes(2);
+      expect(host.guestSessions.has(1)).toBe(true);
+      expect(sentTypes(await guest.getSentMessages())).not.toContain("kick");
+      adapter.dispose();
+    });
+
+    for (const verdict of ["admitting", "refusing"] as const) {
+      it(`does not attach a stale host's guest when the lease is replaced during the ${verdict} check`, async () => {
+        const { adapter, guest, check, host } = await parkedAdmission();
+
+        claimP2PHostLease(host.authority.sessionKey);
+        if (verdict === "admitting") check.resolve(undefined);
+        else check.reject(new Error("printings must contain at most 2048 entries"));
+        await flushPromises(20);
+
+        expect(nativeWebSocketMocks.initializePregame).toHaveBeenCalledTimes(1);
+        const messages = await guest.getSentMessages();
+        expect(messages).toContainEqual({ type: "reconnect_rejected", reason: "Host session superseded" });
+        expect(sentTypes(messages)).not.toContain("kick");
+        expect(host.guestSessions.has(1)).toBe(false);
+        expect(host.guestDecks.has(1)).toBe(false);
+        adapter.dispose();
+      });
+
+      it(`neither attaches nor persists a guest that disconnected during the ${verdict} check`, async () => {
+        const { adapter, guest, check, host } = await parkedAdmission();
+
+        guest.simulateClose();
+        if (verdict === "admitting") check.resolve(undefined);
+        else check.reject(new Error("printings must contain at most 2048 entries"));
+        await flushPromises(20);
+
+        // Nothing was attached, so nothing is released.
+        expect(nativeWebSocketMocks.initializePregame).toHaveBeenCalledTimes(1);
+        expect(nativeWebSocketMocks.sendSeatMutation).not.toHaveBeenCalled();
+        expect(host.guestSessions.has(1)).toBe(false);
+        expect(host.guestDecks.has(1)).toBe(false);
+        expect(persistenceMocks.saveP2PHostSession).not.toHaveBeenCalled();
+        adapter.dispose();
+      });
+    }
+  });
+
   /**
    * CR 903.13f(3): `commander_draft_partner_grant` computes the Commander
    * Masters partner grant from the request's `draft_set_codes`. This gate KICKS
@@ -3597,6 +3929,9 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
       deckData: { player: { main_deck: ["Swamp"], sideboard: [] } },
       wireProtocolVersion: WIRE_PROTOCOL_VERSION,
     });
+    // The first join reaches its seat projection only after the engine's sidecar
+    // check settles, so wait for it rather than for a fixed number of microtasks.
+    await vi.waitFor(() => expect(firstStateJson).not.toBe(""));
     await flushPromises();
 
     secondConn.simulateClose();
@@ -11261,5 +11596,789 @@ describe("P2PHostAdapter — contest input", () => {
       expect(nativeWebSocketMocks.submitContestClick).not.toHaveBeenCalled();
       adapter.dispose();
     });
+  });
+});
+
+describe("P2P takeback transport", () => {
+  type Frame = P2PMessage;
+  const typesOf = (frames: unknown[]) => (frames as Frame[]).map((frame) => frame.type);
+  const ordered = (frames: unknown[], kinds: string[]) => typesOf(frames).filter((type) => kinds.includes(type));
+  const framesAfter = async (conn: FakeDataConnection, mark: number) =>
+    (await conn.getSentMessages()).slice(mark) as Frame[];
+  const markOf = async (conn: FakeDataConnection) => {
+    await flushPromises(20);
+    return (await conn.getSentMessages()).length;
+  };
+  const playerToken = async (conn: FakeDataConnection) =>
+    ((await conn.getSentMessages()).find((m) => (m as Frame).type === "game_setup") as Extract<Frame, { type: "game_setup" }>)
+      .playerToken;
+  type HostInternals = {
+    eliminatedSeats: Set<number>;
+    disconnectedSeats: Map<number, unknown>;
+    gameRunState: string;
+    kickedTokens: Set<string>;
+    nativeBridge: { isGuestAttached: (playerId: number) => boolean };
+  };
+  const internals = (adapter: P2PHostAdapter) => adapter as unknown as HostInternals;
+  const savedEliminated = () =>
+    (persistenceMocks.saveP2PHostSession.mock.calls as unknown as Array<[string, { eliminatedSeats: number[] }]>)
+      .map(([, session]) => session.eliminatedSeats);
+  const lastSavedEliminated = () => savedEliminated().slice(-1)[0];
+  const choicesFor = (events: P2PAdapterEvent[], playerId: number) =>
+    events.filter((event) => event.type === "opponentDisconnectedWithChoice" && event.playerId === playerId).length;
+  const concede = (playerId: number) => ({ type: "Concede", data: { player_id: playerId } });
+  // Lightning Bolt: "Lightning Bolt deals 3 damage to any target." A seat it took to 0
+  // life lost by state-based action (CR 704.5a) and is in `eliminated_players`.
+  const boardWith = (eliminated: number[], waitingOn = 0) => mockGetState.mockResolvedValue({
+    players: [],
+    objects: {},
+    eliminated_players: eliminated,
+    waiting_for: { type: "Priority", data: { player: waitingOn } },
+    priority_player: waitingOn,
+  });
+
+  async function browserTable(persistence?: { gameId: string; roomCode: string }) {
+    const { adapter, emitConnection } = makeHost(3, 5_000, undefined, persistence);
+    const events: P2PAdapterEvent[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await adapter.initialize();
+    const p1 = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: ["Plains"], sideboard: [] } },
+      displayName: "Guest One",
+    });
+    const p2 = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: ["Island"], sideboard: [] } },
+      displayName: "Guest Two",
+    });
+    await adapter.initializeGame();
+    await flushPromises(20);
+    return { adapter, emitConnection, events, p1, p2 };
+  }
+
+  async function openVote(adapter: P2PHostAdapter, events: P2PAdapterEvent[], requester = 0, voters = [1, 2]) {
+    mocks.requestTakeback.mockResolvedValueOnce({ status: "requested", requester, voters });
+    adapter.sendRequestTakeback();
+    await vi.waitFor(() => expect(events).toContainEqual(expect.objectContaining({ type: "takebackRequested", requester })));
+  }
+
+  it("B1: routes a guest's request to the browser authority and announces the vote to every seat", async () => {
+    const t = await browserTable();
+    const marks = [t.p1.sent.length, t.p2.sent.length] as const;
+    mocks.requestTakeback.mockResolvedValueOnce({ status: "requested", requester: 1, voters: [0, 2] });
+    await t.p1.simulateData({ type: "request_takeback" });
+    const announced = { type: "takebackRequested", requester: 1, requesterName: "Guest One", voters: [0, 2] };
+    await vi.waitFor(() => expect(t.events).toContainEqual(announced));
+    expect(mocks.requestTakeback).toHaveBeenCalledWith(1, []);
+    for (const [conn, mark] of [[t.p1, marks[0]], [t.p2, marks[1]]] as const) {
+      expect(await framesAfter(conn, mark)).toContainEqual(expect.objectContaining({
+        type: "takeback_requested",
+        requester: 1,
+        requesterName: "Guest One",
+        voters: [0, 2],
+      }));
+    }
+
+    const stranger = new FakeOpenableConnection();
+    t.emitConnection(stranger as unknown as DataConnection);
+    stranger.fireOpen();
+    await stranger.simulateData({ type: "request_takeback" });
+    await flushPromises(20);
+    expect(mocks.requestTakeback).toHaveBeenCalledTimes(1);
+
+    t.adapter.sendRequestTakeback();
+    await vi.waitFor(() => expect(mocks.requestTakeback).toHaveBeenLastCalledWith(0, []));
+
+    const { peer } = createFakePeer();
+    const guest = new P2PGuestAdapter(
+      { player: { main_deck: [], sideboard: [] } },
+      peer as unknown as Peer,
+      "host-peer",
+      new FakeDataConnection() as unknown as DataConnection,
+    );
+    expect(supportsTakeback(t.adapter)).toBe(true);
+    expect(supportsTakeback(guest)).toBe(true);
+    expect(supportsTurnRewind(t.adapter)).toBe(false);
+    expect(supportsTurnRewind(guest)).toBe(false);
+    t.adapter.dispose();
+  });
+
+  it("B2: an approval reaches every seat after the restored state", async () => {
+    const t = await browserTable();
+    const marks = [t.p1.sent.length, t.p2.sent.length] as const;
+    const hostMark = t.events.length;
+    mocks.respondTakeback.mockResolvedValueOnce({ status: "resolved", resolution: "approved", resolvedBy: 2 });
+    await t.p2.simulateData({ type: "respond_takeback", approve: true });
+    await vi.waitFor(() => expect(t.events).toContainEqual({ type: "takebackResolved", resolution: "approved", resolvedBy: 2 }));
+    expect(mocks.respondTakeback).toHaveBeenCalledWith(2, true, []);
+    for (const [conn, mark] of [[t.p1, marks[0]], [t.p2, marks[1]]] as const) {
+      const frames = await framesAfter(conn, mark);
+      expect(ordered(frames, ["state_update", "takeback_resolved"])).toEqual(["state_update", "takeback_resolved"]);
+      expect(frames).toContainEqual(expect.objectContaining({ type: "takeback_resolved", resolution: "approved", resolvedBy: 2 }));
+    }
+    expect(ordered(t.events.slice(hostMark), ["stateChanged", "takebackResolved"])).toEqual(["stateChanged", "takebackResolved"]);
+
+    await t.p2.simulateData({ type: "respond_takeback", approve: "yes" } as never);
+    await flushPromises(20);
+    expect(mocks.respondTakeback).toHaveBeenCalledTimes(1);
+    t.adapter.dispose();
+  });
+
+  it("B2b: an approval still reaches the guests when the terminal close cannot read the final state", async () => {
+    const t = await browserTable();
+    const mark = t.p1.sent.length;
+    const hostMark = t.events.length;
+    // The host publication reads first; the terminal close's read is the second.
+    const original = mocks.getSnapshot.getMockImplementation()!;
+    let closeReadFailed = false;
+    mocks.getSnapshot.mockImplementationOnce(original).mockImplementationOnce(async () => {
+      closeReadFailed = true;
+      throw new Error("terminal close read failed");
+    });
+    mocks.respondTakeback.mockResolvedValueOnce({ status: "resolved", resolution: "approved", resolvedBy: 1 });
+    await t.p1.simulateData({ type: "respond_takeback", approve: true });
+    await vi.waitFor(() => expect(t.events.slice(hostMark)).toContainEqual(expect.objectContaining({ type: "terminalUnavailable" })));
+    await flushPromises(20);
+    expect(closeReadFailed).toBe(true);
+    const frames = await framesAfter(t.p1, mark);
+    expect(ordered(frames, ["state_update", "takeback_resolved"])).toEqual(["state_update", "takeback_resolved"]);
+    expect(frames).toContainEqual(expect.objectContaining({ type: "takeback_resolved", resolution: "approved", resolvedBy: 1 }));
+    t.adapter.dispose();
+  });
+
+  async function aiTable() {
+    const { adapter, emitConnection } = makeHost(3);
+    const events: P2PAdapterEvent[] = [];
+    adapter.onEvent((event) => events.push(event));
+    await adapter.initialize();
+    const seatState = (adapter as unknown as { pregameSeatState: Record<string, unknown> }).pregameSeatState;
+    const aiKind = { type: "Ai", data: { difficulty: "Medium", deck: { type: "Random" } } };
+    mocks.applySeatMutation.mockResolvedValueOnce({
+      state: { ...seatState, seats: [{ type: "HostHuman" }, aiKind, { type: "WaitingHuman" }], tokens: ["host", "", ""] },
+      delta: {
+        mutatedSeats: [1],
+        invalidatedTokens: [],
+        removedAi: [],
+        newAi: [[1, "Medium", { main_deck: [], sideboard: [], commander: [] }]],
+        renumbering: null,
+        nowStarted: false,
+      },
+    } as never);
+    await adapter.applySeatMutation({ type: "SetKind", data: { seatIndex: 1, kind: aiKind } } as never);
+    const guest = await joinGuest(emitConnection, {
+      type: "guest_deck",
+      deckData: { player: { main_deck: ["Island"], sideboard: [] } },
+      displayName: "Guest Two",
+    });
+    await adapter.initializeGame();
+    await flushPromises(20);
+    return { adapter, events, guest };
+  }
+
+  it.each(["approved", "declined", "cancelled"] as const)(
+    "B3: the AI seat holding priority acts again after a %s vote",
+    async (resolution) => {
+      const t = await aiTable();
+      boardWith([], 1);
+      await openVote(t.adapter, t.events);
+      expect(mockGetAiActionProposal).not.toHaveBeenCalled();
+      const mark = t.guest.sent.length;
+      if (resolution === "cancelled") {
+        mocks.cancelTakeback.mockResolvedValueOnce({ status: "resolved", resolution, resolvedBy: 0 });
+        t.adapter.sendCancelTakeback();
+      } else {
+        mocks.respondTakeback.mockResolvedValueOnce({ status: "resolved", resolution, resolvedBy: 2 });
+        await t.guest.simulateData({ type: "respond_takeback", approve: resolution === "approved" });
+      }
+      await vi.waitFor(() => expect(mockGetAiActionProposal).toHaveBeenCalledWith("Medium", 1));
+      const frames = await framesAfter(t.guest, mark);
+      expect(frames).toContainEqual(expect.objectContaining({ type: "takeback_resolved", resolution }));
+      if (resolution !== "approved") expect(typesOf(frames)).not.toContain("state_update");
+      t.adapter.dispose();
+    },
+  );
+
+  it("B4: the engine's refusal reaches only the seat that asked", async () => {
+    const t = await browserTable();
+    const p2Mark = t.p2.sent.length;
+    const refusal = "Only the players asked to approve this takeback may respond";
+    mocks.respondTakeback.mockResolvedValueOnce({ status: "rejected", reason: refusal });
+    await t.p1.simulateData({ type: "respond_takeback", approve: true });
+    await vi.waitFor(async () => expect(await t.p1.getSentMessages()).toContainEqual(
+      expect.objectContaining({ type: "request_rejected", reason: refusal }),
+    ));
+    expect(mocks.respondTakeback).toHaveBeenCalledWith(1, true, []);
+    expect(typesOf(await framesAfter(t.p2, p2Mark))).not.toContain("request_rejected");
+
+    mocks.cancelTakeback.mockResolvedValueOnce({ status: "rejected", reason: "There is no pending takeback request" });
+    t.adapter.sendCancelTakeback();
+    await vi.waitFor(() => expect(t.events).toContainEqual({ type: "requestRejected", reason: "There is no pending takeback request" }));
+
+    mocks.cancelTakeback.mockResolvedValueOnce({ status: "resolved", resolution: "cancelled", resolvedBy: 1 });
+    await t.p1.simulateData({ type: "cancel_takeback" });
+    for (const conn of [t.p1, t.p2]) {
+      await vi.waitFor(async () => expect(await conn.getSentMessages()).toContainEqual(
+        expect.objectContaining({ type: "takeback_resolved", resolution: "cancelled", resolvedBy: 1 }),
+      ));
+    }
+    expect(mocks.cancelTakeback).toHaveBeenLastCalledWith(1);
+    t.adapter.dispose();
+  });
+
+  it("B5: a concession's withdrawal reaches every seat before the concession's state", async () => {
+    const t = await browserTable();
+    const p1Mark = t.p1.sent.length;
+    const hostMark = t.events.length;
+    mockSubmitAction.mockResolvedValueOnce({ events: [], takeback: { resolution: "withdrawn", resolvedBy: 2 } } as never);
+    await t.p2.simulateData({ type: "concede" });
+    await vi.waitFor(async () => expect(typesOf(await framesAfter(t.p1, p1Mark))).toContain("player_conceded"));
+    expect(mockSubmitAction).toHaveBeenCalledWith(concede(2), 2);
+    const frames = await framesAfter(t.p1, p1Mark);
+    expect(ordered(frames, ["takeback_resolved", "state_update", "player_conceded"]))
+      .toEqual(["takeback_resolved", "state_update", "player_conceded"]);
+    expect(frames).toContainEqual(expect.objectContaining({ type: "takeback_resolved", resolution: "withdrawn", resolvedBy: 2 }));
+    expect(ordered(t.events.slice(hostMark), ["takebackResolved", "stateChanged"])).toEqual(["takebackResolved", "stateChanged"]);
+    t.adapter.dispose();
+  });
+
+  it("B6: a dropped state-based loser's concession that approves the vote brings the seat back on grace", async () => {
+    const t = await browserTable({ gameId: "takeback-restore", roomCode: "ABCDE" });
+    boardWith([1]);
+    t.p1.simulateClose();
+    expect(choicesFor(t.events, 1)).toBe(1);
+    // The approval restores the board from before the Bolt.
+    boardWith([]);
+    mockSubmitAction.mockResolvedValueOnce({ events: [], takeback: { resolution: "approved", resolvedBy: 1 } } as never);
+    const mark = await markOf(t.p2);
+    const saveMark = savedEliminated().length;
+    await t.adapter.concedeDisconnected(1);
+    await flushPromises(20);
+    expect(mockSubmitAction).toHaveBeenCalledWith(concede(1), 1);
+    const frames = await framesAfter(t.p2, mark);
+    expect(ordered(frames, ["state_update", "player_disconnected", "game_paused", "takeback_resolved"]))
+      .toEqual(["state_update", "player_disconnected", "game_paused", "takeback_resolved"]);
+    expect(frames).toContainEqual(expect.objectContaining({ type: "player_disconnected", playerId: 1 }));
+    expect(frames).toContainEqual(expect.objectContaining({ type: "takeback_resolved", resolution: "approved", resolvedBy: 1 }));
+    const host = internals(t.adapter);
+    expect(host.eliminatedSeats.has(1)).toBe(false);
+    expect(host.disconnectedSeats.has(1)).toBe(true);
+    expect(host.gameRunState).toBe("paused-disconnect");
+    expect(choicesFor(t.events, 1)).toBe(2);
+    const saves = savedEliminated().slice(saveMark);
+    expect(saves.some((eliminated) => eliminated.includes(1))).toBe(true);
+    expect(saves[saves.length - 1]).not.toContain(1);
+    t.adapter.dispose();
+  });
+
+  it.each(["continue without", "kick"] as const)(
+    "B7: an approval reopens a state-based loser the host closed by %s",
+    async (closedBy) => {
+      const t = await browserTable({ gameId: "takeback-restore", roomCode: "ABCDE" });
+      boardWith([1]);
+      const token = await playerToken(t.p1);
+      t.p1.simulateClose();
+      if (closedBy === "kick") await t.adapter.kickPlayer(1);
+      else await t.adapter.concedeDisconnected(1);
+      expect(mockSubmitAction).toHaveBeenCalledWith(concede(1), 1);
+      const host = internals(t.adapter);
+      if (closedBy === "kick") expect(host.kickedTokens.has(token)).toBe(true);
+      expect(host.eliminatedSeats.has(1)).toBe(true);
+      expect(lastSavedEliminated()).toContain(1);
+      const refusedReason = closedBy === "kick" ? "Player kicked" : "No grace window active for this seat";
+      const early = await joinGuest(t.emitConnection, { type: "reconnect", playerToken: token });
+      await flushPromises(20);
+      expect(await early.getSentMessages()).toContainEqual(expect.objectContaining({ type: "reconnect_rejected", reason: refusedReason }));
+
+      await openVote(t.adapter, t.events);
+      boardWith([]);
+      mocks.respondTakeback.mockResolvedValueOnce({ status: "resolved", resolution: "approved", resolvedBy: 2 });
+      const mark = t.p2.sent.length;
+      const choices = choicesFor(t.events, 1);
+      await t.p2.simulateData({ type: "respond_takeback", approve: true });
+      await vi.waitFor(() => expect(t.events).toContainEqual({ type: "takebackResolved", resolution: "approved", resolvedBy: 2 }));
+      expect(host.eliminatedSeats.has(1)).toBe(false);
+      expect(host.disconnectedSeats.has(1)).toBe(true);
+      expect(host.gameRunState).toBe("paused-disconnect");
+      expect(ordered(await framesAfter(t.p2, mark), ["player_disconnected", "game_paused", "takeback_resolved"]))
+        .toEqual(["player_disconnected", "game_paused", "takeback_resolved"]);
+      expect(choicesFor(t.events, 1)).toBe(choices + 1);
+      expect(lastSavedEliminated()).not.toContain(1);
+
+      const back = await joinGuest(t.emitConnection, { type: "reconnect", playerToken: token });
+      await flushPromises(20);
+      if (closedBy === "kick") {
+        expect(await back.getSentMessages()).toContainEqual(expect.objectContaining({ type: "reconnect_rejected", reason: "Player kicked" }));
+        const concessions = mockSubmitAction.mock.calls.filter(([action]) => JSON.stringify(action) === JSON.stringify(concede(1))).length;
+        await t.adapter.concedeDisconnected(1);
+        expect(mockSubmitAction.mock.calls.filter(([action]) => JSON.stringify(action) === JSON.stringify(concede(1))))
+          .toHaveLength(concessions + 1);
+      } else {
+        await vi.waitFor(async () => expect(typesOf(await back.getSentMessages())).toContain("reconnect_ack"));
+      }
+      t.adapter.dispose();
+    },
+  );
+
+  it.each([
+    [{ requester: 0, voters: [1, 2] }, ["reconnect_ack", "takeback_requested"]],
+    [null, ["reconnect_ack"]],
+  ] as const)(
+    "B8: a reconnecting guest is told of the open vote %o after its ack",
+    async (vote, expected) => {
+      const t = await browserTable();
+      const token = await playerToken(t.p1);
+      t.p1.simulateClose();
+      mocks.pendingTakeback.mockResolvedValueOnce(vote === null ? null : { requester: vote.requester, voters: [...vote.voters] });
+      const back = await joinGuest(t.emitConnection, { type: "reconnect", playerToken: token });
+      await vi.waitFor(async () => expect(typesOf(await back.getSentMessages())).toContain("reconnect_ack"));
+      await flushPromises(20);
+      const frames = await back.getSentMessages();
+      expect(ordered(frames, ["reconnect_ack", "takeback_requested"])).toEqual(expected);
+      if (vote !== null) {
+        expect(frames).toContainEqual(expect.objectContaining({
+          type: "takeback_requested", requester: 0, requesterName: "Host", voters: [1, 2],
+        }));
+      }
+      t.adapter.dispose();
+    },
+  );
+
+  it("B9: a seat out of the game still reaches the authority", async () => {
+    const t = await browserTable();
+    await t.adapter.sendConcede();
+    expect(internals(t.adapter).eliminatedSeats.has(0)).toBe(true);
+    const reason = "There is no previous action of yours to take back";
+    mocks.requestTakeback.mockResolvedValueOnce({ status: "rejected", reason });
+    t.adapter.sendRequestTakeback();
+    await vi.waitFor(() => expect(t.events).toContainEqual({ type: "requestRejected", reason }));
+    expect(mocks.requestTakeback).toHaveBeenCalledWith(0, []);
+    t.adapter.dispose();
+  });
+
+  it("B10: a live state-based loser can still concede after an approval that leaves it out", async () => {
+    const t = await browserTable();
+    boardWith([2]);
+    await openVote(t.adapter, t.events, 1, [0, 2]);
+    mocks.respondTakeback.mockResolvedValueOnce({ status: "resolved", resolution: "approved", resolvedBy: 0 });
+    t.adapter.sendRespondTakeback(true);
+    await vi.waitFor(() => expect(t.events).toContainEqual({ type: "takebackResolved", resolution: "approved", resolvedBy: 0 }));
+    expect(mocks.respondTakeback).toHaveBeenCalledWith(0, true, []);
+    const mark = t.p2.sent.length;
+    await t.p2.simulateData({ type: "action", senderPlayerId: 2, action: concede(2) as GameAction });
+    await vi.waitFor(() => expect(mockSubmitAction).toHaveBeenCalledWith(concede(2), 2));
+    expect(await framesAfter(t.p2, mark)).not.toContainEqual(
+      expect.objectContaining({ type: "action_failed", message: "Player has conceded and can no longer act" }),
+    );
+    t.adapter.dispose();
+  });
+
+  it("B11: a dropped state-based loser keeps its grace after an approval that leaves it out", async () => {
+    const t = await browserTable();
+    boardWith([2]);
+    const token = await playerToken(t.p2);
+    t.p2.simulateClose();
+    await openVote(t.adapter, t.events, 1, [0, 2]);
+    mocks.respondTakeback.mockResolvedValueOnce({ status: "resolved", resolution: "approved", resolvedBy: 0 });
+    const p1Mark = t.p1.sent.length;
+    const hostMark = t.events.length;
+    t.adapter.sendRespondTakeback(true);
+    await vi.waitFor(async () => expect(await framesAfter(t.p1, p1Mark)).toContainEqual(
+      expect.objectContaining({ type: "takeback_resolved", resolution: "approved", resolvedBy: 0 }),
+    ));
+    await flushPromises(20);
+    const host = internals(t.adapter);
+    expect(host.disconnectedSeats.has(2)).toBe(true);
+    expect(host.gameRunState).toBe("paused-disconnect");
+    expect(typesOf(await framesAfter(t.p1, p1Mark))).not.toContain("game_resumed");
+    expect(t.events.slice(hostMark).map((event) => event.type)).not.toContain("gameResumed");
+    const back = await joinGuest(t.emitConnection, { type: "reconnect", playerToken: token });
+    await vi.waitFor(async () => expect(typesOf(await back.getSentMessages())).toContain("reconnect_ack"));
+    t.adapter.dispose();
+  });
+
+  it.each(["cancel", "concession"] as const)(
+    "B12: a %s that ends the vote during a reconnect replay reaches the guest after the replay",
+    async (leg) => {
+      const t = await browserTable();
+      await openVote(t.adapter, t.events);
+      const token = await playerToken(t.p1);
+      t.p1.simulateClose();
+      const held = deferred<TakebackVote | null>();
+      mocks.pendingTakeback.mockReturnValueOnce(held.promise);
+      const back = await joinGuest(t.emitConnection, { type: "reconnect", playerToken: token });
+      await vi.waitFor(() => expect(mocks.pendingTakeback).toHaveBeenCalled());
+      const resolved = leg === "cancel"
+        ? { resolution: "cancelled", resolvedBy: 0 } as const
+        : { resolution: "withdrawn", resolvedBy: 2 } as const;
+      let conceding: Promise<void> = Promise.resolve();
+      if (leg === "cancel") {
+        mocks.cancelTakeback.mockResolvedValueOnce({ status: "resolved", ...resolved });
+        t.adapter.sendCancelTakeback();
+        await vi.waitFor(() => expect(mocks.cancelTakeback).toHaveBeenCalledWith(0));
+      } else {
+        mockSubmitAction.mockResolvedValueOnce({ events: [], takeback: resolved } as never);
+        // Settles only after the held replay: its withdrawal waits behind the reconnect.
+        conceding = t.p2.simulateData({ type: "concede" });
+        await vi.waitFor(() => expect(mockSubmitAction).toHaveBeenCalledWith(concede(2), 2));
+      }
+      await flushPromises(20);
+      held.resolve({ requester: 0, voters: [1, 2] });
+      await conceding;
+      await vi.waitFor(() => expect(t.events).toContainEqual({ type: "takebackResolved", ...resolved }));
+      await vi.waitFor(async () => expect(typesOf(await back.getSentMessages())).toContain("takeback_resolved"));
+      const frames = await back.getSentMessages();
+      expect(ordered(frames, ["reconnect_ack", "takeback_requested", "takeback_resolved"]))
+        .toEqual(["reconnect_ack", "takeback_requested", "takeback_resolved"]);
+      expect(frames).toContainEqual(expect.objectContaining({ type: "takeback_resolved", ...resolved }));
+      t.adapter.dispose();
+    },
+  );
+
+  async function nativeTable() {
+    nativeWebSocketMocks.real = true;
+    const { adapter, emitConnection } = makeNativeHost(3, { gameId: "native-takeback", roomCode: "ABCDE" });
+    const events: P2PAdapterEvent[] = [];
+    adapter.onEvent((event) => events.push(event));
+    const fullKey = { game_code: "TAKEBACK", generation: 1 };
+    const hello = (socket: AuditSocket) =>
+      socket.frame("ServerHello", { server_version: "0.0.0-test", build_commit: "testhash", protocol_version: PROTOCOL_VERSION, mode: "Full" });
+    const attach = async (pid: number) => {
+      await vi.waitFor(() => expect(AuditSocket.sockets).toHaveLength(pid + 1));
+      const socket = AuditSocket.sockets[pid];
+      await flushPromises(20);
+      hello(socket);
+      await vi.waitFor(() => expect(socket.sent.length).toBeGreaterThan(0));
+      socket.frame("SessionAttached", { game_code: "TAKEBACK", player_id: pid, player_token: `takeback-native-${pid}`, full_key: fullKey });
+      for (const s of AuditSocket.sockets) s.frame("PlayerSlotsUpdate", { slots: [], full_key: fullKey });
+    };
+    const init = adapter.initialize();
+    await attach(0);
+    await init;
+    const joining1 = joinGuest(emitConnection, { type: "guest_deck", deckData: { player: { main_deck: ["Plains"], sideboard: [] } }, displayName: "Guest One" });
+    await attach(1);
+    const p1 = await joining1;
+    const joining2 = joinGuest(emitConnection, { type: "guest_deck", deckData: { player: { main_deck: ["Island"], sideboard: [] } }, displayName: "Guest Two" });
+    await attach(2);
+    const p2 = await joining2;
+    const start = adapter.initializeGame();
+    await vi.waitFor(() => expect(AuditSocket.sockets[0].sent.some((m) => m.type === "SeatMutate")).toBe(true));
+    for (const [pid, s] of AuditSocket.sockets.entries()) {
+      s.frame("GameStarted", { state_revision: 1, state: remoteState("native takeback start"), your_player: pid, full_key: fullKey });
+    }
+    AuditSocket.sockets[0].frame("PlayerSlotsUpdate", { slots: [], full_key: fullKey });
+    await start;
+    await flushPromises(30);
+    const reattachSeat = async (index: number, revision: number, state: GameState) => {
+      await vi.waitFor(() => expect(AuditSocket.sockets).toHaveLength(index + 1));
+      const reattached = AuditSocket.sockets[index];
+      await flushPromises(20);
+      hello(reattached);
+      await vi.waitFor(() => expect(reattached.sent.length).toBeGreaterThan(0));
+      reattached.frame("GameStarted", { state_revision: revision, state, your_player: 1, player_token: "takeback-native-1", full_key: fullKey });
+      return reattached;
+    };
+    const live = () => AuditSocket.sockets.filter((s) => s.readyState === 1);
+    const stateUpdate = (socket: AuditSocket, revision: number, state: GameState) =>
+      socket.frame("StateUpdate", { state_revision: revision, state, events: [], full_key: fullKey });
+    return { adapter, emitConnection, events, fullKey, p1, p2, reattachSeat, live, stateUpdate };
+  }
+
+  it("N1: every takeback control reaches the seat's own loopback socket with no target", async () => {
+    const t = await nativeTable();
+    try {
+      await t.p1.simulateData({ type: "request_takeback" });
+      await t.p1.simulateData({ type: "respond_takeback", approve: true });
+      await t.p1.simulateData({ type: "cancel_takeback" });
+      t.adapter.sendRequestTakeback();
+      const takebackFrames = (socket: AuditSocket) =>
+        socket.sent.filter((m) => ["RequestTakeback", "RespondTakeback", "CancelTakeback"].includes(m.type));
+      await vi.waitFor(() => expect(takebackFrames(AuditSocket.sockets[1])).toHaveLength(3));
+      expect(takebackFrames(AuditSocket.sockets[1])).toEqual([
+        { type: "RequestTakeback" },
+        { type: "RespondTakeback", data: { approve: true } },
+        { type: "CancelTakeback" },
+      ]);
+      expect(takebackFrames(AuditSocket.sockets[0])).toEqual([{ type: "RequestTakeback" }]);
+      expect(takebackFrames(AuditSocket.sockets[2])).toEqual([]);
+    } finally { t.adapter.dispose(); }
+  });
+
+  it("N2: a native approval reaches each seat after that seat's restored state", async () => {
+    const t = await nativeTable();
+    try {
+      const [s0, s1, s2] = AuditSocket.sockets;
+      s0.frame("StateWithheld", { full_key: t.fullKey, state_revision: 2, withheld: { type: "StateUpdate" }, reason: "too large" });
+      t.stateUpdate(s1, 2, remoteState("revision 2"));
+      t.stateUpdate(s2, 2, remoteState("revision 2"));
+      await vi.waitFor(() => expect(t.events).toContainEqual({ type: "stateDelivery", withheld: expect.objectContaining({ revision: 2 }) }));
+      const p1Mark = t.p1.sent.length;
+      const p2Mark = t.p2.sent.length;
+      const hostMark = t.events.length;
+      const approved = { resolution: "approved", resolved_by: 1 };
+      for (const s of [s0, s1]) {
+        t.stateUpdate(s, 3, remoteState("restored"));
+        s.frame("TakebackResolved", approved);
+      }
+      await flushPromises(40);
+      expect(typesOf(await framesAfter(t.p1, p1Mark))).not.toContain("takeback_resolved");
+      t.stateUpdate(s2, 3, remoteState("restored"));
+      s2.frame("TakebackResolved", approved);
+      await vi.waitFor(async () => expect(typesOf(await framesAfter(t.p2, p2Mark))).toContain("takeback_resolved"));
+      await flushPromises(40);
+      const p1Frames = await framesAfter(t.p1, p1Mark);
+      expect(ordered(p1Frames, ["state_update", "takeback_resolved"])).toEqual(["state_update", "takeback_resolved"]);
+      expect(p1Frames).toContainEqual(expect.objectContaining({ type: "state_update", revision: 3 }));
+      expect(p1Frames).toContainEqual(expect.objectContaining({ type: "takeback_resolved", resolution: "approved", resolvedBy: 1 }));
+      expect(ordered(await framesAfter(t.p2, p2Mark), ["takeback_resolved"])).toEqual(["takeback_resolved"]);
+      const hostEvents = t.events.slice(hostMark);
+      expect(ordered(hostEvents, ["stateDelivery", "stateChanged", "takebackResolved"]))
+        .toEqual(["stateDelivery", "stateChanged", "takebackResolved"]);
+      expect(hostEvents).toContainEqual({ type: "stateDelivery", withheld: null });
+    } finally { t.adapter.dispose(); }
+  });
+
+  it("N3: a native withdrawal precedes the concession's state, and a refusal reaches only its seat", async () => {
+    const t = await nativeTable();
+    try {
+      const sockets = AuditSocket.sockets.slice(0, 3);
+      const p1Mark = t.p1.sent.length;
+      const p2Mark = t.p2.sent.length;
+      for (const s of sockets) s.frame("TakebackResolved", { resolution: "withdrawn", resolved_by: 2 });
+      for (const s of sockets) t.stateUpdate(s, 2, remoteState("after the concession"));
+      await vi.waitFor(async () => expect(typesOf(await framesAfter(t.p1, p1Mark))).toContain("state_update"));
+      const p1Frames = await framesAfter(t.p1, p1Mark);
+      expect(ordered(p1Frames, ["takeback_resolved", "state_update"])).toEqual(["takeback_resolved", "state_update"]);
+      expect(p1Frames).toContainEqual(expect.objectContaining({ type: "takeback_resolved", resolution: "withdrawn", resolvedBy: 2 }));
+
+      sockets[1].frame("RequestRejected", { reason: "r" });
+      await vi.waitFor(async () => expect(await framesAfter(t.p1, p1Mark)).toContainEqual(
+        expect.objectContaining({ type: "request_rejected", reason: "r" }),
+      ));
+      sockets[0].frame("RequestRejected", { reason: "host refusal" });
+      await vi.waitFor(() => expect(t.events).toContainEqual({ type: "requestRejected", reason: "host refusal" }));
+      expect(typesOf(await framesAfter(t.p2, p2Mark))).not.toContain("request_rejected");
+    } finally { t.adapter.dispose(); }
+  });
+
+  it("N4: a returning native seat hears the server's replay of the open vote after its ack", async () => {
+    const t = await nativeTable();
+    try {
+      const token = await playerToken(t.p1);
+      t.p1.simulateClose();
+      await vi.waitFor(() => expect(AuditSocket.sockets[1].readyState).toBe(3));
+      const reconnecting = joinGuest(t.emitConnection, { type: "reconnect", playerToken: token });
+      const returned = await t.reattachSeat(3, 1, remoteState("returning seat"));
+      returned.frame("TakebackRequested", { requester: 0, requester_name: "Host", voters: [1, 2] });
+      const back = await reconnecting;
+      await vi.waitFor(async () => expect(typesOf(await back.getSentMessages())).toContain("takeback_requested"));
+      const frames = await back.getSentMessages();
+      expect(ordered(frames, ["reconnect_ack", "takeback_requested"])).toEqual(["reconnect_ack", "takeback_requested"]);
+      expect(frames).toContainEqual(expect.objectContaining({
+        type: "takeback_requested", requester: 0, requesterName: "Host", voters: [1, 2],
+      }));
+    } finally { t.adapter.dispose(); }
+  });
+
+  it.each([
+    ["TakebackRequested", { requester: 0, requester_name: "Host", voters: [1, 2] }, "takeback_requested"],
+    ["TakebackResolved", { resolution: "cancelled", resolved_by: 0 }, "takeback_resolved"],
+    ["RequestRejected", { reason: "stale refusal" }, "request_rejected"],
+  ] as const)(
+    "N4b: a native %s held behind a revision does not outlive the seat's suspended attachment",
+    async (frame, data, wireType) => {
+      const t = await nativeTable();
+      try {
+        const [s0, s1, s2] = AuditSocket.sockets;
+        const token = await playerToken(t.p1);
+        // Seat 2 withholds its report of revision 2, so seat 1's notice waits behind it.
+        t.stateUpdate(s0, 2, remoteState("revision 2"));
+        t.stateUpdate(s1, 2, remoteState("revision 2"));
+        await flushPromises(20);
+        s1.frame(frame, data);
+        t.p1.simulateClose();
+        await vi.waitFor(() => expect(s1.readyState).toBe(3));
+        s0.frame("TakebackResolved", { resolution: "cancelled", resolved_by: 0 });
+        const reconnecting = joinGuest(t.emitConnection, { type: "reconnect", playerToken: token });
+        await t.reattachSeat(3, 2, remoteState("revision 2"));
+        const back = await reconnecting;
+        await vi.waitFor(async () => expect(typesOf(await back.getSentMessages())).toContain("reconnect_ack"));
+        t.stateUpdate(s2, 2, remoteState("revision 2"));
+        await vi.waitFor(() => expect(t.events).toContainEqual({ type: "takebackResolved", resolution: "cancelled", resolvedBy: 0 }));
+        await flushPromises(40);
+        expect(typesOf(await back.getSentMessages())).not.toContain(wireType);
+      } finally { t.adapter.dispose(); }
+    },
+  );
+
+  it("N4c: a held native notice reaches a still-connected seat whose loopback a concession reconcile replaced", async () => {
+    const t = await nativeTable();
+    try {
+      const [s0, s1, s2] = AuditSocket.sockets;
+      const bridge = (t.adapter as unknown as {
+        nativeBridge: { reconcileConcede: (playerId: number) => Promise<unknown> };
+      }).nativeBridge;
+      t.stateUpdate(s0, 2, remoteState("revision 2"));
+      t.stateUpdate(s1, 2, remoteState("revision 2"));
+      await flushPromises(20);
+      const p1Mark = t.p1.sent.length;
+      s1.frame("TakebackResolved", { resolution: "cancelled", resolved_by: 0 });
+      s0.frame("TakebackResolved", { resolution: "cancelled", resolved_by: 0 });
+      const reconciling = bridge.reconcileConcede(1);
+      await t.reattachSeat(3, 2, remoteState("revision 2"));
+      await reconciling;
+      expect(s1.readyState).toBe(3);
+      t.stateUpdate(s2, 2, remoteState("revision 2"));
+      await vi.waitFor(() => expect(t.events).toContainEqual({ type: "takebackResolved", resolution: "cancelled", resolvedBy: 0 }));
+      await vi.waitFor(async () => expect(await framesAfter(t.p1, p1Mark)).toContainEqual(
+        expect.objectContaining({ type: "takeback_resolved", resolution: "cancelled", resolvedBy: 0 }),
+      ));
+    } finally { t.adapter.dispose(); }
+  });
+
+  it("N4d: a returning native seat hears a vote replay held behind a revision it reattached at", async () => {
+    const t = await nativeTable();
+    try {
+      const [s0, s1, s2] = AuditSocket.sockets;
+      const token = await playerToken(t.p1);
+      t.stateUpdate(s0, 2, remoteState("revision 2"));
+      t.stateUpdate(s1, 2, remoteState("revision 2"));
+      await flushPromises(20);
+      t.p1.simulateClose();
+      await vi.waitFor(() => expect(s1.readyState).toBe(3));
+      const reconnecting = joinGuest(t.emitConnection, { type: "reconnect", playerToken: token });
+      const returned = await t.reattachSeat(3, 2, remoteState("revision 2"));
+      returned.frame("TakebackRequested", { requester: 0, requester_name: "Host", voters: [1, 2] });
+      const back = await reconnecting;
+      await vi.waitFor(async () => expect(typesOf(await back.getSentMessages())).toContain("reconnect_ack"));
+      await flushPromises(40);
+      expect(typesOf(await back.getSentMessages())).not.toContain("takeback_requested");
+      t.stateUpdate(s2, 2, remoteState("revision 2"));
+      await vi.waitFor(async () => expect(await back.getSentMessages()).toContainEqual(expect.objectContaining({
+        type: "takeback_requested", requester: 0, requesterName: "Host", voters: [1, 2],
+      })));
+    } finally { t.adapter.dispose(); }
+  });
+
+  it("N5: a native approval restores a closed state-based loser, holds it away from the server, and replays the next vote", async () => {
+    const t = await nativeTable();
+    try {
+      const token = await playerToken(t.p1);
+      const host = internals(t.adapter);
+      const boltLoss = { ...remoteState("after the Bolt"), eliminated_players: [1] } as unknown as GameState;
+      for (const s of t.live()) t.stateUpdate(s, 2, boltLoss);
+      await flushPromises(30);
+      t.p1.simulateClose();
+      await vi.waitFor(() => expect(AuditSocket.sockets[1].readyState).toBe(3));
+      const conceding = t.adapter.concedeDisconnected(1);
+      const reattached = await t.reattachSeat(3, 2, boltLoss);
+      await vi.waitFor(() => expect(reattached.sent.filter((m) => m.type === "Action")).toHaveLength(1));
+      for (const s of t.live()) t.stateUpdate(s, 3, { ...boltLoss, label: "no-op concession" } as unknown as GameState);
+      await conceding;
+      expect(host.eliminatedSeats.has(1)).toBe(true);
+      expect(host.nativeBridge.isGuestAttached(1)).toBe(true);
+
+      const p2Mark = t.p2.sent.length;
+      const restored = { ...remoteState("before the Bolt"), eliminated_players: [] } as unknown as GameState;
+      for (const s of t.live()) t.stateUpdate(s, 4, restored);
+      AuditSocket.sockets[0].frame("TakebackResolved", { resolution: "approved", resolved_by: 2 });
+      await vi.waitFor(() => expect(t.events).toContainEqual({ type: "takebackResolved", resolution: "approved", resolvedBy: 2 }));
+      expect(host.eliminatedSeats.has(1)).toBe(false);
+      expect(host.disconnectedSeats.has(1)).toBe(true);
+      expect(host.nativeBridge.isGuestAttached(1)).toBe(false);
+      const p2Frames = await framesAfter(t.p2, p2Mark);
+      expect(p2Frames).toContainEqual(expect.objectContaining({ type: "player_disconnected", playerId: 1 }));
+      expect(typesOf(p2Frames)).toContain("game_paused");
+
+      AuditSocket.sockets[0].frame("TakebackRequested", { requester: 0, requester_name: "Host", voters: [1, 2] });
+      await vi.waitFor(() => expect(t.events).toContainEqual(expect.objectContaining({ type: "takebackRequested", requester: 0 })));
+      const socketCount = AuditSocket.sockets.length;
+      const reconnecting = joinGuest(t.emitConnection, { type: "reconnect", playerToken: token });
+      const returned = await t.reattachSeat(socketCount, 4, restored);
+      returned.frame("TakebackRequested", { requester: 0, requester_name: "Host", voters: [1, 2] });
+      const back = await reconnecting;
+      await vi.waitFor(async () => expect(typesOf(await back.getSentMessages())).toContain("takeback_requested"));
+      expect(ordered(await back.getSentMessages(), ["reconnect_ack", "takeback_requested"]))
+        .toEqual(["reconnect_ack", "takeback_requested"]);
+    } finally { t.adapter.dispose(); }
+  });
+
+  it("G1: a guest sends takeback controls only once authenticated and emits the host's notices", async () => {
+    const { peer } = createFakePeer();
+    const conn = new FakeDataConnection();
+    const guest = new P2PGuestAdapter(
+      { player: { main_deck: [], sideboard: [] } },
+      peer as unknown as Peer,
+      "host-peer",
+      conn as unknown as DataConnection,
+    );
+    const controls = async () => ordered(await conn.getSentMessages(), ["request_takeback", "respond_takeback", "cancel_takeback"]);
+    await guest.initialize();
+    guest.sendRequestTakeback();
+    guest.sendRespondTakeback(false);
+    guest.sendCancelTakeback();
+    await flushPromises(20);
+    expect(await controls()).toEqual([]);
+
+    await conn.simulateData({
+      type: "game_setup",
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+      assignedPlayerId: 1,
+      playerToken: "seat-token",
+      state: remoteState("setup"),
+      events: [],
+      legalActions: [],
+      autoPassRecommended: false,
+      manaPaymentShortcutActions: [],
+    });
+    await guest.initializeGame();
+    guest.sendRequestTakeback();
+    guest.sendRespondTakeback(false);
+    guest.sendCancelTakeback();
+    await vi.waitFor(async () => expect(await controls()).toHaveLength(3));
+    const sent = (await conn.getSentMessages()) as Frame[];
+    expect(sent).toContainEqual(expect.objectContaining({ type: "respond_takeback", approve: false }));
+    expect(await controls()).toEqual(["request_takeback", "respond_takeback", "cancel_takeback"]);
+
+    const events: P2PAdapterEvent[] = [];
+    guest.onEvent((event) => events.push(event));
+    await conn.simulateData({ type: "takeback_requested", requester: 1, requesterName: "guest-one", voters: [0] });
+    await conn.simulateData({ type: "takeback_resolved", resolution: "withdrawn", resolvedBy: 1 });
+    await conn.simulateData({ type: "request_rejected", reason: "No takeback request is pending" });
+    await vi.waitFor(() => expect(ordered(events, ["takebackRequested", "takebackResolved", "requestRejected"])).toHaveLength(3));
+    expect(events.filter((event) => ["takebackRequested", "takebackResolved", "requestRejected"].includes(event.type))).toEqual([
+      { type: "takebackRequested", requester: 1, requesterName: "guest-one", voters: [0] },
+      { type: "takebackResolved", resolution: "withdrawn", resolvedBy: 1 },
+      { type: "requestRejected", reason: "No takeback request is pending" },
+    ]);
+    guest.dispose();
+  });
+
+  it("A2: a guest marks its reconnect_ack as a bootstrap before the replayed vote", async () => {
+    const { peer } = createFakePeer();
+    const conn = new FakeDataConnection();
+    const guest = new P2PGuestAdapter(
+      { player: { main_deck: [], sideboard: [] } },
+      peer as unknown as Peer,
+      "host-peer",
+      conn as unknown as DataConnection,
+    );
+    await guest.initialize();
+    const events: P2PAdapterEvent[] = [];
+    guest.onEvent((event) => events.push(event));
+    await conn.simulateData({
+      type: "reconnect_ack",
+      wireProtocolVersion: WIRE_PROTOCOL_VERSION,
+      assignedPlayerId: 1,
+      revision: 7,
+      state: remoteState("resumed"),
+      legalActions: [],
+      autoPassRecommended: false,
+      manaPaymentShortcutActions: [],
+    });
+    await conn.simulateData({ type: "takeback_requested", requester: 0, requesterName: "Host", voters: [1, 2] });
+    await vi.waitFor(() => expect(ordered(events, ["takebackRequested"])).toHaveLength(1));
+    expect(ordered(events, ["bootstrapDelivered", "takebackRequested"])).toEqual(["bootstrapDelivered", "takebackRequested"]);
+    guest.dispose();
   });
 });

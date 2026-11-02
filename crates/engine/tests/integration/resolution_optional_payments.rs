@@ -870,6 +870,8 @@ fn resolution_optional_oneof_decline_clears_loop_ring_and_cannot_replay() {
         .push_back(std::sync::Arc::new(LoopDetectSample {
             normalized: sampled.clone(),
             live: sampled,
+            tally: Default::default(),
+            trace_at: None,
         }));
     let decline = GameAction::ChooseResolutionOptionalPaymentBranch {
         choice: ResolutionOptionalPaymentChoice::Decline,
@@ -909,6 +911,8 @@ fn resolution_optional_phyrexian_payment_clears_ring_before_observable_life_move
         .push_back(std::sync::Arc::new(LoopDetectSample {
             normalized: sampled.clone(),
             live: sampled,
+            tally: Default::default(),
+            trace_at: None,
         }));
 
     apply(

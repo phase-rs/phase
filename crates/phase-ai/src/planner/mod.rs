@@ -4,17 +4,20 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use engine::ai_support::{
-    build_decision_context, classify_payment_continuation, witness_payment_continuations,
-    AiDecisionContext, CandidateAction, PaymentContinuationBatchStatus, PaymentContinuationState,
+    activates_mana_ability, build_decision_context, classify_payment_continuation,
+    witness_payment_continuations, AiDecisionContext, CandidateAction,
+    PaymentContinuationBatchStatus, PaymentContinuationState, PaymentContinuationStep,
     TacticalClass,
 };
 use engine::game::engine::apply_as_current_for_simulation;
 use engine::game::players;
 use engine::types::actions::GameAction;
 use engine::types::counter::{has_positive_counters, positive_counter_entries};
+use engine::types::display_only::rules_projection;
 use engine::types::game_state::{DayNight, GameState, WaitingFor};
 use engine::types::keywords::Keyword;
 use engine::types::player::PlayerId;
+use serde::Serialize;
 
 use crate::card_hints::should_play_now_with_facts;
 use crate::cast_facts::cast_facts_for_action;
@@ -93,6 +96,8 @@ pub(crate) struct PreparedCandidate {
     pub source_index: usize,
     pub candidate: CandidateAction,
     pub payment_successor: Option<GameState>,
+    /// Whether the witnessed edge finalizes the payment root in its own step.
+    pub payment_step: Option<PaymentContinuationStep>,
 }
 
 /// Fail closed for affiliated payment states before ranking or width limits.
@@ -112,6 +117,7 @@ pub(crate) fn prepare_payment_candidates(
                 source_index,
                 candidate,
                 payment_successor: None,
+                payment_step: None,
             })
             .collect(),
         PaymentContinuationState::UnsupportedAffiliated(_) => Vec::new(),
@@ -131,6 +137,7 @@ pub(crate) fn prepare_payment_candidates(
                             source_index,
                             candidate,
                             payment_successor: Some(accepted.state),
+                            payment_step: Some(accepted.step),
                         })
                     })
                     .collect(),
@@ -145,6 +152,7 @@ pub(crate) fn prepare_payment_candidates(
                                     source_index,
                                     candidate,
                                     payment_successor: Some(accepted.state),
+                                    payment_step: Some(accepted.step),
                                 })
                             })
                             .collect()
@@ -158,6 +166,7 @@ pub(crate) fn prepare_payment_candidates(
                                         source_index,
                                         candidate,
                                         payment_successor: None,
+                                        payment_step: None,
                                     },
                                 )
                             })
@@ -169,6 +178,60 @@ pub(crate) fn prepare_payment_candidates(
             }
         }
     }
+}
+
+/// Whether a leaf `state` is not yet quiet: something is on the stack, or a
+/// spell or ability is being paid for. CR 602.2a creates an activated ability
+/// on the stack as its activation begins, but the engine adds it to
+/// `state.stack` only once its payment finalizes, so an activation paid at
+/// `ManaPayment` has an empty stack and still has to be finished
+/// (`finalizing_payment_action`; CR 602.2b applies CR 601.2b–i to it).
+fn needs_quiescence(state: &GameState) -> bool {
+    !state.stack.is_empty()
+        || matches!(
+            classify_payment_continuation(state),
+            PaymentContinuationState::Affiliated(_)
+        )
+}
+
+/// The action that finishes the payment in progress at `state` as it stands:
+/// an action that activates no mana ability (at `ManaPayment`, the pass that
+/// pays the total cost, CR 601.2h) and that the payment witness proves
+/// finalizes the root in its own step. `None` when `state` is not a payment
+/// the witness owns, or no such action is among `actions`.
+///
+/// CR 118.3c: activating mana abilities is never mandatory, so finishing the
+/// payment now is always one way to continue it. Quiescence and rollouts use it
+/// to value a position in the middle of a payment as that payment completed:
+/// nobody gets priority while a spell or ability is being paid for (CR 601.2,
+/// CR 602.2b), so such a position is not a quiet leaf. Further activations stay
+/// selectable as search edges (see `search_value_at` for their depth).
+fn finalizing_payment_action(state: &GameState, actions: &[GameAction]) -> Option<GameAction> {
+    if !matches!(
+        classify_payment_continuation(state),
+        PaymentContinuationState::Affiliated(_)
+    ) {
+        return None;
+    }
+    let finishers: Vec<_> = actions
+        .iter()
+        .filter(|action| {
+            !matches!(action, GameAction::CancelCast) && !activates_mana_ability(state, action)
+        })
+        .cloned()
+        .collect();
+    if finishers.is_empty() {
+        return None;
+    }
+    witness_payment_continuations(state, &finishers)
+        .successors
+        .into_iter()
+        .flatten()
+        .find(|accepted| match accepted.step {
+            PaymentContinuationStep::Finalizes => true,
+            PaymentContinuationStep::Continues => false,
+        })
+        .map(|accepted| accepted.action)
 }
 
 pub(crate) fn rank_prepared_candidates<F>(
@@ -354,15 +417,14 @@ pub fn quick_state_hash(state: &GameState) -> u64 {
 
     // Pending state (resolution frames, replacements, triggers affect game
     // flow). The typed stack may retain an ability continuation below its
-    // active prompt, so nonempty stacks hash their full ordered wire shape
-    // rather than inspecting a non-top frame. The overwhelmingly common empty
-    // stack stays allocation-free on this hot cache-key path.
+    // active prompt, so nonempty stacks hash the rules projection of their
+    // full ordered wire shape rather than inspecting a non-top frame. The
+    // overwhelmingly common empty stack stays allocation-free on this hot
+    // cache-key path.
     let has_resolution_frames = !state.resolution_stack.is_empty();
     has_resolution_frames.hash(&mut hasher);
     if has_resolution_frames {
-        let resolution_stack = serde_json::to_value(&state.resolution_stack)
-            .expect("resolution stack serializes for the planner cache key");
-        hash_json_value(&resolution_stack, &mut hasher);
+        hash_rules_projection(&state.resolution_stack, "resolution stack", &mut hasher);
     }
     state.pending_replacement.is_some().hash(&mut hasher);
     state.pending_trigger.is_some().hash(&mut hasher);
@@ -417,10 +479,7 @@ fn fold_object_keywords(keywords: &[Keyword], hasher: &mut DefaultHasher) {
         // future new keyword) serde-folds -> sound by default.
         match Keyword::promote_keyword_kind(kw.kind()) {
             Some(unit) if &unit == kw => {} // parameterless -> discriminant suffices
-            _ => hash_json_value(
-                &serde_json::to_value(kw).expect("keyword serializes"),
-                hasher,
-            ),
+            _ => hash_rules_projection(kw, "keyword", hasher),
         }
     }
 }
@@ -454,20 +513,14 @@ pub fn search_position_hash(state: &GameState) -> u64 {
     // eval_cache 256-cap means this eval-leaf read is not reliably memoized.
     // Serialize but not Hash -> serde-fold. Empty in non-commander games -> skipped.
     if !state.commander_damage.is_empty() {
-        hash_json_value(
-            &serde_json::to_value(&state.commander_damage).expect("commander_damage serializes"),
-            &mut hasher,
-        );
+        hash_rules_projection(&state.commander_damage, "commander damage", &mut hasher);
     }
 
     // Stack entry targets/modes: NOT covered by either cache (post-apply
     // divergence — e.g. "Shock target A" vs "Shock target B" share source_id +
     // controller). Empty stack (common) -> skipped.
     for entry in &state.stack {
-        hash_json_value(
-            &serde_json::to_value(entry).expect("stack entry serializes"),
-            &mut hasher,
-        );
+        hash_rules_projection(entry, "stack entry", &mut hasher);
     }
 
     // Per-battlefield-object: summoning sickness (available_mana eval leaf) and
@@ -493,9 +546,9 @@ pub fn search_position_hash(state: &GameState) -> u64 {
 /// `ModeChoice`), so two states with identical boards but different
 /// `waiting_for` would collide in a hash keyed only on board state and return
 /// a cached context populated with wrong candidates. Include the full
-/// `WaitingFor` payload as a canonical structural projection; map keys are
-/// sorted so hash-equal waiting states do not depend on `HashMap` iteration
-/// order.
+/// `WaitingFor` payload through the rules projection (display-only values
+/// omitted); map keys are sorted so hash-equal waiting states do not depend on
+/// `HashMap` iteration order.
 pub fn candidate_cache_key(state: &GameState) -> u64 {
     let mut hasher = DefaultHasher::new();
     quick_state_hash(state).hash(&mut hasher);
@@ -556,52 +609,67 @@ pub struct RungStat {
 }
 
 fn hash_waiting_for(waiting_for: &WaitingFor, hasher: &mut impl Hasher) {
-    let value = serde_json::to_value(waiting_for).expect("WaitingFor serializes");
-    hash_json_value(&value, hasher);
+    hash_rules_projection(waiting_for, "WaitingFor", hasher);
 }
 
-fn hash_json_value(value: &serde_json::Value, hasher: &mut impl Hasher) {
-    match value {
-        serde_json::Value::Null => 0u8.hash(hasher),
-        serde_json::Value::Bool(value) => {
-            1u8.hash(hasher);
-            value.hash(hasher);
-        }
-        serde_json::Value::Number(value) => {
-            2u8.hash(hasher);
-            if let Some(value) = value.as_i64() {
-                0u8.hash(hasher);
-                value.hash(hasher);
-            } else if let Some(value) = value.as_u64() {
+/// The planner keys' only door from serialized state to a hash: every root is
+/// hashed through the engine's rules projection, so display-only data never
+/// reaches a key (CR 203.1 + CR 206.1). Object entries are hashed in sorted key
+/// order, so `HashMap` iteration order never reaches the key.
+///
+/// An unserializable root is a programming error, so it panics naming `root`.
+fn hash_rules_projection<T: Serialize + ?Sized>(
+    value: &T,
+    root: &'static str,
+    hasher: &mut impl Hasher,
+) {
+    fn hash_json_value(value: &serde_json::Value, hasher: &mut impl Hasher) {
+        match value {
+            serde_json::Value::Null => 0u8.hash(hasher),
+            serde_json::Value::Bool(value) => {
                 1u8.hash(hasher);
                 value.hash(hasher);
-            } else if let Some(value) = value.as_f64() {
+            }
+            serde_json::Value::Number(value) => {
                 2u8.hash(hasher);
-                value.to_bits().hash(hasher);
+                if let Some(value) = value.as_i64() {
+                    0u8.hash(hasher);
+                    value.hash(hasher);
+                } else if let Some(value) = value.as_u64() {
+                    1u8.hash(hasher);
+                    value.hash(hasher);
+                } else if let Some(value) = value.as_f64() {
+                    2u8.hash(hasher);
+                    value.to_bits().hash(hasher);
+                }
             }
-        }
-        serde_json::Value::String(value) => {
-            3u8.hash(hasher);
-            value.hash(hasher);
-        }
-        serde_json::Value::Array(values) => {
-            4u8.hash(hasher);
-            values.len().hash(hasher);
-            for value in values {
-                hash_json_value(value, hasher);
+            serde_json::Value::String(value) => {
+                3u8.hash(hasher);
+                value.hash(hasher);
             }
-        }
-        serde_json::Value::Object(entries) => {
-            5u8.hash(hasher);
-            entries.len().hash(hasher);
-            let mut entries: Vec<_> = entries.iter().collect();
-            entries.sort_by_key(|(left, _)| *left);
-            for (key, value) in entries {
-                key.hash(hasher);
-                hash_json_value(value, hasher);
+            serde_json::Value::Array(values) => {
+                4u8.hash(hasher);
+                values.len().hash(hasher);
+                for value in values {
+                    hash_json_value(value, hasher);
+                }
+            }
+            serde_json::Value::Object(entries) => {
+                5u8.hash(hasher);
+                entries.len().hash(hasher);
+                let mut entries: Vec<_> = entries.iter().collect();
+                entries.sort_by_key(|(left, _)| *left);
+                for (key, value) in entries {
+                    key.hash(hasher);
+                    hash_json_value(value, hasher);
+                }
             }
         }
     }
+
+    let projected = rules_projection(value)
+        .unwrap_or_else(|error| panic!("{root} serializes for the planner key: {error}"));
+    hash_json_value(&projected, hasher);
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1633,6 +1701,18 @@ impl<'a> PlannerServices<'a> {
                 }
             }
 
+            // Case 4: a payment in progress is not a quiet position; finish it
+            // as it stands (see `finalizing_payment_action`).
+            if let Some(action) = finalizing_payment_action(cursor.state(), &actions) {
+                match self.quiesce_step(node, &mut cursor, action) {
+                    QuiesceStep::Advanced(next) => {
+                        node = next;
+                        continue;
+                    }
+                    QuiesceStep::Failed => break,
+                }
+            }
+
             // Genuine decision point — stop quiescence
             break;
         }
@@ -1657,7 +1737,7 @@ impl<'a> PlannerServices<'a> {
         node: Option<SearchNodeId>,
         state: &GameState,
     ) -> f64 {
-        if state.stack.is_empty() || self.deadline.expired() {
+        if !needs_quiescence(state) || self.deadline.expired() {
             return self.evaluate_state_cached(state);
         }
         let quiesced = self.quiesce_at(node, state);
@@ -1672,7 +1752,7 @@ impl<'a> PlannerServices<'a> {
     /// [`PlannerServices::quiesced_leaf_eval`] for a position that may be
     /// tracked; `node`, when given, must identify `state`.
     fn quiesced_leaf_eval_at(&mut self, node: Option<SearchNodeId>, state: &GameState) -> f64 {
-        if state.stack.is_empty() || self.deadline.expired() {
+        if !needs_quiescence(state) || self.deadline.expired() {
             let value = self.evaluate_for_planner(state);
             return self.reduce_utility(state, &value);
         }
@@ -1844,6 +1924,27 @@ impl<'a> PlannerServices<'a> {
         }
         if depth == 0 || matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
             return self.quiesced_leaf_eval_at(node, state);
+        }
+
+        // CR 601.2: a payment in progress and the cast it completes are one
+        // move; the rollout finishes the payment as it stands rather than
+        // spending its depth on mana activations (see `finalizing_payment_action`).
+        if matches!(
+            classify_payment_continuation(state),
+            PaymentContinuationState::Affiliated(_)
+        ) {
+            let actions: Vec<_> = self
+                .build_decision_context_at(node, state)
+                .candidates
+                .iter()
+                .map(|candidate| candidate.action.clone())
+                .collect();
+            if let Some(action) = finalizing_payment_action(state, &actions) {
+                let mut finished = state.clone();
+                if apply_as_current_for_simulation(&mut finished, action).is_ok() {
+                    return self.rollout_estimate_at(None, &finished, depth);
+                }
+            }
         }
 
         let evaluation = self.planner_evaluation_at(node, state);
@@ -2068,6 +2169,30 @@ impl BeamContinuationPlanner {
         let node_player = state.waiting_for.acting_player();
         let is_maximizing = node_player.is_none_or(|player| player == services.ai_player);
         let scoring_player = node_player.unwrap_or(services.ai_player);
+        // CR 601.2: nobody receives priority while a spell or ability is being
+        // paid for, so a payment step and the cast it completes are one move.
+        // Charging a ply for continuing a payment that the pass could finish
+        // let another mana activation (and its life, card or permanent) push
+        // the opponent's reply to the cast past the horizon (#10488). So a step
+        // inside a payment costs no depth, with one exception: at the payment
+        // window itself, while no edge that activates no mana ability can
+        // finish it yet, every option continues the payment and is charged
+        // alike. Prompts nested in a mana ability's activation (its cost, its
+        // color) belong to that one activation (CR 605.3a). The node budget
+        // bounds the payment chain.
+        let payment_can_finish_now = candidates.iter().any(|prepared| {
+            prepared.payment_step == Some(PaymentContinuationStep::Finalizes)
+                && !activates_mana_ability(state, &prepared.candidate.action)
+        });
+        let free_payment_step = match classify_payment_continuation(state) {
+            PaymentContinuationState::Affiliated(_) => {
+                payment_can_finish_now
+                    || !matches!(state.waiting_for, WaitingFor::ManaPayment { .. })
+            }
+            PaymentContinuationState::NotAffiliated
+            | PaymentContinuationState::UnsupportedAffiliated(_) => false,
+        };
+        let child_depth = if free_payment_step { depth } else { depth - 1 };
         let mut ranked = rank_prepared_candidates(
             candidates,
             // Interior beam node: `search_value` is always entered ≥1 ply below
@@ -2114,7 +2239,7 @@ impl BeamContinuationPlanner {
             let value = self.search_value_at(
                 child,
                 &sim,
-                depth - 1,
+                child_depth,
                 ply + 1,
                 alpha,
                 beta,
@@ -2211,6 +2336,7 @@ where
                 source_index,
                 candidate,
                 payment_successor: None,
+                payment_step: None,
             }),
         |candidate| scorer(candidate),
         limit,
@@ -2248,6 +2374,7 @@ pub(crate) mod tests {
     use engine::types::actions::{GameAction, MulliganChoice};
     use engine::types::card_type::{CoreType, Supertype};
     use engine::types::counter::CounterType;
+    use engine::types::display_only::DisplayOnly;
     use engine::types::game_state::{
         ActiveSearchDecisionAuthority, CastPaymentMode, CommanderDamageEntry,
         NamedChoiceSourceBinding, PendingContinuation, PendingScopedLibrarySearch,
@@ -2958,6 +3085,117 @@ pub(crate) mod tests {
             unchanged.stack.len(),
             stack_before,
             "revert-failing: quiesce must break at loop top on an expired deadline"
+        );
+    }
+
+    /// Bonesplitter's equip, paid by Treasonous Ogre's "Pay 3 life: Add {R}."
+    /// at its `ManaPayment` window (a Manual activation reaches that window, as
+    /// in `activation_manual_mana_payment.rs`). Oracle text verbatim from
+    /// Scryfall `cards/named`.
+    fn equip_paid_by_ogre_mid_payment() -> GameState {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        let ogre = scenario
+            .add_creature(P0, "Treasonous Ogre", 2, 3)
+            .from_oracle_text_with_keywords(
+                &["Dethrone"],
+                "Dethrone (Whenever this creature attacks the player with the most life or tied for most life, put a +1/+1 counter on it.)\nPay 3 life: Add {R}.",
+            )
+            .id();
+        let bonesplitter = scenario
+            .add_artifact_from_oracle(
+                P0,
+                "Bonesplitter",
+                "Equipped creature gets +2/+0.\nEquip {1}",
+            )
+            .with_subtypes(vec!["Equipment"])
+            .id();
+        let mut runner = scenario.build();
+        let equip_index = runner.state().objects[&bonesplitter]
+            .abilities
+            .iter()
+            .position(|ability| ability.kind == AbilityKind::Activated)
+            .expect("Bonesplitter has its equip ability");
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: bonesplitter,
+                ability_index: equip_index,
+                payment_mode: CastPaymentMode::Manual,
+            })
+            .expect("the equip activation begins");
+        if matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ) {
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(bears)),
+                })
+                .expect("Grizzly Bears is a legal equip target");
+        }
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
+            "reach: the Manual equip waits for its payment, got {:?}",
+            runner.state().waiting_for
+        );
+        runner
+            .act(GameAction::ActivateAbility {
+                source_id: ogre,
+                ability_index: 0,
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .expect("the Ogre pays 3 life for {R} while the equip is paid for");
+        runner.state().clone()
+    }
+
+    /// CR 602.2b + CR 601.2h: an activation paid at `ManaPayment` has nothing on
+    /// the stack yet, and a leaf there is valued as its payment finished, not
+    /// with the life paid and the ability missing (#10488).
+    #[test]
+    fn activation_payment_leaf_is_valued_as_its_finished_payment() {
+        let mid = equip_paid_by_ogre_mid_payment();
+        assert!(mid.stack.is_empty(), "reach: nothing is on the stack yet");
+        assert_eq!(mid.players[0].life, 17, "reach: the Ogre paid 3 life");
+        assert!(matches!(
+            classify_payment_continuation(&mid),
+            PaymentContinuationState::Affiliated(
+                engine::ai_support::PaymentContinuationRoot::Activation { .. }
+            )
+        ));
+        let mut finished = mid.clone();
+        apply_as_current_for_simulation(&mut finished, GameAction::PassPriority)
+            .expect("the floating {R} pays Equip {1}");
+        assert_eq!(
+            finished.stack.len(),
+            1,
+            "reach: the equip ability is on the stack"
+        );
+
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let policies = PolicyRegistry::default();
+        let mut services = PlannerServices::with_deadline(
+            PlayerId(0),
+            &config,
+            &policies,
+            crate::context::AiContext::empty(&config.weights),
+            Some(engine::util::Deadline::none()),
+        );
+        let finished_value = services.evaluate_state_quiesced(&finished);
+        assert_ne!(
+            services.evaluate_state_cached(&mid),
+            finished_value,
+            "reach: valuing the payment unfinished differs from finishing it"
+        );
+        assert_eq!(
+            services.evaluate_state_quiesced(&mid),
+            finished_value,
+            "the search leaf finishes the activation's payment"
+        );
+        assert_eq!(
+            services.quiesced_leaf_eval(&mid),
+            services.quiesced_leaf_eval(&finished),
+            "the rollout leaf finishes the activation's payment"
         );
     }
 
@@ -5796,6 +6034,83 @@ pub(crate) mod tests {
         PlannerServices::new_default(PlayerId(0), config, policies)
     }
 
+    /// A nontrivial state whose every serialized planner-key root is populated:
+    /// a parked resolution continuation, a stack ability with a target, a
+    /// commander-damage entry, a battlefield creature with a parameterized Ward
+    /// keyword, and a `DeclareBlockers` waiting state with two-entry maps.
+    fn planner_key_root_fixture() -> GameState {
+        let mut state = make_state();
+        let creature = add_bf_creature(&mut state, PlayerId(0));
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .keywords
+            .push(Keyword::Ward(WardCost::PayLife(2)));
+
+        let continuation = PendingContinuation::new(
+            Box::new(ResolvedAbility::new(
+                Effect::NoOp,
+                Vec::new(),
+                ObjectId(0),
+                PlayerId(0),
+            )),
+            &state,
+        );
+        state.park_ability_continuation(continuation);
+
+        let src = ObjectId(500);
+        state.stack.push_back(StackEntry {
+            id: src,
+            source_id: src,
+            controller: PlayerId(0),
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: src,
+                ability: Box::new(ResolvedAbility::new(
+                    Effect::NoOp,
+                    vec![TargetRef::Object(ObjectId(999))],
+                    src,
+                    PlayerId(0),
+                )),
+            },
+        });
+
+        state.commander_damage.push(CommanderDamageEntry {
+            player: PlayerId(0),
+            commander: ObjectId(7),
+            damage: 3,
+        });
+
+        let mut targets = HashMap::new();
+        targets.insert(ObjectId(10), vec![ObjectId(1), ObjectId(2)]);
+        targets.insert(ObjectId(20), vec![ObjectId(3)]);
+        let mut requirements = HashMap::new();
+        requirements.insert(
+            ObjectId(10),
+            BlockRequirement {
+                count: 2,
+                sources: vec![],
+            },
+        );
+        requirements.insert(
+            ObjectId(20),
+            BlockRequirement {
+                count: 1,
+                sources: vec![],
+            },
+        );
+        state.waiting_for = WaitingFor::DeclareBlockers {
+            player: PlayerId(0),
+            valid_blocker_ids: vec![ObjectId(30)],
+            valid_block_targets: targets,
+            block_requirements: requirements,
+            blocker_constraints: Default::default(),
+            must_be_blocked_targets: Default::default(),
+            block_capacities: Default::default(),
+        };
+        state
+    }
+
     // Row 1: a unit-keyword-only difference that `quick_state_hash` aliases must
     // be distinguished by `search_position_hash`'s discriminant fold.
     #[test]
@@ -5960,6 +6275,339 @@ pub(crate) mod tests {
         assert!(
             elapsed.as_millis() < 500,
             "keyword-dense position hash too slow ({elapsed:?}) — the fold regressed"
+        );
+    }
+
+    #[derive(Serialize)]
+    struct ShownRow {
+        name: String,
+        power: i32,
+        #[serde(default, skip_serializing_if = "DisplayOnly::is_none")]
+        shown: DisplayOnly<Option<String>>,
+    }
+
+    #[derive(Serialize)]
+    enum ShownEvent {
+        Changed {
+            power: i32,
+            #[serde(default, skip_serializing_if = "DisplayOnly::is_none")]
+            shown: DisplayOnly<Option<String>>,
+        },
+    }
+
+    #[derive(Serialize)]
+    struct ShownTree {
+        rows: Vec<ShownRow>,
+        event: ShownEvent,
+    }
+
+    fn shown_tree(shown: Option<&str>, power: i32) -> ShownTree {
+        let shown = || DisplayOnly::new(shown.map(str::to_owned));
+        ShownTree {
+            rows: vec![ShownRow {
+                name: "Bear".to_string(),
+                power,
+                shown: shown(),
+            }],
+            event: ShownEvent::Changed {
+                power: 1,
+                shown: shown(),
+            },
+        }
+    }
+
+    fn projection_digest<T: Serialize>(value: &T) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        hash_rules_projection(value, "test tree", &mut hasher);
+        hasher.finish()
+    }
+
+    #[test]
+    fn planner_key_hash_ignores_display_only_values() {
+        let present = shown_tree(Some("SENTINEL"), 2);
+        let absent = shown_tree(None, 2);
+
+        // Reach-guard: the wire form did carry the display-only value at both
+        // positions (a `Vec` element and an enum struct-variant field).
+        let wire = serde_json::to_string(&present).unwrap();
+        assert_eq!(wire.matches("SENTINEL").count(), 2);
+        assert!(!serde_json::to_string(&absent).unwrap().contains("SENTINEL"));
+
+        // Revert-failing: hashing `serde_json::to_value` would tell these apart.
+        assert_eq!(projection_digest(&present), projection_digest(&absent));
+        // Positive control: a rules difference at the same position still moves it.
+        assert_ne!(
+            projection_digest(&present),
+            projection_digest(&shown_tree(Some("SENTINEL"), 3))
+        );
+    }
+
+    /// One real `TriggerSourceContext` at each serialized planner root: a parked
+    /// optional-effect event, a stack trigger's source context and a waiting-state event.
+    /// `powers` is the rules fact each position carries beside the printing.
+    fn printing_carrier_fixture(
+        printing: Option<engine::types::card_printing::SharedPrinting>,
+        powers: [i32; 3],
+    ) -> GameState {
+        use engine::types::events::GameEvent;
+        use engine::types::resolution::OptionalEffectFrame;
+
+        let mut state = make_state();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Carrier Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let record = |power: i32| {
+            let mut record = state
+                .objects
+                .get(&id)
+                .expect("the carrier object exists")
+                .snapshot_for_zone_change(id, Some(Zone::Battlefield), Zone::Graveyard);
+            let context = record
+                .trigger_source_context
+                .as_mut()
+                .expect("a real record carries its source context");
+            context.printing = DisplayOnly::new(printing.clone());
+            context.lki.power = Some(power);
+            record
+        };
+        let event = |power: i32| GameEvent::ZoneChanged {
+            object_id: id,
+            from: Some(Zone::Battlefield),
+            to: Zone::Graveyard,
+            record: Box::new(record(power)),
+        };
+        let optional_event = event(powers[0]);
+        let waiting_event = event(powers[2]);
+        let mut trigger_ability = ResolvedAbility::new(Effect::NoOp, vec![], id, PlayerId(0));
+        trigger_ability.trigger_source = record(powers[1]).trigger_source_context;
+
+        state.push_optional_effect_frame(OptionalEffectFrame {
+            ability: Box::new(ResolvedAbility::new(Effect::NoOp, vec![], id, PlayerId(0))),
+            trigger_event: Some(optional_event),
+            trigger_events: Vec::new(),
+            trigger_match_count: None,
+            return_result_occurrence: None,
+        });
+        state.stack.push_back(StackEntry {
+            id: ObjectId(600),
+            source_id: id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::TriggeredAbility {
+                source_id: id,
+                ability: Box::new(trigger_ability),
+                condition: None,
+                trigger_event: None,
+                description: None,
+                source_name: String::new(),
+                subject_match_count: None,
+                die_result: None,
+                provenance: None,
+            },
+        });
+        state.waiting_for = WaitingFor::TriggerTargetSelection {
+            player: PlayerId(0),
+            trigger_controller: None,
+            trigger_event: Some(waiting_event),
+            trigger_events: Vec::new(),
+            target_slots: Vec::new(),
+            mode_labels: Vec::new(),
+            target_constraints: Vec::new(),
+            selection: Default::default(),
+            source_id: None,
+            description: None,
+        };
+        state
+    }
+
+    fn planner_keys(state: &GameState) -> [u64; 4] {
+        [
+            quick_state_hash(state),
+            search_position_hash(state),
+            candidate_cache_key(state),
+            transposition_key(state),
+        ]
+    }
+
+    #[test]
+    fn planner_keys_ignore_printing_in_real_carriers() {
+        use engine::types::card_printing::{CardPrinting, SharedPrinting};
+
+        let s1 = SharedPrinting::new(CardPrinting {
+            set_code: "SNTA".to_string(),
+            collector_number: "1".to_string(),
+        });
+        let s2 = SharedPrinting::new(CardPrinting {
+            set_code: "SNTB".to_string(),
+            collector_number: "2".to_string(),
+        });
+        let powers = [2, 2, 2];
+        let none = printing_carrier_fixture(None, powers);
+        let first = printing_carrier_fixture(Some(s1.clone()), powers);
+        let second = printing_carrier_fixture(Some(s2), powers);
+
+        // Reach: every root really carries the printing on the wire, and the projection the
+        // keys fold omits it.
+        for (label, wire, projected) in [
+            (
+                "resolution stack",
+                serde_json::to_string(&first.resolution_stack).unwrap(),
+                serde_json::to_string(&rules_projection(&first.resolution_stack).unwrap()).unwrap(),
+            ),
+            (
+                "stack entry",
+                serde_json::to_string(&first.stack[0]).unwrap(),
+                serde_json::to_string(&rules_projection(&first.stack[0]).unwrap()).unwrap(),
+            ),
+            (
+                "waiting state",
+                serde_json::to_string(&first.waiting_for).unwrap(),
+                serde_json::to_string(&rules_projection(&first.waiting_for).unwrap()).unwrap(),
+            ),
+        ] {
+            assert!(
+                wire.contains("SNTA"),
+                "{label}: the wire carries the printing"
+            );
+            assert!(
+                !projected.contains("SNTA"),
+                "{label}: the projection omits it"
+            );
+        }
+
+        // Revert-failing: a root hashed from `serde_json::to_value` would tell these apart.
+        let keys = planner_keys(&none);
+        assert_eq!(keys, planner_keys(&first));
+        assert_eq!(keys, planner_keys(&second));
+
+        // Positive controls, one per position: the same `lki.power` changed under a printing
+        // moves exactly the keys that read that root.
+        let changed =
+            |powers: [i32; 3]| planner_keys(&printing_carrier_fixture(Some(s1.clone()), powers));
+        let [quick, position, candidate, transposition] = keys;
+        let [q, p, c, t] = changed([3, 2, 2]);
+        assert!(q != quick && p != position && c != candidate && t != transposition);
+        let [q, p, c, t] = changed([2, 3, 2]);
+        assert!(
+            q == quick && c == candidate,
+            "the stack entry is not in the cheap keys"
+        );
+        assert!(p != position && t != transposition);
+        let [q, p, c, t] = changed([2, 2, 3]);
+        assert!(
+            q == quick && p == position,
+            "the waiting state is not in the position keys"
+        );
+        assert!(c != candidate && t != transposition);
+    }
+
+    #[test]
+    fn planner_key_roots_project_to_their_wire_form() {
+        let state = planner_key_root_fixture();
+
+        fn assert_wire_form<T: Serialize>(root: &T) -> serde_json::Value {
+            let wire = serde_json::to_value(root).unwrap();
+            assert_eq!(rules_projection(root).unwrap(), wire);
+            wire
+        }
+
+        // Reach-guards: each root is the populated shape the keys fold.
+        let resolution = assert_wire_form(&state.resolution_stack);
+        let frames = resolution["frames"]
+            .as_array()
+            .expect("resolution stack frames serialize as an array");
+        assert!(!frames.is_empty());
+        assert_eq!(frames[0]["type"], "AbilityContinuation");
+
+        assert!(!state.stack.is_empty());
+        for entry in &state.stack {
+            assert!(assert_wire_form(entry).is_object());
+        }
+
+        assert!(!state.commander_damage.is_empty());
+        assert!(assert_wire_form(&state.commander_damage)
+            .as_array()
+            .is_some_and(|entries| !entries.is_empty()));
+
+        let ward_roots = state
+            .battlefield
+            .iter()
+            .filter_map(|id| state.objects.get(id))
+            .flat_map(|obj| obj.keywords.iter())
+            .filter(|kw| matches!(kw, Keyword::Ward(_)))
+            .map(assert_wire_form)
+            .count();
+        assert_eq!(ward_roots, 1);
+
+        let waiting = assert_wire_form(&state.waiting_for);
+        let waiting_text = serde_json::to_string(&waiting).unwrap();
+        assert!(waiting_text.contains("\"10\"") && waiting_text.contains("\"20\""));
+    }
+
+    #[test]
+    fn planner_key_projection_dense_waiting_for_stays_fast() {
+        let mut state = make_state();
+        let mut targets = HashMap::new();
+        let mut requirements = HashMap::new();
+        for i in 0..400u64 {
+            let attacker = ObjectId(1000 + i);
+            targets.insert(attacker, vec![ObjectId(1), ObjectId(2)]);
+            requirements.insert(
+                attacker,
+                BlockRequirement {
+                    count: 1,
+                    sources: vec![],
+                },
+            );
+        }
+        state.waiting_for = WaitingFor::DeclareBlockers {
+            player: PlayerId(0),
+            valid_blocker_ids: vec![ObjectId(30)],
+            valid_block_targets: targets,
+            block_requirements: requirements,
+            blocker_constraints: Default::default(),
+            must_be_blocked_targets: Default::default(),
+            block_capacities: Default::default(),
+        };
+
+        // Reach: the projected waiting state carries all 400 target keys.
+        let projected =
+            serde_json::to_string(&rules_projection(&state.waiting_for).unwrap()).unwrap();
+        for i in 0..400u64 {
+            assert!(
+                projected.contains(&format!("\"{}\":", 1000 + i)),
+                "attacker {} missing from the projected waiting state",
+                1000 + i
+            );
+        }
+
+        let start = std::time::Instant::now();
+        for _ in 0..50 {
+            let _ = transposition_key(&state);
+        }
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed.as_millis() < 1000,
+            "projection-hashed dense WaitingFor too slow ({elapsed:?})"
+        );
+
+        // Measurement only (not asserted): projection cost relative to `to_value`.
+        let start = std::time::Instant::now();
+        for _ in 0..50 {
+            let _ = rules_projection(&state.waiting_for).unwrap();
+        }
+        let projection = start.elapsed();
+        let start = std::time::Instant::now();
+        for _ in 0..50 {
+            let _ = serde_json::to_value(&state.waiting_for).unwrap();
+        }
+        let to_value = start.elapsed();
+        eprintln!(
+            "MEASURE 50x rules_projection={projection:?} 50x to_value={to_value:?} ratio={:.2}",
+            projection.as_secs_f64() / to_value.as_secs_f64()
         );
     }
 

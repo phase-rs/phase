@@ -18,6 +18,10 @@ import {
 
 /** Events that produce no visual output and are skipped entirely. */
 const NON_VISUAL_EVENTS = new Set([
+  // Un-card gags play out-of-band (`flashUnActionEvents` → UnActionOverlay).
+  "UnTellPerformed",
+  "PhraseSaid",
+  "GotchaSaid",
   "PriorityPassed",
   "MulliganStarted",
   "GameStarted",

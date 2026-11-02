@@ -6,8 +6,8 @@ use serde::Deserialize;
 use engine::parser::oracle::draft_effect_from_oracle_text;
 
 use crate::set_pool::{
-    LimitedCardPrint, LimitedSetPool, PackSlot, PackVariant, Rarity, SheetCard, SheetDefinition,
-    WeightedSheetChoice,
+    normalize_pack_variants, LimitedCardPrint, LimitedSetPool, PackSlot, PackVariant, Rarity,
+    SheetCard, SheetDefinition, WeightedSheetChoice,
 };
 
 // ---------------------------------------------------------------------------
@@ -230,7 +230,7 @@ fn extract_set_pool_indexed(
     }
 
     // Build pack variants
-    let pack_variants: Vec<PackVariant> = booster
+    let mut pack_variants: Vec<PackVariant> = booster
         .boosters
         .iter()
         .map(|variant| {
@@ -254,6 +254,7 @@ fn extract_set_pool_indexed(
             }
         })
         .collect();
+    normalize_pack_variants(&data.code, &mut pack_variants);
 
     // Build prints: cards tagged for the booster pool or appearing in any sheet.
     // Set-local: this is *this* set's print run, not the cross-set index.
@@ -755,6 +756,57 @@ mod tests {
 
         let result = extract_set_pool(json).unwrap().unwrap();
         assert_eq!(result.basic_lands, vec!["Island", "Plains"]);
+    }
+
+    #[test]
+    fn test_extract_unglued_normalizes_booster_variants() {
+        let json = r#"{
+            "data": {
+                "code": "UGL",
+                "name": "Unglued",
+                "booster": {
+                    "draft": {
+                        "sheets": {
+                            "basic": { "cards": { "uuid-b": 1 }, "totalWeight": 1 },
+                            "common": { "cards": { "uuid-c": 1 }, "totalWeight": 1 },
+                            "uncommon": { "cards": { "uuid-u": 1 }, "totalWeight": 1 },
+                            "rare": { "cards": { "uuid-r": 1 }, "totalWeight": 1 }
+                        },
+                        "boosters": [
+                            {
+                                "contents": { "basic": 1, "common": 6, "rare": 1, "uncommon": 2 },
+                                "weight": 3
+                            },
+                            {
+                                "contents": { "basic": 1, "common": 6, "rare": 1, "uncommon": 1 },
+                                "weight": 2
+                            }
+                        ],
+                        "boostersTotalWeight": 5
+                    }
+                },
+                "cards": [
+                    { "uuid": "uuid-b", "name": "Forest", "rarity": "common", "number": "1", "setCode": "UGL", "supertypes": ["Basic"] },
+                    { "uuid": "uuid-c", "name": "Common Card", "rarity": "common", "number": "2", "setCode": "UGL", "supertypes": [] },
+                    { "uuid": "uuid-u", "name": "Uncommon Card", "rarity": "uncommon", "number": "3", "setCode": "UGL", "supertypes": [] },
+                    { "uuid": "uuid-r", "name": "Rare Card", "rarity": "rare", "number": "4", "setCode": "UGL", "supertypes": [] }
+                ]
+            }
+        }"#;
+
+        let pool = extract_set_pool(json).unwrap().expect("UGL pool extracted");
+        assert_eq!(pool.cards_per_pack(), Some(10));
+        assert_eq!(pool.pack_variants.len(), 2);
+        for variant in &pool.pack_variants {
+            let total_cards: u16 = variant.contents.iter().map(|s| u16::from(s.count)).sum();
+            assert_eq!(total_cards, 10);
+            let uncommon_slot = variant
+                .contents
+                .iter()
+                .find(|s| s.slot == "uncommon")
+                .unwrap();
+            assert_eq!(uncommon_slot.count, 2);
+        }
     }
 
     // --- extract_all_set_pools (directory-level loading) ---

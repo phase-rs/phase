@@ -1455,6 +1455,7 @@ fn optional_replacement_choice_labels(
 /// forces a deliberate label decision here.
 fn replacement_cost_description(cost: &AbilityCost) -> String {
     match cost {
+        AbilityCost::SayPhrase { phrase } => format!("Say \"{phrase}\""),
         AbilityCost::Mana { cost } => match cost {
             crate::types::mana::ManaCost::NoCost => "Pay no mana".to_string(),
             crate::types::mana::ManaCost::Cost { shards, generic } => {
@@ -1487,6 +1488,9 @@ fn replacement_cost_description(cost: &AbilityCost) -> String {
                 value,
             } => {
                 format!("Sacrifice creatures with total power {value} ({comparator:?} constraint)")
+            }
+            crate::types::ability::SacrificeRequirement::All => {
+                "Sacrifice all permanents".to_string()
             }
         },
         AbilityCost::Discard { .. } => "Discard a card".to_string(),
@@ -1934,7 +1938,9 @@ fn pay_replacement_may_cost(
         );
         return MayCostOutcome::Unpaid;
     }
-    if !cost.is_payable(state, player, source_id) {
+    // CR 614.1c: an "as this enters, you may pay" cost is offered by a
+    // replacement effect, not a cast, so its source isn't a spell being cast.
+    if !cost.is_payable_for_replacement(state, player, source_id) {
         return MayCostOutcome::Unpaid;
     }
     let paid = match cost {
@@ -12957,13 +12963,13 @@ fn replay_pending_replacement(
     player: PlayerId,
     events: &mut Vec<GameEvent>,
 ) -> ReplacementResult {
-    // CR 616.1: choosing an optional effect's turn is separate from its may
-    // decision. Discard ordering automation before looking up that saved decision.
-    if state
+    let optional = state
         .pending_replacement
         .as_ref()
-        .is_some_and(|pending| pending.is_optional)
-    {
+        .is_some_and(|pending| pending.is_optional);
+    // CR 616.1: choosing an optional effect's turn is separate from its may
+    // decision. Discard ordering automation before looking up that saved decision.
+    if optional {
         state.replacement_auto_choice_tail = None;
     }
     let had_tail = state.replacement_auto_choice_tail.is_some();
@@ -13035,6 +13041,13 @@ fn replay_pending_replacement(
         }
         return ReplacementResult::NeedsChoice(player);
     };
+    // CR 616.1e + CR 616.1: a replayed answer is still the affected player's choice —
+    // whether to apply an optional effect, or which effect applies next.
+    state.record_loop_decision(if optional {
+        crate::game::play_trace::AnswerOptionality::Optional
+    } else {
+        crate::game::play_trace::AnswerOptionality::Mandatory
+    });
     let result = continue_replacement_impl(state, index, events);
     if !matches!(result, ReplacementResult::Execute(_)) {
         state.replacement_auto_choice_tail = None;
