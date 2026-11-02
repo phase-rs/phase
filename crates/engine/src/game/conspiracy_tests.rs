@@ -16,6 +16,7 @@ use super::filter::{matches_target_filter, FilterContext};
 use super::functioning_abilities::{
     active_static_definitions, active_trigger_definitions, game_functioning_statics,
 };
+use super::morph::{turn_face_up_offer, turn_face_up_prepare, TurnFaceUpOffer};
 use crate::database::synthesis::synthesize_conspiracy;
 use crate::types::ability::{StaticDefinition, TargetFilter, TriggerDefinition};
 use crate::types::card::CardFace;
@@ -243,6 +244,15 @@ fn turn_hidden_agenda_face_up_reveals_and_is_guarded() {
         &mut Vec::new()
     ));
     assert!(state.objects.get(&id).unwrap().face_down);
+
+    // CR 116.2j: the free action is offered outside the paid turn-face-up
+    // authority, which only ever reports paid-cost sources.
+    assert_eq!(turn_face_up_offer(&state, P1, id), None);
+    assert_eq!(
+        turn_face_up_offer(&state, P0, id),
+        Some(TurnFaceUpOffer::Ready)
+    );
+    assert!(turn_face_up_prepare(&state, id, P0).is_err());
 
     // The controller can.
     assert!(turn_hidden_agenda_face_up(

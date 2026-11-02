@@ -71,6 +71,15 @@ pub(crate) fn turn_face_up_offer(
     player: PlayerId,
     object_id: ObjectId,
 ) -> Option<TurnFaceUpOffer> {
+    // CR 702.106c + CR 116.2j: turning a hidden agenda conspiracy face up costs
+    // nothing, so it never reaches the paid-cost authority below.
+    if state
+        .objects
+        .get(&object_id)
+        .is_some_and(|obj| crate::game::conspiracy::is_face_down_conspiracy_candidate(obj, player))
+    {
+        return Some(TurnFaceUpOffer::Ready);
+    }
     let (cost_source, cost) = turn_face_up_prepare(state, object_id, player).ok()?;
     match cost {
         TurnFaceUpCost::Mana(cost) => {
@@ -153,9 +162,7 @@ pub(in crate::game) fn priority_turn_face_up_candidates(
 
     // CR 702.106c / CR 116.2j / CR 905.4a: As a special action, a player may turn a
     // face-down hidden agenda conspiracy card they control in the command zone face up.
-    // This is now handled by turn_face_up_offer which covers both battlefield and
-    // command-zone face-down objects. The command-zone branch in turn_face_up_offer
-    // returns Ready for eligible conspiracies (no cost, no X).
+    // `turn_face_up_offer` returns Ready for eligible conspiracies (no cost, no X).
     for &object_id in &state.command_zone {
         if let Some(offer) = turn_face_up_offer(state, player, object_id) {
             candidates.push(match offer {
@@ -464,20 +471,6 @@ pub(crate) fn turn_face_up_prepare(
         .objects
         .get(&object_id)
         .ok_or_else(|| EngineError::InvalidAction("Object not found".to_string()))?;
-
-    // CR 702.106c / CR 116.2j / CR 905.4a: Face-down hidden agenda conspiracy in command zone.
-    // Turning it face up is a special action with no cost (CR 116.2j).
-    if obj.zone == Zone::Command && crate::game::conspiracy::is_conspiracy(obj) {
-        if !crate::game::conspiracy::is_face_down_conspiracy_candidate(obj, player) {
-            return Err(EngineError::InvalidAction(
-                "You don't control this face-down conspiracy".to_string(),
-            ));
-        }
-        return Ok((
-            TurnUpCostSource::HiddenAgenda,
-            TurnFaceUpCost::Mana(ManaCost::NoCost),
-        ));
-    }
 
     if obj.controller != player {
         return Err(EngineError::InvalidAction(
