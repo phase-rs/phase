@@ -16084,6 +16084,29 @@ fn optional_head_declined_all_object_targets(ability: &ResolvedAbility) -> bool 
             .any(|t| matches!(t, TargetRef::Object(_)))
 }
 
+/// CR 608.2c + CR 609.3: prove whether a supported phasing union has no
+/// instruction independent of its parent target. Unknown shapes retain pruning.
+fn phase_out_context_union_requires_parent(effect: &Effect) -> Option<bool> {
+    fn requires_parent(filter: &TargetFilter) -> Option<bool> {
+        match filter {
+            TargetFilter::ParentTarget => Some(true),
+            TargetFilter::SelfRef => Some(false),
+            TargetFilter::Or(filters) => filters.iter().try_fold(true, |dependent, filter| {
+                // Inspect every child, even after SelfRef: unsupported later leaves
+                // must invalidate the proof rather than inherit independence.
+                requires_parent(filter).map(|child| dependent && child)
+            }),
+            _ => None,
+        }
+    }
+    match effect {
+        Effect::PhaseOut {
+            target: target @ TargetFilter::Or(_),
+        } => requires_parent(target),
+        _ => None,
+    }
+}
+
 /// CR 608.2c + CR 601.2c: Whether [`resolved_object_filter`] should concretize
 /// this effect's POSITIVE parent-target population legs through
 /// `filter::concretize_mass_population_parent_legs`.
@@ -25991,6 +26014,8 @@ fn resolve_chain_body(
             && ability.targets.is_empty()
             && effect_refs_parent_target(&sub.effect)
             && optional_head_declined_all_object_targets(ability)
+            // CR 609.3: independent union work takes normal context fallthrough.
+            && phase_out_context_union_requires_parent(&sub.effect) != Some(false)
         {
             // CR 115.6 + CR 608.2c (issue #5287): Optional multi-target / up-to-one
             // head legally chose zero object targets — a ParentTarget consumer
@@ -28749,6 +28774,153 @@ mod tests {
         ChooseOneOfKind, CoinFlipRun, LibraryInstructionActor, LibraryPosition,
         ParentTargetMissingReason, SearchSelectionConstraint, SpentColor, UNION_DEPTH_BUDGET,
     };
+
+    #[test]
+    fn phase_out_context_union_dependency_proof_is_bounded() {
+        use TargetFilter::{Or, ParentTarget, SelfRef};
+        for (target, expected) in [
+            (Or(vec![SelfRef, ParentTarget]), Some(false)),
+            (
+                Or(vec![ParentTarget, Or(vec![SelfRef, SelfRef])]),
+                Some(false),
+            ),
+            (Or(vec![ParentTarget, Or(vec![ParentTarget])]), Some(true)),
+            (Or(vec![]), Some(true)),
+            (Or(vec![Or(vec![])]), Some(true)),
+            (Or(vec![TargetFilter::Any, SelfRef, ParentTarget]), None),
+            (Or(vec![SelfRef, ParentTarget, TargetFilter::Any]), None),
+            (Or(vec![SelfRef, Or(vec![TargetFilter::Any])]), None),
+            (ParentTarget, None),
+            (TargetFilter::And(vec![SelfRef, ParentTarget]), None),
+            (TargetFilter::Not(Box::new(SelfRef)), None),
+        ] {
+            assert_eq!(
+                phase_out_context_union_requires_parent(&Effect::PhaseOut {
+                    target: target.clone()
+                }),
+                expected,
+                "{target:?}"
+            );
+            assert_eq!(
+                phase_out_context_union_requires_parent(&Effect::PhaseIn { target }),
+                None
+            );
+        }
+        assert_eq!(
+            phase_out_context_union_requires_parent(&Effect::Destroy {
+                target: ParentTarget,
+                cant_regenerate: false
+            }),
+            None
+        );
+    }
+
+    // Synthetic composition supplement: Defiant has the union but no Draw tail;
+    // Samwise supplies the real parent-only plus independent-tail preservation.
+    // CR 115.6 + CR 608.2c + CR 609.3: zero targets omit only dependent work.
+    #[test]
+    fn phase_out_optional_parent_chain_preserves_independent_tail() {
+        use TargetFilter::{Or, ParentTarget, SelfRef};
+        for (target, selected, stale, reaches, phases_source) in [
+            (ParentTarget, false, false, false, false),
+            (ParentTarget, true, false, true, false),
+            (
+                Or(vec![ParentTarget, Or(vec![ParentTarget])]),
+                false,
+                false,
+                false,
+                false,
+            ),
+            (Or(vec![SelfRef, ParentTarget]), false, false, true, true),
+            (
+                Or(vec![ParentTarget, Or(vec![SelfRef, SelfRef])]),
+                false,
+                false,
+                true,
+                true,
+            ),
+            (Or(vec![SelfRef, ParentTarget]), false, true, true, false),
+            (Or(vec![SelfRef, ParentTarget]), true, false, true, true),
+            (
+                Or(vec![SelfRef, ParentTarget, TargetFilter::Any]),
+                false,
+                false,
+                false,
+                false,
+            ),
+            (
+                Or(vec![TargetFilter::Any, ParentTarget, SelfRef]),
+                false,
+                false,
+                false,
+                false,
+            ),
+            (Or(vec![]), false, false, true, false),
+            (Or(vec![Or(vec![])]), false, false, true, false),
+        ] {
+            let mut scenario = GameScenario::new();
+            let source = scenario.add_creature(P0, "Source", 2, 2).id();
+            let chosen = scenario.add_creature(P0, "Chosen", 2, 2).id();
+            let unrelated = scenario.add_creature(P1, "Unrelated", 2, 2).id();
+            scenario.with_library_top(P0, &["Island", "Mountain"]);
+            let mut state = scenario.build().state().clone();
+            let mut draw = ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                source,
+                P0,
+            );
+            draw.sub_link = SubAbilityLink::SequentialSibling;
+            let mut child = ResolvedAbility::new(Effect::PhaseOut { target }, vec![], source, P0)
+                .sub_ability(draw);
+            child.source_incarnation = Some(state.objects[&source].incarnation);
+            let mut head = ResolvedAbility::new(
+                Effect::TargetOnly {
+                    target: TargetFilter::Any,
+                },
+                if selected {
+                    vec![TargetRef::Object(chosen)]
+                } else {
+                    vec![]
+                },
+                source,
+                P0,
+            )
+            .sub_ability(child);
+            head.optional_targeting = true;
+            if stale {
+                state.objects.get_mut(&source).unwrap().incarnation += 1;
+            }
+            let hand_before = state.players[0].hand.len();
+            let mut events = vec![];
+            assert_eq!(
+                resolve_ability_chain_step(&mut state, &head, &mut events, 1).unwrap(),
+                ResolutionProgress::Complete
+            );
+            assert_eq!(state.players[0].hand.len(), hand_before + 1);
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(
+                        event,
+                        GameEvent::EffectResolved {
+                            kind: EffectKind::PhaseOut,
+                            ..
+                        }
+                    ))
+                    .count(),
+                usize::from(reaches)
+            );
+            assert_eq!(state.objects[&source].is_phased_out(), phases_source);
+            assert_eq!(state.objects[&chosen].is_phased_out(), selected);
+            assert!(!state.objects[&unrelated].is_phased_out());
+            assert!(state.stack.is_empty());
+            assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        }
+    }
 
     /// CR 603.2h + CR 608.2d: the "would it prompt" authority agrees with production for
     /// an instance whose controller already took the ability's indicated action — no gate

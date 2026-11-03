@@ -510,153 +510,248 @@ fn unification_empty_and_illegal_targets_do_not_draw() {
 // their identities and counters; attachments follow their host.
 #[test]
 fn defiant_optional_target_and_attachments_phase_and_return() {
-    for pick in [false, true] {
-        let mut scenario = GameScenario::new();
-        scenario.at_phase(Phase::PreCombatMain);
-        scenario.with_library_top(P0, &["Island"; 8]);
-        scenario.with_library_top(P1, &["Mountain"; 8]);
-        scenario.add_creature_from_oracle(P0, "Fountain Watch", 2, 4, "Artifacts and enchantments you control have shroud. (They can't be the targets of spells or abilities.)");
-        let source = defiant(&mut scenario);
-        let target = scenario
-            .add_creature(P0, "Grizzly Bears", 2, 2)
-            .with_plus_counters(1)
-            .id();
-        let other = scenario.add_creature(P0, "Runeclaw Bear", 2, 2).id();
-        let opponent = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
-        let equipment = scenario
-            .add_artifact_from_oracle(
-                P0,
-                "Bonesplitter",
-                "Equipped creature gets +2/+0.\nEquip {1}",
-            )
-            .with_subtypes(vec!["Equipment"])
-            .id();
-        let aura = scenario
-            .add_enchantment_from_oracle(
-                P0,
-                "Holy Strength",
-                "Enchant creature\nEnchanted creature gets +1/+2.",
-            )
-            .with_subtypes(vec!["Aura"])
-            .id();
-        let mut runner = scenario.build();
-        runner
-            .state_mut()
-            .objects
-            .get_mut(&aura)
-            .unwrap()
-            .attached_to = Some(target.into());
-        runner
-            .state_mut()
-            .objects
-            .get_mut(&target)
-            .unwrap()
-            .attachments
-            .push(aura);
-        runner
-            .state_mut()
-            .objects
-            .get_mut(&equipment)
-            .unwrap()
-            .attached_to = Some(target.into());
-        runner
-            .state_mut()
-            .objects
-            .get_mut(&target)
-            .unwrap()
-            .attachments
-            .push(equipment);
-        cast_to_trigger(&mut runner, source);
-        // CR 702.18a: shroud does not prohibit the untargeted source leg.
-        assert!(engine::game::keywords::has_keyword(
-            &runner.state().objects[&source],
-            &Keyword::Shroud
-        ));
-        let WaitingFor::TriggerTargetSelection { target_slots, .. } = &runner.state().waiting_for
-        else {
-            panic!("Defiant must announce its optional target");
-        };
-        assert_eq!(target_slots.len(), 1);
-        let legal = optional_object_slot(&runner);
-        assert!(legal.contains(&TargetRef::Object(target)));
-        assert!(!legal.contains(&TargetRef::Object(opponent)));
-        runner
-            .act(GameAction::ChooseTarget {
-                target: pick.then_some(TargetRef::Object(target)),
-            })
-            .unwrap();
-        runner.advance_until_stack_empty();
-        finished(&runner);
-        assert!(runner.state().objects[&source].is_phased_out());
-        for id in [target, equipment, aura] {
-            assert_eq!(runner.state().objects[&id].is_phased_out(), pick);
-        }
-        for id in [other, opponent] {
-            assert!(!runner.state().objects[&id].is_phased_out());
-        }
-        for id in [source, target, equipment, aura] {
-            assert_eq!(runner.state().objects[&id].zone, Zone::Battlefield);
-        }
-        assert_eq!(
-            runner.state().objects[&target]
-                .counters
-                .get(&CounterType::Plus1Plus1),
-            Some(&1)
-        );
-        // Existing phase driver: park before the relevant untap, then advance
-        // through it. No direct phasing invocation or resolved effect injection.
-        runner.state_mut().phase = Phase::Cleanup;
-        runner.state_mut().active_player = P1;
-        runner.state_mut().priority_player = P1;
-        runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
-        runner.advance_to_upkeep();
-        assert_eq!(runner.state().active_player, P0);
-        for id in [source, target, equipment, aura] {
-            assert!(!runner.state().objects[&id].is_phased_out());
-        }
-        assert_eq!(
-            runner.state().objects[&equipment].attached_to,
-            Some(target.into())
-        );
-        assert_eq!(
-            runner.state().objects[&aura].attached_to,
-            Some(target.into())
-        );
-        assert_eq!(
-            runner.state().objects[&target]
-                .counters
-                .get(&CounterType::Plus1Plus1),
-            Some(&1)
-        );
-        finished(&runner);
+    defiant_optional_target_and_attachments_case(true);
+}
+
+#[test]
+fn defiant_zero_choice_with_legal_options_phases_and_returns() {
+    defiant_optional_target_and_attachments_case(false);
+}
+
+fn defiant_optional_target_and_attachments_case(pick: bool) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Island"; 8]);
+    scenario.with_library_top(P1, &["Mountain"; 8]);
+    scenario.add_creature_from_oracle(P0, "Fountain Watch", 2, 4, "Artifacts and enchantments you control have shroud. (They can't be the targets of spells or abilities.)");
+    let source = defiant(&mut scenario);
+    let target = scenario
+        .add_creature(P0, "Grizzly Bears", 2, 2)
+        .with_plus_counters(1)
+        .id();
+    let other = scenario.add_creature(P0, "Runeclaw Bear", 2, 2).id();
+    let opponent = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+    let equipment = scenario
+        .add_artifact_from_oracle(
+            P0,
+            "Bonesplitter",
+            "Equipped creature gets +2/+0.\nEquip {1}",
+        )
+        .with_subtypes(vec!["Equipment"])
+        .id();
+    let aura = scenario
+        .add_enchantment_from_oracle(
+            P0,
+            "Holy Strength",
+            "Enchant creature\nEnchanted creature gets +1/+2.",
+        )
+        .with_subtypes(vec!["Aura"])
+        .id();
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&aura)
+        .unwrap()
+        .attached_to = Some(target.into());
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&target)
+        .unwrap()
+        .attachments
+        .push(aura);
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&equipment)
+        .unwrap()
+        .attached_to = Some(target.into());
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&target)
+        .unwrap()
+        .attachments
+        .push(equipment);
+    cast_to_trigger(&mut runner, source);
+    // CR 702.18a: shroud does not prohibit the untargeted source leg.
+    assert!(engine::game::keywords::has_keyword(
+        &runner.state().objects[&source],
+        &Keyword::Shroud
+    ));
+    let WaitingFor::TriggerTargetSelection { target_slots, .. } = &runner.state().waiting_for
+    else {
+        panic!("Defiant must announce its optional target");
+    };
+    assert_eq!(target_slots.len(), 1);
+    let legal = optional_object_slot(&runner);
+    assert!(legal.contains(&TargetRef::Object(target)));
+    assert!(!legal.contains(&TargetRef::Object(opponent)));
+    runner
+        .act(GameAction::ChooseTarget {
+            target: pick.then_some(TargetRef::Object(target)),
+        })
+        .unwrap();
+    assert_eq!(runner.state().stack.len(), 1);
+    let engine::types::game_state::StackEntryKind::TriggeredAbility { ability, .. } =
+        &runner.state().stack[0].kind
+    else {
+        panic!("admitted Defiant trigger");
+    };
+    assert_eq!(ability.source_id, source);
+    assert_eq!(
+        ability.source_incarnation,
+        Some(runner.state().objects[&source].incarnation)
+    );
+    let child = ability.sub_ability.as_ref().expect("PhaseOut child");
+    assert_eq!(child.source_id, source);
+    assert_eq!(child.source_incarnation, ability.source_incarnation);
+    if !pick {
+        assert!(ability.targets.is_empty());
+        assert!(child.targets.is_empty());
     }
+    let mut events = vec![];
+    for _ in 0..8 {
+        if runner.state().stack.is_empty() {
+            break;
+        }
+        events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+    }
+    assert!(events.iter().any(|event| matches!(event, GameEvent::EffectResolved { kind: engine::types::ability::EffectKind::PhaseOut, source_id, .. } if *source_id == source)));
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, GameEvent::StackResolved { .. })));
+    finished(&runner);
+    assert!(runner.state().objects[&source].is_phased_out());
+    for id in [target, equipment, aura] {
+        assert_eq!(runner.state().objects[&id].is_phased_out(), pick);
+    }
+    for id in [other, opponent] {
+        assert!(!runner.state().objects[&id].is_phased_out());
+    }
+    for id in [source, target, equipment, aura] {
+        assert_eq!(runner.state().objects[&id].zone, Zone::Battlefield);
+    }
+    assert_eq!(
+        runner.state().objects[&target]
+            .counters
+            .get(&CounterType::Plus1Plus1),
+        Some(&1)
+    );
+    // Existing phase driver: park before the relevant untap, then advance
+    // through it. No direct phasing invocation or resolved effect injection.
+    runner.state_mut().phase = Phase::Cleanup;
+    runner.state_mut().active_player = P1;
+    runner.state_mut().priority_player = P1;
+    runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+    runner.advance_to_upkeep();
+    assert_eq!(runner.state().active_player, P0);
+    for id in [source, target, equipment, aura] {
+        assert!(!runner.state().objects[&id].is_phased_out());
+    }
+    assert_eq!(
+        runner.state().objects[&equipment].attached_to,
+        Some(target.into())
+    );
+    assert_eq!(
+        runner.state().objects[&aura].attached_to,
+        Some(target.into())
+    );
+    assert_eq!(
+        runner.state().objects[&target]
+            .counters
+            .get(&CounterType::Plus1Plus1),
+        Some(&1)
+    );
+    finished(&runner);
 }
 
 // CR 608.2b: an admitted target leaving invalidates the whole ability, including
 // its untargeted source leg. Empty selection still resolves that source leg.
 #[test]
 fn defiant_no_creatures_and_illegal_target() {
-    for illegal in [false, true] {
-        let mut scenario = GameScenario::new();
-        scenario.at_phase(Phase::PreCombatMain);
-        let source = defiant(&mut scenario);
-        let target = illegal.then(|| scenario.add_creature(P0, "Grizzly Bears", 2, 2).id());
-        let mut runner = scenario.build();
-        cast_to_trigger(&mut runner, source);
-        if let Some(id) = target {
-            let legal = optional_object_slot(&runner);
-            assert!(legal.contains(&TargetRef::Object(id)));
-            runner
-                .act(GameAction::ChooseTarget {
-                    target: Some(TargetRef::Object(id)),
-                })
-                .unwrap();
-            assert_eq!(runner.state().stack.len(), 1);
-            engine::game::zones::move_to_zone(runner.state_mut(), id, Zone::Exile, &mut vec![]);
-            runner.advance_until_stack_empty();
+    defiant_no_creatures_or_illegal_target_case(false);
+}
+
+#[test]
+fn defiant_chosen_target_becoming_illegal_prevents_source_phasing() {
+    defiant_no_creatures_or_illegal_target_case(true);
+}
+
+fn defiant_no_creatures_or_illegal_target_case(illegal: bool) {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = defiant(&mut scenario);
+    let target = illegal.then(|| scenario.add_creature(P0, "Grizzly Bears", 2, 2).id());
+    let mut runner = scenario.build();
+    cast_to_trigger(&mut runner, source);
+    if let Some(id) = target {
+        let legal = optional_object_slot(&runner);
+        assert!(legal.contains(&TargetRef::Object(id)));
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(id)),
+            })
+            .unwrap();
+        assert_eq!(runner.state().stack.len(), 1);
+        engine::game::zones::move_to_zone(runner.state_mut(), id, Zone::Exile, &mut vec![]);
+        runner.advance_until_stack_empty();
+    }
+    finished(&runner);
+    assert_eq!(runner.state().objects[&source].is_phased_out(), !illegal);
+}
+
+// CR 400.7: the queued source identity cannot bind to a new incarnation.
+#[test]
+fn defiant_zero_choice_stale_source_does_not_substitute_a_permanent() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P0, "Fountain Watch", 2, 4, "Artifacts and enchantments you control have shroud. (They can't be the targets of spells or abilities.)");
+    let source = defiant(&mut scenario);
+    let own = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let other = scenario.add_creature(P1, "Runeclaw Bear", 2, 2).id();
+    let mut runner = scenario.build();
+    cast_to_trigger(&mut runner, source);
+    assert!(engine::game::keywords::has_keyword(
+        &runner.state().objects[&source],
+        &Keyword::Shroud
+    ));
+    assert!(optional_object_slot(&runner).contains(&TargetRef::Object(own)));
+    runner
+        .act(GameAction::ChooseTarget { target: None })
+        .unwrap();
+    assert_eq!(runner.state().stack.len(), 1);
+    let engine::types::game_state::StackEntryKind::TriggeredAbility { ability, .. } =
+        &runner.state().stack[0].kind
+    else {
+        panic!("admitted Defiant trigger");
+    };
+    let old_incarnation = runner.state().objects[&source].incarnation;
+    assert_eq!(ability.source_id, source);
+    assert_eq!(ability.source_incarnation, Some(old_incarnation));
+    assert!(ability.targets.is_empty());
+    let child = ability.sub_ability.as_ref().expect("PhaseOut child");
+    assert!(child.targets.is_empty());
+    assert_eq!(child.source_incarnation, Some(old_incarnation));
+    // Fixture-only return isolates the already admitted trigger from a new ETB.
+    engine::game::zones::move_to_zone(runner.state_mut(), source, Zone::Exile, &mut vec![]);
+    engine::game::zones::move_to_zone(runner.state_mut(), source, Zone::Battlefield, &mut vec![]);
+    assert_ne!(runner.state().objects[&source].incarnation, old_incarnation);
+    let mut events = vec![];
+    for _ in 0..8 {
+        if runner.state().stack.is_empty() {
+            break;
         }
-        finished(&runner);
-        assert_eq!(runner.state().objects[&source].is_phased_out(), !illegal);
+        events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+    }
+    finished(&runner);
+    assert!(events.iter().any(|event| matches!(event, GameEvent::EffectResolved { kind: engine::types::ability::EffectKind::PhaseOut, source_id, .. } if *source_id == source)));
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, GameEvent::StackResolved { .. })));
+    for id in [source, own, other] {
+        assert!(!runner.state().objects[&id].is_phased_out());
     }
 }
 
