@@ -102,7 +102,12 @@ impl TacticalPolicy for LandAnimationPolicy {
         // This must precede the tapped check: `land_animation_tapped` returns
         // first for a tapped source, and an already-animated man-land can be
         // tapped, which would make this veto unreachable on those boards.
-        if crate::manland::repeat_gains_nothing(ctx.state, ctx.ai_player, *source_id, ability_def) {
+        //
+        // Root only (`SearchDepth`): the check activates and settles the
+        // repeat on copies of the board.
+        if ctx.at_root()
+            && crate::manland::repeat_gains_nothing(ctx.state, &ctx.candidate.action, ability_def)
+        {
             return PolicyVerdict::reject(PolicyReason::new(
                 "land_animation_redundant_already_creature",
             ));
@@ -259,6 +264,7 @@ mod tests {
     use super::*;
     use crate::config::AiConfig;
     use crate::context::AiContext;
+    use crate::policies::context::SearchDepth;
     use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, TacticalClass};
     use engine::game::effects::counter;
     use engine::game::engine::apply_as_current_for_simulation;
@@ -520,6 +526,15 @@ mod tests {
     const RAGING_RAVINE: &str = "This land enters tapped.\n{T}: Add {R} or {G}.\n{2}{R}{G}: Until end of turn, this land becomes a 3/3 red and green Elemental creature with \"Whenever this creature attacks, put a +1/+1 counter on it.\" It's still a land.";
 
     fn verdict_at(state: &GameState, source_id: ObjectId, ability_index: usize) -> PolicyVerdict {
+        verdict_at_depth(state, source_id, ability_index, SearchDepth::Root)
+    }
+
+    fn verdict_at_depth(
+        state: &GameState,
+        source_id: ObjectId,
+        ability_index: usize,
+        search_depth: SearchDepth,
+    ) -> PolicyVerdict {
         let decision = AiDecisionContext {
             waiting_for: WaitingFor::Priority { player: AI },
             candidates: Vec::new(),
@@ -542,7 +557,7 @@ mod tests {
             config: &config,
             context: &context,
             cast_facts: None,
-            search_depth: crate::policies::context::SearchDepth::Root,
+            search_depth,
         };
         LandAnimationPolicy.verdict(&ctx)
     }
@@ -963,13 +978,10 @@ mod tests {
 
     #[test]
     fn leaf_chain_reactivation_after_a_later_pt_setting_effect_is_not_rejected() {
-        let (mut runner, stones, index) =
-            oracle_board("Stalking Stones", STALKING_STONES, &[(ManaColor::Green, 8)]);
-        assert!(
-            runner.state().objects[&stones].abilities[index]
-                .sub_ability
-                .is_none(),
-            "reach guard: a leaf chain, which leaves the layers unflushed"
+        let (mut runner, stones, index) = oracle_board(
+            "Stalking Stones",
+            STALKING_STONES,
+            &[(ManaColor::Green, 12)],
         );
         announce(&mut runner, stones, index);
         resolve_accepting_optional(&mut runner);
@@ -1089,6 +1101,7 @@ mod tests {
             entry_targets(runner.state(), top).contains(&TargetRef::Object(pending)),
             "reach guard: the counter targets the pending activation"
         );
+        pass_until(&mut runner, p0_has_priority);
         assert!(
             !is_creature(runner.state(), village),
             "reach guard: the land is not a creature yet"
@@ -1123,6 +1136,7 @@ mod tests {
             !entry_targets(runner.state(), top).contains(&TargetRef::Object(pending)),
             "reach guard: the bolt does not target the pending activation"
         );
+        pass_until(&mut runner, p0_has_priority);
         assert!(
             !is_creature(runner.state(), village),
             "reach guard: the land is not a creature yet"
@@ -1277,8 +1291,9 @@ mod tests {
         );
 
         let copy_entry_id = ObjectId(runner.state().next_object_id);
-        // Hand-pushed copy entry standing in for a printed copier such as
-        // Lithoform Engine.
+        // Synthetic: an opponent's copy of the pending activation. No printed
+        // card copies an opponent's untargeted ability; the nearest, Lithoform
+        // Engine, copies only an ability its controller controls.
         {
             let state = runner.state_mut();
             let ability = ResolvedAbility::new(
@@ -1595,8 +1610,11 @@ mod tests {
 
     #[test]
     fn stalking_stones_repeat_after_resolution_is_rejected() {
-        let (mut runner, stones, index) =
-            oracle_board("Stalking Stones", STALKING_STONES, &[(ManaColor::Green, 8)]);
+        let (mut runner, stones, index) = oracle_board(
+            "Stalking Stones",
+            STALKING_STONES,
+            &[(ManaColor::Green, 12)],
+        );
         announce(&mut runner, stones, index);
         resolve_accepting_optional(&mut runner);
         assert!(
@@ -2197,5 +2215,185 @@ mod tests {
         );
         let verdict = verdict_at(runner.state(), village, index);
         assert!(is_redundant_reject(&verdict), "got {verdict:?}");
+    }
+
+    const ELROND_MOON_READER: &str = "Whenever you activate an ability of a creature, draw a card. This ability triggers only once each turn.\n{5}{U}{U}: Exile up to two other target nonland permanents you control. Return those cards to the battlefield under their owner's control at the beginning of the next end step.";
+    const CRACKDOWN_CONSTRUCT: &str = "Whenever you activate an ability of an artifact or creature that isn't a mana ability, this creature gets +1/+1 until end of turn.";
+
+    /// Mutavault animated by a resolved activation, with P0 holding priority
+    /// over an empty stack.
+    fn animated_mutavault(
+        add: impl FnOnce(&mut GameScenario) -> ObjectId,
+    ) -> (GameRunner, ObjectId, usize, ObjectId) {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let vault = scenario
+            .add_land_from_oracle(P0, "Mutavault", MUTAVAULT)
+            .id();
+        for _ in 0..4 {
+            scenario.add_basic_land(P0, ManaColor::Blue);
+        }
+        for _ in 0..3 {
+            scenario.add_card_to_library_top(P0, "Island");
+        }
+        let added = add(&mut scenario);
+        let mut runner = scenario.build();
+        p0_main_phase(&mut runner);
+        let index = animation_indices(&runner, vault)[0];
+        announce(&mut runner, vault, index);
+        resolve_accepting_optional(&mut runner);
+        assert!(
+            is_creature(runner.state(), vault) && runner.state().stack.is_empty(),
+            "reach guard: Mutavault is a creature and nothing is pending"
+        );
+        (runner, vault, index, added)
+    }
+
+    /// CR 603.2: once Mutavault is a creature, activating the
+    /// repeat is the event Elrond, Moon-Reader triggers on.
+    #[test]
+    fn a_draw_triggered_by_activating_the_repeat_leaves_it_eligible() {
+        let (runner, vault, index, _) = animated_mutavault(|scenario| {
+            scenario
+                .add_creature_from_oracle(P0, "Elrond, Moon-Reader", 3, 3, ELROND_MOON_READER)
+                .as_legendary()
+                .id()
+        });
+        let hand = |state: &GameState| state.players[0].hand.len();
+        let without = played_out(runner.state(), None);
+        let with = played_out(runner.state(), Some(activate(vault, index)));
+        assert_eq!(
+            hand(&with),
+            hand(&without) + 1,
+            "reach guard: activating the repeat draws a card"
+        );
+        let verdict = verdict_at(runner.state(), vault, index);
+        assert!(
+            matches!(verdict, PolicyVerdict::Score { .. }),
+            "got {verdict:?}"
+        );
+    }
+
+    /// CR 603.2: once Mutavault is a creature, activating the
+    /// repeat is the event Crackdown Construct triggers on.
+    #[test]
+    fn a_pump_triggered_by_activating_the_repeat_leaves_it_eligible() {
+        let (runner, vault, index, construct) = animated_mutavault(|scenario| {
+            scenario
+                .add_creature_from_oracle(P0, "Crackdown Construct", 2, 2, CRACKDOWN_CONSTRUCT)
+                .as_artifact_creature()
+                .id()
+        });
+        let power = |state: &GameState| state.objects[&construct].power;
+        let without = played_out(runner.state(), None);
+        let with = played_out(runner.state(), Some(activate(vault, index)));
+        assert_eq!(
+            (power(&without), power(&with)),
+            (Some(2), Some(3)),
+            "reach guard: activating the repeat pumps the Construct"
+        );
+        let verdict = verdict_at(runner.state(), vault, index);
+        assert!(
+            matches!(verdict, PolicyVerdict::Score { .. }),
+            "got {verdict:?}"
+        );
+    }
+
+    const HARSH_MENTOR: &str = "Whenever an opponent activates an ability of an artifact, creature, or land on the battlefield, if it isn't a mana ability, this creature deals 2 damage to that player.";
+
+    /// Harsh Mentor's trigger only costs P0 life, and the repeat stays
+    /// eligible all the same: the check abstains on any entry the activation
+    /// adds besides the repeat.
+    #[test]
+    fn a_punisher_triggered_by_activating_the_repeat_leaves_it_eligible() {
+        let (runner, vault, index, _) = animated_mutavault(|scenario| {
+            scenario
+                .add_creature_from_oracle(P1, "Harsh Mentor", 2, 2, HARSH_MENTOR)
+                .id()
+        });
+        let life = |state: &GameState| state.players[0].life;
+        let without = played_out(runner.state(), None);
+        let with = played_out(runner.state(), Some(activate(vault, index)));
+        assert_eq!(
+            life(&with),
+            life(&without) - 2,
+            "reach guard: activating the repeat costs P0 2 life"
+        );
+        let verdict = verdict_at(runner.state(), vault, index);
+        assert!(
+            matches!(verdict, PolicyVerdict::Score { .. }),
+            "got {verdict:?}"
+        );
+    }
+
+    #[test]
+    fn two_activation_triggers_leave_the_repeat_eligible() {
+        let (runner, vault, index, _) = animated_mutavault(|scenario| {
+            scenario
+                .add_creature_from_oracle(P0, "Crackdown Construct", 2, 2, CRACKDOWN_CONSTRUCT)
+                .as_artifact_creature();
+            scenario
+                .add_creature_from_oracle(P0, "Elrond, Moon-Reader", 3, 3, ELROND_MOON_READER)
+                .as_legendary()
+                .id()
+        });
+        let mut activated = runner.state().clone();
+        apply_as_current_for_simulation(&mut activated, activate(vault, index))
+            .expect("the engine accepts it");
+        assert!(
+            matches!(activated.waiting_for, WaitingFor::OrderTriggers { .. }),
+            "reach guard: the two triggers wait to be ordered, got {:?}",
+            activated.waiting_for
+        );
+        let verdict = verdict_at(runner.state(), vault, index);
+        assert!(
+            matches!(verdict, PolicyVerdict::Score { .. }),
+            "got {verdict:?}"
+        );
+    }
+
+    /// Elrond, Moon-Reader has already triggered this turn, so a further
+    /// repeat triggers nothing.
+    #[test]
+    fn an_activation_trigger_already_spent_this_turn_keeps_the_veto() {
+        let (mut runner, vault, index, _) = animated_mutavault(|scenario| {
+            scenario
+                .add_creature_from_oracle(P0, "Elrond, Moon-Reader", 3, 3, ELROND_MOON_READER)
+                .as_legendary()
+                .id()
+        });
+        let hand = |state: &GameState| state.players[0].hand.len();
+        let before = hand(runner.state());
+        *runner.state_mut() = played_out(runner.state(), Some(activate(vault, index)));
+        p0_main_phase(&mut runner);
+        assert_eq!(
+            hand(runner.state()),
+            before + 1,
+            "reach guard: the first repeat drew a card"
+        );
+        let without = played_out(runner.state(), None);
+        let with = played_out(runner.state(), Some(activate(vault, index)));
+        assert_eq!(
+            hand(&with),
+            hand(&without),
+            "reach guard: a second repeat draws nothing"
+        );
+        let verdict = verdict_at(runner.state(), vault, index);
+        assert!(is_redundant_reject(&verdict), "got {verdict:?}");
+    }
+
+    #[test]
+    fn a_redundant_repeat_is_vetoed_only_at_the_root() {
+        let (mut runner, vault, index) =
+            oracle_board("Mutavault", MUTAVAULT, &[(ManaColor::Green, 5)]);
+        announce(&mut runner, vault, index);
+        resolve_accepting_optional(&mut runner);
+        let root = verdict_at(runner.state(), vault, index);
+        assert!(is_redundant_reject(&root), "reach guard: got {root:?}");
+        let lookahead = verdict_at_depth(runner.state(), vault, index, SearchDepth::Lookahead);
+        assert!(
+            matches!(lookahead, PolicyVerdict::Score { .. }),
+            "got {lookahead:?}"
+        );
     }
 }

@@ -17,9 +17,7 @@
 use std::collections::HashSet;
 
 use engine::database::synthesis::KeywordTriggerInstaller;
-use engine::game::ability_utils::build_resolved_from_def;
 use engine::game::casting::can_pay_ability_mana_cost_after_auto_tap_excluding;
-use engine::game::effects::resolve_ability_chain;
 use engine::game::engine::apply_as_current_for_simulation;
 use engine::game::layers::flush_layers;
 use engine::types::ability::{
@@ -329,17 +327,20 @@ fn keyword_grant_collapses(keyword: &Keyword) -> bool {
     !keyword.instances_must_coexist() && KeywordTriggerInstaller::triggers_for(keyword).is_empty()
 }
 
-/// True when `source_id` is a creature or an activated ability of it is on the
-/// stack, `ability`'s chain only resets characteristics
-/// ([`repeat_only_resets_characteristics`]), and [`settles_alike`] holds for
-/// the board with the repeat resolved first and that board with the repeat's
-/// continuous effects removed, each [`settle`]d.
+/// True when `activation`'s source is a creature or an activated ability of it
+/// is on the stack, `ability`'s chain only resets characteristics
+/// ([`repeat_only_resets_characteristics`]), activating it adds only the
+/// repeat to the stack, and [`settles_alike`] holds for the board with the
+/// repeat resolved first and that board with the repeat's continuous effects
+/// removed, each [`settle`]d.
 pub(crate) fn repeat_gains_nothing(
     state: &GameState,
-    controller: PlayerId,
-    source_id: ObjectId,
+    activation: &GameAction,
     ability: &AbilityDefinition,
 ) -> bool {
+    let &GameAction::ActivateAbility { source_id, .. } = activation else {
+        return false;
+    };
     let pending: Vec<ObjectId> = state
         .stack
         .iter()
@@ -369,12 +370,18 @@ pub(crate) fn repeat_gains_nothing(
         .iter()
         .map(|effect| effect.id)
         .collect();
-    // The repeat is resolved, not activated: neither line pays its cost.
-    let resolved = build_resolved_from_def(ability, source_id, controller);
-    if resolve_ability_chain(&mut with, &resolved, &mut Vec::new(), 0).is_err() {
+    let below = with.stack.len();
+    // CR 603.2: activating the repeat is a game event that abilities can
+    // trigger on.
+    if apply_as_current_for_simulation(&mut with, activation.clone()).is_err()
+        || with.stack.len() != below + 1
+    {
         return false;
     }
-    flush_layers(&mut with);
+    let repeat_entry = with.stack.back().map(|entry| entry.id);
+    let Some(with) = settle(with, repeat_entry.as_slice()) else {
+        return false;
+    };
     let repeat: HashSet<u64> = with
         .transient_continuous_effects
         .iter()
