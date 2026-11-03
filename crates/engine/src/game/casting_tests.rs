@@ -32,7 +32,7 @@ use crate::types::mana::{
 };
 use crate::types::phase::Phase;
 use crate::types::replacements::ReplacementEvent;
-use crate::types::statics::StaticMode;
+use crate::types::statics::{CastFrequency, CostModifyMode, StaticMode};
 use std::sync::Arc;
 
 fn setup_game_at_main_phase() -> GameState {
@@ -62401,9 +62401,6 @@ fn an_activation_journal_row_round_trips() {
 /// controller), flipping the first assertion.
 #[test]
 fn a_graveyard_activation_does_not_consume_a_battlefield_scoped_first_activation_discount() {
-    use crate::types::ability::{ControllerRef, StaticDefinition, TypedFilter};
-    use crate::types::statics::{CastFrequency, CostModifyMode, StaticMode};
-
     let mut state = GameState::new_two_player(7);
     let reducer = create_object(
         &mut state,
