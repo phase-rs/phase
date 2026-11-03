@@ -91,11 +91,17 @@ test binaries are already built in `/src`.
   once in the build). Engine behaviour is covered by
   `cargo test -p phase-engine` (large; run targeted modules, e.g.
   `cargo test -p phase-engine parser`, rather than the whole suite).
-- **A server to attack**: `./target/debug/phase-server` listens for
-  WebSocket connections on loopback (see `--help` for the port and
-  data-dir flags; it needs a card-data directory, pointed to by
-  `PHASE_DATA_DIR`). The fastest reproducer is usually a Rust test in
-  `server-core` that feeds bytes or a `ClientMessage` through the
+- **A server to attack**: `PHASE_DEV_FIXTURE=1 ./target/debug/phase-server`
+  listens for WebSocket connections on loopback (see `--help` for the
+  port and bind flags). Fixture mode loads the committed
+  `data/mtgjson/test_fixture.json` and disables the startup download
+  bootstrap, so it runs with no network and no generated production
+  `card-data.json`; the Dockerfile smoke-tests this path and `/health`
+  must answer. Without `PHASE_DEV_FIXTURE=1`, a clean checkout exits
+  during data bootstrap because this binary has no embedded
+  `PHASE_CHANNEL` identity and cannot download a compatible database.
+  The fastest reproducer is usually a Rust test in `server-core` that
+  feeds bytes or a `ClientMessage` through the
   guard and dispatch path — no live server needed.
 - **Hidden information**: `filter_state_for_player` and
   `guard_game_state_for_broadcast` are the functions to test; a

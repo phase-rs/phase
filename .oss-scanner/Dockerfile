@@ -1,8 +1,12 @@
 # Scanner image for https://github.com/phase-rs/phase.
 # Enrolment: anthropics/oss-scanner `projects/phase/project.yaml` points
 # here (`dockerfile: .oss-scanner/Dockerfile`) once that PR points at
-# this in-repo copy; until then the scanner uses the identical copy
-# beside project.yaml. Keep both in sync, or delete the other copy.
+# this in-repo copy; until then the scanner uses the copy beside
+# project.yaml. Keep the two Dockerfiles and threat models in sync, or
+# delete the scanner-repo copies after the pointer switch.
+# Dockerfile.dockerignore, next to this file, keeps data/ (including the
+# test fixture the engine tests embed) visible to this build; the root
+# .dockerignore is written for phase's production images and hides it.
 #
 # The audit runs offline, so this build installs the pinned toolchain,
 # fetches every crate the workspace resolves, and compiles the native
@@ -69,6 +73,26 @@ RUN cargo build -p phase-server -p server-core -p lobby-broker \
 RUN (timeout 1200 cargo test -p server-core -p lobby-broker \
        -p draft-core -p seat-reducer \
      || echo "WARNING: cargo test reported failures")
+
+# Verify the documented fixture-backed server startup without network or a
+# generated production card-data.json. PHASE_DEV_FIXTURE=1 loads the
+# committed data/mtgjson/test_fixture.json and disables the download
+# bootstrap; /health must answer on the smoke-test port.
+RUN set -eu; \
+    PHASE_DEV_FIXTURE=1 ./target/debug/phase-server \
+      --port 19374 --games-db /tmp/phase-server-smoke.db \
+      >/tmp/phase-server-smoke.log 2>&1 & \
+    pid=$!; \
+    ok=0; \
+    for _ in $(seq 1 30); do \
+      if python3 -c "import urllib.request; raise SystemExit(0 if urllib.request.urlopen('http://127.0.0.1:19374/health', timeout=1).read() == b'ok' else 1)" 2>/dev/null; then \
+        ok=1; break; \
+      fi; \
+      sleep 1; \
+    done; \
+    kill "$pid" 2>/dev/null || true; \
+    wait "$pid" 2>/dev/null || true; \
+    if [ "$ok" != 1 ]; then cat /tmp/phase-server-smoke.log; exit 1; fi
 
 # Everything is fetched and built. From here on cargo must not wait
 # for a registry it cannot reach.
