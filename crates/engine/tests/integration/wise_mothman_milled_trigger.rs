@@ -587,6 +587,11 @@ fn infesting_radroach_accepted_optional_return_moves_itself() {
         .act(GameAction::DecideOptionalEffect { accept: true })
         .expect("accepting the optional return-to-hand should be legal");
     runner.advance_until_stack_empty();
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
 
     assert_eq!(
         total_hand_size(&runner),
