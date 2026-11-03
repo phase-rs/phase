@@ -80,7 +80,7 @@ RUN (timeout 1200 cargo test -p server-core -p lobby-broker \
 # bootstrap; /health must answer on the smoke-test port.
 RUN set -eu; \
     PHASE_DEV_FIXTURE=1 ./target/debug/phase-server \
-      --port 19374 --games-db /tmp/phase-server-smoke.db \
+      --bind 127.0.0.1 --port 19374 --games-db /tmp/phase-server-smoke.db \
       >/tmp/phase-server-smoke.log 2>&1 & \
     pid=$!; \
     ok=0; \

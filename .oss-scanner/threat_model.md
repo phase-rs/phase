@@ -12,16 +12,22 @@ hostile. Treat all of the following as attacker-controlled:
 
 - **WebSocket messages.** `crates/phase-server` (axum, `ws`) accepts
   JSON `ClientMessage` values defined in `crates/server-core/src/
-  protocol.rs` (wire protocol version 7, with a hello handshake that
-  enforces a minimum supported version). Lobby creation and joining,
-  seat mutations, game actions, draft actions, emotes, reconnects,
-  spectator joins and P2P backup snapshots all arrive this way, before
-  or shortly after a player token is issued. Deserialization alone is
-  not the control: `crates/server-core` runs a dedicated guard per
-  message family (the `*_wire_guard.rs` modules, e.g.
-  `guard_client_hello`, `guard_client_message_before_dispatch`,
-  `guard_game_action_payload`, the draft/lobby/spectator/reconnect
-  guards) before dispatch.
+  protocol.rs` (a generated, versioned wire protocol, with a hello
+  handshake that enforces a minimum supported version). Lobby creation
+  and joining, seat mutations, game actions, draft actions, emotes,
+  reconnects and spectator joins all arrive this way, before or shortly
+  after a player token is issued. Deserialization alone is not the
+  control: `crates/server-core` runs a dedicated guard per message
+  family (the `*_wire_guard.rs` modules, e.g. `guard_client_hello`,
+  `guard_client_message_before_dispatch`, `guard_game_action_payload`,
+  the draft/lobby/spectator/reconnect guards) before dispatch.
+- **HTTP P2P draft backups.** Separately from WebSocket traffic,
+  `POST /p2p-draft-backup` accepts a JSON body, and
+  `GET`/`DELETE /p2p-draft-backup/{code}` accept the code in the path
+  and `host_peer_id` in the query. These handlers in
+  `crates/phase-server/src/admin.rs` validate the draft code, run
+  `guard_p2p_backup` / overwrite and secret-redaction checks, and only
+  disclose or delete a snapshot when `host_peer_id` matches its owner.
 - **Game actions inside a running game.** A seated player submits
   `GameAction` values that the engine reducer applies to shared
   `GameState`. The server must only accept actions from the player
@@ -82,27 +88,34 @@ a dependency belongs upstream.
 
 ## How to exercise it
 
-The image has only loopback networking; every dependency is in the
-cargo cache, `CARGO_NET_OFFLINE` is set, and the server stack and its
-test binaries are already built in `/src`.
+The scanner runs the audit with external networking disabled; pass
+`--bind 127.0.0.1` for any live server (its default bind is `0.0.0.0`).
+Every dependency is in the cargo cache, `CARGO_NET_OFFLINE` is set,
+and the server binary plus the listed guard/session test binaries are
+already built in `/src`.
 
 - **Tests**: `cargo test -p server-core -p lobby-broker -p draft-core
   -p seat-reducer` runs the wire-guard and session suites (already run
-  once in the build). Engine behaviour is covered by
+  once in the build). Run `cargo test -p phase-server` for the
+  WebSocket/HTTP server's own tests; the image does not pre-run that
+  large target. Engine behaviour is covered by
   `cargo test -p phase-engine` (large; run targeted modules, e.g.
-  `cargo test -p phase-engine parser`, rather than the whole suite).
-- **A server to attack**: `PHASE_DEV_FIXTURE=1 ./target/debug/phase-server`
+  `cargo test -p phase-engine -- parser`, rather than the whole suite).
+- **A server to attack**: `PHASE_DEV_FIXTURE=1 ./target/debug/phase-server --bind 127.0.0.1`
   listens for WebSocket connections on loopback (see `--help` for the
-  port and bind flags). Fixture mode loads the committed
+  port flag). Fixture mode loads the committed
   `data/mtgjson/test_fixture.json` and disables the startup download
   bootstrap, so it runs with no network and no generated production
   `card-data.json`; the Dockerfile smoke-tests this path and `/health`
   must answer. Without `PHASE_DEV_FIXTURE=1`, a clean checkout exits
   during data bootstrap because this binary has no embedded
   `PHASE_CHANNEL` identity and cannot download a compatible database.
-  The fastest reproducer is usually a Rust test in `server-core` that
-  feeds bytes or a `ClientMessage` through the
-  guard and dispatch path — no live server needed.
+  Fixture mode has no `draft-pools.json`, so server-hosted draft start
+  is unavailable against the live fixture server; exercise draft logic
+  through `draft-core` and `phase-server` tests, which inject pool
+  fixtures (e.g. `tst_draft_pools`). The fastest reproducer is usually
+  a Rust test in `server-core` that feeds bytes or a `ClientMessage`
+  through the guard and dispatch path — no live server needed.
 - **Hidden information**: `filter_state_for_player` and
   `guard_game_state_for_broadcast` are the functions to test; a
   reproducer shows a field from one player's hidden zone present in
@@ -119,10 +132,12 @@ test binaries are already built in `/src`.
 
 A finding counts when one principal (an unauthenticated client, a
 lobby peer, a spectator, or a player in a game) can affect another
-player, the shared server, or a game they are not entitled to affect.
-State the exact message sequence or input and the configuration it
-needs; a finding against the defaults weighs more than one needing a
-raised limit.
+player, the shared server, or a game they are not entitled to affect,
+or can make server-side handling of a connection or session panic,
+hang, exhaust resources or corrupt state. Severity follows the blast
+radius. State the exact message sequence or input and the
+configuration it needs; a finding against the defaults weighs more
+than one needing a raised limit.
 
 - **Critical**: memory corruption or code execution on the server
   reachable from WebSocket input; acting as another player (seat or
