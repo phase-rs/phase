@@ -17,10 +17,29 @@
 //! - First Day of Class: "Whenever a creature you control enters this turn, put a +1/+1 counter on
 //!   it and it gains haste until end of turn.\nLearn. (You may reveal a Lesson card you own from
 //!   outside the game and put it into your hand, or discard a card to draw a card.)"
+//! - Servant of the Scale: "This creature enters with a +1/+1 counter on it.\nWhen this creature
+//!   dies, put X +1/+1 counters on target creature you control, where X is the number of +1/+1
+//!   counters on this creature."
+//! - Hardened Scales: "If one or more +1/+1 counters would be put on a creature you control, that
+//!   many plus one +1/+1 counters are put on it instead."
+//! - Corpsejack Menace: "If one or more +1/+1 counters would be put on a creature you control,
+//!   twice that many +1/+1 counters are put on it instead."
+//!
+//! Synthetic (row `connive_redirect_to_battlefield_counter_prompt_records_the_delivered_discard`):
+//! one replacement, "If a card would be put into a graveyard from anywhere, put it onto the
+//! battlefield instead." No printed card reaches this seam for connive or learn rummage. The
+//! nearest printed cards are Loxodon Smiter ("If a spell or ability an opponent controls causes
+//! you to discard this card, put it onto the battlefield instead of putting it into your
+//! graveyard.") and Wilt-Leaf Liege (same sentence), but their
+//! `ReplacementCondition::EventSourceControlledBy` (replacement.rs) is false here: connive and
+//! learn rummage pass `source_id: None` on the discard, and the discarding player controls the
+//! effect anyway.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
-use engine::types::ability::Effect;
+use engine::types::ability::{
+    AbilityDefinition, AbilityKind, Effect, ReplacementDefinition, TargetFilter,
+};
 use engine::types::actions::{GameAction, LearnOption};
 use engine::types::events::GameEvent;
 use engine::types::game_state::WaitingFor;
@@ -28,6 +47,8 @@ use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::replacements::ReplacementEvent;
+use engine::types::zones::EtbTapState;
 use engine::types::zones::Zone;
 
 use crate::support::shared_card_db;
@@ -337,4 +358,139 @@ fn mind_rot_batch_is_not_double_counted() {
     );
     assert_eq!(st.objects[&a].zone, Zone::Exile);
     assert_eq!(st.objects[&b].zone, Zone::Exile);
+}
+
+/// CR 701.9a + CR 614.6: a paused frameless discard whose redirected move is delivered, and whose
+/// delivery tail then parks a CR 616.1 counter prompt, is recorded in the delivering answer.
+#[test]
+fn connive_redirect_to_battlefield_counter_prompt_records_the_delivered_discard() {
+    let db = shared_card_db().expect("card database");
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let servant = s.add_real_card(P0, "Servant of the Scale", Zone::Library, db);
+    let grimoire = s.add_real_card(P1, "Geth's Grimoire", Zone::Battlefield, db);
+    s.add_real_card(P1, "Rest in Peace", Zone::Battlefield, db);
+    s.add_real_card(P0, "Hardened Scales", Zone::Battlefield, db);
+    s.add_real_card(P0, "Corpsejack Menace", Zone::Battlefield, db);
+    s.add_creature(P0, "Synthetic Redirect Field", 0, 0)
+        .as_enchantment()
+        .with_replacement_definition(
+            ReplacementDefinition::new(ReplacementEvent::Moved)
+                .destination_zone(Zone::Graveyard)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::ChangeZone {
+                        destination: Zone::Battlefield,
+                        origin: None,
+                        target: TargetFilter::SelfRef,
+                        owner_library: false,
+                        enter_transformed: false,
+                        enters_under: None,
+                        enter_tapped: EtbTapState::Unspecified,
+                        enters_attacking: false,
+                        up_to: false,
+                        enter_with_counters: vec![],
+                        conditional_enter_with_counters: vec![],
+                        face_down_profile: None,
+                        enters_modified_if: None,
+                    },
+                ))
+                .description(
+                    "If a card would be put into a graveyard from anywhere, put it onto the battlefield instead."
+                        .to_string(),
+                ),
+        );
+    let grifter = s.add_real_card(P0, "Hypnotic Grifter", Zone::Battlefield, db);
+    s.with_mana_pool(
+        P0,
+        (0..3)
+            .map(|_| ManaUnit::new(ManaType::Colorless, ObjectId(0), false, vec![]))
+            .collect(),
+    );
+    let mut runner: GameRunner = s.build();
+    let idx = runner.state().objects[&grifter]
+        .abilities
+        .iter()
+        .position(|a| matches!(a.effect.as_ref(), Effect::Connive { .. }))
+        .expect("Hypnotic Grifter has a connive ability");
+    let mut events = runner.activate(grifter, idx).resolve().events().to_vec();
+
+    let mut prompts = 0;
+    let mut steps: Vec<Step> = Vec::new();
+    while let WaitingFor::ReplacementChoice { candidates, .. } = runner.state().waiting_for.clone()
+    {
+        let descs: Vec<String> = candidates.iter().map(|c| c.description.clone()).collect();
+        let want = if prompts == 0 {
+            assert!(
+                descs
+                    .iter()
+                    .any(|d| d.contains("onto the battlefield instead")),
+                "reach guard: prompt 1 must offer the redirect, got {descs:?}"
+            );
+            "onto the battlefield instead"
+        } else {
+            assert_eq!(
+                descs.len(),
+                2,
+                "reach guard: the counter prompt, got {descs:?}"
+            );
+            assert!(
+                descs
+                    .iter()
+                    .all(|d| d.contains("+1/+1 counters would be put on a creature you control")),
+                "reach guard: both counter replacements, got {descs:?}"
+            );
+            "plus one"
+        };
+        let index = descs
+            .iter()
+            .position(|d| d.contains(want))
+            .unwrap_or_else(|| panic!("no candidate containing {want:?} in {descs:?}"));
+        prompts += 1;
+        assert!(prompts <= 5, "runaway replacement prompts");
+        let answer_events = runner
+            .act(GameAction::ChooseReplacement { index })
+            .expect("answer replacement choice")
+            .events;
+        let st = runner.state();
+        steps.push(Step {
+            discarded_in_action: discarded_for(&answer_events, P0).len(),
+            carrier_present: st.pending_single_discard.is_some(),
+            prompting: matches!(st.waiting_for, WaitingFor::ReplacementChoice { .. }),
+            card_zone: st.objects.get(&servant).map(|o| o.zone),
+        });
+        events.extend(answer_events);
+    }
+
+    assert_eq!(prompts, 2, "redirect prompt, then the counter prompt");
+    // Delivering answer: the move happened, the counter prompt is parked, and the discard is
+    // already recorded and its carrier consumed.
+    assert_eq!(
+        steps[0].card_zone,
+        Some(Zone::Battlefield),
+        "reach guard: move delivered"
+    );
+    assert!(steps[0].prompting, "reach guard: tail prompt parked");
+    assert_eq!(
+        steps[0].discarded_in_action, 1,
+        "discard recorded by the delivering answer"
+    );
+    assert!(
+        !steps[0].carrier_present,
+        "carrier consumed by the delivering answer"
+    );
+
+    let st = runner.state();
+    assert_eq!(discarded_for(&events, P0), vec![(servant, None)]);
+    assert_eq!(
+        st.cards_discarded_this_turn_by_player.get(&P0).copied(),
+        Some(1)
+    );
+    // CR 603.2 + CR 603.3b: Geth's Grimoire triggered and waits on the stack.
+    assert_eq!(
+        st.stack.iter().filter(|e| e.source_id == grimoire).count(),
+        1
+    );
+    assert!(st.pending_single_discard.is_none());
+    assert!(matches!(st.waiting_for, WaitingFor::Priority { .. }));
 }

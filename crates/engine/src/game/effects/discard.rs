@@ -911,7 +911,9 @@ pub(crate) fn discard_caused_by_effect_with_source(
     let outcome = discard_caused_by_effect_with_source_and_frame(
         state, object_id, player, source_id, None, events,
     );
-    // CR 616.1 + CR 400.7: a CR 616.1 choice paused this frameless discard with
+    // CR 400.7: a replacement choice (a CR 616.1 choice among two or more
+    // applicable effects, or a single optional "you may ... instead"
+    // replacement's apply-or-decline choice) paused this frameless discard with
     // the card still in hand. Pin that occurrence so the resume can record the
     // discard (CR 701.9a + CR 614.6) -- the resumed zone-change delivery
     // records only provenance-framed discards. Batch paths call `_and_frame`

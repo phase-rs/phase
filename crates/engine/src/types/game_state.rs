@@ -5637,8 +5637,11 @@ pub enum PendingPlayerScopeSacrificeFollowUp {
     },
 }
 
-/// CR 701.9a + CR 614.6 + CR 616.1: a frameless single-card effect discard
-/// (connive, learn rummage) whose move paused for a replacement choice.
+/// CR 701.9a + CR 614.6: a frameless single-card effect discard (connive,
+/// learn rummage) whose move paused for a replacement choice: either a
+/// CR 616.1 choice among two or more applicable replacement effects (two
+/// Rest in Peace), or the apply-or-decline choice of a single optional
+/// replacement whose own text says "you may ... instead" (Library of Leng).
 ///
 /// CR 614.6: "If an event is replaced, it never happens. A modified event
 /// occurs instead." A hand -> graveyard redirect (Rest in Peace) or an optional
@@ -25114,9 +25117,8 @@ declare_game_state! {
     /// box.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_discard_batch: Option<Box<PendingDiscardBatch>>,
-    /// CR 701.9a + CR 614.6 + CR 616.1: a frameless single-card effect discard
-    /// (connive, learn rummage) paused by a replacement choice. See
-    /// [`PendingSingleDiscard`].
+    /// CR 701.9a + CR 614.6: a frameless single-card effect discard (connive,
+    /// learn rummage) paused by a replacement choice. See [`PendingSingleDiscard`].
     ///
     /// Boxed for the same stack-budget reason as `pending_discard_batch`
     /// (`types/game_state_size.rs`); populated only during a pause.
