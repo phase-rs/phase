@@ -221,6 +221,21 @@ describe("GamePage rapid say-it payment (Toy Boat)", () => {
     expect(payUnlessCostCalls()).toEqual([true]);
   });
 
+  it("does not start the window until the first saying, even when more are owed", async () => {
+    setup(3);
+    render(gamePageTree());
+
+    expect(await screen.findByText(PHRASE)).toBeInTheDocument();
+    vi.useFakeTimers();
+    // "Without pausing between" times the gaps BETWEEN sayings, so reading the
+    // prompt before the first one is not a pause, however long it takes.
+    advance(GAP_MS * 10);
+    expect(payUnlessCostCalls()).toEqual([]);
+
+    fireEvent.click(phraseBox());
+    expect(payUnlessCostCalls()).toEqual([true]);
+  });
+
   it("reports one saying per click and lets the engine ask for the rest", async () => {
     setup(2);
     render(gamePageTree());
