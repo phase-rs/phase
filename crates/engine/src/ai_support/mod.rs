@@ -385,10 +385,11 @@ pub fn structurally_valid_prompt_answer(state: &GameState, action: &GameAction) 
 /// place the drive will not take the sequence to — and `Accept` names no place, so it passes every
 /// pre-take guard.
 ///
-/// PRE-TAKE GUARDS ARE THE WHOLE CLAIM. An admitted answer can still fail when applied: an
-/// `Accept` from the last responder takes the shortcut, a `Shorten` at place 0 elides the rest of
-/// the poll and takes it at once, and either can be rejected after the guards (a life change
-/// outside the engine's range, `LifeChangeUnrepresentable`, a departed proposer). That is the same class as an
+/// PRE-TAKE GUARDS ARE THE WHOLE CLAIM. An admitted answer can still fail when applied: a
+/// `Shorten` at place 0 elides the rest of the poll and takes it at once, the last responder's
+/// answer takes it too, and that take can be rejected after the guards (a life change outside the
+/// engine's range, `LifeChangeUnrepresentable`) or fall back to manual play without an error (a
+/// departed proposer, whose guard restores priority). That is the same class as an
 /// admitted named choice whose life gain is unrepresentable — the authority's contract is that an
 /// admitted answer is one the PROMPT admits, not one the engine can execute, which is why phase-ai's
 /// chooser simulates the single answer it submits and re-decides on a rejection
