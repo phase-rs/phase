@@ -3,18 +3,29 @@
 //! CR 107.4b: remaining units may pay generic costs; CR 106.6 preserves restrictions.
 
 use engine::ai_support::{legal_actions, legal_actions_full};
+use engine::game::casting::activated_ability_definitions;
 use engine::game::layers::evaluate_layers;
+use engine::game::mana_payment::{
+    can_pay_for_spell, compute_phyrexian_shards, pay_cost_with_demand_and_choices, pay_from_pool,
+};
 use engine::game::mana_sources::activatable_mana_source_selections;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::types::ability::{ActivationRestriction, ChosenAttribute, Effect, ManaProduction};
+use engine::types::ability::{
+    ActivationManaPaymentRestriction, ActivationRestriction, ChosenAttribute, Effect,
+    ManaProduction, ManaSpendPermission,
+};
 use engine::types::actions::GameAction;
+use engine::types::card_type::Supertype;
 use engine::types::counter::CounterType;
 use engine::types::game_state::{
-    CastPaymentMode, ManaChoice, ManaChoicePrompt, PayCostKind, WaitingFor,
+    CastPaymentMode, ManaChoice, ManaChoicePrompt, PayCostKind, ShardChoice, ShardOptions,
+    WaitingFor,
 };
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{
-    parse_mtgjson_mana_cost, ManaColor, ManaSourceOutput, ManaSourceQuantity, ManaType,
+    parse_mtgjson_mana_cost, CostPermissionContext, LifePaymentColors, ManaColor, ManaPipId,
+    ManaPool, ManaRestriction, ManaSourceOutput, ManaSourceQuantity, ManaSupertype, ManaType,
+    ManaUnit, PaymentContext,
 };
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
@@ -70,9 +81,6 @@ fn assert_any_one(r: &GameRunner, source: ObjectId) -> usize {
 
 #[test]
 fn activation_color_rider_filters_type_agnostic_source_rows() {
-    use engine::game::casting::activated_ability_definitions;
-    use engine::types::ability::ActivationManaPaymentRestriction;
-
     // CR 106.6: Throne's printed activation permits only its chosen color.
     // The Z variant is supplemental: combine that real rider with Experiment
     // Five's source-quality shard to exercise the empty acceptable-type list.
@@ -165,7 +173,6 @@ fn snow_forest(s: &mut GameScenario) -> ObjectId {
 // The Oracle constructor supplies Land and Forest; complete the printed Basic
 // supertype as well, so this fixture follows the real source preference tier.
 fn finish_snow_forest(r: &mut GameRunner, forest: ObjectId) {
-    use engine::types::card_type::Supertype;
     let object = r.state_mut().objects.get_mut(&forest).unwrap();
     object.base_card_types.supertypes.push(Supertype::Basic);
     object.card_types.supertypes.push(Supertype::Basic);
@@ -289,7 +296,6 @@ fn snow_land_and_nonsnow_aura_reserve_distinct_units() {
             );
         }
         if life_permission {
-            use engine::types::game_state::{ShardChoice, ShardOptions};
             let card_id = r.state().objects[&wurm].card_id;
             r.act(GameAction::CastSpell {
                 object_id: wurm,
@@ -335,9 +341,6 @@ fn snow_land_and_nonsnow_aura_reserve_distinct_units() {
 
 #[test]
 fn snow_pool_payment_preserves_strict_and_source_constrained_demand() {
-    use engine::game::mana_payment::{can_pay_for_spell, pay_from_pool};
-    use engine::types::mana::{CostPermissionContext, ManaPool, ManaSupertype};
-
     // Supplemental pool invariants, not invented printed cards: Wowzer covers
     // mixed colored/Snow payment above; Experiment Five's printed {1}{Z}
     // activation is the real source-constrained symbol, without a Snow symbol.
@@ -413,13 +416,6 @@ fn snow_pool_payment_preserves_strict_and_source_constrained_demand() {
 
 #[test]
 fn snow_pool_payment_preserves_permitted_off_color_mana() {
-    use engine::game::mana_payment::{can_pay_for_spell, pay_cost_with_demand_and_choices};
-    use engine::types::ability::ManaSpendPermission;
-    use engine::types::mana::{
-        CostPermissionContext, LifePaymentColors, ManaPipId, ManaPool, ManaRestriction,
-        ManaSupertype, ManaUnit, PaymentContext,
-    };
-
     // These are supplemental pool shapes, not printed cards. Mycosynth Lattice
     // plus printed Wowzer exercises the permission through public casting below;
     // Experiment Five establishes Z's real source-quality requirement.
@@ -566,15 +562,6 @@ fn snow_pool_payment_preserves_permitted_off_color_mana() {
 
 #[test]
 fn snow_pool_payment_preserves_later_z_mana() {
-    use engine::game::mana_payment::{
-        can_pay_for_spell, compute_phyrexian_shards, pay_cost_with_demand_and_choices,
-    };
-    use engine::types::game_state::{ShardChoice, ShardOptions};
-    use engine::types::mana::{
-        CostPermissionContext, LifePaymentColors, ManaPipId, ManaPool, ManaRestriction,
-        ManaSupertype, ManaUnit, PaymentContext,
-    };
-
     // Supplemental U/Z/S permutations, not printed-card claims. Wowzer supplies
     // mixed colored/Snow requirements; Experiment Five supplies printed Z.
     let snow = |color, id, multicolor| ManaUnit {
@@ -765,7 +752,6 @@ fn mycosynth_lattice_preserves_snow_for_printed_wowzer() {
             1
         );
         if krrik {
-            use engine::types::game_state::{ShardChoice, ShardOptions};
             r.act(GameAction::CastSpell {
                 object_id: wurm,
                 card_id: r.state().objects[&wurm].card_id,
@@ -797,14 +783,6 @@ fn mycosynth_lattice_preserves_snow_for_printed_wowzer() {
 
 #[test]
 fn snow_pool_payment_precedes_two_generic_hybrid_fallback() {
-    use engine::game::mana_payment::{
-        can_pay_for_spell, compute_phyrexian_shards, pay_cost_with_demand_and_choices,
-    };
-    use engine::types::game_state::{ShardChoice, ShardOptions};
-    use engine::types::mana::{
-        CostPermissionContext, LifePaymentColors, ManaPool, ManaSupertype, ManaUnit,
-    };
-
     // Supplemental combined shape: no printing combines Snow and two-brid.
     // Wowzer supplies the printed Snow requirement; Reaper King's printed
     // {2/W}{2/U}{2/B}{2/R}{2/G} supplies two-brid. CR 107.4e + CR 107.4h:
@@ -881,12 +859,6 @@ fn snow_regression_unit(color: ManaType, id: u64) -> engine::types::mana::ManaUn
 
 #[test]
 fn snow_pool_payment_preserves_future_phyrexian_mana_and_explicit_life() {
-    use engine::game::mana_payment::{compute_phyrexian_shards, pay_cost_with_demand_and_choices};
-    use engine::types::game_state::{ShardChoice, ShardOptions};
-    use engine::types::mana::{
-        CostPermissionContext, LifePaymentColors, ManaPool, ManaSupertype, ManaUnit,
-    };
-
     // Supplemental U/S/U-P shape, not a printed-card claim. The real printed
     // Wowzer + K'rrik case below covers the same future-mana reservation.
     // CR 107.4f + CR 107.4h: S can use G, leaving U/P payable with U or life.
@@ -1047,7 +1019,6 @@ fn wowzer_snow_payment_is_invariant_to_cost_symbol_order() {
                 "public activations preserve the hostile pool insertion order"
             );
             if life_permission {
-                use engine::types::game_state::{ShardChoice, ShardOptions};
                 r.act(GameAction::CastSpell {
                     object_id: wurm,
                     card_id: r.state().objects[&wurm].card_id,
