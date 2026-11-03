@@ -478,6 +478,63 @@ fn resolution_zone_candidates(
         .collect()
 }
 
+/// The player who performs this zone move (CR 608.2c; the subject case per the
+/// instruction's own wording — see `LibraryInstructionActor`'s doc for the same
+/// rule stated for `ExileTop`).
+///
+/// `filter_controller` is the move's chooser, which is the performer for a move
+/// that names another player as its subject ("that player exiles a card from
+/// their hand"). Two shapes measured on printed cards are NOT that:
+///   * a destination other than Exile — `performed_by` also feeds entry
+///     ownership under `EntryOwnership::ActorOwns` (`zone_pipeline.rs::entry_receiver`,
+///     Dandan), so a non-Exile move keeps the controller;
+///   * a library-owned subject filter (`Owned { ScopedPlayer }` + `InZone { Library }`),
+///     where "their library" names whose library it is, not who acts — Rahilda,
+///     Wanted Cutthroat: "exile a nonland card from their library at random" is
+///     the controller's exile. (The mirror clause "that player exiles all cards
+///     from their library", Thought Lash, needs an actor axis; see the issue.)
+fn move_performer(
+    ability: &ResolvedAbility,
+    target_filter: &TargetFilter,
+    destination: Zone,
+    filter_controller: PlayerId,
+) -> PlayerId {
+    if destination != Zone::Exile || filter_names_library_owner(target_filter) {
+        ability.controller
+    } else {
+        filter_controller
+    }
+}
+
+/// `Owned { ScopedPlayer }` together with `InZone { Library }` on the same typed
+/// leg: the filter picks a card out of that player's library by ownership.
+fn filter_names_library_owner(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => {
+            tf.properties.iter().any(|p| {
+                matches!(
+                    p,
+                    crate::types::ability::FilterProp::Owned {
+                        controller: crate::types::ability::ControllerRef::ScopedPlayer
+                    }
+                )
+            }) && tf.properties.iter().any(|p| {
+                matches!(
+                    p,
+                    crate::types::ability::FilterProp::InZone {
+                        zone: Zone::Library
+                    }
+                )
+            })
+        }
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(filter_names_library_owner)
+        }
+        TargetFilter::Not { filter } => filter_names_library_owner(filter),
+        _ => false,
+    }
+}
+
 /// CR 608.2d + CR 701.13a: report whether this exact optional-for-any-player
 /// graveyard-exile instruction lacks enough legal cards for its exact
 /// resolution-time selection. Adjacent ChangeZone shapes return `None` so the
@@ -968,6 +1025,9 @@ pub fn resolve(
     let origin = expected_move_origin(state, origin, target_filter);
     let filter_controller =
         crate::game::effects::controller_for_relative_filter(state, ability, target_filter);
+    // CR 608.2c: who performs this move, decided once per instruction beside the
+    // chooser (see `move_performer` for the two shapes where they differ).
+    let performer = move_performer(ability, target_filter, dest_zone, filter_controller);
     let track_exiled_by_source =
         crate::game::exile_links::should_track_exiled_by_source(state, ability.source_id, ability);
 
@@ -1241,8 +1301,10 @@ pub fn resolve(
                 None,
                 None,
                 Some(ability.controller),
-                // CR 608.2c: the controller follows the instruction, so it performs the move.
-                Some(ability.controller),
+                // CR 608.2c: the subject of the instruction ("that player
+                // exiles a card from their hand") performs the move; where the
+                // instruction names no subject this is the controller.
+                Some(performer),
                 events,
             ) {
                 ZoneMoveResult::Done => {
@@ -1318,8 +1380,10 @@ pub fn resolve(
                 None,
                 None,
                 Some(ability.controller),
-                // CR 608.2c: the controller follows the instruction, so it performs the move.
-                Some(ability.controller),
+                // CR 608.2c: the subject of the instruction ("that player
+                // exiles a card from their hand") performs the move; where the
+                // instruction names no subject this is the controller.
+                Some(performer),
                 events,
             ) {
                 ZoneMoveResult::Done => {
@@ -1412,6 +1476,13 @@ pub fn resolve(
 
     let ctx = ChangeZoneIterationCtx {
         source_id: ability.source_id,
+        // CR 601.2c + 608.2c: these members were announced as targets by this
+        // instruction's controller, so the (possibly seat-bound) controller
+        // performs the move — the subject rule of the pick and mass paths does
+        // not apply here (Froghemoth: "exile up to that many target cards from
+        // their graveyard" is your exile, not theirs; Battle at the Helvault's
+        // "that player controls" under a player_scope fan-out is likewise the
+        // seat-bound controller).
         controller: ability.controller,
         origin,
         destination: dest_zone,
@@ -1897,6 +1968,11 @@ pub(crate) fn resolving_stack_ability_for_source(
 #[derive(Clone)]
 pub(crate) struct ChangeZoneIterationCtx {
     pub source_id: ObjectId,
+    /// The player who performs this instruction's move (CR 608.2c) — the
+    /// announced-target controller when the members were announced as targets,
+    /// the instruction's performer on the mass path, and the `EffectZoneChoice`
+    /// chooser on an interactive pick resume (which has no `ResolvedAbility` to
+    /// re-derive it from).
     pub controller: PlayerId,
     pub origin: Option<Zone>,
     pub destination: Zone,
@@ -2018,7 +2094,9 @@ pub(crate) fn process_one_zone_move_with_terminal(
         ctx.library_placement.clone(),
         ctx.enter_attached_to,
         Some(ctx.controller),
-        // CR 608.2c: the controller follows the instruction, so it performs the move.
+        // CR 608.2c: `ctx.controller` is the performer the caller computed —
+        // the caster for announced targets, the instruction's subject on the
+        // mass path, the chooser on an `EffectZoneChoice` resume.
         Some(ctx.controller),
         events,
     );
@@ -2800,6 +2878,11 @@ pub fn resolve_all(
 
     let filter_controller =
         crate::game::effects::controller_for_relative_filter(state, ability, &target_filter);
+    // CR 608.2c: who performs this mass move, decided once beside the chooser.
+    // A mass move announces no targets, so the instruction's own subject (when
+    // it names one) is the performer; the library gate keeps a library-owner
+    // move on the controller (`move_performer`).
+    let performer = move_performer(ability, &target_filter, dest_zone, filter_controller);
     let target_filter = owner_scoped_nonbattlefield_mass_filter(target_filter, &origin_zones);
 
     // Use a permissive default filter if the effect's target is None
@@ -3093,9 +3176,17 @@ pub fn resolve_all(
             track_exiled_by_source,
             member_library_placement.clone(),
             None,
-            Some(ability.controller),
-            // CR 608.2c: the controller follows the instruction, so it performs the move.
-            Some(ability.controller),
+            // CR 608.2c + CR 610.3: `exile_controller` and `performed_by` are
+            // both the instruction's performer on this path, so a member resumed
+            // through the pause carrier records the same player the direct
+            // member does. `exile_controller` only anchors an
+            // `UntilOpponentBecomesMonarch` link; no printed mass move creates
+            // one (Palace Jailer is a targeted single-object move).
+            Some(performer),
+            // CR 608.2c: the instruction's own subject performs the move
+            // ("that player exiles …"); where no subject is named this is the
+            // controller (see `move_performer`).
+            Some(performer),
             events,
         ) {
             crate::game::zone_pipeline::ZoneMoveTerminalResult::Completed(completion) => {
@@ -3169,7 +3260,10 @@ pub fn resolve_all(
                             })
                             .collect(),
                         source_id: ability.source_id,
-                        controller: ability.controller,
+                        // CR 608.2h + 608.2c: the performer, carried across a
+                        // replacement/aura pause so every resumed member of this
+                        // mass move records the same one.
+                        controller: performer,
                         origin: None,
                         destination: dest_zone,
                         enter_transformed: false,
@@ -3231,7 +3325,10 @@ pub fn resolve_all(
                             })
                             .collect(),
                         source_id: ability.source_id,
-                        controller: ability.controller,
+                        // CR 608.2h + 608.2c: the performer, carried across a
+                        // replacement/aura pause so every resumed member of this
+                        // mass move records the same one.
+                        controller: performer,
                         origin: None,
                         destination: dest_zone,
                         enter_transformed: false,

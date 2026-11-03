@@ -4766,6 +4766,11 @@ pub struct PendingChangeZoneIteration {
     /// (CR 603.6a).
     pub remaining: Vec<ChangeZoneMemberEntry>,
     pub source_id: ObjectId,
+    /// The player who performs this instruction's move (CR 608.2c) — the
+    /// announced-target controller when the members were announced as targets,
+    /// the instruction's performer on the mass path, and the `EffectZoneChoice`
+    /// chooser on an interactive pick resume. Carried because a resumed member
+    /// has no `ResolvedAbility` to re-derive the performer from.
     pub controller: PlayerId,
     pub origin: Option<crate::types::zones::Zone>,
     pub destination: crate::types::zones::Zone,
