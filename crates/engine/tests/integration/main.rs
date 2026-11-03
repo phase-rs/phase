@@ -94,6 +94,7 @@ mod gimbal_gremlin_prodigy;
 mod goaded_creature_under_pacifism_visible;
 mod graveyard_permission_announcement;
 mod grim_repriser_restriction;
+mod grub_storied_matriarch_769;
 mod hellkite_tyrant_steal_artifacts_2906;
 mod heroic_sacrifice_redirect;
 mod hunters_insight_combat_draw;

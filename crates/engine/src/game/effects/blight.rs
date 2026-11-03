@@ -1,9 +1,49 @@
+use crate::game::effects::counters;
+use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::card_type::CoreType;
+use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
+use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
+
+/// CR 701.68a + CR 701.68b: the creatures `player` can blight for `count`: those
+/// they control on the battlefield that can actually take the -1/-1 counters.
+/// Placement prohibitions (CR 614.17) are read through the real replacement
+/// pipeline, so a creature the counters can't be put on is never offered.
+fn blightable_creatures(
+    state: &GameState,
+    player: PlayerId,
+    count: u32,
+) -> impl Iterator<Item = ObjectId> + '_ {
+    state.battlefield.iter().copied().filter(move |id| {
+        state.objects.get(id).is_some_and(|obj| {
+            obj.controller == player
+                && !obj.is_emblem
+                && obj.card_types.core_types.contains(&CoreType::Creature)
+                && counters::preview_counter_addition(
+                    state,
+                    player,
+                    ObjectIncarnationRef::from_object(obj),
+                    CounterType::Minus1Minus1,
+                    count,
+                )
+                .is_some_and(|preview| !preview.is_prohibited())
+        })
+    })
+}
+
+/// CR 701.68b + CR 608.2d: a player unable to put the counters on a creature
+/// they control can't choose to blight, so the "you may" is an impossible option.
+pub(crate) fn optional_blight_is_infeasible(state: &GameState, ability: &ResolvedAbility) -> bool {
+    let Effect::BlightEffect { count, player } = &ability.effect else {
+        return false;
+    };
+    crate::game::effects::resolve_player_for_context_ref(state, ability, player)
+        .is_none_or(|player| blightable_creatures(state, player, *count).next().is_none())
+}
 
 /// CR 701.68a: Blight N as an effect.
 ///
@@ -14,7 +54,8 @@ use crate::types::zones::Zone;
 /// and the counters are placed by the `EffectKind::BlightEffect` handler arm in
 /// `engine_resolution_choices.rs`.
 ///
-/// CR 701.68b: If the controller controls no creatures, blight is a no-op.
+/// CR 701.68b: If the controller is unable to put N -1/-1 counters on a creature
+/// they control, blight is a no-op.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
@@ -41,22 +82,11 @@ pub fn resolve(
     let source_id = ability.source_id;
 
     // CR 701.68a: Eligible creatures are those the blighting player controls on
-    // the battlefield.
-    let eligible: Vec<ObjectId> = state
-        .battlefield
-        .iter()
-        .copied()
-        .filter(|id| {
-            state.objects.get(id).is_some_and(|obj| {
-                obj.controller == blighting_player
-                    && !obj.is_emblem
-                    && obj.card_types.core_types.contains(&CoreType::Creature)
-            })
-        })
-        .collect();
+    // the battlefield that can take the counters.
+    let eligible: Vec<ObjectId> = blightable_creatures(state, blighting_player, count).collect();
 
-    // CR 701.68b: If a player is given the choice to blight but is unable to
-    // (controls no creatures), the effect does nothing.
+    // CR 701.68b: A player unable to put N -1/-1 counters on a creature they
+    // control can't blight, so the effect does nothing.
     if eligible.is_empty() {
         resolve_nothing_blighted(state, ability, events);
         return Ok(());
@@ -117,9 +147,7 @@ mod tests {
     use crate::game::zones;
     use crate::types::ability::TargetFilter;
     use crate::types::actions::GameAction;
-    use crate::types::counter::CounterType;
     use crate::types::identifiers::CardId;
-    use crate::types::player::PlayerId;
 
     fn make_creature(state: &mut GameState, card_id: u64, controller: PlayerId) -> ObjectId {
         let id = zones::create_object(

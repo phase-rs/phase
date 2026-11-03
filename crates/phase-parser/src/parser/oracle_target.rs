@@ -9106,6 +9106,9 @@ pub(crate) fn parse_target_disjunction(input: &str) -> (TargetFilter, &str) {
 /// `nom::Err::Error`, so dispatch falls through to the `TRACKED_SET_PHRASES`
 /// table, which keeps "the exiled card" → `TrackedSet` for the common
 /// effect-exile case.
+///
+/// CR 608.2c + CR 701.68c: the filter also names an object an earlier
+/// instruction of the same resolution bound, as "the blighted creature" does.
 fn parse_cost_paid_object_reference<'a>(
     input: &'a str,
     ctx: &ParseContext,
@@ -9122,6 +9125,16 @@ fn parse_cost_paid_object_reference<'a>(
                 ),
             ),
             |i| parse_exile_cost_paid_object(i, ctx),
+            // CR 701.68c: "the blighted creature" is the object chosen when blighting.
+            // A possessive ("the blighted creature's controller") names something else.
+            value(
+                (),
+                (
+                    tag("the "),
+                    |i| parse_word_bounded(i, "blighted creature"),
+                    not(tag("'")),
+                ),
+            ),
         )),
     )
     .parse(input)
@@ -16474,6 +16487,28 @@ mod tests {
         let (filter, rest) = parse_target("the sacrificed creature");
         assert_eq!(filter, TargetFilter::CostPaidObject);
         assert!(rest.is_empty(), "remainder: {rest:?}");
+    }
+
+    #[test]
+    fn the_blighted_creature_is_an_effect_bound_object_reference() {
+        // CR 701.68c: the phrase names the object chosen when blighting.
+        let (filter, rest) = parse_target("the blighted creature");
+        assert_eq!(filter, TargetFilter::CostPaidObject);
+        assert!(rest.is_empty(), "remainder: {rest:?}");
+
+        let (plural, _) = parse_target("the blighted creatures");
+        assert_ne!(
+            plural,
+            TargetFilter::CostPaidObject,
+            "the referent is one object, so the plural must not bind it"
+        );
+
+        let (possessive, _) = parse_target("the blighted creature's controller");
+        assert_ne!(
+            possessive,
+            TargetFilter::CostPaidObject,
+            "a possessive names another object, so it must reach the possessive arms"
+        );
     }
 
     #[test]

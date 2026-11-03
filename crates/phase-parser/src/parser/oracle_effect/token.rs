@@ -2545,6 +2545,31 @@ mod tests {
     }
 
     #[test]
+    fn copy_of_the_blighted_creature_binds_the_blight_choice() {
+        // CR 701.68c: "the blighted creature" is the creature chosen for the
+        // blight, never a new target, and the except clause stays on the token.
+        let txt = "create a tapped and attacking token that's a copy of the blighted creature, \
+                   except it has \"At the beginning of the end step, sacrifice this token.\"";
+        let effect = try_parse_token(&txt.to_lowercase(), txt, &mut ParseContext::default())
+            .expect("expected CopyTokenOf");
+        let Effect::CopyTokenOf {
+            target,
+            tapped,
+            enters_attacking,
+            additional_modifications,
+            ..
+        } = effect
+        else {
+            panic!("expected CopyTokenOf")
+        };
+        assert_eq!(target, TargetFilter::CostPaidObject);
+        assert!(tapped && enters_attacking);
+        assert!(additional_modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::GrantTrigger { .. })));
+    }
+
+    #[test]
     fn copy_x_tokens_binds_where_clause() {
         // CR 107.3: X bound to a trailing "where X is <quantity>" clause.
         let txt = "Create X tokens that are copies of target creature you control, where X is the number of Clues you control.";
