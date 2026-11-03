@@ -6911,12 +6911,13 @@ pub(crate) fn parse_cant_attack_defended_scope_nom(
 pub(crate) fn parse_previously_attacked_player_scope_nom(
     input: &str,
 ) -> OracleResult<'_, crate::types::triggers::AttackTargetFilter> {
-    use crate::types::triggers::AttackTargetFilter;
-
     let (rest, _) = tag("a player ").parse(input)?;
     let (rest, _) = crate::parser::oracle_nom::target::parse_self_reference.parse(rest)?;
     let (rest, _) = tag(" has already attacked this turn").parse(rest)?;
-    Ok((rest, AttackTargetFilter::PlayerAttackedBySourceThisTurn))
+    Ok((
+        rest,
+        crate::types::triggers::AttackTargetFilter::PlayerAttackedBySourceThisTurn,
+    ))
 }
 
 pub(crate) fn parse_cant_attack_rule_static_predicate_nom(
