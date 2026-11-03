@@ -351,6 +351,7 @@ mod issue_1021_recurring_nightmare;
 mod issue_1022_savai_triome_cycling;
 mod issue_1023_oversold_cemetery;
 mod issue_1025_rishkars_expertise;
+mod issue_10315_one_ring_attackable;
 mod issue_1092_chthonian_nightmare;
 mod issue_1120_warden_of_the_grove;
 mod issue_1128_elrond_scry_counter;
