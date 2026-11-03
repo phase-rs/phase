@@ -1882,9 +1882,12 @@ fn a_remembered_decline_once_per_turn_observation_still_refuses_undo() {
     );
 }
 
-/// Synthetic text: no printed card has an optional, targeted, once-per-turn
-/// activation trigger, but this shape is the one an auto-inert context is still
-/// pruned for.
+/// Synthetic combination: no printed card has this optional, targeted, once-per-turn
+/// activation trigger. The nearest activation/limit precedent is Elrond, Moon-Reader
+/// ("Whenever you activate an ability of a creature, draw a card. This ability triggers
+/// only once each turn."); Soul's Attendant supplies the optional-trigger precedent.
+/// Combining them with a target exercises the remaining CR 603.3d pruning branch
+/// while preserving the activation-admission/undo invariant.
 const ONCE_OPTIONAL_TARGETED: &str = "Whenever you activate an ability of a creature, you may tap target creature an opponent controls. This ability triggers only once each turn.";
 
 /// A remembered accept whose trigger has no legal target is pruned before the
