@@ -223,6 +223,7 @@ pub mod support;
 mod swallow_optional_you_may;
 mod target_instance_identity_9280;
 mod terra_herald_optional_prompt;
+mod thada_adel_search_damaged_player;
 mod thoughtweft_trample_regression;
 mod total_war_attacking_player_scope;
 mod types_ability;
