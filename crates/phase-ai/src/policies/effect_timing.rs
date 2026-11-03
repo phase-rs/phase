@@ -636,7 +636,12 @@ fn combat_trick_score(ctx: &PolicyContext<'_>) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cast_facts::{collect_definition_effects_with, ModeWalk};
     use crate::config::AiConfig;
+    use crate::policies::effect_classify::effect_is_temporary_combat_modifier;
+    use crate::policies::self_protection_classify::{
+        effect_has_defensive_payload, is_self_protection_effect,
+    };
     use engine::ai_support::{
         build_decision_context, validated_candidate_actions_for_semantic_owner, ActionMetadata,
         AiDecisionContext, CandidateAction, TacticalClass,
@@ -661,6 +666,7 @@ mod tests {
         TargetSelectionProgress, TargetSelectionSlot, WaitingFor,
     };
     use engine::types::identifiers::{CardId, ExtraPhaseId, ObjectId};
+    use engine::types::mana::ManaCostShard::{Black, Blue, Green, Red, White};
     use engine::types::mana::{ManaColor, ManaCost, ManaCostShard};
     use engine::types::phase::{PhaseGroup, TurnSegment};
     use engine::types::player::PlayerId;
@@ -2894,11 +2900,6 @@ mod tests {
     /// trick penalty on the same boards.
     #[test]
     fn effect_timing_does_not_price_a_protective_grant_as_a_combat_trick() {
-        use crate::policies::effect_classify::effect_is_temporary_combat_modifier;
-        use crate::policies::self_protection_classify::{
-            effect_has_defensive_payload, is_self_protection_effect,
-        };
-
         let adamant = instant_effect(ADAMANT_WILL, "Adamant Will");
         assert!(
             effect_is_temporary_combat_modifier(&adamant) && effect_has_defensive_payload(&adamant),
@@ -2962,8 +2963,6 @@ mod tests {
     /// sorcery-speed row is exempt only in a precombat main, where no later window opens for it.
     #[test]
     fn effect_timing_does_not_price_a_grant_whose_value_lands_outside_combat() {
-        use crate::policies::effect_classify::effect_is_temporary_combat_modifier;
-
         for (name, oracle_text) in [
             ("Past in Flames", PAST_IN_FLAMES),
             ("Flashback", FLASHBACK),
@@ -3110,8 +3109,6 @@ mod tests {
     /// the same cost does, on a board where Coordinated Assault takes the trick penalty.
     #[test]
     fn effect_timing_does_not_price_a_permanent_spells_activated_pump_as_a_combat_trick() {
-        use engine::types::mana::ManaCostShard::Red;
-
         let cost = |shards: Vec<_>, generic| ManaCost::Cost { shards, generic };
         for (name, oracle_text, keywords, mana_cost) in [
             (
@@ -3315,7 +3312,6 @@ mod tests {
     }
 
     fn add_overrun(s: &mut GameScenario) -> ObjectId {
-        use ManaCostShard::Green;
         add_spell(
             s,
             "Overrun",
@@ -3441,8 +3437,6 @@ mod tests {
     /// turn's combat is behind every one of them (CR 505.1a), so the penalty stands.
     #[test]
     fn sorcery_confined_trick_is_neutral_in_its_own_precombat_main() {
-        use ManaCostShard::{Green, Red, White};
-
         let mut s = trick_scenario();
         let overrun = add_overrun(&mut s);
         let overcome = add_spell(
@@ -3732,8 +3726,6 @@ mod tests {
     }
 
     fn clarion_mode_deltas(phase: Phase, leyline: bool) -> [f64; 3] {
-        use ManaCostShard::{Red, White};
-
         let cost = mana(1, vec![Red, White]);
         mode_deltas(phase, leyline, "Deafening Clarion", DEAFENING_CLARION, cost)
     }
@@ -3766,8 +3758,6 @@ mod tests {
     /// price, and entwine's `[0, 1]` (CR 702.42a) reads as any other pair.
     #[test]
     fn mode_prompt_prices_a_selection_by_its_own_modes() {
-        use ManaCostShard::Red;
-
         let phase = Phase::PostCombatMain;
         for (name, [lasting, pump, both]) in [
             ("Deafening Clarion", clarion_mode_deltas(phase, false)),
@@ -3796,8 +3786,6 @@ mod tests {
     /// the sign is the card's).
     #[test]
     fn trick_price_needs_combat_to_be_the_whole_value() {
-        use ManaCostShard::{Black, Blue, Green, Red, White};
-
         let mut s = trick_scenario();
         let reinforcements = add_spell(
             &mut s,
@@ -4007,8 +3995,6 @@ mod tests {
     /// through the printed abilities would miss Rowan's Talent's grant.
     #[test]
     fn a_positive_loyalty_cost_is_value_outside_combat() {
-        use crate::cast_facts::{collect_definition_effects_with, ModeWalk};
-
         let mut s = trick_scenario();
         let elspeth = s
             .add_planeswalker_from_oracle(

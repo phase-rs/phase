@@ -49,18 +49,20 @@ use engine::game::zones::create_object;
 use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
-    Comparator, ControllerRef, DelayedTriggerCondition, Effect, LibraryPosition, ParsedCondition,
-    PlayerFilter, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TriggerConstraint,
-    TriggerDefinition, ZoneRef,
+    Comparator, ControllerRef, CostCategory, CostReduction, DelayedTriggerCondition, Effect,
+    LibraryPosition, ParsedCondition, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
+    ResolvedAbility, TargetFilter, TriggerConstraint, TriggerDefinition, ZoneRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::card::LayoutKind;
+use engine::types::card::LayoutKind::{Adventure, Omen, Prepare};
 use engine::types::card_type::{CardType, CoreType};
 use engine::types::game_state::{DelayedTrigger, GameState, WaitingFor};
 use engine::types::identifiers::{CardId, ObjectId};
-use engine::types::mana::ManaCost;
+use engine::types::mana::{ManaCost, ManaExpiry, ManaRestriction, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::statics::CostModifyMode;
 use engine::types::zones::Zone;
 use std::sync::Arc;
 
@@ -69,7 +71,10 @@ use engine::ai_support::{ActionMetadata, AiDecisionContext, CandidateAction, Tac
 use crate::ability_chain::{collect_chain_effects, collect_scoped_nodes, AbilityScope};
 use crate::config::AiConfig;
 use crate::context::AiContext;
-use crate::policies::activation_patience::{held_line, ActivationPatiencePolicy, HeldLine};
+use crate::policies::activation_patience::{
+    held_line, ActivationPatiencePolicy,
+    HeldLine::{Irreproducible, Reproducible},
+};
 use crate::policies::context::{PolicyContext, SearchDepth};
 use crate::policies::registry::{PolicyVerdict, TacticalPolicy};
 use crate::session::AiSession;
@@ -1129,7 +1134,6 @@ enum Slot {
 /// The player slot of an arrangement shape the hatch reads (CR 701.22a scry, CR 701.25a
 /// surveil, CR 701.20e a look-and-reorder dig), or `None` when `effect` is not one.
 fn arrangement_slot(effect: &engine::types::ability::Effect) -> Option<Slot> {
-    use engine::types::ability::{ControllerRef, Effect, TargetFilter};
     let player = match effect {
         Effect::Scry { target: player, .. }
         | Effect::Surveil { target: player, .. }
@@ -1185,8 +1189,6 @@ fn set_dig_player(
 /// resolves. Only a slot that can't name the AI, "target opponent's library", is held.
 #[test]
 fn an_upkeep_library_top_arrangement_is_not_held_while_the_draw_is_ahead() {
-    use engine::types::ability::{AbilityCost, CostCategory, QuantityExpr};
-
     struct Row {
         label: &'static str,
         name: &'static str,
@@ -2185,11 +2187,12 @@ impl HeldRow {
 /// from its verbatim Oracle text; each asserts its parse premise, and the reason is its reach.
 ///
 /// Held and not lent: a search that can reach the AI's library (CR 701.23a, CR 701.24a), a line
-/// sized by the AI's hand (CR 701.9a), and a discard the hand can't pay (CR 609.3). Stood down,
-/// because waiting gives the activation up (CR 602.5): a restriction the draw lifts the hand out
-/// of, and a phase with no main phase in it. Held and lent: a line that doesn't touch the AI's
-/// library or hand, a fixed discard the hand pays, and a floor on the hand. In the draw step
-/// that draw is behind (CR 504.2), so the main phase reproduces every one of them.
+/// sized by the AI's hand (CR 701.9a), a cost sized by it (CR 602.2b + CR 601.2f), and a discard
+/// the hand can't pay (CR 609.3). Stood down, because waiting gives the activation up
+/// (CR 602.5): a restriction the draw lifts the hand out of, and a phase with no main phase in
+/// it. Held and lent: a line that doesn't touch the AI's library or hand, a fixed discard the
+/// hand pays, and a floor on the hand. In the draw step that draw is behind (CR 504.2), so the
+/// main phase reproduces every one of them.
 ///
 /// `held_line_answers_each_class` pins the consumer's reading of these reasons.
 #[test]
@@ -2255,6 +2258,30 @@ fn an_upkeep_line_waiting_cannot_reproduce_is_held_but_not_lent() {
                         collect_chain_effects(ability).as_slice(),
                         [Effect::Discard { .. }, Effect::Draw { .. }]
                     )
+            },
+            expected,
+        )
+    };
+    let stone = |expected| {
+        row(
+            "Loreseeker's Stone (a cost sized by the hand)",
+            "Loreseeker's Stone",
+            LORESEEKERS_STONE,
+            0,
+            |ability| {
+                matches!(
+                    &ability.cost_reduction,
+                    Some(CostReduction {
+                        mode: CostModifyMode::Raise,
+                        count: QuantityExpr::Ref {
+                            qty: QuantityRef::ZoneCardCount {
+                                zone: ZoneRef::Hand,
+                                ..
+                            }
+                        },
+                        ..
+                    })
+                )
             },
             expected,
         )
@@ -2500,6 +2527,8 @@ fn an_upkeep_line_waiting_cannot_reproduce_is_held_but_not_lent() {
             },
             UNLENT,
         ),
+        stone(UNLENT),
+        in_draw(stone(HOLD_FOR_MAIN)),
         row(
             "The Darkhold ability 0 (`ZoneCardCount`)",
             "The Darkhold",
@@ -2699,7 +2728,6 @@ fn held_line_answers_each_class() {
             expected,
         )
     };
-    use HeldLine::{Irreproducible, Reproducible};
     let rows = [
         row(
             "Boseiju, upkeep",
@@ -2822,6 +2850,91 @@ fn an_upkeep_only_ability_is_not_deferrable() {
     assert_eq!(delta, 0.0);
 }
 
+/// Loreseeker's Stone, verbatim.
+const LORESEEKERS_STONE: &str = "{3}, {T}: Draw three cards. This ability costs {1} more to activate for each card in your hand.";
+
+/// CR 602.2b + CR 601.2f + CR 504.1: an ability's own cost modification is determined as it's
+/// activated, so one that counts or tests the AI's hand costs differently after the draw step's
+/// draw, and the main phase can't reproduce the upkeep line. Each row is Loreseeker's Stone
+/// (verbatim) with its rider as printed or swapped for another shape of the class: the class is
+/// read from the rider's typed count and condition, not the card. Without the rider the Stone is
+/// a plain draw, which commutes. In the draw step that draw is behind (CR 504.2).
+#[test]
+fn a_cost_modification_the_hand_sizes_is_held_but_not_lent() {
+    let printed = || None;
+    let no_rider = || Some(None);
+    // Arm-Mounted Anchor's form: "costs {2} less to activate if you have one or fewer cards in
+    // hand", a conditional flat reduction.
+    let one_or_fewer_in_hand = || {
+        Some(Some(CostReduction {
+            mode: CostModifyMode::Reduce,
+            amount_per: 2,
+            count: QuantityExpr::Fixed { value: 1 },
+            condition: Some(ParsedCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                comparator: Comparator::LE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            }),
+        }))
+    };
+    let rows = [
+        ("printed, upkeep", Phase::Upkeep, printed(), Irreproducible),
+        ("printed, draw step", Phase::Draw, printed(), Reproducible),
+        ("no rider, upkeep", Phase::Upkeep, no_rider(), Reproducible),
+        (
+            "a rider gated on the hand, upkeep",
+            Phase::Upkeep,
+            one_or_fewer_in_hand(),
+            Irreproducible,
+        ),
+    ];
+    for (label, phase, rider, expected) in rows {
+        let row = HeldRow {
+            label,
+            name: "Loreseeker's Stone",
+            oracle_text: LORESEEKERS_STONE,
+            ability_index: 0,
+            premise: |ability| {
+                matches!(*ability.effect, Effect::Draw { .. })
+                    && matches!(
+                        &ability.cost_reduction,
+                        Some(CostReduction {
+                            mode: CostModifyMode::Raise,
+                            amount_per: 1,
+                            count: QuantityExpr::Ref {
+                                qty: QuantityRef::ZoneCardCount {
+                                    zone: ZoneRef::Hand,
+                                    ..
+                                }
+                            },
+                            condition: None,
+                        })
+                    )
+            },
+            phase,
+            after_trigger: false,
+            hand: 1,
+        };
+        let (mut board, id) = row.board();
+        if let Some(rider) = rider {
+            Arc::make_mut(&mut board.state.objects.get_mut(&id).unwrap().abilities)[0]
+                .cost_reduction = rider;
+        }
+        let (delta, _) = score_and_reason(&verdict_for(&board));
+        assert!(delta < 0.0, "{label}: reach: held, got {delta}");
+        let action = GameAction::ActivateAbility {
+            source_id: id,
+            ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        };
+        assert_eq!(held_line(&board.state, AI, &action), expected, "{label}");
+    }
+}
+
 /// An instant in the AI's hand, parsed from `text`, as the engine would offer it.
 fn add_instant(state: &mut GameState, id: u64, name: &str, text: &str) -> GameAction {
     let card_id = CardId(id);
@@ -2843,7 +2956,6 @@ fn add_instant(state: &mut GameState, id: u64, name: &str, text: &str) -> GameAc
 /// `cast_facts_for_action` finds: with none, every row would read as `Reproducible`.
 #[test]
 fn held_line_reads_a_spells_resolution_against_the_draw() {
-    use HeldLine::{Irreproducible, Reproducible};
     const NATURAL_CONNECTION: &str =
         "Search your library for a basic land card, put it onto the battlefield tapped, then shuffle.";
     const FAITHLESS_SALVAGING: &str = "Discard a card, then draw a card.\nRebound (If you cast this spell from your hand, exile it as it resolves. At the beginning of your next upkeep, you may cast this card from exile without paying its mana cost.)";
@@ -2931,8 +3043,6 @@ pub(crate) fn add_instant_face(
 /// face. Each face's Oracle text is verbatim.
 #[test]
 fn held_line_reads_every_face_a_cast_can_put_on_the_stack() {
-    use HeldLine::{Irreproducible, Reproducible};
-    use LayoutKind::{Adventure, Omen, Prepare};
     const MEND_THE_WILDS: &str = "Put target permanent card from your graveyard on top of your library. (Then exile this card. You may cast the creature later from exile.)";
     #[rustfmt::skip]
     let rows = [
@@ -2999,9 +3109,6 @@ fn held_line_reads_every_face_a_cast_can_put_on_the_stack() {
 /// empties first (CR 500.5), in the draw step too. A mana ability isn't read for that mana.
 #[test]
 fn held_line_reads_what_the_main_phase_loses() {
-    use engine::types::mana::{ManaExpiry, ManaRestriction, ManaType, ManaUnit};
-    use HeldLine::{Irreproducible, Reproducible};
-
     let activate = |source_id, ability_index| GameAction::ActivateAbility {
         source_id,
         ability_index,

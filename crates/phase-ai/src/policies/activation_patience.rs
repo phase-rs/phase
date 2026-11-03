@@ -70,7 +70,10 @@
 //!
 //! A clear of the AI's hand is held but not lent for the same reason. Magus of the Wheel in the
 //! upkeep keeps the draw step's card on top of its seven, and in the main phase discards it. So
-//! is anything else sized by the hand, and a discard the hand can't pay.
+//! is anything else sized by the hand, and a discard the hand can't pay. So is an activation
+//! whose own cost the hand sizes (CR 602.2b + CR 601.2f): Loreseeker's Stone costs {1} more for
+//! each card in hand, so the main phase pays more for the same line, or can't pay it. It stays
+//! held, because the main phase can play the hand down first.
 //!
 //! A continuation is a whole line, so such an activation, or one that stands down over the draw
 //! (Crystal Ball), ends the lend of every other hold at its root (`root_held_line`): a held
@@ -88,9 +91,7 @@
 //! whose intervening-if (CR 603.4) an upkeep activation may make true: Starving Revenant's
 //! descend 8 after an upkeep sacrifice. Only beginning-of-step triggers are scanned. And the
 //! classification does not read inside an inline branch carrier (a die roll's results) or a node
-//! the parser left `Unimplemented`. And a surcharge on the activation is not read: Loreseeker's
-//! Stone keeps its hand count in `cost_reduction`, which neither walker reads. Its upkeep line
-//! costs {1} less than main's. It stays held and lent. And `root_held_line` reads each action the
+//! the parser left `Unimplemented`. And `root_held_line` reads each action the
 //! root offers, by its own definition, so a lent line can still go through what that doesn't
 //! show: an activation that line alone puts on offer, a cast beyond its spell's resolution, or
 //! an activation that stands down for another reason (one whose own `condition` is met now).
@@ -164,8 +165,8 @@ use engine::ai_support::CandidateAction;
 use engine::game::{attractions, mana_abilities};
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, ActivationRestriction, Comparator,
-    DelayedTriggerCondition, Effect, ParsedCondition, PlayerScope, QuantityExpr, QuantityRef,
-    TargetFilter, ZoneRef,
+    CostReduction, DelayedTriggerCondition, Effect, ParsedCondition, PlayerScope, QuantityExpr,
+    QuantityRef, TargetFilter, ZoneRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::{GameState, WaitingFor};
@@ -324,10 +325,11 @@ enum DrawSetup {
     /// (CR 121.1). Unlike the three above it stays held, because its payoff is a card better
     /// chosen after the draw; only its line isn't lent. [`HeldLine::Irreproducible`].
     Search,
-    /// CR 121.1 + CR 701.9a: a line sized by the AI's hand, or a discard the hand can't pay
-    /// (CR 609.3). An activation before the draw reads a hand without the card that draw
-    /// takes; one after it does not. So it does not commute with the draw, and like a search
-    /// it is held and not lent: held because main can play out the hand first.
+    /// CR 121.1 + CR 701.9a: a line sized by the AI's hand, a cost sized by it (CR 602.2b +
+    /// CR 601.2f), or a discard the hand can't pay (CR 609.3). An activation before the draw
+    /// reads a hand without the card that draw takes; one after it does not. So it does not
+    /// commute with the draw, and like a search it is held and not lent: held because main can
+    /// play out the hand first.
     HandClear,
 }
 
@@ -443,7 +445,9 @@ fn ability_draw_setup(
 /// - What a cast does beyond its spell's resolution: its additional cost, the floating mana that
 ///   pays it, and a flash permanent's enters trigger, which is the permanent's and not the
 ///   spell's (CR 608.3a + CR 603.6a). So too what turning a permanent face up triggers (Nervous
-///   Gardener's search).
+///   Gardener's search). A spell's own cost static is unread too, though the draw can change it
+///   (CR 601.2f): Saiba Syphoner costs {2} less with no instant or sorcery card in hand, so a
+///   drawn instant raises it. Only an activation's own cost modification is read (`draw_setup`).
 ///
 /// It also bars what doesn't need barring: at rung 0 a donor's continuation is its quiesced
 /// resolution, which takes no sibling, and a deeper line may not take it either. Pass then keeps
@@ -550,7 +554,8 @@ fn line_past_draw(setup: Option<DrawSetup>) -> HeldLine {
 ///   reads a hand without the card that draw takes, and a line after it reads that card too,
 ///   with a draw after a clear (Magus of the Wheel), with none (Bomat Courier), or with a loss
 ///   counted by the hand (Castle Locthwain). It is `DrawSetup::HandClear`, read from any
-///   quantity of the node or its cost that counts a hand, or a mass move out of the hand. A
+///   quantity of the node or its cost that counts a hand, from its own cost modification when
+///   that counts or tests a hand (Loreseeker's Stone), or from a mass move out of the hand. A
 ///   fixed count leaves the choice to the discarder, so a looter commutes, unless the hand can't
 ///   pay it (CR 609.3: Bazaar of Baghdad on an empty hand).
 /// - A look or reveal whose card nothing then acts on (CR 701.20b, CR 701.20e). One whose card
@@ -615,7 +620,11 @@ fn draw_setup(
         _ => None,
     };
     // CR 602.1a: an activation cost is paid by the activator, so it is the AI's own hand.
-    let hand_cost = node.cost.as_ref().is_some_and(cost_reads_a_hand);
+    let hand_cost = node.cost.as_ref().is_some_and(cost_reads_a_hand)
+        || node
+            .cost_reduction
+            .as_ref()
+            .is_some_and(cost_rider_reads_a_hand);
     effect_setup.or_else(|| {
         (hand_cost || effect_reads_a_hand(&node.effect) && reaches())
             .then_some(DrawSetup::HandClear)
@@ -650,6 +659,39 @@ fn cost_reads_a_hand(cost: &AbilityCost) -> bool {
     let mut reads = false;
     cost.for_each_quantity_expr(&mut |expr| reads |= expr.any_ref(&mut reads_a_hand));
     reads
+}
+
+/// CR 602.2b + CR 601.2f: does the ability's own cost modification count that hand, or test it?
+/// The total cost is determined as it's activated, so the draw step's draw changes it: Loreseeker's
+/// Stone costs {1} more for each card in hand, and the main phase pays more for the same line or
+/// can't pay it at all.
+fn cost_rider_reads_a_hand(rider: &CostReduction) -> bool {
+    rider.count.any_ref(&mut reads_a_hand)
+        || rider.condition.as_ref().is_some_and(condition_reads_a_hand)
+}
+
+/// Does `condition` test a hand that can be the AI's, in either direction? Unlike
+/// [`condition_caps_hand`], a floor counts too: Arm-Mounted Anchor's equip costs {2} less with
+/// one or fewer cards in hand.
+fn condition_reads_a_hand(condition: &ParsedCondition) -> bool {
+    match condition {
+        ParsedCondition::QuantityComparison { lhs, rhs, .. } => {
+            lhs.any_ref(&mut reads_a_hand) || rhs.any_ref(&mut reads_a_hand)
+        }
+        ParsedCondition::QuantityVsEachOpponent { lhs, rhs, .. } => {
+            reads_a_hand(lhs) || reads_a_hand(rhs)
+        }
+        ParsedCondition::HandSizeExact { .. } | ParsedCondition::HandSizeOneOf { .. } => true,
+        ParsedCondition::ZoneCardCountAtLeast { zone, .. }
+        | ParsedCondition::ZoneCardTypeCountAtLeast { zone, .. }
+        | ParsedCondition::ZoneCoreTypeCardCountAtLeast { zone, .. }
+        | ParsedCondition::ZoneSubtypeCardCountAtLeast { zone, .. } => *zone == Zone::Hand,
+        ParsedCondition::And { conditions } | ParsedCondition::Or { conditions } => {
+            conditions.iter().any(condition_reads_a_hand)
+        }
+        ParsedCondition::Not { condition } => condition_reads_a_hand(condition),
+        _ => false,
+    }
 }
 
 /// CR 609.3 + CR 701.9a: can this fixed discard take more than the hand holds when it resolves?

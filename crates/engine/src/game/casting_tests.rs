@@ -1,5 +1,6 @@
 use super::super::engine::apply_as_current;
 use super::*;
+use crate::game::restrictions::spell_confined_to_sorcery_timing;
 use crate::game::zones;
 use crate::game::zones::create_object;
 use crate::parser::oracle::parse_oracle_text;
@@ -50783,8 +50784,6 @@ fn azula_exile_static_grants_flash_timing() {
 /// confined.
 #[test]
 fn exile_flash_permission_lifts_sorcery_timing_confinement() {
-    use crate::game::restrictions::spell_confined_to_sorcery_timing;
-
     let player = PlayerId(0);
     for grants_flash in [true, false] {
         let mut state = setup_game_at_main_phase();

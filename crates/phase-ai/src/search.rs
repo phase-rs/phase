@@ -5725,9 +5725,13 @@ mod tests {
     use engine::types::actions::ResolveAllScope;
     use std::path::Path;
 
+    use super::RootLine::{Searched, Unsearched};
     use super::*;
     use crate::planner::apply_candidate;
+    use crate::policies::activation_patience::ActivationPatiencePolicy;
     use crate::policies::mulligan::{registry_keeps, FREE_REVEAL_BOUND};
+    use crate::policies::registry::NUDGE_MAX;
+    use crate::policies::tests::activation_patience_repro::add_instant_face;
     use engine::ai_support::{
         ActionMetadata, AiDecisionContext, CandidateAction, CertifiedPactPlan, TacticalClass,
     };
@@ -5736,20 +5740,22 @@ mod tests {
         load_and_hydrate_decks, resolve_deck_list, DeckList, DeckPayload, PlayerDeckList,
     };
     use engine::game::engine::start_game_with_starting_player;
+    use engine::game::game_object::PreparedState;
     use engine::game::mulligan::free_reveal_futile_for;
     use engine::game::rehydrate_game_from_card_db;
     use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
     use engine::game::scenario_db::GameScenarioDbExt;
     use engine::game::zones::{add_to_zone, create_object, remove_from_zone};
     use engine::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, CategoryChooserScope, CommanderOwnership,
-        ContinuousModification, ControllerRef, Duration, Effect, EffectKind, ManaProduction,
-        ModalChoice, ModalSelectionCondition, ModalSelectionConstraint, PlayerFilter, PtValue,
-        QuantityExpr, QuantityRef, ReplacementDefinition, ResolvedAbility, StaticCondition,
-        StaticDefinition, TargetFilter, TargetRef, TriggerConstraint, TriggerDefinition,
-        TypedFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, CategoryChooserScope,
+        CommanderOwnership, ContinuousModification, ControllerRef, CostCategory, Duration, Effect,
+        EffectKind, ManaProduction, ModalChoice, ModalSelectionCondition, ModalSelectionConstraint,
+        PlayerFilter, PtValue, QuantityExpr, QuantityRef, ReplacementDefinition, ResolvedAbility,
+        StaticCondition, StaticDefinition, TapStateChange, TargetFilter, TargetRef,
+        TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
     };
     use engine::types::ability::{ChoiceType, ChosenAttribute};
+    use engine::types::card::LayoutKind;
     use engine::types::card_type::CoreType;
     use engine::types::counter::CounterType;
     use engine::types::format::FormatConfig;
@@ -5759,10 +5765,13 @@ mod tests {
     };
     use engine::types::identifiers::{CardId, ObjectId};
     use engine::types::keywords::{EvokeCost, Keyword};
-    use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
+    use engine::types::mana::{
+        AbilityActivationScope, ManaColor, ManaCost, ManaCostShard, ManaRestriction, ManaType,
+        ManaUnit,
+    };
     use engine::types::phase::Phase;
     use engine::types::replacements::ReplacementEvent;
-    use engine::types::statics::StaticMode;
+    use engine::types::statics::{CostModifyMode, StaticMode};
     use engine::types::triggers::TriggerMode;
     use engine::types::zones::Zone;
     use rand::rngs::SmallRng;
@@ -20687,7 +20696,6 @@ one on the bottom of your library.";
 
     impl PatienceRoots {
         fn score(state: &GameState, config: &AiConfig) -> Self {
-            use crate::policies::activation_patience::ActivationPatiencePolicy;
             let with =
                 || -> Vec<Box<dyn TacticalPolicy>> { vec![Box::new(ActivationPatiencePolicy)] };
             let mut heuristic = config.clone();
@@ -20734,8 +20742,6 @@ one on the bottom of your library.";
     /// stands down) the verdict is silent and nothing moves.
     #[test]
     fn own_upkeep_and_draw_root_carry_activation_patience_at_full_strength() {
-        use crate::policies::registry::NUDGE_MAX;
-
         let cfg = hard_rung0_config();
         for (label, phase, saga, held) in [
             ("own Upkeep", Phase::Upkeep, false, true),
@@ -20780,8 +20786,6 @@ one on the bottom of your library.";
     /// Wellwisher keeps its own continuation, with the hold at full strength.
     #[test]
     fn pass_inherits_a_held_activations_continuation_in_own_upkeep_and_draw() {
-        use crate::policies::registry::NUDGE_MAX;
-
         let cfg = hard_rung0_config();
         for phase in [Phase::Upkeep, Phase::Draw] {
             let (state, wellwisher) = wellwisher_board(phase);
@@ -20833,9 +20837,6 @@ one on the bottom of your library.";
     /// inherit, because passing hands the opponents priority first (CR 117.3d).
     #[test]
     fn pass_inherits_nothing_from_a_line_activation_patience_does_not_hold_or_that_ends_the_game() {
-        use crate::policies::registry::NUDGE_MAX;
-        use engine::types::ability::ActivationRestriction;
-
         let pass = GameAction::PassPriority;
         let cfg = hard_rung0_config();
 
@@ -21083,7 +21084,6 @@ one on the bottom of your library.";
     /// (`eval::terminal_outcome`). An irreproducible hold donates nothing, whatever its line.
     #[test]
     fn lend_deferral_witness_lends_only_between_open_lines() {
-        use RootLine::{Searched, Unsearched};
         let pass = |line| line_entry(GameAction::PassPriority, line, 0.2, None);
         let held_as = |held_line, id, line| {
             let deferral = Deferral {
@@ -21225,8 +21225,6 @@ one on the bottom of your library.";
     /// the same activation is held at full strength.
     #[test]
     fn own_upkeep_root_neither_holds_nor_lends_a_library_top_arrangement() {
-        use crate::policies::registry::NUDGE_MAX;
-
         let top_board = |phase: Phase| {
             let db = shared_integration_card_db();
             let mut scenario = GameScenario::new();
@@ -21304,8 +21302,6 @@ one on the bottom of your library.";
     /// valuation question and is not asserted here.
     #[test]
     fn own_upkeep_root_does_not_lend_a_tap_limited_arrangement_and_its_choice_is_drawn() {
-        use engine::types::ability::CostCategory;
-
         let db = shared_integration_card_db();
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::Upkeep);
@@ -21706,10 +21702,6 @@ one on the bottom of your library.";
     /// `cargo test -p phase-ai own_upkeep_root_does_not_lend_a_line_a_draw_step_trigger_reads -- --nocapture`.
     #[test]
     fn own_upkeep_root_does_not_lend_a_line_a_draw_step_trigger_reads() {
-        use crate::policies::activation_patience::ActivationPatiencePolicy;
-        use crate::policies::registry::NUDGE_MAX;
-        use engine::types::ability::{TapStateChange, TriggerCondition, TypeFilter};
-
         let (runner, key, mine) = key_board(UntapTarget::HowlingMine);
         let state = runner.state().clone();
 
@@ -22049,7 +22041,6 @@ one on the bottom of your library.";
         donor: &GameAction,
         config: &AiConfig,
     ) -> Option<Option<f64>> {
-        use crate::policies::activation_patience::ActivationPatiencePolicy;
         let registry = PolicyRegistry::for_tests(vec![Box::new(ActivationPatiencePolicy)]);
         let beam = build_root_beam(state, &PlannerServices::new_default(P0, config, &registry));
         beam.iter()
@@ -22136,8 +22127,6 @@ one on the bottom of your library.";
         /// Draw-step control is held, so these zeros come from the upkeep hatch and not from a
         /// candidate the root dropped.
         fn assert_not_held_or_lent(&self) {
-            use crate::policies::registry::NUDGE_MAX;
-
             let Self {
                 label,
                 donor,
@@ -22694,8 +22683,6 @@ one on the bottom of your library.";
     /// `cargo test -p phase-ai own_upkeep_root_does_not_lend_a_search -- --nocapture`.
     #[test]
     fn own_upkeep_root_does_not_lend_a_search_and_the_draw_differs() {
-        use crate::policies::registry::NUDGE_MAX;
-
         let cfg = hard_rung0_config();
         let pass = GameAction::PassPriority;
         let empty = PolicyRegistry::for_tests(vec![]);
@@ -22915,6 +22902,195 @@ one on the bottom of your library.";
         );
     }
 
+    /// Loreseeker's Stone, verbatim.
+    const LORESEEKERS_STONE: &str = "{3}, {T}: Draw three cards. This ability costs {1} more to activate for each card in your hand.";
+
+    /// P0's `phase`, empty stack: Loreseeker's Stone, `islands` Islands and `bears` Grizzly Bears
+    /// in hand, which the Islands can't cast. Returns the runner and the Stone.
+    fn loreseekers_stone_board(
+        phase: Phase,
+        islands: usize,
+        bears: usize,
+    ) -> (GameRunner, ObjectId) {
+        let db = shared_integration_card_db();
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(phase);
+        let stone = scenario
+            .add_artifact_from_oracle(P0, "Loreseeker's Stone", LORESEEKERS_STONE)
+            .id();
+        for _ in 0..islands {
+            scenario.add_basic_land(P0, ManaColor::Blue);
+        }
+        for _ in 0..bears {
+            scenario.add_real_card(P0, "Grizzly Bears", Zone::Hand, db);
+        }
+        let mut runner = scenario.build();
+        rehydrate_game_from_card_db(runner.state_mut(), db);
+        add_libraries(runner.state_mut(), 10);
+        (runner, stone)
+    }
+
+    /// Whether the engine offers `action` at `state`'s root.
+    fn offered(state: &GameState, action: &GameAction) -> bool {
+        build_decision_context(state)
+            .candidates
+            .iter()
+            .any(|candidate| candidate.action == *action)
+    }
+
+    /// Maintainer review 6: an activation whose own cost the hand sizes costs more after the draw
+    /// step's draw (CR 504.1 + CR 602.2b + CR 601.2f), so the main phase can't reproduce its
+    /// line. Loreseeker's Stone with one card in hand and four Islands is affordable in the
+    /// upkeep; after the draw it costs {5}, and the main phase can't activate it at all. Patience
+    /// holds it, and Pass is not lent its continuation, though that continuation is above Pass's
+    /// own, so a lend would move Pass.
+    ///
+    /// The control is the same Stone in the draw step, with the drawn card already in hand and
+    /// five Islands: affordable there and in the main phase at the same cost, because the draw is
+    /// behind (CR 504.2). It's held and lent. With a fifth Island in the upkeep the main phase can
+    /// pay {5}, but the line is still not lent: it leaves a land fewer than the upkeep line does.
+    ///
+    /// Every observable is printed before the first assertion; regenerate them with
+    /// `cargo test -p phase-ai own_upkeep_root_does_not_lend_a_cost_the_draw_raises -- --nocapture`.
+    #[test]
+    fn own_upkeep_root_does_not_lend_a_cost_the_draw_raises() {
+        let cfg = hard_rung0_config();
+        let pass = GameAction::PassPriority;
+
+        let (upkeep_runner, stone) = loreseekers_stone_board(Phase::Upkeep, 4, 1);
+        let state = upkeep_runner.state().clone();
+        let (draw_runner, stone_c) = loreseekers_stone_board(Phase::Draw, 5, 2);
+        let control_state = draw_runner.state().clone();
+        let row = UpkeepDonorRow::score(
+            "Loreseeker's Stone",
+            (&state, activate(stone, 0)),
+            (&control_state, activate(stone_c, 0)),
+            &cfg,
+        );
+        let lines = beam_lines(&state, &cfg);
+        let control_lines = beam_lines(&control_state, &cfg);
+        // A fifth Island: main can pay {5}, but leaves a land fewer than the upkeep line does.
+        let (flush_runner, stone_f) = loreseekers_stone_board(Phase::Upkeep, 5, 1);
+        let flush_lines = beam_lines(flush_runner.state(), &cfg);
+        eprintln!(
+            "  upkeep holds = {lines:?}, draw-step holds = {control_lines:?}, upkeep holds with \
+             five Islands = {flush_lines:?}"
+        );
+
+        // Line P: pass, so the draw takes a card and the Stone costs {5} in the main phase.
+        let (mut line_p, stone_p) = loreseekers_stone_board(Phase::Upkeep, 4, 1);
+        pass_to_priority_in(&mut line_p, Phase::PreCombatMain);
+        let p_hand = p0_player(line_p.state()).hand.len();
+        let p_offered = offered(line_p.state(), &activate(stone_p, 0));
+        // The control's main phase: the same hand, so the same {5}.
+        let (mut line_c, stone_m) = loreseekers_stone_board(Phase::Draw, 5, 2);
+        pass_to_priority_in(&mut line_c, Phase::PreCombatMain);
+        let c_hand = p0_player(line_c.state()).hand.len();
+        let c_offered = offered(line_c.state(), &activate(stone_m, 0));
+        eprintln!(
+            "line P in the main phase: hand {p_hand}, Stone offered {p_offered}; control's main \
+             phase: hand {c_hand}, Stone offered {c_offered}"
+        );
+
+        // Premises.
+        assert!(
+            matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0)
+                && state.active_player == P0
+                && state.phase == Phase::Upkeep
+                && state.stack.is_empty(),
+            "premise: P0 holds priority in its own Upkeep on an empty stack"
+        );
+        let ability = &state.objects[&stone].abilities[0];
+        assert!(
+            matches!(*ability.effect, Effect::Draw { .. })
+                && matches!(
+                    &ability.cost_reduction,
+                    Some(rider) if rider.mode == CostModifyMode::Raise
+                        && matches!(
+                            rider.count,
+                            QuantityExpr::Ref {
+                                qty: QuantityRef::ZoneCardCount { zone: ZoneRef::Hand, .. }
+                            }
+                        )
+                ),
+            "premise: the Stone draws, with a surcharge counted by the hand, got {ability:?}"
+        );
+        assert_eq!(p0_player(&state).hand.len(), 1, "premise: one card in hand");
+        assert!(
+            offered(&state, &activate(stone, 0)),
+            "premise: {{4}} is affordable in the upkeep"
+        );
+        assert_eq!(p_hand, 2, "line P: the draw took a card");
+        assert!(
+            !p_offered,
+            "line P: {{5}} is not affordable in the main phase, so main can't reproduce the line"
+        );
+        assert_eq!(
+            c_hand, 2,
+            "control: the draw is behind, so the hand is unchanged"
+        );
+        assert!(
+            offered(&control_state, &activate(stone_c, 0)) && c_offered,
+            "control: {{5}} is affordable in the draw step and in the main phase"
+        );
+
+        // The Upkeep root: held, and not lent.
+        let donor = &row.donor;
+        let roots = &row.roots;
+        roots.assert_scored(row.label, &[donor, &pass]);
+        assert!(
+            roots.cont(donor) > roots.cont(&pass),
+            "reach: the donor's continuation {} is above Pass's {}, so a lend would move Pass",
+            roots.cont(donor),
+            roots.cont(&pass)
+        );
+        let held = roots.ap(donor);
+        assert!(held < -NUDGE_MAX, "the Upkeep holds the Stone, got {held}");
+        assert_eq!(
+            lines,
+            [(donor.clone(), HeldLine::Irreproducible)],
+            "the hold's line is irreproducible"
+        );
+        assert_eq!(
+            flush_lines,
+            [(activate(stone_f, 0), HeldLine::Irreproducible)],
+            "with five Islands the cost still differs, so the line is still irreproducible"
+        );
+        assert_eq!(
+            score_of(&roots.s1, &pass),
+            score_of(&roots.s0, &pass),
+            "Pass is not lent the Stone's continuation"
+        );
+
+        // The draw-step control: the same cost in main, so it's held and lent.
+        let control_donor = &row.control_donor;
+        let control = &row.control;
+        control.assert_scored(row.label, &[control_donor, &pass]);
+        assert!(
+            control.ap(control_donor) < -NUDGE_MAX,
+            "control: the draw step holds the Stone, got {}",
+            control.ap(control_donor)
+        );
+        assert_eq!(
+            control_lines,
+            [(control_donor.clone(), HeldLine::Reproducible)],
+            "control: the hold's line is reproducible"
+        );
+        assert!(
+            control.cont(control_donor) > control.cont(&pass),
+            "control reach: the donor's continuation {} is above Pass's {}",
+            control.cont(control_donor),
+            control.cont(&pass)
+        );
+        assert!(
+            (score_of(&control.s1, &pass)
+                - (control.cont(control_donor) + score_of(&control.h0, &pass) * control.tw))
+                .abs()
+                < 1e-9,
+            "control: Pass inherits the Stone's continuation"
+        );
+    }
+
     /// Magus of the Wheel, verbatim.
     const MAGUS_OF_THE_WHEEL: &str = "{1}{R}, {T}, Sacrifice this creature: Each player discards their hand, then draws seven cards.";
 
@@ -22953,7 +23129,6 @@ one on the bottom of your library.";
 
     /// The holds in the root beam for `state`, with each one's line.
     fn beam_lines(state: &GameState, config: &AiConfig) -> Vec<(GameAction, HeldLine)> {
-        use crate::policies::activation_patience::ActivationPatiencePolicy;
         let registry = PolicyRegistry::for_tests(vec![Box::new(ActivationPatiencePolicy)]);
         let mut lines: Vec<_> =
             build_root_beam(state, &PlannerServices::new_default(P0, config, &registry))
@@ -23005,8 +23180,6 @@ one on the bottom of your library.";
     /// `cargo test -p phase-ai own_upkeep_root_lends_nothing_beside -- --nocapture`.
     #[test]
     fn own_upkeep_root_lends_nothing_beside_an_irreproducible_activation() {
-        use crate::policies::registry::NUDGE_MAX;
-
         let cfg = medium_searched_config();
         let pass = GameAction::PassPriority;
 
@@ -23145,8 +23318,6 @@ one on the bottom of your library.";
     /// on offer, and Wellwisher's hold lends again.
     #[test]
     fn own_upkeep_root_lends_nothing_beside_a_hand_clear_or_an_arrangement() {
-        use crate::policies::registry::NUDGE_MAX;
-
         let cfg = medium_searched_config();
         let pass = GameAction::PassPriority;
         for (label, sibling_held) in [("Magus of the Wheel", true), ("Crystal Ball", false)] {
@@ -23282,8 +23453,6 @@ one on the bottom of your library.";
     /// `cargo test -p phase-ai own_upkeep_root_lends_nothing_beside_a -- --nocapture`.
     #[test]
     fn own_upkeep_root_lends_nothing_beside_a_spell_over_the_draw() {
-        use crate::policies::registry::NUDGE_MAX;
-
         let cfg = medium_searched_config();
         let pass = GameAction::PassPriority;
         let (state, wellwisher, spell) = natural_connection_board(true);
@@ -23334,9 +23503,6 @@ one on the bottom of your library.";
     /// in the graveyard: with nothing there Mend the Wilds has no target and isn't on offer.
     /// Oracle text verbatim. Returns the state, Wellwisher and Woodland Acolyte.
     fn woodland_acolyte_board(graveyard: &[&str]) -> (GameState, ObjectId, ObjectId) {
-        use crate::policies::tests::activation_patience_repro::add_instant_face;
-        use engine::types::card::LayoutKind;
-
         let db = shared_integration_card_db();
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::Upkeep);
@@ -23382,10 +23548,6 @@ one on the bottom of your library.";
     /// and a Vastlands Scavenger with Bind to Life, its prepare spell, castable if `prepared`.
     /// Oracle text verbatim. Returns the state, Wellwisher and the Scavenger.
     fn vastlands_scavenger_board(prepared: bool) -> (GameState, ObjectId, ObjectId) {
-        use crate::policies::tests::activation_patience_repro::add_instant_face;
-        use engine::game::game_object::PreparedState;
-        use engine::types::card::LayoutKind;
-
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::Upkeep);
         let wellwisher = add_wellwisher(&mut scenario);
@@ -23432,8 +23594,6 @@ one on the bottom of your library.";
     /// and it lends. Every observable is printed before the first assertion.
     #[test]
     fn own_upkeep_root_lends_nothing_beside_a_second_face_over_the_draw() {
-        use crate::policies::registry::NUDGE_MAX;
-
         let cfg = medium_searched_config();
         let pass = GameAction::PassPriority;
         let (state, wellwisher, acolyte) = woodland_acolyte_board(&["Serra Angel"]);
@@ -23484,8 +23644,6 @@ one on the bottom of your library.";
     /// The control isn't prepared, so the copy isn't on offer, and the lend moves Pass.
     #[test]
     fn own_upkeep_root_lends_nothing_beside_a_prepared_copy_over_the_draw() {
-        use crate::policies::registry::NUDGE_MAX;
-
         let cfg = medium_searched_config();
         let pass = GameAction::PassPriority;
         let (state, wellwisher, scavenger) = vastlands_scavenger_board(true);
@@ -23524,8 +23682,6 @@ one on the bottom of your library.";
     /// row is printed only.
     #[test]
     fn own_upkeep_root_lends_nothing_beside_an_upkeep_only_activation() {
-        use crate::policies::registry::NUDGE_MAX;
-
         let cfg = medium_searched_config();
         let pass = GameAction::PassPriority;
         let db = shared_integration_card_db();
@@ -23599,8 +23755,6 @@ one on the bottom of your library.";
     /// doesn't, so the hold lends with it on offer.
     #[test]
     fn own_upkeep_root_reads_a_spell_for_what_it_does_to_the_draw() {
-        use crate::policies::registry::NUDGE_MAX;
-
         let cfg = medium_searched_config();
         let db = shared_integration_card_db();
         for (label, text, expected) in [
@@ -23657,8 +23811,6 @@ one on the bottom of your library.";
     /// it's still a hold, and it lends nothing. With the pool empty both are held and both lend.
     #[test]
     fn own_upkeep_root_lends_nothing_beside_an_activation_on_floating_mana() {
-        use engine::types::mana::{AbilityActivationScope, ManaRestriction};
-
         let cfg = medium_searched_config();
         let db = shared_integration_card_db();
         let mut scenario = GameScenario::new();
@@ -23713,8 +23865,6 @@ one on the bottom of your library.";
     /// GenericEffect pumps.
     #[test]
     fn own_draw_root_carries_the_trick_verdict_on_a_generic_effect_pump_at_0_35() {
-        use crate::policies::registry::NUDGE_MAX;
-
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::Draw);
         let assault = scenario
@@ -23779,8 +23929,6 @@ one on the bottom of your library.";
     /// read it.
     #[test]
     fn own_precombat_main_root_does_not_price_a_sorcery_pump_as_a_trick() {
-        use crate::policies::registry::NUDGE_MAX;
-
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         let overrun = scenario
@@ -23884,8 +24032,6 @@ one on the bottom of your library.";
     /// reads every mode of a cast that has chosen none (CR 601.2b).
     #[test]
     fn own_postcombat_main_root_does_not_price_a_lasting_payoff_as_a_trick() {
-        use crate::policies::registry::NUDGE_MAX;
-
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PostCombatMain);
         let reinforcements = scenario

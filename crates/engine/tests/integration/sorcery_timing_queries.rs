@@ -24,6 +24,7 @@ use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
+use engine::types::mana::ManaCostShard::{Black, Blue, Green, Red, White};
 use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -60,7 +61,6 @@ fn mana(generic: u32, shards: Vec<ManaCostShard>) -> ManaCost {
 }
 
 fn overrun_cost() -> ManaCost {
-    use ManaCostShard::Green;
     mana(2, vec![Green, Green, Green])
 }
 
@@ -271,7 +271,6 @@ fn granted_flash_is_scoped_to_the_permissions_controller() {
 /// S5. CR 601.3c: the option's surcharge is a cost, not a timing gate.
 #[test]
 fn flash_option_opens_the_route_whatever_its_surcharge() {
-    use ManaCostShard::White;
     let mut s = scenario();
     let rout = s
         .add_spell_to_hand_from_oracle(P0, "Rout", false, ROUT)
@@ -285,7 +284,6 @@ fn flash_option_opens_the_route_whatever_its_surcharge() {
 /// creature keeps the card castable when P0 controls no permanent.
 #[test]
 fn target_dependent_flash_option_needs_a_qualifying_target() {
-    use ManaCostShard::Blue;
     let photography_cost = || mana(2, vec![Blue, Blue]);
 
     let mut feasible = scenario();
@@ -334,7 +332,6 @@ fn alternative_cost_timing_needs_a_payable_cost() {
 /// the caster can sacrifice.
 #[test]
 fn offering_needs_a_permanent_the_caster_can_sacrifice() {
-    use ManaCostShard::White;
     for (fox_controller, expected_confined) in [(P0, false), (P1, true)] {
         let mut s = scenario();
         s.add_creature(fox_controller, "Fox", 1, 1)
@@ -362,7 +359,6 @@ fn offering_needs_a_permanent_the_caster_can_sacrifice() {
 /// same board, is confined and is not offered.
 #[test]
 fn sneak_opens_a_declare_blockers_cast() {
-    use ManaCostShard::{Black, White};
     let mut s = scenario();
     let attacker = s.add_creature(P0, "Grizzly Bears", 2, 2).id();
     let karai = s
@@ -412,7 +408,6 @@ fn sneak_opens_a_declare_blockers_cast() {
 /// a rule; mid-cast, the spell is already being cast.
 #[test]
 fn mode_prompt_reads_as_the_proposed_cast() {
-    use ManaCostShard::{Red, White};
     for (leyline, expected_confined) in [(false, true), (true, false)] {
         let mut s = scenario();
         if leyline {
@@ -461,7 +456,6 @@ fn mode_prompt_reads_as_the_proposed_cast() {
 /// and no restriction do not. CR 702.62a: card cast timing follows the type.
 #[test]
 fn activation_query_classifies_each_timing_restriction() {
-    use ManaCostShard::{Black, Blue, Red, White};
     let mut s = scenario();
     let garruk = add_garruk(&mut s);
     let brave_kin = s

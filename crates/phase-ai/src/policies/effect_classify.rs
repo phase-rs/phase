@@ -2673,10 +2673,11 @@ mod suspect_scope_tests {
 
 #[cfg(test)]
 mod temporary_combat_modifier_tests {
+    use super::CombatBinding::{Partial, Unbound, Whole};
     use super::*;
     use crate::cast_facts::{collect_definition_effects_with, ModeWalk};
     use engine::types::ability::{
-        BounceSelection, DelayedTriggerCondition, EffectKind, TypedFilter,
+        BounceSelection, DelayedTriggerCondition, EffectKind, EffectKind as K, TypedFilter,
     };
     use engine::types::identifiers::ObjectIncarnationRef;
     use engine::types::keywords::{EmbalmCost, EscapeCost, FlashbackCost};
@@ -2859,9 +2860,6 @@ mod temporary_combat_modifier_tests {
     /// card's parsed shape, so a row cannot pass by parsing into a different chain.
     #[test]
     fn combat_binding_reads_the_whole_resolution() {
-        use CombatBinding::{Partial, Whole};
-        use EffectKind as K;
-
         type Row = (
             &'static str,
             &'static str,
@@ -3175,8 +3173,6 @@ mod temporary_combat_modifier_tests {
     /// A rider alone is no payload, and anything else beside a payload fails closed.
     #[test]
     fn only_attack_and_block_statics_and_self_removal_ride_a_trick() {
-        use CombatBinding::{Partial, Unbound, Whole};
-
         let until_eot = Some(Duration::UntilEndOfTurn);
         for mode in [
             StaticMode::CantAttack,
