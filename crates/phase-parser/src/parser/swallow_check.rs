@@ -6618,7 +6618,8 @@ mod tests {
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::ability::{
         AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, CardPlayMode,
-        CardSelectionMode, CastFromZoneDriver, ChooseFromZoneConstraint, ChooseOneOfKind, Chooser,
+        CardSelectionMode, CastFromZoneDriver, CastManaObjectScope, CastManaSpentMetric,
+        ChooseFromZoneConstraint, ChooseOneOfKind, Chooser,
         Comparator, ContinuousModification, CopyRetargetPermission, DamageModification, Effect,
         EffectOutcomeSignal, FilterProp, ManaProduction, OutsideGameSourcePool, ParsedCondition,
         PlayerFilter, QuantityExpr, QuantityRef, SpellStackToGraveyardReplacement, StaticCondition,
@@ -15585,8 +15586,6 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
     /// the same unit's filter back to `SelfRef`, the shape the real parse carries.
     #[test]
     fn cast_mana_source_detector_flags_a_carrier_for_another_source() {
-        use crate::types::ability::{CastManaObjectScope, CastManaSpentMetric};
-
         let (name, types, text) = CAST_MANA_SOURCE_CARDS[0];
         let real = parse_named(text, name, types);
         let line = text.lines().last().expect("the trigger is the last line");
