@@ -7880,6 +7880,11 @@ fn effect_slot_denotes_damage_any_target(effect: &Effect, slot: AbilityTargetSlo
     }
     match effect {
         Effect::DealDamage { target, .. } => is_any_target_filter(target),
+        // CR 115.1c: a draw replacement's slot is its substitute head's slot
+        // (Words of War) — see `extract_target_filter_from_effect`.
+        Effect::CreateDrawReplacement { replacement_effect } => {
+            effect_slot_denotes_damage_any_target(&replacement_effect.effect, slot)
+        }
         // CR 115.4 + CR 615.7: a single, declared recipient for a finite
         // "next N damage" shield uses the same creature/player/planeswalker/
         // battle domain as any other damage target. Broadcast and source-scoped

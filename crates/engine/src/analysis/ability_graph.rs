@@ -1492,6 +1492,10 @@ fn collect_effects_in_effect<'a>(
             ..
         } => collect_effects(d, out),
         Effect::CreateDelayedTrigger { effect, .. } => collect_effects(effect, out),
+        // CR 614.6: a draw replacement's substitute is a nested definition.
+        Effect::CreateDrawReplacement { replacement_effect } => {
+            collect_effects(replacement_effect, out)
+        }
         Effect::CreateBoon { trigger, .. } => {
             if let Some(execute) = trigger.execute.as_deref() {
                 collect_effects(execute, out)
@@ -1519,13 +1523,12 @@ fn collect_effects_in_effect<'a>(
                 collect_effects(d, out);
             }
         }
-        // CR 614.1a: the heterogeneous substitute Effect installed by a draw /
+        // CR 614.1a: the heterogeneous substitute Effect installed by a
         // planeswalk replacement rides in `replacement_effect: Box<Effect>` (not an
         // `AbilityDefinition` payload), so it is invisible to the sibling recursions
         // above. Descend it too — otherwise a randomness effect nested inside a
         // replacement install escapes every `collect_effects` consumer.
-        Effect::CreateDrawReplacement { replacement_effect }
-        | Effect::CreatePlaneswalkReplacement { replacement_effect } => {
+        Effect::CreatePlaneswalkReplacement { replacement_effect } => {
             collect_effects_in_effect(replacement_effect, None, out);
         }
         _ => {}

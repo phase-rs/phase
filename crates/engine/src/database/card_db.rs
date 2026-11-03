@@ -984,7 +984,9 @@ fn map_layout_str(s: &str) -> Option<LayoutKind> {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        AbilityDefinition, ReplacementDefinition, StaticDefinition, TriggerDefinition,
+        AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, Effect, ModalChoice,
+        PlayerFilter, QuantityExpr, ReplacementDefinition, StaticDefinition, TargetChoiceTiming,
+        TargetFilter, TriggerDefinition,
     };
     use crate::types::card_type::CardType;
     use crate::types::keywords::Keyword;
@@ -1168,6 +1170,116 @@ mod tests {
             "a nested payment gate on a combat-taxed mode is enforceable and must pass: {:?}",
             ok_db.export_integrity_errors()
         );
+    }
+
+    #[test]
+    fn export_loaders_read_legacy_draw_replacements_and_preserve_current_metadata() {
+        let gain_life = || {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 5 },
+                    player: TargetFilter::Controller,
+                },
+            )
+        };
+        let current = gain_life()
+            .player_scope(PlayerFilter::All)
+            .condition(AbilityCondition::IsYourTurn)
+            .target_choice_timing(TargetChoiceTiming::Resolution)
+            .sub_ability(gain_life())
+            .with_else_ability(gain_life())
+            .with_modal(
+                ModalChoice {
+                    min_choices: 1,
+                    max_choices: 1,
+                    mode_count: 1,
+                    ..Default::default()
+                },
+                vec![gain_life()],
+            );
+        let mut face = test_face("Words of Worship");
+        face.oracle_text = Some(
+            "{1}: The next time you would draw a card this turn, you gain 5 life instead."
+                .to_string(),
+        );
+        face.abilities.push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::CreateDrawReplacement {
+                    replacement_effect: Box::new(current.clone()),
+                },
+            )
+            .cost(AbilityCost::Mana {
+                cost: ManaCost::generic(1),
+            })
+            .description(
+                "{1}: The next time you would draw a card this turn, you gain 5 life instead."
+                    .to_string(),
+            ),
+        );
+        let mut export = serde_json::json!({ "words of worship": face });
+        // Exact bare replacement payload witnessed in the original-base export.
+        let legacy =
+            serde_json::json!({"type": "GainLife", "amount": {"type": "Fixed", "value": 5}});
+        for (payload, expected) in [
+            (legacy, gain_life()),
+            (serde_json::to_value(&current).unwrap(), current),
+        ] {
+            export["words of worship"]["abilities"][0]["effect"]["replacement_effect"] =
+                payload.clone();
+            let bytes = serde_json::to_vec(&export).unwrap();
+            let json = std::str::from_utf8(&bytes).unwrap();
+            for db in [
+                CardDatabase::from_export_reader(bytes.as_slice())
+                    .expect("reader reaches the replacement decoder"),
+                CardDatabase::from_json_str(json)
+                    .expect("string loader reaches the replacement decoder"),
+            ] {
+                let loaded = db
+                    .get_face_by_name("Words of Worship")
+                    .expect("populated face survives loading");
+                assert_eq!(loaded.abilities.len(), 1);
+                assert_eq!(loaded.abilities[0].kind, AbilityKind::Activated);
+                let Effect::CreateDrawReplacement { replacement_effect } =
+                    &*loaded.abilities[0].effect
+                else {
+                    panic!("expected replacement on loaded face")
+                };
+                assert_eq!(**replacement_effect, expected);
+                assert!(matches!(
+                    *replacement_effect.effect,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 5 },
+                        ..
+                    }
+                ));
+                assert_eq!(replacement_effect.player_scope, expected.player_scope);
+                assert_eq!(
+                    replacement_effect.mode_abilities.len(),
+                    expected.mode_abilities.len()
+                );
+                let names = ["Words of Worship".to_string()].into_iter().collect();
+                let emitted: serde_json::Value =
+                    serde_json::from_str(&db.export_subset_json(&names)).unwrap();
+                let replacement =
+                    &emitted["words of worship"]["abilities"][0]["effect"]["replacement_effect"];
+                assert_eq!(replacement["kind"], "Spell");
+                assert_eq!(replacement["effect"]["amount"]["value"], 5);
+                assert!(replacement.get("type").is_none());
+                assert_eq!(*replacement, serde_json::to_value(&expected).unwrap());
+            }
+            let mut malformed = export.clone();
+            malformed["words of worship"]["abilities"][0]["effect"]["replacement_effect"] =
+                if payload.get("type").is_some() {
+                    serde_json::json!({"type": "GainLife", "amount": {"type": "Fixed"}})
+                } else {
+                    serde_json::json!({"kind": "Spell", "effect": {"type": "Unknown"}})
+                };
+            let bad_bytes = serde_json::to_vec(&malformed).unwrap();
+            assert!(CardDatabase::from_export_reader(bad_bytes.as_slice()).is_err());
+            assert!(CardDatabase::from_json_str(std::str::from_utf8(&bad_bytes).unwrap()).is_err());
+        }
     }
 
     #[test]

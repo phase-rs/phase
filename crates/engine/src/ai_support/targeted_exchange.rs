@@ -1724,7 +1724,7 @@ mod tests {
             AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::CreateDrawReplacement {
-                    replacement_effect: Box::new(fight_effect()),
+                    replacement_effect: Box::new(fight_def()),
                 },
             ),
         ));

@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "CreateDrawReplacement.replacement_effect now carries a full AbilityDefinition (player scope, sub-ability chains) instead of a bare Effect, and GameState gains pending_player_scope_bounce_choice for collect-then-move per-player return choices. Older peers cannot read the new wrapper; the current engine still decodes legacy bare stored effects."
+}

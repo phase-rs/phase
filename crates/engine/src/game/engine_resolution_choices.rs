@@ -6705,6 +6705,42 @@ pub(super) fn handle_resolution_choice(
                 }
             }
 
+            if matches!(effect_kind, EffectKind::Bounce)
+                && state.pending_player_scope_bounce_choice.is_some()
+            {
+                // CR 101.4: collect every player's return choice before the
+                // chosen permanents move as one simultaneous batch.
+                match effects::bounce::advance_pending_player_scope_bounce_choice(
+                    state, &chosen, events,
+                ) {
+                    effects::bounce::PendingPlayerScopeBounceOutcome::WaitingForNextChoice
+                    | effects::bounce::PendingPlayerScopeBounceOutcome::PausedForReplacement => {
+                        return Ok(ResolutionChoiceOutcome::WaitingFor(
+                            state.waiting_for.clone(),
+                        ));
+                    }
+                    effects::bounce::PendingPlayerScopeBounceOutcome::Completed {
+                        events_before,
+                        events_after,
+                    } => {
+                        set_priority(state, player);
+                        resume_with_error_propagation(state, events)?;
+                        if let Some(outcome) = batch_or_drain_observer_triggers(
+                            state,
+                            events,
+                            events_before,
+                            events_after,
+                            false,
+                        ) {
+                            return Ok(outcome);
+                        }
+                        return Ok(ResolutionChoiceOutcome::WaitingFor(
+                            state.waiting_for.clone(),
+                        ));
+                    }
+                }
+            }
+
             // CR 101.4 + CR 401.4: owners arrange in APNAP order, then the
             // arrangement happens as one simultaneous action. Collect this owner's
             // order; only the last owner's submission moves cards, and it moves every

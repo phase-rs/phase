@@ -19108,8 +19108,7 @@ fn nested_payload_reads_created_referent(effect: &Effect) -> bool {
     });
     reads
         || match effect {
-            Effect::CreateDrawReplacement { replacement_effect }
-            | Effect::CreatePlaneswalkReplacement { replacement_effect } => {
+            Effect::CreatePlaneswalkReplacement { replacement_effect } => {
                 effect_reads_created_referent(replacement_effect)
             }
             Effect::AddTargetReplacement { replacement, .. } => {
@@ -22151,6 +22150,19 @@ fn resolve_chain_body(
 
         if should_collect_player_scope_sacrifice_choices(&scoped_template) {
             progress = start_player_scope_sacrifice_choices(
+                state,
+                &scoped_template,
+                controller,
+                &matching_players,
+                after_scope,
+                events,
+                depth,
+            )?;
+            return Ok(progress);
+        }
+
+        if bounce::should_collect_player_scope_choices(&scoped_template) {
+            progress = bounce::start_player_scope_choices(
                 state,
                 &scoped_template,
                 controller,
@@ -50298,7 +50310,7 @@ mod tests {
             (
                 "CreateDrawReplacement",
                 Effect::CreateDrawReplacement {
-                    replacement_effect: Box::new(placement()),
+                    replacement_effect: payload(),
                 },
             ),
             (

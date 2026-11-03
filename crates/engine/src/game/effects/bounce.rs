@@ -4,7 +4,10 @@ use crate::types::ability::{
     TargetChoiceTiming, TargetFilter, TargetRef, TypedFilter,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{CastingVariant, GameState, StackEntryKind, WaitingFor};
+use crate::types::game_state::{
+    CastingVariant, GameState, PendingPlayerScopeBounceChoice, StackEntryKind, WaitingFor,
+};
+use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
@@ -65,6 +68,22 @@ fn filter_uses_scoped_player(filter: &TargetFilter) -> bool {
         TargetFilter::Not { filter } => filter_uses_scoped_player(filter),
         _ => false,
     }
+}
+
+/// CR 608.2d: the battlefield permanents an untargeted "return a [filter]"
+/// instruction may choose from, evaluated in the resolving ability's context.
+fn untargeted_battlefield_pool(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+) -> Vec<ObjectId> {
+    let ctx = crate::game::filter::FilterContext::from_ability(ability);
+    state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| crate::game::filter::matches_target_filter(state, *id, filter, &ctx))
+        .collect()
 }
 
 /// Finds a spell's casting variant while it is on the stack or resolving.
@@ -203,15 +222,7 @@ pub fn resolve(
     // chosen-player graveyard branch which has different selecting-player
     // semantics (Skullwinder-class).
     if non_targeting && targets.is_empty() && !filter_targets_zone(target_filter, Zone::Graveyard) {
-        let ctx = crate::game::filter::FilterContext::from_ability(ability);
-        let eligible: Vec<_> = state
-            .battlefield
-            .iter()
-            .copied()
-            .filter(|id| {
-                crate::game::filter::matches_target_filter(state, *id, target_filter, &ctx)
-            })
-            .collect();
+        let eligible = untargeted_battlefield_pool(state, ability, target_filter);
 
         match eligible.len() {
             0 => {
@@ -425,6 +436,225 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+/// CR 101.4 + CR 608.2d: whether a `player_scope` fan-out of `ability` is an
+/// untargeted battlefield return ("each player returns a permanent they control
+/// to its owner's hand") whose per-player choices must all be made before any
+/// chosen permanent moves.
+pub(super) fn should_collect_player_scope_choices(ability: &ResolvedAbility) -> bool {
+    matches!(
+        &ability.effect,
+        Effect::Bounce {
+            target,
+            selection: BounceSelection::AtResolution,
+            ..
+        } if !filter_targets_zone(target, Zone::Graveyard)
+    ) && ability.sub_ability.is_none()
+}
+
+enum ScopedBounceStep {
+    Noop,
+    Auto(ObjectId),
+    Prompt {
+        player: PlayerId,
+        cards: Vec<ObjectId>,
+    },
+}
+
+pub(crate) enum PendingPlayerScopeBounceOutcome {
+    WaitingForNextChoice,
+    /// A CR 616.1 replacement choice parked the batch; the replacement-choice
+    /// resume path finishes it and then drains the continuation.
+    PausedForReplacement,
+    Completed {
+        events_before: usize,
+        events_after: usize,
+    },
+}
+
+fn scoped_bounce_step(
+    state: &GameState,
+    template: &ResolvedAbility,
+    original_controller: PlayerId,
+    seat: PlayerId,
+) -> ScopedBounceStep {
+    let scoped = super::bind_scoped_seat(template, original_controller, seat);
+    let Effect::Bounce { target, .. } = &scoped.effect else {
+        return ScopedBounceStep::Noop;
+    };
+    let mut pool = untargeted_battlefield_pool(state, &scoped, target);
+    match pool.len() {
+        // CR 608.2d: an empty pool leaves this player with nothing to choose.
+        0 => ScopedBounceStep::Noop,
+        1 => ScopedBounceStep::Auto(pool.remove(0)),
+        _ => ScopedBounceStep::Prompt {
+            player: seat,
+            cards: pool,
+        },
+    }
+}
+
+fn set_scoped_bounce_waiting_for(
+    state: &mut GameState,
+    template: &ResolvedAbility,
+    player: PlayerId,
+    cards: Vec<ObjectId>,
+) {
+    let destination = match &template.effect {
+        Effect::Bounce { destination, .. } => destination.unwrap_or(Zone::Hand),
+        _ => Zone::Hand,
+    };
+    state.waiting_for = WaitingFor::EffectZoneChoice {
+        player,
+        cards,
+        count: 1,
+        min_count: 1,
+        up_to: false,
+        source_id: template.source_id,
+        effect_kind: EffectKind::Bounce,
+        zone: Zone::Battlefield,
+        destination: Some(destination),
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+        enter_transformed: false,
+        enters_under_player: None,
+        enters_attacking: false,
+        owner_library: false,
+        track_exiled_by_source: false,
+        face_down_in_exile: crate::types::ability::ExileConcealment::Public,
+        // CR 708.2a: bounce returns cards face up; no face-down entry.
+        face_down_profile: None,
+        enter_with_counters: vec![],
+        conditional_enter_with_counters: vec![],
+        count_param: 0,
+        library_position: None,
+        mass_library_order: None,
+        is_cost_payment: false,
+        enters_modified_if: None,
+        duration: None,
+    };
+}
+
+/// CR 101.4: deliver every announced return as ONE simultaneous batch through
+/// the zone-change pipeline (CR 614.6 redirects fire; CR 603.10a co-departure).
+fn deliver_scoped_bounces(
+    state: &mut GameState,
+    template: &ResolvedAbility,
+    selections: Vec<ObjectId>,
+    events: &mut Vec<GameEvent>,
+) -> PendingPlayerScopeBounceOutcome {
+    let destination = match &template.effect {
+        Effect::Bounce { destination, .. } => destination.unwrap_or(Zone::Hand),
+        _ => Zone::Hand,
+    };
+    let events_before = events.len();
+    state.last_effect_count = Some(selections.len() as i32);
+    if !selections.is_empty() {
+        let reqs: Vec<ZoneMoveRequest> = selections
+            .into_iter()
+            .map(|id| ZoneMoveRequest::effect(id, destination, template.source_id))
+            .collect();
+        if let BatchMoveResult::NeedsChoice =
+            zone_pipeline::move_objects_simultaneously_then(state, reqs, None, events)
+        {
+            return PendingPlayerScopeBounceOutcome::PausedForReplacement;
+        }
+    }
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::from(&template.effect),
+        source_id: template.source_id,
+        subject: None,
+    });
+    PendingPlayerScopeBounceOutcome::Completed {
+        events_before,
+        events_after: events.len(),
+    }
+}
+
+/// CR 101.4: walk `players` in APNAP order, collecting each one's return choice
+/// without moving anything. Parks on the first multi-candidate pool; otherwise
+/// delivers the batch.
+fn collect_scoped_bounce_choices(
+    state: &mut GameState,
+    template: &ResolvedAbility,
+    original_controller: PlayerId,
+    mut remaining: Vec<PlayerId>,
+    mut selections: Vec<ObjectId>,
+    events: &mut Vec<GameEvent>,
+) -> PendingPlayerScopeBounceOutcome {
+    while !remaining.is_empty() {
+        let seat = remaining.remove(0);
+        match scoped_bounce_step(state, template, original_controller, seat) {
+            ScopedBounceStep::Noop => {}
+            ScopedBounceStep::Auto(id) => selections.push(id),
+            ScopedBounceStep::Prompt { player, cards } => {
+                state.pending_player_scope_bounce_choice = Some(PendingPlayerScopeBounceChoice {
+                    ability: Box::new(template.clone()),
+                    remaining_players: remaining,
+                    selections,
+                });
+                set_scoped_bounce_waiting_for(state, template, player, cards);
+                return PendingPlayerScopeBounceOutcome::WaitingForNextChoice;
+            }
+        }
+    }
+    deliver_scoped_bounces(state, template, selections, events)
+}
+
+/// Entry from the `player_scope` fan-out for an untargeted scoped return.
+pub(super) fn start_player_scope_choices(
+    state: &mut GameState,
+    template: &ResolvedAbility,
+    original_controller: PlayerId,
+    matching_players: &[PlayerId],
+    after_scope: Option<Box<ResolvedAbility>>,
+    events: &mut Vec<GameEvent>,
+    depth: u32,
+) -> Result<super::ResolutionProgress, EffectError> {
+    match collect_scoped_bounce_choices(
+        state,
+        template,
+        original_controller,
+        matching_players.to_vec(),
+        Vec::new(),
+        events,
+    ) {
+        // The unscoped tail runs once, after the whole simultaneous return.
+        PendingPlayerScopeBounceOutcome::Completed { .. } => match after_scope {
+            Some(after_scope) => {
+                super::resolve_ability_chain_step(state, &after_scope, events, depth + 1)
+            }
+            None => Ok(super::ResolutionProgress::Complete),
+        },
+        // A prompt or replacement pause resumes the tail through the
+        // continuation queue once the batch has been delivered.
+        PendingPlayerScopeBounceOutcome::WaitingForNextChoice
+        | PendingPlayerScopeBounceOutcome::PausedForReplacement => {
+            super::append_to_pending_continuation(state, after_scope);
+            Ok(super::ResolutionProgress::Waiting)
+        }
+    }
+}
+
+/// CR 101.4: record `player`'s answer and continue the APNAP walk.
+pub(crate) fn advance_pending_player_scope_bounce_choice(
+    state: &mut GameState,
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> PendingPlayerScopeBounceOutcome {
+    let Some(mut pending) = state.pending_player_scope_bounce_choice.take() else {
+        return PendingPlayerScopeBounceOutcome::WaitingForNextChoice;
+    };
+    pending.selections.extend_from_slice(chosen);
+    let original_controller = pending.ability.controller;
+    collect_scoped_bounce_choices(
+        state,
+        &pending.ability,
+        original_controller,
+        pending.remaining_players,
+        pending.selections,
+        events,
+    )
 }
 
 /// CR 400.7: Mass-bounce — return every battlefield permanent

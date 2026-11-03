@@ -4022,8 +4022,11 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::CreateDrawReplacement { replacement_effect } => {
             d.push((
                 "replacement_effect".into(),
-                crate::types::ability::effect_variant_name(replacement_effect).to_string(),
+                crate::types::ability::effect_variant_name(&replacement_effect.effect).to_string(),
             ));
+            if let Some(scope) = &replacement_effect.player_scope {
+                d.push(("replacement_player_scope".into(), fmt_player_filter(scope)));
+            }
         }
         Effect::CreatePlaneswalkReplacement { replacement_effect } => {
             d.push((
@@ -16084,6 +16087,18 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn draw_replacement_details_distinguish_substitute_player_scope() {
+        let make = |scope| Effect::CreateDrawReplacement {
+            replacement_effect: Box::new(
+                AbilityDefinition::new(AbilityKind::Spell, Effect::NoOp).player_scope(scope),
+            ),
+        };
+        let each_player = make(PlayerFilter::All);
+        let each_opponent = make(PlayerFilter::Opponent);
+        assert_ne!(effect_details(&each_player), effect_details(&each_opponent));
     }
 
     /// CR 102.1 + CR 608.2c: a `player_scope` union is supported only when every
