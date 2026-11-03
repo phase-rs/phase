@@ -1034,9 +1034,11 @@ fn apply_energy_delta(
 ///
 /// CR 303.4f: For a CARD Aura / Equipment, the caller is expected to wire
 /// `attached_to` through `attach_to` / `attach_to_player` BEFORE invoking this
-/// function. A card placement is then severed by its own move (CR 701.3a: the
-/// move takes it to a new zone), so the caller's pre-attachment survives only
-/// as the staging journal row — see the raw branch below. A TOKEN must not be
+/// function when it takes the RAW branch. That staging pre-attachment is then
+/// severed by the card's own move (CR 400.7: an object that changes zones is a
+/// new object with no relation to its previous existence), so it survives only
+/// as the staging journal row — see the raw branch below. A real-entry card
+/// carries its host on the `ZoneChange` proposal instead. A TOKEN must not be
 /// pre-attached at all: its host rides the `TokenEntry` and its finalize
 /// attaches after birth.
 pub fn route_debug_create_to_battlefield(
@@ -1426,7 +1428,7 @@ pub fn create_debug_cards(
             };
             // CR 303.4f: only a CARD takes the staging pre-attach; its arm is
             // byte-identical to today (the raw move then severs the edge, since
-            // the move is an ordinary CR 701.3a zone change, and this PR pins
+            // the move is an ordinary CR 400.7 zone change, and this PR pins
             // that — it does not fix it). A TOKEN must not: the token route
             // discards the staging incarnation and births a new one, so a
             // staging attach would journal an attachment edit for an object

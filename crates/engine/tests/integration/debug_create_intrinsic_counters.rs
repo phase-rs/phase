@@ -74,7 +74,8 @@ const PACIFISM: &str = "Pacifism";
 const FYLGJA: &str = "Enchant creature\n\
 This Aura enters with four healing counters on it.\n\
 Remove a healing counter from this Aura: Prevent the next 1 damage that would be dealt to \
-enchanted creature this turn.";
+enchanted creature this turn.\n\
+{2}{W}: Put a healing counter on this Aura.";
 
 /// Verbatim Oracle text of Shock.
 const SHOCK: &str = "Shock deals 2 damage to any target.";
@@ -1795,7 +1796,7 @@ fn raw_debug_token_attaches_once() {
     );
 }
 
-/// CR 701.3a: the `staging_attach` CARD arm is today's behaviour, byte for
+/// CR 400.7: the `staging_attach` CARD arm is today's behaviour, byte for
 /// byte. A raw battlefield CARDS request is pre-attached in the Hand staging
 /// zone — journaling one attachment row naming the staging incarnation — and
 /// its own move then severs the edge, so it lands unattached with one
@@ -1829,7 +1830,7 @@ fn raw_debug_card_is_severed_by_its_move() {
     assert!(!state.objects[&card].is_token, "{row}");
     assert_eq!(
         state.objects[&card].attached_to, None,
-        "{row}: the move severed the staging attachment (CR 701.3a)"
+        "{row}: the move severed the staging attachment (CR 400.7)"
     );
     assert!(
         !state.objects[&host].attachments.contains(&card),

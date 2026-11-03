@@ -2590,45 +2590,42 @@ pub(crate) fn commit_liminal_token_entry_with_replacement_state(
             .expect("resolved copy-token creation must have a live journal cause");
     }
 
-    // CR 303.4f/g: `Forced` runs no as-enters host choice. It must SKIP the act
-    // half rather than feed it `NotApplicable`: `apply_entering_aura_hosts`
-    // clears any parked `entering_aura_authority` (zone_pipeline.rs) BEFORE its
-    // `NotApplicable` early return, and a raw debug entry is admitted from any
-    // waiting state — calling it would spend an unrelated Aura's parked
-    // CR 303.4f authority.
-    if matches!(mode, TokenEntryMode::Forced) {
-        debug_assert!(matches!(
-            hosts,
-            crate::game::zone_pipeline::EnteringAuraHosts::NotApplicable
-        ));
-    } else {
-        match crate::game::zone_pipeline::apply_entering_aura_hosts(state, entry_ref, hosts) {
-            // `NoLegalHost` is unreachable here: the empty-`legal_targets` arm above
-            // returned for every entrant, card-backed included.
-            crate::game::zone_pipeline::EnteringAuraAttachment::NotApplicable
-            | crate::game::zone_pipeline::EnteringAuraAttachment::Attached
-            | crate::game::zone_pipeline::EnteringAuraAttachment::NoLegalHost => {}
-            crate::game::zone_pipeline::EnteringAuraAttachment::NeedsChoice {
-                controller: chooser,
-                legal_targets,
-            } => {
-                // CR 616.1 carrier: park the entry tail exactly like the
-                // enter-with-counters pause below, so the finalize step and any
-                // remaining batch continuation run after the host is chosen.
-                state.last_created_token_ids = entry.created_ids.clone();
-                let remaining_counters = counters_to_apply
-                    .iter()
-                    .filter(|(_, count)| *count > 0)
-                    .map(|(counter_type, count)| PendingCounterAddition::Object {
-                        actor: owner,
-                        object_id: entry_ref,
-                        counter_type: counter_type.clone(),
-                        count: *count,
-                    })
-                    .collect();
-                let mut post_actions = vec![finalization];
-                post_actions.extend(post_actions_after_finalize);
-                super::counters::stash_pending_counter_additions(
+    match mode {
+        // CR 303.4f/g: `Forced` runs no as-enters host choice. It must SKIP the
+        // act half rather than feed it `NotApplicable`: `apply_entering_aura_hosts`
+        // clears any parked `entering_aura_authority` (zone_pipeline.rs) BEFORE
+        // its `NotApplicable` early return, and a raw debug entry is admitted
+        // from any waiting state — calling it would spend an unrelated Aura's
+        // parked CR 303.4f authority.
+        TokenEntryMode::Forced => {}
+        TokenEntryMode::Standard => {
+            match crate::game::zone_pipeline::apply_entering_aura_hosts(state, entry_ref, hosts) {
+                // `NoLegalHost` is unreachable here: the empty-`legal_targets` arm above
+                // returned for every entrant, card-backed included.
+                crate::game::zone_pipeline::EnteringAuraAttachment::NotApplicable
+                | crate::game::zone_pipeline::EnteringAuraAttachment::Attached
+                | crate::game::zone_pipeline::EnteringAuraAttachment::NoLegalHost => {}
+                crate::game::zone_pipeline::EnteringAuraAttachment::NeedsChoice {
+                    controller: chooser,
+                    legal_targets,
+                } => {
+                    // CR 616.1 carrier: park the entry tail exactly like the
+                    // enter-with-counters pause below, so the finalize step and any
+                    // remaining batch continuation run after the host is chosen.
+                    state.last_created_token_ids = entry.created_ids.clone();
+                    let remaining_counters = counters_to_apply
+                        .iter()
+                        .filter(|(_, count)| *count > 0)
+                        .map(|(counter_type, count)| PendingCounterAddition::Object {
+                            actor: owner,
+                            object_id: entry_ref,
+                            counter_type: counter_type.clone(),
+                            count: *count,
+                        })
+                        .collect();
+                    let mut post_actions = vec![finalization];
+                    post_actions.extend(post_actions_after_finalize);
+                    super::counters::stash_pending_counter_additions(
                 state,
                 remaining_counters,
                 crate::types::game_state::PendingEffectResolved::with_post_actions_without_effect(
@@ -2641,25 +2638,26 @@ pub(crate) fn commit_liminal_token_entry_with_replacement_state(
                     post_actions,
                 ),
             );
-                state.waiting_for = WaitingFor::ReturnAsAuraTarget {
-                    player: chooser,
-                    source_id: entry.source_id,
-                    returned_id: entry_ref,
-                    legal_targets,
-                    pending_effect: Box::new(ResolvedAbility::new(
-                        Effect::Attach {
-                            attachment: TargetFilter::SelfRef,
-                            target: TargetFilter::Any,
-                            selection: AttachSelection::AtResolution {
-                                count: AttachCardinality::One,
+                    state.waiting_for = WaitingFor::ReturnAsAuraTarget {
+                        player: chooser,
+                        source_id: entry.source_id,
+                        returned_id: entry_ref,
+                        legal_targets,
+                        pending_effect: Box::new(ResolvedAbility::new(
+                            Effect::Attach {
+                                attachment: TargetFilter::SelfRef,
+                                target: TargetFilter::Any,
+                                selection: AttachSelection::AtResolution {
+                                    count: AttachCardinality::One,
+                                },
                             },
-                        },
-                        Vec::new(),
-                        entry.source_id,
-                        chooser,
-                    )),
-                };
-                return false;
+                            Vec::new(),
+                            entry.source_id,
+                            chooser,
+                        )),
+                    };
+                    return false;
+                }
             }
         }
     }
