@@ -1,9 +1,10 @@
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef, ThisWayCause,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::game_state::RandomDraw;
+use crate::types::player::PlayerId;
 
 /// CR 701.24a: Shuffle — randomize the cards in a library.
 pub fn resolve(
@@ -11,6 +12,13 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    // CR 701.24c-e + CR 400.3: the terminal shuffle of a "move into owners'
+    // libraries, then shuffle" instruction shuffles the library of every owner of
+    // the moved population, once each — the move itself deferred its shuffle to it.
+    if super::is_self_iterating_owner_library_shuffle(ability) {
+        return resolve_owner_population(state, ability, events);
+    }
+
     // CR 608.2c + CR 115.1: Resolve the shuffle's acting player. The filter is
     // the source of truth for *which* player. Mirror Draw/Mill/Discard:
     // context-ref filters (Controller, etc.) MUST NOT consult `ability.targets`
@@ -86,6 +94,59 @@ pub fn resolve(
         },
     };
 
+    shuffle_player(state, ability, target_player, events)
+}
+
+/// CR 701.24c-e + CR 400.3: Shuffle the library of each owner in the exact
+/// prospective subject population the preceding move published during THIS
+/// resolution, in APNAP order, once each.
+///
+/// The population is read from the resolution's own chain set
+/// (`chain_tracked_set_id`, reset at every depth-0 resolution), never from "the
+/// newest set in the game": a terminal shuffle that no move published for (a
+/// replacement redirect, a move that returned early) shuffles nobody rather than
+/// whoever an earlier resolution left behind. Reading the set CLOSES it — the next
+/// shuffle-into-library instruction in the same chain (Cathartic Parting's second
+/// clause) publishes and consumes a population of its own instead of re-shuffling
+/// the first instruction's owners.
+fn resolve_owner_population(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let published: Vec<PlayerId> = state
+        .chain_tracked_set_id
+        .and_then(|set_id| state.tracked_set_participants.get(&set_id))
+        .map(|ledger| {
+            ledger
+                .iter()
+                .filter(|(_, cause)| *cause == ThisWayCause::OwnerLibraryShuffleSubject)
+                .map(|(player, _)| *player)
+                .collect()
+        })
+        .unwrap_or_default();
+    state.chain_tracked_set_id = None;
+    let apnap = crate::game::players::apnap_order_from(
+        state,
+        ability.starting_with.clone(),
+        ability.controller,
+    );
+    for owner in apnap
+        .into_iter()
+        .filter(|player| published.contains(player))
+    {
+        shuffle_player(state, ability, owner, events)?;
+    }
+    Ok(())
+}
+
+/// CR 701.24a: Shuffle one player's library, honoring "can't shuffle".
+fn shuffle_player(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    target_player: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
     // CR 701.24a: the target player must exist before any shuffle logic runs.
     // Validate first, unconditionally, so an unknown player is rejected even
     // when a broad "Can't shuffle" static would otherwise suppress the shuffle.

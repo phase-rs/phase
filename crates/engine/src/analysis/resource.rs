@@ -6485,6 +6485,10 @@ fn eq_except_growable(pa: &GameState, pb: &GameState, grown: &HashSet<ObjectId>)
         .retain(|id, _| id.0 < window_floor);
     b.tracked_set_member_origins
         .retain(|id, _| id.0 < window_floor);
+    // CR 701.24d: the participant ledger (the owners a shuffle-into-library instruction
+    // designated) is set-keyed bookkeeping exactly like the member maps above.
+    b.tracked_set_participants
+        .retain(|id, _| id.0 < window_floor);
     b.next_tracked_set_id = a.next_tracked_set_id;
     a == b
         && a.post_replacement_token_substitution_count
@@ -29285,6 +29289,42 @@ mod tests {
                 eq_except_growable(&prior, &prior_mutated, &grown),
             ),
             (true, false, false)
+        );
+    }
+
+    /// CR 701.24d: the owners a shuffle-into-library instruction designated (the participant
+    /// ledger) are set-keyed bookkeeping like the member maps: a ledger entry on a set allocated
+    /// inside the window drops out of the compare (a Worldspine Wurm loop publishes one per
+    /// cycle), while a change to an earlier set's ledger still refuses.
+    ///
+    /// REVERT-PROBE: delete the `tracked_set_participants` retain ⇒ the relieved leg **FAILS**.
+    #[test]
+    fn window_new_tracked_set_participants_are_bookkeeping_growth() {
+        use crate::types::ability::ThisWayCause::OwnerLibraryShuffleSubject as Cause;
+        use crate::types::identifiers::TrackedSetId;
+        let grown = HashSet::new();
+        let prior = with_tracked_sets(&[(0, vec![500])], None);
+        let ledger = |state: &mut GameState, set: u64, owner: u8| {
+            state
+                .tracked_set_participants
+                .entry(TrackedSetId(set))
+                .or_default()
+                .push((PlayerId(owner), Cause));
+        };
+        let mut prior_with_ledger = prior.clone();
+        ledger(&mut prior_with_ledger, 0, 1);
+        let mut relieved = with_tracked_sets(&[(0, vec![500]), (1, vec![501])], None);
+        ledger(&mut relieved, 0, 1);
+        ledger(&mut relieved, 1, 1);
+        let mut earlier_set_changed = with_tracked_sets(&[(0, vec![500]), (1, vec![501])], None);
+        ledger(&mut earlier_set_changed, 0, 0);
+        ledger(&mut earlier_set_changed, 1, 1);
+        assert_eq!(
+            (
+                eq_except_growable(&prior_with_ledger, &relieved, &grown),
+                eq_except_growable(&prior_with_ledger, &earlier_set_changed, &grown),
+            ),
+            (true, false)
         );
     }
 

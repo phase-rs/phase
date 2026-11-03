@@ -8552,14 +8552,19 @@ fn parse_graveyard_redirect_replacement(
         // dropping it is what this change exists to stop — fail closed instead.
         Outcome::ShuffleBack { .. } if consequent.is_some() => return None,
         Outcome::ShuffleBack { reveal } => {
-            // CR 701.24: shuffle into owner's library. CR 400.3 is the owner-routing
-            // authority — TargetFilter::Owner resolves to state.objects[source_id].owner,
-            // correct under Mind Control / Threads of Disloyalty when control ≠ ownership.
-            let shuffle = AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::Shuffle {
-                    target: TargetFilter::Owner,
-                },
+            // CR 701.24a: "shuffle it into its owner's library" is ONE shuffle
+            // instruction. The redirect is delivered by the zone pipeline, whose tail
+            // randomizes the owner's library for a placement-less library delivery —
+            // that is the instruction's one shuffle (CR 400.3: the tail shuffles the
+            // moved object's owner, correct under Mind Control / Threads of
+            // Disloyalty when control != ownership). The redirect `ChangeZone` is an
+            // event modifier the replacement pipeline applies without resolving it
+            // through `change_zone::resolve`, so it publishes no owner population;
+            // this terminal `Shuffle` carries the same owner-library scope as every
+            // other shuffle-into-library chain, so it joins that model and adds no
+            // second randomization.
+            let shuffle = super::oracle_effect::imperative::owner_library_terminal_shuffle(
+                TargetFilter::Owner,
             );
             let post = if reveal {
                 // CR 701.20: reveal the affected object before shuffling.
@@ -20064,6 +20069,23 @@ mod tests {
                     target: TargetFilter::Owner
                 }
             ));
+            // CR 701.24a: the redirect's delivery performs the instruction's one
+            // shuffle; this terminal shuffle carries the owner-library scope like
+            // every shuffle-into-library chain and finds no population published by
+            // the redirect (an event modifier), so it adds none.
+            assert!(
+                matches!(
+                    shuffle.player_scope,
+                    Some(PlayerFilter::TrackedSetPossessor {
+                        caused_by: Some(
+                            crate::types::ability::ThisWayCause::OwnerLibraryShuffleSubject
+                        ),
+                        ..
+                    })
+                ),
+                "{card}: terminal shuffle must carry the owner-library scope, got {:?}",
+                shuffle.player_scope
+            );
         }
     }
 
