@@ -3446,13 +3446,17 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             // A new sentence: only a window that HEADS it scopes its coordinated
             // predicates ("Until your next turn, X and Y"). A trailing window
             // ("X until end of turn, then Y") belongs to its own clause, so it is not
-            // distributed — mirrors `compute_sentence_leading_duration`. A sentinel
-            // (`None` = nothing stated, `Some(Permanent)` = the sub-parser's "no
-            // window" marker) states nothing to distribute.
-            let heads_sentence = clause_ir
-                .source
-                .fragment()
-                .is_some_and(|text| strip_leading_duration(text.trim()).is_some());
+            // distributed — mirrors `compute_sentence_leading_duration`. The window
+            // is read off the shell-peeled body, so a leading guard the chunk loop
+            // already lifted into `condition` ("If {W}{U} was spent to cast this
+            // spell, until your next turn, …" — Mythos of Vadrok) does not hide it.
+            // A sentinel (`None` = nothing stated, `Some(Permanent)` = the
+            // sub-parser's "no window" marker) states nothing to distribute.
+            let heads_sentence = clause_ir.source.fragment().is_some_and(|text| {
+                let (body, _) =
+                    crate::parser::clause_shell::peel_clause_with_anchor(text.trim(), false);
+                strip_leading_duration(body.trim()).is_some()
+            });
             sentence_duration = (heads_sentence && !duration_is_unset_sentinel(&def.duration))
                 .then(|| def.duration.clone())
                 .flatten();

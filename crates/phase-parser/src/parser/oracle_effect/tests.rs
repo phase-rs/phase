@@ -28469,6 +28469,38 @@ fn trailing_clause_window_is_not_distributed_to_later_clause() {
     );
 }
 
+/// CR 611.2a + CR 608.2c: a leading window still heads its sentence when a leading
+/// guard precedes it — Mythos of Vadrok's "If {W}{U} was spent to cast this spell,
+/// until your next turn, …" scopes both coordinated predicates (#7962).
+#[test]
+fn guarded_leading_window_is_distributed_to_coordinated_clause() {
+    let def = parse_effect_chain(
+        "Mythos of Vadrok deals 5 damage divided as you choose among any number of target creatures and/or planeswalkers. If {W}{U} was spent to cast this spell, until your next turn, those permanents can't attack or block and their activated abilities can't be activated.",
+        AbilityKind::Spell,
+    );
+    let printed = Duration::UntilNextTurnOf {
+        player: PlayerScope::Controller,
+    };
+    assert_eq!(def.duration, None, "the damage sentence states no window");
+    let mut guarded = Vec::new();
+    let mut link = def.sub_ability.as_deref();
+    while let Some(d) = link {
+        guarded.push(d);
+        link = d.sub_ability.as_deref();
+    }
+    assert!(
+        guarded.len() >= 2,
+        "both coordinated predicates must be built: {guarded:#?}"
+    );
+    for d in &guarded {
+        assert_eq!(
+            d.duration.as_ref(),
+            Some(&printed),
+            "every predicate of the guarded sentence carries its window: {d:#?}"
+        );
+    }
+}
+
 /// CR 602.5 + CR 603.2a + CR 608.2c: Dovin Baan's +1 — "up to one target
 /// creature gets -3/-0 and its activated abilities can't be activated."
 /// The compound splits into a Pump primary and a CantBeActivated conjunct
