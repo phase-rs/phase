@@ -4661,7 +4661,6 @@ pub(super) fn handle_resolution_choice(
                     crate::game::zone_pipeline::submit_staged_batch_arrangement(
                         state,
                         logical_group_id,
-                        split_player,
                         library_owner,
                         &cards,
                         top_count,

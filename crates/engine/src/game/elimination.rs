@@ -1226,11 +1226,7 @@ fn abandon_pending_zone_change_member_for_player_left(
             pending
                 .requests
                 .retain(|request| request.object_id != identity.object_id);
-            crate::game::zone_pipeline::prune_staged_member_for_player_left(
-                pending,
-                identity,
-                leaving_player,
-            );
+            crate::game::zone_pipeline::prune_staged_member_for_player_left(pending, identity);
             if pending.paused_current.as_ref().is_some_and(|paused| {
                 paused.member == identity && paused.terminal_completion.is_none()
             }) {
@@ -1249,15 +1245,15 @@ fn abandon_pending_zone_change_member_for_player_left(
         // below a top `PostReplacement` child; the pair visitor above only
         // reaches the top batch, so visit that exact parent too.
         state.resolution_stack.visit_staged_batch_mut(|pending| {
+            pending
+                .logical_zone_change_group
+                .record_abandoned_by_player_left(identity)
+                .expect("buried staged batch owns a coherent logical group");
             pending.remaining.retain(|id| *id != identity.object_id);
             pending
                 .requests
                 .retain(|request| request.object_id != identity.object_id);
-            crate::game::zone_pipeline::prune_staged_member_for_player_left(
-                pending,
-                identity,
-                leaving_player,
-            );
+            crate::game::zone_pipeline::prune_staged_member_for_player_left(pending, identity);
             if pending.paused_current.as_ref().is_some_and(|paused| {
                 paused.member == identity && paused.terminal_completion.is_none()
             }) {
@@ -5638,11 +5634,7 @@ mod r4b_staged_elimination_tests {
                 .take_active_batch_delivery()
                 .unwrap()
                 .unwrap();
-            crate::game::zone_pipeline::prune_staged_member_for_player_left(
-                &mut owner,
-                identity,
-                PlayerId(0),
-            );
+            crate::game::zone_pipeline::prune_staged_member_for_player_left(&mut owner, identity);
             let staged = owner.staged.as_ref().unwrap();
             let pruned = staged
                 .members
@@ -5682,5 +5674,92 @@ mod r4b_staged_elimination_tests {
             "the abandoned staged batch settles rather than stranding"
         );
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    }
+
+    #[test]
+    fn a_public_concession_settles_a_staged_arrangement_prompt() {
+        // Three seats: eliminating P1 leaves a live game, so the non-terminal
+        // reconciliation seam (which owns the batch prompt arm) runs.
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 3, 42);
+        let a = create_object(
+            &mut state,
+            CardId(31),
+            PlayerId(1),
+            "Leaving staged A".to_string(),
+            Zone::Battlefield,
+        );
+        let b = create_object(
+            &mut state,
+            CardId(32),
+            PlayerId(1),
+            "Leaving staged B".to_string(),
+            Zone::Battlefield,
+        );
+        let group = crate::game::triggers::allocate_logical_zone_change_group(&mut state, &[a, b]);
+        let group_id = group.logical_group_id;
+        let members = vec![member(&state, a, 0), member(&state, b, 1)];
+        let arrangements = vec![StagedLibraryArrangement {
+            position: LibraryPosition::Bottom,
+            batch: MassLibraryOrderBatch {
+                owner: PlayerId(1),
+                arranger: None,
+                members: members
+                    .iter()
+                    .map(|member| MassLibraryOrderMember {
+                        identity: member.identity,
+                        origin: Zone::Battlefield,
+                    })
+                    .collect(),
+            },
+            status: StagedArrangementStatus::Offered,
+        }];
+        state.push_batch_delivery(PendingBatchDeliveries {
+            component_delivery_parent: None,
+            logical_zone_change_group: group,
+            paused_current: None,
+            remaining: Vec::new(),
+            destination: Zone::Library,
+            source_id: None,
+            enter_tapped: EtbTapState::Unspecified,
+            exile_tracking: ZoneDeliveryExileTracking::None,
+            library_placement: None,
+            completion: None,
+            replacement_applied: HashSet::new(),
+            requests: Vec::new(),
+            attempted: vec![a, b],
+            zone_change_record_start: state.zone_changes_this_turn.len(),
+            deferred_events: Vec::new(),
+            staged: Some(StagedBatchDelivery {
+                stage: BatchDeliveryStage::Arranging,
+                cursor: 2,
+                members,
+                arrangements,
+                arrangement_cursor: 0,
+            }),
+        });
+        state.waiting_for = WaitingFor::new_dig_rest_split_for_batch(
+            PlayerId(1),
+            PlayerId(1),
+            vec![a, b],
+            0,
+            DigRestSplitScope::OrderOnly,
+            None,
+            group_id,
+        );
+
+        let mut events = Vec::new();
+        eliminate_player(&mut state, PlayerId(1), &mut events);
+
+        assert!(
+            state.active_batch_delivery().is_none(),
+            "the batch-owned prompt arm settles the abandoned staged batch"
+        );
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(
+            state.objects[&a].zone,
+            Zone::Exile,
+            "the departed owner's objects leave the game"
+        );
+        assert_eq!(state.objects[&b].zone, Zone::Exile);
     }
 }

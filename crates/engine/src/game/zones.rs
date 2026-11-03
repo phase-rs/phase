@@ -5058,7 +5058,7 @@ mod tests {
         );
         state.players[0].library = crate::im::vector![sentinel, c0, c1, c2];
         let incarnation_before = state.objects[&c0].incarnation;
-        let epoch_before = state.library_knowledge_epoch(PlayerId(0));
+        let epoch_before = state.library_knowledge_boundary_generation(PlayerId(0));
 
         // Submitted permutation [C1, C2, C0]; announcement/request order
         // [C2, C0, C1] is different, so a fixed-base formula would fail.
@@ -5086,7 +5086,11 @@ mod tests {
             state.zone_changes_this_turn.is_empty(),
             "a within-library reorder does not enter the zone-change ledger"
         );
-        let _ = epoch_before;
+        assert_eq!(
+            state.library_knowledge_boundary_generation(PlayerId(0)),
+            epoch_before + 3,
+            "one knowledge boundary generation per reinsertion"
+        );
     }
 
     /// R4b S2b (F1 control): a mixed cross-zone/library-origin Bottom group

@@ -1928,31 +1928,33 @@ impl ResolutionStack {
         &mut self,
         mut visit: impl FnMut(&mut PendingBatchDeliveries),
     ) -> bool {
+        // There is at most one staged owner per action (no second owner or
+        // queue). Walk down from the top to the nearest BatchDelivery carrying
+        // `staged`, skipping component children (`staged: None`) and any
+        // transient delivery frames that bury it.
         let Some(top) = self.frames.top() else {
             return false;
         };
-        match self.frames.get(top) {
-            Some(ResolutionFrame::BatchDelivery(batch)) if batch.staged.is_some() => {
-                if let Some(ResolutionFrame::BatchDelivery(frame)) = self.frames.get_mut(top) {
-                    visit(frame);
-                    return true;
-                }
-                false
+        let mut cursor = Some(top);
+        let mut found = None;
+        while let Some(id) = cursor {
+            if matches!(
+                self.frames.get(id),
+                Some(ResolutionFrame::BatchDelivery(batch)) if batch.staged.is_some()
+            ) {
+                found = Some(id);
+                break;
             }
-            Some(ResolutionFrame::PostReplacement(_)) => {
-                let Some(below) = self.frames.below(top) else {
-                    return false;
-                };
-                match self.frames.get_mut(below) {
-                    Some(ResolutionFrame::BatchDelivery(frame)) if frame.staged.is_some() => {
-                        visit(frame);
-                        true
-                    }
-                    _ => false,
-                }
-            }
-            _ => false,
+            cursor = self.frames.below(id);
         }
+        let Some(id) = found else {
+            return false;
+        };
+        if let Some(ResolutionFrame::BatchDelivery(frame)) = self.frames.get_mut(id) {
+            visit(frame);
+            return true;
+        }
+        false
     }
 
     /// Mutably accesses a BatchDelivery owner while its exact active
