@@ -35009,10 +35009,11 @@ impl GameState {
     /// See `normalize_for_loop`. Per object, rank-based over the retained
     /// `lki_copiable_values_by_incarnation` keys, the incarnations trigger
     /// events name (`ZoneChanged` entries and every incarnation inside their
-    /// records, stamped `PermanentTapped` taps), the may-trigger origins and
-    /// stored answers, the turn and combat block-history pairs (CR 509.1g), and
-    /// the live incarnation of every object those or a tracked-set origin
-    /// (CR 608.2c) name. Ranks count down from the
+    /// records, stamped `PermanentTapped` taps and the CR 400.7 damage-source
+    /// stamps of `DamageDealt` / `CombatDamageDealtToPlayer`), the may-trigger
+    /// origins and stored answers, the turn and combat block-history pairs
+    /// (CR 509.1g), and the live incarnation of every object those or a tracked-set
+    /// origin (CR 608.2c) name. Ranks count down from the
     /// highest member, so the live incarnation anchors them: two positions
     /// minted at different times compare equal, while which incarnation each
     /// carrier names, relative to the live one, and whether a snapshot sits
@@ -35020,25 +35021,57 @@ impl GameState {
     /// same map, so normalizing a normalized state is a fixed point. Kept
     /// snapshots no carrier reads rank among themselves, and tracked-set
     /// origins are renamed by their read class rather than ranked.
+    ///
+    /// The same rule covers the bounded per-turn ledgers that pin a participant
+    /// by exact incarnation — combat membership and pinned destinations
+    /// (CR 400.7 + CR 506.4c), crew activation/resolution/crewed-by history
+    /// (CR 702.122a-c), weaponized attack declarations (CR 508.1a), modal
+    /// no-repeat history (CR 700.2), reveal leases (CR 701.20a), the per-definition
+    /// trigger limits (CR 603.2/603.2h/603.4), instruction-result records
+    /// (CR 608.2c), and the combat status an LKI record captured (CR 506.3).
+    /// An UNBOUNDED pump ledger is deliberately NOT ranked: it gains one entry per
+    /// cycle, so ranking it could not make two recurrence frames equal anyway.
+    ///
+    /// A compared record's trigger identity needs TWO visitors — incarnations rank
+    /// through `canonical`, layer-6 grant generations through the grant map — and
+    /// routing one pool's value through the other's `above` panics, so
+    /// `record_incarnations` takes both.
     fn canonicalize_lki_incarnations_for_loop(&mut self) {
-        fn named_incarnation(event: &mut GameEvent) -> Option<(ObjectId, &mut u64)> {
+        /// Every incarnation a trigger event names OUTSIDE its `ZoneChanged` record.
+        /// The record's own pins belong to `record_incarnations`: visiting them here
+        /// too would re-rank an already-ranked value and panic in `above`.
+        fn named_incarnations(event: &mut GameEvent, f: &mut impl FnMut(ObjectId, &mut u64)) {
             match event {
-                GameEvent::ZoneChanged {
-                    object_id, record, ..
-                } => record
-                    .entered_incarnation
-                    .as_mut()
-                    .map(|incarnation| (*object_id, incarnation)),
                 GameEvent::PermanentTapped {
                     object_id,
                     incarnation: Some(incarnation),
                     ..
-                } => Some((*object_id, incarnation)),
+                } => f(*object_id, incarnation),
+                // CR 400.7 + CR 608.2h (#9754): the source stamp a damage event
+                // carries is the same class of pin as a tap stamp.
+                GameEvent::DamageDealt {
+                    source_id,
+                    source_incarnation: Some(incarnation),
+                    ..
+                } => f(*source_id, incarnation),
+                GameEvent::CombatDamageDealtToPlayer {
+                    source_incarnations,
+                    ..
+                } => {
+                    for reference in source_incarnations {
+                        f(reference.object_id, &mut reference.incarnation);
+                    }
+                }
                 // Exhaustive on purpose: a new event that names an incarnation must
                 // decide here whether loop normalization renumbers it.
                 GameEvent::PermanentTapped {
                     incarnation: None, ..
                 }
+                | GameEvent::DamageDealt {
+                    source_incarnation: None,
+                    ..
+                }
+                | GameEvent::ZoneChanged { .. }
                 | GameEvent::GameStarted
                 | GameEvent::HiddenSearchViewed { .. }
                 | GameEvent::TurnStarted { .. }
@@ -35082,7 +35115,6 @@ impl GameState {
                 | GameEvent::GameOver { .. }
                 | GameEvent::ResolutionHalted { .. }
                 | GameEvent::ShortcutRepetition { .. }
-                | GameEvent::DamageDealt { .. }
                 | GameEvent::DamagePrevented { .. }
                 | GameEvent::SpellCountered { .. }
                 | GameEvent::CounterAdded { .. }
@@ -35120,7 +35152,6 @@ impl GameState {
                 | GameEvent::TurnedFaceDown { .. }
                 | GameEvent::CardsRevealed { .. }
                 | GameEvent::ChosenNumbersRevealed { .. }
-                | GameEvent::CombatDamageDealtToPlayer { .. }
                 | GameEvent::PlayerEliminated { .. }
                 | GameEvent::CrimeCommitted { .. }
                 | GameEvent::Cycled { .. }
@@ -35181,24 +35212,34 @@ impl GameState {
                 | GameEvent::CascadeMissed { .. }
                 | GameEvent::DebugActionUsed { .. }
                 | GameEvent::DebugPermissionGranted { .. }
-                | GameEvent::DebugPermissionRevoked { .. } => None,
+                | GameEvent::DebugPermissionRevoked { .. } => {}
             }
         }
-        // Every incarnation inside a `ZoneChanged` record except `entered_incarnation`,
-        // which `named_incarnation` owns. Destructured without `..` so a new
-        // incarnation-bearing field must decide here whether it is ranked.
-        fn record_incarnations(event: &mut GameEvent, f: &mut impl FnMut(ObjectId, &mut u64)) {
-            let GameEvent::ZoneChanged { record, .. } = event else {
-                return;
-            };
+        /// Every incarnation and every layer-6 grant generation a `ZoneChanged`
+        /// record names, except `entered_incarnation` (owned by
+        /// `record_entered_incarnation`, the one pin also pooled as a read class).
+        ///
+        /// Two visitors, not one: an incarnation ranks through `canonical`, a grant
+        /// generation through the grant map, and each `above` panics on a value its
+        /// own pool never collected. `may_trigger_origins` already keeps those two
+        /// pools apart in a single walk. Destructured without `..` so a new
+        /// incarnation-bearing field must decide here whether it is ranked.
+        fn record_incarnations<I, G>(
+            record: &mut ZoneChangeRecord,
+            incarnations: &mut I,
+            grant_generations: &mut G,
+        ) where
+            I: FnMut(ObjectId, &mut u64),
+            G: FnMut(ObjectId, &mut u64),
+        {
             let ZoneChangeRecord {
-                object_id: _,
+                object_id,
                 name: _,
                 core_types: _,
                 subtypes: _,
                 supertypes: _,
                 keywords: _,
-                trigger_definitions: _,
+                trigger_definitions,
                 trigger_source_context,
                 power: _,
                 toughness: _,
@@ -35216,7 +35257,7 @@ impl GameState {
                 attachments,
                 linked_exile_snapshot,
                 is_token: _,
-                combat_status: _,
+                combat_status,
                 block_pairs,
                 co_departed: _,
                 entered_incarnation: _,
@@ -35226,10 +35267,19 @@ impl GameState {
                 is_suspected: _,
                 was_prepared: _,
                 departure: _,
-            } = &mut **record;
-            attachment_incarnations(attachments, f);
-            linked_exile_incarnations(linked_exile_snapshot, f);
-            block_pair_incarnations(block_pairs, f);
+            } = record;
+            let minted_by = *object_id;
+            attachment_incarnations(attachments, incarnations);
+            linked_exile_incarnations(linked_exile_snapshot, incarnations);
+            block_pair_incarnations(block_pairs, incarnations);
+            for entry in trigger_definitions {
+                trigger_entry_incarnations(entry, minted_by, incarnations, grant_generations);
+            }
+            // CR 506.3 + CR 400.7 + CR 603.10a: the attack target this object was
+            // attacking when the status was captured.
+            if let Some(identity) = combat_status.attack_target_identity.as_mut() {
+                incarnations(identity.object_id, &mut identity.incarnation);
+            }
             let Some(TriggerSourceContext {
                 identity,
                 lki,
@@ -35248,7 +35298,7 @@ impl GameState {
                 convoked_creatures: _,
                 case_state: _,
                 class_level: _,
-                trigger_entries: _,
+                trigger_entries,
                 timestamp: _,
                 entered_battlefield_turn: _,
                 paired_with: _,
@@ -35257,7 +35307,7 @@ impl GameState {
                 attachments,
                 linked_exile_snapshot,
                 cards_exiled_this_turn: _,
-                combat_status: _,
+                combat_status,
                 cast_from_zone: _,
                 played_from_zone: _,
                 entered_via_ability_source: _,
@@ -35284,12 +35334,18 @@ impl GameState {
                 reference,
                 expected_zone: _,
             } = identity;
-            f(reference.object_id, &mut reference.incarnation);
-            lki_incarnations(lki, f);
-            attachment_incarnations(attachments, f);
-            linked_exile_incarnations(linked_exile_snapshot, f);
+            incarnations(reference.object_id, &mut reference.incarnation);
+            lki_incarnations(lki, incarnations);
+            attachment_incarnations(attachments, incarnations);
+            linked_exile_incarnations(linked_exile_snapshot, incarnations);
+            for entry in trigger_entries {
+                trigger_entry_incarnations(entry, minted_by, incarnations, grant_generations);
+            }
+            if let Some(identity) = combat_status.attack_target_identity.as_mut() {
+                incarnations(identity.object_id, &mut identity.incarnation);
+            }
             for ManaSpentSourceSnapshot { source_id: _, lki } in mana_spent_source_snapshots {
-                lki_incarnations(lki, f);
+                lki_incarnations(lki, incarnations);
             }
             if let Some(CostPaidObjectSnapshot {
                 object_id,
@@ -35297,11 +35353,39 @@ impl GameState {
                 incarnation,
             }) = cast_cost_paid_object
             {
-                f(*object_id, incarnation);
-                lki_incarnations(lki, f);
+                incarnations(*object_id, incarnation);
+                lki_incarnations(lki, incarnations);
             }
             if let Some(granting) = granting_object {
-                f(granting.object_id, &mut granting.incarnation);
+                incarnations(granting.object_id, &mut granting.incarnation);
+            }
+        }
+        /// A `TriggerEntry` carries no `TriggerDefinitionRef`: its source *is* the
+        /// record's object, so the caller supplies the minting object.
+        fn trigger_entry_incarnations<I, G>(
+            entry: &mut TriggerEntry,
+            minted_by: ObjectId,
+            incarnations: &mut I,
+            grant_generations: &mut G,
+        ) where
+            I: FnMut(ObjectId, &mut u64),
+            G: FnMut(ObjectId, &mut u64),
+        {
+            entry.occurrence.for_each_incarnation_mut(incarnations);
+            entry
+                .occurrence
+                .for_each_grant_generation_mut(minted_by, grant_generations);
+        }
+        /// The one record pin `record_incarnations` leaves to its own visitor: a
+        /// record's `entered_incarnation` is also a pooled carrier-read value
+        /// (`lki_by_incarnation`'s `key_name` class), so the collection site has to
+        /// know which values went in as carrier reads.
+        fn record_entered_incarnation(
+            record: &mut ZoneChangeRecord,
+            f: &mut impl FnMut(ObjectId, &mut u64),
+        ) {
+            if let Some(incarnation) = record.entered_incarnation.as_mut() {
+                f(record.object_id, incarnation);
             }
         }
         fn lki_incarnations(lki: &mut LKISnapshot, f: &mut impl FnMut(ObjectId, &mut u64)) {
@@ -35354,6 +35438,42 @@ impl GameState {
                 f(blocker.object_id, &mut blocker.incarnation);
                 f(attacker.object_id, &mut attacker.incarnation);
             }
+        }
+        /// CR 702.122b/c: "crewed by" pairs, the same two-ended shape as a block pair.
+        fn crew_pair_incarnations(
+            pairs: &mut [crate::game::crew_payment::CrewHistoryPair],
+            f: &mut impl FnMut(ObjectId, &mut u64),
+        ) {
+            for crate::game::crew_payment::CrewHistoryPair { vehicle, crewer } in pairs {
+                f(vehicle.object_id, &mut vehicle.incarnation);
+                f(crewer.object_id, &mut crewer.incarnation);
+            }
+        }
+        /// A hash container's element identity decides its bucket, so a ranked value is
+        /// rewritten by taking the container apart and rebuilding it — never by mutating
+        /// a key in place. `BTreeMap`/`Vec` values are rewritten in place at their sites.
+        fn rank_hash_set<T: std::hash::Hash + Eq>(
+            set: HashSet<T>,
+            f: &mut impl FnMut(&mut T),
+        ) -> HashSet<T> {
+            set.into_iter()
+                .map(|mut item| {
+                    f(&mut item);
+                    item
+                })
+                .collect()
+        }
+        /// The map-key half of [`rank_hash_set`]; the value is untouched.
+        fn rank_hash_map<K: std::hash::Hash + Eq, V>(
+            map: HashMap<K, V>,
+            f: &mut impl FnMut(&mut K),
+        ) -> HashMap<K, V> {
+            map.into_iter()
+                .map(|(mut key, value)| {
+                    f(&mut key);
+                    (key, value)
+                })
+                .collect()
         }
         fn linked_exile_incarnations(
             snapshots: &mut [LinkedExileSnapshot],
@@ -35435,17 +35555,29 @@ impl GameState {
                 .or_default()
                 .extend(history.keys().copied());
         }
+        let mut grants: HashMap<ObjectId, Vec<u64>> = HashMap::new();
         let mut carrier_read: HashSet<ObjectIncarnationRef> = HashSet::new();
         self.for_each_trigger_event_carrier_mut(&mut |event| {
-            if let Some((object_id, incarnation)) = named_incarnation(event) {
+            named_incarnations(event, &mut |object_id, incarnation| {
                 present.entry(object_id).or_default().push(*incarnation);
                 carrier_read.insert(ObjectIncarnationRef::of(object_id, *incarnation));
-            }
-            record_incarnations(event, &mut |object_id, incarnation| {
-                present.entry(object_id).or_default().push(*incarnation);
             });
+            if let GameEvent::ZoneChanged { record, .. } = event {
+                record_entered_incarnation(record, &mut |object_id, incarnation| {
+                    present.entry(object_id).or_default().push(*incarnation);
+                    carrier_read.insert(ObjectIncarnationRef::of(object_id, *incarnation));
+                });
+                record_incarnations(
+                    record,
+                    &mut |object_id, incarnation| {
+                        present.entry(object_id).or_default().push(*incarnation);
+                    },
+                    &mut |object_id, generation| {
+                        grants.entry(object_id).or_default().push(*generation);
+                    },
+                );
+            }
         });
-        let mut grants: HashMap<ObjectId, Vec<u64>> = HashMap::new();
         may_trigger_origins(self, &mut |definition_ref| {
             definition_ref.for_each_incarnation_mut(&mut |object_id, incarnation| {
                 present.entry(object_id).or_default().push(*incarnation);
@@ -35466,6 +35598,154 @@ impl GameState {
                     present.entry(object_id).or_default().push(*incarnation);
                 },
             );
+        }
+        // CR 400.7 + CR 104.4b: the bounded per-turn ledgers that pin a participant
+        // by exact incarnation. Unbounded pump ledgers are deliberately absent: they
+        // grow one entry per cycle, so ranking cannot equalize a real loop.
+        if let Some(combat) = self.combat.as_ref() {
+            for reference in combat
+                .attacking_incarnations_this_combat
+                .iter()
+                .chain(combat.attacked_permanents.values())
+            {
+                present
+                    .entry(reference.object_id)
+                    .or_default()
+                    .push(reference.incarnation);
+            }
+        }
+        for reference in self
+            .crew_activated_this_turn
+            .iter()
+            .chain(self.crew_resolved_this_turn.iter())
+        {
+            present
+                .entry(reference.object_id)
+                .or_default()
+                .push(reference.incarnation);
+        }
+        for mut pair in self.crew_history_this_turn.iter().copied() {
+            crew_pair_incarnations(
+                std::slice::from_mut(&mut pair),
+                &mut |object_id, incarnation| {
+                    present.entry(object_id).or_default().push(*incarnation);
+                },
+            );
+        }
+        for (reference, _) in self
+            .modal_modes_chosen_this_turn
+            .iter()
+            .chain(self.modal_modes_chosen_this_game.iter())
+        {
+            present
+                .entry(reference.object_id)
+                .or_default()
+                .push(reference.incarnation);
+        }
+        for record in &mut self.attacker_declarations_this_turn {
+            if let Some(incarnation) = record.incarnation {
+                present
+                    .entry(record.object_id)
+                    .or_default()
+                    .push(incarnation);
+            }
+            lki_incarnations(&mut record.lki, &mut |object_id, incarnation| {
+                present.entry(object_id).or_default().push(*incarnation);
+            });
+        }
+        for rows in self.stack_bound_reveals.values() {
+            for reference in rows {
+                present
+                    .entry(reference.object_id)
+                    .or_default()
+                    .push(reference.incarnation);
+            }
+        }
+        let fired = std::mem::take(&mut self.triggers_fired_this_turn);
+        self.triggers_fired_this_turn = fired
+            .into_iter()
+            .map(|mut reference| {
+                reference.for_each_incarnation_mut(&mut |object_id, incarnation| {
+                    present.entry(object_id).or_default().push(*incarnation);
+                });
+                reference.for_each_grant_generation_mut(&mut |object_id, generation| {
+                    grants.entry(object_id).or_default().push(*generation);
+                });
+                reference
+            })
+            .collect();
+        let fired_this_game = std::mem::take(&mut self.triggers_fired_this_game);
+        self.triggers_fired_this_game = fired_this_game
+            .into_iter()
+            .map(|mut reference| {
+                reference.for_each_incarnation_mut(&mut |object_id, incarnation| {
+                    present.entry(object_id).or_default().push(*incarnation);
+                });
+                reference.for_each_grant_generation_mut(&mut |object_id, generation| {
+                    grants.entry(object_id).or_default().push(*generation);
+                });
+                reference
+            })
+            .collect();
+        let fire_counts = std::mem::take(&mut self.trigger_fire_counts_this_turn);
+        self.trigger_fire_counts_this_turn = fire_counts
+            .into_iter()
+            .map(|(mut reference, count)| {
+                reference.for_each_incarnation_mut(&mut |object_id, incarnation| {
+                    present.entry(object_id).or_default().push(*incarnation);
+                });
+                reference.for_each_grant_generation_mut(&mut |object_id, generation| {
+                    grants.entry(object_id).or_default().push(*generation);
+                });
+                (reference, count)
+            })
+            .collect();
+        let fired_per_opponent = std::mem::take(&mut self.triggers_fired_this_turn_per_opponent);
+        self.triggers_fired_this_turn_per_opponent = fired_per_opponent
+            .into_iter()
+            .map(|(mut reference, player)| {
+                reference.for_each_incarnation_mut(&mut |object_id, incarnation| {
+                    present.entry(object_id).or_default().push(*incarnation);
+                });
+                reference.for_each_grant_generation_mut(&mut |object_id, generation| {
+                    grants.entry(object_id).or_default().push(*generation);
+                });
+                (reference, player)
+            })
+            .collect();
+        let indicated = std::mem::take(&mut *self.trigger_indicated_actions_this_turn);
+        self.trigger_indicated_actions_this_turn = Box::new(
+            indicated
+                .into_iter()
+                .map(|(mut reference, player)| {
+                    reference.for_each_incarnation_mut(&mut |object_id, incarnation| {
+                        present.entry(object_id).or_default().push(*incarnation);
+                    });
+                    reference.for_each_grant_generation_mut(&mut |object_id, generation| {
+                        grants.entry(object_id).or_default().push(*generation);
+                    });
+                    (reference, player)
+                })
+                .collect(),
+        );
+        for frame in self.return_result_frames.values_mut() {
+            for records in frame.values_mut() {
+                for record in records.iter_mut() {
+                    record_entered_incarnation(record, &mut |object_id, incarnation| {
+                        present.entry(object_id).or_default().push(*incarnation);
+                        carrier_read.insert(ObjectIncarnationRef::of(object_id, *incarnation));
+                    });
+                    record_incarnations(
+                        record,
+                        &mut |object_id, incarnation| {
+                            present.entry(object_id).or_default().push(*incarnation);
+                        },
+                        &mut |object_id, generation| {
+                            grants.entry(object_id).or_default().push(*generation);
+                        },
+                    );
+                }
+            }
         }
         for (object_id, generations) in grants.iter_mut() {
             if let Some(object) = self.objects.get(object_id) {
@@ -35601,13 +35881,22 @@ impl GameState {
                 })
                 .collect();
         self.for_each_trigger_event_carrier_mut(&mut |event| {
-            if let Some((object_id, incarnation)) = named_incarnation(event) {
-                *incarnation = canonical(object_id, *incarnation);
-            }
-            record_incarnations(event, &mut |object_id, incarnation| {
+            named_incarnations(event, &mut |object_id, incarnation| {
                 *incarnation = canonical(object_id, *incarnation);
             });
             if let GameEvent::ZoneChanged { record, .. } = event {
+                record_entered_incarnation(record, &mut |object_id, incarnation| {
+                    *incarnation = canonical(object_id, *incarnation);
+                });
+                record_incarnations(
+                    record,
+                    &mut |object_id, incarnation| {
+                        *incarnation = canonical(object_id, *incarnation);
+                    },
+                    &mut |object_id, generation| {
+                        *generation = u64::MAX - above(&grants, object_id, *generation);
+                    },
+                );
                 record.turn_zone_change_index = 0;
                 if let Some(context) = record.trigger_source_context.as_mut() {
                     context.timestamp = 0;
@@ -35636,6 +35925,104 @@ impl GameState {
                 &mut combat.creature_blocked_attackers_this_combat,
             ));
         }
+        let rank_reference = |reference: &mut TriggerDefinitionRef| {
+            reference.for_each_incarnation_mut(&mut |object_id, incarnation| {
+                *incarnation = canonical(object_id, *incarnation);
+            });
+            reference.for_each_grant_generation_mut(&mut |object_id, generation| {
+                *generation = u64::MAX - above(&grants, object_id, *generation);
+            });
+        };
+        let rank_incarnation = |reference: &mut ObjectIncarnationRef| {
+            reference.incarnation = canonical(reference.object_id, reference.incarnation);
+        };
+        if let Some(combat) = self.combat.as_mut() {
+            combat.attacking_incarnations_this_combat = rank_hash_set(
+                std::mem::take(&mut combat.attacking_incarnations_this_combat),
+                &mut |reference| rank_incarnation(reference),
+            );
+            for reference in combat.attacked_permanents.values_mut() {
+                rank_incarnation(reference);
+            }
+        }
+        self.crew_activated_this_turn = rank_hash_set(
+            std::mem::take(&mut self.crew_activated_this_turn),
+            &mut |reference| rank_incarnation(reference),
+        );
+        self.crew_resolved_this_turn = rank_hash_set(
+            std::mem::take(&mut self.crew_resolved_this_turn),
+            &mut |reference| rank_incarnation(reference),
+        );
+        self.crew_history_this_turn = rank_hash_set(
+            std::mem::take(&mut self.crew_history_this_turn),
+            &mut |pair| {
+                crew_pair_incarnations(
+                    std::slice::from_mut(pair),
+                    &mut |object_id, incarnation| {
+                        *incarnation = canonical(object_id, *incarnation);
+                    },
+                );
+            },
+        );
+        self.modal_modes_chosen_this_turn = rank_hash_set(
+            std::mem::take(&mut self.modal_modes_chosen_this_turn),
+            &mut |(reference, _)| rank_incarnation(reference),
+        );
+        self.modal_modes_chosen_this_game = rank_hash_set(
+            std::mem::take(&mut self.modal_modes_chosen_this_game),
+            &mut |(reference, _)| rank_incarnation(reference),
+        );
+        for record in &mut self.attacker_declarations_this_turn {
+            if let Some(incarnation) = record.incarnation.as_mut() {
+                *incarnation = canonical(record.object_id, *incarnation);
+            }
+            lki_incarnations(&mut record.lki, &mut |object_id, incarnation| {
+                *incarnation = canonical(object_id, *incarnation);
+            });
+        }
+        for rows in self.stack_bound_reveals.values_mut() {
+            for reference in rows.iter_mut() {
+                rank_incarnation(reference);
+            }
+        }
+        self.triggers_fired_this_turn = rank_hash_set(
+            std::mem::take(&mut self.triggers_fired_this_turn),
+            &mut |reference| rank_reference(reference),
+        );
+        self.triggers_fired_this_game = rank_hash_set(
+            std::mem::take(&mut self.triggers_fired_this_game),
+            &mut |reference| rank_reference(reference),
+        );
+        self.trigger_fire_counts_this_turn = rank_hash_map(
+            std::mem::take(&mut self.trigger_fire_counts_this_turn),
+            &mut |reference| rank_reference(reference),
+        );
+        self.triggers_fired_this_turn_per_opponent = rank_hash_set(
+            std::mem::take(&mut self.triggers_fired_this_turn_per_opponent),
+            &mut |(reference, _)| rank_reference(reference),
+        );
+        self.trigger_indicated_actions_this_turn = Box::new(rank_hash_set(
+            std::mem::take(&mut *self.trigger_indicated_actions_this_turn),
+            &mut |(reference, _)| rank_reference(reference),
+        ));
+        for frame in self.return_result_frames.values_mut() {
+            for records in frame.values_mut() {
+                for record in records.iter_mut() {
+                    record_entered_incarnation(record, &mut |object_id, incarnation| {
+                        *incarnation = canonical(object_id, *incarnation);
+                    });
+                    record_incarnations(
+                        record,
+                        &mut |object_id, incarnation| {
+                            *incarnation = canonical(object_id, *incarnation);
+                        },
+                        &mut |object_id, generation| {
+                            *generation = u64::MAX - above(&grants, object_id, *generation);
+                        },
+                    );
+                }
+            }
+        }
         // CR 613.1f + CR 104.4b: a grant generation, relative to the recipient's current grants, is position too.
         may_trigger_origins(self, &mut |definition_ref| {
             definition_ref.for_each_incarnation_mut(&mut |object_id, incarnation| {
@@ -35658,6 +36045,428 @@ impl GameState {
             }
         }
         self.tracked_set_member_origins = origins;
+    }
+
+    /// CR 104.4b + CR 400.7: compile-forced classification of every compared
+    /// `GameState`/`CombatState` field that can hold an incarnation id.
+    ///
+    /// WHAT THIS DESTRUCTURE BUYS is a FORCED DECISION, not an invariant — the same contract
+    /// as `_gamestate_partition_is_total`. The no-`..` binding breaks `cargo check --all-targets`
+    /// the moment a field is added, until a reviewer names it in exactly ONE of the sections
+    /// below. It does not prove the classification right; it proves someone decided on the
+    /// record.
+    ///
+    /// Section 1 is rewritten by `canonicalize_lki_incarnations_for_loop` directly; section 2
+    /// only through a carrier the walk visits (an event, an ability, or a record); section 3 is
+    /// out of this class. A field belongs in section 1 only when ranking changes a VERDICT it
+    /// can express: it makes two frames equal when each carrier names the same incarnation
+    /// position relative to its live object, or it keeps a stale pin distinct from the live one.
+    /// An unbounded pump ledger cannot do either — it gains a row every cycle.
+    #[cfg(test)]
+    fn _loop_incarnation_carriers_are_classified(s: &GameState) {
+        let GameState {
+            // RANKED — rewritten through `canonical` (or, for a layer-6 grant
+            // generation, the grant map) by `canonicalize_lki_incarnations_for_loop`:
+            objects: _,
+            lki_by_incarnation: _,
+            lki_copiable_values_by_incarnation: _,
+            creature_blocked_attackers_this_turn: _,
+            combat: _,
+            crew_activated_this_turn: _,
+            crew_resolved_this_turn: _,
+            crew_history_this_turn: _,
+            modal_modes_chosen_this_turn: _,
+            modal_modes_chosen_this_game: _,
+            attacker_declarations_this_turn: _,
+            stack_bound_reveals: _,
+            triggers_fired_this_turn: _,
+            trigger_fire_counts_this_turn: _,
+            triggers_fired_this_turn_per_opponent: _,
+            triggers_fired_this_game: _,
+            trigger_indicated_actions_this_turn: _,
+            return_result_frames: _,
+            tracked_set_member_origins: _,
+            // RANKED THROUGH A CARRIER — these hold the events, abilities and records
+            // whose own pins sections 1 and 3 classify:
+            stack: _,
+            resolving_stack_entry: _,
+            pending_trigger: _,
+            pending_trigger_firing: _,
+            pending_trigger_event_batch: _,
+            current_trigger_events: _,
+            stack_trigger_event_batches: _,
+            stack_trigger_firings: _,
+            deferred_triggers: _,
+            pending_trigger_order: _,
+            deferred_entry_events: _,
+            pending_attack_trigger_events: _,
+            delayed_triggers: _,
+            may_trigger_auto_choices: _,
+            pending_triggered_mana_resume: _,
+            resolution_stack: _,
+            departed_stack_spells: _,
+            departed_activated_abilities: _,
+            // NOT THIS CLASS — no incarnation id, a stable `ObjectId`/`PlayerId` only, or an
+            // unbounded ledger that grows every cycle, so ranking it cannot equalize a loop:
+            turn_number: _,
+            active_player: _,
+            phase: _,
+            players: _,
+            priority_player: _,
+            turn_decision_controller: _,
+            turn_decision_control_timestamp: _,
+            active_full_turn_control: _,
+            active_combat_phase_control: _,
+            active_library_searches: _,
+            active_search_decision_controls: _,
+            next_object_id: _,
+            next_delayed_trigger_token: _,
+            next_delayed_trigger_instance: _,
+            next_resolution_cast_offer_id: _,
+            next_logical_zone_change_group_id: _,
+            next_pip_id: _,
+            next_spell_announcement: _,
+            resolved_rules_journal: _,
+            ability_onset_record: _,
+            active_payment_pins: _,
+            active_rules_execution_node: _,
+            active_casting_permission_index: _,
+            active_graveyard_permission_latch: _,
+            active_paid_resolution_offer_tail: _,
+            active_spend_only_on_x_count: _,
+            ingress_life_window: _,
+            replacement_quantity_overflow: _,
+            active_auto_tap_row_policy: _,
+            battlefield: _,
+            stack_paid_facts: _,
+            exile: _,
+            command_zone: _,
+            rng_seed: _,
+            rng_word_pos: _,
+            rng: _,
+            waiting_for: _,
+            game_end: _,
+            next_resolve_all_consent_epoch: _,
+            viewer_projection: _,
+            resolve_all_consent_run: _,
+            stack_resolution_session: _,
+            interaction_session_id: _,
+            interaction_generation: _,
+            next_interaction_serial: _,
+            active_interaction_slots: _,
+            has_pending_cast: _,
+            allows_cancel_cast: _,
+            lands_played_this_turn: _,
+            max_lands_per_turn: _,
+            priority_pass_count: _,
+            pending_replacement: _,
+            pending_combat_lifelink: _,
+            replacement_may_cost_paused: _,
+            post_replacement_token_choice_applied: _,
+            pending_token_battlefield_entry: _,
+            layers_dirty: _,
+            layers_read_current_step: _,
+            static_gate_truth: _,
+            trigger_index: _,
+            replacement_index: _,
+            static_source_index: _,
+            static_mode_presence: _,
+            loop_detect_ring: _,
+            loop_detect_held: _,
+            loop_answer_journal: _,
+            loop_decision_tally: _,
+            play_trace: _,
+            precast_shortcut_runtime: _,
+            life_safety_probe: _,
+            next_timestamp: _,
+            public_state_dirty: _,
+            state_revision: _,
+            transient_continuous_effects: _,
+            next_continuous_effect_id: _,
+            next_end_effect_group_id: _,
+            attribution: _,
+            remote_type_layer_recipients: _,
+            day_night: _,
+            spells_cast_this_turn: _,
+            spells_cast_last_turn: _,
+            cancelled_casts: _,
+            pending_activations: _,
+            pending_trigger_entry: _,
+            consumed_before_priority_trigger_events: _,
+            exile_links: _,
+            paradigm_primed: _,
+            tracked_object_sets: _,
+            next_tracked_set_id: _,
+            chain_tracked_set_id: _,
+            active_return_result_occurrence: _,
+            next_return_result_occurrence_id: _,
+            resolving_modal_instruction: _,
+            tracked_set_member_causes: _,
+            tracked_set_participants: _,
+            commander_cast_count: _,
+            commander_cast_owners: _,
+            commander_declined_zone_return: _,
+            objects_that_dealt_damage: _,
+            extra_turns: _,
+            extra_turn_sequence_anchor: _,
+            turns_to_skip: _,
+            steps_to_skip: _,
+            pending_combat_phase_skips: _,
+            combat_phase_skip_next_turn: _,
+            scheduled_turn_controls: _,
+            extra_phases: _,
+            extra_phase_resume: _,
+            next_extra_phase_id: _,
+            last_added_phase_ids: _,
+            turn_direction: _,
+            current_combat_attacker_restriction: _,
+            current_combat_attacker_restriction_source: _,
+            seat_order: _,
+            format_config: _,
+            eliminated_players: _,
+            commander_damage: _,
+            priority_passes: _,
+            auto_pass: _,
+            phase_stops: _,
+            priority_passing_modes: _,
+            lands_tapped_for_mana: _,
+            prepaid_mulligan_bottoms: _,
+            debug_mode: _,
+            debug_permitted: _,
+            debug_infinite_mana: _,
+            unbounded_resources: _,
+            unbounded_rising: _,
+            unbounded_loop_pile: _,
+            unbounded_counter_targets: _,
+            pending_unbounded_materialization: _,
+            pending_materialization_count: _,
+            unimplemented_oracle_ids: _,
+            pending_trigger_abandons: _,
+            loop_detection: _,
+            match_config: _,
+            match_phase: _,
+            match_score: _,
+            match_forfeit_result: _,
+            game_number: _,
+            current_starting_player: _,
+            next_game_chooser: _,
+            deck_pools: _,
+            outside_game_cards_brought_in: _,
+            sideboard_submitted: _,
+            triggered_abilities_added_mana_this_turn: _,
+            activated_abilities_this_turn: _,
+            activated_abilities_this_game: _,
+            loyalty_abilities_activated_this_turn: _,
+            extra_loyalty_activations_this_turn: _,
+            exerted_this_turn: _,
+            object_tap_count_this_turn: _,
+            object_counter_placement_count_this_turn: _,
+            ability_resolutions_this_turn: _,
+            graveyard_cast_permissions_used: _,
+            graveyard_cast_permissions_used_per_type: _,
+            pending_permanent_type_slot: _,
+            hand_cast_free_permissions_used: _,
+            alt_cost_grant_permissions_used: _,
+            abilities_activated_this_turn_by_player: _,
+            exile_play_permissions_used: _,
+            exile_play_single_use_consumed: _,
+            exile_cast_permissions_used: _,
+            top_of_library_cast_permissions_used: _,
+            cards_exiled_with_source_this_turn: _,
+            first_card_drawn_this_turn: _,
+            cards_drawn_this_turn: _,
+            pending_miracle_offers: _,
+            pending_paradigm_remaining_offers: _,
+            spells_cast_this_game: _,
+            spells_cast_this_game_by_player: _,
+            spells_cast_this_turn_by_player: _,
+            lands_played_this_turn_by_player: _,
+            players_who_searched_library_this_turn: _,
+            player_actions_this_turn: _,
+            players_attacked_this_step: _,
+            players_attacked_this_turn: _,
+            attacking_creatures_this_turn: _,
+            attacked_defenders_this_turn: _,
+            attacked_defenders_last_turn: _,
+            creature_attacked_defenders_this_turn: _,
+            steps_started_this_turn: _,
+            creatures_attacked_this_turn: _,
+            creatures_blocked_this_turn: _,
+            players_who_created_token_this_turn: _,
+            players_who_flipped_coins_this_turn: _,
+            created_tokens_this_turn: _,
+            counter_added_this_turn: _,
+            players_who_discarded_card_this_turn: _,
+            cards_discarded_this_turn_by_player: _,
+            players_who_sacrificed_artifact_this_turn: _,
+            zone_changes_this_turn: _,
+            battlefield_entry_observations: _,
+            battlefield_entries_this_turn: _,
+            damage_dealt_this_turn: _,
+            creatures_exploited_this_turn: _,
+            assassin_or_commander_dealt_combat_damage_this_turn: _,
+            creature_types_dealt_combat_damage_this_turn: _,
+            mana_spent_on_spells_this_turn: _,
+            pending_spell_cost_reductions: _,
+            pending_next_spell_modifiers: _,
+            pending_etb_counters: _,
+            revealed_cards: _,
+            public_revealed_cards: _,
+            product_knowledge_state: _,
+            payment_transaction: _,
+            spell_cast_reversal: _,
+            payment_transaction_replay: _,
+            payment_transaction_just_handled: _,
+            resolving_continuation_attach_host: _,
+            resolving_player_scope_tail: _,
+            resolving_created_token_seats: _,
+            merged_card_component_route: _,
+            leaving_game_departure: _,
+            resolution_coin_flip: _,
+            repeat_process_requested: _,
+            un_actions: _,
+            replacement_auto_choices: _,
+            replacement_auto_choice_tail: _,
+            decision_templates: _,
+            priority_yields: _,
+            pending_begin_game_abilities: _,
+            resolving_begin_game_abilities: _,
+            last_named_choice: _,
+            chosen_counter_kind_this_resolution: _,
+            chosen_color_this_resolution: _,
+            named_color_this_resolution: _,
+            named_label_this_resolution: _,
+            placed_sticker_this_resolution: _,
+            noted_numbers_this_resolution: _,
+            last_chosen_damage_source: _,
+            all_creature_types: _,
+            all_card_names: _,
+            card_face_registry: _,
+            meld_pair_registry: _,
+            card_db: _,
+            booster_shelf: _,
+            booster_pack_pool: _,
+            log_player_names: _,
+            last_created_token_ids: _,
+            last_revealed_ids: _,
+            last_parent_target_missing_reason: _,
+            private_look_ids: _,
+            private_look_player: _,
+            last_zone_changed_ids: _,
+            exile_rider_countered_ids: _,
+            last_vote_ballots: _,
+            player_actions_this_way: _,
+            last_effect_amount: _,
+            last_effect_excess_amount: _,
+            die_result_this_resolution: _,
+            last_effect_count: _,
+            last_effect_counts_by_player: _,
+            clause_minimum_snapshot: _,
+            control_change_captures: _,
+            next_control_change_capture_id: _,
+            control_change_observations: _,
+            next_control_change_observation_id: _,
+            exiled_from_hand_this_resolution: _,
+            monarch: _,
+            city_blessing: _,
+            enduring_story: _,
+            replacement_continuations: _,
+            restrictions: _,
+            pending_damage_replacements: _,
+            pending_step_end_mana_handlers: _,
+            pending_phase_transition_progress: _,
+            deferred_step_trigger_resume: _,
+            pending_team_draw_step: _,
+            pending_untap_declines: _,
+            current_trigger_event: _,
+            current_trigger_match_count: _,
+            announced_source_x: _,
+            turn_up_paid_cost_source: _,
+            resolving_trigger_firing: _,
+            resolving_spell_final_part: _,
+            resolving_stack_object: _,
+            pending_resolution_completion: _,
+            lki_cache: _,
+            lki_copiable_values: _,
+            linked_exile_lki: _,
+            cost_payment_failed_flag: _,
+            pending_taps_for_mana_overrides: _,
+            current_triggered_mana_override: _,
+            pending_cost_move_resume: _,
+            pending_deferred_life_cost_resume: _,
+            pending_trigger_construction_priority_recipient: _,
+            active_accepted_triggered_mana_node: _,
+            mana_subresolution_depth: _,
+            trigger_construction_finisher_ran_this_action: _,
+            pending_discard_for_cost: _,
+            pending_cast: _,
+            in_flight_spell_trigger_carrier: _,
+            announcement_event_scope: _,
+            ring_level: _,
+            ring_bearer: _,
+            dungeon_progress: _,
+            planar_deck: _,
+            planar_controller: _,
+            planar_die_actions_this_turn: _,
+            scheme_deck: _,
+            archenemy: _,
+            initiative: _,
+            combat_prevention_tally: _,
+            combat_one_shot_applications: _,
+            liminal_entries: _,
+            pending_liminal_entry_resume: _,
+            entering_aura_authority: _,
+            last_discover_value: _,
+            pending_player_scope_sacrifice_choice: _,
+            pending_player_scope_unless_payment: _,
+            pending_discard_batch: _,
+            pending_exile_from_top_until: _,
+            pending_mass_library_order_choice: _,
+            pending_scoped_library_search: _,
+            pending_library_search_delivery: _,
+            completed_hidden_search_audiences: _,
+            pending_search_found_batch: _,
+            pending_die_roll_instruction: _,
+            post_replacement_token_substitution_count: _,
+            resolution_source_relatch: _,
+            // CR 104.4b: append-only and immutable, compared raw on purpose. Clearing their
+            // trigger identity would let a twice-normalized state (a ring prior the resource
+            // projection normalizes again) build the stack rename's table from cleared
+            // snapshots and merge handles a once-normalized state keeps apart; two samples of
+            // one game hold equal entries at every common position anyway.
+            epic_effects: _,
+            // Unbounded CR 400.7 carriers, compared on both feeds and deliberately NOT ranked:
+            // `sacrificed_permanents_this_turn` appends one record per sacrifice and
+            // `batched_zone_change_trigger_fired` keys on `(definition, recorded turn, zone
+            // change index)`, so in a loop that repeats either act both grow per cycle and
+            // ranking their pins cannot make two frames equal.
+            sacrificed_permanents_this_turn: _,
+            batched_zone_change_trigger_fired: _,
+        } = s;
+        if let Some(combat) = s.combat.as_ref() {
+            let crate::game::combat::CombatState {
+                // RANKED:
+                attacking_incarnations_this_combat: _,
+                attacked_permanents: _,
+                creature_blocked_attackers_this_combat: _,
+                // NOT THIS CLASS — stable ids only:
+                attackers: _,
+                attacked_permanent_kinds: _,
+                blocker_assignments: _,
+                blocker_to_attacker: _,
+                blockers_declared_by: _,
+                pending_blocker_declaration_events: _,
+                attacked_defenders_this_combat: _,
+                creature_attacked_defenders_this_combat: _,
+                removed_attackers_this_combat: _,
+                damage_assignments: _,
+                first_strike_done: _,
+                first_strike_participants: _,
+                damage_step_index: _,
+                pending_damage: _,
+                regular_damage_done: _,
+            } = combat;
+        }
     }
 
     /// The spell announcements named by `BecomesTarget` targeters on every
@@ -48864,6 +49673,969 @@ mod tests {
             normalized_equal(&stale, &stale.clone()),
             "control: identical twins"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // CR 400.7 + CR 104.4b: the bounded per-turn ledgers that pin a participant
+    // by exact incarnation. Each row pairs a split direction (a later mint with
+    // the same relative structure compares equal) with a merge direction (a stale
+    // pin is not the live one).
+    // ---------------------------------------------------------------------
+
+    /// A second battlefield object beside the one `records_naming` returns.
+    fn second_object(state: &mut GameState) -> ObjectId {
+        create_object(
+            state,
+            CardId(61),
+            PlayerId(1),
+            "Second Object".to_string(),
+            Zone::Battlefield,
+        )
+    }
+
+    fn printed_ref_pinning(
+        x: ObjectId,
+        incarnation: u64,
+        printed_index: usize,
+    ) -> TriggerDefinitionRef {
+        TriggerDefinitionRef {
+            source: ObjectIncarnationRef::of(x, incarnation),
+            occurrence: TriggerDefinitionOccurrenceRef::Printed {
+                base_set: TriggerBaseSetInstanceRef::INITIAL,
+                printed_index,
+            },
+        }
+    }
+
+    fn granted_ref_pinning(x: ObjectId, incarnation: u64, generation: u64) -> TriggerDefinitionRef {
+        TriggerDefinitionRef {
+            source: ObjectIncarnationRef::of(x, incarnation),
+            occurrence: TriggerDefinitionOccurrenceRef::Granted {
+                grant_instance: TriggerGrantInstanceRef(generation),
+            },
+        }
+    }
+
+    fn aura_on(x: ObjectId, attached: u64) -> AttachmentSnapshot {
+        AttachmentSnapshot {
+            object_id: x,
+            identity: Some(ObjectIncarnationRef::of(x, attached)),
+            controller: PlayerId(0),
+            kind: crate::types::ability::AttachmentKind::Aura,
+        }
+    }
+
+    /// A zone-change record naming `named` in its entry incarnation and in the one
+    /// attachment pin it holds.
+    fn zone_change_record_naming(state: &GameState, x: ObjectId, named: u64) -> ZoneChangeRecord {
+        let mut record =
+            state.objects[&x].snapshot_for_zone_change(x, Some(Zone::Battlefield), Zone::Graveyard);
+        record.entered_incarnation = Some(named);
+        record.attachments = vec![aura_on(x, named)];
+        record
+    }
+
+    /// A stack trigger carrying a `ZoneChanged` record the caller finishes.
+    fn with_zone_change_record(live: u64, build: impl FnOnce(&mut ZoneChangeRecord)) -> GameState {
+        let (mut state, x) = records_naming(live, &[]);
+        let mut record = zone_change_record_naming(&state, x, live);
+        build(&mut record);
+        push_trigger(
+            &mut state,
+            x,
+            draw_one(x),
+            Some(GameEvent::ZoneChanged {
+                object_id: x,
+                from: Some(Zone::Battlefield),
+                to: Zone::Graveyard,
+                record: Box::new(record),
+            }),
+        );
+        state
+    }
+
+    /// One ranked carrier holding a pin at `named` on an object live at `live`.
+    ///
+    /// `named` is the carrier's INCARNATION, except on the two grant-generation
+    /// carriers (`FrameGrantedEntry`), where it is the generation and the source
+    /// incarnation is `live`: a generation ranks through the grant map, not `canonical`.
+    #[derive(Debug, Clone, Copy)]
+    enum CarrierKind {
+        Attacking,
+        AttackedPermanent,
+        CrewActivated,
+        CrewResolved,
+        CrewHistory,
+        ModalTurn,
+        ModalGame,
+        AttackerDeclaration,
+        AttackerDeclarationLki,
+        StackBoundReveal,
+        TriggersFiredTurn,
+        FireCounts,
+        FiredPerOpponent,
+        FiredThisGame,
+        IndicatedActions,
+        FrameRecord,
+        FrameGrantedEntry,
+        DamageDealt,
+        CombatDamageToPlayer,
+    }
+
+    fn carrier_naming(kind: CarrierKind, live: u64, named: u64) -> GameState {
+        let (mut state, x) = records_naming(live, &[]);
+        let reference = ObjectIncarnationRef::of(x, named);
+        match kind {
+            CarrierKind::Attacking => {
+                state.combat = Some(CombatState {
+                    attacking_incarnations_this_combat: HashSet::from([reference]),
+                    ..CombatState::default()
+                });
+            }
+            CarrierKind::AttackedPermanent => {
+                let attacker = second_object(&mut state);
+                state.combat = Some(CombatState {
+                    attacked_permanents: HashMap::from([(attacker, reference)]),
+                    ..CombatState::default()
+                });
+            }
+            CarrierKind::CrewActivated => {
+                state.crew_activated_this_turn = HashSet::from([reference]);
+            }
+            CarrierKind::CrewResolved => {
+                state.crew_resolved_this_turn = HashSet::from([reference]);
+            }
+            CarrierKind::CrewHistory => {
+                state.crew_history_this_turn =
+                    HashSet::from([crate::game::crew_payment::CrewHistoryPair {
+                        vehicle: reference,
+                        crewer: reference,
+                    }]);
+            }
+            CarrierKind::ModalTurn => {
+                state.modal_modes_chosen_this_turn = HashSet::from([(reference, 1)]);
+            }
+            CarrierKind::ModalGame => {
+                state.modal_modes_chosen_this_game = HashSet::from([(reference, 1)]);
+            }
+            CarrierKind::AttackerDeclaration => {
+                let lki = state.objects[&x].snapshot_public_characteristics();
+                state
+                    .attacker_declarations_this_turn
+                    .push(AttackDeclarationRecord {
+                        object_id: x,
+                        incarnation: Some(named),
+                        lki,
+                        is_token: false,
+                        is_commander: false,
+                    });
+            }
+            CarrierKind::AttackerDeclarationLki => {
+                let mut lki = state.objects[&x].snapshot_public_characteristics();
+                lki.attachments = vec![aura_on(x, named)];
+                state
+                    .attacker_declarations_this_turn
+                    .push(AttackDeclarationRecord {
+                        object_id: x,
+                        incarnation: None,
+                        lki,
+                        is_token: false,
+                        is_commander: false,
+                    });
+            }
+            CarrierKind::StackBoundReveal => {
+                state.stack_bound_reveals =
+                    Box::new(BTreeMap::from([(ObjectId(999), vec![reference])]));
+            }
+            CarrierKind::TriggersFiredTurn => {
+                state
+                    .triggers_fired_this_turn
+                    .insert(printed_ref_pinning(x, named, 0));
+            }
+            CarrierKind::FireCounts => {
+                state
+                    .trigger_fire_counts_this_turn
+                    .insert(printed_ref_pinning(x, named, 0), 2);
+            }
+            CarrierKind::FiredPerOpponent => {
+                state
+                    .triggers_fired_this_turn_per_opponent
+                    .insert((printed_ref_pinning(x, named, 0), PlayerId(1)));
+            }
+            CarrierKind::FiredThisGame => {
+                state
+                    .triggers_fired_this_game
+                    .insert(printed_ref_pinning(x, named, 0));
+            }
+            CarrierKind::IndicatedActions => {
+                state
+                    .trigger_indicated_actions_this_turn
+                    .insert((printed_ref_pinning(x, named, 0), PlayerId(0)));
+            }
+            CarrierKind::FrameRecord => {
+                let record = zone_change_record_naming(&state, x, named);
+                state.return_result_frames.insert(
+                    ReturnResultOccurrenceId(1),
+                    BTreeMap::from([(ReturnResultId(1), vec![record])]),
+                );
+            }
+            CarrierKind::FrameGrantedEntry => {
+                let mut record = zone_change_record_naming(&state, x, live);
+                record.trigger_definitions = vec![TriggerEntry::new(
+                    TriggerDefinitionOccurrenceRef::Granted {
+                        grant_instance: TriggerGrantInstanceRef(named),
+                    },
+                    crate::types::ability::TriggerDefinition::new(TriggerMode::Attacks),
+                )];
+                state.return_result_frames.insert(
+                    ReturnResultOccurrenceId(1),
+                    BTreeMap::from([(ReturnResultId(1), vec![record])]),
+                );
+            }
+            CarrierKind::DamageDealt => {
+                push_trigger(
+                    &mut state,
+                    x,
+                    draw_one(x),
+                    Some(GameEvent::DamageDealt {
+                        source_id: x,
+                        target: TargetRef::Player(PlayerId(1)),
+                        amount: 2,
+                        is_combat: false,
+                        excess: 0,
+                        source_incarnation: Some(named),
+                    }),
+                );
+            }
+            CarrierKind::CombatDamageToPlayer => {
+                push_trigger(
+                    &mut state,
+                    x,
+                    draw_one(x),
+                    Some(GameEvent::CombatDamageDealtToPlayer {
+                        player_id: PlayerId(1),
+                        source_amounts: vec![(x, 2)],
+                        total_damage: 2,
+                        source_incarnations: vec![reference],
+                    }),
+                );
+            }
+        }
+        state
+    }
+
+    /// One ranked carrier, with both directions. `split(inc)` builds a state whose only
+    /// incarnation is `inc`; `merge(carrier, live)` builds one whose carrier still names
+    /// `carrier` while the object is live at `live` — the direction a one-argument
+    /// constructor cannot express.
+    struct CarrierCase {
+        name: &'static str,
+        split: fn(u64) -> GameState,
+        merge: fn(u64, u64) -> GameState,
+    }
+
+    const RANKED_CARRIERS: &[CarrierCase] = &[
+        CarrierCase {
+            name: "attacking_incarnations_this_combat",
+            split: |incarnation| carrier_naming(CarrierKind::Attacking, incarnation, incarnation),
+            merge: |carrier, live| carrier_naming(CarrierKind::Attacking, live, carrier),
+        },
+        CarrierCase {
+            name: "attacked_permanents",
+            split: |incarnation| {
+                carrier_naming(CarrierKind::AttackedPermanent, incarnation, incarnation)
+            },
+            merge: |carrier, live| carrier_naming(CarrierKind::AttackedPermanent, live, carrier),
+        },
+        CarrierCase {
+            name: "crew_activated_this_turn",
+            split: |incarnation| {
+                carrier_naming(CarrierKind::CrewActivated, incarnation, incarnation)
+            },
+            merge: |carrier, live| carrier_naming(CarrierKind::CrewActivated, live, carrier),
+        },
+        CarrierCase {
+            name: "crew_resolved_this_turn",
+            split: |incarnation| {
+                carrier_naming(CarrierKind::CrewResolved, incarnation, incarnation)
+            },
+            merge: |carrier, live| carrier_naming(CarrierKind::CrewResolved, live, carrier),
+        },
+        CarrierCase {
+            name: "crew_history_this_turn",
+            split: |incarnation| carrier_naming(CarrierKind::CrewHistory, incarnation, incarnation),
+            merge: |carrier, live| carrier_naming(CarrierKind::CrewHistory, live, carrier),
+        },
+        CarrierCase {
+            name: "modal_modes_chosen_this_turn",
+            split: |incarnation| carrier_naming(CarrierKind::ModalTurn, incarnation, incarnation),
+            merge: |carrier, live| carrier_naming(CarrierKind::ModalTurn, live, carrier),
+        },
+        CarrierCase {
+            name: "modal_modes_chosen_this_game",
+            split: |incarnation| carrier_naming(CarrierKind::ModalGame, incarnation, incarnation),
+            merge: |carrier, live| carrier_naming(CarrierKind::ModalGame, live, carrier),
+        },
+        CarrierCase {
+            name: "attacker_declarations_this_turn",
+            split: |incarnation| {
+                carrier_naming(CarrierKind::AttackerDeclaration, incarnation, incarnation)
+            },
+            merge: |carrier, live| carrier_naming(CarrierKind::AttackerDeclaration, live, carrier),
+        },
+        CarrierCase {
+            name: "attacker_declarations_this_turn.lki",
+            split: |incarnation| {
+                carrier_naming(
+                    CarrierKind::AttackerDeclarationLki,
+                    incarnation,
+                    incarnation,
+                )
+            },
+            merge: |carrier, live| {
+                carrier_naming(CarrierKind::AttackerDeclarationLki, live, carrier)
+            },
+        },
+        CarrierCase {
+            name: "stack_bound_reveals",
+            split: |incarnation| {
+                carrier_naming(CarrierKind::StackBoundReveal, incarnation, incarnation)
+            },
+            merge: |carrier, live| carrier_naming(CarrierKind::StackBoundReveal, live, carrier),
+        },
+        CarrierCase {
+            name: "triggers_fired_this_turn",
+            split: |incarnation| {
+                carrier_naming(CarrierKind::TriggersFiredTurn, incarnation, incarnation)
+            },
+            merge: |carrier, live| carrier_naming(CarrierKind::TriggersFiredTurn, live, carrier),
+        },
+        CarrierCase {
+            name: "trigger_fire_counts_this_turn",
+            split: |incarnation| carrier_naming(CarrierKind::FireCounts, incarnation, incarnation),
+            merge: |carrier, live| carrier_naming(CarrierKind::FireCounts, live, carrier),
+        },
+        CarrierCase {
+            name: "triggers_fired_this_turn_per_opponent",
+            split: |incarnation| {
+                carrier_naming(CarrierKind::FiredPerOpponent, incarnation, incarnation)
+            },
+            merge: |carrier, live| carrier_naming(CarrierKind::FiredPerOpponent, live, carrier),
+        },
+        CarrierCase {
+            name: "triggers_fired_this_game",
+            split: |incarnation| {
+                carrier_naming(CarrierKind::FiredThisGame, incarnation, incarnation)
+            },
+            merge: |carrier, live| carrier_naming(CarrierKind::FiredThisGame, live, carrier),
+        },
+        CarrierCase {
+            name: "trigger_indicated_actions_this_turn",
+            split: |incarnation| {
+                carrier_naming(CarrierKind::IndicatedActions, incarnation, incarnation)
+            },
+            merge: |carrier, live| carrier_naming(CarrierKind::IndicatedActions, live, carrier),
+        },
+        CarrierCase {
+            name: "return_result_frames",
+            split: |incarnation| carrier_naming(CarrierKind::FrameRecord, incarnation, incarnation),
+            merge: |carrier, live| carrier_naming(CarrierKind::FrameRecord, live, carrier),
+        },
+        // A layer-6 grant generation has no single live anchor: its pool is the object's
+        // active grants, so "stale versus live" is a POOL-CARDINALITY question and lives
+        // in `normalize_for_loop_ranks_frame_carried_grant_generation` (row 17) instead of
+        // this table's one-argument split.
+        CarrierCase {
+            name: "DamageDealt.source_incarnation",
+            split: |incarnation| carrier_naming(CarrierKind::DamageDealt, incarnation, incarnation),
+            merge: |carrier, live| carrier_naming(CarrierKind::DamageDealt, live, carrier),
+        },
+        CarrierCase {
+            name: "CombatDamageDealtToPlayer.source_incarnations",
+            split: |incarnation| {
+                carrier_naming(CarrierKind::CombatDamageToPlayer, incarnation, incarnation)
+            },
+            merge: |carrier, live| carrier_naming(CarrierKind::CombatDamageToPlayer, live, carrier),
+        },
+    ];
+
+    /// Row 14 — ring frames are normalized again on every compare, so normalization must
+    /// be a fixed point on its own output for EVERY ranked carrier, not just the
+    /// block-history and record pins the older row covers.
+    #[test]
+    fn normalize_for_loop_is_idempotent_on_every_ranked_carrier() {
+        for case in RANKED_CARRIERS {
+            for built in [(case.split)(3), (case.merge)(5, 8)] {
+                let once = built.normalize_for_loop();
+                assert!(
+                    loop_states_equal(&once.normalize_for_loop(), &once),
+                    "normalizing a normalized state changed {}",
+                    case.name
+                );
+            }
+        }
+    }
+
+    /// Every ranked carrier closes the split direction: a position minted later, with the
+    /// same structure, is the same position.
+    #[test]
+    fn every_ranked_carrier_survives_a_reincarnation_mint() {
+        for case in RANKED_CARRIERS {
+            let early = (case.split)(3);
+            let late = (case.split)(8);
+            assert_ne!(early, late, "{}: reach guard", case.name);
+            assert!(
+                normalized_equal(&early, &late),
+                "{} is not ranked",
+                case.name
+            );
+        }
+    }
+
+    /// Every ranked carrier keeps the merge direction: a pin left at a superseded
+    /// incarnation is not the pin naming the live one.
+    #[test]
+    fn every_ranked_carrier_distinguishes_a_stale_pin_from_the_live_one() {
+        for case in RANKED_CARRIERS {
+            let live = (case.merge)(5, 5);
+            let stale = (case.merge)(5, 8);
+            assert!(
+                normalized_equal(&live, &live.clone()),
+                "{}: twins control",
+                case.name
+            );
+            assert!(
+                !normalized_equal(&live, &stale),
+                "{} lost its anchor",
+                case.name
+            );
+        }
+    }
+
+    /// Row 1 — CR 508.1 + CR 400.7: this combat's attack ledger is ranked.
+    #[test]
+    fn normalize_for_loop_ranks_attacking_incarnations_this_combat() {
+        let early = carrier_naming(CarrierKind::Attacking, 3, 3);
+        let late = carrier_naming(CarrierKind::Attacking, 8, 8);
+        assert_ne!(early, late, "reach guard: the raw positions differ");
+        assert!(normalized_equal(&early, &late));
+        // Hostile: a departed attacker names an incarnation no live object owns, so the
+        // pin ranks among itself (one member) instead of anchoring on a live object.
+        let departed = |named: u64| {
+            let mut state = GameState::new_two_player(7);
+            state.combat = Some(CombatState {
+                attacking_incarnations_this_combat: HashSet::from([ObjectIncarnationRef::of(
+                    ObjectId(77),
+                    named,
+                )]),
+                ..CombatState::default()
+            });
+            state
+        };
+        assert!(
+            normalized_equal(&departed(3), &departed(91)),
+            "a pin no live object owns still ranks"
+        );
+    }
+
+    /// Row 2 — CR 400.7: a ledger entry naming a stale incarnation is not the entry
+    /// naming the live one (the issue's X@5 / X@8 example).
+    #[test]
+    fn normalize_for_loop_anchors_attacking_incarnations_on_the_live_object() {
+        let live = carrier_naming(CarrierKind::Attacking, 5, 5);
+        let stale = carrier_naming(CarrierKind::Attacking, 8, 5);
+        assert!(!normalized_equal(&live, &stale));
+        assert!(
+            normalized_equal(&live, &live.clone()),
+            "control: identical twins"
+        );
+        assert!(
+            normalized_equal(
+                &carrier_naming(CarrierKind::Attacking, 8, 8),
+                &carrier_naming(CarrierKind::Attacking, 12, 12)
+            ),
+            "control: the pair that must stay equal"
+        );
+        // Hostile: two objects in the ledger; only the second one's pin is stale, and the
+        // pin sits below the newer live incarnation.
+        let two = |live_y: u64| {
+            let (mut state, x) = records_naming(5, &[]);
+            let y = second_object(&mut state);
+            state.objects.get_mut(&y).unwrap().incarnation = live_y;
+            state.combat = Some(CombatState {
+                attacking_incarnations_this_combat: HashSet::from([
+                    ObjectIncarnationRef::of(x, 5),
+                    ObjectIncarnationRef::of(y, 7),
+                ]),
+                ..CombatState::default()
+            });
+            state
+        };
+        assert!(
+            !normalized_equal(&two(7), &two(9)),
+            "the second object's stale pin is a different position"
+        );
+    }
+
+    /// Row 3 — CR 506.4c + CR 400.7: the pinned attack destination's incarnation is ranked.
+    #[test]
+    fn normalize_for_loop_ranks_attacked_permanents_pins() {
+        let early = carrier_naming(CarrierKind::AttackedPermanent, 3, 3);
+        let late = carrier_naming(CarrierKind::AttackedPermanent, 8, 8);
+        assert_ne!(early, late, "reach guard: the raw positions differ");
+        assert!(normalized_equal(&early, &late));
+        let live = carrier_naming(CarrierKind::AttackedPermanent, 5, 5);
+        let stale = carrier_naming(CarrierKind::AttackedPermanent, 8, 5);
+        assert!(!normalized_equal(&live, &stale));
+    }
+
+    /// Row 4 — CR 702.122a-c + CR 602.5b: the crew ledgers are ranked.
+    #[test]
+    fn normalize_for_loop_ranks_crew_ledgers() {
+        for kind in [
+            CarrierKind::CrewActivated,
+            CarrierKind::CrewResolved,
+            CarrierKind::CrewHistory,
+        ] {
+            let early = carrier_naming(kind, 3, 3);
+            let late = carrier_naming(kind, 8, 8);
+            assert_ne!(early, late, "reach guard: {kind:?}");
+            assert!(normalized_equal(&early, &late), "{kind:?} is not ranked");
+        }
+        // Hostile: a crewed-by pair naming two objects, both live at their pinned
+        // incarnations versus one end stale.
+        let pair = |live_vehicle: u64, live_crewer: u64| {
+            let (mut state, vehicle) = records_naming(live_vehicle, &[]);
+            let crewer = second_object(&mut state);
+            state.objects.get_mut(&crewer).unwrap().incarnation = live_crewer;
+            state.crew_history_this_turn =
+                HashSet::from([crate::game::crew_payment::CrewHistoryPair {
+                    vehicle: ObjectIncarnationRef::of(vehicle, 5),
+                    crewer: ObjectIncarnationRef::of(crewer, 4),
+                }]);
+            state
+        };
+        assert!(
+            !normalized_equal(&pair(8, 9), &pair(5, 4)),
+            "both ends superseded is not both ends current"
+        );
+    }
+
+    /// Row 5 — CR 702.122b/c: one stale end of a crewed-by pair is a different position.
+    #[test]
+    fn normalize_for_loop_anchors_crew_history_on_the_live_objects() {
+        let pair = |live_vehicle: u64, live_crewer: u64| {
+            let (mut state, vehicle) = records_naming(live_vehicle, &[]);
+            let crewer = second_object(&mut state);
+            state.objects.get_mut(&crewer).unwrap().incarnation = live_crewer;
+            state.crew_history_this_turn =
+                HashSet::from([crate::game::crew_payment::CrewHistoryPair {
+                    vehicle: ObjectIncarnationRef::of(vehicle, 5),
+                    crewer: ObjectIncarnationRef::of(crewer, 4),
+                }]);
+            state
+        };
+        let current = pair(5, 4);
+        assert!(
+            normalized_equal(&current, &current.clone()),
+            "control: identical twins"
+        );
+        assert!(
+            !normalized_equal(&current, &pair(8, 4)),
+            "a superseded vehicle is a different position"
+        );
+        assert!(
+            !normalized_equal(&current, &pair(5, 9)),
+            "a superseded crewer is a different position"
+        );
+    }
+
+    /// Row 6 — CR 700.2 + CR 603.10a: modal no-repeat history is ranked, and the mode
+    /// ordinal is not absorbed by the ranking.
+    #[test]
+    fn normalize_for_loop_ranks_modal_mode_history() {
+        for kind in [CarrierKind::ModalTurn, CarrierKind::ModalGame] {
+            let early = carrier_naming(kind, 3, 3);
+            let late = carrier_naming(kind, 8, 8);
+            assert_ne!(early, late, "reach guard: {kind:?}");
+            assert!(normalized_equal(&early, &late), "{kind:?} is not ranked");
+        }
+        let modal = |live: u64, named: u64, mode: usize| {
+            let (mut state, x) = records_naming(live, &[]);
+            let entry = (ObjectIncarnationRef::of(x, named), mode);
+            state.modal_modes_chosen_this_turn = HashSet::from([entry]);
+            state.modal_modes_chosen_this_game = HashSet::from([entry]);
+            state
+        };
+        assert!(
+            !normalized_equal(&modal(3, 3, 1), &modal(3, 3, 2)),
+            "the mode ordinal is not absorbed"
+        );
+        // CR 603.10a: a mode chosen for a source that has since departed is never pruned,
+        // so it still ranks.
+        let departed = |live: u64, named: u64| {
+            let mut state = modal(live, named, 1);
+            for (_, object) in state.objects.iter_mut() {
+                object.zone = Zone::Graveyard;
+            }
+            state
+        };
+        assert!(normalized_equal(&departed(3, 3), &departed(8, 8)));
+    }
+
+    /// Row 7 — CR 508.1a: the declaration record's incarnation and its LKI attachment
+    /// pins are both ranked; a legacy `None` stays `None`.
+    #[test]
+    fn normalize_for_loop_ranks_attacker_declarations() {
+        let early = carrier_naming(CarrierKind::AttackerDeclaration, 3, 3);
+        let late = carrier_naming(CarrierKind::AttackerDeclaration, 8, 8);
+        assert_ne!(early, late, "reach guard: the raw positions differ");
+        assert!(normalized_equal(&early, &late));
+        // This assertion flips only if `lki_incarnations` runs over `record.lki`.
+        let early_lki = carrier_naming(CarrierKind::AttackerDeclarationLki, 3, 3);
+        let late_lki = carrier_naming(CarrierKind::AttackerDeclarationLki, 8, 8);
+        assert_ne!(early_lki, late_lki, "reach guard: the raw snapshots differ");
+        assert!(
+            normalized_equal(&early_lki, &late_lki),
+            "the declaration's LKI attachment pin is not ranked"
+        );
+        let mut legacy = early.clone();
+        legacy.attacker_declarations_this_turn[0].incarnation = None;
+        let mut named = legacy.clone();
+        named.attacker_declarations_this_turn[0].incarnation = Some(5);
+        assert!(
+            !normalized_equal(&legacy, &named),
+            "a legacy `None` pin must not read as a ranked one"
+        );
+    }
+
+    /// Row 8 — CR 701.20a: reveal leases are ranked by their value; the stack-entry key is
+    /// a different identity class and stays untouched.
+    #[test]
+    fn normalize_for_loop_ranks_stack_bound_reveals() {
+        let rows = |live: u64, named: &[u64]| {
+            let (mut state, x) = records_naming(live, &[]);
+            state.stack_bound_reveals = Box::new(BTreeMap::from([(
+                ObjectId(999),
+                named
+                    .iter()
+                    .map(|&incarnation| ObjectIncarnationRef::of(x, incarnation))
+                    .collect(),
+            )]));
+            state
+        };
+        let early = rows(3, &[3]);
+        let late = rows(8, &[8]);
+        assert_ne!(early, late, "reach guard: the raw positions differ");
+        assert!(normalized_equal(&early, &late));
+        assert!(
+            normalized_equal(&rows(3, &[3, 7]), &rows(8, &[8, 12])),
+            "two rows, shifted consistently"
+        );
+        assert_ne!(early.stack_bound_reveals, late.stack_bound_reveals);
+        assert!(
+            !normalized_equal(&rows(3, &[3]), &rows(3, &[3, 7])),
+            "one row versus two rows is a real lease difference"
+        );
+    }
+
+    /// Row 9 — CR 603.2 / 603.2h / 603.4 + CR 613.1f: every per-definition trigger limit
+    /// ledger ranks its source incarnation and its layer-6 grant generation.
+    #[test]
+    fn normalize_for_loop_ranks_trigger_limit_ledgers() {
+        for kind in [
+            CarrierKind::TriggersFiredTurn,
+            CarrierKind::FireCounts,
+            CarrierKind::FiredPerOpponent,
+            CarrierKind::FiredThisGame,
+            CarrierKind::IndicatedActions,
+        ] {
+            let early = carrier_naming(kind, 3, 3);
+            let late = carrier_naming(kind, 8, 8);
+            assert_ne!(early, late, "reach guard: {kind:?}");
+            assert!(normalized_equal(&early, &late), "{kind:?} is not ranked");
+        }
+        let ledger = |live: u64, printed_index: usize| {
+            let (mut state, x) = records_naming(live, &[]);
+            state
+                .triggers_fired_this_turn
+                .insert(printed_ref_pinning(x, live, printed_index));
+            state
+        };
+        let granted = |live: u64, generation: u64| {
+            let (mut state, x) = records_naming(live, &[]);
+            state
+                .triggers_fired_this_turn
+                .insert(granted_ref_pinning(x, live, generation));
+            state
+        };
+        let early_grant = granted(3, 7);
+        let late_grant = granted(3, 9);
+        assert_ne!(
+            early_grant, late_grant,
+            "reach guard: the raw generations differ"
+        );
+        assert!(
+            normalized_equal(&early_grant, &late_grant),
+            "a granted trigger's generation is not ranked"
+        );
+        assert!(
+            !normalized_equal(&ledger(3, 0), &ledger(3, 1)),
+            "a different printed occurrence is a different trigger"
+        );
+        let opponent = |player: PlayerId| {
+            let (mut state, x) = records_naming(3, &[]);
+            state
+                .triggers_fired_this_turn_per_opponent
+                .insert((printed_ref_pinning(x, 3, 0), player));
+            state
+        };
+        assert!(
+            !normalized_equal(&opponent(PlayerId(0)), &opponent(PlayerId(1))),
+            "the player key is not absorbed by ranking"
+        );
+    }
+
+    /// Row 10 — CR 603.2 / 603.4: a limit ledger keyed on a superseded incarnation is not
+    /// the key naming the live one, and a gate that fired on one side only stays distinct.
+    #[test]
+    fn normalize_for_loop_anchors_trigger_limit_ledgers_on_the_live_object() {
+        for kind in [
+            CarrierKind::TriggersFiredTurn,
+            CarrierKind::FireCounts,
+            CarrierKind::FiredPerOpponent,
+            CarrierKind::FiredThisGame,
+            CarrierKind::IndicatedActions,
+        ] {
+            let live = carrier_naming(kind, 5, 5);
+            let stale = carrier_naming(kind, 8, 5);
+            assert!(
+                normalized_equal(&live, &live.clone()),
+                "control: identical twins {kind:?}"
+            );
+            assert!(!normalized_equal(&live, &stale), "{kind:?} lost its anchor");
+        }
+        let fired = carrier_naming(CarrierKind::TriggersFiredTurn, 3, 3);
+        let mut unfired = fired.clone();
+        unfired.triggers_fired_this_turn.clear();
+        assert!(
+            !normalized_equal(&fired, &unfired),
+            "a fired-once limit is a real gate difference"
+        );
+    }
+
+    /// Row 11 — CR 608.2c: instruction-result frame records are ranked, including the
+    /// CR 506.3 attack-target pin they carry.
+    #[test]
+    fn normalize_for_loop_ranks_return_result_frame_records() {
+        let early = carrier_naming(CarrierKind::FrameRecord, 3, 3);
+        let late = carrier_naming(CarrierKind::FrameRecord, 8, 8);
+        assert_ne!(early, late, "reach guard: the raw frames differ");
+        assert!(normalized_equal(&early, &late));
+        let target = |live: u64, target: u64| {
+            let (mut state, x) = records_naming(live, &[]);
+            let mut record = zone_change_record_naming(&state, x, live);
+            record.combat_status.attack_target_identity = Some(ObjectIncarnationRef::of(x, target));
+            state.return_result_frames.insert(
+                ReturnResultOccurrenceId(1),
+                BTreeMap::from([(ReturnResultId(1), vec![record])]),
+            );
+            state
+        };
+        assert!(
+            !normalized_equal(&target(5, 5), &target(8, 5)),
+            "a stale attack target in a frame record is a different position"
+        );
+    }
+
+    /// Row 12 — CR 603.10a: a record's trigger entries are ranked through both visitors,
+    /// and a `Printed` entry is untouched by the grant-generation walk.
+    #[test]
+    fn normalize_for_loop_ranks_record_trigger_entries() {
+        let granted = |live: u64, generation: u64| {
+            with_zone_change_record(live, |record| {
+                record.trigger_definitions = vec![TriggerEntry::new(
+                    TriggerDefinitionOccurrenceRef::Granted {
+                        grant_instance: TriggerGrantInstanceRef(generation),
+                    },
+                    crate::types::ability::TriggerDefinition::new(TriggerMode::Attacks),
+                )];
+            })
+        };
+        let early = granted(3, 7);
+        let late = granted(3, 9);
+        assert_ne!(early, late, "reach guard: the raw generations differ");
+        assert!(
+            normalized_equal(&early, &late),
+            "a record's granted trigger generation is not ranked"
+        );
+        let printed = |live: u64, printed_index: usize| {
+            with_zone_change_record(live, |record| {
+                record.trigger_definitions = vec![TriggerEntry::new(
+                    TriggerDefinitionOccurrenceRef::Printed {
+                        base_set: TriggerBaseSetInstanceRef::INITIAL,
+                        printed_index,
+                    },
+                    crate::types::ability::TriggerDefinition::new(TriggerMode::Attacks),
+                )];
+            })
+        };
+        assert!(
+            !normalized_equal(&printed(3, 0), &printed(3, 1)),
+            "a different printed occurrence stays a different trigger"
+        );
+        // An `ExpandedGrant` provider is an incarnation pin, not a generation.
+        let expanded = |live: u64, provider: u64| {
+            with_zone_change_record(live, |record| {
+                record.trigger_definitions = vec![TriggerEntry::new(
+                    TriggerDefinitionOccurrenceRef::ExpandedGrant {
+                        grant_instance: TriggerGrantInstanceRef(1),
+                        provider: Box::new(printed_ref_pinning(record.object_id, provider, 0)),
+                        provider_output_index: 0,
+                    },
+                    crate::types::ability::TriggerDefinition::new(TriggerMode::Attacks),
+                )];
+            })
+        };
+        assert!(
+            normalized_equal(&expanded(3, 3), &expanded(8, 8)),
+            "an expanded grant's provider incarnation is not ranked"
+        );
+    }
+
+    /// Row 17 — the record helper's SECOND visitor, reached through `return_result_frames`.
+    /// Routing a generation through the incarnation visitor would panic in `above`
+    /// ("every ranked value was collected first"); this row proves the split is wired.
+    #[test]
+    fn normalize_for_loop_ranks_frame_carried_grant_generation() {
+        let early = carrier_naming(CarrierKind::FrameGrantedEntry, 3, 7);
+        let late = carrier_naming(CarrierKind::FrameGrantedEntry, 3, 9);
+        assert_ne!(early, late, "reach guard: the raw generations differ");
+        assert!(
+            normalized_equal(&early, &late),
+            "the frame record's grant generation is not ranked"
+        );
+        // A generation ranks against the object's grant pool, so the same generation is a
+        // different position once a newer grant exists beside it in the same record.
+        let pool = |generations: &[u64]| {
+            with_zone_change_record(3, |record| {
+                record.trigger_definitions = generations
+                    .iter()
+                    .map(|&generation| {
+                        TriggerEntry::new(
+                            TriggerDefinitionOccurrenceRef::Granted {
+                                grant_instance: TriggerGrantInstanceRef(generation),
+                            },
+                            crate::types::ability::TriggerDefinition::new(TriggerMode::Attacks),
+                        )
+                    })
+                    .collect();
+            })
+        };
+        assert!(
+            !normalized_equal(&pool(&[5]), &pool(&[5, 9])),
+            "a generation ranks against the grant pool it sits in"
+        );
+        assert!(
+            normalized_equal(&pool(&[5, 9]), &pool(&[7, 11])),
+            "control: a consistently shifted grant pool is the same position"
+        );
+        // A `Printed` entry in the same record is untouched.
+        let printed = |printed_index: usize| {
+            let mut state = early.clone();
+            for records in state.return_result_frames.values_mut() {
+                for record in records.values_mut().flatten() {
+                    record.trigger_definitions = vec![TriggerEntry::new(
+                        TriggerDefinitionOccurrenceRef::Printed {
+                            base_set: TriggerBaseSetInstanceRef::INITIAL,
+                            printed_index,
+                        },
+                        crate::types::ability::TriggerDefinition::new(TriggerMode::Attacks),
+                    )];
+                }
+            }
+            state
+        };
+        assert!(!normalized_equal(&printed(0), &printed(1)));
+        let mut empty = early.clone();
+        for records in empty.return_result_frames.values_mut() {
+            for record in records.values_mut().flatten() {
+                record.trigger_definitions.clear();
+            }
+        }
+        assert!(
+            !normalized_equal(&early, &empty),
+            "a granted trigger on one side only is a real gate difference"
+        );
+    }
+
+    /// Row 13 — #9754: the damage events' source stamps are ranked like a tap stamp.
+    #[test]
+    fn normalize_for_loop_ranks_damage_event_incarnations() {
+        let damage = |live: u64, named: Option<u64>| {
+            let (mut state, x) = records_naming(live, &[]);
+            push_trigger(
+                &mut state,
+                x,
+                draw_one(x),
+                Some(GameEvent::DamageDealt {
+                    source_id: x,
+                    target: TargetRef::Player(PlayerId(1)),
+                    amount: 2,
+                    is_combat: false,
+                    excess: 0,
+                    source_incarnation: named,
+                }),
+            );
+            state
+        };
+        let early = damage(3, Some(3));
+        let late = damage(91, Some(91));
+        assert_ne!(early, late, "reach guard: the raw positions differ");
+        assert!(
+            normalized_equal(&early, &late),
+            "the #9754 damage-source stamp is not ranked"
+        );
+        let combat = |live: u64, named: u64| {
+            let (mut state, x) = records_naming(live, &[]);
+            push_trigger(
+                &mut state,
+                x,
+                draw_one(x),
+                Some(GameEvent::CombatDamageDealtToPlayer {
+                    player_id: PlayerId(1),
+                    source_amounts: vec![(x, 2)],
+                    total_damage: 2,
+                    source_incarnations: vec![ObjectIncarnationRef::of(x, named)],
+                }),
+            );
+            state
+        };
+        let early_combat = combat(3, 3);
+        let late_combat = combat(91, 91);
+        assert_ne!(
+            early_combat, late_combat,
+            "reach guard: the raw combat-damage positions differ"
+        );
+        assert!(normalized_equal(&early_combat, &late_combat));
+        // Control: a stamped tap already compared equal before this change.
+        let tapped = |live: u64, named: u64| {
+            let (mut state, x) = records_naming(live, &[]);
+            push_trigger(
+                &mut state,
+                x,
+                draw_one(x),
+                Some(GameEvent::PermanentTapped {
+                    object_id: x,
+                    caused_by: None,
+                    incarnation: Some(named),
+                }),
+            );
+            state
+        };
+        assert!(normalized_equal(&tapped(3, 3), &tapped(91, 91)));
+        // A legacy `None` stamp is not a pin, so it does not equal a ranked one.
+        assert!(!normalized_equal(&damage(3, None), &damage(3, Some(3))));
     }
 
     /// CR 400.7 + CR 104.4b: zone-change allocation order is history.
