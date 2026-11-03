@@ -28469,6 +28469,32 @@ fn trailing_clause_window_is_not_distributed_to_later_clause() {
     );
 }
 
+/// CR 611.2a + CR 608.2c: the review's counterexample — a TRAILING window on the
+/// head clause must not be distributed onto a following type-change clause just
+/// because the boundary is `then`. The later clause states no window of its own,
+/// so the printed window stays with the clause that printed it (#7962 review).
+#[test]
+fn trailing_clause_window_does_not_reach_a_following_type_change() {
+    let def = parse_effect_chain(
+        "Target creature gains flying until end of turn, then it becomes a Dragon",
+        AbilityKind::Spell,
+    );
+    assert_eq!(
+        def.duration,
+        Some(Duration::UntilEndOfTurn),
+        "the head clause keeps its own printed window: {def:#?}"
+    );
+    let later = def
+        .sub_ability
+        .as_deref()
+        .expect("the type-change clause must be built as the coordinated sibling");
+    assert_ne!(
+        later.duration,
+        Some(Duration::UntilEndOfTurn),
+        "a trailing window belongs to its own clause and must not be distributed: {later:#?}"
+    );
+}
+
 /// CR 611.2a + CR 608.2c: a leading window still heads its sentence when a leading
 /// guard precedes it — Mythos of Vadrok's "If {W}{U} was spent to cast this spell,
 /// until your next turn, …" scopes both coordinated predicates (#7962).
