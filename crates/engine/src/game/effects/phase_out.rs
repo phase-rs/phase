@@ -187,7 +187,10 @@ pub(super) fn collect_object_targets(
                     TargetFilter::ParentTarget => ability
                         .live_object_targets(state)
                         .iter()
-                        .filter_map(TargetRef::as_object)
+                        .filter_map(|target| match target {
+                            TargetRef::Object(id) => Some(*id),
+                            TargetRef::Player(_) => None,
+                        })
                         .collect(),
                     other => collect_object_targets(state, ability, other),
                 }

@@ -26055,6 +26055,15 @@ fn phase_out_or_in_filter_is_mass(filter: &TargetFilter) -> bool {
     }
 }
 
+/// CR 115.10a: a PhaseOut union of already-bound references declares no new
+/// target. This does not prove that any reference resolves to a live object.
+fn phase_out_filter_is_context_union(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Or { filters } => filters.iter().all(phase_out_filter_is_context_union),
+        other => other.is_context_ref(),
+    }
+}
+
 pub fn extract_target_filter_from_effect(effect: &Effect) -> Option<&TargetFilter> {
     // CR 701.21a: Sacrifice does not target — the controller chooses permanents
     // at resolution time via EffectZoneChoice. Returning a filter here would
@@ -26228,6 +26237,13 @@ pub fn extract_target_filter_from_effect(effect: &Effect) -> Option<&TargetFilte
             .is_some_and(phase_out_or_in_filter_is_mass)
     {
         return None;
+    }
+    // CR 115.10a: affecting the source and a previously selected target does
+    // not declare another target. PhaseOut collects these references as a union.
+    if let Effect::PhaseOut { target } = effect {
+        if phase_out_filter_is_context_union(target) {
+            return None;
+        }
     }
     effect.target_filter().filter(|t| !t.is_context_ref())
 }
@@ -42835,6 +42851,94 @@ mod tests {
     use super::*;
     use crate::types::mana::ZoneSpendPolarity;
     use crate::types::zones::Zone;
+
+    #[test]
+    fn phase_out_context_union_extracts_no_new_target() {
+        let pair = TargetFilter::Or {
+            filters: vec![TargetFilter::SelfRef, TargetFilter::ParentTarget],
+        };
+        for target in [
+            pair.clone(),
+            TargetFilter::Or {
+                filters: vec![pair, TargetFilter::SelfRef],
+            },
+            TargetFilter::Or { filters: vec![] },
+            TargetFilter::Or {
+                filters: vec![TargetFilter::Or { filters: vec![] }],
+            },
+            TargetFilter::SelfRef,
+            TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You)),
+        ] {
+            let effect = Effect::PhaseOut { target };
+            assert_eq!(extract_target_filter_from_effect(&effect), None);
+            assert!(!effect_has_stack_target_declaration(&effect));
+            let control = Effect::PhaseOut {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            };
+            assert!(std::ptr::eq(
+                extract_target_filter_from_effect(&control).unwrap(),
+                control.target_filter().unwrap()
+            ));
+            assert!(effect_has_stack_target_declaration(&control));
+        }
+    }
+
+    #[test]
+    fn phase_out_context_union_preserves_targeted_boundaries() {
+        let creature = TargetFilter::Typed(TypedFilter::creature());
+        let mixed = TargetFilter::Or {
+            filters: vec![TargetFilter::SelfRef, creature],
+        };
+        for target in [
+            mixed.clone(),
+            TargetFilter::Or {
+                filters: vec![TargetFilter::ParentTarget, mixed],
+            },
+            TargetFilter::Or {
+                filters: vec![TargetFilter::SelfRef, TargetFilter::Any],
+            },
+            TargetFilter::Any,
+            TargetFilter::And {
+                filters: vec![TargetFilter::SelfRef, TargetFilter::ParentTarget],
+            },
+            TargetFilter::Not {
+                filter: Box::new(TargetFilter::SelfRef),
+            },
+        ] {
+            let effect = Effect::PhaseOut { target };
+            assert!(std::ptr::eq(
+                extract_target_filter_from_effect(&effect).unwrap(),
+                effect.target_filter().unwrap()
+            ));
+            assert!(effect_has_stack_target_declaration(&effect));
+        }
+        let pair = TargetFilter::Or {
+            filters: vec![TargetFilter::SelfRef, TargetFilter::ParentTarget],
+        };
+        for effect in [
+            Effect::PhaseIn {
+                target: pair.clone(),
+            },
+            Effect::Destroy {
+                target: pair,
+                cant_regenerate: false,
+            },
+        ] {
+            assert_eq!(
+                extract_target_filter_from_effect(&effect),
+                effect.target_filter()
+            );
+            assert!(effect_has_stack_target_declaration(&effect));
+        }
+        for target in [
+            TargetFilter::SelfRef,
+            TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You)),
+        ] {
+            let effect = Effect::PhaseIn { target };
+            assert_eq!(extract_target_filter_from_effect(&effect), None);
+            assert!(!effect_has_stack_target_declaration(&effect));
+        }
+    }
 
     fn goblin_token(attack_destination: TokenAttackDestination) -> Effect {
         Effect::Token {

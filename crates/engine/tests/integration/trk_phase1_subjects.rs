@@ -327,7 +327,10 @@ fn scientists_full_multiline_reminder_draws_then_discards() {
     assert_eq!(runner.state().objects[&second].zone, Zone::Hand);
     // The live full-card parse must not leave the reminder as a rules ability.
     let object = &runner.state().objects[&source];
-    assert!(!format!("{:?} {:?}", object.abilities, object.triggers).contains("Unimplemented"));
+    assert!(
+        !format!("{:?} {:?}", object.abilities, object.trigger_definitions)
+            .contains("Unimplemented")
+    );
     runner
         .act(GameAction::SelectCards {
             cards: vec![keep, second],
@@ -569,6 +572,11 @@ fn defiant_optional_target_and_attachments_phase_and_return() {
             &runner.state().objects[&source],
             &Keyword::Shroud
         ));
+        let WaitingFor::TriggerTargetSelection { target_slots, .. } = &runner.state().waiting_for
+        else {
+            panic!("Defiant must announce its optional target");
+        };
+        assert_eq!(target_slots.len(), 1);
         let legal = optional_object_slot(&runner);
         assert!(legal.contains(&TargetRef::Object(target)));
         assert!(!legal.contains(&TargetRef::Object(opponent)));
@@ -883,6 +891,272 @@ fn defiant_animated_source_deduplicates_self_selection() {
     assert!(runner.state().objects[&source].is_phased_out());
     assert_eq!(runner.state().objects[&source].zone, Zone::Battlefield);
 }
+// SHAPE / slot seam supplement to the full-card runtime regressions above.
+#[test]
+fn defiant_full_oracle_has_one_optional_slot_and_no_phase_out_slot() {
+    use engine::game::ability_utils::{build_resolved_from_def, build_target_slots};
+    use engine::types::ability::{
+        ControllerRef, Effect, MultiTargetSpec, TargetFilter, TypedFilter,
+    };
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature_from_oracle(P0, "Fountain Watch", 2, 4, "Artifacts and enchantments you control have shroud. (They can't be the targets of spells or abilities.)");
+    let source = defiant(&mut scenario);
+    let creature = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+    let opponent = scenario.add_creature(P1, "Runeclaw Bear", 2, 2).id();
+    let mut runner = scenario.build();
+    cast_to_trigger(&mut runner, source);
+    assert!(engine::game::keywords::has_keyword(
+        &runner.state().objects[&source],
+        &Keyword::Shroud
+    ));
+    let object = &runner.state().objects[&source];
+    let def = object
+        .trigger_definitions
+        .iter()
+        .filter_map(|trigger| trigger.execute.as_deref())
+        .find(|def| matches!(def.effect.as_ref(), Effect::TargetOnly { .. }))
+        .expect("full Defiant ETB starts with a target declaration");
+    assert_eq!(
+        def.effect.as_ref(),
+        &Effect::TargetOnly {
+            target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+        }
+    );
+    assert_eq!(def.multi_target, Some(MultiTargetSpec::fixed(0, 1)));
+    let sub = def.sub_ability.as_ref().expect("compound PhaseOut");
+    assert_eq!(
+        sub.effect.as_ref(),
+        &Effect::PhaseOut {
+            target: TargetFilter::Or {
+                filters: vec![TargetFilter::SelfRef, TargetFilter::ParentTarget]
+            },
+        }
+    );
+    let slots =
+        build_target_slots(runner.state(), &build_resolved_from_def(def, source, P0)).unwrap();
+    assert_eq!(slots.len(), 1);
+    assert!(slots[0].optional);
+    assert!(slots[0]
+        .legal_targets
+        .contains(&TargetRef::Object(creature)));
+    assert!(!slots[0]
+        .legal_targets
+        .contains(&TargetRef::Object(opponent)));
+    assert!(
+        build_target_slots(runner.state(), &build_resolved_from_def(sub, source, P0))
+            .unwrap()
+            .is_empty()
+    );
+}
+
+const REALITY_RIPPLE: &str = "Target artifact, creature, or land phases out. (While it's phased out, it's treated as though it doesn't exist. It phases in before its controller untaps during their next untap step.)";
+const TEFERIS_PROTECTION: &str = "Until your next turn, your life total can't change and you gain protection from everything. All permanents you control phase out. (While they're phased out, they're treated as though they don't exist. They phase in before you untap during your untap step.)\nExile Teferi's Protection.";
+
+// CR 608.2b + CR 702.18a: a genuine targeted phase-out requires a legal
+// chosen object at announcement and rechecks that object at resolution.
+#[test]
+fn reality_ripple_preserves_target_selection_and_legality() {
+    for illegal in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Reality Ripple", true, REALITY_RIPPLE)
+            .id();
+        let selected = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+        let other = scenario.add_creature(P1, "Runeclaw Bear", 2, 2).id();
+        let shrouded = scenario
+            .add_creature_from_oracle(
+                P1,
+                "Deadly Insect",
+                6,
+                1,
+                "Shroud (This creature can't be the target of spells or abilities.)",
+            )
+            .id();
+        let enchantment = scenario
+            .add_enchantment_from_oracle(P1, "Glorious Anthem", "Creatures you control get +1/+1.")
+            .id();
+        let mut runner = scenario.build();
+        let card_id = runner.state().objects[&spell].card_id;
+        runner
+            .act(GameAction::CastSpell {
+                object_id: spell,
+                card_id,
+                targets: vec![],
+                payment_mode: CastPaymentMode::Auto,
+            })
+            .unwrap();
+        let WaitingFor::TargetSelection {
+            player,
+            target_slots,
+            ..
+        } = &runner.state().waiting_for
+        else {
+            panic!("Reality Ripple must ask for a target");
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(target_slots.len(), 1);
+        assert!(!target_slots[0].optional);
+        assert!(engine::game::keywords::has_keyword(
+            &runner.state().objects[&shrouded],
+            &Keyword::Shroud
+        ));
+        let legal = &target_slots[0].legal_targets;
+        for id in [selected, other] {
+            assert!(legal.contains(&TargetRef::Object(id)));
+        }
+        for id in [shrouded, enchantment] {
+            assert!(!legal.contains(&TargetRef::Object(id)));
+        }
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(selected)),
+            })
+            .unwrap();
+        assert_eq!(runner.state().stack.len(), 1);
+        assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        if illegal {
+            engine::game::zones::move_to_zone(
+                runner.state_mut(),
+                selected,
+                Zone::Exile,
+                &mut vec![],
+            );
+        }
+        runner.advance_until_stack_empty();
+        finished(&runner);
+        assert_eq!(runner.state().objects[&selected].is_phased_out(), !illegal);
+        for id in [other, shrouded, enchantment] {
+            assert!(!runner.state().objects[&id].is_phased_out());
+        }
+        assert_eq!(runner.state().objects[&spell].zone, Zone::Graveyard);
+    }
+
+    // Same full spell as the positive board, with only prohibited candidates.
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Reality Ripple", true, REALITY_RIPPLE)
+        .id();
+    scenario.add_creature_from_oracle(
+        P1,
+        "Deadly Insect",
+        6,
+        1,
+        "Shroud (This creature can't be the target of spells or abilities.)",
+    );
+    scenario.add_enchantment_from_oracle(P1, "Glorious Anthem", "Creatures you control get +1/+1.");
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&spell].card_id;
+    assert!(runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto
+        })
+        .is_err());
+    assert_eq!(runner.state().objects[&spell].zone, Zone::Hand);
+    finished(&runner);
+}
+
+// CR 115.10a + CR 702.26a/g: mass phasing affects shrouded permanents and
+// attached Equipment without targeting, then restores them on the next turn.
+#[test]
+fn teferis_protection_preserves_mass_phasing_and_empty_population() {
+    for populated in [false, true] {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        scenario.with_library_top(P0, &["Island"; 8]);
+        scenario.with_library_top(P1, &["Mountain"; 8]);
+        let spell = scenario
+            .add_spell_to_hand_from_oracle(P0, "Teferi's Protection", true, TEFERIS_PROTECTION)
+            .id();
+        let opponent = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
+        let own = populated.then(|| {
+            let creature = scenario.add_creature(P0, "Runeclaw Bear", 2, 2).id();
+            let shrouded = scenario
+                .add_creature_from_oracle(
+                    P0,
+                    "Deadly Insect",
+                    6,
+                    1,
+                    "Shroud (This creature can't be the target of spells or abilities.)",
+                )
+                .id();
+            let equipment = scenario
+                .add_artifact_from_oracle(
+                    P0,
+                    "Bonesplitter",
+                    "Equipped creature gets +2/+0.\nEquip {1}",
+                )
+                .with_subtypes(vec!["Equipment"])
+                .id();
+            (creature, shrouded, equipment)
+        });
+        let mut runner = scenario.build();
+        if let Some((creature, shrouded, equipment)) = own {
+            runner
+                .state_mut()
+                .objects
+                .get_mut(&equipment)
+                .unwrap()
+                .attached_to = Some(creature.into());
+            runner
+                .state_mut()
+                .objects
+                .get_mut(&creature)
+                .unwrap()
+                .attachments
+                .push(equipment);
+            assert!(engine::game::keywords::has_keyword(
+                &runner.state().objects[&shrouded],
+                &Keyword::Shroud
+            ));
+        }
+        runner.cast(spell).commit();
+        assert_eq!(runner.state().stack.len(), 1);
+        assert_eq!(runner.state().objects[&spell].zone, Zone::Stack);
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::Priority { .. }
+        ));
+        runner.advance_until_stack_empty();
+        finished(&runner);
+        assert_eq!(runner.state().objects[&spell].zone, Zone::Exile);
+        assert!(!runner.state().objects[&opponent].is_phased_out());
+        if let Some((creature, shrouded, equipment)) = own {
+            for id in [creature, shrouded, equipment] {
+                assert!(runner.state().objects[&id].is_phased_out());
+                assert_eq!(runner.state().objects[&id].zone, Zone::Battlefield);
+            }
+            runner.state_mut().phase = Phase::Cleanup;
+            runner.state_mut().active_player = P1;
+            runner.state_mut().priority_player = P1;
+            runner.state_mut().waiting_for = WaitingFor::Priority { player: P1 };
+            runner.advance_to_upkeep();
+            assert_eq!(runner.state().active_player, P0);
+            for id in [creature, shrouded, equipment] {
+                assert!(!runner.state().objects[&id].is_phased_out());
+            }
+            assert_eq!(
+                runner.state().objects[&equipment].attached_to,
+                Some(creature.into())
+            );
+            assert!(runner.state().objects[&creature]
+                .attachments
+                .contains(&equipment));
+            finished(&runner);
+        }
+    }
+}
+
 // CR 714.3c: fixture a prior chapter's counter, then let turn progression
 // produce the next chapter; never inject its trigger or ability.
 fn next_chapter_scenario(name: &str, text: &str, previous: u32) -> (GameScenario, ObjectId) {
