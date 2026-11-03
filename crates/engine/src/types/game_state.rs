@@ -35661,73 +35661,42 @@ impl GameState {
                     .push(reference.incarnation);
             }
         }
-        let fired = std::mem::take(&mut self.triggers_fired_this_turn);
-        self.triggers_fired_this_turn = fired
-            .into_iter()
-            .map(|mut reference| {
-                reference.for_each_incarnation_mut(&mut |object_id, incarnation| {
-                    present.entry(object_id).or_default().push(*incarnation);
-                });
-                reference.for_each_grant_generation_mut(&mut |object_id, generation| {
-                    grants.entry(object_id).or_default().push(*generation);
-                });
-                reference
-            })
-            .collect();
-        let fired_this_game = std::mem::take(&mut self.triggers_fired_this_game);
-        self.triggers_fired_this_game = fired_this_game
-            .into_iter()
-            .map(|mut reference| {
-                reference.for_each_incarnation_mut(&mut |object_id, incarnation| {
-                    present.entry(object_id).or_default().push(*incarnation);
-                });
-                reference.for_each_grant_generation_mut(&mut |object_id, generation| {
-                    grants.entry(object_id).or_default().push(*generation);
-                });
-                reference
-            })
-            .collect();
-        let fire_counts = std::mem::take(&mut self.trigger_fire_counts_this_turn);
-        self.trigger_fire_counts_this_turn = fire_counts
-            .into_iter()
-            .map(|(mut reference, count)| {
-                reference.for_each_incarnation_mut(&mut |object_id, incarnation| {
-                    present.entry(object_id).or_default().push(*incarnation);
-                });
-                reference.for_each_grant_generation_mut(&mut |object_id, generation| {
-                    grants.entry(object_id).or_default().push(*generation);
-                });
-                (reference, count)
-            })
-            .collect();
-        let fired_per_opponent = std::mem::take(&mut self.triggers_fired_this_turn_per_opponent);
-        self.triggers_fired_this_turn_per_opponent = fired_per_opponent
-            .into_iter()
-            .map(|(mut reference, player)| {
-                reference.for_each_incarnation_mut(&mut |object_id, incarnation| {
-                    present.entry(object_id).or_default().push(*incarnation);
-                });
-                reference.for_each_grant_generation_mut(&mut |object_id, generation| {
-                    grants.entry(object_id).or_default().push(*generation);
-                });
-                (reference, player)
-            })
-            .collect();
-        let indicated = std::mem::take(&mut *self.trigger_indicated_actions_this_turn);
-        self.trigger_indicated_actions_this_turn = Box::new(
-            indicated
-                .into_iter()
-                .map(|(mut reference, player)| {
-                    reference.for_each_incarnation_mut(&mut |object_id, incarnation| {
-                        present.entry(object_id).or_default().push(*incarnation);
-                    });
-                    reference.for_each_grant_generation_mut(&mut |object_id, generation| {
-                        grants.entry(object_id).or_default().push(*generation);
-                    });
-                    (reference, player)
-                })
-                .collect(),
-        );
+        // This pass only reads these keys, so it walks the live containers in place;
+        // taking and rebuilding a container belongs to the rewrite pass, which changes it.
+        // The containers expose their elements only as `&T` and every visit is
+        // mutating-shaped, so each key is cloned once rather than the container rebuilt.
+        fn collect_reference(
+            reference: &TriggerDefinitionRef,
+            present: &mut HashMap<ObjectId, Vec<u64>>,
+            grants: &mut HashMap<ObjectId, Vec<u64>>,
+        ) {
+            let mut reference = (*reference).clone();
+            reference.for_each_incarnation_mut(&mut |object_id, incarnation| {
+                present.entry(object_id).or_default().push(*incarnation);
+            });
+            reference.for_each_grant_generation_mut(&mut |object_id, generation| {
+                grants.entry(object_id).or_default().push(*generation);
+            });
+        }
+        for reference in self.triggers_fired_this_turn.iter() {
+            collect_reference(reference, &mut present, &mut grants);
+        }
+        for reference in self.triggers_fired_this_game.iter() {
+            collect_reference(reference, &mut present, &mut grants);
+        }
+        for (reference, _) in self.trigger_fire_counts_this_turn.iter() {
+            collect_reference(reference, &mut present, &mut grants);
+        }
+        for (reference, _) in self.triggers_fired_this_turn_per_opponent.iter() {
+            collect_reference(reference, &mut present, &mut grants);
+        }
+        for (reference, _) in self.trigger_indicated_actions_this_turn.iter() {
+            collect_reference(reference, &mut present, &mut grants);
+        }
+        // CR 400.7: same per-definition-and-player key shape as the ledgers above.
+        for (reference, _) in self.triggered_abilities_added_mana_this_turn.iter() {
+            collect_reference(reference, &mut present, &mut grants);
+        }
         for frame in self.return_result_frames.values_mut() {
             for records in frame.values_mut() {
                 for record in records.iter_mut() {
@@ -36005,6 +35974,10 @@ impl GameState {
             std::mem::take(&mut *self.trigger_indicated_actions_this_turn),
             &mut |(reference, _)| rank_reference(reference),
         ));
+        self.triggered_abilities_added_mana_this_turn = rank_hash_set(
+            std::mem::take(&mut self.triggered_abilities_added_mana_this_turn),
+            &mut |(reference, _)| rank_reference(reference),
+        );
         for frame in self.return_result_frames.values_mut() {
             for records in frame.values_mut() {
                 for record in records.iter_mut() {
@@ -36084,6 +36057,7 @@ impl GameState {
             triggers_fired_this_turn_per_opponent: _,
             triggers_fired_this_game: _,
             trigger_indicated_actions_this_turn: _,
+            triggered_abilities_added_mana_this_turn: _,
             return_result_frames: _,
             tracked_set_member_origins: _,
             // RANKED THROUGH A CARRIER — these hold the events, abilities and records
@@ -36253,7 +36227,6 @@ impl GameState {
             deck_pools: _,
             outside_game_cards_brought_in: _,
             sideboard_submitted: _,
-            triggered_abilities_added_mana_this_turn: _,
             activated_abilities_this_turn: _,
             activated_abilities_this_game: _,
             loyalty_abilities_activated_this_turn: _,
@@ -49776,6 +49749,7 @@ mod tests {
         FiredPerOpponent,
         FiredThisGame,
         IndicatedActions,
+        TriggeredManaAdded,
         FrameRecord,
         FrameGrantedEntry,
         DamageDealt,
@@ -49871,6 +49845,10 @@ mod tests {
                 state
                     .trigger_indicated_actions_this_turn
                     .insert((printed_ref_pinning(x, named, 0), PlayerId(0)));
+            }
+            CarrierKind::TriggeredManaAdded => {
+                state.triggered_abilities_added_mana_this_turn =
+                    HashSet::from([(printed_ref_pinning(x, named, 0), PlayerId(1))]);
             }
             CarrierKind::FrameRecord => {
                 let record = zone_change_record_naming(&state, x, named);
@@ -50035,6 +50013,13 @@ mod tests {
                 carrier_naming(CarrierKind::IndicatedActions, incarnation, incarnation)
             },
             merge: |carrier, live| carrier_naming(CarrierKind::IndicatedActions, live, carrier),
+        },
+        CarrierCase {
+            name: "triggered_abilities_added_mana_this_turn",
+            split: |incarnation| {
+                carrier_naming(CarrierKind::TriggeredManaAdded, incarnation, incarnation)
+            },
+            merge: |carrier, live| carrier_naming(CarrierKind::TriggeredManaAdded, live, carrier),
         },
         CarrierCase {
             name: "return_result_frames",
