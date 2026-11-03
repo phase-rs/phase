@@ -24641,9 +24641,10 @@ fn pay_ability_mana_cost_with_choices_excluding_and_parent(
 /// CR 701.67a: How many generic mana of an activation's waterbend cost the
 /// player's tap markers pay. A marker never pays for an activation through the
 /// spend path, where `ManaRestriction::allows_activation` keeps it from funding
-/// any other ability, such as a mana ability's own `{1}`: only the waterbend
-/// payment window it was tapped in may redeem it, and that is the window the
-/// `resume` names.
+/// any other ability, such as a mana ability's own `{1}`: only a waterbend
+/// payment window may redeem it, and that is the window the `resume` names. A
+/// surplus marker from tapping past the generic count stays in the pool, so a
+/// later window or spell can redeem it.
 fn waterbend_taps_paying_activation(
     state: &GameState,
     player: PlayerId,
@@ -24674,7 +24675,8 @@ fn waterbend_taps_paying_activation(
 }
 
 /// CR 701.67a + CR 118.3a: Remove the markers whose taps paid part of an
-/// activation's cost. Being no mana, they join no spent-mana record.
+/// activation's cost. Being no mana, they reach no spent-mana read; only the
+/// journal's pip ledger sees them.
 fn consume_waterbend_tap_markers(
     state: &mut GameState,
     player: PlayerId,
@@ -31584,7 +31586,8 @@ pub fn handle_cancel_cast(
         }
     }
     // CR 733.1: an activation has no cast reversal to restore its payments, so
-    // a waterbend tap made toward it is undone along with its marker.
+    // every tap marker in a pool is undone with its tap, including a surplus
+    // marker from an earlier payment. No abilities trigger, so no event follows.
     if pending.activation_ability_index.is_some() {
         let tapped_for_payment = state
             .players
@@ -31594,8 +31597,16 @@ pub fn handle_cancel_cast(
             .map(|(unit, _)| unit.source_id)
             .collect::<Vec<_>>();
         for object_id in tapped_for_payment {
-            if let Some(obj) = state.objects.get_mut(&object_id) {
-                obj.tapped = false;
+            if crate::game::object_state::resolve_and_apply_object_edit(
+                state,
+                object_id,
+                crate::types::resolved_commands::ResolvedObjectStatus::Tapped,
+                false,
+            )
+            .is_ok_and(|untapped| untapped)
+            {
+                crate::game::public_state::mark_public_state_object_dirty(state, object_id);
+                crate::game::public_state::mark_mana_display_dirty(state);
             }
         }
     }

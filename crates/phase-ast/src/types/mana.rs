@@ -585,8 +585,8 @@ pub enum ManaRestriction {
     Impossible,
     /// CR 702.51a + CR 702.126a + CR 702.66a + CR 701.67a: Internal marker for a
     /// tap (or delve exile) that substitutes for paying mana. The payment
-    /// algorithm may consume it for the current spell or waterbend activation,
-    /// but cast-spent metrics and mana-added triggers must ignore it.
+    /// algorithm may consume it for a spell or in a waterbend activation's
+    /// payment window, but cast-spent metrics and mana-added triggers must ignore it.
     ConvokePayment,
 }
 
