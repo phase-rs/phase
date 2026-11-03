@@ -569,12 +569,6 @@ fn touch_object(
         // not part of that announcement either — cancelling the announcement
         // (CR 733.1) must not undo it.
         super::engine_priority::park_triggers_until_priority(state, &events);
-        super::announcement_triggers::claim_ordinary_collected_span(
-            state,
-            &events,
-            0,
-            events.len(),
-        );
         Ok(ActionResult::applied(events, state.waiting_for.clone()))
     }
 }
