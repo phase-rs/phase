@@ -14,9 +14,10 @@ use crate::types::actions::{GameAction, LearnOption, OutsideGameSelection};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     ActionResult, BatchCompletion, CastOfferKind, ChosenDamageSource, ContinuationXAnnouncement,
-    CopyChosenSelection, CostResume, GameState, OutsideGameChoiceSource, PayCostKind,
-    PayableResource, PendingContinuation, PendingPlayerScopeSacrificeCompletion,
-    PersistentAxisMaterialization, WaitingFor, ZoneOpponentChooserPurpose,
+    CopyChosenSelection, CostResume, GameState, LibraryPlacementContinuation,
+    OutsideGameChoiceSource, PayCostKind, PayableResource, PendingContinuation,
+    PendingPlayerScopeSacrificeCompletion, PersistentAxisMaterialization, WaitingFor,
+    ZoneOpponentChooserPurpose,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::resolved_commands::{
@@ -4644,11 +4645,25 @@ pub(super) fn handle_resolution_choice(
             // echoed back (or a hand-built/corrupt state), not a real pending
             // dig. Reject it before a single card moves rather than finishing
             // the split against bookkeeping that is not there.
-            let Some(completion) = completion else {
+            let Some(continuation) = completion else {
                 return Err(EngineError::InvalidAction(
                     "rest-split state has no pending dig completion to finish; \
                      refusing to move cards against missing bookkeeping"
                         .to_string(),
+                ));
+            };
+            // R4b types stage: only the dig-route `Requests` arm is wired. A
+            // batch-owned arrangement prompt is never published in production
+            // yet (no staged payload is created at this stage), so answering
+            // one means a hand-built or corrupt state. Fail safe without
+            // touching the cards rather than inventing a delivery path.
+            let LibraryPlacementContinuation::Requests(completion) = continuation else {
+                debug_assert!(
+                    false,
+                    "batch-owned library arrangement submission is not implemented yet"
+                );
+                return Err(EngineError::InvalidAction(
+                    "batch-owned library arrangement is not implemented".to_string(),
                 ));
             };
             // Total: `top_count` was clamped to `cards.len()` at park time and

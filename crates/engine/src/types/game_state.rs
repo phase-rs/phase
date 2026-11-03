@@ -6776,6 +6776,378 @@ pub struct PendingBatchDeliveries {
     /// the full action settles so one co-departure/LKI batch is observable.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deferred_events: Vec<GameEvent>,
+    /// CR 101.4 + CR 616.1: staged common-approval lifecycle, if this batch was
+    /// admitted to it. `None` is every non-staged batch and every legacy save;
+    /// the `requests` loop above remains its authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staged: Option<StagedBatchDelivery>,
+}
+
+impl PendingBatchDeliveries {
+    /// R4b structural validation for the staged lifecycle.
+    ///
+    /// `None` is inert: ordinary batches and every legacy save keep exactly the
+    /// existing rules. `Some` must be internally coherent before it is
+    /// serialized or can resume, so a malformed save cannot enter the staged
+    /// driver and silently drop approved members. Called by
+    /// `ResolutionStack::validate`, and therefore by `ResolutionStateWire` before
+    /// any save.
+    pub(crate) fn validate_staged(&self) -> Result<(), String> {
+        let Some(staged) = &self.staged else {
+            return Ok(());
+        };
+        let members = &staged.members;
+        if members.is_empty() {
+            return Err("staged batch delivery has no members".to_string());
+        }
+        if staged.cursor > members.len() {
+            return Err("staged batch cursor is past its members".to_string());
+        }
+        if staged.arrangement_cursor > staged.arrangements.len() {
+            return Err("staged arrangement cursor is past its groups".to_string());
+        }
+
+        let mut object_ids = HashSet::new();
+        for (index, member) in members.iter().enumerate() {
+            if member.announcement_index != index as u32 {
+                return Err("staged batch announcement indices are not their positions".to_string());
+            }
+            if !object_ids.insert(member.identity.object_id) {
+                return Err("staged batch announces one object twice".to_string());
+            }
+            if member.request.object_id != member.identity.object_id {
+                return Err("staged member request names another object".to_string());
+            }
+            Self::validate_staged_member(member)?;
+        }
+
+        // `requests`/`remaining` are exactly the not-yet-consulted suffix, in
+        // announcement order. `attempted` is the whole original cohort.
+        let first_unconsulted = members
+            .iter()
+            .position(|member| member.state == StagedBatchMemberState::Unconsulted);
+        let unconsulted = match first_unconsulted {
+            Some(start) => {
+                let suffix = &members[start..];
+                if suffix
+                    .iter()
+                    .any(|member| member.state != StagedBatchMemberState::Unconsulted)
+                {
+                    return Err(
+                        "staged batch has an unconsulted member after a consulted one".to_string(),
+                    );
+                }
+                suffix
+            }
+            None => &members[members.len()..],
+        };
+        let expected_requests: Vec<&PendingBatchZoneMoveRequest> =
+            unconsulted.iter().map(|member| &member.request).collect();
+        if self.requests.len() != expected_requests.len()
+            || !self
+                .requests
+                .iter()
+                .zip(expected_requests.iter())
+                .all(|(request, expected)| request == *expected)
+        {
+            return Err(
+                "staged batch requests are not the unconsulted suffix in order".to_string(),
+            );
+        }
+        let expected_remaining: Vec<ObjectId> = unconsulted
+            .iter()
+            .map(|member| member.identity.object_id)
+            .collect();
+        if self.remaining != expected_remaining {
+            return Err("staged batch remaining is not the unconsulted suffix".to_string());
+        }
+        let attempted: HashSet<ObjectId> = self.attempted.iter().copied().collect();
+        if attempted.len() != self.attempted.len() || attempted != object_ids {
+            return Err("staged batch attempted is not the original cohort".to_string());
+        }
+
+        self.validate_staged_stage(staged)?;
+        for arrangement in &staged.arrangements {
+            Self::validate_staged_arrangement(staged, arrangement)?;
+        }
+        Ok(())
+    }
+
+    fn validate_staged_member(member: &StagedBatchMember) -> Result<(), String> {
+        let approved_object = |event: &ProposedEvent| match event {
+            ProposedEvent::ZoneChange { object_id, .. } => *object_id == member.identity.object_id,
+            _ => false,
+        };
+        match member.state {
+            StagedBatchMemberState::Unconsulted => {
+                if member.approved_event.is_some()
+                    || member.pending_outcome.is_some()
+                    || member.terminal.is_some()
+                {
+                    return Err(
+                        "an unconsulted staged member already carries an outcome".to_string()
+                    );
+                }
+            }
+            StagedBatchMemberState::OuterConsulting | StagedBatchMemberState::InnerConsulting => {
+                if member.approved_event.is_some() || member.terminal.is_some() {
+                    return Err(
+                        "a consulting staged member already carries an approval or terminal"
+                            .to_string(),
+                    );
+                }
+                if let Some(outcome) = &member.pending_outcome {
+                    match outcome {
+                        StagedMemberOutcome::Approved(event) if approved_object(event) => {}
+                        StagedMemberOutcome::Prevented => {}
+                        StagedMemberOutcome::Approved(_) => {
+                            return Err(
+                                "a consulting staged member approved another object".to_string()
+                            )
+                        }
+                    }
+                }
+            }
+            StagedBatchMemberState::Approved => {
+                let Some(event) = &member.approved_event else {
+                    return Err("an approved staged member has no approved event".to_string());
+                };
+                if !approved_object(event) {
+                    return Err("an approved staged member approved another object".to_string());
+                }
+                if member.pending_outcome.is_some() || member.terminal.is_some() {
+                    return Err(
+                        "an approved staged member carries a pending outcome or terminal"
+                            .to_string(),
+                    );
+                }
+            }
+            StagedBatchMemberState::PreventedWithChild => {
+                if member.pending_outcome != Some(StagedMemberOutcome::Prevented) {
+                    return Err(
+                        "a prevented staged member with a child has no prevented outcome"
+                            .to_string(),
+                    );
+                }
+                if member.approved_event.is_some() || member.terminal.is_some() {
+                    return Err(
+                        "a prevented staged member with a child carries an approval or terminal"
+                            .to_string(),
+                    );
+                }
+            }
+            StagedBatchMemberState::Terminal => {
+                if member.terminal.is_none() {
+                    return Err("a terminal staged member has no terminal outcome".to_string());
+                }
+            }
+            StagedBatchMemberState::Abandoned => {
+                if member.approved_event.is_some()
+                    || member.pending_outcome.is_some()
+                    || member.terminal.is_some()
+                {
+                    return Err(
+                        "an abandoned staged member still carries delivery data".to_string()
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_staged_stage(&self, staged: &StagedBatchDelivery) -> Result<(), String> {
+        let members = &staged.members;
+        match staged.stage {
+            BatchDeliveryStage::Approving => {
+                for (index, member) in members.iter().enumerate() {
+                    let unconsulted = member.state == StagedBatchMemberState::Unconsulted;
+                    if index < staged.cursor && unconsulted {
+                        return Err(
+                            "an unconsulted staged member precedes the approval cursor".to_string()
+                        );
+                    }
+                    if index > staged.cursor && !unconsulted {
+                        return Err(
+                            "a consulted staged member follows the approval cursor".to_string()
+                        );
+                    }
+                }
+                // A parked boundary belongs to the cursor member; the member
+                // itself may still have no terminal (a bare `NeedsChoice`).
+                if let Some(paused) = &self.paused_current {
+                    let Some(member) = members.get(staged.cursor) else {
+                        return Err("a staged batch paused past its member cohort".to_string());
+                    };
+                    if paused.member != member.identity {
+                        return Err("a staged approval pause does not capture the cursor member"
+                            .to_string());
+                    }
+                }
+            }
+            BatchDeliveryStage::Arranging => {
+                if self.paused_current.is_some() {
+                    return Err(
+                        "an arranging staged batch still holds a paused delivery".to_string()
+                    );
+                }
+                if members
+                    .iter()
+                    .any(|member| member.state == StagedBatchMemberState::Unconsulted)
+                {
+                    return Err(
+                        "an unconsulted staged member survived into arrangement".to_string()
+                    );
+                }
+                for (index, arrangement) in staged.arrangements.iter().enumerate() {
+                    if index != staged.arrangement_cursor
+                        && arrangement.status == StagedArrangementStatus::Offered
+                    {
+                        return Err(
+                            "a staged arrangement other than the cursor is offered".to_string()
+                        );
+                    }
+                    if index < staged.arrangement_cursor
+                        && !matches!(
+                            arrangement.status,
+                            StagedArrangementStatus::Derived | StagedArrangementStatus::Submitted
+                        )
+                    {
+                        return Err(
+                            "a staged arrangement before the cursor is still pending".to_string()
+                        );
+                    }
+                }
+            }
+            BatchDeliveryStage::Delivering => {
+                for member in members {
+                    if !matches!(
+                        member.state,
+                        StagedBatchMemberState::Approved
+                            | StagedBatchMemberState::Terminal
+                            | StagedBatchMemberState::Abandoned
+                    ) {
+                        return Err(
+                            "a staged member entered delivery without a final approval".to_string()
+                        );
+                    }
+                }
+                if staged.arrangements.iter().any(|arrangement| {
+                    matches!(
+                        arrangement.status,
+                        StagedArrangementStatus::Awaiting | StagedArrangementStatus::Offered
+                    )
+                }) {
+                    return Err("a staged arrangement is still pending at delivery".to_string());
+                }
+                // A delivery pause captures the cursor member and already has
+                // its terminal classification.
+                if let Some(paused) = &self.paused_current {
+                    let Some(member) = members.get(staged.cursor) else {
+                        return Err("a staged batch paused past its member cohort".to_string());
+                    };
+                    if paused.member != member.identity {
+                        return Err("a staged delivery pause does not capture the cursor member"
+                            .to_string());
+                    }
+                    if paused.terminal_completion.is_none() {
+                        return Err(
+                            "a staged delivery pause has no terminal classification".to_string()
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_staged_arrangement(
+        staged: &StagedBatchDelivery,
+        arrangement: &StagedLibraryArrangement,
+    ) -> Result<(), String> {
+        if !matches!(
+            arrangement.position,
+            LibraryPosition::Top | LibraryPosition::Bottom
+        ) {
+            return Err("a staged arrangement groups a non-Top/Bottom position".to_string());
+        }
+        if arrangement.batch.arranger.is_some() {
+            return Err("a staged arrangement has a named arranger".to_string());
+        }
+        let mut seen = HashSet::new();
+        for ordered in &arrangement.batch.members {
+            if !seen.insert(ordered.identity) {
+                return Err("a staged arrangement repeats one member".to_string());
+            }
+            let Some(member) = staged
+                .members
+                .iter()
+                .find(|member| member.identity.object_id == ordered.identity.object_id)
+            else {
+                return Err("a staged arrangement names a foreign member".to_string());
+            };
+            if member.identity != ordered.identity {
+                return Err("a staged arrangement rebinds a stale incarnation".to_string());
+            }
+            if member.owner != arrangement.batch.owner {
+                return Err("a staged arrangement mixes library owners".to_string());
+            }
+        }
+        if staged.stage == BatchDeliveryStage::Arranging {
+            let expected: Vec<ObjectIncarnationRef> = staged
+                .members
+                .iter()
+                .filter(|member| {
+                    member.state == StagedBatchMemberState::Approved
+                        && member.owner == arrangement.batch.owner
+                        && member.approved_event.as_ref().is_some_and(|event| {
+                            matches!(
+                                event,
+                                ProposedEvent::ZoneChange {
+                                    to: Zone::Library,
+                                    library_placement: Some(position),
+                                    ..
+                                } if *position == arrangement.position
+                            )
+                        })
+                })
+                .map(|member| member.identity)
+                .collect();
+            let offered: HashSet<ObjectIncarnationRef> = arrangement
+                .batch
+                .members
+                .iter()
+                .map(|m| m.identity)
+                .collect();
+            if offered.len() != expected.len() || offered != expected.iter().copied().collect() {
+                return Err(
+                    "a staged arrangement is not the exact approved group membership".to_string(),
+                );
+            }
+            if arrangement.status == StagedArrangementStatus::Awaiting
+                || arrangement.status == StagedArrangementStatus::Offered
+            {
+                let announcement: Vec<ObjectIncarnationRef> = staged
+                    .members
+                    .iter()
+                    .filter(|member| offered.contains(&member.identity))
+                    .map(|member| member.identity)
+                    .collect();
+                let offered_order: Vec<ObjectIncarnationRef> = arrangement
+                    .batch
+                    .members
+                    .iter()
+                    .map(|m| m.identity)
+                    .collect();
+                if offered_order != announcement {
+                    return Err(
+                        "an unpublished staged arrangement is not in announcement order"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -6852,6 +7224,110 @@ pub struct PendingBatchZoneMoveRequest {
         skip_serializing_if = "crate::types::ability::ExileConcealment::is_public"
     )]
     pub face_down_in_exile: crate::types::ability::ExileConcealment,
+}
+
+/// CR 101.4 + CR 616.1: staged common-approval lifecycle for one simultaneous
+/// request group that retains every member's exact approval through
+/// consultation, arranges positional subsets privately, and delivers the whole
+/// cohort once. Hangs off the existing [`PendingBatchDeliveries`] authority;
+/// it is not a second queue or transaction.
+///
+/// `None` on the owner is every non-staged batch and every legacy save: the
+/// existing per-member loop and drain remain its authority. `Some` is created
+/// only when a batch is admitted to the staged driver and then owns the whole
+/// lifecycle for that batch.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StagedBatchDelivery {
+    pub stage: BatchDeliveryStage,
+    /// Original membership in announcement order; fixed length after entry.
+    pub members: Vec<StagedBatchMember>,
+    /// Next member to consult (`Approving`) or deliver (`Delivering`).
+    pub cursor: usize,
+    /// Owner/position groups derived from final approvals, in prompt order.
+    pub arrangements: Vec<StagedLibraryArrangement>,
+    /// Next arrangement group to prompt (`Arranging`).
+    pub arrangement_cursor: usize,
+}
+
+/// CR 101.4: the three distinct stages of one admitted batch. Consultation and
+/// arrangement may each pause; delivery never re-enters consultation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BatchDeliveryStage {
+    Approving,
+    Arranging,
+    Delivering,
+}
+
+/// One retained member of a staged batch. The exact original request, its
+/// pre-consultation incarnation and the announcement index are frozen at entry,
+/// so no later object with the same id can satisfy this entry.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StagedBatchMember {
+    pub announcement_index: u32,
+    pub request: PendingBatchZoneMoveRequest,
+    pub identity: ObjectIncarnationRef,
+    /// CR 400.3 owner recorded at approval; validated live before delivery.
+    pub owner: PlayerId,
+    pub state: StagedBatchMemberState,
+    /// Exact final replaced event, present once approved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_event: Option<ProposedEvent>,
+    /// Consultation result retained while a post-replacement child is live.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_outcome: Option<StagedMemberOutcome>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<ZoneMoveCompletion>,
+}
+
+/// The charter's current-member states. `OuterConsulting` is produced only by
+/// the later outer-event adapters; this stage never writes it, but the wire
+/// enum carries it now so extending the carriers does not change the saved
+/// enum a second time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StagedBatchMemberState {
+    Unconsulted,
+    OuterConsulting,
+    InnerConsulting,
+    Approved,
+    PreventedWithChild,
+    Terminal,
+    Abandoned,
+}
+
+/// CR 614.5: one consultation's exact result, retained while a post-replacement
+/// child remains live so the child's later settlement cannot re-run the
+/// replacement choice.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum StagedMemberOutcome {
+    Approved(ProposedEvent),
+    Prevented,
+}
+
+/// CR 401.4 + CR 101.4: one private owner/position arrangement group derived
+/// from final approvals. Only `Top` and `Bottom` are grouped; other positions
+/// stay on the ordinary per-member placement path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StagedLibraryArrangement {
+    /// Only `Top` and `Bottom` are grouped (see the phase scope note).
+    pub position: LibraryPosition,
+    /// Reused vocabulary: `owner` is the library owner, `arranger: None`
+    /// means CR 401.4 owner arranging, and `members` holds the final order for
+    /// `Derived`/`Submitted` and the offered order for `Offered`/`Awaiting`.
+    pub batch: MassLibraryOrderBatch,
+    pub status: StagedArrangementStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StagedArrangementStatus {
+    /// Request-origin: no owner prompt; `batch.members` is the legacy-replayed
+    /// final order and is already authoritative.
+    Derived,
+    /// Needs a prompt but has not been published yet.
+    Awaiting,
+    /// Prompt published; `batch.members` is only the offered order.
+    Offered,
+    /// Owner permutation stored; `batch.members` is the final order.
+    Submitted,
 }
 
 /// CR 701.25a / manifest dread: the post-loop cleanup a rest-pile batch must run
@@ -7532,6 +8008,30 @@ pub enum BatchCompletion {
         /// actually departed the library, so the set is a candidate list rather
         /// than a result.
         cards: Vec<ObjectId>,
+    },
+}
+
+/// CR 401.2 + CR 401.4 + CR 608.2c: what finishing a
+/// [`WaitingFor::DigRestSplitChoice`] must do, parameterized so the existing
+/// prompt can also carry a batch-owned CR 401.4 arrangement without a second
+/// prompt variant or a new `GameAction`.
+///
+/// The enum is `untagged` because the two arms are shape-disjoint by
+/// construction: [`BatchCompletion`] is externally tagged, so a legacy save's
+/// completion object is a single-key map that can never be an
+/// `ApprovedBatch { logical_group_id }` map. The `Requests` arm therefore
+/// serializes transparently as the legacy object, keeping old saves
+/// byte-identical and needing no migration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum LibraryPlacementContinuation {
+    /// Existing dig/search remainder route; the wire shape is the legacy
+    /// externally tagged `BatchCompletion` object.
+    Requests(Box<BatchCompletion>),
+    /// Batch-owned CR 401.4 arrangement; the id selects the exact staged batch
+    /// that owns the prompt.
+    ApprovedBatch {
+        logical_group_id: LogicalZoneChangeGroupId,
     },
 }
 
@@ -17587,8 +18087,13 @@ pub enum WaitingFor {
         /// moving any card, rather than completing the move and dropping the
         /// dig's reveal-marker cleanup and tracked-set publication on the
         /// floor.
+        ///
+        /// [`LibraryPlacementContinuation`] keeps that legacy `Requests` tail
+        /// wire-identical while letting a batch-owned CR 401.4 arrangement
+        /// reuse this same prompt; its group id is stripped together with the
+        /// tail in every client projection.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        completion: Option<Box<BatchCompletion>>,
+        completion: Option<LibraryPlacementContinuation>,
     },
     SurveilChoice {
         player: PlayerId,
@@ -19983,6 +20488,52 @@ impl WaitingFor {
         scope: DigRestSplitScope,
         source_id: Option<ObjectId>,
         completion: Option<Box<BatchCompletion>>,
+    ) -> Self {
+        Self::new_dig_rest_split_with_continuation(
+            chooser,
+            library_owner,
+            cards,
+            top_count,
+            scope,
+            source_id,
+            completion.map(LibraryPlacementContinuation::Requests),
+        )
+    }
+
+    /// CR 401.4 + CR 101.4: the same prompt addressed to a library owner for a
+    /// batch-owned arrangement group. The prompt carries no
+    /// `BatchCompletion`: its continuation names the exact staged batch, and
+    /// that batch's frame owns the completion.
+    pub fn new_dig_rest_split_for_batch(
+        chooser: PlayerId,
+        library_owner: PlayerId,
+        cards: Vec<ObjectId>,
+        top_count: usize,
+        scope: DigRestSplitScope,
+        source_id: Option<ObjectId>,
+        logical_group_id: LogicalZoneChangeGroupId,
+    ) -> Self {
+        Self::new_dig_rest_split_with_continuation(
+            chooser,
+            library_owner,
+            cards,
+            top_count,
+            scope,
+            source_id,
+            Some(LibraryPlacementContinuation::ApprovedBatch { logical_group_id }),
+        )
+    }
+
+    /// The one place the prompt's derived fields are computed, so every
+    /// constructor shares the same clamp and actor mapping.
+    fn new_dig_rest_split_with_continuation(
+        chooser: PlayerId,
+        library_owner: PlayerId,
+        cards: Vec<ObjectId>,
+        top_count: usize,
+        scope: DigRestSplitScope,
+        source_id: Option<ObjectId>,
+        completion: Option<LibraryPlacementContinuation>,
     ) -> Self {
         let top_count = top_count.min(cards.len());
         let bottom_count = cards.len() - top_count;
@@ -27529,7 +28080,10 @@ fn visit_waiting_for_chains<'a>(
             visit_mana_choice_context_chains(context, f)?
         }
         WaitingFor::DigRestSplitChoice { completion, .. } => {
-            if let Some(completion) = completion.as_deref() {
+            // Only the dig-route arm carries a `BatchCompletion` chain; a
+            // batch-owned arrangement's completion lives on its staged batch
+            // frame and is visited through that frame instead.
+            if let Some(LibraryPlacementContinuation::Requests(completion)) = completion.as_ref() {
                 visit_batch_completion_chains(completion, f)?;
             }
         }
@@ -53957,6 +54511,89 @@ mod tests {
         );
     }
 
+    /// CR 401.2 + CR 401.4: the `DigRestSplitChoice` continuation is parameterized
+    /// so a batch-owned arrangement can reuse the prompt. The `untagged`
+    /// wrapping must stay wire-transparent for the legacy dig route: an old save's
+    /// externally tagged `BatchCompletion` object decodes as `Requests`, the
+    /// wrapped arm re-serializes byte-identically, and the batch-owned arm
+    /// round-trips without being mistaken for a legacy completion.
+    #[test]
+    fn dig_rest_split_continuation_preserves_legacy_wire_shape() {
+        use crate::types::identifiers::LogicalZoneChangeGroupId;
+
+        let legacy = BatchCompletion::ReturnAsAuraNoTargetComplete {
+            source_id: ObjectId(7),
+        };
+
+        // The wrapper is wire-transparent: the `Requests` arm serializes exactly
+        // like the legacy externally tagged `BatchCompletion` object.
+        let wrapped = LibraryPlacementContinuation::Requests(Box::new(legacy.clone()));
+        assert_eq!(
+            serde_json::to_string(&wrapped).unwrap(),
+            serde_json::to_string(&legacy).unwrap(),
+            "the Requests arm must not add a tag or wrapper object"
+        );
+
+        // A legacy save's completion object decodes as `Requests`.
+        let decoded: LibraryPlacementContinuation =
+            serde_json::from_str(&serde_json::to_string(&legacy).unwrap()).unwrap();
+        match decoded {
+            LibraryPlacementContinuation::Requests(completion) => assert_eq!(*completion, legacy),
+            other => panic!("a legacy completion must decode as Requests, got {other:?}"),
+        }
+
+        // The batch-owned arm round-trips and is never a legacy completion.
+        let batch = LibraryPlacementContinuation::ApprovedBatch {
+            logical_group_id: LogicalZoneChangeGroupId(9),
+        };
+        let batch_json = serde_json::to_string(&batch).unwrap();
+        assert_eq!(
+            serde_json::from_str::<LibraryPlacementContinuation>(&batch_json).unwrap(),
+            batch
+        );
+
+        // End to end: the legacy prompt's own JSON shape is unchanged.
+        let prompt = WaitingFor::new_dig_rest_split(
+            PlayerId(0),
+            PlayerId(0),
+            vec![ObjectId(3), ObjectId(4)],
+            1,
+            DigRestSplitScope::PartitionAndOrder,
+            Some(ObjectId(5)),
+            Some(Box::new(legacy.clone())),
+        );
+        let wire = serde_json::to_value(&prompt).unwrap();
+        assert_eq!(
+            wire["data"]["completion"],
+            serde_json::to_value(&legacy).unwrap(),
+            "a legacy prompt must serialize its completion exactly as before"
+        );
+        let WaitingFor::DigRestSplitChoice { completion, .. } =
+            serde_json::from_value::<WaitingFor>(wire.clone()).unwrap()
+        else {
+            panic!("the prompt round-trips as DigRestSplitChoice");
+        };
+        assert_eq!(
+            completion,
+            Some(LibraryPlacementContinuation::Requests(Box::new(legacy)))
+        );
+
+        // `None` remains the redaction signal, untouched by the new arm.
+        let redacted = WaitingFor::new_dig_rest_split(
+            PlayerId(0),
+            PlayerId(0),
+            vec![ObjectId(3), ObjectId(4)],
+            1,
+            DigRestSplitScope::PartitionAndOrder,
+            Some(ObjectId(5)),
+            None,
+        );
+        let WaitingFor::DigRestSplitChoice { completion, .. } = redacted else {
+            panic!("the prompt is a DigRestSplitChoice");
+        };
+        assert!(completion.is_none(), "None stays the redaction signal");
+    }
+
     /// CR 608.2c: a player-scope sacrifice carrier saved before it recorded the
     /// resolution that wrote it decodes with no entry provenance, so it binds on
     /// its instruction source and carrier shape alone; a carrier with no
@@ -58456,6 +59093,7 @@ mod restored_exact_attack_authority_tests {
                         attempted: Vec::new(),
                         zone_change_record_start: 0,
                         deferred_events: Vec::new(),
+                        staged: None,
                     });
                     state.waiting_for.clone()
                 }

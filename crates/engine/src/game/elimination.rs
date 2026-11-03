@@ -2334,6 +2334,7 @@ mod tests {
             attempted: Vec::new(),
             zone_change_record_start: 0,
             deferred_events: Vec::new(),
+            staged: None,
         }
     }
 
@@ -2503,6 +2504,7 @@ mod tests {
             attempted: vec![leaving, surviving],
             zone_change_record_start: 0,
             deferred_events: Vec::new(),
+            staged: None,
         });
 
         let mut events = Vec::new();
@@ -2620,6 +2622,7 @@ mod tests {
             attempted: vec![leaving, surviving],
             zone_change_record_start: 0,
             deferred_events: Vec::new(),
+            staged: None,
         });
 
         let mut events = Vec::new();
@@ -2697,6 +2700,7 @@ mod tests {
             attempted: vec![leaving, surviving],
             zone_change_record_start: 0,
             deferred_events: Vec::new(),
+            staged: None,
         });
         state.push_batch_delivery(crate::types::game_state::PendingBatchDeliveries {
             component_delivery_parent: Some(PendingComponentDeliveryParent {
@@ -2719,6 +2723,7 @@ mod tests {
             attempted: vec![leaving],
             zone_change_record_start: 0,
             deferred_events: Vec::new(),
+            staged: None,
         });
         state
             .resolution_stack

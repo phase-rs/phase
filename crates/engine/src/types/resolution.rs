@@ -4070,6 +4070,16 @@ impl ResolutionStack {
         let mut buried_direct_choice = None;
         for (index, frame) in self.frames.iter().enumerate() {
             if let ResolutionFrame::BatchDelivery(child) = frame {
+                // R4b: the staged lifecycle is inert (`None`) for every
+                // ordinary batch and legacy save; when present it must be
+                // internally coherent before the payload can be saved or
+                // resumed.
+                child.validate_staged().map_err(|message| {
+                    ResolutionStackError::InvalidPayload {
+                        frame: FrameKind::BatchDelivery,
+                        message,
+                    }
+                })?;
                 if let Some(link) = &child.component_delivery_parent {
                     let parent = index.checked_sub(1).and_then(|i| self.frames.iter().nth(i));
                     let Some(ResolutionFrame::BatchDelivery(parent)) = parent else {
@@ -6940,6 +6950,7 @@ mod tests {
             attempted: Vec::new(),
             zone_change_record_start: state.zone_changes_this_turn.len(),
             deferred_events: Vec::new(),
+            staged: None,
         }))
     }
 
@@ -6988,6 +6999,7 @@ mod tests {
             attempted: Vec::new(),
             zone_change_record_start: 0,
             deferred_events: Vec::new(),
+            staged: None,
         };
         let parent = batch(
             parent_group,
@@ -8965,6 +8977,7 @@ mod tests {
             attempted: Vec::new(),
             zone_change_record_start: batch.zone_changes_this_turn.len(),
             deferred_events: Vec::new(),
+            staged: None,
         };
         let mut batch = restore_v1_batch_delivery_fixture(batch, pending.clone());
         crate::game::zone_pipeline::drain_pending_batch_deliveries(&mut batch, &mut Vec::new());

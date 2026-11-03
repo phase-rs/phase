@@ -1422,6 +1422,7 @@ fn ensure_batch_record(state: &mut GameState, destination: Zone) -> &mut Pending
             attempted: Vec::new(),
             zone_change_record_start,
             deferred_events: Vec::new(),
+            staged: None,
         });
     }
     state
@@ -1599,6 +1600,7 @@ fn stash_batch_tail(
         attempted: Vec::new(),
         zone_change_record_start: state.zone_changes_this_turn.len(),
         deferred_events: Vec::new(),
+        staged: None,
     };
     match parking {
         BatchDeliveryParking::NewChild => state
@@ -1702,6 +1704,10 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
             attempted,
             zone_change_record_start,
             mut deferred_events,
+            // R4b types stage: the staged driver is not wired into the drain
+            // yet, and no production payload creates `Some`; ignore it here so
+            // the existing loop stays exactly the authority it is today.
+            staged: _,
         } = pending;
         deferred_events.append(events);
         let attempted = if attempted.is_empty() {
@@ -1946,6 +1952,7 @@ mod paused_search_audience_tests {
             attempted: Vec::new(),
             zone_change_record_start: 0,
             deferred_events: Vec::new(),
+            staged: None,
         });
 
         drain_pending_batch_deliveries(&mut state, &mut Vec::new());
@@ -2032,6 +2039,7 @@ mod paused_search_audience_tests {
             attempted: Vec::new(),
             zone_change_record_start: 0,
             deferred_events: Vec::new(),
+            staged: None,
         });
 
         // An answer pins the boundary, then changes the proposal.
@@ -7673,6 +7681,7 @@ mod w3_library_placement_tests {
             attempted: Vec::new(),
             zone_change_record_start: 0,
             deferred_events: Vec::new(),
+            staged: None,
         });
         install_library_to_exile_redirect(&mut state);
         install_library_to_exile_redirect(&mut state);
