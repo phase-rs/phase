@@ -520,11 +520,26 @@ while IFS= read -r file; do
     # sharing a long common prefix AND suffix. Skipped (not failed) if python3
     # is unavailable, so the gate degrades gracefully outside CI.
     if command -v python3 >/dev/null 2>&1 && [ -f "$CROSS_PRODUCT_DETECTOR" ]; then
-        crossprod_hits=$(printf '%s\n' "$file_added" \
-            | python3 "$CROSS_PRODUCT_DETECTOR" "$file" 2>/dev/null || true)
-        if [ -n "$crossprod_hits" ]; then
-            report_crossprod="${report_crossprod}
+        # A non-zero detector exit is an INSTRUMENT error, not "no findings":
+        # treating it as a pass is how family D lost every check silently (an
+        # import error, a malformed record). Exit 0 with empty output is the only
+        # "clean" answer; anything else fails the gate with the detector's own
+        # diagnostic, named against the file it was scanning.
+        detector_err="$(mktemp "${TMPDIR:-/tmp}/crossprod-detector.XXXXXX")"
+        if crossprod_hits=$(printf '%s\n' "$file_added" \
+            | python3 "$CROSS_PRODUCT_DETECTOR" "$file" 2>"$detector_err"); then
+            rm -f "$detector_err"
+            if [ -n "$crossprod_hits" ]; then
+                report_crossprod="${report_crossprod}
 ${crossprod_hits}"
+                FAIL=1
+            fi
+        else
+            detector_rc=$?
+            report_crossprod="${report_crossprod}
+  ${file}: family D cross-product detector failed (exit ${detector_rc}):
+$(sed 's/^/    /' "$detector_err")"
+            rm -f "$detector_err"
             FAIL=1
         fi
     fi
