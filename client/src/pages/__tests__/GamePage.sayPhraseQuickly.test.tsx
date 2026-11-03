@@ -164,6 +164,47 @@ function acknowledgeSayings() {
   });
 }
 
+/** Acknowledge each accepted saying only when the test flushes it: models a
+ *  multiplayer round trip whose reply lands after the pace window was armed, so
+ *  the player's next saying is reported before the engine answers the last one. */
+function deferAcknowledgements() {
+  const pending: Array<() => void> = [];
+  dispatchMock.mockImplementation((action: { type: string; data?: { pay?: boolean } }) => {
+    if (action.type !== "PayUnlessCost" || action.data?.pay !== true) {
+      return Promise.resolve();
+    }
+    pending.push(() => {
+      const current = useGameStore.getState().waitingFor;
+      if (
+        current?.type !== "UnlessPayment" ||
+        current.data.cost.type !== "SayPhrase"
+      ) {
+        return;
+      }
+      const owed = Math.max(1, current.data.cost.repetitions ?? 1);
+      const next: WaitingFor | null =
+        owed <= 1
+          ? null
+          : {
+              ...current,
+              data: {
+                ...current.data,
+                cost: { ...current.data.cost, repetitions: owed - 1 },
+              },
+            };
+      act(() => {
+        useGameStore.setState({ waitingFor: next });
+      });
+    });
+    return Promise.resolve();
+  });
+  return () => {
+    const acknowledge = pending.shift();
+    if (!acknowledge) throw new Error("no saying is awaiting acknowledgement");
+    acknowledge();
+  };
+}
+
 function advance(ms: number) {
   act(() => {
     vi.advanceTimersByTime(ms);
@@ -262,6 +303,34 @@ describe("GamePage rapid say-it payment (Toy Boat)", () => {
 
     advance(GAP_MS * 4);
     expect(payUnlessCostCalls()).toEqual([true, false]);
+  });
+
+  it("does not expire a saying answered inside the window but acknowledged late", async () => {
+    const acknowledgeNextSaying = deferAcknowledgements();
+    setup(3);
+    render(gamePageTree());
+
+    await screen.findByText(PHRASE);
+    vi.useFakeTimers();
+    fireEvent.click(phraseBox());
+    // The first saying comes back: the window between sayings is now live.
+    acknowledgeNextSaying();
+
+    advance(GAP_MS / 2);
+    fireEvent.click(phraseBox());
+    expect(payUnlessCostCalls()).toEqual([true, true]);
+
+    // Its acknowledgement is slower than the window. The player already said
+    // the phrase in time, so the window must wait for the engine rather than
+    // decline a payment that was made.
+    advance(GAP_MS * 4);
+    expect(payUnlessCostCalls()).toEqual([true, true]);
+
+    // Once the engine answers, one saying is still owed and the window is live
+    // again: not saying it now is the pause the card punishes.
+    acknowledgeNextSaying();
+    advance(GAP_MS * 4);
+    expect(payUnlessCostCalls()).toEqual([true, true, false]);
   });
 
   it("pays after one saying per repetition inside the window", async () => {

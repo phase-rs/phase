@@ -3927,6 +3927,11 @@ function SayPhrasePanel({
   const [said, setSaid] = useState(0);
   const previousOwed = useRef(owed);
   const inFlight = useRef(0);
+  // Sayings reported to the engine whose acknowledgement has not arrived yet.
+  // The ref stays the synchronous over-report guard; this mirror is what holds
+  // the pace window, because a round trip can outlast the window and a lapsed
+  // timer must never decline a payment the player already made in time.
+  const [awaitingAck, setAwaitingAck] = useState(0);
 
   // A smaller owed count is the engine acknowledging sayings already reported;
   // anything else is a fresh prompt, where the local progress starts over.
@@ -3936,31 +3941,36 @@ function SayPhrasePanel({
     if (owed < previous) {
       const acknowledged = previous - owed;
       inFlight.current = Math.max(0, inFlight.current - acknowledged);
+      setAwaitingAck(inFlight.current);
       setSaid((current) => current + acknowledged);
       return;
     }
     inFlight.current = 0;
+    setAwaitingAck(0);
     setSaid(0);
   }, [owed]);
 
   // CR 118.12a: the pace is part of the payment. The window times the pause
-  // *between* sayings, so it only starts once a saying has been reported: a
-  // single required saying has no pause to measure and must never expire before
-  // it is made. Each acknowledgement re-arms it; a window that lapses
-  // unanswered is a refusal to pay, which the engine turns into the sacrifice.
+  // *between* sayings, so it only starts once a saying has been made: a single
+  // required saying has no pause to measure and must never expire before it is
+  // made. A saying still awaiting its acknowledgement holds the window (the
+  // pause it measures is one the player has already not taken), and each
+  // acknowledgement re-arms it. A window that lapses unanswered is a refusal to
+  // pay, which the engine turns into the sacrifice.
   useEffect(() => {
-    if (quickWindowMs === undefined || said === 0) return;
+    if (quickWindowMs === undefined || said === 0 || awaitingAck > 0) return;
     const timer = setTimeout(() => {
       void dispatch({ type: "PayUnlessCost", data: { pay: false } });
     }, quickWindowMs);
     return () => clearTimeout(timer);
-  }, [dispatch, quickWindowMs, said]);
+  }, [awaitingAck, dispatch, quickWindowMs, said]);
 
   const say = () => {
     // One click is one saying, and the engine accepts no more than the sayings
     // still owed (a rapid double click must not over-report).
     if (inFlight.current >= owed) return;
     inFlight.current += 1;
+    setAwaitingAck(inFlight.current);
     void dispatch({ type: "PayUnlessCost", data: { pay: true } });
   };
 
