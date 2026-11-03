@@ -8021,6 +8021,7 @@ mod tests {
             selectable_cards: top_three.clone(),
             kept_destination: Some(Zone::Library),
             rest_destination: Some(Zone::Library),
+            rest_remainder: engine::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: engine::types::ability::DigRestOrder::Preserve,
             source_id: None,

@@ -16,8 +16,16 @@
 //! handler's `None` → graveyard default milled all seventeen unchosen cards.
 //! Both assertions below fail on that build: the looked-at cards land in the
 //! graveyard and leave the library.
+//!
+//! The fix records the silent remainder as `DigRestRemainder::StayInLibrary`
+//! rather than routing it to a destination. That distinction matters beyond this
+//! card: `rest_destination: Some(Zone::Library)` would put the remainder on the
+//! BOTTOM (CR 401.4), which moves and reorders the library — the card below
+//! covers that difference, because this card's own printed "then shuffle" hides
+//! the resulting order.
 use engine::game::scenario::{GameRunner, GameScenario};
 use engine::game::zones::create_object;
+use engine::types::ability::{DigRestOrder, DigRestRemainder};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::WaitingFor;
@@ -297,5 +305,64 @@ fn through_the_forest_gate_declining_every_land_still_shuffles_and_gains_life() 
         runner.state().players[0].life,
         life_before + 8,
         "\"You gain 8 life\" must be applied"
+    );
+}
+
+/// ENGINE-LEVEL counterpart: the printed card shuffles immediately after the put,
+/// so "left in place" and "moved to the bottom" are indistinguishable there.
+/// This case drives the same `WaitingFor::DigChoice` submission the card reaches,
+/// with the remainder the parser marks for a silent instruction and with no
+/// shuffle behind it, and asserts the unkept cards are still in their original
+/// positions. Routing them to `rest_destination: Some(Zone::Library)` would leave
+/// the same contents in a different order — the difference the fix exists for.
+#[test]
+fn a_silent_remainder_is_never_moved_to_the_library_bottom() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mut runner = scenario.build();
+
+    let above = add_library_card(&mut runner, "Above", false);
+    let land = add_library_card(&mut runner, "Land", true);
+    let below = add_library_card(&mut runner, "Below", false);
+    let deepest = add_library_card(&mut runner, "Deep Sentinel", false);
+    assert_eq!(library_ids(&runner), vec![above, land, below, deepest]);
+
+    runner.state_mut().waiting_for = WaitingFor::DigChoice {
+        player: P0,
+        library_owner: P0,
+        cards: vec![above, land, below],
+        selectable_cards: vec![land],
+        keep_count: 1,
+        up_to: true,
+        kept_destination: Some(Zone::Battlefield),
+        rest_destination: None,
+        rest_remainder: DigRestRemainder::StayInLibrary,
+        rest_split_top_count: None,
+        rest_order: DigRestOrder::Preserve,
+        source_id: None,
+        enter_tapped: false,
+        enters_attacking: false,
+    };
+
+    runner
+        .act(GameAction::SelectCards { cards: vec![land] })
+        .expect("putting the one land card onto the battlefield must be accepted");
+
+    let st = runner.state();
+    assert_eq!(
+        st.objects[&land].zone,
+        Zone::Battlefield,
+        "the chosen land is put onto the battlefield"
+    );
+    assert!(
+        st.players[0].graveyard.is_empty(),
+        "CR 701.20e: nothing routes a card that was only looked at, got {:?}",
+        st.players[0].graveyard
+    );
+    assert_eq!(
+        library_ids(&runner),
+        vec![above, below, deepest],
+        "the unkept looked-at cards keep their positions; a bottom placement \
+         would leave the same cards in a different order"
     );
 }

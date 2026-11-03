@@ -1,8 +1,8 @@
 use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{
-    DigRestOrder, DigSource, Effect, EffectError, EffectKind, ParentTargetMissingReason,
-    ResolvedAbility, TargetFilter,
+    DigRestOrder, DigRestRemainder, DigSource, Effect, EffectError, EffectKind,
+    ParentTargetMissingReason, ResolvedAbility, TargetFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{BatchCompletion, GameState, WaitingFor};
@@ -23,6 +23,7 @@ pub fn resolve(
         filter,
         kept_dest,
         rest_dest,
+        rest_remainder,
         rest_split_top,
         rest_order,
         is_reveal,
@@ -39,6 +40,7 @@ pub fn resolve(
             filter,
             destination,
             rest_destination,
+            rest_remainder,
             rest_split_top_count,
             rest_order,
             reveal,
@@ -69,6 +71,7 @@ pub fn resolve(
                 filter.clone(),
                 *destination,
                 *rest_destination,
+                *rest_remainder,
                 // CR 608.2c + CR 107.1b: the split size is fixed as the effect
                 // is applied (and clamped non-negative), exactly like the
                 // sibling `keep_count_expr` above.
@@ -90,6 +93,7 @@ pub fn resolve(
             TargetFilter::Any,
             None,
             None,
+            DigRestRemainder::Route,
             None,
             DigRestOrder::Preserve,
             false,
@@ -130,6 +134,7 @@ pub fn resolve(
             filter,
             kept_dest,
             rest_dest,
+            rest_remainder,
             rest_split_top,
             rest_order,
             enter_tapped,
@@ -268,6 +273,7 @@ pub fn resolve(
                 &selectable_cards,
                 dest,
                 rest_dest,
+                rest_remainder,
                 rest_order,
                 enter_tapped,
                 enters_attacking,
@@ -292,6 +298,7 @@ pub fn resolve(
         up_to: is_up_to,
         kept_destination: kept_dest,
         rest_destination: rest_dest,
+        rest_remainder,
         rest_split_top_count: rest_split_top,
         rest_order,
         source_id: Some(ability.source_id),
@@ -332,11 +339,20 @@ fn resolve_from_prior_look(
     filter: TargetFilter,
     kept_dest: Option<Zone>,
     rest_dest: Option<Zone>,
+    rest_remainder: DigRestRemainder,
     rest_split_top: Option<usize>,
     rest_order: DigRestOrder,
     enter_tapped: bool,
     enters_attacking: bool,
 ) -> Result<(), EffectError> {
+    // CR 701.20e: a silent remainder was only looked at, so nothing is routed —
+    // the two "route the rest" branches below take no destination and therefore
+    // leave those cards exactly where they are.
+    let rest_dest = if rest_remainder.is_route() {
+        rest_dest
+    } else {
+        None
+    };
     let cards = state.private_look_ids.clone();
     if cards.is_empty() {
         // CR 608.2c: mirrors the empty-library branch in `resolve` (issue
@@ -455,6 +471,7 @@ fn resolve_from_prior_look(
         up_to: is_up_to,
         kept_destination: kept_dest,
         rest_destination: rest_dest,
+        rest_remainder,
         rest_split_top_count: rest_split_top,
         rest_order,
         source_id: Some(ability.source_id),
@@ -491,16 +508,23 @@ fn resolve_mass_put_all(
     selectable: &[crate::types::identifiers::ObjectId],
     dest: Zone,
     rest_destination: Option<Zone>,
+    rest_remainder: DigRestRemainder,
     rest_order: DigRestOrder,
     enter_tapped: bool,
     enters_attacking: bool,
     events: &mut Vec<GameEvent>,
 ) {
-    let rest: Vec<_> = cards
-        .iter()
-        .filter(|id| !selectable.contains(id))
-        .copied()
-        .collect();
+    let rest: Vec<_> = if rest_remainder.is_route() {
+        cards
+            .iter()
+            .filter(|id| !selectable.contains(id))
+            .copied()
+            .collect()
+    } else {
+        // CR 701.20e: the instruction never sent the unkept cards anywhere, so
+        // there is no rest pile to move — they stay in the library untouched.
+        Vec::new()
+    };
 
     // Route the (deterministic) rest pile first so a kept-card pause cannot
     // strand it. None => bottom of library (CR 701.20a "in a random order").
@@ -615,6 +639,7 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
+                rest_remainder: crate::types::ability::DigRestRemainder::Route,
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
                 reveal: false,
@@ -712,6 +737,7 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
+                rest_remainder: crate::types::ability::DigRestRemainder::Route,
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
                 reveal: false,
@@ -768,6 +794,7 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
+                rest_remainder: crate::types::ability::DigRestRemainder::Route,
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
                 reveal: false,
@@ -824,6 +851,7 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: Some(Zone::Library),
+                rest_remainder: crate::types::ability::DigRestRemainder::Route,
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
                 reveal: false,
@@ -897,6 +925,7 @@ mod tests {
             up_to: true,
             kept_destination: None,
             rest_destination: Some(Zone::Library),
+            rest_remainder: crate::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
@@ -981,6 +1010,7 @@ mod tests {
             up_to: true,
             kept_destination: None,
             rest_destination: Some(Zone::Library),
+            rest_remainder: crate::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
@@ -1044,6 +1074,7 @@ mod tests {
             up_to: false,
             kept_destination: Some(Zone::Library),
             rest_destination: Some(Zone::Library),
+            rest_remainder: crate::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
@@ -1118,6 +1149,7 @@ mod tests {
             up_to: false,
             kept_destination: Some(Zone::Library),
             rest_destination: Some(Zone::Library),
+            rest_remainder: crate::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
@@ -1184,6 +1216,7 @@ mod tests {
             up_to: true,
             kept_destination: Some(Zone::Hand),
             rest_destination: Some(Zone::Graveyard),
+            rest_remainder: crate::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
@@ -1247,6 +1280,7 @@ mod tests {
             up_to: true,
             kept_destination: Some(Zone::Hand),
             rest_destination: Some(Zone::Graveyard),
+            rest_remainder: crate::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
@@ -1319,6 +1353,7 @@ mod tests {
             up_to: true,
             kept_destination: Some(Zone::Hand),
             rest_destination: Some(Zone::Library),
+            rest_remainder: crate::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
@@ -1394,6 +1429,7 @@ mod tests {
             up_to: true,
             kept_destination: Some(Zone::Hand),
             rest_destination: Some(Zone::Library),
+            rest_remainder: crate::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
@@ -1463,6 +1499,7 @@ mod tests {
             up_to: true,
             kept_destination: Some(Zone::Hand),
             rest_destination: Some(Zone::Library),
+            rest_remainder: crate::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),
@@ -1543,6 +1580,7 @@ mod tests {
                 up_to: false,
                 filter,
                 rest_destination: None,
+                rest_remainder: crate::types::ability::DigRestRemainder::Route,
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
                 reveal: false,
@@ -1622,6 +1660,7 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Typed(TypedFilter::creature()),
                 rest_destination: Some(Zone::Library),
+                rest_remainder: crate::types::ability::DigRestRemainder::Route,
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
                 reveal: false,
@@ -1937,6 +1976,7 @@ mod tests {
                 up_to: true,
                 filter: filter.clone(),
                 rest_destination: Some(Zone::Library),
+                rest_remainder: crate::types::ability::DigRestRemainder::Route,
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
                 reveal: false,
@@ -1996,6 +2036,7 @@ mod tests {
                 up_to: true,
                 filter: filter_you,
                 rest_destination: Some(Zone::Library),
+                rest_remainder: crate::types::ability::DigRestRemainder::Route,
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
                 reveal: false,
@@ -2066,6 +2107,7 @@ mod tests {
             up_to: true,
             kept_destination: Some(Zone::Battlefield),
             rest_destination: Some(Zone::Library),
+            rest_remainder: crate::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: DigRestOrder::Preserve,
             source_id: Some(ObjectId(100)),

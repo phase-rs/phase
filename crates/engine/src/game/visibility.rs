@@ -2397,6 +2397,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
         ref selectable_cards,
         kept_destination,
         rest_destination,
+        rest_remainder,
         rest_split_top_count,
         rest_order,
         source_id,
@@ -2414,6 +2415,7 @@ fn filter_state_for_scope(state: &GameState, viewer: Option<PlayerId>) -> GameSt
                 selectable_cards: selectable_cards.iter().map(|_| ObjectId(0)).collect(),
                 kept_destination,
                 rest_destination,
+                rest_remainder,
                 // The split SIZE is public (it is printed on the card); only
                 // the identities of the cards are private, and those are
                 // blanked above.

@@ -7638,6 +7638,7 @@ mod tests {
                 up_to: false,
                 filter: TargetFilter::Any,
                 rest_destination: None,
+                rest_remainder: crate::types::ability::DigRestRemainder::Route,
                 rest_split_top_count: None,
                 rest_order: crate::types::ability::DigRestOrder::Preserve,
                 reveal: false,

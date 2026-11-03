@@ -16,15 +16,15 @@ use crate::types::ability::{
     AbilityKind, AbilityTag, ActivationManaPaymentRestriction, ActivationRestriction,
     AdditionalCost, CardPlayMode, CastManaSpentMetric, CastTimingPermission, CastingPermission,
     CastingRestriction, ChoiceType, ChosenSubtypeKind, ContinuousModification, ControllerRef,
-    CostReduction, CounterSourceRider, DamageRedirectTarget, DelayedTriggerCondition, Duration,
-    Effect, EffectScope, FilterProp, GuardReading, ManaProduction, ModalChoice, ParsedCondition,
-    PlayerFilter, QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode,
-    SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition, TapStateChange,
-    TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnloweredGuard,
-    VoteSubject,
+    CostReduction, CounterSourceRider, DamageRedirectTarget, DelayedTriggerCondition,
+    DigRestRemainder, Duration, Effect, EffectScope, FilterProp, GuardReading, ManaProduction,
+    ModalChoice, ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef, ReplacementDefinition,
+    ReplacementMode, SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition,
+    TapStateChange, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    UnloweredGuard, VoteSubject,
 };
 use crate::types::ability_visit::{
-    granter_symbols, visit_ability_def_scoped, DefinitionNode, ResolutionScope,
+    granter_symbols, visit_ability_def_scoped, DefinitionNode, DefinitionNodeMut, ResolutionScope,
 };
 use crate::types::card::DraftEffect;
 use crate::types::card_type::CoreType;
@@ -9103,22 +9103,25 @@ pub fn parse_oracle_text(
 /// from among them onto the battlefield tapped, then shuffle. You gain 8 life."
 ///
 /// Looking at cards does not move them (CR 701.20e), so a "from among them"
-/// instruction that moves its chosen cards OUT of the library and never says
-/// where the rest goes leaves those other looked-at cards IN THE LIBRARY. The
-/// `Effect::Dig` AST records a remainder destination only when the text names
-/// one (`rest_destination: Some(..)`); a silent remainder stays `None`, which the
-/// `DigChoice` handler's graveyard default would otherwise read as "mill them" —
-/// the reported bug, where seventeen looked-at cards went to the graveyard and
-/// never came back to the shuffled library.
+/// instruction that routes its chosen cards OUT of the library and never says
+/// where the rest goes leaves the other looked-at cards IN THE LIBRARY, holding
+/// the order they already had. That outcome is `DigRestRemainder::StayInLibrary`:
+/// neither alternative is equivalent. `rest_destination: Some(Zone::Library)`
+/// means an explicit "put the rest on the bottom", which MOVES them and reorders
+/// the library under CR 401.4, changing the next draw of any such dig with no
+/// later shuffle; the `None` graveyard default is a move too, and is the
+/// reported bug (seventeen looked-at cards milled and never shuffled back).
 ///
 /// The same shape prints on Through the Forest Gate, Famished Worldsire and
 /// Ajani, Outland Chaperone's −8, so this is a class rule, not a card special
 /// case.
-fn default_silent_dig_rest_to_library(def: &mut AbilityDefinition) {
+fn mark_silent_dig_remainder(def: &mut AbilityDefinition) {
     if let Effect::Dig {
         destination: Some(kept_destination),
         rest_destination,
+        rest_split_top_count,
         keep_count,
+        rest_remainder,
         ..
     } = &mut *def.effect
     {
@@ -9129,15 +9132,38 @@ fn default_silent_dig_rest_to_library(def: &mut AbilityDefinition) {
         if *kept_destination != Zone::Library
             && !matches!(*keep_count, Some(0))
             && rest_destination.is_none()
+            && rest_split_top_count.is_none()
         {
-            *rest_destination = Some(Zone::Library);
+            *rest_remainder = DigRestRemainder::StayInLibrary;
         }
     }
-    if let Some(sub) = def.sub_ability.as_deref_mut() {
-        default_silent_dig_rest_to_library(sub);
+}
+
+/// CR 701.20e: applies [`mark_silent_dig_remainder`] to every definition node of
+/// a finished parse. The walk is the shared `ability_visit::nodes_mut` one, so a
+/// Dig nested anywhere the engine can reach — a `mode_abilities` branch, a
+/// `CreateDelayedTrigger` payload, a `ChooseOneOf` branch, a granted static, a
+/// replacement's decline continuation, or the replacement node itself — is
+/// covered by the same rule as a top-level spell line, instead of by whatever
+/// recursion set this pass happens to hand-roll.
+fn mark_silent_dig_remainders(parsed: &mut ParsedAbilities) {
+    let mut visit = |node: DefinitionNodeMut<'_>| {
+        if let DefinitionNodeMut::Ability(def) = node {
+            mark_silent_dig_remainder(def);
+        }
+        ControlFlow::Continue(())
+    };
+    for ability in parsed.abilities.iter_mut() {
+        let _ = crate::types::ability_visit::nodes_mut::visit_ability_def(ability, &mut visit);
     }
-    if let Some(else_def) = def.else_ability.as_deref_mut() {
-        default_silent_dig_rest_to_library(else_def);
+    for trigger in parsed.triggers.iter_mut() {
+        let _ = crate::types::ability_visit::nodes_mut::visit_trigger(trigger, &mut visit);
+    }
+    for static_def in parsed.statics.iter_mut() {
+        let _ = crate::types::ability_visit::nodes_mut::visit_static(static_def, &mut visit);
+    }
+    for replacement in parsed.replacements.iter_mut() {
+        let _ = crate::types::ability_visit::nodes_mut::visit_replacement(replacement, &mut visit);
     }
 }
 
@@ -9989,26 +10015,14 @@ fn parse_oracle_pipeline(
         resolve_unlowered_guards(raw);
     }
     // CR 701.20e + CR 608.2c — issue #7754 (Through the Forest Gate): a Dig that
-    // moves its chosen cards OUT of the library and was never told where the
+    // routes its chosen cards OUT of the library and was never told where the
     // rest goes leaves the unchosen looked-at cards IN THE LIBRARY, because
     // looking at cards never moves them. Runs on the FINISHED card, after every
     // unit is lowered, so a remainder instruction printed anywhere on it owns
     // the rest pile (Follow the Lumarets' "Put the rest on the bottom of your
     // library in a random order" patches both of its Dig branches from a later
     // unit than the one that built them).
-    for ability in parsed.abilities.iter_mut() {
-        default_silent_dig_rest_to_library(ability);
-    }
-    for trigger in parsed.triggers.iter_mut() {
-        if let Some(execute) = trigger.execute.as_deref_mut() {
-            default_silent_dig_rest_to_library(execute);
-        }
-    }
-    for replacement in parsed.replacements.iter_mut() {
-        if let Some(execute) = replacement.execute.as_deref_mut() {
-            default_silent_dig_rest_to_library(execute);
-        }
-    }
+    mark_silent_dig_remainders(&mut parsed);
     let stages = document_ir
         .zip(raw_lowered)
         .map(|(document, raw)| (document, raw, normalized));

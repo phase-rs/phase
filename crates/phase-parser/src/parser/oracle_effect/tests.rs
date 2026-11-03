@@ -21,10 +21,10 @@ use crate::types::ability::CastFromZoneDriver::{DuringResolution, LingeringPermi
 use crate::types::ability::{
     AbilityUseTally, ActivationRestriction, AttachSelection, AttachmentKind, AttachmentReferent,
     CardSelectionMode, CastCostModifier, CastManaObjectScope, CastManaSpentMetric, ChooseOneOfKind,
-    CommanderOwnership, CountBinding, CounterTransferMode, DigRestOrder, ExcessRecipient,
-    ForEachCategoryAction, MassLibraryShuffleMode, ModalChoice, PerpetualModification, PileSource,
-    PossessionAxis, RepeatContinuation, RuntimeHandler, SeatDirection, TurnJournalKind, VoteTally,
-    VoteVisibility, VoterScope,
+    CommanderOwnership, CountBinding, CounterTransferMode, DigRestOrder, DigRestRemainder,
+    ExcessRecipient, ForEachCategoryAction, MassLibraryShuffleMode, ModalChoice,
+    PerpetualModification, PileSource, PossessionAxis, RepeatContinuation, RuntimeHandler,
+    SeatDirection, TurnJournalKind, VoteTally, VoteVisibility, VoterScope,
 };
 use crate::types::card_type::CoreType;
 use crate::types::mana::{ManaCost, ManaCostShard};
@@ -95764,8 +95764,11 @@ fn return_arm_routes_through_the_shared_this_way_policy() {
 ///
 /// Looking at cards never moves them, and the instruction names a destination
 /// only for the chosen cards, so the rest of the looked-at pile REMAINS IN THE
-/// LIBRARY. A silent remainder used to stay `rest_destination: None`, which the
-/// `DigChoice` handler's graveyard default read as "mill them".
+/// LIBRARY in the order it already had. That is neither of the two states
+/// `rest_destination` can name: its `None` is the graveyard default (the old
+/// behaviour — "mill them") and `Some(Zone::Library)` is an explicit "put the
+/// rest on the bottom", which moves and reorders the pile. The parser records
+/// the distinction as `DigRestRemainder::StayInLibrary`.
 #[test]
 fn dig_from_among_without_a_rest_clause_keeps_the_remainder_in_the_library() {
     let parsed = crate::parser::oracle::parse_oracle_text(
@@ -95789,6 +95792,7 @@ fn dig_from_among_without_a_rest_clause_keeps_the_remainder_in_the_library() {
             up_to,
             filter,
             rest_destination,
+            rest_remainder,
             enter_tapped,
             ..
         } => {
@@ -95811,10 +95815,15 @@ fn dig_from_among_without_a_rest_clause_keeps_the_remainder_in_the_library() {
             assert!(*enter_tapped, "they enter the battlefield tapped");
             // THE REGRESSION ASSERTION.
             assert_eq!(
-                *rest_destination,
-                Some(Zone::Library),
+                *rest_remainder,
+                DigRestRemainder::StayInLibrary,
                 "CR 701.20e: cards that were only looked at stay in the library — \
-                 `None` would mill them into the graveyard"
+                 the `None` graveyard default mills them"
+            );
+            assert_eq!(
+                *rest_destination, None,
+                "a silent remainder names no destination at all; `Some(Library)` \
+                 would be a different instruction (put the rest on the bottom)"
             );
         }
         other => panic!("expected Effect::Dig, got {other:?}"),
@@ -95864,10 +95873,17 @@ fn dig_from_among_explicit_rest_clauses_still_override_the_library_default() {
     match &expand {
         Effect::Dig {
             rest_destination,
+            rest_remainder,
             rest_order,
             ..
         } => {
             assert_eq!(*rest_destination, Some(Zone::Library));
+            assert_eq!(
+                *rest_remainder,
+                DigRestRemainder::Route,
+                "an explicit \"on the bottom\" instruction routes the pile — it is \
+                 not a silent remainder"
+            );
             assert_eq!(
                 *rest_order,
                 DigRestOrder::Random,
@@ -95886,18 +95902,27 @@ fn dig_from_among_explicit_rest_clauses_still_override_the_library_default() {
     );
     match &alchemy {
         Effect::Dig {
-            rest_destination, ..
-        } => assert_eq!(
-            *rest_destination,
-            Some(Zone::Graveyard),
-            "an explicit \"into your graveyard\" rider must not be replaced by the library default"
-        ),
+            rest_destination,
+            rest_remainder,
+            ..
+        } => {
+            assert_eq!(
+                *rest_destination,
+                Some(Zone::Graveyard),
+                "an explicit \"into your graveyard\" rider must not be replaced by the silent default"
+            );
+            assert_eq!(
+                *rest_remainder,
+                DigRestRemainder::Route,
+                "a named graveyard destination is a routed remainder"
+            );
+        }
         other => panic!("expected Effect::Dig, got {other:?}"),
     }
 }
 
-/// PAIRED NEGATIVE at the class boundary: the silent-remainder default belongs
-/// to LIBRARY LOOKS (CR 701.20e "look at … does not move them"), not to any
+/// PAIRED NEGATIVE at the class boundary: the silent-remainder rule belongs to
+/// LIBRARY LOOKS (CR 701.20e "look at … does not move them"), not to any
 /// "from among them" anaphor. When the cards were MILLED first (CR 701.17a)
 /// they are already in the graveyard, and "return a permanent card from among
 /// them to your hand" selects out of that milled set — the unchosen milled
@@ -95907,7 +95932,7 @@ fn dig_from_among_explicit_rest_clauses_still_override_the_library_default() {
 /// milled tracked set (CR 701.17c), so the default has no `Effect::Dig` to
 /// touch; this test pins that shape with a printed card's verbatim text.
 #[test]
-fn mill_from_among_never_gets_the_library_remainder_default() {
+fn mill_from_among_never_gets_the_silent_remainder_rule() {
     fn collect<'a>(def: &'a crate::types::ability::AbilityDefinition, out: &mut Vec<&'a Effect>) {
         out.push(&def.effect);
         if let Some(sub) = def.sub_ability.as_deref() {
@@ -95960,8 +95985,8 @@ fn mill_from_among_never_gets_the_library_remainder_default() {
         "the \"from among them\" return must read the milled tracked set, got {effects:#?}"
     );
 
-    // THE EXCLUSION: no look-at Dig exists here at all, so the library
-    // remainder default can never route a milled card back into the library.
+    // THE EXCLUSION: no look-at Dig exists here at all, so the silent-remainder
+    // rule has no Dig to mark and can never route a milled card anywhere.
     assert!(
         !effects
             .iter()

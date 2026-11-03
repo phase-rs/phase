@@ -21481,6 +21481,35 @@ impl DigRestOrder {
     }
 }
 
+/// CR 701.20e + CR 608.2c: what happens to the cards a look-at Dig did NOT keep.
+///
+/// Looking at cards never moves them (CR 701.20e). An instruction that routes
+/// its chosen cards out of the library and stays silent about the others ("put
+/// any number of land cards from among them onto the battlefield tapped") leaves
+/// those others exactly where they are. That outcome is neither of the two
+/// states `rest_destination: Option<Zone>` can name: its `None` means the
+/// historical graveyard default (a move), and `Some(Zone::Library)` means an
+/// explicit "put the rest on the bottom" (also a move, and one that reorders
+/// the library under CR 401.4, changing the next draw of any such dig that has
+/// no later shuffle).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DigRestRemainder {
+    /// Move the unkept cards to `rest_destination` (`None` = graveyard).
+    #[default]
+    Route,
+    /// The instruction named no destination for the unkept cards, so they are
+    /// never moved: they were only looked at and stay in the library in their
+    /// existing order.
+    StayInLibrary,
+}
+
+impl DigRestRemainder {
+    pub fn is_route(&self) -> bool {
+        matches!(self, DigRestRemainder::Route)
+    }
+}
+
 /// CR 701.20e + CR 608.2c: Discriminates where `Effect::Dig` reads its
 /// card set from. `Library` (the default) reads from the top of the library;
 /// `PriorLook` reads from `GameState::private_look_ids`, which was populated
@@ -22388,6 +22417,13 @@ pub enum Effect {
         /// Where unchosen cards go (None = Graveyard, Some(Library) = bottom).
         #[serde(default)]
         rest_destination: Option<Zone>,
+        /// CR 701.20e: whether the unkept cards are moved at all. A silent
+        /// remainder ("… put any number of land cards from among them onto the
+        /// battlefield", with no clause naming the rest) stays in the library
+        /// untouched — `RestRemainder::StayInLibrary` — rather than being routed
+        /// to `rest_destination`'s graveyard default or to the library bottom.
+        #[serde(default, skip_serializing_if = "DigRestRemainder::is_route")]
+        rest_remainder: DigRestRemainder,
         /// CR 401.2 + CR 701.20e + CR 608.2c: Telling Time-class split of the
         /// unkept remainder between the two rules-legal positions of ONE
         /// library ("...one on top of your library, and one on the bottom of

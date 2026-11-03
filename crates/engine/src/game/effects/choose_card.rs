@@ -86,7 +86,10 @@ pub fn resolve(
         up_to: false,
         kept_destination: None,
         rest_destination: None,
-        // A bare card choice moves no remainder, so it never splits one.
+        // A bare card choice moves no remainder, so it never splits one — and
+        // it names no remainder destination either, which is the same
+        // `Route` default every non-silent Dig parses to.
+        rest_remainder: crate::types::ability::DigRestRemainder::Route,
         rest_split_top_count: None,
         rest_order: crate::types::ability::DigRestOrder::Preserve,
         source_id: Some(ability.source_id),

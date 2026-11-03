@@ -2609,6 +2609,7 @@ pub(super) fn handle_resolution_choice(
                             source_id: Some(source_id),
                             rest_cards: graveyard_cards,
                             rest_destination: Zone::Graveyard,
+                            rest_remainder: crate::types::ability::DigRestRemainder::Route,
                             rest_order: DigRestOrder::Preserve,
                             rest_split_top_count: None,
                             clear_markers: cards.clone(),
@@ -2916,6 +2917,7 @@ pub(super) fn handle_resolution_choice(
                                     kept_delivery: Default::default(),
                                     continuation_targets: Vec::new(),
                                     rest_delivery: Default::default(),
+                                    rest_remainder: crate::types::ability::DigRestRemainder::Route,
                                 },
                             );
                             return Ok(ResolutionChoiceOutcome::WaitingFor(
@@ -3014,6 +3016,7 @@ pub(super) fn handle_resolution_choice(
                     kept_delivery: Default::default(),
                     continuation_targets: Vec::new(),
                     rest_delivery: Default::default(),
+                    rest_remainder: crate::types::ability::DigRestRemainder::Route,
                 }),
                 events,
             ) {
@@ -3322,6 +3325,7 @@ pub(super) fn handle_resolution_choice(
                 source_id: Some(source_id),
                 rest_cards: Vec::new(),
                 rest_destination: Zone::Library,
+                rest_remainder: crate::types::ability::DigRestRemainder::Route,
                 rest_order: DigRestOrder::Preserve,
                 rest_split_top_count: None,
                 clear_markers,
@@ -4702,6 +4706,7 @@ pub(super) fn handle_resolution_choice(
                 selectable_cards,
                 kept_destination,
                 rest_destination,
+                rest_remainder,
                 rest_split_top_count,
                 rest_order,
                 enter_tapped,
@@ -4788,6 +4793,9 @@ pub(super) fn handle_resolution_choice(
                             None
                         }
                         Some(zone) => Some(zone),
+                        // CR 701.20e: a silent remainder is never moved, so the
+                        // graveyard default does not apply to it.
+                        None if !rest_remainder.is_route() => None,
                         None => Some(Zone::Graveyard),
                     }
                 };
@@ -4837,6 +4845,7 @@ pub(super) fn handle_resolution_choice(
                                     source_id: dig_source_id,
                                     rest_cards: Vec::new(),
                                     rest_destination: zone,
+                                    rest_remainder: crate::types::ability::DigRestRemainder::Route,
                                     rest_order: DigRestOrder::Preserve,
                                     rest_split_top_count: None,
                                     clear_markers: Vec::new(),
@@ -4915,12 +4924,13 @@ pub(super) fn handle_resolution_choice(
                         delivery_stage: crate::types::game_state::DigDeliveryStage::Kept,
                         player,
                         source_id: dig_source_id,
-                        rest_cards: if defer_rest_routing {
+                        rest_cards: if defer_rest_routing || !rest_remainder.is_route() {
                             Vec::new()
                         } else {
                             unkept
                         },
                         rest_destination: rest_destination.unwrap_or(Zone::Graveyard),
+                        rest_remainder,
                         rest_order,
                         // CR 401.2 + CR 701.20e: carry the Telling Time-class
                         // remainder split onto the kept delivery. The split
@@ -4986,9 +4996,13 @@ pub(super) fn handle_resolution_choice(
             // can pause this batch, so the tracked-set publication and
             // continuation wiring stay below the result match: neither may see
             // a pre-redirect rest pile.
-            let defer_rest_routing = state
-                .active_ability_continuation()
-                .is_some_and(|cont| dig_continuation_needs_full_looked_at_tracked_set(&cont.chain));
+            // CR 701.20e: a silent remainder is never moved, so the rest mover
+            // below is not reached and the tail (tracked-set publication +
+            // continuation) runs immediately.
+            let defer_rest_routing = !rest_remainder.is_route()
+                || state.active_ability_continuation().is_some_and(|cont| {
+                    dig_continuation_needs_full_looked_at_tracked_set(&cont.chain)
+                });
             if !defer_rest_routing {
                 let rest_destination = rest_destination.unwrap_or(Zone::Graveyard);
                 let mut ordered_unkept = unkept.clone();
@@ -5016,6 +5030,7 @@ pub(super) fn handle_resolution_choice(
                         ordered_unkept.clone(),
                         rest_destination,
                     ),
+                    rest_remainder,
                 };
                 // CR 401.2 + CR 701.20e: the same Telling Time-class split the
                 // kept-delivery completion applies, for the reveal-only dig
@@ -9298,6 +9313,7 @@ fn route_kept_card_or_defer(
                     source_id: Some(cx.source_id),
                     rest_cards: cx.misses.to_vec(),
                     rest_destination: cx.rest_destination,
+                    rest_remainder: crate::types::ability::DigRestRemainder::Route,
                     rest_order: cx.rest_order,
                     rest_split_top_count: None,
                     clear_markers,
@@ -10359,6 +10375,7 @@ pub(crate) fn run_batch_completion(
             source_id,
             rest_cards,
             rest_destination,
+            rest_remainder,
             rest_order,
             rest_split_top_count,
             clear_markers,
@@ -10371,13 +10388,17 @@ pub(crate) fn run_batch_completion(
             continuation_targets,
             rest_delivery,
         } => {
+            // CR 701.20e: a silent remainder is never moved. The pile is still
+            // reported so the drain knows what the instruction covered, but it
+            // contributes no card to the rest mover and the arm falls straight
+            // through to the reveal-marker cleanup, tracked-set publication, and
+            // continuation below.
+            let routes_rest = rest_remainder.is_route() && !rest_cards.is_empty();
             // CR 608.2c + CR 614.1 + CR 616.1: A kept Dig delivery can pause
             // before its rest pile starts. Keep its completion in the same
             // typed carrier, then advance it to the rest stage before routing
             // the unkept cards so replacement re-parks retain the full tail.
-            if delivery_stage == crate::types::game_state::DigDeliveryStage::Kept
-                && !rest_cards.is_empty()
-            {
+            if delivery_stage == crate::types::game_state::DigDeliveryStage::Kept && routes_rest {
                 let mut ordered_rest_cards = rest_cards.clone();
                 if rest_destination == Zone::Library && rest_order == DigRestOrder::Random {
                     ordered_rest_cards.shuffle(state.rng.draw(RandomDraw::Placement));
@@ -10403,6 +10424,7 @@ pub(crate) fn run_batch_completion(
                         ordered_rest_cards.clone(),
                         rest_destination,
                     ),
+                    rest_remainder,
                 };
                 // CR 401.2 + CR 701.20e + CR 608.2c: Telling Time-class
                 // remainder. The pile is fixed now that the kept cards have
@@ -10449,7 +10471,7 @@ pub(crate) fn run_batch_completion(
             // reveal-until path routes through `move_rest_then`, including
             // Library-bottom placement and any CR 616.1 pause. Dispatch on the
             // dig-only payload so each site keeps its synchronous semantics.
-            if publish_tracked_set.is_some() && !rest_cards.is_empty() {
+            if publish_tracked_set.is_some() && routes_rest {
                 let mut ordered_rest_cards = rest_cards.clone();
                 if rest_destination == Zone::Library && rest_order == DigRestOrder::Random {
                     ordered_rest_cards.shuffle(state.rng.draw(RandomDraw::Placement));
@@ -10475,6 +10497,7 @@ pub(crate) fn run_batch_completion(
                         ordered_rest_cards.clone(),
                         rest_destination,
                     ),
+                    rest_remainder,
                 };
                 return route_rest_partition_then(
                     state,
@@ -10484,7 +10507,7 @@ pub(crate) fn run_batch_completion(
                     Some(cleanup),
                     events,
                 );
-            } else if !rest_cards.is_empty() {
+            } else if routes_rest {
                 // CR 701.20a + CR 608.2d: If the rest cards are being placed on the bottom
                 // of the library in any order (PlayerChoice) and there are 2 or more cards,
                 // pause for the controller to announce their permutation.
@@ -10524,6 +10547,7 @@ pub(crate) fn run_batch_completion(
                     kept_delivery,
                     continuation_targets,
                     rest_delivery,
+                    rest_remainder,
                 };
                 return effects::reveal_until::move_rest_then(
                     state,
@@ -14169,6 +14193,7 @@ mod tests {
                 selectable_cards: vec![black, white],
                 kept_destination: Some(Zone::Library),
                 rest_destination: Some(Zone::Library),
+                rest_remainder: crate::types::ability::DigRestRemainder::Route,
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
                 source_id: None,
@@ -14253,6 +14278,7 @@ mod tests {
                 selectable_cards: vec![keep, rest[0], rest[1], rest[2]],
                 kept_destination: Some(Zone::Library),
                 rest_destination: Some(Zone::Library),
+                rest_remainder: crate::types::ability::DigRestRemainder::Route,
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::Random,
                 source_id: None,
@@ -14294,6 +14320,7 @@ mod tests {
                 selectable_cards: vec![keep, rest[0], rest[1], rest[2]],
                 kept_destination: Some(Zone::Library),
                 rest_destination: Some(Zone::Library),
+                rest_remainder: crate::types::ability::DigRestRemainder::Route,
                 rest_split_top_count: None,
                 rest_order: DigRestOrder::Preserve,
                 source_id: None,

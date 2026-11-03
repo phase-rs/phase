@@ -6125,6 +6125,7 @@ pub(crate) fn try_parse_dig_instead_alternative(
         up_to: alt_up_to,
         filter: alt_filter,
         rest_destination: alt_rest.or(*prev_rest),
+        rest_remainder: crate::types::ability::DigRestRemainder::Route,
         // CR 608.2c ("read the whole text and apply the rules of English"):
         // the remainder instruction is inherited ONLY when the alternative is
         // silent about the remainder. Precedence mirrors `alt_rest` /

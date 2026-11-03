@@ -25,13 +25,14 @@ use super::ability::{
     ChoiceValue, ChooseFromZoneConstraint, ChosenAttribute, CoinFlipResult, ContinuousModification,
     ControlWindow, CopiableValues, CopyChooseScope, CopyScale, CopyTargetPurpose,
     CostPaidObjectSnapshot, CounterCostSelection, DelayedTriggerCondition, DelayedTriggerKind,
-    DigRestOrder, DigRestSplitScope, Duration, EffectKind, EntryAttackDestination, FaceDownProfile,
-    GameRestriction, KeywordAction, KickerVariant, LibraryPosition, ModalChoice,
-    PermanentEntryMode, PileSource, QuantityExpr, ReplacementDefinition, ResolvedAbility,
-    ReturnResultId, SearchDestinationSplit, SearchOrderingHint, SearchSelectionConstraint,
-    StackAbilityKind, StaticCondition, TapCreaturesSelectionMode, TargetFilter, TargetRef,
-    ThisWayCause, TriggerBaseSetInstanceRef, TriggerCondition, TriggerDefinition,
-    TriggerDefinitionOccurrenceRef, TriggerDefinitionRef, TriggerEntry,
+    DigRestOrder, DigRestRemainder, DigRestSplitScope, Duration, EffectKind,
+    EntryAttackDestination, FaceDownProfile, GameRestriction, KeywordAction, KickerVariant,
+    LibraryPosition, ModalChoice, PermanentEntryMode, PileSource, QuantityExpr,
+    ReplacementDefinition, ResolvedAbility, ReturnResultId, SearchDestinationSplit,
+    SearchOrderingHint, SearchSelectionConstraint, StackAbilityKind, StaticCondition,
+    TapCreaturesSelectionMode, TargetFilter, TargetRef, ThisWayCause, TriggerBaseSetInstanceRef,
+    TriggerCondition, TriggerDefinition, TriggerDefinitionOccurrenceRef, TriggerDefinitionRef,
+    TriggerEntry,
 };
 use super::actions::{DebugCardCreationKind, GameAction, ResolveAllScope};
 use super::attribution::ObjectAttribution;
@@ -7307,6 +7308,13 @@ pub enum BatchCompletion {
         /// Where the rest pile goes (`Library` => bottom in a reposition, else
         /// the destination zone).
         rest_destination: Zone,
+        /// CR 701.20e: whether this rest pile is moved at all. `StayInLibrary`
+        /// keeps the drain moving nothing and falling straight through to the
+        /// reveal-marker cleanup / tracked-set publication / continuation, which
+        /// is where an instruction that never named a remainder destination
+        /// belongs.
+        #[serde(default)]
+        rest_remainder: DigRestRemainder,
         /// Dig-only rest piles preserve this policy across a replacement pause.
         /// Reveal-until uses the serde-default Preserve value.
         #[serde(default)]
@@ -17140,6 +17148,12 @@ pub enum WaitingFor {
         /// Where unchosen cards go (None = Graveyard, Some(Library) = bottom).
         #[serde(default)]
         rest_destination: Option<Zone>,
+        /// CR 701.20e: whether the unkept cards are moved at all. A silent
+        /// remainder stays in the library untouched, so the submission moves
+        /// only the kept cards; `rest_destination`'s graveyard default must not
+        /// be applied to cards that were only looked at.
+        #[serde(default, skip_serializing_if = "DigRestRemainder::is_route")]
+        rest_remainder: DigRestRemainder,
         /// CR 401.2 + CR 701.20e + CR 608.2c: Telling Time-class remainder
         /// split. `Some(n)` routes the unkept pile into a follow-up
         /// `DigRestSplitChoice` that puts exactly `n` of it on top of the
@@ -51469,6 +51483,7 @@ mod tests {
             selectable_cards: vec![ObjectId(1)],
             kept_destination: None,
             rest_destination: None,
+            rest_remainder: crate::types::ability::DigRestRemainder::Route,
             rest_split_top_count: None,
             rest_order: crate::types::ability::DigRestOrder::Preserve,
             source_id: None,
