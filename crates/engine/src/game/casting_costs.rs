@@ -1056,12 +1056,34 @@ pub(crate) fn handle_choose_gift_recipient(
             finish_pending_cost_or_cast(state, player, pending, events)
         }
         CastOpponentChoicePurpose::EffectCost { cost } => {
-            let Some(PlayerRecipientCost::GainLife { amount, .. }) = cost.player_recipient_cost()
+            let Some(PlayerRecipientCost::GainLife {
+                amount,
+                recipient,
+                selection,
+            }) = cost.player_recipient_cost()
             else {
                 return Err(EngineError::InvalidAction(
                     "Recipient choice carried a cost with no chosen-player instruction".to_string(),
                 ));
             };
+            // CR 104.3a + CR 118.3 + CR 601.2h: an offered opponent may have left
+            // while this prompt was pending; only a live, payable recipient can bind.
+            let eligible = match super::life_costs::life_gain_cost_recipients(
+                state,
+                player,
+                pending.object_id,
+                recipient,
+                selection,
+            ) {
+                LifeGainCostRecipients::Unpayable => false,
+                LifeGainCostRecipients::Choose(recipients)
+                | LifeGainCostRecipients::All(recipients) => recipients.contains(&opponent),
+            };
+            if !eligible {
+                return Err(EngineError::InvalidAction(
+                    "Recipient is no longer eligible for this life-gain cost".to_string(),
+                ));
+            }
             let finalization = pending.prepaid_finalization.take().ok_or_else(|| {
                 EngineError::InvalidAction(
                     "A life-gain cost recipient is chosen only at the payment commit".to_string(),
@@ -1449,7 +1471,8 @@ fn alternative_cost_total_includes_mana(
     object_id: ObjectId,
 ) -> bool {
     super::casting::apply_cost_modifiers_to_base(state, player, object_id, ManaCost::NoCost)
-        .is_some_and(|total| !total.is_without_paying_mana())
+        // CR 107.4d + CR 118.5 + CR 601.2g: concrete {0} still includes a mana payment.
+        .is_some_and(|total| matches!(total, ManaCost::Cost { .. }))
 }
 
 pub(crate) fn eligible_behold_choices(
@@ -13415,7 +13438,9 @@ pub(super) fn pay_and_push_adventure(
     // `enter_payment_step` diverts to `ChooseXValue` when the cost has an unchosen X,
     // per CR 601.2f (X chosen before mana is paid).
     let has_x = cost_has_x(cost);
-    let manual_payment = payment_mode == CastPaymentMode::Manual && cost.mana_value() > 0;
+    // CR 107.4d + CR 118.5 + CR 601.2g: {0} still has a manual mana-ability window.
+    let manual_payment =
+        payment_mode == CastPaymentMode::Manual && matches!(cost, ManaCost::Cost { .. });
     let auto_payment_needs_input = payment_mode == CastPaymentMode::Auto
         && cost.mana_value() > 0
         && !super::casting::can_pay_cost_after_auto_tap(state, player, object_id, cost)

@@ -833,6 +833,58 @@ fn v8f_four_players_one_locked_prompts_between_remaining_two() {
     assert_eq!(power(&runner, bear), Some(6));
 }
 
+/// CR 104.3a + CR 118.3 + CR 601.2h: a conceding opponent leaves immediately
+/// and cannot receive the pending life-gain cost. Rejecting that stale answer
+/// preserves the caster's prompt so the remaining opponent can be chosen.
+#[test]
+fn recipient_who_concedes_after_the_prompt_cannot_pay_the_life_gain_cost() {
+    let Setup {
+        mut scenario,
+        inv,
+        bear,
+    } = setup(GameScenario::new_n_player(3, 42));
+    scenario.add_basic_land(P0, ManaColor::Green);
+    let mut runner = scenario.build();
+    let p2_before = runner.life(P2);
+    let prompt = to_recipient_prompt(&mut runner, inv, bear);
+    assert!(matches!(
+        prompt,
+        WaitingFor::ChooseGiftRecipient { player, ref candidates, purpose: CastOpponentChoicePurpose::EffectCost { .. }, .. }
+            if player == P0 && candidates == &vec![P1, P2]
+    ));
+    let stack_before_choice = runner.state().stack.len();
+
+    runner
+        .act(GameAction::Concede { player_id: P1 })
+        .expect("an opponent can concede while the caster owns the prompt");
+    let prompt_after_concession = runner.state().waiting_for.clone();
+    assert!(matches!(
+        prompt_after_concession,
+        WaitingFor::ChooseGiftRecipient { player, .. } if player == P0
+    ));
+    assert!(runner
+        .act(GameAction::ChooseGiftRecipient { opponent: P1 })
+        .is_err());
+    assert_eq!(runner.state().waiting_for, prompt_after_concession);
+    assert_eq!(runner.state().stack.len(), stack_before_choice);
+    assert_eq!(runner.life(P2), p2_before);
+
+    runner
+        .act(GameAction::ChooseGiftRecipient { opponent: P2 })
+        .expect("the remaining opponent is still eligible");
+    assert_eq!(runner.life(P2), p2_before + 3);
+    assert_eq!(runner.state().stack.len(), 1);
+    assert_eq!(runner.state().stack[0].id, inv);
+    finish_resolution(&mut runner);
+    assert_eq!(runner.life(P2), p2_before + 3);
+    assert_eq!(power(&runner, bear), Some(6));
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+}
+
 /// V8g — controller-relative lock in four players: an Archfiend under P1 locks
 /// P0, P2 and P3, so P1 is the only recipient and binds automatically.
 #[test]
@@ -1239,7 +1291,8 @@ const ASHNODS_ALTAR: &str = "Sacrifice a creature: Add {C}{C}.";
 
 /// P0 controls a Forest, Ashnod's Altar and Archfiend of Despair (P1 can't gain
 /// life); Sphere of Resistance makes Invigorate's total cost through the
-/// alternative cost {1}, so a mana-ability window precedes its payment.
+/// alternative cost {1}, reduced to {0} by Emerald Medallion. CR 118.5 +
+/// CR 601.2g: that concrete mana cost still permits mana abilities before payment.
 fn taxed_archfiend_board() -> (GameRunner, ObjectId, ObjectId, ObjectId, ObjectId) {
     let Setup {
         mut scenario,
@@ -1254,6 +1307,11 @@ fn taxed_archfiend_board() -> (GameRunner, ObjectId, ObjectId, ObjectId, ObjectI
         .add_creature_from_oracle(P0, "Archfiend of Despair", 6, 6, ARCHFIEND_OF_DESPAIR)
         .id();
     scenario.add_artifact_from_oracle(P1, "Sphere of Resistance", SPHERE_OF_RESISTANCE);
+    scenario.add_artifact_from_oracle(
+        P0,
+        "Emerald Medallion",
+        "Green spells you cast cost {1} less to cast.",
+    );
     (scenario.build(), inv, bear, altar, archfiend)
 }
 
@@ -1295,12 +1353,12 @@ fn to_manual_mana_window(runner: &mut GameRunner, inv: ObjectId, bear: ObjectId)
     panic!("mana-payment window never opened");
 }
 
-/// V19 — CR 601.2g + CR 601.2h + CR 119.7: with a cost increase the cast has a
+/// V19 — CR 118.5 + CR 601.2g + CR 601.2h + CR 119.7: a concrete {0} cost has a
 /// mana-ability window before the life-gain cost is paid, so Archfiend's lock on
 /// P1 does not hide the alternative cost. Sacrificing Archfiend to Ashnod's Altar
-/// in that window removes the lock; the commit then pays {1} and P1 gains 3. The
+/// in that window removes the lock; the commit then pays {0} and P1 gains 3. The
 /// gain is not made before the window. Control on the same board: paying the
-/// {1} with Archfiend still out leaves P1 unable to gain life, so the commit is
+/// {0} with Archfiend still out leaves P1 unable to gain life, so the commit is
 /// refused and nothing is paid.
 #[test]
 fn v19_mana_ability_window_removes_the_lock_before_the_gain_is_paid() {
@@ -1308,6 +1366,10 @@ fn v19_mana_ability_window_removes_the_lock_before_the_gain_is_paid() {
     let p1_before = runner.life(P1);
 
     to_manual_mana_window(&mut runner, inv, bear);
+    assert!(matches!(
+        &runner.state().pending_cast.as_ref().expect("pending manual cast").cost,
+        ManaCost::Cost { generic: 0, shards } if shards.is_empty()
+    ));
     assert_eq!(
         runner.life(P1),
         p1_before,
@@ -1331,19 +1393,21 @@ fn v19_mana_ability_window_removes_the_lock_before_the_gain_is_paid() {
         .act(GameAction::PassPriority)
         .expect("the payment commits once the lock is gone");
     assert_eq!(runner.life(P1), p1_before + 3, "P1 gains 3 at payment");
+    assert_eq!(runner.state().stack.len(), 1);
     assert!(runner.state().stack.iter().any(|e| e.id == inv));
     finish_resolution(&mut runner);
     assert_eq!(power(&runner, bear), Some(6));
-
-    // Control: Archfiend stays; floating {C} pays the {1}, but P1 still can't
-    // gain life when the cost is paid, so the commit is refused.
-    let (mut runner, inv, bear, _altar, archfiend) = taxed_archfiend_board();
-    runner.state_mut().players[0].mana_pool.add(ManaUnit::new(
-        ManaType::Colorless,
-        archfiend,
-        false,
-        vec![],
+    assert_eq!(runner.life(P1), p1_before + 3, "the cost is paid once");
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
     ));
+
+    // Control: Archfiend stays; {0} needs no resources, but P1 still can't gain
+    // life when the cost is paid, so the commit is refused.
+    let (mut runner, inv, bear, _altar, archfiend) = taxed_archfiend_board();
+    assert_eq!(runner.state().objects[&archfiend].zone, Zone::Battlefield);
     let p1_before = runner.life(P1);
     to_manual_mana_window(&mut runner, inv, bear);
     assert!(
@@ -1383,6 +1447,54 @@ fn v20_taxed_cast_pays_the_gain_at_the_commit() {
     assert_eq!(runner.life(P1), p1_before + 3, "paid at the commit");
     finish_resolution(&mut runner);
     assert_eq!(power(&runner, bear), Some(6));
+}
+
+/// CR 107.4d + CR 118.5 + CR 601.2g: an ordinary printed {0} spell also stops
+/// for manual payment; the window is not specific to a deferred life-gain cost.
+#[test]
+fn manual_zero_mana_spell_requires_payment_acknowledgment() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let memnite = scenario
+        .add_creature_to_hand_from_oracle(P0, "Memnite", 1, 1, "")
+        .as_artifact_creature()
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&memnite].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: memnite,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("a zero-mana spell can be cast manually");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ManaPayment { player, .. } if player == P0
+    ));
+    assert_eq!(
+        runner
+            .state()
+            .pending_cast
+            .as_ref()
+            .expect("pending manual cast")
+            .cost,
+        ManaCost::zero()
+    );
+    runner
+        .act(GameAction::PassPriority)
+        .expect("acknowledge payment");
+    assert!(runner.state().pending_cast.is_none());
+    assert_eq!(runner.state().stack.len(), 1);
+    finish_resolution(&mut runner);
+    assert_eq!(runner.state().objects[&memnite].zone, Zone::Battlefield);
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
 }
 
 // ---------------------------------------------------------------------------

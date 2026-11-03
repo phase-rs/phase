@@ -14,7 +14,7 @@
 //! is the top-ranked candidate in the diagnostic receipt), and that whatever it
 //! samples is a legal candidate that completes the cast.
 
-use engine::ai_support::legal_actions;
+use engine::ai_support::{legal_actions, AiDecisionContract};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::ability::TargetRef;
 use engine::types::actions::GameAction;
@@ -146,13 +146,14 @@ fn ai_gives_the_life_to_the_less_threatening_opponent() {
     // and completes the cast.
     let config = create_config(AiDifficulty::Medium, Platform::Native);
     let session = AiSession::arc_from_game(&state);
+    let contract = AiDecisionContract::issue(&state, P0);
     for seed in SEEDS {
         let selection = choose_action_with_session_diagnostic(
             &state,
-            P0,
             &config,
             &mut SmallRng::seed_from_u64(seed),
             &session,
+            &contract,
         );
         let receipt = selection.receipt.expect("diagnostic receipt");
         let top: Vec<&GameAction> = receipt
