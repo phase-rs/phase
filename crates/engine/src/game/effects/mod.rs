@@ -60081,8 +60081,6 @@ mod tests {
     /// looked-at library card and a lingering grant stay offerable.
     #[test]
     fn optional_unbound_resolve_now_with_an_empty_link_is_infeasible() {
-        use crate::types::ability::{CardPlayMode, CastFromZoneDriver};
-
         fn set_cast_mode(ability: &mut ResolvedAbility) {
             if let Effect::CastFromZone { mode, .. } = &mut ability.effect {
                 *mode = CardPlayMode::Cast;
