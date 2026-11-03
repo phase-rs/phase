@@ -6820,6 +6820,16 @@ impl PendingBatchDeliveries {
             }
             Self::validate_staged_member(member)?;
         }
+        // CR 101.4: one batch is one operation family.
+        let destroy_family = matches!(members[0].operation, StagedMemberOperation::Destroy(_));
+        if members.iter().any(|member| {
+            matches!(member.operation, StagedMemberOperation::Destroy(_)) != destroy_family
+        }) {
+            return Err("staged batch mixes operation families".to_string());
+        }
+        if destroy_family && staged.change_zone.is_some() {
+            return Err("a destroy staged batch carries ChangeZone metadata".to_string());
+        }
 
         // `requests`/`remaining` are exactly the not-yet-consulted members in
         // announcement order. A member abandoned because its owner left the
@@ -6865,8 +6875,13 @@ impl PendingBatchDeliveries {
     fn validate_staged_member(member: &StagedBatchMember) -> Result<(), String> {
         let approved_object = |event: &ProposedEvent| match event {
             ProposedEvent::ZoneChange { object_id, .. } => *object_id == member.identity.object_id,
+            ProposedEvent::Destroy { object_id, .. } => *object_id == member.identity.object_id,
             _ => false,
         };
+        let is_destroy = matches!(member.operation, StagedMemberOperation::Destroy(_));
+        if member.outer_destroy_approved && !is_destroy {
+            return Err("a zone-move staged member carries the destroy approval flag".to_string());
+        }
         match member.state {
             StagedBatchMemberState::Unconsulted => {
                 if member.approved_event.is_some()
@@ -6878,7 +6893,13 @@ impl PendingBatchDeliveries {
                     );
                 }
             }
-            StagedBatchMemberState::OuterConsulting | StagedBatchMemberState::InnerConsulting => {
+            StagedBatchMemberState::OuterConsulting => {
+                // CR 701.8a: only the later Destroy adapter has an outer event.
+                if !is_destroy {
+                    return Err(
+                        "a zone-move staged member is in the outer-consulting state".to_string()
+                    );
+                }
                 if member.approved_event.is_some() || member.terminal.is_some() {
                     return Err(
                         "a consulting staged member already carries an approval or terminal"
@@ -6887,7 +6908,33 @@ impl PendingBatchDeliveries {
                 }
                 if let Some(outcome) = &member.pending_outcome {
                     match outcome {
-                        StagedMemberOutcome::Approved(event) if approved_object(event) => {}
+                        StagedMemberOutcome::Approved(event)
+                            if approved_object(event)
+                                && matches!(event, ProposedEvent::Destroy { .. }) => {}
+                        StagedMemberOutcome::Prevented => {}
+                        StagedMemberOutcome::Approved(_) => {
+                            return Err("an outer-consulting staged member approved another event"
+                                .to_string())
+                        }
+                    }
+                }
+            }
+            StagedBatchMemberState::InnerConsulting => {
+                // F1: this keeps the accepted R4b meaning for BOTH operations —
+                // the single-consult state with no outcome while the choice is
+                // unresolved or a `ZoneChange` outcome. It must not require
+                // Destroy.
+                if member.approved_event.is_some() || member.terminal.is_some() {
+                    return Err(
+                        "a consulting staged member already carries an approval or terminal"
+                            .to_string(),
+                    );
+                }
+                if let Some(outcome) = &member.pending_outcome {
+                    match outcome {
+                        StagedMemberOutcome::Approved(event)
+                            if approved_object(event)
+                                && matches!(event, ProposedEvent::ZoneChange { .. }) => {}
                         StagedMemberOutcome::Prevented => {}
                         StagedMemberOutcome::Approved(_) => {
                             return Err(
@@ -6901,7 +6948,7 @@ impl PendingBatchDeliveries {
                 let Some(event) = &member.approved_event else {
                     return Err("an approved staged member has no approved event".to_string());
                 };
-                if !approved_object(event) {
+                if !matches!(event, ProposedEvent::ZoneChange { .. }) || !approved_object(event) {
                     return Err("an approved staged member approved another object".to_string());
                 }
                 if member.pending_outcome.is_some() || member.terminal.is_some() {
@@ -7235,6 +7282,26 @@ pub struct StagedBatchDelivery {
     pub arrangements: Vec<StagedLibraryArrangement>,
     /// Next arrangement group to prompt (`Arranging`).
     pub arrangement_cursor: usize,
+    /// CR 608.2c: ChangeZone-family delivery bookkeeping. `None` for Destroy
+    /// and generic R4b batches; `Some` for the ChangeZone family.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_zone: Option<ChangeZoneBatchMeta>,
+}
+
+/// CR 400.7 + CR 608.2c: the late per-member ChangeZone bookkeeping that the
+/// legacy producer loop ran inline after each move. A staged member may pause
+/// before delivery, so the rule runs at the delivery terminal instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ChangeZoneBatchMeta {
+    /// Mass `ChangeZoneAll` whose filter is `ExiledBySource`; owns link
+    /// consumption.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub exiled_by_source: bool,
+    /// CR 608.2c: the legacy hand-exile counter is mass-only. Targeted and
+    /// effect-choice paths leave it false so they never increment the mass
+    /// counter.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub count_hand_exile: bool,
 }
 
 /// CR 101.4: the three distinct stages of one admitted batch. Consultation and
@@ -7244,6 +7311,26 @@ pub enum BatchDeliveryStage {
     Approving,
     Arranging,
     Delivering,
+}
+
+/// CR 101.4: the operation family a staged member belongs to. A batch is
+/// homogeneous: every member is one variant or the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum StagedMemberOperation {
+    /// An ordinary replaceable zone move; the member's request IS the event.
+    #[default]
+    ZoneMove,
+    /// CR 701.8a: an `Effect::Destroy`/`DestroyAll` member. The outer
+    /// `ProposedEvent::Destroy` is rebuilt from this provenance, never from the
+    /// retained inner request.
+    Destroy(StagedDestroyOperation),
+}
+
+/// CR 701.8a + CR 702.12b: the outer destruction a staged member re-proposes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StagedDestroyOperation {
+    pub source: ObjectId,
+    pub cant_regenerate: bool,
 }
 
 /// One retained member of a staged batch. The exact original request, its
@@ -7265,6 +7352,16 @@ pub struct StagedBatchMember {
     pub pending_outcome: Option<StagedMemberOutcome>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal: Option<ZoneMoveCompletion>,
+    /// CR 101.4 + CR 701.8a: this member's operation family. Legacy saves and
+    /// every R4b member decode as `ZoneMove`.
+    #[serde(default)]
+    pub operation: StagedMemberOperation,
+    /// CR 701.8a: set once the outer `Destroy` event was approved (not
+    /// prevented, not redirected). The singleton pushes `CreatureDestroyed` for
+    /// both an inner `Moved` and an inner `Prevented` (`destroy.rs:60-63`), so
+    /// this flag is the exact emission witness.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub outer_destroy_approved: bool,
 }
 
 /// The charter's current-member states. `OuterConsulting` is produced only by
@@ -7513,8 +7610,37 @@ pub(crate) fn settle_batch_delivery_outcome(
     completion: &mut BatchCompletion,
     state: &GameState,
     group: &LogicalZoneChangeGroup,
+    members: &[StagedBatchMember],
 ) {
     match completion {
+        BatchCompletion::DestroyPopulationSettled {
+            settled_destroyed, ..
+        } => {
+            assert!(
+                settled_destroyed.is_none(),
+                "destroy population settled twice"
+            );
+            *settled_destroyed = Some(
+                members
+                    .iter()
+                    .filter(|member| {
+                        member.outer_destroy_approved
+                            && member.state != StagedBatchMemberState::Abandoned
+                    })
+                    .map(|member| member.identity.object_id)
+                    .collect(),
+            );
+        }
+        BatchCompletion::ChangeZonePopulationSettled { tail, settled } => {
+            assert!(settled.is_none(), "ChangeZone population settled twice");
+            *settled = Some(change_zone_settled_facts(
+                state,
+                group,
+                members,
+                &tail.count,
+                tail.destination,
+            ));
+        }
         BatchCompletion::RecordInstructionZoneResult {
             settled_records, ..
         } => {
@@ -7563,6 +7689,69 @@ pub(crate) fn settled_logical_zone_change_records(
             Some((**record).clone())
         })
         .collect()
+}
+
+/// CR 614.1 + CR 616.1: compute one settled ChangeZone population's exact
+/// facts. Transient per-member inputs only: no member vector is retained.
+pub(crate) fn change_zone_settled_facts(
+    _state: &GameState,
+    group: &LogicalZoneChangeGroup,
+    members: &[StagedBatchMember],
+    policy: &ChangeZoneCountPolicy,
+    destination: Zone,
+) -> ChangeZoneSettled {
+    let mut records = Vec::new();
+    let mut policy_count = 0i32;
+    let mut arrival_count = 0usize;
+    for member in members {
+        if member.state == StagedBatchMemberState::Abandoned {
+            continue;
+        }
+        let mut final_zone = None;
+        let mut moved_record = None;
+        for occurrence in &group.all_origin_occurrences {
+            let GameEvent::ZoneChanged { record, .. } = &occurrence.event else {
+                continue;
+            };
+            if record
+                .trigger_source_context()
+                .is_some_and(|context| context.identity.reference == member.identity)
+            {
+                final_zone = Some(record.to_zone);
+                moved_record = Some((**record).clone());
+            }
+        }
+        let arrived =
+            member.terminal == Some(ZoneMoveCompletion::Moved) && final_zone == Some(destination);
+        if arrived {
+            arrival_count += 1;
+        }
+        if member.terminal == Some(ZoneMoveCompletion::Moved) {
+            if let Some(record) = moved_record {
+                records.push(record);
+            }
+        }
+        let selected = match policy {
+            ChangeZoneCountPolicy::TargetedArrivals { selected }
+            | ChangeZoneCountPolicy::ChoiceSelected { chosen: selected } => {
+                Some(selected.as_slice())
+            }
+            ChangeZoneCountPolicy::MassAllMembers => None,
+        };
+        match selected {
+            None => policy_count += 1,
+            Some(selected) => {
+                if selected.contains(&member.identity.object_id) && arrived {
+                    policy_count += 1;
+                }
+            }
+        }
+    }
+    ChangeZoneSettled {
+        policy_count,
+        arrival_count,
+        records,
+    }
 }
 
 impl BatchCompletion {
@@ -7997,6 +8186,71 @@ pub enum BatchCompletion {
         /// than a result.
         cards: Vec<ObjectId>,
     },
+    /// CR 701.8a + CR 614.5 + CR 603.10a: one admitted destruction population
+    /// settled. `settled_destroyed` is filled exactly once by settlement with
+    /// the members whose outer `Destroy` was approved and whose terminal is not
+    /// `Abandoned` (Moved, Remained or inner-Prevented) — the singleton's exact
+    /// `CreatureDestroyed` emission rule.
+    DestroyPopulationSettled {
+        ability: Box<ResolvedAbility>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        settled_destroyed: Option<Vec<ObjectId>>,
+    },
+    /// CR 608.2c + CR 614.1 + CR 603.10a: one admitted ChangeZone population
+    /// settled. The tail carries the producer's finish parameters; `settled`
+    /// is filled exactly once by settlement from the member terminals and the
+    /// logical group's all-origin occurrences.
+    ChangeZonePopulationSettled {
+        tail: Box<ChangeZoneBatchTail>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        settled: Option<ChangeZoneSettled>,
+    },
+}
+
+/// CR 608.2c + CR 614.1: the ChangeZone producer's finish parameters, carried
+/// onto the batch owner when the population may pause before delivery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChangeZoneBatchTail {
+    pub group_id: LogicalZoneChangeGroupId,
+    pub effect_kind: EffectKind,
+    pub source_id: ObjectId,
+    pub controller: PlayerId,
+    pub destination: Zone,
+    pub count: ChangeZoneCountPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_return_result_producer: Option<(ReturnResultOccurrenceId, ReturnResultId)>,
+    /// The paused path takes the drain's this-way stamp; the synchronous
+    /// targeted/mass paths do not.
+    #[serde(default)]
+    pub stamp_this_way: bool,
+}
+
+/// CR 608.2c: how a settled ChangeZone population contributes
+/// `last_effect_count`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChangeZoneCountPolicy {
+    /// Targeted `resolve`: only selected members that actually arrived at the
+    /// destination.
+    TargetedArrivals { selected: Vec<ObjectId> },
+    /// Mass `ChangeZoneAll`: every non-abandoned member regardless of terminal.
+    MassAllMembers,
+    /// Effect `EffectZoneChoice`: the synchronous producer keeps
+    /// `chosen.len()`; the paused completion counts arrivals among the chosen.
+    ChoiceSelected { chosen: Vec<ObjectId> },
+}
+
+/// CR 614.1 + CR 616.1: the exact counts and moved records of a settled
+/// ChangeZone population.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChangeZoneSettled {
+    /// Policy value for `last_effect_count`.
+    pub policy_count: i32,
+    /// Arrival value for the this-way stamp.
+    pub arrival_count: usize,
+    /// Moved member records from `all_origin_occurrences`, for the
+    /// selected-return publisher and the moved-id ledger.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub records: Vec<ZoneChangeRecord>,
 }
 
 /// CR 401.2 + CR 401.4 + CR 608.2c: what finishing a
@@ -27928,9 +28182,11 @@ fn visit_batch_completion_chains<'a>(
     match completion {
         BatchCompletion::CastFromZoneExileDeliveryComplete { ability, .. }
         | BatchCompletion::TopCardContestRoundComplete { ability, .. }
+        | BatchCompletion::DestroyPopulationSettled { ability, .. }
         | BatchCompletion::ForEachCategoryExileComplete { ability, .. } => {
             f(ability, SuspendedChainEvent::Ambient)
         }
+        BatchCompletion::ChangeZonePopulationSettled { .. } => Ok(()),
         // CR 701.23a + CR 608.2c: a settled search delivery resumes its scoped
         // "after the search" tail.
         BatchCompletion::LibrarySearchDeliverySettled { resume }
@@ -30761,6 +31017,21 @@ impl GameState {
         self.resolution_stack.active_ability_continuation()
     }
 
+    /// CR 608.2c + CR 400.7j: the ability continuation that is the stack top or
+    /// its immediate parent (the staged ChangeZone batch parks above it).
+    pub fn ability_continuation_at_top_or_parent(&self) -> Option<&AbilityContinuationFrame> {
+        self.resolution_stack
+            .ability_continuation_at_top_or_parent()
+    }
+
+    /// Mutable twin of [`Self::ability_continuation_at_top_or_parent`].
+    pub fn ability_continuation_at_top_or_parent_mut(
+        &mut self,
+    ) -> Option<&mut AbilityContinuationFrame> {
+        self.resolution_stack
+            .ability_continuation_at_top_or_parent_mut()
+    }
+
     /// Mutably accesses only the active continuation frame.
     pub fn active_ability_continuation_frame_mut(
         &mut self,
@@ -30943,7 +31214,23 @@ impl GameState {
         self.push_change_zone_frame(ChangeZoneFrame {
             pending: None,
             devour_eligible_snapshot: Some(snapshot),
+            awaiting_batch: None,
         });
+    }
+
+    /// CR 616.1: the exact boundary a staged outer `Destroy` consultation
+    /// parked on. Unlike the zone-change helper, the parked proposal is the
+    /// outer event itself.
+    pub fn pending_staged_approval_boundary(
+        &self,
+    ) -> Option<(ObjectIncarnationRef, ProposedEvent)> {
+        let pending = self.pending_replacement.as_ref()?;
+        let object_id = pending.proposed.affected_object_id()?;
+        let object = self.objects.get(&object_id)?;
+        Some((
+            ObjectIncarnationRef::from_object(object),
+            pending.proposed.clone(),
+        ))
     }
 
     /// CR 614.12a + CR 614.13a: A Devour-only ChangeZone frame owns the
@@ -30952,7 +31239,9 @@ impl GameState {
     /// iteration, retire the now-ownerless frame.
     pub fn clear_completed_active_devour_snapshot(&mut self) -> bool {
         if !self.active_change_zone_frame().is_some_and(|frame| {
-            frame.pending.is_none() && frame.devour_eligible_snapshot.is_some()
+            frame.pending.is_none()
+                && frame.awaiting_batch.is_none()
+                && frame.devour_eligible_snapshot.is_some()
         }) {
             return false;
         }
@@ -30969,7 +31258,7 @@ impl GameState {
     pub fn push_change_zone_iteration(&mut self, pending: PendingChangeZoneIteration) {
         if self
             .active_change_zone_frame()
-            .is_some_and(|frame| frame.pending.is_none())
+            .is_some_and(|frame| frame.pending.is_none() && frame.awaiting_batch.is_none())
         {
             let devour_eligible_snapshot = self
                 .active_change_zone_frame()
@@ -30977,14 +31266,82 @@ impl GameState {
             self.replace_active_change_zone_frame(ChangeZoneFrame {
                 pending: Some(pending),
                 devour_eligible_snapshot,
+                awaiting_batch: None,
             })
             .expect("Devour-only ChangeZone frame must re-park atomically");
         } else {
             self.push_change_zone_frame(ChangeZoneFrame {
                 pending: Some(pending),
                 devour_eligible_snapshot: None,
+                awaiting_batch: None,
             });
         }
+    }
+
+    /// CR 101.4 + CR 608.2c: install the ChangeZone family's structural parent
+    /// for one staged batch child. The depth was captured before the batch was
+    /// parked, so the marker lands immediately below the child.
+    pub fn insert_change_zone_batch_parent_at_child_boundary(
+        &mut self,
+        group_id: crate::types::identifiers::LogicalZoneChangeGroupId,
+        devour_eligible_snapshot: Option<HashSet<ObjectId>>,
+        child_stack_start: ChildStackDepth,
+    ) {
+        self.resolution_stack
+            .insert_parent_at_child_boundary(
+                crate::types::resolution::ResolutionFrame::ChangeZone(Box::new(ChangeZoneFrame {
+                    pending: None,
+                    devour_eligible_snapshot,
+                    awaiting_batch: Some(crate::types::resolution::ChangeZoneBatchMarker {
+                        group_id,
+                    }),
+                })),
+                child_stack_start,
+            )
+            .expect("staged ChangeZone batch parent must be inserted below its child");
+    }
+
+    /// CR 101.4 + CR 608.2c: re-park a detached staged batch owner after a run
+    /// that may have raised a delivery child (an ETB-counter/choice frame).
+    /// The batch belongs immediately BELOW that child and above its ChangeZone
+    /// marker, so a plain top parking would bury the marker under the child.
+    /// `boundary` is the stack depth captured right after the owner was taken
+    /// off the stack; when the run raised nothing above it the owner parks
+    /// normally.
+    pub fn repark_batch_owner_below_children(
+        &mut self,
+        owner: PendingBatchDeliveries,
+        boundary: ChildStackDepth,
+    ) {
+        match self
+            .resolution_stack
+            .capture_child_boundary()
+            .cmp(&boundary)
+        {
+            std::cmp::Ordering::Greater => self
+                .resolution_stack
+                .insert_parent_at_child_boundary(
+                    crate::types::resolution::ResolutionFrame::BatchDelivery(Box::new(owner)),
+                    boundary,
+                )
+                .expect("re-parked staged batch inserts below its delivery child stack"),
+            std::cmp::Ordering::Less | std::cmp::Ordering::Equal => self
+                .resolution_stack
+                .park_batch_owner(owner)
+                .expect("staged batch re-parks its exact owner"),
+        }
+    }
+
+    /// CR 101.4 + CR 608.2c: retire the ChangeZone marker frame that awaits
+    /// exactly `group_id` when it is the stack top or the immediate parent of
+    /// the resolving continuation that the staged delivery spliced above it.
+    /// Returns whether a frame was consumed.
+    pub fn take_change_zone_batch_marker(
+        &mut self,
+        group_id: crate::types::identifiers::LogicalZoneChangeGroupId,
+    ) -> bool {
+        self.resolution_stack
+            .take_change_zone_batch_marker_at_top_or_parent(group_id)
     }
 
     /// Park a newly paused ChangeZone iteration beneath the complete child
@@ -31021,6 +31378,7 @@ impl GameState {
         self.replace_active_change_zone_frame(ChangeZoneFrame {
             pending: Some(pending),
             devour_eligible_snapshot,
+            awaiting_batch: None,
         })
         .expect("re-paused ChangeZone must own the active frame");
     }

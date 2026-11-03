@@ -33,7 +33,9 @@ use crate::types::game_state::{
     PostReplacementFrameId, RepeatIterationChoice, ResidentDrainPolicy, ResolvingTriggerContext,
     WaitingFor, ABILITY_ONSET_RECORD_FIELD,
 };
-use crate::types::identifiers::{DiscardFrameId, ObjectId, ObjectIncarnationRef};
+use crate::types::identifiers::{
+    DiscardFrameId, LogicalZoneChangeGroupId, ObjectId, ObjectIncarnationRef,
+};
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::EtbTapState;
@@ -634,6 +636,18 @@ pub struct ChangeZoneFrame {
         serialize_with = "crate::types::deterministic_serde::option_hash_set"
     )]
     pub devour_eligible_snapshot: Option<HashSet<ObjectId>>,
+    /// CR 101.4 + CR 608.2c: the ChangeZone family's structural parent for one
+    /// staged batch child. Mutually exclusive with `pending`; holds no group,
+    /// suffix or tail (the child owns the group and the completion owns the
+    /// tail).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub awaiting_batch: Option<ChangeZoneBatchMarker>,
+}
+
+/// CR 101.4: identifies the staged batch a ChangeZone parent frame awaits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChangeZoneBatchMarker {
+    pub group_id: LogicalZoneChangeGroupId,
 }
 
 /// The complete parked continuation authority.
@@ -1593,6 +1607,49 @@ impl ResolutionStack {
         }
     }
 
+    /// CR 608.2c + CR 400.7j: the ability continuation that is the stack top or
+    /// its immediate parent. A staged ChangeZone batch parks above the
+    /// resolving continuation, so the forwarded-result parking gates must see
+    /// that exact bounded neighbour — never a deeper scan.
+    pub fn ability_continuation_at_top_or_parent(&self) -> Option<&AbilityContinuationFrame> {
+        let top = self.frames.top()?;
+        if let Some(ResolutionFrame::AbilityContinuation(frame)) = self.frames.get(top) {
+            return Some(frame);
+        }
+        let parent = self.frames.below(top)?;
+        match self.frames.get(parent) {
+            Some(ResolutionFrame::AbilityContinuation(frame)) => Some(frame),
+            _ => None,
+        }
+    }
+
+    /// Mutable twin of [`Self::ability_continuation_at_top_or_parent`].
+    pub fn ability_continuation_at_top_or_parent_mut(
+        &mut self,
+    ) -> Option<&mut AbilityContinuationFrame> {
+        let top = self.frames.top()?;
+        if matches!(
+            self.frames.get(top),
+            Some(ResolutionFrame::AbilityContinuation(_))
+        ) {
+            return match self.frames.get_mut(top) {
+                Some(ResolutionFrame::AbilityContinuation(frame)) => Some(frame),
+                _ => None,
+            };
+        }
+        let parent = self.frames.below(top)?;
+        if !matches!(
+            self.frames.get(parent),
+            Some(ResolutionFrame::AbilityContinuation(_))
+        ) {
+            return None;
+        }
+        match self.frames.get_mut(parent) {
+            Some(ResolutionFrame::AbilityContinuation(frame)) => Some(frame),
+            _ => None,
+        }
+    }
+
     /// Mutable top-only access to the complete ChangeZone owner.
     pub fn active_change_zone_mut(&mut self) -> Option<&mut ChangeZoneFrame> {
         match self.frames.last_mut() {
@@ -1669,6 +1726,7 @@ impl ResolutionStack {
                     ResolutionFrame::ChangeZone(Box::new(ChangeZoneFrame {
                         pending: Some(pending),
                         devour_eligible_snapshot,
+                        awaiting_batch: None,
                     })),
                 );
                 return Ok(());
@@ -1684,6 +1742,7 @@ impl ResolutionStack {
                         ResolutionFrame::ChangeZone(Box::new(ChangeZoneFrame {
                             pending: Some(pending),
                             devour_eligible_snapshot,
+                            awaiting_batch: None,
                         })),
                     );
                     return Ok(());
@@ -1695,6 +1754,7 @@ impl ResolutionStack {
             ResolutionFrame::ChangeZone(Box::new(ChangeZoneFrame {
                 pending: Some(pending),
                 devour_eligible_snapshot: None,
+                awaiting_batch: None,
             })),
             child_stack_start,
         )
@@ -1723,6 +1783,7 @@ impl ResolutionStack {
                         ResolutionFrame::ChangeZone(Box::new(ChangeZoneFrame {
                             pending: Some(pending),
                             devour_eligible_snapshot,
+                            awaiting_batch: None,
                         })),
                     );
                     return Ok(());
@@ -1762,9 +1823,59 @@ impl ResolutionStack {
             ResolutionFrame::ChangeZone(Box::new(ChangeZoneFrame {
                 pending: Some(pending),
                 devour_eligible_snapshot,
+                awaiting_batch: None,
             })),
         );
         Ok(())
+    }
+
+    /// CR 101.4 + CR 608.2c: retire the ChangeZone marker that awaits exactly
+    /// `group_id` when it owns the stack top or when it is the immediate parent
+    /// of the resolving ability continuation spliced above it by the staged
+    /// delivery. Returns whether a frame was consumed.
+    pub fn take_change_zone_batch_marker_at_top_or_parent(
+        &mut self,
+        group_id: crate::types::identifiers::LogicalZoneChangeGroupId,
+    ) -> bool {
+        let is_marker = |frame: &ResolutionFrame| {
+            matches!(
+                frame,
+                ResolutionFrame::ChangeZone(frame)
+                    if frame.pending.is_none()
+                        && frame.awaiting_batch == Some(ChangeZoneBatchMarker { group_id })
+            )
+        };
+        match self.last() {
+            Some(frame) if is_marker(frame) => {
+                let _ = self
+                    .pop_expected(FrameKind::ChangeZone)
+                    .expect("checked ChangeZone marker frame must be active");
+                true
+            }
+            // The staged delivery may splice the resolving continuation between
+            // the marker and its batch; once the batch is settled the
+            // continuation is the top and the marker is its immediate parent.
+            // Only that exact bounded neighbour is consumed — never a deeper
+            // scan for a buried marker.
+            Some(ResolutionFrame::AbilityContinuation(_)) => {
+                let Some(top) = self.frames.top() else {
+                    return false;
+                };
+                let Some(parent) = self.frames.below(top) else {
+                    return false;
+                };
+                if !self.frames.get(parent).is_some_and(is_marker) {
+                    return false;
+                }
+                let Some(continuation) = self.frames.pop() else {
+                    return false;
+                };
+                let _ = self.frames.pop();
+                self.push_inner(continuation);
+                true
+            }
+            Some(_) | None => false,
+        }
     }
 
     /// Returns the complete BatchDelivery owner only when it owns the stack
@@ -4136,6 +4247,80 @@ impl ResolutionStack {
                     }
                 }
             }
+            if let ResolutionFrame::ChangeZone(change_zone) = frame {
+                // CR 101.4 + CR 608.2c: an awaiting-batch marker is the
+                // structural parent of one staged batch child and owns no
+                // iteration of its own.
+                if let Some(marker) = change_zone.awaiting_batch {
+                    if change_zone.pending.is_some() {
+                        return Err(ResolutionStackError::InvalidPayload {
+                            frame: FrameKind::ChangeZone,
+                            message: "a batch-awaiting ChangeZone frame holds an iteration"
+                                .to_string(),
+                        });
+                    }
+                    // R4c addendum (a): the marker need not be the batch's
+                    // IMMEDIATE parent. A resolving continuation or a
+                    // post-replacement drain may be spliced between them by the
+                    // delivery chain itself; nothing else may intervene, and
+                    // exactly one matching batch must exist above. Everything
+                    // above that batch is the batch's own delivery child stack
+                    // (a CounterAdditions direct-choice child, a nested
+                    // continuation) and is not "between" the marker and it.
+                    let mut matching: Option<&PendingBatchDeliveries> = None;
+                    let mut reached_child_stack = false;
+                    for above in self.frames.iter().skip(index + 1) {
+                        match above {
+                            ResolutionFrame::BatchDelivery(batch)
+                                if batch.logical_zone_change_group.logical_group_id
+                                    == marker.group_id =>
+                            {
+                                if matching.is_some() {
+                                    return Err(ResolutionStackError::InvalidPayload {
+                                        frame: FrameKind::ChangeZone,
+                                        message: "a batch-awaiting ChangeZone marker has duplicate matching batches".to_string(),
+                                    });
+                                }
+                                matching = Some(batch);
+                                reached_child_stack = true;
+                            }
+                            ResolutionFrame::AbilityContinuation(_) => {}
+                            _ if reached_child_stack => {}
+                            frame => {
+                                return Err(ResolutionStackError::InvalidPayload {
+                                    frame: FrameKind::ChangeZone,
+                                    message: format!(
+                                        "an unrelated {:?} frame sits between a batch-awaiting ChangeZone marker and its batch",
+                                        frame.kind()
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                    let Some(child) = matching else {
+                        return Err(ResolutionStackError::InvalidPayload {
+                            frame: FrameKind::ChangeZone,
+                            message: "a batch-awaiting ChangeZone frame has no batch child"
+                                .to_string(),
+                        });
+                    };
+                    let matches_completion = matches!(
+                        child.completion.as_ref(),
+                        Some(crate::types::game_state::BatchCompletion::ChangeZonePopulationSettled {
+                            tail,
+                            ..
+                        }) if tail.group_id == marker.group_id
+                    );
+                    if !matches_completion {
+                        return Err(ResolutionStackError::InvalidPayload {
+                            frame: FrameKind::ChangeZone,
+                            message:
+                                "a batch-awaiting ChangeZone marker has no matching completion"
+                                    .to_string(),
+                        });
+                    }
+                }
+            }
             if matches!(frame.gate(), FrameGate::DirectChoice(_)) {
                 direct_choice_count += 1;
                 if index + 1 != self.frames.len() {
@@ -6028,6 +6213,7 @@ impl LegacyChangeZoneWire {
             .then_some(ChangeZoneFrame {
                 pending: self.pending_change_zone_iteration,
                 devour_eligible_snapshot: self.devour_eligible_snapshot,
+                awaiting_batch: None,
             })
     }
 }
@@ -7309,7 +7495,152 @@ mod tests {
                 effect_kind: EffectKind::ChangeZone,
             }),
             devour_eligible_snapshot: None,
+            awaiting_batch: None,
         }))
+    }
+
+    /// R4c addendum (a): a marker frame plus a matching staged ChangeZone
+    /// batch, built with the same seed so both name the same logical group.
+    fn marker_and_batch(
+        seed: u64,
+    ) -> (
+        ResolutionFrame,
+        ResolutionFrame,
+        crate::types::identifiers::LogicalZoneChangeGroupId,
+    ) {
+        let ResolutionFrame::ChangeZone(original) = change_zone_frame(seed) else {
+            unreachable!()
+        };
+        let group_id = original
+            .pending
+            .as_ref()
+            .expect("base frame carries an iteration")
+            .logical_zone_change_group
+            .logical_group_id;
+        let marker = ResolutionFrame::ChangeZone(Box::new(ChangeZoneFrame {
+            pending: None,
+            devour_eligible_snapshot: None,
+            awaiting_batch: Some(ChangeZoneBatchMarker { group_id }),
+        }));
+        let ResolutionFrame::BatchDelivery(mut batch) = batch_delivery_frame(seed) else {
+            unreachable!()
+        };
+        assert_eq!(
+            batch.logical_zone_change_group.logical_group_id, group_id,
+            "fixture premise: same seed names the same group"
+        );
+        batch.completion = Some(
+            crate::types::game_state::BatchCompletion::ChangeZonePopulationSettled {
+                tail: Box::new(crate::types::game_state::ChangeZoneBatchTail {
+                    group_id,
+                    effect_kind: EffectKind::ChangeZone,
+                    source_id: ObjectId(1),
+                    controller: PlayerId(0),
+                    destination: Zone::Graveyard,
+                    count: crate::types::game_state::ChangeZoneCountPolicy::MassAllMembers,
+                    pending_return_result_producer: None,
+                    stamp_this_way: true,
+                }),
+                settled: None,
+            },
+        );
+        (marker, ResolutionFrame::BatchDelivery(batch), group_id)
+    }
+
+    fn marker_stack(marker: ResolutionFrame) -> ResolutionStack {
+        let mut stack = ResolutionStack::default();
+        stack.push_inner(marker);
+        stack
+    }
+
+    fn priority() -> WaitingFor {
+        WaitingFor::Priority {
+            player: PlayerId(0),
+        }
+    }
+
+    #[test]
+    fn batch_awaiting_marker_accepts_a_continuation_between_it_and_its_batch() {
+        let (marker, batch, _) = marker_and_batch(311);
+        let mut stack = marker_stack(marker);
+        stack.push_inner(continuation_frame(311));
+        stack.push_inner(batch);
+        assert!(
+            stack.validate(&priority()).is_ok(),
+            "the delivery chain's own continuation may sit between marker and batch"
+        );
+    }
+
+    #[test]
+    fn batch_awaiting_marker_accepts_the_immediate_batch() {
+        let (marker, batch, _) = marker_and_batch(312);
+        let mut stack = marker_stack(marker);
+        stack.push_inner(batch);
+        assert!(stack.validate(&priority()).is_ok());
+    }
+
+    #[test]
+    fn batch_awaiting_marker_rejects_an_unrelated_intervening_frame() {
+        let (marker, batch, seed) = marker_and_batch(313);
+        let mut stack = marker_stack(marker);
+        stack.push_inner(change_zone_frame(seed.0 + 1));
+        stack.push_inner(batch);
+        assert!(
+            stack.validate(&priority()).is_err(),
+            "only delivery-chain frames may sit between marker and batch"
+        );
+    }
+
+    #[test]
+    fn batch_awaiting_marker_rejects_a_wrong_group() {
+        let (marker, _batch, seed) = marker_and_batch(314);
+        let mut stack = marker_stack(marker);
+        stack.push_inner(batch_delivery_frame(seed.0 + 1));
+        assert!(
+            stack.validate(&priority()).is_err(),
+            "a batch of another group cannot satisfy the marker"
+        );
+    }
+
+    #[test]
+    fn batch_awaiting_marker_rejects_duplicate_matching_batches() {
+        let (marker, batch, _) = marker_and_batch(315);
+        let mut stack = marker_stack(marker);
+        stack.push_inner(batch.clone());
+        stack.push_inner(batch);
+        assert!(
+            stack.validate(&priority()).is_err(),
+            "duplicate matching batches are ambiguous"
+        );
+    }
+
+    #[test]
+    fn batch_awaiting_marker_rejects_a_mismatched_completion() {
+        let (marker, mut batch, seed) = marker_and_batch(316);
+        let ResolutionFrame::BatchDelivery(owner) = &mut batch else {
+            unreachable!()
+        };
+        owner.completion = Some(
+            crate::types::game_state::BatchCompletion::ChangeZonePopulationSettled {
+                tail: Box::new(crate::types::game_state::ChangeZoneBatchTail {
+                    group_id: crate::types::identifiers::LogicalZoneChangeGroupId(seed.0 + 1),
+                    effect_kind: EffectKind::ChangeZone,
+                    source_id: ObjectId(1),
+                    controller: PlayerId(0),
+                    destination: Zone::Graveyard,
+                    count: crate::types::game_state::ChangeZoneCountPolicy::MassAllMembers,
+                    pending_return_result_producer: None,
+                    stamp_this_way: true,
+                }),
+                settled: None,
+            },
+        );
+        let mut stack = marker_stack(marker);
+        stack.push_inner(batch);
+        assert!(
+            stack.validate(&priority()).is_err(),
+            "the completion must name the marker's group"
+        );
     }
 
     fn paused_post_replacement_frame() -> ResolutionFrame {

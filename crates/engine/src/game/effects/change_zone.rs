@@ -17,7 +17,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{
     ChangeZoneMemberEntry, GameState, MassLibraryOrderBatch, MassLibraryOrderMember,
     PendingCounterPostAction, PendingMassLibraryOrderBatches, PendingMassLibraryOrderChoice,
-    PendingZoneChangeDelivery, WaitingFor, ZoneOpponentChooserPurpose,
+    PendingZoneChangeDelivery, WaitingFor, ZoneDeliveryExileTracking, ZoneOpponentChooserPurpose,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::player::PlayerId;
@@ -1459,6 +1459,96 @@ pub fn resolve(
     let mut logical_zone_change_group =
         crate::game::triggers::allocate_logical_zone_change_group(state, &targeted_objects);
     let logical_group_event_start = events.len();
+    // CR 101.4 + CR 608.2c: two or more determined members are one announced
+    // simultaneous ChangeZone population. The producer transfers its exact
+    // requests and allocated group to the staged owner; a pause retains the
+    // unresolved member context instead of dropping the suffix.
+    let staged_members: Vec<ChangeZoneMemberEntry> = members
+        .iter()
+        .filter(|member| {
+            if dest_zone != Zone::Exile {
+                return true;
+            }
+            let acting_player = state
+                .objects
+                .get(&member.object_id)
+                .map(|obj| obj.controller)
+                .unwrap_or(ability.controller);
+            !crate::game::static_abilities::triggered_cause_sacrifice_or_exile_muzzled(
+                state,
+                ability,
+                member.object_id,
+                acting_player,
+            )
+        })
+        .cloned()
+        .collect();
+    if staged_members.len() >= 2 {
+        for muzzled in members.iter().filter(|member| {
+            !staged_members
+                .iter()
+                .any(|m| m.object_id == member.object_id)
+        }) {
+            logical_zone_change_group
+                .record_delivery_completion(
+                    muzzled.object_id,
+                    crate::types::game_state::ZoneMoveCompletion::Remained,
+                )
+                .expect("muzzled ChangeZone member remains in its original zone");
+        }
+        let requests = change_zone_member_requests(&ctx, &staged_members);
+        let selected: Vec<ObjectId> = staged_members
+            .iter()
+            .map(|member| member.object_id)
+            .collect();
+        let tail = crate::types::game_state::ChangeZoneBatchTail {
+            group_id: logical_zone_change_group.logical_group_id,
+            effect_kind: EffectKind::from(&ability.effect),
+            source_id: ctx.source_id,
+            controller: ctx.controller,
+            destination: dest_zone,
+            count: crate::types::game_state::ChangeZoneCountPolicy::TargetedArrivals {
+                selected: selected.clone(),
+            },
+            pending_return_result_producer: None,
+            stamp_this_way: true,
+        };
+        let meta = crate::types::game_state::ChangeZoneBatchMeta::default();
+        match crate::game::zone_pipeline::deliver_staged_change_zone_batch(
+            state,
+            requests,
+            logical_zone_change_group,
+            meta,
+            tail,
+            events,
+        ) {
+            crate::game::zone_pipeline::StagedChangeZoneOutcome::Paused => return Ok(None),
+            crate::game::zone_pipeline::StagedChangeZoneOutcome::Settled { group, members } => {
+                let settled = crate::types::game_state::change_zone_settled_facts(
+                    state,
+                    &group,
+                    &members,
+                    &crate::types::game_state::ChangeZoneCountPolicy::TargetedArrivals { selected },
+                    dest_zone,
+                );
+                state.last_effect_count = Some(settled.policy_count);
+                if state
+                    .active_change_zone_frame()
+                    .is_some_and(|frame| frame.pending.is_none() && frame.awaiting_batch.is_none())
+                {
+                    let _ = state
+                        .take_active_change_zone_frame()
+                        .expect("completed ChangeZone owns the active frame");
+                }
+                events.push(GameEvent::EffectResolved {
+                    kind: EffectKind::from(&ability.effect),
+                    source_id: ability.source_id,
+                    subject: None,
+                });
+                return Ok(completed_result(settled.arrival_count));
+            }
+        }
+    }
     for (i, member) in members.iter().enumerate() {
         let obj_id = &member.object_id;
         if dest_zone == Zone::Exile {
@@ -2030,6 +2120,49 @@ pub(crate) fn process_one_zone_move_with_terminal(
     );
 
     result
+}
+
+/// CR 608.2c + CR 614.12: build the exact per-member requests for one staged
+/// ChangeZone population from the iteration context and the resolved member
+/// entries. The request is the delivery authority; the producer's context is
+/// only its source.
+pub(crate) fn change_zone_member_requests(
+    ctx: &ChangeZoneIterationCtx,
+    members: &[ChangeZoneMemberEntry],
+) -> Vec<crate::game::zone_pipeline::ZoneMoveRequest> {
+    members
+        .iter()
+        .map(|member| {
+            let mut request = crate::game::zone_pipeline::ZoneMoveRequest::effect(
+                member.object_id,
+                ctx.destination,
+                ctx.source_id,
+            );
+            request.mods.enter_tapped = member.enter_tapped;
+            request.mods.enters_attacking = member.enters_attacking;
+            request.mods.enter_with_counters = member.enter_with_counters.clone();
+            request.mods.enter_transformed = ctx.enter_transformed;
+            request.mods.controller_override = ctx.enters_under_player;
+            request.mods.face_down_profile = ctx.face_down_profile.clone();
+            // The legacy mover passes `Silent` for this constructor.
+            request.mods.chain_referent = crate::types::zones::ChainReferentIntent::Silent;
+            request.mods.attach_to = ctx.enter_attached_to;
+            // CR 608.2c: the controller follows the instruction.
+            request.mods.performed_by = Some(ctx.controller);
+            request.placement = ctx.library_placement.clone();
+            request.exile_links = crate::game::zone_pipeline::ExileLinkSpec {
+                duration: ctx.duration.clone(),
+                controller: Some(ctx.controller),
+                tracking: if ctx.track_exiled_by_source {
+                    ZoneDeliveryExileTracking::TrackBySource
+                } else {
+                    ZoneDeliveryExileTracking::None
+                },
+            };
+            request.face_down_in_exile = ctx.face_down_in_exile;
+            request
+        })
+        .collect()
 }
 
 /// CR 401.4: Group object ids by owner in APNAP order for per-owner library
@@ -3119,6 +3252,83 @@ pub fn resolve_all(
     let mut logical_zone_change_group =
         crate::game::triggers::allocate_logical_zone_change_group(state, &matching);
     let logical_group_event_start = events.len();
+    // CR 101.4 + CR 608.2c: two or more matched objects are one announced
+    // simultaneous population; the staged owner retains every member across a
+    // pause. The early owner-arrangement branch above stays legacy.
+    if matching.len() >= 2 {
+        let ctx = ChangeZoneIterationCtx {
+            source_id: ability.source_id,
+            controller: ability.controller,
+            origin: None,
+            destination: dest_zone,
+            enter_transformed: false,
+            enters_under_player,
+            duration: ability.duration.clone(),
+            track_exiled_by_source,
+            face_down_in_exile: ability.context.face_down_in_exile,
+            face_down_profile: face_down_profile.clone(),
+            library_placement: member_library_placement.clone(),
+            enter_attached_to: None,
+        };
+        let member_entries: Vec<ChangeZoneMemberEntry> = matching
+            .iter()
+            .map(|&object_id| ChangeZoneMemberEntry {
+                object_id,
+                enter_with_counters: enter_with_counters.clone(),
+                enter_tapped,
+                enters_attacking,
+            })
+            .collect();
+        let requests = change_zone_member_requests(&ctx, &member_entries);
+        let meta = crate::types::game_state::ChangeZoneBatchMeta {
+            exiled_by_source: matches!(effective_filter, TargetFilter::ExiledBySource),
+            count_hand_exile: true,
+        };
+        let tail = crate::types::game_state::ChangeZoneBatchTail {
+            group_id: logical_zone_change_group.logical_group_id,
+            effect_kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+            controller: ability.controller,
+            destination: dest_zone,
+            count: crate::types::game_state::ChangeZoneCountPolicy::MassAllMembers,
+            pending_return_result_producer: None,
+            stamp_this_way: true,
+        };
+        match crate::game::zone_pipeline::deliver_staged_change_zone_batch(
+            state,
+            requests,
+            logical_zone_change_group,
+            meta,
+            tail,
+            events,
+        ) {
+            crate::game::zone_pipeline::StagedChangeZoneOutcome::Paused => return Ok(()),
+            crate::game::zone_pipeline::StagedChangeZoneOutcome::Settled { group, members } => {
+                let settled = crate::types::game_state::change_zone_settled_facts(
+                    state,
+                    &group,
+                    &members,
+                    &crate::types::game_state::ChangeZoneCountPolicy::MassAllMembers,
+                    dest_zone,
+                );
+                state.last_effect_count = Some(settled.policy_count);
+                if state
+                    .active_change_zone_frame()
+                    .is_some_and(|frame| frame.pending.is_none() && frame.awaiting_batch.is_none())
+                {
+                    let _ = state
+                        .take_active_change_zone_frame()
+                        .expect("completed ChangeZone owns the active frame");
+                }
+                events.push(GameEvent::EffectResolved {
+                    kind: EffectKind::from(&ability.effect),
+                    source_id: ability.source_id,
+                    subject: None,
+                });
+                return Ok(());
+            }
+        }
+    }
     for (i, obj_id) in matching.iter().enumerate() {
         let obj_id = *obj_id;
         // CR 400.3: Each object's actual current zone is the source zone for the
@@ -4573,9 +4783,9 @@ mod tests {
             state.waiting_for,
             WaitingFor::ReturnAsAuraTarget { .. }
         ));
-        assert!(state
-            .active_change_zone_frame()
-            .is_some_and(|frame| frame.pending.is_some()));
+        // R4c: the remaining members ride the staged batch owner (marker below
+        // the BatchDelivery) rather than a legacy `pending` carrier.
+        assert!(staged_change_zone(&state).is_some());
         assert_eq!(state.objects[&other_card].zone, Zone::Graveyard);
 
         let result = apply_as_current(
@@ -4616,6 +4826,31 @@ mod tests {
             })
             .count();
         assert_eq!(change_zone_resolutions, 1);
+        // R4c residual R-c13 discriminator: exactly one ChangeZone resolution
+        // event — the `ReturnAsAuraTarget` resume handler's premature copy is
+        // absorbed — and it sits at the canonical completion position, after
+        // the remaining member's delivery (legacy order).
+        let resolved_at = result.events.iter().position(|event| {
+            matches!(
+                event,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::ChangeZone,
+                    source_id: ObjectId(100),
+                    ..
+                }
+            )
+        });
+        let last_zone_changed = result
+            .events
+            .iter()
+            .rposition(|event| matches!(event, GameEvent::ZoneChanged { .. }));
+        assert!(
+            matches!(
+                (resolved_at, last_zone_changed),
+                (Some(resolved), Some(changed)) if resolved > changed
+            ),
+            "the single ChangeZone EffectResolved must follow every remaining delivery"
+        );
     }
 
     /// Issue #2858 (Archangel Elspeth −6): "Return all nonland permanent cards …
@@ -4710,9 +4945,7 @@ mod tests {
             WaitingFor::ReturnAsAuraTarget { .. }
         ));
         assert!(
-            state
-                .active_change_zone_frame()
-                .is_some_and(|frame| frame.pending.is_some()),
+            staged_change_zone(&state).is_some(),
             "remaining members must be stashed so the mass move can resume"
         );
 
@@ -5653,6 +5886,59 @@ mod tests {
             .contains(&CoreType::Creature)
     }
 
+    /// R4c: the staged ChangeZone family owner wherever it sits on the stack
+    /// (the ChangeZone marker is below the `BatchDelivery`, which may itself
+    /// sit below a live delivery child). The batch is the delivery authority;
+    /// the legacy `pending` carrier is absent from this shape.
+    fn staged_change_zone(
+        state: &GameState,
+    ) -> Option<&crate::types::game_state::PendingBatchDeliveries> {
+        state.resolution_stack.iter().find_map(|frame| match frame {
+            crate::types::resolution::ResolutionFrame::BatchDelivery(batch)
+                if batch
+                    .staged
+                    .as_ref()
+                    .is_some_and(|staged| staged.change_zone.is_some()) =>
+            {
+                Some(&**batch)
+            }
+            _ => None,
+        })
+    }
+
+    /// R4c: the staged member requests still awaiting consultation, projected
+    /// into the legacy `ChangeZoneMemberEntry` shape for the readers below.
+    /// Each value is the same one the legacy carrier held (the request IS the
+    /// pre-event entry the staged producer resolved).
+    fn staged_unconsulted_member_entries(state: &GameState) -> Option<Vec<ChangeZoneMemberEntry>> {
+        let batch = staged_change_zone(state)?;
+        Some(
+            batch
+                .requests
+                .iter()
+                .map(|request| ChangeZoneMemberEntry {
+                    object_id: request.object_id,
+                    enter_with_counters: request.enter_with_counters.clone(),
+                    enter_tapped: request.enter_tapped,
+                    enters_attacking: request.enters_attacking,
+                })
+                .collect(),
+        )
+    }
+
+    /// R4c: the staged cursor member's request (the member whose delivery
+    /// authority carries the pause context).
+    fn staged_current_member_request(
+        state: &GameState,
+    ) -> Option<&crate::types::game_state::PendingBatchZoneMoveRequest> {
+        let batch = staged_change_zone(state)?;
+        let staged = batch.staged.as_ref()?;
+        staged
+            .members
+            .get(staged.cursor)
+            .map(|member| &member.request)
+    }
+
     /// The parked `ChangeZone` iteration wherever it sits on the resolution
     /// stack (a replacement pause may park it below a child frame).
     fn parked_change_zone_iteration(
@@ -6100,7 +6386,7 @@ mod tests {
                 vec![unconditional(rest[0], vec![(CounterType::Plus1Plus1, 1)])]
             };
             assert_eq!(
-                parked_change_zone_iteration(state).map(|pending| pending.remaining.clone()),
+                staged_unconsulted_member_entries(state),
                 Some(expected_remaining),
                 "row_a={row_a}: the parked carrier holds each member's pre-event entry"
             );
@@ -6223,6 +6509,19 @@ mod tests {
             "premise: the shock member parks the loop, got {:?}",
             commit.state().waiting_for
         );
+        // R4c addendum (c): the legacy wire/migration rows need an EXPLICIT
+        // legacy `PendingChangeZoneIteration.pending` carrier, not the staged
+        // producer's batch shape. Convert the parked staged owner into the
+        // legacy carrier for this fixture only; production never does this.
+        assert!(
+            commit.state().resolution_stack.iter().any(|frame| matches!(
+                frame,
+                crate::types::resolution::ResolutionFrame::BatchDelivery(batch)
+                    if batch.staged.as_ref().is_some_and(|staged| staged.change_zone.is_some())
+            )),
+            "premise: the production producer parks the staged ChangeZone owner"
+        );
+        downgrade_staged_change_zone_to_legacy(commit.state_mut());
         assert_eq!(
             commit
                 .state()
@@ -6234,6 +6533,58 @@ mod tests {
             "premise: the parked ChangeZone owns the only resolution frame"
         );
         (commit.state().clone(), shock, relic, orni)
+    }
+
+    /// R4c addendum (c): test-only conversion of one parked staged ChangeZone
+    /// owner into the legacy `PendingChangeZoneIteration` carrier, so the
+    /// old-save wire/migration rows keep testing the legacy shape.
+    fn downgrade_staged_change_zone_to_legacy(state: &mut GameState) {
+        let owner = state
+            .resolution_stack
+            .take_active_batch_delivery()
+            .expect("staged frame")
+            .expect("staged owner");
+        let _ = state
+            .take_active_change_zone_frame()
+            .expect("the ChangeZone marker is exposed below the batch");
+        let staged = owner.staged.as_ref().expect("staged payload");
+        let remaining = staged
+            .members
+            .iter()
+            .filter(|member| {
+                member.state == crate::types::game_state::StagedBatchMemberState::Unconsulted
+            })
+            .map(|member| ChangeZoneMemberEntry {
+                object_id: member.identity.object_id,
+                enter_with_counters: member.request.enter_with_counters.clone(),
+                enter_tapped: member.request.enter_tapped,
+                enters_attacking: member.request.enters_attacking,
+            })
+            .collect();
+        state.push_change_zone_frame(crate::types::resolution::ChangeZoneFrame {
+            pending: Some(crate::types::game_state::PendingChangeZoneIteration {
+                pending_return_result_producer: None,
+                logical_zone_change_group: owner.logical_zone_change_group,
+                paused_current: owner.paused_current,
+                remaining,
+                source_id: owner.source_id.unwrap_or(ObjectId(0)),
+                controller: PlayerId(0),
+                origin: None,
+                destination: owner.destination,
+                enter_transformed: false,
+                enters_under_player: None,
+                duration: None,
+                track_exiled_by_source: false,
+                face_down_in_exile: crate::types::ability::ExileConcealment::Public,
+                moved_count: None,
+                face_down_profile: None,
+                library_placement: owner.library_placement,
+                enter_attached_to: None,
+                effect_kind: EffectKind::ChangeZone,
+            }),
+            devour_eligible_snapshot: None,
+            awaiting_batch: None,
+        });
     }
 
     /// Restores `wire` through the public persisted-state reader exactly as a
@@ -12603,6 +12954,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 crate::types::resolution::FrameKind::ChangeZone,
+                crate::types::resolution::FrameKind::BatchDelivery,
                 crate::types::resolution::FrameKind::CounterAdditions,
             ],
             "the complete ChangeZone owner must remain below its ETB-counter child"
@@ -12764,9 +13116,10 @@ mod tests {
             "expected first ReplacementChoice, got {:?}",
             state.waiting_for
         );
-        let pending = state
-            .active_change_zone_frame()
-            .and_then(|frame| frame.pending.as_ref())
+        // R4c: the staged batch's cursor member request is the delivery
+        // authority and carries the same face-down profile the legacy carrier
+        // held; the behavior assertions below are unchanged.
+        let pending = staged_current_member_request(&state)
             .expect("a paused targeted ChangeZone must stash the iteration");
         assert_eq!(
             pending.face_down_profile.as_ref(),
@@ -12878,9 +13231,7 @@ mod tests {
             state.waiting_for
         );
         assert!(
-            state
-                .active_change_zone_frame()
-                .is_some_and(|frame| frame.pending.is_some()),
+            staged_change_zone(&state).is_some(),
             "resolve_all must stash remaining library matches on NeedsChoice"
         );
 
@@ -13005,10 +13356,8 @@ mod tests {
             WaitingFor::ReplacementChoice { .. }
         ));
         assert_eq!(
-            state
-                .active_change_zone_frame()
-                .and_then(|frame| frame.pending.as_ref())
-                .and_then(|pending| pending.library_placement.clone()),
+            staged_current_member_request(&state)
+                .and_then(|request| request.library_placement.clone()),
             Some(LibraryPosition::Bottom),
             "the first replacement pause must retain terminal-shuffle suppression"
         );
@@ -13021,10 +13370,8 @@ mod tests {
             WaitingFor::ReplacementChoice { .. }
         ));
         assert_eq!(
-            state
-                .active_change_zone_frame()
-                .and_then(|frame| frame.pending.as_ref())
-                .and_then(|pending| pending.library_placement.clone()),
+            staged_current_member_request(&state)
+                .and_then(|request| request.library_placement.clone()),
             Some(LibraryPosition::Bottom),
             "the second replacement pause must retain terminal-shuffle suppression"
         );
@@ -13629,20 +13976,23 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        for expected_retained_occurrences in 0..3 {
+        for _ in 0..3 {
             assert!(
                 matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
                 "expected ReplacementChoice at each iteration"
             );
-            let group = &state
-                .active_change_zone_frame()
-                .and_then(|frame| frame.pending.as_ref())
+            // R4c: the staged ChangeZone owner IS the logical owner; all three
+            // members are consulted before any delivery, so the group is
+            // retained with its announced members and no delivery occurrence
+            // yet. The retained-owner property (not the legacy delivery-drain
+            // occurrence count) is what this row guards.
+            let group = &staged_change_zone(&state)
                 .expect("each pending replacement choice retains the logical owner")
                 .logical_zone_change_group;
             assert_eq!(
                 group.all_origin_occurrences.len(),
-                expected_retained_occurrences,
-                "each re-pause must retain exactly the completed delivery segments"
+                0,
+                "consultation pauses precede every delivery"
             );
             let _ = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 1 })
                 .expect("decline shock");
@@ -13825,16 +14175,17 @@ mod tests {
                 .map(crate::types::resolution::ResolutionFrame::kind)
                 .collect::<Vec<_>>(),
             vec![
-                crate::types::resolution::FrameKind::AbilityContinuation,
                 crate::types::resolution::FrameKind::ChangeZone,
+                crate::types::resolution::FrameKind::AbilityContinuation,
+                crate::types::resolution::FrameKind::BatchDelivery,
             ],
-            "the continuation must remain the ChangeZone frame's immediate parent"
+            "the chained continuation stays between the ChangeZone marker and its batch"
         );
 
         // Persist the real prompt boundary through the v2 frames-only wire.
-        // Both the complete ChangeZone owner and its immediate parent
-        // continuation must survive without reintroducing either legacy runtime
-        // field onto `GameState`.
+        // The parent continuation, the ChangeZone marker and the staged batch
+        // owner must survive without reintroducing either legacy runtime field
+        // onto `GameState`.
         let wire = crate::types::resolution::ResolutionStateWire::from_game_state(state);
         let v2 = serde_json::to_value(&wire).expect("ChangeZone prompt serializes as v2");
         assert!(v2.get("resolution_stack").is_none());
@@ -13845,8 +14196,8 @@ mod tests {
                 .as_array()
                 .expect("v2 resolution stack exposes its frames array")
                 .len(),
-            2,
-            "the real prompt retains exactly its parent continuation and ChangeZone owner"
+            3,
+            "the real prompt retains exactly its parent continuation and staged ChangeZone owner"
         );
         let wire: crate::types::resolution::ResolutionStateWire =
             serde_json::from_value(v2).expect("v2 ChangeZone prompt deserializes");
@@ -13862,10 +14213,11 @@ mod tests {
                 .map(crate::types::resolution::ResolutionFrame::kind)
                 .collect::<Vec<_>>(),
             vec![
-                crate::types::resolution::FrameKind::AbilityContinuation,
                 crate::types::resolution::FrameKind::ChangeZone,
+                crate::types::resolution::FrameKind::AbilityContinuation,
+                crate::types::resolution::FrameKind::BatchDelivery,
             ],
-            "v2 restore preserves the exact continuation/ChangeZone frame nesting"
+            "v2 restore preserves the exact continuation/ChangeZone/batch nesting"
         );
 
         // Decline each replacement; each returned card still enters (tapped).

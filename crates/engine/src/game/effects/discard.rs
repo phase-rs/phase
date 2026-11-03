@@ -1795,6 +1795,7 @@ mod tests {
         state.push_change_zone_frame(ChangeZoneFrame {
             pending: None,
             devour_eligible_snapshot: None,
+            awaiting_batch: None,
         });
         assert!(
             !hand_off_recruit_discard_result(&mut state, discard_frame),

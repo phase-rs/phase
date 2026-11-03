@@ -1226,7 +1226,8 @@ fn abandon_pending_zone_change_member_for_player_left(
             pending
                 .requests
                 .retain(|request| request.object_id != identity.object_id);
-            crate::game::zone_pipeline::prune_staged_member_for_player_left(pending, identity);
+            // CR 800.4a + CR 616.1: cancel the exact live child boundary
+            // before abandoning the member, then prune the abandoned slot.
             if pending.paused_current.as_ref().is_some_and(|paused| {
                 paused.member == identity && paused.terminal_completion.is_none()
             }) {
@@ -1238,6 +1239,7 @@ fn abandon_pending_zone_change_member_for_player_left(
                         .expected_event,
                 );
             }
+            crate::game::zone_pipeline::prune_staged_member_for_player_left(pending, identity);
         })
         .expect("elimination visits only an identified component delivery pair");
     {
@@ -1253,7 +1255,8 @@ fn abandon_pending_zone_change_member_for_player_left(
             pending
                 .requests
                 .retain(|request| request.object_id != identity.object_id);
-            crate::game::zone_pipeline::prune_staged_member_for_player_left(pending, identity);
+            // CR 800.4a + CR 616.1: cancel the exact live child boundary
+            // before abandoning the member, then prune the abandoned slot.
             if pending.paused_current.as_ref().is_some_and(|paused| {
                 paused.member == identity && paused.terminal_completion.is_none()
             }) {
@@ -1265,6 +1268,7 @@ fn abandon_pending_zone_change_member_for_player_left(
                         .expected_event,
                 );
             }
+            crate::game::zone_pipeline::prune_staged_member_for_player_left(pending, identity);
         });
     }
 
@@ -5509,7 +5513,7 @@ mod r4b_staged_elimination_tests {
         BatchDeliveryStage, MassLibraryOrderBatch, MassLibraryOrderMember, PendingBatchDeliveries,
         PendingBatchZoneChangeCause, PendingBatchZoneMoveRequest, StagedArrangementStatus,
         StagedBatchDelivery, StagedBatchMember, StagedBatchMemberState, StagedLibraryArrangement,
-        WaitingFor, ZoneDeliveryExileTracking,
+        StagedMemberOperation, WaitingFor, ZoneDeliveryExileTracking,
     };
     use crate::types::identifiers::{
         CardId, LogicalZoneChangeGroupId, ObjectId, ObjectIncarnationRef,
@@ -5554,6 +5558,8 @@ mod r4b_staged_elimination_tests {
             )),
             pending_outcome: None,
             terminal: None,
+            operation: StagedMemberOperation::ZoneMove,
+            outer_destroy_approved: false,
         }
     }
 
@@ -5598,6 +5604,7 @@ mod r4b_staged_elimination_tests {
             members,
             arrangements,
             arrangement_cursor: 0,
+            change_zone: None,
         };
         state.push_batch_delivery(PendingBatchDeliveries {
             component_delivery_parent: None,
@@ -5735,6 +5742,7 @@ mod r4b_staged_elimination_tests {
                 members,
                 arrangements,
                 arrangement_cursor: 0,
+                change_zone: None,
             }),
         });
         state.waiting_for = WaitingFor::new_dig_rest_split_for_batch(

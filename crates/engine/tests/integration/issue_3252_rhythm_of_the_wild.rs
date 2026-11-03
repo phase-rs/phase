@@ -102,17 +102,32 @@ fn rhythm_of_the_wild_grants_riot_on_library_to_battlefield_put() {
     resolve_ability_chain(runner.state_mut(), &ability, &mut events, 0).unwrap();
 
     assert_riot_replacement_choice(&runner);
+    // R4c: the staged population parks the marker + batch child (a
+    // one-member population keeps the legacy carrier).
     assert!(
-        runner.state().active_change_zone_frame().is_some(),
-        "the real ChangeZone delivery must park its resume frame at the replacement choice"
+        runner.state().active_change_zone_frame().is_some()
+            || runner.state().resolution_stack.iter().any(|frame| matches!(
+                frame,
+                engine::types::resolution::ResolutionFrame::BatchDelivery(batch)
+                    if batch
+                        .staged
+                        .as_ref()
+                        .is_some_and(|staged| staged.change_zone.is_some())
+            )),
+        "the real ChangeZone delivery must park its resume carrier at the replacement choice"
     );
 
     runner
         .act(GameAction::ChooseReplacement { index: 0 })
         .expect("choose Riot counter");
     assert!(
-        runner.state().active_change_zone_frame().is_none(),
-        "answering the replacement choice must drain the parked ChangeZone iteration"
+        runner.state().active_change_zone_frame().is_none()
+            && !runner.state().resolution_stack.iter().any(|frame| matches!(
+                frame,
+                engine::types::resolution::ResolutionFrame::BatchDelivery(batch)
+                    if batch.staged.is_some()
+            )),
+        "answering the replacement choice must drain the parked ChangeZone owner"
     );
     assert_eq!(
         runner.state().objects[&wurm].zone,

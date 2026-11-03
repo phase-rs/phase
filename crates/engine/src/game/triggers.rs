@@ -52638,6 +52638,73 @@ pub mod tests {
         }
     }
 
+    /// R4c (option i): the staged ChangeZone family parks a
+    /// `[ChangeZone{awaiting_batch}, BatchDelivery]` pair instead of a legacy
+    /// `pending` carrier. Assert that exact staged representation and return
+    /// the batch owner that now owns the logical group.
+    fn assert_staged_change_zone_owner(
+        state: &GameState,
+    ) -> &crate::types::game_state::PendingBatchDeliveries {
+        let marker = state
+            .resolution_stack
+            .iter()
+            .find_map(|frame| match frame {
+                crate::types::resolution::ResolutionFrame::ChangeZone(frame)
+                    if frame.awaiting_batch.is_some() =>
+                {
+                    Some(&**frame)
+                }
+                _ => None,
+            })
+            .expect("staged ChangeZone marker is parked");
+        assert!(
+            marker.pending.is_none(),
+            "a staged marker owns no legacy iteration suffix"
+        );
+        let group_id = marker
+            .awaiting_batch
+            .expect("checked awaiting_batch marker")
+            .group_id;
+        state
+            .resolution_stack
+            .iter()
+            .find_map(|frame| match frame {
+                crate::types::resolution::ResolutionFrame::BatchDelivery(batch)
+                    if batch
+                        .staged
+                        .as_ref()
+                        .is_some_and(|staged| staged.change_zone.is_some())
+                        && batch.logical_zone_change_group.logical_group_id == group_id =>
+                {
+                    Some(&**batch)
+                }
+                _ => None,
+            })
+            .expect("staged ChangeZone batch matching the marker is parked")
+    }
+
+    /// The logical group of a parked staged ChangeZone owner (the batch child is
+    /// the single logical owner; the marker holds no group).
+    fn staged_change_zone_group(
+        state: &GameState,
+    ) -> &crate::types::game_state::LogicalZoneChangeGroup {
+        // A one-member population keeps the legacy carrier (>=2 is the staged
+        // threshold); both representations own the exact logical group while
+        // parked, and exactly one of them is present.
+        if let Some(frame) = state.active_change_zone_frame() {
+            assert!(
+                frame.pending.is_some(),
+                "singleton ChangeZone carrier is parked as a legacy iteration"
+            );
+            return &frame
+                .pending
+                .as_ref()
+                .expect("checked legacy pending carrier")
+                .logical_zone_change_group;
+        }
+        &assert_staged_change_zone_owner(state).logical_zone_change_group
+    }
+
     /// A batched trigger carries its complete match set in the stack side table
     /// once the real post-action priority pipeline has placed it.  Single-event
     /// triggers deliberately have no side-table row.
@@ -53420,12 +53487,12 @@ pub mod tests {
                     "{carrier:?} slot {paused_index} must reach the real replacement prompt"
                 );
                 match carrier {
-                    LogicalZoneProductionCarrier::ChangeZone => assert!(
-                        state
-                            .active_change_zone_frame()
-                            .is_some_and(|frame| frame.pending.is_some()),
-                        "ChangeZone slot {paused_index} must retain its production carrier"
-                    ),
+                    LogicalZoneProductionCarrier::ChangeZone => {
+                        // R4c: the staged representation is marker + batch; the
+                        // marker owns no legacy suffix and the batch owns the
+                        // exact logical group.
+                        assert_staged_change_zone_owner(&state);
+                    }
                     LogicalZoneProductionCarrier::BatchDelivery => assert!(
                         state.active_batch_delivery().is_some(),
                         "BatchDelivery slot {paused_index} must retain its production carrier"
@@ -53878,12 +53945,11 @@ pub mod tests {
                     "{carrier:?} all_origins={all_origins}: the batched observer remains in its declared off-zone source zone"
                 );
                 match carrier {
-                    LogicalZoneProductionCarrier::ChangeZone => assert!(
-                        state
-                            .active_change_zone_frame()
-                            .is_some_and(|frame| frame.pending.is_some()),
-                        "ChangeZone must retain the mixed-origin owner while parked"
-                    ),
+                    LogicalZoneProductionCarrier::ChangeZone => {
+                        // R4c: the mixed-origin population is owned by the staged
+                        // batch child, with the marker as its structural parent.
+                        assert_staged_change_zone_owner(&state);
+                    }
                     LogicalZoneProductionCarrier::BatchDelivery => assert!(
                         state.active_batch_delivery().is_some(),
                         "BatchDelivery must retain the mixed-origin owner while parked"
@@ -54243,11 +54309,22 @@ pub mod tests {
                 Zone::Battlefield,
                 &mut events,
             );
-            assert_eq!(
-                state.objects[&early].zone,
-                Zone::Battlefield,
-                "{carrier:?} positive reach guard: the graveyard member supplies the immediately-before occurrence before the real ordering pause"
-            );
+            // R4c staged order: the immediately-before occurrence is captured
+            // from the initial board, and the member itself is still in its
+            // origin zone at the later consultation pause (approvals precede
+            // delivery).
+            match carrier {
+                LogicalZoneProductionCarrier::ChangeZone => assert_eq!(
+                    state.objects[&early].zone,
+                    Zone::Graveyard,
+                    "{carrier:?} staged approvals precede delivery: the graveyard member supplies the immediately-before occurrence while still in its origin zone"
+                ),
+                LogicalZoneProductionCarrier::BatchDelivery => assert_eq!(
+                    state.objects[&early].zone,
+                    Zone::Battlefield,
+                    "{carrier:?} sequential delivery moves the early member before the later pause"
+                ),
+            }
             assert!(
                 matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
                 "{carrier:?} positive reach guard: two material Moved redirects surface the CR 616.1 production prompt"
@@ -54262,6 +54339,11 @@ pub mod tests {
             )
             .expect("the ordering choice resumes the saved logical owner");
 
+            assert_eq!(
+                state.objects[&early].zone,
+                Zone::Battlefield,
+                "{carrier:?} the early member is delivered after the pause and supplies the immediately-after observation"
+            );
             assert!(
                 state.objects[&recipient].zone == Zone::Battlefield
                     && state.objects[&provider].zone == Zone::Battlefield,
@@ -54809,13 +54891,7 @@ pub mod tests {
                     "{carrier:?} co_departing={co_departing}: positive reach guard reaches the saved replacement"
                 );
                 let logical_group = match carrier {
-                    LogicalZoneProductionCarrier::ChangeZone => {
-                        &state
-                            .active_change_zone_frame()
-                            .and_then(|frame| frame.pending.as_ref())
-                            .expect("ChangeZone suppressor owner is parked")
-                            .logical_zone_change_group
-                    }
+                    LogicalZoneProductionCarrier::ChangeZone => staged_change_zone_group(&state),
                     LogicalZoneProductionCarrier::BatchDelivery => {
                         &state
                             .active_batch_delivery()
@@ -55018,13 +55094,7 @@ pub mod tests {
                 "{carrier:?} positive reach guard parks the simultaneous entry"
             );
             let logical_group = match carrier {
-                LogicalZoneProductionCarrier::ChangeZone => {
-                    &state
-                        .active_change_zone_frame()
-                        .and_then(|frame| frame.pending.as_ref())
-                        .expect("ChangeZone entering-suppressor owner is parked")
-                        .logical_zone_change_group
-                }
+                LogicalZoneProductionCarrier::ChangeZone => staged_change_zone_group(&state),
                 LogicalZoneProductionCarrier::BatchDelivery => {
                     &state
                         .active_batch_delivery()
@@ -55324,10 +55394,13 @@ pub mod tests {
                 matches!(state.waiting_for, WaitingFor::ReplacementChoice { .. }),
                 "{carrier:?} positive reach guard parks after the observer is in its off-zone trigger zone"
             );
+            // R4c staged order: every member is approved before any delivery,
+            // so at this consultation pause the earlier observer has not moved
+            // yet; the later assertions pin that it does move on delivery.
             assert_eq!(
                 state.objects[&observer].zone,
-                Zone::Graveyard,
-                "{carrier:?} positive reach guard moves the observer before the later segment"
+                Zone::Battlefield,
+                "{carrier:?} staged approvals precede delivery: the early observer is still in its origin zone at the later consultation pause"
             );
             let saved =
                 serde_json::to_value(&state).expect("parked early-observer carrier serializes");

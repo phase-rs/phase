@@ -432,6 +432,15 @@ fn handle_replacement_choice_inner(
     let staged_approval_owner = parked_zone_change_delivery
         .as_ref()
         .and_then(|parked| crate::game::zone_pipeline::staged_approval_owner(state, parked));
+    // CR 701.8a: an outer Destroy pause has no `PendingZoneChangeDelivery`; its
+    // exact boundary is the parked `Destroy` proposal itself.
+    let staged_destroy_approval_owner = state
+        .pending_staged_approval_boundary()
+        .filter(|(_, expected)| matches!(expected, ProposedEvent::Destroy { .. }))
+        .and_then(|(identity, expected)| {
+            crate::game::zone_pipeline::staged_approval_owner_for(state, identity, &expected)
+        });
+    let staged_consult_owner = staged_approval_owner.or(staged_destroy_approval_owner);
     let parked_phase_begin = state
         .pending_replacement
         .as_ref()
@@ -1068,6 +1077,21 @@ fn handle_replacement_choice_inner(
                 // inner ZoneChange itself needs a choice, the helper sets
                 // `state.waiting_for` and we propagate it back below.
                 destroy @ ProposedEvent::Destroy { .. } => {
+                    if let Some((group, fresh)) = staged_destroy_approval_owner {
+                        if fresh {
+                            if let Some(waiting) =
+                                crate::game::zone_pipeline::record_staged_batch_consultation_result(
+                                    state,
+                                    group,
+                                    StagedMemberOutcome::Approved(destroy),
+                                    events,
+                                )
+                            {
+                                return Ok(waiting);
+                            }
+                        }
+                        return Ok(state.waiting_for.clone());
+                    }
                     if !apply_destroy_after_replacement(state, destroy, events) {
                         return Ok(state.waiting_for.clone());
                     }
@@ -1657,7 +1681,7 @@ fn handle_replacement_choice_inner(
             // CR 101.4 + CR 614.5: a staged prevention is a retained terminal
             // (or a `PreventedWithChild` while its own child prompt is live),
             // never an immediate delivery or logical-group recording.
-            if let Some((group, fresh)) = staged_approval_owner {
+            if let Some((group, fresh)) = staged_consult_owner {
                 if fresh {
                     if let Some(waiting) =
                         crate::game::zone_pipeline::record_staged_batch_consultation_result(

@@ -23,8 +23,9 @@ use crate::types::game_state::{
     PendingBatchZoneChangeCause, PendingBatchZoneMoveRequest, PendingComponentDeliveryParent,
     PendingCounterPostAction, PendingLiminalEntryResume, PendingZoneChangeDelivery,
     PostReplacementDrainOwner, StagedArrangementStatus, StagedBatchDelivery, StagedBatchMember,
-    StagedBatchMemberState, StagedLibraryArrangement, StagedMemberOutcome, WaitingFor,
-    ZoneDeliveryExileTracking, ZoneMoveCompletion,
+    StagedBatchMemberState, StagedDestroyOperation, StagedLibraryArrangement,
+    StagedMemberOperation, StagedMemberOutcome, WaitingFor, ZoneDeliveryExileTracking,
+    ZoneMoveCompletion,
 };
 use std::collections::HashSet;
 
@@ -1406,6 +1407,7 @@ pub(crate) fn move_component_batch_then(
                     &mut completion,
                     state,
                     &logical_zone_change_group,
+                    &[],
                 );
                 run_batch_completion(state, completion, events)
             })
@@ -1662,6 +1664,8 @@ fn new_staged_batch(state: &GameState, reqs: &[ZoneMoveRequest]) -> StagedBatchD
                 approved_event: None,
                 pending_outcome: None,
                 terminal: None,
+                operation: StagedMemberOperation::ZoneMove,
+                outer_destroy_approved: false,
             }
         })
         .collect();
@@ -1671,6 +1675,7 @@ fn new_staged_batch(state: &GameState, reqs: &[ZoneMoveRequest]) -> StagedBatchD
         cursor: 0,
         arrangements: Vec::new(),
         arrangement_cursor: 0,
+        change_zone: None,
     }
 }
 
@@ -1740,62 +1745,25 @@ fn prepared_batch_member_event(
     request: &ZoneMoveRequest,
 ) -> Option<PreparedBatchMemberEvent> {
     let object = state.objects.get(&request.object_id)?;
-    let from_zone = object.zone;
-    if request.to == Zone::Library {
-        if let Some(position) = request.placement.clone() {
-            let source_id = request.source();
-            let mut proposed =
-                ProposedEvent::zone_change(request.object_id, from_zone, Zone::Library, source_id);
-            if let ProposedEvent::ZoneChange {
-                applied,
-                face_down_in_exile: conceal_in_exile,
-                library_placement,
-                chain_referent,
-                performed_by,
-                ..
-            } = &mut proposed
-            {
-                *library_placement = Some(position);
-                *chain_referent = request.mods.chain_referent;
-                *performed_by = request.mods.performed_by;
-                *applied = request.replacement_applied.clone();
-                *conceal_in_exile = request.face_down_in_exile;
-            }
-            return Some(PreparedBatchMemberEvent { proposed });
-        }
-    }
-    let source_id = Some(request.source().unwrap_or(request.object_id));
-    let mut proposed =
-        ProposedEvent::zone_change(request.object_id, from_zone, request.to, source_id);
-    if let ProposedEvent::ZoneChange {
-        applied,
-        face_down_in_exile: conceal_in_exile,
-        chain_referent,
-        performed_by,
-        enter_with_counters,
-        enter_tapped,
-        enters_attacking,
-        enter_transformed,
-        controller_override,
-        face_down_profile,
-        attach_to,
-        ..
-    } = &mut proposed
-    {
-        *performed_by = request.mods.performed_by;
-        *enter_transformed = request.mods.enter_transformed;
-        if !request.mods.enter_tapped.is_unspecified() {
-            *enter_tapped = request.mods.enter_tapped;
-        }
-        *enters_attacking = request.mods.enters_attacking;
-        *controller_override = request.mods.controller_override;
-        *enter_with_counters = request.mods.enter_with_counters.clone();
-        *face_down_profile = request.mods.face_down_profile.clone().map(Box::new);
-        *conceal_in_exile = request.face_down_in_exile;
-        *chain_referent = request.mods.chain_referent;
-        *attach_to = request.mods.attach_to;
-        *applied = request.replacement_applied.clone();
-    }
+    let proposed = prepare_zone_move_proposal(
+        state,
+        request.object_id,
+        object.zone,
+        request.to,
+        request.source().unwrap_or(request.object_id),
+        request.mods.enter_transformed,
+        request.mods.enter_tapped,
+        request.mods.enters_attacking,
+        request.mods.controller_override,
+        &request.mods.enter_with_counters,
+        request.mods.face_down_profile.as_ref(),
+        request.face_down_in_exile,
+        request.mods.chain_referent,
+        request.placement.clone(),
+        request.mods.attach_to,
+        request.mods.performed_by,
+        request.replacement_applied.clone(),
+    )?;
     Some(PreparedBatchMemberEvent { proposed })
 }
 
@@ -1865,32 +1833,51 @@ fn consult_next_staged_member(
     else {
         return StagedConsult::AllConsulted;
     };
-    if member.state != StagedBatchMemberState::Unconsulted {
-        // A member still consulting has a live child; the drain finalizes it.
-        return StagedConsult::Paused;
+    let destroy_operation = match member.operation {
+        StagedMemberOperation::Destroy(operation) => Some(operation),
+        StagedMemberOperation::ZoneMove => None,
+    };
+    match (destroy_operation, member.state) {
+        (Some(operation), StagedBatchMemberState::Unconsulted) => {
+            return consult_staged_destroy_outer(state, owner, events, member, operation);
+        }
+        (Some(operation), StagedBatchMemberState::InnerConsulting) => {
+            return consult_staged_destroy_inner(state, owner, events, member, operation);
+        }
+        (_, StagedBatchMemberState::Unconsulted) => {}
+        _ => {
+            // A member still consulting has a live child; the drain finalizes it.
+            return StagedConsult::Paused;
+        }
     }
     let request = ZoneMoveRequest::from_pending(member.request.clone());
     let Some(object) = state.objects.get(&request.object_id) else {
         mark_staged_member_terminal(
+            state,
             owner,
             member.announcement_index as usize,
             ZoneMoveCompletion::Remained,
+            events,
         );
         return StagedConsult::Continue;
     };
     if zone_move_is_primitive_noop(state, object, request.to) {
         mark_staged_member_terminal(
+            state,
             owner,
             member.announcement_index as usize,
             ZoneMoveCompletion::Remained,
+            events,
         );
         return StagedConsult::Continue;
     }
     let Some(prepared) = prepared_batch_member_event(state, &request) else {
         mark_staged_member_terminal(
+            state,
             owner,
             member.announcement_index as usize,
             ZoneMoveCompletion::Remained,
+            events,
         );
         return StagedConsult::Continue;
     };
@@ -1919,7 +1906,13 @@ fn consult_next_staged_member(
                 sync_staged_requests(owner);
                 return StagedConsult::Paused;
             }
-            mark_staged_member_terminal(owner, cursor, ZoneMoveCompletion::Prevented);
+            mark_staged_member_terminal(
+                state,
+                owner,
+                cursor,
+                ZoneMoveCompletion::Prevented,
+                events,
+            );
             StagedConsult::Continue
         }
         ReplacementResult::NeedsChoice(player) => {
@@ -1940,6 +1933,140 @@ fn consult_next_staged_member(
                 .filter(|parked| parked.member == member.identity)
                 .unwrap_or_else(|| {
                     PendingZoneChangeDelivery::new(member.identity, prepared.proposed.clone())
+                });
+            owner.paused_current = Some(boundary);
+            sync_staged_requests(owner);
+            state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
+            StagedConsult::Paused
+        }
+    }
+}
+
+/// CR 701.8a + CR 616.1: stage one Destroy member's outer event. The four
+/// pre-proposal guards are re-applied here, before the outer `Destroy` reaches
+/// the replacement pipeline.
+fn consult_staged_destroy_outer(
+    state: &mut GameState,
+    owner: &mut PendingBatchDeliveries,
+    events: &mut Vec<GameEvent>,
+    member: StagedBatchMember,
+    operation: StagedDestroyOperation,
+) -> StagedConsult {
+    let cursor = member.announcement_index as usize;
+    let object_id = member.identity.object_id;
+    let Some(object) = state.objects.get(&object_id) else {
+        mark_staged_member_terminal(state, owner, cursor, ZoneMoveCompletion::Remained, events);
+        return StagedConsult::Continue;
+    };
+    if object.is_emblem
+        || object.zone != Zone::Battlefield
+        || object.has_keyword(&crate::types::keywords::Keyword::Indestructible)
+    {
+        mark_staged_member_terminal(state, owner, cursor, ZoneMoveCompletion::Remained, events);
+        return StagedConsult::Continue;
+    }
+    let proposed = ProposedEvent::Destroy {
+        object_id,
+        source: Some(operation.source),
+        cant_regenerate: operation.cant_regenerate,
+        applied: HashSet::new(),
+    };
+    set_staged_member_state(owner, cursor, StagedBatchMemberState::OuterConsulting);
+    match replacement::replace_event(state, proposed.clone(), events) {
+        ReplacementResult::Execute(event) => {
+            if matches!(event, ProposedEvent::Destroy { .. }) {
+                if let Some(member) = owner
+                    .staged
+                    .as_mut()
+                    .and_then(|staged| staged.members.get_mut(cursor))
+                {
+                    member.outer_destroy_approved = true;
+                }
+                set_staged_member_state(owner, cursor, StagedBatchMemberState::InnerConsulting);
+                let member = owner
+                    .staged
+                    .as_ref()
+                    .and_then(|staged| staged.members.get(cursor))
+                    .cloned()
+                    .expect("outer-approved Destroy member remains the cursor");
+                consult_staged_destroy_inner(state, owner, events, member, operation)
+            } else {
+                // CR 614.6: the outer Destroy replacement redirected directly
+                // to a zone change; it is the final event.
+                record_staged_member_approval(owner, cursor, event);
+                StagedConsult::Continue
+            }
+        }
+        ReplacementResult::Prevented => {
+            mark_staged_member_terminal(
+                state,
+                owner,
+                cursor,
+                ZoneMoveCompletion::Prevented,
+                events,
+            );
+            StagedConsult::Continue
+        }
+        ReplacementResult::NeedsChoice(player) => {
+            let boundary = state
+                .pending_staged_approval_boundary()
+                .filter(|(identity, _)| *identity == member.identity)
+                .map(|(identity, expected)| PendingZoneChangeDelivery::new(identity, expected))
+                .unwrap_or_else(|| {
+                    PendingZoneChangeDelivery::new(member.identity, proposed.clone())
+                });
+            owner.paused_current = Some(boundary);
+            sync_staged_requests(owner);
+            state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
+            StagedConsult::Paused
+        }
+    }
+}
+
+/// CR 701.8a + CR 614.6: propose the inner guarded `Battlefield → Graveyard`
+/// move for an outer-approved Destroy member. This is a second, independent
+/// replacement consult.
+fn consult_staged_destroy_inner(
+    state: &mut GameState,
+    owner: &mut PendingBatchDeliveries,
+    events: &mut Vec<GameEvent>,
+    member: StagedBatchMember,
+    operation: StagedDestroyOperation,
+) -> StagedConsult {
+    let cursor = member.announcement_index as usize;
+    let object_id = member.identity.object_id;
+    if !state.objects.contains_key(&object_id) {
+        mark_staged_member_terminal(state, owner, cursor, ZoneMoveCompletion::Remained, events);
+        return StagedConsult::Continue;
+    }
+    let proposed = ProposedEvent::zone_change(
+        object_id,
+        Zone::Battlefield,
+        Zone::Graveyard,
+        Some(operation.source),
+    );
+    set_staged_member_state(owner, cursor, StagedBatchMemberState::InnerConsulting);
+    match replacement::replace_event(state, proposed.clone(), events) {
+        ReplacementResult::Execute(event) => {
+            record_staged_member_approval(owner, cursor, event);
+            StagedConsult::Continue
+        }
+        ReplacementResult::Prevented => {
+            mark_staged_member_terminal(
+                state,
+                owner,
+                cursor,
+                ZoneMoveCompletion::Prevented,
+                events,
+            );
+            StagedConsult::Continue
+        }
+        ReplacementResult::NeedsChoice(player) => {
+            let boundary = state
+                .pending_zone_change_delivery_from_replacement()
+                .filter(|parked| parked.member == member.identity)
+                .unwrap_or_else(|| {
+                    PendingZoneChangeDelivery::new(member.identity, proposed.clone())
                 });
             owner.paused_current = Some(boundary);
             sync_staged_requests(owner);
@@ -1982,12 +2109,27 @@ fn record_staged_member_approval(
 }
 
 fn mark_staged_member_terminal(
+    state: &mut GameState,
     owner: &mut PendingBatchDeliveries,
     index: usize,
     terminal: ZoneMoveCompletion,
+    events: &mut Vec<GameEvent>,
 ) {
+    let mut destroyed = None;
+    let mut change_zone_bookkeeping = None;
     if let Some(staged) = owner.staged.as_mut() {
         if let Some(member) = staged.members.get_mut(index) {
+            if let StagedMemberOperation::Destroy(operation) = member.operation {
+                if member.outer_destroy_approved {
+                    destroyed = Some((member.identity.object_id, operation.source));
+                }
+            } else if let Some(meta) = staged.change_zone {
+                change_zone_bookkeeping = Some((
+                    member.identity.object_id,
+                    member.approved_event.clone(),
+                    meta,
+                ));
+            }
             member.state = StagedBatchMemberState::Terminal;
             member.terminal = Some(terminal);
             member.pending_outcome = None;
@@ -1996,6 +2138,45 @@ fn mark_staged_member_terminal(
     }
     owner.paused_current = None;
     sync_staged_requests(owner);
+    if let Some((object_id, source_id)) = destroyed {
+        // CR 701.8a: the singleton emits `CreatureDestroyed` for both an inner
+        // `Moved` and an inner `Prevented`; the outer approval is the witness.
+        events.push(GameEvent::CreatureDestroyed {
+            object_id,
+            source_id: Some(source_id),
+        });
+    }
+    if let Some((object_id, approved_event, meta)) = change_zone_bookkeeping {
+        note_change_zone_member_terminal(state, object_id, approved_event.as_ref(), terminal, meta);
+    }
+}
+
+/// CR 400.7 + CR 608.2c: the legacy late per-member ChangeZone bookkeeping,
+/// run at each member's actual delivery terminal.
+fn note_change_zone_member_terminal(
+    state: &mut GameState,
+    object_id: ObjectId,
+    approved_event: Option<&ProposedEvent>,
+    terminal: ZoneMoveCompletion,
+    meta: crate::types::game_state::ChangeZoneBatchMeta,
+) {
+    if meta.count_hand_exile && terminal == ZoneMoveCompletion::Moved {
+        let hand_to_exile = matches!(
+            approved_event,
+            Some(ProposedEvent::ZoneChange {
+                from: Zone::Hand,
+                to: Zone::Exile,
+                ..
+            })
+        );
+        if hand_to_exile {
+            state.exiled_from_hand_this_resolution =
+                state.exiled_from_hand_this_resolution.saturating_add(1);
+        }
+    }
+    if meta.exiled_by_source {
+        state.exile_links.retain(|link| link.exiled_id != object_id);
+    }
 }
 
 /// CR 401.4 + CR 101.4: derive the private owner/position groups from final
@@ -2183,17 +2364,23 @@ fn deliver_staged_members(
             .get(&member.identity.object_id)
             .map(ObjectIncarnationRef::from_object);
         if live_identity != Some(member.identity) {
-            mark_staged_member_terminal(owner, cursor, ZoneMoveCompletion::Remained);
+            mark_staged_member_terminal(state, owner, cursor, ZoneMoveCompletion::Remained, events);
             continue;
         }
         let Some(event) = member.approved_event.clone() else {
-            mark_staged_member_terminal(owner, cursor, ZoneMoveCompletion::Remained);
+            mark_staged_member_terminal(state, owner, cursor, ZoneMoveCompletion::Remained, events);
             continue;
         };
         let event_cause = match &event {
             ProposedEvent::ZoneChange { cause, .. } => *cause,
             _ => {
-                mark_staged_member_terminal(owner, cursor, ZoneMoveCompletion::Remained);
+                mark_staged_member_terminal(
+                    state,
+                    owner,
+                    cursor,
+                    ZoneMoveCompletion::Remained,
+                    events,
+                );
                 continue;
             }
         };
@@ -2204,8 +2391,10 @@ fn deliver_staged_members(
             member: member.identity,
             expected_event: Some(event.clone()),
         });
-        match deliver_replaced_batch_member(
+        match deliver_replaced_zone_change_with_aura_host(
             state,
+            member.identity.object_id,
+            member.identity,
             event.clone(),
             event_cause,
             member.request.exile_duration.as_ref(),
@@ -2214,21 +2403,20 @@ fn deliver_staged_members(
                 member.request.exile_tracking,
                 ZoneDeliveryExileTracking::TrackBySource
             ),
-            PostReplacementDrainOwner::DeliveryTail,
             None,
             explicit_index,
             delivery_owner,
             events,
         ) {
-            ZoneDeliveryResult::Done => {
-                let completion =
-                    zone_move_completion_from_delivery(member.identity, &events[delivery_start..]);
-                mark_staged_member_terminal(owner, cursor, completion);
+            AuraAwareZoneDelivery::Completed(completion) => {
+                mark_staged_member_terminal(state, owner, cursor, completion, events);
             }
-            ZoneDeliveryResult::NeedsChoice(_) => {
+            AuraAwareZoneDelivery::NeedsChoice(_) | AuraAwareZoneDelivery::NeedsAuraHostChoice => {
                 // Keep the authoritative parked boundary and retain this
                 // member's own delivered slice; the drain derives the terminal
-                // from it when no sidecar classification exists.
+                // from it when no sidecar classification exists. A host choice
+                // pauses AFTER the entry was delivered, so its retained slice
+                // already witnesses the member's terminal.
                 let paused_current =
                     staged_delivery_pause(state, &member, &event, &events[delivery_start..]);
                 crate::game::triggers::append_and_collect_logical_zone_trigger_segment(
@@ -2354,6 +2542,154 @@ fn deliver_staged_batch_entry(
     }
 }
 
+/// CR 101.4: the outcome of one admitted family entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StagedFamilyOutcome {
+    Settled,
+    Paused,
+}
+
+/// CR 701.8a + CR 603.10a: enter one admitted destruction population. On a
+/// synchronous delivery the entry settles the whole owner (including its
+/// `DestroyPopulationSettled` completion) and returns nothing to a producer
+/// tail; on a pause it parks the exact owner with its completion.
+pub(crate) fn deliver_staged_destroy_batch(
+    state: &mut GameState,
+    reqs: Vec<ZoneMoveRequest>,
+    logical_zone_change_group: LogicalZoneChangeGroup,
+    ability: &crate::types::ability::ResolvedAbility,
+    source: ObjectId,
+    cant_regenerate: bool,
+    events: &mut Vec<GameEvent>,
+) -> StagedFamilyOutcome {
+    let mut staged = new_staged_batch(state, &reqs);
+    for member in &mut staged.members {
+        member.operation = StagedMemberOperation::Destroy(StagedDestroyOperation {
+            source,
+            cant_regenerate,
+        });
+    }
+    let mut owner = new_staged_owner(state, &reqs, logical_zone_change_group, staged);
+    owner.completion = Some(BatchCompletion::DestroyPopulationSettled {
+        ability: Box::new(ability.clone()),
+        settled_destroyed: None,
+    });
+    match run_staged_batch(state, &mut owner, events) {
+        StagedStop::Paused | StagedStop::Arranging => {
+            state
+                .resolution_stack
+                .park_batch_owner(owner)
+                .expect("paused staged destroy batch parks its exact owner");
+            StagedFamilyOutcome::Paused
+        }
+        StagedStop::Delivered => {
+            record_staged_terminals_for_settlement(&mut owner);
+            let deferred_events = owner.deferred_events.clone();
+            settle_batch_owner(state, owner, deferred_events, events);
+            StagedFamilyOutcome::Settled
+        }
+    }
+}
+
+/// CR 608.2c + CR 603.10a: the ChangeZone family's synchronous delivery result.
+pub(crate) enum StagedChangeZoneOutcome {
+    Settled {
+        group: LogicalZoneChangeGroup,
+        members: Vec<StagedBatchMember>,
+    },
+    Paused,
+}
+
+/// CR 608.2c + CR 603.10a: enter one admitted ChangeZone population. The group
+/// is moved by value into the child, which is its single logical owner; on a
+/// pause the ChangeZone parent marker is installed immediately below the batch
+/// child and the tail rides the batch's typed completion.
+pub(crate) fn deliver_staged_change_zone_batch(
+    state: &mut GameState,
+    reqs: Vec<ZoneMoveRequest>,
+    logical_zone_change_group: LogicalZoneChangeGroup,
+    meta: crate::types::game_state::ChangeZoneBatchMeta,
+    tail: crate::types::game_state::ChangeZoneBatchTail,
+    events: &mut Vec<GameEvent>,
+) -> StagedChangeZoneOutcome {
+    let event_start = events.len();
+    let group_id = logical_zone_change_group.logical_group_id;
+    let mut staged = new_staged_batch(state, &reqs);
+    staged.change_zone = Some(meta);
+    // CR 614.13a: absorb a Devour-only frame for this exact move; the marker
+    // replaces it (and keeps its eligibility snapshot across a pause).
+    let devour_eligible_snapshot = if state.active_change_zone_frame().is_some_and(|frame| {
+        frame.pending.is_none()
+            && frame.awaiting_batch.is_none()
+            && frame.devour_eligible_snapshot.is_some()
+    }) {
+        let snapshot = state
+            .active_change_zone_frame()
+            .and_then(|frame| frame.devour_eligible_snapshot.clone());
+        let _ = state
+            .take_active_change_zone_frame()
+            .expect("the absorbed Devour-only frame is active");
+        snapshot
+    } else {
+        None
+    };
+    let child_stack_start = state.resolution_stack.capture_child_boundary();
+    let mut owner = new_staged_owner(state, &reqs, logical_zone_change_group, staged);
+    owner.completion = Some(BatchCompletion::ChangeZonePopulationSettled {
+        tail: Box::new(tail),
+        settled: None,
+    });
+    match run_staged_batch(state, &mut owner, events) {
+        StagedStop::Paused | StagedStop::Arranging => {
+            // R4c addendum (a): the batch owner must sit BELOW the delivery
+            // child stack (an ETB-counter direct-choice child owns the stack
+            // top), and the ChangeZone marker immediately below it.
+            let after_run = state.resolution_stack.capture_child_boundary();
+            if after_run > child_stack_start {
+                state
+                    .resolution_stack
+                    .insert_parent_at_child_boundary(
+                        crate::types::resolution::ResolutionFrame::BatchDelivery(Box::new(owner)),
+                        child_stack_start,
+                    )
+                    .expect("paused staged ChangeZone batch inserts below its child stack");
+            } else {
+                state
+                    .resolution_stack
+                    .park_batch_owner(owner)
+                    .expect("paused staged ChangeZone batch parks its exact owner");
+            }
+            state.insert_change_zone_batch_parent_at_child_boundary(
+                group_id,
+                devour_eligible_snapshot,
+                child_stack_start,
+            );
+            StagedChangeZoneOutcome::Paused
+        }
+        StagedStop::Delivered => {
+            record_staged_terminals_for_settlement(&mut owner);
+            let mut group = owner.logical_zone_change_group;
+            let members = owner
+                .staged
+                .as_ref()
+                .map(|staged| staged.members.clone())
+                .unwrap_or_default();
+            crate::game::triggers::complete_logical_zone_trigger_collection(
+                state,
+                &mut group,
+                &mut events[event_start..],
+            )
+            .expect("completed ChangeZone owns every terminal member outcome");
+            crate::game::triggers::mark_logical_zone_events_consumed_before_priority(
+                state,
+                &group,
+                &events[event_start..],
+            );
+            StagedChangeZoneOutcome::Settled { group, members }
+        }
+    }
+}
+
 /// CR 101.4 + CR 616.1: identify the staged member whose replacement prompt is
 /// parked. The owner key is the exact parked boundary — not a live-object
 /// lookup — so a modified proposal or a changed incarnation cannot be consumed
@@ -2363,6 +2699,16 @@ pub(crate) fn staged_approval_owner(
     state: &GameState,
     parked: &PendingZoneChangeDelivery,
 ) -> Option<(LogicalZoneChangeGroupId, bool)> {
+    staged_approval_owner_for(state, parked.member, &parked.expected_event)
+}
+
+/// CR 101.4 + CR 616.1: the exact parked boundary a staged consultation owns,
+/// for either an outer `Destroy` proposal or a zone change.
+pub(crate) fn staged_approval_owner_for(
+    state: &GameState,
+    identity: ObjectIncarnationRef,
+    expected_event: &ProposedEvent,
+) -> Option<(LogicalZoneChangeGroupId, bool)> {
     let batch = state.active_batch_delivery()?;
     let staged = batch.staged.as_ref()?;
     if staged.stage != BatchDeliveryStage::Approving {
@@ -2371,9 +2717,22 @@ pub(crate) fn staged_approval_owner(
     let member = staged.members.get(staged.cursor)?;
     let paused = batch.paused_current.as_ref()?;
     if paused.terminal_completion.is_some()
-        || !paused.captures(parked.member, &parked.expected_event)
-        || parked.member != member.identity
+        || !paused.captures(identity, expected_event)
+        || identity != member.identity
     {
+        return None;
+    }
+    let compatible = match (&member.operation, expected_event) {
+        (StagedMemberOperation::ZoneMove, ProposedEvent::ZoneChange { .. }) => true,
+        (StagedMemberOperation::Destroy(_), ProposedEvent::Destroy { .. }) => {
+            member.state == StagedBatchMemberState::OuterConsulting
+        }
+        (StagedMemberOperation::Destroy(_), ProposedEvent::ZoneChange { .. }) => {
+            member.state == StagedBatchMemberState::InnerConsulting
+        }
+        _ => false,
+    };
+    if !compatible {
         return None;
     }
     Some((
@@ -2452,7 +2811,7 @@ pub(crate) fn record_staged_batch_consultation_result(
     state.waiting_for = WaitingFor::Priority {
         player: state.active_player,
     };
-    if !finalize_staged_pending_outcome_on(state, &mut owner) {
+    if !finalize_staged_pending_outcome_on(state, &mut owner, events) {
         state
             .resolution_stack
             .park_batch_owner(owner)
@@ -2463,6 +2822,15 @@ pub(crate) fn record_staged_batch_consultation_result(
     if stop == StagedStop::Delivered {
         let deferred_events = owner.deferred_events.clone();
         settle_batch_owner(state, owner, deferred_events, events);
+        // CR 608.2c: the resumed consultation completed the whole population,
+        // so the parked chained continuation ("create that many", the
+        // owner-shuffle consumer) must run against the settled count/records.
+        // This is the legacy epilogue's order after `drain_pending_change_zone_
+        // iteration`; the staged resume path otherwise stops at Priority with
+        // that continuation still parked.
+        if matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            crate::game::effects::drain_pending_continuation(state, events);
+        }
     } else {
         state
             .resolution_stack
@@ -2477,6 +2845,7 @@ pub(crate) fn record_staged_batch_consultation_result(
 fn finalize_staged_pending_outcome_on(
     state: &mut GameState,
     owner: &mut PendingBatchDeliveries,
+    events: &mut Vec<GameEvent>,
 ) -> bool {
     if state.pending_replacement.is_some()
         || !matches!(state.waiting_for, WaitingFor::Priority { .. })
@@ -2496,21 +2865,64 @@ fn finalize_staged_pending_outcome_on(
     let Some(outcome) = member.pending_outcome.clone() else {
         return false;
     };
-    match outcome {
-        StagedMemberOutcome::Approved(event) => {
+    match (member.state, outcome) {
+        (
+            StagedBatchMemberState::OuterConsulting,
+            StagedMemberOutcome::Approved(ProposedEvent::Destroy { .. }),
+        ) => {
+            // CR 701.8a: outer approval, not delivery. Keep the cursor here and
+            // let the driver run the second, inner consult.
+            member.outer_destroy_approved = true;
+            member.state = StagedBatchMemberState::InnerConsulting;
+            member.pending_outcome = None;
+            owner.paused_current = None;
+            sync_staged_requests(owner);
+            true
+        }
+        (
+            StagedBatchMemberState::OuterConsulting
+            | StagedBatchMemberState::InnerConsulting
+            | StagedBatchMemberState::PreventedWithChild,
+            StagedMemberOutcome::Approved(event),
+        ) => {
             member.approved_event = Some(event);
             member.state = StagedBatchMemberState::Approved;
+            member.pending_outcome = None;
+            staged.cursor = cursor + 1;
+            owner.paused_current = None;
+            sync_staged_requests(owner);
+            true
         }
-        StagedMemberOutcome::Prevented => {
+        (
+            StagedBatchMemberState::OuterConsulting
+            | StagedBatchMemberState::InnerConsulting
+            | StagedBatchMemberState::PreventedWithChild,
+            StagedMemberOutcome::Prevented,
+        ) => {
+            let destroyed = match member.operation {
+                StagedMemberOperation::Destroy(operation) if member.outer_destroy_approved => {
+                    Some((member.identity.object_id, operation.source))
+                }
+                _ => None,
+            };
             member.terminal = Some(ZoneMoveCompletion::Prevented);
             member.state = StagedBatchMemberState::Terminal;
+            member.pending_outcome = None;
+            staged.cursor = cursor + 1;
+            owner.paused_current = None;
+            sync_staged_requests(owner);
+            if let Some((object_id, source_id)) = destroyed {
+                // CR 701.8a: an inner prevention after outer approval still
+                // emits `CreatureDestroyed` once.
+                events.push(GameEvent::CreatureDestroyed {
+                    object_id,
+                    source_id: Some(source_id),
+                });
+            }
+            true
         }
+        _ => false,
     }
-    member.pending_outcome = None;
-    staged.cursor = cursor + 1;
-    owner.paused_current = None;
-    sync_staged_requests(owner);
-    true
 }
 
 /// Test/diagnostic wrapper: finalize the top staged owner in place.
@@ -2528,7 +2940,7 @@ pub(crate) fn finalize_staged_pending_outcome(
     let Ok(Some(mut owner)) = state.resolution_stack.take_active_batch_delivery() else {
         return false;
     };
-    let finalized = finalize_staged_pending_outcome_on(state, &mut owner);
+    let finalized = finalize_staged_pending_outcome_on(state, &mut owner, &mut Vec::new());
     state
         .resolution_stack
         .park_batch_owner(owner)
@@ -2969,13 +3381,34 @@ fn settle_batch_owner(
             state.record_completed_hidden_search_audience(entry.identity, &entry.audience);
         }
     }
+    let staged_members: Vec<StagedBatchMember> = pending
+        .staged
+        .as_ref()
+        .map(|staged| staged.members.clone())
+        .unwrap_or_default();
+    let change_zone_family = pending
+        .staged
+        .as_ref()
+        .is_some_and(|staged| staged.change_zone.is_some());
     if let Some(mut completion) = completion {
         crate::types::game_state::settle_batch_delivery_outcome(
             &mut completion,
             state,
             &pending.logical_zone_change_group,
+            &staged_members,
         );
         let _ = run_batch_completion(state, completion, events);
+    }
+    if change_zone_family {
+        // CR 608.2c + CR 400.7j: the ChangeZone completion retires the parent
+        // marker once, then binds the forwarded result against this exact
+        // logical group's arrivals.
+        let group_id = pending.logical_zone_change_group.logical_group_id;
+        let _ = state.take_change_zone_batch_marker(group_id);
+        crate::game::effects::settle_forwarded_zone_result(
+            state,
+            &pending.logical_zone_change_group,
+        );
     }
     if component_delivery_parent.is_some()
         && matches!(state.waiting_for, WaitingFor::Priority { .. })
@@ -3260,6 +3693,39 @@ fn drain_staged_batch(
     let Ok(Some(mut owner)) = state.resolution_stack.take_active_batch_delivery() else {
         return;
     };
+    // The boundary the detached owner left behind: a delivery child raised by
+    // the run belongs above it, so the owner must be inserted back below that
+    // child (and above its ChangeZone marker).
+    let repark_boundary = state.resolution_stack.capture_child_boundary();
+    // R4c residual R-c13 (bounded compensation; removal/replacement owned by
+    // R4e, which owns engine.rs): the `ReturnAsAuraTarget` resume handler
+    // treats a staged ChangeZone batch (marker below the BatchDelivery, no
+    // legacy `pending`) as "no iteration in flight" and pushes one premature
+    // `EffectResolved`. A staged ChangeZone Aura pause is the only path that can
+    // park an already-delivered member here, so absorb exactly that trailing
+    // event and let `ChangeZonePopulationSettled` emit the single canonical
+    // `EffectResolved` at the existing completion position (legacy order:
+    // remaining deliveries, then the event). The check is idempotent when the
+    // handler stops pushing.
+    if owner
+        .staged
+        .as_ref()
+        .is_some_and(|staged| staged.change_zone.is_some())
+    {
+        if let (Some(BatchCompletion::ChangeZonePopulationSettled { tail, .. }), Some(paused)) =
+            (owner.completion.as_ref(), owner.paused_current.as_ref())
+        {
+            let delivered = paused.terminal_completion_after_resume() == ZoneMoveCompletion::Moved;
+            let premature = matches!(
+                events.last(),
+                Some(GameEvent::EffectResolved { kind, source_id, .. })
+                    if *kind == tail.effect_kind && *source_id == tail.source_id
+            );
+            if delivered && premature {
+                events.pop();
+            }
+        }
+    }
     let component_delivery_parent = owner.component_delivery_parent.clone();
     let completion = owner.completion.clone();
     let attempted = owner.attempted.clone();
@@ -3284,31 +3750,20 @@ fn drain_staged_batch(
                 .logical_zone_change_group
                 .record_delivery_completion(paused.member.object_id, terminal)
                 .expect("resumed staged member records its exact terminal outcome");
-            if let Some(staged) = owner.staged.as_mut() {
-                if let Some(member) = staged
-                    .members
-                    .iter_mut()
-                    .find(|member| member.identity == paused.member)
-                {
-                    member.state = StagedBatchMemberState::Terminal;
-                    member.terminal = Some(terminal);
-                }
-                if let Some(index) = staged
+            if let Some(index) = owner.staged.as_ref().and_then(|staged| {
+                staged
                     .members
                     .iter()
                     .position(|member| member.identity == paused.member)
-                {
-                    staged.cursor = staged.cursor.max(index + 1);
-                }
+            }) {
+                mark_staged_member_terminal(state, &mut owner, index, terminal, events);
             }
-            owner.paused_current = None;
-            sync_staged_requests(&mut owner);
         }
     }
 
     let stop = match stage {
         Some(BatchDeliveryStage::Approving) => {
-            let _ = finalize_staged_pending_outcome_on(state, &mut owner);
+            let _ = finalize_staged_pending_outcome_on(state, &mut owner, events);
             run_staged_batch(state, &mut owner, events)
         }
         Some(BatchDeliveryStage::Arranging) => {
@@ -3329,10 +3784,7 @@ fn drain_staged_batch(
             owner.zone_change_record_start = zone_change_record_start;
             deferred_events.append(events);
             owner.deferred_events = deferred_events;
-            state
-                .resolution_stack
-                .park_batch_owner(owner)
-                .expect("staged batch re-parks its exact owner");
+            state.repark_batch_owner_below_children(owner, repark_boundary);
         }
         StagedStop::Delivered => {
             if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
@@ -4027,6 +4479,213 @@ pub(crate) fn unhosted_aura_entry(entrant: &GameObject, from: Zone) -> UnhostedA
         Zone::Stack => UnhostedAuraEntry::OwnersGraveyard,
         _ => UnhostedAuraEntry::RemainInCurrentZone,
     }
+}
+
+/// CR 303.4f + CR 303.4g + CR 614.12: the Aura-host half of the
+/// post-replacement battlefield-entry consult. Shared by the legacy mover
+/// (`execute_zone_move_with_applied_terminal`) and the staged batch delivery
+/// seam, so both apply the same host legality, the same unhosted disposition
+/// and the same controller-authorized prompt.
+pub(crate) enum AuraHostPostReplaceOutcome {
+    /// Attach to the sole legal host (recorded on the event), or no Aura work.
+    Deliver,
+    /// CR 303.4g: the entry does not happen and the Aura is put into its
+    /// owner's graveyard instead — a FRESH, never-consulted move.
+    UnhostedOwnersGraveyard,
+    /// CR 303.4g: the Aura remains in its current zone; the entry does not happen.
+    Remained,
+    /// CR 303.4f: several legal hosts, so the Aura's controller chooses one
+    /// after the entry has been delivered.
+    NeedsHost {
+        controller: PlayerId,
+        aura_id: ObjectId,
+        legal_targets: Vec<TargetRef>,
+    },
+}
+
+/// CR 303.4f + CR 303.4g: decide the Aura-host half of one approved battlefield
+/// entry. Mutates `event`'s `attach_to` for a sole legal host and never touches
+/// the game state.
+pub(crate) fn consult_aura_host_post_replace(
+    state: &GameState,
+    event: &mut ProposedEvent,
+    _source_id: Option<ObjectId>,
+) -> AuraHostPostReplaceOutcome {
+    let ProposedEvent::ZoneChange {
+        object_id,
+        from,
+        to: Zone::Battlefield,
+        attach_to,
+        controller_override,
+        ..
+    } = event
+    else {
+        return AuraHostPostReplaceOutcome::Deliver;
+    };
+    if attach_to.is_some() {
+        return AuraHostPostReplaceOutcome::Deliver;
+    }
+    let Some(enchant_filter) = aura_enchant_filter(state, *object_id) else {
+        return AuraHostPostReplaceOutcome::Deliver;
+    };
+    // CR 614.12: read the entrant's projected characteristics, not the
+    // pre-entry object still stored under this id — for a meld the latter is
+    // the exiled component card and has the wrong controller as well as the
+    // wrong typeline.
+    let controller = (*controller_override)
+        .or_else(|| entering_object_projection(state, *object_id).map(|obj| obj.controller))
+        .unwrap_or(PlayerId(0));
+    let legal_targets = legal_aura_attachment_targets(
+        state,
+        *object_id,
+        entering_object_projection(state, *object_id),
+        controller,
+        &enchant_filter,
+    );
+    match legal_targets.as_slice() {
+        // CR 303.4g: no legal object or player to enchant, so this entry does
+        // not happen. Decided BEFORE delivery, i.e. before the object is
+        // inserted into the battlefield and before any entry event.
+        [] => match entering_object_projection(state, *object_id)
+            .map(|entrant| unhosted_aura_entry(entrant, *from))
+        {
+            Some(UnhostedAuraEntry::OwnersGraveyard) => {
+                AuraHostPostReplaceOutcome::UnhostedOwnersGraveyard
+            }
+            Some(UnhostedAuraEntry::NotCreated)
+            | Some(UnhostedAuraEntry::RemainInCurrentZone)
+            | None => AuraHostPostReplaceOutcome::Remained,
+        },
+        [TargetRef::Object(id)] => {
+            *attach_to = Some(AttachTarget::Object(*id));
+            AuraHostPostReplaceOutcome::Deliver
+        }
+        [TargetRef::Player(id)] => {
+            *attach_to = Some(AttachTarget::Player(*id));
+            AuraHostPostReplaceOutcome::Deliver
+        }
+        _ => AuraHostPostReplaceOutcome::NeedsHost {
+            controller,
+            aura_id: *object_id,
+            legal_targets,
+        },
+    }
+}
+
+/// One shared terminal for a replaced zone change that may surface an Aura
+/// host choice.
+pub(crate) enum AuraAwareZoneDelivery {
+    Completed(ZoneMoveCompletion),
+    NeedsChoice(PlayerId),
+    /// The entry was delivered and `WaitingFor::ReturnAsAuraTarget` is parked.
+    NeedsAuraHostChoice,
+}
+
+/// CR 303.4f + CR 303.4g + CR 614.6: deliver one already-approved battlefield
+/// entry with the shared Aura-host consult, then the ordinary zone-delivery
+/// tail. The single seam both the legacy mover and the staged batch use.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn deliver_replaced_zone_change_with_aura_host(
+    state: &mut GameState,
+    obj_id: ObjectId,
+    member: ObjectIncarnationRef,
+    mut event: ProposedEvent,
+    source_id: Option<ObjectId>,
+    duration: Option<&Duration>,
+    exile_controller: Option<PlayerId>,
+    track_exiled_by_source: bool,
+    library_placement: Option<LibraryPosition>,
+    explicit_library_index: Option<usize>,
+    owner: Option<BatchMemberDeliveryOwner>,
+    events: &mut Vec<GameEvent>,
+) -> AuraAwareZoneDelivery {
+    let host = consult_aura_host_post_replace(state, &mut event, source_id);
+    let pending_host = match host {
+        AuraHostPostReplaceOutcome::Deliver => None,
+        AuraHostPostReplaceOutcome::Remained => {
+            return AuraAwareZoneDelivery::Completed(ZoneMoveCompletion::Remained);
+        }
+        AuraHostPostReplaceOutcome::UnhostedOwnersGraveyard => {
+            // CR 303.4g + CR 614.6: the approved battlefield entry never
+            // happens and the graveyard placement that replaces it is a FRESH,
+            // never-consulted event — so it routes through the pipeline rather
+            // than being written as a destination rewrite of the already-
+            // approved event. A board-wide `Moved` graveyard→exile redirect
+            // (Rest in Peace / Leyline of the Void) therefore fires on it. The
+            // already-applied set rides along so no replacement can be spent
+            // twice.
+            let applied = event.applied_set().clone();
+            return match move_batch_member_with_terminal(
+                state,
+                ZoneMoveRequest::effect(obj_id, Zone::Graveyard, source_id.unwrap_or(obj_id))
+                    .with_replacement_applied(applied),
+                owner,
+                events,
+            ) {
+                ZoneMoveTerminalResult::Completed(completion) => {
+                    AuraAwareZoneDelivery::Completed(completion)
+                }
+                ZoneMoveTerminalResult::NeedsChoice(player) => {
+                    AuraAwareZoneDelivery::NeedsChoice(player)
+                }
+                ZoneMoveTerminalResult::NeedsAuraAttachmentChoice => {
+                    AuraAwareZoneDelivery::NeedsAuraHostChoice
+                }
+            };
+        }
+        AuraHostPostReplaceOutcome::NeedsHost {
+            controller,
+            aura_id,
+            legal_targets,
+        } => Some((controller, aura_id, legal_targets)),
+    };
+
+    let delivery_start = events.len();
+    match deliver_replaced_batch_member(
+        state,
+        event,
+        source_id,
+        duration,
+        exile_controller,
+        track_exiled_by_source,
+        PostReplacementDrainOwner::DeliveryTail,
+        library_placement,
+        explicit_library_index,
+        owner,
+        events,
+    ) {
+        ZoneDeliveryResult::Done => {}
+        ZoneDeliveryResult::NeedsChoice(player) => {
+            return AuraAwareZoneDelivery::NeedsChoice(player);
+        }
+    }
+    if let Some((controller, aura_id, legal_targets)) = pending_host {
+        state.waiting_for = WaitingFor::ReturnAsAuraTarget {
+            player: controller,
+            source_id: source_id.unwrap_or(aura_id),
+            returned_id: aura_id,
+            legal_targets,
+            pending_effect: Box::new(ResolvedAbility::new(
+                Effect::Attach {
+                    attachment: TargetFilter::SelfRef,
+                    target: TargetFilter::Any,
+                    // Aura-attachment delivery: the entering Aura is the
+                    // attachment; only its host is chosen here.
+                    selection: AttachSelection::AtResolution {
+                        count: AttachCardinality::One,
+                    },
+                },
+                Vec::new(),
+                source_id.unwrap_or(aura_id),
+                controller,
+            )),
+        };
+        return AuraAwareZoneDelivery::NeedsAuraHostChoice;
+    }
+    AuraAwareZoneDelivery::Completed(zone_move_completion_from_delivery(
+        member,
+        &events[delivery_start..],
+    ))
 }
 
 /// Disposition of an object that has just become an Aura while already on the
@@ -6303,14 +6962,21 @@ pub(crate) fn seed_intrinsic_entry_counters(state: &GameState, proposed: &mut Pr
     enter_with_counters.extend(intrinsic);
 }
 
+/// CR 712.14a + CR 400.7 + CR 701.24c + CR 614.1 + CR 306.5b: build the exact
+/// pre-consult proposal for one effect-driven zone move. Shared by the legacy
+/// mover and the staged batch member so both apply the same guards, entry
+/// modifications, intrinsic loyalty/defense seeding and effect counters.
+///
+/// Returns `None` when a pre-consult guard proves the move cannot happen: a
+/// single-faced object cannot enter transformed, and a library card put into
+/// its own library at no stated position does not change zones.
 #[allow(clippy::too_many_arguments)]
-fn execute_zone_move_with_applied_terminal(
-    state: &mut GameState,
+fn prepare_zone_move_proposal(
+    state: &GameState,
     obj_id: ObjectId,
     from_zone: Zone,
     dest_zone: Zone,
     source_id: ObjectId,
-    duration: Option<&Duration>,
     enter_transformed: bool,
     enter_tapped: EtbTapState,
     enters_attacking: bool,
@@ -6318,28 +6984,12 @@ fn execute_zone_move_with_applied_terminal(
     effect_enter_with_counters: &[(CounterType, u32)],
     face_down_profile: Option<&crate::types::ability::FaceDownProfile>,
     face_down_in_exile: ExileConcealment,
-    // CR 608.2c: whether this entry is the producer a following demonstrative
-    // anaphor binds to. Only `move_object_with_terminal` forwards a request's
-    // intent; the four public `execute_zone_move*` wrappers are raw movers with
-    // no originating instruction to speak for, and pass `Silent`.
     chain_referent: crate::types::zones::ChainReferentIntent,
-    track_exiled_by_source: bool,
     library_placement: Option<LibraryPosition>,
     enter_attached_to: Option<AttachTarget>,
-    exile_controller: Option<PlayerId>,
-    // CR 608.2c + CR 406.6: the player performing this move, if any.
     performed_by: Option<PlayerId>,
     replacement_applied: HashSet<AppliedReplacementKey>,
-    owner: Option<BatchMemberDeliveryOwner>,
-    events: &mut Vec<GameEvent>,
-) -> ZoneMoveTerminalResult {
-    let Some(member) = state
-        .objects
-        .get(&obj_id)
-        .map(ObjectIncarnationRef::from_object)
-    else {
-        return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
-    };
+) -> Option<ProposedEvent> {
     // CR 712.14a: A single-faced object instructed to enter transformed
     // cannot enter the battlefield. A single-faced copy of a transforming
     // Saga therefore remains in exile after its final chapter resolves.
@@ -6350,12 +7000,12 @@ fn execute_zone_move_with_applied_terminal(
             .get(&obj_id)
             .is_some_and(|obj| obj.back_face.is_none())
     {
-        return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
+        return None;
     }
     // CR 400.7 + CR 701.24c: a library card put into its own library at no stated
     // position does not change zones; a shuffle the instruction names is its own step.
     if from_zone == Zone::Library && dest_zone == Zone::Library && library_placement.is_none() {
-        return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
+        return None;
     }
     let mut proposed = ProposedEvent::zone_change(obj_id, from_zone, dest_zone, Some(source_id));
     if let ProposedEvent::ZoneChange {
@@ -6367,15 +7017,15 @@ fn execute_zone_move_with_applied_terminal(
         ..
     } = &mut proposed
     {
-        *placement = library_placement.clone();
+        *placement = library_placement;
         *applied = replacement_applied;
         *conceal_in_exile = face_down_in_exile;
         *intent = chain_referent;
         *performer = performed_by;
     }
 
-    // CR 712.14a: Set enter_transformed on the proposed event so replacement effects
-    // preserve it through the pipeline.
+    // CR 712.14a: Set enter_transformed on the proposed event so replacement
+    // effects preserve it through the pipeline.
     if enter_transformed {
         if let ProposedEvent::ZoneChange {
             enter_transformed: ref mut et,
@@ -6387,11 +7037,7 @@ fn execute_zone_move_with_applied_terminal(
     }
 
     // CR 614.1: Seed the three-state ETB tap-state directly onto the proposed
-    // event so the replacement pipeline preserves it. `Unspecified` leaves the
-    // event's default untouched (the originating effect set no explicit state);
-    // an explicit `Tapped`/`Untapped` overrides it. Seeding the enum directly
-    // (rather than collapsing through a bool) keeps the `Unspecified`-vs-
-    // `Untapped` distinction the pipeline carrier `EtbTapState` exists to hold.
+    // event so the replacement pipeline preserves it.
     if !enter_tapped.is_unspecified() {
         if let ProposedEvent::ZoneChange {
             enter_tapped: ref mut et,
@@ -6412,8 +7058,8 @@ fn execute_zone_move_with_applied_terminal(
         }
     }
 
-    // CR 110.2a: Set controller_override on the proposed event so replacement effects
-    // see the correct controller through the pipeline.
+    // CR 110.2a: Set controller_override on the proposed event so replacement
+    // effects see the correct controller through the pipeline.
     if let Some(ctrl) = controller_override {
         if let ProposedEvent::ZoneChange {
             controller_override: ref mut co,
@@ -6424,9 +7070,7 @@ fn execute_zone_move_with_applied_terminal(
         }
     }
 
-    // CR 708.2a + CR 708.3: Carry the face-down profile on the proposed event so
-    // the object is turned face down before it enters the battlefield (after the
-    // replacement pipeline runs, in `deliver_replaced_zone_change`).
+    // CR 708.2a + CR 708.3: Carry the face-down profile on the proposed event.
     if let Some(profile) = face_down_profile {
         if let ProposedEvent::ZoneChange {
             face_down_profile: ref mut fdp,
@@ -6448,36 +7092,12 @@ fn execute_zone_move_with_applied_terminal(
     }
 
     // CR 306.5b + CR 310.4b + CR 614.1c: seed the intrinsic loyalty/defense
-    // counters onto the proposal; `enter_transformed` and `face_down_profile`
-    // were stamped on it above, so the helper's back-face and face-down gates
-    // read the same values the replacement pipeline will see.
+    // counters onto the proposal; the transformed and face-down stamps above
+    // are read by the helper's gates.
     seed_intrinsic_entry_counters(state, &mut proposed);
-    // CR 122.1 + CR 614.1c: effect-driven enter-with-counters apply to EVERY
-    // battlefield entry, face-down included — the explicit instruction is
-    // independent of the intrinsic loyalty/defense seeding gated above.
-    if dest_zone == Zone::Battlefield {
-        // CR 122.1 + CR 614.1c: Seed effect-driven enter-with-counters from
-        // `Effect::ChangeZone.enter_with_counters` (Darkness Crystal class:
-        // "put target creature card ... onto the battlefield with two
-        // additional +1/+1 counters on it"). Only applied for battlefield
-        // entries — other destinations (Exile, etc.) carry the counters
-        // through to drive `apply_etb_counters` downstream when the object
-        // arrives at a counter-bearing zone.
-        if !effect_enter_with_counters.is_empty() {
-            if let ProposedEvent::ZoneChange {
-                enter_with_counters,
-                ..
-            } = &mut proposed
-            {
-                enter_with_counters.extend(effect_enter_with_counters.iter().cloned());
-            }
-        }
-    } else if !effect_enter_with_counters.is_empty() {
-        // CR 122.1 + CR 614.1c: For non-battlefield destinations (e.g., Exile
-        // for "exile it with three egg counters on it"), counters are applied
-        // post-move via `apply_etb_counters` directly on the object. The
-        // ProposedEvent slot is reserved for battlefield entries that flow
-        // through the replacement pipeline.
+    // CR 122.1 + CR 614.1c: effect-driven enter-with-counters apply to every
+    // entry; non-battlefield destinations carry them to `apply_etb_counters`.
+    if !effect_enter_with_counters.is_empty() {
         if let ProposedEvent::ZoneChange {
             enter_with_counters,
             ..
@@ -6486,6 +7106,63 @@ fn execute_zone_move_with_applied_terminal(
             enter_with_counters.extend(effect_enter_with_counters.iter().cloned());
         }
     }
+
+    Some(proposed)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_zone_move_with_applied_terminal(
+    state: &mut GameState,
+    obj_id: ObjectId,
+    from_zone: Zone,
+    dest_zone: Zone,
+    source_id: ObjectId,
+    duration: Option<&Duration>,
+    enter_transformed: bool,
+    enter_tapped: EtbTapState,
+    enters_attacking: bool,
+    controller_override: Option<PlayerId>,
+    effect_enter_with_counters: &[(CounterType, u32)],
+    face_down_profile: Option<&crate::types::ability::FaceDownProfile>,
+    face_down_in_exile: ExileConcealment,
+    chain_referent: crate::types::zones::ChainReferentIntent,
+    track_exiled_by_source: bool,
+    library_placement: Option<LibraryPosition>,
+    enter_attached_to: Option<AttachTarget>,
+    exile_controller: Option<PlayerId>,
+    performed_by: Option<PlayerId>,
+    replacement_applied: HashSet<AppliedReplacementKey>,
+    owner: Option<BatchMemberDeliveryOwner>,
+    events: &mut Vec<GameEvent>,
+) -> ZoneMoveTerminalResult {
+    let Some(member) = state
+        .objects
+        .get(&obj_id)
+        .map(ObjectIncarnationRef::from_object)
+    else {
+        return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
+    };
+    let Some(proposed) = prepare_zone_move_proposal(
+        state,
+        obj_id,
+        from_zone,
+        dest_zone,
+        source_id,
+        enter_transformed,
+        enter_tapped,
+        enters_attacking,
+        controller_override,
+        effect_enter_with_counters,
+        face_down_profile,
+        face_down_in_exile,
+        chain_referent,
+        library_placement.clone(),
+        enter_attached_to,
+        performed_by,
+        replacement_applied,
+    ) else {
+        return ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained);
+    };
 
     // KNOWN GAP (CR 614.12, documented deferral): for a FACE-DOWN battlefield
     // entry (the proposal carries `face_down_profile`), this consult runs the
@@ -6502,186 +7179,36 @@ fn execute_zone_move_with_applied_terminal(
     // to evaluate filters against the profile-projected characteristics when
     // `face_down_profile` is present.
     match replacement::replace_event(state, proposed, events) {
-        ReplacementResult::Execute(mut event) => {
-            let mut pending_aura_choice: Option<(PlayerId, ObjectId, Vec<TargetRef>)> = None;
-            // CR 303.4g: set when the unhosted entrant came from the stack and so
-            // must be put into its owner's graveyard rather than remain. Acted on
-            // after the borrow of `event` ends — the battlefield entry is denied
-            // and a FRESH graveyard move is proposed in its place.
-            let mut unhosted_to_owners_graveyard = false;
-            if let ProposedEvent::ZoneChange {
-                object_id,
-                from,
-                to: Zone::Battlefield,
-                attach_to,
-                controller_override,
-                ..
-            } = &mut event
-            {
-                if attach_to.is_none() {
-                    if let Some(enchant_filter) = aura_enchant_filter(state, *object_id) {
-                        // CR 614.12: read the entrant's projected characteristics,
-                        // not the pre-entry object still stored under this id — for
-                        // a meld the latter is the exiled component card and has
-                        // the wrong controller as well as the wrong typeline.
-                        let controller = (*controller_override)
-                            .or_else(|| {
-                                entering_object_projection(state, *object_id)
-                                    .map(|obj| obj.controller)
-                            })
-                            .unwrap_or(PlayerId(0));
-                        let legal_targets = legal_aura_attachment_targets(
-                            state,
-                            *object_id,
-                            entering_object_projection(state, *object_id),
-                            controller,
-                            &enchant_filter,
-                        );
-                        match legal_targets.as_slice() {
-                            // CR 303.4g: no legal object or player to enchant, so
-                            // this entry does not happen. Decided BEFORE
-                            // `deliver_replaced_zone_change`, i.e. before the
-                            // object is inserted into the battlefield, before the
-                            // meld commit journals anything, and before any entry
-                            // event — the rule denies the entry, so nothing may
-                            // observe one.
-                            [] => {
-                                match entering_object_projection(state, *object_id)
-                                    .map(|entrant| unhosted_aura_entry(entrant, *from))
-                                {
-                                    Some(UnhostedAuraEntry::OwnersGraveyard) => {
-                                        unhosted_to_owners_graveyard = true;
-                                    }
-                                    // "The Aura remains in its current zone" —
-                                    // and, for a token already in a zone, "isn't
-                                    // created" has nothing left to withhold, so
-                                    // both leave the object exactly where it is.
-                                    Some(UnhostedAuraEntry::NotCreated)
-                                    | Some(UnhostedAuraEntry::RemainInCurrentZone)
-                                    | None => {
-                                        return ZoneMoveTerminalResult::Completed(
-                                            ZoneMoveCompletion::Remained,
-                                        );
-                                    }
-                                }
-                            }
-                            [TargetRef::Object(id)] => {
-                                *attach_to =
-                                    Some(crate::game::game_object::AttachTarget::Object(*id));
-                            }
-                            [TargetRef::Player(id)] => {
-                                *attach_to =
-                                    Some(crate::game::game_object::AttachTarget::Player(*id));
-                            }
-                            _ => {
-                                pending_aura_choice = Some((controller, *object_id, legal_targets))
-                            }
-                        }
-                    }
-                }
-                // CR 303.4i specified-host Remain is handled after delivery when
-                // `attach_to` fails / SBA (CR 704.5m). Pre-move filter checks while
-                // the Aura is still in GY falsely Remained legal Gift/Lynde hosts.
-            }
-            if unhosted_to_owners_graveyard {
-                // CR 303.4g: "…the Aura is put into its owner's graveyard instead
-                // of entering the battlefield."
-                //
-                // CR 614.6: the approved battlefield entry never happens, and the
-                // graveyard placement that replaces it is a FRESH, never-consulted
-                // event — so it routes through the pipeline rather than being
-                // written as a destination rewrite of the already-approved event.
-                // A board-wide `Moved` graveyard→exile redirect (Rest in Peace /
-                // Leyline of the Void) therefore fires on it. Same house decision
-                // as `engine_replacement.rs`'s CR 608.3e prevented-permanent
-                // graveyard fallback, which is the structural twin of this arm.
-                //
-                // The already-applied set rides along on the fresh request so no
-                // replacement can be spent twice: every def that applied to this
-                // entry was consulted against `to: Battlefield`, and the new
-                // proposal is `to: Graveyard`, so a battlefield-scoped entry
-                // replacement cannot re-match it either way — carrying `applied`
-                // makes that structural fact explicit instead of implicit.
-                let applied = event.applied_set().clone();
-                return move_batch_member_with_terminal(
-                    state,
-                    ZoneMoveRequest::effect(obj_id, Zone::Graveyard, source_id)
-                        .with_replacement_applied(applied),
-                    owner,
-                    events,
-                );
-            }
-            if let Some((controller, aura_id, legal_targets)) = pending_aura_choice {
-                let delivery_start = events.len();
-                match deliver_replaced_batch_member(
-                    state,
-                    event,
-                    Some(source_id),
-                    duration,
-                    exile_controller,
-                    track_exiled_by_source,
-                    PostReplacementDrainOwner::DeliveryTail,
-                    library_placement,
-                    None,
-                    owner,
-                    events,
-                ) {
-                    ZoneDeliveryResult::Done => {
-                        debug_assert_eq!(
-                            zone_move_completion_from_delivery(member, &events[delivery_start..]),
-                            ZoneMoveCompletion::Moved,
-                            "an Aura host choice follows a completed battlefield entry"
-                        );
-                    }
-                    ZoneDeliveryResult::NeedsChoice(player) => {
-                        return ZoneMoveTerminalResult::NeedsChoice(player);
-                    }
-                }
-                state.waiting_for = WaitingFor::ReturnAsAuraTarget {
-                    player: controller,
-                    source_id,
-                    returned_id: aura_id,
-                    legal_targets,
-                    pending_effect: Box::new(ResolvedAbility::new(
-                        Effect::Attach {
-                            attachment: TargetFilter::SelfRef,
-                            target: TargetFilter::Any,
-                            // Aura-attachment delivery: the entering Aura is the
-                            // attachment; only its host is chosen here.
-                            selection: AttachSelection::AtResolution {
-                                count: AttachCardinality::One,
-                            },
-                        },
-                        Vec::new(),
-                        source_id,
-                        controller,
-                    )),
-                };
-                return ZoneMoveTerminalResult::NeedsAuraAttachmentChoice;
-            }
-            let delivery_start = events.len();
-            match deliver_replaced_batch_member(
+        ReplacementResult::Execute(event) => {
+            // R4c (b): the Aura-host post-replace consult and the delivery tail
+            // are one shared seam (`deliver_replaced_zone_change_with_aura_host`)
+            // used by both this legacy mover and the staged ChangeZone batch, so
+            // the prompt, the unhosted disposition and the sole-host attach
+            // cannot drift between the two producers.
+            match deliver_replaced_zone_change_with_aura_host(
                 state,
+                obj_id,
+                member,
                 event,
                 Some(source_id),
                 duration,
                 exile_controller,
                 track_exiled_by_source,
-                PostReplacementDrainOwner::DeliveryTail,
-                library_placement,
+                library_placement.clone(),
                 None,
                 owner,
                 events,
             ) {
-                ZoneDeliveryResult::Done => {}
-                ZoneDeliveryResult::NeedsChoice(player) => {
-                    return ZoneMoveTerminalResult::NeedsChoice(player);
+                AuraAwareZoneDelivery::Completed(completion) => {
+                    ZoneMoveTerminalResult::Completed(completion)
+                }
+                AuraAwareZoneDelivery::NeedsChoice(player) => {
+                    ZoneMoveTerminalResult::NeedsChoice(player)
+                }
+                AuraAwareZoneDelivery::NeedsAuraHostChoice => {
+                    ZoneMoveTerminalResult::NeedsAuraAttachmentChoice
                 }
             }
-            ZoneMoveTerminalResult::Completed(zone_move_completion_from_delivery(
-                member,
-                &events[delivery_start..],
-            ))
         }
         ReplacementResult::Prevented => {
             ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Prevented)
@@ -10665,6 +11192,8 @@ mod staged_batch_tests {
             approved_event: approved,
             pending_outcome: None,
             terminal: None,
+            operation: StagedMemberOperation::ZoneMove,
+            outer_destroy_approved: false,
         }
     }
 
@@ -10721,6 +11250,7 @@ mod staged_batch_tests {
             members,
             arrangements: Vec::new(),
             arrangement_cursor: 0,
+            change_zone: None,
         };
         state.push_batch_delivery(PendingBatchDeliveries {
             component_delivery_parent: None,
@@ -11022,6 +11552,7 @@ mod staged_batch_tests {
             members,
             arrangements: Vec::new(),
             arrangement_cursor: 0,
+            change_zone: None,
         };
         state.push_batch_delivery(PendingBatchDeliveries {
             component_delivery_parent: None,

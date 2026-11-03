@@ -918,8 +918,15 @@ pub(crate) fn settle_forwarded_zone_result(
     group: &crate::types::game_state::LogicalZoneChangeGroup,
 ) {
     let Some(marker) = state
-        .active_ability_continuation()
-        .and_then(|pending| pending.chain.context.pending_forwarded_zone_result.clone())
+        .ability_continuation_at_top_or_parent()
+        .and_then(|frame| {
+            frame
+                .pending
+                .chain
+                .context
+                .pending_forwarded_zone_result
+                .clone()
+        })
     else {
         return;
     };
@@ -957,7 +964,15 @@ fn pending_forwarded_zone_result(
     let group = state
         .active_change_zone_frame()
         .and_then(|frame| frame.pending.as_ref())
-        .map(|pending| pending.logical_zone_change_group.logical_group_id);
+        .map(|pending| pending.logical_zone_change_group.logical_group_id)
+        // CR 400.7j: the staged ChangeZone family owns the group on its batch
+        // child instead of a legacy iteration frame.
+        .or_else(|| {
+            state
+                .active_batch_delivery()
+                .filter(|batch| batch.staged.is_some())
+                .map(|batch| batch.logical_zone_change_group.logical_group_id)
+        });
     let selected = group
         .is_none()
         .then(|| state.pending_zone_change_delivery_from_replacement())
@@ -1384,19 +1399,24 @@ fn park_forwarded_zone_result_on_active_continuation(
     ability: &ResolvedAbility,
     producer_events: &[GameEvent],
 ) {
+    // CR 400.7j: the continuation may sit immediately below the staged batch
+    // child; the bounded top-or-parent accessor is the exact neighbour.
     if !forwards_battlefield_move(ability)
-        || !state.active_ability_continuation().is_some_and(|pending| {
-            pending.chain.source_id == ability.source_id
-                && pending
-                    .chain
-                    .context
-                    .pending_forwarded_zone_result
-                    .is_none()
-        })
+        || !state
+            .ability_continuation_at_top_or_parent()
+            .is_some_and(|frame| {
+                frame.pending.chain.source_id == ability.source_id
+                    && frame
+                        .pending
+                        .chain
+                        .context
+                        .pending_forwarded_zone_result
+                        .is_none()
+            })
     {
         return;
     }
-    if let Some(frame) = state.active_ability_continuation_frame_mut() {
+    if let Some(frame) = state.ability_continuation_at_top_or_parent_mut() {
         bind_forwarded_generic_self_ref(&mut frame.pending.chain);
     }
     let marker = pending_forwarded_zone_result(state, ability.source_id);
@@ -1405,7 +1425,7 @@ fn park_forwarded_zone_result_on_active_continuation(
         || (result.object_incarnations.is_empty()
             && waits_for_resolution_choice(&state.waiting_for))
     {
-        if let Some(frame) = state.active_ability_continuation_frame_mut() {
+        if let Some(frame) = state.ability_continuation_at_top_or_parent_mut() {
             frame.pending.chain.context.pending_forwarded_zone_result = Some(marker);
         }
     } else {
@@ -1425,8 +1445,15 @@ pub(crate) fn settle_replaced_forwarded_zone_delivery(
     delivery_events: &[GameEvent],
 ) {
     let owns_delivery = state
-        .active_ability_continuation()
-        .and_then(|pending| pending.chain.context.pending_forwarded_zone_result.as_ref())
+        .ability_continuation_at_top_or_parent()
+        .and_then(|frame| {
+            frame
+                .pending
+                .chain
+                .context
+                .pending_forwarded_zone_result
+                .as_ref()
+        })
         .is_some_and(|marker| {
             marker.group.is_none() && marker.selected.as_deref() == Some(&[member][..])
         });
@@ -5517,9 +5544,11 @@ fn batch_completion_may_apply_with_entry(
     use crate::types::game_state::BatchCompletion;
     match completion {
         BatchCompletion::CastFromZoneExileDeliveryComplete { ability, .. }
+        | BatchCompletion::DestroyPopulationSettled { ability, .. }
         | BatchCompletion::ForEachCategoryExileComplete { ability, .. } => {
             resolved_chain_may_apply_with_entry(ability)
         }
+        BatchCompletion::ChangeZonePopulationSettled { .. } => false,
         BatchCompletion::LibrarySearchDeliverySettled { resume }
         | BatchCompletion::SearchPartitionPrimaryDelivered { resume, .. } => {
             library_search_resume_may_apply_with_entry(resume)
