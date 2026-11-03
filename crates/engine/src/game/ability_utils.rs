@@ -5699,7 +5699,9 @@ fn union_over_declared_slot_candidates(
 /// CR 201.5a + CR 601.2c: a slot is enumerated with its ability in scope when the
 /// filter needs it or the ability carries a granter stamp.
 fn slot_needs_ability_context(filter: &TargetFilter, ability: &ResolvedAbility) -> bool {
-    target_filter_needs_ability_context(filter) || ability.context.granting_object.is_some()
+    target_filter_needs_ability_context(filter)
+        || ability.context.granting_object.is_some()
+        || ability.trigger_source.is_some()
 }
 
 fn target_filter_needs_ability_context(filter: &TargetFilter) -> bool {
@@ -7915,12 +7917,8 @@ fn damage_any_target_legal_targets(
     }
 
     // CR 115.4: "any target" is a creature, player, planeswalker or battle
-    let player_targets = targeting::find_legal_targets(
-        state,
-        &TargetFilter::Player,
-        ability.controller,
-        ability.source_id,
-    );
+    let player_targets =
+        targeting::find_legal_targets_for_ability(state, &TargetFilter::Player, ability);
     let mut permanent_filter = TypedFilter::default().with_type(TypeFilter::AnyOf(vec![
         TypeFilter::Creature,
         TypeFilter::Planeswalker,
@@ -7929,11 +7927,10 @@ fn damage_any_target_legal_targets(
     if let TargetFilter::Typed(tf) = slot.filter() {
         permanent_filter.properties = tf.properties.clone();
     }
-    let permanent_targets = targeting::find_legal_targets(
+    let permanent_targets = targeting::find_legal_targets_for_ability(
         state,
         &TargetFilter::Typed(permanent_filter),
-        ability.controller,
-        ability.source_id,
+        ability,
     );
 
     Some(

@@ -240,7 +240,7 @@ const DESCRIPTION_KEY: &str = "description";
 /// type definitions, not a guess — the carrier set is closed:
 ///
 /// ```text
-/// $ rg ': (Option<)?Duration[,>]' crates/engine/src/types/
+/// $ rg ': (Option<)?Duration[,>]' crates/engine/src/types/ crates/phase-ast/src/types/
 ///   AbilityDefinition.duration                        <- the definition's own slot
 ///   Effect::BecomeCopy.duration                       ┐
 ///   Effect::GainActivatedAbilitiesOfTarget.duration   │
@@ -271,7 +271,7 @@ const WHENEVER_EVENT_EXPIRY_KEYS: &[&str] = &["expiry"];
 /// same anchoring requirement as [`DURATION_KEYS`].
 ///
 /// ```text
-/// $ rg ': (Option<)?StaticMode[,>]' crates/engine/src/types/
+/// $ rg ': (Option<)?StaticMode[,>]' crates/engine/src/types/ crates/phase-ast/src/types/
 ///   StaticDefinition.mode
 ///   ContinuousModification::GrantStatic.mode
 /// ```
@@ -285,7 +285,7 @@ const STATIC_MODE_KEYS: &[&str] = &["mode"];
 /// Every JSON key at which a `QuantityExpr`- or `QuantityRef`-typed field is serialized.
 ///
 /// ```text
-/// $ rg '(\w+): (Option<)?(Box<)?(Vec<)?(QuantityExpr|QuantityRef)\b' crates/engine/src/types/
+/// $ rg '(\w+): (Option<)?(Box<)?(Vec<)?(QuantityExpr|QuantityRef)\b' crates/engine/src/types/ crates/phase-ast/src/types/
 /// ```
 ///
 /// Anchoring these is **mandatory**, and for a different reason than [`DURATION_KEYS`].
@@ -363,7 +363,7 @@ const QUANTITY_KEYS: &[&str] = &[
 /// Every JSON key at which an `Effect`-typed field is serialized.
 ///
 /// ```text
-/// $ rg '(\w+): (Option<)?(Box<)?(Vec<)?Effect\b' crates/engine/src/types/   # comments stripped
+/// $ rg '(\w+): (Option<)?(Box<)?(Vec<)?Effect\b' crates/engine/src/types/ crates/phase-ast/src/types/   # comments stripped
 ///   AbilityDefinition.effect                  Box<Effect>   <- the definition's own slot
 ///   Effect::<nested>.effect                   Box<Effect>
 ///   ReplacementDefinition.replacement_effect  Box<Effect>   <- NOT named `effect`
@@ -393,7 +393,7 @@ const EFFECT_KEYS: &[&str] = &["effect", "replacement_effect"];
 /// Every JSON key at which an `ActivationRestriction`-typed field is serialized.
 ///
 /// ```text
-/// $ rg '(\w+): (Option<)?(Box<)?(Vec<)?ActivationRestriction\b' crates/engine/src/types/
+/// $ rg '(\w+): (Option<)?(Box<)?(Vec<)?ActivationRestriction\b' crates/engine/src/types/ crates/phase-ast/src/types/
 ///   activation_restrictions   Vec<ActivationRestriction>          (×2)
 ///   restrictions              Vec<ActivationRestriction>
 ///   cap                       Option<ActivationRestriction>
@@ -417,7 +417,7 @@ const ACTIVATION_RESTRICTION_KEYS: &[&str] = &[
 /// Every JSON key at which a `StaticDefinition`-typed field is serialized.
 ///
 /// ```text
-/// $ rg ': (Option<)?(Box<)?(Vec<)?StaticDefinition\b' crates/engine/src/types/
+/// $ rg ': (Option<)?(Box<)?(Vec<)?StaticDefinition\b' crates/engine/src/types/ crates/phase-ast/src/types/
 ///   ParsedAbilities.statics                                  Vec<StaticDefinition>
 ///   CardFace.static_abilities / CardRules.static_abilities   Vec<StaticDefinition>
 ///   Effect::GenericEffect.static_abilities                   Vec<StaticDefinition>

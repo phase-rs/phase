@@ -29,6 +29,28 @@ interface DisplayStackEntry {
   groupCount: number;
 }
 
+function ownerArtKey(details: StackEntryDisplay | undefined): string {
+  const p = details?.printing;
+  const ref = details?.printed_ref;
+  return JSON.stringify(p && ref ? [p.set_code, p.collector_number, ref.oracle_id, ref.face_name] : null);
+}
+
+/** A missing details row is missing comparison authority, not an absent printing. */
+function shouldSplitStackGroup(
+  group: StackDisplayGroup,
+  legalMemberIds: readonly ObjectId[],
+  detailsByEntry: Readonly<Record<string, StackEntryDisplay>>,
+  showOwnerPrintings: boolean,
+): boolean {
+  if (legalMemberIds.length >= 2) return true;
+  if (!showOwnerPrintings) return false;
+  const firstKey = ownerArtKey(detailsByEntry[String(group.member_ids[0])]);
+  return group.member_ids.some((id) => {
+    const details = detailsByEntry[String(id)];
+    return !details || ownerArtKey(details) !== firstKey;
+  });
+}
+
 const STAGGER_Y = 24;
 const STAGGER_X = 10;
 const PANEL_PADDING_X = 16;
@@ -80,6 +102,7 @@ export function StackDisplay({
   // User size multiplier over the viewport-derived auto-scale (absent ⇒ 1).
   // Cards derive width AND height from one scale, so this stays aspect-correct.
   const userStackScale = usePreferencesStore((s) => s.flexLayout.scales?.stack) ?? 1;
+  const showOwnerPrintings = usePreferencesStore((s) => s.showOwnerPrintings);
 
   useEffect(() => {
     function handleResize() {
@@ -98,52 +121,44 @@ export function StackDisplay({
 
   if (stack.length === 0) return null;
 
-  // When engine-authored groups are available and actually coalesce anything,
-  // preserve a compact group only while it names at most one legal choice.
-  // With multiple legal members each visible target needs its own click surface;
-  // the engine-owned group data and shared object-choice selector are the only
-  // inputs to that display decision. Absent groups keeps raw rendering intact.
+  // Engine groups remain authoritative. One display-only split decision governs
+  // both the drawn entries and the DOM representatives used by target arcs.
   const entryById = new Map(stack.map((e) => [e.id, e] as const));
   const choiceObjectIds = new Set(getWaitingForObjectChoiceIds(waitingFor));
-  const groupedStack: DisplayStackEntry[] =
-    groups.length > 0 && groups.some((g) => g.count > 1)
-      ? groups
-          .flatMap((group) => {
-            const representative = entryById.get(group.representative);
-            if (!representative) return [];
-
-            const legalMemberIds = group.member_ids.filter((id) => choiceObjectIds.has(id));
-            if (legalMemberIds.length < 2) {
-              return [{
-                entry: representative,
-                choiceObjectId: legalMemberIds[0],
-                groupedObjectIds: group.member_ids,
-                groupCount: group.count,
-              }];
-            }
-
-            return group.member_ids.flatMap((memberId) => {
-              const entry = entryById.get(memberId);
-              return entry ? [{ entry, groupCount: 1 }] : [];
-            });
-          })
-      : stack.map((entry) => ({ entry, groupCount: 1 }));
-  const displayStack = groupedStack.map((g) => g.entry);
   const stackEntryRepresentatives = new Map<ObjectId, ObjectId>();
   for (const entry of stack) {
     stackEntryRepresentatives.set(entry.id, entry.id);
   }
+  const groupedStack: DisplayStackEntry[] = [];
   if (groups.length > 0 && groups.some((g) => g.count > 1)) {
     for (const group of groups) {
-      const legalMemberCount = group.member_ids.filter((id) => choiceObjectIds.has(id)).length;
+      const legalMemberIds = group.member_ids.filter((id) => choiceObjectIds.has(id));
+      const split = shouldSplitStackGroup(group, legalMemberIds, stackEntryDetails, showOwnerPrintings);
       for (const memberId of group.member_ids) {
-        stackEntryRepresentatives.set(
-          memberId,
-          legalMemberCount < 2 ? group.representative : memberId,
-        );
+        stackEntryRepresentatives.set(memberId, split ? memberId : group.representative);
+      }
+      const representative = entryById.get(group.representative);
+      if (!representative) continue;
+      if (split) {
+        for (const memberId of group.member_ids) {
+          const entry = entryById.get(memberId);
+          if (entry) groupedStack.push({ entry, groupCount: 1 });
+        }
+      } else {
+        groupedStack.push({
+          entry: representative,
+          choiceObjectId: legalMemberIds[0],
+          groupedObjectIds: group.member_ids,
+          groupCount: group.count,
+        });
       }
     }
+  } else {
+    for (const entry of stack) {
+      groupedStack.push({ entry, groupCount: 1 });
+    }
   }
+  const displayStack = groupedStack.map((g) => g.entry);
   const rawCardSize = getStackCardSize(displayStack.length);
   const widthScale =
     viewport.width < 640 ? 0.58 :
