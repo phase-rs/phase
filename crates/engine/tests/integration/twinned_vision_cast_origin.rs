@@ -317,7 +317,7 @@ mod commandeer_ordinary {
         tops: [ObjectId; 2],
     }
 
-    fn board(cast_think: bool, cast_bolt: bool) -> Board {
+    fn board(mana: &[ManaType]) -> Board {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
         let tops = [
@@ -345,14 +345,7 @@ mod commandeer_ordinary {
                 generic: 5,
             })
             .id();
-        let mut mana = Vec::new();
-        if cast_think {
-            mana.extend([ManaType::Colorless, ManaType::Blue]);
-        }
-        if cast_bolt {
-            mana.push(ManaType::Red);
-        }
-        scenario.with_mana_pool(P0, pool(&mana));
+        scenario.with_mana_pool(P0, pool(mana));
         scenario.with_mana_pool(
             P1,
             pool(&[
@@ -593,7 +586,7 @@ mod commandeer_ordinary {
     // CR 109.5 + CR 121.1: ordinary Think Twice draws once for its resolving controller.
     #[test]
     fn r3_think_twice_normal() {
-        let mut b = board(true, false);
+        let mut b = board(&[ManaType::Colorless, ManaType::Blue]);
         let committed = b.runner.cast(b.think).commit();
         normal_cast(committed.state(), b.think, 2);
         let outcome = committed.resolve();
@@ -608,7 +601,7 @@ mod commandeer_ordinary {
     // CR 120.3a: Bolt's damage causes three life loss to its selected player.
     #[test]
     fn r3_bolt_normal() {
-        let mut b = board(false, true);
+        let mut b = board(&[ManaType::Red]);
         let committed = b.runner.cast(b.bolt).target_player(P1).commit();
         normal_cast(committed.state(), b.bolt, 1);
         let outcome = committed.resolve();
@@ -621,8 +614,12 @@ mod commandeer_ordinary {
     }
 
     // CR 109.5 + CR 121.1: the new controller draws; optional retargeting cannot undo control.
-    fn stolen_think(accept: bool) {
-        let mut b = board(true, false);
+    fn stolen_think(optional_response: GameAction) {
+        assert!(matches!(
+            optional_response,
+            GameAction::DecideOptionalEffect { .. }
+        ));
+        let mut b = board(&[ManaType::Colorless, ManaType::Blue]);
         let mut original = b.runner.cast(b.think).commit();
         normal_cast(original.state(), b.think, 2);
         original.act(GameAction::PassPriority).unwrap();
@@ -633,12 +630,7 @@ mod commandeer_ordinary {
             .unwrap()
             .targets
             .is_empty());
-        events.extend(
-            response
-                .act(GameAction::DecideOptionalEffect { accept })
-                .unwrap()
-                .events,
-        );
+        events.extend(response.act(optional_response).unwrap().events);
         // Accepted targetless retargeting must finish, never demand an impossible selection.
         commandeer_finished(&mut response, &mut events, b.commandeer, b.think);
         assert_eq!(response.state().stack.len(), 1);
@@ -658,28 +650,43 @@ mod commandeer_ordinary {
 
     #[test]
     fn r3_think_twice_decline() {
-        stolen_think(false);
+        stolen_think(GameAction::DecideOptionalEffect { accept: false });
     }
 
     #[test]
     fn r3_think_twice_accept_targetless() {
-        stolen_think(true);
+        stolen_think(GameAction::DecideOptionalEffect { accept: true });
     }
 
     // CR 608.2c + CR 608.2d + CR 115.7d + CR 115.7e: control persists through retargeting.
     // CR 120.3a: the final target determines which player loses three life.
-    fn stolen_bolt(accept: bool, keep: bool, illegal_first: bool, second_spell: bool) {
-        let mut b = board(second_spell, true);
-        if second_spell {
-            let original = b.runner.cast(b.think).commit();
-            normal_cast(original.state(), b.think, 2);
+    fn stolen_bolt(
+        mut b: Board,
+        retarget: Option<GameAction>,
+        rejected_retarget: Option<GameAction>,
+        preceding_spell: Option<ObjectId>,
+        expected_target: PlayerId,
+    ) {
+        assert!(matches!(
+            &retarget,
+            None | Some(GameAction::RetargetSpell { .. })
+        ));
+        assert!(matches!(
+            &rejected_retarget,
+            None | Some(GameAction::RetargetSpell { .. })
+        ));
+        assert!(rejected_retarget.is_none() || retarget.is_some());
+        if let Some(spell) = preceding_spell {
+            assert_eq!(spell, b.think);
+            let original = b.runner.cast(spell).commit();
+            normal_cast(original.state(), spell, 2);
         }
         let mut original = b.runner.cast(b.bolt).target_player(P1).commit();
         normal_cast(original.state(), b.bolt, 1);
         original.act(GameAction::PassPriority).unwrap();
         let mut response = original.cast(b.commandeer).target_object(b.bolt).commit();
         let mut events = optional_boundary(&mut response, b.bolt, b.commandeer);
-        if second_spell {
+        if preceding_spell.is_some() {
             control(response.state(), b.think, P0);
             assert!(!events.iter().any(|event| matches!(event, GameEvent::ControllerChanged { object_id, .. } if *object_id == b.think)));
         }
@@ -689,47 +696,33 @@ mod commandeer_ordinary {
         );
         events.extend(
             response
-                .act(GameAction::DecideOptionalEffect { accept })
+                .act(GameAction::DecideOptionalEffect {
+                    accept: retarget.is_some(),
+                })
                 .unwrap()
                 .events,
         );
-        if accept {
+        if let Some(retarget) = retarget {
             retarget_boundary(response.state(), b.bolt);
-            if illegal_first {
+            if let Some(rejected_retarget) = rejected_retarget {
                 let before = response.state().waiting_for.clone();
-                assert!(response
-                    .act(GameAction::RetargetSpell {
-                        new_targets: vec![Some(TargetRef::Object(b.tops[0]))],
-                    })
-                    .is_err());
+                assert!(response.act(rejected_retarget).is_err());
                 assert_eq!(response.state().waiting_for, before);
                 retarget_boundary(response.state(), b.bolt);
             }
-            events.extend(
-                response
-                    .act(GameAction::RetargetSpell {
-                        new_targets: vec![if keep {
-                            None
-                        } else {
-                            Some(TargetRef::Player(P0))
-                        }],
-                    })
-                    .unwrap()
-                    .events,
-            );
+            events.extend(response.act(retarget).unwrap().events);
         }
         commandeer_finished(&mut response, &mut events, b.commandeer, b.bolt);
-        let changed = accept && !keep;
         assert_eq!(
             entry(response.state(), b.bolt).ability().unwrap().targets,
-            vec![TargetRef::Player(if changed { P0 } else { P1 })]
+            vec![TargetRef::Player(expected_target)]
         );
         normal_cast(response.state(), b.bolt, 1);
         assert_eq!(
             response.state().stack.len(),
-            if second_spell { 2 } else { 1 }
+            if preceding_spell.is_some() { 2 } else { 1 }
         );
-        if second_spell {
+        if preceding_spell.is_some() {
             for _ in 0..12 {
                 if response.state().objects[&b.bolt].zone == Zone::Graveyard {
                     break;
@@ -745,19 +738,19 @@ mod commandeer_ordinary {
         let outcome = response.resolve();
         events.extend_from_slice(outcome.events());
         only_selected_control_changed(&events, b.bolt);
-        outcome.assert_life_delta(P0, if changed { -3 } else { 0 });
-        outcome.assert_life_delta(P1, if changed { 0 } else { -3 });
-        outcome.assert_hand_drawn(P0, if second_spell { 1 } else { 0 });
+        outcome.assert_life_delta(P0, if expected_target == P0 { -3 } else { 0 });
+        outcome.assert_life_delta(P1, if expected_target == P1 { -3 } else { 0 });
+        outcome.assert_hand_drawn(P0, if preceding_spell.is_some() { 1 } else { 0 });
         outcome.assert_hand_drawn(P1, 0);
         draws(
             outcome.state(),
             &events,
             b.tops,
-            if second_spell { Some(P0) } else { None },
+            preceding_spell.map(|_| P0),
         );
         graveyard(outcome.state(), b.bolt, P0);
         graveyard(outcome.state(), b.commandeer, P1);
-        if second_spell {
+        if preceding_spell.is_some() {
             graveyard(outcome.state(), b.think, P0);
         }
         settled(outcome.state());
@@ -766,21 +759,51 @@ mod commandeer_ordinary {
 
     #[test]
     fn r3_bolt_decline() {
-        stolen_bolt(false, false, false, false);
+        stolen_bolt(board(&[ManaType::Red]), None, None, None, P1);
     }
 
     #[test]
     fn r3_bolt_accept_illegal_then_change() {
-        stolen_bolt(true, false, true, false);
+        let b = board(&[ManaType::Red]);
+        let rejected_retarget = GameAction::RetargetSpell {
+            new_targets: vec![Some(TargetRef::Object(b.tops[0]))],
+        };
+        stolen_bolt(
+            b,
+            Some(GameAction::RetargetSpell {
+                new_targets: vec![Some(TargetRef::Player(P0))],
+            }),
+            Some(rejected_retarget),
+            None,
+            P0,
+        );
     }
 
     #[test]
     fn r3_bolt_accept_keep() {
-        stolen_bolt(true, true, false, false);
+        stolen_bolt(
+            board(&[ManaType::Red]),
+            Some(GameAction::RetargetSpell {
+                new_targets: vec![None],
+            }),
+            None,
+            None,
+            P1,
+        );
     }
 
     #[test]
     fn r3_bolt_selected_subject_above_think_twice() {
-        stolen_bolt(true, false, false, true);
+        let b = board(&[ManaType::Colorless, ManaType::Blue, ManaType::Red]);
+        let preceding_spell = b.think;
+        stolen_bolt(
+            b,
+            Some(GameAction::RetargetSpell {
+                new_targets: vec![Some(TargetRef::Player(P0))],
+            }),
+            None,
+            Some(preceding_spell),
+            P0,
+        );
     }
 }
