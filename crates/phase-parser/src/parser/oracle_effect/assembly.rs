@@ -3437,6 +3437,16 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 // recognizer stated its own window keeps it. The clause's own sub
                 // chain is still detached here on the sibling path (`clause_sub`), so
                 // it is stamped separately; it belongs to the same sentence.
+                //
+                // MEASURED during #7962 review: the second stamp is DEFENSIVE today.
+                // Removing it leaves the duration-distribution parser rows and all 23
+                // tests of `tests/integration/leading_duration_distribution_7923.rs`
+                // green, because every probed shape that builds a recognizer-owned sub
+                // chain also carries the window on its own clause — one clause absorbs
+                // the whole sentence — so that clause's leading-duration walk reaches
+                // the chain first. It stays for the recognizer that peels its own
+                // leading window and builds a chain: the sentence is then the only
+                // authority left to reach it.
                 stamp_governed_chain_duration(&mut def, &duration);
                 if let Some(sub) = clause_sub.as_deref_mut() {
                     stamp_governed_chain_duration(sub, &duration);
