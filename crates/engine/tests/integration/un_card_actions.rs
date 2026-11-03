@@ -2182,6 +2182,67 @@ fn touch_triggers_held_in_an_ordering_prompt_count_toward_the_cap() {
 }
 
 #[test]
+fn touch_triggers_parked_behind_a_decision_count_toward_the_cap() {
+    let max = engine::game::un_actions::MAX_PENDING_TOUCH_TRIGGERS;
+    // P1 already touched Vile Bile once while P0's Bolt announcement is paused
+    // for a target; those touches park in the deferred queue (CR 603.3).
+    let (mut runner, bile, _bolt) = touch_vile_bile_during_a_bolt_announcement();
+    runner.state_mut().players[1].life = 1000;
+    for _ in 1..max {
+        touch(&mut runner, P1, bile);
+    }
+    assert_eq!(
+        runner.state().deferred_triggers.len(),
+        max,
+        "reach guard: every touch parked while the decision was pending"
+    );
+    assert!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .all(|entry| entry.source_id != bile),
+        "no touch trigger reaches the stack before a player would receive priority"
+    );
+
+    // The bound holds before a touch is parked, not only once it reaches the stack.
+    let rejected = touch_result(&mut runner, P1, bile);
+    assert!(
+        matches!(rejected, Err(EngineError::InvalidAction(_))),
+        "{max} parked touches fill the bound: {rejected:?}"
+    );
+    assert_eq!(
+        runner.state().deferred_triggers.len(),
+        max,
+        "the rejected touch parked nothing"
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ),
+        "the rejection leaves the announcement pending, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(runner.life(P1), 1000, "no parked touch has resolved yet");
+
+    // CR 733.1 undoes only the cancelled announcement; every parked touch is
+    // still owed and resolves once priority returns.
+    runner
+        .act(GameAction::CancelCast)
+        .expect("P0 cancels the cast");
+    while !runner.state().stack.is_empty() {
+        runner.resolve_top();
+    }
+    assert_eq!(
+        runner.life(P1),
+        1000 - 2 * max as i32,
+        "every parked touch still resolved"
+    );
+    assert_settled(&runner, "after the parked touches resolve");
+}
+
+#[test]
 fn a_phased_out_or_absorbed_vile_bile_cannot_be_touched() {
     let (mut runner, bile, other_bile, _) = vile_bile_scenario();
 
