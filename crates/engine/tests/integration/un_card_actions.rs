@@ -2058,6 +2058,93 @@ fn waiting_touch_triggers_are_bounded_per_player() {
 }
 
 #[test]
+fn waiting_triggers_that_are_not_touches_do_not_count_toward_the_touch_bound() {
+    let max = engine::game::un_actions::MAX_PENDING_TOUCH_TRIGGERS;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bile = scenario
+        .add_creature_from_oracle(P0, "Vile Bile", 2, 2, VILE_BILE)
+        .id();
+    // A real triggered ability that is not a touch trigger, cast through the
+    // ordinary pipeline so it waits on the stack beside the touches.
+    let missionary = scenario
+        .add_creature_to_hand_from_oracle(
+            P0,
+            "Lone Missionary",
+            2,
+            1,
+            "When this creature enters, you gain 4 life.",
+        )
+        .with_mana_cost(ManaCost::generic(1))
+        .id();
+    scenario.with_mana_pool(P0, generic_mana(1));
+    let mut runner = scenario.build();
+    // Enough life to survive every touch this test admits.
+    runner.state_mut().players[1].life = 1000;
+    un_action(&mut runner, P1, UnAction::SetEnabled { enabled: true });
+
+    let card_id = runner.state().objects[&missionary].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: missionary,
+            card_id,
+            targets: vec![],
+            payment_mode: Default::default(),
+        })
+        .expect("P0 casts Lone Missionary");
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P0 passes on the creature spell");
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P1 passes, the creature enters");
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "reach guard: the enters trigger waits on the stack, got {:?}",
+        runner.state().stack
+    );
+    assert_eq!(
+        runner.state().stack[0].source_id,
+        missionary,
+        "reach guard: the waiting entry is the enters trigger, not a touch"
+    );
+
+    // The bound is on the toucher's own touch triggers: a busy stack that is
+    // waiting for other reasons must not shrink the room left for P1's touches.
+    for _ in 0..max {
+        touch(&mut runner, P1, bile);
+    }
+    assert_eq!(
+        runner.state().stack.len(),
+        1 + max,
+        "the non-touch trigger neither fills the bound nor is displaced by it"
+    );
+
+    let rejected = touch_result(&mut runner, P1, bile);
+    assert!(
+        matches!(rejected, Err(EngineError::InvalidAction(_))),
+        "{max} of P1's own touches fill the bound: {rejected:?}"
+    );
+    assert_eq!(
+        runner.state().stack.len(),
+        1 + max,
+        "nothing more was added"
+    );
+
+    while !runner.state().stack.is_empty() {
+        runner.resolve_top();
+    }
+    assert_eq!(
+        runner.life(P1),
+        1000 - 2 * max as i32,
+        "every admitted touch resolved"
+    );
+    assert_eq!(runner.life(P0), 24, "the enters trigger resolved as well");
+    assert_settled(&runner, "after the enters trigger and every touch resolved");
+}
+
+#[test]
 fn touch_triggers_held_in_an_ordering_prompt_count_toward_the_cap() {
     let max = engine::game::un_actions::MAX_PENDING_TOUCH_TRIGGERS;
     let mut scenario = GameScenario::new();
