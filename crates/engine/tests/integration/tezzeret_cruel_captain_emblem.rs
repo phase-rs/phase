@@ -145,6 +145,10 @@ fn emblem_animates_each_targeted_artifact_and_it_can_attack() {
     }
     resolve_emblem_trigger(&mut runner, map);
     assert_robot(&runner, map);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
     assert!(runner.state().objects[&prism]
         .card_types
         .core_types
