@@ -48,7 +48,7 @@ fn heros_sundering_exiles_the_target_and_transforms_venat() {
         runner.state().objects[&venat].name,
         "Venat, Heart of Hydaelyn"
     );
-    assert!(runner.state().objects[&venat].transformed == false);
+    assert!(!runner.state().objects[&venat].transformed);
 
     let ability_index = 0;
     runner
