@@ -72,8 +72,8 @@ Two kinds of issue make up most of the backlog, and they need different handling
 ### What to decide
 
 - **status**: `status:confirmed` if a fixer could start work from what's written. `status:needs-repro` if something essential is missing, such as which card, what happened, or the board state, and write the question to ask in `needs_info`. `status:duplicate` if you've found the same defect already filed. Remove `status:needs-triage` whenever you set one of these.
-- **area**: the part of the codebase that owns the fix, using the label list below. A card that does nothing or does the wrong thing because its text was misread is `area:parser`; a card whose text was read correctly but resolves wrong is `area:engine`. When you can't tell which, use the coverage check below.
-- **priority**: how bad it is for someone playing. Crash beats stall, stall beats hang, a whole mechanic broken beats one wrong result, wrong result beats a narrow edge case, and anything that changes no outcome is polish. Skip priority for proposals, scope documents and tracking issues.
+- **area**: the part of the codebase that owns the fix, using the label list below. A card that does nothing or does the wrong thing because its text was misread is `area:parser`; a card whose text was read correctly but resolves wrong is `area:engine`. When you can't tell which, use the coverage check below. If a report describes two separate problems, such as a wrong rules decision plus a broken dialog, give it both areas and cover both in the summary.
+- **priority**: how bad it is for someone playing. Crash beats stall, stall beats hang, a whole mechanic broken beats one wrong result, wrong result beats a narrow edge case, and anything that changes no outcome is polish. Skip priority for feature requests, proposals, scope documents and tracking issues.
 - **mechanic**: up to two, only when clearly applicable. This label is what clustering leans on most, so it's worth getting right.
 - **kind**: add `bug`, `enhancement`, `feature`, `refactor`, `test` or `documentation` only if the issue has no kind label and it's obvious.
 
@@ -98,11 +98,13 @@ Otherwise quote `oracle_text` from the coverage file. The two agree for almost e
 Then work out which clause the report is about. `parse_details` lists each ability with its `source_text`, a `supported` flag, a `label`, and `details` and `children` describing what the parser built. Pick the one clause the complaint matches and set the classifier verdict:
 
 - `unsupported-aspect`: that clause is `supported: false`. It's a known gap; the report is right, but the work is already tracked.
-- `supported-aspect-defect`: that clause is `supported: true` and the engine still misbehaves. This is the bucket that matters most, so put your effort here. Read the clause's `children` and `details` against its `source_text` and look for what was lost: a sub-effect missing from the chain ("discards a card, and loses 3 life" with no discard child), a target filter that dropped "an opponent controls", a wrong count, the wrong controller or zone. Name the specific gap in `reasoning`. If the parse looks faithful, the bug is probably at runtime; say that instead.
-- `not-card-data`: the complaint isn't about card text at all. Combat assignment, AI choices, UI, multiplayer and the deckbuilder fall here.
+- `supported-aspect-defect`: that clause is `supported: true` and the card still misbehaves. This is the bucket that matters most, so put your effort here. Read the clause's `children` and `details` against its `source_text` and look for what was lost: a sub-effect missing from the chain ("discards a card, and loses 3 life" with no discard child), a target filter that dropped "an opponent controls", a wrong count, the wrong controller or zone. Name the specific gap in `reasoning`. If the parse looks faithful, the verdict is still `supported-aspect-defect`: the card claims support and doesn't deliver it, so the bug is in how the engine runs a correctly parsed ability. Say "parse looks faithful; runtime bug in <where>" in `reasoning`.
+- `not-card-data`: the complaint isn't about what a card's ability does. Combat damage assignment, AI choices, UI layout, multiplayer and the deckbuilder fall here. A card ability resolving wrong is never `not-card-data`, even when the fault is in a shared engine module rather than the parser.
 - `cannot-determine`: you can't tell which clause is meant. Put the question for the reporter in `needs_info`.
 
-Propose swapping `classifier:pending` for `classifier:<verdict>`. Note that "supported" only means the parser produced a typed result. It doesn't mean the result is right, so a supported clause is never evidence that a reported bug is fixed.
+Fill in `classifier` for every card report, but only propose a classifier label when the issue already carries `classifier:pending`: swap it for `classifier:<verdict>`. Issues without `classifier:pending` didn't come through the classifier pipeline, so leave their labels alone and let the verdict live in the proposal.
+
+"Supported" only means the parser produced a typed result. It doesn't mean the result is right, so a supported clause is never evidence that a reported bug is fixed.
 
 ### Duplicates
 
@@ -145,7 +147,7 @@ gh api graphql -f query='{ repository(owner: "phase-rs", name: "phase") { issues
 Then group the proposals:
 
 - **Group by mechanism, not by label.** A good cluster is a set of issues that one fix, or one shared piece of new engine support, would resolve: "copy effects drop cast-time choices", "triggers fire once per batch instead of once per object", "attachments lose their host after a zone change". "All trigger bugs" or "all AI issues" is a label search, not a cluster. Start from `root_cause`, then `mechanic`, then the files code-level reports cite.
-- **Prefer existing trackers.** If an issue fits an open tracker's theme, propose attaching it there instead of starting a new cluster.
+- **Prefer existing trackers, but only on a mechanism match.** Read the tracker's title and rationale, and attach an issue only if it has the mechanism the tracker describes. Touching the same subsystem isn't enough: a bug about who controls a spell copy doesn't belong in a tracker about copies losing their copiable values, even though both are copy bugs. If the fit rests on the area rather than the mechanism, leave the issue unclustered or start a new cluster.
 - **Three or more issues** make a new cluster. Record pairs as `related` in the cluster file without proposing a tracker; they may become a cluster once more issues are triaged.
 - **One cluster per issue.** If an issue fits two, pick the cluster whose theme better predicts what the fix looks like.
 - **A cluster needs an end.** It should be done when its issues are fixed. "Ongoing parser gaps" never ends, so it isn't a cluster.
