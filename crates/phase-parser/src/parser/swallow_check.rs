@@ -421,6 +421,21 @@ fn detect_replacement(
     }) {
         return;
     }
+    // CR 106.6a + CR 614.1c: a mana unit's "that creature enters with an additional
+    // counter" rider is the replacement itself, carried on the produced mana as
+    // `ManaSpellGrant::EntersWithCounters` and registered when the mana is spent
+    // (Biophagus, Animal Attendant, Guildmages' Forum, Opal Palace).
+    if evidence.any_effect(|e| {
+        matches!(
+            e,
+            Effect::Mana { grants, .. }
+                if grants
+                    .iter()
+                    .any(|grant| matches!(grant, ManaSpellGrant::EntersWithCounters { .. }))
+        )
+    }) {
+        return;
+    }
     // CR 614.1c + CR 614.12: the per-object enters-modifier slots — an "as it enters"
     // gate the parser folded onto the moving object rather than into a standalone
     // replacement definition.
@@ -10661,8 +10676,10 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
 
     /// CR 106.6 + CR 614.1c: the leading "If this/that mana is spent …" of an
     /// entry-counter mana rider is the spend event the `EntersWithCounters`
-    /// grant's filter represents, not a swallowed `Condition_If` (Biophagus,
-    /// Animal Attendant, Guildmages' Forum — verbatim Oracle text).
+    /// grant's filter represents, and its "enters with" is the replacement the
+    /// grant carries — neither is a swallowed `Condition_If` / `Replacement`
+    /// (Biophagus, Animal Attendant, Guildmages' Forum, Opal Palace — verbatim
+    /// Oracle text).
     #[test]
     fn mana_entry_counter_grant_if_is_evidence() {
         let cases: &[(&str, &str, &[&str])] = &[
@@ -10686,6 +10703,14 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
                 "Guildmages' Forum",
                 &["Land"],
             ),
+            (
+                "{T}: Add {C}.\n{1}, {T}: Add one mana of any color in your commander's color \
+                 identity. If you spend this mana to cast your commander, it enters with a \
+                 number of additional +1/+1 counters on it equal to the number of times it's \
+                 been cast from the command zone this game.",
+                "Opal Palace",
+                &["Land"],
+            ),
         ];
         for (oracle, name, types) in cases {
             let parsed = parse_named(oracle, name, types);
@@ -10701,11 +10726,14 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
                 )),
                 "{name} reach guard: the EntersWithCounters grant must be present"
             );
-            assert!(
-                !has_swallowed_detector(&parsed, "Condition_If"),
-                "{name} must account for its printed 'if' through the mana grant; warnings: {:?}",
-                parsed.parse_warnings
-            );
+            for detector in ["Condition_If", "Replacement"] {
+                assert!(
+                    !has_swallowed_detector(&parsed, detector),
+                    "{name} must account for its {detector} marker through the mana grant; \
+                     warnings: {:?}",
+                    parsed.parse_warnings
+                );
+            }
         }
     }
 
