@@ -96,6 +96,7 @@ mod grim_repriser_restriction;
 mod hellkite_tyrant_steal_artifacts_2906;
 mod heroic_sacrifice_redirect;
 mod hunters_insight_combat_draw;
+mod indoraptor_enrage_chosen_opponent;
 mod innocent_bystander_whole_event_damage;
 mod interaction_contract;
 mod invasion_of_alara_8750;
