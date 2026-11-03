@@ -210,10 +210,11 @@ pub enum AttackTargetFilter {
     /// self-referential attack restriction that lets a creature untap into an
     /// additional combat phase without re-attacking the same opponent
     /// (Bloodthirster, Port Razer: "This creature can't attack a player it has
-    /// already attacked this turn."). CR 508.6 defines "attacked [a player]" as
-    /// having declared the creature as an attacker attacking that player, which
-    /// is exactly what the per-creature `creature_attacked_defenders_this_turn`
-    /// ledger records.
+    /// already attacked this turn."). CR 508.6 defines when a player has
+    /// "attacked [a player]"; CR 508.7a ties a creature's attack to the player
+    /// chosen as it was declared, which is what the per-creature
+    /// `creature_attacked_defenders_this_turn` ledger records (direct player
+    /// attacks only).
     ///
     /// KIND-GATED on the declared target: attacking a planeswalker or a battle is
     /// not attacking a player (CR 506.3), and the printed restriction names only

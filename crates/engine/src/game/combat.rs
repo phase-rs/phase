@@ -7099,12 +7099,20 @@ pub(super) fn commit_attack_declaration(
     state
         .creatures_attacked_this_turn
         .extend(attacker_ids.iter().copied());
-    for (attacker_id, defending_player) in creature_attacked_defenders {
+    // CR 508.6: a creature has "attacked [a player]" only when declared attacking
+    // that player; attacking a planeswalker or battle that player controls or
+    // protects is not attacking the player (CR 506.3), so those declarations are
+    // not recorded in the per-creature player ledger.
+    for attacker in combat
+        .attackers
+        .iter()
+        .filter(|attacker| matches!(attacker.attack_target, AttackTarget::Player(_)))
+    {
         state
             .creature_attacked_defenders_this_turn
-            .entry(attacker_id)
+            .entry(attacker.object_id)
             .or_default()
-            .insert(defending_player);
+            .insert(attacker.defending_player);
     }
 
     // Use the first attacker's defending player for the event
@@ -11356,6 +11364,56 @@ mod tests {
                 &[PlayerId(0)],
             ),
             "the already-attacked PLAYER stays prohibited"
+        );
+    }
+
+    /// CR 508.6 + CR 506.3: attacking a planeswalker a player controls is not
+    /// attacking that player, so it does not record a player attack — the same
+    /// player stays attackable in the additional combat.
+    #[test]
+    fn attacking_a_planeswalker_does_not_count_as_attacking_its_controller() {
+        let mut state = GameState::new(FormatConfig::free_for_all(), 3, 42);
+        state.active_player = PlayerId(0);
+        state.turn_number = 2;
+
+        let razer = create_creature(&mut state, PlayerId(0), "Port Razer", 4, 4);
+        let def = parse_static_line(
+            "This creature can't attack a player it has already attacked this turn.",
+        )
+        .unwrap();
+        state
+            .objects
+            .get_mut(&razer)
+            .unwrap()
+            .static_definitions
+            .push(def);
+        let walker = create_planeswalker(&mut state, PlayerId(1), "Jace");
+
+        let mut events = Vec::new();
+        declare_attackers(
+            &mut state,
+            &[(razer, AttackTarget::Planeswalker(walker))],
+            &mut events,
+        )
+        .expect("attacking a planeswalker is legal");
+        assert!(
+            state.creatures_attacked_this_turn.contains(&razer),
+            "guard: the attack was declared"
+        );
+
+        state.combat = None;
+        state.objects.get_mut(&razer).unwrap().tapped = false;
+
+        let gates = CombatStaticGates::compute(&state);
+        assert!(
+            attacker_can_attack_target(
+                &state,
+                razer,
+                AttackTarget::Player(PlayerId(1)),
+                &gates,
+                &[PlayerId(0)],
+            ),
+            "P1 was never attacked directly, so it stays attackable"
         );
     }
 
