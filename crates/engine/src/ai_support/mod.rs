@@ -267,7 +267,9 @@ pub(crate) fn structurally_valid_tap_for_convoke_payment(
             }
         }
         ConvokeMode::Waterbend => {
-            obj.is_waterbend_eligible(*player) && *mana_type == ManaType::Colorless
+            obj.is_waterbend_eligible(*player)
+                && *mana_type == ManaType::Colorless
+                && crate::game::casting::waterbend_taps_remaining(state, *player) > 0
         }
         ConvokeMode::Improvise => {
             obj.is_improvise_eligible(*player) && *mana_type == ManaType::Colorless

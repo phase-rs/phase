@@ -24679,8 +24679,9 @@ fn waterbend_taps_paying_activation(
 /// every tap marker already in the payer's pool stands in for one of those
 /// generic mana. For an activation `pending.cost` is the waterbend cost itself;
 /// for a spell it is the whole total, so this bounds the taps by the generic
-/// mana the spell still has (the narrower CR 701.67b limit is not modelled here).
-/// The `TapForConvoke` handler and both offer sites read this one count.
+/// mana in that total: pinned pool units don't reduce it, and the narrower
+/// CR 701.67b limit is not modelled here. The `TapForConvoke` handler, both
+/// offer sites and the AI's structural legality check read this one count.
 pub(crate) fn waterbend_taps_remaining(state: &GameState, player: PlayerId) -> u32 {
     let generic = match state.pending_cast.as_deref().map(|pending| &pending.cost) {
         Some(ManaCost::Cost { generic, .. }) => *generic,
