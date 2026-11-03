@@ -39421,6 +39421,48 @@ pub(crate) fn singular_battlefield_recall(lower: &str) -> bool {
         && scan_contains_phrase(lower, "battlefield")
 }
 
+/// CR 608.2c: a clause led by a PLURAL recall anaphor — "Return them to the
+/// battlefield …", "Put them into your hand".
+///
+/// The singular sibling ("Return it …") names ONE object: the parent's chosen
+/// target or the creating event's source. Both surface pronouns lower to the
+/// same `ParentTarget` filter, so number is the only thing that distinguishes a
+/// reference to a published SET from a reference to a single referent.
+fn starts_with_plural_recall_anaphor(lower: &str) -> bool {
+    (
+        alt((tag::<_, _, OracleError<'_>>("return "), tag("put "))),
+        tag("them "),
+    )
+        .parse(lower.trim_start())
+        .is_ok()
+}
+
+/// CR 608.2c + CR 603.7c: bind a delayed payload whose own clause begins with a
+/// PLURAL recall anaphor to the tracked set a prior instruction of this chain
+/// published.
+///
+/// The suffix-delayed wrapper (`strip_temporal_suffix` -> `CreateDelayedTrigger`)
+/// is built before the tracked-set pass runs, and
+/// [`rewrite_parent_targets_to_tracked_set`] deliberately does not descend into
+/// it: a SINGULAR recall inside the payload ("Return it …") names the parent's
+/// chosen object or the creating event's source — Fortune, Loyal Steed's "exile
+/// it and up to one creature that saddled it this turn" — and a recursive
+/// rewrite would replace that referent with the whole set (CR 608.2c: the
+/// instruction's actual English referent governs). The clause head's number is
+/// the authority here, not the absence of a declared target slot, which is
+/// equally true of both shapes.
+fn rebind_plural_recall_delayed_payload_to_tracked_set(effect: &mut Effect) {
+    let Effect::CreateDelayedTrigger {
+        effect: payload, ..
+    } = effect
+    else {
+        return;
+    };
+    if let Effect::ChangeZone { target, .. } = &mut *payload.effect {
+        rewrite_filter_parent_to_tracked_set(target);
+    }
+}
+
 fn mark_uses_tracked_set(def: &mut AbilityDefinition) {
     if let Effect::CreateDelayedTrigger {
         uses_tracked_set, ..

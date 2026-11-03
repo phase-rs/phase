@@ -432,15 +432,15 @@ pub fn resolve(
     // single-target contextual bind. This operates on the built `delayed_ability`
     // (not the condition), so it must stay after the ability chain is built.
     if let Some(real_id) = tracked_set_id {
-        // CR 608.2c + CR 603.7c: a plural anaphor ("return them") after a mass
-        // publisher with no declared target slot names the whole published
-        // set, not the creation event's source (Golden Argosy's "exile each
-        // creature that crewed it … Return them"). Without this, the
-        // `parent_target_snapshot` event-source fallback would filter the set
-        // down to the trigger source, which is not a member.
-        if parent_chain_names_no_referent(state, ability) {
-            rebind_parent_target_returns_to_tracked_set(&mut delayed_ability, real_id);
-        }
+        // CR 608.2c + CR 603.7c: which referent a payload's `ParentTarget`
+        // names is decided by the PARSER, not inferred here. A plural anaphor
+        // to a published set is emitted as the `TrackedSet` sentinel (Golden
+        // Argosy's "Return them"); a singular creation-source reference stays
+        // `ParentTarget` (Fortune, Loyal Steed's "exile it") and must keep the
+        // parent/event-source binding below rather than absorb the whole set.
+        // Neither the absence of a declared target slot nor the fall back to
+        // `latest_tracked_set_id` proves a plural referent, so no rewrite is
+        // applied here.
         bind_tracked_set_to_ability_chain(&mut delayed_ability, real_id);
     }
 
@@ -1899,31 +1899,6 @@ fn bind_tracked_set_to_effect(effect: &mut Effect, real_id: TrackedSetId) {
             };
         }
         _ => {}
-    }
-}
-
-/// True when the creating chain declares no target slot and carries no
-/// propagated referent, so a `ParentTarget` anaphor in the delayed payload can
-/// only denote the tracked set a prior mass instruction published.
-fn parent_chain_names_no_referent(state: &GameState, ability: &ResolvedAbility) -> bool {
-    crate::game::targeting::parent_chain_referents(state, ability).is_none()
-}
-
-/// Rewrite a bare `ParentTarget` zone-move payload (and its sub-chain) to the
-/// whole tracked set `real_id`.
-fn rebind_parent_target_returns_to_tracked_set(
-    ability: &mut ResolvedAbility,
-    real_id: TrackedSetId,
-) {
-    if let Effect::ChangeZone {
-        target: target @ TargetFilter::ParentTarget,
-        ..
-    } = &mut ability.effect
-    {
-        *target = TargetFilter::TrackedSet { id: real_id };
-    }
-    if let Some(sub_ability) = ability.sub_ability.as_deref_mut() {
-        rebind_parent_target_returns_to_tracked_set(sub_ability, real_id);
     }
 }
 
@@ -6816,5 +6791,99 @@ mod attached_set_delayed_tests {
         );
         bind_event_subject_nodes(&mut ability, &state, attacker);
         assert!(ability.targets.is_empty());
+    }
+
+    /// CR 608.2c + CR 603.7c: a delayed payload's SINGULAR creation-source
+    /// anaphor ("exile it", Fortune, Loyal Steed) keeps its own referent even
+    /// when an unrelated tracked set is the most recently published one. The
+    /// source-filtered binding must not be widened to that whole set: only a
+    /// payload that NAMES the published set (a plural anaphor, which the parser
+    /// emits as `TrackedSet`) reads it.
+    ///
+    /// Revert probe: reinstate a creation-time "no declared referent ⇒ whole
+    /// set" rewrite here and the payload becomes a bare `TrackedSet`, so the
+    /// `TrackedSetFiltered { filter: ParentTarget }` assertion flips.
+    #[test]
+    fn singular_source_anaphor_does_not_absorb_an_unrelated_tracked_set() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "When Fortune enters, scry 2.\nWhenever Fortune attacks while saddled, at end of combat, exile it and up to one creature that saddled it this turn, then return those cards to the battlefield under their owner's control.\nSaddle 1",
+            "Fortune, Loyal Steed",
+            &[],
+            &["Creature".to_string()],
+            &["Horse".to_string(), "Mount".to_string()],
+        );
+        let execute = parsed.triggers[1]
+            .execute
+            .as_ref()
+            .expect("Fortune's attack trigger");
+        let Effect::CreateDelayedTrigger {
+            effect: payload, ..
+        } = &*execute.effect
+        else {
+            panic!(
+                "expected the end-of-combat delayed trigger, got {:?}",
+                execute.effect
+            );
+        };
+        assert!(
+            matches!(
+                &*payload.effect,
+                Effect::ChangeZone {
+                    destination: Zone::Exile,
+                    target: TargetFilter::ParentTarget,
+                    ..
+                }
+            ),
+            "reach: the payload head is the singular source exile: {:?}",
+            payload.effect
+        );
+
+        let mut state = GameState::new_two_player(42);
+        let foreign = crate::game::zones::create_object(
+            &mut state,
+            CardId(7),
+            PlayerId(1),
+            "Unrelated card".to_string(),
+            Zone::Exile,
+        );
+        let foreign_set = TrackedSetId(1);
+        state.tracked_object_sets.insert(foreign_set, vec![foreign]);
+        state.next_tracked_set_id = 2;
+        // The creating resolution published nothing: the foreign set is only
+        // the globally latest one, never a publisher of this resolution.
+        state.chain_tracked_set_id = None;
+
+        let ability = ResolvedAbility::new(
+            (*execute.effect).clone(),
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).expect("the delayed trigger installs");
+
+        let delayed = state.delayed_triggers[0].ability.clone();
+        let Effect::ChangeZoneAll {
+            destination,
+            target,
+            ..
+        } = &delayed.effect
+        else {
+            panic!(
+                "expected the payload's zone-move head, got {:?}",
+                delayed.effect
+            );
+        };
+        assert_eq!(*destination, Zone::Exile);
+        assert!(
+            matches!(
+                target,
+                TargetFilter::TrackedSetFiltered { id, filter, .. }
+                    if *id == foreign_set
+                        && matches!(filter.as_ref(), TargetFilter::ParentTarget)
+            ),
+            "the singular source anaphor keeps its source filter; it must not \
+             become the whole unrelated set: {target:?}"
+        );
     }
 }
