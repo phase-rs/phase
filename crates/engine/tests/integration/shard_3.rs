@@ -346,6 +346,7 @@ mod issue_1011_vexing_puzzlebox_roll;
 mod issue_1016_peregrin_took_food_token;
 mod issue_1017_ring_tempts_you;
 mod issue_1018_manifest_dread_choice;
+mod issue_10195_exile_origin;
 mod issue_1019_heraldic_banner_chosen_color;
 mod issue_1021_recurring_nightmare;
 mod issue_1022_savai_triome_cycling;

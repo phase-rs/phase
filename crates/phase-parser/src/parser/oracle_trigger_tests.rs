@@ -28170,6 +28170,80 @@ fn trigger_is_exiled() {
     assert!(def.valid_card.is_some());
 }
 
+/// CR 603.6c + CR 701.13a: "is exiled from [zone]" must carry the source-zone
+/// restriction (issue #10195). The arm used to drop the whole tail, so these
+/// triggers fired on an exile from any zone.
+#[test]
+fn trigger_is_exiled_from_battlefield_carries_its_origin() {
+    for (name, text) in [
+        (
+            "Soulherder",
+            "Whenever a creature is exiled from the battlefield, put a +1/+1 counter on this creature.",
+        ),
+        (
+            "Captain Marvel, Shooting Star",
+            "Whenever a creature other than Captain Marvel is exiled from the battlefield, you gain life equal to its power.",
+        ),
+        (
+            "Market Gnome",
+            "When this creature is exiled from the battlefield while you're activating a craft ability, you gain 1 life and draw a card.",
+        ),
+    ] {
+        let def = parse_trigger_line(text, name);
+        assert_eq!(def.mode, TriggerMode::Exiled, "{name}");
+        assert_eq!(def.origin, Some(Zone::Battlefield), "{name}");
+        assert!(def.origin_zones.is_empty(), "{name}");
+    }
+}
+
+/// CR 603.6c: an "exiled from <zone>" tail the shared vocabulary cannot read
+/// fails the arm closed rather than widening the trigger to every origin.
+///
+/// Synthetic text: no printed card carries an unreadable exile origin (the
+/// corpus's three `is/are exiled from` triggers all say "the battlefield").
+#[test]
+fn trigger_is_exiled_with_an_unreadable_origin_fails_closed() {
+    let def = parse_trigger_line(
+        "Whenever a creature is exiled from an opponent's library, draw a card.",
+        "Test Card",
+    );
+    assert_ne!(def.mode, TriggerMode::Exiled);
+}
+
+/// CR 603.6c: an unconsumed zone-list or exclusion remainder fails the arm
+/// closed instead of narrowing or widening the origin silently.
+///
+/// Synthetic text: no printed card carries these remainders; the nearest
+/// printed cards are the three "exiled from the battlefield" triggers.
+#[test]
+fn trigger_is_exiled_with_a_residual_tail_fails_closed() {
+    for text in [
+        "Whenever a creature is exiled from the battlefield or your graveyard, draw a card.",
+        "Whenever a creature is exiled from anywhere other than a graveyard, draw a card.",
+    ] {
+        let def = parse_trigger_line(text, "Test Card");
+        assert_ne!(def.mode, TriggerMode::Exiled, "{text}");
+    }
+}
+
+/// The no-`from` shape keeps the unconstrained origin.
+///
+/// Synthetic text: no printed card pairs a bare "is exiled" with its effect
+/// verbatim; the nearest printed card is Malfegor Avatar — "Whenever a creature
+/// you control is exiled, if it was unearthed, shuffle that card into its
+/// owner's library." (its trigger is unsupported for the separate "if it was
+/// unearthed" condition).
+#[test]
+fn trigger_is_exiled_without_origin_stays_unconstrained() {
+    let def = parse_trigger_line(
+        "Whenever a creature you control is exiled, draw a card.",
+        "Test Card",
+    );
+    assert_eq!(def.mode, TriggerMode::Exiled);
+    assert_eq!(def.origin, None);
+    assert!(def.origin_zones.is_empty());
+}
+
 #[test]
 fn trigger_is_sacrificed() {
     let def = parse_trigger_line(
