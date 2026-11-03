@@ -102,7 +102,8 @@ function gamePageTree() {
 }
 
 /** Toy Boat's cumulative-upkeep say-it payment: `repetitions` sayings of the
- *  phrase, each after the previous one inside the engine's `pace` window. */
+ *  phrase still owed, each reported one click at a time inside the engine's
+ *  `pace` window. */
 function toyBoatUnlessPayment(repetitions: number): WaitingFor {
   return {
     type: "UnlessPayment",
@@ -120,12 +121,6 @@ function toyBoatUnlessPayment(repetitions: number): WaitingFor {
   };
 }
 
-async function settle(ms: number) {
-  await act(async () => {
-    await new Promise((resolve) => setTimeout(resolve, ms));
-  });
-}
-
 function phraseBox() {
   return screen.getByRole("button", { name: new RegExp(PHRASE) });
 }
@@ -135,6 +130,44 @@ function payUnlessCostCalls() {
     .map(([action]) => action as { type: string; data?: { pay?: boolean } })
     .filter((action) => action.type === "PayUnlessCost")
     .map((action) => action.data?.pay);
+}
+
+/** Stands in for the engine's spoken-payment bookkeeping: each accepted saying
+ *  is one `PayUnlessCost`, the sayings still owed shrink by one, and the last
+ *  one closes the prompt. */
+function acknowledgeSayings() {
+  dispatchMock.mockImplementation((action: { type: string; data?: { pay?: boolean } }) => {
+    const current = useGameStore.getState().waitingFor;
+    if (
+      action.type !== "PayUnlessCost" ||
+      action.data?.pay !== true ||
+      current?.type !== "UnlessPayment" ||
+      current.data.cost.type !== "SayPhrase"
+    ) {
+      return Promise.resolve();
+    }
+    const owed = Math.max(1, current.data.cost.repetitions ?? 1);
+    const next: WaitingFor | null =
+      owed <= 1
+        ? null
+        : {
+            ...current,
+            data: {
+              ...current.data,
+              cost: { ...current.data.cost, repetitions: owed - 1 },
+            },
+          };
+    act(() => {
+      useGameStore.setState({ waitingFor: next });
+    });
+    return Promise.resolve();
+  });
+}
+
+function advance(ms: number) {
+  act(() => {
+    vi.advanceTimersByTime(ms);
+  });
 }
 
 function setup(repetitions: number) {
@@ -160,10 +193,12 @@ function setup(repetitions: number) {
 
 describe("GamePage rapid say-it payment (Toy Boat)", () => {
   beforeEach(() => {
-    dispatchMock.mockClear();
+    dispatchMock.mockReset();
+    acknowledgeSayings();
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     cleanup();
     act(() => {
       useGameStore.setState({ gameId: null, gameState: null, waitingFor: null, adapter: null });
@@ -176,13 +211,29 @@ describe("GamePage rapid say-it payment (Toy Boat)", () => {
     render(gamePageTree());
 
     expect(await screen.findByText(PHRASE)).toBeInTheDocument();
+    vi.useFakeTimers();
     // A one-age-counter upkeep asks for exactly one saying, so there is no
     // pause between sayings to time: reading the prompt must not decline.
-    await settle(GAP_MS * 5);
+    advance(GAP_MS * 5);
     expect(payUnlessCostCalls()).toEqual([]);
 
     fireEvent.click(phraseBox());
     expect(payUnlessCostCalls()).toEqual([true]);
+  });
+
+  it("reports one saying per click and lets the engine ask for the rest", async () => {
+    setup(2);
+    render(gamePageTree());
+
+    await screen.findByText(PHRASE);
+    fireEvent.click(phraseBox());
+    expect(payUnlessCostCalls()).toEqual([true]);
+    // The engine still owes a saying, so the prompt is still up for it.
+    expect(phraseBox()).toBeInTheDocument();
+
+    fireEvent.click(phraseBox());
+    expect(payUnlessCostCalls()).toEqual([true, true]);
+    expect(screen.queryByText(PHRASE)).toBeNull();
   });
 
   it("declines when the next saying does not follow inside the window", async () => {
@@ -190,11 +241,12 @@ describe("GamePage rapid say-it payment (Toy Boat)", () => {
     render(gamePageTree());
 
     await screen.findByText(PHRASE);
+    vi.useFakeTimers();
     fireEvent.click(phraseBox());
-    expect(payUnlessCostCalls()).toEqual([]);
+    expect(payUnlessCostCalls()).toEqual([true]);
 
-    await settle(GAP_MS * 4);
-    expect(payUnlessCostCalls()).toEqual([false]);
+    advance(GAP_MS * 4);
+    expect(payUnlessCostCalls()).toEqual([true, false]);
   });
 
   it("pays after one saying per repetition inside the window", async () => {
@@ -202,10 +254,28 @@ describe("GamePage rapid say-it payment (Toy Boat)", () => {
     render(gamePageTree());
 
     await screen.findByText(PHRASE);
+    vi.useFakeTimers();
     fireEvent.click(phraseBox());
-    await settle(GAP_MS / 4);
+    advance(GAP_MS / 4);
     fireEvent.click(phraseBox());
 
+    expect(payUnlessCostCalls()).toEqual([true, true]);
+  });
+
+  it("lets a following prompt start a fresh payment", async () => {
+    setup(1);
+    render(gamePageTree());
+
+    await screen.findByText(PHRASE);
+    fireEvent.click(phraseBox());
     expect(payUnlessCostCalls()).toEqual([true]);
+
+    // Successive Toy Boat upkeeps replace the prompt at the same position, so
+    // the retained panel must not inherit the finished payment.
+    act(() => {
+      useGameStore.setState({ waitingFor: toyBoatUnlessPayment(1) });
+    });
+    fireEvent.click(phraseBox());
+    expect(payUnlessCostCalls()).toEqual([true, true]);
   });
 });

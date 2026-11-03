@@ -3911,6 +3911,7 @@ function SayPhrasePanel({
   effect,
 }: {
   phrase: string;
+  /** Sayings the engine still owes an answer for (one click each). */
   repetitions: number;
   /** Present for a "quickly" payment: each click must land inside the window. */
   quickWindowMs?: number;
@@ -3918,41 +3919,52 @@ function SayPhrasePanel({
 }) {
   const { t } = useTranslation("game");
   const dispatch = useGameDispatch();
-  const required = Math.max(1, repetitions);
+  const owed = Math.max(1, repetitions);
+  // The engine owns the payment count: every `PayUnlessCost` reports exactly one
+  // saying and comes back with the sayings still owed. So this panel keeps no
+  // completion flag — a later prompt that reuses this component starts from the
+  // engine's own count instead of inheriting a finished payment.
   const [said, setSaid] = useState(0);
-  const settled = useRef(false);
+  const previousOwed = useRef(owed);
+  const inFlight = useRef(0);
 
-  // CR 118.12a: the pace is part of the payment. The window times the pause
-  // *between* sayings, so it starts with the first one: a single required
-  // saying has no pause to measure and must never expire before it is made.
-  // After each click the window is re-armed; a window that lapses unanswered is
-  // a refusal to pay.
+  // A smaller owed count is the engine acknowledging sayings already reported;
+  // anything else is a fresh prompt, where the local progress starts over.
   useEffect(() => {
-    if (
-      quickWindowMs === undefined ||
-      said === 0 ||
-      said >= required ||
-      settled.current
-    ) {
+    const previous = previousOwed.current;
+    previousOwed.current = owed;
+    if (owed < previous) {
+      const acknowledged = previous - owed;
+      inFlight.current = Math.max(0, inFlight.current - acknowledged);
+      setSaid((current) => current + acknowledged);
       return;
     }
+    inFlight.current = 0;
+    setSaid(0);
+  }, [owed]);
+
+  // CR 118.12a: the pace is part of the payment. The window times the pause
+  // *between* sayings, so it only starts once a saying has been reported: a
+  // single required saying has no pause to measure and must never expire before
+  // it is made. Each acknowledgement re-arms it; a window that lapses
+  // unanswered is a refusal to pay, which the engine turns into the sacrifice.
+  useEffect(() => {
+    if (quickWindowMs === undefined || said === 0) return;
     const timer = setTimeout(() => {
-      settled.current = true;
       void dispatch({ type: "PayUnlessCost", data: { pay: false } });
     }, quickWindowMs);
     return () => clearTimeout(timer);
-  }, [dispatch, quickWindowMs, required, said]);
+  }, [dispatch, quickWindowMs, said]);
 
   const say = () => {
-    if (settled.current) return;
-    const next = said + 1;
-    if (next >= required) {
-      settled.current = true;
-      void dispatch({ type: "PayUnlessCost", data: { pay: true } });
-      return;
-    }
-    setSaid(next);
+    // One click is one saying, and the engine accepts no more than the sayings
+    // still owed (a rapid double click must not over-report).
+    if (inFlight.current >= owed) return;
+    inFlight.current += 1;
+    void dispatch({ type: "PayUnlessCost", data: { pay: true } });
   };
+
+  const required = said + owed;
 
   return (
     <AnimatePresence>
