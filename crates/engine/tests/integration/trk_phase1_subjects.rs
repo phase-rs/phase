@@ -915,7 +915,7 @@ fn defiant_full_oracle_has_one_optional_slot_and_no_phase_out_slot() {
     let def = object
         .trigger_definitions
         .iter_all()
-        .filter_map(|trigger| trigger.execute.as_deref())
+        .filter_map(|trigger| trigger.definition.execute.as_deref())
         .find(|def| matches!(def.effect.as_ref(), Effect::TargetOnly { .. }))
         .expect("full Defiant ETB starts with a target declaration");
     assert_eq!(
