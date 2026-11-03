@@ -8,7 +8,9 @@ use engine::game::combat::{
 };
 use engine::game::commander::commander_lethal_headroom;
 use engine::game::players;
-use engine::types::ability::{is_loyalty_ability_cost, AbilityCost, StaticDefinition};
+use engine::types::ability::{
+    is_loyalty_ability_cost, AbilityCost, StaticDefinition, TargetFilter,
+};
 use engine::types::card_type::CoreType;
 use engine::types::format::FormatTopology;
 use engine::types::game_state::GameState;
@@ -16,6 +18,7 @@ use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
+use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 use engine::util::Deadline;
 
@@ -308,7 +311,7 @@ pub(crate) fn choose_attackers_with_targets_with_profile_and_deadline_and_threat
 
     // Use engine-provided valid attacker list when available; fall back to
     // local can_attack() for tests and hypothetical scenarios.
-    let candidates: Vec<ObjectId> = if let Some(ids) = targeting.valid_attacker_ids {
+    let mut candidates: Vec<ObjectId> = if let Some(ids) = targeting.valid_attacker_ids {
         ids.to_vec()
     } else {
         state
@@ -359,6 +362,17 @@ pub(crate) fn choose_attackers_with_targets_with_profile_and_deadline_and_threat
             )
         })
         .collect();
+
+    // CR 702.16e + CR 702.16j: a voluntary attacker whose every legal target is a
+    // player preventing all of its damage (The One Ring, Teferi's Protection)
+    // gains nothing by attacking, so it is not a candidate. Filtering here keeps
+    // its power out of the lethal, objective, and crackback math below.
+    candidates.retain(|&id| {
+        mandatory.contains(&id) || attack_can_matter(state, &targeting, &attackable, id)
+    });
+    if candidates.is_empty() {
+        return Vec::new();
+    }
 
     let comparison_enabled = targeting.comparison_deadline.is_some()
         && matches!(
@@ -817,6 +831,13 @@ pub(crate) fn choose_attackers_with_targets_with_profile_and_deadline_and_threat
             opponent_life,
             &connecting_damage,
         );
+        let assignments = retarget_prevented_player_attacks(
+            state,
+            &targeting,
+            &attackable,
+            &mandatory,
+            assignments,
+        );
         emit_attack_trace(player, &candidates, &assignments);
         return assignments;
     }
@@ -840,6 +861,8 @@ pub(crate) fn choose_attackers_with_targets_with_profile_and_deadline_and_threat
     } else {
         assign_attack_targets(state, player, &opponents, attacking_ids)
     };
+    let assignments =
+        retarget_prevented_player_attacks(state, &targeting, &attackable, &mandatory, assignments);
     emit_attack_trace(player, &candidates, &assignments);
     assignments
 }
@@ -1621,6 +1644,92 @@ fn preferred_attack_opponent(
     }
 
     multiplayer_pressure_target(state, player, opponents)
+}
+
+/// CR 702.16e + CR 702.16j: whether `defender`'s protection prevents all damage
+/// `attacker` would deal to them (The One Ring, Teferi's Protection, Serra's
+/// Emissary). The engine's `pre_replacement_damage_gate` applies the same query
+/// to combat damage, so an attack into such a player deals nothing.
+fn player_damage_prevented(state: &GameState, defender: PlayerId, attacker: ObjectId) -> bool {
+    engine::game::static_abilities::player_protection_from(state, defender, Some(attacker))
+}
+
+/// CR 508.3a: "Whenever [this creature] attacks" pays off on the declaration
+/// itself, whether or not any combat damage is later dealt.
+fn has_self_attack_trigger(state: &GameState, attacker: ObjectId) -> bool {
+    state.objects.get(&attacker).is_some_and(|obj| {
+        obj.trigger_definitions.iter_unchecked().any(|entry| {
+            matches!(entry.definition.mode, TriggerMode::Attacks)
+                && matches!(entry.definition.valid_card, Some(TargetFilter::SelfRef))
+        })
+    })
+}
+
+/// The attack targets the engine issued for `attacker`: its per-attacker
+/// support when present (a missing key means none), else the aggregate list,
+/// else the live defender universe.
+fn attacker_legal_targets<'a>(
+    targeting: &AttackTargetingContext<'a>,
+    attackable: &'a [AttackTarget],
+    attacker: ObjectId,
+) -> &'a [AttackTarget] {
+    match targeting.valid_attack_targets_by_attacker {
+        Some(targets_by_attacker) => targets_by_attacker
+            .get(&attacker)
+            .map_or(&[], Vec::as_slice),
+        None => targeting.valid_attack_targets.unwrap_or(attackable),
+    }
+}
+
+/// Whether `attacker`'s combat damage would be dealt to `target`: a player only
+/// when their protection doesn't prevent it; planeswalkers and battles carry
+/// their own protection, which the block/damage evaluation already reads.
+fn target_takes_damage_from(state: &GameState, target: AttackTarget, attacker: ObjectId) -> bool {
+    match target {
+        AttackTarget::Player(defender) => !player_damage_prevented(state, defender, attacker),
+        AttackTarget::Planeswalker(_) | AttackTarget::Battle(_) => true,
+    }
+}
+
+/// Whether declaring `attacker` can accomplish anything: some legal target
+/// takes its damage, or the declaration itself triggers it.
+fn attack_can_matter(
+    state: &GameState,
+    targeting: &AttackTargetingContext<'_>,
+    attackable: &[AttackTarget],
+    attacker: ObjectId,
+) -> bool {
+    attacker_legal_targets(targeting, attackable, attacker)
+        .iter()
+        .any(|&target| target_takes_damage_from(state, target, attacker))
+        || has_self_attack_trigger(state, attacker)
+}
+
+/// CR 702.16e + CR 702.16j: move each voluntary attack aimed at a player who
+/// would prevent all of its damage onto a legal target that takes it; drop the
+/// attack when none exists, unless the creature's own attack trigger still pays
+/// off. Must-attack creatures (CR 508.1d) keep their assignment.
+fn retarget_prevented_player_attacks(
+    state: &GameState,
+    targeting: &AttackTargetingContext<'_>,
+    attackable: &[AttackTarget],
+    mandatory: &[ObjectId],
+    assignments: Vec<(ObjectId, AttackTarget)>,
+) -> Vec<(ObjectId, AttackTarget)> {
+    assignments
+        .into_iter()
+        .filter_map(|(id, target)| {
+            if mandatory.contains(&id) || target_takes_damage_from(state, target, id) {
+                return Some((id, target));
+            }
+            attacker_legal_targets(targeting, attackable, id)
+                .iter()
+                .copied()
+                .find(|&other| target_takes_damage_from(state, other, id))
+                .or_else(|| has_self_attack_trigger(state, id).then_some(target))
+                .map(|chosen| (id, chosen))
+        })
+        .collect()
 }
 
 /// Assign each attacker to an opponent based on threat and lethal detection.
@@ -9523,5 +9632,133 @@ mod tests {
             blocker_survives,
             "the 1/1 blocker is not dealt lethal damage"
         );
+    }
+
+    /// Grant `player` protection from everything until end of turn — the shape
+    /// The One Ring's cast trigger and Teferi's Protection install (CR 702.16j).
+    fn grant_protection_from_everything(state: &mut GameState, player: PlayerId) {
+        use engine::types::ability::{ContinuousModification, Duration};
+        use engine::types::keywords::ProtectionTarget;
+        let source = create_object(
+            state,
+            CardId(state.next_object_id),
+            player,
+            "The One Ring".to_string(),
+            Zone::Battlefield,
+        );
+        state.add_transient_continuous_effect(
+            source,
+            player,
+            Duration::UntilEndOfTurn,
+            TargetFilter::SpecificPlayer { id: player },
+            vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Protection(ProtectionTarget::Everything),
+            }],
+            None,
+        );
+        assert!(
+            engine::game::static_abilities::player_has_protection_from_everything(state, player),
+            "fixture must grant protection from everything"
+        );
+    }
+
+    fn choose_with_engine_targets(state: &GameState) -> Vec<(ObjectId, AttackTarget)> {
+        let targets = valid_targets(state);
+        choose_attackers_with_targets_with_profile(
+            state,
+            PlayerId(0),
+            &AiProfile::default(),
+            CombatLookahead::Disabled,
+            None,
+            Some(&targets),
+            None,
+        )
+    }
+
+    /// CR 702.16e + CR 702.16j: the engine lets a protected player be attacked
+    /// (#10315), but all the damage is prevented, so the AI declines an attack
+    /// that would otherwise be free.
+    #[test]
+    fn declines_attack_into_player_whose_damage_is_prevented() {
+        let mut state = setup();
+        let attacker = add_creature(&mut state, PlayerId(0), "Bear", 3, 3, vec![]);
+
+        // Control: open board, unprotected opponent — the free attack is taken.
+        let attacks = choose_with_engine_targets(&state);
+        assert_eq!(attacks, vec![(attacker, AttackTarget::Player(PlayerId(1)))]);
+
+        grant_protection_from_everything(&mut state, PlayerId(1));
+        assert!(
+            valid_targets(&state).contains(&AttackTarget::Player(PlayerId(1))),
+            "the protected player must still be a legal attack target"
+        );
+        let attacks = choose_with_engine_targets(&state);
+        assert!(
+            attacks.is_empty(),
+            "no attack into a player who prevents all of it, got {attacks:?}"
+        );
+    }
+
+    /// The protected player's planeswalker has no protection of its own, so the
+    /// attack goes there instead of being wasted on the player.
+    #[test]
+    fn redirects_attack_from_protected_player_to_their_planeswalker() {
+        let mut state = setup();
+        let attacker = add_creature(&mut state, PlayerId(0), "Bear", 3, 3, vec![]);
+        let pw = add_planeswalker(&mut state, PlayerId(1), 6);
+        grant_protection_from_everything(&mut state, PlayerId(1));
+
+        let attacks = choose_with_engine_targets(&state);
+        assert_eq!(attacks, vec![(attacker, AttackTarget::Planeswalker(pw))]);
+        engine::game::combat::declare_attackers(&mut state, &attacks, &mut vec![])
+            .expect("engine must accept the redirected declaration");
+    }
+
+    /// CR 508.3a: a "whenever this creature attacks" trigger pays off on the
+    /// declaration, so the creature still attacks a protected player.
+    #[test]
+    fn self_attack_trigger_still_attacks_protected_player() {
+        use engine::types::ability::{AbilityDefinition, AbilityKind, TriggerDefinition};
+        let mut state = setup();
+        let attacker = add_creature(&mut state, PlayerId(0), "Raider", 3, 3, vec![]);
+        let trigger = TriggerDefinition::new(TriggerMode::Attacks)
+            .valid_card(TargetFilter::SelfRef)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: engine::types::ability::QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .trigger_definitions
+            .push(trigger);
+        grant_protection_from_everything(&mut state, PlayerId(1));
+
+        let attacks = choose_with_engine_targets(&state);
+        assert_eq!(attacks, vec![(attacker, AttackTarget::Player(PlayerId(1)))]);
+    }
+
+    /// CR 508.1d + CR 701.15b: a goaded creature must still attack even when the
+    /// only player it can attack prevents all its damage.
+    #[test]
+    fn goaded_creature_still_attacks_protected_player() {
+        let mut state = setup();
+        let goaded = add_creature(&mut state, PlayerId(0), "Omo", 3, 3, vec![]);
+        state
+            .objects
+            .get_mut(&goaded)
+            .unwrap()
+            .goaded_by
+            .insert(PlayerId(1));
+        grant_protection_from_everything(&mut state, PlayerId(1));
+
+        let attacks = choose_with_engine_targets(&state);
+        assert_eq!(attacks, vec![(goaded, AttackTarget::Player(PlayerId(1)))]);
+        engine::game::combat::declare_attackers(&mut state, &attacks, &mut vec![])
+            .expect("engine must accept the goad-compliant declaration");
     }
 }
