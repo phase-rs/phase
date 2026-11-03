@@ -28,6 +28,7 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
+use engine::types::display_only::rules_projection;
 use engine::types::game_state::{GameState, StackEntryKind, TransientContinuousEffect, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
@@ -331,8 +332,8 @@ fn keyword_grant_collapses(keyword: &Keyword) -> bool {
 /// True when `source_id` is a creature or an activated ability of it is on the
 /// stack, `ability`'s chain only resets characteristics
 /// ([`repeat_only_resets_characteristics`]), and [`settles_alike`] holds for
-/// the board [`settle`]d without the repeat and the board settled with it
-/// resolved first.
+/// the board with the repeat resolved first and that board with the repeat's
+/// continuous effects removed, each [`settle`]d.
 pub(crate) fn repeat_gains_nothing(
     state: &GameState,
     controller: PlayerId,
@@ -361,16 +362,36 @@ pub(crate) fn repeat_gains_nothing(
     {
         return false;
     }
-    let mut before = state.clone();
-    flush_layers(&mut before);
-    let mut after = before.clone();
+    let mut with = state.clone();
+    flush_layers(&mut with);
+    let in_force: HashSet<u64> = with
+        .transient_continuous_effects
+        .iter()
+        .map(|effect| effect.id)
+        .collect();
+    // The repeat is resolved, not activated: neither line pays its cost.
     let resolved = build_resolved_from_def(ability, source_id, controller);
-    if resolve_ability_chain(&mut after, &resolved, &mut Vec::new(), 0).is_err() {
+    if resolve_ability_chain(&mut with, &resolved, &mut Vec::new(), 0).is_err() {
         return false;
     }
-    flush_layers(&mut after);
-    match (settle(before, &pending), settle(after, &pending)) {
-        (Some(without), Some(with)) => settles_alike(&without, &with, source_id),
+    flush_layers(&mut with);
+    let repeat: HashSet<u64> = with
+        .transient_continuous_effects
+        .iter()
+        .map(|effect| effect.id)
+        .filter(|id| !in_force.contains(id))
+        .collect();
+    // CR 613.1: removing the effects restores the characteristics. Derived
+    // from `with`, the line without the repeat starts from the same id and
+    // timestamp counters.
+    let mut without = with.clone();
+    without
+        .transient_continuous_effects
+        .retain(|effect| !repeat.contains(&effect.id));
+    without.layers_dirty.mark_full();
+    flush_layers(&mut without);
+    match (settle(without, &pending), settle(with, &pending)) {
+        (Some(without), Some(with)) => settles_alike(without, with, &repeat),
         _ => false,
     }
 }
@@ -395,24 +416,37 @@ fn settle(mut board: GameState, pending: &[ObjectId]) -> Option<GameState> {
     None
 }
 
-/// CR 613.7 + CR 613.7b + CR 611.2a: `source_id` has the same public
-/// characteristics on both boards, or is on neither, and every continuous
-/// effect on `with` is also on `without` with every field but its id and
-/// timestamp equal, its duration among them.
-fn settles_alike(without: &GameState, with: &GameState, source_id: ObjectId) -> bool {
-    let characteristics = |board: &GameState| {
-        board
-            .objects
-            .get(&source_id)
-            .map(|object| object.snapshot_public_characteristics())
-    };
-    characteristics(without) == characteristics(with)
-        && with.transient_continuous_effects.iter().all(|effect| {
+/// CR 613.7b + CR 611.2a: every `repeat` effect on `with` equals an effect on
+/// `without` in every field but its id and timestamp, its duration among them,
+/// and the boards' [`rules_projection`]s are equal once those effects are
+/// dropped from `with`.
+/// The boards are compared beyond the land because an entry above the pending
+/// activations reads them as it resolves (CR 608.2h).
+fn settles_alike(mut without: GameState, mut with: GameState, repeat: &HashSet<u64>) -> bool {
+    let shadowed = with
+        .transient_continuous_effects
+        .iter()
+        .filter(|effect| repeat.contains(&effect.id))
+        .all(|effect| {
             without
                 .transient_continuous_effects
                 .iter()
                 .any(|old| identity_free(old) == identity_free(effect))
-        })
+        });
+    with.transient_continuous_effects
+        .retain(|effect| !repeat.contains(&effect.id));
+    for board in [&mut without, &mut with] {
+        // On `with` it still names the dropped effects.
+        board.attribution.clear();
+        // `GameState::normalize_for_loop` resets the journal too: it is
+        // provenance, not position.
+        board.resolved_rules_journal = Default::default();
+    }
+    shadowed
+        && matches!(
+            (rules_projection(&without), rules_projection(&with)),
+            (Ok(without), Ok(with)) if without == with
+        )
 }
 
 /// `effect` with the id and timestamp each installation mints cleared, so two

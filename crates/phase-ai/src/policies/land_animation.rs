@@ -270,6 +270,7 @@ mod tests {
         CopyRetargetPermission, PtValue, QuantityExpr, StaticDefinition, TargetFilter,
     };
     use engine::types::ability::{Duration, ResolvedAbility, TargetRef};
+    use engine::types::counter::CounterType;
     use engine::types::game_state::{StackEntry, StackEntryKind, WaitingFor};
     use engine::types::identifiers::CardId;
     use engine::types::keywords::Keyword;
@@ -738,6 +739,44 @@ mod tests {
         );
     }
 
+    /// Synthetic: Crawling Barrens, the nearest printed land, with its optional
+    /// animation made mandatory.
+    const MANDATORY_CRAWLING_BARRENS: &str = "{T}: Add {C}.\n{4}: Put two +1/+1 counters on this land. It becomes a 0/0 Elemental creature until end of turn. It's still a land.";
+
+    #[test]
+    fn a_reactivation_that_also_places_counters_is_not_rejected() {
+        let (mut runner, barrens, index) = oracle_board(
+            "Crawling Barrens",
+            MANDATORY_CRAWLING_BARRENS,
+            &[(ManaColor::Green, 12)],
+        );
+        announce(&mut runner, barrens, index);
+        resolve_accepting_optional(&mut runner);
+        assert!(
+            is_creature(runner.state(), barrens),
+            "reach guard: the animation resolved"
+        );
+        let counters = |state: &GameState| {
+            state.objects[&barrens]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+        };
+        assert_eq!(
+            (
+                counters(&played_out(runner.state(), None)),
+                counters(&played_out(runner.state(), Some(activate(barrens, index)))),
+            ),
+            (Some(2), Some(4)),
+            "reach guard: the repeat is worth two counters"
+        );
+        let verdict = verdict_at(runner.state(), barrens, index);
+        assert!(
+            matches!(verdict, PolicyVerdict::Score { .. }),
+            "got {verdict:?}"
+        );
+    }
+
     #[test]
     fn trigger_granting_reactivation_is_not_rejected() {
         let (mut runner, ravine, index) = oracle_board(
@@ -793,7 +832,7 @@ mod tests {
     /// An opponent's until-end-of-turn effect on `target`, timestamped after
     /// everything already applied to it. The effects are injected, not cast;
     /// printed effects of these shapes include Diminish (base power and
-    /// toughness) and Canopy Claws (loses flying).
+    /// toughness), Canopy Claws (loses flying) and Kamahl, Fist of Krosa (a land becomes a 1/1 creature).
     fn later_opponent_effect(
         runner: &mut GameRunner,
         target: ObjectId,
@@ -1092,8 +1131,10 @@ mod tests {
         assert!(is_redundant_reject(&verdict), "got {verdict:?}");
     }
 
+    /// CR 700.4: on the line with the repeat, the land is a creature when
+    /// Beast Within destroys it, so only that line has a creature die.
     #[test]
-    fn removal_aimed_at_the_land_not_at_the_pending_activation_still_vetoes() {
+    fn removal_aimed_at_the_land_above_the_pending_activation_leaves_the_repeat_eligible() {
         let (mut runner, village, index, beast_within) =
             responder_board("Beast Within", BEAST_WITHIN, P1);
         announce(&mut runner, village, index);
@@ -1115,8 +1156,25 @@ mod tests {
             !entry_targets(runner.state(), top).contains(&TargetRef::Object(pending)),
             "reach guard: it does not target the pending activation"
         );
+        pass_until(&mut runner, p0_has_priority);
+        let died_a_creature = |state: &GameState| {
+            state.zone_changes_this_turn.iter().any(|record| {
+                record.object_id == village && record.core_types.contains(&CoreType::Creature)
+            })
+        };
+        assert_eq!(
+            (
+                died_a_creature(&played_out(runner.state(), None)),
+                died_a_creature(&played_out(runner.state(), Some(activate(village, index)))),
+            ),
+            (false, true),
+            "reach guard: the land dies a creature only after a repeat"
+        );
         let verdict = verdict_at(runner.state(), village, index);
-        assert!(is_redundant_reject(&verdict), "got {verdict:?}");
+        assert!(
+            matches!(verdict, PolicyVerdict::Score { .. }),
+            "got {verdict:?}"
+        );
     }
 
     /// CR 117.3c: activating keeps priority with the same player, so P0 can
@@ -1309,8 +1367,7 @@ mod tests {
         }
     }
 
-    /// Synthetic: a root that targets `pending` and does nothing to it, above
-    /// `child`. No printed card in card-data has this compound shape.
+    /// Synthetic: a root that targets `pending` and does nothing to it, above `child`. Aether Spike has this shape aimed at a spell; Flavor Judge, an Un-card, aims it at a spell or ability, but its parse targets spells only.
     fn root_aimed_at(pending: ObjectId, child: ResolvedAbility) -> ResolvedAbility {
         ResolvedAbility::new(
             Effect::TargetOnly {
@@ -1323,8 +1380,7 @@ mod tests {
         .sub_ability(child)
     }
 
-    /// Synthetic: a `Counter` node with explicit targets, used as a child of
-    /// `root_aimed_at`. No printed card in card-data has that compound shape.
+    /// Synthetic: the `Counter` child of `root_aimed_at`; see there for the nearest printed cards.
     fn counter_node(targets: Vec<TargetRef>, target: TargetFilter) -> ResolvedAbility {
         ResolvedAbility::new(
             Effect::Counter {
@@ -1929,6 +1985,144 @@ mod tests {
         assert!(
             p0_has_priority(runner.state()),
             "reach guard: the AI holds priority"
+        );
+        let verdict = verdict_at(runner.state(), village, index);
+        assert!(
+            matches!(verdict, PolicyVerdict::Score { .. }),
+            "got {verdict:?}"
+        );
+    }
+
+    const CONGREGATE: &str = "Target player gains 2 life for each creature on the battlefield.";
+    const RETURN_OF_THE_WILDSPEAKER: &str = "Choose one \u{2014}\n\u{2022} Draw cards equal to the greatest power among non-Human creatures you control.\n\u{2022} Non-Human creatures you control get +3/+3 until end of turn.";
+
+    /// `state` once every player has passed until the stack is empty, after
+    /// `first` if it is given.
+    fn played_out(state: &GameState, first: Option<GameAction>) -> GameState {
+        let mut line = state.clone();
+        if let Some(action) = first {
+            apply_as_current_for_simulation(&mut line, action).expect("the engine accepts it");
+        }
+        for _ in 0..16 {
+            if line.stack.is_empty() {
+                return line;
+            }
+            apply_as_current_for_simulation(&mut line, GameAction::PassPriority)
+                .expect("the player with priority passes");
+        }
+        panic!("the stack did not empty: {:?}", line.waiting_for);
+    }
+
+    fn activate(source_id: ObjectId, ability_index: usize) -> GameAction {
+        GameAction::ActivateAbility {
+            source_id,
+            ability_index,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
+        }
+    }
+
+    /// CR 608.2h: Congregate counts the creatures as it resolves, so the land
+    /// counts only if a repeat resolved first.
+    #[test]
+    fn a_life_gain_counting_creatures_above_the_pending_animation_leaves_the_repeat_eligible() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let village = scenario
+            .add_land_from_oracle(P0, "Treetop Village", TREETOP_VILLAGE)
+            .id();
+        for _ in 0..4 {
+            scenario.add_basic_land(P0, ManaColor::Green);
+            scenario.add_basic_land(P0, ManaColor::White);
+        }
+        let congregate = scenario
+            .add_spell_to_hand_from_oracle(P0, "Congregate", true, CONGREGATE)
+            .id();
+        let mut runner = scenario.build();
+        p0_main_phase(&mut runner);
+        let index = animation_indices(&runner, village)[0];
+        announce(&mut runner, village, index);
+        let pending = runner.state().stack.back().unwrap().id;
+        {
+            runner.cast(congregate).target_player(P0).commit();
+        }
+        let top = runner.state().stack.back().unwrap().id;
+        assert_eq!(
+            runner
+                .state()
+                .stack
+                .iter()
+                .map(|e| e.id)
+                .collect::<Vec<_>>(),
+            vec![pending, top],
+            "reach guard: Congregate sits above the animation"
+        );
+        assert!(
+            p0_has_priority(runner.state()),
+            "reach guard: the AI holds priority"
+        );
+        let without = played_out(runner.state(), None);
+        let with = played_out(runner.state(), Some(activate(village, index)));
+        assert_eq!(
+            (without.players[0].life, with.players[0].life),
+            (20, 22),
+            "reach guard: the repeat is worth 2 life"
+        );
+        let verdict = verdict_at(runner.state(), village, index);
+        assert!(
+            matches!(verdict, PolicyVerdict::Score { .. }),
+            "got {verdict:?}"
+        );
+    }
+
+    /// CR 608.2h: the first mode reads the greatest power as it resolves, and
+    /// the land is a non-Human creature only if a repeat resolved first.
+    #[test]
+    fn a_draw_reading_power_above_the_pending_animation_leaves_the_repeat_eligible() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let village = scenario
+            .add_land_from_oracle(P0, "Treetop Village", TREETOP_VILLAGE)
+            .id();
+        for _ in 0..10 {
+            scenario.add_basic_land(P0, ManaColor::Green);
+        }
+        let wildspeaker = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Return of the Wildspeaker",
+                true,
+                RETURN_OF_THE_WILDSPEAKER,
+            )
+            .id();
+        for _ in 0..4 {
+            scenario.add_card_to_library_top(P0, "Forest");
+        }
+        let mut runner = scenario.build();
+        p0_main_phase(&mut runner);
+        let index = animation_indices(&runner, village)[0];
+        announce(&mut runner, village, index);
+        let pending = runner.state().stack.back().unwrap().id;
+        {
+            runner.cast(wildspeaker).modes(&[0]).commit();
+        }
+        let top = runner.state().stack.back().unwrap().id;
+        assert_eq!(
+            runner
+                .state()
+                .stack
+                .iter()
+                .map(|e| e.id)
+                .collect::<Vec<_>>(),
+            vec![pending, top],
+            "reach guard: the spell sits above the animation"
+        );
+        let hand = |state: &GameState| state.players[0].hand.len();
+        let without = played_out(runner.state(), None);
+        let with = played_out(runner.state(), Some(activate(village, index)));
+        assert_eq!(
+            hand(&with),
+            hand(&without) + 3,
+            "reach guard: the repeat is worth three cards"
         );
         let verdict = verdict_at(runner.state(), village, index);
         assert!(
