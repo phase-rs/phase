@@ -28766,8 +28766,9 @@ mod tests {
     use crate::database::synthesis::synthesize_extort;
     use crate::game::scenario::{GameScenario, P0, P1};
     use crate::types::ability::{
-        ChooseOneOfKind, CoinFlipRun, LibraryInstructionActor, LibraryPosition,
-        ParentTargetMissingReason, SearchSelectionConstraint, SpentColor, UNION_DEPTH_BUDGET,
+        AbilityDefinition, AbilityKind, ChooseOneOfKind, CoinFlipRun, DieResultBranch,
+        LibraryInstructionActor, LibraryPosition, ParentTargetMissingReason,
+        SearchSelectionConstraint, SpentColor, UNION_DEPTH_BUDGET,
     };
 
     fn continuation_die_context_fixture(effect: Effect) -> (GameState, ObjectId, GameEvent) {
@@ -28800,8 +28801,6 @@ mod tests {
     /// Box of Free-Range Goblins and Boing! are the nearest printed die payload anchors.
     #[test]
     fn continuation_drain_preserves_a_die_result_settled_inside_it() {
-        use crate::types::ability::{AbilityDefinition, AbilityKind, DieResultBranch};
-
         let (mut state, _, ambient) = continuation_die_context_fixture(Effect::RollDie {
             count: QuantityExpr::Fixed { value: 1 },
             sides: 1,
