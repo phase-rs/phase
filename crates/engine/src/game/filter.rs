@@ -11837,29 +11837,42 @@ struct SharedQualitySource<'a> {
     keywords: &'a [Keyword],
 }
 
-/// CR 201.2a: the name value set of a single name. An object with no name — a
-/// face-down permanent carries `""` (CR 708.2a) — yields the EMPTY set, which
-/// `quality_sets_overlap` can never intersect: "An object with no name doesn't
-/// have the same name as any other object, including another object with no
-/// name." This is the single home of that rule for every name VALUE-SET
-/// comparison; `FilterProp::SameName` still compares raw names (see its arm).
+/// CR 201.2a: the ONE nameless test. An object with no name — a face-down
+/// permanent carries `""` (CR 708.2a) — names nothing: "An object with no name
+/// doesn't have the same name as any other object, including another object
+/// with no name." Every name comparison, value-set or pairwise, reads this one
+/// function, so the rule has exactly one home. `FilterProp::SameName` still
+/// compares raw names (see its arm).
+fn name_value(name: &str) -> Option<&str> {
+    (!name.is_empty()).then_some(name)
+}
+
+/// CR 201.2a: the name value set of a single name. A nameless object yields the
+/// EMPTY set (via `name_value`, the single nameless test), which
+/// `quality_sets_overlap` can never intersect; a named object yields its
+/// ASCII-folded name. Delegating to `name_value` keeps the value-set answer
+/// identical to `names_shared`.
 fn shared_name_values(name: &str) -> HashSet<String> {
-    if name.is_empty() {
-        HashSet::new()
-    } else {
-        HashSet::from([name.to_ascii_lowercase()])
+    match name_value(name) {
+        Some(name) => HashSet::from([name.to_ascii_lowercase()]),
+        None => HashSet::new(),
     }
 }
 
 /// CR 201.2a: the one same-name test for the object-to-object name predicates
 /// (`NameMatchesAnyPermanent`, `SameNameAsParentTarget`, `SameNameAsExiledBySource`),
-/// live and zone-change-record doors. Both sides read `shared_name_values` and
-/// the comparator is the shared `quality_sets_overlap` — the same authority
+/// live and zone-change-record doors. Every call site is per-candidate inside a
+/// scan, so the pairwise comparator allocates nothing. It matches on
+/// `name_value`, the single nameless test, and folds ASCII-only on both sides,
+/// so it is provably identical to the `shared_name_values` answer that
 /// `FilterProp::SharesQuality` (#10141) and `FilterProp::DifferentNameFrom`
-/// (#10142) use, so there is no second empty-name rule. CR 201.2a "at least one
-/// name in common" keeps self-equality for a named object.
+/// (#10142) use. CR 201.2a "at least one name in common" keeps self-equality
+/// for a named object.
 fn names_shared(left: &str, right: &str) -> bool {
-    quality_sets_overlap(&shared_name_values(left), &shared_name_values(right))
+    match (name_value(left), name_value(right)) {
+        (Some(left), Some(right)) => left.eq_ignore_ascii_case(right),
+        _ => false,
+    }
 }
 
 fn shared_quality_values(
@@ -19555,6 +19568,36 @@ mod tests {
         );
     }
 
+    /// CR 201.2a: `name_value` is the single nameless test. `names_shared` is
+    /// the allocation-free pairwise comparator built on it, and
+    /// `shared_name_values` delegates to it, so the value-set path
+    /// (`SharedQuality::Name`, `SharesQuality`, `DifferentNameFrom`) and the
+    /// pairwise path give the same answer.
+    #[test]
+    fn names_shared_and_shared_name_values_agree_on_the_nameless_test() {
+        assert!(
+            !names_shared("", ""),
+            "a nameless object shares no name, not even with another nameless one"
+        );
+        assert!(
+            names_shared("Grizzly Bears", "grizzly bears"),
+            "names match ASCII-case-insensitively"
+        );
+        assert!(
+            !names_shared("", "Grizzly Bears"),
+            "a nameless object shares no name with a named one"
+        );
+        assert!(
+            shared_name_values("").is_empty(),
+            "a nameless object's name value set is empty"
+        );
+        assert_eq!(
+            shared_name_values("Grizzly Bears"),
+            HashSet::from(["grizzly bears".to_string()]),
+            "a named object's value set carries its ASCII-folded name"
+        );
+    }
+
     /// CR 201.2 + CR 201.2a + CR 708.2a: `FilterProp::SameNameAsParentTarget`
     /// reads the parent target's name through the shared `names_shared` rule at
     /// both doors. Driving card: **Bile Blight** — "Target creature and all other
@@ -19669,7 +19712,7 @@ mod tests {
             crate::game::effects::resolved_object_filter(&state, &on_bears, &pump_shape);
         assert!(
             !matches(&state, bears, &resolved_pump, &on_bears),
-            "CR 611.2a: the announced target does not receive the modification twice"
+            "CR 611.2c: the announced target does not receive the modification twice"
         );
         assert!(
             matches(&state, bears_twin, &resolved_pump, &on_bears),
