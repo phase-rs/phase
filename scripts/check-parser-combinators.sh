@@ -59,7 +59,8 @@
 #   1  SUITE RED        - the added-line helper's own test suite
 #                         (scripts/lib/added_lines_tests.py) failed; no verdict.
 #   2  INSTRUMENT FAILURE - the added-line helper could not read the diff
-#                         (scripts/lib/added-lines.py); no verdict.
+#                         (scripts/lib/added-lines.py), or the family D
+#                         detector's stderr file could not be created; no verdict.
 #   3  CANNOT ANSWER    - the window itself is unknowable: base == head AND the
 #                         index holds nothing in scope, so nothing at all was
 #                         read. Not a failure - the same meaning exit 3 carries
@@ -525,7 +526,11 @@ while IFS= read -r file; do
         # import error, a malformed record). Exit 0 with empty output is the only
         # "clean" answer; anything else fails the gate with the detector's own
         # diagnostic, named against the file it was scanning.
-        detector_err="$(mktemp "${TMPDIR:-/tmp}/crossprod-detector.XXXXXX")"
+        detector_err="$(mktemp "${TMPDIR:-/tmp}/crossprod-detector.XXXXXX")" || {
+            echo "ERROR: cannot create a temp file for the family D detector's stderr:" >&2
+            echo "       TMPDIR=${TMPDIR:-/tmp}" >&2
+            exit 2
+        }
         if crossprod_hits=$(printf '%s\n' "$file_added" \
             | python3 "$CROSS_PRODUCT_DETECTOR" "$file" 2>"$detector_err"); then
             rm -f "$detector_err"

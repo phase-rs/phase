@@ -459,11 +459,11 @@ expect_listed 'legacy-quantity: only the call planted in phase-parser is listed'
 P_BENIGN='fn added_by_the_fixture() { let _ = 1; }'
 parser_fixture
 put crates/engine/src/parser/clause.rs 'use super::*;' 'fn other() {}'
-# Gate H self-tests the detector; stub that too so the ONLY failure is family D.
+# The (D0) seam suite imports the detector; stub that too so the ONLY failure is family D.
 put scripts/lib/detect_cross_product_alts_tests.py 'import sys' 'sys.exit(0)'
 put scripts/lib/detect-cross-product-alts.py \
     'import sys' \
-    'sys.stderr.write("stub detector: cannot import zone_authority_census\\n")' \
+    'sys.stderr.write("stub detector: cannot import zone_authority_census\n")' \
     'sys.exit(3)'
 commit_base
 put crates/engine/src/parser/clause.rs 'use super::*;' "$P_BENIGN" 'fn other() {}'
