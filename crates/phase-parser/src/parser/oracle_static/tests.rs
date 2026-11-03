@@ -6547,6 +6547,21 @@ fn static_cost_reduction_with_unreadable_for_each_count_fails_closed() {
             "{line}: unreadable count must not yield a cost modifier, got {def:?}"
         );
     }
+    // Reach guard: a readable count through the same "for each" path still
+    // lowers to a dynamic cost modifier.
+    let readable = parse_static_line(
+        "This spell costs {1} less to cast for each creature that attacked this turn.",
+    );
+    assert!(
+        matches!(
+            readable.as_ref().map(|def| &def.mode),
+            Some(StaticMode::ModifyCost {
+                dynamic_count: Some(QuantityRef::ObjectCount { .. }),
+                ..
+            })
+        ),
+        "readable count must still parse, got {readable:?}"
+    );
 }
 
 #[test]

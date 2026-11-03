@@ -5,7 +5,9 @@
 //! energy held (but not spent) reduces nothing.
 
 use engine::game::casting::effective_spell_cost;
+use engine::game::quantity::resolve_quantity;
 use engine::game::scenario::{GameScenario, P0};
+use engine::types::ability::{QuantityExpr, QuantityRef};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -104,5 +106,56 @@ fn blaster_hulk_counts_energy_paid_earlier_this_turn() {
         outcome.mana_pool_total(P0),
         0,
         "the reduced cost spends exactly the six available mana"
+    );
+}
+
+#[test]
+fn energy_paid_last_turn_no_longer_reduces_blaster_hulk() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let cub = {
+        let mut builder = scenario.add_creature_from_oracle(P0, "Longtusk Cub", 2, 2, LONGTUSK_CUB);
+        builder.with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 1,
+        });
+        builder.id()
+    };
+    let hulk = add_hulk(&mut scenario);
+
+    let energy_paid = QuantityExpr::Ref {
+        qty: QuantityRef::EnergyPaidOrLostThisTurn,
+    };
+    let mut runner = scenario.build();
+    runner.state_mut().players[P0.0 as usize].energy = 2;
+    runner.activate(cub, 0).resolve();
+    assert_eq!(
+        effective_spell_cost(runner.state(), P0, hulk),
+        Some(hulk_cost(4)),
+        "reach guard: the payment reduced the cost this turn"
+    );
+    assert_eq!(resolve_quantity(runner.state(), &energy_paid, P0, hulk), 2);
+
+    let turn = runner.state().turn_number;
+    runner.advance_to_combat();
+    runner
+        .declare_attackers(&[])
+        .expect("declaring no attackers ends combat");
+    runner.advance_to_upkeep();
+    assert_eq!(
+        runner.state().turn_number,
+        turn + 1,
+        "the game must reach the next turn"
+    );
+    assert_eq!(
+        runner.state().players[P0.0 as usize].energy_paid_or_lost_this_turn,
+        0
+    );
+    // CR 601.2f: the reduction reads the per-turn tracker; it is now an
+    // opponent's turn, so read the quantity directly rather than a cast cost.
+    assert_eq!(
+        resolve_quantity(runner.state(), &energy_paid, P0, hulk),
+        0,
+        "\"this turn\": energy paid during an earlier turn no longer counts"
     );
 }
