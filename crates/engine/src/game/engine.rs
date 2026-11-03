@@ -14068,14 +14068,19 @@ fn apply_non_priority_pass_action(
                     }
                     // CR 701.3d + CR 608.2k: Unattach a matching attachment from the
                     // source as an activation cost (Captain America's Throw). The
-                    // handler snapshots the detached Equipment as the cost-referent,
-                    // then re-surfaces the deferred damage division.
+                    // leg's cardinality authority is the prompt built at
+                    // `casting_costs::surface_next_interactive_activation_cost_leg`
+                    // (`WaitingFor::PayCost.{min_count, count}`), which the handler
+                    // enforces before touching state; it then snapshots the detached
+                    // Equipment as the cost-referent and re-surfaces the deferred
+                    // damage division.
                     PayCostKind::UnattachFrom { filter } => {
                         casting_costs::handle_unattach_for_cost(
                             state,
                             *player,
                             filter,
                             *pending_cast.clone(),
+                            (*min_count, *count),
                             choices,
                             &chosen,
                             &mut events,
