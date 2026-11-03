@@ -2135,6 +2135,17 @@ fn mark_independent_mana_spent_gates(defs: &mut [AbilityDefinition]) {
     }
 }
 
+/// CR 608.2c: whether the clause after `prev_boundary` is a coordinated predicate
+/// of the SAME printed sentence. A `Comma`/`Then` boundary continues it; a
+/// `Sentence` boundary, or none at all (the chain root), starts a new one. The
+/// single test for sentence-scoped duration distribution in `assemble_effect_chain`.
+fn boundary_continues_sentence(prev_boundary: Option<ClauseBoundary>) -> bool {
+    matches!(
+        prev_boundary,
+        Some(ClauseBoundary::Comma) | Some(ClauseBoundary::Then)
+    )
+}
+
 pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     let _chain = tracing::debug_span!(target: "engine::parser::binding", "chain", kind = ?ir.kind, clauses = ir.clauses.len()).entered();
     let kind = ir.kind;
@@ -2187,6 +2198,15 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             previous_clause_start = this_clause_start;
         }
         this_clause_start = defs.len();
+        // CR 608.2c: a clause that does not continue the previous clause's sentence
+        // starts a new one, so the old sentence's window ends here. Cleared at the
+        // loop top rather than only on the emitting path, because special and
+        // absorbed clauses advance `prev_boundary` too: a new sentence opened by
+        // one of them must not hand the previous sentence's window to a following
+        // comma-linked clause.
+        if !boundary_continues_sentence(prev_boundary) {
+            sentence_duration = None;
+        }
         // "The arena mirrors `defs`" is load-bearing for every binding below, and it
         // is asserted HERE, at the one point every clause path must pass through.
         //
@@ -3107,7 +3127,7 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         // pushing then wrapping each unit would yield CDT{ChangeZone} +
         // CDT{Attach} instead of CDT{ChangeZone[+Attach]}. TargetOnly already
         // nests before wrap; mirror that for this attach-on-return shape.
-        let clause_sub = if is_target_only {
+        let mut clause_sub = if is_target_only {
             def.sub_ability = timed_clause_sub_chain(clause_ir);
             // CR 701.3a + CR 303.4f: TargetOnly → ChangeZone[+Attach] (Necrotic
             // Plague) must stamp `forward_result` on the nested return so the
@@ -3411,15 +3431,16 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         // (or no boundary at all — the chain root) starts a new one. The two cases
         // mirror `sub_link_after_boundary`, so duration scoping and link semantics
         // agree on what "the same sentence" means.
-        let continues_same_sentence = matches!(
-            prev_boundary,
-            Some(ClauseBoundary::Comma) | Some(ClauseBoundary::Then)
-        );
-        if continues_same_sentence {
+        if boundary_continues_sentence(prev_boundary) {
             if let Some(duration) = sentence_duration.clone() {
                 // Both carriers travel through the one authority; a clause whose
-                // recognizer stated its own window keeps it.
+                // recognizer stated its own window keeps it. The clause's own sub
+                // chain is still detached here on the sibling path (`clause_sub`), so
+                // it is stamped separately; it belongs to the same sentence.
                 stamp_governed_chain_duration(&mut def, &duration);
+                if let Some(sub) = clause_sub.as_deref_mut() {
+                    stamp_governed_chain_duration(sub, &duration);
+                }
             }
         } else {
             // A new sentence: its own window is whatever it printed. A sentinel

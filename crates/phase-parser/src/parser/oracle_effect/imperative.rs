@@ -8806,7 +8806,7 @@ fn try_parse_gain_quoted_ability(text: &str) -> Option<Effect> {
     if modifications.is_empty() {
         return None;
     }
-    // CR 113.3a + CR 611.2a: an inline granted ability lasts as long as the
+    // CR 611.2a: an inline granted ability lasts as long as the
     // granting effect, so its window is the parsed one VERBATIM. `None` must stay
     // a true unset sentinel: an injected `UntilEndOfTurn` is byte-identical to a
     // printed one, which strands an enclosing printed window (an "Until your next
