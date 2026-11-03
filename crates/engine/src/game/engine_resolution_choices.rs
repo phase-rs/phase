@@ -1239,18 +1239,20 @@ fn dig_continuation_wants_rest_pile_for_count(ability: &ResolvedAbility) -> bool
 }
 
 /// CR 701.20a + CR 701.20d + CR 401.2: a card revealed by an instruction stays
-/// revealed only as long as that instruction needs it, and revealed cards that
-/// are reordered within a library stop being revealed. Once a dig's keep
-/// decision has put the cards it did not pick back into the library, their
-/// reveal markers must be dropped, or the caster (and every other player) keeps
-/// seeing the cards that were just put away at the bottom of the library
-/// (issue #8059).
+/// revealed only as long as that instruction needs it (CR 701.20a), and revealed
+/// cards that are shuffled or otherwise reordered inside a library stop being
+/// revealed and become new objects (CR 701.20d). Once a reveal-dig's keep
+/// decision has committed a reordered pile back into the library, no card in
+/// that pile may keep a reveal marker — the rest pile that went to the bottom
+/// AND the card the player kept on top. Leaving any of them marked is issue
+/// #8059: the caster (and every other player) kept seeing cards that the
+/// instruction had already put away.
 ///
-/// Only the REST pile is cleared. A kept card that stays in the library
-/// (Fertile Thicket's "put that card on top of your library") was just
-/// publicly revealed and is still sitting there, so its reveal stands until it
-/// leaves; a kept card that moves to hand, the battlefield or a graveyard loses
-/// its marker with the zone change itself (CR 400.7), never from here.
+/// Callers pass exactly the cards the instruction reordered. A card that leaves
+/// the library loses its marker with the zone change itself (CR 400.7), never
+/// from here, and a card a private "look at" dig never publicly revealed has no
+/// marker to drop — those occurrences are filtered out so this cleanup only ever
+/// hides a reveal that is actually active.
 ///
 /// This is the same cleanup the shared `BatchCompletion::RevealRestPile` tail
 /// runs for the delivery shapes that have a completion to ride; the in-place
@@ -1261,12 +1263,17 @@ fn hide_dig_reveal_markers(
     player: crate::types::player::PlayerId,
     cards: &[ObjectId],
 ) {
-    if cards.is_empty() {
+    let still_revealed: Vec<ObjectId> = cards
+        .iter()
+        .copied()
+        .filter(|card_id| state.revealed_cards.contains(card_id))
+        .collect();
+    if still_revealed.is_empty() {
         return;
     }
     state
         .resolve_and_apply_information(
-            cards,
+            &still_revealed,
             ResolvedInformationAudience::Controller(player),
             ResolvedInformationLifetime::UntilActionBoundary,
             ResolvedInformationEdit::Hide,
@@ -4875,11 +4882,12 @@ pub(super) fn handle_resolution_choice(
                                     rest_destination: zone,
                                     rest_order: DigRestOrder::Preserve,
                                     rest_split_top_count: None,
-                                    // CR 701.20d: the unkept pile was reordered
-                                    // into the library, so those cards stop
-                                    // being revealed — drop the markers for
-                                    // every card this dig revealed once it has
-                                    // landed.
+                                    // CR 701.20d: the whole looked-at pile was
+                                    // reordered into the library (the kept cards
+                                    // to the top, the rest to the bottom), so
+                                    // none of those cards is still revealed —
+                                    // drop the markers for every card this dig
+                                    // revealed once the pile has landed.
                                     clear_markers: cards.clone(),
                                     publish_tracked_set: None,
                                     publish_tracked_set_cause: None,
@@ -4897,14 +4905,14 @@ pub(super) fn handle_resolution_choice(
                         }
                     }
                 }
-                // CR 701.20a + CR 701.20d + CR 401.2: the unkept cards were
-                // just reordered beneath the kept ones inside the same hidden
-                // zone, so the pick no longer needs them revealed — close that
-                // part of the window before the continuation resumes. The kept
-                // cards are deliberately kept revealed: the reorder form leaves
-                // them in the library, and a kept card sitting on top was
-                // publicly revealed by this very instruction.
-                hide_dig_reveal_markers(state, player, &unkept);
+                // CR 701.20a + CR 701.20d + CR 401.2: this branch reordered the
+                // whole looked-at pile inside the library — the kept cards to
+                // the top, the rest to the bottom — so the pick no longer needs
+                // ANY of it revealed, not the rest pile and not the kept card
+                // either (a revealed card that is reordered in a library stops
+                // being revealed). Close the window for the whole pile before
+                // the continuation resumes.
+                hide_dig_reveal_markers(state, player, &cards);
                 return Ok(ResolutionChoiceOutcome::WaitingFor(
                     finish_with_continuation(state, player, events),
                 ));
@@ -4943,9 +4951,10 @@ pub(super) fn handle_resolution_choice(
                 // CR 701.20a + CR 701.20d + CR 401.2: the keep decision ends the
                 // reveal window for the cards it did NOT keep. They are about to
                 // be put away inside the library (or another rest zone), where
-                // the instruction no longer needs them revealed. Kept cards that
-                // stay in the library keep their reveal; the ones that leave it
-                // lose it with the zone change (CR 400.7).
+                // the instruction no longer needs them revealed. The kept cards
+                // leave the looked-at pile for a concrete zone, so their markers
+                // fall with the zone change itself (CR 400.7) — only the rest
+                // pile needs an explicit close here.
                 let rest_marker_cleanup = unkept.clone();
                 let reqs = kept
                     .iter()

@@ -99,6 +99,17 @@ fn fertile_thicket_keeps_revealed_basic_land_on_top_and_rest_on_bottom() {
         "only the basic land may be kept; selectable = {selectable_cards:?}"
     );
 
+    // CR 701.20a (fails if Step 2 reverted): the clause's verb is "reveal", so
+    // the card it may keep is publicly revealed while the pick is pending. Had
+    // the Dig been left at reveal:false (a private look), no public marker would
+    // exist for it.
+    assert!(
+        runner.state().revealed_cards.contains(&basic_land),
+        "the revealed basic land must be publicly revealed while the pick is \
+         pending (reveal:true); revealed_cards = {:?}",
+        runner.state().revealed_cards
+    );
+
     // Submit the keep-selection: the revealed Forest.
     runner
         .act(GameAction::SelectCards {
@@ -143,41 +154,27 @@ fn fertile_thicket_keeps_revealed_basic_land_on_top_and_rest_on_bottom() {
         "the kept basic land must not be moved to hand"
     );
 
-    // CR 701.20a (second assertion — fails if Step 2 reverted): the looked-at
-    // cards were publicly revealed because the clause's verb is "reveal". If the
-    // Dig were left at reveal:false (a private look), `revealed_cards` would be
-    // empty for these cards.
-    assert!(
-        state.revealed_cards.contains(&basic_land),
-        "the revealed basic land must be publicly revealed (reveal:true); \
-         revealed_cards = {:?}",
-        state.revealed_cards
-    );
-
-    // CR 701.20a + CR 701.20d + CR 401.2 (issue #8059): the reveal window ends
-    // with this instruction for the cards it put away. The four cards now on the
-    // bottom of the library stop being revealed, so neither player may see their
-    // faces there; only the kept Forest, which this instruction revealed and left
-    // on top, stays public.
+    // CR 701.20d + CR 401.2 (issue #8059): putting that card on top and the rest
+    // on the bottom reordered the library, so NO card this instruction revealed
+    // is still revealed — the four cards on the bottom and the kept Forest on
+    // top alike. A revealed card that is reordered in a library stops being
+    // revealed (CR 701.20d), and once it is back in the library no player may
+    // see its face there (CR 401.2).
     let caster_view = filter_state_for_viewer(state, P0);
     let opponent_view = filter_state_for_viewer(state, P1);
-    for &id in &[other1, other2, other3, other4] {
+    for &id in &[basic_land, other1, other2, other3, other4] {
         assert!(
             !state.revealed_cards.contains(&id),
-            "the bottomed card {id:?} must not stay revealed; revealed_cards = {:?}",
+            "the reordered card {id:?} must stop being revealed; revealed_cards = {:?}",
             state.revealed_cards
         );
         assert_eq!(
             caster_view.objects[&id].name, "Hidden Card",
-            "the bottomed card {id:?} must not stay visible to its own controller"
+            "the reordered card {id:?} must not stay visible to its own controller"
         );
         assert_eq!(
             opponent_view.objects[&id].name, "Hidden Card",
-            "the bottomed card {id:?} must not stay visible to the opponent"
+            "the reordered card {id:?} must not stay visible to the opponent"
         );
     }
-    assert_ne!(
-        opponent_view.objects[&basic_land].name, "Hidden Card",
-        "positive guard: the kept Forest is still publicly revealed on top"
-    );
 }
