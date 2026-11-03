@@ -163,6 +163,7 @@ mod layer_boundary_census;
 mod lost_monarch_combat_damage_by_type_intervening_if;
 mod mana_ability_mana_payment_window;
 mod mana_burn;
+mod master_of_the_wild_hunt;
 mod maze_of_ith_untap_bidirectional_prevent;
 mod mbaku_attacked_monarch_intervening_if;
 mod min_blocker_floor_block_candidates_7183;
