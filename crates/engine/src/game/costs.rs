@@ -1295,13 +1295,17 @@ fn pay_ability_cost_inner(
     match cost {
         // Un-card (no CR entry): saying the phrase is the whole payment. A
         // cumulative-upkeep expansion of a spoken cost demands one saying per age
-        // counter (CR 702.24a), so the payment announces one `PhraseSaid` per
-        // repetition. The pace (Toy Boat's "quickly") is a wall-clock property
-        // of the saying itself: the client that collects the repetitions enforces
-        // the published window and declines the payment when it lapses. As with
-        // `types::contest`, the engine never reads a clock — a host that can
-        // observe wall-clock time reports what the human did, so the payment
-        // records exactly the sayings that were reported.
+        // counter (CR 702.24a), so this authority announces one `PhraseSaid` per
+        // `repetitions` in the cost it is handed. The interactive unless-payment
+        // prompt hands it one saying at a time and re-asks for the rest, so no
+        // caller can report a multi-saying payment from a single action; a
+        // non-interactive payment of a cost that still carries `repetitions > 1`
+        // announces them all here, as one payment.
+        //
+        // The pace (Toy Boat's "quickly") is a wall-clock property of the saying
+        // itself. As with `types::contest`, the engine never reads a clock — a
+        // host that can observe wall-clock time reports what the human did, so
+        // the payment records exactly the sayings that were reported.
         AbilityCost::SayPhrase {
             phrase,
             repetitions,

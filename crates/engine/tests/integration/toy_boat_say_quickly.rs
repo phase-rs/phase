@@ -114,40 +114,87 @@ fn toy_boat_demands_one_saying_per_age_counter() {
     }
 }
 
-/// CR 702.24a + CR 118.12a: paying says the phrase once per age counter and the
-/// permanent stays on the battlefield.
+/// The phrases announced in `events`, in order.
+fn phrases_said(events: &[GameEvent]) -> Vec<(PlayerId, String)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::PhraseSaid { player, phrase } => Some((*player, phrase.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// CR 702.24a + CR 118.12a + Un-card (no CR entry): the engine owns the count.
+/// Each answer reports exactly ONE saying and the prompt comes back carrying the
+/// sayings still owed, so a caller cannot satisfy a two-saying upkeep with a
+/// single action.
+#[test]
+fn each_answer_reports_one_saying_and_the_engine_asks_for_the_rest() {
+    let (mut runner, toy_boat) = setup_at_unless_prompt(1, true);
+
+    let first = runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("the first saying is accepted");
+    assert_eq!(
+        phrases_said(&first.events),
+        vec![(P0, "Toy Boat".to_string())],
+        "one announcement per answer: {:?}",
+        first.events
+    );
+
+    match &runner.state().waiting_for {
+        WaitingFor::UnlessPayment { cost, .. } => match cost {
+            AbilityCost::SayPhrase { repetitions, .. } => assert_eq!(
+                *repetitions, 1,
+                "the re-prompt carries exactly the saying still owed"
+            ),
+            other => panic!("expected the remaining SayPhrase cost, got {other:?}"),
+        },
+        other => panic!("expected the remaining saying to be re-prompted, got {other:?}"),
+    }
+    assert_eq!(
+        runner.state().objects[&toy_boat].zone,
+        Zone::Battlefield,
+        "the upkeep is undecided while sayings are still owed"
+    );
+}
+
+/// CR 702.24a + CR 118.12a: answering every saying keeps Toy Boat.
 #[test]
 fn saying_it_once_per_counter_keeps_toy_boat() {
     let (mut runner, toy_boat) = setup_at_unless_prompt(1, true);
 
-    let result = runner
-        .act(GameAction::PayUnlessCost { pay: true })
-        .expect("saying the phrase is accepted");
+    // Two age counters after the upkeep tick, so two answers are needed.
+    let mut said = Vec::new();
+    for answer in 1..=2 {
+        let result = runner
+            .act(GameAction::PayUnlessCost { pay: true })
+            .expect("saying the phrase is accepted");
+        let announced = phrases_said(&result.events);
+        assert_eq!(
+            announced.len(),
+            1,
+            "answer {answer} reports one saying: {:?}",
+            result.events
+        );
+        said.extend(announced);
+    }
 
-    let said: Vec<&GameEvent> = result
-        .events
-        .iter()
-        .filter(|event| matches!(event, GameEvent::PhraseSaid { .. }))
-        .collect();
     assert_eq!(
-        said.len(),
-        2,
-        "one announcement per required saying: {:?}",
-        result.events
-    );
-    assert!(
-        said.iter().all(|event| matches!(
-            event,
-            GameEvent::PhraseSaid { player, phrase }
-                if *player == P0 && phrase == "Toy Boat"
-        )),
-        "every saying is P0 saying \"Toy Boat\": {:?}",
-        result.events
+        said,
+        vec![(P0, "Toy Boat".to_string()), (P0, "Toy Boat".to_string())],
+        "one saying per age counter, all by the payer"
     );
     assert_eq!(
         runner.state().objects[&toy_boat].zone,
         Zone::Battlefield,
         "paying the cumulative-upkeep say-it cost keeps Toy Boat"
+    );
+    assert!(
+        !matches!(runner.state().waiting_for, WaitingFor::UnlessPayment { .. }),
+        "the completed payment closes the prompt, got {:?}",
+        runner.state().waiting_for
     );
 }
 
