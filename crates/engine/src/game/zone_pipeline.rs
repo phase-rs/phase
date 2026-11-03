@@ -7120,9 +7120,15 @@ mod layers_incremental_flush_tests {
 #[cfg(test)]
 mod effect_driven_transformed_entry_tests {
     use super::*;
+    use crate::game::layers::{evaluate_layers, flush_layers, mark_layers_full};
     use crate::game::zones::create_object;
+    use crate::types::ability::{
+        ContinuousModification, ControllerRef, FilterProp, StaticCondition, TypeFilter, TypedFilter,
+    };
     use crate::types::card_type::{CardType, CoreType};
+    use crate::types::game_state::LayersDirty;
     use crate::types::identifiers::CardId;
+    use crate::types::keywords::Keyword;
 
     /// CR 712.14a (2nd sentence) regression guard: a SINGLE-FACED object
     /// instructed to enter transformed cannot enter the battlefield — it remains
@@ -7293,14 +7299,6 @@ mod effect_driven_transformed_entry_tests {
     /// does not read.
     #[test]
     fn reanimated_incarnation_marks_full_and_drops_graveyard_grant() {
-        use crate::game::layers::{evaluate_layers, flush_layers, mark_layers_full};
-        use crate::types::ability::{
-            ContinuousModification, ControllerRef, FilterProp, StaticCondition, TypeFilter,
-            TypedFilter,
-        };
-        use crate::types::game_state::LayersDirty;
-        use crate::types::keywords::Keyword;
-
         let mut state = GameState::new_two_player(42);
         let source = create_object(
             &mut state,
