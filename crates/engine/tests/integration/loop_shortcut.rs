@@ -743,6 +743,9 @@ fn an_accepted_until_lethal_grant_drains_even_with_a_foreign_period_in_state() {
 /// zero counters from being satisfied by an empty action list.
 #[test]
 fn shortcut_accept_validation_does_not_take_the_shortcut() {
+    // This measures the generic shortcut protocol using the existing composed synthetic loop.
+    // Nearest printed anchors: Marauding Blight-Priest and Exquisite Blood; the fixture's
+    // fixed-one Test Blood Sipper is not Exquisite Blood's variable-amount printed ability.
     let (mut runner, kickoff) = setup_3p_optional_cascade(LoopDetectionMode::Interactive);
     let _ = runner.cast(kickoff).resolve();
     let (_events, wf) = drive_collect(&mut runner, 500);

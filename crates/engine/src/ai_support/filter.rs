@@ -1608,6 +1608,10 @@ fn legality_equivalence_key(
 mod tests {
     use super::*;
     use crate::ai_support::{candidate_actions, structurally_valid_named_choice_answer as hatch};
+    use crate::analysis::decision_template::IterationCount;
+    use crate::analysis::loop_check::{
+        CountedTake, OfferRoad, ShortcutProposal, ShortcutResponse, UnperformableCause,
+    };
     use crate::game::game_object::ObjectIncarnationRefExt;
     use crate::game::layers::evaluate_layers;
     use crate::game::scenario::GameScenario;
@@ -3547,10 +3551,6 @@ mod tests {
     /// measures the HATCH, not the drive.
     #[test]
     fn shortcut_response_hatch_is_wired_into_both_accept_methods() {
-        use crate::ai_support::candidates::{ActionMetadata, TacticalClass};
-        use crate::analysis::decision_template::IterationCount;
-        use crate::analysis::loop_check::{OfferRoad, ShortcutProposal, ShortcutResponse};
-
         // CR 732.2c: one queued responder is what keeps an Accept on the advance path — the
         // shortcut is taken only once the last player has answered. The count is two so place 1
         // is a CR 732.2b shortening place the proposal admits.
@@ -3628,12 +3628,6 @@ mod tests {
     /// place after skipping the clone that used to reject it.
     #[test]
     fn shortcut_response_authority_refuses_every_reducer_refusal() {
-        use crate::ai_support::candidates::{ActionMetadata, TacticalClass};
-        use crate::analysis::decision_template::IterationCount;
-        use crate::analysis::loop_check::{
-            CountedTake, OfferRoad, ShortcutProposal, ShortcutResponse, UnperformableCause,
-        };
-
         let state_with = |count: IterationCount, counted_take: CountedTake| {
             let mut state = GameState::new_two_player(42);
             state.waiting_for = WaitingFor::RespondToShortcut {
