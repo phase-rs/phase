@@ -5801,7 +5801,7 @@ fn synthesized_charge_points(
 /// Three callers, and they must stay one rule: this module's `handle_respond_to_shortcut` refusal,
 /// its consumption guard, and `ai_support`'s structural legality hatch
 /// (`structurally_valid_shortcut_response`), which admits a `Shorten` without cloning the state
-/// precisely when this answers `true`. A second derivation in the hatch would be free to drift
+/// when this answers `true` and the place is inside the proposal's own range. A second derivation in the hatch would be free to drift
 /// from the reducer in either direction: dropping a legal answer, or admitting one the reducer
 /// refuses — which is the direction that spends a clone and still returns a rejection.
 pub(crate) fn shortcut_count_is_drivable(

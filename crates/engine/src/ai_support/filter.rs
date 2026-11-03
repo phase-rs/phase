@@ -3551,8 +3551,9 @@ mod tests {
         use crate::analysis::decision_template::IterationCount;
         use crate::analysis::loop_check::{OfferRoad, ShortcutProposal, ShortcutResponse};
 
-        // CR 732.2b: one queued responder is what keeps an Accept on the advance path; the
-        // count is two so place 1 is a shortening place the proposal admits.
+        // CR 732.2c: one queued responder is what keeps an Accept on the advance path — the
+        // shortcut is taken only once the last player has answered. The count is two so place 1
+        // is a CR 732.2b shortening place the proposal admits.
         let shortcut_state = || {
             let mut state = GameState::new_two_player(42);
             state.waiting_for = WaitingFor::RespondToShortcut {

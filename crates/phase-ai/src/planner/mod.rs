@@ -1991,9 +1991,10 @@ impl<'a> PlannerServices<'a> {
 }
 
 /// How the planner legality gate (`PlannerServices::candidate_is_valid`)
-/// validates a prompt answer, a named-choice answer or a library search
-/// selection, that `engine::ai_support::structurally_valid_prompt_answer`
-/// admits. Every other candidate is validated the same way under both.
+/// validates a prompt answer, a named-choice answer, a library search selection
+/// or a loop-shortcut answer, that
+/// `engine::ai_support::structurally_valid_prompt_answer` admits. Every other
+/// candidate is validated the same way under both.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PromptAnswerValidation {
     /// Simulate each answer on a state copy, as the gate's catch-all does. The
@@ -3342,11 +3343,11 @@ pub(crate) mod tests {
 
     // ------------------------------------------------------------------
     // Prompt-answer legality gate: `candidate_is_valid` admits a named-choice
-    // answer or a library search selection through
-    // `engine::ai_support::structurally_valid_prompt_answer` instead of a state
-    // copy + simulation, and only at the `NamedChoice` / `SearchChoice`
-    // windows. Every base board is reached through the real cast/play pipeline
-    // from the card's verbatim Oracle text.
+    // answer, a library search selection, or a loop-shortcut responder's answer
+    // through `engine::ai_support::structurally_valid_prompt_answer` instead of a
+    // state copy + simulation, and only at the `NamedChoice` / `SearchChoice` /
+    // `RespondToShortcut` windows. Every base board is reached through the real
+    // cast/play pipeline from the card's verbatim Oracle text.
     // ------------------------------------------------------------------
 
     const DISTANT_MELODY_ORACLE: &str =

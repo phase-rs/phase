@@ -736,7 +736,8 @@ fn an_accepted_until_lethal_grant_drains_even_with_a_foreign_period_in_state() {
 /// after every action.
 ///
 /// **Fixture pin:** P1 accepts first, so the window measured is P2's with `remaining_players`
-/// empty — the seat whose `Accept` is the materializing one. On a window that still has a queued
+/// empty — the seat whose `Accept` is the materializing one (CR 732.2c: the shortcut is taken once
+/// the last player has answered). On a window that still has a queued
 /// responder an `Accept` merely advances the poll, which is why the shorter window would pass
 /// vacuously. The enumeration reach guard (`exactly one RespondToShortcut`) is what keeps the
 /// zero counters from being satisfied by an empty action list.
@@ -804,6 +805,9 @@ fn shortcut_accept_validation_does_not_take_the_shortcut() {
     // Accept's take made driving the shortcut. Head: `validation_clones=0, state_copies=1`.
     // Exactly one copy remains, and it is `smart_shortcut_response`'s own probe clone (the
     // candidate's efficacy stage re-parks a copy at `Priority`); the take's snapshots are gone.
+    // `drive_snapshots` is 0 on BOTH sides here (the UntilLethal take drives through a path that
+    // records no drive snapshot), so the state copy is this board's take instrument, not that
+    // counter.
     assert_eq!(
         during.state_copies, 1,
         "one copy, the candidate probe's; the legality verdict must not add a take's snapshot"
