@@ -3388,6 +3388,7 @@ fn matches_via_origin_scoped_branch(
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
@@ -19500,14 +19501,11 @@ fn announce_spell_on_stack(
             super::engine_casting::remember_cast_start(state, prepared.object_id)?;
         }
         state.spell_cast_reversal = Some(std::sync::Arc::new(
-            crate::types::game_state::SpellCastReversal {
-                object_id: prepared.object_id,
+            crate::types::game_state::SpellCastReversal::announced(
+                prepared.object_id,
                 player,
-                journal_start: state.resolved_rules_journal.entries().len(),
-                undo: Vec::new(),
-                cost_mutations: false,
-                library_undo_forbidden: false,
-            },
+                state.resolved_rules_journal.entries().len(),
+            ),
         ));
     }
     // CR 400.7: A new cast announcement is a new casting event — discard any
@@ -27023,17 +27021,6 @@ fn alternative_cost_offer_payable(
     {
         return false;
     }
-    // CR 601.2b + CR 601.2h: a cast whose object carries its own REQUIRED
-    // additional cost pays that cost's declaration before the Defiler prompt,
-    // and that declaration can't see a Defiler's reduction, so the payment
-    // pipeline can't complete a cast that needs the reduction. The offer then
-    // doesn't credit it either: offer and payment agree (an honest gap for that
-    // combination, which no printed card has) rather than offering a cast that
-    // payment refuses.
-    let defiler_creditable = !state
-        .objects
-        .get(&object_id)
-        .is_some_and(|obj| matches!(obj.additional_cost, Some(AdditionalCost::Required(_))));
     target_assignments.iter().any(|targets| {
         let mut pricing = ResolvedAbility::new(Effect::NoOp, targets.clone(), object_id, player);
         if let Some(authority) = authority {
@@ -27059,17 +27046,16 @@ fn alternative_cost_offer_payable(
             // CR 118.3: a zero mana cost is always payable.
             && mana.as_ref().is_none_or(|m| {
                 can_pay_cost_after_auto_tap(state, player, object_id, m)
-                    || (defiler_creditable
-                        && casting_costs::defiler_reduced_cost_alongside(
-                            state,
-                            player,
-                            object_id,
-                            m,
-                            committed_life,
-                        )
-                        .is_some_and(|reduced| {
-                            can_pay_cost_after_auto_tap(state, player, object_id, &reduced)
-                        }))
+                    || casting_costs::defiler_reduced_cost_alongside(
+                        state,
+                        player,
+                        object_id,
+                        m,
+                        committed_life,
+                    )
+                    .is_some_and(|reduced| {
+                        can_pay_cost_after_auto_tap(state, player, object_id, &reduced)
+                    })
             })
     })
 }
@@ -32604,6 +32590,7 @@ fn target_filter_reads_chosen_target(filter: &TargetFilter, read: TargetRead) ->
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
