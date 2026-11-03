@@ -237,6 +237,17 @@ REQUIRED_ARTIFACT_H2_HEADINGS = (
     "anchored on",
     "final review-impl",
 )
+# The H2 heading matcher both the artifact audit and `scripts/check-pr-body.sh` parse with:
+# one definition, so a body cannot be split one way for one reader and another way for the
+# other.
+H2_HEADING_PATTERN = re.compile(r"^##\s+(.+?)\s*$")
+
+# The two head-bound PR-body lines, as AI-CONTRIBUTOR §5-6 prints them. Module constants
+# because a second reader (scripts/check-pr-body.sh) must test the SAME patterns the
+# artifact audit matches, rather than a copy that can drift.
+GATE_A_PASS_PATTERN = r"(?m)^Gate A PASS head=([0-9a-f]{40}) base=([0-9a-f]{40})$"
+FINAL_REVIEW_IMPL_PASS_PATTERN = r"(?m)^Final review-impl PASS head=([0-9a-f]{40})$"
+
 REQUIRED_VERIFICATION_CHECKBOX_LABELS = (
     "Required checks ran clean, or the exact CI-owned alternative is stated below.",
     "Gate A output below is for the current committed head.",
@@ -1924,7 +1935,7 @@ def markdown_sections(body: str | None) -> dict[str, list[str]]:
     current: str | None = None
     for line in (body or "").splitlines():
         stripped = line.strip()
-        match = re.match(r"^##\s+(.+?)\s*$", stripped)
+        match = H2_HEADING_PATTERN.match(stripped)
         if match:
             current = match.group(1).casefold()
             sections.setdefault(current, [])
@@ -1936,7 +1947,7 @@ def markdown_sections(body: str | None) -> dict[str, list[str]]:
 def relevant_h2_heading_counts(body: str | None) -> dict[str, int]:
     counts = {heading: 0 for heading in REQUIRED_ARTIFACT_H2_HEADINGS}
     for line in (body or "").splitlines():
-        match = re.match(r"^##\s+(.+?)\s*$", line.strip())
+        match = H2_HEADING_PATTERN.match(line.strip())
         if match:
             heading = match.group(1).casefold()
             if heading in counts:
@@ -1998,11 +2009,11 @@ def artifact_profile(
         heading for heading, count in heading_counts.items() if count > 1
     )
     gate_matches = re.findall(
-        r"(?m)^Gate A PASS head=([0-9a-f]{40}) base=([0-9a-f]{40})$",
+        GATE_A_PASS_PATTERN,
         section_text(sections, "gate a"),
     )
     review_matches = re.findall(
-        r"(?m)^Final review-impl PASS head=([0-9a-f]{40})$",
+        FINAL_REVIEW_IMPL_PASS_PATTERN,
         section_text(sections, "final review-impl"),
     )
     anchor_pattern = re.compile(r"^-\s+([^\s:][^:]*):([1-9][0-9]*)\s+(?:—|-)\s+.+$")
