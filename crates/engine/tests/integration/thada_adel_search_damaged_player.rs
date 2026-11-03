@@ -6,7 +6,6 @@ use super::rules::{run_combat, GameScenario, Phase, P0, P1};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::WaitingFor;
-use engine::types::identifiers::ObjectId;
 use engine::types::zones::Zone;
 
 const THADA_TRIGGER: &str = "Whenever Thada Adel deals combat damage to a player, search that player's library for an artifact card and exile it. Then that player shuffles. Until end of turn, you may play that card.";
@@ -53,7 +52,7 @@ fn thada_adel_searches_the_damaged_players_library() {
     };
     assert_eq!(*player, P0, "the controller is the searcher");
     assert_eq!(
-        cards.iter().copied().collect::<Vec<ObjectId>>(),
+        cards.to_vec(),
         vec![opp_artifact],
         "only the damaged player's artifact is a candidate"
     );
