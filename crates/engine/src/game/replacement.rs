@@ -13524,7 +13524,10 @@ enum CombatRiderPause {
     May { decline: usize },
     /// A choice the rider's own effect asks for (Channel Harm's "you may have Channel Harm deal
     /// that much damage"; Outfitted Jouster's "sacrifice an Equipment attached to Outfitted
-    /// Jouster" with two attached).
+    /// Jouster" with two attached). A rider that ended the game (Nefarious Lich: "If you can't,
+    /// you lose the game") lands here too: restoring the caller's wait overwrites its
+    /// `GameOver`, and the action boundary restores it from `game_end`
+    /// (`elimination::ensure_game_over_if_terminal`, CR 104.1).
     OwnPrompt,
 }
 
