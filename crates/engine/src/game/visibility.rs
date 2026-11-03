@@ -5082,7 +5082,7 @@ mod tests {
         continue_replacement, replace_event, replacement_choice_waiting_for, ReplacementResult,
     };
     use crate::game::scenario::{GameScenario, P0, P1};
-    use crate::game::zones::create_object;
+    use crate::game::zones::{create_object, move_to_zone};
     use crate::types::ability::EffectKind;
     use crate::types::ability::{
         AbilityCost, AbilityDefinition, AbilityKind, BeholdCostAction, CostPaidObjectSnapshot,
@@ -5110,6 +5110,9 @@ mod tests {
     use crate::types::proposed_event::{ProposedEvent, SearchFoundDisposition};
     use crate::types::replacements::ReplacementEvent;
     use crate::types::resolution::OptionalEffectFrame;
+    use crate::types::resolved_commands::{
+        ResolvedInformationAudience, ResolvedInformationEdit, ResolvedInformationLifetime,
+    };
     use crate::types::zones::{ExileCostSourceZone, Zone};
     use rand::RngCore;
     use std::collections::BTreeSet;
@@ -9994,11 +9997,6 @@ mod tests {
     /// behavior) ⇒ the hand assertion below FAILS.
     #[test]
     fn public_reveal_memory_survives_a_move_into_a_hand() {
-        use crate::game::zones::move_to_zone;
-        use crate::types::resolved_commands::{
-            ResolvedInformationAudience, ResolvedInformationEdit, ResolvedInformationLifetime,
-        };
-
         let mut state = GameState::new_two_player(42);
         let card_id = create_object(
             &mut state,
