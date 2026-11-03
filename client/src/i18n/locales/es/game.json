@@ -2405,6 +2405,7 @@
     "cardFallback": "Card",
     "title": "Pon {{name}} en la parte superior o inferior de la biblioteca",
     "top": "Superior de la biblioteca",
+    "nthFromTop": "Position {{n}} from the top of library",
     "bottom": "Inferior de la biblioteca"
   },
   "mutateMerge": {

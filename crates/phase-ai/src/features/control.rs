@@ -2,7 +2,7 @@
 //!
 //! Parser AST verification — VERIFIED:
 //! - `Effect::Counter { .. }` — counterspell detection
-//!   (`crates/engine/src/types/ability.rs:2118`). CR 701.6.
+//!   (`crates/phase-ast/src/types/ability.rs`). CR 701.6.
 //! - `Effect::Destroy { .. }` — destroy removal
 //!   (`ability.rs:2106`). CR 701.8.
 //! - `Effect::Bounce { destination: None | Some(Hand) }` — bounce removal
