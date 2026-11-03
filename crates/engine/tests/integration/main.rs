@@ -30,6 +30,7 @@ mod betor_lifelink_counters_repro;
 mod bishop_of_binding_where_x_exiled_card_power;
 mod blitz_em_dash_graveyard_cast;
 mod blizzard_brawl_snow_indestructible;
+mod board_wipe_co_departure_scaling;
 mod bring_to_light_free_cast_2880;
 mod cartographers_hawk_relative_damage_recipient;
 mod case_solve_condition;
