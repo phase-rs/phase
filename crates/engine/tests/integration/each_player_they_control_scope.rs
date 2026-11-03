@@ -37,6 +37,8 @@ const SHAMAN_ACTIVATED: &str = "Each player's life total becomes the number of c
 const WORLDFIRE_LIFE: &str = "Each player's life total becomes 1.";
 const REPAY_IN_KIND: &str =
     "Each player's life total becomes the lowest life total among all players.";
+const WORLDFIRE: &str =
+    "Exile all permanents. Exile all cards from all hands and graveyards. Each player's life total becomes 1.";
 const OKETRA: &str = "Your life total becomes equal to your starting life total.";
 
 /// Extract the `controller` of the lone `ObjectCount` quantity in `amount`.
@@ -287,4 +289,29 @@ fn repay_in_kind_seat_one_archenemy_sets_all_sides_to_ten() {
         heroes_shared, 10,
         "the heroes' shared total is set to the minimum 10"
     );
+}
+
+/// CR 119.5: Worldfire's "Each player's life total becomes 1" is the FIXED
+/// amount arm of the `AllPlayers` `SetLifeTotal` resolver, which the Biorhythm
+/// and Repay in Kind tests (both dynamic amounts) do not exercise. It is also an
+/// untargeted `AllPlayers` spell, so it casts through the same announcement path
+/// (CR 115.1a) that this change fixed; at the pre-fix base the cast is rejected
+/// with "No legal targets available".
+#[test]
+fn worldfire_casts_through_the_production_path_and_sets_every_player_to_one() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Worldfire", false, WORLDFIRE)
+        .with_mana_cost(ManaCost::zero())
+        .id();
+    let mut runner = scenario.build();
+    // Distinct starting totals, so "every player becomes 1" is not vacuous.
+    runner.state_mut().players[0].life = 20;
+    runner.state_mut().players[1].life = 7;
+
+    runner.cast(spell).resolve();
+
+    assert_eq!(runner.life(P0), 1, "P0 set to 1 from 20");
+    assert_eq!(runner.life(P1), 1, "P1 set to 1 from 7");
 }
