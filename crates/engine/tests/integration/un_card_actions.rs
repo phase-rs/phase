@@ -2182,6 +2182,101 @@ fn touch_triggers_held_in_an_ordering_prompt_count_toward_the_cap() {
 }
 
 #[test]
+fn the_touch_bound_spans_the_stack_and_the_deferred_queue() {
+    let max = engine::game::un_actions::MAX_PENDING_TOUCH_TRIGGERS;
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bile = scenario
+        .add_creature_from_oracle(P0, "Vile Bile", 2, 2, VILE_BILE)
+        .id();
+    let bolt = scenario.add_bolt_to_hand(P0);
+    let mut runner = scenario.build();
+    runner.state_mut().players[1].life = 1000;
+    un_action(&mut runner, P1, UnAction::SetEnabled { enabled: true });
+
+    // P1 is free to touch at any time, so fill most of the bound straight onto
+    // the stack while P1 holds a priority boundary.
+    let on_stack = max - 5;
+    for _ in 0..on_stack {
+        touch(&mut runner, P1, bile);
+    }
+    assert_eq!(runner.state().stack.len(), on_stack);
+
+    // P0 starts casting Lightning Bolt, which pauses for its target; touches
+    // made now park in the deferred queue instead (CR 603.3).
+    let card_id = runner.state().objects[&bolt].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: bolt,
+            card_id,
+            targets: vec![],
+            payment_mode: Default::default(),
+        })
+        .expect("P0 begins casting Lightning Bolt");
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ),
+        "reach guard: the announcement pauses for Bolt's target, got {:?}",
+        runner.state().waiting_for
+    );
+    let stack_while_casting = runner.state().stack.len();
+    for _ in 0..5 {
+        touch(&mut runner, P1, bile);
+    }
+    assert_eq!(runner.state().deferred_triggers.len(), 5);
+    assert_eq!(
+        runner.state().stack.len(),
+        stack_while_casting,
+        "a parked touch stays off the stack"
+    );
+
+    // The bound is on everything still waiting to resolve, not on either queue
+    // alone: an attacker alternating the two free entry points gains nothing.
+    let rejected = touch_result(&mut runner, P1, bile);
+    assert!(
+        matches!(rejected, Err(EngineError::InvalidAction(_))),
+        "{max} touches across the stack and the deferred queue fill the bound: {rejected:?}"
+    );
+    assert_eq!(
+        runner.state().deferred_triggers.len(),
+        5,
+        "a rejected touch parks nothing"
+    );
+    assert_eq!(
+        runner.state().stack.len(),
+        stack_while_casting,
+        "a rejected touch adds nothing to the stack"
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ),
+        "the rejection leaves the announcement pending, got {:?}",
+        runner.state().waiting_for
+    );
+    assert_eq!(runner.life(P1), 1000, "no touch has resolved yet");
+
+    // Every admitted touch is still owed once priority returns.
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Player(P0)),
+        })
+        .expect("P0 targets themself with Bolt");
+    while !runner.state().stack.is_empty() {
+        runner.resolve_top();
+    }
+    assert_eq!(
+        runner.life(P1),
+        1000 - 2 * max as i32,
+        "all {max} admitted touches resolved"
+    );
+    assert_settled(&runner, "after every touch resolved");
+}
+
+#[test]
 fn touch_triggers_parked_behind_a_decision_count_toward_the_cap() {
     let max = engine::game::un_actions::MAX_PENDING_TOUCH_TRIGGERS;
     // P1 already touched Vile Bile once while P0's Bolt announcement is paused

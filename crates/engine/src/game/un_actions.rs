@@ -331,12 +331,18 @@ fn has_functioning_touch_ability(state: &GameState, obj: &GameObject) -> bool {
         })
 }
 
-/// The most touch triggers one player may have waiting at once — parked in
-/// the deferred queue or on the stack. Each touch is its own trigger instance,
-/// but a touch is free and legal at any time, so without a bound one player
-/// could grow the stack without limit. An engine resource guard, not a rule:
-/// a touch costs Vile Bile's toucher 2 life, so this many waiting touches is
-/// already more life than any ordinary game holds.
+/// The most touch triggers one player may have waiting at once — on the stack,
+/// parked in the deferred queue, or held by a CR 603.3b ordering pass. Each
+/// touch is its own trigger instance, but a touch is free and legal at any
+/// time, so without a bound one player could grow the stack without limit.
+/// The bound covers those three queues together, so alternating the entry
+/// points that feed them (a priority boundary and a pending decision) buys
+/// nothing. An engine resource guard, not a rule: a touch costs Vile Bile's
+/// toucher 2 life, so this many waiting touches is already more life than any
+/// ordinary game holds.
+///
+/// A touch that triggers nothing adds no engine state to bound — its cost is
+/// one ordinary action, which the server's action rate limiter already covers.
 pub const MAX_PENDING_TOUCH_TRIGGERS: usize = 64;
 
 /// Whether `event` records `player` touching an object.
