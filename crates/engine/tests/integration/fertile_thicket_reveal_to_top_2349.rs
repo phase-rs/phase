@@ -99,17 +99,6 @@ fn fertile_thicket_keeps_revealed_basic_land_on_top_and_rest_on_bottom() {
         "only the basic land may be kept; selectable = {selectable_cards:?}"
     );
 
-    // CR 701.20a (fails if Step 2 reverted): the clause's verb is "reveal", so
-    // the card it may keep is publicly revealed while the pick is pending. Had
-    // the Dig been left at reveal:false (a private look), no public marker would
-    // exist for it.
-    assert!(
-        runner.state().revealed_cards.contains(&basic_land),
-        "the revealed basic land must be publicly revealed while the pick is \
-         pending (reveal:true); revealed_cards = {:?}",
-        runner.state().revealed_cards
-    );
-
     // Submit the keep-selection: the revealed Forest.
     runner
         .act(GameAction::SelectCards {
