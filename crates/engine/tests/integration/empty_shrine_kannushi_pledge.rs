@@ -5,7 +5,10 @@
 use std::io::Read;
 
 use engine::database::card_db::CardDatabase;
-use engine::game::coverage::card_face_gaps;
+use engine::game::combat::AttackTarget;
+use engine::game::coverage::{
+    audit_resolver_features, build_parse_details_for_face, card_face_gaps,
+};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::targeting::find_legal_targets;
@@ -13,10 +16,11 @@ use engine::types::ability::{
     ContinuousModification, ProtectionDoesNotRemove, TargetFilter, TargetRef, TypedFilter,
 };
 use engine::types::actions::GameAction;
-use engine::types::game_state::{GameState, WaitingFor};
+use engine::types::card_type::CoreType;
+use engine::types::game_state::{CastingVariant, GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::{Keyword, ProtectionColorSet, ProtectionTarget};
-use engine::types::mana::{ManaColor, ManaType, ManaUnit};
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
@@ -668,8 +672,6 @@ fn kannushi_pledge_protection_reaches_targeting() {
 // CR 702.16f: blocking reads the same concrete colors as targeting and damage.
 #[test]
 fn kannushi_pledge_protection_reaches_blocking() {
-    use engine::game::combat::AttackTarget;
-
     let mut s = scenario();
     let host = s.add_creature(P0, "Attacker fixture", 4, 6).id();
     let sibling = s.add_creature(P0, "Sibling attacker fixture", 4, 6).id();
@@ -718,8 +720,6 @@ fn kannushi_pledge_protection_reaches_blocking() {
 // substitutes for either real Oracle card. Runtime support is guarded above.
 #[test]
 fn kannushi_pledge_coverage_keeps_unexpanded_and_inert_encodings_red() {
-    use engine::game::coverage::{audit_resolver_features, build_parse_details_for_face};
-
     let face = db().get_face_by_name("Empty-Shrine Kannushi").unwrap();
     let mut printed = face.clone();
     printed.static_abilities.clear();
@@ -809,10 +809,6 @@ fn kannushi_pledge_raw_oracle_and_nonbattlefield_colors() {
 // No test-side layer flush, dirty marking, keyword seeding, or form assignment.
 #[test]
 fn kannushi_pledge_prototype_entry_updates_existing_recipient() {
-    use engine::types::card_type::CoreType;
-    use engine::types::game_state::CastingVariant;
-    use engine::types::mana::{ManaCost, ManaCostShard};
-
     const FLESHGORGER: &str = "Prototype {1}{B}{B} — 3/3 (You may cast this spell with different mana cost, color, and size. It keeps its abilities and types.)\nMenace, lifelink\nWard—Pay life equal to this creature's power.";
     let database = db();
     assert_grant(database, "Empty-Shrine Kannushi", KANNUSHI, false);

@@ -9,12 +9,13 @@ use crate::types::ability::{
     ActivationRestriction, AggregateFunction, AttackedYouScope, AttackerBlockStatus,
     CardTypeSetSource, CommanderOwnership, Comparator, ControllerRef, CountScope, DamageKindFilter,
     Duration, Effect, FilterProp, ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation,
-    PlayerScope, PtStat, PtValueScope, QuantityExpr, QuantityRef, SharedQuality,
-    SharedQualityRelation, SubtypeExclusion, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
+    PlayerScope, ProtectionDoesNotRemove, PtStat, PtValueScope, QuantityExpr, QuantityRef,
+    SharedQuality, SharedQualityRelation, SubtypeExclusion, TargetFilter, TypeFilter, TypedFilter,
+    ZoneRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
-use crate::types::keywords::{Keyword, WardCost};
+use crate::types::keywords::{Keyword, ProtectionColorSet, ProtectionTarget, WardCost};
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::statics::{AdditionalCostTaxAction, CrewAction, CrewContributionKind};
 use crate::types::zones::Zone;
@@ -41897,9 +41898,6 @@ fn commanders_plate_static_line_parses_to_each_color_protection_set() {
 // SHAPE: full-document routing must retain the live set and the Aura's own-source rider.
 #[test]
 fn kannushi_pledge_full_oracle_live_color_set() {
-    use crate::types::ability::ProtectionDoesNotRemove;
-    use crate::types::keywords::{ProtectionColorSet, ProtectionTarget};
-
     for (name, text, types, subtypes, aura) in [
         (
             "Empty-Shrine Kannushi",

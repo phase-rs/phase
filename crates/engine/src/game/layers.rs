@@ -13503,8 +13503,6 @@ mod tests {
     // broader invalidation. The integration regression casts the actual cards.
     #[test]
     fn kannushi_pledge_population_probe_reads_entrant_color_and_controller() {
-        use crate::game::scenario::{GameScenario, P0, P1};
-
         for with_hour in [false, true] {
             let mut scenario = GameScenario::new();
             let host = scenario
