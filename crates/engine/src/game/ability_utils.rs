@@ -13208,12 +13208,15 @@ mod tests {
     use std::cell::RefCell;
 
     use super::*;
+    use crate::game::scenario::{GameScenario, P0, P1};
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AttachCardinality, AttachmentReferent, CopyRecipient, ManaProduction, ManaTargetRole,
-        PreventionAmount, PreventionScope,
+        AttachCardinality, AttachmentReferent, CoinFlipResult, CopyRecipient, ManaProduction,
+        ManaTargetRole, PreventionAmount, PreventionScope,
     };
     use crate::types::ability::{CombatRelation, CombatRelationSubject};
+    use crate::types::counter::CounterType;
+    use crate::types::phase::Phase;
 
     #[test]
     fn inherit_result_branch_source_identity_follows_the_carrier_policy() {
@@ -15962,10 +15965,6 @@ mod tests {
     /// target declarations (Clash of the Eikons, phase-rs/phase#8354).
     #[test]
     fn fight_head_mode_truncates_later_modes_slots_clash_of_the_eikons() {
-        use crate::game::scenario::{GameScenario, P0, P1};
-        use crate::types::counter::CounterType;
-        use crate::types::phase::Phase;
-
         const CLASH_OF_THE_EIKONS_TEXT: &str = "Choose one or more —\n\
             • Target creature you control fights target creature an opponent controls.\n\
             • Remove a lore counter from target Saga you control. (Removing lore counters \
@@ -30036,7 +30035,6 @@ mod tests {
     // declares its own target. Neither nests declarations three levels deep.
     #[test]
     fn coin_antecedent_authority_skips_same_instance_and_dependent_declarations() {
-        use crate::types::ability::CoinFlipResult;
         let branch = ChainStep::CoinFlipBranch {
             result: CoinFlipResult::Lost,
         };

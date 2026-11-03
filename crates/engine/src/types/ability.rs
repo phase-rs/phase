@@ -3927,26 +3927,31 @@ impl ResolvedAbility {
     pub fn child_links(
         &self,
     ) -> impl Iterator<Item = (crate::types::game_state::ChainStep, &ResolvedAbility)> {
-        use crate::types::game_state::ChainStep;
         let (won, lost) = match self.coin_branches.as_deref() {
             Some(branches) => (branches.won.as_ref(), branches.lost.as_ref()),
             None => (None, None),
         };
         [
             (
-                ChainStep::CoinFlipBranch {
+                crate::types::game_state::ChainStep::CoinFlipBranch {
                     result: CoinFlipResult::Won,
                 },
                 won,
             ),
             (
-                ChainStep::CoinFlipBranch {
+                crate::types::game_state::ChainStep::CoinFlipBranch {
                     result: CoinFlipResult::Lost,
                 },
                 lost,
             ),
-            (ChainStep::SubAbility, self.sub_ability.as_deref()),
-            (ChainStep::ElseAbility, self.else_ability.as_deref()),
+            (
+                crate::types::game_state::ChainStep::SubAbility,
+                self.sub_ability.as_deref(),
+            ),
+            (
+                crate::types::game_state::ChainStep::ElseAbility,
+                self.else_ability.as_deref(),
+            ),
         ]
         .into_iter()
         .filter_map(|(edge, child)| child.map(|child| (edge, child)))
@@ -3955,26 +3960,31 @@ impl ResolvedAbility {
     pub fn child_links_mut(
         &mut self,
     ) -> impl Iterator<Item = (crate::types::game_state::ChainStep, &mut ResolvedAbility)> {
-        use crate::types::game_state::ChainStep;
         let (won, lost) = match self.coin_branches.as_deref_mut() {
             Some(branches) => (branches.won.as_mut(), branches.lost.as_mut()),
             None => (None, None),
         };
         [
             (
-                ChainStep::CoinFlipBranch {
+                crate::types::game_state::ChainStep::CoinFlipBranch {
                     result: CoinFlipResult::Won,
                 },
                 won,
             ),
             (
-                ChainStep::CoinFlipBranch {
+                crate::types::game_state::ChainStep::CoinFlipBranch {
                     result: CoinFlipResult::Lost,
                 },
                 lost,
             ),
-            (ChainStep::SubAbility, self.sub_ability.as_deref_mut()),
-            (ChainStep::ElseAbility, self.else_ability.as_deref_mut()),
+            (
+                crate::types::game_state::ChainStep::SubAbility,
+                self.sub_ability.as_deref_mut(),
+            ),
+            (
+                crate::types::game_state::ChainStep::ElseAbility,
+                self.else_ability.as_deref_mut(),
+            ),
         ]
         .into_iter()
         .filter_map(|(edge, child)| child.map(|child| (edge, child)))

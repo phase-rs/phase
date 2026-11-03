@@ -19369,13 +19369,13 @@ pub mod tests {
         CommanderOwnership, Comparator, ContinuousModification, ControllerRef, DamageChannel,
         DamageKindFilter, DelayedTriggerCondition, DelayedTriggerKind, DelayedTriggerLifetime,
         DiscardSelfScope, Duration, EachDamageRecipient, Effect, FilterProp, GuessSubject,
-        KickerVariant, ModalChoice, MultiTargetSpec, NumberQuality, Parity, PlayerFilter,
-        PlayerScope, PreventionAmount, PreventionScope, PtStat, PtValue, PtValueScope,
-        QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode, ResolvedAbility,
-        SearchSelectionConstraint, SharedQuality, SharedQualityRelation, SpentColor,
-        StaticCondition, StaticDefinition, TargetFilter, TargetRef, TargetSelectionMode,
-        TriggerCondition, TriggerConstraint, TriggerDefinition, TriggerGrantInstanceRef,
-        TypeFilter, TypedFilter,
+        KickerVariant, ModalChoice, MultiTargetSpec, NumberQuality, ParentTargetMissingReason,
+        Parity, PlayerFilter, PlayerScope, PreventionAmount, PreventionScope, PtStat, PtValue,
+        PtValueScope, QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode,
+        ResolvedAbility, SearchSelectionConstraint, SharedQuality, SharedQualityRelation,
+        SpentColor, StaticCondition, StaticDefinition, TargetFilter, TargetReadOrigin, TargetRef,
+        TargetSelectionMode, TriggerCondition, TriggerConstraint, TriggerDefinition,
+        TriggerGrantInstanceRef, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card::LayoutKind;
@@ -21088,7 +21088,6 @@ pub mod tests {
     // block that seeding.
     #[test]
     fn unavailable_announcements_block_only_their_own_event_and_attack_reseeding() {
-        use crate::types::ability::{ParentTargetMissingReason, TargetReadOrigin};
         let state = GameState::default();
         let event = GameEvent::Milled {
             player_id: PlayerId(0),

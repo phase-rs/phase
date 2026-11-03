@@ -4582,7 +4582,10 @@ mod tests {
     use super::*;
     use crate::game::game_object::AttachTarget;
     use crate::game::zones::create_object;
-    use crate::types::ability::{Comparator, ContinuousModification, Duration, QuantityExpr};
+    use crate::types::ability::{
+        Comparator, ContinuousModification, Duration, ParentTargetMissingReason, QuantityExpr,
+        TargetReadOrigin,
+    };
     use crate::types::card_type::CoreType;
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
@@ -8250,8 +8253,6 @@ mod tests {
     // whole); Assembled Alphas names the block-event creature's controller (the fallback case).
     #[test]
     fn unavailable_parent_player_does_not_fall_back_to_the_firing_event() {
-        use crate::types::ability::{ParentTargetMissingReason, TargetReadOrigin};
-
         let (mut state, source, host) = setup_with_creatures();
         state.current_trigger_event = Some(GameEvent::BlockersDeclared {
             assignments: vec![(source, host)],

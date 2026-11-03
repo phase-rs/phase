@@ -27537,8 +27537,8 @@ mod attached_set_host_filter_tests {
     use crate::game::effects::attach::attach_to;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        filter_prop_contains, AttachmentReferent, Effect, FilterProp, ResolvedAbility,
-        TargetFilter, TypedFilter,
+        filter_prop_contains, AttachmentReferent, ControllerRef, Effect, FilterProp,
+        ParentTargetMissingReason, ResolvedAbility, TargetFilter, TargetReadOrigin, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::events::GameEvent;
@@ -27642,8 +27642,6 @@ mod attached_set_host_filter_tests {
     // fizzles whole.
     #[test]
     fn unavailable_parent_host_does_not_fall_back_to_the_firing_event() {
-        use crate::types::ability::{ParentTargetMissingReason, TargetReadOrigin};
-
         let mut state = state();
         let host = creature(&mut state, PlayerId(1), "Event host");
         let att = aura(&mut state, PlayerId(1), "Attached aura");
@@ -27690,8 +27688,6 @@ mod attached_set_host_filter_tests {
     // supply a wrong fallback.
     #[test]
     fn unavailable_parent_possessor_matches_no_players_objects() {
-        use crate::types::ability::{ControllerRef, ParentTargetMissingReason, TargetReadOrigin};
-
         let mut state = state();
         let candidate = creature(&mut state, PlayerId(1), "Event player's creature");
         state.current_trigger_event = Some(GameEvent::PermanentUntapped {

@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{
-    ChoiceType, CoinFlipRun, Effect, ForwardedResultContext, QuantityExpr,
+    ChoiceType, CoinFlipRun, Effect, ForwardedResultContext, QuantityExpr, TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
@@ -608,7 +608,6 @@ fn branch_local_player_choice_follows_the_enclosing_choice_after_krark() {
 // then a flip whose loss hands the creature to that opponent.
 #[test]
 fn thumb_incoming_references_restore_without_repinning_and_reject_missing_pins() {
-    use engine::types::ability::TargetRef;
     for forwarded in [false, true] {
         for stale in [false, true] {
             let mut game = two_choices(true);

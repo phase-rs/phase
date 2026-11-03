@@ -2137,7 +2137,8 @@ mod tests {
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, BounceSelection, ControllerRef, DamageKindFilter,
         DelayedTriggerCondition, Effect, ExtraPhaseAnchor, ExtraPhaseRecipient, ManaProduction,
-        ObjectScope, PtValue, QuantityExpr, QuantityRef, TriggerDefinition, TypedFilter,
+        ObjectScope, ParentTargetMissingReason, PtValue, QuantityExpr, QuantityRef,
+        TargetReadOrigin, TriggerDefinition, TypedFilter,
     };
     use crate::types::identifiers::{CardId, ExtraPhaseId, ObjectId, TrackedSetId};
     use crate::types::mana::ManaCost;
@@ -4416,8 +4417,6 @@ mod tests {
     // parent target is not created when that announcement is illegal, only when unassigned.
     #[test]
     fn zone_conditions_distinguish_unavailable_and_unassigned_parent_bindings() {
-        use crate::types::ability::{ParentTargetMissingReason, TargetReadOrigin};
-
         for condition in [
             DelayedTriggerCondition::WhenDies {
                 filter: TargetFilter::ParentTarget,

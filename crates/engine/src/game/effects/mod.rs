@@ -9,6 +9,7 @@ pub(crate) use crate::types::ability::{
 };
 use crate::types::ability::{
     effect_parent_ref_slots, effect_target_filter, filter_refs_event_subject,
+    ParentTargetMissingReason,
 };
 
 use crate::game::conditions::{
@@ -4722,7 +4723,6 @@ fn resolve_sub_with_missing_forward_result(
 // CR 608.2c + CR 609.3: A referent never produced stays absent through
 // targetless hops; a branch with its own targets has its own referent.
 fn inherit_missing_parent_referent(child: &mut ResolvedAbility, parent: &ResolvedAbility) {
-    use crate::types::ability::ParentTargetMissingReason;
     // CR 608.2b: this declaration's own legality verdict outranks every
     // incoming producer's missing-result reason.
     if child.has_authoritative_empty_binding()
@@ -28822,8 +28822,9 @@ mod tests {
     use crate::database::synthesis::synthesize_extort;
     use crate::game::scenario::{GameScenario, P0, P1};
     use crate::types::ability::{
-        ChooseOneOfKind, CoinFlipRun, LibraryInstructionActor, LibraryPosition,
-        ParentTargetMissingReason, SearchSelectionConstraint, SpentColor, UNION_DEPTH_BUDGET,
+        filter_requires_parent_target_object, ChooseOneOfKind, CoinFlipRun,
+        LibraryInstructionActor, LibraryPosition, ParentTargetMissingReason,
+        SearchSelectionConstraint, SpentColor, UNION_DEPTH_BUDGET,
     };
 
     /// CR 603.2h + CR 608.2d: the "would it prompt" authority agrees with production for
@@ -29545,7 +29546,6 @@ mod tests {
     // control' filter does not.
     #[test]
     fn typed_parent_controller_and_owner_are_metadata_dependencies() {
-        use crate::types::ability::filter_requires_parent_target_object;
         for controller in [
             ControllerRef::ParentTargetController,
             ControllerRef::ParentTargetOwner,
@@ -65070,7 +65070,6 @@ mod untargeted_target_only_choice_tests {
     // target, with no later payoff; Fight for the Throne's subject is announced.
     #[test]
     fn missing_forward_result_prunes_declaring_fight_but_keeps_independent_payoff() {
-        use crate::types::ability::TypedFilter;
         let mut runner = GameScenario::new().build();
         let mut payoff = gain_life(4);
         payoff.sub_link = SubAbilityLink::SequentialSibling;

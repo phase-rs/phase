@@ -3364,7 +3364,6 @@ mod tests {
     // whole. Sovereigns: event-referent host, the unassigned fallback case.
     #[test]
     fn unavailable_attachment_host_does_not_use_an_unrelated_event_referent() {
-        use crate::types::ability::{AttachSelection, ParentTargetMissingReason, TargetReadOrigin};
         let mut state = GameState::new_two_player(42);
         state.current_trigger_event = Some(GameEvent::Milled {
             player_id: PlayerId(0),
@@ -3414,10 +3413,10 @@ mod tests {
     use crate::game::engine::apply_as_current;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, ControllerRef, FilterProp, MultiTargetSpec, PlayerFilter,
-        PtValue, QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode,
-        StaticDefinition, TargetChoiceTiming, TargetFilter, TargetRef, ThisWayCause, TypeFilter,
-        TypedFilter,
+        AbilityDefinition, AbilityKind, AttachSelection, ControllerRef, FilterProp,
+        MultiTargetSpec, ParentTargetMissingReason, PlayerFilter, PtValue, QuantityExpr,
+        QuantityRef, ReplacementDefinition, ReplacementMode, StaticDefinition, TargetChoiceTiming,
+        TargetFilter, TargetReadOrigin, TargetRef, ThisWayCause, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card::PrintedLoyalty;

@@ -3,17 +3,43 @@
 //! "unless you pay {3}" with `finish_declining_payment`.
 
 use engine::ai_support::legal_actions;
+use engine::game::ability_utils::{build_resolved_from_def, build_target_slots};
 use engine::game::casting::can_activate_ability_now;
-use engine::game::game_object::ObjectIncarnationRefExt;
+use engine::game::combat::{AttackTarget, AttackerInfo, CombatState};
+use engine::game::effects;
+use engine::game::effects::attach::attach_to;
+use engine::game::effects::flip_coin;
+use engine::game::game_object::{AttachTarget, ObjectIncarnationRefExt};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::stack::stack_display_groups;
+use engine::game::visibility::filter_state_for_viewer;
 use engine::parser::parse_oracle_text;
-use engine::types::ability::{CoinFlipRun, Effect, EffectKind, TargetFilter, TargetRef};
+use engine::types::ability::{
+    AbilityCost, AbilityDefinition, AbilityKind, AttachSelection, AttachmentReferent, ChoiceType,
+    CoinFlipResult, CoinFlipRun, Comparator, ControllerRef, CopyRetargetPermission,
+    CostPaidObjectSnapshot, DelayedTriggerCondition, Effect, EffectError, EffectKind, FilterProp,
+    MultiTargetSpec, ObjectScope, PileSource, PlayerFilter, PlayerScope, PreventionAmount, PtStat,
+    PtValueScope, QuantityExpr, QuantityRef, ReplacementDefinition, ResolvedAbility, SharedQuality,
+    SharedQualityRelation, StackAbilityKind, SubAbilityLink, TargetChoiceTiming, TargetFilter,
+    TargetRef, TargetSelectionMode, TriggerDefinition, TypeFilter, TypedFilter, VoterScope,
+};
 use engine::types::actions::GameAction;
+use engine::types::card_type::CoreType;
+use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{CastPaymentMode, GameRng, RandomDraw, WaitingFor};
-use engine::types::identifiers::ObjectId;
-use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+use engine::types::game_state::{
+    CastPaymentMode, ChainStep, CopyChoiceMode, DistributionUnit, GameRng, ManaSpentSourceSnapshot,
+    PersistedGameState, PileSide, RandomDraw, RetargetScope, RetargetSlotAddress, StackEntryKind,
+    WaitingFor,
+};
+use engine::types::identifiers::{CardId, ObjectId, ObjectIncarnationRef};
+use engine::types::keywords::Keyword;
+use engine::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
+use engine::types::player::PlayerId;
+use engine::types::replacements::ReplacementEvent;
+use engine::types::resolution::{ResolutionStateWire, RESOLUTION_STATE_WIRE_VERSION};
+use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 use rand::Rng;
 
@@ -714,7 +740,6 @@ fn crooked_scales_printed_text_lost_flip_asks_for_the_payment_and_destroys_the_a
 
 #[test]
 fn coin_branch_stack_persistence_is_strict_and_current_bindings_execute() {
-    use engine::types::resolution::{ResolutionStateWire, RESOLUTION_STATE_WIRE_VERSION};
     let (mut runner, source, own, opposing) = two_branch_fixture(true, true);
     runner
         .act(GameAction::ActivateAbility {
@@ -802,7 +827,6 @@ fn coin_branch_stack_persistence_is_strict_and_current_bindings_execute() {
 // color word); Chaotic Strike has only a targeted win pump.
 #[test]
 fn text_substitution_reaches_both_live_coin_branch_filters() {
-    use engine::types::mana::ManaColor;
     // Synthetic supported pump grammar; neither real pump card has a color restriction.
     const COIN: &str = "Flip a coin. If you win the flip, target nonred creature gets +1/+1 until end of turn. If you lose the flip, target nonred creature gets +2/+2 until end of turn.";
     const CHANGE: &str = "Change the text of target spell or permanent by replacing all instances of one color word with another. (For example, you may change \"target black spell\" to \"target blue spell.\" This effect lasts indefinitely.)";
@@ -893,12 +917,6 @@ fn text_substitution_reaches_both_live_coin_branch_filters() {
 // installed); Desperate Gambit's coin installs replacements instead of being one.
 #[test]
 fn installed_coin_replacements_round_trip_and_execute_the_selected_bound_branch() {
-    use engine::types::ability::{AbilityDefinition, AbilityKind, QuantityExpr};
-    use engine::types::card_type::CoreType;
-    use engine::types::identifiers::CardId;
-    use engine::types::replacements::ReplacementEvent;
-    use engine::types::resolution::ResolutionStateWire;
-
     for family in [ReplacementEvent::Draw, ReplacementEvent::Planeswalk] {
         // None is the non-coin substitute control; both coin outcomes are pinned.
         for outcome in [Some(true), Some(false), None] {
@@ -1058,11 +1076,6 @@ fn installed_coin_replacements_round_trip_and_execute_the_selected_bound_branch(
 // sibling branches; Frenetic Sliver's won branch delays returning itself at end step.
 #[test]
 fn delayed_parent_referent_never_reads_an_unselected_coin_siblings_declaration() {
-    use engine::types::ability::{
-        AbilityDefinition, AbilityKind, DelayedTriggerCondition, QuantityExpr, TypedFilter,
-    };
-    use engine::types::counter::CounterType;
-
     for has_ancestor in [false, true] {
         let counter = |target| Effect::PutCounter {
             counter_type: CounterType::Plus1Plus1,
@@ -1168,14 +1181,6 @@ fn delayed_parent_referent_never_reads_an_unselected_coin_siblings_declaration()
 // lose branch counts creatures controlled by its target's controller (no nested coin); Goblin Kites
 // delays a coin referring to an earlier target.
 fn typed_owner_coin_binding_scenario(remove_b: bool, delayed_phase: Option<Phase>) {
-    use engine::game::game_object::AttachTarget;
-    use engine::types::ability::{
-        AbilityDefinition, AbilityKind, ControllerRef, DelayedTriggerCondition, QuantityExpr,
-        TypedFilter,
-    };
-    use engine::types::counter::CounterType;
-    use engine::types::player::PlayerId;
-
     let mass = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::PutCounterAll {
@@ -1433,10 +1438,6 @@ fn delayed_coin_typed_owner_scope_snapshots_its_announced_binding() {
 // trigger about itself.
 #[test]
 fn delayed_death_condition_never_widens_an_unavailable_announcement() {
-    use engine::types::ability::{
-        AbilityDefinition, AbilityKind, DelayedTriggerCondition, QuantityExpr, TypedFilter,
-    };
-
     for remove_b in [true, false] {
         let creature = TargetFilter::Typed(TypedFilter::creature());
         let delayed = AbilityDefinition::new(
@@ -1607,16 +1608,6 @@ fn empty_coin_binding_scenario(
     keep_restore: bool,
     rider: EmptyCoinRider,
 ) {
-    use engine::game::combat::{AttackTarget, AttackerInfo, CombatState};
-    use engine::game::game_object::AttachTarget;
-    use engine::types::ability::{
-        AbilityDefinition, AbilityKind, DelayedTriggerCondition, PreventionAmount, QuantityExpr,
-        ReplacementDefinition, TypedFilter,
-    };
-    use engine::types::counter::CounterType;
-    use engine::types::replacements::ReplacementEvent;
-    use engine::types::resolution::ResolutionStateWire;
-
     let player_rider = matches!(
         rider,
         EmptyCoinRider::DrawController
@@ -2503,10 +2494,6 @@ fn pass_to_coin_keep(runner: &mut GameRunner, events: &mut Vec<GameEvent>) {
 
 #[test]
 fn thumb_restore_keeps_each_declared_branch_occurrence_and_refuses_pin_drift() {
-    use engine::types::ability::{AbilityDefinition, AbilityKind};
-    use engine::types::identifiers::ObjectIncarnationRef;
-    use engine::types::resolution::ResolutionStateWire;
-
     for won in [false, true] {
         for stale in [false, true] {
             let mut scenario = GameScenario::new();
@@ -2645,9 +2632,6 @@ fn thumb_restore_keeps_each_declared_branch_occurrence_and_refuses_pin_drift() {
 
 #[test]
 fn malformed_coin_carrier_refuses_before_rng_or_mutation_and_canonical_executes() {
-    use engine::game::ability_utils::build_resolved_from_def;
-    use engine::game::effects::flip_coin;
-    use engine::types::ability::{EffectError, ResolvedAbility};
     // Tavern Swindler, printed text (byte-identical to the exported MTGJSON oracle_text).
     const TAVERN_SWINDLER: &str =
         "{T}, Pay 3 life: Flip a coin. If you win the flip, you gain 6 life.";
@@ -2714,7 +2698,6 @@ fn malformed_coin_carrier_refuses_before_rng_or_mutation_and_canonical_executes(
 // the PR body lists it as a known limitation.
 #[test]
 fn bangchuckers_shaped_loss_never_borrows_the_win_only_target() {
-    use engine::types::ability::{AbilityDefinition, AbilityKind, QuantityExpr, TypedFilter};
     for (won, self_damage) in [(true, false), (false, false), (false, true)] {
         let mut scenario = GameScenario::new();
         scenario.at_phase(Phase::PreCombatMain);
@@ -2794,10 +2777,6 @@ fn bangchuckers_shaped_loss_never_borrows_the_win_only_target() {
 // fixed count; Traprunner: three-coin per-win effect, untargeted.
 #[test]
 fn repeated_bound_branch_recomputes_counter_quantity_from_a_pristine_template() {
-    use engine::types::ability::{
-        AbilityDefinition, AbilityKind, ObjectScope, QuantityExpr, QuantityRef, TypedFilter,
-    };
-    use engine::types::counter::CounterType;
     for until_loss in [false, true] {
         let coin = Effect::FlipCoins {
             flips: if until_loss {
@@ -2864,20 +2843,19 @@ fn repeated_bound_branch_recomputes_counter_quantity_from_a_pristine_template() 
             Counter(u32),
             Complete,
         }
-        use RunEvent::{Complete, Counter, Flip};
         let stream: Vec<_> = outcome
             .events()
             .iter()
             .filter_map(|event| match event {
-                GameEvent::CoinFlipped { won, .. } => Some(Flip(*won)),
+                GameEvent::CoinFlipped { won, .. } => Some(RunEvent::Flip(*won)),
                 GameEvent::CounterAdded {
                     object_id, count, ..
-                } if *object_id == target => Some(Counter(*count)),
+                } if *object_id == target => Some(RunEvent::Counter(*count)),
                 GameEvent::EffectResolved {
                     kind: EffectKind::FlipCoins,
                     source_id,
                     ..
-                } if *source_id == spell => Some(Complete),
+                } if *source_id == spell => Some(RunEvent::Complete),
                 _ => None,
             })
             .collect();
@@ -2885,24 +2863,24 @@ fn repeated_bound_branch_recomputes_counter_quantity_from_a_pristine_template() 
             stream,
             if until_loss {
                 vec![
-                    Flip(true),
-                    Flip(true),
-                    Flip(true),
-                    Flip(false),
-                    Counter(2),
-                    Counter(4),
-                    Counter(8),
-                    Complete,
+                    RunEvent::Flip(true),
+                    RunEvent::Flip(true),
+                    RunEvent::Flip(true),
+                    RunEvent::Flip(false),
+                    RunEvent::Counter(2),
+                    RunEvent::Counter(4),
+                    RunEvent::Counter(8),
+                    RunEvent::Complete,
                 ]
             } else {
                 vec![
-                    Flip(true),
-                    Counter(2),
-                    Flip(true),
-                    Counter(4),
-                    Flip(true),
-                    Counter(8),
-                    Complete,
+                    RunEvent::Flip(true),
+                    RunEvent::Counter(2),
+                    RunEvent::Flip(true),
+                    RunEvent::Counter(4),
+                    RunEvent::Flip(true),
+                    RunEvent::Counter(8),
+                    RunEvent::Complete,
                 ]
             }
         );
@@ -2918,7 +2896,6 @@ fn repeated_bound_branch_recomputes_counter_quantity_from_a_pristine_template() 
 
 #[test]
 fn independent_coin_declaration_owns_its_pins_even_when_incoming_id_is_reused() {
-    use engine::types::identifiers::ObjectIncarnationRef;
     for keyed_child in [None, Some(false), Some(true)] {
         // Chaotic Strike, printed text: the win-only branch targets a creature declared at cast.
         let (mut runner, spell, creatures) = chaotic_fixture(true);
@@ -2982,11 +2959,6 @@ fn independent_coin_declaration_owns_its_pins_even_when_incoming_id_is_reused() 
 // control of that creature.").
 #[test]
 fn thumb_completed_empty_choice_restores_and_runs_only_independent_instructions() {
-    use engine::types::ability::{
-        AbilityDefinition, AbilityKind, ControllerRef, QuantityExpr, SubAbilityLink,
-        TargetChoiceTiming, TypedFilter,
-    };
-    use engine::types::resolution::ResolutionStateWire;
     for populated in [false, true] {
         let mut life = AbilityDefinition::new(
             AbilityKind::Spell,
@@ -3121,7 +3093,6 @@ fn thumb_completed_empty_choice_restores_and_runs_only_independent_instructions(
 // instruction after the coin.
 #[test]
 fn coin_children_precede_a_targeted_successor_and_nested_children() {
-    use engine::types::ability::{AbilityDefinition, AbilityKind};
     for nested in [false, true] {
         for won in [false, true] {
             for bulk in [false, true] {
@@ -3277,7 +3248,6 @@ fn chaotic_strike_loss_still_draws_without_pumping_either_creature() {
 // independent instruction after the coin.
 #[test]
 fn illegal_coin_children_do_not_substitute_distractors_or_suppress_a_legal_tail() {
-    use engine::types::ability::{AbilityDefinition, AbilityKind, QuantityExpr};
     for removed in [0, 1, 2, 3] {
         for won in [false, true] {
             let mut definition = parse_oracle_text(
@@ -3464,9 +3434,6 @@ fn separate_coin_target_occurrences_allow_the_same_creature() {
 // targets for a spell.
 #[test]
 fn restored_retarget_changes_only_the_addressed_coin_or_later_occurrence() {
-    use engine::types::ability::{AbilityDefinition, AbilityKind, CoinFlipResult};
-    use engine::types::game_state::{ChainStep, RetargetScope, RetargetSlotAddress};
-    use engine::types::resolution::ResolutionStateWire;
     for changed in 0..3 {
         for won in [false, true] {
             for stale_current in [false, true] {
@@ -3802,7 +3769,6 @@ fn aleatory_draws_once_at_the_next_upkeep_on_either_coin_outcome() {
 // creature targets, but separate occurrences before the coin.
 #[test]
 fn one_coin_occurrence_rejects_duplicate_targets_but_accepts_two_distinct_creatures() {
-    use engine::types::ability::{AbilityDefinition, AbilityKind, MultiTargetSpec, TypedFilter};
     let mut child = AbilityDefinition::new(
         AbilityKind::Activated,
         Effect::Destroy {
@@ -3873,7 +3839,6 @@ fn one_coin_occurrence_rejects_duplicate_targets_but_accepts_two_distinct_creatu
 
 #[test]
 fn cross_controller_activated_copy_rebinds_each_branch_without_mutating_original() {
-    use engine::types::player::PlayerId;
     for won in [false, true] {
         let p2 = PlayerId(2);
         let mut scenario = GameScenario::new_n_player(3, 7);
@@ -4042,7 +4007,6 @@ fn cross_controller_activated_copy_rebinds_each_branch_without_mutating_original
 
 #[test]
 fn three_seat_borrowed_source_and_target_keep_controller_and_incarnation_authority() {
-    use engine::types::player::PlayerId;
     for alteration in ["unchanged", "source leaves", "blink", "control changes"] {
         for won in [false, true] {
             let p2 = PlayerId(2);
@@ -4301,11 +4265,6 @@ fn optional_empty_coin_slot_does_not_steal_the_later_target() {
 // separation.
 #[test]
 fn separate_piles_materializes_targetless_coin_children_before_execution() {
-    use engine::types::ability::{
-        AbilityDefinition, AbilityKind, PileSource, PlayerScope, QuantityExpr, TypedFilter,
-        VoterScope,
-    };
-    use engine::types::game_state::PileSide;
     for won in [false, true] {
         let reward = AbilityDefinition::new(
             AbilityKind::Spell,
@@ -4407,8 +4366,6 @@ fn separate_piles_materializes_targetless_coin_children_before_execution() {
 // ability.
 #[test]
 fn copied_coin_child_re_elects_a_departed_announcer_without_rebinding_other_groups() {
-    use engine::types::game_state::CopyChoiceMode;
-    use engine::types::player::PlayerId;
     let p2 = PlayerId(2);
     let mut definition = parse_oracle_text(
         "Flip a coin. If you win the flip, destroy target creature an opponent controls. If you lose the flip, destroy target artifact.",
@@ -4602,7 +4559,6 @@ fn copied_coin_child_re_elects_a_departed_announcer_without_rebinding_other_grou
 
 #[test]
 fn differently_bound_coin_children_do_not_coalesce_and_each_resolves_its_own_target() {
-    use engine::game::stack::stack_display_groups;
     for same in [false, true] {
         // Crooked Scales, printed text. Eight mana pays two activations; the artifact is untapped
         // between them (as an untap effect would), so both activations go through the
@@ -4669,9 +4625,6 @@ fn differently_bound_coin_children_do_not_coalesce_and_each_resolves_its_own_tar
 
 #[test]
 fn viewer_projection_redacts_hidden_coin_child_context_but_keeps_public_sibling_context() {
-    use engine::game::visibility::filter_state_for_viewer;
-    use engine::types::ability::CostPaidObjectSnapshot;
-    use engine::types::game_state::ManaSpentSourceSnapshot;
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     // Crooked Scales, printed text and cost: the source of the announced coin ability.
@@ -4811,10 +4764,6 @@ fn viewer_projection_redacts_hidden_coin_child_context_but_keeps_public_sibling_
 // targets but copies spells.
 #[test]
 fn copied_coin_targets_preserve_single_and_separate_occurrence_uniqueness() {
-    use engine::types::ability::{
-        AbilityDefinition, AbilityKind, CopyRetargetPermission, MultiTargetSpec, StackAbilityKind,
-        TypedFilter,
-    };
     for single_occurrence in [false, true] {
         let destroy = || {
             AbilityDefinition::new(
@@ -4949,8 +4898,6 @@ fn copied_coin_targets_preserve_single_and_separate_occurrence_uniqueness() {
 // neither puts a target-free instruction ahead of the rider that references it.
 #[test]
 fn independent_branch_head_preserves_incoming_referent_inline_and_after_thumb_restore() {
-    use engine::types::ability::{AbilityDefinition, AbilityKind, QuantityExpr, TypedFilter};
-    use engine::types::game_state::PersistedGameState;
     for thumb in [false, true] {
         let branch = AbilityDefinition::new(
             AbilityKind::Spell,
@@ -5047,7 +4994,6 @@ fn independent_branch_head_preserves_incoming_referent_inline_and_after_thumb_re
 // target-free coin with only a won-branch reward; neither is modal.
 #[test]
 fn modal_coin_first_mode_round_trips_at_mode_choice_and_executes_its_branch() {
-    use engine::types::game_state::PersistedGameState;
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let spell = scenario.add_spell_to_hand_from_oracle(P0, "Synthetic modal coin", true,
@@ -5112,12 +5058,6 @@ fn modal_coin_first_mode_round_trips_at_mode_choice_and_executes_its_branch() {
 // has no per-opponent fan-out, no Aura and no attach.
 #[test]
 fn fanout_attachment_tail_keeps_enchant_restriction_with_and_without_coin_parent() {
-    use engine::game::effects::attach::attach_to;
-    use engine::types::ability::{
-        AbilityDefinition, AbilityKind, AttachSelection, ControllerRef, MultiTargetSpec,
-        PlayerFilter, QuantityExpr, QuantityRef, TypedFilter,
-    };
-    use engine::types::keywords::Keyword;
     for coin_parent in [false, true] {
         let mut fanout = AbilityDefinition::new(
             AbilityKind::Activated,
@@ -5262,8 +5202,6 @@ fn fanout_attachment_tail_keeps_enchant_restriction_with_and_without_coin_parent
 
 #[test]
 fn mixed_incoming_pins_round_trip_through_a_production_thumb_keep() {
-    use engine::types::game_state::PersistedGameState;
-    use engine::types::identifiers::ObjectIncarnationRef;
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.add_artifact_from_oracle(
@@ -5374,7 +5312,6 @@ fn mixed_incoming_pins_round_trip_through_a_production_thumb_keep() {
 // target.
 #[test]
 fn both_coin_branch_targets_emit_events_and_the_heroic_target_triggers_once() {
-    use engine::types::game_state::StackEntryKind;
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     let hero = scenario
@@ -5556,7 +5493,6 @@ fn non_coin_blink_and_exile_life_riders_follow_the_moved_object() {
 // replacement, but declares no creature first.
 #[test]
 fn coin_damage_any_target_legality_uses_the_declaring_instruction() {
-    use engine::types::ability::{AbilityDefinition, AbilityKind, QuantityExpr, TypedFilter};
     for replacement in [false, true] {
         let damage = if replacement {
             serde_json::from_value(serde_json::json!({
@@ -5694,10 +5630,6 @@ fn coin_damage_any_target_legality_uses_the_declaring_instruction() {
 // branch declares its own target; neither has an empty prior choice.
 #[test]
 fn coin_own_declaration_shadows_an_empty_incoming_result_inline_and_after_restore() {
-    use engine::types::ability::{
-        AbilityDefinition, AbilityKind, ControllerRef, TargetChoiceTiming, TypedFilter,
-    };
-    use engine::types::game_state::PersistedGameState;
     for thumb in [false, true] {
         let branch = AbilityDefinition::new(
             AbilityKind::Spell,
@@ -5803,9 +5735,6 @@ fn coin_own_declaration_shadows_an_empty_incoming_result_inline_and_after_restor
 // neither attaches anything.
 #[test]
 fn coin_attachment_host_uses_its_own_branch_aura() {
-    use engine::game::effects::attach::attach_to;
-    use engine::types::ability::{AbilityDefinition, AbilityKind, AttachSelection, TypedFilter};
-    use engine::types::keywords::Keyword;
     let branch = || {
         AbilityDefinition::new(
             AbilityKind::Spell,
@@ -5916,7 +5845,6 @@ fn coin_attachment_host_uses_its_own_branch_aura() {
 
 #[test]
 fn non_coin_forwarded_parent_target_resolution_rider_keeps_its_bound_object() {
-    use engine::types::counter::CounterType;
     // Miraculous Recovery, printed text (byte-identical to the exported MTGJSON oracle_text).
     const MIRACULOUS_RECOVERY: &str =
         "Return target creature card from your graveyard to the battlefield. Put a +1/+1 counter on it.";
@@ -5974,11 +5902,6 @@ fn non_coin_forwarded_parent_target_resolution_rider_keeps_its_bound_object() {
 // neither has a dependent shares-a-type target.
 #[test]
 fn coin_lost_dependent_target_uses_its_lexical_creature_not_won_artifact() {
-    use engine::game::ability_utils::{build_resolved_from_def, build_target_slots};
-    use engine::types::ability::{
-        AbilityDefinition, AbilityKind, FilterProp, SharedQuality, SharedQualityRelation,
-        TypedFilter,
-    };
     let declare =
         |target| AbilityDefinition::new(AbilityKind::Spell, Effect::TargetOnly { target });
     let lost =
@@ -6074,11 +5997,6 @@ fn coin_lost_dependent_target_uses_its_lexical_creature_not_won_artifact() {
 // declares them before the coin; Crooked Scales targets per branch but only one per branch.
 #[test]
 fn coin_lost_numbered_reference_keeps_branch_base_and_outer_legality_across_restore() {
-    use engine::types::ability::{
-        AbilityDefinition, AbilityKind, ControllerRef, QuantityExpr, TypedFilter,
-    };
-    use engine::types::counter::CounterType;
-    use engine::types::game_state::PersistedGameState;
     for thumb in [false, true] {
         for illegal in [None, Some(0), Some(1)] {
             let declare = |controller| {
@@ -6177,10 +6095,6 @@ fn coin_lost_numbered_reference_keeps_branch_base_and_outer_legality_across_rest
 
 #[test]
 fn declaring_root_delayed_pin_still_guards_its_inherited_counter_rider() {
-    use engine::game::ability_utils::build_resolved_from_def;
-    use engine::game::effects;
-    use engine::types::counter::CounterType;
-    use engine::types::identifiers::ObjectIncarnationRef;
     // Big Play, printed text (byte-identical to the exported MTGJSON oracle_text): a
     // creature-target root whose later "Put a +1/+1 counter on it" inherits that target.
     const BIG_PLAY: &str = "Target creature gets +2/+2 and gains reach until end of turn. Put a +1/+1 counter on it. (A creature with reach can block creatures with flying.)";
@@ -6242,10 +6156,6 @@ fn declaring_root_delayed_pin_still_guards_its_inherited_counter_rider() {
 // Declares two creature targets in one coin ability; it has no fight, no shares-a-type dependency,
 // and both targets precede the coin.
 fn same_node_coin_scope(won: bool) {
-    use engine::types::ability::{
-        AbilityDefinition, AbilityKind, FilterProp, SharedQuality, SharedQualityRelation,
-        TypedFilter,
-    };
     let branch = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Fight {
@@ -6373,10 +6283,6 @@ fn coin_scope_same_node_lost_static_pool_matches_live_prompt() {
 // reference.
 #[test]
 fn coin_scope_numbered_declared_view_uses_lost_branch_base() {
-    use engine::game::effects::attach::attach_to;
-    use engine::types::ability::{
-        AbilityDefinition, AbilityKind, AttachmentReferent, FilterProp, TypedFilter,
-    };
     let declare = || {
         AbilityDefinition::new(
             AbilityKind::Spell,
@@ -6495,10 +6401,6 @@ fn coin_scope_numbered_declared_view_uses_lost_branch_base() {
 // it has no interposed player target and no dependent shares-a-type target.
 #[test]
 fn coin_scope_player_declaration_does_not_shadow_object_antecedent() {
-    use engine::types::ability::{
-        AbilityDefinition, AbilityKind, FilterProp, SharedQuality, SharedQualityRelation,
-        TypedFilter,
-    };
     for changed in [false, true] {
         let branch = AbilityDefinition::new(
             AbilityKind::Spell,
@@ -6596,10 +6498,6 @@ fn coin_scope_player_declaration_does_not_shadow_object_antecedent() {
 // second declares several typed targets in sequence.
 #[test]
 fn non_coin_scope_keeps_first_prefix_object_across_later_declarations() {
-    use engine::types::ability::{
-        AbilityDefinition, AbilityKind, FilterProp, SharedQuality, SharedQualityRelation,
-        TypeFilter, TypedFilter,
-    };
     let declare =
         |target| AbilityDefinition::new(AbilityKind::Spell, Effect::TargetOnly { target });
     let definition = declare(TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact)))
@@ -6694,10 +6592,6 @@ fn non_coin_scope_keeps_first_prefix_object_across_later_declarations() {
 // lose the flip, sacrifice this creature.") -- Destroys a typed target inside a coin branch; it has
 // no dependency on an earlier declared referent.
 fn shared_type_destroy() -> engine::types::ability::AbilityDefinition {
-    use engine::types::ability::{
-        AbilityDefinition, AbilityKind, FilterProp, SharedQuality, SharedQualityRelation,
-        TypedFilter,
-    };
     AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Destroy {
@@ -6725,9 +6619,6 @@ fn shared_type_destroy() -> engine::types::ability::AbilityDefinition {
 // targets; neither has dependent multi-target instances.
 #[test]
 fn coin_dependent_multitarget_instances_keep_the_ancestor_referent() {
-    use engine::types::ability::{
-        AbilityDefinition, AbilityKind, ControllerRef, MultiTargetSpec, TypedFilter,
-    };
     let mut destroy = shared_type_destroy();
     destroy.multi_target = Some(MultiTargetSpec::fixed(2, 2));
     let definition = AbilityDefinition::new(
@@ -6844,7 +6735,6 @@ fn coin_dependent_multitarget_instances_keep_the_ancestor_referent() {
 // Crooked Scales targets per branch; neither has a dependent shares-a-type slot.
 #[test]
 fn coin_mixed_slot_static_pool_covers_player_and_object_elections() {
-    use engine::types::ability::{AbilityDefinition, AbilityKind, TypedFilter};
     for elect_object in [false, true] {
         let branch = AbilityDefinition::new(
             AbilityKind::Spell,
@@ -6947,7 +6837,6 @@ fn coin_mixed_slot_static_pool_covers_player_and_object_elections() {
 // targets; neither has optional targeting or a dependency.
 #[test]
 fn coin_optional_same_node_election_keeps_the_ancestor_in_static_scope() {
-    use engine::types::ability::{AbilityDefinition, AbilityKind, TypedFilter};
     let mut branch = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Fight {
@@ -7064,7 +6953,6 @@ fn coin_optional_same_node_election_keeps_the_ancestor_in_static_scope() {
 // dependent new target.
 #[test]
 fn coin_binds_prior_intermediate_never_becomes_the_antecedent() {
-    use engine::types::ability::{AbilityDefinition, AbilityKind, TypedFilter};
     for all_inside in [false, true] {
         let dependent = shared_type_destroy()
             .effect
@@ -7184,7 +7072,6 @@ fn coin_binds_prior_intermediate_never_becomes_the_antecedent() {
 // destroy targets; neither has an empty dependent group before a player target.
 #[test]
 fn coin_zero_slot_declaration_does_not_borrow_the_following_player_pool() {
-    use engine::types::ability::{AbilityDefinition, AbilityKind, MultiTargetSpec};
     let mut empty = shared_type_destroy();
     empty.multi_target = Some(MultiTargetSpec::fixed(0, 2));
     let branch = empty.sub_ability(AbilityDefinition::new(
@@ -7223,9 +7110,6 @@ fn coin_zero_slot_declaration_does_not_borrow_the_following_player_pool() {
 // Polarity targets before the coin. Neither has a two-operand outcome.
 #[test]
 fn coin_dependent_source_and_attachment_counts_match_their_slots() {
-    use engine::types::ability::{
-        AbilityDefinition, AbilityKind, AttachSelection, MultiTargetSpec, TypedFilter,
-    };
     for attachment in [false, true] {
         let sources = shared_type_destroy()
             .effect
@@ -7347,10 +7231,6 @@ fn coin_dependent_source_and_attachment_counts_match_their_slots() {
 // target; it has no target filter comparing a declared object's mana value.
 #[test]
 fn coin_unbound_scalar_refuses_cast_until_an_object_antecedent_is_declared() {
-    use engine::types::ability::{
-        AbilityDefinition, AbilityKind, Comparator, ControllerRef, FilterProp, ObjectScope, PtStat,
-        PtValueScope, QuantityExpr, QuantityRef, TypedFilter,
-    };
     for power in [false, true] {
         for comparator in [Comparator::GE, Comparator::GT] {
             for bound in [false, true] {
@@ -7462,10 +7342,6 @@ fn coin_unbound_scalar_refuses_cast_until_an_object_antecedent_is_declared() {
 // target. Neither filters a target by it.
 #[test]
 fn coin_dependent_value_read_does_not_happen_when_the_announced_antecedent_becomes_illegal() {
-    use engine::types::ability::{
-        AbilityDefinition, AbilityKind, Comparator, ControllerRef, FilterProp, ObjectScope,
-        QuantityExpr, QuantityRef, TypeFilter, TypedFilter,
-    };
     for antecedent_stays_legal in [true, false] {
         let won = AbilityDefinition::new(
             AbilityKind::Spell,
@@ -7612,10 +7488,6 @@ fn coin_dependent_value_read_does_not_happen_when_the_announced_antecedent_becom
 // Neither has an optional antecedent.
 #[test]
 fn coin_declining_the_only_possible_antecedent_offers_no_unbound_targets() {
-    use engine::types::ability::{
-        AbilityDefinition, AbilityKind, Comparator, FilterProp, ObjectScope, QuantityExpr,
-        QuantityRef, TypeFilter, TypedFilter,
-    };
     for elect_antecedent in [false, true] {
         let mut destroy = AbilityDefinition::new(
             AbilityKind::Spell,
@@ -7867,13 +7739,6 @@ struct ChooseThenFlip {
 /// the flip inline (`thumb == false`) or after Krark's Thumb with a persisted
 /// round trip at the keep prompt (`thumb == true`).
 fn choose_then_flip(case: &ChooseThenFlip, thumb: bool, won: bool) {
-    use engine::types::ability::{
-        AbilityDefinition, AbilityKind, QuantityExpr, QuantityRef, TargetSelectionMode,
-        TriggerDefinition,
-    };
-    use engine::types::game_state::PersistedGameState;
-    use engine::types::triggers::TriggerMode;
-
     let label = format!("thumb={thumb} won={won}");
     let branch = AbilityDefinition::new(
         AbilityKind::Spell,
@@ -8063,7 +7928,6 @@ fn choose_then_flip(case: &ChooseThenFlip, thumb: bool, won: bool) {
 // that choice; neither chooses a creature type or card name.
 #[test]
 fn choose_then_flip_outcome_reads_the_published_choice() {
-    use engine::types::ability::{ChoiceType, ControllerRef, FilterProp, TypedFilter};
     // Synthetic: a non-card-name choice (CR 608.2c) published before the flip.
     let case = ChooseThenFlip {
         choice_type: ChoiceType::CreatureType {
@@ -8103,7 +7967,6 @@ fn choose_then_flip_outcome_reads_the_published_choice() {
 // that choice; neither chooses a creature type or card name.
 #[test]
 fn choose_then_flip_outcome_reads_the_named_card() {
-    use engine::types::ability::{ChoiceType, ControllerRef, TypedFilter};
     // Synthetic: a card name answered through the interactive continuation
     // (CR 608.2d) reaches the bound coin outcome that reads it (CR 608.2c).
     let case = ChooseThenFlip {
@@ -8184,9 +8047,6 @@ fn cast_for_prompts(runner: &mut GameRunner, spell: ObjectId) {
 fn multi_target_ancestor_runner(
     thumb: bool,
 ) -> (GameRunner, ObjectId, ObjectId, ObjectId, ObjectId) {
-    use engine::types::ability::{
-        AbilityDefinition, AbilityKind, ControllerRef, MultiTargetSpec, TypedFilter,
-    };
     let mut definition = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::TargetOnly {
@@ -8235,8 +8095,6 @@ fn multi_target_ancestor_runner(
 // make an outcome act on it; neither has an outcome that declares its own dependent new target.
 #[test]
 fn multi_target_ancestor_keeps_its_dependent_coin_outcome_target() {
-    use engine::types::resolution::ResolutionStateWire;
-
     // Synthetic. CR 601.2c: the ancestor's variable-count declaration is fixed
     // at announcement, and CR 115.1 declares the coin outcome's target in the
     // same announcement. Assignment must reproduce the announced slot groups,
@@ -8334,9 +8192,6 @@ fn multi_target_ancestor_keeps_its_dependent_coin_outcome_target() {
 // outcome act on it; neither has an outcome that declares its own dependent new target.
 #[test]
 fn empty_multi_target_node_between_ancestor_and_dependent_coin_outcome() {
-    use engine::types::ability::{
-        AbilityDefinition, AbilityKind, ControllerRef, MultiTargetSpec, TypeFilter, TypedFilter,
-    };
     // Synthetic. The middle "up to one target artifact an opponent controls"
     // node announces zero slots (CR 601.2c: its count is fixed at announcement)
     // because the opponent controls no artifact, yet the ancestor above it must
@@ -8404,9 +8259,6 @@ fn empty_multi_target_node_between_ancestor_and_dependent_coin_outcome() {
 // destroy target; neither has an up-to-two outcome group.
 #[test]
 fn coin_outcome_multi_target_group_keeps_to_its_own_slots() {
-    use engine::types::ability::{
-        AbilityDefinition, AbilityKind, MultiTargetSpec, TypeFilter, TypedFilter,
-    };
     // Synthetic. Won = "destroy up to two target artifacts" with a single
     // artifact on the battlefield, so the announcement gives Won one slot and
     // Lost one slot (CR 601.2c: counts fixed at announcement; CR 115.1: both
@@ -8510,12 +8362,6 @@ enum LostShape {
 /// production entry for `entry`, and the losing outcome is either required or
 /// "up to one" so that a lost flip may find its slot optional.
 fn bulk_coin_groups(entry: BulkEntry, lost: LostShape, won: bool) {
-    use engine::types::ability::TriggerDefinition;
-    use engine::types::ability::{
-        AbilityDefinition, AbilityKind, MultiTargetSpec, TypeFilter, TypedFilter,
-    };
-    use engine::types::triggers::TriggerMode;
-
     let label = format!("{entry:?}/{lost:?}/{}", if won { "win" } else { "lose" });
 
     let mut won_effect = AbilityDefinition::new(
@@ -8769,8 +8615,6 @@ fn answer_prompt_choices(runner: &mut GameRunner, label: &str, answers: &[Option
 /// same choice stays expressible one slot at a time (CR 608.2c).
 #[test]
 fn bulk_declaration_reads_an_ancestor_multi_target_group_positionally() {
-    use engine::types::ability::{AbilityDefinition, AbilityKind, MultiTargetSpec, TypedFilter};
-
     // Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this
     // shape: AST ability for the positional test: up-to-two target creatures (TargetOnly), then a
     // coin whose losing outcome destroys target creature. Nearest printed card: Mogg Assassin
@@ -8999,10 +8843,6 @@ fn bulk_declaration_reads_an_ancestor_multi_target_group_positionally() {
 /// CR 608.2c).
 #[test]
 fn activation_offer_prices_a_declined_ancestor_group_in_a_coin_chain() {
-    use engine::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, MultiTargetSpec, TypedFilter,
-    };
-
     // Kopala, Warden of Waves: the printed Oracle text, verbatim.
     const KOPALA: &str =
         "Spells your opponents cast that target a Merfolk you control cost {2} more to cast.\nAbilities your opponents activate that target a Merfolk you control cost {2} more to activate.";
@@ -9139,10 +8979,6 @@ fn activation_offer_prices_a_declined_ancestor_group_in_a_coin_chain() {
 /// goes; only the winning outcome destroys its own target (CR 705.2 + CR 608.2c).
 #[test]
 fn bulk_declaration_keeps_a_coin_outcome_group_off_the_continuation_target() {
-    use engine::types::ability::{
-        AbilityDefinition, AbilityKind, MultiTargetSpec, TypeFilter, TypedFilter,
-    };
-
     for won in [false, true] {
         let label = if won { "win" } else { "lose" };
         let mut won_effect = AbilityDefinition::new(
@@ -9263,11 +9099,6 @@ fn bulk_declaration_keeps_a_coin_outcome_group_off_the_continuation_target() {
 /// mis-assignment, and a refused cast must leave the game state untouched.
 #[test]
 fn divided_damage_coin_chain_is_refused_not_mis_assigned_when_the_pool_caps_the_prompt() {
-    use engine::types::ability::{
-        AbilityDefinition, AbilityKind, MultiTargetSpec, QuantityExpr, TypedFilter,
-    };
-    use engine::types::game_state::DistributionUnit;
-
     // Real cards: none of the 86 printed coin-flip cards in the exported card data exhibits this
     // shape: AST ability: deal 1 damage divided among up to two target creatures, then a coin whose
     // losing outcome destroys target creature. Nearest printed card: Goblin Bangchuckers ("{T}:

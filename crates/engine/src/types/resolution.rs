@@ -6641,26 +6641,30 @@ fn validate_shipped_post_replacement_draw_pair(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::ability_utils::build_resolved_from_def;
     use crate::game::engine::apply_as_current;
     use crate::game::merge::MergeSide;
-    use crate::game::scenario::GameScenario;
+    use crate::game::scenario::{GameRunner, GameScenario, P0};
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, CardSelectionMode, Chooser, CopyChooseScope, Effect,
-        EffectKind, ForEachCategoryAction, IterationCategory, PerPlayerScope,
+        AbilityDefinition, AbilityKind, CardSelectionMode, Chooser, CoinFlipRun, CopyChooseScope,
+        Effect, EffectKind, ForEachCategoryAction, IterationCategory, PerPlayerScope,
         PostReplacementContinuation, QuantityExpr, RepeatContinuation, ReplacementDefinition,
-        SpellContext, TargetFilter, ZoneOwner,
+        SpellContext, TargetFilter, TypedFilter, ZoneOwner,
     };
     use crate::types::actions::GameAction;
     use crate::types::game_state::{
-        CastingVariant, CopyChosenStage, DrainStatus, DrawSequenceOrigin, ExiledStopInput,
+        CastingVariant, CopyChosenStage, DrainStatus, DrawSequenceOrigin, ExiledStopInput, GameRng,
         GameState, PendingBatchDeliveries, PendingChooseOneOf, PendingCopyTokenResolution,
         PendingCounterAdditionQueue, PendingCounterMoveQueue, PendingCounterRemovalQueue,
         PendingEachPlayerCopyChosen, PendingLifeTotalAssignment, PendingPerCategoryZoneChoice,
         PendingPerPlayerZoneChoice, PendingRepeatIteration, PendingRepeatUntil,
-        PendingSpellResolution, PendingVoteBallotIteration, PostReplacementDrain,
-        RepeatUntilStopWitness, ResidentDrainPolicy, StackEntry, StackEntryKind,
-        ZoneDeliveryExileTracking,
+        PendingSpellResolution, PendingVoteBallotIteration, PersistedGameState,
+        PostReplacementDrain, RandomDraw, RepeatUntilStopWitness, ResidentDrainPolicy, StackEntry,
+        StackEntryKind, ZoneDeliveryExileTracking,
     };
+    use crate::types::mana::ManaCost;
+    use crate::types::phase::Phase;
+    use rand::Rng;
 
     use crate::types::identifiers::{CardId, LogicalZoneChangeGroupId, ObjectId};
     use crate::types::player::PlayerId;
@@ -10569,7 +10573,6 @@ mod tests {
     // another creature named Goblin Artisans.").
     #[test]
     fn resolution_wire_coin_decode_checks_nested_correspondence_and_pins() {
-        use crate::game::ability_utils::build_resolved_from_def;
         use crate::types::ability::{AbilityKind, CoinFlipRun, Effect, TargetFilter};
         let leaf = AbilityDefinition::new(AbilityKind::Spell, resolved_draw(1).effect);
         let definition = AbilityDefinition::new(
@@ -10714,15 +10717,6 @@ mod tests {
         illegal: bool,
         post_coin_pause: bool,
     ) -> (crate::game::scenario::GameRunner, ObjectId, ObjectId) {
-        use crate::game::scenario::{GameScenario, P0};
-        use crate::types::ability::{
-            AbilityKind, CoinFlipRun, Effect, QuantityExpr, TargetFilter, TypedFilter,
-        };
-        use crate::types::actions::GameAction;
-        use crate::types::game_state::{GameRng, RandomDraw};
-        use crate::types::mana::ManaCost;
-        use crate::types::phase::Phase;
-        use rand::Rng;
         let mut payoff = AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::PutCounter {
@@ -10830,8 +10824,6 @@ mod tests {
     }
 
     fn finish_announcement_fixture(state: GameState, a: ObjectId, b: ObjectId, illegal: bool) {
-        use crate::game::scenario::{GameRunner, P0};
-        use crate::types::actions::GameAction;
         let mut runner = GameRunner::from_state(state);
         let events = runner
             .act(GameAction::SelectCoinFlips {
@@ -10899,8 +10891,6 @@ mod tests {
     // coin. If you win the flip, target creature gets +1/+1 until end of turn. / Draw a card.").
     #[test]
     fn legacy_coin_resolution_without_announcement_provenance_is_refused() {
-        use crate::types::actions::GameAction;
-        use crate::types::game_state::PersistedGameState;
         for illegal in [false, true] {
             let (runner, a, b) = parked_announcement_fixture(illegal, false);
             let wire =
