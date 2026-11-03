@@ -3,6 +3,12 @@ import type { DeckChoice } from "../multiplayer/seatTypes";
 import { loadSavedDeck } from "../constants/storage";
 import { expandParsedDeck, type ExpandedDeck } from "./deckParser";
 import { deckSupplyForFormat } from "./engineRuntime";
+import {
+  captureSubmissionArtPreferences,
+  submitParsedDeck,
+  type SubmissionArtSnapshot,
+  type SubmittedDeck,
+} from "./deckSubmission";
 
 /** The host's pile for a `HostPile` format: the engine's default list or one of their saved decks. */
 export type PileSource = { type: "Default" } | { type: "SavedDeck"; name: string };
@@ -41,9 +47,13 @@ export function suppliedAiDeckChoice(): { id: string; label: string; choice: Dec
  * The pile seat's submission: a named saved deck only when the engine says the
  * host supplies the pile, else the empty deck; `null` when that saved deck is gone.
  */
-export async function pileSeatDeck(format: GameFormat, source: PileSource): Promise<ExpandedDeck | null> {
+export async function pileSeatDeck(
+  format: GameFormat,
+  source: PileSource,
+  snapshot: SubmissionArtSnapshot = captureSubmissionArtPreferences(),
+): Promise<SubmittedDeck<ExpandedDeck> | null> {
   if (source.type === "Default") return emptySeatDeck();
   if ((await deckSupplyForFormat(format)) !== "HostPile") return emptySeatDeck();
   const deck = loadSavedDeck(source.name);
-  return deck ? expandParsedDeck(deck) : null;
+  return deck ? submitParsedDeck(deck, snapshot) : null;
 }

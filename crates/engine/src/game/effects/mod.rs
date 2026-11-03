@@ -8350,6 +8350,7 @@ fn referent_exists_without_gated_action(
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
@@ -13729,7 +13730,15 @@ fn node_or_branch_references_tracked_set(
         || ability
             .player_scope
             .as_ref()
-            .is_some_and(player_filter_references_tracked_set);
+            .is_some_and(player_filter_references_tracked_set)
+        // CR 608.2c: a gate that measures the set ("If all cards revealed this
+        // way are creature cards, …") reads it as surely as the effect does.
+        || ability
+            .condition
+            .as_ref()
+            .is_some_and(|condition| {
+                condition.any_quantity_expr(&quantity_expr_references_tracked_set)
+            });
 
     // CR 700.2 + CR 608.2c: both descents stop at a mode boundary. Guarding only
     // the entry hop in `next_sub_needs_tracked_set` is INSUFFICIENT whenever a
