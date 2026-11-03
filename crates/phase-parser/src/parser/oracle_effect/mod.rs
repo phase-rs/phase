@@ -12751,8 +12751,10 @@ fn parse_effect_clause_inner_with_damage_context(
     }
 
     // Digital-only: "conjure a card named X into/onto zone" — Conjure keyword action.
-    if let Some(effect) = try_parse_conjure(tp) {
-        return parsed_clause(effect);
+    if let Some((effect, attach)) = try_parse_conjure(tp) {
+        let mut clause = parsed_clause(effect);
+        clause.sub_ability = attach.map(Box::new);
+        return clause;
     }
 
     let ast = parse_clause_ast(text, ctx);
@@ -14524,7 +14526,7 @@ fn try_parse_conjure_named_group(tp: TextPair) -> Option<Effect> {
 /// - "conjure X cards named Y onto the battlefield"
 ///
 /// Uses nom combinators exclusively for dispatch and structure recognition.
-fn try_parse_conjure(tp: TextPair) -> Option<Effect> {
+fn try_parse_conjure(tp: TextPair) -> Option<(Effect, Option<AbilityDefinition>)> {
     // Gate: must start with "conjure " (nom tag dispatch).
     let (rest, _) = tag::<_, _, OracleError<'_>>("conjure ")
         .parse(tp.lower)
@@ -14576,17 +14578,130 @@ fn try_parse_conjure(tp: TextPair) -> Option<Effect> {
         parse_conjure_zone(zone_rest)?;
 
     // Parse optional "tapped" suffix.
-    let tapped = tag::<_, _, OracleError<'_>>(" tapped")
-        .parse(zone_rest)
-        .is_ok();
+    let (zone_rest, tapped) = match tag::<_, _, OracleError<'_>>(" tapped").parse(zone_rest) {
+        Ok((rest, _)) => (rest, true),
+        Err(_) => (zone_rest, false),
+    };
 
-    Some(Effect::Conjure {
-        cards,
-        destination,
-        tapped,
-        library_position,
-        library_players,
-    })
+    // CR 701.3a + CR 608.2c: "and attach them to ~" names exactly what this conjure just
+    // created, so the operand is the determined set `LastCreated` publishes (Outfitted
+    // Jouster: "conjure a card named Steelclaw Lance and a card named Brawler's Plate onto
+    // the battlefield and attach them to Outfitted Jouster").
+    let attach = (destination == Zone::Battlefield)
+        .then(|| {
+            tag::<_, _, OracleError<'_>>(" and attach them to ~")
+                .parse(zone_rest)
+                .ok()
+        })
+        .flatten()
+        .map(|_| {
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Attach {
+                    attachment: TargetFilter::LastCreated,
+                    target: TargetFilter::SelfRef,
+                    selection: AttachSelection::AtResolution {
+                        count: AttachCardinality::All,
+                    },
+                },
+            )
+        });
+
+    Some((
+        Effect::Conjure {
+            cards,
+            destination,
+            tapped,
+            library_position,
+            library_players,
+        },
+        attach,
+    ))
+}
+
+#[cfg(test)]
+mod conjure_attach_parser_tests {
+    use super::*;
+
+    /// The trigger body of a card's first triggered ability.
+    fn first_trigger_body(text: &str, name: &str) -> AbilityDefinition {
+        let parsed =
+            crate::parser::oracle::parse_oracle_text(text, name, &[], &["Creature".into()], &[]);
+        *parsed
+            .triggers
+            .first()
+            .and_then(|trigger| trigger.execute.clone())
+            .unwrap_or_else(|| panic!("{name}: a triggered ability with a body"))
+    }
+
+    /// CR 701.3a + CR 608.2c: Outfitted Jouster's "and attach them to Outfitted
+    /// Jouster" attaches exactly the two conjured Equipment to the Jouster, so the
+    /// conjure carries an `Attach` over `LastCreated` onto `SelfRef`, and the
+    /// result is not forwarded (forwarding would rebind `~` to a conjured card).
+    #[test]
+    fn outfitted_jouster_conjure_attaches_what_it_created_to_itself() {
+        let body = first_trigger_body(
+            "When Outfitted Jouster enters, conjure a card named Steelclaw Lance and a card named Brawler's Plate onto the battlefield and attach them to Outfitted Jouster.\nIf damage would be dealt to Outfitted Jouster while it's equipped, prevent that damage. When damage is prevented this way, sacrifice an Equipment attached to Outfitted Jouster.",
+            "Outfitted Jouster",
+        );
+        let Effect::Conjure {
+            cards, destination, ..
+        } = &*body.effect
+        else {
+            panic!("expected Conjure, got {:?}", body.effect);
+        };
+        assert_eq!(*destination, Zone::Battlefield);
+        assert_eq!(
+            cards.iter().map(|c| c.named_name()).collect::<Vec<_>>(),
+            vec![Some("Steelclaw Lance"), Some("Brawler's Plate")]
+        );
+        assert!(!body.forward_result);
+        let sub = body.sub_ability.as_deref().expect("the attach clause");
+        assert_eq!(
+            *sub.effect,
+            Effect::Attach {
+                attachment: TargetFilter::LastCreated,
+                target: TargetFilter::SelfRef,
+                selection: AttachSelection::AtResolution {
+                    count: AttachCardinality::All,
+                },
+            }
+        );
+        assert!(sub.sub_ability.is_none());
+    }
+
+    /// Conjures with no "and attach them to ~" tail keep no `Attach` sub. Perforator
+    /// Crocodile's "onto the battlefield attached to that creature" is a different
+    /// shape and stays as it was.
+    #[test]
+    fn conjure_without_an_attach_tail_has_no_attach_sub() {
+        let crocodile = first_trigger_body(
+            "When Perforator Crocodile enters, for each creature your opponents control, conjure a card named Stab Wound onto the battlefield attached to that creature.\nCycling {1}{B}",
+            "Perforator Crocodile",
+        );
+        let mut node = Some(&crocodile);
+        while let Some(ability) = node {
+            assert!(
+                !matches!(
+                    &*ability.effect,
+                    Effect::Attach {
+                        attachment: TargetFilter::LastCreated,
+                        ..
+                    }
+                ),
+                "got {crocodile:?}"
+            );
+            node = ability.sub_ability.as_deref();
+        }
+
+        let (effect, attach) = try_parse_conjure(TextPair::new(
+            "conjure a card named Regal Force onto the battlefield",
+            "conjure a card named regal force onto the battlefield",
+        ))
+        .expect("a bare conjure parses");
+        assert!(matches!(effect, Effect::Conjure { .. }));
+        assert!(attach.is_none());
+    }
 }
 
 /// Digital-only keyword action: Parse "conjure a duplicate of {reference} into/onto {zone}".

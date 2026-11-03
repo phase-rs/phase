@@ -1801,10 +1801,31 @@ pub struct PendingForwardedZoneResult {
     pub group: Option<crate::types::identifiers::LogicalZoneChangeGroupId>,
 }
 
+/// CR 510.2 + CR 611.3a: what a printed damage guard read when its simultaneous batch
+/// opened. Keyed on the object and the condition, not on a registry index, so the record
+/// survives the layer pass a CR 616.1 pause runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettledDamageGuard {
+    pub source: ObjectIncarnationRef,
+    pub condition: ReplacementCondition,
+    pub reading: DamageGuardReading,
+}
+
+/// CR 611.3a: the one reading a guard gives a simultaneous batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DamageGuardReading {
+    Holds,
+    Fails,
+}
+
 /// Casting-time facts that flow with a spell from casting through resolution.
 /// Conditions in the sub_ability chain are evaluated against this context.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SpellContext {
+    /// CR 510.2 + CR 611.3a: guards read for the simultaneous damage batch this node is a
+    /// remaining portion of. Node-local: a later instruction reads live (CR 700.1).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub settled_damage_guards: Vec<SettledDamageGuard>,
     /// Typed SearchLibrary intent for a face-down Exile destination.
     /// This is carried in the existing resolution context so it survives
     /// ordinary ability-chain handoffs without widening every ability literal.

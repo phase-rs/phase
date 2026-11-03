@@ -26045,15 +26045,14 @@ declare_game_state! {
     /// is excluded from serialization and structural equality.
     #[serde(skip)]
     pub combat_prevention_tally: Option<HashMap<AppliedReplacementKey, i32>>,
-    /// CR 510.2 + CR 700.1 + CR 615.8: Successful one-shot applications to a
-    /// damage source's current simultaneous combat-damage instance. A consumed
-    /// replacement stays eligible only for that same source inside this batch.
-    /// Only this ledger is suspended during independent follow-ups, then restored
-    /// before the next portion; the prevention tally remains active.
-    /// Restored to its prior value before returning; excluded from serialization
-    /// and equality like the prevention tally.
+    /// CR 510.2 + CR 700.1 + CR 615.8 + CR 611.3a: what one simultaneous damage batch has
+    /// settled. Only this ledger is suspended during independent follow-ups, then restored
+    /// before the next portion; the prevention tally remains active. Restored to its prior
+    /// value before returning; excluded from serialization and equality like the
+    /// prevention tally. A batch that pauses hands its guards to `PendingReplacement` and
+    /// to its remaining portions (`SpellContext::settled_damage_guards`).
     #[serde(skip)]
-    pub(crate) combat_one_shot_applications: Option<Vec<(AppliedReplacementKey, ObjectId)>>,
+    pub(crate) damage_batch_ledger: Option<DamageBatchLedger>,
 }
 
 /// The map-backed history entries `copy` does not share with `original`, a nested causes map
@@ -28853,6 +28852,10 @@ fn validate_draw_dealer(frame: &DrawSequenceFrame, dealer: &DrawDealer) -> Resul
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingReplacement {
     pub proposed: ProposedEvent,
+    /// CR 510.2 + CR 611.3a: the guards of the simultaneous damage batch this portion
+    /// belongs to, read again when the answer re-scans this portion.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub settled_damage_guards: Vec<crate::types::ability::SettledDamageGuard>,
     /// CR 701.21a + CR 614.1: An inner Battlefield→graveyard `ZoneChange`
     /// can pause for a `Moved` replacement after its enclosing sacrifice was
     /// already accepted. Preserve that action's subject and controller until
@@ -28943,6 +28946,18 @@ pub struct PendingReplacement {
         skip_serializing_if = "UnrepresentablePolicy::is_ignore_impossible"
     )]
     pub unrepresentable_life_change: UnrepresentablePolicy,
+}
+
+/// CR 510.2 + CR 700.1 + CR 615.8 + CR 611.3a: what one simultaneous damage batch has
+/// settled so far.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct DamageBatchLedger {
+    /// A consumed one-shot stays eligible only for the same source's portions of a combat
+    /// batch.
+    pub(crate) applications: Vec<(AppliedReplacementKey, ObjectId)>,
+    /// A printed guard reads once for the whole batch (Undergrowth Champion ruling: "its
+    /// prevention effect will apply once to all that damage").
+    pub(crate) settled_guards: Vec<crate::types::ability::SettledDamageGuard>,
 }
 
 /// Who owns a player-resource change (life, player counter, energy) whose final
@@ -33338,7 +33353,7 @@ impl GameState {
             archenemy,
             initiative: None,
             combat_prevention_tally: None,
-            combat_one_shot_applications: None,
+            damage_batch_ledger: None,
             cancelled_casts: Vec::new(),
             pending_activations: Vec::new(),
             commander_declined_zone_return: HashSet::new(),
@@ -37147,7 +37162,7 @@ fn _gamestate_partition_is_total(s: &GameState) {
         archenemy: _,
         initiative: _,
         combat_prevention_tally: _,
-        combat_one_shot_applications: _,
+        damage_batch_ledger: _,
         // Post-rebase upstream additions (v0.21.x: #5515 discover + liminal mechanic).
         // Strict-compared by eq_except_growable's GameState PartialEq reuse (fail-safe:
         // a differing value is correctly not a fixed-point repeat); object-growth loops
@@ -56597,6 +56612,7 @@ mod tests {
 
     fn pending_life_gain_replacement(policy: UnrepresentablePolicy) -> PendingReplacement {
         PendingReplacement {
+            settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::LifeGain {
                 player_id: PlayerId(0),
                 amount: 1,
@@ -56651,6 +56667,53 @@ mod tests {
             legacy.unrepresentable_life_change,
             UnrepresentablePolicy::IgnoreImpossible
         );
+    }
+
+    /// Wire shape of the settled damage-guard carrier (CR 510.2 + CR 611.3a): omitted
+    /// when empty, absent in older payloads, and a non-empty value round-trips on both
+    /// `PendingReplacement` and `SpellContext`.
+    #[test]
+    fn settled_damage_guards_wire_shape() {
+        use crate::types::ability::{
+            DamageGuardReading, ReplacementCondition, SettledDamageGuard, SpellContext,
+            StaticCondition,
+        };
+        use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
+
+        let guard = SettledDamageGuard {
+            source: ObjectIncarnationRef::of(ObjectId(7), 2),
+            condition: ReplacementCondition::OnlyIfStatic {
+                condition: Box::new(StaticCondition::SourceIsEquipped),
+            },
+            reading: DamageGuardReading::Holds,
+        };
+
+        let empty = pending_life_gain_replacement(UnrepresentablePolicy::IgnoreImpossible);
+        let json = serde_json::to_value(&empty).expect("record must serialize");
+        assert!(json.get("settled_damage_guards").is_none(), "{json}");
+        let legacy: PendingReplacement =
+            serde_json::from_value(json).expect("legacy record must deserialize");
+        assert!(legacy.settled_damage_guards.is_empty());
+
+        let mut carried = empty;
+        carried.settled_damage_guards = vec![guard.clone()];
+        let json = serde_json::to_value(&carried).expect("record must serialize");
+        assert!(json.get("settled_damage_guards").is_some(), "{json}");
+        let round_trip: PendingReplacement =
+            serde_json::from_value(json).expect("record must deserialize");
+        assert_eq!(round_trip, carried);
+
+        let legacy_context: SpellContext =
+            serde_json::from_value(serde_json::json!({})).expect("legacy context");
+        assert!(legacy_context.settled_damage_guards.is_empty());
+        let context = SpellContext {
+            settled_damage_guards: vec![guard],
+            ..SpellContext::default()
+        };
+        let round_trip: SpellContext =
+            serde_json::from_value(serde_json::to_value(&context).expect("context serializes"))
+                .expect("context deserializes");
+        assert_eq!(round_trip, context);
     }
 
     /// CR 616.1f: a re-parked record copies a `Reject` stamp from its

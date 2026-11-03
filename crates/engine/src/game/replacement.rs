@@ -24,7 +24,9 @@ use super::filter::{
     matches_target_filter_on_damage_record_source, matches_target_filter_on_event_snapshot,
     FilterContext,
 };
+use crate::types::ability::{DamageGuardReading, SettledDamageGuard};
 use crate::types::events::GameEvent;
+use crate::types::game_state::DamageBatchLedger;
 use crate::types::game_state::{
     DrainStatus, GameState, LiminalEntry, LiminalEntryKind, NamedChoiceSource,
     NamedChoiceSourceBinding, PayableResource, PendingReplacement, PostReplacementDrain,
@@ -2580,7 +2582,7 @@ fn redirect_damage_event(
                 // covers this source's whole simultaneous combat instance.
                 // Zero-damage events returned above; illegal recipients do nothing.
                 if redirected {
-                    record_combat_one_shot_application(
+                    record_damage_batch_application(
                         state,
                         AppliedReplacementKey::for_event(&event, rid),
                         source_id,
@@ -2823,7 +2825,7 @@ fn damage_done_applier(
             ) {
                 consume_prevention_shield(state, rid, None);
                 if amount > 0 && new_amount != amount {
-                    record_combat_one_shot_application(state, applied_key, source_id);
+                    record_damage_batch_application(state, applied_key, source_id);
                 }
             }
             // CR 615.1a + CR 702.64b + CR 510.2: `PreventionMinus` is the typed
@@ -3236,6 +3238,118 @@ fn damage_done_applier(
     ApplyResult::Modified(event)
 }
 
+/// CR 510.2 + CR 608.2f + CR 611.3a: a shield's printed guard is read once for a simultaneous
+/// batch, before any portion applies, because a rider draining between portions must not flip
+/// it in either direction. Undergrowth Champion ruling: "its prevention effect will apply once
+/// to all that damage." Every self-scoped shield on the board is read, not only the batch's
+/// recipients, because a redirection can bring a portion to one (Pariah). A condition that
+/// reads the event varies by portion and stays live (Divine Presence).
+pub(crate) fn read_damage_guards(state: &GameState) -> Vec<SettledDamageGuard> {
+    let mut guards = Vec::new();
+    for (_, host, definition) in super::functioning_abilities::active_replacements(state) {
+        let Some(condition) = definition.condition.as_ref() else {
+            continue;
+        };
+        if definition.event != ReplacementEvent::DamageDone
+            || !super::functioning_abilities::replacement_functions_in_zone(host, definition)
+            || definition.valid_card != Some(TargetFilter::SelfRef)
+            || !matches!(definition.shield_kind, ShieldKind::Prevention { .. })
+            || super::ability_scan::replacement_condition_reads_event(condition)
+        {
+            continue;
+        }
+        let portion = ProposedEvent::Damage {
+            source_id: host.id,
+            target: TargetRef::Object(host.id),
+            amount: 0,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        let reading = if evaluate_replacement_condition(
+            condition,
+            replacement_source_player(host),
+            host.id,
+            state,
+            Some(host.id),
+            &portion,
+        ) {
+            DamageGuardReading::Holds
+        } else {
+            DamageGuardReading::Fails
+        };
+        guards.push(SettledDamageGuard {
+            source: ObjectIncarnationRef::from_object(host),
+            condition: condition.clone(),
+            reading,
+        });
+    }
+    guards
+}
+
+/// The reading this batch settled for `condition` on `host`, if any.
+fn settled_damage_guard_reading(
+    state: &GameState,
+    host: &GameObject,
+    condition: &ReplacementCondition,
+    event: &ProposedEvent,
+) -> Option<DamageGuardReading> {
+    if !matches!(event, ProposedEvent::Damage { .. }) {
+        return None;
+    }
+    let source = ObjectIncarnationRef::from_object(host);
+    state
+        .damage_batch_ledger
+        .as_ref()?
+        .settled_guards
+        .iter()
+        .find(|guard| guard.source == source && guard.condition == *condition)
+        .map(|guard| guard.reading)
+}
+
+/// The guards a parked portion hands to `PendingReplacement`, or a stash to its remaining
+/// portions.
+pub(crate) fn settled_damage_guards(state: &GameState) -> Vec<SettledDamageGuard> {
+    state
+        .damage_batch_ledger
+        .as_ref()
+        .map(|ledger| ledger.settled_guards.clone())
+        .unwrap_or_default()
+}
+
+/// CR 608.2f + CR 700.1: run `body` as one simultaneous noncombat damage batch: under the
+/// guards `ability` carries (a remaining portion after a CR 616.1 pause, or a clause of a
+/// joined run), else under a fresh read. A rider's damage carries none, so it opens its own
+/// batch.
+pub(crate) fn with_damage_batch<T>(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    body: impl FnOnce(&mut GameState) -> T,
+) -> T {
+    let settled_guards = match ability.context.settled_damage_guards.as_slice() {
+        [] => read_damage_guards(state),
+        guards => guards.to_vec(),
+    };
+    with_settled_damage_guards(state, settled_guards, body)
+}
+
+/// CR 608.2f + CR 611.3a: run `body` under guards a batch already read. The applications
+/// don't travel: consumed_replacement_applies_in_combat_batch reads them only for combat.
+/// Filed: Awe Strike on Thrashing Wumpus (CR 615.8) covers only the first portion; the issue
+/// number is added at PR time.
+fn with_settled_damage_guards<T>(
+    state: &mut GameState,
+    settled_guards: Vec<SettledDamageGuard>,
+    body: impl FnOnce(&mut GameState) -> T,
+) -> T {
+    let restore = state.damage_batch_ledger.replace(DamageBatchLedger {
+        applications: Vec::new(),
+        settled_guards,
+    });
+    let result = body(state);
+    state.damage_batch_ledger = restore;
+    result
+}
+
 /// CR 510.2 + CR 700.1 + CR 615.8: A consumed one-shot may still cover another
 /// portion of the same damage source's current simultaneous combat instance.
 fn consumed_replacement_applies_in_combat_batch(
@@ -3248,19 +3362,18 @@ fn consumed_replacement_applies_in_combat_batch(
             source_id,
             is_combat: true,
             ..
-        } => state
-            .combat_one_shot_applications
-            .as_ref()
-            .is_some_and(|applications| {
-                applications.contains(&(AppliedReplacementKey::for_event(event, rid), *source_id))
-            }),
+        } => state.damage_batch_ledger.as_ref().is_some_and(|ledger| {
+            ledger
+                .applications
+                .contains(&(AppliedReplacementKey::for_event(event, rid), *source_id))
+        }),
         _ => false,
     }
 }
 
 /// CR 609.7b + CR 700.1: Record only successful one-shot damage applications;
 /// CR 615.7: finite Next(N) depletion never records.
-fn record_combat_one_shot_application(
+fn record_damage_batch_application(
     state: &mut GameState,
     key: AppliedReplacementKey,
     damage_source: ObjectId,
@@ -3273,10 +3386,10 @@ fn record_combat_one_shot_application(
     ) {
         return;
     }
-    if let Some(applications) = state.combat_one_shot_applications.as_mut() {
+    if let Some(ledger) = state.damage_batch_ledger.as_mut() {
         let application = (key, damage_source);
-        if !applications.contains(&application) {
-            applications.push(application);
+        if !ledger.applications.contains(&application) {
+            ledger.applications.push(application);
         }
     }
 }
@@ -7125,6 +7238,11 @@ fn evaluate_replacement_condition(
                 crate::game::quantity::resolve_quantity_with_ctx(state, rhs, controller, ctx);
             comparator.evaluate(lhs_val, rhs_val)
         }
+        // CR 604.2 + CR 611.3a: a printed "while <state>" read live by the static
+        // condition authority (Jared Carthalion, True Heir; Outfitted Jouster).
+        ReplacementCondition::OnlyIfStatic { condition } => {
+            super::layers::evaluate_condition(state, condition, controller, source_id)
+        }
         ReplacementCondition::HasMaxSpeed => super::speed::has_max_speed(state, controller),
         // CR 702.138c: "escapes with" — applies only when the source was cast via escape.
         // Check cast_from_zone on the entering permanent as a proxy for escape.
@@ -7950,14 +8068,21 @@ fn object_replacement_candidate_applies(
         }
     }
     if let Some(ref cond) = repl_def.condition {
-        if !evaluate_replacement_condition(
-            cond,
-            replacement_player,
-            obj.id,
-            state,
-            replacement_condition_affected_object_id(event),
-            event,
-        ) {
+        // CR 510.2 + CR 611.3a: a guard the current simultaneous batch already read gives
+        // the same answer to every portion.
+        let holds = settled_damage_guard_reading(state, obj, cond, event)
+            .map(|reading| reading == DamageGuardReading::Holds)
+            .unwrap_or_else(|| {
+                evaluate_replacement_condition(
+                    cond,
+                    replacement_player,
+                    obj.id,
+                    state,
+                    replacement_condition_affected_object_id(event),
+                    event,
+                )
+            });
+        if !holds {
             return false;
         }
     }
@@ -10762,9 +10887,9 @@ fn apply_single_replacement(
     let replacement_applied = proposed.applied_set().clone();
     // CR 609.7b + CR 120.8: Membership requires positive damage actually changed
     // or prevented. Capture scalar provenance only; do not clone damage events.
-    let combat_one_shot_application =
+    let damage_batch_application =
         state
-            .combat_one_shot_applications
+            .damage_batch_ledger
             .as_ref()
             .and_then(|_| match &proposed {
                 ProposedEvent::Damage {
@@ -10952,7 +11077,7 @@ fn apply_single_replacement(
                     || (pre_applier_event.is_none() && consume_on_apply)
                 {
                     mark_replacement_consumed(state, rid);
-                    if let Some((key, damage_source, damage_amount)) = combat_one_shot_application {
+                    if let Some((key, damage_source, damage_amount)) = damage_batch_application {
                         let changed = match &new_event {
                             ProposedEvent::Damage {
                                 source_id,
@@ -10967,7 +11092,7 @@ fn apply_single_replacement(
                             _ => true,
                         };
                         if changed {
-                            record_combat_one_shot_application(state, key, damage_source);
+                            record_damage_batch_application(state, key, damage_source);
                         }
                     }
                 }
@@ -11032,8 +11157,8 @@ fn apply_single_replacement(
             ApplyResult::Prevented => {
                 if consume_on_apply {
                     mark_replacement_consumed(state, rid);
-                    if let Some((key, damage_source, _)) = combat_one_shot_application {
-                        record_combat_one_shot_application(state, key, damage_source);
+                    if let Some((key, damage_source, _)) = damage_batch_application {
+                        record_damage_batch_application(state, key, damage_source);
                     }
                 }
                 // CR 615.5: A prevention effect's additional effect (e.g.
@@ -12055,6 +12180,7 @@ fn park_entry_controller_choice(
     candidates: Vec<PlayerId>,
 ) -> ReplacementResult {
     state.pending_replacement = Some(PendingReplacement {
+        settled_damage_guards: Vec::new(),
         proposed,
         sacrifice_provenance: None,
         candidates: vec![rid],
@@ -12230,6 +12356,7 @@ fn park_as_enters_named_choice(
 ) -> ReplacementResult {
     let object_id = rid.source;
     state.pending_replacement = Some(PendingReplacement {
+        settled_damage_guards: Vec::new(),
         proposed,
         sacrifice_provenance: None,
         candidates: vec![rid],
@@ -12440,6 +12567,7 @@ fn park_as_enters_pay_choice(
     events: &mut Vec<GameEvent>,
 ) -> ReplacementResult {
     state.pending_replacement = Some(PendingReplacement {
+        settled_damage_guards: Vec::new(),
         proposed,
         sacrifice_provenance: None,
         candidates: vec![rid],
@@ -13193,6 +13321,7 @@ fn pipeline_loop(
                 let search_found_candidates =
                     snapshot_search_found_candidates(state, &proposed, &candidates);
                 state.pending_replacement = Some(PendingReplacement {
+                    settled_damage_guards: settled_damage_guards(state),
                     proposed,
                     sacrifice_provenance: None,
                     candidates,
@@ -13266,6 +13395,7 @@ fn pipeline_loop(
             let search_found_candidates =
                 snapshot_search_found_candidates(state, &proposed, &candidates);
             state.pending_replacement = Some(PendingReplacement {
+                settled_damage_guards: settled_damage_guards(state),
                 proposed,
                 sacrifice_provenance: None,
                 candidates,
@@ -13355,11 +13485,11 @@ pub fn replace_event(
 fn drain_damage_rider(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 700.1: Follow-up damage is an independent event, even if its
     // source also participates in the original simultaneous instance.
-    let applications = state.combat_one_shot_applications.take();
+    let ledger = state.damage_batch_ledger.take();
     let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
         state, None, None, None, events,
     );
-    state.combat_one_shot_applications = applications;
+    state.damage_batch_ledger = ledger;
 }
 
 /// CR 616.1 + CR 510.2: the affected player orders these effects, but combat damage
@@ -13426,8 +13556,14 @@ pub(crate) fn replace_combat_damage_batch(
     // CR 510.2: Activate the batch tally so the applier aggregates per shield.
     let restore_tally = state.combat_prevention_tally.take();
     state.combat_prevention_tally = Some(HashMap::new());
-    let restore_applications = state.combat_one_shot_applications.replace(Vec::new());
-    // AppliedReplacementKey is registry-index based, exactly as combat_prevention_tally's keys are.
+    let settled_guards = read_damage_guards(state);
+    let restore_ledger = state.damage_batch_ledger.replace(DamageBatchLedger {
+        applications: Vec::new(),
+        settled_guards,
+    });
+    // The ledger's `applications` are keyed by AppliedReplacementKey, which is registry-index
+    // based, exactly as combat_prevention_tally's keys are. Its `settled_guards` are keyed by
+    // object incarnation and condition, so none of the following applies to them.
     // Absolute indices stay valid only while the replacement lists are unchanged between portions:
     // consumption marks entries in place, but a follow-up drain can rebuild or prune lists (layer flush;
     // layers.rs prune_controller_controls_source_on_leave; turns.rs prunes the pending registry outside
@@ -13477,7 +13613,7 @@ pub(crate) fn replace_combat_damage_batch(
 
     let tally = state.combat_prevention_tally.take().unwrap_or_default();
     state.combat_prevention_tally = restore_tally;
-    state.combat_one_shot_applications = restore_applications;
+    state.damage_batch_ledger = restore_ledger;
     (survivors, tally)
 }
 
@@ -13734,6 +13870,7 @@ fn continue_replacement_impl(
                 // `Execute` payload is inert — the flag short-circuits the caller
                 // before it is read.
                 let outer_replacement = crate::types::game_state::PendingReplacement {
+                    settled_damage_guards: Vec::new(),
                     proposed: proposed.clone(),
                     sacrifice_provenance: reparked_sacrifice_provenance,
                     candidates: reparked_candidates,
@@ -14102,7 +14239,20 @@ pub fn continue_replacement(
         .pending_replacement
         .as_ref()
         .map(|pending| pending.unrepresentable_life_change);
-    let result = continue_replacement_impl(state, chosen_index, events);
+    // CR 510.2 + CR 611.3a: the answer re-scans the parked portion under the guards its
+    // batch read. An open combat batch already holds them.
+    let parked_guards = state
+        .pending_replacement
+        .as_ref()
+        .filter(|_| state.damage_batch_ledger.is_none())
+        .map(|pending| pending.settled_damage_guards.clone())
+        .filter(|guards| !guards.is_empty());
+    let result = match parked_guards {
+        Some(guards) => with_settled_damage_guards(state, guards, |state| {
+            continue_replacement_impl(state, chosen_index, events)
+        }),
+        None => continue_replacement_impl(state, chosen_index, events),
+    };
     // CR 616.1f: backstop for the stamp — a record re-parked while a stamped
     // record is answered stays stamped (a fresh park already reads the open
     // ingress window; this never downgrades).
@@ -17101,6 +17251,7 @@ mod tests {
         // single optional replacement produces): candidate 0 is the real Riot
         // replacement, decline is synthetic. This isolates the label builder.
         state.pending_replacement = Some(PendingReplacement {
+            settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::zone_change(ObjectId(20), Zone::Hand, Zone::Battlefield, None),
             sacrifice_provenance: None,
             candidates: vec![ReplacementId {
@@ -17164,6 +17315,7 @@ mod tests {
         ] {
             let mut state = test_state_with_object(commander, Zone::Battlefield, vec![]);
             state.pending_replacement = Some(PendingReplacement {
+                settled_damage_guards: Vec::new(),
                 proposed: ProposedEvent::zone_change(
                     commander,
                     Zone::Battlefield,
@@ -17246,6 +17398,7 @@ mod tests {
                 description: "Retain green mana".to_string(),
             }];
         state.pending_replacement = Some(PendingReplacement {
+            settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::EmptyManaPool {
                 player_id: PlayerId(0),
                 units: vec![],
@@ -18142,6 +18295,146 @@ mod tests {
             assert_eq!(
                 replacement_condition_quantity_ctx(&state, ObjectId(10), None, &event).event_amount,
                 Some(i32::try_from(amount).unwrap_or(i32::MAX)),
+            );
+        }
+    }
+
+    const UNDERGROWTH_CHAMPION: &str = "If damage would be dealt to this creature while it has a +1/+1 counter on it, prevent that damage and remove a +1/+1 counter from this creature.\nLandfall — Whenever a land you control enters, put a +1/+1 counter on this creature.";
+
+    fn printed_damage_shields(text: &str, name: &str) -> Vec<ReplacementDefinition> {
+        crate::parser::oracle::parse_oracle_text(text, name, &[], &["Creature".into()], &[])
+            .replacements
+            .into_iter()
+            .filter(|r| r.event == ReplacementEvent::DamageDone)
+            .collect()
+    }
+
+    /// CR 510.2 + CR 611.3a + CR 400.7: a batch's guard reading is found by the host's
+    /// incarnation and the condition, not by a registry index, so a definition added
+    /// ahead of the shield (as a layer pass at a CR 616.1 pause can do) doesn't lose it.
+    /// The reading wins over the live state: Undergrowth Champion read with no counter
+    /// stays unshielded for the batch after a counter arrives. A new incarnation of
+    /// the same id is a new object and finds nothing.
+    #[test]
+    fn settled_damage_guard_is_keyed_by_incarnation_and_condition() {
+        let champion = ObjectId(10);
+        let shields = printed_damage_shields(UNDERGROWTH_CHAMPION, "Undergrowth Champion");
+        assert_eq!(shields.len(), 1);
+        let condition = shields[0].condition.clone().expect("the printed guard");
+        let mut state = test_state_with_object(champion, Zone::Battlefield, shields);
+        let guards = read_damage_guards(&state);
+        assert_eq!(
+            guards,
+            vec![SettledDamageGuard {
+                source: ObjectIncarnationRef::from_object(&state.objects[&champion]),
+                condition: condition.clone(),
+                reading: DamageGuardReading::Fails,
+            }]
+        );
+        state.damage_batch_ledger = Some(DamageBatchLedger {
+            applications: Vec::new(),
+            settled_guards: guards,
+        });
+
+        let obj = state.objects.get_mut(&champion).unwrap();
+        let mut reordered = vec![make_repl(ReplacementEvent::Moved)];
+        reordered.extend(obj.replacement_definitions.iter_all().cloned());
+        obj.replacement_definitions = reordered.into();
+        obj.counters.insert(CounterType::Plus1Plus1, 1);
+
+        let event = ProposedEvent::Damage {
+            source_id: ObjectId(11),
+            target: TargetRef::Object(champion),
+            amount: 2,
+            is_combat: false,
+            applied: HashSet::new(),
+        };
+        assert_eq!(
+            settled_damage_guard_reading(&state, &state.objects[&champion], &condition, &event),
+            Some(DamageGuardReading::Fails)
+        );
+        let registry = build_replacement_registry();
+        assert!(find_applicable_replacements(&state, &event, &registry).is_empty());
+        // Reach guard: with no batch open the live counter makes the shield a candidate.
+        let settled = state.damage_batch_ledger.take();
+        assert_eq!(
+            find_applicable_replacements(&state, &event, &registry).len(),
+            1
+        );
+        state.damage_batch_ledger = settled;
+
+        state.objects.get_mut(&champion).unwrap().bump_incarnation();
+        assert_eq!(
+            settled_damage_guard_reading(&state, &state.objects[&champion], &condition, &event),
+            None
+        );
+    }
+
+    /// CR 510.2 + CR 615.8: a consumed one-shot shield (Awe Strike: "The next time target
+    /// creature would deal damage this turn, prevent that damage.") still covers the same
+    /// source's other portions of one combat damage instance, through the batch's
+    /// `applications`. Every batch opens with none, so a later batch finds it spent.
+    #[test]
+    fn consumed_one_shot_is_revived_only_inside_its_combat_batch() {
+        let source = ObjectId(11);
+        let rid = ReplacementId {
+            source: ObjectId(0),
+            index: 0,
+        };
+        let mut state = GameState::new_two_player(42);
+        let combat_portion = ProposedEvent::Damage {
+            source_id: source,
+            target: TargetRef::Player(PlayerId(1)),
+            amount: 3,
+            is_combat: true,
+            applied: HashSet::new(),
+        };
+        state.damage_batch_ledger = Some(DamageBatchLedger {
+            applications: vec![(
+                AppliedReplacementKey::for_event(&combat_portion, rid),
+                source,
+            )],
+            settled_guards: Vec::new(),
+        });
+        assert!(consumed_replacement_applies_in_combat_batch(
+            &state,
+            &combat_portion,
+            rid
+        ));
+        state.damage_batch_ledger = Some(DamageBatchLedger::default());
+        assert!(!consumed_replacement_applies_in_combat_batch(
+            &state,
+            &combat_portion,
+            rid
+        ));
+    }
+
+    /// CR 614.1 + CR 611.3a: a condition that reads the proposed event can't be settled
+    /// once for a batch. Divine Presence reads each portion's amount ("If a source would
+    /// deal 4 or more damage"); Undergrowth Champion's counter guard and Jared
+    /// Carthalion's "while you're the monarch" read only the board.
+    #[test]
+    fn only_board_reading_guards_settle_for_a_batch() {
+        let presence = crate::parser::oracle_replacement::parse_replacement_line(
+            "If a source would deal 4 or more damage to a permanent or player, that source deals 3 damage to that permanent or player instead.",
+            "Divine Presence",
+        )
+        .expect("the printed fixed damage replacement must parse");
+        let presence = presence.condition.expect("Divine Presence's threshold");
+        assert!(crate::game::ability_scan::replacement_condition_reads_event(&presence));
+
+        for (name, text) in [
+            ("Undergrowth Champion", UNDERGROWTH_CHAMPION),
+            (
+                "Jared Carthalion, True Heir",
+                "When Jared Carthalion enters, target opponent becomes the monarch. You can't become the monarch this turn.\nIf damage would be dealt to Jared Carthalion while you're the monarch, prevent that damage and put that many +1/+1 counters on it.",
+            ),
+        ] {
+            let shields = printed_damage_shields(text, name);
+            let guard = shields[0].condition.as_ref().expect("the printed guard");
+            assert!(
+                !crate::game::ability_scan::replacement_condition_reads_event(guard),
+                "{name}"
             );
         }
     }
@@ -22746,6 +23039,7 @@ mod tests {
         // ReplacementChoice — covering the non-None branch of the guard.
         let mut state = GameState::new_two_player(42);
         state.pending_replacement = Some(PendingReplacement {
+            settled_damage_guards: Vec::new(),
             proposed: ProposedEvent::zone_change(ObjectId(20), Zone::Hand, Zone::Battlefield, None),
             sacrifice_provenance: None,
             candidates: vec![],

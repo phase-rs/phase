@@ -5451,6 +5451,7 @@ fn scan_replacement_condition(x: &ReplacementCondition, mode: ScanMode) -> Axes 
             acc
         }
         ReplacementCondition::HasMaxSpeed => Axes::NONE,
+        ReplacementCondition::OnlyIfStatic { condition } => scan_static_condition(condition, mode),
         ReplacementCondition::CastViaEscape => Axes::NONE,
         ReplacementCondition::CastVariantPaid { variant: _ } => {
             Axes::history_of(HistoryMember::TurnNumber)
@@ -5867,6 +5868,12 @@ pub(crate) fn replacement_condition_reads_sibling_mutable(
     condition: &ReplacementCondition,
 ) -> bool {
     scan_replacement_condition(condition, ScanMode::Conservative).sibling
+}
+
+/// Axis 1 on a replacement effect's `condition` (CR 614.1): the verdict varies by event, so
+/// it can't be settled once for a simultaneous batch (Divine Presence reads each proposal).
+pub(crate) fn replacement_condition_reads_event(condition: &ReplacementCondition) -> bool {
+    scan_replacement_condition(condition, ScanMode::Conservative).event
 }
 
 /// Axis 2 on a transient `Duration::ForAsLongAs` condition (CR 604.1).

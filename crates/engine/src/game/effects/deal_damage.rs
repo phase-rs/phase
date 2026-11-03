@@ -13,8 +13,8 @@ use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     names_resolution_chosen_recipient, quantity_expr_uses_recipient, DamageContextSnapshot,
     DamageSource, EachDamageRecipient, Effect, EffectError, EffectKind, ExcessRecipient,
-    PlayerFilter, QuantityExpr, ResolvedAbility, TargetChoiceTiming, TargetDamageSourceBinding,
-    TargetFilter, TargetRef,
+    PlayerFilter, QuantityExpr, ResolvedAbility, SubAbilityLink, TargetChoiceTiming,
+    TargetDamageSourceBinding, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
@@ -1195,7 +1195,7 @@ fn stash_remaining_post_replacement_damage(
     let mut iter = remaining
         .iter()
         .filter_map(|(ctx, event)| build_post_replacement_damage_node(ctx, event))
-        .map(|node| keep_chain_identity(node, ability));
+        .map(|node| keep_chain_identity(state, node, ability));
     let Some(mut head) = iter.next() else {
         if let Some(sub) = ability.sub_ability.as_ref() {
             let tail = cast_tail_with_parent_targets(state, sub, ability);
@@ -1227,7 +1227,7 @@ fn stash_remaining_damage_chain(
     damage_source_id: ObjectId,
     remaining: impl IntoIterator<Item = (TargetRef, u32)>,
 ) {
-    let Some(mut head) = remaining_damage_chain(ability, damage_source_id, remaining) else {
+    let Some(mut head) = remaining_damage_chain(state, ability, damage_source_id, remaining) else {
         // No remaining batch work — still forward the parent's sub_ability so the
         // downstream chain resumes after the pending replacement choice resolves.
         if let Some(sub) = ability.sub_ability.as_ref() {
@@ -1249,6 +1249,7 @@ fn stash_remaining_damage_chain(
 /// `sub_ability` chain. Every node keeps the parent's latched trigger source so a
 /// departed source is still evaluated by its last known information.
 fn remaining_damage_chain(
+    state: &GameState,
     ability: &ResolvedAbility,
     damage_source_id: ObjectId,
     remaining: impl IntoIterator<Item = (TargetRef, u32)>,
@@ -1257,7 +1258,7 @@ fn remaining_damage_chain(
         let mut node =
             build_remaining_damage_node(damage_source_id, ability.controller, target, amount);
         node.trigger_source = ability.trigger_source.clone();
-        keep_chain_identity(node, ability)
+        keep_chain_identity(state, node, ability)
     };
     let mut iter = remaining.into_iter();
     let (first_target, first_amount) = iter.next()?;
@@ -1303,10 +1304,95 @@ fn cast_tail_with_parent_targets(
 /// and hands this node's context on, so it carries the chain's (Nibelheim Aflame, "If this
 /// spell was cast from a graveyard"; Tannuk, "the second time this ability has resolved").
 /// A drain runs at depth 1, so the index counts no resolution.
-fn keep_chain_identity(mut node: ResolvedAbility, ability: &ResolvedAbility) -> ResolvedAbility {
+fn keep_chain_identity(
+    state: &GameState,
+    mut node: ResolvedAbility,
+    ability: &ResolvedAbility,
+) -> ResolvedAbility {
     node.context = ability.context.clone();
     node.ability_index = ability.ability_index;
+    // CR 510.2 + CR 611.3a: a remaining portion of a simultaneous batch keeps the guards
+    // the batch read; nothing else is such a portion (`apply_parent_chain_context`).
+    node.context.settled_damage_guards = replacement::settled_damage_guards(state);
     node
+}
+
+/// CR 120.2b: the one object a damage node names as the dealer: `Some(None)` for the
+/// spell or ability itself. `None` for any other effect, and for a node with several
+/// sources.
+fn named_damage_dealer(effect: &Effect) -> Option<Option<DamageSource>> {
+    match effect {
+        Effect::DealDamage { damage_source, .. } | Effect::DamageAll { damage_source, .. } => {
+            Some(*damage_source)
+        }
+        Effect::DamageEachPlayer { .. } => Some(None),
+        _ => None,
+    }
+}
+
+/// CR 608.2c: the node holding this clause's next instruction, when it is unconditional: a
+/// `ContinuationStep` sub, or the base clause of an unswapped "instead" sub (Searing Blaze
+/// lowers its printed second clause to that sub's `else_ability`).
+fn next_damage_clause(node: &ResolvedAbility) -> Option<&ResolvedAbility> {
+    let sub = node
+        .sub_ability
+        .as_deref()
+        .filter(|sub| sub.sub_link == SubAbilityLink::ContinuationStep)?;
+    match &sub.condition {
+        None => Some(sub),
+        Some(condition) if condition.is_instead_override() => sub.else_ability.as_deref(),
+        Some(_) => None,
+    }
+}
+
+/// CR 608.2f: does this node's clause and the next one form one simultaneous action? One
+/// dealer, one sentence: Chandra's Outrage, "deals 4 damage to target creature and 2 damage
+/// to that creature's controller." A `SequentialSibling` or a conditioned node is a later
+/// instruction (Misthios's Fury). A different dealer is too: the AST doesn't mark Alpha
+/// Brawl's "then each of those creatures deals damage", and that card's ruling says "The
+/// two parts of Alpha Brawl's effect happen sequentially".
+fn joins_next_damage_clause(node: &ResolvedAbility) -> bool {
+    next_damage_clause(node).is_some_and(|next| {
+        named_damage_dealer(&node.effect).is_some()
+            && named_damage_dealer(&node.effect) == named_damage_dealer(&next.effect)
+    })
+}
+
+/// CR 510.2 + CR 608.2f + CR 611.3a: read the guards once for a joined run of damage clauses
+/// and stamp every clause of the run, so each opens its batch under the same reading
+/// (Undergrowth Champion ruling: "its prevention effect will apply once to all that damage").
+/// `None` when this node starts no run, or when nothing on the board has a guard. The stamp
+/// is the carrier a remaining portion already uses, so a pause inside the run composes.
+pub(super) fn settle_joined_damage_run(
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> Option<ResolvedAbility> {
+    if !ability.context.settled_damage_guards.is_empty() || !joins_next_damage_clause(ability) {
+        return None;
+    }
+    let guards = replacement::read_damage_guards(state);
+    if guards.is_empty() {
+        return None;
+    }
+    let mut stamped = ability.clone();
+    let mut node = &mut stamped;
+    loop {
+        node.context.settled_damage_guards = guards.clone();
+        if !joins_next_damage_clause(node) {
+            return Some(stamped);
+        }
+        // `joins_next_damage_clause` held, so this is `next_damage_clause`'s node. An
+        // unswapped "instead" sub is stamped too: a pause in the head forwards it, and its
+        // else clause resolves under its context (Searing Blaze under Furnace of Rath).
+        let sub = node.sub_ability.as_deref_mut()?;
+        node = match sub.condition {
+            None => sub,
+            Some(_) => {
+                sub.context.settled_damage_guards = guards.clone();
+                sub.else_ability.as_deref_mut()?
+            }
+        };
+    }
 }
 
 /// CR 608.2c: tell `resolve_chain_body` that this pause parked the node's later
@@ -1341,7 +1427,7 @@ fn stash_each_source_combined_continuation(
 
     for (ctx, event) in already_replaced {
         if let Some(node) = build_post_replacement_damage_node(ctx, event) {
-            let node = keep_chain_identity(node, ability);
+            let node = keep_chain_identity(state, node, ability);
             match head_opt.as_mut() {
                 None => head_opt = Some(node),
                 Some(h) => append_to_sub_chain(h, node),
@@ -1351,6 +1437,7 @@ fn stash_each_source_combined_continuation(
 
     for (source_id, target, amount) in raw_remaining {
         let node = keep_chain_identity(
+            state,
             build_remaining_damage_node(source_id, controller, target, amount),
             ability,
         );
@@ -1403,11 +1490,13 @@ fn stash_remaining_each_source_damage(
     };
 
     let mut head = keep_chain_identity(
+        state,
         build_remaining_damage_node(first_source, controller, first_target, first_amount),
         ability,
     );
     for (source_id, target, amount) in iter {
         let node = keep_chain_identity(
+            state,
             build_remaining_damage_node(source_id, controller, target, amount),
             ability,
         );
@@ -1450,6 +1539,16 @@ fn active_excess_recipient(
 /// CR 120.1: Deal N damage — reduces life for players, marks damage on creatures.
 /// Reads amount from `Effect::DealDamage { amount }`.
 pub fn resolve(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    replacement::with_damage_batch(state, ability, |state| {
+        resolve_damage_clause(state, ability, events)
+    })
+}
+
+fn resolve_damage_clause(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
@@ -2113,6 +2212,16 @@ pub fn resolve_all(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    replacement::with_damage_batch(state, ability, |state| {
+        resolve_all_portions(state, ability, events)
+    })
+}
+
+fn resolve_all_portions(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
     let (amount, target_filter, player_filter, damage_source): (
         &QuantityExpr,
         TargetFilter,
@@ -2584,6 +2693,16 @@ pub fn resolve_each_player(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    replacement::with_damage_batch(state, ability, |state| {
+        resolve_each_player_portions(state, ability, events)
+    })
+}
+
+fn resolve_each_player_portions(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
     let (amount_expr, player_filter) = match &ability.effect {
         Effect::DamageEachPlayer {
             amount,
@@ -2951,6 +3070,16 @@ pub fn resolve_each_deals_equal_to_power(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
+    replacement::with_damage_batch(state, ability, |state| {
+        resolve_each_deals_equal_to_power_portions(state, ability, events)
+    })
+}
+
+fn resolve_each_deals_equal_to_power_portions(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
     if !matches!(ability.effect, Effect::EachDealsDamageEqualToPower { .. }) {
         return Err(EffectError::MissingParam(
             "EachDealsDamageEqualToPower".to_string(),
@@ -3039,6 +3168,16 @@ pub fn resolve_each_deals_equal_to_power(
 /// remaining sources with PER-SOURCE identity preserved
 /// (`stash_remaining_each_source_damage`).
 pub fn resolve_each_source_deals_damage(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    replacement::with_damage_batch(state, ability, |state| {
+        resolve_each_source_deals_damage_portions(state, ability, events)
+    })
+}
+
+fn resolve_each_source_deals_damage_portions(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
@@ -3307,6 +3446,7 @@ fn stash_remaining_each_deals_chain(
             continue;
         }
         let node = keep_chain_identity(
+            state,
             build_remaining_damage_node(
                 source_id,
                 ability.controller,
@@ -8647,6 +8787,7 @@ mod attacked_referent_recipient_tests {
         ability.trigger_source = Some(latched);
 
         let head = remaining_damage_chain(
+            &state,
             &ability,
             token,
             [

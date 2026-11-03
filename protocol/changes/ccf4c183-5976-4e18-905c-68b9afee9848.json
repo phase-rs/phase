@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "ReplacementCondition::OnlyIfStatic and the damage-batch guard carrier: printed 'while' guards are serialized, and SpellContext and PendingReplacement carry settled_damage_guards across a CR 616.1 pause, so older full-game and P2P readers cannot decode them"
+}

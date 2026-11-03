@@ -2515,8 +2515,9 @@ pub(super) fn target_choice_timing_for_parsed(
         // `Effect::unimplemented("plural_attachment_anaphor")` before any
         // `Effect::Attach` exists. Every measured plural-anaphor attachment
         // clause THAT REACHES THE EFFECT PARSER (Fumble, Helm of Kaldra) lowers
-        // through that arm; Outfitted Jouster's tail is swallowed upstream by its
-        // conjure clause and never becomes a clause at all (its own defect). The
+        // through that arm; Outfitted Jouster's tail is handled by its conjure
+        // clause (`try_parse_conjure`), which builds the `Attach` over the
+        // determined `LastCreated` set itself, so it never reaches this arm. The
         // sibling fallback arms cannot match a plural anaphor phrase either: the
         // token arm lists only singular anaphors and the Cass/Zack-Fair arm
         // requires the literal `equipment that was/were attached to`. The
@@ -3674,6 +3675,17 @@ pub(super) fn rebind_attach_attachment_to_forwarded_source_if_anaphor_names_move
 /// (each `StaticDefinition.affected`), `CreateDelayedTrigger`'s inner
 /// `AbilityDefinition`, and nested `sub_ability` / `else_ability`.
 fn sub_targets_moved_card(sub: &AbilityDefinition) -> bool {
+    // CR 701.3a + CR 608.2c: "attach them to ~" names what the parent created as the
+    // attachment, so `~` stays the ability's source (Outfitted Jouster).
+    if matches!(
+        &*sub.effect,
+        Effect::Attach {
+            attachment: TargetFilter::LastCreated,
+            ..
+        }
+    ) {
+        return false;
+    }
     if matches!(
         sub.effect.target_filter(),
         Some(TargetFilter::SelfRef | TargetFilter::ParentTarget)
