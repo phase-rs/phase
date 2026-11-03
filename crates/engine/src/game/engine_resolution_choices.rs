@@ -4779,13 +4779,13 @@ pub(super) fn handle_resolution_choice(
                         .iter_mut()
                         .find(|candidate| candidate.id == holder)
                         .expect("player exists");
-                    // allow-raw-zone: looked-at cards remain library objects until a keep decision (CR 701.20b/e).
                     // CR 701.20e: a ROUTED remainder is lifted out with the kept
                     // cards so it can be re-delivered (bottom or another zone). A
                     // SILENT remainder is never moved, so only the kept cards leave
                     // their slots — the unchosen ones keep the positions they
                     // already had, relative to every card the instruction never
                     // touched.
+                    // allow-raw-zone: looked-at cards remain library objects until a keep decision (CR 701.20b/e).
                     player_state.library.retain(|id| {
                         if rest_remainder.is_route() {
                             !cards.contains(id)

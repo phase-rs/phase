@@ -37482,6 +37482,107 @@ impl AbilityCondition {
         }
     }
 
+    /// CR 608.2c: whether any filter-grammar node this condition carries — a
+    /// `TargetFilter`, a `PlayerFilter`'s nested filters, a `FilterProp`, or a
+    /// filter inside a compared quantity — satisfies `visit`, through the `Not`
+    /// / `ConditionInstead` / `And` / `Or` wrappers. The filter-axis companion of
+    /// [`Self::any_quantity_expr`]: a gate that tests membership in the chain's
+    /// tracked set ("if it was put into your graveyard this way") reads it as
+    /// surely as one that counts it. Exhaustive, no wildcard arm, so a new
+    /// filter-bearing condition must say what it carries.
+    pub fn any_filter_grammar(&self, visit: &dyn Fn(FilterGrammarNode<'_>) -> bool) -> bool {
+        match self {
+            AbilityCondition::RevealedHasCardType {
+                additional_filter,
+                subtype_filter,
+                ..
+            } => {
+                additional_filter
+                    .as_ref()
+                    .is_some_and(|prop| filter_prop_grammar_any(prop, visit))
+                    || subtype_filter
+                        .as_deref()
+                        .is_some_and(|filter| filter_grammar_any(filter, visit))
+            }
+            AbilityCondition::ObjectsShareQuality {
+                subject, reference, ..
+            } => filter_grammar_any(subject, visit) || filter_grammar_any(reference, visit),
+            AbilityCondition::TargetSharesNameWithOtherExiledThisWay { target: filter }
+            | AbilityCondition::DiscardedCardMatchesFilter { filter }
+            | AbilityCondition::TargetMatchesFilter { filter, .. }
+            | AbilityCondition::TriggeringSpellTargetsFilter { filter }
+            | AbilityCondition::SourceMatchesFilter { filter }
+            | AbilityCondition::PostReplacementDamageSourceMatchesFilter { filter }
+            | AbilityCondition::ZoneChangeObjectMatchesFilter { filter, .. }
+            | AbilityCondition::ControllerControlsMatching { filter }
+            | AbilityCondition::ControllerControlledMatchingAsCast { filter }
+            | AbilityCondition::ZoneChangedThisWay { filter, .. }
+            | AbilityCondition::CostPaidObjectMatchesFilter { filter } => {
+                filter_grammar_any(filter, visit)
+            }
+            AbilityCondition::ScopedPlayerMatches { filter } => {
+                player_filter_grammar_any(filter, visit)
+            }
+            AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
+                quantity_expr_grammar_any(lhs, visit) || quantity_expr_grammar_any(rhs, visit)
+            }
+            AbilityCondition::QuantityQuality { quantity, .. } => {
+                quantity_expr_grammar_any(quantity, visit)
+            }
+            AbilityCondition::PreviousEffectAmount { rhs, .. } => {
+                quantity_expr_grammar_any(rhs, visit)
+            }
+            AbilityCondition::Not { condition }
+            | AbilityCondition::ConditionInstead { inner: condition } => {
+                condition.any_filter_grammar(visit)
+            }
+            AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+                conditions
+                    .iter()
+                    .any(|condition| condition.any_filter_grammar(visit))
+            }
+            AbilityCondition::TriggerEventTargetDamagedBySourceThisTurn
+            | AbilityCondition::TriggerEventTargetExploitedBySource
+            | AbilityCondition::AdditionalCostPaid { .. }
+            | AbilityCondition::AdditionalCostPaidInstead
+            | AbilityCondition::AlternativeManaCostPaid
+            | AbilityCondition::EffectOutcome { .. }
+            | AbilityCondition::EventOutcomeWon
+            | AbilityCondition::CoinFlipOutcome { .. }
+            | AbilityCondition::ChosenLabelIs { .. }
+            | AbilityCondition::WhenYouDo
+            | AbilityCondition::WasCast { .. }
+            | AbilityCondition::CastDuringPhase { .. }
+            | AbilityCondition::CurrentPhaseIs { .. }
+            | AbilityCondition::CastTimingPermission { .. }
+            | AbilityCondition::ManaColorSpent { .. }
+            | AbilityCondition::SourceEnteredThisTurn
+            | AbilityCondition::CastVariantPaid { .. }
+            | AbilityCondition::CastVariantPaidInstead { .. }
+            | AbilityCondition::HasMaxSpeed
+            | AbilityCondition::IsMonarch
+            | AbilityCondition::IsInitiative
+            | AbilityCondition::HasCityBlessing
+            | AbilityCondition::HasEnduringStory
+            | AbilityCondition::ControlsCommander { .. }
+            | AbilityCondition::IsRingBearer
+            | AbilityCondition::CompletedDungeon { .. }
+            | AbilityCondition::TargetHasKeywordInstead { .. }
+            | AbilityCondition::HasObjectTarget
+            | AbilityCondition::IsYourTurn
+            | AbilityCondition::WasStartingPlayer { .. }
+            | AbilityCondition::SpellCastWithVariantThisTurn { .. }
+            | AbilityCondition::FirstCombatPhaseOfTurn
+            | AbilityCondition::FirstEndStepOfTurn
+            | AbilityCondition::SourceIsTapped
+            | AbilityCondition::SourceAttachedToCreature
+            | AbilityCondition::DayNightIsNeither
+            | AbilityCondition::DayNightIs { .. }
+            | AbilityCondition::AbilityUseCountThisTurn { .. }
+            | AbilityCondition::SourceLacksKeyword { .. } => false,
+        }
+    }
+
     /// CR 608.2k: does this ability condition read the cost-paid object?
     pub fn references_cost_paid_object(&self) -> bool {
         match self {

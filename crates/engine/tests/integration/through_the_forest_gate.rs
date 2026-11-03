@@ -420,6 +420,67 @@ fn a_silent_remainder_in_the_reorder_form_keeps_the_unchosen_cards_in_place() {
     );
 }
 
+/// The same reorder form with an EMPTY selection. "Any number" includes zero
+/// (CR 107.1c), so declining every card must leave the library exactly as it
+/// was — contents AND order. This is a different code path from the one-card
+/// case: nothing is lifted out of the library at all, so a remainder routed to
+/// the graveyard would strand or drop the whole looked-at pile instead of only
+/// the unchosen tail.
+#[test]
+fn a_zero_card_selection_in_the_reorder_form_leaves_the_library_unchanged() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mut runner = scenario.build();
+
+    let above = add_library_card(&mut runner, "Above", false);
+    let kept = add_library_card(&mut runner, "Kept", false);
+    let below = add_library_card(&mut runner, "Below", false);
+    let deepest = add_library_card(&mut runner, "Deep Sentinel", false);
+    let before = library_ids(&runner);
+    assert_eq!(before, vec![above, kept, below, deepest]);
+
+    runner.state_mut().waiting_for = WaitingFor::DigChoice {
+        player: P0,
+        library_owner: P0,
+        cards: vec![above, kept, below],
+        selectable_cards: vec![above, kept, below],
+        keep_count: 1,
+        up_to: true,
+        kept_destination: Some(Zone::Library),
+        rest_destination: None,
+        rest_remainder: DigRestRemainder::StayInLibrary,
+        rest_split_top_count: None,
+        rest_order: DigRestOrder::Preserve,
+        source_id: None,
+        enter_tapped: false,
+        enters_attacking: false,
+    };
+
+    runner
+        .act(GameAction::SelectCards { cards: Vec::new() })
+        .expect("an empty selection is a legal \"any number\" choice");
+
+    let st = runner.state();
+    assert!(
+        st.players[0].graveyard.is_empty(),
+        "CR 701.20e: nothing routes a card that was only looked at, got {:?}",
+        st.players[0].graveyard
+    );
+    assert_eq!(
+        library_ids(&runner),
+        before,
+        "declining every card leaves the library untouched, order included"
+    );
+    for card in [above, kept, below, deepest] {
+        assert_eq!(
+            st.objects[&card].zone,
+            Zone::Library,
+            "{} must stay in the library",
+            st.objects[&card].name
+        );
+    }
+}
+
 /// CR 701.20a + CR 701.20e: a reveal-dig with a silent remainder ends the reveal
 /// at the choice's information boundary. The unchosen cards stay in the library,
 /// so a surviving `revealed_cards` marker would pair each name with the position
@@ -469,4 +530,86 @@ fn a_silent_remainder_ends_the_reveal_of_the_cards_it_leaves_in_the_library() {
         "the reveal ends with the instruction that caused it, got {:?}",
         st.revealed_cards
     );
+}
+
+/// CR 608.2c + CR 701.20e — the WHOLE-SET boundary of the remainder rule.
+///
+/// Petals of Insight (verbatim Scryfall text): "Look at the top three cards of
+/// your library. You may put those cards on the bottom of your library in any
+/// order. If you do, return Petals of Insight to its owner's hand. Otherwise,
+/// draw three cards."
+///
+/// "Those cards" names every looked-at card, not a remainder of a keep. When the
+/// parser folded it into the look's rest destination, the zero-keep look never
+/// applied it, so accepting left all three cards on top. It now lowers to its own
+/// placement over the looked-at set, which must move all three to the bottom.
+#[test]
+fn put_those_cards_on_the_bottom_moves_every_looked_at_card() {
+    const PETALS_OF_INSIGHT: &str = "Look at the top three cards of your library. You may put \
+those cards on the bottom of your library in any order. If you do, return Petals of Insight to \
+its owner's hand. Otherwise, draw three cards.";
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mut builder =
+        scenario.add_spell_to_hand_from_oracle(P0, "Petals of Insight", false, PETALS_OF_INSIGHT);
+    builder.with_mana_cost(ManaCost::Cost {
+        shards: vec![ManaCostShard::Blue],
+        generic: 4,
+    });
+    let spell_id = builder.id();
+    let mut runner = scenario.build();
+
+    let looked_at: Vec<ObjectId> = (0..3)
+        .map(|index| add_library_card(&mut runner, &format!("Looked {index}"), false))
+        .collect();
+    let deeper: Vec<ObjectId> = (0..2)
+        .map(|index| add_library_card(&mut runner, &format!("Deeper {index}"), false))
+        .collect();
+    add_mana(&mut runner, ManaType::Blue, 1);
+    add_mana(&mut runner, ManaType::Colorless, 4);
+    let hand_before = runner.state().players[0].hand.len();
+
+    let outcome = runner.cast(spell_id).accept_optional().resolve();
+    assert!(
+        matches!(outcome.final_waiting_for(), WaitingFor::Priority { .. }),
+        "the spell resolves fully, got {:?}",
+        outcome.final_waiting_for()
+    );
+
+    let st = runner.state();
+    assert!(
+        st.stack.is_empty(),
+        "Petals of Insight finished resolving, stack: {:?}",
+        st.stack
+    );
+    // Positive reach guard: the "if you do" branch ran — Petals returned to hand
+    // and the "otherwise" draw did not.
+    assert_eq!(
+        st.objects[&spell_id].zone,
+        Zone::Hand,
+        "accepting the placement returns Petals of Insight to its owner's hand"
+    );
+    assert_eq!(
+        st.players[0].hand.len(),
+        hand_before,
+        "the cast card left the hand and came back; the \"otherwise\" draw never ran"
+    );
+
+    let library = library_ids(&runner);
+    assert_eq!(library.len(), 5, "no card left the library");
+    assert_eq!(
+        &library[..2],
+        deeper.as_slice(),
+        "the two cards never looked at are now on top"
+    );
+    let mut bottom = library[2..].to_vec();
+    bottom.sort();
+    let mut expected = looked_at.clone();
+    expected.sort();
+    assert_eq!(
+        bottom, expected,
+        "all three looked-at cards went to the bottom, not one of them"
+    );
+    assert!(st.players[0].graveyard.is_empty());
 }

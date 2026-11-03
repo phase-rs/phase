@@ -114,6 +114,7 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::TargetFilter;
+    use crate::types::actions::GameAction;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
@@ -193,15 +194,31 @@ mod tests {
     /// routed anywhere — under the `Route` graveyard default a bare card choice
     /// over the library, hand, exile or battlefield would mill/discard every other
     /// candidate.
+    ///
+    /// The selection is submitted through the production resolution-choice
+    /// reducer, because the choice state is only half the claim: the FAILURE this
+    /// test prevents happens when the answer is applied, and a prompt-only
+    /// assertion would pass even if the unchosen candidate were milled.
     #[test]
     fn test_choose_card_never_routes_the_unselected_cards() {
         let mut state = GameState::new_two_player(42);
-        let card = create_object(
+        let chosen = create_object(
             &mut state,
             CardId(1),
             PlayerId(0),
             "Card A".to_string(),
             Zone::Library,
+        );
+        let unchosen = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Card B".to_string(),
+            Zone::Library,
+        );
+        assert_eq!(
+            state.players[0].library.iter().copied().collect::<Vec<_>>(),
+            vec![chosen, unchosen]
         );
 
         let ability = ResolvedAbility::new(
@@ -217,7 +234,7 @@ mod tests {
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        match &state.waiting_for {
+        let waiting_for = match &state.waiting_for {
             WaitingFor::DigChoice {
                 cards,
                 kept_destination,
@@ -225,7 +242,7 @@ mod tests {
                 rest_remainder,
                 ..
             } => {
-                assert_eq!(*cards, vec![card]);
+                assert_eq!(*cards, vec![chosen, unchosen]);
                 assert_eq!(*kept_destination, None);
                 assert_eq!(*rest_destination, None);
                 assert_eq!(
@@ -234,9 +251,39 @@ mod tests {
                     "CR 701.20e: a card choice moves nothing, so the rest of the \
                      candidates must stay where they are"
                 );
+                state.waiting_for.clone()
             }
             other => panic!("Expected DigChoice, got {:?}", other),
-        }
+        };
+
+        crate::game::engine_resolution_choices::handle_resolution_choice(
+            &mut state,
+            waiting_for,
+            GameAction::SelectCards {
+                cards: vec![chosen],
+            },
+            &mut events,
+        )
+        .expect("naming one of the offered cards must be accepted");
+
+        // CR 701.20e: neither candidate changed zone. The chosen card is only
+        // NAMED; the unchosen one must not be routed by the graveyard default.
+        assert_eq!(state.objects[&chosen].zone, Zone::Library);
+        assert_eq!(state.objects[&unchosen].zone, Zone::Library);
+        assert!(
+            state.players[0].library.iter().any(|id| *id == chosen),
+            "the chosen card stays in the library"
+        );
+        assert!(
+            state.players[0].library.iter().any(|id| *id == unchosen),
+            "the unchosen card must stay in the library, got {:?}",
+            state.players[0].library
+        );
+        assert!(
+            state.players[0].graveyard.is_empty(),
+            "a card choice moves nothing, got {:?}",
+            state.players[0].graveyard
+        );
     }
 
     #[test]
