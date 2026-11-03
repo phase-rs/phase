@@ -62384,13 +62384,17 @@ fn an_activation_journal_row_round_trips() {
 
 /// CR 109.2 + CR 110.1 + CR 602.2a: MECHANISM ROW, not a printed-card row.
 ///
-/// No printed card carries a source-scoped `OncePerTurn` ability-cost reducer,
-/// so the journal arm is pinned with a hand-built definition instead: a
-/// once-per-turn reducer whose scope is "a creature you control" must not count
-/// an activation announced from a graveyard as its qualifying first activation,
-/// while a battlefield activation of the same shape must. Both rows come from
-/// `capture_activation_record_from`, the real announcement capturer, so the
-/// recorded `source_zone` is what the gate reads.
+/// Tezzeret, Betrayer of Flesh ("The first activated ability of an artifact you
+/// activate each turn costs {2} less to activate.") is the nearest printed card,
+/// but its line is a strict parse failure today (`dispatch.rs` declines it; see
+/// `professor_hojo_activation_cost.rs::
+/// once_per_turn_discount_without_a_target_restriction_stays_unsupported`), so
+/// no supported card reaches this arm. The journal arm is therefore pinned with
+/// a hand-built definition: a once-per-turn reducer whose scope is "a creature
+/// you control" must not count an activation announced from a graveyard as its
+/// qualifying first activation, while a battlefield activation of the same shape
+/// must. Both rows come from `capture_activation_record_from`, the real
+/// announcement capturer, so the recorded `source_zone` is what the gate reads.
 ///
 /// Reverting the gate's zone predicate makes the graveyard row qualify (the
 /// creature CARD still matches "creature you control" through its at-departure
