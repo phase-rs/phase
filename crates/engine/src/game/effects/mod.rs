@@ -11416,6 +11416,25 @@ fn is_player_scope_local_continuation(
     child: &Effect,
     scope: &PlayerFilter,
 ) -> bool {
+    // CR 608.2c + CR 701.20a: an owner-relative top-card instruction follows
+    // that owner's terminal shuffle inside the published owner iteration.
+    // Other player populations do not acquire this continuation authority.
+    if is_owner_library_shuffle_scope(scope)
+        && matches!(
+            (parent, child),
+            (
+                Effect::Shuffle {
+                    target: TargetFilter::ScopedPlayer,
+                },
+                Effect::RevealTop {
+                    player: TargetFilter::ScopedPlayer,
+                    ..
+                }
+            )
+        )
+    {
+        return true;
+    }
     // CR 109.5 + CR 608.2c: Compound-subject distribution — when the parent
     // and child effects of a player_scope-tagged ability both reference an
     // iteration-bound recipient (`OriginalController` or `ScopedPlayer`), the
@@ -11866,7 +11885,10 @@ fn detach_after_player_scope_local_chain(
     // referent consumer, so it still runs as its own post-all-iterations loop.
     let referent_in_scope =
         referent_introduced || effect_introduces_per_iteration_referent(&node.effect);
-    let next_is_co_scoped_anaphoric_consumer = next.player_scope.as_ref() == Some(scope)
+    // CR 608.2c: the owner-shuffle continuation introduces its revealed card
+    // inside this iteration without a second explicit scope on "put it".
+    let next_is_co_scoped_anaphoric_consumer = (next.player_scope.as_ref() == Some(scope)
+        || (next.player_scope.is_none() && is_owner_library_shuffle_scope(scope)))
         && referent_in_scope
         && effect_consumes_parent_object_referent(&next.effect);
     if next_is_co_scoped_anaphoric_consumer {
@@ -15450,18 +15472,25 @@ pub(crate) enum TrackedSetPublicationInput<'a> {
 
 fn is_owner_library_shuffle_consumer(ability: &ResolvedAbility) -> bool {
     matches!(
-        (&ability.effect, ability.player_scope.as_ref()),
-        (
-            Effect::Shuffle {
-                target: TargetFilter::ScopedPlayer,
-            },
-            Some(PlayerFilter::TrackedSetPossessor {
-                relation: PlayerRelation::All,
-                possession: PossessionAxis::Owner,
-                filter: TargetFilter::Any,
-                caused_by: Some(ThisWayCause::OwnerLibraryShuffleSubject),
-            })
-        )
+        ability.effect,
+        Effect::Shuffle {
+            target: TargetFilter::ScopedPlayer,
+        }
+    ) && ability
+        .player_scope
+        .as_ref()
+        .is_some_and(is_owner_library_shuffle_scope)
+}
+
+fn is_owner_library_shuffle_scope(scope: &PlayerFilter) -> bool {
+    matches!(
+        scope,
+        PlayerFilter::TrackedSetPossessor {
+            relation: PlayerRelation::All,
+            possession: PossessionAxis::Owner,
+            filter: TargetFilter::Any,
+            caused_by: Some(ThisWayCause::OwnerLibraryShuffleSubject),
+        }
     )
 }
 
@@ -52462,6 +52491,76 @@ mod tests {
         apply_parent_chain_context(&mut child, &parent, None, &mut state);
         assert!(child.context.face_down_in_exile.is_face_down());
         assert_eq!(child.context.duration_events, latched);
+    }
+
+    // SHAPE supplement to the public Chaos Warp cast regression: retain the
+    // revealed-card consumer, but not an independent instruction, in this scope.
+    #[test]
+    fn owner_shuffle_scope_keeps_reveal_and_anaphoric_deploy_only() {
+        let definition = crate::parser::oracle_effect::parse_effect_chain(
+            "The owner of target permanent shuffles it into their library, then reveals the top card of their library. If it's a permanent card, they put it onto the battlefield.",
+            AbilityKind::Spell,
+        );
+        let ability = build_resolved_from_def(&definition, ObjectId(100), PlayerId(0));
+        let mut shuffle = ability.sub_ability.unwrap().sub_ability.unwrap();
+        let scope = shuffle.player_scope.clone().expect("published owner scope");
+        assert!(is_owner_library_shuffle_consumer(&shuffle));
+        let reveal = shuffle.sub_ability.as_deref_mut().expect("reveal");
+        assert!(matches!(
+            reveal.effect,
+            Effect::RevealTop {
+                player: TargetFilter::ScopedPlayer,
+                ..
+            }
+        ));
+        let deploy = reveal
+            .sub_ability
+            .as_deref_mut()
+            .expect("conditional deploy");
+        assert!(deploy.condition.is_some());
+        assert!(effect_consumes_parent_object_referent(&deploy.effect));
+        let mut independent = ResolvedAbility::new(
+            Effect::Draw {
+                target: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        independent.sub_link = SubAbilityLink::SequentialSibling;
+        deploy.sub_ability = Some(Box::new(independent));
+        let (scoped, tail) = split_player_scope_chain(&shuffle, &scope);
+        let kept_reveal = scoped.sub_ability.expect("reveal stays local");
+        let kept_deploy = kept_reveal.sub_ability.expect("deploy stays local");
+        assert!(kept_deploy.condition.is_some());
+        assert!(kept_deploy.sub_ability.is_none());
+        assert!(matches!(
+            tail.expect("independent sibling detaches").effect,
+            Effect::Draw { .. }
+        ));
+
+        // CR 608.2c: neither another population nor an explicit controller
+        // library instruction receives owner-relative continuation authority.
+        let (unrelated, tail) = split_player_scope_chain(&shuffle, &PlayerFilter::All);
+        assert!(unrelated.sub_ability.is_none());
+        assert!(matches!(
+            tail.expect("unrelated-scope reveal detaches").effect,
+            Effect::RevealTop { .. }
+        ));
+        shuffle.sub_ability.as_deref_mut().unwrap().effect = Effect::RevealTop {
+            player: TargetFilter::Controller,
+            count: 1,
+        };
+        let (explicit_your, tail) = split_player_scope_chain(&shuffle, &scope);
+        assert!(explicit_your.sub_ability.is_none());
+        assert!(matches!(
+            tail.expect("your-library reveal detaches").effect,
+            Effect::RevealTop {
+                player: TargetFilter::Controller,
+                ..
+            }
+        ));
     }
 
     /// CR 608.2c — building-block discriminator for the per-player reveal-anaphora

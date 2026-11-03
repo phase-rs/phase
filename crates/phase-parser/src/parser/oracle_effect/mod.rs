@@ -43887,7 +43887,7 @@ fn apply_owner_library_reveal_anchor_from_text(def: &mut AbilityDefinition, text
     // reveal/exile parser binds "their library" to the relative-player anaphor (or, for
     // a subjectless reveal/exile, to the controller), so repair only the owner-shuffle
     // chain and leave explicit "your library" instructions untouched.
-    let mut saw_owner_shuffle = false;
+    let mut owner_anchor = None;
     let mut current = Some(def);
     while let Some(node) = current {
         match node.effect.as_mut() {
@@ -43897,15 +43897,19 @@ fn apply_owner_library_reveal_anchor_from_text(def: &mut AbilityDefinition, text
                         && node.player_scope.as_ref()
                             == Some(&imperative::owner_library_shuffle_scope())) =>
             {
-                saw_owner_shuffle = true;
+                owner_anchor = Some(target.clone());
             }
             Effect::RevealTop { player, .. }
-                if saw_owner_shuffle && repair_reveal && is_repairable_library_owner(player) =>
+                if repair_reveal && is_repairable_library_owner(player) =>
             {
-                *player = TargetFilter::ParentTargetOwner;
+                if let Some(anchor) = &owner_anchor {
+                    *player = anchor.clone();
+                }
             }
             Effect::ExileTop { player, .. }
-                if saw_owner_shuffle && repair_exile && is_repairable_library_owner(player) =>
+                if owner_anchor.is_some()
+                    && repair_exile
+                    && is_repairable_library_owner(player) =>
             {
                 *player = TargetFilter::ParentTargetOwner;
             }
@@ -53912,7 +53916,7 @@ fn issue_2406_chaos_warp_owner_library_shuffle_and_reveal() {
     let Effect::RevealTop { player, count: 1 } = reveal else {
         panic!("expected RevealTop of owner's library, got {reveal:?}");
     };
-    assert_eq!(*player, TargetFilter::ParentTargetOwner);
+    assert_eq!(*player, TargetFilter::ScopedPlayer);
 }
 
 #[test]
@@ -53934,6 +53938,60 @@ fn owner_anchor_does_not_rewrite_explicit_your_library_reveal() {
         panic!("expected RevealTop of your library, got {reveal:?}");
     };
     assert_eq!(*player, TargetFilter::Controller);
+}
+
+// SHAPE: preserve the legacy scalar representation for callers that still
+// supply it; only the exact published owner scope supplies ScopedPlayer.
+#[test]
+fn owner_anchor_preserves_legacy_scalar_and_rejects_unrelated_scope() {
+    let text = "The owner of target permanent shuffles it into their library, then reveals the top card of their library. If it's a permanent card, they put it onto the battlefield.";
+    for (target, scope, expected) in [
+        (
+            TargetFilter::ParentTargetOwner,
+            None,
+            TargetFilter::ParentTargetOwner,
+        ),
+        (
+            TargetFilter::ScopedPlayer,
+            Some(PlayerFilter::All),
+            TargetFilter::Controller,
+        ),
+    ] {
+        let mut def = parse_effect_chain(text, AbilityKind::Spell);
+        let shuffle = def
+            .sub_ability
+            .as_deref_mut()
+            .unwrap()
+            .sub_ability
+            .as_deref_mut()
+            .unwrap();
+        assert!(matches!(*shuffle.effect, Effect::Shuffle { .. }));
+        shuffle.effect = Box::new(Effect::Shuffle { target });
+        shuffle.player_scope = scope;
+        let reveal = shuffle
+            .sub_ability
+            .as_deref_mut()
+            .expect("positive reveal reach guard");
+        assert!(matches!(*reveal.effect, Effect::RevealTop { .. }));
+        reveal.effect = Box::new(Effect::RevealTop {
+            player: TargetFilter::Controller,
+            count: 1,
+        });
+        apply_owner_library_reveal_anchor_from_text(&mut def, text);
+        let reveal = def
+            .sub_ability
+            .as_ref()
+            .unwrap()
+            .sub_ability
+            .as_ref()
+            .unwrap()
+            .sub_ability
+            .as_ref()
+            .unwrap();
+        assert!(
+            matches!(reveal.effect.as_ref(), Effect::RevealTop { player, count: 1 } if *player == expected)
+        );
+    }
 }
 
 #[test]
