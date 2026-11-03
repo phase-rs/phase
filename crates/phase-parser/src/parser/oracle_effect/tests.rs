@@ -28502,11 +28502,12 @@ fn guarded_leading_window_is_distributed_to_coordinated_clause() {
 }
 
 /// CR 611.2a + CR 608.2c: a leading window behind a reflexive "If you do," head
-/// still scopes both coordinated predicates of its sentence (#7962).
+/// still scopes both coordinated predicates of its sentence (#7962). Building-block
+/// shape: no printed card pairs a reflexive head with this coordinated predicate.
 #[test]
 fn reflexive_guarded_leading_window_is_distributed_to_coordinated_clause() {
     let def = parse_effect_chain(
-        "Mythos of Vadrok deals 5 damage to target creature. If you do, until your next turn, that creature can't attack or block and its activated abilities can't be activated.",
+        "Tap target creature. If you do, until your next turn, that creature can't attack or block and its activated abilities can't be activated.",
         AbilityKind::Spell,
     );
     let printed = Duration::UntilNextTurnOf {
@@ -28521,6 +28522,42 @@ fn reflexive_guarded_leading_window_is_distributed_to_coordinated_clause() {
         link = d.sub_ability.as_deref();
     }
     assert!(windowed >= 2, "both predicates carry the window: {def:#?}");
+}
+
+/// CR 611.2a + CR 608.2c: the clause parser, not a re-peel of the printed
+/// fragment, declares which window heads a clause (`ClauseIr::head_window`). A
+/// window behind a lifted guard — general or reflexive — is still the head
+/// window; a trailing window is not, so it is never distributed (#7962).
+#[test]
+fn clause_ir_declares_head_window_past_lifted_guards_only() {
+    let next_turn = Duration::UntilNextTurnOf {
+        player: PlayerScope::Controller,
+    };
+    for (text, expected) in [
+        (
+            "Tap target creature. If you do, until your next turn, that creature can't attack or block.",
+            Some(next_turn.clone()),
+        ),
+        (
+            "Tap target creature. If you control an artifact, until your next turn, that creature can't attack or block.",
+            Some(next_turn.clone()),
+        ),
+        (
+            "Tap target creature. If you do, that creature can't attack or block until your next turn.",
+            None,
+        ),
+    ] {
+        let ir = parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default());
+        assert!(
+            ir.clauses.first().is_some_and(|c| c.head_window.is_none()),
+            "the unwindowed head sentence declares no head window: {text}"
+        );
+        let guarded = ir
+            .clauses
+            .get(1)
+            .unwrap_or_else(|| panic!("the guarded sentence must lower to a clause: {text}"));
+        assert_eq!(guarded.head_window, expected, "{text}");
+    }
 }
 
 /// CR 602.5 + CR 603.2a + CR 608.2c: Dovin Baan's +1 — "up to one target

@@ -1015,6 +1015,13 @@ pub(crate) struct ClauseIr {
     /// delayed payload and is consumed by `assemble_effect_chain`'s relocation step.
     #[serde(default, skip_serializing_if = "ClausePlacement::is_sibling")]
     pub(crate) placement: ClausePlacement,
+    /// CR 611.2a + CR 608.2c: the window this clause printed at its HEAD, as read by
+    /// the clause parser on the guard-free text it lowered (lifted from
+    /// `ParseContext::head_window` by the chain chunk loop). `assemble_effect_chain`
+    /// distributes it to the sentence's later coordinated clauses; `None` states
+    /// nothing to distribute, including for a clause whose window is trailing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) head_window: Option<Duration>,
     /// Construction seal: a private field forces all construction through
     /// [`ClauseIrBuilder`], so no call site can mint a clause without identity,
     /// source, disposition, and provenance (Plan 01 §5 construction gate).
@@ -1067,6 +1074,7 @@ impl ClauseIr {
             declared_player_group,
             chosen_color_grant,
             placement,
+            head_window,
             _sealed: _,
         } = self;
         *declares_chosen_clause = None;
@@ -1099,6 +1107,7 @@ impl ClauseIr {
         *declared_player_group = None;
         *chosen_color_grant = None;
         *placement = ClausePlacement::Sibling;
+        *head_window = None;
     }
 }
 
@@ -1274,6 +1283,7 @@ impl ClauseIrBuilder {
             printed_color_choice: None,
             declared_player_group: None,
             placement: ClausePlacement::Sibling,
+            head_window: None,
         }
     }
 
@@ -1359,6 +1369,7 @@ impl ClauseIrBuilder {
         .declared_target_choice_timing(c.declared_target_choice_timing)
         .printed_color_choice(c.printed_color_choice)
         .declared_player_group(c.declared_player_group)
+        .head_window(c.head_window)
         .push();
         if let Some(absorbed) = self.clauses.last_mut() {
             absorbed.target_reads = c.target_reads;
@@ -1400,6 +1411,7 @@ pub(crate) struct ClauseDraft<'a> {
     printed_color_choice: Option<ChoiceType>,
     declared_player_group: Option<ChosenGroupId>,
     placement: ClausePlacement,
+    head_window: Option<Duration>,
 }
 
 impl ClauseDraft<'_> {
@@ -1492,6 +1504,13 @@ impl ClauseDraft<'_> {
     }
     pub(crate) fn declared_player_group(mut self, v: Option<ChosenGroupId>) -> Self {
         self.declared_player_group = v;
+        self
+    }
+    /// CR 611.2a: declare the window this clause's text printed at its head (see
+    /// `ClauseIr::head_window`). The only writer is the chain chunk loop, lifting
+    /// `ParseContext::head_window` after the clause's main parse.
+    pub(crate) fn head_window(mut self, v: Option<Duration>) -> Self {
+        self.head_window = v;
         self
     }
 
@@ -1741,6 +1760,7 @@ impl ClauseDraft<'_> {
             ),
             declared_player_group: self.declared_player_group,
             placement: self.placement,
+            head_window: self.head_window,
             _sealed: (),
         });
     }

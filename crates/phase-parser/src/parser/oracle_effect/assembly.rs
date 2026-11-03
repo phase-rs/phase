@@ -66,7 +66,7 @@ use super::lower::{
     resolve_those_tokens_anaphors, rewire_result_anchored_subchain,
     rewrite_counter_instead_target_from_antecedent, rewrite_else_event_context_to_stable,
     rewrite_else_parent_target_to_self_ref, rewrite_player_anaphor_targets_in_definition,
-    rewrite_those_tokens_from_antecedent, rewrite_two_target_counter_chain, strip_leading_duration,
+    rewrite_those_tokens_from_antecedent, rewrite_two_target_counter_chain,
     target_choice_timing_for_clause, thread_chosen_damage_source_into_oneshot_effects,
     timed_clause_sub_chain,
 };
@@ -3446,21 +3446,16 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             // A new sentence: only a window that HEADS it scopes its coordinated
             // predicates ("Until your next turn, X and Y"). A trailing window
             // ("X until end of turn, then Y") belongs to its own clause, so it is not
-            // distributed — mirrors `compute_sentence_leading_duration`. The window
-            // is read off the shell-peeled body, so a leading guard the chunk loop
-            // already lifted into `condition` ("If {W}{U} was spent to cast this
-            // spell, until your next turn, …" — Mythos of Vadrok) does not hide it.
-            // A reflexive head ("If you do, until your next turn, …") is not a
-            // general conditional the shell peels, so it is stripped first.
+            // distributed — mirrors `compute_sentence_leading_duration`. Whether the
+            // window heads the clause is the clause parser's own reading
+            // (`ClauseIr::head_window`), taken on the text it lowered after the
+            // chunk loop lifted every leading guard — a general conditional
+            // ("If {W}{U} was spent to cast this spell, until your next turn, …" —
+            // Mythos of Vadrok) or a reflexive head ("If you do, until your next
+            // turn, …") — so it is not re-derived from the printed fragment here.
             // A sentinel (`None` = nothing stated, `Some(Permanent)` = the
             // sub-parser's "no window" marker) states nothing to distribute.
-            let heads_sentence = clause_ir.source.fragment().is_some_and(|text| {
-                let (_, _, unguarded) =
-                    super::conditions::strip_if_you_do_conditional_with_head(text.trim());
-                let (body, _) =
-                    crate::parser::clause_shell::peel_clause_with_anchor(unguarded.trim(), false);
-                strip_leading_duration(body.trim()).is_some()
-            });
+            let heads_sentence = clause_ir.head_window.is_some();
             sentence_duration = (heads_sentence && !duration_is_unset_sentinel(&def.duration))
                 .then(|| def.duration.clone())
                 .flatten();
