@@ -1,5 +1,6 @@
 //! A frameless single-card effect discard (connive, learn rummage) whose move is paused by a
-//! CR 616.1 replacement choice must still be recorded exactly once on the resume.
+//! replacement choice (a CR 616.1 choice, or a single optional replacement's apply-or-decline)
+//! must still be recorded exactly once on the resume.
 //!
 //! CR 701.9a: "To discard a card, move it from its owner's hand to that player's graveyard."
 //! CR 614.6: "If an event is replaced, it never happens. A modified event occurs instead, which may
