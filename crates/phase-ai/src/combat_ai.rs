@@ -1674,7 +1674,10 @@ fn player_damage_prevented(state: &GameState, defender: PlayerId, attacker: Obje
 /// combined "enters or attacks" (Grave Titan) and "attacks or blocks" modes.
 /// Controller-scoped "whenever you attack" payoffs (CR 508.3d) on other
 /// permanents are not read here: they ask whether any creature attacks, not
-/// whether this one should.
+/// whether this one should. Nor is a targeted trigger's target availability:
+/// against a protected player (CR 702.16j: can't be targeted) a damage trigger
+/// such as Inferno Titan's still counts, even if only the attacker's own side
+/// offers targets.
 fn has_self_attack_trigger(state: &GameState, attacker: ObjectId) -> bool {
     state.objects.get(&attacker).is_some_and(|obj| {
         engine::game::functioning_abilities::active_trigger_definitions(state, obj).any(|active| {
@@ -9754,26 +9757,18 @@ mod tests {
         )
     }
 
-    fn integration_card_db() -> &'static engine::database::card_db::CardDatabase {
-        static DB: std::sync::OnceLock<engine::database::card_db::CardDatabase> =
-            std::sync::OnceLock::new();
-        DB.get_or_init(|| {
-            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../engine/tests/fixtures/integration_cards.json.gz");
-            let file = std::fs::File::open(path).expect("integration fixture should open");
-            let decoder = flate2::read::GzDecoder::new(std::io::BufReader::new(file));
-            engine::database::card_db::CardDatabase::from_export_reader(decoder)
-                .expect("integration fixture should load")
-        })
-    }
-
     /// A two-player state with `card` (from the real card data) on P0's
     /// battlefield, able to attack this turn.
     fn state_with_real_attacker(card: &str) -> (GameState, ObjectId) {
         use engine::game::scenario::{GameScenario, P0};
         use engine::game::scenario_db::GameScenarioDbExt;
         let mut scenario = GameScenario::new();
-        let id = scenario.add_real_card(P0, card, Zone::Battlefield, integration_card_db());
+        let id = scenario.add_real_card(
+            P0,
+            card,
+            Zone::Battlefield,
+            crate::test_support::shared_integration_card_db(),
+        );
         let mut state = scenario.build().state().clone();
         state.turn_number = 2;
         state.active_player = PlayerId(0);
@@ -9825,8 +9820,9 @@ mod tests {
 
     /// CR 508.3a: an attack trigger pays off on the declaration, so the creature
     /// still attacks a protected player — for the plain "attacks" mode
-    /// (Aclazotz, Deepest Betrayal: each opponent discards) and the combined
-    /// "enters or attacks" mode (Inferno Titan).
+    /// (Aclazotz, Deepest Betrayal: each opponent discards, no target) and the
+    /// combined "enters or attacks" mode (Inferno Titan, aimed at the protected
+    /// player's tapped creature, since the player can't be targeted).
     #[test]
     fn self_attack_trigger_still_attacks_protected_player() {
         for card in ["Aclazotz, Deepest Betrayal", "Inferno Titan"] {
@@ -9835,6 +9831,8 @@ mod tests {
                 has_self_attack_trigger(&state, attacker),
                 "{card}'s parsed attack trigger must be recognized"
             );
+            let target = add_creature(&mut state, PlayerId(1), "Bear", 2, 2, vec![]);
+            state.objects.get_mut(&target).unwrap().tapped = true;
             grant_protection_from_everything(&mut state, PlayerId(1));
 
             let attacks = choose_from_engine_prompt(&mut state);
