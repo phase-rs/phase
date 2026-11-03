@@ -27,10 +27,10 @@ use crate::parser::oracle_nom::target::chain_text_mentions_chosen_object;
 use crate::types::ability::{
     effect_variant_name, AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind,
     AggregateFunction, CastFromZoneDriver, CastingPermission, ChoiceType, ChosenGroupId,
-    Comparator, ControllerRef, DamageChannel, Effect, EffectOutcomeSignal, EffectScope, FilterProp,
-    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation, ReturnResultId,
-    SharedQuality, SharedQualityRelation, SiblingCondition, StaticCondition, SubAbilityLink,
-    TapStateChange, TargetFilter, TypedFilter,
+    Comparator, ControllerRef, DamageChannel, Duration, Effect, EffectOutcomeSignal, EffectScope,
+    FilterProp, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RepeatContinuation,
+    ReturnResultId, SharedQuality, SharedQualityRelation, SiblingCondition, StaticCondition,
+    SubAbilityLink, TapStateChange, TargetFilter, TypedFilter,
 };
 use crate::types::game_state_kinds::TargetSelectionConstraint;
 use crate::types::zones::Zone;
@@ -2152,6 +2152,26 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
     // makes it a `SequentialSibling` (independent following instruction); a
     // `Comma`/`Then`/no boundary makes it a within-clause `ContinuationStep`.
     let mut prev_boundary: Option<ClauseBoundary> = None;
+    // CR 611.2a + CR 608.2c: the window stated by the sentence currently being
+    // assembled. A duration printed at the head of a sentence scopes every
+    // coordinated predicate of THAT sentence — "Until your next turn, your life total
+    // can't change and you gain protection from everything" is one window over two
+    // predicates — so a later clause of the same sentence that states no window of
+    // its own takes this one. Reset at every `Sentence` boundary, which is the
+    // printed end of the sentence (`sub_link_after_boundary`'s other side).
+    //
+    // This is the seam the #7923 work left open: `with_clause_chain_duration` walks
+    // only a SINGLE clause's `sub_ability` chain, so a coordinated clause that the
+    // clause splitter minted as its own `ClauseIr` (Dovin Baan's "and its activated
+    // abilities can't be activated") was never reached, and its carrier stayed unset
+    // while the head printed `UntilNextTurnOf`. Measured on the corpus at #7962: the
+    // four cards in that gap (Dovin Baan, Edifice of Authority, Mythos of Vadrok,
+    // Teferi's Protection) expire a full turn early without this stamp.
+    //
+    // Scope is `duration_governs`-shaped and sentinel-gated inside
+    // `stamp_governed_chain_duration`, so one-shot instructions are never stamped and
+    // a clause that printed its own window keeps it (CR 608.2c — read the whole text).
+    let mut sentence_duration: Option<Duration> = None;
     // CR 603.7 + CR 608.2c: record delayed-payload relocations during the clause
     // loop and execute them only after every later clause has performed its
     // top-level binding work against today's unchanged `defs` shape.
@@ -3382,6 +3402,32 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
         }
         if let Some(ref duration) = clause_ir.parsed.duration {
             def = def.duration(duration.clone());
+        }
+        // CR 611.2a + CR 608.2c: distribute the sentence's stated window onto this
+        // clause, or record this clause's window as the sentence's.
+        //
+        // A `Comma`/`Then` boundary after the previous clause means this clause is a
+        // coordinated predicate of the SAME printed sentence; a `Sentence` boundary
+        // (or no boundary at all — the chain root) starts a new one. The two cases
+        // mirror `sub_link_after_boundary`, so duration scoping and link semantics
+        // agree on what "the same sentence" means.
+        let continues_same_sentence = matches!(
+            prev_boundary,
+            Some(ClauseBoundary::Comma) | Some(ClauseBoundary::Then)
+        );
+        if continues_same_sentence {
+            if let Some(duration) = sentence_duration.clone() {
+                // Both carriers travel through the one authority; a clause whose
+                // recognizer stated its own window keeps it.
+                stamp_governed_chain_duration(&mut def, &duration);
+            }
+        } else {
+            // A new sentence: its own window is whatever it printed. A sentinel
+            // (`None` = nothing stated, `Some(Permanent)` = the sub-parser's "no
+            // window" marker) states nothing to distribute.
+            sentence_duration = (!duration_is_unset_sentinel(&def.duration))
+                .then(|| def.duration.clone())
+                .flatten();
         }
         // CR 608.2c: Apply condition — chain-level takes priority over clause-level.
         let effective_condition = clause_ir

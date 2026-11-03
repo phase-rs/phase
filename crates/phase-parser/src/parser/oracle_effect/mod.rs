@@ -8950,10 +8950,14 @@ fn try_parse_have_base_pt_become(tp: TextPair<'_>) -> Option<ParsedEffectClause>
     };
 
     // CR 611.2 + CR 514.2: this set is a continuous effect from the resolution of
-    // a (triggered) ability. The card's "until end of turn" suffix is normally
-    // stripped onto the ability frame before this body parses; default to end of
-    // turn when no explicit suffix reaches here, an explicit suffix wins.
-    let duration = duration.or(Some(Duration::UntilEndOfTurn));
+    // a (triggered) ability, and its window is whatever the clause printed.
+    // Emitted VERBATIM: `None` is the only value that says "this recognizer saw no
+    // window", so an enclosing printed window (a leading "Until your next turn,")
+    // can distribute onto it through `with_clause_duration` /
+    // `with_clause_chain_duration`. An injected `UntilEndOfTurn` is byte-identical
+    // to a printed one and silently blocked that distribution (#7962). The
+    // end-of-turn fallback for a genuinely windowless set already exists in the
+    // resolver (`game/effects/animate.rs`'s `.unwrap_or`).
     let mut clause = parsed_clause(effect);
     clause.duration = duration;
     Some(clause)

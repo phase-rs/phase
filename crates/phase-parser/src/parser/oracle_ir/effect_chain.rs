@@ -1520,19 +1520,12 @@ impl ClauseDraft<'_> {
             // NOTE those two cards are cited for the RECOGNIZER's behaviour, not as
             // traffic through this seam: `starts_clause_text_or_conjugated` excludes
             // "its", so Dovin Baan's bare " and its ..." never splits and never
-            // reaches `push` at all. Its link is governed by
-            // `with_clause_chain_duration`'s sub-link walk, whose gate is still
-            // CARRIER-based and therefore still cannot tell an injected default from
-            // a printed window — measured, Dovin Baan, Edifice of Authority and
-            // Mythos of Vadrok carry a link stuck at `UntilEndOfTurn` under an
-            // `UntilNextTurnOf` head. Teferi's Protection is a fourth instance in a
-            // different shape and from a DIFFERENT CAUSE — carrier `None` (which
-            // would PASS the walk's gate), injected `UntilEndOfTurn` on the EMBEDDED
-            // effect duration, different recognizer — so the head window never
-            // reaches that link at all. Both are KNOWN REMAINING GAPS this seam does
-            // not fix, and the second is not closed by the injected-default class
-            // remedy alone; see the U1 section note in the 7923 integration test for
-            // the measured detail and tasks #138/#144 in `game/effects/effect.rs`.
+            // reaches `push` at all. Nor does the gate need to carry that class any
+            // more: #7962 removed the injection at the source, so this recognizer now
+            // emits the parsed `Option` verbatim (a printed `ForAsLongAs` for Braided
+            // Net, `None` for Dovin Baan / Xathrid Gorgon), and the link those cards
+            // leave unstamped is reached by `oracle_effect::assembly`'s
+            // sentence-scoped stamp instead of by this chunk-level seam.
             //
             // COUPLING: `strip_trailing_duration` finds only trailing windows, so a
             // conjunct printing a LEADING window of its own would read as unprinted.
