@@ -35008,9 +35008,12 @@ impl GameState {
 
     /// See `normalize_for_loop`. Per object, rank-based over the retained
     /// `lki_copiable_values_by_incarnation` keys, the incarnations trigger
-    /// events name (`ZoneChanged` entries and every incarnation inside their
-    /// records, stamped `PermanentTapped` taps and the CR 400.7 damage-source
-    /// stamps of `DamageDealt` / `CombatDamageDealtToPlayer`), the may-trigger
+    /// events name (`ZoneChanged` entries and every incarnation inside the
+    /// records those events own — zone-change and departure records, attack
+    /// declaration records, a Saga's source context — stamped
+    /// `PermanentTapped` taps, the CR 400.7 damage-source stamps of
+    /// `DamageDealt` / `CombatDamageDealtToPlayer` and the CR 702.110b
+    /// exploiter stamp of `CreatureExploited`), the may-trigger
     /// origins and stored answers, the turn and combat block-history pairs
     /// (CR 509.1g), and the live incarnation of every object those or a tracked-set
     /// origin (CR 608.2c) name. Ranks count down from the
@@ -35037,9 +35040,10 @@ impl GameState {
     /// routing one pool's value through the other's `above` panics, so
     /// `record_incarnations` takes both.
     fn canonicalize_lki_incarnations_for_loop(&mut self) {
-        /// Every incarnation a trigger event names OUTSIDE its `ZoneChanged` record.
-        /// The record's own pins belong to `record_incarnations`: visiting them here
-        /// too would re-rank an already-ranked value and panic in `above`.
+        /// Every incarnation a trigger event names OUTSIDE the records
+        /// `event_record_incarnations` walks. Those records' own pins belong to
+        /// `record_incarnations`: visiting them here too would re-rank an
+        /// already-ranked value and panic in `above`.
         fn named_incarnations(event: &mut GameEvent, f: &mut impl FnMut(ObjectId, &mut u64)) {
             match event {
                 GameEvent::PermanentTapped {
@@ -35062,6 +35066,14 @@ impl GameState {
                         f(reference.object_id, &mut reference.incarnation);
                     }
                 }
+                // CR 702.110b + CR 400.7: the exploiter stamp is the same class of pin
+                // as a damage event's source stamp; its own record is walked by
+                // `event_record_incarnations`.
+                GameEvent::CreatureExploited {
+                    exploiter,
+                    exploiter_incarnation: Some(incarnation),
+                    ..
+                } => f(*exploiter, incarnation),
                 // Exhaustive on purpose: a new event that names an incarnation must
                 // decide here whether loop normalization renumbers it.
                 GameEvent::PermanentTapped {
@@ -35197,7 +35209,10 @@ impl GameState {
                 | GameEvent::CompanionMovedToHand { .. }
                 | GameEvent::NinjutsuActivated { .. }
                 | GameEvent::KeywordAbilityActivated { .. }
-                | GameEvent::CreatureExploited { .. }
+                | GameEvent::CreatureExploited {
+                    exploiter_incarnation: None,
+                    ..
+                }
                 | GameEvent::EnergyChanged { .. }
                 | GameEvent::SpeedChanged { .. }
                 | GameEvent::PlayerCounterChanged { .. }
@@ -35280,7 +35295,24 @@ impl GameState {
             if let Some(identity) = combat_status.attack_target_identity.as_mut() {
                 incarnations(identity.object_id, &mut identity.incarnation);
             }
-            let Some(TriggerSourceContext {
+            if let Some(context) = trigger_source_context.as_mut() {
+                trigger_source_context_incarnations(context, incarnations, grant_generations);
+            }
+        }
+        /// Every incarnation pin a `TriggerSourceContext` names: the identity binding,
+        /// the LKI snapshot, the attachments and linked-exile snapshots, the trigger
+        /// entries' occurrences and layer-6 grant generations, the captured combat
+        /// target, every mana-spent source snapshot, the cast's paid object and the
+        /// granting object.
+        fn trigger_source_context_incarnations<I, G>(
+            context: &mut TriggerSourceContext,
+            incarnations: &mut I,
+            grant_generations: &mut G,
+        ) where
+            I: FnMut(ObjectId, &mut u64),
+            G: FnMut(ObjectId, &mut u64),
+        {
+            let TriggerSourceContext {
                 identity,
                 lki,
                 card_id: _,
@@ -35326,10 +35358,7 @@ impl GameState {
                 additional_cost_payments: _,
                 cast_cost_paid_object,
                 granting_object,
-            }) = trigger_source_context.as_mut()
-            else {
-                return;
-            };
+            } = context;
             let ObjectIdentityBinding {
                 reference,
                 expected_zone: _,
@@ -35339,7 +35368,12 @@ impl GameState {
             attachment_incarnations(attachments, incarnations);
             linked_exile_incarnations(linked_exile_snapshot, incarnations);
             for entry in trigger_entries {
-                trigger_entry_incarnations(entry, minted_by, incarnations, grant_generations);
+                trigger_entry_incarnations(
+                    entry,
+                    reference.object_id,
+                    incarnations,
+                    grant_generations,
+                );
             }
             if let Some(identity) = combat_status.attack_target_identity.as_mut() {
                 incarnations(identity.object_id, &mut identity.incarnation);
@@ -35386,6 +35420,67 @@ impl GameState {
         ) {
             if let Some(incarnation) = record.entered_incarnation.as_mut() {
                 f(record.object_id, incarnation);
+            }
+        }
+        /// CR 508.1a: one attack declaration record's own incarnation, keyed by the
+        /// record's object, and the attachment pins its LKI snapshot holds.
+        fn attack_declaration_incarnations(
+            record: &mut AttackDeclarationRecord,
+            f: &mut impl FnMut(ObjectId, &mut u64),
+        ) {
+            if let Some(incarnation) = record.incarnation.as_mut() {
+                f(record.object_id, incarnation);
+            }
+            lki_incarnations(&mut record.lki, f);
+        }
+        /// The `entered_incarnation` an event-owned record carries — the one pin
+        /// [`event_record_incarnations`] leaves out, because it is also a pooled
+        /// carrier-read value (`record_entered_incarnation`).
+        fn event_entered_incarnations(
+            event: &mut GameEvent,
+            f: &mut impl FnMut(ObjectId, &mut u64),
+        ) {
+            match event {
+                GameEvent::ZoneChanged { record, .. }
+                | GameEvent::CreatureExploited { record, .. } => {
+                    record_entered_incarnation(record, f);
+                }
+                _ => {}
+            }
+        }
+        /// Every incarnation pin the records an event owns hold, walked by the same
+        /// two visitors `record_incarnations` takes and never entering
+        /// `entered_incarnation` (owned by [`event_entered_incarnations`]): a
+        /// `ZoneChanged` event's zone-change record, `AttackersDeclared`'s per-attacker
+        /// declaration records (CR 508.1a), `CreatureExploited`'s departure record
+        /// (CR 702.110b) and the source context a `SagaChapterAbilityResolved` event
+        /// carries (CR 714.2b). These events reach the same Priority-frame carriers a
+        /// `ZoneChanged` event does.
+        fn event_record_incarnations<I, G>(
+            event: &mut GameEvent,
+            incarnations: &mut I,
+            grant_generations: &mut G,
+        ) where
+            I: FnMut(ObjectId, &mut u64),
+            G: FnMut(ObjectId, &mut u64),
+        {
+            match event {
+                GameEvent::ZoneChanged { record, .. }
+                | GameEvent::CreatureExploited { record, .. } => {
+                    record_incarnations(record, incarnations, grant_generations);
+                }
+                GameEvent::AttackersDeclared {
+                    declaration_records,
+                    ..
+                } => {
+                    for record in declaration_records {
+                        attack_declaration_incarnations(record, incarnations);
+                    }
+                }
+                GameEvent::SagaChapterAbilityResolved { saga, .. } => {
+                    trigger_source_context_incarnations(saga, incarnations, grant_generations);
+                }
+                _ => {}
             }
         }
         fn lki_incarnations(lki: &mut LKISnapshot, f: &mut impl FnMut(ObjectId, &mut u64)) {
@@ -35562,21 +35657,19 @@ impl GameState {
                 present.entry(object_id).or_default().push(*incarnation);
                 carrier_read.insert(ObjectIncarnationRef::of(object_id, *incarnation));
             });
-            if let GameEvent::ZoneChanged { record, .. } = event {
-                record_entered_incarnation(record, &mut |object_id, incarnation| {
+            event_entered_incarnations(event, &mut |object_id, incarnation| {
+                present.entry(object_id).or_default().push(*incarnation);
+                carrier_read.insert(ObjectIncarnationRef::of(object_id, *incarnation));
+            });
+            event_record_incarnations(
+                event,
+                &mut |object_id, incarnation| {
                     present.entry(object_id).or_default().push(*incarnation);
-                    carrier_read.insert(ObjectIncarnationRef::of(object_id, *incarnation));
-                });
-                record_incarnations(
-                    record,
-                    &mut |object_id, incarnation| {
-                        present.entry(object_id).or_default().push(*incarnation);
-                    },
-                    &mut |object_id, generation| {
-                        grants.entry(object_id).or_default().push(*generation);
-                    },
-                );
-            }
+                },
+                &mut |object_id, generation| {
+                    grants.entry(object_id).or_default().push(*generation);
+                },
+            );
         });
         may_trigger_origins(self, &mut |definition_ref| {
             definition_ref.for_each_incarnation_mut(&mut |object_id, incarnation| {
@@ -35643,13 +35736,7 @@ impl GameState {
                 .push(reference.incarnation);
         }
         for record in &mut self.attacker_declarations_this_turn {
-            if let Some(incarnation) = record.incarnation {
-                present
-                    .entry(record.object_id)
-                    .or_default()
-                    .push(incarnation);
-            }
-            lki_incarnations(&mut record.lki, &mut |object_id, incarnation| {
+            attack_declaration_incarnations(record, &mut |object_id, incarnation| {
                 present.entry(object_id).or_default().push(*incarnation);
             });
         }
@@ -35853,19 +35940,19 @@ impl GameState {
             named_incarnations(event, &mut |object_id, incarnation| {
                 *incarnation = canonical(object_id, *incarnation);
             });
-            if let GameEvent::ZoneChanged { record, .. } = event {
-                record_entered_incarnation(record, &mut |object_id, incarnation| {
+            event_entered_incarnations(event, &mut |object_id, incarnation| {
+                *incarnation = canonical(object_id, *incarnation);
+            });
+            event_record_incarnations(
+                event,
+                &mut |object_id, incarnation| {
                     *incarnation = canonical(object_id, *incarnation);
-                });
-                record_incarnations(
-                    record,
-                    &mut |object_id, incarnation| {
-                        *incarnation = canonical(object_id, *incarnation);
-                    },
-                    &mut |object_id, generation| {
-                        *generation = u64::MAX - above(&grants, object_id, *generation);
-                    },
-                );
+                },
+                &mut |object_id, generation| {
+                    *generation = u64::MAX - above(&grants, object_id, *generation);
+                },
+            );
+            if let GameEvent::ZoneChanged { record, .. } = event {
                 record.turn_zone_change_index = 0;
                 if let Some(context) = record.trigger_source_context.as_mut() {
                     context.timestamp = 0;
@@ -35942,10 +36029,7 @@ impl GameState {
             &mut |(reference, _)| rank_incarnation(reference),
         );
         for record in &mut self.attacker_declarations_this_turn {
-            if let Some(incarnation) = record.incarnation.as_mut() {
-                *incarnation = canonical(record.object_id, *incarnation);
-            }
-            lki_incarnations(&mut record.lki, &mut |object_id, incarnation| {
+            attack_declaration_incarnations(record, &mut |object_id, incarnation| {
                 *incarnation = canonical(object_id, *incarnation);
             });
         }
@@ -36030,8 +36114,11 @@ impl GameState {
     /// record.
     ///
     /// Section 1 is rewritten by `canonicalize_lki_incarnations_for_loop` directly; section 2
-    /// only through a carrier the walk visits (an event, an ability, or a record); section 3 is
-    /// out of this class. A field belongs in section 1 only when ranking changes a VERDICT it
+    /// only through a carrier the walk visits (an event, an ability, or a record); the two
+    /// buckets after it hold fields that CAN carry pins but are provably absent from a compared
+    /// sample — one because it is a bare compared event list `is_loop_comparable` requires
+    /// empty, one because it lives only inside a search's own prompt; section 3 is out of this
+    /// class. A field belongs in section 1 only when ranking changes a VERDICT it
     /// can express: it makes two frames equal when each carrier names the same incarnation
     /// position relative to its live object, or it keeps a stale pin distinct from the live one.
     /// An unbounded pump ledger cannot do either — it gains a row every cycle.
@@ -36072,14 +36159,24 @@ impl GameState {
             stack_trigger_firings: _,
             deferred_triggers: _,
             pending_trigger_order: _,
-            deferred_entry_events: _,
-            pending_attack_trigger_events: _,
             delayed_triggers: _,
             may_trigger_auto_choices: _,
             pending_triggered_mana_resume: _,
             resolution_stack: _,
             departed_stack_spells: _,
             departed_activated_abilities: _,
+            // NOT CARRIED AT A SAMPLE — a bare `Vec<GameEvent>`, compared raw, so a
+            // `ZoneChanged` record inside it would hold unranked pins; but
+            // `is_loop_comparable` requires both empty, so no sampled position holds one.
+            deferred_entry_events: _,
+            pending_attack_trigger_events: _,
+            // NOT AT A SAMPLE — each carries `ObjectIncarnationRef` and is compared, but it
+            // is non-empty only while `waiting_for` is that search's own non-Priority
+            // prompt; every loop sample is taken at `WaitingFor::Priority`, so it cannot be
+            // live in one.
+            active_library_searches: _,
+            pending_scoped_library_search: _,
+            pending_library_search_delivery: _,
             // NOT THIS CLASS — no incarnation id, a stable `ObjectId`/`PlayerId` only, or an
             // unbounded ledger that grows every cycle, so ranking it cannot equalize a loop:
             turn_number: _,
@@ -36091,7 +36188,6 @@ impl GameState {
             turn_decision_control_timestamp: _,
             active_full_turn_control: _,
             active_combat_phase_control: _,
-            active_library_searches: _,
             active_search_decision_controls: _,
             next_object_id: _,
             next_delayed_trigger_token: _,
@@ -36272,8 +36368,6 @@ impl GameState {
             players_who_discarded_card_this_turn: _,
             cards_discarded_this_turn_by_player: _,
             players_who_sacrificed_artifact_this_turn: _,
-            zone_changes_this_turn: _,
-            battlefield_entry_observations: _,
             battlefield_entries_this_turn: _,
             damage_dealt_this_turn: _,
             creatures_exploited_this_turn: _,
@@ -36395,8 +36489,6 @@ impl GameState {
             pending_discard_batch: _,
             pending_exile_from_top_until: _,
             pending_mass_library_order_choice: _,
-            pending_scoped_library_search: _,
-            pending_library_search_delivery: _,
             completed_hidden_search_audiences: _,
             pending_search_found_batch: _,
             pending_die_roll_instruction: _,
@@ -36409,11 +36501,15 @@ impl GameState {
             // one game hold equal entries at every common position anyway.
             epic_effects: _,
             // Unbounded CR 400.7 carriers, compared on both feeds and deliberately NOT ranked:
-            // `sacrificed_permanents_this_turn` appends one record per sacrifice and
-            // `batched_zone_change_trigger_fired` keys on `(definition, recorded turn, zone
-            // change index)`, so in a loop that repeats either act both grow per cycle and
-            // ranking their pins cannot make two frames equal.
+            // `sacrificed_permanents_this_turn` appends one record per sacrifice,
+            // `zone_changes_this_turn` one per zone change and a `battlefield_entry_observations`
+            // row per battlefield entry (keyed by that same zone-change index), so in a loop
+            // that repeats any of those acts they grow per cycle and ranking their pins cannot
+            // make two frames equal; `batched_zone_change_trigger_fired` keys on `(definition,
+            // recorded turn, zone change index)` and grows the same way.
             sacrificed_permanents_this_turn: _,
+            zone_changes_this_turn: _,
+            battlefield_entry_observations: _,
             batched_zone_change_trigger_fired: _,
         } = s;
         if let Some(combat) = s.combat.as_ref() {
@@ -49754,6 +49850,12 @@ mod tests {
         FrameGrantedEntry,
         DamageDealt,
         CombatDamageToPlayer,
+        /// CR 508.1a: the per-attacker record an `AttackersDeclared` event carries.
+        AttackersDeclaredRecord,
+        /// CR 702.110b: the departure record a `CreatureExploited` event carries.
+        ExploitedRecord,
+        /// CR 714.2b: the source context a `SagaChapterAbilityResolved` event carries.
+        SagaContext,
     }
 
     fn carrier_naming(kind: CarrierKind, live: u64, named: u64) -> GameState {
@@ -49895,6 +49997,57 @@ mod tests {
                         source_amounts: vec![(x, 2)],
                         total_damage: 2,
                         source_incarnations: vec![reference],
+                    }),
+                );
+            }
+            CarrierKind::AttackersDeclaredRecord => {
+                let lki = state.objects[&x].snapshot_public_characteristics();
+                push_trigger(
+                    &mut state,
+                    x,
+                    draw_one(x),
+                    Some(GameEvent::AttackersDeclared {
+                        attacker_ids: vec![x],
+                        defending_player: PlayerId(1),
+                        attacks: vec![(x, AttackTarget::Player(PlayerId(1)))],
+                        declaration_records: vec![AttackDeclarationRecord {
+                            object_id: x,
+                            incarnation: Some(named),
+                            lki,
+                            is_token: false,
+                            is_commander: false,
+                        }],
+                    }),
+                );
+            }
+            CarrierKind::ExploitedRecord => {
+                let record = zone_change_record_naming(&state, x, named);
+                push_trigger(
+                    &mut state,
+                    x,
+                    draw_one(x),
+                    Some(GameEvent::CreatureExploited {
+                        exploiter: x,
+                        exploiter_incarnation: Some(named),
+                        sacrificed: x,
+                        record: Box::new(record),
+                    }),
+                );
+            }
+            CarrierKind::SagaContext => {
+                let mut saga = zone_change_record_naming(&state, x, named)
+                    .trigger_source_context
+                    .expect("a zone-change snapshot carries the trigger context");
+                saga.identity.reference.incarnation = named;
+                push_trigger(
+                    &mut state,
+                    x,
+                    draw_one(x),
+                    Some(GameEvent::SagaChapterAbilityResolved {
+                        saga: Box::new(saga),
+                        controller: PlayerId(0),
+                        chapter: 1,
+                        final_chapter: 3,
                     }),
                 );
             }
@@ -50041,6 +50194,31 @@ mod tests {
                 carrier_naming(CarrierKind::CombatDamageToPlayer, incarnation, incarnation)
             },
             merge: |carrier, live| carrier_naming(CarrierKind::CombatDamageToPlayer, live, carrier),
+        },
+        CarrierCase {
+            name: "AttackersDeclared.declaration_records",
+            split: |incarnation| {
+                carrier_naming(
+                    CarrierKind::AttackersDeclaredRecord,
+                    incarnation,
+                    incarnation,
+                )
+            },
+            merge: |carrier, live| {
+                carrier_naming(CarrierKind::AttackersDeclaredRecord, live, carrier)
+            },
+        },
+        CarrierCase {
+            name: "CreatureExploited.record",
+            split: |incarnation| {
+                carrier_naming(CarrierKind::ExploitedRecord, incarnation, incarnation)
+            },
+            merge: |carrier, live| carrier_naming(CarrierKind::ExploitedRecord, live, carrier),
+        },
+        CarrierCase {
+            name: "SagaChapterAbilityResolved.saga",
+            split: |incarnation| carrier_naming(CarrierKind::SagaContext, incarnation, incarnation),
+            merge: |carrier, live| carrier_naming(CarrierKind::SagaContext, live, carrier),
         },
     ];
 
