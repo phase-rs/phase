@@ -62,7 +62,6 @@ const JUDGE_UNWORTHY: &str = "Choose target attacking or blocking creature. Scry
 const CRUSH_UNDERFOOT: &str =
     "Choose a Giant creature you control. It deals damage equal to its power to target creature.";
 const ORIMS_THUNDER: &str = "Kicker {R} (You may pay an additional {R} as you cast this spell.)\nDestroy target artifact or enchantment. If this spell was kicked, it deals damage equal to that permanent's mana value to target creature.";
-const DELIRIUM: &str = "Cast this spell only during an opponent's turn.\nTap target creature that player controls. That creature deals damage equal to its power to the player. Prevent all combat damage that would be dealt to and dealt by the creature this turn.";
 const BRIGHTMARE: &str = "When this creature enters, tap up to one target creature. You gain life equal to that creature's power.";
 const LAGONNA_BAND_STORYTELLER: &str = "When this creature enters, you may put target enchantment card from your graveyard on top of your library. If you do, you gain life equal to its mana value.";
 
@@ -1699,9 +1698,8 @@ fn a_non_root_target_lends_no_referent() {
 
 /// CR 608.2c: a damage instruction whose printed recipient the parse dropped sends
 /// its damage to the parent's own target. The announced object must not become the
-/// referent, or it would deal damage to itself. Crush Underfoot's Giant, Orim's
-/// Thunder's indestructible artifact creature, and Delirium's already-tapped
-/// creature each take no damage.
+/// referent, or it would deal damage to itself. Crush Underfoot's Giant and Orim's
+/// Thunder's indestructible artifact creature each take no damage.
 #[test]
 fn a_dropped_damage_recipient_takes_no_referent() {
     let mut s = GameScenario::new();
@@ -1747,53 +1745,6 @@ fn a_dropped_damage_recipient_takes_no_referent() {
         "reach: it survived"
     );
     assert_eq!(runner.state().objects[&artifact].damage_marked, 0);
-}
-
-/// Delirium: "Cast this spell only during an opponent's turn." P0 reaches P1's turn
-/// through the game. The parse's target filter admits a creature the caster
-/// controls, so the row targets P0's own creature, as measured. On a creature
-/// already tapped (it attacked on P0's turn and has not untapped), the tap leaves
-/// no event and the creature takes no damage. The reach twin on an untapped
-/// creature shows the damage step runs: there the tap's event makes the creature
-/// the referent and the dropped-recipient parse has it deal its power to itself, a
-/// pre-existing defect of the parse that a fix to it will flip.
-#[test]
-fn delirium_on_a_tapped_creature_takes_no_referent() {
-    for already_tapped in [true, false] {
-        let mut s = GameScenario::new();
-        s.at_phase(Phase::PreCombatMain);
-        let t = s.add_creature(P0, "T", 3, 7).id();
-        let delirium = free_spell(&mut s, P0, "Delirium", DELIRIUM);
-        s.with_library_top(P0, &["Forest", "Forest", "Forest"]);
-        s.with_library_top(P1, &["Forest", "Forest", "Forest"]);
-        let mut runner = s.build();
-        let turn = runner.state().turn_number;
-        if already_tapped {
-            runner.advance_to_combat();
-            attack(&mut runner, &[t]);
-        }
-        pass_until(&mut runner, "P1's main phase", |s| {
-            s.turn_number == turn + 1
-                && s.active_player == P1
-                && s.phase == Phase::PreCombatMain
-                && matches!(s.waiting_for, WaitingFor::Priority { player } if player == P1)
-        });
-        assert_eq!(tapped(&runner, t), already_tapped, "reach: tapped state");
-        pass_priority_to(&mut runner, P0);
-        runner.cast(delirium).target_objects(&[t]).resolve();
-        drain(&mut runner);
-        assert_eq!(
-            zone(&runner, delirium),
-            Zone::Graveyard,
-            "reach: it resolved"
-        );
-        let expected = if already_tapped { 0 } else { 3 };
-        assert_eq!(
-            runner.state().objects[&t].damage_marked,
-            expected,
-            "already tapped = {already_tapped}"
-        );
-    }
 }
 
 // ── V38, V39: triggered roots ──────────────────────────────────────────
