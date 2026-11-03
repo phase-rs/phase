@@ -365,14 +365,24 @@ pub(crate) fn choose_attackers_with_targets_with_profile_and_deadline_and_threat
 
     // CR 702.16e + CR 702.16j: a voluntary attacker whose every legal target is a
     // player preventing all of its damage (The One Ring, Teferi's Protection)
-    // gains nothing by attacking, so it is not a candidate. Filtering here keeps
-    // its power out of the lethal, objective, and crackback math below.
+    // gains nothing by attacking, so it is not a candidate.
     candidates.retain(|&id| {
         mandatory.contains(&id) || attack_can_matter(state, &targeting, &attackable, id)
     });
     if candidates.is_empty() {
         return Vec::new();
     }
+    // CR 702.16e + CR 702.16j: the defender is chosen, and lethal read, only among
+    // opponents some candidate can damage. Blocker grouping, crackback, and the
+    // stabilize read keep every opponent: a protected player still blocks and
+    // still attacks back. With no damageable opponent the candidates remain for
+    // non-player targets or attack triggers, so the full list stands in.
+    let damageable = damageable_opponents(state, &opponents, &candidates);
+    let defender_pool: &[PlayerId] = if damageable.is_empty() {
+        &opponents
+    } else {
+        &damageable
+    };
 
     let comparison_enabled = targeting.comparison_deadline.is_some()
         && matches!(
@@ -447,7 +457,7 @@ pub(crate) fn choose_attackers_with_targets_with_profile_and_deadline_and_threat
                 state,
                 player,
                 ExpandedComparisonInput {
-                    opponents: &opponents,
+                    opponents: defender_pool,
                     candidates: &candidates,
                     mandatory: &mandatory,
                     slices: &slices,
@@ -470,7 +480,7 @@ pub(crate) fn choose_attackers_with_targets_with_profile_and_deadline_and_threat
             .and_then(|groups| groups.get(&defender).cloned())
             .unwrap_or_default()
     } else {
-        preferred_attack_opponent(state, player, &opponents, &candidates)
+        preferred_attack_opponent(state, player, defender_pool, &candidates)
             .map(|opponent| untapped_creature_blockers(state, opponent))
             .unwrap_or_default()
     };
@@ -492,7 +502,12 @@ pub(crate) fn choose_attackers_with_targets_with_profile_and_deadline_and_threat
         );
         // A raw lowest-life check is not a lethal certificate in a free-for-all.
         // The bounded comparison below accounts for the selected defender's blocks.
-        if selected_defender.is_some() && matches!(objective, CombatObjective::PushLethal) {
+        // CR 702.16e + CR 702.16j: nor is it one when that player prevents the
+        // damage — lethal must land on an opponent the attackers can damage.
+        if matches!(objective, CombatObjective::PushLethal)
+            && (selected_defender.is_some()
+                || !lethal_on_damageable_opponent(state, &damageable, &candidates))
+        {
             CombatObjective::Race
         } else {
             objective
@@ -500,7 +515,7 @@ pub(crate) fn choose_attackers_with_targets_with_profile_and_deadline_and_threat
     };
 
     let evaluated_defender = selected_defender
-        .or_else(|| preferred_attack_opponent(state, player, &opponents, &candidates));
+        .or_else(|| preferred_attack_opponent(state, player, defender_pool, &candidates));
     let downside_weighted = matches!(profile.combat_ev_model, CombatEvModel::DownsideWeighted);
     let latent_blocker_bodies: Vec<AnimatedBody> = if downside_weighted {
         evaluated_defender
@@ -859,7 +874,7 @@ pub(crate) fn choose_attackers_with_targets_with_profile_and_deadline_and_threat
             .map(|id| (id, AttackTarget::Player(defender)))
             .collect()
     } else {
-        assign_attack_targets(state, player, &opponents, attacking_ids)
+        assign_attack_targets(state, player, defender_pool, attacking_ids)
     };
     let assignments =
         retarget_prevented_player_attacks(state, &targeting, &attackable, &mandatory, assignments);
@@ -1655,13 +1670,56 @@ fn player_damage_prevented(state: &GameState, defender: PlayerId, attacker: Obje
 }
 
 /// CR 508.3a: "Whenever [this creature] attacks" pays off on the declaration
-/// itself, whether or not any combat damage is later dealt.
+/// itself, whether or not any combat damage is later dealt — including the
+/// combined "enters or attacks" (Grave Titan) and "attacks or blocks" modes.
+/// Controller-scoped "whenever you attack" payoffs (CR 508.3d) on other
+/// permanents are not read here: they ask whether any creature attacks, not
+/// whether this one should.
 fn has_self_attack_trigger(state: &GameState, attacker: ObjectId) -> bool {
     state.objects.get(&attacker).is_some_and(|obj| {
-        obj.trigger_definitions.iter_unchecked().any(|entry| {
-            matches!(entry.definition.mode, TriggerMode::Attacks)
-                && matches!(entry.definition.valid_card, Some(TargetFilter::SelfRef))
+        engine::game::functioning_abilities::active_trigger_definitions(state, obj).any(|active| {
+            matches!(
+                active.definition.mode,
+                TriggerMode::Attacks | TriggerMode::EntersOrAttacks | TriggerMode::AttacksOrBlocks
+            ) && matches!(active.definition.valid_card, Some(TargetFilter::SelfRef))
         })
+    })
+}
+
+/// CR 702.16e + CR 702.16j: the opponents at least one candidate's combat
+/// damage reaches.
+fn damageable_opponents(
+    state: &GameState,
+    opponents: &[PlayerId],
+    candidates: &[ObjectId],
+) -> Vec<PlayerId> {
+    opponents
+        .iter()
+        .copied()
+        .filter(|&opponent| {
+            candidates
+                .iter()
+                .any(|&id| !player_damage_prevented(state, opponent, id))
+        })
+        .collect()
+}
+
+/// CR 702.16e + CR 702.16j: whether some opponent's life is covered by the
+/// power of the candidates whose damage that opponent does not prevent — the
+/// lethal read `determine_attack_objective` makes from raw life totals.
+fn lethal_on_damageable_opponent(
+    state: &GameState,
+    opponents: &[PlayerId],
+    candidates: &[ObjectId],
+) -> bool {
+    opponents.iter().any(|&opponent| {
+        let life = state.players[opponent.0 as usize].life;
+        let reaching: Vec<ObjectId> = candidates
+            .iter()
+            .copied()
+            .filter(|&id| !player_damage_prevented(state, opponent, id))
+            .collect();
+        life > 0 && sum_power(state, &reaching) >= life
     })
 }
 
@@ -9662,17 +9720,68 @@ mod tests {
         );
     }
 
-    fn choose_with_engine_targets(state: &GameState) -> Vec<(ObjectId, AttackTarget)> {
-        let targets = valid_targets(state);
-        choose_attackers_with_targets_with_profile(
+    /// Choose attacks from the engine's own declare-attackers prompt — the
+    /// attacker list, aggregate targets, and per-attacker target map production
+    /// passes (`search.rs`), with the unbounded comparison allowance.
+    fn choose_from_engine_prompt(state: &mut GameState) -> Vec<(ObjectId, AttackTarget)> {
+        state.phase = engine::types::phase::Phase::DeclareAttackers;
+        state.waiting_for = engine::game::combat::build_declare_attackers_waiting_for(state);
+        let WaitingFor::DeclareAttackers {
+            valid_attacker_ids,
+            valid_attack_targets,
+            valid_attack_targets_by_attacker,
+            ..
+        } = &state.waiting_for
+        else {
+            panic!("engine must offer the declare-attackers prompt")
+        };
+        assert!(
+            valid_attack_targets_by_attacker.is_some(),
+            "the prompt must carry the per-attacker target map"
+        );
+        choose_attackers_with_targets_with_profile_and_deadline(
             state,
             PlayerId(0),
             &AiProfile::default(),
             CombatLookahead::Disabled,
             None,
-            Some(&targets),
-            None,
+            AttackTargetingContext {
+                valid_attacker_ids: Some(valid_attacker_ids),
+                valid_attack_targets: Some(valid_attack_targets),
+                valid_attack_targets_by_attacker: valid_attack_targets_by_attacker.as_ref(),
+                comparison_deadline: Some(Deadline::none()),
+            },
         )
+    }
+
+    fn integration_card_db() -> &'static engine::database::card_db::CardDatabase {
+        static DB: std::sync::OnceLock<engine::database::card_db::CardDatabase> =
+            std::sync::OnceLock::new();
+        DB.get_or_init(|| {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../engine/tests/fixtures/integration_cards.json.gz");
+            let file = std::fs::File::open(path).expect("integration fixture should open");
+            let decoder = flate2::read::GzDecoder::new(std::io::BufReader::new(file));
+            engine::database::card_db::CardDatabase::from_export_reader(decoder)
+                .expect("integration fixture should load")
+        })
+    }
+
+    /// A two-player state with `card` (from the real card data) on P0's
+    /// battlefield, able to attack this turn.
+    fn state_with_real_attacker(card: &str) -> (GameState, ObjectId) {
+        use engine::game::scenario::{GameScenario, P0};
+        use engine::game::scenario_db::GameScenarioDbExt;
+        let mut scenario = GameScenario::new();
+        let id = scenario.add_real_card(P0, card, Zone::Battlefield, integration_card_db());
+        let mut state = scenario.build().state().clone();
+        state.turn_number = 2;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.summoning_sick = false;
+        obj.entered_battlefield_turn = Some(1);
+        (state, id)
     }
 
     /// CR 702.16e + CR 702.16j: the engine lets a protected player be attacked
@@ -9684,7 +9793,7 @@ mod tests {
         let attacker = add_creature(&mut state, PlayerId(0), "Bear", 3, 3, vec![]);
 
         // Control: open board, unprotected opponent — the free attack is taken.
-        let attacks = choose_with_engine_targets(&state);
+        let attacks = choose_from_engine_prompt(&mut state.clone());
         assert_eq!(attacks, vec![(attacker, AttackTarget::Player(PlayerId(1)))]);
 
         grant_protection_from_everything(&mut state, PlayerId(1));
@@ -9692,7 +9801,7 @@ mod tests {
             valid_targets(&state).contains(&AttackTarget::Player(PlayerId(1))),
             "the protected player must still be a legal attack target"
         );
-        let attacks = choose_with_engine_targets(&state);
+        let attacks = choose_from_engine_prompt(&mut state);
         assert!(
             attacks.is_empty(),
             "no attack into a player who prevents all of it, got {attacks:?}"
@@ -9708,38 +9817,33 @@ mod tests {
         let pw = add_planeswalker(&mut state, PlayerId(1), 6);
         grant_protection_from_everything(&mut state, PlayerId(1));
 
-        let attacks = choose_with_engine_targets(&state);
+        let attacks = choose_from_engine_prompt(&mut state);
         assert_eq!(attacks, vec![(attacker, AttackTarget::Planeswalker(pw))]);
         engine::game::combat::declare_attackers(&mut state, &attacks, &mut vec![])
             .expect("engine must accept the redirected declaration");
     }
 
-    /// CR 508.3a: a "whenever this creature attacks" trigger pays off on the
-    /// declaration, so the creature still attacks a protected player.
+    /// CR 508.3a: an attack trigger pays off on the declaration, so the creature
+    /// still attacks a protected player — for the plain "attacks" mode
+    /// (Aclazotz, Deepest Betrayal: each opponent discards) and the combined
+    /// "enters or attacks" mode (Inferno Titan).
     #[test]
     fn self_attack_trigger_still_attacks_protected_player() {
-        use engine::types::ability::{AbilityDefinition, AbilityKind, TriggerDefinition};
-        let mut state = setup();
-        let attacker = add_creature(&mut state, PlayerId(0), "Raider", 3, 3, vec![]);
-        let trigger = TriggerDefinition::new(TriggerMode::Attacks)
-            .valid_card(TargetFilter::SelfRef)
-            .execute(AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::Draw {
-                    count: engine::types::ability::QuantityExpr::Fixed { value: 1 },
-                    target: TargetFilter::Controller,
-                },
-            ));
-        state
-            .objects
-            .get_mut(&attacker)
-            .unwrap()
-            .trigger_definitions
-            .push(trigger);
-        grant_protection_from_everything(&mut state, PlayerId(1));
+        for card in ["Aclazotz, Deepest Betrayal", "Inferno Titan"] {
+            let (mut state, attacker) = state_with_real_attacker(card);
+            assert!(
+                has_self_attack_trigger(&state, attacker),
+                "{card}'s parsed attack trigger must be recognized"
+            );
+            grant_protection_from_everything(&mut state, PlayerId(1));
 
-        let attacks = choose_with_engine_targets(&state);
-        assert_eq!(attacks, vec![(attacker, AttackTarget::Player(PlayerId(1)))]);
+            let attacks = choose_from_engine_prompt(&mut state);
+            assert_eq!(
+                attacks,
+                vec![(attacker, AttackTarget::Player(PlayerId(1)))],
+                "{card} must still attack for its trigger"
+            );
+        }
     }
 
     /// CR 508.1d + CR 701.15b: a goaded creature must still attack even when the
@@ -9756,9 +9860,65 @@ mod tests {
             .insert(PlayerId(1));
         grant_protection_from_everything(&mut state, PlayerId(1));
 
-        let attacks = choose_with_engine_targets(&state);
+        let attacks = choose_from_engine_prompt(&mut state);
         assert_eq!(attacks, vec![(goaded, AttackTarget::Player(PlayerId(1)))]);
         engine::game::combat::declare_attackers(&mut state, &attacks, &mut vec![])
             .expect("engine must accept the goad-compliant declaration");
+    }
+
+    /// CR 702.16e + CR 702.16j: the raw lowest-life lethal read does not hold
+    /// when that opponent prevents the damage.
+    #[test]
+    fn lethal_read_ignores_an_opponent_who_prevents_the_damage() {
+        let mut state = setup();
+        let attackers = [
+            add_creature(&mut state, PlayerId(0), "Bear", 3, 3, vec![]),
+            add_creature(&mut state, PlayerId(0), "Bear", 3, 3, vec![]),
+        ];
+        state.players[1].life = 6;
+        assert!(lethal_on_damageable_opponent(
+            &state,
+            &[PlayerId(1)],
+            &attackers
+        ));
+
+        grant_protection_from_everything(&mut state, PlayerId(1));
+        assert!(damageable_opponents(&state, &[PlayerId(1)], &attackers).is_empty());
+        assert!(!lethal_on_damageable_opponent(
+            &state,
+            &[PlayerId(1)],
+            &attackers
+        ));
+    }
+
+    /// CR 702.16e + CR 702.16j: in a free-for-all, a protected opponent at low
+    /// life is not chosen as the defender — otherwise its "lethal" pull sends the
+    /// attack there and the retarget lands it on an opponent whose blocks were
+    /// never evaluated (here P2's deathtouch wall). The attack goes to the
+    /// open-board opponent instead.
+    #[test]
+    fn free_for_all_never_chooses_a_protected_defender() {
+        let mut state = setup_multiplayer(4);
+        add_creature(&mut state, PlayerId(0), "Bear", 3, 3, vec![]);
+        add_creature(&mut state, PlayerId(0), "Bear", 3, 3, vec![]);
+        state.players[1].life = 3;
+        grant_protection_from_everything(&mut state, PlayerId(1));
+        add_creature(
+            &mut state,
+            PlayerId(2),
+            "Wall",
+            0,
+            8,
+            vec![Keyword::Deathtouch, Keyword::Defender],
+        );
+
+        let attacks = choose_from_engine_prompt(&mut state);
+        assert!(!attacks.is_empty(), "the open board is worth attacking");
+        assert!(
+            attacks
+                .iter()
+                .all(|(_, target)| *target == AttackTarget::Player(PlayerId(3))),
+            "every attack must go to the open-board opponent, got {attacks:?}"
+        );
     }
 }
