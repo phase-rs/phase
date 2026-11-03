@@ -60,8 +60,11 @@ fi
 jq_num() {
     local value
     value="$(jq "$@" | tr -d '\r')"
-    case "$value" in
-        '' | *[!0-9-]*)
+    # A sign is allowed; anything else that is not a digit is refused. Testing the whole value
+    # against `[!0-9-]` let `-`, `--` and `1-2` through, and those fail inside `[[ ]]`'s CONDITION
+    # context silently — no verdict, exit 0 — which is the false clean this boundary exists to stop.
+    case "${value#-}" in
+        '' | *[!0-9]*)
             echo "ERROR: jq produced a non-numeric value where a count was required: jq $*" >&2
             echo "       got '$value' — refusing to compare against a value that is not a number" >&2
             return 2
@@ -292,6 +295,13 @@ if [[ "$baseline_has_diag" -eq 1 ]]; then
 
     while IFS='=' read -r cat count; do
         count="${count%$'\r'}"
+        case "${count#-}" in
+            '' | *[!0-9]*)
+                echo "ERROR: non-numeric diagnostic count for '$cat': '$count'" >&2
+                echo "       refusing to compare against a value that is not a number" >&2
+                exit 2
+                ;;
+        esac
         base_count=$(jq_num -r ".diagnostics[\"$cat\"] // 0" "$BASELINE")
         if [[ "$count" -gt "$base_count" ]]; then
             increase=$((count - base_count))
@@ -327,6 +337,13 @@ if [[ "$baseline_has_diag" -eq 1 ]]; then
     # Also check for new categories not in baseline
     while IFS='=' read -r cat count; do
         count="${count%$'\r'}"
+        case "${count#-}" in
+            '' | *[!0-9]*)
+                echo "ERROR: non-numeric diagnostic count for '$cat': '$count'" >&2
+                echo "       refusing to compare against a value that is not a number" >&2
+                exit 2
+                ;;
+        esac
         if ! jq -e ".diagnostics[\"$cat\"]" "$BASELINE" > /dev/null 2>&1; then
             echo "DIAGNOSTIC REGRESSION: new category $cat with count $count (not in baseline)" >&2
             diag_fail=1

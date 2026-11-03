@@ -58,11 +58,18 @@ cat > "$TMP/text/jq" <<'EOF'
 #!/usr/bin/env bash
 printf 'n/a\r\n'
 EOF
-mkdir -p "$TMP/mid_total" "$TMP/mid_diag"
+mkdir -p "$TMP/mid_total" "$TMP/mid_curr_total" "$TMP/mid_diag"
 cat > "$TMP/mid_total/jq" <<EOF
 #!/usr/bin/env bash
 case "\$*" in
     *'total_cards // 0'*) printf 'n/a\\r\\n' ;;
+    *) exec "$REAL_JQ" "\$@" ;;
+esac
+EOF
+cat > "$TMP/mid_curr_total/jq" <<EOF
+#!/usr/bin/env bash
+case "\$*" in
+    *'total_cards // 0'*worse.json*) printf 'n/a\\r\\n' ;;
     *) exec "$REAL_JQ" "\$@" ;;
 esac
 EOF
@@ -73,7 +80,7 @@ case "\$*" in
     *) exec "$REAL_JQ" "\$@" ;;
 esac
 EOF
-chmod +x "$TMP/crlf/jq" "$TMP/text/jq" "$TMP/mid_total/jq" "$TMP/mid_diag/jq"
+chmod +x "$TMP/crlf/jq" "$TMP/text/jq" "$TMP/mid_total/jq" "$TMP/mid_curr_total/jq" "$TMP/mid_diag/jq"
 
 # --- helpers ----------------------------------------------------------------------------------
 # run <jq-dir|-> <baseline> <current> : stdout+stderr in $OUT, status in $RC
@@ -145,7 +152,7 @@ fi
 # --- row 4: a refusal on a LATER numeric read is still named on stderr -------------------------
 # These two sites used to carry a leftover `2>/dev/null` from their bare-jq days, which discarded
 # `jq_num`'s own message and left a bare exit 2 with empty stderr — the failure this row pins.
-for target in mid_total mid_diag; do
+for target in mid_total mid_curr_total mid_diag; do
     run "$TMP/$target" "$TMP/base.json" "$TMP/worse.json"
     if [ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -q "non-numeric value where a count was required"; then
         ok "a mid-run refusal at $target is named on stderr (exit $RC)"
@@ -154,6 +161,26 @@ for target in mid_total mid_diag; do
         printf '%s\n' "$OUT" | sed 's/^/     /'
     fi
 done
+
+# --- row 5: a sign-only value is refused, not silently "clean" ---------------------------------
+# `-` passes a naive `[!0-9-]` guard and then fails inside `[[ ]]`'s condition context with no
+# verdict and exit 0 — the false clean this boundary exists to prevent.
+mkdir -p "$TMP/signonly"
+cat > "$TMP/signonly/jq" <<EOF
+#!/usr/bin/env bash
+case "\$*" in
+    *.diagnostics\[*) printf -- '-\\r\\n' ;;
+    *) exec "$REAL_JQ" "\$@" ;;
+esac
+EOF
+chmod +x "$TMP/signonly/jq"
+run "$TMP/signonly" "$TMP/base.json" "$TMP/worse.json"
+if [ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -q "non-numeric value where a count was required"; then
+    ok "a sign-only value is refused (exit $RC)"
+else
+    bad "a sign-only value must be refused, got exit $RC"
+    printf '%s\n' "$OUT" | sed 's/^/     /'
+fi
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1
