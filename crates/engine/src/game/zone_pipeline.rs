@@ -7331,6 +7331,122 @@ mod w3_library_placement_tests {
         );
     }
 
+    /// CR 616.1 + save compatibility: a real pinned delivery boundary can be
+    /// older than a redirected proposal. The migration follows the boundary copy
+    /// and never transplants the proposal's new destination or placement onto it.
+    #[test]
+    fn legacy_positioned_batch_pinned_boundary_survives_redirected_proposal() {
+        let (state, first, _, _) = positioned_batch_fixture();
+        let mut parked = state;
+        let mut events = Vec::new();
+        assert!(matches!(
+            move_objects_simultaneously(
+                &mut parked,
+                vec![ZoneMoveRequest::effect(first, Zone::Library, first)
+                    .at_library_position(LibraryPosition::Bottom)],
+                &mut events
+            ),
+            BatchMoveResult::NeedsChoice
+        ));
+        parked
+            .pending_replacement
+            .as_mut()
+            .expect("authentic positioned pause")
+            .pin_delivery_boundary();
+        let pinned = parked
+            .pending_replacement
+            .as_ref()
+            .expect("authentic positioned pause")
+            .delivery_boundary_event()
+            .clone();
+        assert!(
+            matches!(
+                &pinned,
+                ProposedEvent::ZoneChange {
+                    to: Zone::Library,
+                    library_placement: Some(LibraryPosition::Bottom),
+                    ..
+                }
+            ),
+            "the production pin retains the original positioned boundary"
+        );
+
+        let bottom = serde_json::json!({"type": "Bottom"});
+        let mut wire = serde_json::to_value(&parked).expect("positioned pause serializes");
+        // A redirect applied after the pin leaves the proposal at a different
+        // destination, while the owner still parked on the original boundary.
+        {
+            let carrier = find_key_mut(&mut wire, "pending_replacement")
+                .and_then(serde_json::Value::as_object_mut)
+                .expect("the pause retains its replacement carrier");
+            carrier["proposed"]["ZoneChange"]["to"] = serde_json::json!("Exile");
+            carrier["proposed"]["ZoneChange"]
+                .as_object_mut()
+                .expect("proposal is a ZoneChange")
+                .remove("library_placement");
+            carrier["delivery_boundary"]["ZoneChange"]
+                .as_object_mut()
+                .expect("the pinned boundary is a ZoneChange")
+                .remove("library_placement");
+        }
+        {
+            let owner = find_key_mut(&mut wire, "paused_current")
+                .and_then(serde_json::Value::as_object_mut)
+                .expect("the pause retains its exact owner");
+            owner["expected_event"]["ZoneChange"]
+                .as_object_mut()
+                .expect("owner expected event is a ZoneChange")
+                .remove("library_placement");
+        }
+        let carrier = find_key(&wire, "pending_replacement").expect("carrier");
+        assert_ne!(
+            carrier["proposed"], carrier["delivery_boundary"],
+            "the legacy shape has a redirected proposal older than its pinned boundary"
+        );
+
+        let restored: GameState =
+            serde_json::from_value(wire).expect("pinned-boundary save restores");
+        let pending = restored
+            .pending_replacement
+            .as_ref()
+            .expect("pause restores");
+        assert!(matches!(
+            &pending.proposed,
+            ProposedEvent::ZoneChange {
+                to: Zone::Exile,
+                library_placement: None,
+                ..
+            }
+        ));
+        assert_eq!(
+            pending.delivery_boundary_event(),
+            &pinned,
+            "the typed pinned boundary is unchanged by normalization"
+        );
+
+        let rewritten = serde_json::to_value(&restored).expect("restored pause serializes");
+        let carrier = find_key(&rewritten, "pending_replacement").expect("carrier");
+        assert_eq!(
+            carrier["proposed"]["ZoneChange"]["library_placement"],
+            serde_json::Value::Null,
+            "the exiling proposal keeps an explicit null placement"
+        );
+        assert_eq!(
+            carrier["delivery_boundary"]["ZoneChange"]["library_placement"], bottom,
+            "the older library boundary imports the mirror placement"
+        );
+        let owner = find_key(&rewritten, "paused_current").expect("owner");
+        assert_eq!(
+            owner["expected_event"]["ZoneChange"]["library_placement"], bottom,
+            "the exact owner copy follows the pinned boundary, not the proposal"
+        );
+
+        let again: GameState =
+            serde_json::from_value(serde_json::to_value(&restored).expect("state serializes"))
+                .expect("pinned-boundary save restores idempotently");
+        assert_eq!(again, restored);
+    }
+
     /// F-A (CR 616.1 + CR 701.24a): the library placement must survive a SECOND
     /// sequential park on the same event. The first optional redirect parks (the
     /// placement is stashed onto `PendingReplacement` by the W3 arm); declining

@@ -26387,9 +26387,6 @@ fn migrate_legacy_spell_cost_elections(value: &mut serde_json::Value) -> Result<
     Ok(())
 }
 
-/// Field-migrate the former paid-resolution offer into its canonical cleanup
-/// carrier. This runs before raw, persisted, trusted and versioned decoding
-/// materializes `CastOfferKind`, independent of the transport.
 #[cfg(test)]
 pub(crate) mod replacement_library_placement_wire_tests {
     use super::*;
@@ -26884,6 +26881,9 @@ fn migrate_legacy_replacement_library_placement(
     Ok(())
 }
 
+/// Field-migrate the former paid-resolution offer into its canonical cleanup
+/// carrier. This runs before raw, persisted, trusted and versioned decoding
+/// materializes `CastOfferKind`, independent of the transport.
 fn migrate_legacy_graveyard_paid_cast_cleanup(value: &mut serde_json::Value) -> Result<(), String> {
     fn legacy_delayed_trigger_receipts(
         value: &serde_json::Value,
