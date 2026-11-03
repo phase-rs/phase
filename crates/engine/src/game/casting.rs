@@ -24642,9 +24642,9 @@ fn pay_ability_mana_cost_with_choices_excluding_and_parent(
 /// player's tap markers pay. A marker never pays for an activation through the
 /// spend path, where `ManaRestriction::allows_activation` keeps it from funding
 /// any other ability, such as a mana ability's own `{1}`: only a waterbend
-/// payment window may redeem it, and that is the window the `resume` names. A
-/// surplus marker from tapping past the generic count stays in the pool, so a
-/// later window or spell can redeem it.
+/// payment window may redeem it, and that is the window the `resume` names.
+/// [`waterbend_taps_remaining`] stops the taps at the generic count, so every
+/// marker in the window is redeemed here.
 fn waterbend_taps_paying_activation(
     state: &GameState,
     player: PlayerId,
@@ -24672,6 +24672,34 @@ fn waterbend_taps_paying_activation(
             p.mana_pool.count_where(|unit| unit.is_convoke_payment())
         });
     u32::try_from(markers).map_or(*generic, |markers| markers.min(*generic))
+}
+
+/// CR 701.67a: How many more permanents `player` may tap toward the waterbend
+/// cost being paid. "For each generic mana in that cost, you may tap" one, and
+/// every tap marker already in the payer's pool stands in for one of those
+/// generic mana. For an activation `pending.cost` is the waterbend cost itself;
+/// for a spell it is the whole total, so this bounds the taps by the generic
+/// mana the spell still has (the narrower CR 701.67b limit is not modelled here).
+/// The `TapForConvoke` handler and both offer sites read this one count.
+pub(crate) fn waterbend_taps_remaining(state: &GameState, player: PlayerId) -> u32 {
+    let generic = match state.pending_cast.as_deref().map(|pending| &pending.cost) {
+        Some(ManaCost::Cost { generic, .. }) => *generic,
+        Some(
+            ManaCost::NoCost
+            | ManaCost::SelfManaCost
+            | ManaCost::SelfManaValue
+            | ManaCost::SelfManaCostReduced { .. },
+        )
+        | None => 0,
+    };
+    let markers = state
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .map_or(0, |p| {
+            p.mana_pool.count_where(|unit| unit.is_convoke_payment())
+        });
+    generic.saturating_sub(u32::try_from(markers).unwrap_or(u32::MAX))
 }
 
 /// CR 701.67a + CR 118.3a: Remove the markers whose taps paid part of an
@@ -31586,12 +31614,15 @@ pub fn handle_cancel_cast(
         }
     }
     // CR 733.1: an activation has no cast reversal to restore its payments, so
-    // every tap marker in a pool is undone with its tap, including a surplus
-    // marker from an earlier payment. No abilities trigger, so no event follows.
+    // the tap markers in the activator's pool are undone with their taps; no
+    // other player paid for this activation. No abilities trigger, so no event
+    // follows.
     if pending.activation_ability_index.is_some() {
+        let activator = pending.ability.controller;
         let tapped_for_payment = state
             .players
             .iter()
+            .filter(|player| player.id == activator)
             .flat_map(|player| player.mana_pool.shapes())
             .filter(|(unit, _)| unit.is_convoke_payment())
             .map(|(unit, _)| unit.source_id)
@@ -31611,8 +31642,16 @@ pub fn handle_cancel_cast(
         }
     }
     // CR 733.1: a cancel drops the cast's delve and convoke markers; a terminal
-    // cancel passes a fresh `PendingCast`, so drop them all.
-    for player in &mut state.players {
+    // cancel passes a fresh `PendingCast`, so drop them all. An activation's
+    // pending state is always its own, so only the activator's are dropped.
+    let activation_payer = pending
+        .activation_ability_index
+        .map(|_| pending.ability.controller);
+    for player in state
+        .players
+        .iter_mut()
+        .filter(|player| activation_payer.is_none_or(|payer| player.id == payer))
+    {
         player
             .mana_pool
             .retain_shapes(|unit| !unit.is_convoke_payment());

@@ -8,14 +8,22 @@
 //! rows run the current parser. Only the transform row reads the printed face from the fixture.
 //! The Myriad Pools' copy effect is out of scope here: only its trigger gate is pinned.
 
+use engine::ai_support::candidate_actions;
 use engine::database::card_db::CardDatabase;
+use engine::game::interaction::{
+    bind_interaction_authority, derive_viewer_interaction, interaction_action_id,
+};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
+use engine::game::visibility::filter_state_for_viewer;
 use engine::types::ability::{TargetRef, TriggerCondition};
 use engine::types::actions::{CastChoice, GameAction};
 use engine::types::events::GameEvent;
 use engine::types::game_state::{CastOfferKind, CastPaymentMode, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
+use engine::types::interaction::{
+    InteractionOpportunityResponse, InteractionPresentationSurface, InteractionSessionId,
+};
 use engine::types::mana::{ManaColor, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -1316,4 +1324,264 @@ fn cancelling_a_waterbend_cast_untaps_barracks() {
     assert_eq!(tap_markers(&board.runner), 0);
     assert_eq!(board.runner.state().players[0].mana_pool.total(), 0);
     assert_eq!(board.runner.state().objects[&spirit].zone, Zone::Hand);
+}
+
+/// Which of `permanents` a waterbend tap is offered for, as the UI's interaction projection and
+/// the AI's candidates each list it.
+fn offered_waterbend_taps(
+    runner: &GameRunner,
+    permanents: &[ObjectId],
+) -> (Vec<ObjectId>, Vec<ObjectId>) {
+    let tap = |object_id: ObjectId| GameAction::TapForConvoke {
+        object_id,
+        mana_type: ManaType::Colorless,
+    };
+    let mut state = runner.state().clone();
+    bind_interaction_authority(
+        &mut state,
+        InteractionSessionId("waterbend-cap".to_string()),
+    )
+    .expect("valid interaction authority binding");
+    let view = derive_viewer_interaction(&state, &filter_state_for_viewer(&state, P0), P0);
+    let ui_action_ids: Vec<_> = view
+        .opportunities
+        .iter()
+        .filter_map(|opportunity| match &opportunity.response {
+            InteractionOpportunityResponse::ExactChoices { choices } => Some(choices),
+            _ => None,
+        })
+        .flatten()
+        .flat_map(|choice| &choice.surfaces)
+        .filter_map(|surface| match surface {
+            InteractionPresentationSurface::Action {
+                action_id: Some(id),
+                ..
+            } => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
+    let ai_actions = candidate_actions(runner.state());
+    let ui = permanents
+        .iter()
+        .copied()
+        .filter(|permanent| ui_action_ids.contains(&interaction_action_id(&tap(*permanent))))
+        .collect();
+    let ai = permanents
+        .iter()
+        .copied()
+        .filter(|permanent| {
+            ai_actions
+                .iter()
+                .any(|candidate| candidate.action == tap(*permanent))
+        })
+        .collect();
+    (ui, ai)
+}
+
+/// Tap each of `helpers` for waterbend in turn, checking before each tap that the UI and the AI
+/// both offer every helper still untapped.
+fn tap_each_while_offered(runner: &mut GameRunner, helpers: &[ObjectId]) {
+    for (tapped, helper) in helpers.iter().enumerate() {
+        let untapped = &helpers[tapped..];
+        let (ui, ai) = offered_waterbend_taps(runner, untapped);
+        assert_eq!(ui, untapped, "the UI offers every untapped helper");
+        assert_eq!(ai, untapped, "the AI offers every untapped helper");
+        tap_for_waterbend(runner, *helper);
+    }
+}
+
+/// Assert a waterbend tap of `permanent` is neither offered nor accepted, and that it stays
+/// untapped.
+fn assert_tap_refused(runner: &mut GameRunner, permanent: ObjectId) {
+    assert_eq!(
+        offered_waterbend_taps(runner, &[permanent]),
+        (vec![], vec![]),
+        "CR 701.67a: neither the UI nor the AI offers a tap past the generic count"
+    );
+    let markers = tap_markers(runner);
+    assert!(
+        runner
+            .act(GameAction::TapForConvoke {
+                object_id: permanent,
+                mana_type: ManaType::Colorless,
+            })
+            .is_err(),
+        "CR 701.67a: the tap past the generic count is refused"
+    );
+    assert!(!runner.state().objects[&permanent].tapped);
+    assert_eq!(tap_markers(runner), markers);
+}
+
+/// CR 701.67a: Benevolent River Spirit's waterbend {5} takes five taps and no sixth: the sixth
+/// helper is offered to neither the UI nor the AI, and tapping it is refused. The Islands pay
+/// {U}{U} and every tap is spent.
+#[test]
+fn a_waterbend_spell_takes_exactly_its_generic_in_taps() {
+    let mut scenario = main_phase();
+    let helpers: Vec<ObjectId> = (0..6).map(|_| scenario.add_vanilla(P0, 1, 1)).collect();
+    let islands: Vec<ObjectId> = (0..2)
+        .map(|_| scenario.add_basic_land(P0, ManaColor::Blue))
+        .collect();
+    let spirit = real(&mut scenario, P0, "Benevolent River Spirit", Zone::Hand);
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&spirit].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spirit,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the spell must be castable");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ManaPayment { .. }
+    ));
+
+    let (five, sixth) = helpers.split_at(5);
+    tap_each_while_offered(&mut runner, five);
+    assert_eq!(tap_markers(&runner), 5);
+    assert_tap_refused(&mut runner, sixth[0]);
+
+    runner
+        .act(GameAction::PassPriority)
+        .expect("five taps and the Islands pay {5}{U}{U}");
+    assert_eq!(runner.state().stack.len(), 1);
+    assert!(islands
+        .iter()
+        .all(|island| runner.state().objects[island].tapped));
+    assert_eq!(tap_markers(&runner), 0, "every tap paid the spell");
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+}
+
+/// CR 701.67a: Waterbender Ascension's waterbend {4} takes four taps and no fifth, and the four
+/// pay all of it.
+#[test]
+fn a_waterbend_activation_takes_no_tap_past_its_generic() {
+    let mut scenario = main_phase();
+    let ascension = real(
+        &mut scenario,
+        P0,
+        "Waterbender Ascension",
+        Zone::Battlefield,
+    );
+    let helpers: Vec<ObjectId> = (0..5).map(|_| scenario.add_vanilla(P0, 1, 1)).collect();
+    let mut runner = scenario.build();
+    activate_ascension(&mut runner, ascension, helpers[0]);
+
+    let (four, fifth) = helpers.split_at(4);
+    tap_each_while_offered(&mut runner, four);
+    assert_eq!(tap_markers(&runner), 4);
+    assert_tap_refused(&mut runner, fifth[0]);
+
+    runner
+        .act(GameAction::PassPriority)
+        .expect("four taps pay {4}");
+    assert_eq!(runner.state().stack.len(), 1);
+    assert_eq!(tap_markers(&runner), 0, "every tap paid the activation");
+}
+
+/// CR 733.1: cancelling an activation undoes only the activator's taps. P0's Benevolent River
+/// Spirit is paid manually with its pool's {U}{U}{W} pinned and five helpers tapped; the pinned
+/// {W} pays one generic mana before the taps do, so one tap is left unspent in P0's pool. That
+/// spare tap is the known spell-side surplus the cap does not cover (a pinned unit is preferred
+/// over a tap). P1 then activates Waterbender Ascension in response, taps its own helper and
+/// cancels: P1's helper untaps, and P0's spare tap and its tapped helper are left alone.
+#[test]
+fn cancelling_an_activation_leaves_another_players_taps_alone() {
+    let mut scenario = main_phase();
+    let p0_helpers: Vec<ObjectId> = (0..5).map(|_| scenario.add_vanilla(P0, 1, 1)).collect();
+    let lands: Vec<ObjectId> = (0..3)
+        .map(|_| scenario.add_basic_land(P0, ManaColor::Blue))
+        .collect();
+    let mut pool = pool_from(ManaType::Blue, &lands[..2]);
+    pool.extend(pool_from(ManaType::White, &lands[2..]));
+    scenario.with_mana_pool(P0, pool);
+    let spirit = real(&mut scenario, P0, "Benevolent River Spirit", Zone::Hand);
+    let ascension = real(
+        &mut scenario,
+        P1,
+        "Waterbender Ascension",
+        Zone::Battlefield,
+    );
+    // Four helpers make the {4} affordable; only one is tapped before the cancel.
+    let p1_helper = scenario.add_vanilla(P1, 1, 1);
+    for _ in 0..3 {
+        scenario.add_vanilla(P1, 1, 1);
+    }
+    let mut runner = scenario.build();
+
+    let card_id = runner.state().objects[&spirit].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spirit,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("the spell must be castable");
+    let pips: Vec<_> = runner.state().players[0]
+        .mana_pool
+        .units()
+        .map(|unit| unit.pip_id)
+        .collect();
+    assert_eq!(pips.len(), 3);
+    for pip_id in pips {
+        runner
+            .act(GameAction::SpendPoolMana { pip_id })
+            .expect("each floating mana can pay part of the spell");
+    }
+    for helper in &p0_helpers {
+        tap_for_waterbend(&mut runner, *helper);
+    }
+    runner
+        .act(GameAction::PassPriority)
+        .expect("the pinned mana and the taps pay {5}{U}{U}");
+    assert_eq!(runner.state().stack.len(), 1, "the Spirit is on the stack");
+    assert_eq!(
+        tap_markers(&runner),
+        1,
+        "reach guard: P0 has a spare tap in its pool"
+    );
+    let spare = runner.state().players[0]
+        .mana_pool
+        .units()
+        .find(|unit| unit.is_convoke_payment())
+        .map(|unit| unit.source_id)
+        .expect("the spare tap names its helper");
+    assert!(runner.state().objects[&spare].tapped);
+
+    runner
+        .act(GameAction::PassPriority)
+        .expect("P0 passes with the Spirit on the stack");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { player: P1, .. }
+    ));
+    activate_ascension(&mut runner, ascension, p1_helper);
+    tap_for_waterbend(&mut runner, p1_helper);
+    assert!(runner.state().objects[&p1_helper].tapped);
+    runner
+        .act(GameAction::CancelCast)
+        .expect("nothing was paid yet");
+
+    assert!(
+        !runner.state().objects[&p1_helper].tapped,
+        "P1's tap is undone"
+    );
+    assert_eq!(
+        runner.state().players[1]
+            .mana_pool
+            .count_where(|unit| unit.is_convoke_payment()),
+        0
+    );
+    assert!(
+        runner.state().objects[&spare].tapped,
+        "P0's helper did not pay for P1's activation"
+    );
+    assert_eq!(
+        tap_markers(&runner),
+        1,
+        "P0's spare tap is not P1's to drop"
+    );
 }

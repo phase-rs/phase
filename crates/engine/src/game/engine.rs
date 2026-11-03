@@ -15713,6 +15713,15 @@ fn apply_non_priority_pass_action(
                         .to_string(),
                 ));
             }
+            // CR 701.67a: one tap "for each generic mana in that cost"; a tap past
+            // the generic count would pay nothing.
+            if mode == ConvokeMode::Waterbend
+                && super::casting::waterbend_taps_remaining(state, *player) == 0
+            {
+                return Err(EngineError::ActionNotAllowed(
+                    "No generic mana of this cost is left for a waterbend tap".to_string(),
+                ));
+            }
             let tapped_creature_for_convoke = mode == ConvokeMode::Convoke
                 && obj
                     .card_types

@@ -6410,6 +6410,8 @@ fn detect_combat_pairing_relation(
 /// must surface as a `FromSource` read of the triggering spell's payment; otherwise the
 /// trigger fires on every matching spell. The audit reads un-normalized text, so only
 /// the name-independent head is scanned: `cleaned` holds the card's name, never `~`.
+/// CR 201.5: the source named is the card itself, so only a `SelfRef` source filter
+/// represents the clause; a `FromSource` read of some other source does not.
 fn detect_cast_mana_source_qualifier(
     cleaned: &str,
     original: &str,
@@ -6421,7 +6423,9 @@ fn detect_cast_mana_source_qualifier(
             qty,
             QuantityRef::ManaSpentToCast {
                 scope: CastManaObjectScope::TriggeringSpell,
-                metric: CastManaSpentMetric::FromSource { .. },
+                metric: CastManaSpentMetric::FromSource {
+                    source_filter: TargetFilter::SelfRef,
+                },
             }
         )
     });
@@ -15574,6 +15578,63 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
                 parsed.parse_warnings
             );
         }
+    }
+
+    /// CR 201.5: "mana produced by ~" names the card itself, so a `FromSource` read of
+    /// another source (Treasure mana here) is not a carrier for it. The positive row swaps
+    /// the same unit's filter back to `SelfRef`, the shape the real parse carries.
+    #[test]
+    fn cast_mana_source_detector_flags_a_carrier_for_another_source() {
+        use crate::types::ability::{CastManaObjectScope, CastManaSpentMetric};
+
+        let (name, types, text) = CAST_MANA_SOURCE_CARDS[0];
+        let real = parse_named(text, name, types);
+        let line = text.lines().last().expect("the trigger is the last line");
+        let cleaned = line.to_lowercase();
+        let carrier = |source_filter: TargetFilter| TriggerCondition::EventTime {
+            condition: Box::new(TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ManaSpentToCast {
+                        scope: CastManaObjectScope::TriggeringSpell,
+                        metric: CastManaSpentMetric::FromSource { source_filter },
+                    },
+                },
+                comparator: Comparator::GT,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            }),
+        };
+        let [trigger] = real.triggers.as_slice() else {
+            panic!("{name}: {:?}", real.triggers);
+        };
+        assert_eq!(
+            trigger.condition,
+            Some(carrier(TargetFilter::SelfRef)),
+            "reach guard: the built carrier is the real parse's"
+        );
+        let detect = |source_filter: TargetFilter| {
+            let mut parsed = real.clone();
+            parsed.triggers[0].condition = Some(carrier(source_filter));
+            assert!(
+                !any_ability_has_unimplemented(&parsed),
+                "reach guard: an unimplemented unit is skipped before the detector runs"
+            );
+            let evidence = UnitEvidence::of(&parsed);
+            let mut found = Vec::new();
+            super::detect_cast_mana_source_qualifier(&cleaned, &cleaned, &evidence, &mut found);
+            found
+        };
+
+        assert_eq!(detect(TargetFilter::SelfRef), []);
+        let treasure =
+            TargetFilter::Typed(TypedFilter::permanent().subtype("Treasure".to_string()));
+        assert!(
+            matches!(
+                detect(treasure).as_slice(),
+                [OracleDiagnostic::SwallowedClause { detector, .. }]
+                    if detector == "CastManaSourceQualifier"
+            ),
+            "a Treasure carrier does not represent mana produced by {name}"
+        );
     }
 }
 
