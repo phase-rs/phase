@@ -2,7 +2,7 @@
 //! Indoraptor deals damage equal to its power to that player unless they
 //! sacrifice a nontoken creature of their choice." The chosen opponent — not
 //! Indoraptor's controller — receives the sacrifice-or-damage decision and the
-//! damage (CR 608.2c + CR 109.4 + CR 118.12a).
+//! damage (CR 608.2c + CR 118.12a).
 
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::actions::GameAction;
