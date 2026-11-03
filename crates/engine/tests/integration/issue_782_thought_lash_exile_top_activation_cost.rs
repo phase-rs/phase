@@ -8,6 +8,7 @@
 use std::sync::Arc;
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::visibility::filter_state_for_viewer;
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, Effect, QuantityExpr, QuantityRef,
     ReplacementDefinition, ReplacementMode, TargetFilter, TargetRef, TypeFilter, TypedFilter,
@@ -121,6 +122,110 @@ fn thought_lash_cannot_be_activated_with_an_empty_library() {
          result = {result:?}, stack = {:?}",
         runner.state().stack
     );
+}
+
+/// CR 400.2 + CR 401.2 + CR 601.2h: an unpaid library cost stays hidden while
+/// the earlier mana payment pauses. CR 616.1: the Ruins' sacrifice requires its
+/// controller to choose between the two printed graveyard replacements.
+#[test]
+fn royal_herbalist_keeps_the_unpaid_library_card_hidden_during_a_mana_pause() {
+    let mut scenario = GameScenario::new_n_player(2, 42);
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.with_library_top(P0, &["Lightning Bolt", "Island", "Forest"]);
+    let herbalist = scenario
+        .add_creature(P0, "Royal Herbalist", 1, 1)
+        .from_oracle_text("{2}, Exile the top card of your library: You gain 1 life.")
+        .id();
+    let ruins = scenario
+        .add_land_from_oracle(
+            P0,
+            "Dwarven Ruins",
+            "This land enters tapped.\n{T}: Add {R}.\n{T}, Sacrifice this land: Add {R}{R}.",
+        )
+        .id();
+    scenario.add_enchantment_from_oracle(
+        P1,
+        "Rest in Peace",
+        "When this enchantment enters, exile all graveyards.\nIf a card or token would be put into a graveyard from anywhere, exile it instead.",
+    );
+    scenario.add_enchantment_from_oracle(
+        P1,
+        "Leyline of the Void",
+        "If this card is in your opening hand, you may begin the game with it on the battlefield.\nIf a card would be put into an opponent's graveyard from anywhere, exile it instead.",
+    );
+    let mut runner = scenario.build();
+    runner.state_mut().objects.get_mut(&ruins).unwrap().tapped = false;
+    let before = library_ids(&runner);
+    let top = before[0];
+    let hidden_name = runner.state().objects[&top].name.clone();
+    let life_before = runner.state().players[0].life;
+    let index = runner.state().objects[&herbalist]
+        .abilities
+        .iter()
+        .position(|ability| ability.kind == AbilityKind::Activated)
+        .expect("reach: Royal Herbalist has its printed activated ability");
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: herbalist,
+            ability_index: index,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the only mana source can pay by sacrificing Dwarven Ruins");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { player, .. } if player == P0
+    ));
+    assert!(runner.state().objects[&ruins].tapped);
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(library_ids(&runner), before);
+    assert_eq!(runner.state().objects[&top].zone, Zone::Library);
+    assert_eq!(runner.state().players[0].life, life_before);
+    for viewer in [P0, P1] {
+        let view = filter_state_for_viewer(runner.state(), viewer);
+        let pending = view
+            .pending_cast
+            .as_ref()
+            .expect("reach: the paused activation remains in the viewer projection");
+        assert_eq!(pending.object_id, herbalist);
+        assert!(
+            pending.ability.cost_paid_object.is_none(),
+            "{viewer:?} must not receive the unpaid hidden card's singular snapshot"
+        );
+        assert!(
+            pending.ability.cost_paid_objects.is_empty(),
+            "{viewer:?} must not receive unpaid hidden-card provenance records"
+        );
+        assert!(
+            view.objects
+                .get(&top)
+                .is_none_or(|object| object.name != hidden_name),
+            "reach: the library card's normal projection also hides its identity"
+        );
+    }
+
+    runner
+        .act(GameAction::ChooseReplacement { index: 0 })
+        .expect("the sacrifice replacement resumes mana and then the library cost");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(runner.state().pending_cast.is_none());
+    assert_eq!(runner.state().stack.len(), 1);
+    assert_eq!(runner.state().objects[&ruins].zone, Zone::Exile);
+    assert_eq!(runner.state().objects[&top].zone, Zone::Exile);
+    assert_eq!(library_ids(&runner), before[1..].to_vec());
+    assert_eq!(runner.state().players[0].life, life_before);
+
+    runner.advance_until_stack_empty();
+    assert!(runner.state().stack.is_empty());
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert_eq!(runner.state().players[0].life, life_before + 1);
+    assert_eq!(library_ids(&runner), before[1..].to_vec());
 }
 
 // Verbatim Oracle text (Scryfall, 2026-09-16).

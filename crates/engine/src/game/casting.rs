@@ -31125,8 +31125,6 @@ fn activate_with_cost_carrier(
             ));
         }
         stamp_self_ref_discard_cost_paid_object(state, source_id, &mut resolved, cost);
-        let top_library_exile_cost_ids =
-            stamp_top_library_exile_cost_paid_object(state, player, &mut resolved, cost);
         if let Some(waiting) = try_finalize_activation_mana_payment(
             state,
             player,
@@ -31141,6 +31139,9 @@ fn activate_with_cost_carrier(
         )? {
             return Ok(waiting);
         }
+        // CR 400.2 + CR 401.2: keep the unpaid library card hidden if mana payment pauses.
+        let top_library_exile_cost_ids =
+            stamp_top_library_exile_cost_paid_object(state, player, &mut resolved, cost);
         // CR 602.2b: this activation's own payment writes its removed-counter
         // count onto `resolved`, which the pause clones and the push consumes.
         if let PaymentOutcome::Paused { remaining_cost } = pay_ability_cost_for_activation(
