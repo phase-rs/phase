@@ -4332,9 +4332,17 @@ mod tests {
 
     // ---- CR 113.6 + CR 113.6b: the MOVED source's own zone of function ----
 
-    /// Anger's printed static, in the shape the real parse emits (CR 113.6b
-    /// `active_zones = [Graveyard]`, compound `SourceInZone` + `IsPresent`
-    /// gate) — the same definition the `layers.rs` incarnation rows build.
+    /// The Anger-shaped declaration the `zones.rs` incarnation rows build:
+    /// CR 113.6b `active_zones = [Graveyard]` with the compound
+    /// `SourceInZone(Graveyard)` + `IsPresent(Mountain you control)` gate. The
+    /// `IsPresent` filter omits the printed parse's
+    /// `FilterProp::InZone { zone: Zone::Battlefield }` — deliberately, so these
+    /// rows stay revert probes: the board-wide term reads that property, and
+    /// with it the pre-move scan would already mark `Full`. The `layers.rs`
+    /// incarnation rows build this same condition shape; its
+    /// `static_definition_zone_of_function_crosses_matches_declared_zones`
+    /// helper builds an `active_zones = [Graveyard]` declaration with no
+    /// `.condition` at all.
     fn incarnation_graveyard_static() -> StaticDefinition {
         StaticDefinition::continuous()
             .affected(TargetFilter::Typed(

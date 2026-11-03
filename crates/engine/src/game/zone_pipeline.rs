@@ -7281,17 +7281,22 @@ mod effect_driven_transformed_entry_tests {
     /// functions from the graveyard stops that static, so recipients' cached
     /// characteristics must be re-derived through the production pipeline.
     ///
-    /// Revert-failing: at base a Graveyard→Battlefield entry matches neither
-    /// the `from == Hand` / `from == Exile` carve-outs nor any board-wide zone
-    /// read (Anger's own affected filter names creatures you control and its
-    /// condition names the battlefield, not the graveyard), so the pipeline
-    /// proposes the cheap `EnteredObjects` mark and the Bear keeps Haste after
-    /// the flush. With the per-object term it is `Full`.
+    /// Reach guard, not a revert probe: with the printed Anger parse the
+    /// `IsPresent(Mountain you control)` filter carries
+    /// `FilterProp::InZone { zone: Zone::Battlefield }`, which
+    /// `static_condition_reads_zone_membership` reads, so for a move whose
+    /// destination is the battlefield the pre-existing board-wide term already
+    /// proposes `Full` at base. What this row guards is the reach end: the
+    /// recipient's applied Haste must lapse after the flush. The revert probes
+    /// for the new per-object term are the mill (V2/V7/V8), exile (V5/V10) and
+    /// library-placement (V11/V11b/V12) rows, whose source zones the condition
+    /// does not read.
     #[test]
     fn reanimated_incarnation_marks_full_and_drops_graveyard_grant() {
         use crate::game::layers::{evaluate_layers, flush_layers, mark_layers_full};
         use crate::types::ability::{
-            ContinuousModification, ControllerRef, StaticCondition, TypeFilter, TypedFilter,
+            ContinuousModification, ControllerRef, FilterProp, StaticCondition, TypeFilter,
+            TypedFilter,
         };
         use crate::types::game_state::LayersDirty;
         use crate::types::keywords::Keyword;
@@ -7361,7 +7366,9 @@ mod effect_driven_transformed_entry_tests {
                                 filter: Some(TargetFilter::Typed(TypedFilter {
                                     type_filters: vec![TypeFilter::Subtype("Mountain".to_string())],
                                     controller: Some(ControllerRef::You),
-                                    properties: vec![],
+                                    properties: vec![FilterProp::InZone {
+                                        zone: Zone::Battlefield,
+                                    }],
                                 })),
                             },
                         ],

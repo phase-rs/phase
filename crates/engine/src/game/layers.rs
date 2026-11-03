@@ -4785,7 +4785,9 @@ fn static_definition_reads_zone_membership(def: &StaticDefinition, zone: Zone) -
 /// that names either side of the transition either starts or stops functioning.
 /// Two of that authority's answers are invariant here and are deliberately not
 /// matched:
-///   * a CDA functions in every zone (CR 604.3), so no move changes it;
+///   * a CDA functions in every zone (CR 604.3), so no move changes whether it
+///     functions (the destination-zone application is still mark-driven, like
+///     any off-battlefield static);
 ///   * an empty `active_zones` is the CR 113.6 battlefield default, and the zone
 ///     pipeline already marks both battlefield entry (`mark_layers_entered`) and
 ///     battlefield exit (`mark_layers_full`).
