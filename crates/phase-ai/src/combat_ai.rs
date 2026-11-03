@@ -502,12 +502,7 @@ pub(crate) fn choose_attackers_with_targets_with_profile_and_deadline_and_threat
         );
         // A raw lowest-life check is not a lethal certificate in a free-for-all.
         // The bounded comparison below accounts for the selected defender's blocks.
-        // CR 702.16e + CR 702.16j: nor is it one when that player prevents the
-        // damage — lethal must land on an opponent the attackers can damage.
-        if matches!(objective, CombatObjective::PushLethal)
-            && (selected_defender.is_some()
-                || !lethal_on_damageable_opponent(state, &damageable, &candidates))
-        {
+        if selected_defender.is_some() && matches!(objective, CombatObjective::PushLethal) {
             CombatObjective::Race
         } else {
             objective
@@ -1708,8 +1703,8 @@ fn damageable_opponents(
 }
 
 /// CR 702.16e + CR 702.16j: whether some opponent's life is covered by the
-/// power of the candidates whose damage that opponent does not prevent — the
-/// lethal read `determine_attack_objective` makes from raw life totals.
+/// power of the candidates whose damage that opponent does not prevent —
+/// `determine_attack_objective`'s lethal read.
 fn lethal_on_damageable_opponent(
     state: &GameState,
     opponents: &[PlayerId],
@@ -2726,8 +2721,12 @@ pub(crate) fn determine_attack_objective(
         .map(|&opp| state.players[opp.0 as usize].life)
         .min()
         .unwrap_or(20);
-    let total_attack_power = sum_power(state, candidate_attackers);
-    if min_opp_life > 0 && total_attack_power >= min_opp_life && opponent_blockers.is_empty() {
+    // CR 702.16e + CR 702.16j: lethal counts, per opponent, only the power whose
+    // damage that opponent does not prevent — a protected player's low life is
+    // not a kill, so the read falls through to the stabilize/race tail below.
+    if opponent_blockers.is_empty()
+        && lethal_on_damageable_opponent(state, opponents, candidate_attackers)
+    {
         return CombatObjective::PushLethal;
     }
 
@@ -9727,6 +9726,15 @@ mod tests {
     /// attacker list, aggregate targets, and per-attacker target map production
     /// passes (`search.rs`), with the unbounded comparison allowance.
     fn choose_from_engine_prompt(state: &mut GameState) -> Vec<(ObjectId, AttackTarget)> {
+        choose_from_engine_prompt_with(state, Some(Deadline::none()))
+    }
+
+    /// `comparison_deadline: None` is the rollout/quiescence path
+    /// (`search.rs` passes `context.map(|c| c.deadline)`).
+    fn choose_from_engine_prompt_with(
+        state: &mut GameState,
+        comparison_deadline: Option<Deadline>,
+    ) -> Vec<(ObjectId, AttackTarget)> {
         state.phase = engine::types::phase::Phase::DeclareAttackers;
         state.waiting_for = engine::game::combat::build_declare_attackers_waiting_for(state);
         let WaitingFor::DeclareAttackers {
@@ -9752,7 +9760,7 @@ mod tests {
                 valid_attacker_ids: Some(valid_attacker_ids),
                 valid_attack_targets: Some(valid_attack_targets),
                 valid_attack_targets_by_attacker: valid_attack_targets_by_attacker.as_ref(),
-                comparison_deadline: Some(Deadline::none()),
+                comparison_deadline,
             },
         )
     }
@@ -9918,5 +9926,32 @@ mod tests {
                 .all(|(_, target)| *target == AttackTarget::Player(PlayerId(3))),
             "every attack must go to the open-board opponent, got {attacks:?}"
         );
+    }
+
+    /// CR 702.16e + CR 702.16j: a protected opponent's low life is not a lethal
+    /// read, so the crackback check still runs. P1 prevents all damage, so P0's
+    /// 6 power can't kill it at 2; its untapped 5/5s swing back for 10 into
+    /// P0's 8. Reading lethal from raw life skipped crackback pruning and sent
+    /// both attackers at P2.
+    #[test]
+    fn protected_low_life_opponent_is_not_a_lethal_read() {
+        let mut state = setup_multiplayer(3);
+        state.players[0].life = 8;
+        add_creature(&mut state, PlayerId(0), "Bear", 3, 3, vec![]);
+        add_creature(&mut state, PlayerId(0), "Bear", 3, 3, vec![]);
+        state.players[1].life = 2;
+        add_creature(&mut state, PlayerId(1), "Giant", 5, 5, vec![]);
+        add_creature(&mut state, PlayerId(1), "Giant", 5, 5, vec![]);
+        grant_protection_from_everything(&mut state, PlayerId(1));
+
+        let attacks = choose_from_engine_prompt_with(&mut state, None);
+        assert_eq!(
+            attacks.len(),
+            1,
+            "one Bear must stay home against the 10-power swing-back, got {attacks:?}"
+        );
+        assert!(attacks
+            .iter()
+            .all(|(_, target)| *target == AttackTarget::Player(PlayerId(2))));
     }
 }
