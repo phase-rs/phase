@@ -9619,6 +9619,7 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::SacrificeForCost { .. }
                     | PendingCostMoveResume::WardSacrificePayment { .. }
                     | PendingCostMoveResume::ReplacementMayCost { .. }
+                    | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
                     | PendingCostMoveResume::CollectEvidencePayment { .. }
                     | PendingCostMoveResume::UnlessBouncePayment { .. }
                     | PendingCostMoveResume::ManaAbilityPayment { .. }
@@ -9639,7 +9640,9 @@ pub(crate) fn drain_pending_cost_move_resume(
         // are eligible here too: whether a prevented placement leaves that
         // payment paid or failed is `resume_counter_addition_unless_payment`'s
         // call, argued in its own header; either way the pending unless branch
-        // must resolve here, not wedge.
+        // must resolve here, not wedge. A parked entry MayCost whose draw leg
+        // was skipped is eligible too: the Prevented arm completes the draw
+        // instruction before this drain (CR 614.11a), then the entry resumes.
         CostMoveDrainBoundary::ReplacementPrevented { .. } => matches!(
             state.pending_cost_move_resume,
             Some(
@@ -9647,6 +9650,7 @@ pub(crate) fn drain_pending_cost_move_resume(
                     | PendingCostMoveResume::SacrificeForCost { .. }
                     | PendingCostMoveResume::WardSacrificePayment { .. }
                     | PendingCostMoveResume::ReplacementMayCost { .. }
+                    | PendingCostMoveResume::ReplacementMayCostInnerChoice { .. }
                     | PendingCostMoveResume::Foretell { .. }
                     | PendingCostMoveResume::CollectEvidencePayment { .. }
                     | PendingCostMoveResume::UnlessBouncePayment { .. }
@@ -9700,6 +9704,11 @@ pub(crate) fn drain_pending_cost_move_resume(
         Some(PendingCostMoveResume::ReplacementMayCost { .. })
     ) {
         super::costs::resume_replacement_may_cost_move(state, events)?
+    } else if matches!(
+        state.pending_cost_move_resume,
+        Some(PendingCostMoveResume::ReplacementMayCostInnerChoice { .. })
+    ) {
+        super::costs::resume_replacement_may_cost_after_inner_choice(state, events)?
     } else if matches!(
         state.pending_cost_move_resume,
         Some(PendingCostMoveResume::Foretell { .. })
@@ -12528,6 +12537,13 @@ fn apply_action(
     if let GameAction::Concede { player_id } = action {
         let mut events = Vec::new();
         super::elimination::concede(state, player_id, &mut events);
+        // CR 800.4a + CR 118.12: a surviving staged payment re-materializes on
+        // the base the departure changed (`settle_after_outside_action`).
+        if let Some(settled) = payment_transaction::settle_after_outside_action(state)? {
+            events.extend(settled.events);
+            return Ok(ActionResult::applied(events, state.waiting_for.clone())
+                .with_log_entries(settled.log_entries));
+        }
         return Ok(ActionResult::applied(events, state.waiting_for.clone()));
     }
 
@@ -30797,6 +30813,7 @@ mod cost_move_drain_priority_boundary_tests {
                 trigger_event: None,
                 effect_description: None,
                 remaining: Vec::new(),
+                unpaid_suffix: None,
             });
         let mut events = Vec::new();
 

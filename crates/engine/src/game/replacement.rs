@@ -30,7 +30,8 @@ use crate::types::game_state::{
     NamedChoiceSourceBinding, PayableResource, PendingReplacement, PostReplacementDrain,
     ReplacementAutoChoiceId, ReplacementAutoChoiceIdentity, ReplacementAutoChoiceKey,
     ReplacementAutoChoiceRecord, ReplacementAutoChoiceTail, ReplacementCandidateSummary,
-    ReplacementChoiceKind, ReplacementIndexEntry, ResidentDrainPolicy, WaitingFor,
+    ReplacementChoiceKind, ReplacementIndexEntry, ResidentDrainPolicy, ResolutionPaymentOrigin,
+    WaitingFor,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
 use crate::types::mana::{StepEndManaAction, UnitDisposition};
@@ -1929,6 +1930,7 @@ fn pay_replacement_may_cost(
     player: PlayerId,
     source_id: ObjectId,
     cost: &AbilityCost,
+    origin: ResolutionPaymentOrigin,
     events: &mut Vec<GameEvent>,
 ) -> MayCostOutcome {
     if replacement_may_cost_has_self_zone_move(cost) {
@@ -1971,8 +1973,31 @@ fn pay_replacement_may_cost(
             // CR 614.12a: a composite accept-cost pays each sub-cost in order; a
             // mid-composite pause carries the unpaid suffix so the resume
             // completes the rest before the replacement applies.
+            //
+            // CR 614.17b + CR 121.2b: choosing to pay is made once, for the whole
+            // cost; a leg-by-leg check would pay early legs before a later one
+            // became impossible.
+            match origin {
+                ResolutionPaymentOrigin::FreshChoice => {
+                    let ability = replacement_may_cost_payment_ability(cost, source_id, player);
+                    if crate::game::costs::resolution_cost_includes_impossible_event(
+                        state, player, cost, &ability,
+                    ) {
+                        return MayCostOutcome::Unpaid;
+                    }
+                }
+                ResolutionPaymentOrigin::LatchedSuffix => {}
+            }
+            // CR 118.12: the whole choice is gated above, so each leg pays latched.
             for (index, sub_cost) in costs.iter().enumerate() {
-                match pay_replacement_may_cost(state, player, source_id, sub_cost, events) {
+                match pay_replacement_may_cost(
+                    state,
+                    player,
+                    source_id,
+                    sub_cost,
+                    ResolutionPaymentOrigin::LatchedSuffix,
+                    events,
+                ) {
                     MayCostOutcome::Paid => {}
                     MayCostOutcome::PausedForChoice { remaining_cost } => {
                         return MayCostOutcome::PausedForChoice {
@@ -2020,7 +2045,7 @@ fn pay_replacement_may_cost(
             // forced/auto discard (`Paid`, no choice) from a paused one.
             let prior_waiting_for = state.waiting_for.clone();
             match crate::game::costs::pay_ability_cost_for_replacement_may_cost(
-                state, player, cost, &ability, events,
+                state, player, cost, &ability, origin, events,
             ) {
                 Ok(crate::game::costs::PaymentOutcome::Paid) => {
                     if state.waiting_for != prior_waiting_for
@@ -2046,7 +2071,7 @@ fn pay_replacement_may_cost(
             let ability = replacement_may_cost_payment_ability(cost, source_id, player);
             let prior_waiting_for = state.waiting_for.clone();
             match crate::game::costs::pay_ability_cost_for_replacement_may_cost(
-                state, player, cost, &ability, events,
+                state, player, cost, &ability, origin, events,
             ) {
                 Ok(crate::game::costs::PaymentOutcome::Paid) => {
                     if state.waiting_for != prior_waiting_for
@@ -2078,7 +2103,7 @@ fn pay_replacement_may_cost(
         _ => {
             let ability = replacement_may_cost_payment_ability(cost, source_id, player);
             match crate::game::costs::pay_ability_cost_for_replacement_may_cost(
-                state, player, cost, &ability, events,
+                state, player, cost, &ability, origin, events,
             ) {
                 Ok(crate::game::costs::PaymentOutcome::Paid) => true,
                 Ok(crate::game::costs::PaymentOutcome::Paused { remaining_cost }) => {
@@ -8717,6 +8742,16 @@ pub fn find_applicable_replacements(
         return union;
     }
 
+    // CR 614.17c: "If an event can't happen, it can only be replaced by a
+    // self-replacement effect (see rule 614.15). Other replacement and/or
+    // prevention effects can't modify or replace it." Every pipeline draw
+    // candidate is a continuous replacement (Dredge, CR 702.52a; Alms
+    // Collector; a Prevent "skip that draw"): a self-replacement is folded into
+    // its own ability before the draw is proposed (see `ReplacementStep`).
+    if proposed_draw_cannot_happen(state, event) {
+        return Vec::new();
+    }
+
     let mut candidates = Vec::new();
 
     match event {
@@ -11839,6 +11874,23 @@ fn effect_overrides_controller(effect: &Effect) -> bool {
     )
 }
 
+/// CR 614.17c + CR 121.2b: true when a proposed draw is an event
+/// that can't happen — no card of it may be drawn (`allowed_draw_count` is
+/// zero: a `CantDraw` effect such as Maralen of the Mornsong, or an exhausted
+/// per-turn limit such as Spirit of the Labyrinth's after the player's first
+/// draw). The test is per stage: a multi-card instruction a per-turn limit
+/// only shortens can still partly happen (CR 121.2b), so it stays replaceable,
+/// while each individual draw the limit forbids can't. An empty library is
+/// not a can't: the attempted draw still happens (CR 121.4).
+fn proposed_draw_cannot_happen(state: &GameState, event: &ProposedEvent) -> bool {
+    match event {
+        ProposedEvent::Draw {
+            player_id, count, ..
+        } => *count > 0 && super::effects::draw::allowed_draw_count(state, *player_id, *count) == 0,
+        _ => false,
+    }
+}
+
 fn is_counter_placement_event(event: &ProposedEvent) -> bool {
     matches!(event, ProposedEvent::AddCounter { count, .. } if *count > 0)
         || matches!(
@@ -13632,12 +13684,29 @@ fn continue_replacement_impl(
         } else if resuming_after_paid_cost {
             match &remaining_may_cost {
                 None => MayCostOutcome::Paid,
-                Some(cost) => pay_replacement_may_cost(state, payer, rid.source, cost, events),
+                // CR 118.12 + CR 614.12a: the accepted MayCost latched the choice;
+                // its unpaid remainder is not re-gated.
+                Some(cost) => pay_replacement_may_cost(
+                    state,
+                    payer,
+                    rid.source,
+                    cost,
+                    ResolutionPaymentOrigin::LatchedSuffix,
+                    events,
+                ),
             }
         } else {
             match &may_cost {
                 None => MayCostOutcome::Paid,
-                Some(cost) => pay_replacement_may_cost(state, payer, rid.source, cost, events),
+                // CR 614.12a + CR 614.17b: accepting is the choice to pay.
+                Some(cost) => pay_replacement_may_cost(
+                    state,
+                    payer,
+                    rid.source,
+                    cost,
+                    ResolutionPaymentOrigin::FreshChoice,
+                    events,
+                ),
             }
         };
 
@@ -13645,14 +13714,14 @@ fn continue_replacement_impl(
             MayCostOutcome::Paid => true,
             MayCostOutcome::Unpaid => false,
             MayCostOutcome::PausedForChoice { remaining_cost } => {
-                // CR 614.12a: the payment surfaced an interactive sub-choice (e.g. a
-                // `DiscardChoice`); `state.waiting_for` is already set to it. Re-park
-                // the SAME pending record with `may_cost_paid: true` and flag the
-                // pause so `handle_replacement_choice` surfaces the live sub-choice
-                // (not a fresh ReplacementChoice). The permanent enters only when
-                // the resume finishes any `may_cost_remaining`. The carried
-                // `Execute` payload is inert — the flag short-circuits the caller
-                // before it is read.
+                // CR 614.12a: the payment surfaced a sub-choice (a `DiscardChoice`, or
+                // a replacement choice on one leg's own event); `state.waiting_for` is
+                // already set to it. Re-park the SAME pending record with
+                // `may_cost_paid: true` and flag the pause so `handle_replacement_choice`
+                // surfaces the live sub-choice (not a fresh ReplacementChoice). The
+                // permanent enters only when the resume finishes any
+                // `may_cost_remaining`. The carried `Execute` payload is inert — the
+                // flag short-circuits the caller before it is read.
                 let outer_replacement = crate::types::game_state::PendingReplacement {
                     proposed: proposed.clone(),
                     sacrifice_provenance: reparked_sacrifice_provenance,
@@ -13678,20 +13747,59 @@ fn continue_replacement_impl(
                     // unchanged).
                     unrepresentable_life_change: reparked_unrepresentable_life_change,
                 };
-                if let Some(crate::types::game_state::PendingCostMoveResume::ReplacementMayCost {
-                    outer_replacement: parked_outer,
-                    ..
-                }) = state.pending_cost_move_resume.as_mut()
-                {
+                use crate::types::game_state::PendingCostMoveResume;
+                match state.pending_cost_move_resume.as_mut() {
                     // CR 614.12a + CR 616.1: an inner cost move already owns
                     // `pending_replacement` for its Moved replacement choice.
                     // Keep that live inner prompt there and retain this outer
                     // optional replacement only in the typed cost continuation.
-                    *parked_outer = Some(Box::new(outer_replacement));
-                    state.replacement_may_cost_paused = true;
-                    return ReplacementResult::Execute(proposed);
+                    Some(PendingCostMoveResume::ReplacementMayCost {
+                        outer_replacement: parked_outer,
+                        ..
+                    }) => *parked_outer = Some(Box::new(outer_replacement)),
+                    // CR 614.12a + CR 616.1 + CR 614.11a: the paused leg owns
+                    // `pending_replacement` with its own event's replacement
+                    // choice (a Dredge on a draw leg, a CR 616.1 ordering on a
+                    // discarded card). That inner record must stay live for the
+                    // answer; the accepted outer entry replacement, with its
+                    // unpaid suffix in `may_cost_remaining`, waits in a typed
+                    // continuation and resumes only once the inner event (a whole
+                    // draw instruction included) has finished.
+                    None if state.pending_replacement.is_some() => {
+                        state.pending_cost_move_resume =
+                            Some(PendingCostMoveResume::ReplacementMayCostInnerChoice {
+                                outer_replacement: Box::new(outer_replacement),
+                            });
+                    }
+                    // An interactive sub-choice (`DiscardChoice`, `EffectZoneChoice`)
+                    // leaves the slot free; its resolution hook re-enters this
+                    // record from `pending_replacement`.
+                    None => state.pending_replacement = Some(outer_replacement),
+                    // Guarded catch-all: no admitted MayCost leg installs any other
+                    // cost-move owner beside a pause (a `ManaDynamic` leg's
+                    // mana-ability cursor could in theory, and has no producer).
+                    // Not `unreachable!`: the state is constructible under the typed
+                    // contract and a release panic would crash a live game. The live
+                    // inner record is never overwritten. If the replacement slot is
+                    // free the outer is re-parked there as before; otherwise the
+                    // outer is dropped and the entry never completes — on the cast
+                    // path the spell stays on the stack with its `SpellResolution`
+                    // frame and no owner to finish it (a wedge).
+                    Some(unexpected_owner) => {
+                        debug_assert!(
+                            false,
+                            "an entry MayCost leg parked a {unexpected_owner:?} owner \
+                             beside its pause"
+                        );
+                        tracing::warn!(
+                            owner = ?unexpected_owner,
+                            "entry MayCost paused beside an unexpected cost-move owner"
+                        );
+                        if state.pending_replacement.is_none() {
+                            state.pending_replacement = Some(outer_replacement);
+                        }
+                    }
                 }
-                state.pending_replacement = Some(outer_replacement);
                 state.replacement_may_cost_paused = true;
                 return ReplacementResult::Execute(proposed);
             }
@@ -27502,6 +27610,144 @@ mod tests {
         assert!(
             record_proposed_events(|| {}).is_empty(),
             "an armed extent with no pipeline entry records nothing"
+        );
+    }
+
+    /// Maralen of the Mornsong, verbatim Oracle text: a CR 121.3 can't-draw effect.
+    const MARALEN_ORACLE: &str = "Players can't draw cards.\n\
+        At the beginning of each player's draw step, that player loses 3 life, searches \
+        their library for a card, puts it into their hand, then shuffles.";
+
+    /// Spirit of the Labyrinth, verbatim Oracle text: a CR 121.2b one-card-per-turn limit.
+    const SPIRIT_OF_THE_LABYRINTH_ORACLE: &str =
+        "Each player can't draw more than one card each turn.";
+
+    fn may_cost_draw(count: i32) -> AbilityCost {
+        AbilityCost::EffectCost {
+            effect: Box::new(Effect::Draw {
+                count: QuantityExpr::Fixed { value: count },
+                target: TargetFilter::Controller,
+            }),
+        }
+    }
+
+    /// A board with P0's library staged and, optionally, a draw-restricting permanent under P1. Returns the
+    /// state and the MayCost source.
+    fn may_cost_draw_board(restriction: Option<(&str, &str)>) -> (GameState, ObjectId) {
+        use crate::game::scenario::{GameScenario, P0, P1};
+        let mut scenario = GameScenario::new();
+        scenario.with_library_top(P0, &["L1", "L2", "L3", "L4"]);
+        let source = scenario.add_creature(P0, "May Cost Source", 1, 1).id();
+        if let Some((name, oracle)) = restriction {
+            scenario.add_creature_from_oracle(P1, name, 2, 2, oracle);
+        }
+        (scenario.state, source)
+    }
+
+    /// CR 118.12 + CR 614.17b + CR 118.11: `pay_replacement_may_cost`'s `origin` is the fresh/latched
+    /// contract. A fresh draw leg its drawer can't draw is refused (`Unpaid`); the same leg resumed latched
+    /// settles `Paid`, and the draw is clamped as it happens.
+    ///
+    /// Revert probe: hardcoding `FreshChoice` into the `_` arm's authority call makes the latched row `Unpaid`.
+    #[test]
+    fn may_cost_draw_leg_is_refused_fresh_and_paid_latched() {
+        use crate::game::scenario::P0;
+        // Reach guard: no restriction, the fresh leg pays and draws.
+        let (mut state, source) = may_cost_draw_board(None);
+        let hand_before = state.players[0].hand.len();
+        let outcome = pay_replacement_may_cost(
+            &mut state,
+            P0,
+            source,
+            &may_cost_draw(1),
+            ResolutionPaymentOrigin::FreshChoice,
+            &mut Vec::new(),
+        );
+        assert_eq!(outcome, MayCostOutcome::Paid);
+        assert_eq!(state.players[0].hand.len(), hand_before + 1);
+
+        let maralen = Some(("Maralen of the Mornsong", MARALEN_ORACLE));
+        let (mut state, source) = may_cost_draw_board(maralen);
+        let outcome = pay_replacement_may_cost(
+            &mut state,
+            P0,
+            source,
+            &may_cost_draw(1),
+            ResolutionPaymentOrigin::FreshChoice,
+            &mut Vec::new(),
+        );
+        assert_eq!(
+            outcome,
+            MayCostOutcome::Unpaid,
+            "a fresh MayCost including an impossible draw can't be chosen"
+        );
+
+        let (mut state, source) = may_cost_draw_board(maralen);
+        let hand_before = state.players[0].hand.len();
+        let outcome = pay_replacement_may_cost(
+            &mut state,
+            P0,
+            source,
+            &may_cost_draw(1),
+            ResolutionPaymentOrigin::LatchedSuffix,
+            &mut Vec::new(),
+        );
+        assert_eq!(
+            outcome,
+            MayCostOutcome::Paid,
+            "a latched MayCost remainder is not re-gated"
+        );
+        assert_eq!(
+            state.players[0].hand.len(),
+            hand_before,
+            "the latched draw is clamped as it happens"
+        );
+    }
+
+    /// CR 614.17b + CR 121.2b: a fresh `Composite` MayCost is judged once, as a whole, before any leg is paid.
+    /// Two one-card draw legs under a one-card limit are refused without drawing the first.
+    ///
+    /// Revert probe: dropping the `Composite` fresh gate lets leg 1 draw (hand +1).
+    #[test]
+    fn may_cost_composite_is_judged_whole_before_any_leg() {
+        use crate::game::scenario::P0;
+        let two_draws = AbilityCost::Composite {
+            costs: vec![may_cost_draw(1), may_cost_draw(1)],
+        };
+        // Reach guard: no limit, both legs pay.
+        let (mut state, source) = may_cost_draw_board(None);
+        let hand_before = state.players[0].hand.len();
+        let outcome = pay_replacement_may_cost(
+            &mut state,
+            P0,
+            source,
+            &two_draws,
+            ResolutionPaymentOrigin::FreshChoice,
+            &mut Vec::new(),
+        );
+        assert_eq!(outcome, MayCostOutcome::Paid);
+        assert_eq!(state.players[0].hand.len(), hand_before + 2);
+
+        let spirit = Some(("Spirit of the Labyrinth", SPIRIT_OF_THE_LABYRINTH_ORACLE));
+        let (mut state, source) = may_cost_draw_board(spirit);
+        let hand_before = state.players[0].hand.len();
+        let outcome = pay_replacement_may_cost(
+            &mut state,
+            P0,
+            source,
+            &two_draws,
+            ResolutionPaymentOrigin::FreshChoice,
+            &mut Vec::new(),
+        );
+        assert_eq!(
+            outcome,
+            MayCostOutcome::Unpaid,
+            "two draws can't be chosen under a one-card limit"
+        );
+        assert_eq!(
+            state.players[0].hand.len(),
+            hand_before,
+            "no leg is paid before the whole choice is refused"
         );
     }
 }

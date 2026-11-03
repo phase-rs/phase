@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Paused cost payments: PendingCostMoveResume::CounterAdditionUnlessPayment gains unpaid_suffix (UnpaidCostSuffix: the unpaid legs of a paused unless effect-cost and their payer) and PendingContinuation gains head_payment_origin (ResolutionPaymentOrigin: a queued PayCost remainder resumes a payment already chosen). An older peer drops both keys, settling a paused multi-leg cost with its later legs unpaid and re-gating a latched remainder as a fresh choice. PendingCostMoveResume also gains ReplacementMayCostInnerChoice (an accepted entry MayCost parked while its leg's own replacement choice is answered), which an older peer cannot decode."
+}
