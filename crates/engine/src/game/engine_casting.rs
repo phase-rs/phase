@@ -6,6 +6,7 @@ use serde::{Serialize, Serializer};
 use crate::types::ability::{
     AbilityCost, AdditionalCost, BeholdCostAction, TapCreaturesSelectionMode, TargetFilter,
 };
+use crate::types::actions::GameAction;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     CollectEvidenceResume, GameState, PendingCast, PendingManaAbility, PlayerDeckPool,
@@ -48,9 +49,7 @@ pub(super) enum CastUndoAction {
 impl CastUndoAction {
     /// The role of `action`. Enumerate every variant so a new action must
     /// explicitly declare whether it can reverse a mana ability.
-    pub(super) fn of(action: &crate::types::actions::GameAction) -> Self {
-        use crate::types::actions::GameAction;
-
+    pub(super) fn of(action: &GameAction) -> Self {
         match action {
             GameAction::UntapLandForMana { .. } => Self::ManaAbilityReversal,
             GameAction::PassPriority
