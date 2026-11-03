@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "Grist, the Hunger Tide / repeat-process and sticker contracts (PR #9968): (1) ability trees gain the 'repeat this process' directive tags RuntimeHandler::RepeatProcess (an Effect::RuntimeHandled node) and EffectOutcomeSignal::RepeatDirectiveReached (the WhileCondition loop predicate), and GameState gains repeat_process_requested (an optional RepeatProcessRequest naming the source whose directive requested the repeat); an older peer cannot parse them. (2) SelectCards answering the ChooseFromZoneChoice of a parked untargeted PutSticker head now binds that instruction's sticker recipient at resolution; an older reducer treats the answer as a partition and can overwrite independently announced following targets. (3) ResolvedZoneChangeCommand gains retained_sticker_timestamps and may carry a non-battlefield entry_timestamp (CR 613.7d/613.7k sticker timestamp renewal); an older reducer rejects these commands. Lobby, draft and directory surfaces are unchanged."
+}

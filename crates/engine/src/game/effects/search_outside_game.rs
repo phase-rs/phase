@@ -1,9 +1,11 @@
+use crate::game::deck_loading;
 use crate::game::effects::change_zone::{self, ZoneMoveResult};
 use crate::game::printed_cards::apply_card_face_to_object;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::zones;
 use crate::types::ability::TargetFilter;
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
+use crate::types::card_printing::DeckSection;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     GameState, OutsideGameCardUse, OutsideGameChoiceEntry, OutsideGameChoiceSource, WaitingFor,
@@ -125,9 +127,11 @@ fn collect_face_up_exile_candidates(
     let controller = ability.controller;
     let ctx = crate::game::filter::FilterContext::from_ability(ability);
     // CR 406.3: A card's default face state in exile is face-up; the
-    // `face_down: true` marker means the card is exiled face-down. Use the
-    // canonical `targeting::zone_object_ids` helper for zone iteration.
-    crate::game::targeting::zone_object_ids(state, Zone::Exile)
+    // `face_down: true` marker means the card is exiled face-down.
+    // CR 108.2 + CR 109.1: the candidates are CARDS in exile, so iterate the
+    // card-level `targeting::zone_card_ids` listing; the CR 722.3c retained
+    // prepare copy is not a card.
+    crate::game::targeting::zone_card_ids(state, Zone::Exile)
         .into_iter()
         .filter_map(|object_id| {
             let object = state.objects.get(&object_id)?;
@@ -182,22 +186,25 @@ pub(crate) fn put_face_up_exile_into(
         origin: Some(Zone::Exile),
         destination,
         enter_transformed: false,
-        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
         enters_under_player: None,
-        enters_attacking: false,
-        enter_with_counters: Vec::new(),
-        conditional_enter_with_counters: vec![],
         duration: None,
         track_exiled_by_source: false,
+        face_down_in_exile: crate::types::ability::ExileConcealment::Public,
         // Search-from-outside brings cards in face up.
         face_down_profile: None,
         library_placement: None,
-        // CR 614.12: search-from-outside carries no moved-object type gate.
-        enters_modified_if: None,
         enter_attached_to: None,
     };
+    // Search-from-outside carries no entry modifications: no counters, no
+    // tapped/attacking rider, and no moved-object type gate.
+    let member = crate::types::game_state::ChangeZoneMemberEntry {
+        object_id,
+        enter_with_counters: Vec::new(),
+        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+        enters_attacking: false,
+    };
     Ok(change_zone::process_one_zone_move(
-        state, &ctx, object_id, events,
+        state, &ctx, &member, events,
     ))
 }
 
@@ -207,13 +214,13 @@ pub(crate) fn put_sideboard_entry_into_game(
     sideboard_index: usize,
     destination: Zone,
 ) -> Result<crate::types::identifiers::ObjectId, EffectError> {
-    let card_face = {
-        let entry = state
+    let (card_face, printing) = {
+        let pool = state
             .deck_pools
             .iter()
             .find(|pool| pool.player == player)
             .ok_or(EffectError::PlayerNotFound)?;
-        let Some(entry) = entry.current_sideboard.get(sideboard_index) else {
+        let Some(entry) = pool.current_sideboard.get(sideboard_index) else {
             return Err(EffectError::InvalidParam(
                 "sideboard index out of range".to_string(),
             ));
@@ -223,7 +230,16 @@ pub(crate) fn put_sideboard_entry_into_game(
                 "sideboard card already brought into game".to_string(),
             ));
         }
-        entry.card.clone()
+        // CR 400.11b + CR 203.1 + CR 206.1: the brought-in card keeps its owner's printing
+        // (display-only). Read before the bookkeeping below, so the copy being brought in
+        // counts as not yet taken.
+        let printing = deck_loading::outside_game_copy_printing(
+            pool,
+            &state.outside_game_cards_brought_in,
+            DeckSection::Sideboard,
+            &entry.card,
+        );
+        (entry.card.clone(), printing)
     };
 
     // CR 407.3: refuse BEFORE the bookkeeping below, not at materialization —
@@ -256,12 +272,15 @@ pub(crate) fn put_sideboard_entry_into_game(
     // The CR 407.3 gate above already cleared this face, so the authority's own
     // check cannot refuse here; map it rather than unwrap so a future divergence
     // between the two surfaces as an error instead of a panic.
-    put_outside_game_face_into(state, player, &card_face, destination).ok_or_else(|| {
-        EffectError::InvalidParam(format!(
-            "{} can't be brought into the game from outside the game (CR 407.3)",
-            card_face.name
-        ))
-    })
+    let object_id =
+        put_outside_game_face_into(state, player, &card_face, destination).ok_or_else(|| {
+            EffectError::InvalidParam(format!(
+                "{} can't be brought into the game from outside the game (CR 407.3)",
+                card_face.name
+            ))
+        })?;
+    deck_loading::stamp_created_card_shared(state, object_id, printing);
+    Ok(object_id)
 }
 
 /// CR 400.11b: Bring one card from OUTSIDE the game into `destination` as a new
@@ -1017,6 +1036,44 @@ mod tests {
             Some(Zone::Hand)
         );
         assert!(!legacy.exile.contains(&exiled));
+    }
+
+    /// CR 108.2 + CR 109.1 + CR 722.3c: the face-up exile half of the pool
+    /// offers CARDS. A non-card copy of a card (the CR 722.3c retained prepare
+    /// copy's shape: `is_copy`, not a token, owned by the Wish's controller)
+    /// in exile is not offered, while the real card of the same type is.
+    #[test]
+    fn exile_card_population_wish_offers_only_cards_in_exile() {
+        let (mut state, exiled, ability) = wish_board(PlayerId(0), false);
+        let copy = create_object(
+            &mut state,
+            CardId(51),
+            PlayerId(0),
+            "Retained Copy".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&copy).unwrap();
+            obj.card_types = CardType {
+                core_types: vec![CoreType::Artifact],
+                ..Default::default()
+            };
+            obj.is_copy = true;
+        }
+        with_wish_scope(
+            &mut state,
+            crate::types::custom_format::WishOutsideGameScope::PreM10ReachesExile,
+        );
+        effects::resolve_ability_chain(&mut state, &ability, &mut Vec::new(), 0).unwrap();
+        assert!(
+            offers_face_up_exile(&state, exiled),
+            "reach guard: the real exiled card is offered, got {:?}",
+            state.waiting_for
+        );
+        assert!(
+            !offers_face_up_exile(&state, copy),
+            "the non-card copy is not a card in exile"
+        );
     }
 
     /// The widening is additive: the sideboard half of the pool is untouched.

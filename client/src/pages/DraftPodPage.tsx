@@ -78,7 +78,13 @@ import {
   type GuestDraftResumeOutcome,
 } from "../stores/multiplayerDraftStore";
 import type { DraftPickDestination, DraftPickPlacementHint } from "../stores/draftStore";
-import { useDraftPodStore } from "../stores/draftPodStore";
+import {
+  LOBBY_HOST_NAME_MAX_CHARS,
+  LOBBY_LABEL_MAX_CHARS,
+  LOBBY_LISTING_MAX_SEATS,
+  podListingEligible,
+  useDraftPodStore,
+} from "../stores/draftPodStore";
 import { useEffectiveOffline } from "../stores/connectivityStore";
 
 // ── Setup Mode ────────────────────────────────────────────────────────
@@ -104,6 +110,16 @@ function subscribePickInteraction(listener: () => void): () => void {
   });
 }
 
+/** Any entry of this length fits the lobby's byte bound for a password. */
+const POD_PASSWORD_MAX_LENGTH = 32;
+
+/** The offline sentinel is a translation key and is translated; any other
+ *  message is shown as written. */
+function usePodErrorMessage(error: string | null): string | null {
+  const { t } = useTranslation("draft");
+  return error === DRAFT_OFFLINE_ERROR ? t("offline.startUnavailable") : error;
+}
+
 function PodSetup() {
   const { t } = useTranslation("draft");
   const effectiveOffline = useEffectiveOffline();
@@ -116,6 +132,10 @@ function PodSetup() {
   const guestDisplayName = useDraftPodStore((s) => s.guestDisplayName);
   const setGuestDisplayName = useDraftPodStore((s) => s.setGuestDisplayName);
   const adoptSavedDisplayName = useDraftPodStore((s) => s.adoptSavedDisplayName);
+  const listing = useDraftPodStore((s) => s.listing);
+  const setListing = useDraftPodStore((s) => s.setListing);
+  const adoptRememberedListing = useDraftPodStore((s) => s.adoptRememberedListing);
+  const [showPassword, setShowPassword] = useState(() => listing.password !== "");
   const joinCode = useDraftPodStore((s) => s.joinCode);
   const setJoinCode = useDraftPodStore((s) => s.setJoinCode);
   const createPod = useDraftPodStore((s) => s.createPod);
@@ -154,6 +174,10 @@ function PodSetup() {
     adoptSavedDisplayName();
   }, [adoptSavedDisplayName]);
 
+  useEffect(() => {
+    adoptRememberedListing();
+  }, [adoptRememberedListing]);
+
   // The kind radios record intent (`setConfig`) but publish nothing, so the
   // ENGINE's per-kind axes — booster count and allowed seat set — are re-read here
   // whenever the selected kind changes. Without this the set selector would
@@ -164,13 +188,7 @@ function PodSetup() {
     void refreshProcedure();
   }, [effectiveOffline, refreshProcedure, config.kind, config.tournamentFormat]);
   // Total over `DraftKind`: a future kind is a TS2741 at this literal rather than
-  // a blank line under the radios. Values are already-resolved strings, which is
-  // the right shape regardless -- but NOT for the reason this comment used to
-  // give. It claimed `react-i18next.d.ts` types `t`'s key so a `t(variable)`
-  // lookup would not typecheck. Measured: it does not. `t()` keys are unchecked
-  // in this client, which is why the interpolated lookups elsewhere on this page
-  // and in the draft components were replaced with total `Record`s rather than
-  // trusted.
+  // a blank line under the radios. Values are already-resolved strings.
   const kindDescription: Record<Exclude<DraftKind, "Quick">, string> = {
     Premier: t("podSetup.kindPremierDesc"),
     Traditional: t("podSetup.kindTraditionalDesc"),
@@ -195,9 +213,10 @@ function PodSetup() {
   const podSizeLabel =
     podSizeItems.find((item) => item.value === String(config.podSize))?.label ??
     t("podSetup.playerCount", { count: config.podSize });
-  const configErrorMessage = configError === DRAFT_OFFLINE_ERROR
-    ? t("offline.startUnavailable")
-    : configError;
+  const configErrorMessage = usePodErrorMessage(configError);
+  const listingEligible = podListingEligible(config.podSize);
+  const listed = listing.isPublic && listingEligible;
+  const hostName = hostDisplayName.trim();
 
   if (effectiveOffline) {
     return (
@@ -294,6 +313,7 @@ function PodSetup() {
             value={hostDisplayName}
             onChange={(e) => setHostDisplayName(e.target.value)}
             placeholder={t("podSetup.namePlaceholder")}
+            maxLength={LOBBY_HOST_NAME_MAX_CHARS}
             className="rounded-lg border border-white/10 bg-black/30 px-4 py-2 text-white placeholder-white/30 outline-none focus:border-emerald-400/40"
           />
         </div>
@@ -435,6 +455,78 @@ function PodSetup() {
             className="min-h-[44px] !rounded-lg border border-white/10 !bg-black/30 px-3 !py-2 text-base text-white shadow-none !hover:bg-black/30 !focus-visible:ring-emerald-400/50"
           />
           <p className="text-xs text-white/40">{podSizeDescription}</p>
+        </div>
+
+        <div className="flex flex-col gap-2">
+          {/* Above the seat ceiling the host's choice stays shown and
+              applies again within it. */}
+          <label
+            className={`flex min-h-11 items-center gap-2 py-2 text-sm ${
+              listingEligible ? "text-white/70" : "cursor-not-allowed text-white/40"
+            }`}
+          >
+            <input
+              type="checkbox"
+              checked={listing.isPublic}
+              disabled={!listingEligible}
+              onChange={(e) => setListing({ isPublic: e.target.checked })}
+              className="accent-emerald-400"
+            />
+            {t("podSetup.listInLobby")}
+          </label>
+          {!listingEligible && (
+            <p className="text-xs text-white/40">
+              {t("podSetup.listingSeatLimit", { max: LOBBY_LISTING_MAX_SEATS })}
+            </p>
+          )}
+          {listed && (
+            <>
+              <label className="flex min-h-11 items-center gap-2 py-2 text-sm text-white/70">
+                <input
+                  type="checkbox"
+                  checked={showPassword}
+                  onChange={(e) => {
+                    const next = e.target.checked;
+                    setShowPassword(next);
+                    if (!next) setListing({ password: "" });
+                  }}
+                  className="accent-emerald-400"
+                />
+                {t("podSetup.setPassword")}
+              </label>
+              {showPassword && (
+                <input
+                  type="password"
+                  value={listing.password}
+                  onChange={(e) => setListing({ password: e.target.value })}
+                  placeholder={t("podSetup.passwordPlaceholder")}
+                  aria-label={t("podSetup.passwordPlaceholder")}
+                  maxLength={POD_PASSWORD_MAX_LENGTH}
+                  className="rounded-lg border border-white/10 bg-black/30 px-4 py-2 text-white placeholder-white/30 outline-none focus:border-emerald-400/40"
+                />
+              )}
+              <div className="flex flex-col gap-1 pt-1">
+                <label htmlFor="pod-setup-room-name" className="text-sm font-medium text-white/60">
+                  {t("podSetup.roomName")} <span className="text-white/40">{t("podSetup.optional")}</span>
+                </label>
+                <input
+                  id="pod-setup-room-name"
+                  type="text"
+                  value={listing.roomName}
+                  onChange={(e) => setListing({ roomName: e.target.value })}
+                  maxLength={LOBBY_LABEL_MAX_CHARS}
+                  // It is the default `podListingRequest` sends for a blank room name.
+                  placeholder={
+                    hostName
+                      ? t("hostSetup.roomNameDefaultPlaceholder", { ns: "multiplayer", name: hostName })
+                      : t("podSetup.roomNamePlaceholder")
+                  }
+                  className="rounded-lg border border-white/10 bg-black/30 px-4 py-2 text-white placeholder-white/30 outline-none focus:border-emerald-400/40"
+                />
+                <p className="text-xs text-white/40">{t("podSetup.roomNameHelp")}</p>
+              </div>
+            </>
+          )}
         </div>
 
         {/* Pool source: Set vs Cube tab switch */}
@@ -1300,13 +1392,9 @@ function CompleteView({ onLeave }: { onLeave: () => void }) {
   // without an optional chain, and keeps that read off every other role's path.
   const launchableView =
     view?.launch_capability === "CommanderMultiplayer" && role === "host" ? view : null;
-  // `commanderLaunch` is the store's ONLY observable of a launch. The host's is
-  // written by its own local emit on the FIRST iteration of
-  // `sendCommanderLaunches` — the host is pod seat 0, `liveSeatDecks` is built
-  // in `view.seats` order, and `sendToSeat`'s seat-0 arm turns that send into a
-  // local event. The loop is synchronous, so the position does not matter to
-  // behaviour; what matters is that the window between the CLICK and that write
-  // is the whole `hostRoom` round-trip, covered by the store's
+  // `commanderLaunch` is written by the host's local event after the finalizer
+  // awaits engine-seat installs and enqueues remote invitations. The whole
+  // bring-up window before that write is covered by the store's
   // `commanderLaunchInFlight` re-entry guard rather than by this flag.
   const launchInFlight = commanderLaunch !== null;
   // The invitation IS the authorization: a guest holds a `commanderLaunch` only
@@ -1428,12 +1516,16 @@ function PodErrorView({
 }) {
   const { t } = useTranslation("draft");
   const recoveryFailure = useMultiplayerDraftStore((s) => s.guestRecoveryFailure);
+  const reason = usePodErrorMessage(useMultiplayerDraftStore((s) => s.error));
+  // A recovery failure's own message wins over the store error, because a
+  // retry that fails offline writes the offline sentinel while the recovery
+  // failure and its retry stay.
   const message =
     phase === "kicked"
       ? t("podError.kicked")
       : phase === "hostLeft"
         ? t("podError.hostLeft")
-        : recoveryFailure?.message ?? t("podError.connection");
+        : recoveryFailure?.message ?? reason ?? t("podError.connection");
   return (
     <div className="flex flex-col items-center justify-center gap-4 py-24">
       <div className="text-xl font-medium text-red-300">{message}</div>
@@ -1660,6 +1752,7 @@ function DraftPodPageContent() {
         // been cleared, so a damaged host record cannot steal a guest's route.
         const outcome = await resumeHostedPod({
           silent: entryMode === "auto",
+          entry: entryMode,
           routeToken,
           signal: controller.signal,
         });

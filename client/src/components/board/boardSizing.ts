@@ -1,5 +1,12 @@
 const CARD_ASPECT_RATIO = 63 / 88; // ~0.716
 
+/**
+ * CR 712.4a: a meld pair's back faces are each half of one oversized card face.
+ * Placed side by side, two cards make a card 1.4× the size of either, so a
+ * melded permanent renders at this multiple of its row's card size.
+ */
+export const MELDED_CARD_SCALE = 1.4;
+
 interface CardSizeOptions {
   baseWidth?: number;
   minWidth?: number;

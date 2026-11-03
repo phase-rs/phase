@@ -4,22 +4,15 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tauri::{AppHandle, Manager};
+
+use crate::channels::Channel;
 
 const STASH_FILE: &str = "legacy-storage-stash.json";
 const MIGRATION_MARKER_FILE: &str = "legacy-storage-imported";
 const REMOTE_LOAD_OK_MARKER_FILE: &str = "remote-load-ok";
 const CHANNEL_PREFERENCE_FILE: &str = "channel-preference.json";
-
-/// The remote content channel the shell loads.
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Channel {
-    #[default]
-    Release,
-    Preview,
-}
 
 /// The bootstrap's one-roundtrip migration and remote-navigation state.
 #[derive(Debug, PartialEq, Eq, Serialize)]

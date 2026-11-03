@@ -119,6 +119,10 @@
   },
   "setSelector": {
     "botDifficulty": "Difficulté des bots",
+    "pickEnhancements": {
+      "label": "Utiliser l'IA intégrée avec améliorations des choix de draft",
+      "hint": "Les bots suivent un guide écrit d'ordre de choix pour les formats qui en ont un (actuellement Mirrodin, Darksteel et Fifth Dawn). S'applique à partir de la difficulté moyenne."
+    },
     "difficultyLevels": {
       "VeryEasy": "Très facile",
       "Easy": "Facile",
@@ -132,6 +136,12 @@
     "packOrder": "Ordre des boosters",
     "candidateSets": "Extensions candidates",
     "clearPacks": "Vider",
+    "randomSet": "Extension aléatoire",
+    "randomSetHint": "Remplir tous les boosters avec une extension choisie au hasard",
+    "randomPacks": "Boosters aléatoires",
+    "randomPacksHint": "Attribuer à chaque booster sa propre extension choisie au hasard",
+    "randomCandidates": "Extensions aléatoires",
+    "randomCandidatesHint": "Choisir au hasard des extensions candidates distinctes",
     "emptyPacks_one": "Choisissez une extension pour chaque booster. Un draft ouvre {{count}} booster par défaut — répétez une extension ou mélangez-en plusieurs.",
     "emptyPacks_other": "Choisissez une extension pour chaque booster. Un draft ouvre {{count}} boosters par défaut — répétez une extension ou mélangez-en plusieurs pour drafter un bloc.",
     "emptyPacksFixed_one": "Le scellé ouvre exactement {{count}} booster. Choisissez une extension pour celui-ci.",
@@ -156,6 +166,7 @@
     "startSealed": "Lancer le scellé"
   },
   "pack": {
+    "label": "Booster de draft",
     "confirmPick": "Confirmer le choix",
     "selected": "Sélection",
     "draftEffects": "Effets de draft :",
@@ -486,6 +497,10 @@
     "upNext": "À suivre — Match {{number}}",
     "nextMatch": "Match suivant",
     "endRun": "Terminer le parcours",
+    "retryEndRun": "Réessayer de terminer le parcours",
+    "retryResume": "Réessayer de reprendre",
+    "startUnavailable": "Cette partie de draft n’a pas pu démarrer.",
+    "resumeUnavailable": "Ce parcours de draft est indisponible. Terminez-le pour recommencer.",
     "done": "Terminé",
     "perfectRun": "Parcours parfait",
     "runComplete": "Parcours terminé",
@@ -572,7 +587,20 @@
     "tabs": {
       "set": "Extension",
       "cube": "Cube"
-    }
+    },
+    "lobbyUnavailable": "Impossible de joindre le salon pour lister ce pod. Désactivez « $t(draft:podSetup.listInLobby) » pour héberger par code de salle.",
+    "listingHostNameTooLong": "Pour lister ce pod dans le salon, utilisez un nom affiché d'au plus {{max}} caractères.",
+    "listingRoomNameTooLong": "Pour lister ce pod dans le salon, utilisez un nom de salle d'au plus {{max}} caractères.",
+    "listingCubeNameTooLong": "Pour lister ce pod dans le salon, utilisez un nom de Cube d'au plus {{max}} caractères.",
+    "listingPasswordTooLong": "Pour lister ce pod dans le salon, utilisez un mot de passe plus court.",
+    "listInLobby": "Répertorier dans le salon",
+    "listingSeatLimit": "Le salon peut lister des pods jusqu'à {{max}} joueurs.",
+    "setPassword": "Définir un mot de passe",
+    "passwordPlaceholder": "Mot de passe du pod",
+    "roomName": "Nom de la salle",
+    "optional": "(facultatif)",
+    "roomNameHelp": "Affiché aux joueurs qui parcourent le salon.",
+    "roomNamePlaceholder": "ex. Cube du vendredi soir"
   },
   "podPhaseView": {
     "tournamentPairings": "Appariements du tournoi",
@@ -708,5 +736,23 @@
     "pools": "Pools (omniscient)",
     "poolSize": "{{count}} cards picked",
     "seat": "Seat {{index}}"
+  },
+  "deckAutosave": {
+    "deckName": "[Sauvegarde auto] {{format}}",
+    "slotQuick": "Quick Draft",
+    "slotSealed": "Scellé",
+    "slotCube": "Cube Draft",
+    "slotPremier": "Draft Premier",
+    "slotTraditional": "Draft traditionnel",
+    "slotCommanderDraft": "Draft Commander",
+    "slotWinston": "Draft Winston"
+  },
+  "llmDrafters": {
+    "label": "Drafteurs IA",
+    "picking": "Choisit",
+    "ready": "A choisi",
+    "fallback": "Choix du moteur",
+    "waiting": "En attente du choix de tous les joueurs…",
+    "seatStatus": "{{seat}} : {{status}}"
   }
 }

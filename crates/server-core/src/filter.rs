@@ -21,6 +21,7 @@ pub fn filter_events_for_player(
 
 #[cfg(test)]
 mod tests {
+    use engine::game::game_object::ObjectIncarnationRefExt;
     use std::sync::Arc;
 
     use super::*;
@@ -410,6 +411,7 @@ mod tests {
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
+            face_down_in_exile: engine::types::ability::ExileConcealment::Public,
             face_down_profile: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
@@ -489,6 +491,7 @@ mod tests {
             enters_attacking: false,
             owner_library: false,
             track_exiled_by_source: false,
+            face_down_in_exile: engine::types::ability::ExileConcealment::Public,
             face_down_profile: None,
             enter_with_counters: vec![],
             conditional_enter_with_counters: vec![],
@@ -497,12 +500,13 @@ mod tests {
             mass_library_order: Some(MassLibraryOrderBatch {
                 owner: PlayerId(0),
                 members,
+                arranger: None,
             }),
             is_cost_payment: false,
             enters_modified_if: None,
             duration: None,
         };
-        state.pending_mass_library_order_choice = Some(PendingMassLibraryOrderChoice {
+        state.pending_mass_library_order_choice = Some(Box::new(PendingMassLibraryOrderChoice {
             source_id: ObjectId(100),
             library_position: LibraryPosition::Bottom,
             track_exiled_by_source: false,
@@ -516,8 +520,19 @@ mod tests {
                         origin: Zone::Library,
                     })
                     .collect(),
+                arranger: None,
             }]),
-        });
+            arranged_batches: vec![MassLibraryOrderBatch {
+                owner: PlayerId(0),
+                members: vec![MassLibraryOrderMember {
+                    identity: ObjectIncarnationRef::from_object(&state.objects[&card_a]),
+                    origin: Zone::Library,
+                }],
+                arranger: None,
+            }],
+            resolving_entry: Some(ObjectId(1)),
+            arranger_election: None,
+        }));
 
         let filtered = filter_state_for_player(&state, PlayerId(1));
         match filtered.waiting_for {

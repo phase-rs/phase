@@ -12,6 +12,8 @@ const mocks = vi.hoisted(() => ({
   init: vi.fn(),
   pause: vi.fn(),
   migrate: vi.fn(),
+  canonicalize: vi.fn(),
+  cardStatus: { value: "idle" as string },
 }));
 
 vi.mock("../stores/connectivityStore", () => ({
@@ -22,7 +24,14 @@ vi.mock("../stores/cloudSyncStore", () => ({
     getState: () => ({ init: mocks.init, pause: mocks.pause }),
   },
 }));
-vi.mock("../services/deckMigrations", () => ({ migrateSavedDecks: mocks.migrate }));
+vi.mock("../services/deckMigrations", () => ({
+  migrateSavedDecks: mocks.migrate,
+  canonicalizeSavedDeckNames: mocks.canonicalize,
+}));
+vi.mock("../stores/cardDataStore", () => ({
+  useCardDataStore: (select: (s: { status: string }) => unknown) =>
+    select({ status: mocks.cardStatus.value }),
+}));
 vi.mock("../hooks/useFeedInitialization", () => ({
   useFeedInitialization: (...args: unknown[]) => {
     mocks.feedInit(...args);
@@ -51,7 +60,12 @@ beforeEach(() => {
   mocks.calls.length = 0;
   mocks.offline.value = true;
   mocks.feedInitializationReady = true;
+  mocks.cardStatus.value = "idle";
   mocks.migrate.mockImplementation(() => mocks.calls.push("migrate"));
+  mocks.canonicalize.mockImplementation(() => {
+    mocks.calls.push("canonicalize");
+    return Promise.resolve();
+  });
   mocks.pause.mockImplementation(() => mocks.calls.push("pause"));
   mocks.init.mockImplementation(() => {
     mocks.calls.push("init");
@@ -120,5 +134,17 @@ describe("App cloud lifecycle", () => {
     act(() => view.rerender(<App />));
 
     expect(mocks.calls).toEqual(["migrate", "init", "cleanup", "pause", "init"]);
+  });
+
+  it("canonicalizes saved deck names once the card data is ready", () => {
+    const view = render(<App />);
+
+    expect(mocks.canonicalize).not.toHaveBeenCalled();
+
+    mocks.cardStatus.value = "ready";
+    act(() => view.rerender(<App />));
+
+    expect(mocks.canonicalize).toHaveBeenCalledTimes(1);
+    expect(mocks.calls.indexOf("migrate")).toBeLessThan(mocks.calls.indexOf("canonicalize"));
   });
 });

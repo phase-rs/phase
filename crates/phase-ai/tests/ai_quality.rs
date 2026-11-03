@@ -21,6 +21,7 @@ use engine::types::game_state::CastPaymentMode;
 use engine::types::game_state::{PlayerDeckPool, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
+use engine::types::mana::ManaColor;
 use engine::types::mana::ManaCost;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -78,6 +79,8 @@ fn blocks_lethal_attack() {
             valid_block_targets: HashMap::from([(blocker, vec![attacker])]),
             block_requirements: HashMap::new(),
             blocker_constraints: Default::default(),
+            must_be_blocked_targets: Default::default(),
+            block_capacities: Default::default(),
         };
     }
 
@@ -114,6 +117,8 @@ fn does_not_block_when_safe() {
             valid_block_targets: HashMap::from([(blocker, vec![attacker])]),
             block_requirements: HashMap::new(),
             blocker_constraints: Default::default(),
+            must_be_blocked_targets: Default::default(),
+            block_capacities: Default::default(),
         };
     }
 
@@ -1185,6 +1190,8 @@ fn ai_vs_ai_completes_combat_sequence() {
             valid_block_targets: HashMap::from([(blocker, vec![attacker])]),
             block_requirements: HashMap::new(),
             blocker_constraints: Default::default(),
+            must_be_blocked_targets: Default::default(),
+            block_capacities: Default::default(),
         };
     }
 
@@ -1250,6 +1257,8 @@ fn run_ai_actions_non_empty_batch_carries_break_reason() {
             valid_block_targets: HashMap::from([(blocker, vec![attacker])]),
             block_requirements: HashMap::new(),
             blocker_constraints: Default::default(),
+            must_be_blocked_targets: Default::default(),
+            block_capacities: Default::default(),
         };
     }
 
@@ -1318,6 +1327,8 @@ fn declare_blockers_never_produces_pass_priority() {
             ]),
             block_requirements: HashMap::new(),
             blocker_constraints: Default::default(),
+            must_be_blocked_targets: Default::default(),
+            block_capacities: Default::default(),
         };
     }
 
@@ -1486,6 +1497,147 @@ fn casts_creature_when_mana_available() {
             payment_mode: CastPaymentMode::Auto,
         },
         "Should cast creature with strong ETB"
+    );
+}
+
+#[test]
+fn casts_creature_with_activated_removal_without_valid_targets() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_basic_land(P0, ManaColor::Green);
+
+    let skysweeper = scenario
+        .add_creature_to_hand_from_oracle(
+            P0,
+            "Elvish Skysweeper",
+            1,
+            1,
+            "{4}{G}, Sacrifice a creature: Destroy target creature with flying.",
+        )
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![engine::types::mana::ManaCostShard::Green],
+            generic: 0,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+    }
+
+    let action = ai_choose(runner.state(), AiDifficulty::VeryHard);
+    assert_eq!(
+        action,
+        GameAction::CastSpell {
+            object_id: skysweeper,
+            card_id: runner.state().objects[&skysweeper].card_id,
+            targets: Vec::new(),
+            payment_mode: CastPaymentMode::Auto,
+        },
+        "AI should cast creature whose activated removal currently has no valid targets"
+    );
+}
+
+#[test]
+fn casts_artifact_with_activated_exile_without_valid_targets() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_basic_land(P0, ManaColor::Green);
+
+    let staff = scenario
+        .add_artifact_to_hand_from_oracle(
+            P0,
+            "Voyager Staff",
+            "{2}, Sacrifice this artifact: Exile target creature. Return the exiled card to the battlefield under its owner's control at the beginning of the next end step.",
+        )
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![],
+            generic: 1,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+    }
+
+    let action = ai_choose(runner.state(), AiDifficulty::VeryHard);
+    assert_eq!(
+        action,
+        GameAction::CastSpell {
+            object_id: staff,
+            card_id: runner.state().objects[&staff].card_id,
+            targets: Vec::new(),
+            payment_mode: CastPaymentMode::Auto,
+        },
+        "AI should cast artifact whose activated exile currently has no valid targets"
+    );
+}
+
+#[test]
+fn casts_sewerdreg_with_battlefield_activated_ability_and_duplicate_in_hand() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    for _ in 0..6 {
+        scenario.add_basic_land(P0, ManaColor::Black);
+    }
+
+    let sewdreg1 = scenario
+        .add_creature_to_hand_from_oracle(
+            P0,
+            "Sewerdreg",
+            3,
+            3,
+            "Swampwalk\nSacrifice this creature: Exile target card from a graveyard.",
+        )
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![
+                engine::types::mana::ManaCostShard::Black,
+                engine::types::mana::ManaCostShard::Black,
+            ],
+            generic: 3,
+        })
+        .id();
+
+    let sewdreg2 = scenario
+        .add_creature_to_hand_from_oracle(
+            P0,
+            "Sewerdreg",
+            3,
+            3,
+            "Swampwalk\nSacrifice this creature: Exile target card from a graveyard.",
+        )
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![
+                engine::types::mana::ManaCostShard::Black,
+                engine::types::mana::ManaCostShard::Black,
+            ],
+            generic: 3,
+        })
+        .id();
+
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+    }
+
+    let action = ai_choose(runner.state(), AiDifficulty::VeryHard);
+    let is_sewerdreg_cast = matches!(
+        action,
+        GameAction::CastSpell { object_id, .. } if object_id == sewdreg1 || object_id == sewdreg2
+    );
+    assert!(
+        is_sewerdreg_cast,
+        "AI should cast Sewerdreg when plenty of mana is available; got {action:?}"
     );
 }
 
@@ -2726,7 +2878,8 @@ fn ai_animates_a_manland_once_per_turn_across_priority_windows() {
             let state = runner.state_mut();
             resolve_all_fast_forward(state, P0, 0, |_, _| {
                 ResolveAllCallbackDecision::Action(GameAction::PassPriority)
-            });
+            })
+            .expect("the fixture's resolutions are representable");
             // Re-arm a fresh P0 priority window. `waiting_for` alone is not enough:
             // later calls then fail `NotYourPriority` and take no action.
             state.phase = Phase::PreCombatMain;

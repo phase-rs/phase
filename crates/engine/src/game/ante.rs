@@ -54,7 +54,7 @@ use crate::types::game_state::GameState;
 /// Quoz, Bronze Tablet, Contract from Below, Darkpact, Demonic Attorney,
 /// Jeweled Bird, Rebirth, Tempest Efreet, Timmerian Fiends — which is the
 /// whole class with no false positives.
-pub(crate) fn face_uses_ante(face: &CardFace) -> bool {
+pub fn face_uses_ante(face: &CardFace) -> bool {
     face.oracle_text
         .as_deref()
         .unwrap_or("")

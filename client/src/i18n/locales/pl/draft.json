@@ -119,6 +119,10 @@
   },
   "setSelector": {
     "botDifficulty": "Poziom trudności botów",
+    "pickEnhancements": {
+      "label": "Użyj wbudowanej SI z ulepszeniami wyborów w draftcie",
+      "hint": "Boty stosują pisemny przewodnik kolejności wyborów w formatach, które go mają (obecnie Mirrodin, Darksteel i Fifth Dawn). Działa od średniego poziomu trudności."
+    },
     "difficultyLevels": {
       "VeryEasy": "Bardzo łatwy",
       "Easy": "Łatwy",
@@ -132,6 +136,12 @@
     "packOrder": "Kolejność boosterów",
     "candidateSets": "Dodatki kandydujące",
     "clearPacks": "Wyczyść",
+    "randomSet": "Losowy dodatek",
+    "randomSetHint": "Wypełnij wszystkie boostery jednym losowo wybranym dodatkiem",
+    "randomPacks": "Losowe boostery",
+    "randomPacksHint": "Przydziel każdemu boosterowi osobny, losowo wybrany dodatek",
+    "randomCandidates": "Losowe dodatki",
+    "randomCandidatesHint": "Wybierz losowo różne dodatki kandydujące",
     "emptyPacks_one": "Wybierz dodatek dla każdego boostera. Draft domyślnie otwiera {{count}} booster — powtórz dodatek lub połącz kilka.",
     "emptyPacks_other": "Wybierz dodatek dla każdego boostera. Draft domyślnie otwiera {{count}} boostery — powtórz dodatek lub połącz kilka, aby draftować blok.",
     "emptyPacksFixed_one": "Sealed otwiera dokładnie {{count}} booster. Wybierz dla niego dodatek.",
@@ -156,6 +166,7 @@
     "startSealed": "Rozpocznij sealed"
   },
   "pack": {
+    "label": "Booster draftu",
     "confirmPick": "Potwierdź wybór",
     "selected": "Wybrano",
     "draftEffects": "Efekty draftu:",
@@ -486,6 +497,10 @@
     "upNext": "Następny — Mecz {{number}}",
     "nextMatch": "Następny mecz",
     "endRun": "Zakończ bieg",
+    "retryEndRun": "Ponów zakończenie biegu",
+    "retryResume": "Ponów wznawianie",
+    "startUnavailable": "Nie udało się rozpocząć meczu draftu.",
+    "resumeUnavailable": "Ten bieg draftu jest niedostępny. Zakończ go, aby zacząć od nowa.",
     "done": "Gotowe",
     "perfectRun": "Idealny bieg",
     "runComplete": "Bieg zakończony",
@@ -572,7 +587,20 @@
     "tabs": {
       "set": "Dodatek",
       "cube": "Cube"
-    }
+    },
+    "lobbyUnavailable": "Nie udało się połączyć z poczekalnią, aby wystawić ten pod. Wyłącz „$t(draft:podSetup.listInLobby)”, aby hostować za pomocą kodu pokoju.",
+    "listingHostNameTooLong": "Aby wystawić ten pod w poczekalni, użyj wyświetlanej nazwy o długości maksymalnie {{max}} znaków.",
+    "listingRoomNameTooLong": "Aby wystawić ten pod w poczekalni, użyj nazwy pokoju o długości maksymalnie {{max}} znaków.",
+    "listingCubeNameTooLong": "Aby wystawić ten pod w poczekalni, użyj nazwy Cube'a o długości maksymalnie {{max}} znaków.",
+    "listingPasswordTooLong": "Aby wystawić ten pod w poczekalni, użyj krótszego hasła.",
+    "listInLobby": "Wyświetl w poczekalni",
+    "listingSeatLimit": "Lista poczekalni obsługuje pody liczące do {{max}} graczy.",
+    "setPassword": "Ustaw hasło",
+    "passwordPlaceholder": "Hasło poda",
+    "roomName": "Nazwa pokoju",
+    "optional": "(opcjonalnie)",
+    "roomNameHelp": "Wyświetlana graczom przeglądającym poczekalnię.",
+    "roomNamePlaceholder": "np. Piątkowy wieczór Cube"
   },
   "podPhaseView": {
     "tournamentPairings": "Pary turniejowe",
@@ -708,5 +736,23 @@
     "pools": "Pools (omniscient)",
     "poolSize": "{{count}} cards picked",
     "seat": "Seat {{index}}"
+  },
+  "deckAutosave": {
+    "deckName": "[Autozapis] {{format}}",
+    "slotQuick": "Szybki draft",
+    "slotSealed": "Sealed",
+    "slotCube": "Draft kostki",
+    "slotPremier": "Draft Premier",
+    "slotTraditional": "Draft tradycyjny",
+    "slotCommanderDraft": "Draft Commander",
+    "slotWinston": "Draft Winston"
+  },
+  "llmDrafters": {
+    "label": "Draftujący AI",
+    "picking": "Wybiera",
+    "ready": "Wybrano",
+    "fallback": "Wybór silnika",
+    "waiting": "Czekanie, aż wszyscy gracze wybiorą…",
+    "seatStatus": "{{seat}}: {{status}}"
   }
 }

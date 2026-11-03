@@ -168,6 +168,7 @@ fn activate_ability_candidate(source_id: ObjectId, ability_index: usize) -> Cand
         action: GameAction::ActivateAbility {
             source_id,
             ability_index,
+            payment_mode: CastPaymentMode::Auto,
         },
         metadata: ActionMetadata::for_actor(Some(AI), TacticalClass::Ability),
     }
@@ -495,7 +496,9 @@ fn ability_mode_decision(source_id: ObjectId) -> AiDecisionContext {
             is_activated: true,
             ability_index: Some(0),
             ability_cost: None,
+            activation_cost_snapshot: None,
             unavailable_modes: Vec::new(),
+            activation_payment_mode: CastPaymentMode::Auto,
         },
         candidates: Vec::new(),
     }

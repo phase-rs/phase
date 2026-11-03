@@ -67,6 +67,7 @@ fn play_from_exile_grant() -> CastingPermission {
         single_use: false,
         cast_cost_modifier: None,
         alt_ability_cost: None,
+        without_paying_mana_cost: false,
         land_enter_tapped: EtbTapState::Unspecified,
     }
 }
@@ -93,6 +94,7 @@ fn exile_and_grant_ability(count: i32) -> AbilityDefinition {
             count: QuantityExpr::Fixed { value: count },
             position: engine::types::ability::LibraryPosition::Top,
             face_down: false,
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
         },
     )
     .player_scope(PlayerFilter::All)

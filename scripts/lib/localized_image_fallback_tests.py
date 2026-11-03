@@ -34,6 +34,40 @@ def card(card_id: str, language: str, oracle: str, name: str, **fields: object) 
 
 
 class LocalizedImageFallbackTests(unittest.TestCase):
+    def test_simplified_chinese_fallback_preserves_exact_and_excludes_traditional(self) -> None:
+        english = card("en-missing", "en", "forest", "Forest")
+        simplified = card("zhs-forest", "zhs", "forest", "Forest",
+                          image_uris=face("simplified"))
+        traditional = card("zht-forest", "zht", "forest", "Forest",
+                           released_at="2099-01-01", image_uris=face("traditional"))
+        english_only_traditional = card("en-traditional-only", "en", "island", "Island")
+        traditional_only = card("zht-island", "zht", "island", "Island",
+                                image_uris=face("traditional-island"))
+        self.assertIsNotNone(MODULE.card_identity(english))
+        self.assertEqual(MODULE.card_identity(english), MODULE.card_identity(simplified))
+        self.assertEqual(MODULE.card_identity(english), MODULE.card_identity(traditional))
+        self.assertEqual(MODULE.card_identity(english_only_traditional),
+                         MODULE.card_identity(traditional_only))
+        self.assertEqual(MODULE.exact_faces(simplified), [face("simplified")])
+        self.assertEqual(MODULE.exact_faces(traditional_only), [face("traditional-island")])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            map_path = root / "scryfall-images.v2.zh.json"
+            exact = {"en-exact": {"id": "zhs-exact", "faces": [face("exact")]}}
+            map_path.write_text(json.dumps(exact), encoding="utf-8")
+            bulk = root / "all-cards.json"
+            bulk.write_text(json.dumps([
+                english, card("en-exact", "en", "forest", "Forest"), simplified,
+                traditional, english_only_traditional, traditional_only,
+            ]), encoding="utf-8")
+
+            self.assertEqual(MODULE.augment_maps(bulk, root), {"zh": 1})
+            result = json.loads(map_path.read_text(encoding="utf-8"))
+            self.assertEqual(result["en-missing"],
+                             {"id": "zhs-forest", "faces": [face("simplified")]})
+            self.assertEqual(result["en-exact"], exact["en-exact"])
+            self.assertNotIn("en-traditional-only", result)
+
     def test_exact_wins_and_matching_candidates_preserve_faces(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

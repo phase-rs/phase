@@ -12,22 +12,23 @@ use crate::types::ability::{
     ActivationRestriction, AdditionalCost, AdditionalCostOrigin, AdditionalCostPaymentSource,
     AggregateFunction, AttachCardinality, AttachSelection, AttackSubject, CardPlayMode,
     CastFromZoneDriver, CastManaObjectScope, CastManaSpentMetric, CastVariantPaid, ChoiceType,
-    CombatHistoryScope, Comparator, ContinuousModification, ControllerRef, CopyRetargetPermission,
-    CounterTriggerFilter, DamageChannel, DamageKindFilter, DamageModification,
-    DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp, KickerVariant,
-    ManaContribution, ManaProduction, ModalSelectionCondition, ModalSelectionConstraint,
-    NinjutsuVariant, ObjectScope, ParsedCondition, PlayerFilter, PlayerScope, PtStat, PtValue,
-    PtValueScope, QuantityExpr, QuantityRef, RenownSubject, ReplacementCondition,
-    ReplacementDefinition, RuntimeHandler, SacrificeCost, SearchSelectionConstraint,
-    StaticCondition, StaticDefinition, TapStateChange, TargetChoiceTiming, TargetFilter,
-    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnlessPayModifier,
+    ChooseOneOfKind, CombatHistoryScope, Comparator, ContinuousModification, ControllerRef,
+    CopyRetargetPermission, CounterTriggerFilter, DamageChannel, DamageKindFilter,
+    DamageModification, DelayedTriggerCondition, Duration, Effect, EffectScope, FilterProp,
+    KickerVariant, ManaContribution, ManaProduction, ModalSelectionCondition,
+    ModalSelectionConstraint, NinjutsuVariant, ObjectScope, ParsedCondition, PlayerFilter,
+    PlayerScope, PtStat, PtValue, PtValueScope, QuantityExpr, QuantityRef, RenownSubject,
+    ReplacementCondition, ReplacementDefinition, RuntimeHandler, SacrificeCost,
+    SearchSelectionConstraint, StaticCondition, StaticDefinition, TapStateChange,
+    TargetChoiceTiming, TargetFilter, TokenAttackDestination, TriggerCondition, TriggerDefinition,
+    TypeFilter, TypedFilter, UnlessPayModifier,
 };
 use crate::types::card::{CardFace, CardLayout, CleaveVariant};
 use crate::types::card_type::{CardType, CoreType, Supertype};
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::format::DeckCopyLimit;
 use crate::types::keywords::{
-    BloodthirstValue, BuybackCost, CyclingCost, EchoCost, Keyword, PartnerType,
+    BloodthirstValue, BuybackCost, CyclingCost, EchoCost, EntwineCost, Keyword, PartnerType,
 };
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 use crate::types::phase::Phase;
@@ -861,6 +862,7 @@ fn build_mobilize_trigger(qty: &QuantityExpr) -> TriggerDefinition {
         owner: TargetFilter::Controller,
         attach_to: None,
         enters_attacking: true,
+        attack_destination: TokenAttackDestination::ControllerChooses,
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
@@ -1020,6 +1022,7 @@ fn synthesize_etb_token_attach_keyword(
         owner: TargetFilter::Controller,
         attach_to: None,
         enters_attacking: false,
+        attack_destination: TokenAttackDestination::ControllerChooses,
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
@@ -2257,7 +2260,7 @@ pub(crate) fn scavenge_ability_for_keyword(keyword: &Keyword) -> Option<AbilityD
 /// (seam 4: activated-ability-on-grant). The runtime activated-ability gather
 /// (`activated_ability_definitions` in `casting.rs`) calls this for each keyword
 /// in a graveyard card's *effective* keyword set so a keyword granted by a
-/// static (e.g. Encore/Scavenge granted to a graveyard card) surfaces its
+/// static (e.g. Encore/Scavenge/Unearth granted to a graveyard card) surfaces its
 /// activatable ability — the `AddKeyword` layer seam installs only the keyword
 /// and triggers, never activated abilities. Returns `None` for keywords whose
 /// behavior is not a graveyard activated ability. Extend this match as new
@@ -2267,6 +2270,9 @@ pub(crate) fn graveyard_activated_ability_for_keyword(
 ) -> Option<AbilityDefinition> {
     crate::database::encore::encore_ability_for_keyword(keyword)
         .or_else(|| scavenge_ability_for_keyword(keyword))
+        // CR 702.84a: Unearth functions while the card is in a graveyard
+        // (Dregscape Sliver, Sedris, Mishra and Solemn Doomguide grant it there).
+        .or_else(|| crate::database::unearth::unearth_ability_for_keyword(keyword))
 }
 
 /// CR 702.107a: Synthesize the Outlast activated ability from a `Keyword::Outlast(cost)`.
@@ -2997,9 +3003,15 @@ pub fn synthesize_entwine(face: &mut CardFace) {
         None => return,
     };
 
+    // Convert EntwineCost to AbilityCost
+    let ability_cost = match cost {
+        EntwineCost::Mana(mc) => AbilityCost::Mana { cost: mc },
+        EntwineCost::NonMana(ac) => ac,
+    };
+
     // Set entwine_cost on the face's modal choice + allow all-mode selection
     if let Some(ref mut modal) = face.modal {
-        modal.entwine_cost = Some(cost);
+        modal.entwine_cost = Some(Box::new(ability_cost));
         // CR 702.42a: "You may choose all modes" — raise max_choices to allow it
         modal.max_choices = modal.mode_count;
     }
@@ -3110,6 +3122,24 @@ pub fn synthesize_dredge(face: &mut CardFace) {
         return;
     }
 
+    face.replacements.push(dredge_replacement_definition(n));
+}
+
+/// CR 702.52a + CR 121.6b + CR 113.6b: the single per-value Dredge Draw
+/// replacement definition — "if you would draw a card, you may instead mill N
+/// cards and return this card from your graveyard to your hand."
+///
+/// The single authority for building a Dredge replacement, shared by:
+/// - build-time synthesis (`synthesize_dredge`) for PRINTED Dredge, and
+/// - the runtime granted-keyword replacement path (`granted_dredge_value` →
+///   `find_applicable_replacements` in `game/replacement.rs`), which surfaces
+///   one virtual candidate for a graveyard card whose Dredge is granted at
+///   runtime (e.g. The Necrobloom's "Land cards in your graveyard have dredge
+///   2") rather than printed.
+///
+/// Because both callers build identical definitions, printed + granted
+/// instances each apply through the same shape.
+pub(crate) fn dredge_replacement_definition(n: u32) -> ReplacementDefinition {
     // CR 702.52a: "return this card from your graveyard to your hand."
     let return_to_hand = AbilityDefinition::new(
         AbilityKind::Spell,
@@ -3152,13 +3182,16 @@ pub fn synthesize_dredge(face: &mut CardFace) {
         .draw_scope(crate::types::ability::DrawReplacementScope::IndividualDraw)
         .active_zones(vec![Zone::Graveyard]);
     replacement.mode = crate::types::ability::ReplacementMode::Optional { decline: None };
-    replacement.description = Some(
-        "CR 702.52a: Dredge — instead of drawing, you may mill N cards and return this \
-         card from your graveyard to your hand."
-            .to_string(),
-    );
+    // CR 616.1: a printed and a differently-valued GRANTED dredge candidate can
+    // co-occur on one card in a single ordering prompt, so this label must show
+    // its own N (the granted label interpolates its own value the same way).
+    let cards = if n == 1 { "card" } else { "cards" };
+    replacement.description = Some(format!(
+        "CR 702.52a: Dredge — instead of drawing, you may mill {n} {cards} and return \
+         this card from your graveyard to your hand."
+    ));
     replacement.execute = Some(Box::new(mill));
-    face.replacements.push(replacement);
+    replacement
 }
 
 /// Idempotency-shape predicate for the synthesized Dredge draw-replacement — a
@@ -3318,6 +3351,7 @@ fn offspring_etb_copy_trigger_for_ordinal(origin_ordinal: u32) -> TriggerDefinit
             owner: TargetFilter::Controller,
             source_filter: None,
             enters_attacking: false,
+            attack_destination: TokenAttackDestination::ControllerChooses,
             tapped: false,
             count: QuantityExpr::Fixed { value: 1 },
             extra_keywords: vec![],
@@ -3516,6 +3550,7 @@ fn install_etb_copy_on_additional_cost(face: &mut CardFace, spec: EtbCopyOnAddit
             owner: TargetFilter::Controller,
             source_filter: None,
             enters_attacking: false,
+            attack_destination: TokenAttackDestination::ControllerChooses,
             tapped: false,
             count: spec.count,
             extra_keywords: vec![],
@@ -3738,6 +3773,7 @@ fn build_fabricate_trigger(n: u32) -> TriggerDefinition {
             owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
+            attack_destination: TokenAttackDestination::ControllerChooses,
             supertypes: vec![],
             static_abilities: vec![],
             enter_with_counters: vec![],
@@ -3752,6 +3788,7 @@ fn build_fabricate_trigger(n: u32) -> TriggerDefinition {
         Effect::ChooseOneOf {
             chooser: crate::types::ability::PlayerFilter::Controller,
             branches: vec![counters_branch, servos_branch],
+            kind: ChooseOneOfKind::Ordinary,
         },
     );
 
@@ -4350,6 +4387,7 @@ fn build_afterlife_trigger(count: u32) -> TriggerDefinition {
         owner: TargetFilter::Controller,
         attach_to: None,
         enters_attacking: false,
+        attack_destination: TokenAttackDestination::ControllerChooses,
         supertypes: vec![],
         static_abilities: vec![],
         enter_with_counters: vec![],
@@ -5021,6 +5059,7 @@ fn build_double_team_trigger() -> TriggerDefinition {
             owner: TargetFilter::Controller,
             source_filter: None,
             enters_attacking: true,
+            attack_destination: TokenAttackDestination::ControllerChooses,
             tapped: true,
             count: QuantityExpr::Fixed { value: 1 },
             extra_keywords: vec![],
@@ -6037,6 +6076,7 @@ fn build_ingest_trigger() -> TriggerDefinition {
         count: QuantityExpr::Fixed { value: 1 },
         position: crate::types::ability::LibraryPosition::Top,
         face_down: false,
+        actor: crate::types::ability::LibraryInstructionActor::LibraryPlayer,
     };
     let execute = AbilityDefinition::new(AbilityKind::Spell, exile).description(
         "CR 702.115a: Ingest — that player exiles the top card of their library".to_string(),
@@ -6069,6 +6109,7 @@ fn is_ingest_trigger(t: &TriggerDefinition) -> bool {
                 count: QuantityExpr::Fixed { value: 1 },
                 position: crate::types::ability::LibraryPosition::Top,
                 face_down: false,
+                actor: crate::types::ability::LibraryInstructionActor::LibraryPlayer,
             })
         )
 }
@@ -7891,18 +7932,29 @@ pub fn synthesize_backup(face: &mut CardFace) {
 /// permanent. The `type_str` is the capitalized Champion payload (e.g.
 /// "Kithkin", "Dragon"); per CR 702.72a it always names a creature type. A
 /// payload of "Creature" (cards that champion a creature of any type) yields a
-/// bare creature filter with no subtype constraint.
+/// bare creature filter with no subtype constraint. An "X or Y" payload
+/// ("Goblin or Shaman") is the union of both types.
 ///
 /// `FilterProp::Another` enforces the "another" clause (CR 109.1): the
-/// championing permanent itself can never be the exiled creature.
+/// championing permanent itself can never be the exiled permanent.
 fn champion_type_filter(type_str: &str) -> TargetFilter {
-    let mut filter = TypedFilter::creature()
-        .controller(ControllerRef::You)
-        .properties(vec![FilterProp::Another]);
-    if !type_str.eq_ignore_ascii_case("creature") {
-        filter = filter.subtype(type_str.to_string());
+    let any_creature = type_str.eq_ignore_ascii_case("creature");
+    // CR 109.2 + CR 205.3m: a creature type names any permanent with that
+    // type, kindreds included; only "a creature" is scoped to creatures.
+    let scope = if any_creature {
+        TypedFilter::creature()
+    } else {
+        TypedFilter::permanent()
     }
-    TargetFilter::Typed(filter)
+    .controller(ControllerRef::You)
+    .properties(vec![FilterProp::Another]);
+    if any_creature {
+        return TargetFilter::Typed(scope);
+    }
+    if let Some(union) = crate::parser::oracle_target::parse_type_phrase_union(type_str, &scope) {
+        return union;
+    }
+    TargetFilter::Typed(scope.subtype(type_str.to_string()))
 }
 
 fn champion_has_eligible_object_condition(type_str: &str) -> AbilityCondition {
@@ -8010,6 +8062,7 @@ fn build_champion_etb_trigger(type_str: &str) -> TriggerDefinition {
         Effect::ChooseOneOf {
             chooser: PlayerFilter::Controller,
             branches: vec![exile_branch, sacrifice_branch.clone()],
+            kind: ChooseOneOfKind::Ordinary,
         },
     )
     .condition(champion_has_eligible_object_condition(type_str));
@@ -9256,6 +9309,7 @@ pub fn synthesize_read_ahead(face: &mut CardFace) {
         // chapter number"; the chosen value is persisted on the entering Saga
         // so the `PutCounter` sub-ability can read it via `ChosenNumber`.
         Effect::Choose {
+            chooser: crate::types::ability::ControllerRef::You,
             choice_type: ChoiceType::NumberRange {
                 min: 1,
                 // CR 702.155b: the Saga states its own upper bound (the final
@@ -9960,6 +10014,7 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
         protector_replacement.execute = Some(Box::new(AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Choose {
+                chooser: crate::types::ability::ControllerRef::You,
                 choice_type: ChoiceType::opponent(),
                 persist: true,
                 selection: crate::types::ability::TargetSelectionMode::Chosen,
@@ -10091,6 +10146,7 @@ pub fn synthesize_tribute_intrinsics(face: &mut CardFace) {
     let choose_stage = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Choose {
+            chooser: crate::types::ability::ControllerRef::You,
             choice_type: ChoiceType::opponent(),
             persist: true,
             selection: crate::types::ability::TargetSelectionMode::Chosen,
@@ -10109,39 +10165,54 @@ pub fn synthesize_tribute_intrinsics(face: &mut CardFace) {
     face.replacements.push(replacement);
 }
 
+/// Whether the parser-extracted keyword `extracted` supersedes the MTGJSON-derived
+/// base keyword `existing` — the per-class reconciliation rule of
+/// [`merge_extracted_keywords`], stated once so the classes cannot drift apart.
+///
+/// The distinction is WHAT identifies the keyword. `kind()` is an identity axis
+/// only while it names one keyword ability (`Keyword::kind_identifies_ability`),
+/// and it is emphatically not one for `KeywordKind::Unknown`, the catch-all bucket
+/// shared by ~60 unrelated keywords (Storm, Echo, Spree, Toxic,
+/// StartingIntensity, …): a `kind()`-based retain there deletes every unrelated
+/// base keyword of that bucket, and the merge's own `extend` only restores the
+/// ones the parser independently re-extracted.
+fn extracted_supersedes_base(existing: &Keyword, extracted: &Keyword) -> bool {
+    // CR 113.2c / CR 702.85c / CR 702.40b / CR 702.116b: a keyword whose instances
+    // each function separately is printed as repeated bare words but deduped by
+    // MTGJSON; only the exact same keyword is dropped, so the parser-recovered
+    // occurrences become authoritative.
+    if extracted.instances_function_separately() {
+        return existing == extracted;
+    }
+    match extracted {
+        // Parameterized keywords whose printed parameter IS the identity axis (and
+        // which share `KeywordKind::Unknown` with unrelated keywords — Bloodthirst
+        // with Echo/Toxic/…, StartingIntensity with Storm/Spree/…): replace the
+        // base copy of the SAME concrete variant, i.e. its previous parameter, and
+        // leave every other base ability of that kind untouched.
+        Keyword::Bloodthirst(_) | Keyword::StartingIntensity(_) => {
+            std::mem::discriminant(existing) == std::mem::discriminant(extracted)
+        }
+        // Everything else: an MTGJSON-derived default of the same `kind()` (e.g.
+        // `Morph(zero)` for a parsed `Morph({2}{B}{G}{U})`) is this keyword's
+        // placeholder and is replaced by the parser-extracted value.
+        _ => existing.kind() == extracted.kind(),
+    }
+}
+
 /// Merge parser-extracted keywords into a base (MTGJSON-derived) keyword list,
 /// reconciling parameterized and multi-instance keywords. Single authority shared
 /// by the production card-data pipeline (`build_oracle_face_inner`) and the
 /// scenario test harness (`game::scenario::build_face_from_oracle`) so the two
 /// cannot diverge.
 ///
-/// CR 113.2c / CR 702.85c / CR 702.40b / CR 702.116b: keywords whose instances
-/// each function separately (`instances_function_separately()`) are printed as
-/// repeated bare words but deduped by MTGJSON; the parser recovered the true
-/// printed instance count from Oracle text, so drop every MTGJSON copy of THIS
-/// keyword (matched on the concrete variant, not `kind()`: Storm and Myriad share
-/// `KeywordKind::Unknown` with ~50 other keywords, so a `kind()`-based retain would
-/// wrongly strip unrelated Unknown keywords — concrete-variant equality is exact for
-/// all four predicate keywords regardless of kind, since they are unit variants) and
-/// let the parser-recovered occurrences be authoritative, then extend. Fallback: if the
-/// parser found zero occurrences, this branch never runs for the keyword, so the
-/// single MTGJSON copy is preserved.
-///
-/// Bloodthirst is parameterized: replace any MTGJSON-derived default
-/// (`Bloodthirst(_)`) with the parser-extracted value.
-/// All other keywords: when the parser extracts a parameterized keyword (e.g.,
-/// `Morph({2}{B}{G}{U})`), remove any MTGJSON-derived default of the same `kind()`
-/// (e.g., `Morph(zero)`).
+/// `extracted_supersedes_base` holds the per-class rules; this function only
+/// applies them and then appends the authoritative parser-recovered keywords.
+/// Fallback: if the parser found zero occurrences of a keyword, no rule runs for
+/// it, so the single MTGJSON copy is preserved.
 pub(crate) fn merge_extracted_keywords(base: &mut Vec<Keyword>, extracted: Vec<Keyword>) {
     for extracted_kw in &extracted {
-        if extracted_kw.instances_function_separately() {
-            base.retain(|existing| existing != extracted_kw);
-        } else if matches!(extracted_kw, Keyword::Bloodthirst(_)) {
-            base.retain(|existing| !matches!(existing, Keyword::Bloodthirst(_)));
-        } else {
-            let kind = extracted_kw.kind();
-            base.retain(|existing| existing.kind() != kind);
-        }
+        base.retain(|existing| !extracted_supersedes_base(existing, extracted_kw));
     }
     base.extend(extracted);
 }
@@ -11911,6 +11982,26 @@ mod madness_synthesis_tests {
         face.keywords.push(Keyword::Flying);
         synthesize_dredge(&mut face);
         assert!(face.replacements.is_empty());
+    }
+
+    /// F1 — the printed label pluralizes its own count: Dredge 1 (Shenanigans,
+    /// Grave-Shell Scarab) reads "mill 1 card", never "mill 1 cards".
+    #[test]
+    fn dredge_description_pluralizes_its_own_count() {
+        assert_eq!(
+            dredge_replacement_definition(1).description.as_deref(),
+            Some(
+                "CR 702.52a: Dredge — instead of drawing, you may mill 1 card and return \
+                 this card from your graveyard to your hand."
+            )
+        );
+        assert_eq!(
+            dredge_replacement_definition(3).description.as_deref(),
+            Some(
+                "CR 702.52a: Dredge — instead of drawing, you may mill 3 cards and return \
+                 this card from your graveyard to your hand."
+            )
+        );
     }
 }
 
@@ -14478,6 +14569,7 @@ mod provoke_runtime_tests {
     use crate::game::ability_utils::build_resolved_from_def_with_targets;
     use crate::game::combat::{AttackTarget, AttackerInfo, CombatState};
     use crate::game::effects::resolve_ability_chain;
+    use crate::game::game_object::ObjectIncarnationRefExt;
     use crate::game::zones::create_object;
     use crate::types::ability::{ContinuousModification, EffectKind, TargetRef};
     use crate::types::events::GameEvent;
@@ -18597,16 +18689,7 @@ mod idempotency_tests {
 
     /// CR 609.3 + CR 111.7 (#8147): one mobilized token trades in combat before
     /// the end step, so it has ceased to exist by the time the delayed
-    /// "sacrifice them" fires. The delayed trigger snapshots BOTH token ids at
-    /// creation and carries no incarnation pins, so `live_object_targets` still
-    /// hands the resolver the dead id; `sacrifice::resolve` used to `?` out with
-    /// `EffectError::ObjectNotFound` on it and abandon the whole effect, leaving
-    /// the survivor on the battlefield forever.
-    ///
-    /// Discriminating (fail-on-revert): restore the `ok_or(...)?` in
-    /// `effects/sacrifice.rs` and the survivor stays on the battlefield.
-    /// `synthesize_mobilize_runtime_sacrifices_tokens_at_next_end_step` cannot
-    /// see this — nothing dies in it, so every snapshotted id is still live.
+    /// "sacrifice them" fires.
     #[test]
     fn mobilize_end_step_sacrifice_still_takes_the_survivor_of_a_combat_trade() {
         let mut face = CardFace::default();
@@ -18648,6 +18731,62 @@ mod idempotency_tests {
             state.objects[&survivor].zone,
             Zone::Graveyard,
             "surviving mobilized token must still be sacrificed"
+        );
+    }
+
+    /// CR 603.7c + CR 111.7: both mobilized tokens are gone before the end step, and
+    /// a later token producer has overwritten `last_created_token_ids`. The delayed
+    /// "sacrifice them" has no referent left, so it must not sacrifice that later
+    /// token.
+    #[test]
+    fn mobilize_end_step_sacrifice_ignores_a_later_producers_token_when_all_referents_are_gone() {
+        let mut face = CardFace::default();
+        face.keywords
+            .push(Keyword::Mobilize(QuantityExpr::Fixed { value: 2 }));
+        synthesize_mobilize(&mut face);
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mobilizer".to_string(),
+            Zone::Battlefield,
+        );
+        let execute = face
+            .triggers
+            .first()
+            .and_then(|trigger| trigger.execute.as_deref())
+            .expect("mobilize trigger must have an execute body");
+        let ability = build_resolved_from_def(execute, source_id, PlayerId(0));
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        let tokens = state.last_created_token_ids.clone();
+        assert_eq!(tokens.len(), 2);
+        for token in tokens {
+            state.battlefield.retain(|id| *id != token);
+            state.objects.remove(&token);
+        }
+
+        let later_token = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Later Token".to_string(),
+            Zone::Battlefield,
+        );
+        state.last_created_token_ids = vec![later_token];
+
+        let stacked =
+            check_delayed_triggers(&mut state, &[GameEvent::PhaseChanged { phase: Phase::End }]);
+        assert_eq!(stacked.len(), 1, "end-step cleanup must still stack");
+        resolve_top(&mut state, &mut events);
+
+        assert_eq!(
+            state.objects[&later_token].zone,
+            Zone::Battlefield,
+            "the later producer's token was never named by the delayed trigger"
         );
     }
 
@@ -22372,6 +22511,122 @@ mod bloodthirst_synthesis_tests {
         assert_eq!(base, vec![Keyword::Squad(squad_cost)]);
     }
 
+    /// Production `build_oracle_face`: merging a parser-extracted
+    /// `StartingIntensity(N)` must not delete an unrelated base keyword that merely
+    /// SHARES `KeywordKind::Unknown` with it.
+    ///
+    /// `StartingIntensity(_)` is `KeywordKind::Unknown`, the catch-all bucket shared
+    /// by ~60 unrelated keywords, so a `kind()`-based retain deletes every base
+    /// keyword of that bucket, and the merge's own `extend` restores only the ones
+    /// the parser independently re-extracted. The MTGJSON array below carries the
+    /// two entries that make the hazard real:
+    ///
+    ///   * `"Intensity"` — the REAL MTGJSON spelling of this mechanic (`AtomicCards`
+    ///     reports `["Intensity"]` for all 20 carriers). It has no `FromStr` arm, so
+    ///     it parses to `Unknown("Intensity")` and the base builder's
+    ///     `!Unknown(_)` filter drops it before the merge; it is here so the fixture
+    ///     is the card's genuine MTGJSON shape rather than a cleaned-up version.
+    ///   * `"Spree"` — an unrelated keyword of that same `Unknown` bucket that the
+    ///     Oracle text never mentions, so nothing re-extracts it. Hostile by
+    ///     construction: no live carrier pairs Intensity with it, which is exactly
+    ///     why the hazard is latent rather than absent.
+    ///
+    /// Revert-red: restoring the `kind()` retain drops `Spree`, so the first
+    /// assertion fails with `[StartingIntensity(2)]`.
+    #[test]
+    fn starting_intensity_face_synthesis_keeps_unrelated_unknown_kind_keywords() {
+        // Verbatim `Ribald Shanty` Oracle text (YLCI), the card the arm exists for.
+        const RIBALD_SHANTY: &str = "Starting intensity 2\n\
+            Ribald Shanty deals damage equal to its intensity to target creature or planeswalker.\n\
+            All Chorus cards you own intensify by 1.";
+
+        let mtgjson = AtomicCard {
+            name: "Ribald Shanty".to_string(),
+            mana_cost: Some("{1}{R}".to_string()),
+            colors: vec!["R".to_string()],
+            color_identity: vec!["R".to_string()],
+            power: None,
+            toughness: None,
+            loyalty: None,
+            defense: None,
+            text: Some(RIBALD_SHANTY.to_string()),
+            layout: "normal".to_string(),
+            type_line: Some("Instant".to_string()),
+            types: vec!["Instant".to_string()],
+            subtypes: vec!["Chorus".to_string()],
+            supertypes: Vec::new(),
+            keywords: Some(vec!["Intensity".to_string(), "Spree".to_string()]),
+            side: None,
+            face_name: None,
+            mana_value: 2.0,
+            legalities: Default::default(),
+            leadership_skills: None,
+            printings: Vec::new(),
+            rulings: Vec::new(),
+            is_game_changer: false,
+            identifiers: crate::database::mtgjson::AtomicIdentifiers {
+                scryfall_oracle_id: None,
+                scryfall_id: None,
+            },
+            foreign_data: Vec::new(),
+            related_cards: crate::database::mtgjson::SetRelatedCards::default(),
+        };
+
+        let face = build_oracle_face(&mtgjson, None);
+
+        // Reach guard: the face really did take the parameterized-merge arm — the
+        // printed N reached `face.keywords` at all.
+        assert!(
+            // allow-raw-authority: test asserts build-time CardFace intrinsic keywords; no GameState/live object at synthesis time
+            face.keywords.contains(&Keyword::StartingIntensity(2)),
+            "the printed \"Starting intensity 2\" must reach the merged face; got {:?}",
+            face.keywords
+        );
+        assert!(
+            // allow-raw-authority: test asserts build-time CardFace intrinsic keywords; no GameState/live object at synthesis time
+            face.keywords.contains(&Keyword::Spree),
+            "an unrelated base keyword sharing KeywordKind::Unknown with \
+             StartingIntensity must survive the merge; got {:?}",
+            face.keywords
+        );
+        assert_eq!(
+            face.keywords
+                .iter()
+                .filter(|keyword| matches!(keyword, Keyword::StartingIntensity(_)))
+                .count(),
+            1,
+            "the parser-extracted parameter must not be duplicated; got {:?}",
+            face.keywords
+        );
+    }
+
+    /// The parameter half of the same rule, pinned at the shared authority.
+    ///
+    /// It cannot be exhibited by a production face: no base source can spell
+    /// `StartingIntensity(_)`. `FromStr` has no arm for it, so BOTH MTGJSON's real
+    /// `"Intensity"` and the typed spelling `"StartingIntensity"` land on
+    /// `Keyword::Unknown(_)` and the base builder filters them out; only the
+    /// card-data deserializer (`keyword_from_tagged`) reconstructs the typed variant,
+    /// and it is not a face-synthesis input. The rule is still load-bearing — the
+    /// merge authority is shared with the scenario harness, and a base copy is what
+    /// the identity-aware arm must REPLACE rather than keep beside the parsed value —
+    /// so it is pinned here, exactly as the Bloodthirst precedent pins its own arm.
+    ///
+    /// Revert-red both ways. The `kind()` retain loses `Spree`; a rule that simply
+    /// keeps every base keyword leaves `StartingIntensity(0)` beside the parsed
+    /// `StartingIntensity(2)` and fails the exact-vector assertion.
+    #[test]
+    fn merge_extracted_keywords_replaces_only_the_same_parameter_family() {
+        let mut base = vec![Keyword::StartingIntensity(0), Keyword::Spree];
+        merge_extracted_keywords(&mut base, vec![Keyword::StartingIntensity(2)]);
+        assert_eq!(
+            base,
+            vec![Keyword::Spree, Keyword::StartingIntensity(2)],
+            "the previous StartingIntensity parameter must be replaced and the \
+             unrelated Unknown-kind base keyword kept"
+        );
+    }
+
     #[test]
     fn build_oracle_face_drops_craft_default_when_material_constraint_is_unparsed() {
         let mtgjson = AtomicCard {
@@ -24685,7 +24940,7 @@ mod sunburst_runtime_tests {
             .map(|c| ManaUnit::new(ManaType::from(*c), ObjectId(0), false, Vec::new()))
             .collect();
         if let Some(p) = state.players.iter_mut().find(|p| p.id == P0) {
-            p.mana_pool.mana = mana;
+            p.mana_pool = crate::types::mana::ManaPool::from_units(mana);
         }
 
         (GameRunner::from_state(state), spell)
@@ -25274,6 +25529,7 @@ mod ingest_gravestorm_synthesis_tests {
             count,
             position: _,
             face_down,
+            actor: _,
         } = effect
         else {
             panic!("Ingest must exile the top card, got {effect:?}");
@@ -25529,8 +25785,9 @@ mod champion_synthesis_tests {
             "Champion should sacrifice itself directly when no eligible object exists"
         );
 
-        let Some(Effect::ChooseOneOf { branches, chooser }) =
-            etb.execute.as_deref().map(|a| &*a.effect)
+        let Some(Effect::ChooseOneOf {
+            branches, chooser, ..
+        }) = etb.execute.as_deref().map(|a| &*a.effect)
         else {
             panic!("expected ChooseOneOf ETB execute");
         };
@@ -25559,7 +25816,12 @@ mod champion_synthesis_tests {
                             .type_filters
                             .iter()
                             .any(|f| matches!(f, TypeFilter::Subtype(s) if s == "Elf")));
+                        // CR 109.2 + CR 205.3m: an Elf permanent, kindreds included.
                         assert!(tf
+                            .type_filters
+                            .iter()
+                            .any(|f| matches!(f, TypeFilter::Permanent)));
+                        assert!(!tf
                             .type_filters
                             .iter()
                             .any(|f| matches!(f, TypeFilter::Creature)));
@@ -25576,6 +25838,28 @@ mod champion_synthesis_tests {
             .find(|b| matches!(&*b.effect, Effect::Sacrifice { .. }))
             .expect("sacrifice branch must exist");
         assert!(is_champion_self_sacrifice_ability(sacrifice));
+    }
+
+    /// CR 702.72a: "Champion a Goblin or Shaman" (Lightning Crafter) exiles
+    /// another Goblin or another Shaman you control, never one subtype named
+    /// "Goblin or Shaman".
+    #[test]
+    fn champion_or_payload_is_a_union_of_both_types() {
+        let filter = champion_type_filter("Goblin or Shaman");
+        let TargetFilter::Or { filters } = &filter else {
+            panic!("expected an Or union, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 2);
+        for (leg, kind) in filters.iter().zip(["Goblin", "Shaman"]) {
+            let TargetFilter::Typed(tf) = leg else {
+                panic!("expected a Typed leg, got {leg:?}");
+            };
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+            assert!(tf.properties.contains(&FilterProp::Another));
+            assert!(tf
+                .type_filters
+                .contains(&TypeFilter::Subtype(kind.to_string())));
+        }
     }
 
     /// CR 702.72a + CR 702.72b: Champion synthesizes an LTB trigger that

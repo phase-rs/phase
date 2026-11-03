@@ -23,7 +23,7 @@ use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::counter::CounterType;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaType, ManaUnit};
-use engine::types::phase::Phase;
+use engine::types::phase::{Phase, PhaseGroup, TurnSegment};
 
 const LNT_ORACLE: &str = "Choose two target creatures. Untap them. Put two +1/+1 counters on \
 each of them. They gain vigilance, indestructible, and haste until end of turn. After this \
@@ -72,7 +72,7 @@ fn last_night_together_restricts_additional_combat_to_chosen_creatures() {
             .state()
             .extra_phases
             .iter()
-            .any(|ep| ep.phase == Phase::BeginCombat),
+            .any(|ep| ep.segment == TurnSegment::Phase(PhaseGroup::Combat)),
         "an additional combat phase must be scheduled; outcome stack empty = {}",
         outcome.state().stack.is_empty()
     );

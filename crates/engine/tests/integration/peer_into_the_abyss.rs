@@ -13,7 +13,8 @@
 //!      library" must route through `parse_fraction_rounded` FIRST so it
 //!      becomes a `DivideRounded` over the target's library count, before the
 //!      generic semantic `parse_quantity_ref` fallback
-//!      (`parse_dynamic_count_phrase` in `oracle_effect/imperative.rs`).
+//!      (`parse_equal_to_count` in `oracle_util.rs`, the draw count
+//!      position's equal-to chain).
 //!
 //! The trailing "Round up each time." flips both `DivideRounded.rounding`
 //! Down→Up. Library = 9 → ceil(9/2) = 5 drawn (Down would be 4); life = 7 →

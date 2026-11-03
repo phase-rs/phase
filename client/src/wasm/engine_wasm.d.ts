@@ -2,6 +2,43 @@
 /* eslint-disable */
 
 /**
+ * Immutable exact-JSON state owned by wasm-bindgen, not an authoritative restore.
+ *
+ * Optional baseline arguments consume their handles. Call `clone_handle` before
+ * transferring a baseline if the caller needs to retain it.
+ */
+export class StateCodecHandle {
+    private constructor();
+    free(): void;
+    [Symbol.dispose](): void;
+    /**
+     * Cheaply share immutable state before transferring a baseline handle.
+     */
+    clone_handle(): StateCodecHandle;
+    /**
+     * Return the full SHA-256 digest of the retained JSON bytes as lowercase hex.
+     */
+    hash(): string;
+    /**
+     * Return the exact retained JSON value as text, including internal whitespace.
+     */
+    json(): string;
+    /**
+     * Return the exact retained JSON bytes, without parsing through JavaScript.
+     */
+    json_bytes(): Uint8Array;
+    /**
+     * Return the publication revision, if supplied, as a JavaScript bigint.
+     */
+    revision(): bigint | undefined;
+    /**
+     * Share immutable JSON with publication metadata, without changing its bytes or hash.
+     * Revisions are supplied by the publisher, not inferred from JSON.
+     */
+    with_revision(revision: bigint): StateCodecHandle;
+}
+
+/**
  * Apply a seat mutation to a seat state, using the TLS card database for deck
  * resolution. Both arguments are JSON strings; returns `{ state, delta }` as
  * a JS object on success, or a JS error string on failure.
@@ -9,10 +46,59 @@
 export function apply_seat_mutation(state_json: string, mutation_json: string): any;
 
 /**
+ * The longest match structure `format` may be played as; the lobby offers Bo3 only when this is Bo3.
+ */
+export function bestOfThreeCeilingForFormat(format: any): any;
+
+/**
+ * Build the HTTP request for one LLM-driven AI decision.
+ *
+ * `endpoint_json` is the player's configured `LlmEndpointConfig`. `history_json`
+ * is the engine-authored game log the caller has accumulated from prior
+ * `ActionResult`s — engine data handed back for rendering, not a client
+ * derivation. Returns `null` when the seat has no decision to make; throws only
+ * on a malformed argument, which is a programming error rather than a runtime
+ * outcome.
+ */
+export function buildLlmDecisionRequest(difficulty: string, player_id: number, endpoint_json: string, history_json: string): any;
+
+/**
+ * Build the connection-probe request for an endpoint.
+ *
+ * Stateless by design: a player configures a provider in Settings, usually
+ * with no game running, and a test that required a live board would be
+ * untestable exactly when it is most needed. The request is built by the same
+ * `build_chat_request` a real decision uses, so a probe that succeeds proves
+ * the endpoint, credential and model the game path will use.
+ */
+export function buildLlmProbeRequest(endpoint_json: string): any;
+
+/**
  * Build the bounded card corpus for parallel AI scoring workers. The live
  * main engine remains the only authority that owns the full card database.
  */
 export function build_ai_card_subset(): string;
+
+/**
+ * `actor` withdraws their own open takeback request.
+ */
+export function cancel_takeback_js(actor: number): any;
+
+/**
+ * The canonical printed name of each of `names`, index-aligned, `null` where
+ * `CardDatabase::canonical_name` has none. Errors if the card database is
+ * not loaded.
+ */
+export function canonicalCardNames(names: any): any;
+
+/**
+ * Resource bounds on one deck list's printings sidecar, for the P2P host's guest
+ * admission (`handleNewGuest` in `client/src/adapter/p2p-adapter.ts`). Takes the
+ * guest deck's `printings` value as received. Decodes it with the one sidecar decoder
+ * (which refuses more than `MAX_DECK_PRINTING_ENTRIES` elements of any shape) and applies
+ * `validate_deck_printings_bounds`; throws the reason on abuse. Needs no card database.
+ */
+export function checkDeckPrintingsBounds(printings: any): void;
 
 /**
  * Classify a deck's archetype (Aggro / Midrange / Control / Combo / Ramp) using
@@ -104,6 +190,25 @@ export function customFormatFromLobbyConfig(name: string, format_config: any): a
 export function deckCopyLimit(name: string): any;
 
 /**
+ * Who supplies `format`'s deck; the lobby offers a pile choice only for `HostPile`.
+ */
+export function deckSupplyForFormat(format: any): any;
+
+/**
+ * Host the running Eye to Eye / Mouth to Mouth contest locally (single-player and
+ * P2P-host engines have no server to stamp time). The JS driver passes its own
+ * monotonic `now_ms` (`performance.now()`), the seats that are AI, and any clicks it
+ * collected since the last call — each stamped with its own `at_ms`. Clicks are
+ * applied in order, then the clock is advanced to `now_ms`, exactly as the server
+ * does; the engine's state machine decides everything.
+ *
+ * A contest's real-time result cannot be replayed from a recorded action list, so
+ * the first drive call invalidates an in-progress replay recording (the same
+ * treatment debug actions get).
+ */
+export function drive_contest_js(now_ms: number, ai_players: Uint8Array, away_players: Uint8Array, clicks: any): any;
+
+/**
  * Estimates a Commander deck's bracket without touching `GAME_STATE`.
  * Reads `CARD_DB` for bracket signals. Returns `null` (via serde) when the
  * deck has no commander or the card database is not loaded.
@@ -122,8 +227,12 @@ export function estimate_bracket_for_deck(deck_js: any): any;
  * (`validateGuestDeck` in `client/src/adapter/p2p-adapter.ts`), which kicks a
  * guest whose deck is illegal for the room's format. UI-hint callers must keep
  * using `evaluate_deck_compatibility_js`: that one deliberately answers "no
- * opinion" (`selected_format_compatible: null`) for a Custom format, which is
- * the honest answer for a legality chip and an unacceptable one for a kick.
+ * opinion" (`selected_format_compatible: null`) for a Custom format — every
+ * request crossing this WASM boundary carries only a bare `GameFormat` tag
+ * (Wire-Inertness Invariant, `types::format::SelectedFormat`), which can never
+ * resolve real rules even though Phase 1d wired a real evaluator
+ * (`evaluate_custom_format`) for a trusted, already-`Resolved` config — which
+ * is the honest answer for a legality chip and an unacceptable one for a kick.
  */
 export function evaluateDeckFormatGate(request: any): any;
 
@@ -167,6 +276,17 @@ export function export_replay_log(): string;
  * would be rejected at the next boundary it crossed.
  */
 export function formatConfigForCustomRules(custom_rules: any): any;
+
+/**
+ * Convert an LLM completion into an authority-bound proposal.
+ *
+ * Mirrors `get_ai_action_proposal_from_scores`: the model's reply is an
+ * untrusted hint, so a fresh contract is derived from the live state and the
+ * selected action is admitted only if that contract contains it. There is
+ * intentionally no endpoint by which model text becomes a `GameAction` without
+ * this check.
+ */
+export function getAiActionProposalFromLlmResponse(player_id: number, fingerprint: string, provider_label: string, status: number, response_body: string): any;
 
 /**
  * Return the authoritative list of user-selectable formats as a typed array.
@@ -253,10 +373,10 @@ export function get_card_parse_details(name: string): any;
 export function get_card_rulings(name: string): any;
 
 /**
- * Filtered-viewer variant of `get_game_state`. Runs the viewer filter
- * first (hides opponent hand/library per standard multiplayer redaction),
- * then derives views over the filtered state so the wire shape is
- * identical to `get_game_state` regardless of filter path.
+ * Variant of `get_game_state` that takes the viewer seat as an argument.
+ * Runs the viewer filter first (hides opponent hand/library per standard
+ * multiplayer redaction), then wraps the result in the same
+ * `ClientGameStateRef` envelope `get_game_state` returns.
  */
 export function get_filtered_game_state(viewer: number): any;
 
@@ -295,6 +415,13 @@ export function get_legal_actions_js(): any;
 export function get_stack_pressure(): any;
 
 export function get_viewer_snapshot_js(player_id: number): any;
+
+/**
+ * Combined viewer projection and event slice for one engine transition.
+ * Unlike the legacy state-only endpoint, this path validates the viewer id
+ * before narrowing it to the engine's representable PlayerId domain.
+ */
+export function get_viewer_transition_snapshot_js(player_id: number, events: any): any;
 
 /**
  * Whether the current game has an in-progress replay recording. `false`
@@ -385,10 +512,17 @@ export function legal_targets_for_castables_js(object_ids: any): any;
 
 /**
  * Returns the engine-typed catalog of debug-spawnable token presets,
- * loaded from `crates/engine/data/known-tokens.toml`. Read by the debug UI
+ * loaded from `crates/phase-ast/data/known-tokens.toml`. Read by the debug UI
  * to populate the Create Token dropdown — frontend never derives this list.
  */
 export function list_token_presets_js(): any;
+
+/**
+ * The engine-owned LLM provider catalog: vendors, default endpoints, and
+ * suggested model ids for the settings UI. The display layer renders exactly
+ * this rather than carrying a list of its own.
+ */
+export function llmProviderCatalog(): any;
 
 /**
  * Load the card database from a JSON string (card-data.json contents).
@@ -427,6 +561,11 @@ export function load_replay_for_playback(json_str: string): number;
  * blocks a legal add.
  */
 export function maxDeckCopies(name: string, format_config: any): any;
+
+/**
+ * The open takeback vote, or `null`, for replay to a reconnecting guest.
+ */
+export function pending_takeback_js(): any;
 
 /**
  * Verify WASM integration works.
@@ -493,6 +632,17 @@ export function replay_length_js(): number;
  * every other fallible engine entry point that returns `Result<_, JsValue>`.
  */
 export function replay_seek_js(target: number): any;
+
+/**
+ * `actor` asks to take back their own most recent action. Throws
+ * `NOT_INITIALIZED` when no game is installed.
+ */
+export function request_takeback_js(actor: number, ai_players: Uint8Array): any;
+
+/**
+ * `actor` approves or declines the open takeback vote.
+ */
+export function respond_takeback_js(actor: number, approve: boolean, ai_players: Uint8Array): any;
 
 /**
  * Restore the game state from a JSON string.
@@ -562,6 +712,13 @@ export function resume_restored_game_state(): any;
 export function search_cards_js(query: any): any;
 
 /**
+ * Request (or stop requesting) the "Show AI Hand" disclosure for the local
+ * seat's `get_game_state` projection. The engine honors it only for a seat
+ * with debug identity access; otherwise hands stay hidden.
+ */
+export function set_debug_hand_reveal(enabled: boolean): void;
+
+/**
  * Set the multiplayer enforcement flag directly.
  *
  * Entering multiplayer is *not* done here: the engine claims the flag itself,
@@ -594,6 +751,40 @@ export function sideboardPolicyForFormat(format_config: any): any;
  * Returns the engine-authored Oathbreaker signature-spell selection policy.
  */
 export function signatureSpellSelectionPolicy(request: any): any;
+
+/**
+ * Decode frame bytes into exact JSON, never through the engine's state decoder.
+ *
+ * FULL ignores every baseline. Passing a baseline consumes that handle; call
+ * `clone_handle` before transfer to retain it. Malformed frames and DELTA
+ * revision/hash mismatches return errors without changing retained clones.
+ */
+export function state_codec_decode(bytes: Uint8Array, baseline?: StateCodecHandle | null): StateCodecHandle;
+
+/**
+ * Encode exact JSON as FULL or, with a compatible revisioned baseline, DELTA.
+ * Pass no baseline to force FULL for initial delivery or stream recovery.
+ *
+ * Passing a baseline consumes that handle; call `clone_handle` before transfer
+ * to retain it. The state argument is borrowed and remains usable.
+ */
+export function state_codec_encode(state: StateCodecHandle, baseline?: StateCodecHandle | null): Uint8Array;
+
+/**
+ * Serialize the current game's engine-filtered viewer state, without changing it.
+ *
+ * A seat selects that player's projection; 255 selects the server's spectator
+ * sentinel. An omitted viewer selects the engine's unseated public projection.
+ * Returns an error when no game is initialized. No derived-view envelope is added.
+ */
+export function state_codec_for_viewer(viewer?: number | null): StateCodecHandle;
+
+/**
+ * Validate raw JSON bytes and retain their exact value span, not outer whitespace.
+ *
+ * This does not deserialize or validate an authoritative engine state.
+ */
+export function state_codec_from_json(bytes: Uint8Array): StateCodecHandle;
 
 /**
  * Submit a game action on behalf of `actor` and return the ActionResult
@@ -634,24 +825,48 @@ export function submit_interaction_js(actor: number, submission: any): any;
  */
 export function take_last_panic_message(): string | undefined;
 
+/**
+ * Validate a probe response through the engine's own extraction and decoding.
+ *
+ * The transport deliberately returns non-2xx bodies rather than rejecting, so
+ * that a vendor's error message survives to be shown. That makes "bytes came
+ * back" a meaningless success signal -- a rejected key and an unknown model
+ * both arrive as well-formed bodies. This is the authority that says whether a
+ * reply is one the game path could actually use.
+ */
+export function validateLlmProbeResponse(provider_label: string, status: number, response_body: string): any;
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
+    readonly __wbg_statecodechandle_free: (a: number, b: number) => void;
     readonly apply_seat_mutation: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly bestOfThreeCeilingForFormat: (a: any) => any;
+    readonly buildLlmDecisionRequest: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
+    readonly buildLlmProbeRequest: (a: number, b: number) => [number, number, number];
     readonly build_ai_card_subset: () => [number, number, number, number];
+    readonly cancel_takeback_js: (a: number) => [number, number, number];
+    readonly canonicalCardNames: (a: any) => [number, number, number];
+    readonly checkDeckPrintingsBounds: (a: any) => [number, number];
     readonly classify_deck_js: (a: any) => [number, number, number];
     readonly clear_game_state: () => void;
+    readonly clear_replay_playback: () => void;
     readonly commanderPartnerCandidates: (a: number, b: number, c: any, d: any) => [number, number, number];
     readonly companionCandidates: (a: any) => [number, number, number];
+    readonly create_initial_state: () => any;
     readonly customFormatFromLobbyConfig: (a: number, b: number, c: any) => [number, number, number];
     readonly deckCopyLimit: (a: number, b: number) => any;
+    readonly deckSupplyForFormat: (a: any) => any;
+    readonly drive_contest_js: (a: number, b: number, c: number, d: number, e: number, f: any) => any;
     readonly estimate_bracket_for_deck: (a: any) => [number, number, number];
     readonly evaluateDeckFormatGate: (a: any) => [number, number, number];
     readonly evaluate_deck_compatibility_js: (a: any) => [number, number, number];
     readonly export_game_state_json: () => [number, number, number, number];
     readonly export_replay_log: () => [number, number, number, number];
     readonly formatConfigForCustomRules: (a: any) => [number, number, number];
+    readonly getAiActionProposalFromLlmResponse: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number];
+    readonly getFormatRegistry: () => any;
     readonly get_ai_action_proposal: (a: number, b: number, c: number) => [number, number, number];
     readonly get_ai_action_proposal_from_scores: (a: number, b: number, c: number, d: number, e: number, f: bigint) => [number, number, number];
     readonly get_ai_action_proposal_from_scores_with_diagnostics: (a: number, b: number, c: number, d: number, e: number, f: bigint) => [number, number, number];
@@ -663,9 +878,14 @@ export interface InitOutput {
     readonly get_card_parse_details: (a: number, b: number) => any;
     readonly get_card_rulings: (a: number, b: number) => any;
     readonly get_filtered_game_state: (a: number) => any;
+    readonly get_game_state: () => any;
     readonly get_legal_actions_for_viewer_js: (a: number) => any;
+    readonly get_legal_actions_js: () => any;
+    readonly get_stack_pressure: () => any;
     readonly get_viewer_snapshot_js: (a: number) => any;
+    readonly get_viewer_transition_snapshot_js: (a: number, b: any) => any;
     readonly has_replay_recording: () => number;
+    readonly init_panic_hook: () => void;
     readonly initialize_game: (a: any, b: number, c: number, d: any, e: any, f: number, g: number) => any;
     readonly initialize_multiplayer_host_game: (a: any, b: number, c: number, d: any, e: any, f: number, g: number) => any;
     readonly isCardCommanderEligibleForFormat: (a: number, b: number, c: any) => number;
@@ -673,36 +893,45 @@ export interface InitOutput {
     readonly is_multiplayer_mode: () => number;
     readonly legal_targets_for_castable_js: (a: number) => any;
     readonly legal_targets_for_castables_js: (a: any) => any;
+    readonly list_token_presets_js: () => any;
+    readonly llmProviderCatalog: () => any;
     readonly load_card_database: (a: number, b: number) => [number, number, number];
     readonly load_replay_for_playback: (a: number, b: number) => [number, number, number];
     readonly maxDeckCopies: (a: number, b: number, c: any) => any;
+    readonly pending_takeback_js: () => any;
     readonly ping: () => [number, number];
     readonly preview_action_js: (a: number, b: any) => any;
     readonly preview_interaction_js: (a: number, b: any) => any;
     readonly preview_mana_payment_js: (a: number, b: any) => any;
     readonly project_seat_view: (a: number, b: number) => [number, number, number];
+    readonly replay_header_js: () => any;
+    readonly replay_length_js: () => number;
     readonly replay_seek_js: (a: number) => [number, number, number];
+    readonly request_takeback_js: (a: number, b: number, c: number) => [number, number, number];
+    readonly respond_takeback_js: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly restore_game_state: (a: number, b: number) => [number, number];
     readonly resume_multiplayer_host_state: (a: number, b: number) => [number, number, number];
     readonly resume_restored_game_state: () => [number, number, number];
     readonly search_cards_js: (a: any) => [number, number, number];
+    readonly set_debug_hand_reveal: (a: number) => void;
     readonly set_multiplayer_mode: (a: number) => void;
     readonly sideboardPolicyForFormat: (a: any) => [number, number, number];
     readonly signatureSpellSelectionPolicy: (a: any) => [number, number, number];
+    readonly state_codec_decode: (a: number, b: number, c: number) => [number, number, number];
+    readonly state_codec_encode: (a: number, b: number) => [number, number, number, number];
+    readonly state_codec_for_viewer: (a: number) => [number, number, number];
+    readonly state_codec_from_json: (a: number, b: number) => [number, number, number];
+    readonly statecodechandle_clone_handle: (a: number) => number;
+    readonly statecodechandle_hash: (a: number) => [number, number];
+    readonly statecodechandle_json: (a: number) => [number, number];
+    readonly statecodechandle_revision: (a: number) => [number, bigint];
+    readonly statecodechandle_with_revision: (a: number, b: bigint) => number;
     readonly submit_action: (a: number, b: any) => any;
     readonly submit_ai_action_proposal: (a: number, b: number, c: number, d: any) => any;
     readonly submit_interaction_js: (a: number, b: any) => any;
     readonly take_last_panic_message: () => [number, number];
-    readonly get_game_state: () => any;
-    readonly get_legal_actions_js: () => any;
-    readonly get_stack_pressure: () => any;
-    readonly init_panic_hook: () => void;
-    readonly replay_header_js: () => any;
-    readonly list_token_presets_js: () => any;
-    readonly create_initial_state: () => any;
-    readonly getFormatRegistry: () => any;
-    readonly clear_replay_playback: () => void;
-    readonly replay_length_js: () => number;
+    readonly validateLlmProbeResponse: (a: number, b: number, c: number, d: number, e: number) => any;
+    readonly statecodechandle_json_bytes: (a: number) => [number, number];
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_exn_store: (a: number) => void;

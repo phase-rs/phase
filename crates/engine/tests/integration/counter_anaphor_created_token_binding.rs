@@ -31,7 +31,9 @@
 use engine::game::ability_utils::build_resolved_from_def_with_targets;
 use engine::game::effects::resolve_ability_chain;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::game::zones::create_object;
+use engine::game::triggers::process_triggers;
+use engine::game::zones::{create_object, move_to_zone};
+use engine::parser::oracle::parse_oracle_text;
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, Effect, ResolvedAbility, TargetFilter, TargetRef,
 };
@@ -40,6 +42,7 @@ use engine::types::counter::CounterType;
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::keywords::KeywordKind;
 use engine::types::mana::ManaColor;
+use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
@@ -50,6 +53,7 @@ const MATCH_THE_ODDS: &str =
 const GRIST_PLUS_ONE: &str = "Create a 1/1 black and green Insect creature token, then mill two cards. Put a deathtouch counter on the token if a black card was milled this way.";
 const APPLIED_GEOMETRY: &str = "Create a token that's a copy of target non-Aura permanent you control, except it's a 0/0 Fractal creature in addition to its other types. Put six +1/+1 counters on it.";
 const LONGSTALK_BRAWL: &str = "Gift a tapped Fish (You may promise an opponent a gift as you cast this spell. If you do, they create a tapped 1/1 blue Fish creature token before its other effects.)\nChoose target creature you control and target creature you don't control. Put a +1/+1 counter on the creature you control if the gift was promised. Then those creatures fight each other.";
+const SYNTHETIC_AUGMENTER: &str = "When this creature dies, create a 0/0 green and blue Fractal creature token, then put this creature's counters on that token.";
 
 fn p1p1(runner: &GameRunner, id: ObjectId) -> u32 {
     runner.state().objects[&id]
@@ -63,6 +67,14 @@ fn deathtouch(runner: &GameRunner, id: ObjectId) -> u32 {
     runner.state().objects[&id]
         .counters
         .get(&CounterType::Keyword(KeywordKind::Deathtouch))
+        .copied()
+        .unwrap_or(0)
+}
+
+fn flying(runner: &GameRunner, id: ObjectId) -> u32 {
+    runner.state().objects[&id]
+        .counters
+        .get(&CounterType::Keyword(KeywordKind::Flying))
         .copied()
         .unwrap_or(0)
 }
@@ -112,6 +124,84 @@ fn resolve(
     let resolved = build_resolved_from_def_with_targets(def, source, P0, targets);
     let mut events = Vec::new();
     resolve_ability_chain(runner.state_mut(), &resolved, &mut events, 0).expect("chain resolves");
+}
+
+/// CR 603.6c + CR 603.10 + CR 400.7 + CR 122.8: a self dies trigger reads the
+/// departed source's LKI counters and puts matching counters onto the token it
+/// just created via "that token" (`LastCreated`), not onto the graveyard object
+/// or an unrelated permanent.
+#[test]
+fn dies_trigger_puts_departed_source_counters_on_created_token() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let source = scenario
+        .add_creature_from_oracle(
+            P0,
+            "Synthetic Ambitious Augmenter",
+            3,
+            3,
+            SYNTHETIC_AUGMENTER,
+        )
+        .id();
+    let decoy = scenario.add_creature(P0, "Unrelated Creature", 2, 2).id();
+    let mut runner = scenario.build();
+    {
+        let source_obj = runner
+            .state_mut()
+            .objects
+            .get_mut(&source)
+            .expect("source exists");
+        source_obj.counters.insert(CounterType::Plus1Plus1, 2);
+        source_obj
+            .counters
+            .insert(CounterType::Keyword(KeywordKind::Flying), 1);
+    }
+
+    let mut events = Vec::new();
+    move_to_zone(runner.state_mut(), source, Zone::Graveyard, &mut events);
+    process_triggers(runner.state_mut(), &events);
+    runner.advance_until_stack_empty();
+
+    let token = last_token(&runner);
+    let token_obj = &runner.state().objects[&token];
+    assert!(
+        token_obj.is_token
+            && token_obj
+                .card_types
+                .subtypes
+                .iter()
+                .any(|subtype| subtype == "Fractal"),
+        "reach guard: trigger created the Fractal token, got {token_obj:?}"
+    );
+    assert_eq!(
+        runner.state().objects[&source].zone,
+        Zone::Graveyard,
+        "source left the battlefield before the counter transfer resolves"
+    );
+    assert!(
+        runner.state().objects[&source].counters.is_empty(),
+        "CR 122.2: live counters cease on zone change; transfer must use LKI"
+    );
+    assert_eq!(
+        p1p1(&runner, token),
+        2,
+        "created Fractal receives the departed source's +1/+1 counters"
+    );
+    assert_eq!(
+        flying(&runner, token),
+        1,
+        "created Fractal receives the departed source's keyword counter too"
+    );
+    assert_eq!(
+        p1p1(&runner, decoy),
+        0,
+        "unrelated creature gets no counters"
+    );
+    assert_eq!(
+        flying(&runner, decoy),
+        0,
+        "unrelated creature gets no keyword counters"
+    );
 }
 
 /// Call site B (for-each dispatch) — LOAD-BEARING FLIP. "Put a +1/+1 counter on
@@ -234,9 +324,9 @@ fn applied_geometry_it_exactly_six_no_double_seed() {
 }
 
 /// No-regression control for the "the creature" EXCLUSION. Longstalk Brawl's
-/// "Put a +1/+1 counter on THE CREATURE you control" binds the CHOSEN target
-/// (`ParentTarget` here in isolation; `ParentTargetSlot { 0 }` in the full-card
-/// parse), NOT the gift-created Fish token. "the creature" is deliberately kept
+/// "Put a +1/+1 counter on THE CREATURE you control" binds the CHOSEN
+/// you-control target (`ParentTargetSlot { 0 }` in the full-card parse, which
+/// declares both target slots), NOT the gift-created Fish token. "the creature" is deliberately kept
 /// OUT of the helper `alt` because it legitimately names a chosen target and is
 /// ambiguous — keeping it out is a forward-looking correctness measure. Measured
 /// caveat: it is not currently load-bearing (adding "the creature" flips ZERO
@@ -245,29 +335,33 @@ fn applied_geometry_it_exactly_six_no_double_seed() {
 /// the counter lands on the chosen creature, not the decoy `LastCreated` token.
 #[test]
 fn longstalk_brawl_the_creature_binds_chosen_target_not_token() {
-    let def = parse_def(LONGSTALK_BRAWL);
+    // The full-card parse strips the Gift keyword line and declares both
+    // "Choose target ..." slots, so the counter's anaphor resolves against them.
+    let parsed = parse_oracle_text(
+        LONGSTALK_BRAWL,
+        "Longstalk Brawl",
+        &["Gift".to_string()],
+        &["Sorcery".to_string()],
+        &[],
+    );
+    let def = parsed
+        .abilities
+        .first()
+        .expect("longstalk brawl parses a spell ability");
 
-    // Parse-level boundary proof: the real card's counter still binds the chosen
-    // slot, not the created token.
-    let put = find_put_counter(&def).expect("longstalk brawl parses a PutCounter");
+    // Parse-level boundary proof: the real card's counter binds the chosen
+    // you-control slot, not the created token.
+    let put = find_put_counter(def).expect("longstalk brawl parses a PutCounter");
     let Effect::PutCounter { target, .. } = put else {
         unreachable!("find_put_counter returns a PutCounter effect")
     };
-    // "the creature" is EXCLUDED from the anaphor set, so the counter keeps a
-    // CHOSEN-TARGET binding (`ParentTarget` in isolation; the full-card parse
-    // seeds the slot registry and yields `ParentTargetSlot { 0 }`) and does NOT
-    // become `LastCreated`. Reds if Longstalk's counter were ever parsed to the
-    // created token.
-    assert!(
-        !matches!(target, TargetFilter::LastCreated),
-        "'the creature you control' must NOT bind the created token (got {target:?})"
-    );
-    assert!(
-        matches!(
-            target,
-            TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
-        ),
-        "'the creature you control' binds the chosen target, not the token (got {target:?})"
+    // CR 601.2c + CR 608.2c: "the creature you control" names the first
+    // declared slot ("target creature you control"); it is EXCLUDED from the
+    // created-token anaphor set, so it never becomes `LastCreated`.
+    assert_eq!(
+        *target,
+        TargetFilter::ParentTargetSlot { index: 0 },
+        "'the creature you control' binds the chosen you-control slot"
     );
 
     // Resolved-delta proof: resolve the REAL parsed PutCounter over a chosen

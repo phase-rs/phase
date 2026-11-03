@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => {
     registerSW: vi.fn(),
     isBundledTauriOrigin: vi.fn(() => false),
     claimServiceWorkerReload: vi.fn(() => true),
+    hasServiceWorkerReloadBudget: vi.fn(() => true),
     markPendingAutoUpdate: vi.fn(),
     claimUpdateStatus: vi.fn((owner: string) => {
       if (!status.allowClaim) return false;
@@ -43,6 +44,7 @@ vi.mock("../../stores/connectivityStore", () => ({
 }));
 vi.mock("../updateMarker", () => ({
   claimServiceWorkerReload: mocks.claimServiceWorkerReload,
+  hasServiceWorkerReloadBudget: mocks.hasServiceWorkerReloadBudget,
   markPendingAutoUpdate: mocks.markPendingAutoUpdate,
 }));
 vi.mock("../updateStatus", () => ({
@@ -83,6 +85,7 @@ describe("registerServiceWorker connectivity lifecycle", () => {
     mocks.connectivity.listeners.clear();
     mocks.status.allowClaim = true;
     mocks.claimServiceWorkerReload.mockReturnValue(true);
+    mocks.hasServiceWorkerReloadBudget.mockReturnValue(true);
     mocks.markRemoteLoadOk.mockResolvedValue(true);
     ({ useMultiplayerDraftStore: draftStore } = await import("../../stores/multiplayerDraftStore"));
     Object.defineProperty(navigator, "serviceWorker", {
@@ -705,6 +708,293 @@ describe("registerServiceWorker connectivity lifecycle", () => {
       resolveFetch(jsonResponse({ build: __BUILD_HASH__ }));
 
       await expect(readiness).resolves.toEqual({ status: "not-ready", reason: "lifecycle-changed" });
+    });
+  });
+
+  describe("deployed-build gate", () => {
+    // Every export below is taken through `await import` after beforeEach's
+    // `vi.resetModules()`, so it is the same module instance `register()`
+    // evaluated: its `lifecycle` and the listeners `onNeedReload` notifies.
+    async function updater() {
+      return import("../registerServiceWorker");
+    }
+
+    /** A registered, idle lifecycle whose worker is `installing`, built by
+     * hand: the scheduler's check returns early while a worker installs, so
+     * `readyRegistration()` (which waits for that check) cannot build it. */
+    async function installingRegistration(): Promise<{ options: ServiceWorkerOptions; entry: ServiceWorkerRegistration }> {
+      const options = await register();
+      const active = activeWorker();
+      Object.defineProperty(navigator, "serviceWorker", { configurable: true, value: { controller: active } });
+      const entry = { ...registration(), active, waiting: null, installing: activeWorker("installing") } as ServiceWorkerRegistration;
+      options.onRegisteredSW("/sw.js", entry);
+      return { options, entry };
+    }
+
+    function pendingState<T>(promise: Promise<T>): Promise<T | "pending"> {
+      return Promise.race([promise, Promise.resolve("pending" as const)]);
+    }
+
+    describe("checkDeployedBuild", () => {
+      it("classifies the deployed build against this bundle's hash, network-only", async () => {
+        const { checkDeployedBuild } = await updater();
+        vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({ build: "testhash" }));
+        await expect(checkDeployedBuild()).resolves.toBe("current");
+        expect(fetch).toHaveBeenCalledWith("/build.json", expect.objectContaining({ cache: "no-store" }));
+
+        vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({ build: "other" }));
+        await expect(checkDeployedBuild()).resolves.toBe("stale");
+      });
+
+      it.each([
+        ["a 404", () => Promise.resolve(jsonResponse({ build: "testhash" }, 404))],
+        ["a rejected fetch", () => Promise.reject(new Error("offline"))],
+        ["malformed JSON", () => Promise.resolve(malformedJsonResponse())],
+        ["a non-string build", () => Promise.resolve(jsonResponse({ build: 5 }))],
+        ["no build field", () => Promise.resolve(jsonResponse({}))],
+      ])("reports %s as unknown", async (_label, respond) => {
+        const { checkDeployedBuild } = await updater();
+        vi.mocked(fetch).mockImplementationOnce(respond);
+        await expect(checkDeployedBuild()).resolves.toBe("unknown");
+      });
+    });
+
+    describe("updateToLatestBuild", () => {
+      it("returns manual with no side effects when the reload budget is spent", async () => {
+        const entry = await readyRegistration();
+        mocks.hasServiceWorkerReloadBudget.mockReturnValue(false);
+        const { updateToLatestBuild } = await updater();
+
+        await expect(updateToLatestBuild({ deadlineMs: 1_000 })).resolves.toBe("manual");
+        expect(reload).not.toHaveBeenCalled();
+        expect(mocks.claimServiceWorkerReload).not.toHaveBeenCalled();
+        expect(entry.update).toHaveBeenCalledTimes(1);
+      });
+
+      it("claims the budget and reloads when no worker controls the page", async () => {
+        Object.defineProperty(navigator, "serviceWorker", { configurable: true, value: { controller: null } });
+        const { updateToLatestBuild } = await updater();
+
+        await expect(updateToLatestBuild({ deadlineMs: 1_000 })).resolves.toBe("reloading");
+        expect(mocks.claimServiceWorkerReload).toHaveBeenCalledTimes(1);
+        expect(mocks.markPendingAutoUpdate).toHaveBeenCalledTimes(1);
+        expect(reload).toHaveBeenCalledTimes(1);
+      });
+
+      it("claims the budget and reloads when the browser has no service worker", async () => {
+        Reflect.deleteProperty(navigator, "serviceWorker");
+        const { updateToLatestBuild } = await updater();
+
+        await expect(updateToLatestBuild({ deadlineMs: 1_000 })).resolves.toBe("reloading");
+        expect(mocks.claimServiceWorkerReload).toHaveBeenCalledTimes(1);
+        expect(reload).toHaveBeenCalledTimes(1);
+      });
+
+      it("checks for an update and resolves reloading only when the reload runs", async () => {
+        const entry = await readyRegistration();
+        const options = mocks.registerSW.mock.calls[0][0] as ServiceWorkerOptions;
+        const { updateToLatestBuild } = await updater();
+
+        const outcome = updateToLatestBuild({ deadlineMs: 1_000 });
+        await vi.waitFor(() => expect(entry.update).toHaveBeenCalledTimes(2));
+        await expect(pendingState(outcome)).resolves.toBe("pending");
+        options.onNeedReload();
+
+        await expect(outcome).resolves.toBe("reloading");
+        expect(reload).toHaveBeenCalledTimes(1);
+      });
+
+      it("returns manual first while a multiplayer game is live, on both branches", async () => {
+        const entry = await readyRegistration();
+        draftStore.setState({ role: "host", phase: "deckbuilding" });
+        const { updateToLatestBuild } = await updater();
+
+        await expect(updateToLatestBuild({ deadlineMs: 1_000 })).resolves.toBe("manual");
+        expect(entry.update).toHaveBeenCalledTimes(1);
+
+        Object.defineProperty(navigator, "serviceWorker", { configurable: true, value: { controller: null } });
+        await expect(updateToLatestBuild({ deadlineMs: 1_000 })).resolves.toBe("manual");
+        expect(reload).not.toHaveBeenCalled();
+        expect(mocks.claimServiceWorkerReload).not.toHaveBeenCalled();
+      });
+
+      it("returns manual at the deadline and stops listening", async () => {
+        await readyRegistration();
+        const options = mocks.registerSW.mock.calls[0][0] as ServiceWorkerOptions;
+        const { updateToLatestBuild } = await updater();
+        vi.useFakeTimers();
+        try {
+          let settled: string | undefined;
+          void updateToLatestBuild({ deadlineMs: 1_000 }).then((outcome) => { settled = outcome; });
+          await vi.advanceTimersByTimeAsync(999);
+          expect(settled).toBeUndefined();
+          await vi.advanceTimersByTimeAsync(1);
+          expect(settled).toBe("manual");
+
+          expect(() => options.onNeedReload()).not.toThrow();
+          expect(reload).toHaveBeenCalledTimes(1);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it("waits for a pending registration, whose own check finds the update", async () => {
+        const options = await register();
+        const { updateToLatestBuild } = await updater();
+
+        const outcome = updateToLatestBuild({ deadlineMs: 5_000 });
+        const entry = registration();
+        options.onRegisteredSW("/sw.js", entry);
+        await vi.waitFor(() => expect(entry.update).toHaveBeenCalled());
+        await expect(pendingState(outcome)).resolves.toBe("pending");
+        options.onNeedReload();
+
+        await expect(outcome).resolves.toBe("reloading");
+      });
+
+      it("returns manual without a timer when there is no lifecycle", async () => {
+        const { updateToLatestBuild } = await updater();
+        vi.useFakeTimers();
+        try {
+          await expect(updateToLatestBuild({ deadlineMs: 1_000 })).resolves.toBe("manual");
+          expect(vi.getTimerCount()).toBe(0);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it.each([
+        ["registration errors", (options: ServiceWorkerOptions) => options.onRegisterError(new Error("x"))],
+        ["registration yields nothing", (options: ServiceWorkerOptions) => options.onRegisteredSW("/sw.js", undefined)],
+      ])("returns manual promptly when %s", async (_label, fail) => {
+        const options = await register();
+        fail(options);
+        const { updateToLatestBuild } = await updater();
+        vi.useFakeTimers();
+        try {
+          const outcome = updateToLatestBuild({ deadlineMs: 15_000 });
+          await expect(pendingState(outcome)).resolves.toBe("manual");
+          expect(reload).not.toHaveBeenCalled();
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it("does not resolve reloading when the reload claim is rejected", async () => {
+        await readyRegistration();
+        const options = mocks.registerSW.mock.calls[0][0] as ServiceWorkerOptions;
+        mocks.claimServiceWorkerReload.mockReturnValue(false);
+        const { updateToLatestBuild } = await updater();
+        vi.useFakeTimers();
+        try {
+          const outcome = updateToLatestBuild({ deadlineMs: 1_000 });
+          options.onNeedReload();
+          await expect(pendingState(outcome)).resolves.toBe("pending");
+          await vi.advanceTimersByTimeAsync(1_000);
+
+          await expect(outcome).resolves.toBe("manual");
+          expect(reload).not.toHaveBeenCalled();
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it("can pass its deadline while a worker installs, and the reload still follows", async () => {
+        const { options } = await installingRegistration();
+        const { updateToLatestBuild, isBuildUpdateInFlight } = await updater();
+        vi.useFakeTimers();
+        try {
+          const outcome = updateToLatestBuild({ deadlineMs: 1_000 });
+          await vi.advanceTimersByTimeAsync(1_000);
+          await expect(outcome).resolves.toBe("manual");
+        } finally {
+          vi.useRealTimers();
+        }
+
+        expect(isBuildUpdateInFlight()).toBe(true);
+        options.onNeedReload();
+        expect(reload).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    describe("isBuildUpdateInFlight", () => {
+      it("is false for an idle registered lifecycle and true once a worker installs", async () => {
+        const entry = await readyRegistration();
+        const { isBuildUpdateInFlight } = await updater();
+        await vi.waitFor(() => expect(isBuildUpdateInFlight()).toBe(false));
+
+        Object.assign(entry, { installing: activeWorker("installing") });
+        expect(isBuildUpdateInFlight()).toBe(true);
+      });
+
+      it("is true while a worker waits to activate", async () => {
+        const entry = await readyRegistration();
+        const { isBuildUpdateInFlight } = await updater();
+        await vi.waitFor(() => expect(isBuildUpdateInFlight()).toBe(false));
+
+        Object.assign(entry, { waiting: activeWorker("installed") });
+        expect(isBuildUpdateInFlight()).toBe(true);
+      });
+
+      it("is true while an update check is running", async () => {
+        const entry = await readyRegistration();
+        const { checkForServiceWorkerUpdate, isBuildUpdateInFlight } = await updater();
+        await vi.waitFor(() => expect(isBuildUpdateInFlight()).toBe(false));
+        entry.update = vi.fn(() => new Promise<void>(() => {}));
+
+        checkForServiceWorkerUpdate();
+        expect(isBuildUpdateInFlight()).toBe(true);
+      });
+
+      it("is true while a reload is retained behind a live game", async () => {
+        await readyRegistration();
+        const options = mocks.registerSW.mock.calls[0][0] as ServiceWorkerOptions;
+        const { isBuildUpdateInFlight } = await updater();
+        await vi.waitFor(() => expect(isBuildUpdateInFlight()).toBe(false));
+        draftStore.setState({ role: "host", phase: "deckbuilding" });
+
+        options.onNeedReload();
+        expect(reload).not.toHaveBeenCalled();
+        expect(isBuildUpdateInFlight()).toBe(true);
+      });
+
+      it("is true while registration is pending", async () => {
+        await register();
+        const { isBuildUpdateInFlight } = await updater();
+        expect(isBuildUpdateInFlight()).toBe(true);
+      });
+
+      it("stays true offline, where the browser still activates the worker", async () => {
+        await installingRegistration();
+        const { isBuildUpdateInFlight } = await updater();
+        transitionOffline(true);
+        expect(isBuildUpdateInFlight()).toBe(true);
+      });
+
+      it("is false once the reload budget is spent, even with a worker installing", async () => {
+        await installingRegistration();
+        mocks.hasServiceWorkerReloadBudget.mockReturnValue(false);
+        const { isBuildUpdateInFlight } = await updater();
+        expect(isBuildUpdateInFlight()).toBe(false);
+      });
+
+      it("is false with no lifecycle", async () => {
+        const { isBuildUpdateInFlight } = await updater();
+        expect(isBuildUpdateInFlight()).toBe(false);
+      });
+    });
+
+    describe("reloadIfNoLiveGame", () => {
+      it("never reloads a live multiplayer game", async () => {
+        const { reloadIfNoLiveGame } = await updater();
+        draftStore.setState({ role: "host", phase: "deckbuilding" });
+        expect(reloadIfNoLiveGame()).toBe(false);
+        expect(reload).not.toHaveBeenCalled();
+
+        draftStore.setState({ role: null, phase: "idle" });
+        expect(reloadIfNoLiveGame()).toBe(true);
+        expect(reload).toHaveBeenCalledTimes(1);
+      });
     });
   });
 });

@@ -1,0 +1,24 @@
+[package]
+name = "phase-ast"
+version.workspace = true
+license.workspace = true
+edition = "2021"
+
+[features]
+test-support = []
+
+[dependencies]
+serde = { workspace = true }
+serde_json = "1"
+serde_ignored = "0.1"
+thiserror = "2"
+toml = "0.8"
+nom = "8.0"
+strum = { version = "0.27", features = ["derive"] }
+im = { version = "15", features = ["serde"] }
+
+[build-dependencies]
+# build.rs converts data/known-tokens.toml → JSON in OUT_DIR so the runtime
+# embed avoids the ~1s-per-process debug-mode toml_edit parse (see build.rs).
+toml = "0.8"
+serde_json = "1"

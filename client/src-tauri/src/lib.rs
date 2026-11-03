@@ -12,6 +12,9 @@ use tauri::{
 };
 
 #[cfg(desktop)]
+use tauri_plugin_deep_link::DeepLinkExt;
+
+#[cfg(desktop)]
 use crate::native_engine_contract::{ShellDownload, ShellDownloadOutcome};
 
 /// Carries a finished download's outcome and destination to the page.
@@ -135,6 +138,9 @@ fn page_load_leaves_the_page(url: &Url, event: PageLoadEvent) -> bool {
 }
 
 mod audio_probe;
+mod channels;
+#[cfg(desktop)]
+mod deep_link;
 mod host_platform;
 #[cfg(desktop)]
 mod lan;
@@ -149,6 +155,16 @@ mod native_engine;
 mod native_engine_contract;
 #[cfg(desktop)]
 mod update_authority;
+
+/// Restores and focuses the main window, for a second launch or a deep link.
+#[cfg(desktop)]
+fn focus_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // WebKitGTK's dmabuf renderer renders blank frames when the GPU import
@@ -180,11 +196,13 @@ pub fn run() {
 
     #[cfg(desktop)]
     let builder = builder
+        // With its `deep-link` feature, single-instance hands a second
+        // process's link to the deep-link plugin, which must therefore be
+        // registered after it.
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.set_focus();
-            }
+            focus_main_window(app)
         }))
+        .plugin(tauri_plugin_deep_link::init())
         // The plugin stays registered everywhere so the `check()` command the
         // web app calls always exists — an unregistered plugin rejects the
         // call, and client/src/pwa/tauriUpdater.ts surfaces that rejection as a
@@ -224,7 +242,8 @@ pub fn run() {
             native_bridge::authorize_lan_server,
             native_bridge::connect_lan_server,
             native_bridge::lan_bridge_send,
-            native_bridge::lan_bridge_close
+            native_bridge::lan_bridge_close,
+            deep_link::take_pending_deep_link
         ]);
 
     #[cfg(mobile)]
@@ -350,6 +369,22 @@ pub fn run() {
                     builder.data_directory(data_dir)
                 };
                 builder.build()?;
+
+                // The listener goes first, so a link arriving between the two
+                // is still delivered; a duplicate delivery is harmless.
+                let handle = app.handle().clone();
+                app.deep_link()
+                    .on_open_url(move |event| deep_link::deliver(&handle, event.urls()));
+                if let Ok(Some(links)) = app.deep_link().get_current() {
+                    deep_link::deliver(app.handle(), links);
+                }
+                // Off the setup thread: it runs up to three subprocesses. Not
+                // in a debug build (see `deep_link`'s module docs).
+                #[cfg(all(target_os = "linux", not(debug_assertions)))]
+                {
+                    let handle = app.handle().clone();
+                    std::thread::spawn(move || deep_link::register_scheme_if_missing(handle));
+                }
             }
             #[cfg(mobile)]
             let _ = app;
@@ -502,12 +537,12 @@ mod tests {
         assert!(window.maximized);
     }
 
-    /// `update_authority` reaches the running app through exactly one call: the
-    /// updater plugin's version comparator. Drop that call and the module still
-    /// compiles, its own unit tests still pass, and self-update is silently
-    /// restored inside the Flatpak sandbox, where `/app` is read-only. No test
-    /// of the module can observe that, so pin the wiring here — the same reason
-    /// the generated Android Gradle invariants are pinned below.
+    /// `update_authority` is wired into the updater through the version
+    /// comparator's `UpdateAuthority::detect()` call. Drop that call and the
+    /// module still compiles, its own unit tests still pass, and self-update is
+    /// silently restored inside the Flatpak sandbox, where `/app` is read-only.
+    /// No test of the module can observe that, so pin the wiring here — the
+    /// same reason the generated Android Gradle invariants are pinned below.
     #[test]
     fn updater_plugin_defers_to_the_update_authority() {
         // Only the production half of this file, because the needles below are
@@ -1210,7 +1245,10 @@ mod tests {
         // Self-update, exit and restart belong to the trusted remote origins only.
         assert_eq!(
             capability_permissions(desktop_local),
-            BTreeSet::from(["core:window:allow-set-fullscreen"])
+            BTreeSet::from([
+                "core:window:allow-set-fullscreen",
+                "allow-take-pending-deep-link",
+            ])
         );
         assert_eq!(
             capability_permissions(desktop_remote),
@@ -1220,6 +1258,7 @@ mod tests {
                 "process:allow-restart",
                 "updater:default",
                 "allow-lan",
+                "allow-take-pending-deep-link",
             ])
         );
         for capability in [common_local, common_remote] {
@@ -1229,6 +1268,14 @@ mod tests {
             assert!(!permissions.contains("process:allow-restart"));
             assert!(!permissions.contains("updater:default"));
             assert!(!permissions.contains("allow-lan"));
+            assert!(!permissions.contains("allow-take-pending-deep-link"));
+        }
+        // Consumers take the validated link through the app command; no
+        // capability exposes the plugin's own command surface.
+        for capability in &capabilities {
+            assert!(!capability_permissions(capability)
+                .iter()
+                .any(|permission| permission.starts_with("deep-link:")));
         }
         for required in [
             "allow-host-platform",
@@ -1246,6 +1293,10 @@ mod tests {
         assert_eq!(
             app_permissions["allow-ensure-native-engine"]["commands"]["allow"],
             json!(["ensure_native_engine", "native_engine_capabilities"])
+        );
+        assert_eq!(
+            app_permissions["allow-take-pending-deep-link"]["commands"]["allow"],
+            json!(["take_pending_deep_link"])
         );
         for capability in [common_local, common_remote] {
             for permission in capability_permissions(capability) {

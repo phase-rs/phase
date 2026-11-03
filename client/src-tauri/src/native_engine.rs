@@ -21,6 +21,7 @@ use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 
+use crate::channels::{PREVIEW_ORIGIN, RELEASE_ORIGIN};
 use crate::lan::{self, LanServerStatus, RunningLan};
 use crate::native_bridge::BridgeHandle;
 use crate::native_engine_contract::{
@@ -48,8 +49,6 @@ const RELEASE_RATCHET_FILE: &str = "native-engine-highest-release-version.json";
 const PREVIEW_RATCHET_FILE: &str = "native-engine-preview-generated-at.json";
 const MANIFEST_DATA_FILE: &str = "manifest-data.json";
 const SIGNED_MANIFEST_ENVELOPE_FILE: &str = "signed-manifest-envelope.json";
-const RELEASE_ORIGIN: &str = "https://phase-rs.dev";
-const PREVIEW_ORIGIN: &str = "https://preview.phase-rs.dev";
 const PROGRESS_EVENT: &str = "native-engine-progress";
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(20);
 const STOP_GRACE: Duration = Duration::from_millis(250);
@@ -593,16 +592,17 @@ pub(crate) fn native_engine_bridge_sender(
 }
 
 pub(crate) fn close_native_engine_bridge(bridge_id: u64) -> bool {
-    let bridge = engine_state()
+    engine_state()
         .lock()
-        .ok()
-        .and_then(|mut state| state.bridges.remove(&bridge_id));
-    if let Some(bridge) = bridge {
-        bridge.abort();
-        true
-    } else {
-        false
-    }
+        .is_ok_and(|mut state| close_registered_bridge(&mut state.bridges, bridge_id))
+}
+
+fn close_registered_bridge(bridges: &mut BTreeMap<u64, BridgeHandle>, bridge_id: u64) -> bool {
+    let Some(bridge) = bridges.remove(&bridge_id) else {
+        return false;
+    };
+    bridge.close();
+    true
 }
 
 pub(crate) fn remove_native_engine_bridge(bridge_id: u64) {
@@ -1217,6 +1217,9 @@ fn resolved_artifact_from_envelope_with_key(
 /// minisign signature is retained alongside the executable so every launch
 /// still verifies what it is about to execute; a missing or invalid cache is
 /// simply replaced from the first-party artifact source.
+// Internal provisioning helper: the args are the separately-borrowed
+// inputs the provisioning chain threads through; `public_key` is the test seam.
+#[allow(clippy::too_many_arguments)]
 fn provision_binary_with_key<F>(
     public_key: &str,
     app: Option<&AppHandle>,
@@ -1586,6 +1589,9 @@ fn plan_spawn_with_key(
     })
 }
 
+// Internal provisioning helper: the args are the separately-borrowed
+// inputs the provisioning chain threads through; `public_key` is the test seam.
+#[allow(clippy::too_many_arguments)]
 fn apply_spawn_plan_with_key<F>(
     public_key: &str,
     app: Option<&AppHandle>,
@@ -1651,6 +1657,9 @@ where
     )
 }
 
+// Internal provisioning helper: the args are the separately-borrowed
+// inputs the provisioning chain threads through; `public_key` is the test seam.
+#[allow(clippy::too_many_arguments)]
 fn provision_resolved_artifact_with_key<F>(
     public_key: &str,
     app: Option<&AppHandle>,
@@ -2229,6 +2238,9 @@ fn emit_progress(app: &AppHandle, phase: NativeEngineProgressPhase, detail: Opti
 #[cfg(test)]
 mod tests {
     use std::{cell::RefCell, fs, time::Duration};
+
+    use tokio::sync::mpsc::error::TryRecvError;
+    use tokio_tungstenite::tungstenite::Message;
 
     use super::*;
 
@@ -3041,14 +3053,16 @@ mod tests {
             .unwrap();
         let stdin = child.stdin.take();
         child.wait().unwrap();
-        let mut state = NativeEngineState::default();
-        state.lan = Some(RunningLan {
-            key: release_key("1.0.0"),
-            child,
-            stdin,
-            addresses: vec![],
-            advertisement: None,
-        });
+        let mut state = NativeEngineState {
+            lan: Some(RunningLan {
+                key: release_key("1.0.0"),
+                child,
+                stdin,
+                addresses: vec![],
+                advertisement: None,
+            }),
+            ..Default::default()
+        };
         clear_exited_lan(&mut state).unwrap();
         assert!(state.lan.is_none());
     }
@@ -3541,15 +3555,36 @@ mod tests {
         let (abort, registration) = futures_util::future::AbortHandle::new_pair();
         let (outbound, _receiver) = tokio::sync::mpsc::unbounded_channel();
         let mut state = NativeEngineState::default();
-        state.bridges.insert(1, BridgeHandle::new(abort, outbound));
+        state
+            .bridges
+            .insert(1, BridgeHandle::new(abort.clone(), outbound));
 
         abort_all_native_engine_bridges(&mut state.bridges);
 
         assert!(state.running.is_none());
         assert!(state.bridges.is_empty());
+        assert!(abort.is_aborted());
         let result = tauri::async_runtime::block_on(async {
             futures_util::future::Abortable::new(std::future::pending::<()>(), registration).await
         });
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn closing_a_registered_bridge_closes_its_queue_without_aborting() {
+        let (abort, _registration) = futures_util::future::AbortHandle::new_pair();
+        let (outbound, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let mut bridges = BTreeMap::from([(1, BridgeHandle::new(abort.clone(), outbound))]);
+        bridges[&1]
+            .outbound()
+            .send(Message::Text("queued".into()))
+            .unwrap();
+
+        assert!(close_registered_bridge(&mut bridges, 1));
+
+        assert!(!close_registered_bridge(&mut bridges, 1));
+        assert!(!abort.is_aborted());
+        assert_eq!(receiver.try_recv().unwrap(), Message::Text("queued".into()));
+        assert_eq!(receiver.try_recv(), Err(TryRecvError::Disconnected));
     }
 }

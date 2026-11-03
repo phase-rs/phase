@@ -583,3 +583,95 @@ fn dromokas_command_source_scoped_shield_is_not_consumed() {
         "the shared shape predicate must reject a Typed leaf that is not exactly [Creature]"
     );
 }
+
+/// CR 510.2 + CR 615.8: the next instance includes both trample recipients.
+/// CR 615.5: the rider gains the total prevented amount once.
+#[test]
+fn awe_strike_prevents_both_trample_portions_and_gains_five_life_once() {
+    use engine::types::game_state::WaitingFor;
+    use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+    use engine::types::zones::Zone;
+
+    use crate::impulsive_maneuvers_batch_shield::{
+        assert_damage_complete, assign_trample, damage_amounts, declare_attacks,
+        reach_combat_damage,
+    };
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker = scenario.add_creature(P0, "Trampler", 5, 5).trample().id();
+    let blocker = scenario.add_creature(P1, "Blocker", 2, 2).id();
+    let spell = scenario
+        .add_spell_to_hand_from_oracle(P0, "Awe Strike", true, AWE_STRIKE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 0,
+        })
+        .id();
+    scenario.with_mana_pool(
+        P0,
+        vec![ManaUnit::new(ManaType::White, spell, false, vec![])],
+    );
+    let mut runner = scenario.build();
+    let outcome = runner.cast(spell).target_objects(&[attacker]).resolve();
+    assert!(matches!(
+        outcome.final_waiting_for(),
+        WaitingFor::Priority { .. }
+    ));
+    assert!(outcome.state().stack.is_empty());
+    assert_eq!(outcome.life_delta(P0), 0);
+    assert_eq!(outcome.state().objects[&spell].zone, Zone::Graveyard);
+    assert!(outcome
+        .state()
+        .pending_damage_replacements
+        .iter()
+        .any(|shield| {
+            shield.shield_kind == ShieldKind::PreventionOneShot && !shield.is_consumed
+        }));
+
+    let mut events = declare_attacks(&mut runner, &[attacker]);
+    events.extend(reach_combat_damage(&mut runner, &[(blocker, attacker)]));
+    events.extend(assign_trample(&mut runner, attacker, &[(blocker, 2)], 3));
+    assert_damage_complete(&runner);
+
+    assert_eq!(
+        damage_amounts(&events, blocker, TargetRef::Object(attacker)),
+        vec![2],
+        "reach guard: the blocker's independent combat damage must be delivered"
+    );
+    assert_eq!(runner.state().objects[&attacker].damage_marked, 2);
+    assert_eq!(runner.life(P1), 20);
+    assert_eq!(runner.state().objects[&blocker].zone, Zone::Battlefield);
+    assert_eq!(runner.state().objects[&blocker].damage_marked, 0);
+    assert!(damage_amounts(&events, attacker, TargetRef::Object(blocker)).is_empty());
+    assert!(damage_amounts(&events, attacker, TargetRef::Player(P1)).is_empty());
+
+    // CR 615.13 + CR 615.5: retain per-recipient prevention provenance; only
+    // the runtime rider is aggregated. No sentinel-source aggregate event may
+    // be added to these two real prevented portions.
+    let prevented: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::DamagePrevented {
+                source_id,
+                target,
+                amount,
+            } => Some((*source_id, target.clone(), *amount)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(prevented.len(), 2);
+    assert!(prevented.contains(&(attacker, TargetRef::Object(blocker), 2)));
+    assert!(prevented.contains(&(attacker, TargetRef::Player(P1), 3)));
+    let gains: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::LifeChanged {
+                player_id, amount, ..
+            } if *player_id == P0 && *amount > 0 => Some(*amount),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(gains, vec![5], "the rider must gain five life in ONE event");
+    assert_eq!(runner.life(P0), 25);
+}

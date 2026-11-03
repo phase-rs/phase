@@ -66,6 +66,13 @@
     "discard": "破棄",
     "saveAndContinue": "保存して続行"
   },
+  "saveConflict": {
+    "title": "デッキが別の場所で変更されました",
+    "bodyChanged": "このエディターで開いた、または最後に保存した後に「{{name}}」が別の場所で変更されたため、何も保存されませんでした。保存済みのバージョンを読み込んで確認する（未保存の変更は破棄されます）か、自分のバージョンをそのまま保存してください。",
+    "bodyDeleted": "このエディターで開いた、または最後に保存した後に「{{name}}」が別の場所で削除されたため、何も保存されませんでした。自分のバージョンをそのまま保存してください。",
+    "loadSaved": "保存済みのバージョンを読み込む",
+    "saveMine": "自分のバージョンを保存"
+  },
   "card": {
     "moveToSideboard": "{{name}}を1枚サイドボードへ移動",
     "moveToMain": "{{name}}を1枚メインデッキへ移動",
@@ -222,6 +229,10 @@
     "identity": "アイデンティティ:",
     "setAsCommander": "統率者に設定:",
     "cardCount": "{{count}}/{{expected}}枚",
+    "cardCountNoMinimum_one": "{{count}}枚",
+    "cardCountNoMinimum_few": "{{count}}枚",
+    "cardCountNoMinimum_many": "{{count}}枚",
+    "cardCountNoMinimum_other": "{{count}}枚",
     "singletonViolations": "1枚制限違反: {{cards}}",
     "colorViolations": "固有色違反: {{cards}}",
     "signatureSpell": {
@@ -267,7 +278,9 @@
     "dataVersion": "データ: {{version}}",
     "aboutBrackets": "ブラケットについて ↗",
     "estimatedChip": "推定: B{{tier}}",
-    "estimatedChipFull": "推定ブラケット: B{{tier}} {{label}}"
+    "estimatedChipFull": "推定ブラケット: B{{tier}} {{label}}",
+    "manualChip": "B{{tier}}",
+    "manualChipFull": "申告ブラケット: B{{tier}} {{label}}"
   },
   "bracketPicker": {
     "ariaLabel": "デッキブラケット",

@@ -27,6 +27,11 @@ pub const MAX_PASSWORD_LEN: usize = 128;
 /// Max game-code length, in bytes. Codes are short server-issued handles; this
 /// is a generous ceiling that still rejects multi-kilobyte junk.
 pub const MAX_GAME_CODE_LEN: usize = 64;
+/// Exact length of every minted room code (`server_core::generate_game_code`,
+/// broker-wasm `WorkerEnv::new_game_code`, `generate_draft_code`) and hence of
+/// every caller-requested one. Distinct from [`MAX_GAME_CODE_LEN`], which is
+/// only a size ceiling on any inbound code field.
+pub const MINTED_GAME_CODE_LEN: usize = 6;
 /// Max length, in bytes, of opaque token/identifier fields (reservation tokens,
 /// host peer id, build commit, version strings).
 pub const MAX_TOKEN_LEN: usize = 128;
@@ -106,6 +111,27 @@ pub fn validate_optional_token(field: &str, value: Option<&str>, max: usize) -> 
     }
 }
 
+/// Validate a caller-requested room code against the minted shape: exactly
+/// [`MINTED_GAME_CODE_LEN`] characters of `A-Z` or `0-9`.
+///
+/// `""` is rejected on purpose, unlike [`validate_token`]'s empty-means-absent
+/// convention: a requested code is a claim, and silently minting a random code
+/// for an empty one would hide a client bug. A caller that wants no claim sends
+/// `None`.
+pub fn validate_requested_game_code(code: &str) -> Result<(), String> {
+    if code.len() == MINTED_GAME_CODE_LEN
+        && code
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "requested_code must be {MINTED_GAME_CODE_LEN} characters of A-Z or 0-9"
+        ))
+    }
+}
+
 pub struct CreateGameSettingsFields<'a> {
     pub display_name: &'a str,
     pub password: Option<&'a str>,
@@ -114,6 +140,7 @@ pub struct CreateGameSettingsFields<'a> {
     pub room_name: Option<&'a str>,
     pub host_peer_id: Option<&'a str>,
     pub draft_metadata: Option<&'a DraftLobbyMetadata>,
+    pub requested_code: Option<&'a str>,
 }
 
 pub fn validate_create_game_settings_fields(
@@ -123,6 +150,9 @@ pub fn validate_create_game_settings_fields(
     validate_optional_label("room_name", fields.room_name, MAX_ROOM_NAME_LEN)?;
     validate_optional_token("password", fields.password, MAX_PASSWORD_LEN)?;
     validate_optional_token("host_peer_id", fields.host_peer_id, MAX_TOKEN_LEN)?;
+    if let Some(code) = fields.requested_code {
+        validate_requested_game_code(code)?;
+    }
     if fields.player_count == 0 || fields.player_count > MAX_PLAYER_COUNT {
         return Err(format!(
             "player_count must be between 1 and {MAX_PLAYER_COUNT}"
@@ -417,6 +447,7 @@ pub fn validate_lobby_message(msg: &crate::protocol::LobbyClientMessage) -> Resu
             room_name,
             host_peer_id,
             draft_metadata,
+            requested_code,
             ..
         } => {
             validate_create_game_settings_fields(CreateGameSettingsFields {
@@ -427,6 +458,7 @@ pub fn validate_lobby_message(msg: &crate::protocol::LobbyClientMessage) -> Resu
                 room_name: room_name.as_deref(),
                 host_peer_id: host_peer_id.as_deref(),
                 draft_metadata: draft_metadata.as_ref(),
+                requested_code: requested_code.as_deref(),
             })?;
         }
         M::JoinGameWithPassword {
@@ -586,7 +618,7 @@ mod tests {
         serde_json::from_str(r#"{"main_deck":[]}"#).expect("deck fixture")
     }
 
-    fn create_with(display_name: &str) -> M {
+    fn create_with(display_name: &str, requested_code: Option<&str>) -> M {
         M::CreateGameWithSettings {
             deck: empty_deck(),
             display_name: display_name.to_string(),
@@ -601,6 +633,7 @@ mod tests {
             draft_metadata: None,
             start_when_full: true,
             ranked: false,
+            requested_code: requested_code.map(str::to_string),
         }
     }
 
@@ -651,17 +684,37 @@ mod tests {
 
     #[test]
     fn create_game_accepts_valid() {
-        assert!(validate_lobby_message(&create_with("Alice")).is_ok());
+        assert!(validate_lobby_message(&create_with("Alice", None)).is_ok());
+    }
+
+    #[test]
+    fn create_game_accepts_well_formed_requested_code() {
+        assert!(validate_lobby_message(&create_with("Alice", Some("AB12CD"))).is_ok());
+        assert!(validate_lobby_message(&create_with("Alice", None)).is_ok());
+    }
+
+    #[test]
+    fn create_game_rejects_malformed_requested_code() {
+        for bad in [
+            "ab12cd", "AB12C", "AB12CDE", "AB 12C", "AB-12C", "ÀB12CD", "",
+        ] {
+            let error = validate_lobby_message(&create_with("Alice", Some(bad)))
+                .expect_err(&format!("{bad:?} must be rejected"));
+            assert!(
+                error.contains("requested_code"),
+                "{bad:?}: refusal names the field: {error}"
+            );
+        }
     }
 
     #[test]
     fn create_game_rejects_oversized_display_name() {
-        assert!(validate_lobby_message(&create_with(&"a".repeat(21))).is_err());
+        assert!(validate_lobby_message(&create_with(&"a".repeat(21), None)).is_err());
     }
 
     #[test]
     fn create_game_rejects_oversized_password() {
-        let mut msg = create_with("Alice");
+        let mut msg = create_with("Alice", None);
         if let M::CreateGameWithSettings { password, .. } = &mut msg {
             *password = Some("p".repeat(MAX_PASSWORD_LEN + 1));
         }
@@ -670,7 +723,7 @@ mod tests {
 
     #[test]
     fn create_game_rejects_out_of_range_timer() {
-        let mut msg = create_with("Alice");
+        let mut msg = create_with("Alice", None);
         if let M::CreateGameWithSettings { timer_seconds, .. } = &mut msg {
             *timer_seconds = Some(MAX_TIMER_SECONDS + 1);
         }
@@ -679,7 +732,7 @@ mod tests {
 
     #[test]
     fn create_game_rejects_out_of_range_player_count() {
-        let mut msg = create_with("Alice");
+        let mut msg = create_with("Alice", None);
         if let M::CreateGameWithSettings { player_count, .. } = &mut msg {
             *player_count = MAX_PLAYER_COUNT + 1;
         }
@@ -688,7 +741,7 @@ mod tests {
 
     #[test]
     fn create_game_rejects_oversized_draft_metadata() {
-        let mut msg = create_with("Alice");
+        let mut msg = create_with("Alice", None);
         if let M::CreateGameWithSettings { draft_metadata, .. } = &mut msg {
             *draft_metadata = Some(DraftLobbyMetadata {
                 set_code: "a".repeat(MAX_DRAFT_SET_LABEL_LEN + 1),
@@ -762,7 +815,7 @@ mod tests {
 
     #[test]
     fn guard_rejects_oversized_main_deck() {
-        let mut msg = create_with("Alice");
+        let mut msg = create_with("Alice", None);
         if let M::CreateGameWithSettings { deck, .. } = &mut msg {
             deck.main_deck = vec!["Card".to_string(); MAX_MAIN_DECK_ENTRIES + 1];
         }
@@ -771,7 +824,7 @@ mod tests {
 
     #[test]
     fn guard_rejects_oversized_card_name_in_deck() {
-        let mut msg = create_with("Alice");
+        let mut msg = create_with("Alice", None);
         if let M::CreateGameWithSettings { deck, .. } = &mut msg {
             deck.main_deck = vec!["x".repeat(MAX_DECK_CARD_NAME_LEN + 1)];
         }
@@ -789,7 +842,7 @@ mod tests {
 
     #[test]
     fn guard_rejects_oversized_planar_deck() {
-        let mut msg = create_with("Alice");
+        let mut msg = create_with("Alice", None);
         if let M::CreateGameWithSettings { deck, .. } = &mut msg {
             deck.planar_deck = vec!["Plane".to_string(); MAX_PLANAR_DECK_ENTRIES + 1];
         }
@@ -809,7 +862,7 @@ mod tests {
 
     #[test]
     fn guard_rejects_oversized_scheme_deck() {
-        let mut msg = create_with("Alice");
+        let mut msg = create_with("Alice", None);
         if let M::CreateGameWithSettings { deck, .. } = &mut msg {
             deck.scheme_deck = vec!["Scheme".to_string(); MAX_SCHEME_DECK_ENTRIES + 1];
         }
@@ -825,6 +878,160 @@ mod tests {
         }
         let err = guard_inbound(&msg).unwrap_err();
         assert!(err.contains("scheme_deck[0]"));
+    }
+
+    // -- Printings sidecar (P2-V4) -------------------------------------------
+
+    /// The wire text of `msg` with `data.deck.printings` replaced by `printings`.
+    fn frame_with_printings(msg: &M, printings: serde_json::Value) -> String {
+        let mut frame = serde_json::to_value(msg).expect("lobby frame serializes");
+        frame["data"]["deck"]["printings"] = printings;
+        frame.to_string()
+    }
+
+    /// The sidecar of a parsed create/join frame.
+    fn parsed_printings(
+        parsed: crate::protocol::ParsedFrame,
+    ) -> (M, Vec<engine::types::card_printing::DeckPrinting>) {
+        let crate::protocol::ParsedFrame::Message(msg) = parsed else {
+            panic!("expected a parsed message, got {parsed:?}");
+        };
+        let printings = match &*msg {
+            M::CreateGameWithSettings { deck, .. } | M::JoinGameWithPassword { deck, .. } => {
+                deck.printings.clone()
+            }
+            other => panic!("not a deck-carrying frame: {other:?}"),
+        };
+        (*msg, printings)
+    }
+
+    /// Both deck-carrying frames, as the Worker receives them.
+    fn deck_carrying_frames() -> [(&'static str, M); 2] {
+        [
+            ("create", create_with("Alice", None)),
+            ("join", join_with("Bob")),
+        ]
+    }
+
+    #[test]
+    fn frame_refuses_a_sidecar_over_the_entry_cap_even_when_every_element_is_malformed() {
+        use crate::protocol::{parse_lobby_client_message, ParsedFrame};
+        for (label, msg) in deck_carrying_frames() {
+            let over = serde_json::json!(vec![0; 2049]);
+            let ParsedFrame::Malformed(reason) =
+                parse_lobby_client_message(&frame_with_printings(&msg, over))
+            else {
+                panic!("{label}: expected a malformed frame");
+            };
+            assert!(
+                reason.contains("printings must contain at most 2048 entries"),
+                "{label}: {reason}"
+            );
+
+            // Boundary and reach guard: 2048 malformed elements are all dropped and the
+            // deck is admitted, so the refusal above is the cap and not a frame error.
+            let at_cap = serde_json::json!(vec![0; 2048]);
+            let (_, printings) = parsed_printings(parse_lobby_client_message(
+                &frame_with_printings(&msg, at_cap),
+            ));
+            assert!(printings.is_empty(), "{label}");
+        }
+    }
+
+    #[test]
+    fn guard_refuses_an_oversized_sidecar_string_naming_the_field() {
+        use crate::protocol::parse_lobby_client_message;
+        for (label, msg) in deck_carrying_frames() {
+            let long_code = "s".repeat(33);
+            let printings = serde_json::json!([{
+                "section": "main_deck",
+                "name": "Plains",
+                "count": 1,
+                "printing": { "set_code": long_code, "collector_number": "1" },
+            }]);
+            // Reach guard: the frame parses, so the refusal below is the guard's.
+            let (parsed, _) = parsed_printings(parse_lobby_client_message(&frame_with_printings(
+                &msg, printings,
+            )));
+            let err = guard_inbound(&parsed).unwrap_err();
+            assert!(
+                err.contains("deck.printings[0].printing.set_code"),
+                "{label}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn frame_with_invalid_annotations_is_admitted_and_only_malformed_elements_dropped() {
+        use crate::protocol::parse_lobby_client_message;
+        use engine::types::card_printing::{CardPrinting, DeckPrinting, DeckSection};
+        let printing = |set_code: &str, collector_number: &str| CardPrinting {
+            set_code: set_code.to_string(),
+            collector_number: collector_number.to_string(),
+        };
+        let e1 = serde_json::json!({"section":"main_deck","name":"Plains","count":1,
+            "printing":{"set_code":"M21","collector_number":"1"}});
+        let e2 = serde_json::json!({"section":"mystery_zone","name":"Plains","count":1,
+            "printing":{"set_code":"M21","collector_number":"1"}});
+        let e3 = serde_json::json!(0);
+        let e4 = serde_json::json!({"section":"main_deck","name":"Plains","count":"one",
+            "printing":{"set_code":"M21","collector_number":"1"}});
+        let e5 = serde_json::json!({"section":"main_deck","name":"","count":1,
+            "printing":{"set_code":"","collector_number":""}});
+        let e6 = serde_json::json!({"section":"main_deck","name":"Bad\nName","count":1,
+            "printing":{"set_code":"M21","collector_number":"1"}});
+        let e7 = serde_json::json!({"section":"main_deck","name":"No Such Card Anywhere","count":1,
+            "printing":{"set_code":"M21","collector_number":"1"}});
+        let e8 = serde_json::json!({"section":"main_deck","name":"Plains","count":0,
+            "printing":{"set_code":"M21","collector_number":"1"}});
+        let expected = vec![
+            DeckPrinting {
+                section: DeckSection::MainDeck,
+                name: "Plains".into(),
+                count: 1,
+                printing: printing("M21", "1"),
+            },
+            DeckPrinting {
+                section: DeckSection::Unknown,
+                name: "Plains".into(),
+                count: 1,
+                printing: printing("M21", "1"),
+            },
+            DeckPrinting {
+                section: DeckSection::MainDeck,
+                name: String::new(),
+                count: 1,
+                printing: printing("", ""),
+            },
+            DeckPrinting {
+                section: DeckSection::MainDeck,
+                name: "Bad\nName".into(),
+                count: 1,
+                printing: printing("M21", "1"),
+            },
+            DeckPrinting {
+                section: DeckSection::MainDeck,
+                name: "No Such Card Anywhere".into(),
+                count: 1,
+                printing: printing("M21", "1"),
+            },
+            DeckPrinting {
+                section: DeckSection::MainDeck,
+                name: "Plains".into(),
+                count: 0,
+                printing: printing("M21", "1"),
+            },
+        ];
+        for (label, msg) in deck_carrying_frames() {
+            let printings = serde_json::json!([e1, e2, e3, e4, e5, e6, e7, e8]);
+            let (parsed, kept) = parsed_printings(parse_lobby_client_message(
+                &frame_with_printings(&msg, printings),
+            ));
+            // The decoder ran: the two structurally malformed elements are gone and the
+            // well-typed unusable ones survive, in input order.
+            assert_eq!(kept, expected, "{label}");
+            assert_eq!(guard_inbound(&parsed), Ok(()), "{label}");
+        }
     }
 
     // -- Tournament organizer ----------------------------------------------

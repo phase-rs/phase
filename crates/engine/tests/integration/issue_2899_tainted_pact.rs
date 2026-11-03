@@ -30,8 +30,8 @@ use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zones::move_to_library_position;
 use engine::parser::oracle_effect::parse_effect_chain;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, ControllerRef, Effect, EffectKind, LibraryPosition,
-    QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility, TargetFilter, TypedFilter,
+    AbilityDefinition, AbilityKind, ControllerRef, Effect, EffectKind, FilterProp, LibraryPosition,
+    QuantityExpr, QuantityRef, RepeatContinuation, ResolvedAbility, TargetFilter,
 };
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
@@ -255,12 +255,12 @@ fn assert_parses_to_opponent_graveyard_trigger(
         .filter(|def| {
             matches!(def.mode, TriggerMode::ChangesZone)
                 && def.destination == Some(Zone::Graveyard)
+                // CR 400.3: "an opponent's graveyard" scopes the card's owner.
                 && matches!(
-                    def.valid_card,
-                    Some(TargetFilter::Typed(TypedFilter {
-                        controller: Some(ControllerRef::Opponent),
-                        ..
-                    }))
+                    &def.valid_card,
+                    Some(TargetFilter::Typed(typed)) if typed.properties.contains(
+                        &FilterProp::Owned { controller: ControllerRef::Opponent }
+                    )
                 )
         })
         .collect();
@@ -758,6 +758,7 @@ fn stalled_repeat_that_offered_an_optional_action_is_not_a_draw() {
             count: QuantityExpr::Fixed { value: 1 },
             position: LibraryPosition::Top,
             face_down: false,
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
         },
         vec![],
         source,
@@ -840,6 +841,7 @@ fn until_stop_conditions_with_a_non_pausing_body_draws_in_loop() {
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
                 face_down: false,
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
             },
             vec![],
             ObjectId(900),
@@ -978,6 +980,7 @@ fn until_stop_conditions_with_a_tracked_non_pausing_body_draws_after_progress() 
                 count: QuantityExpr::Fixed { value: 1 },
                 position: LibraryPosition::Top,
                 face_down: false,
+                actor: engine::types::ability::LibraryInstructionActor::Controller,
             },
             vec![],
             source,
@@ -1125,6 +1128,7 @@ fn until_stop_conditions_that_moves_an_untracked_card_stops_without_a_draw() {
             count: QuantityExpr::Fixed { value: 1 },
             position: LibraryPosition::Top,
             face_down: false,
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
         },
         vec![],
         source,
@@ -1215,6 +1219,7 @@ fn parent_target_move_after_an_empty_exile_top_moves_nothing() {
             count: QuantityExpr::Fixed { value: 1 },
             position: LibraryPosition::Top,
             face_down: false,
+            actor: engine::types::ability::LibraryInstructionActor::Controller,
         },
         vec![],
         source,

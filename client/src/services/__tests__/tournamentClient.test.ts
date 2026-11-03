@@ -4,11 +4,12 @@ import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { repoRoot } from "../../adapter/__tests__/rustEnumVariants";
-import type { TournamentSummary, TournamentView } from "../../adapter/types";
+import type { GameFormat, TournamentSummary, TournamentView } from "../../adapter/types";
 import type { PhaseSocket } from "../openPhaseSocket";
 import {
   LOBBY_PROTOCOL_VERSION,
   MIN_LOBBY_PROTOCOL_FOR_DEFAULT_SCORING,
+  MIN_LOBBY_PROTOCOL_FOR_FREEFORM_FORMATS,
   MIN_LOBBY_PROTOCOL_FOR_TOURNAMENT_ACK,
   type ServerInfo,
 } from "../../adapter/ws-adapter";
@@ -599,6 +600,73 @@ describe("tournament request frames", () => {
       expect(ws.send).toHaveBeenCalledWith(
         '{"type":"CreateTournament","data":{"name":"Friday Night","arity":2,"scoring":{"win_points":5,"draw_points":0,"loss_points":0},"bracket":"Swiss","total_rounds":3,"plus_rounds":null,"format":null,"match_type":null}}',
       );
+    });
+  });
+
+  describe("createTournamentOver format gate", () => {
+    async function createWithFormat(
+      ws: MockWebSocket,
+      lobbyProtocolVersion: number | undefined,
+      format: GameFormat | null,
+    ): Promise<void> {
+      const controller = new AbortController();
+      const promise = createTournamentOver(
+        makePhaseSocket(ws, { lobbyProtocolVersion }),
+        {
+          name: "Friday Night",
+          arity: 2,
+          scoring: { win_points: 3, draw_points: 1, loss_points: 0 },
+          bracket: "Swiss",
+          totalRounds: 3,
+          format,
+        },
+        { signal: controller.signal },
+      );
+      controller.abort();
+      await expect(promise).resolves.toMatchObject({ ok: false, reason: "aborted" });
+    }
+
+    function sentFormat(ws: MockWebSocket): unknown {
+      const frame = JSON.parse(ws.send.mock.calls[0][0] as string) as {
+        data: { format: unknown };
+      };
+      return frame.data.format;
+    }
+
+    it.each([
+      ["Freeform", 9],
+      ["FreeformCommander", 9],
+    ] as const)(
+      "sends format: null for %s below the floor (lobby %i)",
+      async (format, lobbyProtocolVersion) => {
+        const ws = new MockWebSocket();
+        await createWithFormat(ws, lobbyProtocolVersion, format);
+        expect(sentFormat(ws)).toBeNull();
+      },
+    );
+
+    it("sends format: null when the broker advertises no lobby version (fails closed)", async () => {
+      const ws = new MockWebSocket();
+      await createWithFormat(ws, undefined, "Freeform");
+      expect(sentFormat(ws)).toBeNull();
+    });
+
+    it("sends the format once the broker is at the floor (reach guard)", async () => {
+      const ws = new MockWebSocket();
+      await createWithFormat(ws, MIN_LOBBY_PROTOCOL_FOR_FREEFORM_FORMATS, "Freeform");
+      expect(sentFormat(ws)).toBe("Freeform");
+    });
+
+    it("sends a long-standing format regardless of lobby version (control)", async () => {
+      const ws = new MockWebSocket();
+      await createWithFormat(ws, 9, "Commander");
+      expect(sentFormat(ws)).toBe("Commander");
+    });
+
+    it("sends format: null as-is when the request names no format", async () => {
+      const ws = new MockWebSocket();
+      await createWithFormat(ws, 9, null);
+      expect(sentFormat(ws)).toBeNull();
     });
   });
 

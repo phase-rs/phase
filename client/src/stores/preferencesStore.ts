@@ -17,11 +17,18 @@ import {
   PACING_MAX,
   PACING_MIN,
   defaultPacingMultipliers,
+  type CardAnimationStyle,
   type PacingCategory,
   type VfxQuality,
 } from "../animation/types";
 import type { AIDifficulty } from "../constants/ai";
 import { DEFAULT_AI_DIFFICULTY } from "../constants/ai";
+import { isMemoryConstrainedDevice } from "../utils/device";
+import {
+  emptyPoolSelection,
+  normalizePoolSelection,
+  type RandomPoolSelection,
+} from "../services/randomPoolSelection";
 import type { DeckArchetype } from "../services/engineRuntime";
 import { detectInitialLanguage, normalizeSupportedLng, type SupportedLng } from "../i18n/resources";
 
@@ -108,7 +115,7 @@ export type OpponentHudDensity = "comfortable" | "compact";
 export type MultiplayerBoardLayout = "auto" | "focused" | "split";
 /** A layout after viewport/table-size resolution, suitable for board chrome. */
 export type ResolvedMultiplayerBoardLayout = Exclude<MultiplayerBoardLayout, "auto">;
-/** "auto-wubrg" picks a random battlefield matching the dominant mana color.
+/** "auto-wubrg" picks the arena matching the dominant mana color.
  *  "random" picks a random battlefield each game regardless of color.
  *  "none" disables the background image.
  *  "custom" uses the URL stored in `customBackgroundUrl`.
@@ -282,10 +289,17 @@ function buildDefaultPreferences(): PreferencesState {
     boardBackground: "auto-wubrg",
     customBackgroundUrl: "",
     vfxQuality: "full",
+    // The WebGL card overlay adds GPU contexts and textures on top of an engine
+    // that already sits near iOS Safari's memory ceiling.
+    cardAnimationStyle: isMemoryConstrainedDevice() ? "classic" : "webgl",
     animationSpeedMultiplier: ANIMATION_SPEED_DEFAULT,
     pacingMultipliers: defaultPacingMultipliers(),
     phaseStops: [],
     priorityPassingMode: "Standard",
+    priorityAlertVisual: true,
+    priorityAlertSound: true,
+    priorityAlertTitle: true,
+    unCardActionsEnabled: false,
     experimentalTournamentsEnabled: false,
     masterVolume: 100,
     sfxVolume: 70,
@@ -312,6 +326,7 @@ function buildDefaultPreferences(): PreferencesState {
     draftDoubleClickConfirmPick: true,
     cardPreviewHoverDelayMs: 0,
     showCardPreviewFooter: true,
+    showOwnerPrintings: true,
     stackDockSide: "right",
     logDockSide: "right",
     opponentHudDensity: "comfortable",
@@ -319,9 +334,12 @@ function buildDefaultPreferences(): PreferencesState {
     multiplayerSplitLayoutNudgeDismissed: true,
     aiSeats: [defaultAiSeat()],
     cedhMode: false,
+    draftPickEnhancements: false,
     aiArchetypeFilter: "Any",
     aiCoverageFloor: DEFAULT_AI_COVERAGE_FLOOR,
     aiBracketFilter: [] as CommanderBracket[],
+    humanPoolSelection: emptyPoolSelection(),
+    aiPoolSelection: emptyPoolSelection(),
     lastFormat: null,
     lastMatchType: "Bo1",
     lastPlayerCount: 2,
@@ -348,6 +366,8 @@ interface PreferencesState {
   boardBackground: BoardBackground;
   customBackgroundUrl: string;
   vfxQuality: VfxQuality;
+  /** New (`"webgl"`) or Classic card animations. Independent of `vfxQuality`. */
+  cardAnimationStyle: CardAnimationStyle;
   /** Continuous global animation-speed multiplier. `0` = instant (skip waits).
    *  `1` = neutral. Higher = slower playback. Multiplies every per-category
    *  duration after pacingMultipliers is applied. */
@@ -358,6 +378,18 @@ interface PreferencesState {
   pacingMultipliers: Record<PacingCategory, number>;
   phaseStops: PhaseStop[];
   priorityPassingMode: PriorityPassingMode;
+  /** Glow the turn-status pill and pass button (stronger once unanswered) when
+   *  a meaningful priority window opens after you were waiting on someone else. */
+  priorityAlertVisual: boolean;
+  /** Play a short cue when a meaningful priority window opens. */
+  priorityAlertSound: boolean;
+  /** Prefix the browser tab title while a priority alert is pending in a
+   *  background tab. */
+  priorityAlertTitle: boolean;
+  /** Opt in to Un-card actions (silver-border sets): say-it prompts, the
+   *  Gotcha! button and the Un-actions menu. Mirrored to the engine, which
+   *  never prompts or offers anything to a player who has not opted in. */
+  unCardActionsEnabled: boolean;
   /** Whether the in-progress tournament UI appears in app navigation. */
   experimentalTournamentsEnabled: boolean;
   masterVolume: number;
@@ -411,6 +443,8 @@ interface PreferencesState {
   /** Whether desktop hover previews show the informational footer beneath the
    *  card art (name, legal activated abilities, and keyboard hints). */
   showCardPreviewFooter: boolean;
+  /** The viewer's display choice, not an owner's submitted printing. */
+  showOwnerPrintings: boolean;
   /** Screen edge the stack panel docks to and collapses toward. */
   stackDockSide: StackDockSide;
   /** Screen edge the game-log panel docks to. */
@@ -427,9 +461,18 @@ interface PreferencesState {
    *  pools are restricted to bracket-5 decks. cEDH is a table property, not a
    *  per-seat difficulty — see `effectiveAiDifficulty` in `services/cedhLock`. */
   cedhMode: boolean;
+  /** Draft bots (Medium and above) apply the built-in per-format draft guides
+   *  to their picks. Off by default; formats without a guide are unaffected. */
+  draftPickEnhancements: boolean;
   aiArchetypeFilter: AiArchetypeFilter;
   aiCoverageFloor: number;
   aiBracketFilter: CommanderBracket[];
+  /** Folder/deck inclusion for the player's own Random deck. All-empty means
+   *  include everything (the pre-feature behavior). */
+  humanPoolSelection: RandomPoolSelection;
+  /** Folder/deck inclusion for every AI Random seat (single-player setup,
+   *  Host Game, live room tile). All-empty means include everything. */
+  aiPoolSelection: RandomPoolSelection;
   lastFormat: GameFormat | null;
   lastMatchType: MatchType;
   lastPlayerCount: number;
@@ -465,6 +508,7 @@ interface PreferencesActions {
   setBoardBackground: (bg: BoardBackground) => void;
   setCustomBackgroundUrl: (url: string) => void;
   setVfxQuality: (quality: VfxQuality) => void;
+  setCardAnimationStyle: (style: CardAnimationStyle) => void;
   setAnimationSpeedMultiplier: (multiplier: number) => void;
   setPacingMultiplier: (category: PacingCategory, multiplier: number) => void;
   /** Reset every pacing slider (animation speed + per-category) back to 1.0×. */
@@ -475,6 +519,10 @@ interface PreferencesActions {
   resetAllPreferences: () => void;
   setPhaseStops: (stops: PhaseStop[]) => void;
   setPriorityPassingMode: (mode: PriorityPassingMode) => void;
+  setPriorityAlertVisual: (enabled: boolean) => void;
+  setPriorityAlertSound: (enabled: boolean) => void;
+  setPriorityAlertTitle: (enabled: boolean) => void;
+  setUnCardActionsEnabled: (enabled: boolean) => void;
   setExperimentalTournamentsEnabled: (enabled: boolean) => void;
   setMasterVolume: (vol: number) => void;
   setSfxVolume: (vol: number) => void;
@@ -503,6 +551,7 @@ interface PreferencesActions {
   setDraftDoubleClickConfirmPick: (enabled: boolean) => void;
   setCardPreviewHoverDelayMs: (ms: number) => void;
   setShowCardPreviewFooter: (show: boolean) => void;
+  setShowOwnerPrintings: (show: boolean) => void;
   setAiSeatDifficulty: (index: number, difficulty: AIDifficulty) => void;
   setAiSeatDeckId: (index: number, id: AiDeckSelection) => void;
   /** Grow or shrink `aiSeats` to `count` slots. New slots inherit defaults;
@@ -511,9 +560,12 @@ interface PreferencesActions {
   ensureAiSeatCount: (count: number) => void;
   /** Toggle the table-wide cEDH mode (all AI play cEDH, deck pools → bracket 5). */
   setCedhMode: (enabled: boolean) => void;
+  setDraftPickEnhancements: (enabled: boolean) => void;
   setAiArchetypeFilter: (filter: AiArchetypeFilter) => void;
   setAiCoverageFloor: (floor: number) => void;
   setAiBracketFilter: (brackets: CommanderBracket[]) => void;
+  setHumanPoolSelection: (selection: RandomPoolSelection) => void;
+  setAiPoolSelection: (selection: RandomPoolSelection) => void;
   setLastFormat: (format: GameFormat) => void;
   setLastMatchType: (matchType: MatchType) => void;
   setLastPlayerCount: (count: number) => void;
@@ -612,6 +664,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       setBoardBackground: (bg) => set({ boardBackground: bg }),
       setCustomBackgroundUrl: (url) => set({ customBackgroundUrl: url.trim() }),
       setVfxQuality: (quality) => set({ vfxQuality: quality }),
+      setCardAnimationStyle: (style) => set({ cardAnimationStyle: style }),
       setAnimationSpeedMultiplier: (multiplier) =>
         set({ animationSpeedMultiplier: clamp(multiplier, ANIMATION_SPEED_MIN, ANIMATION_SPEED_MAX) }),
       setPacingMultiplier: (category, multiplier) =>
@@ -629,6 +682,10 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       resetAllPreferences: () => set(buildDefaultPreferences()),
       setPhaseStops: (stops) => set({ phaseStops: stops }),
       setPriorityPassingMode: (mode) => set({ priorityPassingMode: mode }),
+      setPriorityAlertVisual: (enabled) => set({ priorityAlertVisual: enabled }),
+      setPriorityAlertSound: (enabled) => set({ priorityAlertSound: enabled }),
+      setPriorityAlertTitle: (enabled) => set({ priorityAlertTitle: enabled }),
+      setUnCardActionsEnabled: (enabled) => set({ unCardActionsEnabled: enabled }),
       setExperimentalTournamentsEnabled: (enabled) => set({ experimentalTournamentsEnabled: enabled }),
       setMasterVolume: (vol) => set({ masterVolume: vol }),
       setSfxVolume: (vol) => set({ sfxVolume: vol }),
@@ -676,6 +733,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
           ),
         }),
       setShowCardPreviewFooter: (show) => set({ showCardPreviewFooter: show }),
+      setShowOwnerPrintings: (show) => set({ showOwnerPrintings: show }),
       setAiSeatDifficulty: (index, difficulty) =>
         set((state) => {
           if (index < 0 || index >= state.aiSeats.length) return state;
@@ -705,9 +763,12 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
           return { aiSeats: grown };
         }),
       setCedhMode: (enabled) => set({ cedhMode: enabled }),
+      setDraftPickEnhancements: (enabled) => set({ draftPickEnhancements: enabled }),
       setAiArchetypeFilter: (filter) => set({ aiArchetypeFilter: filter }),
       setAiCoverageFloor: (floor) => set({ aiCoverageFloor: floor }),
       setAiBracketFilter: (brackets) => set({ aiBracketFilter: brackets }),
+      setHumanPoolSelection: (selection) => set({ humanPoolSelection: selection }),
+      setAiPoolSelection: (selection) => set({ aiPoolSelection: selection }),
       setLastFormat: (format) => set({ lastFormat: format }),
       setLastMatchType: (matchType) => set({ lastMatchType: matchType }),
       setLastPlayerCount: (count) => set({ lastPlayerCount: count }),
@@ -825,7 +886,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
     }),
     {
       name: "phase-preferences",
-      version: 35,
+      version: 41,
       // v0 → v1: flat aiDifficulty + aiDeckName become aiSeats[0].
       // v1 → v2: discrete animationSpeed/combatPacing enums become numeric
       //          animationSpeedMultiplier/combatPacingMultiplier.
@@ -911,6 +972,22 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       // v34 → v35: Add experimentalTournamentsEnabled. Existing users retain
       //          the hidden-by-default navigation because the shallow merge
       //          supplies false.
+      // v35 → v36: Add cardAnimationStyle. Existing users get "webgl" (the New
+      //          card animations) through the shallow merge, the same as fresh
+      //          stores, so no migrate block is needed.
+      // v36 → v37: Consolidate battlefield art to one animated arena per color.
+      // v37 → v38: Add priorityAlertVisual/Sound/Title. Existing users get all
+      //          three on (true) through the shallow merge, the same as fresh
+      //          stores, so no migrate block is needed.
+      // v38 → v39: Add humanPoolSelection/aiPoolSelection. Absent keys fall
+      //          through the shallow merge to include-all; present-but-malformed
+      //          blobs normalize below (and in `merge` for current-version blobs).
+      // v39 → v40: iOS devices and Android phones default to "classic" card
+      //          animations. Their stores persisted v36's "webgl" default,
+      //          which almost no one chose, so they move to "classic" once;
+      //          picking New again afterwards sticks.
+      // v40 → v41: Add showOwnerPrintings; absent fields default to true via
+      //          the shallow merge, while a saved false remains authoritative.
       migrate: (persisted: unknown, version: number) => {
         if (!persisted || typeof persisted !== "object") return persisted;
         let migrated = persisted as Record<string, unknown>;
@@ -1110,6 +1187,41 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
           migrated = { ...rest, logPanelLastChoice: "open" };
         }
 
+        if (version < 37) {
+          switch (migrated.boardBackground) {
+            case "water_frozen_aurora":
+              migrated = { ...migrated, boardBackground: "water_moonlit_ocean_temple" };
+              break;
+            case "shadow_haunted_graveyard":
+            case "shadow_ruined_archway":
+              migrated = { ...migrated, boardBackground: "shadow_moon_coven_sanctum" };
+              break;
+            case "earth_jurassic":
+              migrated = { ...migrated, boardBackground: "earth_snowy_forest" };
+              break;
+          }
+        }
+
+        if (version < 39) {
+          const legacy = migrated as {
+            humanPoolSelection?: unknown;
+            aiPoolSelection?: unknown;
+          };
+          migrated = {
+            ...migrated,
+            humanPoolSelection: legacy.humanPoolSelection === undefined
+              ? undefined
+              : normalizePoolSelection(legacy.humanPoolSelection),
+            aiPoolSelection: legacy.aiPoolSelection === undefined
+              ? undefined
+              : normalizePoolSelection(legacy.aiPoolSelection),
+          };
+        }
+
+        if (version < 40 && isMemoryConstrainedDevice()) {
+          migrated = { ...migrated, cardAnimationStyle: "classic" };
+        }
+
         return {
           ...migrated,
           language: normalizeSupportedLng(migrated.language, detectInitialLanguage()),
@@ -1129,6 +1241,12 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
           logDockSide: saved.logDockSide === "left" || saved.logDockSide === "right"
             ? saved.logDockSide
             : "right",
+          humanPoolSelection: saved.humanPoolSelection === undefined
+            ? current.humanPoolSelection
+            : normalizePoolSelection(saved.humanPoolSelection),
+          aiPoolSelection: saved.aiPoolSelection === undefined
+            ? current.aiPoolSelection
+            : normalizePoolSelection(saved.aiPoolSelection),
         };
       },
     },

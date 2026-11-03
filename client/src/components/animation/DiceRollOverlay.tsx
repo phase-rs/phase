@@ -1,23 +1,50 @@
-import { lazy, Suspense, useCallback, useEffect, useState, type ReactNode } from "react";
+import { Component, Suspense, type ComponentProps, useCallback, useEffect, useState, type ReactNode } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { useTranslation } from "react-i18next";
 
 import { getPlayerId } from "../../hooks/usePlayerId";
+import { reportBoundaryError } from "../../services/telemetryEvents";
 import { getOpponentDisplayName } from "../../stores/multiplayerStore";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 import { useUiStore } from "../../stores/uiStore";
 import type { DiceRollPayload } from "../../stores/uiStore";
+import type { Coin3D as Coin3DImpl } from "./dice3d/Coin3D.tsx";
+import type { Dice3D as Dice3DImpl } from "./dice3d/Dice3D.tsx";
+import { loadCoin3DModule, loadDice3DModule } from "./dice3d/loaders";
+import { safeLazy, warnOnce } from "./dice3d/safeLazy";
 
 // Code-split the WebGL renderer: `three` only loads when a die is actually
-// rolled, keeping it out of the main bundle.
-const Dice3D = lazy(() => import("./dice3d/Dice3D.tsx").then((m) => ({ default: m.Dice3D })));
-const Coin3D = lazy(() => import("./dice3d/Coin3D.tsx").then((m) => ({ default: m.Coin3D })));
+// rolled, keeping it out of the main bundle. The roll is cosmetic, so a chunk
+// that is missing after a deploy degrades to the static face (`safeLazy`)
+// instead of throwing into the app-level ErrorBoundary and unmounting the game.
+const Dice3D = safeLazy(
+  "Dice3D",
+  loadDice3DModule,
+  (m) => m.Dice3D,
+  function StaticDice3D({ result, onSettle }: Dice3DFallbackProps) {
+    return <SettledPlaceholder label={String(result)} onSettle={onSettle} />;
+  },
+);
+const Coin3D = safeLazy(
+  "Coin3D",
+  loadCoin3DModule,
+  (m) => m.Coin3D,
+  function StaticCoin3D({ face, labels, onSettle }: Coin3DFallbackProps) {
+    return <SettledPlaceholder label={labels?.[face] ?? face} onSettle={onSettle} />;
+  },
+);
+
+// Prop types come from the real components (type-only imports are erased, so
+// `three` stays out of the main bundle).
+type Dice3DFallbackProps = ComponentProps<typeof Dice3DImpl>;
+type Coin3DFallbackProps = ComponentProps<typeof Coin3DImpl>;
 
 const DIE_SIZE = 132;
 
 // Accent RGB triples (sans `rgb(...)`) so they compose into rgba()/gradients.
 const GOLD = "251,191,36"; // amber-400 — the winner / emphasis accent
 const NEUTRAL = "148,163,184"; // slate-400 — a non-decisive die
+const IGNORED = "100,116,139"; // slate-500 — a dropped/ignored die, still shown so the roll stays auditable
 const COIN_WON = "52,211,153"; // emerald-400 — the flipper won
 const COIN_LOST = "251,113,133"; // rose-400 — the flipper lost
 
@@ -78,8 +105,10 @@ export function DiceRollOverlay() {
   // fallback while the chunk downloads. Skipped where we'd never animate.
   useEffect(() => {
     if (shouldReduceMotion || !hasWebGL()) return;
-    void import("./dice3d/Dice3D.tsx");
-    void import("./dice3d/Coin3D.tsx");
+    // Best-effort warm-up: a failed prefetch must not become an unhandled
+    // rejection; the render path degrades on its own.
+    void loadDice3DModule().catch(() => {});
+    void loadCoin3DModule().catch(() => {});
   }, [shouldReduceMotion]);
 
   // CR 103.1 contest holds for input, so its hint reads "tap to continue"; an
@@ -113,11 +142,15 @@ export function DiceRollOverlay() {
           />
           {/* Keyed by payload identity so each roll the FIFO advances to gets a
               fresh component instance (resets settle state, re-runs the 3D mount). */}
-          <DiceRollContent
+          <DiceRollBoundary
             key={diceRollKey(diceRoll)}
-            payload={diceRoll}
-            animate={!shouldReduceMotion && hasWebGL()}
-          />
+            fallback={<DiceRollContent payload={diceRoll} animate={false} />}
+          >
+            <DiceRollContent
+              payload={diceRoll}
+              animate={!shouldReduceMotion && hasWebGL()}
+            />
+          </DiceRollBoundary>
           <motion.span
             className="pointer-events-none absolute bottom-8 text-xs font-medium uppercase tracking-[0.2em] text-slate-400/70"
             initial={{ opacity: 0 }}
@@ -130,6 +163,34 @@ export function DiceRollOverlay() {
       )}
     </AnimatePresence>
   );
+}
+
+/**
+ * Keeps a failure inside the cosmetic dice/coin render local rather than letting
+ * it reach the app-level ErrorBoundary, which would unmount the whole game
+ * route. The animation is dropped but the engine's result is not: `fallback`
+ * re-renders the same payload statically (first-player caption, turn order,
+ * coin outcome). The error is still reported to telemetry like any other
+ * caught render error, so a real WebGL crash does not go unseen.
+ */
+class DiceRollBoundary extends Component<
+  { children: ReactNode; fallback: ReactNode },
+  { failed: boolean }
+> {
+  state = { failed: false };
+
+  static getDerivedStateFromError(): { failed: boolean } {
+    return { failed: true };
+  }
+
+  componentDidCatch(error: Error): void {
+    reportBoundaryError(error);
+    warnOnce("DiceRollBoundary", "dice roll render failed; showing the static result.", error);
+  }
+
+  render(): ReactNode {
+    return this.state.failed ? this.props.fallback : this.props.children;
+  }
 }
 
 /** Stable identity for a payload so the FIFO advancing from one roll to the next
@@ -417,12 +478,18 @@ function InGameDice({
   return (
     <div className="relative flex items-end justify-center gap-10 select-none">
       {payload.rolls.map((roll, i) => (
-        <DieFace key={i} animate={animate} accent={NEUTRAL} value={roll.value}>
+        <DieFace
+          key={i}
+          animate={animate}
+          accent={roll.ignored ? IGNORED : NEUTRAL}
+          ignored={roll.ignored}
+          value={roll.value}
+        >
           {(handleSettle) =>
             animate ? (
               <Suspense fallback={<DiePlaceholder label={String(roll.value)} />}>
                 <Dice3D
-                  sides={payload.sides}
+                  sides={roll.sides ?? payload.sides}
                   result={roll.value}
                   speedMultiplier={speedMultiplier}
                   size={DIE_SIZE}
@@ -442,15 +509,18 @@ function InGameDice({
 /**
  * Wraps a single die/coin and plays a landing flourish the moment it settles: a
  * scale "pop", an expanding accent ring, and a soft radial flash. `emphasize`
- * adds a lingering glow for the contest winner. The die is supplied as a render
- * prop so the wrapper can hand its settle callback to whichever 3D child (Dice3D
- * / Coin3D) it renders; the static fallback settles on mount instead.
+ * adds a lingering glow for the contest winner. `ignored` dims a dropped die
+ * (roll-2-drop-lowest) and strikes its badge while still showing its value.
+ * The die is supplied as a render prop so the wrapper can hand its settle
+ * callback to whichever 3D child (Dice3D / Coin3D) it renders; the static
+ * fallback settles on mount instead.
  */
 function DieFace({
   children,
   animate,
   accent,
   emphasize = false,
+  ignored = false,
   value,
   onSettle,
 }: {
@@ -458,10 +528,13 @@ function DieFace({
   animate: boolean;
   accent: string;
   emphasize?: boolean;
+  /** A dropped die: dimmed with a struck badge, value still visible. */
+  ignored?: boolean;
   /** When set, a numeric result badge pops in below the die as it lands. */
   value?: number;
   onSettle?: () => void;
 }) {
+  const { t } = useTranslation();
   // Static fallbacks never fire a 3D `onSettle`, so they start settled.
   const [settled, setSettled] = useState(!animate);
   const handleSettle = useCallback(() => {
@@ -481,7 +554,10 @@ function DieFace({
       animate={settled ? { scale: [1, 1.14, 1] } : { scale: 1 }}
       transition={{ duration: 0.36, ease: [0.34, 1.56, 0.64, 1] }}
     >
-      <div className="relative rounded-2xl" style={{ width: DIE_SIZE, height: DIE_SIZE }}>
+      <div
+        className={`relative rounded-2xl${ignored ? " opacity-60 saturate-50" : ""}`}
+        style={{ width: DIE_SIZE, height: DIE_SIZE }}
+      >
         {/* Lingering glow for the emphasized (winner) die. */}
         {emphasize && (
           <motion.div
@@ -520,12 +596,16 @@ function DieFace({
       </div>
 
       {/* Result badge: the engine's rolled value, revealed as the die lands so
-          the outcome is legible without reading the cluttered polyhedron face. */}
+          the outcome is legible without reading the cluttered polyhedron face.
+          A dropped (ignored) die keeps its value struck through with an
+          "Ignored" caption so players see what the lowest roll was. */}
       {value != null && (
         <AnimatePresence>
           {settled && (
             <motion.span
-              className="min-w-9 rounded-md px-2 py-0.5 text-center text-xl font-extrabold tabular-nums"
+              className={`min-w-9 rounded-md px-2 py-0.5 text-center text-xl font-extrabold tabular-nums${
+                ignored ? " line-through decoration-2" : ""
+              }`}
               initial={{ opacity: 0, scale: 0.6, y: -4 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0 }}
@@ -540,6 +620,11 @@ function DieFace({
             </motion.span>
           )}
         </AnimatePresence>
+      )}
+      {ignored && settled && (
+        <span className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+          {t("diceRoll.ignoredDie")}
+        </span>
       )}
     </motion.div>
   );
@@ -557,4 +642,13 @@ function DiePlaceholder({ label }: { label: string }) {
       {label}
     </div>
   );
+}
+
+/** The static stand-in used as a `safeLazy` fallback: shows the result and
+ *  reports settled on mount, since there is no 3D animation to wait for. */
+function SettledPlaceholder({ label, onSettle }: { label: string; onSettle?: () => void }) {
+  useEffect(() => {
+    onSettle?.();
+  }, [onSettle]);
+  return <DiePlaceholder label={label} />;
 }

@@ -1,13 +1,132 @@
 import { act } from "react";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { usePreferencesStore } from "../preferencesStore";
+import { emptyPoolSelection } from "../../services/randomPoolSelection";
 
 describe("preferencesStore", () => {
+  it.each([
+    ["water_frozen_aurora", "water_moonlit_ocean_temple"],
+    ["shadow_haunted_graveyard", "shadow_moon_coven_sanctum"],
+    ["shadow_ruined_archway", "shadow_moon_coven_sanctum"],
+    ["earth_jurassic", "earth_snowy_forest"],
+    ["air_angelic_sky", "air_angelic_sky"],
+    ["none", "none"],
+    ["custom", "custom"],
+    ["auto-wubrg", "auto-wubrg"],
+  ])("migrates saved background %s to %s", (previous, expected) => {
+    localStorage.setItem("phase-preferences", JSON.stringify({
+      state: { boardBackground: previous },
+      version: 36,
+    }));
+    usePreferencesStore.persist.rehydrate();
+    expect(usePreferencesStore.getState().boardBackground).toBe(expected);
+  });
+
+  it("normalizes malformed v37 pool selections on migrate", () => {
+    localStorage.setItem("phase-preferences", JSON.stringify({
+      state: {
+        humanPoolSelection: {
+          excludedGroups: "unfiled",
+          excludedDecks: ["saved:a", 7],
+          includedDecks: [],
+        },
+        aiPoolSelection: "nope",
+      },
+      version: 37,
+    }));
+    usePreferencesStore.persist.rehydrate();
+    expect(usePreferencesStore.getState().humanPoolSelection).toEqual({
+      excludedGroups: [],
+      excludedDecks: ["saved:a"],
+      includedDecks: [],
+    });
+    expect(usePreferencesStore.getState().aiPoolSelection).toEqual(emptyPoolSelection());
+  });
+
+  it("defaults absent pool selections to include-all", () => {
+    localStorage.setItem("phase-preferences", JSON.stringify({
+      state: {},
+      version: 37,
+    }));
+    usePreferencesStore.persist.rehydrate();
+    expect(usePreferencesStore.getState().humanPoolSelection).toEqual(emptyPoolSelection());
+    expect(usePreferencesStore.getState().aiPoolSelection).toEqual(emptyPoolSelection());
+  });
+
+  it("preserves v38 priority-alert choices while adding pool selections", () => {
+    localStorage.setItem("phase-preferences", JSON.stringify({
+      state: {
+        priorityAlertVisual: false,
+        priorityAlertSound: true,
+        priorityAlertTitle: false,
+      },
+      version: 38,
+    }));
+    usePreferencesStore.persist.rehydrate();
+    const state = usePreferencesStore.getState();
+    expect(state.priorityAlertVisual).toBe(false);
+    expect(state.priorityAlertSound).toBe(true);
+    expect(state.priorityAlertTitle).toBe(false);
+    expect(state.humanPoolSelection).toEqual(emptyPoolSelection());
+    expect(state.aiPoolSelection).toEqual(emptyPoolSelection());
+  });
+
+  describe("card animation style on memory-constrained devices", () => {
+    const IPHONE_UA =
+      "Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1";
+    const DESKTOP_UA =
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36";
+    const realUserAgent = navigator.userAgent;
+
+    function useUserAgent(userAgent: string): void {
+      Object.defineProperty(navigator, "userAgent", { value: userAgent, configurable: true });
+    }
+
+    afterEach(() => useUserAgent(realUserAgent));
+
+    it.each([
+      [IPHONE_UA, "classic"],
+      [DESKTOP_UA, "webgl"],
+    ] as const)("moves a v39 webgl store to the device default (%s)", (userAgent, expected) => {
+      useUserAgent(userAgent);
+      localStorage.setItem("phase-preferences", JSON.stringify({
+        state: { cardAnimationStyle: "webgl" },
+        version: 39,
+      }));
+      usePreferencesStore.persist.rehydrate();
+      expect(usePreferencesStore.getState().cardAnimationStyle).toBe(expected);
+    });
+
+    it("keeps a phone's webgl choice made after the migration", () => {
+      useUserAgent(IPHONE_UA);
+      localStorage.setItem("phase-preferences", JSON.stringify({
+        state: { cardAnimationStyle: "webgl", showOwnerPrintings: false },
+        version: 40,
+      }));
+      usePreferencesStore.persist.rehydrate();
+      expect(usePreferencesStore.getState()).toMatchObject({
+        cardAnimationStyle: "webgl",
+        showOwnerPrintings: false,
+      });
+    });
+
+    it.each([
+      [IPHONE_UA, "classic"],
+      [DESKTOP_UA, "webgl"],
+    ] as const)("resets to the device default (%s)", (userAgent, expected) => {
+      useUserAgent(userAgent);
+      usePreferencesStore.setState({ cardAnimationStyle: expected === "classic" ? "webgl" : "classic" });
+      act(() => usePreferencesStore.getState().resetAllPreferences());
+      expect(usePreferencesStore.getState().cardAnimationStyle).toBe(expected);
+    });
+  });
+
   beforeEach(() => {
     // Reset store state between tests
     act(() => {
       usePreferencesStore.setState({
+        ...usePreferencesStore.getInitialState(),
         cardSize: "medium",
         hudLayout: "inline",
         followActiveOpponent: false,
@@ -15,6 +134,7 @@ describe("preferencesStore", () => {
         logDockSide: "right",
         boardBackground: "auto-wubrg",
         vfxQuality: "full",
+        cardAnimationStyle: "webgl",
         animationSpeedMultiplier: 1.0,
         showCardPreviewFooter: true,
         draftDoubleClickConfirmPick: true,
@@ -31,6 +151,8 @@ describe("preferencesStore", () => {
         multiplayerSplitLayoutNudgeDismissed: true,
         aiSeats: [{ difficulty: "Medium", deckId: "Random" }],
         aiBracketFilter: [],
+        humanPoolSelection: emptyPoolSelection(),
+        aiPoolSelection: emptyPoolSelection(),
       });
     });
     localStorage.clear();
@@ -54,6 +176,9 @@ describe("preferencesStore", () => {
     expect(state.priorityPassingMode).toBe("Standard");
     expect(state.experimentalTournamentsEnabled).toBe(false);
     expect(state.draftDoubleClickConfirmPick).toBe(true);
+    expect(usePreferencesStore.getInitialState().cardAnimationStyle).toBe("webgl");
+    expect(usePreferencesStore.getInitialState().humanPoolSelection).toEqual(emptyPoolSelection());
+    expect(usePreferencesStore.getInitialState().aiPoolSelection).toEqual(emptyPoolSelection());
   });
 
   it("setAiSeatDifficulty updates the target seat", () => {
@@ -121,6 +246,15 @@ describe("preferencesStore", () => {
 
     expect(usePreferencesStore.getState().experimentalTournamentsEnabled).toBe(true);
     expect(JSON.parse(localStorage.getItem("phase-preferences")!).state.experimentalTournamentsEnabled).toBe(true);
+  });
+
+  it("persists the card animation style preference", () => {
+    act(() => {
+      usePreferencesStore.getState().setCardAnimationStyle("classic");
+    });
+
+    expect(usePreferencesStore.getState().cardAnimationStyle).toBe("classic");
+    expect(JSON.parse(localStorage.getItem("phase-preferences")!).state.cardAnimationStyle).toBe("classic");
   });
 
   it("updates the multiplayer split-layout nudge dismissal independently", () => {
@@ -195,6 +329,22 @@ describe("preferencesStore", () => {
     expect(usePreferencesStore.getState().vfxQuality).toBe("minimal");
   });
 
+  it("keeps the card animation style independent of VFX quality", () => {
+    act(() => {
+      usePreferencesStore.getState().setVfxQuality("minimal");
+    });
+
+    expect(usePreferencesStore.getState().vfxQuality).toBe("minimal");
+    expect(usePreferencesStore.getState().cardAnimationStyle).toBe("webgl");
+
+    act(() => {
+      usePreferencesStore.getState().setCardAnimationStyle("classic");
+    });
+
+    expect(usePreferencesStore.getState().cardAnimationStyle).toBe("classic");
+    expect(usePreferencesStore.getState().vfxQuality).toBe("minimal");
+  });
+
   it("shows the card preview footer by default and persists changes", () => {
     // Read the store's actual initialization snapshot so the shared beforeEach
     // reset cannot mask a regression in buildDefaultPreferences().
@@ -207,6 +357,77 @@ describe("preferencesStore", () => {
     expect(usePreferencesStore.getState().showCardPreviewFooter).toBe(false);
     const stored = JSON.parse(localStorage.getItem("phase-preferences")!);
     expect(stored.state.showCardPreviewFooter).toBe(false);
+  });
+
+  describe("owner printing preference", () => {
+    beforeEach(() => {
+      act(() => usePreferencesStore.setState(usePreferencesStore.getInitialState()));
+      localStorage.removeItem("phase-preferences");
+    });
+
+    afterEach(() => {
+      act(() => usePreferencesStore.setState(usePreferencesStore.getInitialState()));
+      localStorage.removeItem("phase-preferences");
+    });
+
+    it.each([false, true])("round-trips explicit %s through storage", async (show) => {
+      act(() => usePreferencesStore.getState().setShowOwnerPrintings(show));
+      expect(usePreferencesStore.getState().showOwnerPrintings).toBe(show);
+      const saved = localStorage.getItem("phase-preferences")!;
+      expect(JSON.parse(saved)).toMatchObject({
+        state: { showOwnerPrintings: show },
+      });
+
+      act(() => usePreferencesStore.getState().setShowOwnerPrintings(!show));
+      expect(usePreferencesStore.getState().showOwnerPrintings).toBe(!show);
+      localStorage.setItem("phase-preferences", saved);
+      await act(async () => { await usePreferencesStore.persist.rehydrate(); });
+      expect(usePreferencesStore.getState().showOwnerPrintings).toBe(show);
+    });
+
+    it.each([
+      { version: 39, savedChoice: {}, expected: true },
+      { version: 39, savedChoice: { showOwnerPrintings: false }, expected: false },
+      { version: 40, savedChoice: {}, expected: true },
+      { version: 40, savedChoice: { showOwnerPrintings: false }, expected: false },
+    ])("migrates v$version $savedChoice without losing sibling choices", async ({ version, savedChoice, expected }) => {
+      localStorage.setItem("phase-preferences", JSON.stringify({
+        state: { cardSize: "large", showCardPreviewFooter: false, ...savedChoice },
+        version,
+      }));
+
+      await act(async () => { await usePreferencesStore.persist.rehydrate(); });
+
+      expect(usePreferencesStore.getState()).toMatchObject({
+        showOwnerPrintings: expected,
+        cardSize: "large",
+        showCardPreviewFooter: false,
+      });
+      expect(JSON.parse(localStorage.getItem("phase-preferences")!)).toMatchObject({
+        state: {
+          showOwnerPrintings: expected,
+          cardSize: "large",
+          showCardPreviewFooter: false,
+        },
+      });
+    });
+
+    it("resets an explicit off to on and rehydrates the reset value", async () => {
+      act(() => usePreferencesStore.getState().setShowOwnerPrintings(false));
+      expect(usePreferencesStore.getState().showOwnerPrintings).toBe(false);
+      expect(JSON.parse(localStorage.getItem("phase-preferences")!).state.showOwnerPrintings).toBe(false);
+
+      act(() => usePreferencesStore.getState().resetAllPreferences());
+      expect(usePreferencesStore.getState().showOwnerPrintings).toBe(true);
+      const reset = localStorage.getItem("phase-preferences")!;
+      expect(JSON.parse(reset).state.showOwnerPrintings).toBe(true);
+
+      act(() => usePreferencesStore.getState().setShowOwnerPrintings(false));
+      expect(usePreferencesStore.getState().showOwnerPrintings).toBe(false);
+      localStorage.setItem("phase-preferences", reset);
+      await act(async () => { await usePreferencesStore.persist.rehydrate(); });
+      expect(usePreferencesStore.getState().showOwnerPrintings).toBe(true);
+    });
   });
 
   it("setAnimationSpeedMultiplier updates the value", () => {
@@ -269,6 +490,36 @@ describe("preferencesStore", () => {
     expect(state.pacingMultipliers).toEqual({ effects: 1.0, combat: 1.0, banners: 1.0 });
   });
 
+  it("hydrates a v37 blob without the priority-alert fields with all three on, and reset restores them", () => {
+    localStorage.setItem(
+      "phase-preferences",
+      JSON.stringify({ state: { cardSize: "large" }, version: 37 }),
+    );
+    act(() => usePreferencesStore.persist.rehydrate());
+
+    const hydrated = usePreferencesStore.getState();
+    expect(hydrated.cardSize).toBe("large");
+    expect(hydrated.priorityAlertVisual).toBe(true);
+    expect(hydrated.priorityAlertSound).toBe(true);
+    expect(hydrated.priorityAlertTitle).toBe(true);
+
+    act(() => {
+      hydrated.setPriorityAlertVisual(false);
+      hydrated.setPriorityAlertSound(false);
+      hydrated.setPriorityAlertTitle(false);
+    });
+    expect(usePreferencesStore.getState().priorityAlertVisual).toBe(false);
+    expect(usePreferencesStore.getState().priorityAlertSound).toBe(false);
+    expect(usePreferencesStore.getState().priorityAlertTitle).toBe(false);
+
+    act(() => usePreferencesStore.getState().resetAllPreferences());
+
+    const reset = usePreferencesStore.getState();
+    expect(reset.priorityAlertVisual).toBe(true);
+    expect(reset.priorityAlertSound).toBe(true);
+    expect(reset.priorityAlertTitle).toBe(true);
+  });
+
   it("resetAllPreferences wipes everything back to defaults", () => {
     act(() => {
       usePreferencesStore.getState().setCardSize("large");
@@ -276,6 +527,7 @@ describe("preferencesStore", () => {
       usePreferencesStore.getState().setPacingMultiplier("combat", 1.5);
       usePreferencesStore.getState().setPriorityPassingMode("SkipLowUseWindows");
       usePreferencesStore.getState().setDraftDoubleClickConfirmPick(false);
+      usePreferencesStore.getState().setCardAnimationStyle("classic");
     });
 
     act(() => {
@@ -288,6 +540,7 @@ describe("preferencesStore", () => {
     expect(state.pacingMultipliers).toEqual({ effects: 1.0, combat: 1.0, banners: 1.0 });
     expect(state.priorityPassingMode).toBe("Standard");
     expect(state.draftDoubleClickConfirmPick).toBe(true);
+    expect(state.cardAnimationStyle).toBe("webgl");
   });
 
   it("existing preferences are unchanged after setting animation prefs", () => {
@@ -334,6 +587,24 @@ describe("preferencesStore", () => {
   });
 
   it("falls back from an unsupported current-version persisted locale", () => {
+    // `zh-Hans` used to be this test's unsupported tag; it now resolves to the
+    // shipped `zh`, so using it here asserted the opposite of the behaviour
+    // under test. `zh-Hant` is genuinely unsupported — no Traditional catalog
+    // ships — and must not be folded into Simplified.
+    localStorage.setItem(
+      "phase-preferences",
+      JSON.stringify({ state: { language: "zh-Hant" }, version: 34 }),
+    );
+
+    act(() => usePreferencesStore.persist.rehydrate());
+
+    expect(usePreferencesStore.getState().language).toBe("en");
+  });
+
+  it("normalizes a persisted Simplified Chinese tag to the shipped zh locale", () => {
+    // The positive half of the case above, so "zh is supported" is asserted
+    // directly rather than being implied by a membership check that a hardcoded
+    // list could quietly stop covering.
     localStorage.setItem(
       "phase-preferences",
       JSON.stringify({ state: { language: "zh-Hans" }, version: 34 }),
@@ -341,9 +612,7 @@ describe("preferencesStore", () => {
 
     act(() => usePreferencesStore.persist.rehydrate());
 
-    expect(["en", "es", "fr", "de", "it", "pt", "pl", "ja"]).toContain(
-      usePreferencesStore.getState().language,
-    );
+    expect(usePreferencesStore.getState().language).toBe("zh");
   });
 
   it("migrates pre-log-dock preferences to the prior right dock", () => {
@@ -749,5 +1018,38 @@ describe("preferencesStore", () => {
     });
 
     expect(usePreferencesStore.getState().draftDoubleClickConfirmPick).toBe(true);
+  });
+
+  it("v35 → v36 migration gives existing stores the New card animations", () => {
+    localStorage.setItem(
+      "phase-preferences",
+      JSON.stringify({
+        state: { cardSize: "large" },
+        version: 35,
+      }),
+    );
+
+    act(() => {
+      usePreferencesStore.persist.rehydrate();
+    });
+
+    expect(usePreferencesStore.getState().cardSize).toBe("large");
+    expect(usePreferencesStore.getState().cardAnimationStyle).toBe("webgl");
+  });
+
+  it("hydrates a stored Classic card animation style", () => {
+    localStorage.setItem(
+      "phase-preferences",
+      JSON.stringify({
+        state: { cardAnimationStyle: "classic" },
+        version: 36,
+      }),
+    );
+
+    act(() => {
+      usePreferencesStore.persist.rehydrate();
+    });
+
+    expect(usePreferencesStore.getState().cardAnimationStyle).toBe("classic");
   });
 });

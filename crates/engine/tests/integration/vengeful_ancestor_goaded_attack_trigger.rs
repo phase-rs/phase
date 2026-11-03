@@ -29,14 +29,20 @@
 //!     creature, so the `valid_card` filter is evaluated against the live attacker,
 //!     not the trigger's own source.
 
+use engine::game::combat::validate_blockers_for_player;
+use engine::game::filter::{matches_target_filter, FilterContext};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::parser::oracle::parse_oracle_text;
-use engine::types::ability::{FilterProp, TargetFilter};
+use engine::types::ability::{
+    ContinuousModification, Duration, FilterProp, TargetFilter, TypedFilter,
+};
 use engine::types::actions::GameAction;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use engine::types::statics::StaticMode;
 use engine::types::triggers::TriggerMode;
+use engine::types::zones::Zone;
 
 use super::rules::AttackTarget;
 
@@ -48,6 +54,8 @@ const P2: PlayerId = PlayerId(2);
 // goaded-attack punish alone.
 const VENGEFUL_GOADED_ATTACK_TRIGGER: &str =
     "Whenever a goaded creature attacks, it deals 1 damage to its controller.";
+const LIFE_OF_THE_PARTY_ORACLE: &str = "First strike, trample, haste\nWhenever this creature attacks, it gets +X/+0 until end of turn, where X is the number of creatures you control.\nWhen this creature enters, if it's not a token, each opponent creates a token that's a copy of it. The tokens are goaded for the rest of the game. (They attack each combat if able and attack a player other than you if able.)";
+const BOTHERSOME_QUASIT_ORACLE: &str = "Menace\nGoaded creatures your opponents control can't block.\nWhenever you cast a noncreature spell, goad target creature an opponent controls. (Until your next turn, that creature attacks each combat if able and attacks a player other than you if able.)";
 
 fn life_of(state: &GameState, player: PlayerId) -> i32 {
     state
@@ -203,5 +211,165 @@ fn vengeful_ancestor_ungoaded_attacker_loses_no_life() {
         life_of(runner.state(), P1),
         20,
         "an ungoaded attacker must not trigger the goaded-attack punisher — P1 loses no life"
+    );
+}
+
+#[test]
+fn vengeful_ancestor_reads_real_registered_life_token_until_it_exits() {
+    assert_goaded_attacks_trigger_parses();
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let ancestor = scenario
+        .add_creature(P0, "Vengeful Ancestor", 3, 2)
+        .from_oracle_text(VENGEFUL_GOADED_ATTACK_TRIGGER)
+        .id();
+    let ox = scenario.add_creature(P1, "Ornery Ox", 2, 2).id();
+    let life = scenario
+        .add_creature_to_hand(P0, "Life of the Party", 0, 1)
+        .with_subtypes(vec!["Elemental"])
+        .from_oracle_text_with_keywords(
+            &["first strike", "trample", "haste"],
+            LIFE_OF_THE_PARTY_ORACLE,
+        )
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(life).resolve();
+    assert!(runner.state().stack.is_empty());
+    assert_eq!(runner.state().objects[&ancestor].controller, P0);
+    let token = *runner
+        .state()
+        .battlefield
+        .iter()
+        .find(|id| {
+            let obj = &runner.state().objects[id];
+            obj.name == "Life of the Party" && obj.is_token && obj.controller == P1
+        })
+        .expect("the actual Life ETB must create a P1 token");
+    assert!(runner
+        .state()
+        .transient_continuous_effects
+        .iter()
+        .any(|effect| {
+            effect.controller == P0
+                && effect.duration == Duration::Permanent
+                && effect.affected == TargetFilter::SpecificObject { id: token }
+                && effect
+                    .modifications
+                    .contains(&ContinuousModification::AddStaticMode {
+                        mode: StaticMode::Goaded,
+                    })
+        }));
+    let goaded = TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Goaded]));
+    assert!(matches_target_filter(
+        runner.state(),
+        token,
+        &goaded,
+        &FilterContext::neutral()
+    ));
+
+    let mut after_exit = GameRunner::from_state(runner.state().clone());
+    engine::game::zones::move_to_zone(
+        after_exit.state_mut(),
+        token,
+        Zone::Graveyard,
+        &mut Vec::new(),
+    );
+    assert!(!after_exit.state().battlefield.contains(&token));
+    assert!(!matches_target_filter(
+        after_exit.state(),
+        ox,
+        &goaded,
+        &FilterContext::neutral()
+    ));
+
+    hand_turn_to(&mut runner, P1);
+    let before = life_of(runner.state(), P1);
+    runner
+        .declare_attackers(&[(token, AttackTarget::Player(P0))])
+        .expect("the registered token attacks its only available opponent");
+    runner.advance_until_stack_empty();
+    assert_eq!(life_of(runner.state(), P1), before - 1);
+
+    hand_turn_to(&mut after_exit, P1);
+    let before = life_of(after_exit.state(), P1);
+    after_exit
+        .declare_attackers(&[(ox, AttackTarget::Player(P0))])
+        .expect("the ungoaded sibling can still attack with Ancestor present");
+    after_exit.advance_until_stack_empty();
+    assert_eq!(after_exit.state().objects[&ancestor].controller, P0);
+    assert_eq!(life_of(after_exit.state(), P1), before);
+}
+
+#[test]
+fn bothersome_quasit_prevents_registered_life_token_from_blocking() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let attacker = scenario.add_creature(P0, "Bear", 2, 2).id();
+    let quasit = scenario
+        .add_creature(P0, "Bothersome Quasit", 3, 2)
+        .from_oracle_text_with_keywords(&["menace"], BOTHERSOME_QUASIT_ORACLE)
+        .id();
+    let ordinary_blocker = scenario.add_creature(P1, "Ornery Ox", 2, 2).id();
+    let life = scenario
+        .add_creature_to_hand(P0, "Life of the Party", 0, 1)
+        .with_subtypes(vec!["Elemental"])
+        .from_oracle_text_with_keywords(
+            &["first strike", "trample", "haste"],
+            LIFE_OF_THE_PARTY_ORACLE,
+        )
+        .id();
+    let mut runner = scenario.build();
+    runner.cast(life).resolve();
+    assert!(runner.state().stack.is_empty());
+    let token = *runner
+        .state()
+        .battlefield
+        .iter()
+        .find(|id| {
+            let object = &runner.state().objects[id];
+            object.name == "Life of the Party" && object.is_token && object.controller == P1
+        })
+        .expect("the real Life trigger creates the P1 blocking candidate");
+    assert_eq!(runner.state().objects[&quasit].controller, P0);
+    assert!(runner
+        .state()
+        .transient_continuous_effects
+        .iter()
+        .any(|effect| {
+            effect.controller == P0
+                && effect.duration == Duration::Permanent
+                && effect.affected == TargetFilter::SpecificObject { id: token }
+                && effect
+                    .modifications
+                    .contains(&ContinuousModification::AddStaticMode {
+                        mode: StaticMode::Goaded,
+                    })
+        }));
+    let goaded = TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Goaded]));
+    assert!(matches_target_filter(
+        runner.state(),
+        token,
+        &goaded,
+        &FilterContext::neutral()
+    ));
+    assert!(!matches_target_filter(
+        runner.state(),
+        ordinary_blocker,
+        &goaded,
+        &FilterContext::neutral()
+    ));
+
+    runner.advance_to_combat();
+    assert_eq!(runner.waiting_for_kind(), "DeclareAttackers");
+    runner
+        .declare_attackers(&[(attacker, AttackTarget::Player(P1))])
+        .expect("the P0 Bear can attack P1");
+    assert!(
+        validate_blockers_for_player(runner.state(), P1, &[(ordinary_blocker, attacker)]).is_ok(),
+        "the ungoaded P1 creature can block the same attacker"
+    );
+    assert!(
+        validate_blockers_for_player(runner.state(), P1, &[(token, attacker)]).is_err(),
+        "the registered P1 token cannot block while P0's Quasit functions"
     );
 }

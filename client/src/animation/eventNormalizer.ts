@@ -1,5 +1,5 @@
-import type { GameEvent } from "../adapter/types";
-import type { AnimationStep, PacingCategory, StepEffect } from "./types";
+import type { GameEvent, GameState } from "../adapter/types";
+import type { AnimationEvent, AnimationStep, PacingCategory, StepEffect } from "./types";
 import {
   DEFAULT_DURATION,
   EVENT_DURATIONS,
@@ -18,6 +18,10 @@ import {
 
 /** Events that produce no visual output and are skipped entirely. */
 const NON_VISUAL_EVENTS = new Set([
+  // Un-card gags play out-of-band (`flashUnActionEvents` → UnActionOverlay).
+  "UnTellPerformed",
+  "PhraseSaid",
+  "GotchaSaid",
   "PriorityPassed",
   "MulliganStarted",
   "GameStarted",
@@ -47,14 +51,30 @@ const NON_VISUAL_EVENTS = new Set([
   // Dice/coin are presented out-of-band by DiceRollOverlay (via flashDiceRoll),
   // not as queued animation steps — same pattern as TurnStarted → the turn banner.
   "DieRolled",
+  // CR 706.6: ignored rolls ride the same overlay as the survivors they were
+  // dropped from — never a queued step of their own.
+  "DieRollIgnored",
   "StartingPlayerContest",
   "CoinFlipped",
+  // Engine bookkeeping with nothing on the board to show: the repetition's own events animate.
+  "ResolutionHalted",
+  "ShortcutRepetition",
 ]);
+
+/** Whether an event produces no visual output. CR 605.3b: a mana ability's
+ *  activation is presented like the mana it adds (`ManaAdded` is non-visual),
+ *  so tapping a land plays no ability-activation step or sound. The `kind`
+ *  field is supplied by the engine. */
+function isNonVisualEvent(event: GameEvent): boolean {
+  return NON_VISUAL_EVENTS.has(event.type)
+    || (event.type === "AbilityActivated" && event.data.kind === "Mana");
+}
 
 /** Events that always begin a new step, regardless of context. */
 const OWN_STEP_TYPES = new Set([
   "SpellCast",
   "TurnStarted",
+  "Melded",
 ]);
 
 /** Events that merge into the preceding step rather than starting a new one. */
@@ -71,11 +91,54 @@ interface NormalizeEventsOptions {
    *  `eventCategory()` and the matching multiplier scales its base duration.
    *  Defaults to neutral pacing (1.0) for every category. */
   pacingMultipliers?: Record<PacingCategory, number>;
+  /** The post-event state, when card flights present steps. A spell announced
+   *  onto the stack (CR 601.2a) whose cast then pauses for a choice is cast in
+   *  a later batch, after the card has left where it was cast from; its
+   *  announcement gets a step of its own so the flight lifts the card from there. */
+  announcementState?: AnnouncementState | null;
 }
 
-/** Group consecutive events of the same type (e.g. multiple creatures dying). */
+type AnnouncementState = Pick<GameState, "stack" | "has_pending_cast">;
+
+/** A permanent's move off the battlefield. */
+function leavesBattlefield(event: AnimationEvent): event is Extract<AnimationEvent, { type: "ZoneChanged" }> {
+  return event.type === "ZoneChanged" && event.data.from === "Battlefield";
+}
+
+/** Group a run of events of one type (e.g. multiple creatures dying) with the
+ *  moves off the battlefield reported among them: CR 701.8a / CR 701.21a, the
+ *  engine reports each destroyed or sacrificed permanent's move to its owner's
+ *  graveyard just before the destruction or sacrifice itself. */
 function sameTypeGrouping(effect: StepEffect, lastStep: AnimationStep): boolean {
-  return lastStep.effects[lastStep.effects.length - 1]?.event.type === effect.event.type;
+  return lastStep.effects.every(
+    ({ event }) => event.type === effect.event.type || leavesBattlefield(event)
+      || ((effect.event.type === "CreatureDestroyed" || effect.event.type === "PermanentSacrificed") && libraryShuffle(event)),
+  );
+}
+
+type DestructionType = "CreatureDestroyed" | "PermanentSacrificed";
+
+/** CR 701.24a: a library redirect may report its shuffle before the destruction completes. */
+function libraryShuffle(event: AnimationEvent): boolean {
+  return event.type === "PlayerPerformedAction" && event.data.action === "ShuffledLibrary";
+}
+
+/** The destruction or sacrifice whose move off the battlefield `events[index]`
+ *  is (CR 701.8a / CR 701.21a): the engine reports the move just before it,
+ *  with non-visual events and a library redirect's shuffle tail between.
+ *  The move and its tail belong in the destruction's step, which
+ *  shows where it went: a replacement (CR 614.1a) may have sent it elsewhere. */
+function destructionOfMove(events: GameEvent[], index: number): { type: DestructionType; index: number } | null {
+  const move = events[index];
+  if (!leavesBattlefield(move)) return null;
+  for (let nextIndex = index + 1; nextIndex < events.length; nextIndex++) {
+    const next = events[nextIndex];
+    if (isNonVisualEvent(next) || (move.data.to === "Library" && libraryShuffle(next))) continue;
+    if ((next.type === "CreatureDestroyed" || next.type === "PermanentSacrificed")
+      && next.data.object_id === move.data.object_id) return { type: next.type, index: nextIndex };
+    return null;
+  }
+  return null;
 }
 
 /**
@@ -116,6 +179,43 @@ const GROUPING_STRATEGIES: Map<string, GroupingStrategy> = new Map([
   ["CreatureDestroyed", sameTypeGrouping],
   ["PermanentSacrificed", sameTypeGrouping],
 ]);
+
+/**
+ * CR 701.42a: a meld exiles both cards of the pair and returns them as one
+ * melded permanent. The `Melded` forge animation presents that whole sequence,
+ * so the pair's preceding exile and entry moves are not animated separately.
+ *
+ * CR 400.7j: a replacement can send either exile attempt to another public
+ * zone (or keep the card on the battlefield) and the meld still happens, so a
+ * component's meld moves are identified by their place in the sequence rather
+ * than by destination: walking back from `Melded`, the survivor's latest move
+ * onto the battlefield is its entry, and each card's latest move off the
+ * battlefield is its exile attempt. Earlier moves of either card stay animated.
+ */
+function meldPresentedZoneChanges(events: GameEvent[]): Set<number> {
+  const presented = new Set<number>();
+  events.forEach((event, meldIndex) => {
+    if (event.type !== "Melded") return;
+    const { object_id: survivor, partner_id: partner } = event.data;
+    for (const component of [survivor, partner]) {
+      let awaitingEntry = component === survivor;
+      for (let index = meldIndex - 1; index >= 0; index--) {
+        const candidate = events[index];
+        if (candidate.type !== "ZoneChanged" || candidate.data.object_id !== component) continue;
+        const { from, to } = candidate.data;
+        if (awaitingEntry && to === "Battlefield") {
+          presented.add(index);
+          awaitingEntry = false;
+          if (from !== "Battlefield") continue;
+        } else if (from === "Battlefield" && to !== "Battlefield") {
+          presented.add(index);
+        }
+        break;
+      }
+    }
+  });
+  return presented;
+}
 
 // ---------------------------------------------------------------------------
 // Step construction helpers
@@ -747,6 +847,20 @@ function findFallbackRun(
   };
 }
 
+/** The spells announced in `events` whose cast is still pending after them. */
+function pausedSpellAnnouncements(events: GameEvent[], state: AnnouncementState | null | undefined): Set<number> {
+  if (!state?.has_pending_cast) return new Set();
+  const spells = new Set(state.stack.filter((entry) => entry.kind.type === "Spell").map((entry) => entry.id));
+  const cast = new Set(events.flatMap((event) => (event.type === "SpellCast" ? [event.data.object_id] : [])));
+  return new Set(
+    events.flatMap((event) =>
+      event.type === "StackPushed" && spells.has(event.data.object_id) && !cast.has(event.data.object_id)
+        ? [event.data.object_id]
+        : [],
+    ),
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Main normalizer
 // ---------------------------------------------------------------------------
@@ -757,11 +871,13 @@ export function normalizeEvents(
 ): AnimationStep[] {
   const pacingMultipliers = options?.pacingMultipliers ?? defaultPacingMultipliers();
   const steps: AnimationStep[] = [];
+  let destructionTail: { step: AnimationStep; until: number } | null = null;
   const { replacements: aggregateReplacements, fallbackBlockedIndices } = findAggregateReplacements(events, pacingMultipliers);
   const replacementByAggregateIndex = new Map(
     aggregateReplacements.map((replacement) => [replacement.aggregateIndex, replacement]),
   );
-  const skipIndices = new Set<number>();
+  const skipIndices = meldPresentedZoneChanges(events);
+  const announcements = pausedSpellAnnouncements(events, options?.announcementState);
   for (const replacement of aggregateReplacements) {
     for (const index of replacement.skipIndices) skipIndices.add(index);
   }
@@ -790,12 +906,36 @@ export function normalizeEvents(
     }
 
     const event = events[index];
-    if (NON_VISUAL_EVENTS.has(event.type)) continue;
+    const isAnnouncement = event.type === "StackPushed" && announcements.has(event.data.object_id);
+    if (isNonVisualEvent(event) && !isAnnouncement) continue;
 
     const effect = toEffect(event, pacingMultipliers);
 
-    if (OWN_STEP_TYPES.has(event.type)) {
+    if (destructionTail && index <= destructionTail.until) {
+      destructionTail.step.effects.push(effect);
+      destructionTail.step.duration = stepDuration(destructionTail.step.effects);
+      continue;
+    }
+    destructionTail = null;
+
+    if (OWN_STEP_TYPES.has(event.type) || isAnnouncement) {
       steps.push({ effects: [effect], duration: effect.duration });
+      continue;
+    }
+
+    const destruction = destructionOfMove(events, index);
+    if (destruction) {
+      // It joins a run of the same destructions, or starts its own.
+      const lastStep = steps[steps.length - 1];
+      const run = lastStep?.effects.some(({ event: other }) => other.type === destruction.type)
+        && lastStep.effects.every(({ event: other }) => other.type === destruction.type || leavesBattlefield(other) || libraryShuffle(other));
+      if (lastStep && run) {
+        lastStep.effects.push(effect);
+        lastStep.duration = stepDuration(lastStep.effects);
+      } else {
+        steps.push({ effects: [effect], duration: effect.duration });
+      }
+      destructionTail = { step: steps[steps.length - 1], until: destruction.index };
       continue;
     }
 

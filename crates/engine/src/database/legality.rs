@@ -86,6 +86,27 @@ impl LegalityFormat {
             _ => None,
         }
     }
+
+    /// Whether this format's card pool contains digital-only (Arena) cards.
+    /// Derived from the conjure/spellbook corpus's own legality rows: no such
+    /// card is `legal` under any other key.
+    pub fn admits_digital_only_cards(self) -> bool {
+        match self {
+            Self::Historic | Self::Timeless | Self::Brawl => true,
+            Self::Standard
+            | Self::Commander
+            | Self::Modern
+            | Self::Premodern
+            | Self::Pioneer
+            | Self::Legacy
+            | Self::Vintage
+            | Self::Pauper
+            | Self::StandardBrawl
+            | Self::PauperCommander
+            | Self::DuelCommander
+            | Self::Oathbreaker => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

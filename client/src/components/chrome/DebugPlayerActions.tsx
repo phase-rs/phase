@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import { useState } from "react";
 
 import type { DebugAction, ManaType, PlayerCounterKind, PlayerId } from "../../adapter/types";
@@ -27,166 +28,215 @@ interface Props {
 }
 
 function SetLifeForm({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
   const [playerId, setPlayerId] = useState<PlayerId>(0);
   const [life, setLife] = useState(20);
 
   return (
     <>
-      <FieldRow label="Player">
+      <FieldRow label={t("sandboxTools.player")}>
         <PlayerSelect value={playerId} onChange={setPlayerId} />
       </FieldRow>
-      <FieldRow label="Life">
+      <FieldRow label={t("sandboxTools.life")}>
         <NumberInput value={life} onChange={setLife} />
       </FieldRow>
       <SubmitButton onClick={() => onDispatch({ type: "SetLife", data: { player_id: playerId, life } })}>
-        Set Life
+        {t("sandboxTools.setLife")}
       </SubmitButton>
     </>
   );
 }
 
 function DrawCardsForm({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
   const [playerId, setPlayerId] = useState<PlayerId>(0);
   const [count, setCount] = useState(1);
 
   return (
     <>
-      <FieldRow label="Player">
+      <FieldRow label={t("sandboxTools.player")}>
         <PlayerSelect value={playerId} onChange={setPlayerId} />
       </FieldRow>
-      <FieldRow label="Count">
+      <FieldRow label={t("sandboxTools.count")}>
         <NumberInput value={count} onChange={setCount} min={1} />
       </FieldRow>
       <SubmitButton onClick={() => onDispatch({ type: "DrawCards", data: { player_id: playerId, count } })}>
-        Draw Cards
+        {t("sandboxTools.drawCards")}
+      </SubmitButton>
+    </>
+  );
+}
+
+function GainLifeForm({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
+  const [playerId, setPlayerId] = useState<PlayerId>(0);
+  const [amount, setAmount] = useState(1);
+
+  return (
+    <>
+      <FieldRow label={t("sandboxTools.player")}>
+        <PlayerSelect value={playerId} onChange={setPlayerId} />
+      </FieldRow>
+      <FieldRow label={t("sandboxTools.amount")}>
+        <NumberInput value={amount} onChange={setAmount} min={1} />
+      </FieldRow>
+      <SubmitButton onClick={() => onDispatch({ type: "GainLife", data: { player_id: playerId, amount } })}>
+        {t("sandboxTools.gainLife")}
+      </SubmitButton>
+    </>
+  );
+}
+
+function LoseLifeForm({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
+  const [playerId, setPlayerId] = useState<PlayerId>(0);
+  const [amount, setAmount] = useState(1);
+
+  return (
+    <>
+      <FieldRow label={t("sandboxTools.player")}>
+        <PlayerSelect value={playerId} onChange={setPlayerId} />
+      </FieldRow>
+      <FieldRow label={t("sandboxTools.amount")}>
+        <NumberInput value={amount} onChange={setAmount} min={1} />
+      </FieldRow>
+      <SubmitButton onClick={() => onDispatch({ type: "LoseLife", data: { player_id: playerId, amount } })}>
+        {t("sandboxTools.loseLife")}
       </SubmitButton>
     </>
   );
 }
 
 function MillForm({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
   const [playerId, setPlayerId] = useState<PlayerId>(0);
   const [count, setCount] = useState(1);
 
   return (
     <>
-      <FieldRow label="Player">
+      <FieldRow label={t("sandboxTools.player")}>
         <PlayerSelect value={playerId} onChange={setPlayerId} />
       </FieldRow>
-      <FieldRow label="Count">
+      <FieldRow label={t("sandboxTools.count")}>
         <NumberInput value={count} onChange={setCount} min={1} />
       </FieldRow>
       <SubmitButton onClick={() => onDispatch({ type: "Mill", data: { player_id: playerId, count } })}>
-        Mill
+        {t("sandboxTools.mill")}
       </SubmitButton>
     </>
   );
 }
 
 function RevealForm({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
   const [playerId, setPlayerId] = useState<PlayerId>(0);
   const [count, setCount] = useState(1);
 
   return (
     <>
-      <FieldRow label="Player">
+      <FieldRow label={t("sandboxTools.player")}>
         <PlayerSelect value={playerId} onChange={setPlayerId} />
       </FieldRow>
-      <FieldRow label="Count">
+      <FieldRow label={t("sandboxTools.count")}>
         <NumberInput value={count} onChange={setCount} min={1} />
       </FieldRow>
       <SubmitButton onClick={() => onDispatch({ type: "Reveal", data: { player_id: playerId, count } })}>
-        Reveal Top
+        {t("sandboxTools.revealTop")}
       </SubmitButton>
     </>
   );
 }
 
 function ShuffleLibraryForm({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
   const [playerId, setPlayerId] = useState<PlayerId>(0);
 
   return (
     <>
-      <FieldRow label="Player">
+      <FieldRow label={t("sandboxTools.player")}>
         <PlayerSelect value={playerId} onChange={setPlayerId} />
       </FieldRow>
       <SubmitButton onClick={() => onDispatch({ type: "ShuffleLibrary", data: { player_id: playerId } })}>
-        Shuffle Library
+        {t("sandboxTools.shuffleLibrary")}
       </SubmitButton>
     </>
   );
 }
 
 function ProliferateForm({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
   const [playerId, setPlayerId] = useState<PlayerId>(0);
 
   return (
     <>
-      <FieldRow label="Player">
+      <FieldRow label={t("sandboxTools.player")}>
         <PlayerSelect value={playerId} onChange={setPlayerId} />
       </FieldRow>
       <SubmitButton onClick={() => onDispatch({ type: "Proliferate", data: { player_id: playerId } })}>
-        Proliferate
+        {t("sandboxTools.proliferate")}
       </SubmitButton>
     </>
   );
 }
 
 function AddManaForm({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
   const [playerId, setPlayerId] = useState<PlayerId>(0);
   const [mana, setMana] = useState<ManaType[]>([]);
 
   return (
     <>
-      <FieldRow label="Player">
+      <FieldRow label={t("sandboxTools.player")}>
         <PlayerSelect value={playerId} onChange={setPlayerId} />
       </FieldRow>
-      <FieldRow label="Mana">
+      <FieldRow label={t("sandboxTools.mana")}>
         <ManaTypeSelect value={mana} onChange={setMana} />
       </FieldRow>
       <SubmitButton
         onClick={() => onDispatch({ type: "AddMana", data: { player_id: playerId, mana } })}
         disabled={mana.length === 0}
       >
-        Add Mana
+        {t("sandboxTools.addMana")}
       </SubmitButton>
     </>
   );
 }
 
 function InfiniteManaForm({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
   const [playerId, setPlayerId] = useState<PlayerId>(0);
   const [enabled, setEnabled] = useState(true);
 
   return (
     <>
-      <FieldRow label="Player">
+      <FieldRow label={t("sandboxTools.player")}>
         <PlayerSelect value={playerId} onChange={setPlayerId} />
       </FieldRow>
-      <FieldRow label="State">
-        <CheckboxInput checked={enabled} onChange={setEnabled} label="Enabled" />
+      <FieldRow label={t("sandboxTools.state")}>
+        <CheckboxInput checked={enabled} onChange={setEnabled} label={t("sandboxTools.enabled")} />
       </FieldRow>
       <SubmitButton onClick={() => onDispatch({ type: "SetInfiniteMana", data: { player_id: playerId, enabled } })}>
-        Apply
+        {t("sandboxTools.apply")}
       </SubmitButton>
     </>
   );
 }
 
 function ModifyPlayerCountersForm({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
   const [playerId, setPlayerId] = useState<PlayerId>(0);
   const [counterKind, setCounterKind] = useState<PlayerCounterKind>("Poison");
   const [delta, setDelta] = useState(1);
 
   return (
     <>
-      <FieldRow label="Player">
+      <FieldRow label={t("sandboxTools.player")}>
         <PlayerSelect value={playerId} onChange={setPlayerId} />
       </FieldRow>
-      <FieldRow label="Counter">
+      <FieldRow label={t("sandboxTools.counter")}>
         <SelectInput value={counterKind} onChange={setCounterKind} options={PLAYER_COUNTER_KINDS} />
       </FieldRow>
-      <FieldRow label="Delta">
+      <FieldRow label={t("sandboxTools.delta")}>
         <NumberInput value={delta} onChange={setDelta} />
       </FieldRow>
       <SubmitButton
@@ -197,28 +247,80 @@ function ModifyPlayerCountersForm({ onDispatch }: Props) {
           })
         }
       >
-        Modify Counters
+        {t("sandboxTools.modifyCounters")}
       </SubmitButton>
     </>
   );
 }
 
 function ModifyEnergyForm({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
   const [playerId, setPlayerId] = useState<PlayerId>(0);
   const [delta, setDelta] = useState(1);
 
   return (
     <>
-      <FieldRow label="Player">
+      <FieldRow label={t("sandboxTools.player")}>
         <PlayerSelect value={playerId} onChange={setPlayerId} />
       </FieldRow>
-      <FieldRow label="Delta">
+      <FieldRow label={t("sandboxTools.delta")}>
         <NumberInput value={delta} onChange={setDelta} />
       </FieldRow>
       <SubmitButton
         onClick={() => onDispatch({ type: "ModifyEnergy", data: { player_id: playerId, delta } })}
       >
-        Modify Energy
+        {t("sandboxTools.modifyEnergy")}
+      </SubmitButton>
+    </>
+  );
+}
+
+function GivePlayerCountersForm({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
+  const [playerId, setPlayerId] = useState<PlayerId>(0);
+  const [counterKind, setCounterKind] = useState<PlayerCounterKind>("Poison");
+  const [count, setCount] = useState(1);
+
+  return (
+    <>
+      <FieldRow label={t("sandboxTools.player")}>
+        <PlayerSelect value={playerId} onChange={setPlayerId} />
+      </FieldRow>
+      <FieldRow label={t("sandboxTools.counter")}>
+        <SelectInput value={counterKind} onChange={setCounterKind} options={PLAYER_COUNTER_KINDS} />
+      </FieldRow>
+      <FieldRow label={t("sandboxTools.amount")}>
+        <NumberInput value={count} onChange={setCount} min={1} />
+      </FieldRow>
+      <SubmitButton
+        onClick={() =>
+          onDispatch({
+            type: "GivePlayerCounters",
+            data: { player_id: playerId, counter_kind: counterKind, count },
+          })
+        }
+      >
+        {t("sandboxTools.givePlayerCounters")}
+      </SubmitButton>
+    </>
+  );
+}
+
+function GiveEnergyForm({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
+  const [playerId, setPlayerId] = useState<PlayerId>(0);
+  const [count, setCount] = useState(1);
+
+  return (
+    <>
+      <FieldRow label={t("sandboxTools.player")}>
+        <PlayerSelect value={playerId} onChange={setPlayerId} />
+      </FieldRow>
+      <FieldRow label={t("sandboxTools.amount")}>
+        <NumberInput value={count} onChange={setCount} min={1} />
+      </FieldRow>
+      <SubmitButton onClick={() => onDispatch({ type: "GiveEnergy", data: { player_id: playerId, count } })}>
+        {t("sandboxTools.giveEnergy")}
       </SubmitButton>
     </>
   );
@@ -229,6 +331,7 @@ function ModifyEnergyForm({ onDispatch }: Props) {
 // this remains scoped to the perspective seat rather than offering a picker
 // that could expose opponent library identities.
 function BrowseLibraryForm() {
+  const { t } = useTranslation("game");
   const openDebugLibraryViewer = useUiStore((s) => s.openDebugLibraryViewer);
   const perspectivePlayerId = usePerspectivePlayerId();
 
@@ -245,57 +348,77 @@ function BrowseLibraryForm() {
   return (
     <>
       <p className="mb-2 px-2 text-[10px] text-gray-500">
-        Opens a modal of your library in randomized order. Click a card to move
-        it to any zone, or use the quick Battlefield / Hand buttons.
+        {t("sandboxTools.browseDescription")}
       </p>
       <SubmitButton onClick={openLibrary}>
-        Browse Library
+        {t("sandboxTools.browseLibrary")}
       </SubmitButton>
     </>
   );
 }
 
 export function DebugPlayerActions({ onDispatch }: Props) {
+  const { t } = useTranslation("game");
   const { expanded, toggle } = useAccordion();
 
   return (
     <div>
-      <AccordionItem label="Set Life" expanded={expanded === "life"} onToggle={() => toggle("life")}>
+      <AccordionItem label={t("sandboxTools.setLife")} expanded={expanded === "life"} onToggle={() => toggle("life")}>
         <SetLifeForm onDispatch={onDispatch} />
       </AccordionItem>
-      <AccordionItem label="Draw Cards" expanded={expanded === "draw"} onToggle={() => toggle("draw")}>
+      <AccordionItem label={t("sandboxTools.gainLife")} expanded={expanded === "gainLife"} onToggle={() => toggle("gainLife")}>
+        <GainLifeForm onDispatch={onDispatch} />
+      </AccordionItem>
+      <AccordionItem label={t("sandboxTools.loseLife")} expanded={expanded === "loseLife"} onToggle={() => toggle("loseLife")}>
+        <LoseLifeForm onDispatch={onDispatch} />
+      </AccordionItem>
+      <AccordionItem label={t("sandboxTools.drawCards")} expanded={expanded === "draw"} onToggle={() => toggle("draw")}>
         <DrawCardsForm onDispatch={onDispatch} />
       </AccordionItem>
-      <AccordionItem label="Mill" expanded={expanded === "mill"} onToggle={() => toggle("mill")}>
+      <AccordionItem label={t("sandboxTools.mill")} expanded={expanded === "mill"} onToggle={() => toggle("mill")}>
         <MillForm onDispatch={onDispatch} />
       </AccordionItem>
-      <AccordionItem label="Reveal Top" expanded={expanded === "reveal"} onToggle={() => toggle("reveal")}>
+      <AccordionItem label={t("sandboxTools.revealTop")} expanded={expanded === "reveal"} onToggle={() => toggle("reveal")}>
         <RevealForm onDispatch={onDispatch} />
       </AccordionItem>
-      <AccordionItem label="Shuffle Library" expanded={expanded === "shuffle"} onToggle={() => toggle("shuffle")}>
+      <AccordionItem label={t("sandboxTools.shuffleLibrary")} expanded={expanded === "shuffle"} onToggle={() => toggle("shuffle")}>
         <ShuffleLibraryForm onDispatch={onDispatch} />
       </AccordionItem>
-      <AccordionItem label="Browse Library" expanded={expanded === "browse"} onToggle={() => toggle("browse")}>
+      <AccordionItem label={t("sandboxTools.browseLibrary")} expanded={expanded === "browse"} onToggle={() => toggle("browse")}>
         <BrowseLibraryForm />
       </AccordionItem>
-      <AccordionItem label="Proliferate" expanded={expanded === "proliferate"} onToggle={() => toggle("proliferate")}>
+      <AccordionItem label={t("sandboxTools.proliferate")} expanded={expanded === "proliferate"} onToggle={() => toggle("proliferate")}>
         <ProliferateForm onDispatch={onDispatch} />
       </AccordionItem>
-      <AccordionItem label="Add Mana" expanded={expanded === "mana"} onToggle={() => toggle("mana")}>
+      <AccordionItem label={t("sandboxTools.addMana")} expanded={expanded === "mana"} onToggle={() => toggle("mana")}>
         <AddManaForm onDispatch={onDispatch} />
       </AccordionItem>
       <AccordionItem
-        label="Infinite Mana"
+        label={t("sandboxTools.infiniteMana")}
         expanded={expanded === "infinite-mana"}
         onToggle={() => toggle("infinite-mana")}
       >
         <InfiniteManaForm onDispatch={onDispatch} />
       </AccordionItem>
-      <AccordionItem label="Modify Counters" expanded={expanded === "counters"} onToggle={() => toggle("counters")}>
+      <AccordionItem label={t("sandboxTools.modifyCounters")} expanded={expanded === "counters"} onToggle={() => toggle("counters")}>
         <ModifyPlayerCountersForm onDispatch={onDispatch} />
       </AccordionItem>
-      <AccordionItem label="Modify Energy" expanded={expanded === "energy"} onToggle={() => toggle("energy")}>
+      <AccordionItem
+        label={t("sandboxTools.givePlayerCounters")}
+        expanded={expanded === "giveCounters"}
+        onToggle={() => toggle("giveCounters")}
+      >
+        <GivePlayerCountersForm onDispatch={onDispatch} />
+      </AccordionItem>
+      <AccordionItem label={t("sandboxTools.modifyEnergy")} expanded={expanded === "energy"} onToggle={() => toggle("energy")}>
         <ModifyEnergyForm onDispatch={onDispatch} />
+      </AccordionItem>
+      <AccordionItem
+        label={t("sandboxTools.giveEnergy")}
+        expanded={expanded === "giveEnergy"}
+        onToggle={() => toggle("giveEnergy")}
+      >
+        <GiveEnergyForm onDispatch={onDispatch} />
       </AccordionItem>
     </div>
   );

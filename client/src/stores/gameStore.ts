@@ -26,7 +26,7 @@ import { MAX_UNDO_HISTORY, UNDOABLE_ACTIONS } from "../constants/game";
 import { applySpellPaymentPreference } from "../game/castPaymentMode";
 import { reportStructuredActionRejection } from "../game/actionRejectionReporter";
 import { getPlayerId } from "../hooks/usePlayerId";
-import { loadCheckpoints, saveAuthoritativeGame } from "../services/gamePersistence";
+import { captureTrustedCheckpoint, loadCheckpoints, saveAuthoritativeGame, saveAuthoritativeGameStrict } from "../services/gamePersistence";
 import { resetStackThroughput } from "../utils/stackThroughput";
 
 /** Map a LegalActionsResult to the store fields it owns — single source of truth. */
@@ -49,6 +49,7 @@ export type { ActiveGameMeta, PersistedP2PHostSession } from "../services/gamePe
 export {
   saveGame,
   saveAuthoritativeGame,
+  captureTrustedCheckpoint,
   loadGame,
   clearGame,
   saveCheckpoints,
@@ -242,8 +243,10 @@ interface GameStoreState {
   stuckDiagnostic: StuckDecisionDiagnostic | null;
   /** Viewer-scoped interaction projection from the same engine snapshot. */
   viewerInteraction: ViewerInteraction | null;
-  stateHistory: GameState[];
-  turnCheckpoints: GameState[];
+  /** Undo ring: engine-authored trusted checkpoints, never screen projections. */
+  stateHistory: PersistedGameState[];
+  /** Debug rewind targets: trusted envelopes for the same reason. */
+  turnCheckpoints: PersistedGameState[];
   /**
    * Server-published turn boundaries offered as rollback targets. Mirrors the
    * server exactly — never appended to client-side, never derived. Empty on
@@ -327,6 +330,7 @@ interface GameStoreActions {
     playerCount?: number,
     matchConfig?: MatchConfig,
     firstPlayer?: number,
+    initialSave?: "best-effort" | "strict",
   ) => Promise<void>;
   resumeGame: (gameId: string, adapter: EngineAdapter, savedState: PersistedGameState) => Promise<void>;
   /**
@@ -390,7 +394,7 @@ interface GameStoreActions {
       /** Seq-stamped and appended to `logHistory`. Applied even when the pair is dropped. */
       logEntries?: GameLogEntry[];
       /** Undo checkpoints. Applied even when the pair is dropped. */
-      stateHistory?: GameState[];
+      stateHistory?: PersistedGameState[];
       /**
        * Site-specific fields applied in the SAME `set()` — but only when the
        * pair commit is accepted, and after the base commit + history handling,
@@ -542,7 +546,7 @@ export const useGameStore = create<GameStore>()(
       return accepted;
     },
 
-    initGame: async (gameId, adapter, deckData, formatConfig, playerCount, matchConfig, firstPlayer) => {
+    initGame: async (gameId, adapter, deckData, formatConfig, playerCount, matchConfig, firstPlayer, initialSave = "best-effort") => {
       // Clear the display-only stack-pacing tracker so a fast-churning end to a
       // prior game can't bleed stale resolution rate into this game's opening
       // pacing (rematch started within the throughput window).
@@ -573,6 +577,14 @@ export const useGameStore = create<GameStore>()(
       // gate, and it drops any leftover in-flight commit from a prior match.
       const snapshot = await adapter.getSnapshot();
       const state = snapshot.state;
+      if (initialSave === "strict") {
+        try {
+          await saveAuthoritativeGameStrict(gameId, adapter, state);
+        } catch (error) {
+          if (get().adapter === adapter) set({ adapter: null });
+          throw error;
+        }
+      }
       const initLogEntries = (initResult.log_entries ?? []).map((entry, i) => ({
         ...entry,
         seq: i,
@@ -609,7 +621,7 @@ export const useGameStore = create<GameStore>()(
           restoredStackAutomation: null,
         },
       });
-      void saveAuthoritativeGame(gameId, adapter, state);
+      if (initialSave === "best-effort") void saveAuthoritativeGame(gameId, adapter, state);
     },
 
     resumeGame: async (gameId, adapter, savedState) => {
@@ -659,7 +671,7 @@ export const useGameStore = create<GameStore>()(
 
     dispatch: async (action) => {
       const submittedAction = applySpellPaymentPreference(action);
-      const { adapter, gameState, gameId, gameMode } = get();
+      const { adapter, gameState, gameId, gameMode, gameSessionGeneration } = get();
       if (!adapter || !gameState) {
         throw new Error("Game not initialized");
       }
@@ -676,6 +688,16 @@ export const useGameStore = create<GameStore>()(
         UNDOABLE_ACTIONS.has(submittedAction.type) &&
         !isAuthorityRemote(gameMode) &&
         gameState.stack.length === 0;
+
+      // Fire the trusted-envelope capture WITHOUT awaiting it: both engine
+      // transports execute requests strictly in call order (worker message
+      // FIFO; fallback promise chain), so an export issued here runs before
+      // the submit below and observes the pre-action state — while the action
+      // itself pays no added latency. Awaited at commit time. A failed capture
+      // degrades to no checkpoint for this action rather than failing it.
+      const checkpointPromise = shouldSaveHistory
+        ? captureTrustedCheckpoint(adapter).catch(() => null)
+        : null;
 
       // `getPlayerId()` returns the local human's authenticated seat ID.
       // The engine rejects the action if this doesn't match the authorized
@@ -697,8 +719,15 @@ export const useGameStore = create<GameStore>()(
       const snapshot = await adapter.getSnapshot();
 
       // Read-then-commit with no `await` between, so no other commit interleaves.
-      const stateHistory = shouldSaveHistory
-        ? [...get().stateHistory, gameState].slice(-MAX_UNDO_HISTORY)
+      const checkpoint = checkpointPromise ? await checkpointPromise : null;
+      const current = get();
+      // The checkpoint was captured before submit; only attach it when the
+      // session is unchanged, so a stale checkpoint cannot enter a
+      // replacement game's history.
+      const sessionUnchanged =
+        current.adapter === adapter && current.gameSessionGeneration === gameSessionGeneration;
+      const stateHistory = checkpoint && sessionUnchanged
+        ? [...current.stateHistory, checkpoint].slice(-MAX_UNDO_HISTORY)
         : undefined;
       get().commitEngineSnapshot(snapshot, {
         events: result.events,
@@ -719,7 +748,7 @@ export const useGameStore = create<GameStore>()(
 
       const previous = stateHistory[stateHistory.length - 1];
 
-      // Sync WASM engine state with the restored client state
+      // Sync engine state with the restored trusted checkpoint
       await adapter.restoreState(previous);
       // Commit the snapshot's OWN state, not `previous`: post-restore the engine
       // is the source of truth, and taking both halves from one snapshot is what

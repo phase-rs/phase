@@ -159,7 +159,8 @@ fn paradigm_targeted_copy_re_offers_after_retarget() {
         .expect("targeted paradigm copy must open CopyRetarget");
 
     let copy_id = runner.state().stack[0].id;
-    assert_fresh_paradigm_cast(runner.state(), copy_id, 0);
+    // CR 601.2i: the copy is not cast until its targets are announced.
+    assert_eq!(runner.state().objects[&copy_id].cast_occurrence, None);
 
     match runner.state().waiting_for.clone() {
         WaitingFor::CopyRetarget { .. } => {}
@@ -173,6 +174,7 @@ fn paradigm_targeted_copy_re_offers_after_retarget() {
             )),
         })
         .expect("choose opponent target for paradigm copy");
+    assert_fresh_paradigm_cast(runner.state(), copy_id, 0);
 
     match runner.state().waiting_for.clone() {
         WaitingFor::CastOffer {

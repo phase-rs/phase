@@ -1861,9 +1861,9 @@ fn cr603_10d_lose_control_trigger_is_controlled_by_the_player_who_lost_control()
 /// control changed (`source_id != object_id`). Its controller comes from a
 /// wholly separate authority — `DelayedTrigger.controller`, bound once at
 /// installation and read directly by `triggers::delayed_trigger_to_context`
-/// — never from `collect_matching_triggers_inner`'s CR 603.10d override
-/// above (which is gated on `trig_def.mode == ChangesController && *object_id
-/// == obj_id`, false here by construction). This row pins that the class
+/// — never from `collect_matching_triggers_inner`'s `ControlChangeSide`
+/// override above (which is gated on `ChangesController { side }` with
+/// `*object_id == obj_id`, false here by construction). This row pins that the class
 /// still resolves for the correct player (P0, the temp holder who created
 /// the delayed trigger) after U3, confirming the two authorities do not
 /// collide — the "must NOT be re-keyed" half of V8b.
@@ -1931,7 +1931,9 @@ fn cr603_10d_delayed_specific_object_shape_still_attributes_to_its_own_source() 
         runner.state().objects.get(&source).unwrap(),
     ));
     let mut trig = engine::types::ability::TriggerDefinition::new(
-        engine::types::triggers::TriggerMode::ChangesController,
+        engine::types::triggers::TriggerMode::ChangesController {
+            side: engine::types::triggers::ControlChangeSide::Loses,
+        },
     );
     trig.valid_card = Some(TargetFilter::SpecificObject { id: sword });
     trig.execute = None;
@@ -2064,6 +2066,7 @@ fn announcement_window_display_uses_the_stack_entry_controller() {
                     single_use: false,
                     cast_cost_modifier: None,
                     alt_ability_cost: None,
+                    without_paying_mana_cost: false,
                     land_enter_tapped: engine::types::zones::EtbTapState::Unspecified,
                 },
             );
@@ -2257,25 +2260,28 @@ fn parent_target_controller_of_a_stolen_spell_is_the_thief() {
     assert_eq!(parent_target_controller(&ability, &state), Some(thief));
 }
 
-/// HOSTILE (V10): the rung matches by `entry.source_id == id` too — an
-/// ability entry matched by `source_id`, where the accessor must fall back to
-/// `entry.controller` per CR 113.8 (no object row for the ability id itself).
+/// HOSTILE (V10): a target naming an ability's SOURCE answers with that source's
+/// controller: live on the battlefield, else as it last existed there. The stack
+/// rung matches only a stack object's own id, so the pending ability, whose
+/// controller differs, never answers for its source (CR 113.7a + CR 608.2h).
 #[test]
-fn parent_target_controller_matches_by_source_id_for_an_ability_entry() {
+fn parent_target_controller_ignores_an_ability_entry_sharing_the_source_id() {
     let mut state = new_state();
     let source = creature_on_battlefield(&mut state, P1, "Ability Source", 1);
     let ability_stack_id = ObjectId(9996);
     state.stack.push_back(StackEntry {
         id: ability_stack_id,
         source_id: source,
-        controller: P1,
+        // Distinct from the source's controller: a source-id match on the stack
+        // rung would answer P0.
+        controller: P0,
         kind: StackEntryKind::ActivatedAbility {
             source_id: source,
             ability: Box::new(ResolvedAbility::new(
                 Effect::unimplemented("test", "V10 ability rung"),
                 vec![],
                 source,
-                P1,
+                P0,
             )),
         },
     });
@@ -2285,6 +2291,13 @@ fn parent_target_controller_matches_by_source_id_for_an_ability_entry() {
         source,
         P1,
     );
+    assert_eq!(parent_target_controller(&ability, &state), Some(P1));
+
+    // The source leaves the battlefield: the battlefield rung no longer answers,
+    // so only its last known information (P1) or a wrong source-id stack match
+    // (P0) can.
+    engine::game::zones::move_to_zone(&mut state, source, Zone::Graveyard, &mut Vec::new());
+    assert_eq!(state.objects[&source].zone, Zone::Graveyard, "reach guard");
     assert_eq!(parent_target_controller(&ability, &state), Some(P1));
 }
 

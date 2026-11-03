@@ -75,6 +75,7 @@ use syn::{Expr, ImplItem, Item, Pat, Stmt};
 
 const GAME_STATE: &str = include_str!("../../src/types/game_state.rs");
 const RESOLVE_BATCH: &str = include_str!("../../src/game/engine_resolve_batch.rs");
+const CONTEST: &str = include_str!("../../src/game/contest.rs");
 
 /// Every production source this census can search FOR A CONSUMER, keyed the way
 /// `ACTORLESS` names it. `include_str!` takes a literal path, so THIS TABLE IS
@@ -84,7 +85,10 @@ const RESOLVE_BATCH: &str = include_str!("../../src/game/engine_resolve_batch.rs
 /// deliberately NOT in this table — it is the census's *subject*, not a consumer
 /// source — so "held by an `include_str!`" and "searchable by `A9`" are different
 /// questions and `A9`'s message must not conflate them.
-const SOURCES: &[(&str, &str)] = &[("game/engine_resolve_batch.rs", RESOLVE_BATCH)];
+const SOURCES: &[(&str, &str)] = &[
+    ("game/engine_resolve_batch.rs", RESOLVE_BATCH),
+    ("game/contest.rs", CONTEST),
+];
 
 /// THE ADJUDICATION TABLE. Every actorless `WaitingFor` variant, the `NoActor`
 /// answer its arm names, the (source file, free function) that actually advances
@@ -114,6 +118,18 @@ const ACTORLESS: &[(&str, &str, (&str, &str), &str)] = &[
          consumes it. EVERY transport able to MINT this latch must also call that \
          consumer — a server-driven AI seat that minted one without a consumer hung a \
          3-player Commander game permanently.",
+    ),
+    (
+        "PhysicalContest",
+        "HostContestDriver",
+        ("game/contest.rs", "advance_contest"),
+        "Eye to Eye / Mouth to Mouth: a real-time clicking contest. No player submits a \
+         `GameAction` — the host stamps clicks and clock ticks and drives the engine's \
+         contest state machine through `game::contest::advance_contest` (and its click / \
+         connection / cancel siblings). EVERY transport that can enter the state \
+         (phase-server's `run_contest_driver`, the WASM `drive_contest_js`) must drive it, \
+         or the game parks with nobody able to move it. Concession stays legal \
+         (`check_actor_authorization`).",
     ),
 ];
 
@@ -590,7 +606,7 @@ fn every_waiting_for_arm_declares_its_acting_authority() {
     // ---- Phase 2 — whole-census findings, in assertion-number order. ----
     assert_eq!(
         ACTORLESS.len(),
-        2,
+        3,
         "reach-guard: the adjudication table in this file lost a row"
     );
 
@@ -757,16 +773,63 @@ fn every_waiting_for_arm_declares_its_acting_authority() {
     // `WaitingFor::acting_authority` as `ActingAuthority::One(player)`. Not
     // actorless: the prompt cannot advance without that player's
     // `GameAction::SelectDieRolls`.
-    // 136 -> 137 is adjudicated: CR 601.2f's caster-elected cost-reduction
+    // 136 -> 137 is adjudicated: the CR 401.2 Telling Time-class remainder
+    // split ("...one on top of your library, and one on the bottom of your
+    // library") added `DigRestSplitChoice`. It names one acting `player` and is
+    // classified by `WaitingFor::acting_authority` as
+    // `ActingAuthority::One(player)`. WHICH player that is depends on the
+    // variant's `scope`: the partition belongs to the looking player
+    // (CR 608.2d + CR 701.20e — the remainder was shown only to them), while
+    // the arrangement of a 2+ card pile belongs to the LIBRARY'S OWNER
+    // (CR 401.4), who may be a different player for a dig of another player's
+    // library. Either way exactly one player acts, so the classification is
+    // unchanged. Not actorless: the prompt cannot advance without that
+    // player's `GameAction::SelectCards`.
+    // 137 -> 138 is adjudicated: CR 601.2f's caster-elected cost-reduction
     // ordering added `OrderCostReductions`. It names one acting `player` —
     // CR 601.2f gives the choice to "the player" determining the total cost,
     // i.e. the caster — and is classified by `WaitingFor::acting_authority` as
     // `ActingAuthority::One(player)`. Not actorless: the prompt cannot advance
     // without that caster's `GameAction::OrderCostReductions` (or a
     // `GameAction::CancelCast`).
-    if declared.len() != 137 {
+    // 138 -> 139 is adjudicated: CR 401.4's library-order choice added
+    // `RevealUntilBottomOrder` for a RevealUntil bottom placement. It names one
+    // acting `player` (the revealing player)
+    // and is classified by `WaitingFor::acting_authority` as
+    // `ActingAuthority::One(player)`. Not actorless: the prompt cannot advance without
+    // that player's `GameAction::SelectCards`.
+    // 139 -> 140 is adjudicated: CR 701.71a's Empower Jace choice (CR 608.2d)
+    // added `EmpowerJaceChoice`. It names one acting `player` — CR 701.71a
+    // gives "Choose a Jace planeswalker token you control" to the player
+    // performing the keyword action, i.e. the resolving controller — and is
+    // classified by `WaitingFor::acting_authority` as
+    // `ActingAuthority::One(player)`. Not actorless: the prompt cannot advance
+    // without that player's `GameAction::SelectCards`.
+    // 140 -> 141 is adjudicated: CR 405.3's relative stack order for a batch
+    // of spell copies (CR 707.10) added `SpellCopyOrderChoice`. It names one
+    // acting `player` — CR 405.3 gives the order to the player who controls
+    // the copies — and is classified by `WaitingFor::acting_authority` as
+    // `ActingAuthority::One(player)`. Not actorless: the prompt cannot advance
+    // without that player's `GameAction::SelectCards`.
+    // 141 -> 142 is adjudicated: CR 605.3a + CR 601.2g via CR 602.2b's
+    // payment window for a mana ability's own mana cost added
+    // `ManaAbilityManaPayment`. It names one acting `player` — the one
+    // activating the mana ability — and is classified by
+    // `WaitingFor::acting_authority` as `ActingAuthority::One(player)`. Not
+    // actorless: the window cannot close without that player's payment.
+    // 142 -> 143 is adjudicated: the one-time-boon token-host choice (CR
+    // 608.2d, Dunbarrow Revivalist) added `ChooseTokenHost`. It names one
+    // acting `player` — the resolving controller choosing among the stamped
+    // entrants — and is classified by `WaitingFor::acting_authority` as
+    // `ActingAuthority::One(player)`. Not actorless: the prompt cannot advance
+    // without that player's `GameAction::ChooseTarget`.
+    // 143 -> 144 is adjudicated: the Eye to Eye / Mouth to Mouth contest added
+    // `PhysicalContest`. It is ACTORLESS — nobody submits a `GameAction` while it
+    // runs — and is declared in `ACTORLESS` with `NoActor::HostContestDriver`,
+    // advanced by `game::contest::advance_contest`.
+    if declared.len() != 144 {
         failures.push(format!(
-            "PIN declared.len()={} != 137.\n\
+            "PIN declared.len()={} != 144.\n\
              \n\
              Adding a `WaitingFor` variant IS the counted event this gate exists to make loud. \
              Repair it by ADJUDICATING, not by bumping the number:\n\
@@ -823,12 +886,14 @@ fn mulligan_adapters_preserve_the_single_pending_actor_rule() {
     let decision = |n: u8| WaitingFor::MulliganDecision {
         pending: (0..n)
             .map(|i| MulliganDecisionEntry {
+                free_reveals_taken: 0,
                 player: PlayerId(i),
                 mulligan_count: 0,
                 phase: MulliganDecisionPhase::Declare,
             })
             .collect(),
         free_first_mulligan: false,
+        declared: Vec::new(),
     };
     let bottoming = |n: u8| WaitingFor::OpeningHandBottomCards {
         pending: (0..n)

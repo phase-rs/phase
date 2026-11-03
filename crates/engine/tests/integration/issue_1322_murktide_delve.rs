@@ -7,7 +7,7 @@ use engine::game::scenario::{GameScenario, P0};
 use engine::types::actions::GameAction;
 use engine::types::counter::CounterType;
 use engine::types::game_state::{CastPaymentMode, ConvokeMode, WaitingFor};
-use engine::types::mana::{ManaType, ManaUnit};
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
@@ -23,6 +23,10 @@ fn issue_1322_murktide_enters_with_counters_for_instants_delved() {
     scenario.at_phase(Phase::PreCombatMain);
     let murktide = scenario
         .add_creature_to_hand_from_oracle(P0, "Murktide Regent", 3, 3, MURKTIDE_ORACLE)
+        .with_mana_cost(ManaCost::Cost {
+            shards: vec![ManaCostShard::Blue],
+            generic: 3,
+        })
         .id();
     let instant_a = scenario
         .add_spell_to_graveyard(P0, "Lightning Bolt", true)
@@ -57,15 +61,22 @@ fn issue_1322_murktide_enters_with_counters_for_instants_delved() {
                 convoke_mode: Some(ConvokeMode::Delve),
                 ..
             } => {
-                for gy_id in [instant_a, instant_b] {
-                    if runner.state().objects[&gy_id].zone == Zone::Graveyard {
-                        runner
-                            .act(GameAction::TapForConvoke {
-                                object_id: gy_id,
-                                mana_type: ManaType::Colorless,
-                            })
-                            .expect("delve graveyard card");
-                    }
+                let pending: Vec<_> = [instant_a, instant_b]
+                    .into_iter()
+                    .filter(|id| runner.state().is_delve_selectable(P0, *id))
+                    .collect();
+                for gy_id in &pending {
+                    runner
+                        .act(GameAction::TapForConvoke {
+                            object_id: *gy_id,
+                            mana_type: ManaType::Colorless,
+                        })
+                        .expect("delve graveyard card");
+                }
+                if pending.is_empty() {
+                    runner
+                        .act(GameAction::PassPriority)
+                        .expect("commit the delve payment");
                 }
             }
             WaitingFor::ManaPayment { .. } => {

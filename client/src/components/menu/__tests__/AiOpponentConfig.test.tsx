@@ -1,3 +1,5 @@
+import "../../../test/helpers/persistedStorage";
+
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { act } from "react";
@@ -6,6 +8,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AiOpponentConfig } from "../AiOpponentConfig";
 import { usePreferencesStore } from "../../../stores/preferencesStore";
 import type { AiDeckCandidate } from "../../../services/aiDeckCatalog";
+import { emptyPoolSelection } from "../../../services/randomPoolSelection";
+import { useLlmStore } from "../../../stores/llmStore";
+import type { LlmProviderCatalogEntry } from "../../../services/llm/types";
+
+const catalogMock = vi.hoisted(() => ({ loadProviderCatalog: vi.fn() }));
+vi.mock("../../../services/llm/catalog", () => catalogMock);
 
 vi.mock("../../../services/aiDeckCatalog", async () => {
   const actual = await vi.importActual<typeof import("../../../services/aiDeckCatalog")>(
@@ -13,7 +21,7 @@ vi.mock("../../../services/aiDeckCatalog", async () => {
   );
   return {
     ...actual,
-    useAiDeckCatalog: () => ({ candidates: mockCandidates, loading: false, error: null }),
+    useAiDeckCatalog: () => ({ candidates: mockCandidates, allCandidates: mockCandidates, loading: false, error: null }),
   };
 });
 
@@ -32,6 +40,11 @@ function candidate(id: string, bracket: AiDeckCandidate["bracket"]): AiDeckCandi
 }
 
 beforeEach(() => {
+  catalogMock.loadProviderCatalog.mockResolvedValue([]);
+  useLlmStore.setState({
+    profiles: [], seatBindings: {}, defaultOpponentProfileId: null,
+    draftEnabled: false, draftProfileId: null,
+  });
   mockCandidates = [
     candidate("Bracket1", 1),
     candidate("Bracket2", 2),
@@ -40,6 +53,7 @@ beforeEach(() => {
   ];
   act(() => {
     usePreferencesStore.getState().setAiBracketFilter([]);
+    usePreferencesStore.getState().setAiPoolSelection(emptyPoolSelection());
     usePreferencesStore.getState().setAiArchetypeFilter("Any");
     usePreferencesStore.getState().setAiCoverageFloor(50);
     // Reset to a single AI seat at Medium difficulty with cEDH mode off so each
@@ -51,6 +65,49 @@ beforeEach(() => {
 });
 
 afterEach(cleanup);
+
+it("waits for catalog rows before offering a provider and keeps an explicit engine choice", async () => {
+  const user = userEvent.setup();
+  let resolveCatalog!: (rows: LlmProviderCatalogEntry[]) => void;
+  catalogMock.loadProviderCatalog.mockReturnValue(new Promise<LlmProviderCatalogEntry[]>((resolve) => {
+    resolveCatalog = resolve;
+  }));
+  const id = useLlmStore.getState().addProfile({
+    name: "Test provider", provider: "OpenAi", model: "gpt-5", apiKey: "key", enabled: true,
+  });
+  useLlmStore.getState().setDefaultOpponentProfileId(id);
+
+  render(<AiOpponentConfig selectedFormat="Standard" opponentCount={1} />);
+  expect(screen.queryByRole("button", { name: /^Driven by$/i })).not.toBeInTheDocument();
+
+  await act(async () => {
+    resolveCatalog([{
+      provider: "OpenAi", value: "OpenAi", displayName: "OpenAI", defaultBaseUrl: null,
+      defaultModel: "gpt-5", requiresApiKey: true, apiKeyUrl: "", models: [],
+    }]);
+  });
+  const picker = await screen.findByRole("button", { name: /^Driven by$/i });
+  expect(picker).toHaveTextContent("Test provider");
+  await user.click(picker);
+  await user.click(screen.getByRole("option", { name: /Engine AI/i }));
+  expect(useLlmStore.getState().seatBindings[0]).toBeNull();
+  expect(picker).toHaveTextContent(/Engine AI/i);
+});
+
+it("does not offer a profile absent from the loaded catalog", async () => {
+  catalogMock.loadProviderCatalog.mockResolvedValue([{
+    provider: "Gemini", value: "Gemini", displayName: "Gemini", defaultBaseUrl: null,
+    defaultModel: "gemini", requiresApiKey: true, apiKeyUrl: "", models: [],
+  }]);
+  useLlmStore.getState().addProfile({
+    provider: "OpenAi", model: "gpt-5", apiKey: "key", enabled: true,
+  });
+
+  render(<AiOpponentConfig selectedFormat="Standard" opponentCount={1} />);
+  await act(async () => { await Promise.resolve(); });
+  expect(catalogMock.loadProviderCatalog).toHaveBeenCalled();
+  expect(screen.queryByRole("button", { name: /^Driven by$/i })).not.toBeInTheDocument();
+});
 
 describe("AiOpponentConfig — cEDH toggle", () => {
   it("enabling cEDH mode sets the table flag without touching per-seat difficulties", async () => {
@@ -224,5 +281,99 @@ describe("AiOpponentConfig — bracket filter", () => {
     await waitFor(() => {
       expect(screen.getByRole("button", { name: /^Deck$/i })).toHaveTextContent(/Random \(2\)/);
     });
+  });
+
+  it("warns when the filter matches nothing but keeps Start available (soft gate)", async () => {
+    const user = userEvent.setup();
+    render(<AiOpponentConfig selectedFormat="Commander" opponentCount={1} />);
+
+    // No bracket-5 candidate in the pool — the filter matches nothing.
+    await user.click(screen.getByRole("button", { name: "5 cEDH" }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("No decks match the selected brackets. Random AI will draw from all legal decks."),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("shows no warning when the filter matches at least one deck", async () => {
+    const user = userEvent.setup();
+    render(<AiOpponentConfig selectedFormat="Commander" opponentCount={1} />);
+
+    await user.click(screen.getByRole("button", { name: "2 Core" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /^Deck$/i })).toHaveTextContent(/Random \(1\)/);
+    });
+    expect(
+      screen.queryByText("No decks match the selected brackets. Random AI will draw from all legal decks."),
+    ).not.toBeInTheDocument();
+  });
+
+  it("warns with the cEDH text when cEDH mode has no bracket-5 decks", async () => {
+    const user = userEvent.setup();
+    render(<AiOpponentConfig selectedFormat="Commander" opponentCount={1} />);
+
+    await user.click(screen.getByRole("switch", { name: /cEDH mode/i }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("No bracket-5 decks available. Random AI seats cannot be filled."),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("warns when the pool selection misses the bracket pool entirely", async () => {
+    const user = userEvent.setup();
+    act(() => {
+      usePreferencesStore.getState().setAiPoolSelection({
+        excludedGroups: [],
+        excludedDecks: ["Bracket1", "Bracket2", "Bracket4"],
+        includedDecks: [],
+      });
+    });
+    render(<AiOpponentConfig selectedFormat="Commander" opponentCount={1} />);
+
+    await user.click(screen.getByRole("button", { name: "2 Core" }));
+
+    // Only Untagged is selected, but bracket 2 keeps only Bracket2: the seat
+    // falls back to the 1-deck bracket pool, and both the tree and the banner
+    // say why instead of letting "Random (1)" look mysterious.
+    await waitFor(() => {
+      expect(screen.getAllByText(/None of the 1 selected decks/)).toHaveLength(2);
+    });
+    expect(
+      screen.getByRole("button", { name: /AI random pool 1 of 4.*0 playable/ }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Deck$/i })).toHaveTextContent(/Random \(1\)/);
+  });
+
+  it("counts Random seats from the soft-filter fallback pool instead of zero", () => {
+    mockCandidates = [
+      { ...candidate("hi", 2), coveragePct: 95 },
+      { ...candidate("lo", 2), coveragePct: 55 },
+    ];
+    act(() => {
+      usePreferencesStore.getState().setAiCoverageFloor(90);
+      usePreferencesStore.getState().setAiPoolSelection({
+        ...emptyPoolSelection(),
+        excludedDecks: ["hi"],
+      });
+    });
+    render(<AiOpponentConfig selectedFormat="Commander" opponentCount={1} />);
+    // The curated pool holds only the coverage-55 deck, which misses floor 90:
+    // production falls back to it, so the seat previews Random (1), not (0).
+    expect(screen.getByRole("button", { name: /^Deck$/i })).toHaveTextContent(/Random \(1\)/);
+  });
+
+  it("falls back to the catalog count when the bracket filter matches nothing", () => {
+    mockCandidates = [candidate("b2", 2), candidate("b4", 4)];
+    act(() => {
+      usePreferencesStore.getState().setAiBracketFilter([5]);
+      usePreferencesStore.getState().setAiCoverageFloor(0);
+    });
+    render(<AiOpponentConfig selectedFormat="Commander" opponentCount={1} />);
+    expect(screen.getByRole("button", { name: /^Deck$/i })).toHaveTextContent(/Random \(2\)/);
   });
 });

@@ -10,9 +10,15 @@ import init, {
   initialize_game,
   initialize_multiplayer_host_game,
   submit_action,
+  drive_contest_js,
+  request_takeback_js,
+  respond_takeback_js,
+  cancel_takeback_js,
+  pending_takeback_js,
   submit_interaction_js,
   get_game_state,
   get_filtered_game_state,
+  set_debug_hand_reveal,
   get_ai_action_proposal,
   get_ai_action_proposal_with_diagnostics,
   get_ai_tactical_action_proposal,
@@ -21,9 +27,12 @@ import init, {
   get_ai_action_proposal_from_scores_with_diagnostics,
   get_ai_scored_candidates,
   submit_ai_action_proposal,
-  get_legal_actions_js,
+  buildLlmDecisionRequest,
+  getAiActionProposalFromLlmResponse,
+  llmProviderCatalog,
   get_legal_actions_for_viewer_js,
   get_viewer_snapshot_js,
+  get_viewer_transition_snapshot_js,
   restore_game_state,
   resume_restored_game_state,
   resume_multiplayer_host_state,
@@ -31,6 +40,7 @@ import init, {
   build_ai_card_subset,
   evaluate_deck_compatibility_js,
   evaluateDeckFormatGate,
+  checkDeckPrintingsBounds,
   customFormatFromLobbyConfig,
   formatConfigForCustomRules,
   apply_seat_mutation,
@@ -51,15 +61,25 @@ import init, {
   get_card_face_data,
   get_card_parse_details,
   get_card_rulings,
+  canonicalCardNames,
 } from "@wasm/engine";
+import * as engineWasm from "@wasm/engine";
 
-import { isActionOutcome, type ActionRejection, type AiActionProposal, type GameAction } from "./types";
+import {
+  appliedSubmitResult,
+  isActionOutcome,
+  type ActionRejection,
+  type AiActionProposal,
+  type GameAction,
+  type GameEvent,
+} from "./types";
 import type {
   InteractionPreviewRequest,
   InteractionSubmission,
 } from "./generated/interaction";
 import type { BracketDeckRequest } from "../types/bracketEstimate";
 import { classifyInitFailure, type InitFailure } from "./init-envelope";
+import { ENGINE_QUERIES, runEngineQuery, type EngineQueryName } from "./engine-queries";
 
 // ── Message Protocol ─────────────────────────────────────────────────────
 
@@ -87,15 +107,29 @@ type EngineRequest =
       firstPlayer?: number;
     }
   | { type: "submitAction"; id: number; actor: number; action: GameAction }
+  | {
+      type: "driveContest";
+      id: number;
+      nowMs: number;
+      aiPlayers: number[];
+      awayPlayers: number[];
+      clicks: unknown[];
+    }
+  | { type: "requestTakeback"; id: number; actor: number; aiPlayers: number[] }
+  | { type: "respondTakeback"; id: number; actor: number; approve: boolean; aiPlayers: number[] }
+  | { type: "cancelTakeback"; id: number; actor: number }
+  | { type: "pendingTakeback"; id: number }
   | { type: "submitInteraction"; id: number; actor: number; submission: InteractionSubmission }
   | { type: "previewManaPayment"; id: number; actor: number; action: GameAction }
   | { type: "previewInteraction"; id: number; actor: number; request: InteractionPreviewRequest }
   | { type: "getState"; id: number }
   | { type: "getFilteredState"; id: number; viewerId: number }
-  | { type: "getLegalActions"; id: number }
-  | { type: "getSnapshot"; id: number }
+  | { type: "setDebugHandReveal"; id: number; enabled: boolean }
+  | { type: "getLegalActions"; id: number; viewerId: number }
+  | { type: "getSnapshot"; id: number; viewerId: number }
   | { type: "getLegalActionsForViewer"; id: number; viewerId: number }
   | { type: "getViewerSnapshot"; id: number; viewerId: number }
+  | { type: "getViewerTransitionSnapshot"; id: number; viewerId: number; events: GameEvent[] }
   | { type: "getAiActionProposal"; id: number; difficulty: string; playerId: number }
   | { type: "getAiActionProposalWithDiagnostics"; id: number; difficulty: string; playerId: number }
   | { type: "getAiTacticalActionProposal"; id: number; difficulty: string; playerId: number }
@@ -104,19 +138,40 @@ type EngineRequest =
   | { type: "getAiActionProposalFromScores"; id: number; scoresJson: string; difficulty: string; playerId: number; seed: number }
   | { type: "getAiActionProposalFromScoresWithDiagnostics"; id: number; scoresJson: string; difficulty: string; playerId: number; seed: number }
   | { type: "submitAiActionProposal"; id: number; proposal: AiActionProposal }
+  | {
+      type: "buildLlmDecisionRequest";
+      id: number;
+      difficulty: string;
+      playerId: number;
+      endpointJson: string;
+      historyJson: string;
+    }
+  | {
+      type: "getAiActionProposalFromLlmResponse";
+      id: number;
+      playerId: number;
+      fingerprint: string;
+      provider: string;
+      status: number;
+      responseBody: string;
+    }
+  | { type: "llmProviderCatalog"; id: number }
   | { type: "restoreState"; id: number; stateJson: string }
-  | { type: "resumeRestoredGameState"; id: number }
-  | { type: "resumeMultiplayerHostState"; id: number; stateJson: string }
+  | { type: "resumeRestoredGameState"; id: number; viewerId: number }
+  | { type: "resumeMultiplayerHostState"; id: number; viewerId: number; stateJson: string }
   | { type: "exportState"; id: number }
   | { type: "loadCardDbFromUrl"; id: number }
   | { type: "buildAiCardSubset"; id: number }
   | { type: "evaluateDeckCompatibility"; id: number; request: unknown }
   | { type: "evaluateDeckFormatGate"; id: number; request: unknown }
+  | { type: "checkDeckPrintingsBounds"; id: number; printings: unknown }
   | { type: "customFormatFromLobbyConfig"; id: number; name: string; formatConfig: unknown }
   | { type: "formatConfigForCustomRules"; id: number; customRules: unknown }
   | { type: "getCardFaceData"; id: number; cardName: string }
   | { type: "getCardParseDetails"; id: number; cardName: string }
   | { type: "getCardRulings"; id: number; cardName: string }
+  | { type: "canonicalCardNames"; id: number; names: string[] }
+  | { type: "query"; id: number; name: EngineQueryName; args: unknown[] }
   | { type: "resetGame"; id: number }
   | { type: "setMultiplayerMode"; id: number; enabled: boolean }
   | { type: "ping"; id: number }
@@ -223,6 +278,7 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           );
         const text = await resp.text();
         const count = load_card_database(text);
+        if (count <= 0) throw new Error("Failed to load card-data.json (no cards loaded)");
         cardDbLoaded = true;
         result(msg.id, count);
         break;
@@ -266,6 +322,16 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
         break;
       }
 
+      // Resource bounds on one guest deck's printings sidecar, for the P2P host's
+      // admission. The engine throws its reason on abuse; the outer try/catch
+      // returns that throw as an `error` response. Reads no card database, so it
+      // does not gate on one.
+      case "checkDeckPrintingsBounds": {
+        checkDeckPrintingsBounds(msg.printings);
+        result(msg.id, null);
+        break;
+      }
+
       // Custom-format save/select. Neither call touches the card database —
       // they are pure format-schema conversions — so neither gates on it.
       case "customFormatFromLobbyConfig": {
@@ -290,6 +356,21 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
 
       case "getCardRulings": {
         result(msg.id, get_card_rulings(msg.cardName));
+        break;
+      }
+
+      case "canonicalCardNames": {
+        result(msg.id, canonicalCardNames(msg.names));
+        break;
+      }
+
+      case "query": {
+        if (ENGINE_QUERIES[msg.name].needsCardDb && !cardDbLoaded) {
+          error(msg.id, "Card database not loaded. Call loadCardDb or loadCardDbFromUrl first.");
+          break;
+        }
+        // The client types `args` against `name`; the worker boundary carries them untyped.
+        result(msg.id, runEngineQuery(engineWasm, msg.name, msg.args as never));
         break;
       }
 
@@ -369,11 +450,45 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           rejectionError(msg.id, outcome.rejection);
           break;
         }
-        const actionResult = outcome.result as { events?: unknown[]; log_entries?: unknown[] };
-        result(msg.id, {
-          events: actionResult.events ?? [],
-          log_entries: actionResult.log_entries ?? [],
-        });
+        result(msg.id, appliedSubmitResult(outcome));
+        break;
+      }
+
+      case "driveContest": {
+        const outcome = drive_contest_js(
+          msg.nowMs,
+          Uint8Array.from(msg.aiPlayers),
+          Uint8Array.from(msg.awayPlayers),
+          msg.clicks,
+        );
+        if (typeof outcome === "string") {
+          error(msg.id, outcome);
+          break;
+        }
+        result(msg.id, outcome);
+        break;
+      }
+
+      case "requestTakeback": {
+        result(msg.id, request_takeback_js(msg.actor, Uint8Array.from(msg.aiPlayers)));
+        break;
+      }
+
+      case "respondTakeback": {
+        result(
+          msg.id,
+          respond_takeback_js(msg.actor, msg.approve, Uint8Array.from(msg.aiPlayers)),
+        );
+        break;
+      }
+
+      case "cancelTakeback": {
+        result(msg.id, cancel_takeback_js(msg.actor));
+        break;
+      }
+
+      case "pendingTakeback": {
+        result(msg.id, pending_takeback_js() ?? null);
         break;
       }
 
@@ -460,10 +575,16 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
         break;
       }
 
+      case "setDebugHandReveal": {
+        set_debug_hand_reveal(msg.enabled);
+        result(msg.id, null);
+        break;
+      }
+
       case "getLegalActions": {
-        const r = get_legal_actions_js();
+        const r = get_legal_actions_for_viewer_js(msg.viewerId);
         if (r === null) {
-          error(msg.id, "NOT_INITIALIZED: get_legal_actions_js returned null");
+          error(msg.id, "NOT_INITIALIZED: get_legal_actions_for_viewer_js returned null");
           break;
         }
         result(msg.id, r);
@@ -480,9 +601,9 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
         // atomic: a snapshot can never observe a half-applied action, nor
         // straddle two engine versions.
         const state = get_game_state();
-        const legalResult = get_legal_actions_js();
+        const legalResult = get_legal_actions_for_viewer_js(msg.viewerId);
         if (state === null || legalResult === null) {
-          error(msg.id, "NOT_INITIALIZED: get_game_state/get_legal_actions_js returned null");
+          error(msg.id, "NOT_INITIALIZED: get_game_state/get_legal_actions_for_viewer_js returned null");
           break;
         }
         result(msg.id, { state, legalResult });
@@ -503,6 +624,20 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
         const r = get_viewer_snapshot_js(msg.viewerId);
         if (r === null) {
           error(msg.id, "NOT_INITIALIZED: get_viewer_snapshot_js returned null");
+          break;
+        }
+        result(msg.id, r);
+        break;
+      }
+
+      case "getViewerTransitionSnapshot": {
+        const r = get_viewer_transition_snapshot_js(msg.viewerId, msg.events);
+        if (typeof r === "string") {
+          error(msg.id, r);
+          break;
+        }
+        if (r === null) {
+          error(msg.id, "NOT_INITIALIZED: get_viewer_transition_snapshot_js returned null");
           break;
         }
         result(msg.id, r);
@@ -553,6 +688,38 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
         break;
       }
 
+      case "buildLlmDecisionRequest": {
+        result(
+          msg.id,
+          buildLlmDecisionRequest(
+            msg.difficulty,
+            msg.playerId,
+            msg.endpointJson,
+            msg.historyJson,
+          ) ?? null,
+        );
+        break;
+      }
+
+      case "getAiActionProposalFromLlmResponse": {
+        result(
+          msg.id,
+          getAiActionProposalFromLlmResponse(
+            msg.playerId,
+            msg.fingerprint,
+            msg.provider,
+            msg.status,
+            msg.responseBody,
+          ) ?? null,
+        );
+        break;
+      }
+
+      case "llmProviderCatalog": {
+        result(msg.id, llmProviderCatalog());
+        break;
+      }
+
       case "submitAiActionProposal": {
         const outcome = submit_ai_action_proposal(
           msg.proposal.token,
@@ -575,7 +742,7 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           presentation,
           snapshot: {
             state: get_game_state(),
-            legalResult: get_legal_actions_js(),
+            legalResult: get_legal_actions_for_viewer_js(msg.viewerId),
           },
         });
         break;
@@ -587,7 +754,7 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           presentation,
           snapshot: {
             state: get_game_state(),
-            legalResult: get_legal_actions_js(),
+            legalResult: get_legal_actions_for_viewer_js(msg.viewerId),
           },
         });
         break;

@@ -241,6 +241,8 @@ mod tests {
         let db = CardDatabase::from_json_str(&export).expect("export db parses");
 
         let mut state = GameState::new_two_player(7);
+        // Source 3 is a spellbook: the default Standard pool seeds no digital-only face.
+        state.format_config = FormatConfig::historic();
 
         // Source 1: a battlefield object carrying the printed face.
         let bf_id = create_object(

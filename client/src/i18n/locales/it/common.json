@@ -179,6 +179,7 @@
       "exportedTo": "Esportato in {{path}}.",
       "exportRequested": "Esportazione richiesta: {{filename}}.",
       "exportFailed": "Impossibile esportare lo stato della partita.",
+      "exportFailedDetail": "Impossibile esportare lo stato della partita. {{detail}}",
       "replayExported": "Replay salvato come {{filename}}.",
       "replayExportUnavailable": "Nessuna registrazione di replay disponibile per questa partita.",
       "replayExportFailed": "Impossibile esportare il replay."
@@ -285,7 +286,9 @@
     "loading": "Caricamento..."
   },
   "turnBanner": {
-    "turn": "Turno {{number}}"
+    "turn": "Turno {{number}}",
+    "yourTurn": "Il tuo turno",
+    "opponentTurn": "Turno di {{name}}"
   },
   "diceRoll": {
     "rollingForFirst": "Tiro per stabilire chi inizia",
@@ -303,7 +306,8 @@
     "lostCoinFlip": "{{name}} ha perso il lancio",
     "turnOrder": "Ordine dei turni",
     "turnOrderItem": "Turno {{turn}}: {{name}}",
-    "youTakeTurn": "Giochi il turno {{turn}}"
+    "youTakeTurn": "Giochi il turno {{turn}}",
+    "ignoredDie": "Ignorato"
   },
   "chrome": {
     "back": "Indietro",
@@ -423,5 +427,25 @@
       "no-turn": "Nessun relay TURN fornito",
       "aborted": "Richiesta annullata"
     }
+  },
+  "savedDeckLibraryBusy": {
+    "description": "Un'altra scheda di Phase è occupata. Chiudi le altre schede di Phase e riprova.",
+    "title": {
+      "save": "Impossibile salvare il mazzo",
+      "clone": "Impossibile clonare il mazzo",
+      "import": "Impossibile importare il mazzo",
+      "delete": "Impossibile eliminare il mazzo",
+      "organize": "Impossibile aggiornare l'organizzazione dei mazzi",
+      "updateFeeds": "Impossibile aggiornare i feed dei mazzi",
+      "restore": "Impossibile ripristinare il backup",
+      "applyCloud": "Impossibile applicare i mazzi cloud",
+      "autosaveDraft": "Impossibile salvare automaticamente il mazzo del draft"
+    }
+  },
+  "savedDeckLibraryStorageFailure": {
+    "description": "Phase non è riuscito ad accedere all'archiviazione del browser. Riprova in un momento."
+  },
+  "savedDeckChanged": {
+    "description": "Questo mazzo è cambiato prima che la tua azione venisse eseguita, quindi non è stato modificato nulla. Controlla il mazzo e riprova."
   }
 }

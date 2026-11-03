@@ -33,7 +33,7 @@ import { debugLog } from "./debugLog";
 import { useGameStore } from "../stores/gameStore";
 import { loadCheckpoints } from "../services/gamePersistence";
 import { trackEvent } from "../services/telemetry";
-import { AdapterError, AdapterErrorCode, type GameState } from "../adapter/types";
+import { AdapterError, AdapterErrorCode, type PersistedGameState } from "../adapter/types";
 
 /**
  * Attempt to repopulate the engine's thread-local state from the last-known
@@ -60,7 +60,7 @@ export async function attemptStateRehydrate(): Promise<boolean> {
   // Prefer the live store snapshot. Fall back to IDB only if the store
   // has also been cleared (rare — only happens if something has nuked
   // the in-memory state without a full reload).
-  let snapshot: GameState | null = gameState;
+  let snapshot: PersistedGameState | null = gameState;
   let usedIdbFallback = false;
   if (!snapshot && gameId) {
     try {

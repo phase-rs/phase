@@ -28,9 +28,8 @@
 //! The card-local AST check (`fills_own_graveyard_parts`, over the action's
 //! authoritative effect chain) runs FIRST and rejects the overwhelming majority
 //! of candidates; only a confirmed graveyard-filler pays for the graveyard
-//! scan. `GameState` carries no zone index, so that scan filters
-//! `state.objects` (house practice) — but it never touches mana affordability
-//! or `find_legal_targets`.
+//! scan, which walks `graveyard_of` and never touches mana affordability or
+//! `find_legal_targets`.
 
 use std::collections::HashSet;
 
@@ -38,7 +37,6 @@ use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
-use engine::types::zones::Zone;
 
 use crate::features::graveyard_types::{abilities_fill_own_graveyard, GRAVEYARD_TYPES_FLOOR};
 use crate::features::DeckFeatures;
@@ -48,15 +46,15 @@ use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, Tacti
 
 pub struct GraveyardTypesPolicy;
 
-/// CR 404.1 + CR 205.2a: how many distinct card types sit in this player's
-/// graveyard. Uses `owner`, not `controller` — control is a battlefield notion
-/// and a card in a graveyard belongs to its owner.
+/// CR 404.1 + CR 205.2a: how many distinct card types sit in the graveyard `player`
+/// reads, shared or its own (CR 400.1).
 pub(crate) fn distinct_graveyard_types(state: &GameState, player: PlayerId) -> u32 {
     let mut seen: HashSet<CoreType> = HashSet::new();
-    for object in state.objects.values() {
-        if object.zone != Zone::Graveyard || object.owner != player {
-            continue;
-        }
+    for object in state
+        .graveyard_of(player)
+        .iter()
+        .filter_map(|id| state.objects.get(id))
+    {
         for core_type in &object.card_types.core_types {
             seen.insert(*core_type);
         }
@@ -173,5 +171,64 @@ fn candidate_fills_own_graveyard(ctx: &PolicyContext<'_>) -> bool {
             .effective_activated_ability()
             .is_some_and(|ability| abilities_fill_own_graveyard(std::iter::once(&ability))),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use engine::game::zones::create_object;
+    use engine::types::card_type::CardType;
+    use engine::types::format::FormatConfig;
+    use engine::types::identifiers::CardId;
+    use engine::types::zones::Zone;
+
+    use super::*;
+
+    fn pile_card(state: &mut GameState, owner: PlayerId, id: u64, core_type: CoreType) {
+        let oid = create_object(
+            state,
+            CardId(id),
+            owner,
+            format!("GY {id}"),
+            Zone::Graveyard,
+        );
+        state.objects.get_mut(&oid).unwrap().card_types = CardType {
+            supertypes: Vec::new(),
+            core_types: vec![core_type],
+            subtypes: Vec::new(),
+        };
+    }
+
+    fn stage(format: FormatConfig) -> GameState {
+        let mut state = GameState::new(format, 2, 42);
+        pile_card(&mut state, PlayerId(0), 1, CoreType::Creature);
+        pile_card(&mut state, PlayerId(1), 2, CoreType::Instant);
+        state
+    }
+
+    #[test]
+    fn shared_graveyard_counts_every_owners_types_for_both_seats() {
+        let state = stage(FormatConfig::dandan());
+        assert_eq!(
+            state.graveyard_of(PlayerId(0)).len(),
+            2,
+            "reach: both owners' cards sit in the one pile"
+        );
+        for seat in [PlayerId(0), PlayerId(1)] {
+            assert_eq!(distinct_graveyard_types(&state, seat), 2);
+        }
+    }
+
+    #[test]
+    fn per_seat_graveyards_count_only_their_own_types() {
+        let state = stage(FormatConfig::standard());
+        assert_eq!(
+            state.graveyard_of(PlayerId(1)).len(),
+            1,
+            "reach: separate piles"
+        );
+        for seat in [PlayerId(0), PlayerId(1)] {
+            assert_eq!(distinct_graveyard_types(&state, seat), 1);
+        }
     }
 }

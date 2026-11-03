@@ -1,17 +1,20 @@
 //! Subprocess-level regression tests for `ai-commander`'s `--games-file` batch
-//! mode: a batch invocation's per-game output must match the single-game
-//! invocation of the same seed+difficulty, byte-for-byte outside the one
+//! mode and its `--players` seat-count contract. A batch invocation's per-game
+//! output must match the single-game invocation of the same seed+difficulty,
+//! byte-for-byte outside the one
 //! inherently nondeterministic field (wall-clock elapsed time). These spawn the
 //! real `ai-commander` binary rather than calling `run()` in-process, so what is
 //! under test is the binary's actual contract with the pod-lab harness —
 //! argument parsing, per-game stdout framing, flush timing, process exit — not
 //! an internal function's.
 //!
-//! Every test here is `#[ignore]`d: it loads `client/public/card-data.json`
-//! (requires `cargo run --bin card-data-export` or the setup.sh script), which
-//! is not available in unit-test CI — the same convention as
-//! `greasefang_bounded.rs`/`whitemane_lion_bounded.rs`. Opt in via
+//! Every test that spawns the binary is `#[ignore]`d: the binary loads
+//! `client/public/card-data.json` (requires `cargo run --bin card-data-export`
+//! or the setup.sh script), which is not available in unit-test CI — the same
+//! convention as `greasefang_bounded.rs`/`whitemane_lion_bounded.rs`. Opt in via
 //! `cargo test -p phase-ai --test ai_commander_batch_equivalence -- --ignored`.
+//! The one exception, `wall_clock_masking_hides_only_timing_values`, tests the
+//! output-masking helper on sample rows: it spawns nothing and runs in CI.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -95,6 +98,57 @@ fn normalized_result_block(game_block: &str) -> String {
         .filter(|line| !line.starts_with("Elapsed:"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// The `P{k}` label of every per-seat row carrying `field` (`"  main="`,
+/// `"  difficulty="`, `"  life="`), in stdout order. A seat row starts with
+/// `"  P"`; `field` includes its `=`, so a deck line such as
+/// `"  Prossh…  |  … main: 99 cards"` is excluded.
+fn seat_row_labels<'a>(stdout: &'a str, field: &str) -> Vec<&'a str> {
+    stdout
+        .lines()
+        .filter(|line| line.starts_with("  P") && line.contains(field))
+        .filter_map(|line| line.split_whitespace().next())
+        .collect()
+}
+
+/// `stdout` with every line kept and only its wall-clock values masked (see
+/// [`mask_wall_clock_value`]): the turn number, active seat, action counts and
+/// life snapshot on turn rows and the seat, turn and action count on
+/// ELIMINATED rows stay in the comparison, so two separately-timed runs compare
+/// equal only when everything they printed apart from timing is the same.
+fn with_wall_clock_masked(stdout: &str) -> String {
+    stdout
+        .lines()
+        .map(mask_wall_clock_value)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// `line` with the seconds value after its wall-clock label replaced by a
+/// fixed placeholder. The label is a leading `Elapsed: ` (the RESULT row) or
+/// the first `elapsed=` (turn and ELIMINATED rows). The value is the run of
+/// spaces after the label, which is the turn row's `{:>6.1}` padding and is
+/// empty on the ELIMINATED row's `{:.1}`, followed by the number's digits and
+/// `.`. The padding is masked along with the digits because its width depends
+/// on the value. The `s` unit and the rest of the line are kept, so the mask
+/// ends before a turn row's life snapshot. A line with neither label is
+/// returned unchanged.
+fn mask_wall_clock_value(line: &str) -> String {
+    const ROW_LABEL: &str = "Elapsed: ";
+    const FIELD_LABEL: &str = "elapsed=";
+    const MASK: &str = "<wall-clock>";
+    let (through_label, value_onward) = if let Some(value_onward) = line.strip_prefix(ROW_LABEL) {
+        (ROW_LABEL, value_onward)
+    } else if let Some(at) = line.find(FIELD_LABEL) {
+        line.split_at(at + FIELD_LABEL.len())
+    } else {
+        return line.to_owned();
+    };
+    let unit_onward = value_onward
+        .trim_start_matches(' ')
+        .trim_start_matches(|c: char| c.is_ascii_digit() || c == '.');
+    format!("{through_label}{MASK}{unit_onward}")
 }
 
 /// Higher action cap for the cross-game-leakage regression below: the
@@ -320,4 +374,264 @@ fn single_game_measurement_env_prints_measurement_marker() {
         "a single-game invocation under PHASE_AI_MEASUREMENT=1 must print the ExecutionMode: measurement marker line:
 {out}"
     );
+}
+
+/// `--players N` end to end at a non-default N on each side of four: the real
+/// binary seats exactly N players with N decks, applies a last-seat override
+/// given BEFORE `--players` (argument-order independence at the binary level),
+/// and drives every seat (no `NoEligibleAiActor` stall) through a short,
+/// action-capped game to its RESULT block.
+#[test]
+#[ignore = "loads card-data.json + runs real games; opt in via --ignored"]
+fn players_flag_seats_exactly_n_players_in_a_short_game() {
+    for players in [2u8, 5] {
+        let last_seat = players - 1;
+        let override_flag = format!("--difficulty-p{last_seat}");
+        let players_value = players.to_string();
+        let out = run_ai_commander(&[
+            override_flag.as_str(),
+            "VeryEasy",
+            "--players",
+            players_value.as_str(),
+            "--seed",
+            "9401",
+            "--difficulty",
+            "Easy",
+            "--action-cap",
+            TEST_ACTION_CAP,
+        ]);
+
+        let expected_preamble = format!(
+            "=== {players}-player Commander AI test ===\n\
+             Feed: feeds/mtggoldfish-commander.json\n\
+             Seed: 9401   Difficulty: Easy\n\n"
+        );
+        assert!(
+            out.starts_with(&expected_preamble),
+            "{players} seats: preamble must name the table size:\n{out}"
+        );
+        assert!(
+            out.contains(&format!("Game started. {players} players.")),
+            "{players} seats: the game must start with {players} players:\n{out}"
+        );
+        let expected_labels: Vec<String> = (0..players).map(|k| format!("P{k}")).collect();
+        for field in ["  main=", "  difficulty=", "  life="] {
+            assert_eq!(
+                seat_row_labels(&out, field),
+                expected_labels,
+                "{players} seats: every {field:?} row set must cover exactly P0..P{last_seat}:\n{out}"
+            );
+        }
+        assert!(
+            out.contains(&format!("  P{last_seat}  difficulty=VeryEasy")),
+            "{players} seats: the last-seat override must reach that seat:\n{out}"
+        );
+        assert!(
+            out.contains("  P0  difficulty=Easy"),
+            "{players} seats: seats without an override keep the table difficulty:\n{out}"
+        );
+        // Panics if the RESULT block is missing; together with the seat rows
+        // above it is the reach guard for the stall assertion below.
+        normalized_result_block(&out);
+        assert!(
+            !out.contains("break_reason=NoEligibleAiActor"),
+            "{players} seats: every seat must have an AI actor:\n{out}"
+        );
+    }
+}
+
+/// `--players 4` is the default table: its output is the unflagged
+/// invocation's, line for line outside wall-clock timing, and both carry the
+/// pinned four-seat preamble.
+#[test]
+#[ignore = "loads card-data.json + runs real games; opt in via --ignored"]
+fn explicit_default_players_matches_the_unflagged_invocation() {
+    let game_args = [
+        "--seed",
+        "9201",
+        "--difficulty",
+        "Easy",
+        "--action-cap",
+        TEST_ACTION_CAP,
+    ];
+    let unflagged = run_ai_commander(&game_args);
+    let flagged_args: Vec<&str> = ["--players", "4"].into_iter().chain(game_args).collect();
+    let flagged = run_ai_commander(&flagged_args);
+
+    let expected_preamble = "=== 4-player Commander AI test ===\n\
+                             Feed: feeds/mtggoldfish-commander.json\n\
+                             Seed: 9201   Difficulty: Easy\n\n";
+    assert!(
+        unflagged.starts_with(expected_preamble),
+        "unflagged preamble changed:\n{unflagged}"
+    );
+    assert!(
+        flagged.starts_with(expected_preamble),
+        "--players 4 preamble differs from the default:\n{flagged}"
+    );
+    assert_eq!(
+        with_wall_clock_masked(&unflagged),
+        with_wall_clock_masked(&flagged)
+    );
+}
+
+/// Batch mode shares one seat count across the whole batch: with
+/// `--players 2`, every game in the games file is a two-seat game.
+#[test]
+#[ignore = "loads card-data.json + runs real games; opt in via --ignored"]
+fn players_flag_applies_to_every_game_in_a_batch() {
+    let pid = std::process::id();
+    let games_file_path =
+        std::env::temp_dir().join(format!("ai_commander_players_batch_{pid}.txt"));
+    std::fs::write(&games_file_path, "9501,Easy\n9502,Easy\n").expect("write games-file");
+    let batch = run_ai_commander(&[
+        "--players",
+        "2",
+        "--games-file",
+        games_file_path.to_str().unwrap(),
+        "--action-cap",
+        TEST_ACTION_CAP,
+    ]);
+    let _ = std::fs::remove_file(&games_file_path);
+
+    let blocks = game_blocks(&batch);
+    assert_eq!(
+        blocks.len(),
+        2,
+        "batch must print exactly one block per games-file line:\n{batch}"
+    );
+    for block in blocks {
+        assert!(
+            block.contains("Game started. 2 players."),
+            "every batch game must be a two-seat game:\n{block}"
+        );
+        assert_eq!(seat_row_labels(block, "  difficulty="), ["P0", "P1"]);
+        assert_eq!(seat_row_labels(block, "  life="), ["P0", "P1"]);
+    }
+    assert_eq!(seat_row_labels(&batch, "  main="), ["P0", "P1"]);
+}
+
+/// The values one `wall_clock_masking_hides_only_timing_values` sample run
+/// varies.
+#[derive(Clone, Copy)]
+struct SampleRun {
+    /// Wall-clock seconds on the turn row, the ELIMINATED row and the RESULT
+    /// `Elapsed:` row, in that order.
+    secs: [f64; 3],
+    /// The turn row's `actions=` value.
+    turn_actions: u32,
+    /// P3's life in the turn row's snapshot.
+    p3_life: i32,
+    /// The seat the ELIMINATED row names.
+    eliminated: u8,
+    /// The RESULT block's `Total actions:` value, on a line with no timing.
+    total_actions: u32,
+}
+
+impl SampleRun {
+    /// A short stdout in `ai-commander`'s own row formats: each row uses the
+    /// literal text and format specs of the matching `println!` in
+    /// `play_one_game` (arguments inlined), so the turn row's `{:>6.1}`
+    /// padding comes from the formatter rather than from hand-counted spaces.
+    fn stdout(self) -> String {
+        let Self {
+            secs: [turn_secs, eliminated_secs, total_secs],
+            turn_actions,
+            p3_life,
+            eliminated,
+            total_actions,
+        } = self;
+        let (turn, active) = (7, 2);
+        let (eliminated_turn, eliminated_actions) = (9, 212);
+        let snapshot = [40, 40, 40, p3_life]
+            .iter()
+            .enumerate()
+            .map(|(i, life)| format!("P{i}:{life}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        [
+            "Game started. 4 players.".to_owned(),
+            format!(
+                "Turn {turn:>2} (active P{active})  actions={turn_actions:>6}  elapsed={turn_secs:>6.1}s  {snapshot}"
+            ),
+            format!(
+                "ELIMINATED: P{eliminated}  turn={eliminated_turn}  actions={eliminated_actions:>6}  elapsed={eliminated_secs:.1}s"
+            ),
+            String::new(),
+            "=== RESULT ===".to_owned(),
+            format!("Elapsed: {total_secs:.1}s"),
+            format!("Total actions: {total_actions}"),
+        ]
+        .join("\n")
+    }
+}
+
+/// `with_wall_clock_masked` on rows rendered in `ai-commander`'s own formats.
+/// Two runs that differ only in their three wall-clock readings compare equal
+/// once masked; a run that also differs in one deterministic value does not.
+/// A helper that drops the timing rows instead of masking them passes the
+/// equality and fails at the turn-row life total; one that masks nothing, or
+/// keeps the padding's width, fails the equality. This test spawns nothing and
+/// loads no card data, so it is not ignored and runs in CI.
+#[test]
+fn wall_clock_masking_hides_only_timing_values() {
+    let fast = SampleRun {
+        secs: [0.3, 0.4, 0.6],
+        turn_actions: 143,
+        p3_life: 36,
+        eliminated: 1,
+        total_actions: 300,
+    };
+    // `   0.3` against `  12.3` on the turn row: the padding narrows as the
+    // value widens. The ELIMINATED and `Elapsed:` values are unpadded.
+    let slow = SampleRun {
+        secs: [12.3, 15.8, 21.0],
+        ..fast
+    };
+    assert_ne!(
+        fast.stdout(),
+        slow.stdout(),
+        "the sample runs must differ before masking"
+    );
+    assert_eq!(
+        with_wall_clock_masked(&fast.stdout()),
+        with_wall_clock_masked(&slow.stdout()),
+        "runs that differ only in wall-clock values must compare equal once masked"
+    );
+    for (value, other) in [
+        (
+            "turn-row life total",
+            SampleRun {
+                p3_life: 35,
+                ..slow
+            },
+        ),
+        (
+            "turn-row action count",
+            SampleRun {
+                turn_actions: 144,
+                ..slow
+            },
+        ),
+        (
+            "ELIMINATED seat",
+            SampleRun {
+                eliminated: 2,
+                ..slow
+            },
+        ),
+        (
+            "RESULT total actions",
+            SampleRun {
+                total_actions: 299,
+                ..slow
+            },
+        ),
+    ] {
+        assert_ne!(
+            with_wall_clock_masked(&fast.stdout()),
+            with_wall_clock_masked(&other.stdout()),
+            "runs that differ in the {value} must not compare equal once masked"
+        );
+    }
 }

@@ -1,12 +1,19 @@
 #![allow(unused_imports)]
 use super::*;
 
+use crate::support::shared_card_db;
+
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, ControllerRef, Effect, EffectScope, FilterProp,
-    ReplacementCondition, ReplacementDefinition, TapStateChange, TargetFilter, TypedFilter,
+    ReplacementCondition, ReplacementDefinition, ResolvedAbility, TapStateChange, TargetFilter,
+    TargetRef, TypedFilter,
 };
 use engine::types::card_type::CoreType;
+use engine::types::counter::CounterType;
+use engine::types::game_state::ReplacementChoiceKind;
 use engine::types::identifiers::CardId;
+use engine::types::proposed_event::EtbTapState;
 use engine::types::replacements::ReplacementEvent;
 
 /// Build a fast land replacement definition matching
@@ -589,5 +596,509 @@ fn turbulent_land_own_lands_do_not_count() {
     assert!(
         obj.tapped,
         "Turbulent Fen must not count controller's lands against the opponent threshold"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// CR 614.12 + CR 712.14a: a transformed battlefield entry consults the back
+// face's own replacement definitions, not the stored front face's. Effect
+// route (`ChangeZone { enter_transformed: true }`) — real cards from the
+// committed integration fixture.
+// ---------------------------------------------------------------------------
+
+fn add_red_mana(runner: &mut GameRunner, count: u32) {
+    let dummy = engine::types::identifiers::ObjectId(0);
+    let pool = &mut runner.state_mut().players[0].mana_pool;
+    for _ in 0..count {
+        pool.add(engine::types::mana::ManaUnit::new(
+            engine::types::mana::ManaType::Red,
+            dummy,
+            false,
+            vec![],
+        ));
+    }
+}
+
+fn resolve_transformed_entry_under(
+    runner: &mut GameRunner,
+    object_id: ObjectId,
+    enters_under: Option<ControllerRef>,
+) {
+    let resolved = ResolvedAbility::new(
+        Effect::ChangeZone {
+            origin: None,
+            destination: Zone::Battlefield,
+            target: TargetFilter::SelfRef,
+            owner_library: false,
+            enter_transformed: true,
+            enters_under,
+            enter_tapped: EtbTapState::Unspecified,
+            enters_attacking: false,
+            up_to: false,
+            enter_with_counters: vec![],
+            conditional_enter_with_counters: vec![],
+            face_down_profile: None,
+            enters_modified_if: None,
+        },
+        vec![TargetRef::Object(object_id)],
+        object_id,
+        P0,
+    );
+    let mut events = Vec::new();
+    engine::game::effects::resolve_ability_chain(runner.state_mut(), &resolved, &mut events, 0)
+        .expect("transformed battlefield entry resolves");
+}
+
+fn resolve_transformed_entry(runner: &mut GameRunner, object_id: ObjectId) {
+    resolve_transformed_entry_under(runner, object_id, None);
+}
+
+/// (CR 614.12 + CR 712.14a): a back face's own mandatory as-enters counter
+/// replacement applies on the effect route — Ral, Monsoon Mage returned
+/// transformed enters with its back face's loyalty bonus on top of printed
+/// loyalty, not the front face's (nonexistent) replacement.
+#[test]
+fn ral_returned_transformed_applies_back_face_loyalty_replacement() {
+    let db = shared_card_db().expect("integration fixture must be present");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let ral = scenario.add_real_card(P0, "Ral, Monsoon Mage", Zone::Exile, db);
+    let bolt = scenario.add_real_card(P0, "Lightning Bolt", Zone::Hand, db);
+    let mut runner = scenario.build();
+    add_red_mana(&mut runner, 1);
+
+    runner.cast(bolt).target_player(P1).resolve();
+
+    // Reach guards: one instant was cast this turn, and the back face carries
+    // exactly one `Moved` replacement (the loyalty bonus) while the front
+    // face carries none.
+    assert_eq!(
+        runner
+            .state()
+            .spells_cast_this_turn_by_player
+            .get(&P0)
+            .map(|v| v.len())
+            .unwrap_or(0),
+        1
+    );
+    {
+        let obj = &runner.state().objects[&ral];
+        assert_eq!(obj.replacement_definitions.len(), 0);
+        let back = obj.back_face.as_ref().expect("Ral must have a back face");
+        assert_eq!(
+            back.replacement_definitions
+                .iter_unchecked()
+                .filter(|def| def.event == ReplacementEvent::Moved)
+                .count(),
+            1
+        );
+    }
+
+    resolve_transformed_entry(&mut runner, ral);
+
+    let obj = &runner.state().objects[&ral];
+    assert_eq!(obj.name, "Ral, Leyline Prodigy");
+    assert!(obj.transformed);
+    assert_eq!(
+        obj.zone,
+        Zone::Battlefield,
+        "CR 614.12 + CR 712.14a: the transformed entry must deliver Ral to the battlefield"
+    );
+    assert_eq!(
+        obj.counters.get(&CounterType::Loyalty).copied(),
+        Some(3),
+        "CR 614.12 + CR 712.14a: printed loyalty 2 plus the back face's own \
+         replacement (+1 for the instant cast this turn)"
+    );
+}
+
+/// (CR 614.12 + CR 110.2a + CR 108.4a) a back-face mandatory as-enters counter
+/// replacement reads "you" as the entering controller, not the owner, when an
+/// effect returns another player's double-faced card to the battlefield
+/// transformed under a different player's control.
+#[test]
+fn ral_returned_transformed_under_non_owner_counts_entering_controllers_spells() {
+    let db = shared_card_db().expect("integration fixture must be present");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let ral = scenario.add_real_card(P1, "Ral, Monsoon Mage", Zone::Exile, db);
+    let bolt = scenario.add_real_card(P0, "Lightning Bolt", Zone::Hand, db);
+    let mut runner = scenario.build();
+    add_red_mana(&mut runner, 1);
+
+    runner.cast(bolt).target_player(P1).resolve();
+
+    // Reach guards: P0 (the entering controller) cast one instant this turn,
+    // P1 (the owner) cast none, Ral's owner is P1, and the back face carries
+    // exactly one `Moved` replacement (the loyalty bonus).
+    assert_eq!(
+        runner
+            .state()
+            .spells_cast_this_turn_by_player
+            .get(&P0)
+            .map_or(0, |v| v.len()),
+        1
+    );
+    assert_eq!(
+        runner
+            .state()
+            .spells_cast_this_turn_by_player
+            .get(&P1)
+            .map_or(0, |v| v.len()),
+        0
+    );
+    assert_eq!(runner.state().objects[&ral].owner, P1);
+    assert_eq!(
+        runner.state().objects[&ral].controller,
+        P1,
+        "reach guard: Ral's stored controller field is the owner while it sits off the \
+         battlefield, distinct from the entering controller the transformed entry installs"
+    );
+    {
+        let obj = &runner.state().objects[&ral];
+        let back = obj.back_face.as_ref().expect("Ral must have a back face");
+        assert_eq!(
+            back.replacement_definitions
+                .iter_unchecked()
+                .filter(|def| def.event == ReplacementEvent::Moved)
+                .count(),
+            1
+        );
+    }
+
+    resolve_transformed_entry_under(&mut runner, ral, Some(ControllerRef::You));
+
+    let obj = &runner.state().objects[&ral];
+    assert_eq!(obj.name, "Ral, Leyline Prodigy");
+    assert!(obj.transformed);
+    assert_eq!(
+        obj.zone,
+        Zone::Battlefield,
+        "CR 614.12 + CR 712.14a: the transformed entry must deliver Ral to the battlefield"
+    );
+    assert_eq!(obj.owner, P1);
+    assert_eq!(
+        obj.controller, P0,
+        "reach guard: the enters_under override must deliver Ral under the entering \
+         controller, not its owner"
+    );
+    assert_eq!(
+        obj.counters.get(&CounterType::Loyalty).copied(),
+        Some(3),
+        "CR 614.12: printed 2 + 1 for the instant the ENTERING controller (P0) cast; \
+         the owner (P1) cast none"
+    );
+}
+
+/// (CR 614.12 + CR 616.1f + CR 110.2a): a back-face dynamic counter replacement
+/// that reads "you" sees the controller an earlier entry-controller replacement
+/// installed, not the controller the entry started with. Ral, Monsoon Mage is
+/// P1's card returned transformed with no controller instruction (so the entry
+/// starts under its owner P1), and its back face additionally carries the
+/// "enters under the control of an opponent of your choice" replacement, which
+/// hands the permanent to P0. The instant P0 cast counts; P1 cast none.
+/// CR 616.1b: the controller replacement must be chosen first, so it applies
+/// without a prompt.
+#[test]
+fn ral_returned_transformed_counts_spells_of_controller_set_by_earlier_entry_replacement() {
+    let db = shared_card_db().expect("integration fixture must be present");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let ral = scenario.add_real_card(P1, "Ral, Monsoon Mage", Zone::Exile, db);
+    let bolt = scenario.add_real_card(P0, "Lightning Bolt", Zone::Hand, db);
+    let mut runner = scenario.build();
+    add_red_mana(&mut runner, 1);
+
+    runner.cast(bolt).target_player(P1).resolve();
+
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&ral)
+        .expect("Ral exists")
+        .back_face
+        .as_mut()
+        .expect("Ral must have a back face")
+        .replacement_definitions
+        .push(
+            ReplacementDefinition::new(ReplacementEvent::Moved)
+                .valid_card(TargetFilter::SelfRef)
+                .destination_zone(Zone::Battlefield)
+                .enters_under(ControllerRef::Opponent)
+                .description("Enters under the control of an opponent of your choice.".to_string()),
+        );
+
+    // Reach guards: P0 cast one instant this turn and P1 none, Ral is P1's
+    // card with P1 as its stored controller (so the entry starts under P1), and
+    // the back face carries two `Moved` replacements (the loyalty bonus and the
+    // controller override).
+    let spells_cast = |runner: &GameRunner, player| {
+        runner
+            .state()
+            .spells_cast_this_turn_by_player
+            .get(&player)
+            .map_or(0, |v| v.len())
+    };
+    assert_eq!(spells_cast(&runner, P0), 1);
+    assert_eq!(spells_cast(&runner, P1), 0);
+    assert_eq!(runner.state().objects[&ral].owner, P1);
+    assert_eq!(runner.state().objects[&ral].controller, P1);
+    {
+        let obj = &runner.state().objects[&ral];
+        let back = obj.back_face.as_ref().expect("Ral must have a back face");
+        assert_eq!(
+            back.replacement_definitions
+                .iter_unchecked()
+                .filter(|def| def.event == ReplacementEvent::Moved)
+                .count(),
+            2
+        );
+    }
+
+    resolve_transformed_entry_under(&mut runner, ral, None);
+
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "CR 616.1b: the counter replacement is never offered before the controller replacement, got {:?}",
+        runner.state().waiting_for
+    );
+    assert!(runner.state().pending_replacement.is_none());
+    for index in 0..2 {
+        assert!(
+            runner
+                .act(GameAction::ChooseReplacement { index })
+                .is_err(),
+            "no CR 616.1 choice is open, so no ordering (counter-first included) is accepted for index {index}"
+        );
+    }
+
+    let obj = &runner.state().objects[&ral];
+    assert_eq!(obj.zone, Zone::Battlefield);
+    assert!(obj.transformed);
+    assert_eq!(obj.name, "Ral, Leyline Prodigy");
+    assert_eq!(obj.owner, P1);
+    assert_eq!(
+        obj.controller, P0,
+        "reach guard: the entry-controller replacement must deliver Ral under P0"
+    );
+    assert_eq!(
+        obj.counters.get(&CounterType::Loyalty).copied(),
+        Some(3),
+        "CR 614.12 + CR 616.1f: printed 2 + 1 for the instant P0, the controller the \
+         earlier replacement installed, cast; the entry's starting controller P1 cast none"
+    );
+}
+
+/// (CR 616.1b + CR 616.1f + CR 614.12): when two applicable replacements each modify
+/// under whose control Ral, Monsoon Mage enters, the affected player chooses between
+/// those two; the back face's own counter replacement is not offered until both have
+/// applied. A choice index naming the withheld counter replacement is rejected through
+/// the production `GameAction::ChooseReplacement` path, and the controller written last
+/// is the one whose cast spells the counter replacement then counts.
+#[test]
+fn two_entry_controller_replacements_are_ordered_before_the_counter_replacement() {
+    let db = shared_card_db().expect("integration fixture must be present");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let ral = scenario.add_real_card(P1, "Ral, Monsoon Mage", Zone::Exile, db);
+    let bolt = scenario.add_real_card(P0, "Lightning Bolt", Zone::Hand, db);
+    let mut runner = scenario.build();
+    add_red_mana(&mut runner, 1);
+
+    runner.cast(bolt).target_player(P1).resolve();
+
+    {
+        let back_face_defs = &mut runner
+            .state_mut()
+            .objects
+            .get_mut(&ral)
+            .expect("Ral exists")
+            .back_face
+            .as_mut()
+            .expect("Ral must have a back face")
+            .replacement_definitions;
+        for controller in [ControllerRef::Opponent, ControllerRef::You] {
+            back_face_defs.push(
+                ReplacementDefinition::new(ReplacementEvent::Moved)
+                    .valid_card(TargetFilter::SelfRef)
+                    .destination_zone(Zone::Battlefield)
+                    .enters_under(controller)
+                    .description("Enters under a controller.".to_string()),
+            );
+        }
+    }
+
+    // Reach guards: three `Moved` back-face replacements (the loyalty bonus and the
+    // two controller overrides), P0 cast one instant this turn and P1 none.
+    let spells_cast = |runner: &GameRunner, player| {
+        runner
+            .state()
+            .spells_cast_this_turn_by_player
+            .get(&player)
+            .map_or(0, |v| v.len())
+    };
+    assert_eq!(spells_cast(&runner, P0), 1);
+    assert_eq!(spells_cast(&runner, P1), 0);
+    {
+        let obj = &runner.state().objects[&ral];
+        let back = obj.back_face.as_ref().expect("Ral must have a back face");
+        assert_eq!(
+            back.replacement_definitions
+                .iter_unchecked()
+                .filter(|def| def.event == ReplacementEvent::Moved)
+                .count(),
+            3
+        );
+    }
+
+    resolve_transformed_entry_under(&mut runner, ral, None);
+
+    let WaitingFor::ReplacementChoice {
+        candidate_count,
+        kind,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "expected a choice between the two controller replacements, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*candidate_count, 2);
+    assert_eq!(*kind, ReplacementChoiceKind::Order);
+
+    let offered = runner
+        .state()
+        .pending_replacement
+        .as_ref()
+        .expect("the parked entry keeps its pending replacement")
+        .candidates
+        .clone();
+    let controller_of =
+        |runner: &GameRunner, rid: &engine::types::proposed_event::ReplacementId| {
+            runner
+                .state()
+                .entering_or_live_object(ral)
+                .and_then(|o| o.replacement_definitions.get(rid.index))
+                .and_then(|def| def.enters_under.clone())
+        };
+    assert_eq!(offered.len(), 2);
+    assert!(
+        offered
+            .iter()
+            .all(|rid| rid.source == ral && controller_of(&runner, rid).is_some()),
+        "CR 616.1b: only the controller replacements are offered, not the counter replacement"
+    );
+
+    // The withheld counter replacement has no acceptable index.
+    assert!(
+        runner
+            .act(GameAction::ChooseReplacement { index: 2 })
+            .is_err(),
+        "an index past the two offered controller replacements is rejected"
+    );
+    let WaitingFor::ReplacementChoice {
+        candidate_count,
+        kind,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "the rejected index leaves the choice open, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(*candidate_count, 2);
+    assert_eq!(*kind, ReplacementChoiceKind::Order);
+    assert_eq!(
+        runner
+            .state()
+            .pending_replacement
+            .as_ref()
+            .map(|pending| pending.candidates.clone()),
+        Some(offered.clone())
+    );
+    assert_eq!(runner.state().objects[&ral].zone, Zone::Exile);
+
+    let you_index = offered
+        .iter()
+        .position(|rid| controller_of(&runner, rid) == Some(ControllerRef::You))
+        .expect("the `You` controller replacement is offered");
+    runner
+        .act(GameAction::ChooseReplacement { index: you_index })
+        .expect("choosing among the offered controller replacements resolves");
+
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::ReplacementChoice { .. }
+        ),
+        "the remaining controller replacement and the counter replacement apply without a further choice, got {:?}",
+        runner.state().waiting_for
+    );
+    let obj = &runner.state().objects[&ral];
+    assert_eq!(obj.zone, Zone::Battlefield);
+    assert!(obj.transformed);
+    assert_eq!(obj.name, "Ral, Leyline Prodigy");
+    let final_controller = obj.controller;
+    let loyalty = obj.counters.get(&CounterType::Loyalty).copied();
+    assert_eq!(
+        loyalty,
+        Some(2 + spells_cast(&runner, final_controller) as u32),
+        "CR 614.12: the counter replacement counts the spells of the controller that the controller replacements installed"
+    );
+    assert_eq!(
+        final_controller, P0,
+        "`You` applies first, then `Opponent` last, so Ral ends under P0"
+    );
+    assert_eq!(loyalty, Some(3));
+}
+
+/// (CR 614.12 + CR 714.3a): a back-face Saga entering transformed gets
+/// exactly one lore counter, from its own replacement applied through the
+/// CR 614.12 transformed-entry projection; the transformed-entry seeding
+/// (`intrinsic_face_entry_counters`) adds no lore counter of its own.
+#[test]
+fn sheoldred_returns_true_scriptures_with_one_lore_counter() {
+    let db = shared_card_db().expect("integration fixture must be present");
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let sheoldred = scenario.add_real_card(P0, "Sheoldred", Zone::Exile, db);
+    let mut runner = scenario.build();
+
+    {
+        let obj = &runner.state().objects[&sheoldred];
+        let back = obj
+            .back_face
+            .as_ref()
+            .expect("Sheoldred must have a back face");
+        assert_eq!(back.name, "The True Scriptures");
+        assert!(back.card_types.subtypes.iter().any(|s| s == "Saga"));
+        assert!(back.replacement_definitions.iter_unchecked().any(|def| {
+            def.event == ReplacementEvent::Moved
+                && matches!(
+                    def.execute.as_deref().map(|a| a.effect.as_ref()),
+                    Some(Effect::PutCounter {
+                        counter_type: CounterType::Lore,
+                        ..
+                    })
+                )
+        }));
+    }
+
+    resolve_transformed_entry(&mut runner, sheoldred);
+
+    let obj = &runner.state().objects[&sheoldred];
+    assert!(obj.transformed);
+    assert_eq!(obj.name, "The True Scriptures");
+    assert!(obj.card_types.subtypes.iter().any(|s| s == "Saga"));
+    assert_eq!(
+        obj.counters.get(&CounterType::Lore).copied(),
+        Some(1),
+        "CR 714.3a + CR 614.12: exactly one lore counter, from the back \
+         face's own replacement"
     );
 }

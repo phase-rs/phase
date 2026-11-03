@@ -30,7 +30,7 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CardType, CoreType};
-use engine::types::events::GameEvent;
+use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
@@ -365,11 +365,22 @@ fn localized_destruction_declined_destroys_every_creature() {
     assert_eq!(runner.state().objects[&o1].zone, Zone::Graveyard);
 }
 
-/// J-2e: paid, the creature whose power equals the energy paid survives.
-/// GREEN AT BASE: reach guard of J-2c; preservation only.
+/// J-2e VACUITY PIN (PR #10008 round 2, B3a): the "pay one or more {E}" clause
+/// is deliberately unimplemented — a min-1 variable payment needing prompt-min
+/// machinery (see `one_or_more_energy_range_declines_while_neighbors_parse` in
+/// `parser::oracle_effect::imperative`). Accepting the optional therefore
+/// spends no energy and applies no power filter: c1's survival rides the
+/// pre-existing unfiltered indestructible grant, a filter gap that pre-dates
+/// this PR (report for triage; out of scope here). This row pins the decline:
+/// energy kept plus the resolution assertions that still hold.
 #[test]
-fn localized_destruction_paid_spares_the_matching_creature() {
+fn localized_destruction_accepted_pay_unimplemented_energy_kept() {
     let (runner, c1, o1) = localized_destruction(true);
+    assert_eq!(
+        runner.state().players[0].energy,
+        1,
+        "no energy spent: the pay clause is unimplemented"
+    );
     assert_eq!(runner.state().objects[&c1].zone, Zone::Battlefield);
     assert_eq!(runner.state().objects[&o1].zone, Zone::Graveyard);
 }
@@ -492,6 +503,7 @@ fn wyll(accept: bool) -> (GameRunner, ObjectId, ObjectId) {
         .act(GameAction::ActivateAbility {
             source_id: wyll,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("specialize is activated");
     runner
@@ -609,7 +621,7 @@ fn assert_no_maximum_hand_size_emblem(runner: &GameRunner) {
 }
 
 /// J-2g: declined, there is no shuffle and no second seek, and the player still
-/// gets the "no maximum hand size" emblem.
+/// gets the "no maximum hand size" emblem while leaving the first two sought cards in hand.
 #[test]
 fn choice_of_fortunes_declined_still_creates_the_emblem() {
     let (runner, events) = choice_of_fortunes(false);
@@ -618,23 +630,109 @@ fn choice_of_fortunes_declined_still_creates_the_emblem() {
         vec![EffectKind::Seek, EffectKind::CreateEmblem]
     );
     assert_no_maximum_hand_size_emblem(&runner);
+
+    // Declined path leaves the two sought cards in hand
+    let p0_hand = &runner.state().players[P0.0 as usize].hand;
+    assert_eq!(p0_hand.len(), 2, "P0 hand should retain the 2 sought cards");
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            GameEvent::PlayerPerformedAction {
+                action: PlayerActionKind::ShuffledLibrary,
+                ..
+            }
+        )),
+        "no shuffle event on declined path"
+    );
 }
 
-/// J-2g′: accepted, every instruction happens. GREEN AT BASE: reach guard of
-/// J-2g; preservation only.
+/// J-2g′: accepted — CR 608.2c + CR 701.24c: "You may shuffle them into your
+/// library" moves BOTH cards the first seek put into hand back into the library
+/// and shuffles it, and only then does "If you do, seek two cards" run.
 #[test]
 fn choice_of_fortunes_accepted_seeks_twice_and_creates_the_emblem() {
     let (runner, events) = choice_of_fortunes(true);
-    assert_eq!(
-        resolved(&events),
-        vec![
-            EffectKind::Seek,
-            EffectKind::Shuffle,
-            EffectKind::Seek,
-            EffectKind::CreateEmblem
-        ]
-    );
     assert_no_maximum_hand_size_emblem(&runner);
+
+    let moves = |from: Zone, to: Zone| -> Vec<(usize, ObjectId)> {
+        events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| match event {
+                GameEvent::ZoneChanged {
+                    object_id,
+                    from: Some(f),
+                    to: t,
+                    ..
+                } if *f == from && *t == to => Some((index, *object_id)),
+                _ => None,
+            })
+            .collect()
+    };
+    let sought = moves(Zone::Library, Zone::Hand);
+    assert_eq!(sought.len(), 4, "two seeks of two cards each: {events:?}");
+    let (first_seek, second_seek) = sought.split_at(2);
+
+    // Both first-seek cards leave the hand for the library.
+    let returned = moves(Zone::Hand, Zone::Library);
+    let mut returned_ids: Vec<ObjectId> = returned.iter().map(|(_, id)| *id).collect();
+    let mut first_ids: Vec<ObjectId> = first_seek.iter().map(|(_, id)| *id).collect();
+    returned_ids.sort();
+    first_ids.sort();
+    assert_eq!(
+        returned_ids, first_ids,
+        "exactly the two first-seek cards return to the library"
+    );
+    assert!(
+        !returned_ids
+            .iter()
+            .any(|id| runner.state().objects[id].name == "Choice of Fortunes"),
+        "the resolving spell is never the moved object"
+    );
+
+    // Then P0's library is shuffled, then the second seek runs.
+    let last_return = returned.iter().map(|(index, _)| *index).max().unwrap();
+    let shuffle = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    player_id,
+                    action: PlayerActionKind::ShuffledLibrary,
+                    ..
+                } if *player_id == P0
+            )
+        })
+        .expect("P0's library is shuffled");
+    assert!(last_return < shuffle, "the cards move before the shuffle");
+    // CR 701.24a: one shuffle for the whole set, not one per moved card.
+    let shuffles = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                GameEvent::PlayerPerformedAction {
+                    action: PlayerActionKind::ShuffledLibrary,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(shuffles, 1, "{events:?}");
+    assert!(
+        second_seek.iter().all(|(index, _)| shuffle < *index),
+        "the second seek runs after the shuffle"
+    );
+
+    // Final state: the second seek's two cards are the hand; the library holds
+    // the other four of the six.
+    let state = runner.state();
+    assert_eq!(state.players[P0.0 as usize].hand.len(), 2);
+    assert_eq!(state.players[P0.0 as usize].library.len(), 4);
+    for (_, id) in second_seek {
+        assert_eq!(state.objects[id].zone, Zone::Hand);
+    }
 }
 
 /// J-3 (a): declined, the gate's doubling is skipped, and both later
@@ -887,18 +985,22 @@ fn hollow_specter_declined_reveals_and_discards_nothing() {
     assert_eq!(runner.state().players[1].hand.len(), 2);
 }
 
-/// J-6 (b2) reach guard at X = 1: paid, the gated reveal and discard effects
-/// resolve. GREEN AT BASE; preservation only. KNOWN-BAD (residue): at X = 1
-/// the whole hand is revealed and nothing is discarded, at base and on the
-/// candidate (measured: 2 cards revealed, P1's hand 2, graveyard 0). This row
-/// pins only the resolved kinds.
+/// J-6 (b2) at X = 1, paid. CR 701.20a: "reveals X cards from their hand and
+/// you choose one of them" is a counted reveal whose chooser rider the reveal
+/// verb does not read, so the clause is an honest gap instead of a whole-hand
+/// reveal (the count-position migration; base resolved `[Reveal, DiscardCard]`
+/// with both cards revealed). The discard after the gap still resolves and
+/// discards nothing: no card was chosen.
 #[test]
-fn hollow_specter_paid_x1_resolves_the_reveal_and_discard_kinds() {
-    let (_, events) = hollow_specter(true);
-    assert_eq!(
-        resolved(&events),
-        vec![EffectKind::Reveal, EffectKind::DiscardCard]
-    );
+fn hollow_specter_paid_x1_reaches_the_honest_reveal_gap() {
+    let (runner, events) = hollow_specter(true);
+    let kinds = resolved(&events);
+    // Reach guard: the declined row resolves nothing, so a non-empty list is
+    // the paid branch running.
+    assert!(!kinds.is_empty());
+    assert_eq!(kinds, vec![EffectKind::DiscardCard]);
+    assert_eq!(runner.state().players[1].hand.len(), 2);
+    assert!(runner.state().players[1].graveyard.is_empty());
 }
 
 /// J-6 (b3): Ardent Dustspeaker declined: nothing is exiled and no play
@@ -964,10 +1066,6 @@ fn loyal_unicorn(with_commander: bool) -> (bool, bool, bool, Vec<EffectKind>) {
                 drain_order_triggers_with_identity(runner.state_mut());
                 continue;
             }
-            // The engine asks for a creature for the prevention instruction.
-            WaitingFor::TriggerTargetSelection { .. } => runner.act(GameAction::ChooseTarget {
-                target: Some(TargetRef::Object(c1)),
-            }),
             WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
             WaitingFor::Priority { .. } => runner.act(GameAction::PassPriority),
             other => panic!("unexpected wait {other:?}"),
@@ -1019,8 +1117,10 @@ fn loyal_unicorn(with_commander: bool) -> (bool, bool, bool, Vec<EffectKind>) {
 /// J-6 (c): Loyal Unicorn's intervening "if" (CR 603.4) is not an "if you do"
 /// gate. With a commander, combat damage to every creature its controller
 /// controls is prevented and the other creatures gain vigilance.
-/// GREEN AT BASE, NON-DISCRIMINATING: there is no `OptionalEffectPerformed`
-/// gate, so the declined walk is unreachable.
+/// RED AT BASE: the "creatures you control" recipient names no target
+/// (CR 115.10a), but at base the trigger raised a spurious
+/// `TriggerTargetSelection` prompt that `loyal_unicorn` no longer answers, so
+/// the helper panics on the unexpected wait.
 #[test]
 fn loyal_unicorn_with_commander_prevents_combat_damage_and_grants_vigilance() {
     let (c1_survived, c3_survived, vigilance, kinds) = loyal_unicorn(true);
@@ -1032,8 +1132,9 @@ fn loyal_unicorn_with_commander_prevents_combat_damage_and_grants_vigilance() {
     assert!(vigilance);
 }
 
-/// J-6 (c): without a commander, nothing happens. GREEN AT BASE,
-/// NON-DISCRIMINATING, as above.
+/// J-6 (c): without a commander, nothing happens. The negative sibling of the
+/// test above: the trigger never fires, so the prompt it once raised is never
+/// reached and this stays green at base.
 #[test]
 fn loyal_unicorn_without_commander_does_nothing() {
     let (c1_survived, c3_survived, vigilance, kinds) = loyal_unicorn(false);

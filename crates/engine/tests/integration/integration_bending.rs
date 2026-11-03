@@ -528,7 +528,7 @@ fn test_convoke_white_creature_pays_white() {
             .all(|e| !matches!(e, GameEvent::ManaAdded { .. })),
         "Convoke should not produce mana"
     );
-    assert!(runner.state().players[0].mana_pool.mana.iter().any(|unit| {
+    assert!(runner.state().players[0].mana_pool.units().any(|unit| {
         unit.color == ManaType::White
             && unit.restrictions.contains(&ManaRestriction::ConvokePayment)
     }));
@@ -574,7 +574,7 @@ fn test_convoke_multicolor_creature_accepts_either_color_payment() {
             .all(|e| !matches!(e, GameEvent::ManaAdded { .. })),
         "Convoke should not produce mana"
     );
-    assert!(runner.state().players[0].mana_pool.mana.iter().any(|unit| {
+    assert!(runner.state().players[0].mana_pool.units().any(|unit| {
         unit.color == ManaType::Green
             && unit.restrictions.contains(&ManaRestriction::ConvokePayment)
     }));
@@ -634,7 +634,7 @@ fn test_convoke_colorless_always_valid() {
             .all(|e| !matches!(e, GameEvent::ManaAdded { .. })),
         "Convoke should not produce mana"
     );
-    assert!(runner.state().players[0].mana_pool.mana.iter().any(|unit| {
+    assert!(runner.state().players[0].mana_pool.units().any(|unit| {
         unit.color == ManaType::Colorless
             && unit.restrictions.contains(&ManaRestriction::ConvokePayment)
     }));
@@ -1945,9 +1945,12 @@ fn earthbend_return_skips_shock_land_pay_life_prompt() {
         controller_override: Some(P0),
         enter_transformed: false,
         face_down_profile: None,
+        face_down_in_exile: engine::types::ability::ExileConcealment::Public,
         chain_referent: engine::types::zones::ChainReferentIntent::Silent,
         enter_as_copy: None,
+        enter_with_choices: None,
         discard_frame: None,
+        performed_by: None,
         applied: std::collections::HashSet::new(),
     };
 
@@ -2024,9 +2027,12 @@ fn plain_shock_land_etb_still_prompts_for_life_payment() {
         controller_override: None,
         enter_transformed: false,
         face_down_profile: None,
+        face_down_in_exile: engine::types::ability::ExileConcealment::Public,
         chain_referent: engine::types::zones::ChainReferentIntent::Silent,
         enter_as_copy: None,
+        enter_with_choices: None,
         discard_frame: None,
+        performed_by: None,
         applied: std::collections::HashSet::new(),
     };
 

@@ -49,6 +49,7 @@ fn issue_2852_breya_modal_activation_sacrifices_two_artifacts_before_resolving()
         .act(GameAction::ActivateAbility {
             source_id: breya,
             ability_index: 0,
+            payment_mode: engine::types::game_state::CastPaymentMode::Auto,
         })
         .expect("Breya's activated ability should be activatable");
 

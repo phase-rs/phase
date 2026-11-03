@@ -117,6 +117,7 @@ mod tests {
             waiting_for: WaitingFor::OptionalEffectChoice {
                 player: PlayerId(0),
                 source_id: engine::types::identifiers::ObjectId(1),
+                decision_subject_id: None,
                 description: Some("adjacent optional effect".to_string()),
                 may_trigger_key: None,
                 same_card_may_trigger_choice_available: false,

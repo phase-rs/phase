@@ -119,6 +119,10 @@
   },
   "setSelector": {
     "botDifficulty": "Bot Difficulty",
+    "pickEnhancements": {
+      "label": "Use built-in AI with draft pick enhancements",
+      "hint": "Bots follow a written pick-order guide for formats that have one (currently Mirrodin, Darksteel and Fifth Dawn). Applies at Medium difficulty and above."
+    },
     "difficultyLevels": {
       "VeryEasy": "Very Easy",
       "Easy": "Easy",
@@ -132,6 +136,12 @@
     "packOrder": "Pack Order",
     "candidateSets": "Candidate Sets",
     "clearPacks": "Clear",
+    "randomSet": "Random Set",
+    "randomSetHint": "Fill every pack from one randomly chosen set",
+    "randomPacks": "Random Packs",
+    "randomPacksHint": "Give each pack its own randomly chosen set",
+    "randomCandidates": "Random Sets",
+    "randomCandidatesHint": "Choose distinct candidate sets at random",
     "emptyPacks_one": "Pick a set for each pack. A draft opens {{count}} pack by default — repeat a set or mix several.",
     "emptyPacks_other": "Pick a set for each pack. A draft opens {{count}} packs by default — repeat a set or mix several to draft a block.",
     "emptyPacksFixed_one": "Sealed opens exactly {{count}} pack. Pick a set for it.",
@@ -156,6 +166,7 @@
     "startSealed": "Start Sealed"
   },
   "pack": {
+    "label": "Draft pack",
     "confirmPick": "Confirm Pick",
     "selected": "Selected",
     "draftEffects": "Draft effects:",
@@ -494,6 +505,10 @@
     "upNext": "Up next — Match {{number}}",
     "nextMatch": "Next Match",
     "endRun": "End Run",
+    "retryEndRun": "Retry End Run",
+    "retryResume": "Retry Resume",
+    "startUnavailable": "This draft match could not be started.",
+    "resumeUnavailable": "This draft run is unavailable. End Run to draft again.",
     "done": "Done",
     "perfectRun": "Perfect Run",
     "runComplete": "Run Complete",
@@ -580,7 +595,20 @@
     "tabs": {
       "set": "Set",
       "cube": "Cube"
-    }
+    },
+    "lobbyUnavailable": "Couldn't reach the lobby to list this pod. Turn off “$t(draft:podSetup.listInLobby)” to host by room code.",
+    "listingHostNameTooLong": "To list this pod in the lobby, use a display name of at most {{max}} characters.",
+    "listingRoomNameTooLong": "To list this pod in the lobby, use a room name of at most {{max}} characters.",
+    "listingCubeNameTooLong": "To list this pod in the lobby, use a cube name of at most {{max}} characters.",
+    "listingPasswordTooLong": "To list this pod in the lobby, use a shorter password.",
+    "listInLobby": "List in lobby",
+    "listingSeatLimit": "Lobby listing supports pods of up to {{max}} players.",
+    "setPassword": "Set password",
+    "passwordPlaceholder": "Pod password",
+    "roomName": "Room Name",
+    "optional": "(optional)",
+    "roomNameHelp": "Shown to players browsing the lobby.",
+    "roomNamePlaceholder": "e.g. Friday Night Cube"
   },
   "podPhaseView": {
     "tournamentPairings": "Tournament Pairings",
@@ -716,5 +744,23 @@
     "leave": "Leave",
     "startDraft": "Start Draft",
     "waitingForHost": "Waiting for host to start the draft..."
+  },
+  "deckAutosave": {
+    "deckName": "[Autosave] {{format}}",
+    "slotQuick": "Quick Draft",
+    "slotSealed": "Sealed",
+    "slotCube": "Cube Draft",
+    "slotPremier": "Premier Draft",
+    "slotTraditional": "Traditional Draft",
+    "slotCommanderDraft": "Commander Draft",
+    "slotWinston": "Winston Draft"
+  },
+  "llmDrafters": {
+    "label": "AI drafters",
+    "picking": "Picking",
+    "ready": "Picked",
+    "fallback": "Engine pick",
+    "waiting": "Waiting on all players to pick…",
+    "seatStatus": "{{seat}}: {{status}}"
   }
 }

@@ -250,7 +250,12 @@ impl ReplayPlayer {
                                 .to_string(),
                     });
                 }
-                resolve_all_ready_prefix(&mut state, boundary.requester);
+                resolve_all_ready_prefix(&mut state, boundary.requester).map_err(|error| {
+                    ReplayError::Desync {
+                        index: recorded.seq,
+                        message: format!("Resolve All boundary is not reproducible: {error}"),
+                    }
+                })?;
             }
         }
         Ok(state)
@@ -364,17 +369,19 @@ mod tests {
         state.waiting_for = WaitingFor::Priority {
             player: PlayerId(0),
         };
+        // P0's own entry: P1 has no standing pass over it
+        // (`priority::standing_priority_pass`), so the session is retained.
         state.stack.push_back(StackEntry {
             id: ObjectId(70_200),
             source_id: ObjectId(70_200),
-            controller: PlayerId(1),
+            controller: PlayerId(0),
             kind: StackEntryKind::ActivatedAbility {
                 source_id: ObjectId(70_200),
                 ability: Box::new(crate::types::ability::ResolvedAbility::new(
                     Effect::NoOp,
                     Vec::new(),
                     ObjectId(70_200),
-                    PlayerId(1),
+                    PlayerId(0),
                 )),
             },
         });
@@ -739,7 +746,8 @@ mod tests {
             WaitingFor::ResolveAllReady { .. }
         ));
 
-        resolve_all_ready_prefix(&mut live, PlayerId(0));
+        resolve_all_ready_prefix(&mut live, PlayerId(0))
+            .expect("the fixture's Resolve All prefix is representable");
         log.push_resolve_all_boundary(PlayerId(0));
 
         let mut replay = ReplayPlayer::load(log, None).expect("the atomic boundary is replayable");

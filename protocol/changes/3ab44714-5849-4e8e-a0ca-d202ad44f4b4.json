@@ -1,0 +1,7 @@
+{
+  "surfaces": [
+    "full",
+    "wire"
+  ],
+  "reason": "AbilityDefinition/ResolvedAbility.entry_onset (CR 611.2e): an older peer defaults it and settles enter observations the new engine defers. GameState gains an always-serialized ability_onset_record; persisted states without it that hold an onset-admitting ability node are refused at restore (RESTORE_INCOMPATIBLE_PRE_ENTRY_ONSET)."
+}

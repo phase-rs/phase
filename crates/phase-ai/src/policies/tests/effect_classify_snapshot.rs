@@ -176,6 +176,13 @@ fn contextual_classifications_unchanged() {
         }),
         EffectPolarity::Contextual
     );
+    // CR 701.71a: empower Jace — classified beside Amass.
+    assert_eq!(
+        effect_polarity(&Effect::EmpowerJace {
+            count: QuantityExpr::Fixed { value: 2 },
+        }),
+        EffectPolarity::Contextual
+    );
     // Mass (non-Single) SetTapState scope falls through to the Contextual bulk.
     assert_eq!(
         effect_polarity(&Effect::SetTapState {
@@ -203,6 +210,9 @@ fn contextual_classifications_unchanged() {
         Effect::SolveCase,
         Effect::HeistExile,
         Effect::ProcessRadCounters,
+        // CR 701.33: abandoning a scheme is Contextual (ongoing pressure vs.
+        // cycling to the next scheme is card-specific).
+        Effect::AbandonScheme,
     ] {
         assert_eq!(
             effect_polarity(&effect),

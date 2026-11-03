@@ -13,6 +13,7 @@ const mockGainNode = () => ({
     linearRampToValueAtTime: vi.fn(),
   },
   connect: vi.fn(),
+  disconnect: vi.fn(),
 });
 
 const mockBufferSource = () => ({
@@ -20,6 +21,20 @@ const mockBufferSource = () => ({
   connect: vi.fn(),
   start: vi.fn(),
 });
+
+const mockOscillator = () => ({
+  type: "sine",
+  frequency: { setValueAtTime: vi.fn() },
+  connect: vi.fn(),
+  disconnect: vi.fn(),
+  start: vi.fn(),
+  stop: vi.fn(),
+  onended: null as (() => void) | null,
+});
+
+const mockCreateOscillator = vi.fn().mockImplementation(mockOscillator);
+let contextState: AudioContextState = "running";
+const mockResume = vi.fn().mockResolvedValue(undefined);
 
 const mockMediaElementSource = () => ({
   connect: vi.fn(),
@@ -41,6 +56,11 @@ vi.stubGlobal(
     return {
       createGain: mockCreateGain,
       createBufferSource: mockCreateBufferSource,
+      createOscillator: mockCreateOscillator,
+      resume: mockResume,
+      get state() {
+        return contextState;
+      },
       createMediaElementSource: mockCreateMediaElementSource,
       decodeAudioData: mockDecodeAudioData,
       close: mockClose,
@@ -93,6 +113,8 @@ import { audioManager, initAudioOnInteraction } from "../AudioManager";
 describe("AudioManager", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    contextState = "running";
+    mockResume.mockReset().mockResolvedValue(undefined);
 
     // This suite exercises post-boot behavior; in production ensurePreload()
     // arms device-open right after the boot-health verdict.
@@ -221,6 +243,165 @@ describe("AudioManager", () => {
     expect(mockCreateBufferSource).not.toHaveBeenCalled();
   });
 
+  // --- playCue ---
+
+  it("plays a short two-note cue through the shared SFX volume control", () => {
+    usePreferencesStore.setState({ masterVolume: 50, sfxVolume: 40 });
+    audioManager.warmUp();
+
+    audioManager.playCue("priority");
+
+    const sfxGain = mockCreateGain.mock.results[0].value;
+    expect(sfxGain.gain.value).toBeCloseTo(0.2);
+    expect(mockCreateOscillator).toHaveBeenCalledTimes(2);
+    const oscillators = mockCreateOscillator.mock.results.map((result) => result.value);
+    const envelopes = mockCreateGain.mock.results.slice(2).map((result) => result.value);
+    for (const [index, oscillator] of oscillators.entries()) {
+      const envelope = envelopes[index];
+      expect(oscillator.type).toBe("sine");
+      expect(oscillator.connect).toHaveBeenCalledWith(envelope);
+      expect(envelope.connect).toHaveBeenCalledWith(sfxGain);
+      const start = oscillator.start.mock.calls[0][0] as number;
+      const end = oscillator.stop.mock.calls[0][0] as number;
+      expect(end - start).toBeGreaterThan(0);
+      expect(end).toBeLessThanOrEqual(0.4);
+      expect(envelope.gain.setValueAtTime).toHaveBeenCalledWith(0, start);
+      expect(envelope.gain.linearRampToValueAtTime).toHaveBeenLastCalledWith(0, end);
+      oscillator.onended();
+      expect(oscillator.disconnect).toHaveBeenCalledOnce();
+      expect(envelope.disconnect).toHaveBeenCalledOnce();
+    }
+    expect(oscillators[1].start.mock.calls[0][0]).toBeGreaterThan(
+      oscillators[0].start.mock.calls[0][0],
+    );
+    expect(mockCreateBufferSource).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { masterMuted: true },
+    { sfxMuted: true },
+    { masterVolume: 0 },
+    { sfxVolume: 0 },
+  ])("does not synthesize a cue with silent preferences %j", (prefs) => {
+    audioManager.warmUp();
+    usePreferencesStore.setState(prefs);
+
+    audioManager.playCue("priority");
+
+    expect(mockCreateOscillator).not.toHaveBeenCalled();
+    expect(mockResume).not.toHaveBeenCalled();
+  });
+
+  it("does nothing before the audio device has been warmed up", () => {
+    audioManager.playCue("priority");
+
+    expect(mockCreateOscillator).not.toHaveBeenCalled();
+    expect(mockResume).not.toHaveBeenCalled();
+  });
+
+  it("resumes a suspended context before playing exactly one cue", async () => {
+    audioManager.warmUp();
+    contextState = "suspended";
+
+    audioManager.playCue("priority");
+    expect(mockResume).toHaveBeenCalledOnce();
+    expect(mockCreateOscillator).not.toHaveBeenCalled();
+    await Promise.resolve();
+
+    expect(mockCreateOscillator).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not play when resuming is rejected", async () => {
+    audioManager.warmUp();
+    contextState = "suspended";
+    mockResume.mockRejectedValueOnce(new Error("autoplay blocked"));
+
+    audioManager.playCue("priority");
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(mockCreateOscillator).not.toHaveBeenCalled();
+  });
+
+  it.each(["dispose", "mute"] as const)(
+    "drops a suspended cue if %s happens before resume completes",
+    async (change) => {
+      audioManager.warmUp();
+      contextState = "suspended";
+      let finishResume!: () => void;
+      mockResume.mockReturnValueOnce(new Promise<void>((resolve) => {
+        finishResume = resolve;
+      }));
+
+      audioManager.playCue("priority");
+      if (change === "dispose") audioManager.dispose();
+      else usePreferencesStore.setState({ masterMuted: true });
+      finishResume();
+      await Promise.resolve();
+
+      expect(mockCreateOscillator).not.toHaveBeenCalled();
+    },
+  );
+
+  it("drops a suspended cue whose signal aborts before resume completes", async () => {
+    audioManager.warmUp();
+    contextState = "suspended";
+    let finishResume!: () => void;
+    mockResume.mockReturnValueOnce(new Promise<void>((resolve) => {
+      finishResume = resolve;
+    }));
+    const controller = new AbortController();
+
+    audioManager.playCue("priority", controller.signal);
+    controller.abort();
+    finishResume();
+    await Promise.resolve();
+
+    expect(mockCreateOscillator).not.toHaveBeenCalled();
+  });
+
+  it("does not even resume for a cue whose signal is already aborted", () => {
+    audioManager.warmUp();
+    contextState = "suspended";
+    const controller = new AbortController();
+    controller.abort();
+
+    audioManager.playCue("priority", controller.signal);
+
+    expect(mockResume).not.toHaveBeenCalled();
+    expect(mockCreateOscillator).not.toHaveBeenCalled();
+  });
+
+  it.each(["before cue", "during resume"] as const)(
+    "a manager disabled %s neither starts nor resumes further cues",
+    async (timing) => {
+      // Static import would reuse the sticky disabled singleton across cases;
+      // exercise a fresh module boundary rather than mutate private state.
+      vi.resetModules();
+      const { audioManager: isolated } = await import("../AudioManager");
+      isolated.armDeviceOpen();
+      isolated.warmUp();
+      contextState = "suspended";
+      let finishResume!: () => void;
+      mockResume.mockReturnValueOnce(new Promise<void>((resolve) => {
+        finishResume = resolve;
+      }));
+      try {
+        if (timing === "during resume") isolated.playCue("priority");
+        isolated.disable();
+        isolated.playCue("priority");
+        expect(mockResume).toHaveBeenCalledTimes(timing === "during resume" ? 1 : 0);
+        if (timing === "during resume") {
+          finishResume();
+          await Promise.resolve();
+        }
+        expect(mockCreateOscillator).not.toHaveBeenCalled();
+      } finally {
+        isolated.dispose();
+      }
+    },
+  );
+
   // --- playSfxForStep ---
 
   it("playSfxForStep consolidates same-type effects into single sound with boosted volume", async () => {
@@ -230,9 +411,9 @@ describe("AudioManager", () => {
     mockCreateGain.mockClear();
 
     audioManager.playSfxForStep([
-      { event: { type: "CreatureDestroyed", data: { object_id: 1 } }, duration: 400 },
-      { event: { type: "CreatureDestroyed", data: { object_id: 2 } }, duration: 400 },
-      { event: { type: "CreatureDestroyed", data: { object_id: 3 } }, duration: 400 },
+      { event: { type: "CreatureDestroyed", data: { object_id: 1, source_id: null } }, duration: 400 },
+      { event: { type: "CreatureDestroyed", data: { object_id: 2, source_id: null } }, duration: 400 },
+      { event: { type: "CreatureDestroyed", data: { object_id: 3, source_id: null } }, duration: 400 },
     ]);
 
     // Single consolidated sound, not 3 separate ones

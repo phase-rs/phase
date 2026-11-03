@@ -16,11 +16,13 @@ use engine::game::game_object::AttachTarget;
 use engine::game::interaction::{
     bind_interaction_authority, derive_viewer_interaction, resolve_interaction_response,
 };
+use engine::game::scenario::GameScenario;
+use engine::game::scenario_db::GameScenarioDbExt;
 use engine::game::visibility::filter_state_for_viewer;
 use engine::game::zones::create_object;
 use engine::types::ability::{
-    ChoiceType, ControllerRef, CopyRetargetPermission, Effect, ResolvedAbility, TargetFilter,
-    TargetRef, TargetSelectionMode, TypedFilter,
+    ChoiceType, ControllerRef, CopyRetargetPermission, Effect, QuantityExpr, ResolvedAbility,
+    TargetFilter, TargetRef, TargetSelectionMode, TypedFilter,
 };
 use engine::types::actions::{GameAction, ResolveAllConsentDecision, ResolveAllScope};
 use engine::types::card_type::CoreType;
@@ -43,10 +45,15 @@ use engine::types::resolved_commands::{
 };
 use engine::types::zones::Zone;
 
+use crate::support::shared_card_db;
+
 const P0: PlayerId = PlayerId(0);
 const P1: PlayerId = PlayerId(1);
 const P2: PlayerId = PlayerId(2);
 const P3: PlayerId = PlayerId(3);
+
+const KYNAIOS_STYLE_NESTED_LAND_ORACLE: &str =
+    "At the beginning of your end step, draw a card. Each player may put a land card from their hand onto the battlefield, then each opponent who didn't draws a card.";
 
 fn begin(state: &mut GameState) -> u64 {
     apply(
@@ -166,6 +173,69 @@ fn browser_partial_priority_equip_state() -> (GameState, ObjectId, ObjectId) {
     (state, equipment, creature)
 }
 
+/// A Resolve All batch whose first item resolves an unrepresentable life change
+/// rejects the public batch and restores the game exactly as the caller found it:
+/// the stack entry, the consent session, and the life total are all unchanged.
+#[test]
+fn resolve_all_rejects_unrepresentable_life_and_restores_the_batch_entry() {
+    let mut state = GameState::new_two_player(0x0A11_E0A2);
+    state.active_player = P0;
+    state.priority_player = P0;
+    state.waiting_for = WaitingFor::Priority { player: P0 };
+    state.players[P0.0 as usize].life = i32::MAX - 1;
+    state.stack = vec![ability_entry(
+        101,
+        P0,
+        Effect::GainLife {
+            amount: QuantityExpr::Fixed { value: 2 },
+            player: TargetFilter::Controller,
+        },
+        vec![],
+    )]
+    .into();
+
+    apply(
+        &mut state,
+        P0,
+        GameAction::BeginResolveAll {
+            max_resolutions: 10,
+            scope: ResolveAllScope::Shared,
+        },
+    )
+    .expect("P0 begins Resolve All");
+    let epoch = match state.waiting_for {
+        WaitingFor::ResolveAllConsent { epoch, .. } => epoch,
+        ref waiting_for => panic!("expected queued consent, got {waiting_for:?}"),
+    };
+    let life_before = state.players[P0.0 as usize].life;
+    let stack_before = state.stack.clone();
+    let session_before = state.stack_resolution_session.clone();
+    let waiting_before = state.waiting_for.clone();
+
+    // The final grant is the public action that materializes the run, so the
+    // unrepresentable gain rejects the grant itself and restores its snapshot.
+    let error = apply(
+        &mut state,
+        P1,
+        GameAction::RespondResolveAllConsent {
+            epoch,
+            decision: ResolveAllConsentDecision::Grant,
+        },
+    )
+    .expect_err("the unrepresentable gain must reject the public grant");
+    assert!(
+        matches!(
+            error,
+            engine::game::engine::EngineError::LifeChangeUnrepresentable { player } if player == P0
+        ),
+        "expected the typed unrepresentable-life rejection, got {error:?}"
+    );
+    assert_eq!(state.players[P0.0 as usize].life, life_before);
+    assert_eq!(state.stack, stack_before, "the batch entry is restored");
+    assert_eq!(state.stack_resolution_session, session_before);
+    assert_eq!(state.waiting_for, waiting_before);
+}
+
 #[test]
 fn browser_partial_priority_equip_grants_then_resolves_at_the_public_batch_seam() {
     let (mut state, equipment, creature) = browser_partial_priority_equip_state();
@@ -242,6 +312,7 @@ fn browser_partial_priority_equip_uses_the_shared_session_instead_of_a_prefix_pr
         amount: 4,
         is_combat: true,
         excess: 0,
+        source_incarnation: None,
     }];
 
     apply(
@@ -286,6 +357,182 @@ fn browser_partial_priority_equip_uses_the_shared_session_instead_of_a_prefix_pr
     assert!(state.auto_pass.is_empty());
 }
 
+/// The four-player Kynaios-and-Tiro shape keeps one triggered ability as the
+/// resolution owner while its effect fans out into one optional land choice
+/// per player.  Cleanup must wait for that nested chain to settle before the
+/// turn boundary is evaluated; otherwise the old path reached `start_next_turn`
+/// with the popped carrier still live.
+#[test]
+fn four_player_nested_land_choices_settle_before_cleanup_wraps_once() {
+    let db = shared_card_db().expect("integration card fixture must load");
+    let face = db
+        .get_face_by_name("Kynaios and Tiro of Meletis")
+        .expect("integration card fixture must include Kynaios and Tiro of Meletis");
+    assert_eq!(
+        face.oracle_text.as_deref(),
+        Some(KYNAIOS_STYLE_NESTED_LAND_ORACLE),
+        "the regression must exercise the printed Kynaios-and-Tiro Oracle text"
+    );
+
+    let mut scenario = GameScenario::new_with_format(FormatConfig::commander(), 4, 0x9200);
+    scenario.at_phase(Phase::PostCombatMain);
+    scenario.add_real_card(P0, "Kynaios and Tiro of Meletis", Zone::Battlefield, db);
+    let mut land_ids = BTreeMap::new();
+    let p0_draw = scenario.add_card_to_library_top(P0, "P0 draw");
+    for (player, library_name) in [
+        (P1, "P1 draw filler"),
+        (P2, "P2 draw filler"),
+        (P3, "P3 draw filler"),
+    ] {
+        scenario.add_card_to_library_top(player, library_name);
+    }
+    for player in [P0, P1, P2, P3] {
+        let land = scenario.add_land_to_hand(player, "Plains").id();
+        land_ids.insert(player, land);
+    }
+
+    let mut runner = scenario.build();
+    runner.advance_to_end_step();
+    assert_eq!(runner.state().phase, Phase::End);
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::Priority { .. }
+    ));
+    assert!(!runner.state().stack.is_empty());
+
+    let starting_turn = runner.state().turn_number;
+    let starting_active = runner.state().active_player;
+    let mut events = Vec::new();
+
+    let mut land_choice_players = BTreeSet::new();
+    let mut land_placements = BTreeSet::new();
+    let mut saw_empty_stack_live_carrier = false;
+    let mut crossed_turn_boundary = false;
+    for _ in 0..160 {
+        if runner.state().turn_number != starting_turn {
+            crossed_turn_boundary = true;
+            break;
+        }
+
+        if runner.state().stack.is_empty()
+            && (runner.state().resolving_stack_entry.is_some()
+                || !runner.state().resolution_stack.is_empty()
+                || runner.state().active_ability_continuation().is_some())
+        {
+            saw_empty_stack_live_carrier = true;
+        }
+
+        if runner.state().resolving_stack_entry.is_some()
+            || runner.state().pending_liminal_entry_resume.is_some()
+        {
+            assert_eq!(
+                runner.state().turn_number,
+                starting_turn,
+                "a live nested resolution carrier must not advance the turn"
+            );
+            assert_eq!(
+                runner.state().active_player,
+                starting_active,
+                "a live nested resolution carrier must retain the active player"
+            );
+        }
+
+        let waiting_for = runner.state().waiting_for.clone();
+        let result = match waiting_for {
+            WaitingFor::Priority { .. } => runner
+                .act(GameAction::PassPriority)
+                .expect("priority pass must not panic in the nested land chain"),
+            WaitingFor::OptionalEffectChoice { player, .. } => {
+                let result = runner
+                    .act(GameAction::DecideOptionalEffect { accept: true })
+                    .expect("each player accepts the offered land choice");
+                let expected_land = *land_ids
+                    .get(&player)
+                    .expect("each optional land choice must belong to a known participant");
+                assert_eq!(
+                    runner.state().objects[&expected_land].zone,
+                    Zone::Battlefield,
+                    "participant {player:?}'s accepted land must enter the battlefield"
+                );
+                land_choice_players.insert(player);
+                land_placements.insert(player);
+                result
+            }
+            WaitingFor::EffectZoneChoice { player, cards, .. } => {
+                let expected_land = *land_ids
+                    .get(&player)
+                    .expect("each land choice must belong to a known participant");
+                assert_eq!(
+                    cards,
+                    vec![expected_land],
+                    "each participant must receive its own independent land choice"
+                );
+                let card = cards.first().copied().expect("land choice offers a card");
+                let result = runner
+                    .act(GameAction::SelectCards { cards: vec![card] })
+                    .expect("each player selects the offered land through apply");
+                assert_eq!(
+                    runner.state().objects[&expected_land].zone,
+                    Zone::Battlefield,
+                    "participant {player:?}'s selected land must enter the battlefield"
+                );
+                land_choice_players.insert(player);
+                land_placements.insert(player);
+                result
+            }
+            WaitingFor::OrderTriggers { triggers, .. } => runner
+                .act(GameAction::OrderTriggers {
+                    order: (0..triggers.len()).collect(),
+                })
+                .expect("nested trigger order uses the production choice route"),
+            other => panic!("unexpected nested Kynaios prompt: {other:?}"),
+        };
+        events.extend(result.events);
+    }
+
+    let expected_players = BTreeSet::from([P0, P1, P2, P3]);
+    assert_eq!(
+        land_choice_players, expected_players,
+        "the Oracle text must fan out one land choice to every player"
+    );
+    assert_eq!(
+        land_placements, expected_players,
+        "every participant's selected land must be placed independently"
+    );
+    assert!(
+        saw_empty_stack_live_carrier,
+        "the regression must reach the old empty-stack/live-carrier boundary"
+    );
+    assert_eq!(
+        runner.state().objects[&p0_draw].zone,
+        Zone::Hand,
+        "the trigger's mandatory controller draw must not be skipped"
+    );
+    assert!(
+        crossed_turn_boundary,
+        "the settled chain must reach the next turn"
+    );
+    assert_eq!(runner.state().turn_number, starting_turn + 1);
+    assert_eq!(runner.state().active_player, P1);
+    assert!(
+        matches!(runner.state().phase, Phase::Untap | Phase::Upkeep),
+        "the next turn must begin after one Cleanup -> Untap boundary, got {:?}",
+        runner.state().phase
+    );
+    assert!(runner.state().stack.is_empty());
+    assert!(runner.state().resolution_stack.is_empty());
+    assert!(runner.state().resolving_stack_entry.is_none());
+    assert!(runner.state().pending_liminal_entry_resume.is_none());
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, GameEvent::TurnStarted { .. }))
+            .count(),
+        1,
+        "nested resolution must create exactly one next-turn event"
+    );
+}
+
 #[test]
 fn restored_mid_stack_priority_discards_an_orphaned_trigger_event_carrier() {
     let (mut state, _, _) = browser_partial_priority_equip_state();
@@ -295,6 +542,7 @@ fn restored_mid_stack_priority_discards_an_orphaned_trigger_event_carrier() {
         amount: 4,
         is_combat: true,
         excess: 0,
+        source_incarnation: None,
     }];
     assert!(state.pending_trigger.is_none());
 
@@ -559,6 +807,7 @@ fn final_grant_prompt_restores_the_preconsent_overlay_before_waiting_for_choice(
         1,
         P0,
         Effect::Choose {
+            chooser: engine::types::ability::ControllerRef::You,
             choice_type: ChoiceType::BasicLandType,
             persist: false,
             selection: TargetSelectionMode::Chosen,
@@ -993,7 +1242,8 @@ fn serialized_legacy_pending_grant_removes_its_mode_before_entering_ready() {
         restored.waiting_for,
         WaitingFor::ResolveAllReady { .. }
     ));
-    let result = resolve_all_ready_prefix(&mut restored, P0);
+    let result = resolve_all_ready_prefix(&mut restored, P0)
+        .expect("the fixture's Resolve All prefix is representable");
     assert_eq!(result.items_resolved, 1);
     assert!(restored.stack.is_empty());
 }
@@ -1423,7 +1673,8 @@ fn ready_consent_collapses_the_safe_prefix_before_a_stack_growing_resolution() {
     .expect("second representative grants");
 
     let result =
-        resolve_all_ready_prefix_with(&mut state, P0, ResolveAllContinuation::StopAtPriority);
+        resolve_all_ready_prefix_with(&mut state, P0, ResolveAllContinuation::StopAtPriority)
+            .expect("the fixture's Resolve All prefix is representable");
 
     assert_eq!(
         result.items_resolved,
@@ -1482,9 +1733,16 @@ fn ready_two_seat_state() -> GameState {
 }
 
 fn restored_session_state(max_resolutions: u32) -> GameState {
+    restored_session_state_with_top_controller(max_resolutions, P1)
+}
+
+fn restored_session_state_with_top_controller(
+    max_resolutions: u32,
+    top_controller: PlayerId,
+) -> GameState {
     let mut state = GameState::new_two_player(0xA11CE);
     state.stack.push_back(no_op_entry(1, P0));
-    state.stack.push_back(no_op_entry(2, P1));
+    state.stack.push_back(no_op_entry(2, top_controller));
     let baseline: BTreeMap<_, _> = BTreeSet::from([P0])
         .into_iter()
         .map(|player| {
@@ -1569,7 +1827,8 @@ fn explicit_restore_resume_drives_a_coherent_session_through_the_ordinary_runner
         RestoredStackAutomation::ActiveSession
     );
 
-    let resumed = resume_restored_stack_automation(&mut state);
+    let resumed = resume_restored_stack_automation(&mut state)
+        .expect("the fixture's restore resume is representable");
     assert_eq!(
         resumed.presentation.outcome,
         RestoredStackAutomationOutcome::Progressed,
@@ -1598,7 +1857,9 @@ fn explicit_restore_resume_drives_a_coherent_session_through_the_ordinary_runner
 
 #[test]
 fn restored_rechecking_session_waits_for_a_fresh_ai_contract() {
-    let mut state = restored_session_state(1);
+    // P0's own top: P1 has no standing pass over it
+    // (`priority::standing_priority_pass`), so its window needs a decision.
+    let mut state = restored_session_state_with_top_controller(1, P0);
     {
         let session = state
             .stack_resolution_session
@@ -1626,7 +1887,8 @@ fn restored_rechecking_session_waits_for_a_fresh_ai_contract() {
     );
     let before_stack = state.stack.clone();
 
-    let resumed = resume_restored_stack_automation(&mut state);
+    let resumed = resume_restored_stack_automation(&mut state)
+        .expect("the fixture's restore resume is representable");
 
     assert_eq!(
         resumed.presentation.outcome,
@@ -1703,7 +1965,8 @@ fn explicit_restore_resume_publishes_revealed_cards_through_the_boundary_journal
         };
     }
 
-    let resumed = resume_restored_stack_automation(&mut state);
+    let resumed = resume_restored_stack_automation(&mut state)
+        .expect("the fixture's restore resume is representable");
     assert_eq!(
         resumed.presentation.outcome,
         RestoredStackAutomationOutcome::Progressed,
@@ -1734,7 +1997,8 @@ fn stale_restored_session_repairs_without_resolving_and_restores_its_baseline() 
         .expect("fixture has a top stack entry")
         .source_id = ObjectId(99);
 
-    let resumed = resume_restored_stack_automation(&mut state);
+    let resumed = resume_restored_stack_automation(&mut state)
+        .expect("the fixture's restore resume is representable");
     assert_eq!(
         resumed.presentation.outcome,
         RestoredStackAutomationOutcome::ZeroResolutionRepair,
@@ -1781,7 +2045,8 @@ fn restored_session_rejects_a_cached_nonrepresentative_without_resolving() {
         classify_restored_stack_automation(&state),
         RestoredStackAutomation::Repair
     );
-    let resumed = resume_restored_stack_automation(&mut state);
+    let resumed = resume_restored_stack_automation(&mut state)
+        .expect("the fixture's restore resume is representable");
 
     assert_eq!(
         resumed.presentation.outcome,
@@ -1809,7 +2074,8 @@ fn stale_restored_session_cursor_or_overlay_repairs_without_resolving() {
         .as_mut()
         .expect("fixture has a session")
         .cursor = entries_len;
-    let cursor_resumed = resume_restored_stack_automation(&mut stale_cursor);
+    let cursor_resumed = resume_restored_stack_automation(&mut stale_cursor)
+        .expect("the fixture's restore resume is representable");
     assert_eq!(
         cursor_resumed.presentation.outcome,
         RestoredStackAutomationOutcome::ZeroResolutionRepair,
@@ -1820,7 +2086,8 @@ fn stale_restored_session_cursor_or_overlay_repairs_without_resolving() {
 
     let mut bad_overlay = restored_session_state(0);
     bad_overlay.auto_pass.remove(&P1);
-    let overlay_resumed = resume_restored_stack_automation(&mut bad_overlay);
+    let overlay_resumed = resume_restored_stack_automation(&mut bad_overlay)
+        .expect("the fixture's restore resume is representable");
     assert_eq!(
         overlay_resumed.presentation.outcome,
         RestoredStackAutomationOutcome::ZeroResolutionRepair,
@@ -1904,7 +2171,8 @@ fn a_ready_latch_with_no_run_repairs_to_priority_without_resolving() {
         "no seat can prove ownership of a run-less latch, so none may be refused"
     );
 
-    let result = resolve_all_ready_prefix(&mut state, P0);
+    let result = resolve_all_ready_prefix(&mut state, P0)
+        .expect("the fixture's Resolve All prefix is representable");
 
     assert_eq!(result.items_resolved, 0, "a repair resolves nothing");
     assert_eq!(state.stack.len(), 1, "the stack entry survives the repair");
@@ -2010,7 +2278,8 @@ fn a_consent_prompt_with_no_run_repairs_to_priority_without_resolving() {
         "an unanswerable saved authorization is a repair, like a run-less Ready latch"
     );
 
-    let resumed = resume_restored_stack_automation(&mut state);
+    let resumed = resume_restored_stack_automation(&mut state)
+        .expect("the fixture's restore resume is representable");
 
     assert_eq!(
         resumed.presentation.outcome,
@@ -2060,7 +2329,8 @@ fn recovery_discharges_an_intact_latch() {
         RestoredStackAutomation::LegacyResolveAllReady,
         "generic decode recognizes but does not consume the legacy authorization"
     );
-    let resumed = resume_restored_stack_automation(&mut state);
+    let resumed = resume_restored_stack_automation(&mut state)
+        .expect("the fixture's restore resume is representable");
     assert_eq!(
         resumed.presentation.outcome,
         RestoredStackAutomationOutcome::Progressed,
@@ -2113,7 +2383,8 @@ fn recovery_of_an_incoherent_latch_re_derives_the_ready_era_slots() {
         "non-vacuity: the fixture must actually carry Ready-era slots"
     );
 
-    let resumed = resume_restored_stack_automation(&mut state);
+    let resumed = resume_restored_stack_automation(&mut state)
+        .expect("the fixture's restore resume is representable");
     assert_eq!(
         resumed.presentation.outcome,
         RestoredStackAutomationOutcome::ZeroResolutionRepair,
@@ -2216,7 +2487,8 @@ fn proof_stopping_ready_state() -> GameState {
 fn the_restore_continuation_installs_no_auto_pass_where_the_live_one_does() {
     let mut live = proof_stopping_ready_state();
     let live_batch =
-        resolve_all_ready_prefix_with(&mut live, P0, ResolveAllContinuation::AutoPassRemainder);
+        resolve_all_ready_prefix_with(&mut live, P0, ResolveAllContinuation::AutoPassRemainder)
+            .expect("the fixture's Resolve All prefix is representable");
     assert!(
         live.auto_pass.is_empty(),
         "the live continuation consumes its temporary fallback when CopySpell grows the stack"
@@ -2224,7 +2496,8 @@ fn the_restore_continuation_installs_no_auto_pass_where_the_live_one_does() {
 
     let mut restored = proof_stopping_ready_state();
     let restored_batch =
-        resolve_all_ready_prefix_with(&mut restored, P0, ResolveAllContinuation::StopAtPriority);
+        resolve_all_ready_prefix_with(&mut restored, P0, ResolveAllContinuation::StopAtPriority)
+            .expect("the fixture's Resolve All prefix is representable");
 
     assert!(
         restored.auto_pass.is_empty(),

@@ -41,7 +41,7 @@ fn targets_satisfying_condition(
                 .map(crate::game::arithmetic::u32_to_i32_saturating)
                 .unwrap_or(0);
             let mut per_target_ability = ability.clone();
-            per_target_ability.targets = vec![TargetRef::Object(*target_id)];
+            per_target_ability.set_unpinned_targets(vec![TargetRef::Object(*target_id)]);
             let rhs = crate::game::quantity::resolve_quantity_for_ability_condition(
                 state,
                 &condition.rhs,
@@ -148,7 +148,7 @@ pub fn resolve(
     // used to drive the counter-kind prompt can re-expand or narrow that set.
     let mut synthetic = ability.clone();
     synthetic.sub_ability = None;
-    synthetic.targets = targets.into_iter().map(TargetRef::Object).collect();
+    synthetic.set_unpinned_targets(targets.into_iter().map(TargetRef::Object).collect());
     synthetic.distribution = None;
     synthetic.effect = Effect::PutCounter {
         counter_type,

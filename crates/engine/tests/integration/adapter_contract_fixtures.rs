@@ -1,3 +1,4 @@
+use engine::game::dungeon::DungeonId;
 use engine::game::game_object::GameObject;
 use engine::game::interaction::{bind_interaction_authority, submit_interaction};
 use engine::types::ability::{TargetFilter, TypeFilter};
@@ -94,6 +95,48 @@ fn waiting_for_fixture_matches_curated_client_contract() {
             assert_eq!(cards.len(), 2);
             assert_eq!(count, 1);
             assert_eq!(source_id.0, 99);
+        }
+        other => panic!("wrong variant: {other:?}"),
+    }
+}
+
+#[test]
+fn waiting_for_choose_dungeon_fixture_matches_curated_client_contract() {
+    let parsed: WaitingFor = serde_json::from_str(include_str!(
+        "../../../../fixtures/adapter-contract/waiting_for_choose_dungeon.json"
+    ))
+    .unwrap();
+    match parsed {
+        WaitingFor::ChooseDungeon { player, options } => {
+            assert_eq!(player.0, 0);
+            // Normal venture offers the AFR trio (CR 701.49a).
+            assert_eq!(options.len(), 3);
+            let lost_mine = options
+                .iter()
+                .find(|option| option.dungeon == DungeonId::LostMineOfPhandelver)
+                .expect("Lost Mine offered");
+            // CR 309.4a: each option previews the topmost room it enters.
+            assert_eq!(lost_mine.entry_room.index, 0);
+            assert_eq!(lost_mine.entry_room.name, "Cave Entrance");
+            assert_eq!(lost_mine.entry_room.text, "Scry 1.");
+            // The choice preview carries the whole dungeon behind the entry:
+            // the card identity, every room with its edges and card geometry,
+            // and the room count placing the entry within the whole.
+            assert_eq!(lost_mine.room_count, 7);
+            assert_eq!(lost_mine.rooms.len(), 7);
+            assert_eq!(
+                lost_mine.card.oracle_id,
+                "5c446a7f-0301-4343-b0df-146cf2db605b"
+            );
+            assert_eq!(
+                lost_mine.card.scryfall_id,
+                "59b11ff8-f118-4978-87dd-509dc0c8c932"
+            );
+            assert_eq!(lost_mine.card.face_name, "Lost Mine of Phandelver");
+            assert_eq!(lost_mine.rooms[0].room.name, "Cave Entrance");
+            assert_eq!(lost_mine.rooms[0].next_rooms, vec![1, 2]);
+            assert_eq!(lost_mine.rooms[0].marker.x_permille, 500);
+            assert_eq!(lost_mine.rooms[0].marker.y_permille, 215);
         }
         other => panic!("wrong variant: {other:?}"),
     }
