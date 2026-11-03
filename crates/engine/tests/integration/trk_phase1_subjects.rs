@@ -409,6 +409,7 @@ fn unification_owner_is_distinct_from_both_controllers() {
             .collect();
         assert_eq!(draws.len(), 2);
         assert!(draws.iter().all(|index| *index < shuffle));
+        assert_eq!(shuffle_owners(&events), vec![P1]);
         for id in [first, second] {
             assert_eq!(runner.state().objects[&id].zone, Zone::Hand);
         }
@@ -1301,13 +1302,13 @@ fn scientists_second_chapter_returns_the_selected_card() {
 // CR 400.3: chapter III routes each selected card to its respective owner.
 #[test]
 fn scientists_third_chapter_distinct_owners_and_no_picks() {
-    for pick in [false, true] {
+    for (pick, second_owner) in [(false, P2), (true, P2), (true, P1)] {
         let (mut scenario, source) = next_chapter_scenario(SCIENTISTS_NAME, SCIENTISTS, 2);
         let first = scenario
             .add_creature_to_graveyard(P1, "Grizzly Bears", 2, 2)
             .id();
         let second = scenario
-            .add_creature_to_graveyard(P2, "Runeclaw Bear", 2, 2)
+            .add_creature_to_graveyard(second_owner, "Runeclaw Bear", 2, 2)
             .id();
         let mut runner = scenario.build();
         runner.advance_to_phase(Phase::PreCombatMain);
@@ -1343,9 +1344,9 @@ fn scientists_third_chapter_distinct_owners_and_no_picks() {
         finished(&runner);
         // CR 701.24a: each selected card's owner shuffles, and no other player does.
         for player in [P0, P1, P2] {
-            assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::PlayerPerformedAction { player_id, action: PlayerActionKind::ShuffledLibrary, .. } if *player_id == player)).count(), usize::from(pick && player != P0));
+            assert_eq!(events.iter().filter(|event| matches!(event, GameEvent::PlayerPerformedAction { player_id, action: PlayerActionKind::ShuffledLibrary, .. } if *player_id == player)).count(), usize::from(pick && (player == P1 || player == second_owner)));
         }
-        for (id, owner) in [(first, P1), (second, P2)] {
+        for (id, owner) in [(first, P1), (second, second_owner)] {
             assert_eq!(
                 runner.state().objects[&id].zone,
                 if pick { Zone::Library } else { Zone::Graveyard }
@@ -1358,6 +1359,216 @@ fn scientists_third_chapter_distinct_owners_and_no_picks() {
             );
         }
         assert_eq!(runner.state().objects[&source].zone, Zone::Graveyard);
+    }
+}
+
+fn shuffle_owners(events: &[GameEvent]) -> Vec<PlayerId> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            GameEvent::PlayerPerformedAction {
+                player_id,
+                action: PlayerActionKind::ShuffledLibrary,
+                ..
+            } => Some(*player_id),
+            _ => None,
+        })
+        .collect()
+}
+
+// CR 608.2b: only still-legal selected cards contribute owners at resolution.
+#[test]
+fn scientists_third_chapter_filters_illegal_members_without_owner_fallback() {
+    for all_illegal in [false, true] {
+        let (mut scenario, _) = next_chapter_scenario(SCIENTISTS_NAME, SCIENTISTS, 2);
+        let first = scenario
+            .add_creature_to_graveyard(P1, "Grizzly Bears", 2, 2)
+            .id();
+        let second = scenario
+            .add_creature_to_graveyard(P2, "Runeclaw Bear", 2, 2)
+            .id();
+        let mut runner = scenario.build();
+        runner.advance_to_phase(Phase::PreCombatMain);
+        for id in [first, second] {
+            assert!(optional_object_slot(&runner).contains(&TargetRef::Object(id)));
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(id)),
+                })
+                .unwrap();
+        }
+        assert_eq!(runner.state().stack.len(), 1);
+        engine::game::zones::move_to_zone(runner.state_mut(), first, Zone::Exile, &mut vec![]);
+        if all_illegal {
+            engine::game::zones::move_to_zone(runner.state_mut(), second, Zone::Exile, &mut vec![]);
+        }
+        let mut events = vec![];
+        for _ in 0..3 {
+            events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+        }
+        finished(&runner);
+        assert_eq!(
+            shuffle_owners(&events),
+            if all_illegal { vec![] } else { vec![P2] }
+        );
+        assert_eq!(runner.state().objects[&first].zone, Zone::Exile);
+        assert_eq!(
+            runner.state().objects[&second].zone,
+            if all_illegal {
+                Zone::Exile
+            } else {
+                Zone::Library
+            }
+        );
+    }
+}
+
+fn commander_library_prompt(runner: &GameRunner, owner: PlayerId) {
+    assert!(
+        matches!(runner.state().waiting_for,
+        WaitingFor::ReplacementChoice { player, candidate_count: 2, kind: engine::types::game_state::ReplacementChoiceKind::OptionalBranch, .. } if player == owner),
+        "commander owner must receive optional replacement: {:?}",
+        runner.state().waiting_for
+    );
+    let actions = engine::ai_support::legal_actions_for_viewer(runner.state(), owner).0;
+    for index in [0, 1] {
+        assert!(actions.iter().any(|action| matches!(action, GameAction::ChooseReplacement { index: offered } if *offered == index)));
+    }
+    assert!(
+        engine::ai_support::legal_actions_for_viewer(runner.state(), P0)
+            .0
+            .is_empty()
+    );
+}
+
+// CR 903.9b + CR 701.24c: both prospective owners shuffle once even when
+// consecutive commander replacements redirect one or both library deliveries.
+#[test]
+fn scientists_third_chapter_commander_pauses_keep_distinct_owner_ledger() {
+    for redirects in [[true, false], [false, true], [true, true], [false, false]] {
+        let (mut scenario, _) = next_chapter_scenario(SCIENTISTS_NAME, SCIENTISTS, 2);
+        let commanders: Vec<_> = [P1, P2]
+            .into_iter()
+            .map(|owner| {
+                scenario
+                    .add_creature_to_graveyard(owner, "Isamaru, Hound of Konda", 2, 2)
+                    .as_legendary()
+                    .with_subtypes(vec!["Dog"])
+                    .with_mana_cost(parse_mtgjson_mana_cost("{W}"))
+                    .from_oracle_text("")
+                    .commander()
+                    .id()
+            })
+            .collect();
+        let mut runner = scenario.build();
+        runner.state_mut().format_config.command_zone = true;
+        runner.advance_to_phase(Phase::PreCombatMain);
+        for id in &commanders {
+            assert!(optional_object_slot(&runner).contains(&TargetRef::Object(*id)));
+            runner
+                .act(GameAction::ChooseTarget {
+                    target: Some(TargetRef::Object(*id)),
+                })
+                .unwrap();
+        }
+        let mut events = vec![];
+        for _ in 0..3 {
+            events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+        }
+        for (index, owner) in [P1, P2].into_iter().enumerate() {
+            commander_library_prompt(&runner, owner);
+            assert!(
+                shuffle_owners(&events).is_empty(),
+                "terminal shuffle waits for every delivery"
+            );
+            events.extend(
+                runner
+                    .act(GameAction::ChooseReplacement {
+                        index: usize::from(!redirects[index]),
+                    })
+                    .unwrap()
+                    .events,
+            );
+        }
+        finished(&runner);
+        let owners = shuffle_owners(&events);
+        for owner in [P1, P2] {
+            assert_eq!(owners.iter().filter(|p| **p == owner).count(), 1);
+        }
+        assert_eq!(owners.len(), 2);
+        for (index, id) in commanders.into_iter().enumerate() {
+            assert_eq!(
+                runner.state().objects[&id].zone,
+                if redirects[index] {
+                    Zone::Command
+                } else {
+                    Zone::Library
+                }
+            );
+        }
+    }
+}
+
+// CR 608.2c + CR 903.9b + CR 701.24c: owner draws precede the paused move,
+// and redirecting the creature never removes the required terminal shuffle.
+#[test]
+fn unification_owner_draws_before_commander_replacement_and_shuffles_once() {
+    for redirect in [false, true] {
+        let mut scenario = GameScenario::new_n_player(3, 42);
+        scenario.at_phase(Phase::PreCombatMain);
+        let source = saga(&mut scenario, UNIFICATION_NAME, UNIFICATION);
+        let target = scenario
+            .add_creature(P1, "Isamaru, Hound of Konda", 2, 2)
+            .as_legendary()
+            .with_subtypes(vec!["Dog"])
+            .with_mana_cost(parse_mtgjson_mana_cost("{W}"))
+            .from_oracle_text("")
+            .commander()
+            .controlled_by(P2)
+            .id();
+        scenario.with_library_top(P1, &["Island", "Mountain"]);
+        let mut runner = scenario.build();
+        runner.state_mut().format_config.command_zone = true;
+        cast_to_trigger(&mut runner, source);
+        assert!(optional_object_slot(&runner).contains(&TargetRef::Object(target)));
+        runner
+            .act(GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(target)),
+            })
+            .unwrap();
+        let mut events = vec![];
+        for _ in 0..3 {
+            events.extend(runner.act(GameAction::PassPriority).unwrap().events);
+        }
+        commander_library_prompt(&runner, P1);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e, GameEvent::CardDrawn { player_id, .. } if *player_id == P1))
+                .count(),
+            2
+        );
+        assert_eq!(runner.state().players[1].hand.len(), 2);
+        assert!(shuffle_owners(&events).is_empty());
+        events.extend(
+            runner
+                .act(GameAction::ChooseReplacement {
+                    index: usize::from(!redirect),
+                })
+                .unwrap()
+                .events,
+        );
+        finished(&runner);
+        assert_eq!(shuffle_owners(&events), vec![P1]);
+        assert_eq!(
+            runner.state().objects[&target].zone,
+            if redirect {
+                Zone::Command
+            } else {
+                Zone::Library
+            }
+        );
+        assert_eq!(runner.state().objects[&source].zone, Zone::Battlefield);
     }
 }
 
@@ -1417,6 +1628,14 @@ fn unification_second_chapter_accepts_each_zone_and_declines() {
         let (mut scenario, source) = next_chapter_scenario(UNIFICATION_NAME, UNIFICATION, 1);
         let hand = defiant(&mut scenario);
         let grave = defiant(&mut scenario);
+        let opponent = scenario
+            .add_creature_to_hand(P1, DEFIANT_NAME, 5, 5)
+            .as_artifact()
+            .as_legendary()
+            .with_subtypes(vec!["Spacecraft"])
+            .with_mana_cost(ManaCost::generic(2))
+            .from_oracle_text_with_keywords(&["Station", "Flash"], DEFIANT)
+            .id();
         let mut runner = scenario.build();
         engine::game::zones::move_to_zone(runner.state_mut(), grave, Zone::Graveyard, &mut vec![]);
         runner.advance_to_phase(Phase::PreCombatMain);
@@ -1445,6 +1664,16 @@ fn unification_second_chapter_accepts_each_zone_and_declines() {
             };
             assert_eq!(*player, P0);
             assert!(cards.contains(&hand) && cards.contains(&grave));
+            assert_eq!(cards.len(), 2);
+            assert!(!cards.contains(&opponent));
+            assert!(runner.state().viewer_knows_card_identity(P0, hand));
+            assert!(!runner.state().viewer_knows_card_identity(P1, hand));
+            assert!(runner.state().viewer_knows_card_identity(P1, grave));
+            assert!(
+                engine::ai_support::legal_actions_for_viewer(runner.state(), P1)
+                    .0
+                    .is_empty()
+            );
             let selected = if zone == Zone::Hand { hand } else { grave };
             runner
                 .act(GameAction::SelectCards {
@@ -1471,6 +1700,112 @@ fn unification_second_chapter_accepts_each_zone_and_declines() {
             assert_eq!(runner.state().objects[&grave].zone, Zone::Graveyard);
         }
         finished(&runner);
+        assert_eq!(runner.state().objects[&opponent].zone, Zone::Hand);
+        if choice != Some(Zone::Hand) {
+            assert!(!runner.state().viewer_knows_card_identity(P1, hand));
+        }
+    }
+}
+
+// CR 608.2d: accepting a singleton union choice uses that object's actual
+// origin; accepting an empty population finishes without inventing a target.
+#[test]
+fn unification_second_chapter_singletons_and_empty_population() {
+    for origin in [Some(Zone::Hand), Some(Zone::Graveyard), None] {
+        let (mut scenario, source) = next_chapter_scenario(UNIFICATION_NAME, UNIFICATION, 1);
+        let selected = origin.map(|_| defiant(&mut scenario));
+        let mut runner = scenario.build();
+        if origin == Some(Zone::Graveyard) {
+            engine::game::zones::move_to_zone(
+                runner.state_mut(),
+                selected.unwrap(),
+                Zone::Graveyard,
+                &mut vec![],
+            );
+        }
+        runner.advance_to_phase(Phase::PreCombatMain);
+        assert!(!matches!(
+            runner.state().waiting_for,
+            WaitingFor::TriggerTargetSelection { .. }
+        ));
+        runner.advance_until_stack_empty();
+        assert!(
+            matches!(runner.state().waiting_for, WaitingFor::OptionalEffectChoice { player: P0, source_id, .. } if source_id == source)
+        );
+        let result = runner
+            .act(GameAction::DecideOptionalEffect { accept: true })
+            .unwrap();
+        if let Some(id) = selected {
+            assert!(result.events.iter().any(|event| matches!(event,
+                GameEvent::ZoneChanged { object_id, from, to: Zone::Battlefield, .. }
+                if *object_id == id && *from == origin)));
+            assert_eq!(runner.state().objects[&id].zone, Zone::Battlefield);
+        }
+        runner.advance_until_stack_empty();
+        finished(&runner);
+        if let Some(id) = selected {
+            assert!(runner.state().objects[&id].is_phased_out());
+        }
+        assert_eq!(runner.state().objects[&source].zone, Zone::Battlefield);
+    }
+}
+
+// CR 608.2d: only a card in the offered Hand/Graveyard population may be chosen.
+#[test]
+fn unification_second_chapter_rejects_non_offered_exile_card() {
+    for origin in [Zone::Hand, Zone::Graveyard] {
+        let (mut scenario, _) = next_chapter_scenario(UNIFICATION_NAME, UNIFICATION, 1);
+        let hand = defiant(&mut scenario);
+        let grave = defiant(&mut scenario);
+        let exiled = defiant(&mut scenario);
+        let mut runner = scenario.build();
+        engine::game::zones::move_to_zone(runner.state_mut(), grave, Zone::Graveyard, &mut vec![]);
+        engine::game::zones::move_to_zone(runner.state_mut(), exiled, Zone::Exile, &mut vec![]);
+        runner.advance_to_phase(Phase::PreCombatMain);
+        runner.advance_until_stack_empty();
+        assert!(matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalEffectChoice { player: P0, .. }
+        ));
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: true })
+            .unwrap();
+        let WaitingFor::EffectZoneChoice { player, cards, .. } = &runner.state().waiting_for else {
+            panic!(
+                "expected deployment choice: {:?}",
+                runner.state().waiting_for
+            );
+        };
+        assert_eq!(*player, P0);
+        assert_eq!(cards.len(), 2);
+        assert!(cards.contains(&hand) && cards.contains(&grave));
+        assert!(!cards.contains(&exiled));
+        let waiting = runner.state().waiting_for.clone();
+        let stack_len = runner.state().stack.len();
+        assert!(runner
+            .act(GameAction::SelectCards {
+                cards: vec![exiled]
+            })
+            .is_err());
+        assert_eq!(runner.state().waiting_for, waiting);
+        assert_eq!(runner.state().stack.len(), stack_len);
+        assert_eq!(runner.state().objects[&hand].zone, Zone::Hand);
+        assert_eq!(runner.state().objects[&grave].zone, Zone::Graveyard);
+        assert_eq!(runner.state().objects[&exiled].zone, Zone::Exile);
+        let selected = if origin == Zone::Hand { hand } else { grave };
+        let result = runner
+            .act(GameAction::SelectCards {
+                cards: vec![selected],
+            })
+            .unwrap();
+        assert!(result.events.iter().any(|event| matches!(event,
+        GameEvent::ZoneChanged { object_id, from, to: Zone::Battlefield, .. }
+        if *object_id == selected && *from == Some(origin))));
+        runner.advance_until_stack_empty();
+        finished(&runner);
+        assert_eq!(runner.state().objects[&exiled].zone, Zone::Exile);
+        assert_eq!(runner.state().objects[&selected].zone, Zone::Battlefield);
+        assert!(runner.state().objects[&selected].is_phased_out());
     }
 }
 

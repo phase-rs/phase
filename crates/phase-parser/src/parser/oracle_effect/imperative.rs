@@ -5102,8 +5102,14 @@ pub(super) fn parse_choose_ast(
             // unclassified fragments into new card-coverage diagnostics.
             // The former parse_target wrapper discarded those diagnostics.
             let diagnostic_count = ctx.diagnostics.len();
-            let (target, _) = parse_target_with_ctx(rest, ctx);
+            let (target, remainder) = parse_target_with_ctx(rest, ctx);
             ctx.diagnostics.truncate(diagnostic_count);
+            if !remainder.trim().is_empty()
+                || matches!(&target, TargetFilter::Typed(filter)
+                    if filter.type_filters.is_empty() && filter.controller.is_none())
+            {
+                return None;
+            }
             return Some(ChooseImperativeAst::TargetOnly { target });
         }
     }
@@ -10516,6 +10522,26 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
             target,
             owner_library,
         } => {
+            if owner_library
+                && matches!(
+                    target,
+                    TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
+                )
+            {
+                return with_shuffle_sub_ability(Effect::ChangeZoneAll {
+                    origin: None,
+                    destination: Zone::Library,
+                    target,
+                    enters_under: None,
+                    enter_tapped: crate::types::zones::EtbTapState::Unspecified,
+                    enters_attacking: false,
+                    enter_with_counters: vec![],
+                    face_down_profile: None,
+                    library_position: None,
+                    library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+                    random_order: false,
+                });
+            }
             // CR 701.24c + CR 400.3: `target` and `owner_library` are
             // populated by `parse_shuffle_ast`'s combinator-based pronoun /
             // possessive classification. See the construction site for the
@@ -10935,7 +10961,7 @@ pub(super) fn with_shuffle_sub_ability(mut effect: Effect) -> ParsedEffectClause
 /// shuffles. Used by the terminal shuffle and by each ChangeZoneAll in the
 /// chain so they all publish the same owner population (including empty zones
 /// per CR 701.24d). Centralized here to keep publisher and consumer in sync.
-fn owner_library_shuffle_scope() -> PlayerFilter {
+pub(super) fn owner_library_shuffle_scope() -> PlayerFilter {
     PlayerFilter::TrackedSetPossessor {
         relation: PlayerRelation::All,
         possession: PossessionAxis::Owner,
@@ -19272,6 +19298,50 @@ fn try_parse_bolster(lower: &str) -> Option<Effect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn r2_bound_shuffle_uses_terminal_population_but_self_keeps_explicit_referent() {
+        for target in [
+            TargetFilter::ParentTarget,
+            TargetFilter::ParentTargetSlot { index: 1 },
+        ] {
+            let clause = lower_shuffle_ast(ShuffleImperativeAst::ChangeZoneToLibrary {
+                target: target.clone(),
+                owner_library: true,
+            });
+            assert!(matches!(&clause.effect, Effect::ChangeZoneAll {
+                origin: None, destination: Zone::Library, target: bound,
+                library_position: None, library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+                random_order: false, ..
+            } if *bound == target));
+            let terminal = clause.sub_ability.as_deref().expect("terminal shuffle");
+            assert!(matches!(
+                *terminal.effect,
+                Effect::Shuffle {
+                    target: TargetFilter::ScopedPlayer
+                }
+            ));
+            assert_eq!(terminal.player_scope, Some(owner_library_shuffle_scope()));
+        }
+        let own = lower_shuffle_ast(ShuffleImperativeAst::ChangeZoneToLibrary {
+            target: TargetFilter::SelfRef,
+            owner_library: true,
+        });
+        assert!(matches!(
+            own.effect,
+            Effect::ChangeZone {
+                target: TargetFilter::SelfRef,
+                owner_library: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            *own.sub_ability.unwrap().effect,
+            Effect::Shuffle {
+                target: TargetFilter::ParentTargetOwner
+            }
+        ));
+    }
     use crate::types::ability::{EffectKind, ParitySource, ZoneChoiceChooser};
     use crate::types::counter::CounterType;
     use crate::types::keywords::KeywordKind;

@@ -36,6 +36,7 @@ mod revealed_card_type_disjunction_518;
 mod revenant_patriarch_skip_combat;
 mod rhys_evermore_remove_counters;
 mod ria_ivor_bane_of_bladehold;
+mod riftsweeper_owner_binding;
 mod riku_modal_modes_chosen_cap;
 mod riku_modal_spell_trigger;
 mod riot_control_regression;

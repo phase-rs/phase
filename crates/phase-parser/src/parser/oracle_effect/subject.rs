@@ -3154,6 +3154,35 @@ pub(super) fn declared_owner_subject_seed(
     Some((ControllerRef::ParentTargetOwner, TargetFilter::ParentTarget))
 }
 
+/// CR 115.1 + CR 608.2c: an owner anaphor can also name the object declared
+/// by the preceding instruction. Owner wording alone is not an object pin.
+pub(super) fn owner_subject_seed(
+    subject: &SubjectPhraseAst,
+    ctx: &ParseContext,
+) -> Option<(ControllerRef, TargetFilter)> {
+    declared_owner_subject_seed(
+        subject.affected.as_ref(),
+        subject.target.as_ref(),
+        subject.multi_target.as_ref(),
+    )
+    .or_else(|| {
+        if subject.affected != Some(TargetFilter::ParentTargetOwner)
+            || subject.target.is_some()
+            || subject.multi_target.is_some()
+            || ctx.token_created_in_chain
+        {
+            return None;
+        }
+        let target = ctx.chain_declared_object_target.as_ref()?;
+        if !matches!(target, TargetFilter::Typed(_))
+            || super::target_filter_can_target_player(target)
+        {
+            return None;
+        }
+        Some((ControllerRef::ParentTargetOwner, TargetFilter::ParentTarget))
+    })
+}
+
 /// Which player-subject anaphor a standalone "that/the player" clause names.
 ///
 /// Both forms resolve to an event-context `TargetFilter` via
@@ -9202,6 +9231,28 @@ pub(super) fn find_predicate_start(text: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn r2_owner_anaphor_requires_prior_object_declaration() {
+        let app = parse_subject_application("its owner", &mut ParseContext::default())
+            .expect("owner subject");
+        let subject = subject_phrase_ast(Some(app));
+        let mut ctx = ParseContext::default();
+        assert_eq!(owner_subject_seed(&subject, &ctx), None);
+        ctx.chain_declared_object_target = Some(TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Card],
+            ..Default::default()
+        }));
+        assert_eq!(
+            owner_subject_seed(&subject, &ctx),
+            Some((ControllerRef::ParentTargetOwner, TargetFilter::ParentTarget))
+        );
+        ctx.token_created_in_chain = true;
+        assert_eq!(owner_subject_seed(&subject, &ctx), None);
+        ctx.token_created_in_chain = false;
+        ctx.chain_declared_object_target = Some(TargetFilter::Player);
+        assert_eq!(owner_subject_seed(&subject, &ctx), None);
+    }
 
     #[test]
     fn declared_owner_subject_seed_accepts_only_one_pinned_object() {

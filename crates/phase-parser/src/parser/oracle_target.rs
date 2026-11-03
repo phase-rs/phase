@@ -374,6 +374,29 @@ pub fn parse_event_context_ref(text: &str) -> Option<(TargetFilter, &str)> {
     })
 }
 
+#[cfg(test)]
+mod r2_exile_modifier_tests {
+    use super::*;
+
+    #[test]
+    fn face_up_exiled_card_consumes_complete_target_and_retains_remainder() {
+        let (target, rest) = parse_target("target face-up exiled card");
+        assert!(rest.is_empty(), "{rest:?}");
+        let TargetFilter::Typed(filter) = target else {
+            panic!("expected typed card")
+        };
+        assert!(filter.type_filters.contains(&TypeFilter::Card));
+        assert!(filter
+            .properties
+            .contains(&FilterProp::InZone { zone: Zone::Exile }));
+        assert!(filter.properties.contains(&FilterProp::Not {
+            prop: Box::new(FilterProp::FaceDown)
+        }));
+        let (_, rest) = parse_target("target face-up exiled card frobnicate");
+        assert_eq!(rest.trim(), "frobnicate");
+    }
+}
+
 /// Parse a target description from Oracle text, returning (filter, remaining_text).
 /// Consumes the longest matching target phrase.
 ///
@@ -3615,6 +3638,24 @@ fn parse_type_phrase_folding_unbound<'a>(
                 pos += lower[pos..].len() - rest_trimmed.len();
             }
         }
+    }
+
+    // CR 406.3: face-up exiled cards retain both their zone and visibility
+    // restrictions. Compose these adjectives before the ordinary type reader.
+    while let Ok((rest, property)) = alt((
+        value(
+            FilterProp::Not {
+                prop: Box::new(FilterProp::FaceDown),
+            },
+            tag::<_, _, OracleError<'_>>("face-up "),
+        ),
+        value(FilterProp::FaceDown, tag("face-down ")),
+        value(FilterProp::InZone { zone: Zone::Exile }, tag("exiled ")),
+    ))
+    .parse(&lower[pos..])
+    {
+        properties.push(property);
+        pos = lower.len() - rest.len();
     }
 
     // Parse the core type, falling back to subtype recognition

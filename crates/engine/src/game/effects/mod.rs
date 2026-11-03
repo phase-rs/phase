@@ -15644,6 +15644,31 @@ fn publish_prospective_tracked_set(
     ledger.sort_unstable_by_key(|(player, _)| player.0);
 }
 
+/// CR 701.24c + CR 608.2c: a selected-object shuffle starts a new owner
+/// population, even when no objects were selected. Only the selected owners
+/// participate; an unrelated player target or enclosing scope supplies none.
+pub(crate) fn publish_selected_owner_library_subjects(
+    state: &mut GameState,
+    producer: &ResolvedAbility,
+    objects: &[ObjectId],
+) {
+    let mut participants: Vec<_> = objects
+        .iter()
+        .filter_map(|id| state.objects.get(id).map(|object| object.owner))
+        .collect();
+    participants.sort_unstable();
+    participants.dedup();
+    state.chain_tracked_set_id = None;
+    publish_tracked_set_for_resolution(
+        state,
+        producer,
+        TrackedSetPublicationInput::FinalizedSubjects {
+            objects,
+            participants: &participants,
+        },
+    );
+}
+
 /// Single authority for tracked-set publication at event and prospective
 /// subject seams. Prospective consumers deliberately ignore event-derived
 /// publication so replacement redirects cannot change which owners shuffle.

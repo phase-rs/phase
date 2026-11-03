@@ -10625,6 +10625,74 @@ pub fn effect_owns_resolution_zone_choice(effect: &Effect, timing: TargetChoiceT
         && !effect_requires_parent_target_object(effect)
 }
 
+#[cfg(test)]
+mod r2_resolution_choice_authority_tests {
+    use super::*;
+
+    #[test]
+    fn zone_union_choice_ownership_requires_resolution_and_preserves_target_filter() {
+        let target = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Subtype("Spacecraft".into())],
+            controller: Some(ControllerRef::You),
+            properties: vec![FilterProp::InAnyZone {
+                zones: vec![Zone::Hand, Zone::Graveyard],
+            }],
+            ..Default::default()
+        });
+        let mut effect: Effect =
+            serde_json::from_str(r#"{"type":"ChangeZone","destination":"Battlefield"}"#).unwrap();
+        let Effect::ChangeZone { target: slot, .. } = &mut effect else {
+            unreachable!()
+        };
+        *slot = target.clone();
+        assert!(effect_owns_resolution_zone_choice(
+            &effect,
+            TargetChoiceTiming::Resolution
+        ));
+        assert!(!effect_owns_resolution_zone_choice(
+            &effect,
+            TargetChoiceTiming::Stack
+        ));
+        assert_eq!(effect.target_filter(), Some(&target));
+        let Effect::ChangeZone { target: slot, .. } = &mut effect else {
+            unreachable!()
+        };
+        *slot = TargetFilter::ParentTarget;
+        assert!(!effect_owns_resolution_zone_choice(
+            &effect,
+            TargetChoiceTiming::Resolution
+        ));
+    }
+
+    #[test]
+    fn terminal_owner_movement_exposes_bound_parent_slots() {
+        for target in [
+            TargetFilter::ParentTarget,
+            TargetFilter::ParentTargetSlot { index: 1 },
+        ] {
+            let mut effect: Effect =
+                serde_json::from_str(r#"{"type":"ChangeZoneAll","destination":"Library"}"#)
+                    .unwrap();
+            let Effect::ChangeZoneAll {
+                target: slot,
+                library_shuffle,
+                ..
+            } = &mut effect
+            else {
+                unreachable!()
+            };
+            *slot = target.clone();
+            *library_shuffle = MassLibraryShuffleMode::TerminalShuffle;
+            assert_eq!(effect_parent_ref_slots(&effect), vec![&target]);
+            assert!(effect_requires_parent_target_object(&effect));
+            assert!(!effect_owns_resolution_zone_choice(
+                &effect,
+                TargetChoiceTiming::Resolution
+            ));
+        }
+    }
+}
+
 /// CR 608.2c + CR 400.7 + CR 115.10a: what one instruction can single out,
 /// introduce or move — the objects a later instruction's definite anaphor
 /// ("that creature") could name. See [`instruction_object_reach`].

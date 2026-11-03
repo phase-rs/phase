@@ -16064,7 +16064,7 @@ fn parse_blight_with_player(tp: TextPair) -> Option<(TargetFilter, u32, String)>
 /// - "The owner of target permanent shuffles it into their library" (Chaos Warp)
 /// - "Target permanent's owner shuffles it into their library"
 ///
-/// Produces a `ChangeZone` to Library with `owner_library: true` + a `Shuffle` sub_ability.
+/// Preserves the target declaration before a bound owner-population move and terminal shuffle.
 fn try_parse_owner_of_target_shuffle(
     tp: TextPair,
     ctx: &mut ParseContext,
@@ -16090,21 +16090,15 @@ fn try_parse_owner_of_target_shuffle(
 
     let target = extract_owner_of_target(tp, ctx)?;
 
-    Some(imperative::with_shuffle_sub_ability(Effect::ChangeZone {
-        origin: None,
-        destination: Zone::Library,
-        target,
+    let movement = imperative::lower_shuffle_ast(ShuffleImperativeAst::ChangeZoneToLibrary {
+        target: TargetFilter::ParentTarget,
         owner_library: true,
-        enter_transformed: false,
-        enters_under: None,
-        enter_tapped: crate::types::zones::EtbTapState::Unspecified,
-        enters_attacking: false,
-        up_to: false,
-        enter_with_counters: vec![],
-        conditional_enter_with_counters: vec![],
-        face_down_profile: None,
-        enters_modified_if: None,
-    }))
+    });
+    let mut bound_move = AbilityDefinition::new(AbilityKind::Spell, movement.effect);
+    bound_move.sub_ability = movement.sub_ability;
+    let mut declaration = parsed_clause(Effect::TargetOnly { target });
+    declaration.sub_ability = Some(Box::new(bound_move));
+    Some(declaration)
 }
 
 /// CR 400.3 + CR 401.7: Parse "the owner of target [filter] puts it into their
@@ -29793,11 +29787,7 @@ fn lower_subject_predicate_ast(
     original_clause: &str,
     damage_context: DamageTargetContext,
 ) -> ParsedEffectClause {
-    if let Some((_, object)) = subject::declared_owner_subject_seed(
-        subject.affected.as_ref(),
-        subject.target.as_ref(),
-        subject.multi_target.as_ref(),
-    ) {
+    if let Some((_, object)) = subject::owner_subject_seed(&subject, ctx) {
         return ctx.with_object_pronoun_ref(object.clone(), |ctx| {
             let previous = ctx.demonstrative_object_ref.replace(object);
             let result = lower_subject_predicate_ast_player_seeded(
@@ -29869,11 +29859,7 @@ fn lower_subject_predicate_ast_player_seeded(
     original_clause: &str,
     damage_context: DamageTargetContext,
 ) -> ParsedEffectClause {
-    let owner_seed = subject::declared_owner_subject_seed(
-        subject.affected.as_ref(),
-        subject.target.as_ref(),
-        subject.multi_target.as_ref(),
-    );
+    let owner_seed = subject::owner_subject_seed(&subject, ctx);
     if let Some((actor, _)) = owner_seed {
         // CR 608.2c: a printed owner subject outranks the enclosing player;
         // declared-player rungs must not capture its library possessive.
@@ -43905,7 +43891,12 @@ fn apply_owner_library_reveal_anchor_from_text(def: &mut AbilityDefinition, text
     let mut current = Some(def);
     while let Some(node) = current {
         match node.effect.as_mut() {
-            Effect::Shuffle { target } if *target == TargetFilter::ParentTargetOwner => {
+            Effect::Shuffle { target }
+                if *target == TargetFilter::ParentTargetOwner
+                    || (*target == TargetFilter::ScopedPlayer
+                        && node.player_scope.as_ref()
+                            == Some(&imperative::owner_library_shuffle_scope())) =>
+            {
                 saw_owner_shuffle = true;
             }
             Effect::RevealTop { player, .. }
@@ -53033,6 +53024,133 @@ mod trk_phase1_binding_tests {
     const CHAPTER: &str = "The owner of up to one target creature draws two cards, then shuffles that creature into their library.";
     const UNIFICATION: &str = "(As this Saga enters and after your draw step, add a lore counter. Sacrifice after III.)\nI — The owner of up to one target creature draws two cards, then shuffles that creature into their library.\nII — You may put a Spacecraft card from your hand or graveyard onto the battlefield.\nIII — You and target opponent each draw two cards.";
 
+    #[test]
+    fn r2_optional_union_keeps_producer_provenance_and_resolution_timing() {
+        let text =
+            "You may put a Spacecraft card from your hand or graveyard onto the battlefield.";
+        let ir = parse_effect_chain_ir(text, AbilityKind::Spell, &mut ParseContext::default());
+        assert_eq!(ir.clauses.len(), 1, "complete instruction is one clause");
+        let clause = ir.clauses.first().expect("put clause");
+        assert_eq!(clause.declared_target_choice_timing, None);
+        assert_eq!(
+            clause.source.fragment(),
+            Some("You may put a Spacecraft card from your hand or graveyard onto the battlefield")
+        );
+        assert!(clause.is_optional || clause.parsed.optional, "{clause:?}");
+        assert!(
+            matches!(clause.parsed.effect, Effect::ChangeZone { .. }),
+            "{clause:?}"
+        );
+        let def = lower::lower_effect_chain_ir(&ir);
+        assert!(def.optional, "{def:?}");
+        assert_eq!(def.target_choice_timing, TargetChoiceTiming::Resolution);
+        let Effect::ChangeZone { target, .. } = def.effect.as_ref() else {
+            panic!("{def:?}")
+        };
+        assert_eq!(target.extract_zones(), vec![Zone::Hand, Zone::Graveyard]);
+        let TargetFilter::Typed(filter) = target else {
+            panic!("{target:?}")
+        };
+        assert_eq!(filter.controller, Some(ControllerRef::You));
+        assert!(filter
+            .type_filters
+            .contains(&TypeFilter::Subtype("Spacecraft".into())));
+    }
+
+    #[test]
+    fn r2_worldsouls_rage_retains_damage_target_and_resolution_land_union() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Worldsoul's Rage deals X damage to any target. Put up to X land cards from your hand and/or graveyard onto the battlefield tapped.",
+            "Worldsoul's Rage", &[], &["Sorcery".into()], &[],
+        );
+        let def = parsed.abilities.first().expect("spell");
+        assert!(matches!(*def.effect, Effect::DealDamage { .. }), "{def:?}");
+        assert_eq!(def.target_choice_timing, TargetChoiceTiming::Stack);
+        let movement = def.sub_ability.as_deref().expect("land deployment");
+        assert_eq!(
+            movement.target_choice_timing,
+            TargetChoiceTiming::Resolution
+        );
+        let Effect::ChangeZone {
+            target,
+            destination: Zone::Battlefield,
+            ..
+        } = movement.effect.as_ref()
+        else {
+            panic!("{def:?}")
+        };
+        assert_eq!(target.extract_zones(), vec![Zone::Hand, Zone::Graveyard]);
+        assert!(
+            !effects(def)
+                .iter()
+                .any(|effect| matches!(effect, Effect::Unimplemented { .. })),
+            "{def:?}"
+        );
+    }
+
+    #[test]
+    fn r2_owner_shuffle_preserves_declarations_and_terminal_scope() {
+        for (text, maximum) in [
+            ("Choose up to two target cards in graveyards. The owners of those cards shuffle them into their libraries.", 2),
+            ("Choose up to three target cards in graveyards. The owners of those cards shuffle them into their libraries. You gain 2 life.", 3),
+        ] {
+            let def = parse_effect_chain(text, AbilityKind::Spell);
+            assert!(matches!(*def.effect, Effect::TargetOnly { .. }), "{def:?}");
+            assert_eq!(def.multi_target, Some(MultiTargetSpec::fixed(0, maximum)));
+            assert_eq!(def.target_choice_timing, TargetChoiceTiming::Stack);
+            let movement = def.sub_ability.as_deref().expect("movement");
+            assert!(matches!(*movement.effect, Effect::ChangeZoneAll {
+                origin: None, target: TargetFilter::ParentTarget, destination: Zone::Library,
+                library_shuffle: MassLibraryShuffleMode::TerminalShuffle, ..
+            }), "{def:?}");
+            let shuffle = movement.sub_ability.as_deref().expect("terminal shuffle");
+            assert!(matches!(*shuffle.effect, Effect::Shuffle { target: TargetFilter::ScopedPlayer }));
+            assert_eq!(shuffle.player_scope, Some(imperative::owner_library_shuffle_scope()));
+            assert!(!effects(&def).iter().any(|effect| matches!(effect, Effect::Unimplemented { .. })), "{def:?}");
+        }
+    }
+
+    #[test]
+    fn r2_riftsweeper_declares_face_up_exile_and_rejects_malformed_choose() {
+        let trigger = parse_trigger_line("When this creature enters, choose target face-up exiled card. Its owner shuffles it into their library.", "Riftsweeper");
+        let def = trigger.execute.as_deref().expect("ETB");
+        assert_eq!(def.target_choice_timing, TargetChoiceTiming::Stack);
+        let Effect::TargetOnly { target } = def.effect.as_ref() else {
+            panic!("{def:?}")
+        };
+        assert_eq!(target.extract_zones(), vec![Zone::Exile]);
+        let movement = def.sub_ability.as_deref().expect("owner move");
+        assert!(
+            matches!(
+                *movement.effect,
+                Effect::ChangeZoneAll {
+                    target: TargetFilter::ParentTarget,
+                    ..
+                }
+            ),
+            "{def:?}"
+        );
+        assert!(
+            !effects(def)
+                .iter()
+                .any(|effect| matches!(effect, Effect::Unimplemented { .. })),
+            "{def:?}"
+        );
+        for text in [
+            "choose target face-up exiled",
+            "choose target face-up exiled card frobnicate",
+            "choose target frobnicate",
+        ] {
+            let malformed = parse_effect_chain(text, AbilityKind::Spell);
+            assert!(
+                effects(&malformed)
+                    .iter()
+                    .any(|effect| matches!(effect, Effect::Unimplemented { .. })),
+                "{text}: {malformed:?}"
+            );
+        }
+    }
+
     fn effects(def: &AbilityDefinition) -> Vec<Effect> {
         let mut effects = Vec::new();
         let _ = crate::types::ability_visit::visit_ability_def(def, &mut |effect: &Effect| {
@@ -53077,10 +53195,11 @@ mod trk_phase1_binding_tests {
             .position(|effect| {
                 matches!(
                     effect,
-                    Effect::ChangeZone {
+                    Effect::ChangeZoneAll {
+                        origin: None,
                         target: TargetFilter::ParentTarget,
                         destination: Zone::Library,
-                        owner_library: true,
+                        library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
                         ..
                     }
                 )
@@ -53143,6 +53262,44 @@ mod trk_phase1_binding_tests {
         );
         assert_eq!(parsed.triggers.len(), 3);
         assert_owner_chain(parsed.triggers[0].execute.as_deref().expect("chapter I"));
+        let deployment = parsed.triggers[1].execute.as_deref().expect("chapter II");
+        assert!(deployment.optional);
+        assert_eq!(
+            deployment.target_choice_timing,
+            TargetChoiceTiming::Resolution
+        );
+        for trigger in &parsed.triggers {
+            let def = trigger.execute.as_deref().expect("chapter body");
+            assert!(
+                !effects(def)
+                    .iter()
+                    .any(|effect| matches!(effect, Effect::Unimplemented { .. })),
+                "{def:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn r2_scientists_full_oracle_preserves_all_chapters() {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "(As this Saga enters and after your draw\nstep, add a lore counter. Sacrifice after III.)\nI — Draw two cards, then discard two cards.\nII — Return up to one target artifact, instant, or sorcery card from your graveyard to your hand.\nIII — Choose up to two target cards in graveyards. The owners of those cards shuffle them into their libraries.",
+            "Those Old Scientists", &[], &["Enchantment".into()], &["Saga".into()],
+        );
+        assert_eq!(parsed.triggers.len(), 3);
+        for trigger in &parsed.triggers {
+            let def = trigger.execute.as_deref().expect("chapter body");
+            assert!(
+                !effects(def)
+                    .iter()
+                    .any(|effect| matches!(effect, Effect::Unimplemented { .. })),
+                "{def:?}"
+            );
+        }
+        let second = parsed.triggers[1].execute.as_deref().unwrap();
+        assert_eq!(second.target_choice_timing, TargetChoiceTiming::Stack);
+        let third = parsed.triggers[2].execute.as_deref().unwrap();
+        assert!(matches!(*third.effect, Effect::TargetOnly { .. }));
+        assert_eq!(third.multi_target, Some(MultiTargetSpec::fixed(0, 2)));
     }
 
     #[test]
@@ -53723,19 +53880,29 @@ fn issue_2406_chaos_warp_owner_library_shuffle_and_reveal() {
         "The owner of target permanent shuffles it into their library, then reveals the top card of their library. If it's a permanent card, they put it onto the battlefield.",
         AbilityKind::Spell,
     );
-    let Effect::ChangeZone {
-        owner_library: true,
+    assert!(matches!(*def.effect, Effect::TargetOnly { .. }));
+    let movement = def.sub_ability.as_ref().expect("bound movement");
+    let Effect::ChangeZoneAll {
+        origin: None,
+        target: TargetFilter::ParentTarget,
+        library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
         ..
-    } = def.effect.as_ref()
+    } = movement.effect.as_ref()
     else {
-        panic!("expected owner-library ChangeZone, got {:?}", def.effect);
+        panic!(
+            "expected bound owner-library movement, got {:?}",
+            movement.effect
+        );
     };
-    let shuffle = def.sub_ability.as_ref().expect("shuffle sub");
+    let shuffle = movement.sub_ability.as_ref().expect("shuffle sub");
     assert_eq!(
         shuffle.effect.target_filter(),
-        Some(&TargetFilter::ParentTargetOwner)
+        Some(&TargetFilter::ScopedPlayer)
     );
-    assert_eq!(shuffle.player_scope, None);
+    assert_eq!(
+        shuffle.player_scope,
+        Some(imperative::owner_library_shuffle_scope())
+    );
     let reveal = shuffle
         .sub_ability
         .as_ref()
@@ -53754,7 +53921,9 @@ fn owner_anchor_does_not_rewrite_explicit_your_library_reveal() {
         "The owner of target permanent shuffles it into their library, then reveals the top card of your library.",
         AbilityKind::Spell,
     );
-    let shuffle = def.sub_ability.as_ref().expect("shuffle sub");
+    assert!(matches!(*def.effect, Effect::TargetOnly { .. }));
+    let movement = def.sub_ability.as_ref().expect("bound movement");
+    let shuffle = movement.sub_ability.as_ref().expect("shuffle sub");
     let reveal = shuffle
         .sub_ability
         .as_ref()
