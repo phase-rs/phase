@@ -458,6 +458,20 @@ fn live_search_found_ids(
         .collect()
 }
 
+/// CR 701.20a + CR 701.20e + CR 401.2: a reveal lasts only as long as the
+/// instruction that caused it. A Dig looks at its window (a `reveal: true` dig
+/// makes those cards public) and a silent remainder (CR 701.20e) never moves the
+/// unchosen ones: they stay in the library. Leaving their `revealed_cards`
+/// markers in place would publish the POSITIONS they hold after the same
+/// instruction's own shuffle, disclosing the library order CR 401.2 keeps from
+/// every player. The reveal therefore ends here, at the boundary where the
+/// instruction stops needing those cards — without moving them.
+pub(crate) fn end_reveal_for_cards_left_in_library(state: &mut GameState, cards: &[ObjectId]) {
+    for card_id in cards {
+        state.revealed_cards.remove(card_id);
+    }
+}
+
 /// CR 614.6 + CR 701.23a: reveal only cards whose original found event still
 /// occurs. A replacement-modified card is delivered independently and never
 /// becomes part of the printed search instruction's reveal event or public
@@ -4766,7 +4780,19 @@ pub(super) fn handle_resolution_choice(
                         .find(|candidate| candidate.id == holder)
                         .expect("player exists");
                     // allow-raw-zone: looked-at cards remain library objects until a keep decision (CR 701.20b/e).
-                    player_state.library.retain(|id| !cards.contains(id));
+                    // CR 701.20e: a ROUTED remainder is lifted out with the kept
+                    // cards so it can be re-delivered (bottom or another zone). A
+                    // SILENT remainder is never moved, so only the kept cards leave
+                    // their slots — the unchosen ones keep the positions they
+                    // already had, relative to every card the instruction never
+                    // touched.
+                    player_state.library.retain(|id| {
+                        if rest_remainder.is_route() {
+                            !cards.contains(id)
+                        } else {
+                            !kept.contains(id)
+                        }
+                    });
                     for (index, &card_id) in kept.iter().enumerate() {
                         // allow-raw-zone: looked-at cards remain library objects until a keep decision (CR 701.20b/e).
                         player_state.library.insert(index, card_id);
@@ -4794,7 +4820,9 @@ pub(super) fn handle_resolution_choice(
                         }
                         Some(zone) => Some(zone),
                         // CR 701.20e: a silent remainder is never moved, so the
-                        // graveyard default does not apply to it.
+                        // graveyard default does not apply to it. The unchosen
+                        // cards were never lifted out of the library above, so
+                        // they are already back in the positions they had.
                         None if !rest_remainder.is_route() => None,
                         None => Some(Zone::Graveyard),
                     }
@@ -4803,6 +4831,13 @@ pub(super) fn handle_resolution_choice(
                 // information boundary as the shared reorder helper. Advance
                 // product knowledge before any unkept cards leave the library.
                 state.advance_library_knowledge_epoch(library_owner);
+                if !rest_remainder.is_route() {
+                    // CR 701.20a + CR 701.20e: the unchosen looked-at cards stay
+                    // in the library, so their reveal ends with the instruction
+                    // that caused it rather than publishing whatever positions a
+                    // later shuffle gives them (CR 401.2).
+                    end_reveal_for_cards_left_in_library(state, &unkept);
+                }
                 // CR 401.5 + CR 611.3a: Dig kept cards on top by editing the
                 // library directly, so a `TopOfLibraryMatches` static must be
                 // re-evaluated (self-gated on liveness).
@@ -4900,6 +4935,16 @@ pub(super) fn handle_resolution_choice(
                 let defer_rest_routing = state.active_ability_continuation().is_some_and(|cont| {
                     dig_continuation_needs_full_looked_at_tracked_set(&cont.chain)
                 });
+                // CR 701.20a + CR 701.20e: a silent remainder stays in the
+                // library, so its reveal has to end with the instruction that
+                // caused it. Hand those cards to the completion's marker
+                // cleanup, which runs once the kept delivery has settled and
+                // survives any replacement re-park in between.
+                let silent_remainder_markers = if rest_remainder.is_route() {
+                    Vec::new()
+                } else {
+                    unkept.clone()
+                };
                 let reqs = kept
                     .iter()
                     .map(|&obj_id| {
@@ -4940,7 +4985,7 @@ pub(super) fn handle_resolution_choice(
                         // survives an arbitrary number of replacement re-parks
                         // in between.
                         rest_split_top_count,
-                        clear_markers: Vec::new(),
+                        clear_markers: silent_remainder_markers,
                         publish_tracked_set: Some(publish_set),
                         publish_tracked_set_cause: publish_cause,
                         emit_reveal_until_resolved: None,
@@ -5072,6 +5117,13 @@ pub(super) fn handle_resolution_choice(
                         }
                     },
                 ));
+            }
+            if !rest_remainder.is_route() {
+                // CR 701.20a + CR 701.20e: this arm keeps the unchosen looked-at
+                // cards in the library, so end their reveal before any later
+                // step of the same resolution shuffles the library — the markers
+                // would otherwise pair each name with its new position (CR 401.2).
+                end_reveal_for_cards_left_in_library(state, &unkept);
             }
             effects::publish_fresh_tracked_set(state, publish_set);
             if let Some(frame) = state.active_ability_continuation_frame_mut() {

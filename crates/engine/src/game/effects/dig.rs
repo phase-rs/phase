@@ -526,6 +526,21 @@ fn resolve_mass_put_all(
         Vec::new()
     };
 
+    if !rest_remainder.is_route() {
+        // CR 701.20a + CR 701.20e: the mass-put form leaves its unchosen
+        // looked-at cards in the library, so their reveal ends with the
+        // instruction that caused it instead of publishing the positions a
+        // later shuffle gives them (CR 401.2).
+        let unkept: Vec<_> = cards
+            .iter()
+            .filter(|id| !selectable.contains(id))
+            .copied()
+            .collect();
+        crate::game::engine_resolution_choices::end_reveal_for_cards_left_in_library(
+            state, &unkept,
+        );
+    }
+
     // Route the (deterministic) rest pile first so a kept-card pause cannot
     // strand it. None => bottom of library (CR 701.20a "in a random order").
     match crate::game::engine_resolution_choices::route_rest_partition(
@@ -651,6 +666,82 @@ mod tests {
             ObjectId(100),
             PlayerId(0),
         )
+    }
+
+    /// CR 701.20a + CR 701.20e: the deterministic "put ALL matching cards" form
+    /// resolves with no choice prompt. With a silent remainder its unchosen
+    /// looked-at cards never move, so the reveal has to end here too — a marker
+    /// left on a library card pairs its name with the position any later shuffle
+    /// gives it, disclosing library order (CR 401.2).
+    #[test]
+    fn mass_put_all_with_a_silent_remainder_ends_the_reveal_of_the_unkept_cards() {
+        let mut state = GameState::new_two_player(42);
+        let mut cards = Vec::new();
+        for i in 0..3u64 {
+            let id = create_object(
+                &mut state,
+                CardId(i + 1),
+                PlayerId(0),
+                format!("Card {i}"),
+                Zone::Library,
+            );
+            if i == 0 {
+                state
+                    .objects
+                    .get_mut(&id)
+                    .unwrap()
+                    .card_types
+                    .core_types
+                    .push(CoreType::Land);
+            }
+            cards.push(id);
+        }
+        // A reveal-dig makes every looked-at card public while it runs.
+        for &card in &cards {
+            state.revealed_cards.insert(card);
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::Dig {
+                player: TargetFilter::Controller,
+                count: QuantityExpr::Fixed { value: 3 },
+                destination: Some(Zone::Battlefield),
+                keep_count: Some(u32::MAX),
+                keep_count_expr: None,
+                up_to: false,
+                filter: TargetFilter::Typed(TypedFilter::land()),
+                rest_destination: None,
+                rest_remainder: crate::types::ability::DigRestRemainder::StayInLibrary,
+                rest_split_top_count: None,
+                rest_order: DigRestOrder::Preserve,
+                reveal: true,
+                enter_tapped: true,
+                enters_attacking: false,
+                source: DigSource::Library,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // Positive reach guards: the deterministic form really resolved (no
+        // prompt) and the matching land really moved.
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::DigChoice { .. }),
+            "the deterministic mass form must not prompt, got {:?}",
+            state.waiting_for
+        );
+        assert_eq!(state.objects[&cards[0]].zone, Zone::Battlefield);
+        assert_eq!(state.objects[&cards[1]].zone, Zone::Library);
+        assert_eq!(state.objects[&cards[2]].zone, Zone::Library);
+        assert!(
+            !state.revealed_cards.contains(&cards[1]) && !state.revealed_cards.contains(&cards[2]),
+            "the reveal ends with the instruction that caused it, got {:?}",
+            state.revealed_cards
+        );
     }
 
     #[test]

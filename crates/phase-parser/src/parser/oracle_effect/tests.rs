@@ -95995,3 +95995,101 @@ fn mill_from_among_never_gets_the_silent_remainder_rule() {
         "a mill-from-among chain must not lower to Effect::Dig, got {effects:#?}"
     );
 }
+
+/// CR 701.20e + CR 608.2c — issue #7754: the STANDALONE entry point.
+///
+/// `parse_effect_chain` assembles and lowers one effect body; the card pipeline's
+/// silent-remainder pass (`parse_oracle_pipeline`) never runs for it, so resolving
+/// a Dig built through that entry point used to apply the `Route` graveyard
+/// default and move every unchosen looked-at card out of the library.
+#[test]
+fn standalone_chain_marks_a_silent_dig_remainder() {
+    let def = super::parse_effect_chain(
+        "look at the top twenty cards of your library, put any number of land cards from among \
+         them onto the battlefield tapped",
+        AbilityKind::Spell,
+    );
+
+    match &*def.effect {
+        Effect::Dig {
+            destination,
+            rest_destination,
+            rest_remainder,
+            ..
+        } => {
+            assert_eq!(*destination, Some(Zone::Battlefield));
+            assert_eq!(
+                *rest_destination, None,
+                "the instruction names no destination for the other looked-at cards"
+            );
+            assert_eq!(
+                *rest_remainder,
+                DigRestRemainder::StayInLibrary,
+                "CR 701.20e: a standalone chain must reach the same verdict as the \
+                 card pipeline — `Route` mills the unchosen cards"
+            );
+        }
+        other => panic!("expected Effect::Dig, got {other:?}"),
+    }
+}
+
+/// CR 701.20e + CR 608.2c: the REORDER form of the silent remainder.
+///
+/// "You may put one of those cards back on top of your library" lowers to a Dig
+/// with `destination: Some(Library)` and, when nothing about the others follows,
+/// `rest_destination: None`. That shape used to keep the `Route` default, which
+/// both sent the unchosen cards to the graveyard and (in the reorder arm) dropped
+/// them out of the library. Devourer of Destiny is the printed card that proves
+/// the clause parses; it adds "Exile the rest" (a routed remainder), so the
+/// silent form is exercised here as the clause pair the sequence parser accepts.
+#[test]
+fn put_one_back_on_top_without_a_rest_clause_keeps_the_others_in_the_library() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "Look at the top four cards of your library. You may put one of those cards back on top \
+         of your library.",
+        "Test Looker",
+        &[],
+        &["Creature".to_string()],
+        &[],
+    );
+    let root = parsed
+        .abilities
+        .first()
+        .expect("the look-at body must parse to one ability");
+    // The continuation patches the look-at Dig in place (destination Library);
+    // accept it chained behind the look step as well, so the assertion pins the
+    // SHAPE rather than the fold site.
+    let dig = if matches!(&*root.effect, Effect::Dig { .. }) {
+        root
+    } else {
+        root.sub_ability
+            .as_deref()
+            .expect("the \"put one back on top\" clause must patch or chain behind the Dig")
+    };
+
+    match &*dig.effect {
+        Effect::Dig {
+            destination,
+            rest_destination,
+            rest_remainder,
+            ..
+        } => {
+            assert_eq!(
+                *destination,
+                Some(Zone::Library),
+                "\"back on top of your library\" is the reorder form"
+            );
+            assert_eq!(
+                *rest_destination, None,
+                "the instruction says nothing about the other looked-at cards"
+            );
+            assert_eq!(
+                *rest_remainder,
+                DigRestRemainder::StayInLibrary,
+                "CR 701.20e: the unchosen cards stay in the library — the \
+                 `Route` default moves them out of it"
+            );
+        }
+        other => panic!("expected Effect::Dig, got {other:?}"),
+    }
+}

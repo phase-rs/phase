@@ -366,3 +366,107 @@ fn a_silent_remainder_is_never_moved_to_the_library_bottom() {
          would leave the same cards in a different order"
     );
 }
+
+/// The REORDER form of the same rule: "put one of those cards back on top of
+/// your library" and say nothing about the others. The choice handler lifts the
+/// looked-at cards out of the library so the kept one can take the top slot; on
+/// a silent remainder only the KEPT card is lifted, so the unchosen ones are
+/// never moved and never re-inserted (the `Route` default would both move them
+/// and, in this arm, drop them out of the library entirely).
+#[test]
+fn a_silent_remainder_in_the_reorder_form_keeps_the_unchosen_cards_in_place() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mut runner = scenario.build();
+
+    let above = add_library_card(&mut runner, "Above", false);
+    let kept = add_library_card(&mut runner, "Kept", false);
+    let below = add_library_card(&mut runner, "Below", false);
+    let deepest = add_library_card(&mut runner, "Deep Sentinel", false);
+    assert_eq!(library_ids(&runner), vec![above, kept, below, deepest]);
+
+    runner.state_mut().waiting_for = WaitingFor::DigChoice {
+        player: P0,
+        library_owner: P0,
+        cards: vec![above, kept, below],
+        selectable_cards: vec![above, kept, below],
+        keep_count: 1,
+        up_to: true,
+        kept_destination: Some(Zone::Library),
+        rest_destination: None,
+        rest_remainder: DigRestRemainder::StayInLibrary,
+        rest_split_top_count: None,
+        rest_order: DigRestOrder::Preserve,
+        source_id: None,
+        enter_tapped: false,
+        enters_attacking: false,
+    };
+
+    runner
+        .act(GameAction::SelectCards { cards: vec![kept] })
+        .expect("putting one looked-at card back on top must be accepted");
+
+    let st = runner.state();
+    assert!(
+        st.players[0].graveyard.is_empty(),
+        "CR 701.20e: nothing routes a card that was only looked at, got {:?}",
+        st.players[0].graveyard
+    );
+    assert_eq!(
+        library_ids(&runner),
+        vec![kept, above, below, deepest],
+        "the kept card takes the top; the unchosen looked-at cards are untouched, \
+         including their order above the deeper card"
+    );
+}
+
+/// CR 701.20a + CR 701.20e: a reveal-dig with a silent remainder ends the reveal
+/// at the choice's information boundary. The unchosen cards stay in the library,
+/// so a surviving `revealed_cards` marker would pair each name with the position
+/// it holds after any later shuffle in the same resolution (CR 401.2).
+#[test]
+fn a_silent_remainder_ends_the_reveal_of_the_cards_it_leaves_in_the_library() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let mut runner = scenario.build();
+
+    let above = add_library_card(&mut runner, "Above", false);
+    let land = add_library_card(&mut runner, "Land", true);
+    let below = add_library_card(&mut runner, "Below", false);
+    for card in [above, land, below] {
+        runner.state_mut().revealed_cards.insert(card);
+    }
+
+    runner.state_mut().waiting_for = WaitingFor::DigChoice {
+        player: P0,
+        library_owner: P0,
+        cards: vec![above, land, below],
+        selectable_cards: vec![land],
+        keep_count: 1,
+        up_to: true,
+        kept_destination: Some(Zone::Battlefield),
+        rest_destination: None,
+        rest_remainder: DigRestRemainder::StayInLibrary,
+        rest_split_top_count: None,
+        rest_order: DigRestOrder::Preserve,
+        source_id: None,
+        enter_tapped: true,
+        enters_attacking: false,
+    };
+
+    runner
+        .act(GameAction::SelectCards { cards: vec![land] })
+        .expect("putting the one land card onto the battlefield must be accepted");
+
+    let st = runner.state();
+    // Positive reach guard: the kept card really moved, so the cleanup ran on a
+    // path that had something to deliver.
+    assert_eq!(st.objects[&land].zone, Zone::Battlefield);
+    assert_eq!(st.objects[&above].zone, Zone::Library);
+    assert_eq!(st.objects[&below].zone, Zone::Library);
+    assert!(
+        !st.revealed_cards.contains(&above) && !st.revealed_cards.contains(&below),
+        "the reveal ends with the instruction that caused it, got {:?}",
+        st.revealed_cards
+    );
+}

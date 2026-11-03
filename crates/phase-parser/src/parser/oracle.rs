@@ -16,12 +16,12 @@ use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, ActivationManaPaymentRestriction,
     ActivationRestriction, AdditionalCost, CardPlayMode, CastManaSpentMetric, CastTimingPermission,
     CastingPermission, CastingRestriction, ChoiceType, ChosenSubtypeKind, ContinuousModification,
-    ControllerRef, CostReduction, CounterSourceRider, DamageRedirectTarget, DelayedTriggerCondition,
-    DigRestRemainder, Duration, Effect, EffectScope, FilterProp, GuardReading, ManaProduction,
-    ModalChoice, ParitySource, ParsedCondition, PlayerFilter, QuantityExpr, QuantityRef,
-    ReplacementDefinition, ReplacementMode, SolveCondition, SpellCastingOption, StaticCondition,
-    StaticDefinition, TapStateChange, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter,
-    TypedFilter, UnloweredGuard, VoteSubject,
+    ControllerRef, CostReduction, CounterSourceRider, DamageRedirectTarget,
+    DelayedTriggerCondition, DigRestRemainder, Duration, Effect, EffectScope, FilterProp,
+    GuardReading, ManaProduction, ModalChoice, ParitySource, ParsedCondition, PlayerFilter,
+    QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode, SolveCondition,
+    SpellCastingOption, StaticCondition, StaticDefinition, TapStateChange, TargetFilter,
+    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter, UnloweredGuard, VoteSubject,
 };
 use crate::types::ability_visit::{
     granter_symbols, visit_ability_def_scoped, DefinitionNode, DefinitionNodeMut, ResolutionScope,
@@ -9232,7 +9232,7 @@ pub fn parse_oracle_text(
 /// case.
 fn mark_silent_dig_remainder(def: &mut AbilityDefinition) {
     if let Effect::Dig {
-        destination: Some(kept_destination),
+        destination: Some(_),
         rest_destination,
         rest_split_top_count,
         keep_count,
@@ -9241,17 +9241,44 @@ fn mark_silent_dig_remainder(def: &mut AbilityDefinition) {
     } = &mut *def.effect
     {
         // `Some(0)` is a pure peek: nothing is ever moved, so the remainder
-        // routing is never reached. A kept destination of `Library` is the
-        // reorder form, which owns both piles through `rest_split_top_count` and
-        // `rest_order` instead.
-        if *kept_destination != Zone::Library
-            && !matches!(*keep_count, Some(0))
+        // routing is never reached. A `rest_split_top_count` with no
+        // `rest_destination` cannot exist (the split names its own bottom pile),
+        // so the split form never reaches this arm either.
+        //
+        // The KEPT destination is deliberately not inspected. Whether the chosen
+        // cards leave the library for another zone or are put back on top of it
+        // ("put one of those cards back on top of your library"), an instruction
+        // that says nothing about the others leaves those others where they are.
+        // A `Library` kept destination is handled by the choice handler's reorder
+        // arm, which puts the unchosen cards back beneath the kept ones — the same
+        // CR 701.20e outcome, not a move.
+        if !matches!(*keep_count, Some(0))
             && rest_destination.is_none()
             && rest_split_top_count.is_none()
         {
             *rest_remainder = DigRestRemainder::StayInLibrary;
         }
     }
+}
+
+/// CR 701.20e + CR 608.2c: [`mark_silent_dig_remainder`] over one finished
+/// ability tree. Every standalone entry point that lowers a single effect body
+/// ([`crate::parser::oracle_effect::parse_effect_chain`]) is its own complete
+/// parse — no later unit of a card can patch a remainder instruction into it —
+/// so it must apply the same rule the card pipeline applies once a card is fully
+/// assembled, rather than depending on a caller to do so.
+pub(crate) fn mark_silent_dig_remainders_in_ability(def: &mut AbilityDefinition) {
+    let _ = crate::types::ability_visit::nodes_mut::visit_ability_def(
+        def,
+        &mut mark_silent_dig_remainder_node,
+    );
+}
+
+fn mark_silent_dig_remainder_node(node: DefinitionNodeMut<'_>) -> ControlFlow<()> {
+    if let DefinitionNodeMut::Ability(def) = node {
+        mark_silent_dig_remainder(def);
+    }
+    ControlFlow::Continue(())
 }
 
 /// CR 701.20e: applies [`mark_silent_dig_remainder`] to every definition node of
@@ -9262,12 +9289,7 @@ fn mark_silent_dig_remainder(def: &mut AbilityDefinition) {
 /// covered by the same rule as a top-level spell line, instead of by whatever
 /// recursion set this pass happens to hand-roll.
 fn mark_silent_dig_remainders(parsed: &mut ParsedAbilities) {
-    let mut visit = |node: DefinitionNodeMut<'_>| {
-        if let DefinitionNodeMut::Ability(def) = node {
-            mark_silent_dig_remainder(def);
-        }
-        ControlFlow::Continue(())
-    };
+    let mut visit = mark_silent_dig_remainder_node;
     for ability in parsed.abilities.iter_mut() {
         let _ = crate::types::ability_visit::nodes_mut::visit_ability_def(ability, &mut visit);
     }
