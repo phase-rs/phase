@@ -6680,6 +6680,16 @@ impl<'de> Deserialize<'de> for PendingCounterRemovalQueue {
     }
 }
 
+/// An explicit delegation of one original batch member to its component batch.
+/// The capture key remains distinct from the event approved after replacements.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingComponentDeliveryParent {
+    pub parent_group_id: LogicalZoneChangeGroupId,
+    pub member: ObjectIncarnationRef,
+    pub expected_event: ProposedEvent,
+    pub approved_event: ProposedEvent,
+}
+
 /// CR 603.10a + CR 616.1: The not-yet-delivered tail of a simultaneous
 /// zone-move batch, parked when a per-object `Moved` replacement surfaces a
 /// replacement choice mid-batch (e.g. two simultaneously-applicable
@@ -6696,6 +6706,8 @@ impl<'de> Deserialize<'de> for PendingCounterRemovalQueue {
 /// name change.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PendingBatchDeliveries {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component_delivery_parent: Option<PendingComponentDeliveryParent>,
     pub logical_zone_change_group: LogicalZoneChangeGroup,
     /// The request that paused for replacement/as-enters resolution. This lives
     /// beside an empty tail when the last member paused, so the resumed delivery
@@ -26622,7 +26634,7 @@ pub(crate) mod replacement_library_placement_wire_tests {
         );
         let unrelated = wire["unrelated"].clone();
         let draw = wire["pending_replacement"].clone();
-        migrate_legacy_replacement_library_placement(&mut wire);
+        migrate_legacy_replacement_library_placement(&mut wire).unwrap();
         assert_eq!(
             wire["resolution_frames"][0]["nested"]["pending_entry"]["proposed"]["ZoneChange"]
                 ["library_placement"],
@@ -26636,7 +26648,7 @@ pub(crate) mod replacement_library_placement_wire_tests {
         assert_eq!(wire["unrelated"], unrelated);
         assert_eq!(wire["pending_replacement"], draw);
         let once = wire.clone();
-        migrate_legacy_replacement_library_placement(&mut wire);
+        migrate_legacy_replacement_library_placement(&mut wire).unwrap();
         assert_eq!(wire, once);
     }
 }
@@ -26644,46 +26656,232 @@ pub(crate) mod replacement_library_placement_wire_tests {
 /// Import only absent event placement from known legacy replacement carriers.
 /// Current null and current values must survive unchanged, including malformed
 /// values that typed decoding will reject.
-fn migrate_legacy_replacement_library_placement(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Array(values) => {
-            for value in values {
-                migrate_legacy_replacement_library_placement(value);
-            }
-        }
-        serde_json::Value::Object(object) => {
-            for key in ["pending_replacement", "pending_entry", "outer_replacement"] {
-                let Some(carrier) = object
-                    .get_mut(key)
-                    .and_then(serde_json::Value::as_object_mut)
-                else {
-                    continue;
-                };
-                let mirror = carrier
-                    .get("library_placement")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null);
-                let Some(event) = carrier
-                    .get_mut("proposed")
-                    .and_then(|proposed| proposed.get_mut("ZoneChange"))
-                    .and_then(serde_json::Value::as_object_mut)
-                else {
-                    continue;
-                };
-                let placement =
-                    if event.get("to").and_then(serde_json::Value::as_str) == Some("Library") {
-                        mirror
-                    } else {
-                        serde_json::Value::Null
-                    };
-                event.entry("library_placement").or_insert(placement);
-            }
-            for value in object.values_mut() {
-                migrate_legacy_replacement_library_placement(value);
-            }
-        }
-        _ => {}
+fn migrate_legacy_replacement_library_placement(
+    value: &mut serde_json::Value,
+) -> Result<(), String> {
+    use serde_json::Value;
+
+    fn child_path(path: &str, key: &str) -> String {
+        format!("{path}/{}", key.replace('~', "~0").replace('/', "~1"))
     }
+
+    fn event_without_placement(event: &Value) -> Value {
+        let mut event = event.clone();
+        if let Some(zone) = event.get_mut("ZoneChange").and_then(Value::as_object_mut) {
+            zone.remove("library_placement");
+        }
+        event
+    }
+
+    fn placement(event: &Value, mirror: &Value) -> Value {
+        event["ZoneChange"]
+            .get("library_placement")
+            .cloned()
+            .unwrap_or_else(|| {
+                if event["ZoneChange"]["to"].as_str() == Some("Library") {
+                    mirror.clone()
+                } else {
+                    Value::Null
+                }
+            })
+    }
+
+    fn retain_edit(
+        snapshot: &Value,
+        edits: &mut BTreeMap<String, Value>,
+        event_path: &str,
+        placement: &Value,
+    ) -> Result<(), String> {
+        let path = format!("{event_path}/ZoneChange/library_placement");
+        if let Some(current) = snapshot.pointer(&path) {
+            if current != placement {
+                return Err(
+                    "conflicting replacement library placement in exact owner copies".into(),
+                );
+            }
+        } else if let Some(previous) = edits.insert(path, placement.clone()) {
+            if previous != *placement {
+                return Err("ambiguous replacement library placement for one owner copy".into());
+            }
+        }
+        Ok(())
+    }
+
+    fn frame_owner(frame: &Value, path: &str) -> Option<String> {
+        match frame["type"].as_str() {
+            Some("BatchDelivery") => Some(format!("{path}/data")),
+            Some("ChangeZone") => Some(format!("{path}/data/pending")),
+            _ => None,
+        }
+    }
+
+    // Paths refer exclusively to the immutable original wire. In particular,
+    // normalizing a proposal cannot change the key used to associate its owner.
+    fn collect(
+        snapshot: &Value,
+        node: &Value,
+        path: &str,
+        enclosing_owners: &[String],
+        edits: &mut BTreeMap<String, Value>,
+    ) -> Result<(), String> {
+        match node {
+            Value::Array(values) => {
+                for (index, value) in values.iter().enumerate() {
+                    collect(
+                        snapshot,
+                        value,
+                        &child_path(path, &index.to_string()),
+                        enclosing_owners,
+                        edits,
+                    )?;
+                }
+            }
+            Value::Object(object) => {
+                let mut local_owners = enclosing_owners.to_vec();
+                // Runtime capture is top-only. Older independent owners below
+                // this frame are not candidates, even with identical events.
+                if object.contains_key("resolution_stack")
+                    || object.contains_key("resolution_frames")
+                {
+                    local_owners.clear();
+                    for key in ["resolution_stack", "resolution_frames"] {
+                        let Some(stack) = object.get(key) else {
+                            continue;
+                        };
+                        // Raw live state wraps frames in `{"frames": [...]}`; the
+                        // versioned resolution wire serializes the transparent
+                        // frame vector as a bare array.
+                        let (frames, frames_path) =
+                            match stack.get("frames").and_then(Value::as_array) {
+                                Some(frames) => (frames, format!("{path}/{key}/frames")),
+                                None => match stack.as_array() {
+                                    Some(frames) => (frames, format!("{path}/{key}")),
+                                    None => continue,
+                                },
+                            };
+                        if let Some((index, frame)) = frames.iter().enumerate().next_back() {
+                            if let Some(owner) =
+                                frame_owner(frame, &format!("{frames_path}/{index}"))
+                            {
+                                local_owners.push(owner);
+                            }
+                        }
+                    }
+                }
+                for key in ["pending_batch_deliveries", "pending_change_zone_iteration"] {
+                    if object.get(key).is_some_and(|owner| !owner.is_null()) {
+                        local_owners.push(child_path(path, key));
+                    }
+                }
+                // A carrier inside a typed frame belongs to that frame, not
+                // to a different frame selected by its surrounding stack.
+                if object.contains_key("type") && object.contains_key("data") {
+                    local_owners = frame_owner(node, path).into_iter().collect();
+                }
+                for key in ["pending_replacement", "pending_entry", "outer_replacement"] {
+                    let Some(carrier) = object.get(key).filter(|value| value.is_object()) else {
+                        continue;
+                    };
+                    let carrier_path = child_path(path, key);
+                    let proposal = &carrier["proposed"];
+                    let mirror = carrier.get("library_placement").unwrap_or(&Value::Null);
+                    if proposal.get("ZoneChange").is_some() {
+                        retain_edit(
+                            snapshot,
+                            edits,
+                            &format!("{carrier_path}/proposed"),
+                            &placement(proposal, mirror),
+                        )?;
+                    }
+                    let (boundary, boundary_path) = match carrier
+                        .get("delivery_boundary")
+                        .filter(|event| !event.is_null())
+                    {
+                        Some(event) => (event, format!("{carrier_path}/delivery_boundary")),
+                        None => (proposal, format!("{carrier_path}/proposed")),
+                    };
+                    if boundary.get("ZoneChange").is_none() {
+                        continue;
+                    }
+                    let boundary_placement = placement(boundary, mirror);
+                    retain_edit(snapshot, edits, &boundary_path, &boundary_placement)?;
+                    let mut associated = Vec::new();
+                    for owner_path in &local_owners {
+                        let Some(owner) = snapshot.pointer(owner_path) else {
+                            continue;
+                        };
+                        let paused = &owner["paused_current"];
+                        let expected = &paused["expected_event"];
+                        if event_without_placement(expected) != event_without_placement(boundary) {
+                            continue;
+                        }
+                        let member: ObjectIncarnationRef =
+                            serde_json::from_value(paused["member"].clone()).map_err(|error| {
+                                format!("invalid replacement delivery member: {error}")
+                            })?;
+                        if serde_json::to_value(member.object_id)
+                            .map_err(|error| error.to_string())?
+                            != boundary["ZoneChange"]["object_id"]
+                        {
+                            return Err(
+                                "replacement delivery boundary disagrees with retained member"
+                                    .into(),
+                            );
+                        }
+                        associated.push((owner_path, owner));
+                    }
+                    // Duplicate representations must identify the same owner,
+                    // including the retained incarnation and logical group.
+                    if let Some((_, first)) = associated.first() {
+                        for (_, other) in associated.iter().skip(1) {
+                            if first["logical_zone_change_group"]
+                                != other["logical_zone_change_group"]
+                                || first["paused_current"]["member"]
+                                    != other["paused_current"]["member"]
+                            {
+                                return Err(
+                                    "ambiguous replacement delivery owner association".into()
+                                );
+                            }
+                        }
+                    }
+                    for (owner_path, _) in associated {
+                        retain_edit(
+                            snapshot,
+                            edits,
+                            &format!("{owner_path}/paused_current/expected_event"),
+                            &boundary_placement,
+                        )?;
+                    }
+                }
+                for (key, value) in object {
+                    collect(
+                        snapshot,
+                        value,
+                        &child_path(path, key),
+                        &local_owners,
+                        edits,
+                    )?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    let mut edits = BTreeMap::new();
+    collect(value, value, "", &[], &mut edits)?;
+    for (path, placement) in edits {
+        let parent = path
+            .strip_suffix("/library_placement")
+            .expect("placement edit path");
+        value
+            .pointer_mut(parent)
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| "replacement placement migration lost its event".to_string())?
+            .insert("library_placement".into(), placement);
+    }
+    Ok(())
 }
 
 fn migrate_legacy_graveyard_paid_cast_cleanup(value: &mut serde_json::Value) -> Result<(), String> {
@@ -27936,7 +28134,7 @@ impl GameStateDecode {
         migrate_legacy_attack_exert_conditions(&mut value)?;
         migrate_legacy_spell_cost_elections(&mut value)?;
         migrate_legacy_graveyard_paid_cast_cleanup(&mut value)?;
-        migrate_legacy_replacement_library_placement(&mut value);
+        migrate_legacy_replacement_library_placement(&mut value)?;
         migrate_legacy_shortcut_repetition_bound(&mut value)?;
         migrate_legacy_offer_road(&mut value);
         let mut state = Self::materialize_prepared(value)?;
@@ -28006,7 +28204,7 @@ impl GameStateDecode {
         migrate_legacy_attack_exert_conditions(value)?;
         migrate_legacy_spell_cost_elections(value)?;
         migrate_legacy_graveyard_paid_cast_cleanup(value)?;
-        migrate_legacy_replacement_library_placement(value);
+        migrate_legacy_replacement_library_placement(value)?;
         migrate_legacy_shortcut_repetition_bound(value)?;
         migrate_legacy_offer_road(value);
         Ok(())
@@ -58238,6 +58436,7 @@ mod restored_exact_attack_authority_tests {
                         .latch_immediately_before(Vec::new(), Vec::new())
                         .expect("test batch owner has explicit pre-delivery authority");
                     state.push_batch_delivery(PendingBatchDeliveries {
+                        component_delivery_parent: None,
                         logical_zone_change_group: group,
                         paused_current: None,
                         remaining: Vec::new(),

@@ -1785,6 +1785,142 @@ impl ResolutionStack {
         }
     }
 
+    fn validate_component_parent(
+        child: &PendingBatchDeliveries,
+        parent: &PendingBatchDeliveries,
+    ) -> Result<(), ResolutionStackError> {
+        let valid = child.component_delivery_parent.as_ref().is_some_and(|link| {
+            link.parent_group_id == parent.logical_zone_change_group.logical_group_id
+                && link.parent_group_id != child.logical_zone_change_group.logical_group_id
+                && parent.paused_current.as_ref().is_some_and(|paused| {
+                    paused.captures(link.member, &link.expected_event)
+                        && paused.terminal_completion.is_none()
+                })
+                && matches!(&link.expected_event, crate::types::proposed_event::ProposedEvent::ZoneChange { object_id, .. } if *object_id == link.member.object_id)
+                && matches!(&link.approved_event, crate::types::proposed_event::ProposedEvent::ZoneChange { object_id, .. } if *object_id == link.member.object_id)
+                && child.logical_zone_change_group.prospective_battlefield_members.iter()
+                    .any(|member| member.identity == link.member)
+        });
+        if valid {
+            Ok(())
+        } else {
+            Err(ResolutionStackError::InvalidPayload {
+                frame: FrameKind::BatchDelivery,
+                message: "component delivery does not identify its immediate original owner".into(),
+            })
+        }
+    }
+
+    /// Access only the active owner or the explicitly linked immediate parent.
+    pub(crate) fn batch_delivery_owner_mut(
+        &mut self,
+        group: crate::types::identifiers::LogicalZoneChangeGroupId,
+    ) -> Result<&mut PendingBatchDeliveries, ResolutionStackError> {
+        let top = self.frames.top().ok_or(ResolutionStackError::Empty)?;
+        let slot = match self.frames.get(top) {
+            Some(ResolutionFrame::BatchDelivery(batch))
+                if batch.logical_zone_change_group.logical_group_id == group =>
+            {
+                top
+            }
+            Some(ResolutionFrame::BatchDelivery(child)) => {
+                let below = self
+                    .frames
+                    .below(top)
+                    .ok_or(ResolutionStackError::NoActiveChild)?;
+                let Some(ResolutionFrame::BatchDelivery(parent)) = self.frames.get(below) else {
+                    return Err(ResolutionStackError::NoActiveChild);
+                };
+                Self::validate_component_parent(child, parent)?;
+                if parent.logical_zone_change_group.logical_group_id != group {
+                    return Err(ResolutionStackError::NoActiveChild);
+                }
+                below
+            }
+            _ => return Err(ResolutionStackError::NoActiveChild),
+        };
+        let Some(ResolutionFrame::BatchDelivery(batch)) = self.frames.get_mut(slot) else {
+            unreachable!()
+        };
+        Ok(batch)
+    }
+
+    /// Install a synchronous original owner below its explicitly named child,
+    /// or replace that same owner when its next member delegates a delivery.
+    pub(crate) fn park_batch_owner(
+        &mut self,
+        pending: PendingBatchDeliveries,
+    ) -> Result<(), ResolutionStackError> {
+        let group = pending.logical_zone_change_group.logical_group_id;
+        let linked = self.active_batch_delivery().is_some_and(|child| {
+            child
+                .component_delivery_parent
+                .as_ref()
+                .is_some_and(|link| link.parent_group_id == group)
+        });
+        if !linked {
+            if self
+                .active_batch_delivery()
+                .is_some_and(|batch| batch.logical_zone_change_group.logical_group_id == group)
+            {
+                return self.replace_active_batch_delivery(pending);
+            }
+            if self.frames.iter().any(|frame| matches!(frame, ResolutionFrame::BatchDelivery(batch) if batch.logical_zone_change_group.logical_group_id == group)) {
+                return Err(ResolutionStackError::NoActiveChild);
+            }
+            self.push_batch_delivery(pending);
+            return Ok(());
+        }
+        Self::validate_component_parent(
+            self.active_batch_delivery().expect("checked child"),
+            &pending,
+        )?;
+        let existing = self.frames.iter().filter(|frame| matches!(frame, ResolutionFrame::BatchDelivery(batch) if batch.logical_zone_change_group.logical_group_id == group)).count();
+        if existing > 0 {
+            // Validate before popping: only the identified immediate parent can be replaced.
+            self.batch_delivery_owner_mut(group)?;
+        }
+        if existing > 1 {
+            return Err(ResolutionStackError::NoActiveChild);
+        }
+        let child = self.take_active_batch_delivery()?.expect("checked child");
+        if existing == 1 {
+            self.replace_active_batch_delivery(pending)?;
+        } else {
+            self.push_batch_delivery(pending);
+        }
+        self.push_batch_delivery(child);
+        Ok(())
+    }
+
+    /// Mutably accesses a BatchDelivery owner while its exact active
+    pub(crate) fn visit_active_component_delivery_pair_mut(
+        &mut self,
+        mut visit: impl FnMut(&mut PendingBatchDeliveries),
+    ) -> Result<(), ResolutionStackError> {
+        let linked = self
+            .active_batch_delivery()
+            .and_then(|child| child.component_delivery_parent.clone());
+        if let Some(link) = linked {
+            let parent = self.batch_delivery_owner_mut(link.parent_group_id)?;
+            visit(parent);
+            let canceled = parent
+                .paused_current
+                .as_ref()
+                .is_none_or(|paused| !paused.captures(link.member, &link.expected_event));
+            let child = self
+                .active_batch_delivery_mut()
+                .expect("checked active child");
+            if canceled {
+                child.component_delivery_parent = None;
+            }
+            visit(child);
+        } else if let Some(active) = self.active_batch_delivery_mut() {
+            visit(active);
+        }
+        Ok(())
+    }
+
     /// Mutably accesses a BatchDelivery owner while its exact active
     /// PostReplacement child finishes an as-enters copy choice. This fixed
     /// parent/child relation lets the copy-choice path record the resumed zone
@@ -3933,6 +4069,27 @@ impl ResolutionStack {
         let mut direct_choice_count = 0;
         let mut buried_direct_choice = None;
         for (index, frame) in self.frames.iter().enumerate() {
+            if let ResolutionFrame::BatchDelivery(child) = frame {
+                if let Some(link) = &child.component_delivery_parent {
+                    let parent = index.checked_sub(1).and_then(|i| self.frames.iter().nth(i));
+                    let Some(ResolutionFrame::BatchDelivery(parent)) = parent else {
+                        return Err(ResolutionStackError::InvalidPayload {
+                            frame: FrameKind::BatchDelivery,
+                            message: "component delivery has no immediate batch parent".into(),
+                        });
+                    };
+                    Self::validate_component_parent(child, parent)?;
+                    for id in [
+                        link.parent_group_id,
+                        child.logical_zone_change_group.logical_group_id,
+                    ] {
+                        if self.frames.iter().filter(|frame| matches!(frame, ResolutionFrame::BatchDelivery(batch) if batch.logical_zone_change_group.logical_group_id == id)).count() != 1 {
+                            return Err(ResolutionStackError::InvalidPayload { frame: FrameKind::BatchDelivery,
+                                message: "duplicate component delivery group".into() });
+                        }
+                    }
+                }
+            }
             if matches!(frame.gate(), FrameGate::DirectChoice(_)) {
                 direct_choice_count += 1;
                 if index + 1 != self.frames.len() {
@@ -6768,6 +6925,7 @@ mod tests {
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("empty batch group retains its pre-delivery latch");
         ResolutionFrame::BatchDelivery(Box::new(PendingBatchDeliveries {
+            component_delivery_parent: None,
             logical_zone_change_group,
             paused_current: None,
             remaining: Vec::new(),
@@ -6783,6 +6941,197 @@ mod tests {
             zone_change_record_start: state.zone_changes_this_turn.len(),
             deferred_events: Vec::new(),
         }))
+    }
+
+    fn component_batch_pair(
+        seed: u64,
+    ) -> (
+        ResolutionStack,
+        crate::types::identifiers::ObjectIncarnationRef,
+        ProposedEvent,
+    ) {
+        use crate::types::game_state::{PendingComponentDeliveryParent, PendingZoneChangeDelivery};
+        use crate::types::identifiers::ObjectIncarnationRef;
+
+        let mut state = GameState::new_two_player(seed);
+        let object = crate::game::zones::create_object(
+            &mut state,
+            CardId(seed),
+            PlayerId(0),
+            "component".to_string(),
+            Zone::Battlefield,
+        );
+        let identity = ObjectIncarnationRef::of(object, state.objects[&object].incarnation);
+        let event = ProposedEvent::zone_change(object, Zone::Battlefield, Zone::Library, None);
+        let mut parent_group = state.allocate_logical_zone_change_group(&[object]);
+        parent_group
+            .latch_immediately_before(Vec::new(), Vec::new())
+            .expect("parent group latches");
+        let parent_group_id = parent_group.logical_group_id;
+        let mut child_group = state.allocate_logical_zone_change_group(&[object]);
+        child_group
+            .latch_immediately_before(Vec::new(), Vec::new())
+            .expect("child group latches");
+        let batch = |group, paused_current, relation| PendingBatchDeliveries {
+            component_delivery_parent: relation,
+            logical_zone_change_group: group,
+            paused_current,
+            remaining: Vec::new(),
+            destination: Zone::Library,
+            source_id: None,
+            enter_tapped: EtbTapState::Unspecified,
+            exile_tracking: ZoneDeliveryExileTracking::None,
+            library_placement: None,
+            completion: None,
+            replacement_applied: HashSet::new(),
+            requests: Vec::new(),
+            attempted: Vec::new(),
+            zone_change_record_start: 0,
+            deferred_events: Vec::new(),
+        };
+        let parent = batch(
+            parent_group,
+            Some(PendingZoneChangeDelivery::new(identity, event.clone())),
+            None,
+        );
+        let child = batch(
+            child_group,
+            None,
+            Some(PendingComponentDeliveryParent {
+                parent_group_id,
+                member: identity,
+                expected_event: event.clone(),
+                approved_event: event.clone(),
+            }),
+        );
+        let mut stack = ResolutionStack::default();
+        stack.push_inner(ResolutionFrame::BatchDelivery(Box::new(parent)));
+        stack.push_inner(ResolutionFrame::BatchDelivery(Box::new(child)));
+        (stack, identity, event)
+    }
+
+    #[test]
+    fn component_delivery_relation_requires_exact_parent_and_member() {
+        use crate::types::game_state::PendingZoneChangeDelivery;
+        let waiting = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        let (valid, identity, event) = component_batch_pair(310);
+        valid
+            .validate(&waiting)
+            .expect("the exact parent/child relation validates");
+
+        let (mut wrong_event, _, _) = component_batch_pair(311);
+        wrong_event
+            .active_batch_delivery_mut()
+            .expect("child owns the top")
+            .component_delivery_parent
+            .as_mut()
+            .expect("child retains its relation")
+            .expected_event = ProposedEvent::zone_change(
+            crate::types::identifiers::ObjectId(9_998),
+            Zone::Battlefield,
+            Zone::Graveyard,
+            None,
+        );
+        assert!(
+            wrong_event.validate(&waiting).is_err(),
+            "a different expected event does not identify the parent boundary"
+        );
+
+        let (mut wrong_incarnation, _, _) = component_batch_pair(312);
+        wrong_incarnation
+            .active_batch_delivery_mut()
+            .expect("child owns the top")
+            .component_delivery_parent
+            .as_mut()
+            .expect("child retains its relation")
+            .member = crate::types::identifiers::ObjectIncarnationRef::of(
+            identity.object_id,
+            identity.incarnation + 1,
+        );
+        assert!(
+            wrong_incarnation.validate(&waiting).is_err(),
+            "a same-id new incarnation cannot stand in for the parked member"
+        );
+
+        let (mut wrong_approved, _, _) = component_batch_pair(313);
+        wrong_approved
+            .active_batch_delivery_mut()
+            .expect("child owns the top")
+            .component_delivery_parent
+            .as_mut()
+            .expect("child retains its relation")
+            .approved_event = ProposedEvent::zone_change(
+            crate::types::identifiers::ObjectId(9_999),
+            Zone::Battlefield,
+            Zone::Graveyard,
+            None,
+        );
+        assert!(
+            wrong_approved.validate(&waiting).is_err(),
+            "the approved event must retain the original member"
+        );
+
+        let (mut missing_parent, _, _) = component_batch_pair(314);
+        let child = missing_parent
+            .take_active_batch_delivery()
+            .expect("child owns the top")
+            .expect("child frame exists");
+        let mut lone_child = ResolutionStack::default();
+        lone_child.push_batch_delivery(child);
+        assert!(
+            lone_child.validate(&waiting).is_err(),
+            "a relation without its immediate batch parent is rejected"
+        );
+
+        let (mut duplicate_group, _, _) = component_batch_pair(315);
+        let owner = duplicate_group
+            .batch_delivery_owner_mut(
+                duplicate_group
+                    .active_batch_delivery()
+                    .expect("child owns the top")
+                    .component_delivery_parent
+                    .as_ref()
+                    .expect("child retains its relation")
+                    .parent_group_id,
+            )
+            .expect("the parent is addressable")
+            .clone();
+        duplicate_group.push_batch_delivery(owner);
+        assert!(
+            duplicate_group.validate(&waiting).is_err(),
+            "one logical component group cannot be installed twice"
+        );
+
+        let (mut mismatched_member, _, _) = component_batch_pair(316);
+        let parent_group = mismatched_member
+            .active_batch_delivery()
+            .expect("child owns the top")
+            .component_delivery_parent
+            .as_ref()
+            .expect("child retains its relation")
+            .parent_group_id;
+        let mismatched_owner = crate::types::identifiers::ObjectIncarnationRef::of(
+            event_object_id(&event),
+            identity.incarnation + 1,
+        );
+        mismatched_member
+            .batch_delivery_owner_mut(parent_group)
+            .expect("the parent is addressable")
+            .paused_current = Some(PendingZoneChangeDelivery::new(mismatched_owner, event));
+        assert!(
+            mismatched_member.validate(&waiting).is_err(),
+            "the parent's paused member must be the delegated incarnation"
+        );
+
+        fn event_object_id(event: &ProposedEvent) -> crate::types::identifiers::ObjectId {
+            match event {
+                ProposedEvent::ZoneChange { object_id, .. } => *object_id,
+                _ => unreachable!(),
+            }
+        }
     }
 
     #[test]
@@ -8601,6 +8950,7 @@ mod tests {
             .latch_immediately_before(Vec::new(), Vec::new())
             .expect("empty batch group retains its pre-delivery latch");
         let pending = PendingBatchDeliveries {
+            component_delivery_parent: None,
             logical_zone_change_group,
             paused_current: None,
             remaining: Vec::new(),

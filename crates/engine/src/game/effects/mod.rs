@@ -63305,6 +63305,7 @@ mod entry_observation_settlement_tests {
                 .latch_immediately_before(Vec::new(), Vec::new())
                 .expect("empty batch group retains its pre-delivery latch");
             let pending = PendingBatchDeliveries {
+                component_delivery_parent: None,
                 logical_zone_change_group,
                 paused_current: None,
                 remaining: Vec::new(),

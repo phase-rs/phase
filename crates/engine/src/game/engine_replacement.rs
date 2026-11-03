@@ -409,6 +409,22 @@ fn handle_replacement_choice_inner(
     // pre-move incarnation and the exact proposed event. Capture this before
     // `continue_replacement` consumes the pending record.
     let parked_zone_change_delivery = state.pending_zone_change_delivery_from_replacement();
+    let batch_member_owner = parked_zone_change_delivery.as_ref().and_then(|paused| {
+        state
+            .active_batch_delivery()
+            .filter(|batch| {
+                batch.paused_current.as_ref().is_some_and(|boundary| {
+                    boundary.captures(paused.member, &paused.expected_event)
+                })
+            })
+            .map(
+                |batch| crate::game::zone_pipeline::BatchMemberDeliveryOwner {
+                    group: batch.logical_zone_change_group.logical_group_id,
+                    member: paused.member,
+                    expected_event: Some(paused.expected_event.clone()),
+                },
+            )
+    });
     let parked_phase_begin = state
         .pending_replacement
         .as_ref()
@@ -490,7 +506,7 @@ fn handle_replacement_choice_inner(
                         unreachable!("arm pattern guarantees a ZoneChange payload");
                     };
                     let delivery_start = events.len();
-                    match crate::game::zone_pipeline::deliver(
+                    match crate::game::zone_pipeline::deliver_batch_member(
                         state,
                         approved,
                         crate::game::zone_pipeline::DeliveryCtx {
@@ -505,6 +521,7 @@ fn handle_replacement_choice_inner(
                             // The approved event carries the final placement.
                             library_placement: None,
                         },
+                        batch_member_owner,
                         events,
                     ) {
                         crate::game::zone_pipeline::ZoneDeliveryResult::Done => {}
