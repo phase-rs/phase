@@ -15,6 +15,7 @@ use crate::validation::{
     JoinGameWithPasswordFields, LookupJoinTargetFields, MAX_PLAYER_COUNT,
 };
 use engine::starter_decks::DeckData;
+use engine::types::card_printing::{validate_deck_printings_bounds, MAX_DECK_PRINTING_ENTRIES};
 use engine::types::format::FormatConfig;
 
 /// Generous ceiling on main-deck entries at the wire boundary. Engine deck
@@ -29,8 +30,38 @@ pub const MAX_COMMANDER_ENTRIES: usize = 4;
 pub const MAX_PLANAR_DECK_ENTRIES: usize = 200;
 /// Max supplementary Archenemy scheme-deck entries accepted on the wire.
 pub const MAX_SCHEME_DECK_ENTRIES: usize = 200;
-/// Max byte length of a single card name string inside a deck payload.
-pub const MAX_DECK_CARD_NAME_LEN: usize = 256;
+/// Max companion entries accepted on the wire (CR 702.139a: a player reveals one
+/// companion; 4 mirrors the commander slots' headroom).
+pub const MAX_COMPANION_ENTRIES: usize = 4;
+/// Max signature-spell entries accepted on the wire (an Oathbreaker deck has one
+/// signature spell per oathbreaker, so at most as many as commander slots).
+pub const MAX_SIGNATURE_SPELL_ENTRIES: usize = 4;
+/// Max supplementary Attraction-deck entries accepted on the wire (CR 717.2a sets a
+/// minimum number of cards and no maximum; 200 mirrors the other supplementary decks).
+pub const MAX_ATTRACTION_DECK_ENTRIES: usize = 200;
+/// Max supplementary Contraption-deck entries accepted on the wire (Contraptions are
+/// outside the Comprehensive Rules, CR 701.45a; 200 mirrors the other supplementary decks).
+pub const MAX_CONTRAPTION_DECK_ENTRIES: usize = 200;
+/// Max byte length of a single card name string inside a deck payload. Defined once
+/// in the engine (`engine::types::card_printing`), where the printings sidecar's
+/// bound reads it too; re-exported so this path stays valid.
+pub use engine::types::card_printing::MAX_DECK_CARD_NAME_LEN;
+
+// A sidecar annotates at most every card copy of its list, so the engine's entry cap
+// must cover a deck at every name-list ceiling. Raising a name-list ceiling must not
+// make a legitimate sidecar abusive.
+const _: () = assert!(
+    MAX_DECK_PRINTING_ENTRIES
+        >= MAX_MAIN_DECK_ENTRIES
+            + MAX_SIDEBOARD_ENTRIES
+            + MAX_COMMANDER_ENTRIES
+            + MAX_COMPANION_ENTRIES
+            + MAX_ATTRACTION_DECK_ENTRIES
+            + MAX_PLANAR_DECK_ENTRIES
+            + MAX_SCHEME_DECK_ENTRIES
+            + MAX_CONTRAPTION_DECK_ENTRIES
+            + MAX_SIGNATURE_SPELL_ENTRIES
+);
 
 fn validate_card_name(field: &str, name: &str) -> Result<(), String> {
     if name.is_empty() {
@@ -59,9 +90,11 @@ pub fn validate_deck_list(field: &str, cards: &[String], max_entries: usize) -> 
     Ok(())
 }
 
-/// Bound the deck half of Create/Join lobby messages. Lobby-only mode ignores
-/// deck contents for matchmaking, but the native shell still deserializes and
-/// clones the full structure on every frame.
+/// Bound the deck half of Create/Join lobby messages: every card-section name list,
+/// and the printings sidecar through the engine's single bound
+/// (`validate_deck_printings_bounds`). Sticker sheets are not bounded here (recorded
+/// pre-existing gap). Lobby-only mode ignores deck contents for matchmaking, but the
+/// native shell still deserializes and clones the full structure on every frame.
 pub fn validate_deck_payload(field: &str, deck: &DeckData) -> Result<(), String> {
     validate_deck_list(
         &format!("{field}.main_deck"),
@@ -88,7 +121,27 @@ pub fn validate_deck_payload(field: &str, deck: &DeckData) -> Result<(), String>
         &deck.scheme_deck,
         MAX_SCHEME_DECK_ENTRIES,
     )?;
-    Ok(())
+    validate_deck_list(
+        &format!("{field}.companion"),
+        &deck.companion,
+        MAX_COMPANION_ENTRIES,
+    )?;
+    validate_deck_list(
+        &format!("{field}.attraction_deck"),
+        &deck.attraction_deck,
+        MAX_ATTRACTION_DECK_ENTRIES,
+    )?;
+    validate_deck_list(
+        &format!("{field}.contraption_deck"),
+        &deck.contraption_deck,
+        MAX_CONTRAPTION_DECK_ENTRIES,
+    )?;
+    validate_deck_list(
+        &format!("{field}.signature_spell"),
+        &deck.signature_spell,
+        MAX_SIGNATURE_SPELL_ENTRIES,
+    )?;
+    validate_deck_printings_bounds(&format!("{field}.printings"), &deck.printings)
 }
 
 pub struct CreateGameSettingsInbound<'a> {
@@ -471,5 +524,125 @@ mod tests {
         .unwrap_err();
 
         assert!(err.contains("game_code"));
+    }
+
+    /// Runs `deck` through both deck-carrying guards, which must agree.
+    fn guard_both(deck: &DeckData) -> (Result<(), String>, Result<(), String>) {
+        let create = guard_create_game_settings_inbound(CreateGameSettingsInbound {
+            deck,
+            display_name: "Host",
+            password: None,
+            timer_seconds: None,
+            player_count: 2,
+            format_config: None,
+            room_name: None,
+            host_peer_id: None,
+            draft_metadata: None,
+            requested_code: None,
+        });
+        let join = guard_join_game_with_password_inbound(JoinGameWithPasswordInbound {
+            game_code: "GAME01",
+            deck,
+            display_name: "Guest",
+            password: None,
+            reservation_token: None,
+        });
+        (create, join)
+    }
+
+    /// P2-V3 (D9): the four sections that had no ceiling take the existing sections'
+    /// count and per-name checks: a reach guard at the ceiling, then ceiling + 1 and a
+    /// control-character name refused naming the section.
+    #[test]
+    fn d9_sections_are_bounded_like_the_existing_name_lists() {
+        type Section = fn(&mut DeckData) -> &mut Vec<String>;
+        let sections: [(&str, usize, Section); 4] = [
+            ("companion", MAX_COMPANION_ENTRIES, |d| &mut d.companion),
+            ("attraction_deck", MAX_ATTRACTION_DECK_ENTRIES, |d| {
+                &mut d.attraction_deck
+            }),
+            ("contraption_deck", MAX_CONTRAPTION_DECK_ENTRIES, |d| {
+                &mut d.contraption_deck
+            }),
+            ("signature_spell", MAX_SIGNATURE_SPELL_ENTRIES, |d| {
+                &mut d.signature_spell
+            }),
+        ];
+        for (name, ceiling, section) in sections {
+            let mut at_ceiling = deck(1, 0);
+            *section(&mut at_ceiling) = vec!["Card".to_string(); ceiling];
+            let (create, join) = guard_both(&at_ceiling);
+            assert_eq!(create, Ok(()), "{name} at the ceiling");
+            assert_eq!(join, Ok(()), "{name} at the ceiling");
+
+            let mut over = deck(1, 0);
+            *section(&mut over) = vec!["Card".to_string(); ceiling + 1];
+            let (create, join) = guard_both(&over);
+            let expected = format!("deck.{name} must contain at most {ceiling} entries");
+            assert_eq!(create, Err(expected.clone()), "{name} over the ceiling");
+            assert_eq!(join, Err(expected), "{name} over the ceiling");
+
+            let mut bad = deck(1, 0);
+            *section(&mut bad) = vec!["Bad\nName".to_string()];
+            let (create, join) = guard_both(&bad);
+            let expected = format!("deck.{name}[0] must not contain control characters");
+            assert_eq!(create, Err(expected.clone()), "{name} control name");
+            assert_eq!(join, Err(expected), "{name} control name");
+        }
+    }
+
+    fn printing(
+        name: &str,
+        set_code: &str,
+        collector_number: &str,
+    ) -> engine::types::card_printing::DeckPrinting {
+        use engine::types::card_printing::{CardPrinting, DeckPrinting, DeckSection};
+        DeckPrinting {
+            section: DeckSection::MainDeck,
+            name: name.to_string(),
+            count: 1,
+            printing: CardPrinting {
+                set_code: set_code.to_string(),
+                collector_number: collector_number.to_string(),
+            },
+        }
+    }
+
+    /// P2-V3: the server guard delegates to the engine's sidecar bound, naming the
+    /// printings field; an in-bounds sidecar of invalid annotations is admitted (R1).
+    #[test]
+    fn sidecar_resource_bounds_are_enforced_and_invalid_annotations_admitted() {
+        let mut abusive = deck(1, 0);
+        abusive.printings = vec![
+            printing("Plains", "M21", "1"),
+            printing("Plains", &"s".repeat(33), "1"),
+        ];
+        let (create, join) = guard_both(&abusive);
+        let expected = "deck.printings[1].printing.set_code must be at most 32 bytes".to_string();
+        assert_eq!(create, Err(expected.clone()));
+        assert_eq!(join, Err(expected));
+
+        let mut too_many = deck(1, 0);
+        too_many.printings = vec![printing("Plains", "M21", "1"); MAX_DECK_PRINTING_ENTRIES + 1];
+        let (create, join) = guard_both(&too_many);
+        let expected = "deck.printings must contain at most 2048 entries".to_string();
+        assert_eq!(create, Err(expected.clone()));
+        assert_eq!(join, Err(expected));
+
+        // Reach guard: the same guard admits a full-size sidecar at the cap and a
+        // sidecar of well-typed but unusable annotations.
+        let mut at_cap = deck(1, 0);
+        at_cap.printings = vec![printing("Plains", "M21", "1"); MAX_DECK_PRINTING_ENTRIES];
+        let (create, join) = guard_both(&at_cap);
+        assert_eq!((create, join), (Ok(()), Ok(())));
+
+        let mut invalid = deck(1, 0);
+        invalid.printings = vec![
+            printing("", "", ""),
+            printing("Bad\nName", "M\u{0}21", "1\t"),
+            printing("No Such Card Anywhere", "ZZZ", "999"),
+        ];
+        let (create, join) = guard_both(&invalid);
+        assert_eq!((create, join), (Ok(()), Ok(())));
     }
 }

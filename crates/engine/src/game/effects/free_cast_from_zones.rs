@@ -433,6 +433,7 @@ fn member_pool_filter(filter: &TargetFilter) -> TargetFilter {
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
+        | TargetFilter::CastingSpell
         | TargetFilter::EventTarget
         | TargetFilter::TriggeringSourceController
         | TargetFilter::EventTargetController
