@@ -4403,10 +4403,10 @@ fn pause_sacrifice_for_cost(
     state.waiting_for.clone()
 }
 
-/// CR 603.2c + CR 603.3b: The typed sacrifice root owns every cost event that
-/// crossed a replacement-choice action boundary. Collect the full stamped set
-/// once, and claim the current action occurrences so its normal Priority
-/// pipeline cannot collect the same events again.
+/// CR 603.2 + CR 603.3: Settle a completed cost prefix before sacrifice can
+/// remove its observers, or a full stamped sacrifice set carried across a
+/// replacement-choice action boundary. Stage triggers until payment completes
+/// and claim the current action occurrences so Priority cannot collect them again.
 pub(crate) fn settle_sacrifice_for_cost_events(
     state: &mut GameState,
     pending: Option<&mut PendingCast>,
@@ -4861,8 +4861,9 @@ pub(crate) fn handle_sacrifice_for_cost(
         chosen
     };
 
-    // CR 601.2h + CR 602.2b: costs are paid in any order; the source's own {T}/{Q} is paid before the sacrifice that removes it.
-    if pending.activation_ability_index.is_some() && chosen.contains(&pending.object_id) {
+    // CR 601.2h + CR 602.2b: choose the legal source-{T}/{Q}-first order,
+    // including when the selected sacrifice removes an observer, not the source.
+    if pending.activation_ability_index.is_some() {
         super::casting::require_locked_activation_cost(
             pending.activation_cost_snapshot.as_deref(),
             super::casting::ActivationCostGuardSite::SacrificeSource,
@@ -4874,6 +4875,7 @@ pub(crate) fn handle_sacrifice_for_cost(
             .unwrap_or((None, None));
         pending.activation_cost = residual;
         if let Some(source_legs) = source_legs {
+            let source_event_start = events.len();
             match super::casting::pay_ability_cost_for_activation(
                 state,
                 player,
@@ -4894,6 +4896,18 @@ pub(crate) fn handle_sacrifice_for_cost(
                 }
             }
             pending.mark_activation_cost_committed();
+            // CR 603.2 + CR 603.10: observe the paid prefix on the post-tap
+            // board, before any sacrifice removes a trigger source. CR 603.3:
+            // the existing collector holds those triggers until payment ends.
+            pending.begin_activation_trigger_collection();
+            settle_sacrifice_for_cost_events(
+                state,
+                Some(&mut pending),
+                Vec::new(),
+                events,
+                source_event_start,
+                events.len(),
+            );
         }
     }
 
@@ -7784,8 +7798,9 @@ fn extract_waterbend_activation_cost(
 }
 
 /// CR 118.3 + CR 601.2h + CR 602.2b: A recognized non-self Count
-/// sacrifice after X mana can continue only when every unpaid leaf is a
-/// concrete Count sacrifice; other residuals retain their existing routing.
+/// sacrifice after X mana can continue with concrete Count sacrifices and Tap.
+/// Existing sacrifice and remaining-cost payers own payment of those leaves;
+/// other residuals retain their existing routing.
 fn validate_x_mana_sacrifice_residual(
     cost: &AbilityCost,
     activation_residual: ActivationResidual,
@@ -7795,11 +7810,11 @@ fn validate_x_mana_sacrifice_residual(
     let mut unsupported_sacrifice = false;
     let mut unsupported_sibling = false;
     if recognized_count {
-        // CR 118.3 + CR 601.2h + CR 602.2b: Only a tree of concrete
-        // non-self Count sacrifices is payable through this continuation.
-        // Inspect every node before the first selection or cost move.
+        // CR 118.3 + CR 601.2h + CR 602.2b: Validate the entire unpaid
+        // suffix before selection. This continuation supports finite Count
+        // sacrifices and Tap; it does not itself pay either cost.
         cost.for_each_cost_node(&mut |node| match node {
-            AbilityCost::Composite { .. } => {}
+            AbilityCost::Composite { .. } | AbilityCost::Tap => {}
             AbilityCost::Sacrifice(sacrifice)
                 if !matches!(sacrifice.target, TargetFilter::SelfRef) =>
             {
@@ -7814,7 +7829,6 @@ fn validate_x_mana_sacrifice_residual(
             | AbilityCost::Mana { .. }
             | AbilityCost::ManaDynamic { .. }
             | AbilityCost::SayPhrase { .. }
-            | AbilityCost::Tap
             | AbilityCost::Untap
             | AbilityCost::Loyalty { .. }
             | AbilityCost::PayLife { .. }
@@ -7875,8 +7889,9 @@ pub(super) fn push_activated_ability_to_stack(
     mut resolved: ResolvedAbility,
     remaining_cost: Option<&crate::types::ability::AbilityCost>,
     // CR 118.3 + CR 601.2h + CR 602.2b: The X-mana detour admits only
-    // concrete non-self Count sacrifice components in its recognized
-    // sacrifice suffix. Unsupported siblings and exile still fail loudly.
+    // concrete non-self Count sacrifices and Tap in its recognized suffix.
+    // The sacrifice handler pays source Tap and captures its observers before
+    // the selected sacrifice. Unsupported siblings still fail loudly.
     activation_residual: ActivationResidual,
     target_selection: ActivationTargetSelection,
     mut pending_loyalty_activation_player: Option<PlayerId>,
@@ -30933,6 +30948,13 @@ its replicate cost was paid.)\nDraw a card.";
             .controller(ControllerRef::You)
             .into();
         let count = AbilityCost::Sacrifice(SacrificeCost::count(creature.clone(), 1));
+        // Synthetic defensive cost matrix, not printed-card execution. Quarry
+        // witnesses the supported X + Tap + Count class; The Secret Lair's
+        // printed SayPhrase cost is distinct, not evidence for X + Count + SayPhrase.
+        let supported = AbilityCost::Composite {
+            costs: vec![count.clone(), AbilityCost::Tap],
+        };
+        assert!(validate_x_mana_sacrifice_residual(&supported, ActivationResidual::XMana).unwrap());
         let unsupported = vec![
             (
                 "mana",
@@ -30946,8 +30968,13 @@ its replicate cost was paid.)\nDraw a card.";
                     quantity: QuantityExpr::Fixed { value: 1 },
                 },
             ),
-            ("tap", AbilityCost::Tap),
             ("untap", AbilityCost::Untap),
+            (
+                "say phrase",
+                AbilityCost::SayPhrase {
+                    phrase: "the secret word".into(),
+                },
+            ),
             ("loyalty", AbilityCost::Loyalty { amount: -1 }),
             (
                 "self sacrifice",
