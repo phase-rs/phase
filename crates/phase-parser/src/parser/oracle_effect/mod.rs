@@ -34175,6 +34175,15 @@ fn ensure_exile_zone_on_cast_target(filter: &mut TargetFilter) {
     }
 }
 
+/// CR 601.3: the spell-type gate printed BEFORE a "from among …" anchor
+/// (`before_anchor` is the text preceding "from among "): a type list ("instant
+/// and/or sorcery spells") or a single type ("creature spells"). `None` for the
+/// untyped heads ("any number of spells ", "up to two spells "). The one probe
+/// every "from among" batch arm uses to classify its prefix side.
+fn parse_from_among_prefix_type_gate(before_anchor: &str) -> Option<TargetFilter> {
+    parse_cast_type_list(before_anchor).or_else(|| parse_cast_type_gate(before_anchor))
+}
+
 /// What the `"from among (the|those) [TYPED] (card|cards) exiled this way"`
 /// anchor lowers to, when it is present.
 #[derive(Debug, Clone, PartialEq)]
@@ -34238,8 +34247,7 @@ fn parse_from_among_exiled_this_way(rest: &str) -> Option<FromAmongExiledAnchor>
     // CR 601.3: a single pre-anchor type ("cast creature spells from among
     // cards exiled this way") is the same restriction as a list; without it
     // the gate was dropped and every exiled card was castable.
-    let prefix_gate =
-        parse_cast_type_list(before_anchor).or_else(|| parse_cast_type_gate(before_anchor));
+    let prefix_gate = parse_from_among_prefix_type_gate(before_anchor);
     let suffix_filter = parse_cast_type_list(after_article)
         .unwrap_or_else(|| super::oracle_target::parse_type_phrase_folding(after_article).0);
     let mut typed_filter = match prefix_gate {
@@ -35310,6 +35318,20 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
     // anywhere in `rest` (post-"cast " prefix) is structurally diagnostic of
     // the per-resolution exile-set anaphor.
     if scan_contains_phrase(rest, "from among those nonland cards") {
+        // CR 712.8a + CR 712.11c: the "nonland cards" suffix gates the card
+        // pool; a spell type printed before the anchor would gate the spell
+        // face at a different stage. Refuse that combined shape exactly as
+        // `parse_from_among_exiled_this_way` does, before lowering a grant
+        // that keeps only the pool gate.
+        let before_anchor = take_until::<_, _, OracleError<'_>>("from among ")
+            .parse(rest)
+            .map_or(rest, |(_, before)| before);
+        if parse_from_among_prefix_type_gate(before_anchor).is_some() {
+            return Some(Effect::unimplemented(
+                FROM_AMONG_POOL_AND_SPELL_GATE_GAP,
+                rest,
+            ));
+        }
         let mut nonland_card_filter = TargetFilter::Typed(
             TypedFilter::card().with_type(TypeFilter::Non(Box::new(TypeFilter::Land))),
         );
