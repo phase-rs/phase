@@ -9981,6 +9981,77 @@ mod tests {
         );
     }
 
+    /// CR 701.20a: a PUBLIC reveal survives a move into a hand. "To reveal a
+    /// card, show that card to all players" — once they have been shown it,
+    /// putting it into a hand does not unshow it, so the opponent must still
+    /// identify the card (Malevolent Rumble, Narset, Parter of Veils: "reveal …
+    /// and put it into your hand"). CR 401.2: the same card moving into a
+    /// LIBRARY retires the reveal, because library order is not public — the
+    /// neighbouring `public_reveal_memory_clears_when_card_changes_zones` test
+    /// owns that half.
+    ///
+    /// Revert probe: retire the public reveal on every destination (the pre-fix
+    /// behavior) ⇒ the hand assertion below FAILS.
+    #[test]
+    fn public_reveal_memory_survives_a_move_into_a_hand() {
+        use crate::game::zones::move_to_zone;
+        use crate::types::resolved_commands::{
+            ResolvedInformationAudience, ResolvedInformationEdit, ResolvedInformationLifetime,
+        };
+
+        let mut state = GameState::new_two_player(42);
+        let card_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Rumbled Card".to_string(),
+            Zone::Library,
+        );
+        // The momentary reveal window a reveal-dig opens (CR 701.20a), plus the
+        // durable publication the `CardsRevealed` event boundary records — the
+        // same pair a `Dig { reveal: true }` produces.
+        state.revealed_cards.insert(card_id);
+        state
+            .resolve_and_apply_information(
+                &[card_id],
+                ResolvedInformationAudience::Public,
+                ResolvedInformationLifetime::UntilZoneChange,
+                ResolvedInformationEdit::Reveal,
+            )
+            .expect("a live library occurrence is published")
+            .expect("the reveal is journaled");
+        assert_eq!(
+            filter_state_for_viewer(&state, PlayerId(1)).objects[&card_id].name,
+            "Rumbled Card",
+            "the reveal is public while the card sits in the library"
+        );
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, card_id, Zone::Hand, &mut events);
+        assert!(
+            state.public_revealed_cards.contains(&card_id),
+            "CR 701.20a: a public reveal must survive a move into a hand"
+        );
+        assert_eq!(
+            filter_state_for_viewer(&state, PlayerId(1)).objects[&card_id].name,
+            "Rumbled Card",
+            "the opponent must still identify the revealed card now that it is a hand card"
+        );
+
+        // CR 401.2: a library destination is the one hidden zone that retires
+        // the publication, so the identity never resurfaces later.
+        move_to_zone(&mut state, card_id, Zone::Library, &mut events);
+        assert!(
+            !state.public_revealed_cards.contains(&card_id),
+            "a move into a library must retire the public reveal"
+        );
+        assert_eq!(
+            filter_state_for_viewer(&state, PlayerId(1)).objects[&card_id].name,
+            "Hidden Card",
+            "a card put back into a library is hidden again"
+        );
+    }
+
     /// Unit 2, site #21 (multi-authority): `viewer_may_look_at_face_down` gates ONLY
     /// its battlefield `MayLookAtFaceDown` scan behind the O(1) presence index (wrap,
     /// not early-return), and falls through UNCHANGED to the duration-bound
