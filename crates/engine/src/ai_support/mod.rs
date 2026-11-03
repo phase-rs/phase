@@ -267,6 +267,9 @@ pub(crate) fn structurally_valid_tap_for_convoke_payment(
             }
         }
         ConvokeMode::Waterbend => {
+            // CR 701.67a: a waterbend tap pays one generic mana of the cost, so
+            // it pays colorless only and is legal only while generic mana is
+            // left for a tap to pay.
             obj.is_waterbend_eligible(*player)
                 && *mana_type == ManaType::Colorless
                 && crate::game::casting::waterbend_taps_remaining(state, *player) > 0

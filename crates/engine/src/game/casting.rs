@@ -24393,6 +24393,9 @@ pub(super) fn pay_mana_cost_from_pool_with_choices(
     })
 }
 
+/// CR 702.51a + CR 702.126a + CR 701.67a: once a spell's payment is complete,
+/// narrow the cast's convoked creatures to those whose tap paid, and release
+/// every convoke, improvise or waterbend tap the payment left unspent.
 fn cleanup_unused_convoke_payments(
     state: &mut GameState,
     player: PlayerId,
@@ -24411,43 +24414,82 @@ fn cleanup_unused_convoke_payments(
                 .map(|obj| obj.convoked_creatures.clone())
         })
         .unwrap_or_default();
-    if convoked_sources.is_empty() {
-        return;
-    }
 
     let mut unused_sources = Vec::new();
-    let spent_convoked_sources = convoked_sources
-        .into_iter()
-        .filter(|object_id| {
-            let spent = spent_sources.contains(object_id);
-            if !spent {
-                unused_sources.push(*object_id);
-            }
-            spent
-        })
-        .collect::<Vec<_>>();
+    if !convoked_sources.is_empty() {
+        let spent_convoked_sources = convoked_sources
+            .into_iter()
+            .filter(|object_id| {
+                let spent = spent_sources.contains(object_id);
+                if !spent {
+                    unused_sources.push(*object_id);
+                }
+                spent
+            })
+            .collect::<Vec<_>>();
 
-    if let Some(pending) = state
-        .pending_cast
-        .as_mut()
-        .filter(|pending| pending.object_id == source_id)
-    {
-        pending.convoked_creatures = spent_convoked_sources.clone();
-    }
-    if let Some(obj) = state.objects.get_mut(&source_id) {
-        obj.convoked_creatures = spent_convoked_sources;
-    }
-
-    for object_id in &unused_sources {
-        if let Some(obj) = state.objects.get_mut(object_id) {
-            obj.tapped = false;
+        if let Some(pending) = state
+            .pending_cast
+            .as_mut()
+            .filter(|pending| pending.object_id == source_id)
+        {
+            pending.convoked_creatures = spent_convoked_sources.clone();
         }
+        if let Some(obj) = state.objects.get_mut(&source_id) {
+            obj.convoked_creatures = spent_convoked_sources;
+        }
+    }
+
+    release_unspent_tap_markers(state, player, &unused_sources);
+}
+
+/// CR 702.51a + CR 702.126a + CR 701.67a: each of these taps a permanent
+/// "rather than pay that mana", so a tap whose marker a completed payment left
+/// in the pool paid for nothing. Drop each such marker from `player`'s pool and
+/// untap its permanent, so no later payment can redeem a tap made for this one.
+/// A marker is a tap when it names a permanent on the battlefield or one of
+/// `known_taps`. A delve marker names a card in a graveyard instead and is
+/// settled with the delve exile (CR 702.66a), so it is left alone here.
+fn release_unspent_tap_markers(state: &mut GameState, player: PlayerId, known_taps: &[ObjectId]) {
+    let mut released = known_taps.to_vec();
+    released.extend(
+        state
+            .players
+            .iter()
+            .filter(|p| p.id == player)
+            .flat_map(|p| p.mana_pool.shapes())
+            .filter(|(unit, _)| unit.is_convoke_payment())
+            .map(|(unit, _)| unit.source_id)
+            .filter(|object_id| {
+                state
+                    .objects
+                    .get(object_id)
+                    .is_some_and(|obj| obj.zone == Zone::Battlefield)
+            }),
+    );
+    released.sort();
+    released.dedup();
+    if released.is_empty() {
+        return;
     }
 
     if let Some(player_data) = state.players.iter_mut().find(|p| p.id == player) {
         player_data.mana_pool.retain_shapes(|unit| {
-            !(unit.is_convoke_payment() && unused_sources.contains(&unit.source_id))
+            !(unit.is_convoke_payment() && released.contains(&unit.source_id))
         });
+    }
+    crate::game::public_state::mark_mana_display_dirty(state);
+    for object_id in released {
+        if crate::game::object_state::resolve_and_apply_object_edit(
+            state,
+            object_id,
+            crate::types::resolved_commands::ResolvedObjectStatus::Tapped,
+            false,
+        )
+        .is_ok_and(|untapped| untapped)
+        {
+            crate::game::public_state::mark_public_state_object_dirty(state, object_id);
+        }
     }
 }
 
@@ -24705,7 +24747,8 @@ pub(crate) fn waterbend_taps_remaining(state: &GameState, player: PlayerId) -> u
 
 /// CR 701.67a + CR 118.3a: Remove the markers whose taps paid part of an
 /// activation's cost. Being no mana, they reach no spent-mana read; only the
-/// journal's pip ledger sees them.
+/// journal's pip ledger sees them. `waterbend_taps_remaining` caps the taps at
+/// the generic being paid, so `count` covers every marker in the window.
 fn consume_waterbend_tap_markers(
     state: &mut GameState,
     player: PlayerId,
@@ -24729,7 +24772,8 @@ fn consume_waterbend_tap_markers(
         .resolve_and_apply_mana_spend(player, recipient, &markers)
         .map_err(|_| {
             EngineError::ActionNotAllowed("Mana pool changed before payment applied".to_string())
-        })
+        })?;
+    Ok(())
 }
 
 /// Pay a mana cost during effect resolution. Resolution-time "you may pay"

@@ -1481,16 +1481,56 @@ fn a_waterbend_activation_takes_no_tap_past_its_generic() {
     assert_eq!(tap_markers(&runner), 0, "every tap paid the activation");
 }
 
-/// CR 733.1: cancelling an activation undoes only the activator's taps. P0's Benevolent River
-/// Spirit is paid manually with its pool's {U}{U}{W} pinned and five helpers tapped; the pinned
-/// {W} pays one generic mana before the taps do, so one tap is left unspent in P0's pool. That
-/// spare tap is the known spell-side surplus the cap does not cover (a pinned unit is preferred
-/// over a tap). P1 then activates Waterbender Ascension in response, taps its own helper and
-/// cancels: P1's helper untaps, and P0's spare tap and its tapped helper are left alone.
+/// Cast `spell` paying manually and pin every unit floating in P0's pool toward it, leaving the
+/// payment window open for taps.
+fn cast_with_pool_pinned(runner: &mut GameRunner, spell: ObjectId, pinned: usize) {
+    let card_id = runner.state().objects[&spell].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: spell,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Manual,
+        })
+        .expect("the spell must be castable");
+    assert!(matches!(
+        runner.state().waiting_for,
+        WaitingFor::ManaPayment { .. }
+    ));
+    let pips: Vec<_> = runner.state().players[0]
+        .mana_pool
+        .units()
+        .map(|unit| unit.pip_id)
+        .collect();
+    assert_eq!(pips.len(), pinned);
+    for pip_id in pips {
+        runner
+            .act(GameAction::SpendPoolMana { pip_id })
+            .expect("each floating mana can pay part of the spell");
+    }
+}
+
+/// Assert the spell is on the stack, `spent` of `helpers` stayed tapped for it, the rest are
+/// untapped, and no tap is left in P0's pool to pay a later cost.
+fn assert_spare_taps_released(runner: &GameRunner, helpers: &[ObjectId], spent: usize) {
+    assert_eq!(runner.state().stack.len(), 1, "the spell is on the stack");
+    let tapped = helpers
+        .iter()
+        .filter(|helper| runner.state().objects[*helper].tapped)
+        .count();
+    assert_eq!(tapped, spent, "only the taps the payment spent stay tapped");
+    assert_eq!(tap_markers(runner), 0, "no spare tap is left in the pool");
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+}
+
+/// CR 701.67a: Benevolent River Spirit is paid manually with its pool's {U}{U}{W} pinned and five
+/// helpers tapped. The pinned {W} pays one generic mana of the waterbend {5} before the taps do,
+/// so four taps pay and the fifth pays nothing: its helper untaps and no tap is left in the pool
+/// for a later waterbend payment to redeem.
 #[test]
-fn cancelling_an_activation_leaves_another_players_taps_alone() {
+fn a_spell_payment_releases_its_spare_waterbend_tap() {
     let mut scenario = main_phase();
-    let p0_helpers: Vec<ObjectId> = (0..5).map(|_| scenario.add_vanilla(P0, 1, 1)).collect();
+    let helpers: Vec<ObjectId> = (0..5).map(|_| scenario.add_vanilla(P0, 1, 1)).collect();
     let lands: Vec<ObjectId> = (0..3)
         .map(|_| scenario.add_basic_land(P0, ManaColor::Blue))
         .collect();
@@ -1498,90 +1538,56 @@ fn cancelling_an_activation_leaves_another_players_taps_alone() {
     pool.extend(pool_from(ManaType::White, &lands[2..]));
     scenario.with_mana_pool(P0, pool);
     let spirit = real(&mut scenario, P0, "Benevolent River Spirit", Zone::Hand);
-    let ascension = real(
-        &mut scenario,
-        P1,
-        "Waterbender Ascension",
-        Zone::Battlefield,
-    );
-    // Four helpers make the {4} affordable; only one is tapped before the cancel.
-    let p1_helper = scenario.add_vanilla(P1, 1, 1);
-    for _ in 0..3 {
-        scenario.add_vanilla(P1, 1, 1);
-    }
     let mut runner = scenario.build();
 
-    let card_id = runner.state().objects[&spirit].card_id;
-    runner
-        .act(GameAction::CastSpell {
-            object_id: spirit,
-            card_id,
-            targets: vec![],
-            payment_mode: CastPaymentMode::Manual,
-        })
-        .expect("the spell must be castable");
-    let pips: Vec<_> = runner.state().players[0]
-        .mana_pool
-        .units()
-        .map(|unit| unit.pip_id)
-        .collect();
-    assert_eq!(pips.len(), 3);
-    for pip_id in pips {
-        runner
-            .act(GameAction::SpendPoolMana { pip_id })
-            .expect("each floating mana can pay part of the spell");
-    }
-    for helper in &p0_helpers {
+    cast_with_pool_pinned(&mut runner, spirit, 3);
+    for helper in &helpers {
         tap_for_waterbend(&mut runner, *helper);
     }
+    assert_eq!(tap_markers(&runner), 5, "reach guard: every helper tapped");
     runner
         .act(GameAction::PassPriority)
         .expect("the pinned mana and the taps pay {5}{U}{U}");
-    assert_eq!(runner.state().stack.len(), 1, "the Spirit is on the stack");
+
+    assert_spare_taps_released(&runner, &helpers, 4);
+}
+
+/// CR 702.126a: the same for improvise. Kappa Cannoneer is paid manually with its pool's {U}{W}
+/// pinned and five artifacts tapped; the pinned {W} pays one generic mana of {5}, so the fifth
+/// tap pays nothing and its artifact untaps.
+#[test]
+fn a_spell_payment_releases_its_spare_improvise_tap() {
+    let mut scenario = main_phase();
+    let artifacts: Vec<ObjectId> = (0..5)
+        .map(|_| real(&mut scenario, P0, "Ornithopter", Zone::Battlefield))
+        .collect();
+    let lands = [
+        scenario.add_basic_land(P0, ManaColor::Blue),
+        scenario.add_basic_land(P0, ManaColor::White),
+    ];
+    let mut pool = pool_from(ManaType::Blue, &lands[..1]);
+    pool.extend(pool_from(ManaType::White, &lands[1..]));
+    scenario.with_mana_pool(P0, pool);
+    let cannoneer = real(&mut scenario, P0, "Kappa Cannoneer", Zone::Hand);
+    let mut runner = scenario.build();
+
+    cast_with_pool_pinned(&mut runner, cannoneer, 2);
+    for artifact in &artifacts {
+        runner
+            .act(GameAction::TapForConvoke {
+                object_id: *artifact,
+                mana_type: ManaType::Colorless,
+            })
+            .expect("the improvise tap must be accepted");
+    }
     assert_eq!(
         tap_markers(&runner),
-        1,
-        "reach guard: P0 has a spare tap in its pool"
+        5,
+        "reach guard: every artifact tapped"
     );
-    let spare = runner.state().players[0]
-        .mana_pool
-        .units()
-        .find(|unit| unit.is_convoke_payment())
-        .map(|unit| unit.source_id)
-        .expect("the spare tap names its helper");
-    assert!(runner.state().objects[&spare].tapped);
-
     runner
         .act(GameAction::PassPriority)
-        .expect("P0 passes with the Spirit on the stack");
-    assert!(matches!(
-        runner.state().waiting_for,
-        WaitingFor::Priority { player: P1, .. }
-    ));
-    activate_ascension(&mut runner, ascension, p1_helper);
-    tap_for_waterbend(&mut runner, p1_helper);
-    assert!(runner.state().objects[&p1_helper].tapped);
-    runner
-        .act(GameAction::CancelCast)
-        .expect("nothing was paid yet");
+        .expect("the pinned mana and the taps pay {5}{U}");
 
-    assert!(
-        !runner.state().objects[&p1_helper].tapped,
-        "P1's tap is undone"
-    );
-    assert_eq!(
-        runner.state().players[1]
-            .mana_pool
-            .count_where(|unit| unit.is_convoke_payment()),
-        0
-    );
-    assert!(
-        runner.state().objects[&spare].tapped,
-        "P0's helper did not pay for P1's activation"
-    );
-    assert_eq!(
-        tap_markers(&runner),
-        1,
-        "P0's spare tap is not P1's to drop"
-    );
+    assert_spare_taps_released(&runner, &artifacts, 4);
 }
