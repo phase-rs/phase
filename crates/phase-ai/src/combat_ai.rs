@@ -2757,6 +2757,15 @@ fn crackback_damage(
     // Without a projection, fall back to current-state filtering.
     let projected_state = projection.map(|p| &p.state);
     let attacker_source = projected_state.unwrap_or(state);
+    // CR 508.1f: declaring attackers taps them, and the projection stops at
+    // `OpponentAttackersDeclared` — so the opponent's declared non-vigilance
+    // attackers are tapped there. They are exactly the creatures that crack
+    // back, so a projected declared attacker counts despite `tapped`.
+    let projected_attacker = |id: ObjectId| -> bool {
+        projected_state
+            .and_then(|ps| ps.combat.as_ref())
+            .is_some_and(|combat| combat.attackers.iter().any(|a| a.object_id == id))
+    };
     // Hoist block-legality statics once for the greedy O(attackers × blockers)
     // assignment sweep below. `attacker_source` is the only state queried.
     let slices = BlockLegalitySlices::collect(attacker_source);
@@ -2767,7 +2776,7 @@ fn crackback_damage(
                 let obj = attacker_source.objects.get(&id)?;
                 if obj.controller == opp
                     && obj.card_types.core_types.contains(&CoreType::Creature)
-                    && !obj.tapped
+                    && (!obj.tapped || projected_attacker(id))
                     && !obj.has_keyword(&Keyword::Defender)
                 {
                     Some((id, obj.power.unwrap_or(0)))
@@ -3952,6 +3961,89 @@ mod tests {
 
         let cb = crackback_damage(&state, PlayerId(0), &[PlayerId(1)], &[], Some(&projection));
         assert_eq!(cb, 4, "projected flying must make the attacker unblocked");
+    }
+
+    /// CR 508.1f: at the `OpponentAttackersDeclared` horizon the opponent's
+    /// declared attackers are tapped by the declaration. They still crack back;
+    /// a tapped creature that did not attack does not.
+    #[test]
+    fn crackback_projection_counts_declared_attackers_despite_tapped() {
+        use engine::game::combat::{AttackerInfo, CombatState};
+        let mut state = setup();
+        let declared = add_creature(&mut state, PlayerId(1), "Giant", 5, 5, vec![]);
+        let idle = add_creature(&mut state, PlayerId(1), "Tapped Giant", 5, 5, vec![]);
+
+        let mut projected = state.clone();
+        for id in [declared, idle] {
+            projected.objects.get_mut(&id).unwrap().tapped = true;
+        }
+        projected.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::new(
+                declared,
+                AttackTarget::Player(PlayerId(0)),
+                PlayerId(0),
+            )],
+            ..Default::default()
+        });
+        let projection = Projection {
+            horizon_reached: ProjectionHorizon::OpponentAttackersDeclared,
+            state: projected,
+            snapshots: Vec::new(),
+            confidence: crate::projection::Confidence::Exact,
+            target_opponent: PlayerId(1),
+        };
+
+        let cb = crackback_damage(&state, PlayerId(0), &[PlayerId(1)], &[], Some(&projection));
+        assert_eq!(
+            cb, 5,
+            "the declared attacker counts despite being tapped; the idle tapped one does not"
+        );
+    }
+
+    /// End to end: P1's tapped 5/5s untap and swing back for 10 into P0's 8 on
+    /// the projected turn, so crackback pruning keeps a 3/3 home. When the
+    /// projected declared attackers were read as tapped, crackback came out 0
+    /// and all three attacked. Measurement mode makes the projection
+    /// step-capped rather than clock-bound, so this is deterministic.
+    #[test]
+    fn projected_crackback_keeps_a_blocker_home() {
+        let mut state = setup();
+        for player in [PlayerId(0), PlayerId(1)] {
+            for _ in 0..5 {
+                let card_id = CardId(state.next_object_id);
+                create_object(
+                    &mut state,
+                    card_id,
+                    player,
+                    "Library card".to_string(),
+                    Zone::Library,
+                );
+            }
+        }
+        state.players[0].life = 8;
+        for _ in 0..3 {
+            add_creature(&mut state, PlayerId(0), "Bear", 3, 3, vec![]);
+        }
+        for _ in 0..2 {
+            let giant = add_creature(&mut state, PlayerId(1), "Giant", 5, 5, vec![]);
+            state.objects.get_mut(&giant).unwrap().tapped = true;
+        }
+
+        let attacks = choose_attackers_with_targets_with_profile(
+            &state,
+            PlayerId(0),
+            &AiProfile::default(),
+            CombatLookahead::Enabled {
+                execution_mode: ExecutionMode::Measurement { seed: 7 },
+            },
+            None,
+            None,
+            None,
+        );
+        assert!(
+            !attacks.is_empty() && attacks.len() < 3,
+            "crackback must keep a blocker home against the 10-power swing-back, got {attacks:?}"
+        );
     }
 
     /// Battlefield planeswalker for `owner` with the given starting loyalty.
