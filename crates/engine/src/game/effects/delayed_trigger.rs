@@ -432,6 +432,15 @@ pub fn resolve(
     // single-target contextual bind. This operates on the built `delayed_ability`
     // (not the condition), so it must stay after the ability chain is built.
     if let Some(real_id) = tracked_set_id {
+        // CR 608.2c + CR 603.7c: a plural anaphor ("return them") after a mass
+        // publisher with no declared target slot names the whole published
+        // set, not the creation event's source (Golden Argosy's "exile each
+        // creature that crewed it … Return them"). Without this, the
+        // `parent_target_snapshot` event-source fallback would filter the set
+        // down to the trigger source, which is not a member.
+        if parent_chain_names_no_referent(state, ability) {
+            rebind_parent_target_returns_to_tracked_set(&mut delayed_ability, real_id);
+        }
         bind_tracked_set_to_ability_chain(&mut delayed_ability, real_id);
     }
 
@@ -1890,6 +1899,31 @@ fn bind_tracked_set_to_effect(effect: &mut Effect, real_id: TrackedSetId) {
             };
         }
         _ => {}
+    }
+}
+
+/// True when the creating chain declares no target slot and carries no
+/// propagated referent, so a `ParentTarget` anaphor in the delayed payload can
+/// only denote the tracked set a prior mass instruction published.
+fn parent_chain_names_no_referent(state: &GameState, ability: &ResolvedAbility) -> bool {
+    crate::game::targeting::parent_chain_referents(state, ability).is_none()
+}
+
+/// Rewrite a bare `ParentTarget` zone-move payload (and its sub-chain) to the
+/// whole tracked set `real_id`.
+fn rebind_parent_target_returns_to_tracked_set(
+    ability: &mut ResolvedAbility,
+    real_id: TrackedSetId,
+) {
+    if let Effect::ChangeZone {
+        target: target @ TargetFilter::ParentTarget,
+        ..
+    } = &mut ability.effect
+    {
+        *target = TargetFilter::TrackedSet { id: real_id };
+    }
+    if let Some(sub_ability) = ability.sub_ability.as_deref_mut() {
+        rebind_parent_target_returns_to_tracked_set(sub_ability, real_id);
     }
 }
 

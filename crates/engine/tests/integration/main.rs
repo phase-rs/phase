@@ -21,6 +21,7 @@ mod attack_qualifier_stack_conditions;
 mod attacks_alone_targeted_trigger;
 mod attacks_while_saddled_trigger;
 mod awe_strike_prevention;
+mod balthier_and_fran_crew_history;
 mod banding_combat;
 mod batched_trigger_subject_count;
 mod battlefield_entry_authority_census;

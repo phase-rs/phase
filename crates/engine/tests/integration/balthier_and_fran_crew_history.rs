@@ -972,3 +972,53 @@ fn crew_history_serde_round_trip_and_legacy_default() {
     let legacy: GameState = serde_json::from_value(value).expect("legacy payload deserializes");
     assert!(legacy.crew_history_this_turn.is_empty());
 }
+
+/// Issue #8061: Golden Argosy exiles exactly the creatures that crewed it and
+/// returns those same creatures, tapped, at the beginning of the next end step
+/// (CR 603.7c: the delayed trigger acts on the objects the exile moved).
+#[test]
+fn golden_argosy_returns_its_crewers_tapped_at_end_step() {
+    let mut s = GameScenario::new();
+    s.at_phase(Phase::PreCombatMain);
+    let argosy = add_vehicle(&mut s, P0, "Golden Argosy", GOLDEN_ARGOSY, 3, 6);
+    let crewer = s.add_creature(P0, "Crewer", 1, 1).id();
+    let bystander = s.add_creature(P0, "Bystander", 1, 1).id();
+    let opposing = s.add_creature(P1, "Opposing", 1, 1).id();
+    let mut r = s.build();
+
+    crew(&mut r, argosy, &[crewer]);
+    let log = drive_to_end_step(
+        &mut r,
+        &Script {
+            attackers: &|_| vec![argosy],
+            accept_optional: true,
+            resolve_first: None,
+            choose_target: &no_targets,
+        },
+    );
+    assert_eq!(
+        log.declarations.first().map(|d| d.1.clone()),
+        Some(vec![argosy])
+    );
+    assert_eq!(
+        r.state().objects[&crewer].zone,
+        Zone::Exile,
+        "reach: the crewer was exiled before the end step"
+    );
+    assert_eq!(r.state().objects[&bystander].zone, Zone::Battlefield);
+    assert_eq!(r.state().objects[&opposing].zone, Zone::Battlefield);
+
+    // Resolve the end-step delayed trigger.
+    for _ in 0..10 {
+        if r.state().objects[&crewer].zone == Zone::Battlefield {
+            break;
+        }
+        r.act(GameAction::PassPriority).expect("end step resolves");
+    }
+    let c = &r.state().objects[&crewer];
+    assert_eq!(c.zone, Zone::Battlefield, "crewer returns at the end step");
+    assert!(c.tapped, "crewer returns tapped");
+    assert_eq!(c.controller, P0);
+    assert_eq!(r.state().objects[&argosy].zone, Zone::Battlefield);
+    assert_eq!(r.state().objects[&bystander].zone, Zone::Battlefield);
+}
