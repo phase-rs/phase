@@ -219,6 +219,45 @@ fn pausing_or_fumbling_sacrifices_toy_boat() {
     );
 }
 
+/// CR 702.24a + CR 118.12a: a pause after some sayings were made still leaves
+/// the cost unpaid. The sayings already reported do not pay part of the upkeep,
+/// so declining the re-prompted remainder sacrifices Toy Boat.
+#[test]
+fn pausing_after_the_first_saying_sacrifices_toy_boat() {
+    let (mut runner, toy_boat) = setup_at_unless_prompt(1, true);
+
+    let first = runner
+        .act(GameAction::PayUnlessCost { pay: true })
+        .expect("the first saying is accepted");
+    assert_eq!(
+        phrases_said(&first.events).len(),
+        1,
+        "the first saying was made: {:?}",
+        first.events
+    );
+    assert!(
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::UnlessPayment {
+                cost: AbilityCost::SayPhrase { repetitions: 1, .. },
+                ..
+            }
+        ),
+        "the second saying must be pending before the window lapses, got {:?}",
+        runner.state().waiting_for
+    );
+
+    runner
+        .act(GameAction::PayUnlessCost { pay: false })
+        .expect("a lapsed window declines the rest of the payment");
+
+    assert_eq!(
+        runner.state().objects[&toy_boat].zone,
+        Zone::Graveyard,
+        "a partly said upkeep is unpaid, so Toy Boat is sacrificed"
+    );
+}
+
 /// Un-card opt-in gate + CR 118.12a: a player who never enabled Un-card actions
 /// is not asked to say anything, so the "unless" branch happens.
 #[test]
