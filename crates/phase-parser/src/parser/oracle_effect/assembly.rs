@@ -66,7 +66,7 @@ use super::lower::{
     resolve_those_tokens_anaphors, rewire_result_anchored_subchain,
     rewrite_counter_instead_target_from_antecedent, rewrite_else_event_context_to_stable,
     rewrite_else_parent_target_to_self_ref, rewrite_player_anaphor_targets_in_definition,
-    rewrite_those_tokens_from_antecedent, rewrite_two_target_counter_chain,
+    rewrite_those_tokens_from_antecedent, rewrite_two_target_counter_chain, strip_leading_duration,
     target_choice_timing_for_clause, thread_chosen_damage_source_into_oneshot_effects,
     timed_clause_sub_chain,
 };
@@ -3443,10 +3443,17 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
                 }
             }
         } else {
-            // A new sentence: its own window is whatever it printed. A sentinel
+            // A new sentence: only a window that HEADS it scopes its coordinated
+            // predicates ("Until your next turn, X and Y"). A trailing window
+            // ("X until end of turn, then Y") belongs to its own clause, so it is not
+            // distributed — mirrors `compute_sentence_leading_duration`. A sentinel
             // (`None` = nothing stated, `Some(Permanent)` = the sub-parser's "no
             // window" marker) states nothing to distribute.
-            sentence_duration = (!duration_is_unset_sentinel(&def.duration))
+            let heads_sentence = clause_ir
+                .source
+                .fragment()
+                .is_some_and(|text| strip_leading_duration(text.trim()).is_some());
+            sentence_duration = (heads_sentence && !duration_is_unset_sentinel(&def.duration))
                 .then(|| def.duration.clone())
                 .flatten();
         }
