@@ -2623,7 +2623,7 @@ pub(crate) fn quantity_expr_contains_filter_prop(
 ) -> bool {
     quantity_expr_grammar_any(expr, &|node| match node {
         FilterGrammarNode::Prop(prop) => predicate(prop),
-        FilterGrammarNode::Filter(_) => false,
+        FilterGrammarNode::Filter(_) | FilterGrammarNode::Player(_) => false,
     })
 }
 
@@ -2686,11 +2686,12 @@ pub(crate) fn quantity_ref_operands_contain(
 }
 
 /// The operand-closed entries' visitor: a `TargetFilter` node is tested
-/// against `leaf`; a `FilterProp` node is only a step of the walk.
+/// against `leaf`; a `FilterProp` or `PlayerFilter` node is only a step of the
+/// walk.
 fn operand_leaf(node: FilterGrammarNode<'_>, leaf: &dyn Fn(&TargetFilter) -> bool) -> bool {
     match node {
         FilterGrammarNode::Filter(filter) => leaf(filter),
-        FilterGrammarNode::Prop(_) => false,
+        FilterGrammarNode::Prop(_) | FilterGrammarNode::Player(_) => false,
     }
 }
 

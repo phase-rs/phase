@@ -8959,19 +8959,23 @@ pub fn filter_contains_filter_prop(
 ) -> bool {
     filter_grammar_any(filter, &|node| match node {
         FilterGrammarNode::Prop(prop) => predicate(prop),
-        FilterGrammarNode::Filter(_) => false,
+        FilterGrammarNode::Filter(_) | FilterGrammarNode::Player(_) => false,
     })
 }
 
 /// One node of the filter grammar as the grammar walkers below reach it: a
-/// `TargetFilter` at its entry, or a `FilterProp` at its entry. The walkers are
-/// generic over what a caller looks for; each entry that calls them names the
-/// node kind it tests (`filter_contains_filter_prop` above, and
-/// `crate::game::filter`'s `*_operands_contain` family).
+/// `TargetFilter`, a `FilterProp` or a `PlayerFilter` at its entry. The walkers
+/// are generic over what a caller looks for; each entry that calls them names
+/// the node kind it tests (`filter_contains_filter_prop` above, and
+/// `crate::game::filter`'s `*_operands_contain` family). A player filter is a
+/// node in its own right because some of its variants read state themselves
+/// (`TrackedSetPossessor` reads the chain's tracked set) rather than only
+/// through the target filters they nest.
 #[derive(Clone, Copy)]
 pub enum FilterGrammarNode<'a> {
     Filter(&'a TargetFilter),
     Prop(&'a FilterProp),
+    Player(&'a PlayerFilter),
 }
 
 /// The complete target → property → player → quantity topology of the filter
@@ -9198,6 +9202,9 @@ pub fn player_filter_grammar_any(
     filter: &PlayerFilter,
     visit: &dyn Fn(FilterGrammarNode<'_>) -> bool,
 ) -> bool {
+    if visit(FilterGrammarNode::Player(filter)) {
+        return true;
+    }
     match filter {
         PlayerFilter::OpponentDealtDamage { source, .. } => source
             .as_deref()

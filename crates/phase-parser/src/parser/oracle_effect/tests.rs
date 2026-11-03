@@ -96141,14 +96141,17 @@ fn put_those_cards_after_a_look_moves_the_whole_looked_at_set() {
             .unwrap_or_else(|| panic!("{name} must parse to one spell ability"));
         let effects = chain(root);
 
-        if let Effect::Dig {
-            rest_destination, ..
-        } = effects[0]
-        {
-            assert_eq!(
+        // The look lowers to a `Dig` ("look at") or a `RevealTop` ("reveal"),
+        // and neither may route the set: a `Dig` must carry no remainder.
+        match effects[0] {
+            Effect::Dig {
+                rest_destination, ..
+            } => assert_eq!(
                 *rest_destination, None,
                 "{name}: the whole-set move is not a remainder of the look"
-            );
+            ),
+            Effect::RevealTop { .. } => {}
+            other => panic!("{name}: the look must lower to a Dig or RevealTop, got {other:#?}"),
         }
         let placement = effects
             .iter()
@@ -96211,6 +96214,7 @@ fn put_those_cards_with_a_rest_clause_keeps_the_dig_partition() {
         Effect::Dig {
             destination,
             rest_destination,
+            rest_remainder,
             up_to,
             ..
         } => {
@@ -96219,6 +96223,11 @@ fn put_those_cards_with_a_rest_clause_keeps_the_dig_partition() {
                 *rest_destination,
                 Some(Zone::Library),
                 "the rest go to the bottom"
+            );
+            assert_eq!(
+                *rest_remainder,
+                DigRestRemainder::Route,
+                "an explicit bottom-of-library remainder is routed, not left in place"
             );
             assert!(*up_to, "\"any number\" is an up-to choice");
         }

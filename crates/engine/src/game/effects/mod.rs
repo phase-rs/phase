@@ -13999,8 +13999,10 @@ fn quantity_ref_references_tracked_set(qty: &QuantityRef) -> bool {
 
 /// CR 608.2c: Does one node reached by a filter-grammar walk consume the chain's
 /// tracked set — a `TrackedSet`/`TrackedSetFiltered` filter, an `InTrackedSet`
-/// membership property, or a property threshold that counts the set? The
-/// per-node test every grammar walk over a condition, quantity or filter shares.
+/// membership property, a property threshold that counts the set, or a player
+/// filter that reads it (`TrackedSetPossessor`, whose inner filter can be plain)?
+/// The per-node test every grammar walk over a condition, quantity or filter
+/// shares.
 fn filter_grammar_node_consumes_tracked_set(
     node: crate::types::ability::FilterGrammarNode<'_>,
 ) -> bool {
@@ -14011,6 +14013,9 @@ fn filter_grammar_node_consumes_tracked_set(
         crate::types::ability::FilterGrammarNode::Prop(prop) => {
             filter_prop_references_tracked_membership(prop)
                 || filter_prop_references_tracked_quantity(prop)
+        }
+        crate::types::ability::FilterGrammarNode::Player(filter) => {
+            player_filter_references_tracked_set(filter)
         }
     }
 }
@@ -14029,30 +14034,10 @@ fn filter_consumes_tracked_set(filter: &TargetFilter) -> bool {
 fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {
     match qty {
         QuantityExpr::Fixed { .. } => false,
-        QuantityExpr::Ref { qty } => match qty {
-            QuantityRef::TrackedSetSize | QuantityRef::FilteredTrackedSetSize { .. } => true,
-            // CR 608.2c: the three characteristic-set quantities share the
-            // population axis, so a tracked set nested inside an `AnyOf` union
-            // must be detected too — a direct-only `TrackedSet` match would let
-            // the producer skip publication and the chained count resolve to 0.
-            QuantityRef::DistinctCardTypes { source }
-            | QuantityRef::SharedCardTypes { source }
-            | QuantityRef::DistinctSubtypes { source, .. }
-            | QuantityRef::DistinctColorsAmong { source } => {
-                card_type_set_source_references_tracked_set(source)
-            }
-            QuantityRef::PropertyAggregate(aggregate) => {
-                card_type_set_source_references_tracked_set(aggregate.source())
-            }
-            // CR 608.2c: a player-count whose filter is keyed on the chain's
-            // tracked object set is a CONSUMER of that set — the preceding
-            // producer must publish it, or the count resolves to 0. This is the
-            // Seasoned Pyromancer (#740) shape one layer up: the tracked-set
-            // reference is nested inside the PLAYER filter, not the quantity.
-            // Not every `PlayerCount` qualifies, so it must be asked per filter.
-            QuantityRef::PlayerCount { filter } => player_filter_references_tracked_set(filter),
-            _ => false,
-        },
+        // CR 608.2c: one authority answers every reference, so a tracked set
+        // nested in any reference's filters (an `ObjectCount` over the set, a
+        // player count keyed on it) forces the producer to publish.
+        QuantityExpr::Ref { qty } => quantity_ref_references_tracked_set(qty),
         QuantityExpr::Offset { inner, .. }
         | QuantityExpr::ClampMin { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
@@ -37331,6 +37316,13 @@ mod tests {
         };
         assert!(!ability_or_branch_references_tracked_set(&base()));
 
+        let possessor = || PlayerFilter::TrackedSetPossessor {
+            relation: crate::types::ability::PlayerRelation::Opponent,
+            possession: crate::types::ability::PossessionAxis::Controller,
+            filter: plain.clone(),
+            caused_by: None,
+        };
+
         // Condition axis: a filter test over the set, directly and wrapped.
         let gate = |filter: TargetFilter| AbilityCondition::TargetMatchesFilter {
             filter,
@@ -37348,6 +37340,32 @@ mod tests {
                 true,
             ),
             ("plain filter", gate(plain.clone()), false),
+            // A condition-carried player filter that reads the set itself
+            // (`TrackedSetPossessor`) over a PLAIN inner filter: only the player
+            // node names the set, so the walk must visit player filters.
+            (
+                "scoped tracked-set possessor",
+                AbilityCondition::ScopedPlayerMatches {
+                    filter: possessor(),
+                },
+                true,
+            ),
+            (
+                "negated scoped tracked-set possessor",
+                AbilityCondition::Not {
+                    condition: Box::new(AbilityCondition::ScopedPlayerMatches {
+                        filter: possessor(),
+                    }),
+                },
+                true,
+            ),
+            (
+                "scoped plain player relation",
+                AbilityCondition::ScopedPlayerMatches {
+                    filter: PlayerFilter::Opponent,
+                },
+                false,
+            ),
         ] {
             let mut ability = base();
             ability.condition = Some(condition);
@@ -37377,7 +37395,39 @@ mod tests {
                 controls(in_tracked_set),
                 true,
             ),
-            ("ControlsCount over a plain filter", controls(plain), false),
+            (
+                "ControlsCount over a plain filter",
+                controls(plain.clone()),
+                false,
+            ),
+            (
+                "ControlsCount whose count is an ObjectCount over the set",
+                PlayerFilter::ControlsCount {
+                    relation: crate::types::ability::PlayerRelation::Opponent,
+                    filter: plain.clone(),
+                    comparator: Comparator::GE,
+                    count: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: tracked.clone(),
+                        },
+                    }),
+                },
+                true,
+            ),
+            (
+                "ControlsCount whose count is an ObjectCount over a plain filter",
+                PlayerFilter::ControlsCount {
+                    relation: crate::types::ability::PlayerRelation::Opponent,
+                    filter: plain.clone(),
+                    comparator: Comparator::GE,
+                    count: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: plain.clone(),
+                        },
+                    }),
+                },
+                false,
+            ),
             (
                 "PlayerAttribute over the set size",
                 PlayerFilter::PlayerAttribute {
