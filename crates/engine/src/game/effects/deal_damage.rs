@@ -3513,6 +3513,7 @@ fn stash_remaining_each_deals_chain(
 mod tests {
     use super::*;
     use crate::game::ability_utils::apply_instead_swap;
+    use crate::game::engine::apply_as_current;
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCondition, ChosenAttribute, Comparator, ContinuousModification, ControllerRef,
@@ -3520,6 +3521,7 @@ mod tests {
         PlayerRelation, PlayerScope, QuantityExpr, QuantityRef, RoundingMode, TapStateChange,
         TargetFilter, ThisWayCause, TypeFilter, TypedFilter,
     };
+    use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
     use crate::types::events::GameEvent;
     use crate::types::format::FormatConfig;
@@ -9030,9 +9032,6 @@ mod tests {
     /// chain entry, the tail runs exactly once.
     #[test]
     fn single_candidate_division_replacement_pause_runs_tail_once() {
-        use crate::game::engine::apply_as_current;
-        use crate::types::actions::GameAction;
-
         let mut state = GameState::new_two_player(42);
         let master = division_creature(&mut state, 1, PlayerId(0), 1, 1, false);
         let w1 = division_creature(&mut state, 2, PlayerId(0), 1, 4, true);

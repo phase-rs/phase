@@ -3221,9 +3221,9 @@ mod tests {
     use crate::types::card_type::CoreType;
     use crate::types::format::FormatConfig;
     use crate::types::game_state::{
-        CommanderDamageEntry, DelayedTrigger, PendingCast, StackEntry, StackEntryKind,
-        StackPaidSnapshot, TargetEffectDetail, TargetSelectionProgress, TargetSelectionSlot,
-        TriggerOrderGroup, WaitingFor, ZoneChangeRecord,
+        CommanderDamageEntry, DelayedTrigger, DistributionScope, DistributionUnit, PendingCast,
+        StackEntry, StackEntryKind, StackPaidSnapshot, TargetEffectDetail, TargetSelectionProgress,
+        TargetSelectionSlot, TriggerOrderGroup, WaitingFor, ZoneChangeRecord,
     };
     use crate::types::identifiers::{
         CardId, DelayedTriggerInstanceId, DelayedTriggerOrigin, DelayedTriggerToken, TriggerFiring,
@@ -9005,8 +9005,6 @@ mod tests {
     /// serializer's own `redact_waiting_for_iteration_members` call is removed.
     #[test]
     fn client_wire_redacts_resolution_division_provenance_without_viewer_filter() {
-        use crate::types::game_state::{DistributionScope, DistributionUnit};
-
         let mut state = GameState::new_two_player(42);
         let mut pending = ResolvedAbility::new(
             Effect::unimplemented("private loop probe", "private loop probe"),

@@ -33,8 +33,9 @@ use crate::types::ability::mana_multi_role;
 #[cfg(test)]
 use crate::types::counter::CounterType;
 use crate::types::game_state::{
-    ChainStep, DistributionUnit, GameState, PtDirection, RetargetSlotAddress, StackEntryKind,
-    TargetEffectDetail, TargetSelectionConstraint, TargetSelectionProgress, TargetSelectionSlot,
+    ChainStep, DistributionScope, DistributionUnit, GameState, PtDirection, RetargetSlotAddress,
+    StackEntryKind, TargetEffectDetail, TargetSelectionConstraint, TargetSelectionProgress,
+    TargetSelectionSlot,
 };
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef, LEGACY_INCARNATION};
 use crate::types::player::PlayerId;
@@ -2967,7 +2968,6 @@ pub(crate) enum DistributionCoverage {
 
 impl DistributionCoverage {
     pub(crate) fn of(scope: &crate::types::game_state::DistributionScope) -> Self {
-        use crate::types::game_state::DistributionScope;
         match scope {
             DistributionScope::AnnouncedTargets => Self::EveryRecipient,
             DistributionScope::ResolutionCandidates { .. } => Self::AnySubset,
@@ -12230,6 +12230,7 @@ fn build_mode_sequences(
 mod tests {
     use std::cell::RefCell;
 
+    use super::DistributionCoverage::{AnySubset, EveryRecipient};
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
@@ -28582,7 +28583,6 @@ mod tests {
     /// CR 601.2d + CR 608.2d + CR 115.7f: the shared division validator.
     #[test]
     fn validate_distribution_enforces_sum_minimum_membership_and_distinctness() {
-        use DistributionCoverage::{AnySubset, EveryRecipient};
         let a = TargetRef::Object(ObjectId(21));
         let b = TargetRef::Object(ObjectId(22));
         let outsider = TargetRef::Object(ObjectId(99));
@@ -28640,7 +28640,6 @@ mod tests {
     /// accepted under the second.
     #[test]
     fn distribution_coverage_follows_the_division_scope() {
-        use crate::types::game_state::DistributionScope;
         assert_eq!(
             DistributionCoverage::of(&DistributionScope::AnnouncedTargets),
             DistributionCoverage::EveryRecipient
