@@ -10802,7 +10802,7 @@ fn static_mode_uses_chosen_color(mode: &crate::types::statics::StaticMode) -> bo
 /// than the carrier's controller, so the graft has to snapshot
 /// `effect.controller` as the definition's anchor.
 ///
-/// Two member classes today:
+/// Three member classes today:
 /// - `MustBeBlockedByAll` / `MustBeBlocked` carrying a controller-relative
 ///   blocker filter (`ControllerRef::You`/`Opponent`/… — "your opponents", "you
 ///   control"). Grafted onto a TARGET permanent by a one-shot effect (You Look
@@ -10810,10 +10810,12 @@ fn static_mode_uses_chosen_color(mode: &crate::types::statics::StaticMode) -> bo
 ///   to the target's controller.
 /// - `MustAttackAwayFromSource`, whose avoided player is the granting effect's
 ///   controller (CR 701.15b).
+/// - `CantBeTargeted` scoped to `Opponents` / `Controller`, whose "your" is the
+///   granting effect's controller (CR 109.5).
 ///
 /// Mirrors `static_mode_uses_chosen_color`.
 fn static_mode_needs_source_controller_anchor(mode: &crate::types::statics::StaticMode) -> bool {
-    use crate::types::statics::StaticMode;
+    use crate::types::statics::{ProhibitionScope, StaticMode};
     match mode {
         StaticMode::MustBeBlockedByAll {
             blockers: Some(filter),
@@ -10827,6 +10829,13 @@ fn static_mode_needs_source_controller_anchor(mode: &crate::types::statics::Stat
         // (Maximum Carnage chapter I), so re-deriving it from the carrier would
         // avoid the wrong player.
         StaticMode::MustAttackAwayFromSource => true,
+        // CR 109.5 + CR 611.2c: a granted "can't be the target of spells or
+        // abilities your opponents control" (Vines of Vastwood) scopes "your"
+        // from the granting effect's controller; re-deriving it from the
+        // carrier would protect an opponent's creature from the wrong players.
+        StaticMode::CantBeTargeted {
+            who: ProhibitionScope::Opponents | ProhibitionScope::Controller,
+        } => true,
         _ => false,
     }
 }
@@ -31580,7 +31589,10 @@ mod tests {
             vec![StaticDefinition::new(StaticMode::IgnoreHexproof)].into();
         let b = make_creature(&mut state, "CantBeTargeted Source", 1, 1, PlayerId(0));
         state.objects.get_mut(&b).unwrap().static_definitions =
-            vec![StaticDefinition::new(StaticMode::CantBeTargeted)].into();
+            vec![StaticDefinition::new(StaticMode::CantBeTargeted {
+                who: crate::types::statics::ProhibitionScope::AllPlayers,
+            })]
+            .into();
         // Phased-out permanent carrying a Shroud static — CR 702.26b excludes it from
         // game_functioning_statics, so its kind must NOT appear in presence.
         let phased = make_creature(&mut state, "Phased Shroud Source", 1, 1, PlayerId(0));

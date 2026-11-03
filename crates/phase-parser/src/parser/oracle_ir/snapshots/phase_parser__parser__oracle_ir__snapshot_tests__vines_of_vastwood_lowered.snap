@@ -17,8 +17,12 @@ expression: "&lowered"
             },
             "modifications": [
               {
-                "type": "AddKeyword",
-                "keyword": "Hexproof"
+                "type": "AddStaticMode",
+                "mode": {
+                  "CantBeTargeted": {
+                    "who": "Opponents"
+                  }
+                }
               }
             ],
             "condition": null,

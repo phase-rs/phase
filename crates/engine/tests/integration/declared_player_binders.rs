@@ -482,7 +482,14 @@ fn curse_token(attach_to: TargetFilter) -> Effect {
         enters_attacking: false,
         attack_destination: engine::types::ability::TokenAttackDestination::ControllerChooses,
         supertypes: vec![],
-        static_abilities: vec![],
+        // CR 111.3 + CR 702.5a: "The token has enchant player", as the export
+        // carries it — without an enchant restriction the Aura cannot legally
+        // enchant a player.
+        static_abilities: vec![StaticDefinition::continuous()
+            .affected(TargetFilter::SelfRef)
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Enchant(TargetFilter::Player),
+            }])],
         enter_with_counters: vec![],
     }
 }

@@ -3,10 +3,11 @@
 //! Saproling tokens when an Aura spell resolves attached to it.
 //!
 //! Root cause: `GameRunner` cast-resolution called `attach::attach_to` /
-//! `attach::attach_to_player` directly (stack.rs) without emitting
-//! `GameEvent::EffectResolved { kind: EffectKind::Attach }`, so the
-//! `TriggerMode::Attached` matcher never saw the attach event and Bramble's
-//! trigger never fired. The fix emits the event at both call sites.
+//! `attach::attach_to_player` directly (stack.rs) without emitting an
+//! attachment event, so the `TriggerMode::Attached` matcher never saw the
+//! attach and Bramble's trigger never fired. Both call sites now attach through
+//! `attach_to*_with_events`, which publish `GameEvent::Attached` (the single
+//! "becomes attached" trigger event) on an actual host transition.
 
 use engine::game::game_object::{AttachTarget, GameObject};
 use engine::game::scenario::{GameScenario, P0};
@@ -321,7 +322,7 @@ fn bramble_elemental_triggers_on_first_attachment_after_replacement_pause() {
         Some(AttachTarget::Object(bramble))
     );
     // The first attachment genuinely occurred on the replacement resume path,
-    // emitting EffectResolved { Attach } and triggering Bramble Elemental once.
+    // emitting GameEvent::Attached and triggering Bramble Elemental once.
     let tokens = saproling_tokens(&runner);
     assert_eq!(
         tokens.len(),

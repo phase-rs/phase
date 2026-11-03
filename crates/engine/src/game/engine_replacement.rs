@@ -4,7 +4,7 @@ use crate::ai_support::copy_target_mana_value_ceiling;
 use crate::game::game_object::ObjectIncarnationRefExt;
 use crate::types::ability::{
     AbilityDefinition, AttachCardinality, AttachSelection, ChosenAttribute, CopyTargetPurpose,
-    Effect, EffectKind, PostReplacementContinuation, ResolvedAbility, TargetFilter, TargetRef,
+    Effect, PostReplacementContinuation, ResolvedAbility, TargetFilter, TargetRef,
 };
 #[cfg(test)]
 use crate::types::ability::{EffectScope, TapStateChange};
@@ -2342,7 +2342,8 @@ fn handle_persist_chosen_attribute_choice(
             .get(&source_id)
             .is_some_and(|aura| aura.attached_to.is_none())
     {
-        match crate::game::zone_pipeline::resolve_entering_aura_attachment(state, source_id) {
+        match crate::game::zone_pipeline::resolve_entering_aura_attachment(state, source_id, events)
+        {
             // CR 303.4g does NOT apply on this route: `NoLegalHost` here means the
             // entrant already ENTERED the battlefield as a non-Aura and only became
             // an Aura when its `BecomeCopy` replacement realized post-entry. There is
@@ -3364,7 +3365,7 @@ fn finish_copy_target_choice_entry_after_counters(
     // to carry its own enter-as-a-copy replacement, and none of those realize into
     // a multi-host Aura with a token continuation), but "no card does this today"
     // is not a property the engine should depend on.
-    match crate::game::zone_pipeline::resolve_entering_aura_attachment(state, source_id) {
+    match crate::game::zone_pipeline::resolve_entering_aura_attachment(state, source_id, events) {
         // CR 303.4g does NOT apply on this route: this entrant already ENTERED the
         // battlefield as a non-Aura (Copy Enchantment enters as a plain enchantment)
         // and only became an Aura when `BecomeCopy` realized post-entry. It cannot be
@@ -4172,11 +4173,8 @@ fn capture_deferred_entry_events_if_mid_entry_choice(
                 if *object_id == source_id
         ) || matches!(
             event,
-            GameEvent::EffectResolved {
-                kind: EffectKind::Attach,
-                source_id: attach_source_id,
-                ..
-            } if *attach_source_id == source_id
+            GameEvent::Attached { attachment_id, .. }
+                if *attachment_id == source_id
         ) {
             state.deferred_entry_events.push(event.clone());
         }
@@ -4251,34 +4249,30 @@ pub(crate) fn apply_pending_spell_resolution(
         .unwrap_or(false);
     if is_aura {
         if let Some(target) = ctx.spell_targets.first() {
-            // CR 608.3c / CR 603.2e: an Aura spell becoming attached on this
-            // resume path is an effect resolution, so emit `EffectResolved
-            // { Attach }` (Bramble Elemental) -- but only when the attachment
-            // actually moved: a same-host re-attach is a CR 701.3b no-op and
-            // must not re-trigger "becomes attached".
-            let attached = match target {
+            // CR 608.3c + CR 603.2e: an Aura spell becoming attached on this
+            // resume path publishes `GameEvent::Attached` (the single "becomes
+            // attached" trigger authority) only on an actual host transition;
+            // a same-host re-attach is a CR 701.3b no-op.
+            match target {
                 crate::types::ability::TargetRef::Object(target_id)
                     if state.battlefield.contains(target_id) =>
                 {
-                    effects::attach::attach_to_reporting_change(state, ctx.object_id, *target_id)
+                    effects::attach::attach_to_with_events(
+                        state,
+                        ctx.object_id,
+                        *target_id,
+                        events,
+                    );
                 }
-                crate::types::ability::TargetRef::Object(_) => false,
+                crate::types::ability::TargetRef::Object(_) => {}
                 crate::types::ability::TargetRef::Player(player_id) => {
-                    effects::attach::attach_to_player_reporting_change(
+                    effects::attach::attach_to_player_with_events(
                         state,
                         ctx.object_id,
                         *player_id,
-                    )
+                        events,
+                    );
                 }
-            };
-            if attached {
-                events.push(GameEvent::EffectResolved {
-                    kind: EffectKind::Attach,
-                    source_id: ctx.object_id,
-                    subject: state
-                        .capture_event_object_snapshot(ctx.object_id)
-                        .map(Box::new),
-                });
             }
         }
     }

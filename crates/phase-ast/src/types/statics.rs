@@ -42,6 +42,10 @@ pub enum ProhibitionScope {
 /// Prefer `ProhibitionScope` in new code.
 pub type CastingProhibitionScope = ProhibitionScope;
 
+fn default_prohibition_all_players() -> ProhibitionScope {
+    ProhibitionScope::AllPlayers
+}
+
 impl fmt::Display for ProhibitionScope {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1124,7 +1128,19 @@ pub enum StaticMode {
     MaxBlockersEachCombat {
         max: u32,
     },
-    CantBeTargeted,
+    /// CR 702.18a / CR 702.11b / CR 109.5: Descriptive targeting prohibition ("can't be the target of spells or abilities [your opponents control]").
+    /// `who` scopes which players are prohibited from targeting the affected object:
+    /// - `AllPlayers`: blanket Shroud (CR 702.18a).
+    /// - `Opponents`: opponents of the static ability source's controller (CR 109.5).
+    CantBeTargeted {
+        // The default only fills a missing `who` inside the struct form
+        // (`{"CantBeTargeted": {}}`). `StaticMode` is externally tagged, so the
+        // former unit form (bare `"CantBeTargeted"`) does NOT deserialize into
+        // this variant; that break is carried by the protocol bump and the
+        // regenerated card data, not by this default.
+        #[serde(default = "default_prohibition_all_players")]
+        who: ProhibitionScope,
+    },
     /// CR 101.2: Blanket casting prohibition — prevents the scoped player(s) from casting spells.
     /// E.g., Steel Golem: "You can't cast creature spells." (Controller scope + creature filter)
     CantBeCast {
@@ -2660,7 +2676,7 @@ impl StaticMode {
             StaticMode::CantBecomeSuspected => StaticModeKind::CantBecomeSuspected,
             StaticMode::MaxAttackersEachCombat { .. } => StaticModeKind::MaxAttackersEachCombat,
             StaticMode::MaxBlockersEachCombat { .. } => StaticModeKind::MaxBlockersEachCombat,
-            StaticMode::CantBeTargeted => StaticModeKind::CantBeTargeted,
+            StaticMode::CantBeTargeted { .. } => StaticModeKind::CantBeTargeted,
             StaticMode::CantBeCast { .. } => StaticModeKind::CantBeCast,
             StaticMode::CantBeActivated { .. } => StaticModeKind::CantBeActivated,
             StaticMode::CantSearchLibrary { .. } => StaticModeKind::CantSearchLibrary,
@@ -2838,7 +2854,7 @@ impl StaticMode {
             | StaticMode::CantBecomeSuspected
             | StaticMode::MaxAttackersEachCombat { .. }
             | StaticMode::MaxBlockersEachCombat { .. }
-            | StaticMode::CantBeTargeted
+            | StaticMode::CantBeTargeted { .. }
             | StaticMode::CantBeCast { .. }
             | StaticMode::CantBeActivated { .. }
             | StaticMode::CantSearchLibrary { .. }
@@ -3222,7 +3238,7 @@ impl StaticMode {
             | StaticMode::CantBecomeSuspected
             | StaticMode::MaxAttackersEachCombat { .. }
             | StaticMode::MaxBlockersEachCombat { .. }
-            | StaticMode::CantBeTargeted
+            | StaticMode::CantBeTargeted { .. }
             | StaticMode::CantBeCast { .. }
             | StaticMode::CantBeActivated { .. }
             | StaticMode::CantSearchLibrary { .. }
@@ -3356,7 +3372,10 @@ impl fmt::Display for StaticMode {
             StaticMode::MaxBlockersEachCombat { max } => {
                 write!(f, "MaxBlockersEachCombat({max})")
             }
-            StaticMode::CantBeTargeted => write!(f, "CantBeTargeted"),
+            StaticMode::CantBeTargeted { who } => match who {
+                ProhibitionScope::AllPlayers => write!(f, "CantBeTargeted"),
+                _ => write!(f, "CantBeTargeted({who})"),
+            },
             StaticMode::CantBeCast { who } => write!(f, "CantBeCast({who})"),
             StaticMode::CantBeActivated { who, .. } => write!(f, "CantBeActivated({who})"),
             StaticMode::CantSearchLibrary { cause } => write!(f, "CantSearchLibrary({cause})"),
@@ -3833,7 +3852,14 @@ impl FromStr for StaticMode {
                 }
             }
             "CantBeBlockedUnlessAllBlock" => StaticMode::CantBeBlockedUnlessAllBlock,
-            "CantBeTargeted" => StaticMode::CantBeTargeted,
+            "CantBeTargeted" => StaticMode::CantBeTargeted {
+                who: ProhibitionScope::AllPlayers,
+            },
+            s if s.starts_with("CantBeTargeted(") && s.ends_with(')') => {
+                let inner = &s["CantBeTargeted(".len()..s.len() - 1];
+                let who = ProhibitionScope::from_str(inner).unwrap_or(ProhibitionScope::AllPlayers);
+                StaticMode::CantBeTargeted { who }
+            }
             "CantBeCast" => StaticMode::CantBeCast {
                 who: ProhibitionScope::Controller,
             },
@@ -5139,7 +5165,12 @@ mod tests {
     fn serde_roundtrip() {
         let modes = vec![
             StaticMode::Continuous,
-            StaticMode::CantBeTargeted,
+            StaticMode::CantBeTargeted {
+                who: ProhibitionScope::AllPlayers,
+            },
+            StaticMode::CantBeTargeted {
+                who: ProhibitionScope::Opponents,
+            },
             StaticMode::CantBeBlocked,
             StaticMode::Flying,
             StaticMode::MustBeBlocked { by: None },

@@ -506,6 +506,7 @@ fn find_legal_targets_with_context(
                     Zone::Exile,
                     zone_card_ids(state, Zone::Exile),
                     filter,
+                    source_controller,
                     target_ctx,
                     &mut targets,
                 ),
@@ -516,6 +517,7 @@ fn find_legal_targets_with_context(
                             Zone::Graveyard,
                             player.graveyard.iter().copied(),
                             filter,
+                            source_controller,
                             target_ctx,
                             &mut targets,
                         );
@@ -528,6 +530,7 @@ fn find_legal_targets_with_context(
                             Zone::Hand,
                             player.hand.iter().copied(),
                             filter,
+                            source_controller,
                             target_ctx,
                             &mut targets,
                         );
@@ -540,6 +543,7 @@ fn find_legal_targets_with_context(
                             Zone::Library,
                             player.library.iter().copied(),
                             filter,
+                            source_controller,
                             target_ctx,
                             &mut targets,
                         );
@@ -560,7 +564,7 @@ fn find_legal_targets_with_context(
                                 Some(o) => o,
                                 None => continue,
                             };
-                            if can_target_off_battlefield(obj, state) {
+                            if can_target_off_battlefield(obj, source_controller, state) {
                                 targets.push(TargetRef::Object(obj_id));
                             }
                         }
@@ -572,7 +576,14 @@ fn find_legal_targets_with_context(
     } else {
         // No explicit zone: default behavior (battlefield + stack for Card type)
         if filter_targets_stack_spells(filter) {
-            add_stack_spells(state, filter, source_id, target_ctx, &mut targets);
+            add_stack_spells(
+                state,
+                filter,
+                source_id,
+                source_controller,
+                target_ctx,
+                &mut targets,
+            );
         }
 
         for &obj_id in &state.battlefield {
@@ -2628,6 +2639,19 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
                     {
                         return Some(TargetRef::Object(*object_id));
                     }
+                    // CR 701.3a + CR 603.2: An attachment trigger's antecedent is
+                    // its target when the source is the attachment, or the attachment
+                    // when the source is the target.
+                    crate::types::events::GameEvent::Attached {
+                        attachment_id,
+                        target,
+                    } => {
+                        return if *attachment_id == source_id {
+                            Some(target.clone())
+                        } else {
+                            Some(TargetRef::Object(*attachment_id))
+                        };
+                    }
                     // CR 400.7: Un-card Gotcha reflexively returns the exact occurrence of
                     // the named card.
                     crate::types::events::GameEvent::GotchaSaid { returns, .. } => {
@@ -3093,6 +3117,10 @@ pub(crate) fn extract_source_from_event(
         GameEvent::TokenCreated { object_id, .. } => Some(*object_id),
         GameEvent::CreatureDestroyed { object_id, .. } => Some(*object_id),
         GameEvent::PermanentSacrificed { object_id, .. } => Some(*object_id),
+        GameEvent::Attached { attachment_id, .. } => Some(*attachment_id),
+        // CR 608.2k + CR 701.3d: for an Unattached trigger, "that permanent"
+        // (CR 701.21a sacrifice) resolves to the permanent from which the attachment
+        // became unattached (its former host).
         GameEvent::Unattached {
             old_target: TargetRef::Object(object_id),
             ..
@@ -3189,6 +3217,14 @@ pub(crate) fn extract_target_object_from_event(
             target: TargetRef::Object(id),
             ..
         } => Some(*id),
+        GameEvent::Attached {
+            target: TargetRef::Object(id),
+            ..
+        } => Some(*id),
+        GameEvent::Unattached {
+            old_target: TargetRef::Object(id),
+            ..
+        } => Some(*id),
         GameEvent::DamageDealt {
             target: TargetRef::Player(_),
             ..
@@ -3258,6 +3294,7 @@ pub(crate) fn extract_target_object_from_event(
         | GameEvent::PermanentSacrificed { .. }
         | GameEvent::ControllerChanged { .. }
         | GameEvent::EffectResolved { .. }
+        | GameEvent::Attached { .. }
         | GameEvent::Unattached { .. }
         | GameEvent::ContinuousEffectEnded { .. }
         | GameEvent::AttackersDeclared { .. }
@@ -3379,7 +3416,11 @@ pub(crate) fn extract_player_from_event(
         // carried on the event.
         GameEvent::AbilityActivated { player_id, .. } => Some(*player_id),
         GameEvent::PermanentSacrificed { player_id, .. } => Some(*player_id),
-        GameEvent::Unattached {
+        GameEvent::Attached {
+            target: TargetRef::Player(player_id),
+            ..
+        }
+        | GameEvent::Unattached {
             old_target: TargetRef::Player(player_id),
             ..
         } => Some(*player_id),
@@ -3715,6 +3756,7 @@ fn add_zone_targets(
     zone: Zone,
     object_ids: impl IntoIterator<Item = ObjectId>,
     filter: &TargetFilter,
+    source_controller: PlayerId,
     target_ctx: &super::filter::FilterContext,
     targets: &mut Vec<TargetRef>,
 ) {
@@ -3724,7 +3766,7 @@ fn add_zone_targets(
                 Some(o) => o,
                 None => continue,
             };
-            if can_target_off_battlefield(obj, state) {
+            if can_target_off_battlefield(obj, source_controller, state) {
                 targets.push(TargetRef::Object(obj_id));
             }
         }
@@ -3735,6 +3777,7 @@ fn add_stack_spells(
     state: &GameState,
     filter: &TargetFilter,
     source_id: ObjectId,
+    source_controller: PlayerId,
     target_ctx: &super::filter::FilterContext,
     targets: &mut Vec<TargetRef>,
 ) {
@@ -3754,7 +3797,7 @@ fn add_stack_spells(
             Some(o) => o,
             None => continue,
         };
-        if can_target_off_battlefield(obj, state) {
+        if can_target_off_battlefield(obj, source_controller, state) {
             targets.push(TargetRef::Object(entry.id));
         }
     }
@@ -3776,22 +3819,67 @@ fn add_stack_spells(
 /// zones it names) still applies.
 fn can_target_off_battlefield(
     obj: &crate::game::game_object::GameObject,
+    source_controller: PlayerId,
     state: &GameState,
 ) -> bool {
-    !has_functioning_cant_be_targeted(obj, state)
+    !own_cant_be_targeted_prohibits(obj, source_controller, state)
 }
 
-/// CR 113.6 + CR 113.6b: whether `obj` carries a `StaticMode::CantBeTargeted`
-/// that functions in its current zone. `active_static_definitions` applies the
-/// zone-of-function gate (an empty `active_zones` means battlefield only). The
-/// one read of this static for both the permanent check ([`can_target`]) and
-/// the off-battlefield check ([`can_target_off_battlefield`]).
-fn has_functioning_cant_be_targeted(
+/// CR 702.18a + CR 702.11b + CR 109.5 + CR 113.6b: whether a
+/// `StaticMode::CantBeTargeted` on `obj` itself — self-referential or granted
+/// onto it, and functioning in its current zone (`active_static_definitions`
+/// applies the zone-of-function gate; an empty `active_zones` means battlefield
+/// only) — prohibits `source_controller` from targeting `obj`.
+///
+/// A static whose `affected` filter names some other object (Shielding Plax's
+/// "enchanted creature") does not protect its own source; it applies to `obj`
+/// only when `obj` matches that filter and the static's condition holds. `who`
+/// is scoped from the static's controller (CR 109.5): `obj`'s controller for a
+/// printed ability of `obj`, or the granting source's controller for one
+/// grafted onto it (`StaticDefinition::source_controller`). The one read of `obj`'s own targeting
+/// prohibition for both the permanent check ([`can_target_with_source_name`])
+/// and the off-battlefield check ([`can_target_off_battlefield`]).
+fn own_cant_be_targeted_prohibits(
     obj: &crate::game::game_object::GameObject,
+    source_controller: PlayerId,
     state: &GameState,
 ) -> bool {
-    super::functioning_abilities::active_static_definitions(state, obj)
-        .any(|def| matches!(def.mode, crate::types::statics::StaticMode::CantBeTargeted))
+    super::functioning_abilities::active_static_definitions(state, obj).any(|def| {
+        let crate::types::statics::StaticMode::CantBeTargeted { ref who } = def.mode else {
+            return false;
+        };
+        let applies = match def.affected {
+            None | Some(TargetFilter::SelfRef) => true,
+            Some(ref filter) => {
+                crate::game::filter::matches_target_filter(
+                    state,
+                    obj.id,
+                    filter,
+                    &crate::game::filter::FilterContext::from_source(state, obj.id),
+                ) && super::static_abilities::static_condition_matches_context(
+                    state,
+                    obj.id,
+                    obj.controller,
+                    def,
+                    &super::static_abilities::StaticCheckContext {
+                        target_id: Some(obj.id),
+                        ..Default::default()
+                    },
+                )
+            }
+        };
+        // CR 109.5: "your" is scoped from the static's controller — for a
+        // static granted onto `obj` (Vines of Vastwood) the granting source's
+        // controller, anchored at graft time, not `obj`'s.
+        applies
+            && super::static_abilities::prohibition_scope_matches_player_anchored(
+                who,
+                source_controller,
+                obj,
+                def.source_controller.unwrap_or(obj.controller),
+                state,
+            )
+    })
 }
 
 /// CR 608.2g: expose a parked resolving spell only while its object is still
@@ -4081,16 +4169,16 @@ fn can_target_with_source_name(
     //     per-object (and now per-source-controller) and stays inside the loop.
     let ignores_hexproof = source_ignores_hexproof
         || crate::game::static_abilities::target_ignores_hexproof(state, obj.id, source_controller);
-    // CR 702.11b: Hexproof on a permanent prevents targeting by opponents.
+    // CR 702.11b + CR 102.3: Hexproof on a permanent prevents targeting by opponents.
     if !ignores_hexproof
         && obj.has_keyword(&Keyword::Hexproof)
-        && obj.controller != source_controller
+        && super::players::is_opponent(state, obj.controller, source_controller)
     {
         return false;
     }
-    // CR 702.11d: "Hexproof from [quality]" prevents targeting by opponents' sources
+    // CR 702.11d + CR 102.3: "Hexproof from [quality]" prevents targeting by opponents' sources
     // with the matching quality. CR 702.11e: IgnoreHexproof bypasses this.
-    if !ignores_hexproof && obj.controller != source_controller {
+    if !ignores_hexproof && super::players::is_opponent(state, obj.controller, source_controller) {
         for kw in &obj.keywords {
             if let Keyword::HexproofFrom(ref filter) = kw {
                 if hexproof_filter_matches(filter, source_id, state) {
@@ -4103,17 +4191,48 @@ fn can_target_with_source_name(
     if is_protected_from(obj, source_id, source_name, state) {
         return false;
     }
-    // CR 702.18a: A static "can't be the target of spells or abilities" is the
-    // descriptive (non-keyworded) form of Shroud — the permanent can't be the
-    // target of any spell or ability, regardless of controller. It is modeled as
-    // `StaticMode::CantBeTargeted`, living on the object's own static definitions
-    // (a self-referential static, or propagated onto a subject via `AddStaticMode`
-    // — see `static_mode_needs_grant_propagation`). The opponent-scoped variant
-    // ("... your opponents control") is parsed as `Keyword::Hexproof` instead, so
-    // it is handled by the Hexproof branch above rather than here.
-    // Per-object (reads `obj`'s own static definitions) — correctly NOT hoisted.
-    if has_functioning_cant_be_targeted(obj, state) {
+    // CR 702.18a / CR 702.11b / CR 109.5: A static "can't be the target of spells or abilities
+    // [your opponents control]" is modeled as `StaticMode::CantBeTargeted { who }`.
+    // 1. Direct on `obj` (self-referential or granted). Per-object (reads
+    // `obj`'s own static definitions) — correctly NOT hoisted.
+    if own_cant_be_targeted_prohibits(obj, source_controller, state) {
         return false;
+    }
+
+    // 2. Battlefield-scoped statics (e.g. Shielding Plax on an enchanted creature, or an anthem):
+    if super::functioning_abilities::static_kind_present(
+        state,
+        crate::types::statics::StaticModeKind::CantBeTargeted,
+    ) {
+        for (source_obj, def) in super::functioning_abilities::game_functioning_statics(state) {
+            if let crate::types::statics::StaticMode::CantBeTargeted { ref who } = def.mode {
+                if let Some(ref filter) = def.affected {
+                    if crate::game::filter::matches_target_filter(
+                        state,
+                        obj.id,
+                        filter,
+                        &crate::game::filter::FilterContext::from_source(state, source_obj.id),
+                    ) && super::static_abilities::static_condition_matches_context(
+                        state,
+                        source_obj.id,
+                        source_obj.controller,
+                        def,
+                        &super::static_abilities::StaticCheckContext {
+                            target_id: Some(obj.id),
+                            ..Default::default()
+                        },
+                    ) && super::static_abilities::prohibition_scope_matches_player_anchored(
+                        who,
+                        source_controller,
+                        source_obj,
+                        def.source_controller.unwrap_or(source_obj.controller),
+                        state,
+                    ) {
+                        return false;
+                    }
+                }
+            }
+        }
     }
     // CR 702.21a: Ward is a triggered ability, not a targeting restriction.
     // Targeting is legal; the ward trigger fires via process_triggers() and
@@ -5648,7 +5767,9 @@ mod tests {
         // a self-referential static / the `AddStaticMode` propagation onto a subject.
         state.objects.get_mut(&c1).unwrap().static_definitions.push(
             crate::types::ability::StaticDefinition::new(
-                crate::types::statics::StaticMode::CantBeTargeted,
+                crate::types::statics::StaticMode::CantBeTargeted {
+                    who: crate::types::statics::ProhibitionScope::AllPlayers,
+                },
             )
             .affected(crate::types::ability::TargetFilter::SelfRef),
         );
@@ -5662,6 +5783,130 @@ mod tests {
         assert!(
             !targets_p1.contains(&TargetRef::Object(c1)),
             "the controller cannot target it either (Shroud semantics, not Hexproof)"
+        );
+    }
+
+    /// CR 109.5 + CR 702.11b: A `StaticMode::CantBeTargeted { who: ProhibitionScope::Opponents }`
+    /// static on an Aura controlled by P0 attached to P1's creature prohibits P0's opponents
+    /// (including P1) from targeting the creature, while P0 (the Aura's controller) CAN target it.
+    #[test]
+    fn cant_be_targeted_opponents_static_scopes_to_static_controller() {
+        let (mut state, _c0, c1) = setup_with_creatures();
+        // c1 is controlled by P1.
+        // P0 controls an Aura on the battlefield attached to c1.
+        let aura_id = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Shielding Plax".to_string(),
+            Zone::Battlefield,
+        );
+        let aura = state.objects.get_mut(&aura_id).unwrap();
+        aura.attached_to = Some(crate::game::game_object::AttachTarget::Object(c1));
+        aura.static_definitions.push(
+            crate::types::ability::StaticDefinition::new(
+                crate::types::statics::StaticMode::CantBeTargeted {
+                    who: crate::types::statics::ProhibitionScope::Opponents,
+                },
+            )
+            .affected(crate::types::ability::TargetFilter::Typed(
+                crate::types::ability::TypedFilter::creature()
+                    .properties(vec![crate::types::ability::FilterProp::EnchantedBy]),
+            )),
+        );
+        aura.card_types.core_types.push(CoreType::Enchantment);
+
+        let targets_p0 = find_legal_targets(&state, &creature_filter(), PlayerId(0), ObjectId(99));
+        let targets_p1 = find_legal_targets(&state, &creature_filter(), PlayerId(1), ObjectId(99));
+
+        assert!(
+            targets_p0.contains(&TargetRef::Object(c1)),
+            "CR 109.5: Aura controller (P0) MUST be able to target enchanted creature even though it's controlled by P1"
+        );
+        assert!(
+            !targets_p1.contains(&TargetRef::Object(c1)),
+            "CR 109.5: P1 is an opponent of the Aura's controller and MUST be prohibited from targeting"
+        );
+
+        // Naturalize check: Shielding Plax itself is an enchantment and CAN be targeted by P1
+        let enchantment_filter = TargetFilter::Typed(crate::types::ability::TypedFilter::new(
+            crate::types::ability::TypeFilter::Enchantment,
+        ));
+        let enchantment_targets_p1 =
+            find_legal_targets(&state, &enchantment_filter, PlayerId(1), ObjectId(99));
+        assert!(
+            enchantment_targets_p1.contains(&TargetRef::Object(aura_id)),
+            "Opponent P1 CAN target the Aura itself (e.g. with Naturalize); Shielding Plax protects only the enchanted creature"
+        );
+    }
+
+    /// CR 102.3: In a game between teams, teammates are not opponents.
+    /// A CantBeTargeted { who: ProhibitionScope::Opponents } static on an Aura allows
+    /// the controller's teammate to target the enchanted creature.
+    #[test]
+    fn cant_be_targeted_opponents_static_permits_teammate_in_2hg() {
+        use crate::types::format::FormatConfig;
+        let mut state = GameState::new(FormatConfig::two_headed_giant(), 4, 0);
+
+        // Creature controlled by P0
+        let c0 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&c0)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        // Aura controlled by P0 attached to c0
+        let aura_id = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Shielding Plax".to_string(),
+            Zone::Battlefield,
+        );
+        let aura = state.objects.get_mut(&aura_id).unwrap();
+        aura.attached_to = Some(crate::game::game_object::AttachTarget::Object(c0));
+        aura.static_definitions.push(
+            crate::types::ability::StaticDefinition::new(
+                crate::types::statics::StaticMode::CantBeTargeted {
+                    who: crate::types::statics::ProhibitionScope::Opponents,
+                },
+            )
+            .affected(crate::types::ability::TargetFilter::Typed(
+                crate::types::ability::TypedFilter::creature()
+                    .properties(vec![crate::types::ability::FilterProp::EnchantedBy]),
+            )),
+        );
+
+        // P0 (controller) CAN target c0
+        let targets_p0 = find_legal_targets(&state, &creature_filter(), PlayerId(0), ObjectId(99));
+        assert!(targets_p0.contains(&TargetRef::Object(c0)));
+
+        // P1 (P0's teammate in 2HG) CAN target c0 (CR 102.3)
+        let targets_p1 = find_legal_targets(&state, &creature_filter(), PlayerId(1), ObjectId(99));
+        assert!(
+            targets_p1.contains(&TargetRef::Object(c0)),
+            "CR 102.3: Teammate P1 is NOT an opponent and CAN target c0"
+        );
+
+        // P2 and P3 (opponents on opposing team) CANNOT target c0
+        let targets_p2 = find_legal_targets(&state, &creature_filter(), PlayerId(2), ObjectId(99));
+        assert!(
+            !targets_p2.contains(&TargetRef::Object(c0)),
+            "P2 is an opponent and cannot target c0"
+        );
+        let targets_p3 = find_legal_targets(&state, &creature_filter(), PlayerId(3), ObjectId(99));
+        assert!(
+            !targets_p3.contains(&TargetRef::Object(c0)),
+            "P3 is an opponent and cannot target c0"
         );
     }
 
@@ -6535,7 +6780,9 @@ mod tests {
                 .static_definitions
                 .push(
                     crate::types::ability::StaticDefinition::new(
-                        crate::types::statics::StaticMode::CantBeTargeted,
+                        crate::types::statics::StaticMode::CantBeTargeted {
+                            who: crate::types::statics::ProhibitionScope::AllPlayers,
+                        },
                     )
                     .affected(TargetFilter::SelfRef)
                     .active_zones(active_zones.clone()),
