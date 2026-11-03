@@ -1238,6 +1238,36 @@ fn dig_continuation_wants_rest_pile_for_count(ability: &ResolvedAbility) -> bool
     wants_rest
 }
 
+/// CR 701.20a + CR 701.20d + CR 401.2: a card revealed by an instruction stays
+/// revealed only as long as that instruction needs it, and revealed cards that
+/// are reordered within a library stop being revealed. Once a dig's keep
+/// decision has placed every card it revealed — the kept ones out of the
+/// library, the rest back into it — the reveal markers must be dropped, or the
+/// caster (and every other player) keeps seeing the cards that were just put
+/// away at the bottom of the library (issue #8059).
+///
+/// This is the same cleanup the shared `BatchCompletion::RevealRestPile` tail
+/// runs for the delivery shapes that have a completion to ride; the in-place
+/// library-commit branch answers the `DigChoice` without one, so it calls the
+/// authority directly.
+fn hide_dig_reveal_markers(
+    state: &mut GameState,
+    player: crate::types::player::PlayerId,
+    cards: &[ObjectId],
+) {
+    if cards.is_empty() {
+        return;
+    }
+    state
+        .resolve_and_apply_information(
+            cards,
+            ResolvedInformationAudience::Controller(player),
+            ResolvedInformationLifetime::UntilActionBoundary,
+            ResolvedInformationEdit::Hide,
+        )
+        .expect("reveal cleanup must reference live card occurrences");
+}
+
 /// CR 701.20e / CR 701.23a + CR 401.4: Move the "rest" partition of an
 /// interactive selection (Dig's unkept cards, a search-split's non-primary
 /// cards) to a concrete destination zone. `Library` routes to the bottom of the
@@ -4839,7 +4869,12 @@ pub(super) fn handle_resolution_choice(
                                     rest_destination: zone,
                                     rest_order: DigRestOrder::Preserve,
                                     rest_split_top_count: None,
-                                    clear_markers: Vec::new(),
+                                    // CR 701.20d: the unkept pile was reordered
+                                    // into the library, so those cards stop
+                                    // being revealed — drop the markers for
+                                    // every card this dig revealed once it has
+                                    // landed.
+                                    clear_markers: cards.clone(),
                                     publish_tracked_set: None,
                                     publish_tracked_set_cause: None,
                                     emit_reveal_until_resolved: None,
@@ -4856,6 +4891,12 @@ pub(super) fn handle_resolution_choice(
                         }
                     }
                 }
+                // CR 701.20a + CR 701.20d + CR 401.2: the kept cards stay at the
+                // top of the library and the remainder is reordered beneath
+                // them, all inside the same hidden zone, so nothing this dig
+                // revealed is still revealed — close the window before the
+                // continuation resumes.
+                hide_dig_reveal_markers(state, player, &cards);
                 return Ok(ResolutionChoiceOutcome::WaitingFor(
                     finish_with_continuation(state, player, events),
                 ));
@@ -4930,7 +4971,12 @@ pub(super) fn handle_resolution_choice(
                         // survives an arbitrary number of replacement re-parks
                         // in between.
                         rest_split_top_count,
-                        clear_markers: Vec::new(),
+                        // CR 701.20a + CR 701.20d + CR 401.2: the keep decision
+                        // ends the reveal window. Every revealed card is now
+                        // either kept (leaving the library) or reordered back
+                        // into it, so its public reveal marker must be dropped
+                        // with the rest pile's landing.
+                        clear_markers: cards.clone(),
                         publish_tracked_set: Some(publish_set),
                         publish_tracked_set_cause: publish_cause,
                         emit_reveal_until_resolved: None,
@@ -5003,7 +5049,10 @@ pub(super) fn handle_resolution_choice(
                     rest_destination,
                     rest_order,
                     rest_split_top_count: None,
-                    clear_markers: Vec::new(),
+                    // CR 701.20a + CR 701.20d + CR 401.2: same reveal-window
+                    // close for the reveal-only form whose kept cards never
+                    // move (`kept_destination: None`).
+                    clear_markers: cards.clone(),
                     publish_tracked_set: Some(publish_set),
                     publish_tracked_set_cause: publish_cause,
                     emit_reveal_until_resolved: None,
