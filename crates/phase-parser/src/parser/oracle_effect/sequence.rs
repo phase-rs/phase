@@ -9111,15 +9111,17 @@ pub(super) fn parse_followup_continuation_ast_with_search_destination(
                 face_down,
             })
         }
-        // "put the rest on the bottom" / "put those cards into your graveyard"
-        // after Dig — sets rest_destination on the preceding Dig effect. A move
+        // "put the rest on the bottom" / "put them back" after Dig — sets
+        // rest_destination on the preceding Dig effect. "put those cards" is
+        // deliberately EXCLUDED: after a look-only Dig, "put those cards into
+        // your graveyard" names the whole looked-at set (not a remainder), and
+        // the zero-keep Dig path returns before applying that destination. A move
         // of the revealed cards onto the battlefield is not a rest pile (its
         // destination has no rest-pile reading), so it parses as its own
         // instruction (Game Preserve: "put those cards onto the battlefield").
         Effect::Dig { .. }
             if (nom_primitives::scan_contains(&lower, "put them back")
-                || nom_primitives::scan_contains(&lower, "put the rest")
-                || nom_primitives::scan_contains(&lower, "put those cards"))
+                || nom_primitives::scan_contains(&lower, "put the rest"))
                 && !nom_primitives::scan_contains(&lower, "onto the battlefield") =>
         {
             let destination = if nom_primitives::scan_contains(&lower, "into your graveyard")
@@ -13308,22 +13310,19 @@ mod tests {
         );
     }
 
+    /// CR 608.2c: "put those cards …" names the whole looked-at set, not the
+    /// remainder of a keep, so it is NOT a `PutRest` continuation of the Dig. It
+    /// parses as its own placement over the tracked set (Stomping Slabs /
+    /// Petals of Insight), which a zero-keep Dig would otherwise never apply.
     #[test]
-    fn put_those_cards_on_bottom() {
+    fn put_those_cards_on_bottom_is_not_a_dig_remainder() {
         let dig = make_dig_effect();
         let result = parse_followup_continuation_ast(
             "Put those cards on the bottom of your library in any order.",
             &dig,
             &mut ParseContext::default(),
         );
-        assert_eq!(
-            result,
-            Some(ContinuationAst::PutRest {
-                destination: Zone::Library,
-                reorder_all: false,
-                rest_order: DigRestOrder::Preserve,
-            })
-        );
+        assert_eq!(result, None);
     }
 
     // --- "put N of them" DigFromAmong continuation ---

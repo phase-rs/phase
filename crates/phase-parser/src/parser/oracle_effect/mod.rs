@@ -20969,9 +20969,31 @@ fn placement_tail_orders_in_any_order(rest: &str) -> bool {
     .is_some()
 }
 
+/// CR 608.2c: does a placement's noun phrase (the text before its positional
+/// terminator, with any cardinality already peeled) name a PLURAL set anaphor —
+/// "those cards" / "these cards" / "them" — with nothing after it? Such a phrase
+/// moves every card of the set it refers to (Stomping Slabs: "reveal the top
+/// seven cards …, then put those cards on the bottom"), not the lowering
+/// default of one card.
+fn placement_names_plural_set_anaphor(noun_phrase: &str) -> bool {
+    all_consuming(alt((
+        tag::<_, _, OracleError<'_>>("those cards"),
+        tag("these cards"),
+        tag("them"),
+    )))
+    .parse(noun_phrase.trim_end())
+    .is_ok()
+}
+
 /// A placement's noun-phrase filter (`None` when it names nothing more specific
-/// than `Any`), its cardinality, and whether its tail closes with "in any order".
-type PlacementNounPhrase = (Option<TargetFilter>, LibraryPlacementCardinality, bool);
+/// than `Any`), its cardinality, whether its tail closes with "in any order", and
+/// whether the noun phrase is a plural set anaphor.
+type PlacementNounPhrase = (
+    Option<TargetFilter>,
+    LibraryPlacementCardinality,
+    bool,
+    bool,
+);
 
 /// `follower` is the player who follows this clause's instruction when the
 /// clause names one structurally (the controller of an imperative, CR 608.2c);
@@ -21071,15 +21093,29 @@ fn refine_put_at_library_position(
                 new_target,
                 cardinality,
                 placement_tail_orders_in_any_order(placement_tail),
+                placement_names_plural_set_anaphor(after_count),
             ))
         })();
-        if let Some((maybe_filter, cardinality, orders_in_any_order)) = extracted {
+        if let Some((maybe_filter, cardinality, orders_in_any_order, names_plural_set)) = extracted
+        {
             if *target == TargetFilter::Any {
                 if let Some(filter) = maybe_filter {
                     *target = filter;
                 }
             }
             match cardinality {
+                // CR 608.2c: "put those cards on the bottom" after a look/reveal
+                // names the WHOLE tracked set the earlier instruction published
+                // (Stomping Slabs, Petals of Insight), so every member is placed —
+                // the `Fixed(1)` lowering default would move one card and leave
+                // the rest of the set where it was.
+                LibraryPlacementCardinality::Unstated
+                    if names_plural_set && matches!(*target, TargetFilter::TrackedSet { .. }) =>
+                {
+                    *count = QuantityExpr::Ref {
+                        qty: QuantityRef::TrackedSetSize,
+                    };
+                }
                 LibraryPlacementCardinality::Unstated => {}
                 LibraryPlacementCardinality::Exact(count_expr) => *count = count_expr,
                 // CR 601.2c + CR 115.1: the announced targets, rather than the

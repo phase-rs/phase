@@ -96093,3 +96093,135 @@ fn put_one_back_on_top_without_a_rest_clause_keeps_the_others_in_the_library() {
         other => panic!("expected Effect::Dig, got {other:?}"),
     }
 }
+
+/// CR 608.2c + CR 701.20e: "put those cards …" after a look/reveal names the
+/// WHOLE looked-at set, not a remainder. It must not be folded into the Dig's
+/// `rest_destination` (a zero-keep Dig never reaches the remainder routing, so
+/// the move was silently lost) and must place every card of the set rather than
+/// the `Fixed(1)` placement default.
+#[test]
+fn put_those_cards_after_a_look_moves_the_whole_looked_at_set() {
+    fn chain(def: &crate::types::ability::AbilityDefinition) -> Vec<&Effect> {
+        let mut out = vec![&*def.effect];
+        let mut next = def.sub_ability.as_deref();
+        while let Some(sub) = next {
+            out.push(&*sub.effect);
+            next = sub.sub_ability.as_deref();
+        }
+        out
+    }
+
+    // Verbatim Scryfall Oracle text.
+    for (name, oracle, card_type) in [
+        (
+            "Stomping Slabs",
+            "Reveal the top seven cards of your library, then put those cards on the bottom of \
+             your library in any order. If a card named Stomping Slabs was revealed this way, \
+             Stomping Slabs deals 7 damage to any target.",
+            "Instant",
+        ),
+        (
+            "Petals of Insight",
+            "Look at the top three cards of your library. You may put those cards on the bottom \
+             of your library in any order. If you do, return Petals of Insight to its owner's \
+             hand. Otherwise, draw three cards.",
+            "Sorcery",
+        ),
+    ] {
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            oracle,
+            name,
+            &[],
+            &[card_type.to_string()],
+            &[],
+        );
+        let root = parsed
+            .abilities
+            .first()
+            .unwrap_or_else(|| panic!("{name} must parse to one spell ability"));
+        let effects = chain(root);
+
+        if let Effect::Dig {
+            rest_destination, ..
+        } = effects[0]
+        {
+            assert_eq!(
+                *rest_destination, None,
+                "{name}: the whole-set move is not a remainder of the look"
+            );
+        }
+        let placement = effects
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::PutAtLibraryPosition {
+                    target,
+                    count,
+                    position,
+                    ..
+                } => Some((target, count, position)),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{name}: \"put those cards on the bottom\" must lower to a placement, got {effects:#?}"));
+        assert!(
+            matches!(placement.0, TargetFilter::TrackedSet { .. }),
+            "{name}: the placement reads the looked-at set, got {:?}",
+            placement.0
+        );
+        assert_eq!(
+            *placement.1,
+            QuantityExpr::Ref {
+                qty: QuantityRef::TrackedSetSize
+            },
+            "{name}: \"those cards\" places every card of the set, not one"
+        );
+        assert_eq!(*placement.2, LibraryPosition::Bottom, "{name}");
+    }
+}
+
+/// PAIRED NEGATIVE: the whole-set reading is only for the bare plural anaphor.
+/// Munda's "reveal any number of Ally cards from among them, then put those cards
+/// on top … and the rest on the bottom" still folds into one Dig whose kept
+/// cards go on top and whose remainder goes to the bottom.
+#[test]
+fn put_those_cards_with_a_rest_clause_keeps_the_dig_partition() {
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "Haste\nRally — Whenever Munda or another Ally you control enters, you may look at the \
+         top four cards of your library. If you do, reveal any number of Ally cards from among \
+         them, then put those cards on top of your library in any order and the rest on the \
+         bottom in any order.",
+        "Munda, Ambush Leader",
+        &[],
+        &["Creature".to_string()],
+        &["Kor".to_string(), "Ally".to_string()],
+    );
+    let trigger = parsed
+        .triggers
+        .first()
+        .expect("Munda's rally trigger must parse");
+    let mut node = trigger.execute.as_deref();
+    let mut dig = None;
+    while let Some(def) = node {
+        if let Effect::Dig { .. } = &*def.effect {
+            dig = Some(&*def.effect);
+            break;
+        }
+        node = def.sub_ability.as_deref();
+    }
+    match dig.expect("the look must lower to a Dig") {
+        Effect::Dig {
+            destination,
+            rest_destination,
+            up_to,
+            ..
+        } => {
+            assert_eq!(*destination, Some(Zone::Library), "kept cards go on top");
+            assert_eq!(
+                *rest_destination,
+                Some(Zone::Library),
+                "the rest go to the bottom"
+            );
+            assert!(*up_to, "\"any number\" is an up-to choice");
+        }
+        other => panic!("expected Effect::Dig, got {other:?}"),
+    }
+}
