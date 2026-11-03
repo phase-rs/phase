@@ -289,3 +289,4 @@ mod resolution_progress_contract;
 
 mod risky_move_gain_control_trigger;
 mod token_attack_destination;
+mod venat_heros_sundering_transform_8071;
