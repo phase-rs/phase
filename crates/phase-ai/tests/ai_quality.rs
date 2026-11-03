@@ -2897,7 +2897,7 @@ fn ai_animates_a_manland_once_per_turn_across_priority_windows() {
     }
 }
 
-/// Synthetic land text.
+/// Synthetic: no printed land has two self-animating abilities; the nearest printed card is Chimeric Sphere (an artifact, outside this policy).
 const TWO_BODIES: &str = "{1}: This land becomes a 2/2 creature until end of turn. It's still a land.\n{2}: This land becomes a 4/4 creature with flying until end of turn. It's still a land.";
 
 #[test]

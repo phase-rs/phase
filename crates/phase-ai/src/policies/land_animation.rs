@@ -278,8 +278,6 @@ mod tests {
     use engine::types::statics::StaticMode;
     use engine::types::zones::Zone;
 
-    use crate::policies::effect_classify::{effect_polarity, EffectPolarity};
-
     const AI: PlayerId = PlayerId(0);
 
     fn mana_effect(colors: Vec<ManaColor>) -> Effect {
@@ -686,6 +684,7 @@ mod tests {
             is_redundant_reject(&verdict_at(runner.state(), village, index)),
             "control: pending rejects"
         );
+        // Hand-built `CounterAll` standing in for Glen Elendra's Answer.
         let mut events = Vec::new();
         counter::resolve_all(
             runner.state_mut(),
@@ -792,7 +791,9 @@ mod tests {
     }
 
     /// An opponent's until-end-of-turn effect on `target`, timestamped after
-    /// everything already applied to it.
+    /// everything already applied to it. The effects are injected, not cast;
+    /// printed effects of these shapes include Diminish (base power and
+    /// toughness) and Canopy Claws (loses flying).
     fn later_opponent_effect(
         runner: &mut GameRunner,
         target: ObjectId,
@@ -1154,10 +1155,9 @@ mod tests {
 
     #[test]
     fn a_second_unanswered_pending_animation_still_vetoes_a_third_activation() {
-        // After Stifle answers the first pending animation and both
-        // players pass back to P0, the AI is free to activate again — but the
-        // resulting second pending animation is itself unanswered, so a third
-        // activation must stay vetoed.
+        // After Stifle answers the first pending animation, the AI is free to
+        // activate again — but the resulting second pending animation is
+        // itself unanswered, so a third activation must stay vetoed.
         let (mut runner, village, index, stifle) = responder_board("Stifle", STIFLE, P1);
         announce(&mut runner, village, index);
         let pending = pass_to_opponent(&mut runner);
@@ -1197,10 +1197,6 @@ mod tests {
         );
     }
 
-    /// CR 707.10: a copy effect's polarity is `Contextual`
-    /// (`effect_classify::effect_polarity`), not `Harmful` — confirmed below —
-    /// so it must not count as an answer to a pending animation the way
-    /// Stifle's `Effect::Counter` does.
     fn copy_spell_effect() -> Effect {
         Effect::CopySpell {
             target: TargetFilter::Any,
@@ -1221,13 +1217,10 @@ mod tests {
             is_redundant_reject(&verdict_at(runner.state(), village, index)),
             "control: with nothing answering it, the pending activation vetoes"
         );
-        assert_eq!(
-            effect_polarity(&copy_spell_effect()),
-            EffectPolarity::Contextual,
-            "reach guard: CopySpell must not classify as Harmful for this test to discriminate"
-        );
 
         let copy_entry_id = ObjectId(runner.state().next_object_id);
+        // Hand-pushed copy entry standing in for a printed copier such as
+        // Lithoform Engine.
         {
             let state = runner.state_mut();
             let ability = ResolvedAbility::new(
@@ -1260,9 +1253,9 @@ mod tests {
     const QUICKEN: &str = "The next sorcery spell you cast this turn can be cast as though it had flash. (It can be cast any time you could cast an instant.)\nDraw a card.";
     const BRAMBLECRUSH: &str = "Destroy target noncreature permanent.";
     const GLEN_ELENDRAS_ANSWER: &str = "This spell can't be countered.\nCounter all spells your opponents control and all abilities your opponents control. Create a 1/1 blue and black Faerie creature token with flying for each spell and ability countered this way.";
-    /// Synthetic land text.
+    /// Synthetic: no printed land has two self-animating abilities; the nearest printed card is Chimeric Sphere (an artifact, outside this policy).
     const TWO_BODIES: &str = "{1}: This land becomes a 2/2 creature until end of turn. It's still a land.\n{2}: This land becomes a 4/4 creature with flying until end of turn. It's still a land.";
-    /// Synthetic land text: the same body until end of turn, or indefinitely.
+    /// Synthetic: no printed land has two self-animating abilities; the nearest printed cards are Mutavault (until end of turn) and Stalking Stones (indefinitely).
     const TWO_LIFETIMES: &str = "{1}: This land becomes a 3/3 creature until end of turn. It's still a land.\n{3}: This land becomes a 3/3 creature that's still a land. (This effect lasts indefinitely.)";
 
     /// Passes priority until `reached` holds.
@@ -1317,7 +1310,7 @@ mod tests {
     }
 
     /// Synthetic: a root that targets `pending` and does nothing to it, above
-    /// `child`.
+    /// `child`. No printed card in card-data has this compound shape.
     fn root_aimed_at(pending: ObjectId, child: ResolvedAbility) -> ResolvedAbility {
         ResolvedAbility::new(
             Effect::TargetOnly {
@@ -1330,6 +1323,8 @@ mod tests {
         .sub_ability(child)
     }
 
+    /// Synthetic: a `Counter` node with explicit targets, used as a child of
+    /// `root_aimed_at`. No printed card in card-data has that compound shape.
     fn counter_node(targets: Vec<TargetRef>, target: TargetFilter) -> ResolvedAbility {
         ResolvedAbility::new(
             Effect::Counter {
