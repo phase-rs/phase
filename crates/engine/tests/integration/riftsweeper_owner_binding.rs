@@ -53,6 +53,9 @@ fn riftsweeper_face_up_target_owner_and_stale_incarnation() {
         let target = scenario
             .add_creature_to_graveyard(P1, "Grizzly Bears", 2, 2)
             .id();
+        let other = scenario
+            .add_creature_to_graveyard(P0, "Balduvian Bears", 2, 2)
+            .id();
         let hidden = scenario
             .add_creature_to_graveyard(P1, "Runeclaw Bear", 2, 2)
             .id();
@@ -66,7 +69,7 @@ fn riftsweeper_face_up_target_owner_and_stale_incarnation() {
                 .collect(),
         );
         let mut runner = scenario.build();
-        for id in [target, hidden] {
+        for id in [target, other, hidden] {
             engine::game::zones::move_to_zone(runner.state_mut(), id, Zone::Exile, &mut vec![]);
         }
         runner
@@ -93,10 +96,17 @@ fn riftsweeper_face_up_target_owner_and_stale_incarnation() {
         assert_eq!(target_slots.len(), 1);
         assert_eq!(selection.current_slot, 0);
         assert!(!target_slots[0].optional);
-        assert_eq!(
-            target_slots[0].legal_targets,
-            vec![TargetRef::Object(target)]
-        );
+        assert_eq!(target_slots[0].legal_targets.len(), 2);
+        for id in [target, other] {
+            assert!(target_slots[0]
+                .legal_targets
+                .contains(&TargetRef::Object(id)));
+        }
+        for id in [hidden, grave] {
+            assert!(!target_slots[0]
+                .legal_targets
+                .contains(&TargetRef::Object(id)));
+        }
         assert!(engine::ai_support::legal_actions_for_viewer(runner.state(), P0).0.iter().any(|action| matches!(action, GameAction::ChooseTarget { target: Some(TargetRef::Object(id)) } if *id == target)));
         assert!(
             engine::ai_support::legal_actions_for_viewer(runner.state(), P1)
@@ -132,6 +142,7 @@ fn riftsweeper_face_up_target_owner_and_stale_incarnation() {
         );
         assert_eq!(runner.state().players[1].library.contains(&target), !stale);
         assert_eq!(runner.state().objects[&source].zone, Zone::Battlefield);
+        assert_eq!(runner.state().objects[&other].zone, Zone::Exile);
         assert_eq!(runner.state().objects[&hidden].zone, Zone::Exile);
         assert_eq!(runner.state().objects[&grave].zone, Zone::Graveyard);
     }
@@ -233,6 +244,13 @@ fn chaos_warp_owner_shuffle_reveals_and_deploys_the_permanent() {
     let mut runner = scenario.build();
     let outcome = runner.cast(spell).target_object(target).resolve();
     assert_eq!(shuffles(outcome.events()), vec![P1]);
+    assert!(
+        outcome.events().iter().any(|event| matches!(event,
+            GameEvent::CardsRevealed { player: P1, card_ids, .. } if card_ids == &[target]
+        )),
+        "Chaos Warp must reveal the only card in the target owner's library"
+    );
+    assert_eq!(outcome.state().last_revealed_ids, vec![target]);
     outcome.assert_zone(&[target], Zone::Battlefield);
     assert_eq!(outcome.state().objects[&target].controller, P1);
     assert!(outcome.events().iter().any(|event| matches!(event, GameEvent::ZoneChanged { object_id, from: Some(Zone::Battlefield), to: Zone::Library, .. } if *object_id == target)));

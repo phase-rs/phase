@@ -15465,6 +15465,26 @@ fn is_owner_library_shuffle_consumer(ability: &ResolvedAbility) -> bool {
     )
 }
 
+/// CR 608.2c: the selected-object move publishes its own owner population,
+/// including an empty population, before its immediate terminal shuffle.
+fn is_selected_owner_library_shuffle_operation(ability: &ResolvedAbility) -> bool {
+    matches!(
+        &ability.effect,
+        Effect::ChangeZoneAll {
+            origin: None,
+            destination: Zone::Library,
+            target: TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. },
+            library_position: None,
+            library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
+            random_order: false,
+            ..
+        }
+    ) && ability
+        .sub_ability
+        .as_deref()
+        .is_some_and(is_owner_library_shuffle_consumer)
+}
+
 fn first_tracked_set_consumer_mode(
     ability: Option<&ResolvedAbility>,
 ) -> Option<TrackedSetPublicationMode> {
@@ -26039,6 +26059,9 @@ fn resolve_chain_body(
             && ability.targets.is_empty()
             && effect_refs_parent_target(&sub.effect)
             && optional_head_declined_all_object_targets(ability)
+            // CR 608.2c: publish the selected operation's empty owner set before
+            // its terminal shuffle can read a previous instruction's owners.
+            && !is_selected_owner_library_shuffle_operation(sub)
             // CR 609.3: independent union work takes normal context fallthrough.
             && phase_out_context_union_requires_parent(&sub.effect) != Some(false)
         {

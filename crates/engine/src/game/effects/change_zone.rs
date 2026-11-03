@@ -2807,21 +2807,7 @@ pub fn resolve_all(
     // CR 608.2c: only the explicit selected-object operation binds these
     // references as a population; other mass/player instructions keep their
     // established zone scan. The terminal owner consumer must be immediate.
-    let selected_owner_operation = matches!(
-        &ability.effect,
-        Effect::ChangeZoneAll {
-            origin: None,
-            destination: Zone::Library,
-            target: TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. },
-            library_position: None,
-            library_shuffle: MassLibraryShuffleMode::TerminalShuffle,
-            random_order: false,
-            ..
-        }
-    ) && ability
-        .sub_ability
-        .as_deref()
-        .is_some_and(super::is_owner_library_shuffle_consumer);
+    let selected_owner_operation = super::is_selected_owner_library_shuffle_operation(ability);
     let selected_objects = if selected_owner_operation {
         // CR 608.2b-c: discriminate player entries before filtering objects.
         // Qualified slots are indexed in the original declaration, before
@@ -13208,10 +13194,12 @@ mod tests {
         }
     }
 
-    /// CR 400.7 + CR 608.2b-c: an earlier stale declaration never renumbers
-    /// the later live object slot, and a qualified player is not an empty set.
+    /// CR 400.7 + CR 608.2b-c: a declaration stamped illegal at resolution never
+    /// renumbers the later live object slot; a qualified player is not empty.
+    /// Supplemental consumer test: models the stack's legality stamp, rather
+    /// than testing announcement-pin validation through the public pipeline.
     #[test]
-    fn selected_owner_shuffle_slots_preserve_declared_positions() {
+    fn selected_owner_shuffle_illegal_slots_preserve_declared_positions() {
         let mut state = GameState::new_two_player(42);
         let first = create_object(
             &mut state,
@@ -13250,6 +13238,9 @@ mod tests {
         root.announce_target_pins(&state);
         zones::move_to_zone(&mut state, first, Zone::Exile, &mut Vec::new());
         zones::move_to_zone(&mut state, first, Zone::Graveyard, &mut Vec::new());
+        // CR 608.2b: stack::record_illegal_target_slots writes this chain-indexed
+        // stamp to the resolving carrier before executing its validated ability.
+        root.illegal_target_slots = vec![0];
         state.resolving_stack_entry = Some(StackEntry {
             id: source,
             source_id: source,

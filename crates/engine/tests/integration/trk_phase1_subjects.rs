@@ -1463,6 +1463,35 @@ fn scientists_third_chapter_commander_pauses_keep_distinct_owner_ledger() {
         let mut runner = scenario.build();
         runner.state_mut().format_config.command_zone = true;
         runner.advance_to_phase(Phase::PreCombatMain);
+        // CR 903.9a: decline each initial graveyard return before announcing
+        // chapter targets; the later library replacements remain independent.
+        let mut declined = vec![];
+        for _ in 0..commanders.len() {
+            let WaitingFor::CommanderZoneChoice {
+                player,
+                commander_id,
+                current_zone: Zone::Graveyard,
+            } = runner.state().waiting_for
+            else {
+                panic!(
+                    "expected initial graveyard commander choice: {:?}",
+                    runner.state().waiting_for
+                );
+            };
+            assert!(commanders.contains(&commander_id));
+            assert_eq!(runner.state().objects[&commander_id].owner, player);
+            assert!([P1, P2].contains(&player));
+            assert!(!declined.contains(&commander_id));
+            runner
+                .act(GameAction::DecideOptionalEffect { accept: false })
+                .unwrap();
+            declined.push(commander_id);
+            assert_eq!(runner.state().objects[&commander_id].zone, Zone::Graveyard);
+            runner.advance_to_phase(Phase::PreCombatMain);
+        }
+        for id in &commanders {
+            assert_eq!(runner.state().objects[id].zone, Zone::Graveyard);
+        }
         for id in &commanders {
             assert!(optional_object_slot(&runner).contains(&TargetRef::Object(*id)));
             runner
@@ -1666,9 +1695,28 @@ fn unification_second_chapter_accepts_each_zone_and_declines() {
             assert!(cards.contains(&hand) && cards.contains(&grave));
             assert_eq!(cards.len(), 2);
             assert!(!cards.contains(&opponent));
-            assert!(runner.state().viewer_knows_card_identity(P0, hand));
-            assert!(!runner.state().viewer_knows_card_identity(P1, hand));
-            assert!(runner.state().viewer_knows_card_identity(P1, grave));
+            // CR 400.2: inspect actual viewer projections, including ordinary
+            // own-hand access and public graveyard visibility.
+            let own_view = engine::game::visibility::filter_state_for_viewer(runner.state(), P0);
+            let opponent_view =
+                engine::game::visibility::filter_state_for_viewer(runner.state(), P1);
+            assert_eq!(own_view.objects[&hand].name, DEFIANT_NAME);
+            assert_eq!(
+                own_view.objects[&hand].card_id,
+                runner.state().objects[&hand].card_id
+            );
+            assert_eq!(opponent_view.objects[&hand].name, "Hidden Card");
+            assert_eq!(
+                opponent_view.objects[&hand].card_id,
+                engine::types::identifiers::CardId(0)
+            );
+            for view in [&own_view, &opponent_view] {
+                assert_eq!(view.objects[&grave].name, DEFIANT_NAME);
+                assert_eq!(
+                    view.objects[&grave].card_id,
+                    runner.state().objects[&grave].card_id
+                );
+            }
             assert!(
                 engine::ai_support::legal_actions_for_viewer(runner.state(), P1)
                     .0
@@ -1701,8 +1749,32 @@ fn unification_second_chapter_accepts_each_zone_and_declines() {
         }
         finished(&runner);
         assert_eq!(runner.state().objects[&opponent].zone, Zone::Hand);
+        let own_view = engine::game::visibility::filter_state_for_viewer(runner.state(), P0);
+        let opponent_view = engine::game::visibility::filter_state_for_viewer(runner.state(), P1);
+        assert_eq!(own_view.objects[&hand].name, DEFIANT_NAME);
+        assert_eq!(
+            own_view.objects[&hand].card_id,
+            runner.state().objects[&hand].card_id
+        );
+        for view in [&own_view, &opponent_view] {
+            assert_eq!(view.objects[&grave].name, DEFIANT_NAME);
+            assert_eq!(
+                view.objects[&grave].card_id,
+                runner.state().objects[&grave].card_id
+            );
+        }
         if choice != Some(Zone::Hand) {
-            assert!(!runner.state().viewer_knows_card_identity(P1, hand));
+            assert_eq!(opponent_view.objects[&hand].name, "Hidden Card");
+            assert_eq!(
+                opponent_view.objects[&hand].card_id,
+                engine::types::identifiers::CardId(0)
+            );
+        } else {
+            assert_eq!(opponent_view.objects[&hand].name, DEFIANT_NAME);
+            assert_eq!(
+                opponent_view.objects[&hand].card_id,
+                runner.state().objects[&hand].card_id
+            );
         }
     }
 }
