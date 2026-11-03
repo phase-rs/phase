@@ -22216,12 +22216,12 @@ fn layers_read_current_step_unknown() -> bool {
 /// continuous `static_definitions` entry (including `GrantStaticAbility` hosts)
 /// and command-zone emblems. The opt-in-zone / off-zone arm (Incarnation cycle —
 /// Anger/Brawn/Filth/Wonder/Valor, `active_zones`-gated statics functioning from
-/// the graveyard) is INTENTIONALLY NOT indexed: its generator-set changes (e.g.
-/// self-milling an Anger into the graveyard) do not all mark `layers_dirty`
-/// (`zones.rs` marks dirty only on battlefield/hand transitions; mill/effect
-/// movers add no mark), so a `layers_dirty`-gated cache of off-zone generators
-/// would go stale. That arm keeps its live `state.objects` scan in
-/// `for_each_static_effect_source`.
+/// the graveyard) is INTENTIONALLY NOT indexed. A source's arrival in or
+/// departure from a zone its own `active_zones` declares NOW marks `layers_dirty`
+/// (#10400, via `zones::move_to_zone` and `zones::move_to_library_at_index` →
+/// `static_layer_dependency_for_zone_transition`), but indexing the arm remains a
+/// separate optimization with no measured need, so it keeps its live
+/// `state.objects` scan in `for_each_static_effect_source`.
 ///
 /// Backed by `im::Vector` so `GameState::clone()` stays O(1) structural share
 /// (and `GameState: Send` is preserved — no `Rc`). Rebuilt at the TOP of

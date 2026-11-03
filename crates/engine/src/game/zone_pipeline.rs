@@ -6856,6 +6856,7 @@ mod layers_incremental_flush_tests {
         assert!(
             crate::game::layers::static_layer_dependency_for_zone_transition(
                 &state,
+                reanimated,
                 Zone::Graveyard,
                 Zone::Battlefield
             ),
@@ -6962,6 +6963,7 @@ mod layers_incremental_flush_tests {
         assert!(
             !crate::game::layers::static_layer_dependency_for_zone_transition(
                 &state,
+                entering_watcher,
                 Zone::Graveyard,
                 Zone::Battlefield
             ),
@@ -6998,6 +7000,13 @@ mod layers_incremental_flush_tests {
     /// test pins that handoff end-to-end — cheap mark at the seam, escalation
     /// plus full evaluation at the flush — so neither half of the contract can
     /// silently regress.
+    ///
+    /// #10400 note: the per-object zone-of-function term in
+    /// `static_layer_dependency_for_zone_transition` reads `state.objects`
+    /// directly, so it too bypasses the stale-by-design index for the MOVED
+    /// SOURCE's own statics. This test's assertions are unchanged because its
+    /// fixture's definitions carry empty `active_zones`, which the term
+    /// deliberately does not match.
     #[test]
     fn populated_index_entry_defers_zone_reading_static_to_flush_escalation() {
         let mut state = GameState::new_two_player(42);
@@ -7068,6 +7077,7 @@ mod layers_incremental_flush_tests {
         assert!(
             !crate::game::layers::static_layer_dependency_for_zone_transition(
                 &state,
+                entering_watcher,
                 Zone::Graveyard,
                 Zone::Battlefield
             ),
@@ -7264,6 +7274,133 @@ mod effect_driven_transformed_entry_tests {
         assert!(
             obj.transformed,
             "CR 712.14a: the DFC must be transformed (back face) after this entry"
+        );
+    }
+
+    /// CR 113.6b + CR 400.7 + CR 611.3a: reanimating a source whose static
+    /// functions from the graveyard stops that static, so recipients' cached
+    /// characteristics must be re-derived through the production pipeline.
+    ///
+    /// Revert-failing: at base a Graveyard→Battlefield entry matches neither
+    /// the `from == Hand` / `from == Exile` carve-outs nor any board-wide zone
+    /// read (Anger's own affected filter names creatures you control and its
+    /// condition names the battlefield, not the graveyard), so the pipeline
+    /// proposes the cheap `EnteredObjects` mark and the Bear keeps Haste after
+    /// the flush. With the per-object term it is `Full`.
+    #[test]
+    fn reanimated_incarnation_marks_full_and_drops_graveyard_grant() {
+        use crate::game::layers::{evaluate_layers, flush_layers, mark_layers_full};
+        use crate::types::ability::{
+            ContinuousModification, ControllerRef, StaticCondition, TypeFilter, TypedFilter,
+        };
+        use crate::types::game_state::LayersDirty;
+        use crate::types::keywords::Keyword;
+
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(80071),
+            PlayerId(0),
+            "Effect Source".to_string(),
+            Zone::Battlefield,
+        );
+        let mountain = create_object(
+            &mut state,
+            CardId(80072),
+            PlayerId(0),
+            "Mountain".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&mountain).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Mountain".to_string());
+            obj.base_card_types = obj.card_types.clone();
+        }
+        let bear = create_object(
+            &mut state,
+            CardId(80073),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&bear).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.base_power = Some(2);
+            obj.base_toughness = Some(2);
+        }
+        let anger = create_object(
+            &mut state,
+            CardId(80074),
+            PlayerId(0),
+            "Anger".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&anger).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::You),
+                    ))
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Haste,
+                    }])
+                    .condition(StaticCondition::And {
+                        conditions: vec![
+                            StaticCondition::SourceInZone {
+                                zone: Zone::Graveyard,
+                            },
+                            StaticCondition::IsPresent {
+                                filter: Some(TargetFilter::Typed(TypedFilter {
+                                    type_filters: vec![TypeFilter::Subtype("Mountain".to_string())],
+                                    controller: Some(ControllerRef::You),
+                                    properties: vec![],
+                                })),
+                            },
+                        ],
+                    })
+                    .active_zones(vec![Zone::Graveyard]),
+            );
+            assert_eq!(
+                obj.static_definitions.iter_all().count(),
+                1,
+                "fixture premise: the milled source carries exactly the Anger static"
+            );
+        }
+
+        mark_layers_full(&mut state);
+        evaluate_layers(&mut state);
+        assert!(
+            state.objects[&bear].has_keyword(&Keyword::Haste),
+            "precondition: Anger in the graveyard with a Mountain grants Haste"
+        );
+        assert!(!state.layers_dirty.is_dirty());
+
+        let mut events = Vec::new();
+        let _ = move_object(
+            &mut state,
+            ZoneMoveRequest::effect(anger, Zone::Battlefield, source),
+            &mut events,
+        );
+
+        assert_eq!(state.objects[&anger].zone, Zone::Battlefield);
+        assert!(
+            matches!(state.layers_dirty, LayersDirty::Full),
+            "reanimating a graveyard-functioning static's source must force a full \
+             re-evaluation via the per-object zone-of-function term, got {:?}",
+            state.layers_dirty
+        );
+        flush_layers(&mut state);
+        assert!(
+            !state.objects[&bear].has_keyword(&Keyword::Haste),
+            "once Anger leaves the graveyard its grant must lapse for pre-existing recipients"
         );
     }
 }
