@@ -311,6 +311,12 @@ fn look_at_pick_closes_the_window_on_the_unkept_library_cards() {
         cards, fixture.revealed,
         "the dig must offer exactly the five cards it revealed"
     );
+    for id in &cards {
+        assert!(
+            fixture.runner.state().revealed_cards.contains(id),
+            "the combined look/reveal dig must mark {id:?} before the choice"
+        );
+    }
 
     let kept = cards[0];
     let unkept: Vec<ObjectId> = cards[1..].to_vec();
