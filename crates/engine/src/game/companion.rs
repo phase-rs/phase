@@ -331,7 +331,10 @@ fn companion_offers(
     };
     if sideboard_offers {
         for (index, entry) in pool.current_sideboard.iter().enumerate() {
-            if offers.iter().any(|offer| offer.name == entry.card.name) || !eligible(entry) {
+            if offers.iter().any(|offer| {
+                offer.source == CompanionChoiceSource::Dedicated && offer.name == entry.card.name
+            }) || !eligible(entry)
+            {
                 continue;
             }
             offers.push(CompanionRevealChoice {

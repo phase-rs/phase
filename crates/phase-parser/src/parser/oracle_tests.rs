@@ -13,6 +13,7 @@ use crate::types::ability::{
     DoorLockOp, PlayerRelation, SpellStackToGraveyardReplacement, SubAbilityLink, TargetReadOrigin,
 };
 use crate::types::counter::{CounterMatch, CounterType};
+use crate::types::keywords::CompanionCondition;
 use crate::types::phase::{PhaseGroup, TurnSegment};
 use crate::types::triggers::AttackTargetFilter;
 
@@ -35152,8 +35153,6 @@ fn self_exile_land_grant_class_parses_until_self_cast_and_self_permission() {
 /// Yorion with forty Plains.
 #[test]
 fn companion_deck_size_condition_parses_to_min_deck_size_over() {
-    use crate::types::keywords::CompanionCondition;
-
     const YORION: &str = "Companion — Your starting deck contains at least twenty cards more than the minimum deck size. (If this card is your chosen companion, you may put it into your hand from outside the game for {3} as a sorcery.)\nFlying\nWhen Yorion enters, exile any number of other nonland permanents you own and control. Return those cards to the battlefield at the beginning of the next end step.";
     let parsed = parse_oracle_text(
         YORION,

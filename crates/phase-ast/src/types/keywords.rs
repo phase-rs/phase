@@ -4,6 +4,7 @@ use std::str::FromStr;
 
 use nom::branch::alt;
 use nom::bytes::complete::tag;
+use nom::character::complete::multispace0;
 use nom::combinator::{all_consuming, opt, value};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
@@ -18,6 +19,7 @@ use super::ability::{
 };
 use super::counter::{parse_counter_type, CounterType};
 use super::mana::{ManaColor, ManaCost};
+use super::text_grammar::{parse_number, OracleError};
 
 pub use super::text_grammar::craft_materials_default;
 
@@ -2466,9 +2468,6 @@ fn parse_companion_condition(text: &str) -> CompanionCondition {
 /// 60-card Constructed and 40-card Limited). Trailing punctuation and reminder
 /// text are left unconsumed.
 fn parse_companion_deck_size_over(input: &str) -> super::text_grammar::OracleResult<'_, u32> {
-    use super::text_grammar::{parse_number, OracleError};
-    use nom::character::complete::multispace0;
-
     let (rest, _) = (
         multispace0,
         opt(alt((

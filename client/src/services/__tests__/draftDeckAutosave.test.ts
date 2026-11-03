@@ -116,6 +116,37 @@ describe("autosaveDraftDeck", () => {
     expectSurvives();
   });
 
+  it("normalizes a padded Limited companion without duplicating its sideboard copy across boots", () => {
+    const key = STORAGE_KEY_PREFIX + "Padded Limited Companion";
+    localStorage.setItem(key, JSON.stringify({
+      main: [{ count: 1, name: "Bolt" }],
+      sideboard: [
+        { count: 1, name: "Lurrus of the Dream-Den" },
+        { count: 1, name: "Bear" },
+      ],
+      companion: " Lurrus of the Dream-Den ",
+      format: "Limited",
+    }));
+    const expectSurvives = () => {
+      const loaded = loadSavedDeck("Padded Limited Companion");
+      expect(loaded?.companion).toBe("Lurrus of the Dream-Den");
+      expect(loaded?.sideboard).toEqual([
+        { count: 1, name: "Lurrus of the Dream-Den" },
+        { count: 1, name: "Bear" },
+      ]);
+    };
+
+    expectSurvives();
+    migrateSavedDecks();
+    const afterFirstBoot = localStorage.getItem(key);
+    expect(JSON.parse(afterFirstBoot ?? "{}").companion).toBe("Lurrus of the Dream-Den");
+    expectSurvives();
+    migrateSavedDecks();
+    migrateSavedDecks();
+    expect(localStorage.getItem(key)).toBe(afterFirstBoot);
+    expectSurvives();
+  });
+
   // The commander-family netting removes the stale double-listed copy once. A record the
   // migration already netted must keep a second, legitimate copy across later boots.
   it("nets a legacy Commander Draft companion copy once, idempotently across boots", () => {

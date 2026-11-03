@@ -68,7 +68,7 @@ export function projectSavedDeckSpecialSlots(
 ): ParsedDeck {
   const format = typeof saved.format === "string" ? saved.format as GameFormat : undefined;
   const projected = projectSignatureSpellForFormat(repaired, format);
-  const companion = saved.companion;
+  const companion = projected.companion;
   if (!companion) return projected;
 
   const withSideboardCopy = projected.sideboard.some((entry) => entry.name === companion)

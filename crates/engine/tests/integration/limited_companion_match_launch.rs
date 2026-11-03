@@ -1,8 +1,10 @@
 use std::collections::BTreeMap;
 
 use engine::ai_support::legal_actions;
+use engine::database::CardDatabase;
 use engine::game::companion::can_activate_companion;
 use engine::game::deck_loading::{load_deck_into_state, DeckEntry, DeckPayload, PlayerDeckPayload};
+use engine::game::deck_validation::{evaluate_deck_compatibility, DeckCompatibilityRequest};
 use engine::game::match_flow::{handle_choose_play_draw, handle_submit_sideboard};
 use engine::game::scenario::{GameRunner, GameScenario};
 use engine::game::{apply, start_game_with_starting_player};
@@ -1216,9 +1218,6 @@ fn limited_yorion_from_oracle_is_offered_only_at_twenty_over_the_limited_minimum
 /// shows and what admission enforces) rejects the real Yorion with 59 cards and accepts 60.
 #[test]
 fn limited_yorion_from_oracle_compatibility_requires_twenty_over_the_limited_minimum() {
-    use engine::database::CardDatabase;
-    use engine::game::deck_validation::{evaluate_deck_compatibility, DeckCompatibilityRequest};
-
     let faces = [yorion_from_oracle().card, land("Plains", 1).card];
     let export: serde_json::Map<String, serde_json::Value> = faces
         .iter()
@@ -1483,7 +1482,7 @@ fn limited_pools_after_reveal_window(
     let payload = DeckPayload {
         player: PlayerDeckPayload {
             main_deck: main_deck.clone(),
-            sideboard: vec![land("Plains", 3)],
+            sideboard: vec![land("Plains", 3), lurrus_companion()],
             companion: vec![lurrus_companion()],
             ..Default::default()
         },
@@ -1495,9 +1494,39 @@ fn limited_pools_after_reveal_window(
     };
     let mut state = GameState::new(FormatConfig::limited(), 2, 42);
     load_deck_into_state(&mut state, &payload);
+    let pool = state
+        .deck_pools
+        .iter()
+        .find(|pool| pool.player == P0)
+        .unwrap();
+    assert_eq!(
+        pool.current_companion.len(),
+        1,
+        "the sideboard backs the designation"
+    );
+    assert_eq!(
+        pool.current_companion[0].card.name,
+        "Lurrus of the Dream-Den"
+    );
+    assert!(pool.current_companion[0]
+        .card
+        .keywords
+        .contains(&Keyword::Companion(
+            CompanionCondition::MaxPermanentManaValue(2),
+        )));
     let start = start_game_with_starting_player(&mut state, P0);
     state.waiting_for = start.waiting_for;
     if let Some(choice) = declaration {
+        assert!(
+            matches!(&state.waiting_for,
+            WaitingFor::CompanionReveal { player, eligible_companions }
+                if *player == P0 && eligible_companions.contains(&CompanionRevealChoice {
+                    name: "Lurrus of the Dream-Den".to_string(),
+                    source: CompanionChoiceSource::Dedicated,
+                })),
+            "reach guard: the designated Lurrus is offered before declaring: {:?}",
+            state.waiting_for
+        );
         apply(&mut state, P0, GameAction::DeclareCompanion { choice })
             .expect("companion declaration");
     }
