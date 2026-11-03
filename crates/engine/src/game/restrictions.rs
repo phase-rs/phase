@@ -2462,6 +2462,10 @@ pub(crate) fn is_source_blocked(
 /// scopes.
 pub(crate) fn attack_target_matches_defended_scope(
     state: &crate::types::game_state::GameState,
+    // CR 508.6: the object carrying the restriction — required by the
+    // source-object-relative scopes ("a player it has already attacked this
+    // turn"), which read that object's own attack history.
+    source_id: ObjectId,
     attack_target: Option<&crate::game::combat::AttackTarget>,
     filter: &crate::types::triggers::AttackTargetFilter,
     source_controller: PlayerId,
@@ -2514,6 +2518,18 @@ pub(crate) fn attack_target_matches_defended_scope(
         (AttackTargetFilter::PlayerOrPermanents, AttackTarget::Battle(b_id)) => {
             permanent_controller(*b_id) == Some(source_controller)
         }
+        // CR 508.1c + CR 508.6: "a player it has already attacked this turn" —
+        // match only a PLAYER the source has already attacked this turn, read from
+        // `creature_attacked_defenders_this_turn` (the single per-creature attack
+        // ledger, written at declaration and cleared at cleanup). Kind-gated: a
+        // planeswalker or battle attack is not an attack on a player (CR 506.3),
+        // so those pairings never match and the restriction leaves them legal
+        // (Port Razer ruling 2024-04-12).
+        (AttackTargetFilter::PlayerAttackedBySourceThisTurn, AttackTarget::Player(p)) => state
+            .creature_attacked_defenders_this_turn
+            .get(&source_id)
+            .is_some_and(|defenders| defenders.contains(p)),
+        (AttackTargetFilter::PlayerAttackedBySourceThisTurn, _) => false,
         _ => false,
     }
 }
