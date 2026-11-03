@@ -22,7 +22,6 @@
 # family=stash     `stash_post_replacement_continuation(...)` call
 # family=consumer  `apply_pending_post_replacement_effect(...)` call
 #
-crates/engine/src/game/combat_damage.rs	fire_combat_prevention_riders	consumer	1
 crates/engine/src/game/combat_damage.rs	fire_combat_prevention_riders	install	1
 crates/engine/src/game/combat_damage.rs	fire_combat_prevention_riders	resolved	1
 crates/engine/src/game/effects/attach.rs	deliver_attach	consumer	1
@@ -46,6 +45,7 @@ crates/engine/src/game/replacement.rs	apply_single_replacement	resolved	1
 crates/engine/src/game/replacement.rs	apply_single_replacement	stash	2
 crates/engine/src/game/replacement.rs	apply_single_replacement	template	5
 crates/engine/src/game/replacement.rs	continue_replacement_impl	template	1
+crates/engine/src/game/replacement.rs	drain_combat_damage_rider	consumer	1
 crates/engine/src/game/replacement.rs	drain_damage_rider	consumer	1
 crates/engine/src/game/stack.rs	resolve_top	consumer	1
 crates/engine/src/game/zone_pipeline.rs	apply_zone_delivery_tail	consumer	1

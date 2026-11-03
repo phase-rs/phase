@@ -13481,8 +13481,13 @@ pub fn replace_event(
 }
 
 /// CR 614.6 + CR 615.5: run the resident damage rider, immediately after the replacement that
-/// stashed it.
+/// stashed it. Inside a combat batch (its tally is open, CR 510.2) the rider's pauses are
+/// settled before the batch moves on (`drain_combat_damage_rider`).
 fn drain_damage_rider(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    if state.combat_prevention_tally.is_some() {
+        drain_combat_damage_rider(state, events);
+        return;
+    }
     // CR 700.1: Follow-up damage is an independent event, even if its
     // source also participates in the original simultaneous instance.
     let ledger = state.damage_batch_ledger.take();
@@ -13490,6 +13495,133 @@ fn drain_damage_rider(state: &mut GameState, events: &mut Vec<GameEvent>) {
         state, None, None, None, events,
     );
     state.damage_batch_ledger = ledger;
+}
+
+/// CR 615.5 + CR 510.2: run the resident damage rider at a combat drain, the per-portion drain
+/// in `replace_combat_damage_batch` (and the substitution arm's drain inside it) or Phase D's
+/// aggregate drain, and settle every pause it raises before the batch moves on. The rider's
+/// event is not a portion of the batch (CR 700.1), so it and every answer below run outside
+/// the batch's ledger, as `drain_damage_rider` does. The caller's wait is restored afterwards,
+/// as a rider that never paused leaves it.
+pub(crate) fn drain_combat_damage_rider(state: &mut GameState, events: &mut Vec<GameEvent>) {
+    let waiting_before = state.waiting_for.clone();
+    let rider_depth = state.resolution_stack.len();
+    let ledger = state.damage_batch_ledger.take();
+    let pause = crate::game::engine_replacement::apply_pending_post_replacement_effect(
+        state, None, None, None, events,
+    );
+    settle_combat_rider_pauses(state, pause, rider_depth, &waiting_before, events);
+    state.damage_batch_ledger = ledger;
+    state.waiting_for = waiting_before;
+}
+
+/// What a damage rider left waiting inside a combat batch.
+enum CombatRiderPause {
+    /// CR 616.1: the rider's event met two or more replacements and its player orders them.
+    Order,
+    /// A parked "may" on the rider's event (Abundance: "you may instead …"), with the index
+    /// that declines it.
+    May { decline: usize },
+    /// A choice the rider's own effect asks for (Channel Harm's "you may have Channel Harm deal
+    /// that much damage"; Outfitted Jouster's "sacrifice an Equipment attached to Outfitted
+    /// Jouster" with two attached).
+    OwnPrompt,
+}
+
+impl CombatRiderPause {
+    fn of(state: &GameState) -> Self {
+        match state.pending_replacement.as_ref() {
+            Some(pending) if pending.is_optional => Self::May {
+                decline: pending.candidates.len(),
+            },
+            Some(_) => Self::Order,
+            None => Self::OwnPrompt,
+        }
+    }
+}
+
+/// CR 510.2 + CR 616.1: settle every pause a combat damage rider raised, the way
+/// `settle_combat_order_parks` settles the damage event's own park. Combat damage can't pause
+/// for a rider's choice yet (Command Zone #140), so nothing the rider parks may outlive the
+/// batch: a park left behind blocks state-based actions for the rest of the game (Ironscale
+/// Hydra with Hardened Scales and Doubling Season, blocked by a 3/3: the 3/3 survives 5
+/// damage, and the turn never passes Cleanup).
+fn settle_combat_rider_pauses(
+    state: &mut GameState,
+    mut pause: Option<WaitingFor>,
+    rider_depth: usize,
+    waiting_before: &WaitingFor,
+    events: &mut Vec<GameEvent>,
+) {
+    while pause.is_some() {
+        pause = match CombatRiderPause::of(state) {
+            // strict-failure: CR 616.1 gives the affected player this order (Hardened Scales
+            // ruling: "you choose the order to apply those effects"), and CR 510.2's batch can't
+            // ask yet (Command Zone #140), so the rider's event takes one legal order. CR 616.1f:
+            // an answer can leave candidates still in order, so repeat.
+            CombatRiderPause::Order => {
+                answer_combat_rider_park(state, 0, rider_depth, waiting_before, events)
+            }
+            // strict-failure: CR 510.2 + CR 616.1: a "may" on the rider's event is its
+            // controller's to answer, and combat can't ask it yet (Command Zone #140), so it is
+            // declined, a legal answer that keeps the rider's event (Swans of Bryn Argoll under
+            // Abundance: the source's controller still draws the cards).
+            CombatRiderPause::May { decline } => {
+                answer_combat_rider_park(state, decline, rider_depth, waiting_before, events)
+            }
+            // strict-failure: CR 510.2: the rider's own choice belongs to its player, and combat
+            // can't ask it yet (Command Zone #140); it is cleared and the rider ends there.
+            CombatRiderPause::OwnPrompt => {
+                abandon_combat_rider_pause(state, rider_depth, waiting_before);
+                None
+            }
+        };
+    }
+}
+
+/// Answer the rider event's park with `index` through the replacement-choice authority (the
+/// first candidate of an order park, the decline of a "may"). Returns the next pause the answer
+/// raised, if any.
+fn answer_combat_rider_park(
+    state: &mut GameState,
+    index: usize,
+    rider_depth: usize,
+    waiting_before: &WaitingFor,
+    events: &mut Vec<GameEvent>,
+) -> Option<WaitingFor> {
+    match super::engine_replacement::handle_replacement_choice(state, index, events) {
+        Ok(WaitingFor::Priority { .. }) => None,
+        Ok(next) => Some(next),
+        Err(_) => {
+            abandon_combat_rider_pause(state, rider_depth, waiting_before);
+            None
+        }
+    }
+}
+
+/// Clear a combat damage rider's pause: its park, the frames its prompt raised above the
+/// rider's own drain, and that drain's paused dispatch, leaving the stack as a rider that
+/// completed leaves it.
+fn abandon_combat_rider_pause(
+    state: &mut GameState,
+    rider_depth: usize,
+    waiting_before: &WaitingFor,
+) {
+    state.pending_replacement = None;
+    state.waiting_for = waiting_before.clone();
+    while state.resolution_stack.len() > rider_depth {
+        let kind = state
+            .resolution_stack
+            .last()
+            .map(crate::types::resolution::ResolutionFrame::kind)
+            .expect("a frame above the rider's depth exists");
+        state
+            .resolve_and_apply_frame_transition(
+                crate::types::resolved_commands::ResolvedFrameTransition::PopExpected { kind },
+            )
+            .expect("the rider's own frame pops at the caller's wait");
+    }
+    state.finish_active_paused_post_replacement_dispatch();
 }
 
 /// CR 616.1 + CR 510.2: the affected player orders these effects, but combat damage
@@ -13537,7 +13669,8 @@ fn settle_combat_order_parks(
 /// player-choice path is not modeled — the shields apply per-event in pipeline
 /// order instead.
 ///
-/// `settle_combat_order_parks` answers each CR 616.1 order park inside the batch.
+/// `settle_combat_order_parks` answers each CR 616.1 order park inside the batch, and
+/// `settle_combat_rider_pauses` settles every pause a rider raises at the batch's drains.
 ///
 /// Returns a vector aligned 1:1 with `proposed`: `Some(event)` is a survivor
 /// post-replacement `Damage` event for `combat_damage.rs` Phase C to apply;
@@ -13587,12 +13720,8 @@ pub(crate) fn replace_combat_damage_batch(
         if !matches!(result, ReplacementResult::NeedsChoice(_))
             && state.has_post_replacement_drain()
         {
-            // strict-failure: CR 510.2 deals this batch simultaneously and the engine can't
-            // suspend it yet (an engine limit, not a rule), so this drain drops a rider's
-            // prompt (Command Zone #140). Nefarious Lich with 4 cards in graveyard, an unblocked
-            // 3/3: no prompt, its controller loses the game. Dralnu, Lich Lord blocking a 2/2 with
-            // 4 other creatures: no prompt, 0 damage, nothing sacrificed. Outfitted Jouster with
-            // Steelclaw Lance and Brawler's Plate, blocking a 2/2: the same.
+            // CR 510.2: the rider runs inside the batch, and every pause it raises is settled
+            // there (`settle_combat_rider_pauses`, Command Zone #140).
             drain_damage_rider(state, events);
         }
         match result {

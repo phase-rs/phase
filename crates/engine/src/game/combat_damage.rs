@@ -1999,9 +1999,8 @@ fn fire_combat_prevention_riders(
                 drain.event_source = Some(source);
             }
         }
-        let _ = crate::game::engine_replacement::apply_pending_post_replacement_effect(
-            state, None, None, None, events,
-        );
+        // CR 510.2: Phase D settles every pause the rider raises, as the per-portion drain does.
+        replacement::drain_combat_damage_rider(state, events);
     }
 }
 
