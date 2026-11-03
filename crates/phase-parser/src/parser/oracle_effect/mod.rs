@@ -106,11 +106,12 @@ use super::oracle_quantity::{
     parse_for_each_object_filter_clause_with_context,
 };
 use super::oracle_target::{
-    parse_anaphoric_target_ref, parse_definite_anaphor, parse_definite_parent_reference,
-    parse_event_context_ref, parse_fight_target, parse_parent_target_controller_population,
-    parse_target, parse_target_with_ctx, parse_target_with_disjunctive_restriction,
-    parse_target_with_syntax, parse_type_phrase_folding, parse_type_phrase_folding_with_ctx,
-    resolve_singular_exiled_card_target, unique_slot_for_anaphor, AnaphorNoun, AnaphorZoneClass,
+    names_unbound_block_partner, parse_anaphoric_target_ref, parse_definite_anaphor,
+    parse_definite_parent_reference, parse_event_context_ref, parse_fight_target,
+    parse_parent_target_controller_population, parse_target, parse_target_with_ctx,
+    parse_target_with_disjunctive_restriction, parse_target_with_syntax, parse_type_phrase_folding,
+    parse_type_phrase_folding_with_ctx, resolve_singular_exiled_card_target,
+    strip_block_history_clauses, unique_slot_for_anaphor, AnaphorNoun, AnaphorZoneClass,
     DefiniteAnaphor, TargetSyntax,
 };
 use super::oracle_util::{
@@ -123,31 +124,31 @@ use crate::parser::oracle_ir::diagnostic::{ClauseGapKind, OracleDiagnostic};
 use crate::types::ability::{
     effect_has_stack_target_declaration, effect_owns_resolution_zone_choice,
     effect_parent_ref_slot_count, effect_refs_parent_target, effect_requires_parent_target_object,
-    extract_target_filter_from_effect, instruction_object_reach, payer_is_declared_target,
-    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AbilityTag, AggregateFunction,
-    AttachCardinality, AttachSelection, AttackSubject, BounceSelection, CardPlayMode,
-    CardTypeSetSource, CastFromZoneDriver, CastMechanism, CastPermissionConstraint,
-    CastingPermission, ChoiceType, ChooseFromZoneConstraint, ChooseOneOfKind, Chooser,
-    ChosenGroupId, CoinFlipRun, CombatDamageScope, CombatHistoryScope, Comparator, ConjureCard,
-    ConjureSource, ContinuousEffectOnset, ContinuousModification, ControlWindow, ControllerRef,
-    CopyChooseScope, CopyRetargetPermission, CopyScale, DamageModification, DamageSource,
-    DelayedTriggerCondition, DelayedTriggerLifetime, DieResultBranch, DigRestOrder, Duration,
-    Effect, EffectOutcomeSignal, EffectScope, ExtraPhaseRecipient, FilterProp, GameRestriction,
-    GuardReading, GuessSubject, IntensityScope, IterationKindBinding, KeeperConstraint,
-    KeeperCounterMark, LibraryPosition, ManaProduction, ManaSpendPermission, ManaTargetRole,
-    MassLibraryShuffleMode, MultiTargetSpec, NameStickerSet, NumberDistinctness, ObjectProperty,
-    ObjectScope, OriginConstraint, PerPlayerScope, PerpetualModification,
-    PlayPermissionInvalidation, PlayerChoiceDistinctness, PlayerFilter, PlayerRelation,
-    PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity, PropertyAggregate, PtValue,
-    QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole, ReplacementCondition,
-    ReplacementDefinition, ResolutionCastWindow, RestrictionExpiry, RestrictionPlayerScope,
-    RevealUntilDisposition, RoundingMode, SharedQuality, SharedQualityRelation, SiblingCondition,
-    SkipScope, SpellStackToGraveyardReplacement, StaticCondition, StaticDefinition, StepSkipTarget,
-    SubAbilityLink, TapStateChange, TargetFilter, TargetReadOrigin, TargetSelectionMode,
-    ThisWayCause, TokenAttackDestination, TrackedAnaphorSource, TriggerCondition,
-    TriggerDefinition, TurnGate, TypeFilter, TypedFilter, UnlessPayModifier, UnloweredGuard,
-    UntilCondition, VoteSubject, WheneverEventExpiry, ZoneChoiceCandidateSource, ZoneChoiceChooser,
-    ZoneChoiceGatherRole, ZoneOwner,
+    extract_target_filter_from_effect, instruction_object_reach, mass_population_target,
+    payer_is_declared_target, AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind,
+    AbilityTag, AggregateFunction, AttachCardinality, AttachSelection, AttackSubject,
+    BounceSelection, CardPlayMode, CardTypeSetSource, CastFromZoneDriver, CastMechanism,
+    CastPermissionConstraint, CastingPermission, ChoiceType, ChooseFromZoneConstraint,
+    ChooseOneOfKind, Chooser, ChosenGroupId, CoinFlipRun, CombatDamageScope, CombatHistoryScope,
+    Comparator, ConjureCard, ConjureSource, ContinuousEffectOnset, ContinuousModification,
+    ControlWindow, ControllerRef, CopyChooseScope, CopyRetargetPermission, CopyScale,
+    DamageModification, DamageSource, DelayedTriggerCondition, DelayedTriggerLifetime,
+    DieResultBranch, DigRestOrder, Duration, Effect, EffectOutcomeSignal, EffectScope,
+    ExtraPhaseRecipient, FilterProp, GameRestriction, GuardReading, GuessSubject, IntensityScope,
+    IterationKindBinding, KeeperConstraint, KeeperCounterMark, LibraryPosition, ManaProduction,
+    ManaSpendPermission, ManaTargetRole, MassLibraryShuffleMode, MultiTargetSpec, NameStickerSet,
+    NumberDistinctness, ObjectProperty, ObjectScope, OriginConstraint, PerPlayerScope,
+    PerpetualModification, PlayPermissionInvalidation, PlayerChoiceDistinctness, PlayerFilter,
+    PlayerRelation, PlayerScope, PreventionAmount, PreventionScope, ProhibitedActivity,
+    PropertyAggregate, PtValue, QuantityExpr, QuantityRef, ReciprocalZoneChoiceRole,
+    ReplacementCondition, ReplacementDefinition, ResolutionCastWindow, RestrictionExpiry,
+    RestrictionPlayerScope, RevealUntilDisposition, RoundingMode, SharedQuality,
+    SharedQualityRelation, SiblingCondition, SkipScope, SpellStackToGraveyardReplacement,
+    StaticCondition, StaticDefinition, StepSkipTarget, SubAbilityLink, TapStateChange,
+    TargetFilter, TargetReadOrigin, TargetSelectionMode, ThisWayCause, TokenAttackDestination,
+    TrackedAnaphorSource, TriggerCondition, TriggerDefinition, TurnGate, TypeFilter, TypedFilter,
+    UnlessPayModifier, UnloweredGuard, UntilCondition, VoteSubject, WheneverEventExpiry,
+    ZoneChoiceCandidateSource, ZoneChoiceChooser, ZoneChoiceGatherRole, ZoneOwner,
 };
 // `DoubleTarget` has no production use in this module since the counter-doubling
 // discriminator moved to `Effect::is_counter_multiplication()`; the child
@@ -26791,6 +26792,22 @@ fn anaphor_rewrite_would_drop_this_way_binding(text_lower: &str, effect: &Effect
             .is_some_and(TargetFilter::references_tracked_set)
 }
 
+/// CR 608.2c + CR 608.2i: a mass instruction whose population is defined by a block-history
+/// clause with a partner no subject word covers. Representing it without the clause would
+/// widen it to every creature (Triton Tactics: "tap each creature that was blocked by one of
+/// those creatures this turn"), so the caller fails the instruction closed.
+fn mass_instruction_drops_block_partner(effect: &Effect, lower: &str) -> bool {
+    (mass_population_target(effect).is_some()
+        || matches!(
+            effect,
+            Effect::SetTapState {
+                scope: EffectScope::All,
+                ..
+            }
+        ))
+        && names_unbound_block_partner(lower)
+}
+
 /// CR 608.2c: whether a gate counts members of the chain's tracked set.
 fn condition_measures_tracked_set(condition: &AbilityCondition) -> bool {
     condition.any_quantity_expr(&|expr| {
@@ -27778,6 +27795,9 @@ fn has_typed_target_widened(effect: &Effect) -> bool {
         | Effect::TargetOnly { target, .. }
         | Effect::CastFromZone { target, .. }
         | Effect::Counter { target, .. }
+        // CR 701.19a + CR 608.2c: "Regenerate target creature." announces a referent for
+        // later text (Gaze of the Gorgon's "it").
+        | Effect::Regenerate { target }
         // CR 608.2c regression (review round on PR #8494): `Effect::SetLifeTotal`
         // is also the "a stat becomes equal to/becomes N" setter for a NAMED
         // TARGET object, not only a player's life total (Baffling Defenses:
@@ -49032,7 +49052,7 @@ fn parse_effect_chain_ir_body(
         // reads the clause without that definition, or "put X counters on target
         // creature you control, where X is that card's mana value" would have
         // its explicit target clobbered to the parent's referent.
-        let recipient_anaphor_lower = strip_trailing_where_x(TextPair::new(&text, &text_lower))
+        let where_x_lower = strip_trailing_where_x(TextPair::new(&text, &text_lower))
             .0
             .lower
             .to_string();
@@ -49045,8 +49065,12 @@ fn parse_effect_chain_ir_body(
         // out of recipient detection, that referent silently misbound the
         // target; now that the explicit target binds, fail the clause closed so
         // coverage does not claim the ruling's timing.
-        let where_x_referent_was_the_only_anaphor = has_anaphoric_reference(&text_lower)
-            && !has_anaphoric_reference(&recipient_anaphor_lower);
+        let where_x_referent_was_the_only_anaphor =
+            has_anaphoric_reference(&text_lower) && !has_anaphoric_reference(&where_x_lower);
+        // CR 608.2c: a block-history clause's partner belongs to a population. It never
+        // names this clause's recipient, or Ride Down's grant would bind to the creature it
+        // just destroyed instead of the attackers.
+        let recipient_anaphor_lower = strip_block_history_clauses(&where_x_lower);
         let normalized_lower = normalized_text.to_lowercase();
         let reflexive_when_head = tag::<_, _, OracleError<'_>>("when ")
             .parse(normalized_lower.as_str())
@@ -49236,6 +49260,12 @@ fn parse_effect_chain_ir_body(
             } else {
                 replace_target_with_parent(&mut clause.effect);
             }
+        }
+        if mass_instruction_drops_block_partner(&clause.effect, &text_lower) {
+            clause.effect = Effect::unimplemented("block_history_partner", text.as_str());
+            clause.sub_ability = None;
+            clause.multi_target = None;
+            clause.distribute = None;
         }
         let player_anaphor = has_player_anaphoric_reference(&text_lower)
             || (ctx.prior_player_declaration && has_they_pronoun(&text_lower));

@@ -32,7 +32,7 @@ use super::oracle_ir::feature::{
 use super::oracle_nom::error::OracleError;
 use super::oracle_nom::primitives::{scan_contains, scan_preceded, split_sentence_units};
 use super::oracle_target::{
-    parse_block_pairing_clause, parse_source_blocked_history_clause, BlockPairingForm,
+    parse_block_history_clause, parse_block_pairing_clause, BlockPairingForm,
     CombatRelationSubjectWord,
 };
 use super::oracle_trigger::parse_distributed_x_cost_condition;
@@ -6282,41 +6282,41 @@ fn detect_damage_subject_conjunction(
 
 // ── Detector Q: CombatHistoryRelation ───────────────────────────────────
 
-/// CR 509.1g + CR 608.2i: "creatures it blocked this combat" / "all creatures it
-/// blocked this turn" (Cathedral Membrane, Defiant Vanguard) is a look-back
+/// CR 509.1g + CR 608.2i: a block-history clause ("creatures it blocked this
+/// combat", "all creatures that blocked or were blocked by it this turn",
+/// "creatures that were blocked by that creature this combat") is a look-back
 /// restriction on the affected object set. Every clause the shared recognizer
-/// `parse_source_blocked_history_clause` finds must surface as a
-/// `CombatRelation::BlockPairing` filter with `SubjectIsBlocker` and the same
-/// window; otherwise the relative clause was dropped and the mass effect silently widened to every
-/// creature (#9179). The duration-ownership guard in `strip_trailing_duration`
-/// keeps the window from reappearing as a spurious effect duration, so without
-/// this detector a declined clause would leave no trace at all.
+/// `parse_block_history_clause` finds, whatever its partner, must surface as a
+/// `CombatRelation::BlockPairing` filter with the clause's own direction and
+/// window, so a one-way filter cannot vouch for a two-way clause; otherwise the
+/// relative clause was dropped and the effect silently widened (#9179). The
+/// duration-ownership guard in `strip_trailing_duration` keeps the window from
+/// reappearing as a spurious effect duration, so without this detector a
+/// declined clause would leave no trace at all.
 fn detect_combat_history_relation(
     cleaned: &str,
     original: &str,
     evidence: &UnitEvidence,
     diagnostics: &mut Vec<OracleDiagnostic>,
 ) {
-    let represented = |scope: CombatHistoryScope| {
+    let represented = |direction: BlockPairDirection, scope: CombatHistoryScope| {
         evidence.any::<FilterProp>(|prop| {
             matches!(
                 prop,
                 FilterProp::CombatRelation {
                     relation: CombatRelation::BlockPairing {
-                        direction: BlockPairDirection::SubjectIsBlocker,
+                        direction: found_direction,
                         scope: found,
                     },
                     ..
-                } if *found == Some(scope)
+                } if *found_direction == direction && *found == Some(scope)
             )
         })
     };
     let mut remaining = cleaned;
     let mut swallowed = false;
-    while let Some((_, (_, scope), rest)) =
-        scan_preceded(remaining, parse_source_blocked_history_clause)
-    {
-        swallowed |= !represented(scope);
+    while let Some((_, clause, rest)) = scan_preceded(remaining, parse_block_history_clause) {
+        swallowed |= !represented(clause.direction, clause.scope);
         remaining = rest;
     }
     if swallowed {
@@ -6403,6 +6403,9 @@ fn pairing_subject_of(word: CombatRelationSubjectWord) -> CombatRelationSubject 
             CombatRelationSubject::Source
         }
         CombatRelationSubjectWord::TargetCreature => CombatRelationSubject::ParentTarget,
+        // The pairing grammar never produces the demonstrative; the arm keeps the
+        // match exhaustive.
+        CombatRelationSubjectWord::Demonstrative => CombatRelationSubject::AnaphoricTarget,
     }
 }
 
@@ -6987,11 +6990,11 @@ If you sang a song the whole time you were searching and shuffling, you may unta
     }
 
     /// The ten detector labels that pass `None` and are measured present in the phase-base
-    /// corpus. `ActivateLimit`, `ModalDynamicMaxDropped` and `CombatHistoryRelation` are
-    /// deliberately absent: none has a corpus warning (`CombatHistoryRelation`'s clause is
-    /// printed on exactly two cards, both represented since #9179), so no corpus fixture
-    /// can reach them. They are bought by the compiler instead — the constructor's new
-    /// parameter makes omission a compile error.
+    /// corpus. `ActivateLimit` and `ModalDynamicMaxDropped` are deliberately absent: neither
+    /// has a corpus warning, so no corpus fixture can reach them. They are bought by the
+    /// compiler instead — the constructor's new parameter makes omission a compile error.
+    /// `CombatHistoryRelation` reports a history clause whose partner no subject word
+    /// covers on a single target (Time to Reflect: "a Zombie").
     ///
     /// "Non-phrase" here means "no gap axis wired at the push site", NOT "no phrase is
     /// nameable". `Replacement` is in this set and its axis names phrases perfectly well —
@@ -7005,6 +7008,7 @@ If you sang a song the whole time you were searching and shuffling, you may unta
     const EXPECTED_NON_PHRASE: &[&str] = &[
         "APNAP",
         "ActivateOnlyDuring",
+        "CombatHistoryRelation",
         "CombatPairingRelation",
         "Duration_NextTurn",
         "Duration_ThisTurn",
@@ -7025,7 +7029,7 @@ If you sang a song the whole time you were searching and shuffling, you may unta
     /// A detector with no gap axis wired at its push site passes `None`.
     ///
     /// The reach guard is a SET EQUALITY, not a count and not `!is_empty()`. An
-    /// `assert!(!observed.is_empty())` here would be satisfied by eight of the nine
+    /// `assert!(!observed.is_empty())` here would be satisfied by nine of the ten
     /// ceasing to fire, which is the "guarded assertion satisfied by the guarded paths
     /// ceasing to fire" shape this suite has shipped before. This is red the moment any
     /// one of them stops.
@@ -7035,16 +7039,17 @@ If you sang a song the whole time you were searching and shuffling, you may unta
         // also fire a phrase-bearing detector; those records are filtered out below, so a
         // card carrying both is fine.
         //
-        // NOTE (merge): the set below stays at nine rather than main's ten:
+        // NOTE (merge): the set below omits main's `DamageSubjectConjunction`:
         // this branch's `try_parse_damage` compound-connector guard fails
         // conjunction-tailed damage closed (Burns/Disorder class), so
         // `DamageSubjectConjunction` has no firing witness while the guard
         // stands. See the deliberately-absent note on the expected set.
+        // `CombatHistoryRelation` joins it, with Time to Reflect as its fixture.
         //
         // The `Duration_UntilEndOfTurn` fixture is Savage Punch, not the former Dragon Egg
         // fixture: Dragon Egg's token grant now carries its duration in the AST (CR 602.1a
         // + CR 611.2a), so it no longer fires this detector and cannot reach it. The set
-        // below stays at nine — a detector that stops firing here needs a different corpus
+        // below stays at ten — a detector that stops firing here needs a different corpus
         // card, never a shrunken set (the `DamageSubjectConjunction` removal above is
         // the branch's guard stance, not a stop-firing: see its note).
         let fixtures: &[(&str, &str, &[&str])] = &[
@@ -7057,6 +7062,7 @@ If you sang a song the whole time you were searching and shuffling, you may unta
             ("Ballot Broker", "While voting, you may vote an additional time. (The votes can be for different choices or for the same choice.)", &["Creature"]),
             ("Vortex Elemental", "{U}: Put this creature and each creature blocking or blocked by it on top of their owners' libraries, then those players shuffle.\n{3}{U}{U}: Target creature blocks this creature this turn if able.", &["Creature"]),
             ("Mikey & Don, Party Planners", "Ward {2}\nYou may look at the top card of your library any time.\nYou may play lands and cast Mutant, Ninja, or Turtle spells from the top of your library. If you cast a creature spell this way, that creature enters with an additional +1/+1 counter on it.", &["Creature"]),
+            ("Time to Reflect", "Exile target creature that blocked or was blocked by a Zombie this turn.", &["Instant"]),
         ];
 
         let mut observed: BTreeSet<String> = BTreeSet::new();
@@ -7085,7 +7091,7 @@ If you sang a song the whole time you were searching and shuffling, you may unta
                 .iter()
                 .map(|d| (*d).to_string())
                 .collect::<BTreeSet<_>>(),
-            "observed non-phrase detector set differs from the corpus-measured nine; \
+            "observed non-phrase detector set differs from the corpus-measured ten; \
              observed = {observed:?}"
         );
 
@@ -15064,8 +15070,10 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
     /// CR 509.1g + CR 608.2i: every shape whose bare "it" has no `SelfRef`
     /// antecedent declines the blocked-history clause and must be REPORTED, in
     /// both windows: a typed trigger subject in an anaphoric compound (a), a
-    /// spell's chosen target (b), a chain-pinned target (c), a typed subject in a
-    /// delayed body (d), and a typed dies-trigger subject (e). Each row pairs the
+    /// spell's chosen target in the same instruction (b), a typed subject in a
+    /// delayed body (d), and a typed dies-trigger subject (e). A chain-pinned
+    /// target (c) now binds as an earlier instruction's target
+    /// (`combat_history_relation_binds_a_chain_pinned_target`). Each row pairs the
     /// negative (no windowed `BlockPairing` in the parse) with its reach guard — the
     /// mass effect parsed with its unrestricted creature filter — and with the
     /// detector firing, which itself proves the unit was not skipped as
@@ -15133,15 +15141,6 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
             ("(a) typed compound", parsed, destroy_all_target as fn(&Effect) -> Option<&TargetFilter>),
             ("(b) spell target", spell, destroy_all_target),
             (
-                "(c) chain-pinned target",
-                parse_named(
-                    "Whenever this creature blocks, tap target creature. Destroy all creatures it blocked this turn.",
-                    "Test Card",
-                    &["Creature"],
-                ),
-                destroy_all_target,
-            ),
-            (
                 "(d) typed delayed body",
                 parse_named(
                     "Whenever a creature you control blocks, at end of combat, destroy all creatures it blocked this turn.",
@@ -15203,7 +15202,7 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
             assert!(
                 crate::parser::oracle_nom::primitives::scan_preceded(
                     &cleaned,
-                    crate::parser::oracle_target::parse_source_blocked_history_clause,
+                    crate::parser::oracle_target::parse_block_history_clause,
                 )
                 .is_some(),
                 "{name}: reach guard — the recognizer must find the clause"
@@ -15246,6 +15245,310 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
             !has_swallowed_detector(&unary, "CombatHistoryRelation"),
             "{:?}",
             unary.parse_warnings
+        );
+    }
+
+    /// Does the parse carry a windowed `BlockPairing` filter of exactly this shape?
+    fn parse_has_history_relation(
+        parsed: &crate::parser::oracle::ParsedAbilities,
+        direction: BlockPairDirection,
+        scope: crate::types::ability::CombatHistoryScope,
+        subject: crate::types::ability::CombatRelationSubject,
+    ) -> bool {
+        use crate::types::ability::CombatRelation;
+        let wanted = FilterProp::CombatRelation {
+            relation: CombatRelation::BlockPairing {
+                direction,
+                scope: Some(scope),
+            },
+            subject,
+        };
+        UnitEvidence::of(parsed).any::<FilterProp>(|prop| *prop == wanted)
+    }
+
+    /// CR 511.2 + CR 603.7b: the "this turn's next end of combat" condition.
+    fn this_turns_next_end_of_combat() -> crate::types::ability::DelayedTriggerCondition {
+        crate::types::ability::DelayedTriggerCondition::WhenNextEvent {
+            trigger: Box::new(
+                crate::types::ability::TriggerDefinition::new(TriggerMode::Phase)
+                    .phase(crate::types::phase::Phase::EndCombat),
+            ),
+            or_trigger: None,
+            lifetime: crate::types::ability::DelayedTriggerLifetime::ThisTurn,
+        }
+    }
+
+    /// Does the parse hold a delayed ability on `condition` whose payload carries no
+    /// duration of its own (the clause owns its window)?
+    fn parse_has_delayed_payload(
+        parsed: &crate::parser::oracle::ParsedAbilities,
+        condition: &crate::types::ability::DelayedTriggerCondition,
+    ) -> bool {
+        UnitEvidence::of(parsed).any_effect(|effect| {
+            matches!(
+                effect,
+                Effect::CreateDelayedTrigger {
+                    condition: found,
+                    effect: payload,
+                    ..
+                } if found == condition && payload.duration.is_none()
+            )
+        })
+    }
+
+    /// CR 509.1g + CR 608.2c + CR 603.7b: each printed card of the class parses
+    /// clean from its verbatim Oracle text — the exact relation, direction and
+    /// window, the earlier instruction's target as subject, the turn-bound
+    /// delayed condition where printed with no duration on its payload, Ride
+    /// Down's grant left on the broadcast path (`target: None`), no
+    /// `Unimplemented` and no warning. The relation's presence is the reach
+    /// guard for the silent detector.
+    #[test]
+    fn target_block_history_cards_parse_clean() {
+        use crate::types::ability::{CombatHistoryScope, CombatRelationSubject};
+        for (name, text, direction, scope, delayed) in [
+            (
+                "Gaze of the Gorgon",
+                "({B/G} can be paid with either {B} or {G}.)\nRegenerate target creature. At this turn's next end of combat, destroy all creatures that blocked or were blocked by it this turn.",
+                BlockPairDirection::Either,
+                CombatHistoryScope::ThisTurn,
+                true,
+            ),
+            (
+                "Venomous Breath",
+                "Choose target creature. At this turn's next end of combat, destroy all creatures that blocked or were blocked by it this turn.",
+                BlockPairDirection::Either,
+                CombatHistoryScope::ThisTurn,
+                true,
+            ),
+            (
+                "Glyph of Doom",
+                "Choose target Wall creature. At this turn's next end of combat, destroy all creatures that were blocked by that creature this turn.",
+                BlockPairDirection::SubjectIsBlocker,
+                CombatHistoryScope::ThisTurn,
+                true,
+            ),
+            (
+                "Ride Down",
+                "Destroy target blocking creature. Creatures that were blocked by that creature this combat gain trample until end of turn.",
+                BlockPairDirection::SubjectIsBlocker,
+                CombatHistoryScope::ThisCombat,
+                false,
+            ),
+        ] {
+            let parsed = parse_named(text, name, &["Instant"]);
+            assert!(
+                parse_has_history_relation(
+                    &parsed,
+                    direction,
+                    scope,
+                    CombatRelationSubject::AnaphoricTarget
+                ),
+                "{name}: the clause must bind the earlier target; {:?}",
+                parsed.abilities
+            );
+            assert!(
+                !any_ability_has_unimplemented(&parsed),
+                "{name}: {:?}",
+                parsed.abilities
+            );
+            assert!(
+                parsed.parse_warnings.is_empty(),
+                "{name}: {:?}",
+                parsed.parse_warnings
+            );
+            assert_eq!(
+                parse_has_delayed_payload(&parsed, &this_turns_next_end_of_combat()),
+                delayed,
+                "{name}: the turn-bound delayed ability with no payload duration"
+            );
+        }
+
+        let ride_down = parse_named(
+            "Destroy target blocking creature. Creatures that were blocked by that creature this combat gain trample until end of turn.",
+            "Ride Down",
+            &["Instant"],
+        );
+        let evidence = UnitEvidence::of(&ride_down);
+        assert!(
+            evidence
+                .any_effect(|effect| matches!(effect, Effect::GenericEffect { target: None, .. })),
+            "Ride Down: the grant stays on the broadcast path; {:?}",
+            ride_down.abilities
+        );
+        assert!(
+            !evidence.any_effect(|effect| matches!(
+                effect,
+                Effect::GenericEffect {
+                    target: Some(TargetFilter::ParentTarget),
+                    ..
+                }
+            )),
+            "Ride Down: the grant must not bind the destroyed creature"
+        );
+    }
+
+    /// CR 608.2c + CR 608.2i: a history clause whose partner no subject word
+    /// covers fails closed. On a mass instruction the instruction becomes
+    /// `Unimplemented { block_history_partner }` with no widened mass effect
+    /// left behind (Triton Tactics, Glyph of Reincarnation); on a single target
+    /// the detector reports it (Time to Reflect, You Cannot Pass!). In each the
+    /// clause owns its window, so no spurious duration appears. A unary clause
+    /// is no history clause and raises no new warning (Heat Stroke, Sizzling
+    /// Barrage).
+    #[test]
+    fn unbound_block_history_partner_fails_closed() {
+        // The failed instruction carries no duration: its window stays with the clause.
+        let unbound = |parsed: &crate::parser::oracle::ParsedAbilities| {
+            UnitEvidence::of(parsed).any::<AbilityDefinition>(|def| {
+                matches!(
+                    &*def.effect,
+                    Effect::Unimplemented { name, .. } if name == "block_history_partner"
+                ) && def.duration.is_none()
+            })
+        };
+        let triton = parse_named(
+            "Up to two target creatures each get +0/+3 until end of turn. Untap those creatures. At this turn's next end of combat, tap each creature that was blocked by one of those creatures this turn and it doesn't untap during its controller's next untap step.",
+            "Triton Tactics",
+            &["Instant"],
+        );
+        assert!(unbound(&triton), "Triton Tactics: {:?}", triton.abilities);
+        assert!(
+            !UnitEvidence::of(&triton).any_effect(|effect| matches!(
+                effect,
+                Effect::SetTapState {
+                    scope: crate::types::ability::EffectScope::All,
+                    ..
+                }
+            )),
+            "Triton Tactics: no widened tap may remain"
+        );
+        assert!(
+            UnitEvidence::of(&triton).any_effect(|effect| matches!(
+                effect,
+                Effect::CreateDelayedTrigger { condition, .. }
+                    if *condition == this_turns_next_end_of_combat()
+            )),
+            "Triton Tactics: reach guard — the delayed ability keeps its turn-bound condition"
+        );
+
+        let reincarnation = parse_named(
+            "Cast this spell only after combat.\nDestroy all creatures that were blocked by target Wall this turn. They can't be regenerated. For each creature that died this way, put a creature card from the graveyard of the player who controlled that creature the last time it became blocked by that Wall onto the battlefield under its owner's control.",
+            "Glyph of Reincarnation",
+            &["Instant"],
+        );
+        assert!(
+            unbound(&reincarnation),
+            "Glyph of Reincarnation: {:?}",
+            reincarnation.abilities
+        );
+        assert!(
+            !UnitEvidence::of(&reincarnation)
+                .any_effect(|effect| matches!(effect, Effect::DestroyAll { .. })),
+            "Glyph of Reincarnation: no widened destroy may remain"
+        );
+
+        for (name, text) in [
+            (
+                "Time to Reflect",
+                "Exile target creature that blocked or was blocked by a Zombie this turn.",
+            ),
+            (
+                "You Cannot Pass!",
+                "Destroy target creature that blocked or was blocked by a legendary creature this turn.",
+            ),
+        ] {
+            let parsed = parse_named(text, name, &["Instant"]);
+            assert!(
+                has_swallowed_detector(&parsed, "CombatHistoryRelation"),
+                "{name}: {:?}",
+                parsed.parse_warnings
+            );
+            assert!(
+                !UnitEvidence::of(&parsed).any_duration(|_| true),
+                "{name}: the window is not a duration; {:?}",
+                parsed.abilities
+            );
+        }
+
+        for (name, text, types) in [
+            (
+                "Heat Stroke",
+                "At end of combat, destroy each creature that blocked or was blocked this turn.",
+                &["Enchantment"][..],
+            ),
+            (
+                "Sizzling Barrage",
+                "Sizzling Barrage deals 4 damage to target creature that blocked this turn.",
+                &["Instant"][..],
+            ),
+        ] {
+            let cleaned = text.to_ascii_lowercase();
+            assert!(
+                crate::parser::oracle_nom::primitives::scan_preceded(
+                    &cleaned,
+                    crate::parser::oracle_target::parse_block_history_clause,
+                )
+                .is_none(),
+                "{name}: a unary clause is no history clause"
+            );
+            let parsed = parse_named(text, name, types);
+            assert!(!unbound(&parsed), "{name}: {:?}", parsed.abilities);
+            assert!(
+                !has_swallowed_detector(&parsed, "CombatHistoryRelation"),
+                "{name}: {:?}",
+                parsed.parse_warnings
+            );
+        }
+    }
+
+    /// CR 608.2c: a chain-pinned target is an earlier instruction's target, so
+    /// "it" in a later history clause binds it (`AnaphoricTarget`) and the
+    /// detector is silent. Hand-built: no printed card has a trigger that taps
+    /// a target and then reads its block history.
+    #[test]
+    fn combat_history_relation_binds_a_chain_pinned_target() {
+        use crate::types::ability::{CombatHistoryScope, CombatRelationSubject};
+        let parsed = parse_named(
+            "Whenever this creature blocks, tap target creature. Destroy all creatures it blocked this turn.",
+            "Test Card",
+            &["Creature"],
+        );
+        assert!(
+            parse_has_history_relation(
+                &parsed,
+                BlockPairDirection::SubjectIsBlocker,
+                CombatHistoryScope::ThisTurn,
+                CombatRelationSubject::AnaphoricTarget,
+            ),
+            "{:?}",
+            parsed.triggers
+        );
+        assert!(
+            !has_swallowed_detector(&parsed, "CombatHistoryRelation"),
+            "{:?}",
+            parsed.parse_warnings
+        );
+    }
+
+    /// CR 509.1g + CR 608.2i: a one-way filter cannot vouch for a two-way clause
+    /// on the same line. Hand-built: no printed card has this shape (nearest:
+    /// Gaze of the Gorgon). The one-way filter is the reach guard.
+    #[test]
+    fn combat_history_relation_one_way_filter_does_not_vouch_for_two_way_clause() {
+        let parsed = parse(
+            "Destroy all creatures that were blocked by Test Card this turn. Destroy all creatures that blocked or were blocked by it this turn.",
+            &["Creature"],
+        );
+        assert!(
+            parse_has_blocked_history_filter(&parsed),
+            "reach guard: the one-way clause is represented; {:?}",
+            parsed.abilities
+        );
+        assert!(
+            has_swallowed_detector(&parsed, "CombatHistoryRelation"),
+            "{:?}",
+            parsed.parse_warnings
         );
     }
 
@@ -15509,6 +15812,41 @@ this spell's mana cost.\nDestroy target attacking creature without flying.",
             assert!(
                 history_reported(direction, scope),
                 "{why} does not represent a recorded block"
+            );
+        }
+
+        // A two-way clause is represented only by a two-way filter in its own window.
+        let two_way = "destroy all creatures that blocked or were blocked by it this turn.";
+        let two_way_reported = |direction, scope| {
+            let mut diagnostics = Vec::new();
+            super::detect_combat_history_relation(
+                two_way,
+                two_way,
+                &evidence(direction, scope),
+                &mut diagnostics,
+            );
+            !diagnostics.is_empty()
+        };
+        assert!(
+            !two_way_reported(BlockPairDirection::Either, this_turn),
+            "the clause's own direction and window represent it"
+        );
+        for (direction, scope, why) in [
+            (
+                BlockPairDirection::SubjectIsBlocker,
+                this_turn,
+                "a one-way filter",
+            ),
+            (
+                BlockPairDirection::CandidateIsBlocker,
+                this_turn,
+                "the inverse one-way filter",
+            ),
+            (BlockPairDirection::Either, this_combat, "a wrong window"),
+        ] {
+            assert!(
+                two_way_reported(direction, scope),
+                "{why} does not represent a two-way clause"
             );
         }
 

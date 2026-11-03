@@ -3515,6 +3515,93 @@ fn tapped_object_context_from_events(
     tapped.next().is_none().then_some(first)
 }
 
+/// CR 608.2c: does `effect` read a characteristic of the object an earlier instruction named?
+fn effect_reads_instruction_referent(effect: &Effect) -> bool {
+    let mut reads = false;
+    effect.for_each_quantity_expr(&mut |quantity| {
+        reads |= quantity.any_ref(&mut |qty| {
+            matches!(
+                qty,
+                QuantityRef::Power { scope }
+                | QuantityRef::Toughness { scope }
+                | QuantityRef::ObjectManaValue { scope }
+                    if matches!(scope, ObjectScope::Demonstrative | ObjectScope::Anaphoric)
+            )
+        });
+    });
+    reads
+}
+
+/// CR 608.2c: does `effect` deal its damage to the parent instruction's own target? Every
+/// printed face of that shape is a parse that dropped the recipient its text prints
+/// (Crush Underfoot: "It deals damage equal to its power to target creature."), so a
+/// referent would turn the announced object's damage on itself. Such an instruction
+/// keeps the reading it has without one.
+fn damages_parent_target(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::DealDamage {
+            target: TargetFilter::ParentTarget,
+            ..
+        } | Effect::DamageAll {
+            target: TargetFilter::ParentTarget,
+            ..
+        }
+    )
+}
+
+/// CR 601.2c: did `node` choose the object `id` as one of its own targets?
+fn chose_object(node: &ResolvedAbility, id: ObjectId) -> bool {
+    node.chosen_target_slots
+        .slots()
+        .iter()
+        .any(|&slot| node.targets.get(slot) == Some(&TargetRef::Object(id)))
+}
+
+/// CR 608.2c + CR 608.2h: an ability's next instruction refers back to the object its first
+/// instruction named, whether or not that instruction left an event naming it: a shield
+/// (Heal the Scars), a grant (Sheltering Word), counters (The Provider), a prevention shield
+/// (Boros Fury-Shield), a retarget (Imp's Mischief), a destroy or counter the target
+/// survived (Feed the Swarm, Essence Backlash), or a card put into a library (Lagonna-Band
+/// Storyteller). Only the root instruction announces, and only its next instruction reads:
+/// a later instruction's "that card" names a card some other instruction looked for, and may
+/// have found nothing (Judge Unworthy with an empty library). The root is the instruction
+/// that chose the object as its own target when the resolving stack object's root chose it
+/// too (CR 601.2c). Depth cannot say so: a "you may" root resumes after the choice at depth 1
+/// (Lagonna-Band Storyteller), and both records travel with it. Only a single object target
+/// is a referent, and never for an instruction that deals damage to the parent's own target
+/// (`damages_parent_target`). The object is snapshot live, after the layers settle (CR 613.1:
+/// The Provider's counters count).
+fn announced_object_context(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+) -> Option<CostPaidObjectSnapshot> {
+    if !ability.sub_ability.as_deref().is_some_and(|sub| {
+        effect_reads_instruction_referent(&sub.effect) && !damages_parent_target(&sub.effect)
+    }) {
+        return None;
+    }
+    crate::game::layers::flush_layers(state);
+    let mut objects =
+        ability
+            .targets
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, target)| match target {
+                TargetRef::Object(id) => state.objects.get(id).map(|object| (slot, object)),
+                TargetRef::Player(_) => None,
+            });
+    let (slot, object) = objects.next()?;
+    let is_root = ability.chosen_target_slots.slots().contains(&slot)
+        && state
+            .resolving_stack_entry
+            .as_ref()
+            .and_then(|entry| entry.ability())
+            .is_some_and(|root| chose_object(root, object.id));
+    (is_root && objects.next().is_none())
+        .then(|| CostPaidObjectSnapshot::capture(object, object.snapshot_for_mana_spent()))
+}
+
 fn sacrificed_object_context_from_events(
     state: &GameState,
     events: &[GameEvent],
@@ -24320,8 +24407,11 @@ fn resolve_chain_body(
     // CR 608.2c + CR 608.2h: a later instruction may read a public-to-hidden
     // move's last-known controller/owner metadata, without treating the hidden
     // object itself as an available parent referent.
-    let effect_context_object =
-        parent_referent_context_from_events(state, effect_events).or_else(|| {
+    // CR 608.2c: an instruction that left no referent event still names the object
+    // its root instruction announced (`announced_object_context`).
+    let effect_context_object = parent_referent_context_from_events(state, effect_events)
+        .or_else(|| announced_object_context(state, ability))
+        .or_else(|| {
             ability
                 .sub_ability
                 .as_deref()
