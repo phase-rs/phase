@@ -794,17 +794,17 @@ fn shortcut_accept_validation_does_not_take_the_shortcut() {
             }]
         ),
         "REACH-GUARD: the window enumerates exactly the materializing Accept, got {actions:?} — \
-         a Shorten at place 0 would take nothing and this row would pass at base too"
+         a Shorten at place 0 takes nothing, so the take counters below would not be measuring \
+         the take this row exists to remove"
     );
     assert_eq!(
         validation_clones, 0,
         "deciding whether the Accept is legal must not reach the clone-and-apply probe"
     );
     // MEASURED, same fixture, same window: base `bf584d6bd` answers this call with
-    // `validation_clones=1, state_copies=50` — the probe's single copy plus the 49 the simulated
-    // Accept's take made driving the shortcut. Head: `validation_clones=0, state_copies=1`.
-    // Exactly one copy remains, and it is `smart_shortcut_response`'s own probe clone (the
-    // candidate's efficacy stage re-parks a copy at `Priority`); the take's snapshots are gone.
+    // `validation_clones=1, state_copies=50`; head with `0` and `1`. The copies above the one the
+    // candidate probe makes are the simulated Accept driving the shortcut — `GameState::clone`
+    // accounts every copy, so the take's snapshots land in this counter.
     // `drive_snapshots` is 0 on BOTH sides here (the UntilLethal take drives through a path that
     // records no drive snapshot), so the state copy is this board's take instrument, not that
     // counter.
