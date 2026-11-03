@@ -5021,6 +5021,133 @@ pub struct ResolutionStateWire {
     state: GameState,
 }
 
+#[cfg(test)]
+mod replacement_library_placement_versioned_tests {
+    use super::*;
+    use crate::types::ability::LibraryPosition;
+    use crate::types::game_state::replacement_library_placement_wire_tests::{
+        assert_placement, change_carriers, nested_states, state_with_pending,
+    };
+    use crate::types::zones::Zone;
+
+    #[test]
+    fn replacement_library_placement_all_supported_versions_preserve_authority() {
+        let top = serde_json::to_value(LibraryPosition::Top).unwrap();
+        let bottom = serde_json::to_value(LibraryPosition::Bottom).unwrap();
+        for state in std::iter::once(state_with_pending()).chain(nested_states()) {
+            for version in LEGACY_RESOLUTION_STATE_WIRE_VERSION..=RESOLUTION_STATE_WIRE_VERSION {
+                for current in [None, Some(Value::Null), Some(bottom.clone())] {
+                    for mirror in [None, Some(Value::Null), Some(top.clone())] {
+                        let expected: Option<LibraryPosition> = serde_json::from_value(
+                            current
+                                .clone()
+                                .unwrap_or_else(|| mirror.clone().unwrap_or(Value::Null)),
+                        )
+                        .unwrap();
+                        let mut wire = if version == LEGACY_RESOLUTION_STATE_WIRE_VERSION {
+                            serde_json::to_value(&state).unwrap()
+                        } else {
+                            serde_json::to_value(ResolutionStateWire::from_game_state(
+                                state.clone(),
+                            ))
+                            .unwrap()
+                        };
+                        wire["resolution_state_version"] = Value::from(version);
+                        change_carriers(
+                            &mut wire,
+                            current.as_ref(),
+                            mirror.as_ref(),
+                            Zone::Library,
+                        );
+                        let restored = serde_json::from_value::<ResolutionStateWire>(wire)
+                            .unwrap()
+                            .into_game_state();
+                        assert_placement(&restored, expected);
+                        let current_wire = serde_json::to_value(
+                            ResolutionStateWire::from_game_state(restored.clone()),
+                        )
+                        .unwrap();
+                        assert_eq!(
+                            current_wire["resolution_state_version"],
+                            Value::from(RESOLUTION_STATE_WIRE_VERSION)
+                        );
+                        let again = serde_json::from_value::<ResolutionStateWire>(current_wire)
+                            .unwrap()
+                            .into_game_state();
+                        assert_eq!(restored, again);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn replacement_library_placement_versioned_rejects_invalid_current_and_future_wire() {
+        for state in std::iter::once(state_with_pending()).chain(nested_states()) {
+            let wire = serde_json::to_value(ResolutionStateWire::from_game_state(state)).unwrap();
+            assert!(serde_json::from_value::<ResolutionStateWire>(wire.clone()).is_ok());
+            let mut invalid = wire.clone();
+            change_carriers(
+                &mut invalid,
+                Some(&serde_json::json!({"type": "NotAPosition"})),
+                Some(&serde_json::json!({"type": "Top"})),
+                Zone::Library,
+            );
+            assert!(serde_json::from_value::<ResolutionStateWire>(invalid).is_err());
+            let mut future = wire;
+            future["resolution_state_version"] = Value::from(RESOLUTION_STATE_WIRE_VERSION + 1);
+            assert!(serde_json::from_value::<ResolutionStateWire>(future).is_err());
+        }
+    }
+
+    #[test]
+    fn replacement_library_placement_keeps_legacy_and_current_parent_frame() {
+        for mut state in std::iter::once(state_with_pending()).chain(nested_states()) {
+            let spell = crate::game::zones::create_object(
+                &mut state,
+                crate::types::identifiers::CardId(3),
+                crate::types::player::PlayerId(0),
+                "parent spell".into(),
+                Zone::Stack,
+            );
+            let parent = PendingSpellResolution {
+                object_id: spell,
+                controller: crate::types::player::PlayerId(0),
+                casting_variant: crate::types::game_state::CastingVariant::Normal,
+                cast_from_zone: None,
+                cast_controller: None,
+                cast_timing_permission: None,
+                spell_targets: Vec::new(),
+                actual_mana_spent: 0,
+                kickers_paid: Vec::new(),
+                additional_cost_payment_count: 0,
+                additional_cost_payments: Vec::new(),
+                convoked_creatures: Vec::new(),
+            };
+            let mut legacy = serde_json::to_value(&state).unwrap();
+            legacy["pending_spell_resolution"] = serde_json::to_value(&parent).unwrap();
+            legacy["resolution_state_version"] = Value::from(LEGACY_RESOLUTION_STATE_WIRE_VERSION);
+            state.resolution_stack.push_spell_resolution(parent.clone());
+            let current =
+                serde_json::to_value(ResolutionStateWire::from_game_state(state)).unwrap();
+            for mut wire in [legacy, current] {
+                change_carriers(
+                    &mut wire,
+                    None,
+                    Some(&serde_json::json!({"type": "Top"})),
+                    Zone::Library,
+                );
+                let restored = serde_json::from_value::<ResolutionStateWire>(wire)
+                    .unwrap()
+                    .into_game_state();
+                assert_placement(&restored, Some(LibraryPosition::Top));
+                assert_eq!(restored.active_spell_resolution(), Some(&parent));
+                assert_eq!(restored.resolution_stack.len(), 1);
+            }
+        }
+    }
+}
+
 impl ResolutionStateWire {
     pub fn from_game_state(state: GameState) -> Self {
         Self { state }

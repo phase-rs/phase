@@ -26378,6 +26378,314 @@ fn migrate_legacy_spell_cost_elections(value: &mut serde_json::Value) -> Result<
 /// Field-migrate the former paid-resolution offer into its canonical cleanup
 /// carrier. This runs before raw, persisted, trusted and versioned decoding
 /// materializes `CastOfferKind`, independent of the transport.
+#[cfg(test)]
+pub(crate) mod replacement_library_placement_wire_tests {
+    use super::*;
+    use crate::types::ability::LibraryPosition;
+    use serde_json::{json, Value};
+
+    // Infrastructure fixture: public producer and resume witnesses live in
+    // zone_pipeline's library-placement tests. No printed replacement is claimed.
+    pub(crate) fn state_with_pending() -> GameState {
+        let mut state = GameState::new_two_player(42);
+        let object = crate::game::zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "placement subject".into(),
+            Zone::Hand,
+        );
+        let source = crate::game::zones::create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "replacement authority".into(),
+            Zone::Battlefield,
+        );
+        let mut proposed =
+            ProposedEvent::zone_change(object, Zone::Hand, Zone::Library, Some(source));
+        if let ProposedEvent::ZoneChange { applied, .. } = &mut proposed {
+            applied.insert(
+                crate::types::proposed_event::AppliedReplacementKey::Object { source, index: 1 },
+            );
+        }
+        state.pending_replacement = Some(
+            serde_json::from_value(json!({
+                "proposed": proposed, "candidates": [{"source": source, "index": 0}],
+                "depth": 2, "choice_player": PlayerId(0), "is_optional": true,
+                "library_placement": LibraryPosition::Top
+            }))
+            .unwrap(),
+        );
+        state.waiting_for =
+            crate::game::replacement::replacement_choice_waiting_for(PlayerId(0), &state);
+        state
+    }
+
+    pub(crate) fn nested_states() -> Vec<GameState> {
+        let mut entry = state_with_pending();
+        let pending = entry.pending_replacement.take().unwrap();
+        entry.pending_deferred_life_cost_resume = Some(DeferredLifeCostResume::PayAmount {
+            player: PlayerId(0),
+            total: 2,
+            resume_at_resolution_depth: 0,
+            pending_entry: Some(Box::new(pending)),
+        });
+        let mut outer = state_with_pending();
+        let pending = outer.pending_replacement.take().unwrap();
+        let ProposedEvent::ZoneChange {
+            object_id,
+            cause: Some(source_id),
+            ..
+        } = pending.proposed
+        else {
+            panic!("fixture zone change")
+        };
+        outer.pending_cost_move_resume = Some(PendingCostMoveResume::ReplacementMayCost {
+            source_id,
+            current: object_id,
+            remaining: Vec::new(),
+            paid_count: 1,
+            outer_replacement: Some(Box::new(pending)),
+        });
+        vec![entry, outer]
+    }
+
+    pub(crate) fn change_carriers(
+        value: &mut Value,
+        current: Option<&Value>,
+        mirror: Option<&Value>,
+        to: Zone,
+    ) {
+        match value {
+            Value::Array(values) => {
+                for value in values {
+                    change_carriers(value, current, mirror, to);
+                }
+            }
+            Value::Object(object) => {
+                for key in ["pending_replacement", "pending_entry", "outer_replacement"] {
+                    if let Some(carrier) = object.get_mut(key).and_then(Value::as_object_mut) {
+                        match mirror {
+                            Some(value) => {
+                                carrier.insert("library_placement".into(), value.clone());
+                            }
+                            None => {
+                                carrier.remove("library_placement");
+                            }
+                        }
+                        if let Some(event) = carrier
+                            .get_mut("proposed")
+                            .and_then(|event| event.get_mut("ZoneChange"))
+                            .and_then(Value::as_object_mut)
+                        {
+                            event.insert("to".into(), serde_json::to_value(to).unwrap());
+                            match current {
+                                Some(value) => {
+                                    event.insert("library_placement".into(), value.clone());
+                                }
+                                None => {
+                                    event.remove("library_placement");
+                                }
+                            }
+                        }
+                    }
+                }
+                for value in object.values_mut() {
+                    change_carriers(value, current, mirror, to);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn assert_placement(state: &GameState, expected: Option<LibraryPosition>) {
+        let pending = state
+            .pending_replacement
+            .as_ref()
+            .or_else(|| match state.pending_deferred_life_cost_resume.as_ref() {
+                Some(DeferredLifeCostResume::PayAmount { pending_entry, .. }) => {
+                    pending_entry.as_deref()
+                }
+                _ => None,
+            })
+            .or_else(|| match state.pending_cost_move_resume.as_ref() {
+                Some(PendingCostMoveResume::ReplacementMayCost {
+                    outer_replacement, ..
+                }) => outer_replacement.as_deref(),
+                _ => None,
+            })
+            .expect("nonempty replacement carrier survives");
+        let ProposedEvent::ZoneChange {
+            library_placement,
+            cause,
+            applied,
+            ..
+        } = &pending.proposed
+        else {
+            panic!("zone event survives")
+        };
+        assert_eq!(library_placement, &expected);
+        assert_eq!(pending.depth, 2);
+        assert_eq!(pending.choice_player, Some(PlayerId(0)));
+        assert_eq!(pending.candidates.len(), 1);
+        assert_eq!(*cause, Some(pending.candidates[0].source));
+        assert!(applied.contains(
+            &crate::types::proposed_event::AppliedReplacementKey::Object {
+                source: pending.candidates[0].source,
+                index: 1
+            }
+        ));
+        let encoded = serde_json::to_value(&pending.proposed).unwrap();
+        assert!(encoded["ZoneChange"].get("library_placement").is_some());
+        assert_eq!(
+            encoded["ZoneChange"]["library_placement"],
+            serde_json::to_value(expected).unwrap()
+        );
+    }
+
+    #[test]
+    fn replacement_library_placement_raw_and_persisted_presence_matrix() {
+        let top = serde_json::to_value(LibraryPosition::Top).unwrap();
+        let bottom = serde_json::to_value(LibraryPosition::Bottom).unwrap();
+        for state in std::iter::once(state_with_pending()).chain(nested_states()) {
+            for to in [Zone::Library, Zone::Exile] {
+                for current in [None, Some(Value::Null), Some(bottom.clone())] {
+                    for mirror in [None, Some(Value::Null), Some(top.clone())] {
+                        let expected = current.clone().unwrap_or_else(|| {
+                            if to == Zone::Library {
+                                mirror.clone().unwrap_or(Value::Null)
+                            } else {
+                                Value::Null
+                            }
+                        });
+                        let expected: Option<LibraryPosition> =
+                            serde_json::from_value(expected).unwrap();
+                        let mut raw = serde_json::to_value(&state).unwrap();
+                        change_carriers(&mut raw, current.as_ref(), mirror.as_ref(), to);
+                        let direct: GameState = serde_json::from_value(raw.clone()).unwrap();
+                        assert_placement(&direct, expected.clone());
+                        let again: GameState =
+                            serde_json::from_value(serde_json::to_value(&direct).unwrap()).unwrap();
+                        assert_eq!(direct, again);
+                        let mut trusted =
+                            serde_json::to_value(PersistedGameState::capture(state.clone()))
+                                .unwrap();
+                        change_carriers(&mut trusted, current.as_ref(), mirror.as_ref(), to);
+                        for wire in [raw, trusted] {
+                            let restored = serde_json::from_value::<PersistedGameState>(wire)
+                                .unwrap()
+                                .into_game_state()
+                                .unwrap();
+                            assert_placement(&restored, expected.clone());
+                            let again = serde_json::from_value::<PersistedGameState>(
+                                serde_json::to_value(PersistedGameState::capture(restored.clone()))
+                                    .unwrap(),
+                            )
+                            .unwrap()
+                            .into_game_state()
+                            .unwrap();
+                            assert_eq!(restored, again);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn replacement_library_placement_malformed_current_never_uses_mirror() {
+        for state in std::iter::once(state_with_pending()).chain(nested_states()) {
+            let mut raw = serde_json::to_value(&state).unwrap();
+            let mut trusted = serde_json::to_value(PersistedGameState::capture(state)).unwrap();
+            let invalid = json!({"type": "NotAPosition"});
+            let top = serde_json::to_value(LibraryPosition::Top).unwrap();
+            change_carriers(&mut raw, Some(&invalid), Some(&top), Zone::Library);
+            change_carriers(&mut trusted, Some(&invalid), Some(&top), Zone::Library);
+            assert!(serde_json::from_value::<GameState>(raw.clone()).is_err());
+            assert!(serde_json::from_value::<PersistedGameState>(raw).is_err());
+            assert!(serde_json::from_value::<PersistedGameState>(trusted).is_err());
+        }
+    }
+
+    #[test]
+    fn replacement_library_placement_migration_is_bounded_and_idempotent() {
+        let pending =
+            serde_json::to_value(state_with_pending().pending_replacement.unwrap()).unwrap();
+        let mut wire = json!({"resolution_frames": [{"nested": {"pending_entry": pending.clone(), "outer_replacement": pending.clone()}}], "unrelated": pending,
+            "pending_replacement": {"proposed": {"Draw": {"player_id": 0, "count": 1, "applied": []}}, "library_placement": {"type": "Top"}}});
+        change_carriers(
+            &mut wire,
+            None,
+            Some(&json!({"type": "Top"})),
+            Zone::Library,
+        );
+        let unrelated = wire["unrelated"].clone();
+        let draw = wire["pending_replacement"].clone();
+        migrate_legacy_replacement_library_placement(&mut wire);
+        assert_eq!(
+            wire["resolution_frames"][0]["nested"]["pending_entry"]["proposed"]["ZoneChange"]
+                ["library_placement"],
+            json!({"type": "Top"})
+        );
+        assert_eq!(
+            wire["resolution_frames"][0]["nested"]["outer_replacement"]["proposed"]["ZoneChange"]
+                ["library_placement"],
+            json!({"type": "Top"})
+        );
+        assert_eq!(wire["unrelated"], unrelated);
+        assert_eq!(wire["pending_replacement"], draw);
+        let once = wire.clone();
+        migrate_legacy_replacement_library_placement(&mut wire);
+        assert_eq!(wire, once);
+    }
+}
+
+/// Import only absent event placement from known legacy replacement carriers.
+/// Current null and current values must survive unchanged, including malformed
+/// values that typed decoding will reject.
+fn migrate_legacy_replacement_library_placement(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Array(values) => {
+            for value in values {
+                migrate_legacy_replacement_library_placement(value);
+            }
+        }
+        serde_json::Value::Object(object) => {
+            for key in ["pending_replacement", "pending_entry", "outer_replacement"] {
+                let Some(carrier) = object
+                    .get_mut(key)
+                    .and_then(serde_json::Value::as_object_mut)
+                else {
+                    continue;
+                };
+                let mirror = carrier
+                    .get("library_placement")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                let Some(event) = carrier
+                    .get_mut("proposed")
+                    .and_then(|proposed| proposed.get_mut("ZoneChange"))
+                    .and_then(serde_json::Value::as_object_mut)
+                else {
+                    continue;
+                };
+                let placement =
+                    if event.get("to").and_then(serde_json::Value::as_str) == Some("Library") {
+                        mirror
+                    } else {
+                        serde_json::Value::Null
+                    };
+                event.entry("library_placement").or_insert(placement);
+            }
+            for value in object.values_mut() {
+                migrate_legacy_replacement_library_placement(value);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn migrate_legacy_graveyard_paid_cast_cleanup(value: &mut serde_json::Value) -> Result<(), String> {
     fn legacy_delayed_trigger_receipts(
         value: &serde_json::Value,
@@ -27628,6 +27936,7 @@ impl GameStateDecode {
         migrate_legacy_attack_exert_conditions(&mut value)?;
         migrate_legacy_spell_cost_elections(&mut value)?;
         migrate_legacy_graveyard_paid_cast_cleanup(&mut value)?;
+        migrate_legacy_replacement_library_placement(&mut value);
         migrate_legacy_shortcut_repetition_bound(&mut value)?;
         migrate_legacy_offer_road(&mut value);
         let mut state = Self::materialize_prepared(value)?;
@@ -27697,6 +28006,7 @@ impl GameStateDecode {
         migrate_legacy_attack_exert_conditions(value)?;
         migrate_legacy_spell_cost_elections(value)?;
         migrate_legacy_graveyard_paid_cast_cleanup(value)?;
+        migrate_legacy_replacement_library_placement(value);
         migrate_legacy_shortcut_repetition_bound(value)?;
         migrate_legacy_offer_road(value);
         Ok(())
@@ -28876,12 +29186,9 @@ pub struct PendingReplacement {
     /// the affected player.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub choice_player: Option<PlayerId>,
-    /// CR 701.24a: the library placement requested by the original `move_object`
-    /// call whose replacement consult parked here (W3 library-placement arm only).
-    /// `Some` solely for a parked Library-targeting `ZoneChange`; the resume path
-    /// (`handle_replacement_choice`) threads it back into the delivery so the
-    /// object lands at the requested index instead of the tail auto-shuffling it
-    /// away. `None` for every other parked event (the common case).
+    /// Legacy save mirror. Decode imports this only when a Library-targeting
+    /// proposed ZoneChange lacks its own `library_placement` key. Current event
+    /// null and values are authoritative; execution must not consult this mirror.
     #[serde(default)]
     pub library_placement: Option<crate::types::ability::LibraryPosition>,
     /// CR 603.3a + CR 109.5: preserve the controller that resolved a

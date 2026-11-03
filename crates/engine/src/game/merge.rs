@@ -53,7 +53,9 @@ use std::sync::Arc;
 use crate::game::game_object::{DisplayIdentity, GameObject, ObjectIncarnationRefExt};
 use crate::game::printed_cards::intrinsic_copiable_values;
 use crate::game::zone_pipeline::{self, BatchMoveResult, ZoneMoveRequest};
-use crate::types::ability::{ContinuousModification, CopiableValues, Duration, TargetFilter};
+use crate::types::ability::{
+    ContinuousModification, CopiableValues, Duration, LibraryPosition, TargetFilter,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::{ObjectId, ObjectIncarnationRef};
@@ -484,6 +486,7 @@ pub(crate) fn move_merged_permanent_on_leave(
     state: &mut GameState,
     merged_id: ObjectId,
     dest: Zone,
+    library_placement: Option<&LibraryPosition>,
     applied: &HashSet<AppliedReplacementKey>,
     events: &mut Vec<GameEvent>,
 ) -> BatchMoveResult {
@@ -520,8 +523,14 @@ pub(crate) fn move_merged_permanent_on_leave(
                     .expect("merged component exists")
                     .split_from_merge_survivor = Some(survivor_successor);
             }
-            ZoneMoveRequest::merged_component(component_id, dest)
-                .with_replacement_applied(applied.clone())
+            let request = ZoneMoveRequest::merged_component(component_id, dest)
+                .with_replacement_applied(applied.clone());
+            // CR 730.3: every component inherits the final approved destination
+            // and position; its own replacement consult may redirect it again.
+            match (dest, library_placement) {
+                (Zone::Library, Some(position)) => request.at_library_position(position.clone()),
+                _ => request,
+            }
         })
         .collect();
 

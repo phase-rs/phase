@@ -675,11 +675,8 @@ pub(crate) struct DeliveryCtx {
     /// CR 614.12a: who drains `post_replacement_continuation` after this
     /// delivery (see [`PostReplacementDrainOwner`]).
     pub drain: PostReplacementDrainOwner,
-    /// CR 701.24a: the library placement to honor when the delivered destination
-    /// is the library. Threaded by the W3 resume path
-    /// (`handle_replacement_choice`) from the parked `PendingReplacement`;
-    /// `None` for every other `deliver` caller (a placement is not a shuffle, so
-    /// `None` means the tail's auto-shuffle convention applies).
+    /// Legacy caller mirror, retained for source compatibility. Terminal delivery
+    /// reads only `ApprovedZoneChange.event.library_placement`, including null.
     pub library_placement: Option<LibraryPosition>,
 }
 
@@ -911,11 +908,13 @@ pub(crate) fn move_object_with_terminal(
             if let ProposedEvent::ZoneChange {
                 applied,
                 face_down_in_exile: conceal_in_exile,
+                library_placement,
                 chain_referent,
                 performed_by,
                 ..
             } = &mut proposed
             {
+                *library_placement = Some(position.clone());
                 *chain_referent = req.mods.chain_referent;
                 *performed_by = req.mods.performed_by;
                 *applied = req.replacement_applied.clone();
@@ -953,16 +952,8 @@ pub(crate) fn move_object_with_terminal(
                     // CR 616.1: park at the single unparked origin (mirrors
                     // `execute_zone_move`'s NeedsChoice arm) so the prompt surfaces.
                     state.waiting_for = replacement::replacement_choice_waiting_for(player, state);
-                    // CR 701.24a: stash the requested library placement on the
-                    // parked record so the resume path
-                    // (`engine_replacement::handle_replacement_choice`) threads it
-                    // back into the delivery. Without this the resume hardcodes
-                    // `library_placement: None` and the delivery tail auto-shuffles,
-                    // randomizing the requested position away. Unreachable today (no
-                    // pool `Moved` def targets the library, so a placement consult
-                    // never reaches a choice), but threaded for correctness — see
-                    // the `library_placement_parked_resume_honors_position` unit
-                    // test for the synthetic-redirect coverage.
+                    // Retain the legacy wire mirror. The proposed event already
+                    // owns the position; resume never restores from this mirror.
                     if let Some(pending) = state.pending_replacement.as_mut() {
                         pending.library_placement = Some(position);
                     }
@@ -2003,11 +1994,7 @@ pub(crate) fn deliver(
         ctx.exile_links.controller,
         track_exiled_by_source,
         ctx.drain,
-        // CR 701.24a: most `deliver` callers (bucket-A destroy / sacrifice / SBA /
-        // land play) carry no library placement — those are graveyard /
-        // battlefield destinations. The W3 resume path is the lone caller that
-        // threads a `Some(..)` here, so a parked Library-targeting redirect lands
-        // at the requested index instead of the tail auto-shuffling it away.
+        // Compatibility context only: the sealed event owns placement.
         ctx.library_placement,
         events,
     )
@@ -3718,7 +3705,7 @@ fn entry_receiver(
 
 /// Deliver a zone-change event that has already passed through replacement.
 ///
-/// `library_placement` (CR 701.24a): when the event's delivered destination is
+/// The event's `library_placement` (CR 701.24a): when its delivered destination is
 /// the library AND a specific position was requested, the object is placed at
 /// that index and the library is NOT shuffled — a placement instruction is not a
 /// shuffle instruction (CR 701.24a defines shuffling). `None` = the zone-default
@@ -3735,13 +3722,14 @@ pub(crate) fn deliver_replaced_zone_change(
     exile_controller: Option<PlayerId>,
     track_exiled_by_source: bool,
     drain: PostReplacementDrainOwner,
-    library_placement: Option<LibraryPosition>,
+    _legacy_library_placement: Option<LibraryPosition>,
     events: &mut Vec<GameEvent>,
 ) -> ZoneDeliveryResult {
     if let ProposedEvent::ZoneChange {
         object_id,
         from,
         to,
+        library_placement,
         cause,
         attach_to,
         enter_transformed: should_transform,
@@ -3795,7 +3783,12 @@ pub(crate) fn deliver_replaced_zone_change(
             // component-specific replacements, including CR 903.9b.
             state.merged_card_component_route = None;
             return match crate::game::merge::move_merged_permanent_on_leave(
-                state, object_id, to, &applied, events,
+                state,
+                object_id,
+                to,
+                library_placement.as_ref(),
+                &applied,
+                events,
             ) {
                 BatchMoveResult::Done => apply_zone_delivery_tail(
                     state,
@@ -3942,60 +3935,46 @@ pub(crate) fn deliver_replaced_zone_change(
         // library-placement branch and the merge-survivor branch, neither of
         // which is analyzed by that carve-out.
         let took_plain_zone_transfer;
-        match (to, library_placement.as_ref()) {
-            (Zone::Library, Some(position)) => {
+        match (split_component_survivor, to, library_placement.as_ref()) {
+            (Some(_), _, position) => {
+                // CR 730.3 + CR 730.3c: an absorbed component arrives without
+                // independently leaving the battlefield; retain its successor
+                // link and sole incarnation bump in the existing component mover.
                 took_plain_zone_transfer = false;
-                let index = match position {
-                    LibraryPosition::Top => Some(0),
-                    LibraryPosition::Bottom => None,
-                    // CR: `NthFromTop { n }` is 1-based ("second from the top"
-                    // => n=2, index 1); `move_to_library_at_index` is 0-based.
-                    LibraryPosition::NthFromTop { n } => Some(n.saturating_sub(1) as usize),
-                    // CR 401.7: "beneath the top N cards" only flows from the
-                    // `PutAtLibraryPosition` resolver (direct move), never this
-                    // path. Exhaustiveness arm: honor a literal depth; a
-                    // runtime-resolved depth needs the originating ability.
-                    LibraryPosition::BeneathTop { depth } => match depth {
-                        crate::types::ability::QuantityExpr::Fixed { value } => {
-                            Some((*value).max(0) as usize)
-                        }
-                        _ => None,
-                    },
-                    // Digital-only Alchemy: `RandomWithinTop` only flows from the
-                    // Conjure resolver (`conjure.rs`), which places the card
-                    // directly and never routes through this path. Exhaustiveness
-                    // arm: default placement.
-                    LibraryPosition::RandomWithinTop { .. } => None,
-                };
-                zones::move_to_library_at_index(state, object_id, index, events);
-            }
-            _ => {
-                if split_component_survivor.is_some() {
-                    // CR 903.9b + CR 903.9c: this component has completed its
-                    // replacement consult. Deliver the resulting destination
-                    // with the CR 730.3 `from: None` event shape rather than
-                    // pretending it independently left the battlefield.
-                    took_plain_zone_transfer = false;
-                    crate::game::merge::put_component_into_zone(state, object_id, to, events);
-                } else {
-                    took_plain_zone_transfer = true;
-                    // CR 712.14a: carry the effect-driven "enters transformed"
-                    // intent into the battlefield-entry guard so a non-permanent
-                    // FRONT face (e.g. instant/sorcery) may enter as its PERMANENT
-                    // back face. `should_transform` is destructured from
-                    // `ProposedEvent::ZoneChange.enter_transformed` above; the
-                    // flag is inert for any non-battlefield destination (the guard
-                    // gates on `to == Battlefield`).
-                    let receiver = entry_receiver(state, object_id, to, performed_by, cause);
-                    zones::move_to_zone_with_entry_flags(
+                crate::game::merge::put_component_into_zone(state, object_id, to, events);
+                if let (Zone::Library, Some(position)) = (to, position) {
+                    let owner = state.objects[&object_id].owner;
+                    zones::reorder_within_library(
                         state,
-                        object_id,
-                        to,
-                        events,
-                        should_transform,
-                        receiver,
+                        owner,
+                        &[object_id],
+                        library_position_index(position),
                     );
                 }
+            }
+            (None, Zone::Library, Some(position)) => {
+                took_plain_zone_transfer = false;
+                let index = library_position_index(position);
+                zones::move_to_library_at_index(state, object_id, index, events);
+            }
+            (None, _, _) => {
+                took_plain_zone_transfer = true;
+                // CR 712.14a: carry the effect-driven "enters transformed"
+                // intent into the battlefield-entry guard so a non-permanent
+                // FRONT face (e.g. instant/sorcery) may enter as its PERMANENT
+                // back face. `should_transform` is destructured from
+                // `ProposedEvent::ZoneChange.enter_transformed` above; the
+                // flag is inert for any non-battlefield destination (the guard
+                // gates on `to == Battlefield`).
+                let receiver = entry_receiver(state, object_id, to, performed_by, cause);
+                zones::move_to_zone_with_entry_flags(
+                    state,
+                    object_id,
+                    to,
+                    events,
+                    should_transform,
+                    receiver,
+                );
             }
         }
         if face_down_in_exile.is_face_down() && to == Zone::Exile {
@@ -4409,6 +4388,22 @@ pub(crate) fn deliver_replaced_zone_change(
     ZoneDeliveryResult::Done
 }
 
+/// CR 401.7: a stated library depth is bounded by the insertion/reorder authority.
+fn library_position_index(position: &LibraryPosition) -> Option<usize> {
+    match position {
+        LibraryPosition::Top => Some(0),
+        LibraryPosition::Bottom => None,
+        LibraryPosition::NthFromTop { n } => Some(n.saturating_sub(1) as usize),
+        // Evaluated depths arrive from the originating resolver. Preserve the
+        // existing fallback for forms that never use this terminal path.
+        LibraryPosition::BeneathTop { depth } => match depth {
+            crate::types::ability::QuantityExpr::Fixed { value } => Some((*value).max(0) as usize),
+            _ => None,
+        },
+        LibraryPosition::RandomWithinTop { .. } => None,
+    }
+}
+
 fn replacement_pause_delivery_result(state: &GameState) -> ZoneDeliveryResult {
     match &state.waiting_for {
         WaitingFor::ReplacementChoice { player, .. }
@@ -4733,12 +4728,14 @@ fn execute_zone_move_with_applied_terminal(
     let mut proposed = ProposedEvent::zone_change(obj_id, from_zone, dest_zone, Some(source_id));
     if let ProposedEvent::ZoneChange {
         applied,
+        library_placement: placement,
         face_down_in_exile: ref mut conceal_in_exile,
         chain_referent: ref mut intent,
         performed_by: ref mut performer,
         ..
     } = &mut proposed
     {
+        *placement = library_placement.clone();
         *applied = replacement_applied;
         *conceal_in_exile = face_down_in_exile;
         *intent = chain_referent;
@@ -5071,10 +5068,8 @@ fn execute_zone_move_with_applied_terminal(
             // wait state is already set by the counter-pause / devour machinery
             // (`replacement_pause_delivery_result` reads it).
             if let Some(pending) = state.pending_replacement.as_mut() {
-                // CR 701.24a: this generic effect-driven entry also accepts an
-                // explicit library placement. Preserve it across the replacement
-                // pause so its resumed delivery does not fall back to the tail's
-                // placement-less auto-shuffle behavior.
+                // Legacy wire mirror only; the proposal owns the disposition
+                // through every pause and terminal delivery.
                 pending.library_placement = library_placement;
                 pending.exile_controller = exile_controller;
                 pending.exile_duration = duration.cloned();
@@ -5157,6 +5152,774 @@ mod w3_library_placement_tests {
     use crate::types::identifiers::CardId;
     use crate::types::replacements::ReplacementEvent;
     use crate::types::resolution::ResolutionFrame;
+
+    fn event_placement(event: &ProposedEvent) -> Option<LibraryPosition> {
+        let ProposedEvent::ZoneChange {
+            library_placement, ..
+        } = event
+        else {
+            panic!("expected a zone-change proposal");
+        };
+        library_placement.clone()
+    }
+
+    fn assert_finished(state: &GameState) {
+        assert!(state.pending_replacement.is_none());
+        assert!(state.active_batch_delivery().is_none());
+        assert!(state.stack.is_empty());
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    }
+
+    fn assert_no_shuffle(events: &[GameEvent]) {
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerPerformedAction {
+                action: crate::types::events::PlayerActionKind::ShuffledLibrary,
+                ..
+            }
+        )));
+    }
+
+    fn library_fixture(count: usize) -> (GameState, ObjectId, Vec<ObjectId>) {
+        let mut state = GameState::new_two_player(42);
+        let sentinels: Vec<_> = (0..count)
+            .map(|n| {
+                create_object(
+                    &mut state,
+                    CardId(n as u64 + 1),
+                    PlayerId(0),
+                    format!("Sentinel {n}"),
+                    Zone::Library,
+                )
+            })
+            .collect();
+        state.players[0].library = sentinels.iter().copied().collect();
+        let card = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Placed".into(),
+            Zone::Graveyard,
+        );
+        (state, card, sentinels)
+    }
+
+    fn install_optional_library_redirect(state: &mut GameState) -> ObjectId {
+        let source = create_object(
+            state,
+            CardId(101),
+            PlayerId(0),
+            "Synthetic positional consult".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .replacement_definitions
+            .push(optional_zone_redirect(Zone::Library, Zone::Exile));
+        source
+    }
+
+    fn assert_parked_position(
+        state: &GameState,
+        card: ObjectId,
+        position: Option<LibraryPosition>,
+    ) {
+        let pending = state
+            .pending_replacement
+            .as_ref()
+            .expect("required replacement pause");
+        assert!(
+            matches!(&pending.proposed, ProposedEvent::ZoneChange { object_id, to: Zone::Library, .. } if *object_id == card)
+        );
+        assert_eq!(event_placement(&pending.proposed), position);
+        assert!(!pending.candidates.is_empty());
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::ReplacementChoice {
+                player: PlayerId(0),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn canonical_placement_is_seeded_by_both_producers_before_consultation() {
+        use crate::game::engine::apply_as_current;
+        use crate::types::actions::GameAction;
+        for position in [
+            LibraryPosition::Top,
+            LibraryPosition::Bottom,
+            LibraryPosition::NthFromTop { n: 2 },
+        ] {
+            let (mut state, card, sentinels) = library_fixture(3);
+            let source = install_optional_library_redirect(&mut state);
+            let mut other = state.clone();
+            assert!(matches!(
+                move_object(
+                    &mut state,
+                    ZoneMoveRequest::effect(card, Zone::Library, source)
+                        .at_library_position(position.clone()),
+                    &mut Vec::new()
+                ),
+                ZoneMoveResult::NeedsChoice(PlayerId(0))
+            ));
+            assert!(matches!(
+                execute_zone_move_with_terminal_and_controller(
+                    &mut other,
+                    card,
+                    Zone::Graveyard,
+                    Zone::Library,
+                    source,
+                    None,
+                    false,
+                    EtbTapState::Unspecified,
+                    false,
+                    None,
+                    &[],
+                    None,
+                    ExileConcealment::Public,
+                    false,
+                    Some(position.clone()),
+                    None,
+                    None,
+                    None,
+                    &mut Vec::new(),
+                ),
+                ZoneMoveTerminalResult::NeedsChoice(PlayerId(0))
+            ));
+            for state in [&mut state, &mut other] {
+                assert_parked_position(state, card, Some(position.clone()));
+                assert_eq!(state.objects[&card].zone, Zone::Graveyard);
+                assert_eq!(
+                    state.players[0].library.iter().copied().collect::<Vec<_>>(),
+                    sentinels
+                );
+                let result =
+                    apply_as_current(state, GameAction::ChooseReplacement { index: 1 }).unwrap();
+                let mut expected = sentinels.clone();
+                expected.insert(
+                    library_position_index(&position)
+                        .unwrap_or(expected.len())
+                        .min(expected.len()),
+                    card,
+                );
+                assert_eq!(
+                    state.players[0].library.iter().copied().collect::<Vec<_>>(),
+                    expected
+                );
+                assert_no_shuffle(&result.events);
+                assert_finished(state);
+            }
+        }
+        let (mut state, card, _) = library_fixture(0);
+        assert!(matches!(
+            move_object_with_terminal(
+                &mut state,
+                ZoneMoveRequest::effect(ObjectId(u64::MAX), Zone::Library, card)
+                    .at_library_position(LibraryPosition::Top),
+                &mut Vec::new()
+            ),
+            ZoneMoveTerminalResult::Completed(ZoneMoveCompletion::Remained)
+        ));
+        assert!(matches!(
+            move_object(
+                &mut state,
+                ZoneMoveRequest::effect(card, Zone::Library, card)
+                    .at_library_position(LibraryPosition::Top),
+                &mut Vec::new()
+            ),
+            ZoneMoveResult::Done
+        ));
+        assert_eq!(state.players[0].library.front(), Some(&card));
+    }
+
+    #[test]
+    fn approved_event_is_the_only_terminal_placement_authority() {
+        for count in [0, 1, 3] {
+            for position in [
+                Some(LibraryPosition::Top),
+                Some(LibraryPosition::Bottom),
+                Some(LibraryPosition::NthFromTop { n: 2 }),
+                None,
+            ] {
+                let (mut state, card, sentinels) = library_fixture(count);
+                let mut event =
+                    ProposedEvent::zone_change(card, Zone::Graveyard, Zone::Library, Some(card));
+                if let ProposedEvent::ZoneChange {
+                    library_placement, ..
+                } = &mut event
+                {
+                    *library_placement = position.clone();
+                }
+                assert_eq!(event_placement(&event), position);
+                let mut events = Vec::new();
+                let approved = ApprovedZoneChange::approve_post_replacement(event).unwrap();
+                assert!(matches!(
+                    deliver(
+                        &mut state,
+                        approved,
+                        DeliveryCtx {
+                            source_id: Some(card),
+                            exile_links: ExileLinkSpec::default(),
+                            drain: PostReplacementDrainOwner::DeliveryTail,
+                            library_placement: Some(LibraryPosition::Top),
+                        },
+                        &mut events
+                    ),
+                    ZoneDeliveryResult::Done
+                ));
+                assert_eq!(state.objects[&card].zone, Zone::Library);
+                assert_eq!(events.iter().filter(|e| matches!(e, GameEvent::ZoneChanged { object_id, .. } if *object_id == card)).count(), 1);
+                if let Some(position) = position {
+                    let mut expected = sentinels;
+                    expected.insert(
+                        library_position_index(&position)
+                            .unwrap_or(expected.len())
+                            .min(expected.len()),
+                        card,
+                    );
+                    assert_eq!(
+                        state.players[0].library.iter().copied().collect::<Vec<_>>(),
+                        expected
+                    );
+                    assert_no_shuffle(&events);
+                } else {
+                    // Current null selects the existing placement-less delivery
+                    // convention even when the legacy caller still says Top.
+                    assert!(events.iter().any(|e| matches!(
+                        e,
+                        GameEvent::PlayerPerformedAction {
+                            action: crate::types::events::PlayerActionKind::ShuffledLibrary,
+                            ..
+                        }
+                    )));
+                }
+            }
+        }
+        let (mut state, card, sentinels) = library_fixture(3);
+        let event = ProposedEvent::zone_change(card, Zone::Graveyard, Zone::Exile, Some(card));
+        assert_eq!(event_placement(&event), None);
+        let mut events = Vec::new();
+        deliver_replaced_zone_change(
+            &mut state,
+            event,
+            Some(card),
+            None,
+            None,
+            false,
+            PostReplacementDrainOwner::DeliveryTail,
+            Some(LibraryPosition::Top),
+            &mut events,
+        );
+        assert_eq!(state.objects[&card].zone, Zone::Exile);
+        assert_eq!(
+            state.players[0].library.iter().copied().collect::<Vec<_>>(),
+            sentinels
+        );
+        assert_no_shuffle(&events);
+    }
+
+    #[test]
+    fn paused_producer_restoration_distinguishes_absent_null_and_current_position() {
+        use crate::game::engine::apply_as_current;
+        use crate::types::actions::GameAction;
+        let (mut state, card, sentinels) = library_fixture(3);
+        let source = install_optional_library_redirect(&mut state);
+        move_object(
+            &mut state,
+            ZoneMoveRequest::effect(card, Zone::Library, source)
+                .at_library_position(LibraryPosition::Top),
+            &mut Vec::new(),
+        );
+        assert_parked_position(&state, card, Some(LibraryPosition::Top));
+        for current in [
+            None,
+            Some(serde_json::Value::Null),
+            Some(serde_json::to_value(LibraryPosition::Bottom).unwrap()),
+        ] {
+            let expected = match &current {
+                None => Some(LibraryPosition::Top),
+                Some(serde_json::Value::Null) => None,
+                Some(_) => Some(LibraryPosition::Bottom),
+            };
+            let mut wire = serde_json::to_value(&state).unwrap();
+            let proposed = wire["pending_replacement"]["proposed"]["ZoneChange"]
+                .as_object_mut()
+                .expect("paused proposal wire");
+            match current {
+                None => {
+                    proposed.remove("library_placement");
+                }
+                Some(value) => {
+                    proposed.insert("library_placement".into(), value);
+                }
+            }
+            let mut restored: GameState = serde_json::from_value(wire).unwrap();
+            assert_parked_position(&restored, card, expected.clone());
+            let saved = serde_json::to_value(&restored).unwrap();
+            assert!(saved["pending_replacement"]["proposed"]["ZoneChange"]
+                .get("library_placement")
+                .is_some());
+            let twice: GameState = serde_json::from_value(saved.clone()).unwrap();
+            assert_eq!(serde_json::to_value(twice).unwrap(), saved);
+            let result =
+                apply_as_current(&mut restored, GameAction::ChooseReplacement { index: 1 })
+                    .unwrap();
+            assert_eq!(restored.objects[&card].zone, Zone::Library);
+            if let Some(position) = expected {
+                let mut order = sentinels.clone();
+                order.insert(
+                    library_position_index(&position).unwrap_or(order.len()),
+                    card,
+                );
+                assert_eq!(
+                    restored.players[0]
+                        .library
+                        .iter()
+                        .copied()
+                        .collect::<Vec<_>>(),
+                    order
+                );
+                assert_no_shuffle(&result.events);
+            } else {
+                assert!(result.events.iter().any(|event| matches!(
+                    event,
+                    GameEvent::PlayerPerformedAction {
+                        action: crate::types::events::PlayerActionKind::ShuffledLibrary,
+                        ..
+                    }
+                )));
+            }
+            assert_finished(&restored);
+        }
+    }
+
+    /// Infrastructure choices only: two distinct optional redirects are present
+    /// before consultation; no board mutation occurs between answers.
+    #[test]
+    fn canonical_placement_survives_public_repeated_choices() {
+        use crate::game::engine::apply_as_current;
+        use crate::types::actions::GameAction;
+        let (mut state, card, sentinels) = library_fixture(3);
+        let first = install_optional_library_redirect(&mut state);
+        let second = create_object(
+            &mut state,
+            CardId(102),
+            PlayerId(0),
+            "Other synthetic redirect".into(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&second)
+            .unwrap()
+            .replacement_definitions
+            .push(optional_zone_redirect(Zone::Library, Zone::Hand));
+        move_object(
+            &mut state,
+            ZoneMoveRequest::effect(card, Zone::Library, first)
+                .at_library_position(LibraryPosition::Bottom),
+            &mut Vec::new(),
+        );
+        assert_parked_position(&state, card, Some(LibraryPosition::Bottom));
+        let pending = state.pending_replacement.as_ref().unwrap();
+        assert_eq!(pending.candidates.len(), 2);
+        assert!(!pending.is_optional);
+        let index = pending
+            .candidates
+            .iter()
+            .position(|rid| rid.source == first)
+            .unwrap();
+        let first_id = pending.candidates[index];
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index }).unwrap();
+        assert_eq!(
+            state.pending_replacement.as_ref().unwrap().candidates,
+            vec![first_id]
+        );
+        assert!(state.pending_replacement.as_ref().unwrap().is_optional);
+        assert_parked_position(&state, card, Some(LibraryPosition::Bottom));
+        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 1 }).unwrap();
+        assert_parked_position(&state, card, Some(LibraryPosition::Bottom));
+        let pending = state.pending_replacement.as_ref().unwrap();
+        assert_eq!(pending.candidates.len(), 1);
+        assert_eq!(pending.candidates[0].source, second);
+        assert!(pending
+            .proposed
+            .applied_set()
+            .contains(&AppliedReplacementKey::Object {
+                source: first,
+                index: first_id.index
+            }));
+        assert_eq!(state.objects[&card].zone, Zone::Graveyard);
+        let result =
+            apply_as_current(&mut state, GameAction::ChooseReplacement { index: 1 }).unwrap();
+        let mut expected = sentinels;
+        expected.push(card);
+        assert_eq!(
+            state.players[0].library.iter().copied().collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(
+            result
+                .events
+                .iter()
+                .filter(
+                    |e| matches!(e, GameEvent::ZoneChanged { object_id, .. } if *object_id == card)
+                )
+                .count(),
+            1
+        );
+        assert_no_shuffle(&result.events);
+        assert_finished(&state);
+    }
+
+    fn totally_lost_mutate_fixture() -> (
+        crate::game::scenario::GameRunner,
+        ObjectId,
+        ObjectId,
+        ObjectId,
+        Vec<ObjectId>,
+    ) {
+        use crate::game::scenario::{GameScenario, P0};
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::CastingVariant;
+        use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+        use crate::types::phase::Phase;
+        // Verbatim AtomicCards Oracle, including the complete mutate reminder.
+        const OCTOPUS: &str = "Mutate {1}{U} (If you cast this spell for its mutate cost, put it over or under target non-Human creature you own. They mutate into the creature on top plus all abilities from under it.)\nFlash\nWhenever this creature deals combat damage to a player, draw a card.";
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let bears = scenario
+            .add_creature(P0, "Grizzly Bears", 2, 2)
+            .with_subtypes(vec!["Bear"])
+            .with_mana_cost(ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::Green],
+            })
+            .id();
+        let octopus = scenario
+            .add_creature_to_hand(P0, "Sea-Dasher Octopus", 2, 2)
+            .with_subtypes(vec!["Octopus"])
+            .with_mana_cost(ManaCost::Cost {
+                generic: 1,
+                shards: vec![ManaCostShard::Blue, ManaCostShard::Blue],
+            })
+            .from_oracle_text_with_keywords(&["Mutate", "Flash"], OCTOPUS)
+            .id();
+        let lost = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Totally Lost",
+                true,
+                "Put target nonland permanent on top of its owner's library.",
+            )
+            .with_mana_cost(ManaCost::Cost {
+                generic: 4,
+                shards: vec![ManaCostShard::Blue],
+            })
+            .id();
+        scenario.with_library_top(P0, &["Forest", "Island", "Mountain"]);
+        scenario.with_mana_pool(
+            P0,
+            (0..7)
+                .map(|_| ManaUnit::new(ManaType::Blue, bears, false, vec![]))
+                .collect(),
+        );
+        let mut runner = scenario.build();
+        let sentinels = runner.state().players[0].library.iter().copied().collect();
+        let outcome = runner
+            .cast(octopus)
+            .casting_variant(CastingVariant::Mutate)
+            .target_object(bears)
+            .resolve();
+        assert!(matches!(
+            outcome.final_waiting_for(),
+            WaitingFor::MutateMergeChoice { .. }
+        ));
+        runner
+            .act(GameAction::ChooseMutateMergeSide {
+                side: crate::game::merge::MergeSide::Bottom,
+            })
+            .unwrap();
+        // CR 702.140c + CR 730.2c: the legal cast merged into the original host.
+        assert_eq!(
+            runner.state().objects[&bears].merged_components,
+            vec![bears, octopus]
+        );
+        assert!(!runner.state().battlefield.contains(&octopus));
+        assert_finished(runner.state());
+        (runner, bears, octopus, lost, sentinels)
+    }
+
+    fn assert_split_provenance(
+        state: &GameState,
+        events: &[GameEvent],
+        survivor: ObjectIncarnationRef,
+        component: ObjectIncarnationRef,
+        record_start: usize,
+        component_destination: Zone,
+    ) {
+        // CR 730.3: only one permanent leaves; the absorbed card has no separate
+        // battlefield departure, in both the emitted events and stored ledger.
+        for (id, origin, destination) in [
+            (survivor.object_id, Some(Zone::Battlefield), Zone::Library),
+            (component.object_id, None, component_destination),
+        ] {
+            let movements: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event {
+                    GameEvent::ZoneChanged {
+                        object_id,
+                        from,
+                        to,
+                        ..
+                    } if *object_id == id => Some((*from, *to)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(movements, vec![(origin, destination)]);
+            let records: Vec<_> = state
+                .zone_changes_this_turn
+                .iter()
+                .skip(record_start)
+                .filter(|record| record.object_id == id)
+                .collect();
+            assert_eq!(records.len(), 1);
+            assert_eq!(records[0].from_zone, origin);
+            assert_eq!(records[0].to_zone, destination);
+        }
+        // CR 400.7 + CR 730.3c: one new incarnation per component and a link to
+        // the survivor's resulting object, including when destinations diverge.
+        assert_eq!(
+            state.objects[&survivor.object_id].incarnation,
+            survivor.incarnation + 1
+        );
+        assert_eq!(
+            state.objects[&component.object_id].incarnation,
+            component.incarnation + 1
+        );
+        assert_eq!(
+            state.objects[&component.object_id].split_from_merge_survivor,
+            Some(ObjectIncarnationRef::from_object(
+                &state.objects[&survivor.object_id]
+            ))
+        );
+        assert_no_shuffle(events);
+        assert_finished(state);
+    }
+
+    fn assert_component_top_set(
+        state: &GameState,
+        components: &[ObjectId],
+        sentinels: &[ObjectId],
+    ) {
+        // CR 730.3a: do not assert a fixed internal permutation. The owner's
+        // private arrangement consumer is deferred to R4b.
+        let library: Vec<_> = state.players[0].library.iter().copied().collect();
+        assert_eq!(&library[components.len()..], sentinels);
+        assert_eq!(
+            library[..components.len()]
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>(),
+            components.iter().copied().collect::<HashSet<_>>()
+        );
+    }
+
+    #[test]
+    fn totally_lost_places_both_mutate_components_without_extra_departure_or_shuffle() {
+        let (mut runner, bears, octopus, lost, sentinels) = totally_lost_mutate_fixture();
+        let survivor = ObjectIncarnationRef::from_object(&runner.state().objects[&bears]);
+        let component = ObjectIncarnationRef::from_object(&runner.state().objects[&octopus]);
+        let start = runner.state().zone_changes_this_turn.len();
+        let outcome = runner.cast(lost).target_object(bears).resolve();
+        assert_component_top_set(outcome.state(), &[bears, octopus], &sentinels);
+        assert_split_provenance(
+            outcome.state(),
+            outcome.events(),
+            survivor,
+            component,
+            start,
+            Zone::Library,
+        );
+        assert_eq!(
+            crate::game::merge::co_split_components(outcome.state(), bears, &[bears]),
+            vec![octopus]
+        );
+    }
+
+    #[test]
+    fn positioned_mutate_component_pause_preserves_applied_identity_and_split_provenance() {
+        use crate::types::ability::{TypeFilter, TypedFilter};
+        use crate::types::actions::GameAction;
+        let (mut runner, bears, octopus, lost, sentinels) = totally_lost_mutate_fixture();
+        let inherited_source = install_optional_library_redirect(runner.state_mut());
+        let component_source = create_object(
+            runner.state_mut(),
+            CardId(103),
+            PlayerId(0),
+            "Synthetic Octopus consult".into(),
+            Zone::Battlefield,
+        );
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&component_source)
+            .unwrap()
+            .replacement_definitions
+            .push(
+                optional_zone_redirect(Zone::Library, Zone::Exile).valid_card(TargetFilter::Typed(
+                    TypedFilter::new(TypeFilter::Creature).subtype("Octopus".into()),
+                )),
+            );
+        let survivor = ObjectIncarnationRef::from_object(&runner.state().objects[&bears]);
+        let component = ObjectIncarnationRef::from_object(&runner.state().objects[&octopus]);
+        let start = runner.state().zone_changes_this_turn.len();
+        let outcome = runner.cast(lost).target_object(bears).resolve();
+        assert_parked_position(outcome.state(), bears, Some(LibraryPosition::Top));
+        let first_id = outcome
+            .state()
+            .pending_replacement
+            .as_ref()
+            .unwrap()
+            .candidates[0];
+        assert_eq!(first_id.source, inherited_source);
+        let mut events = outcome.events().to_vec();
+        events.extend(
+            runner
+                .act(GameAction::ChooseReplacement { index: 1 })
+                .unwrap()
+                .events,
+        );
+        assert_parked_position(runner.state(), octopus, Some(LibraryPosition::Top));
+        let pending = runner.state().pending_replacement.as_ref().unwrap();
+        assert_eq!(pending.candidates.len(), 1);
+        assert_eq!(pending.candidates[0].source, component_source);
+        assert!(pending
+            .proposed
+            .applied_set()
+            .contains(&AppliedReplacementKey::Object {
+                source: inherited_source,
+                index: first_id.index
+            }));
+        assert_eq!(
+            runner.state().objects[&octopus].incarnation,
+            component.incarnation
+        );
+        events.extend(
+            runner
+                .act(GameAction::ChooseReplacement { index: 1 })
+                .unwrap()
+                .events,
+        );
+        assert_component_top_set(runner.state(), &[bears, octopus], &sentinels);
+        assert_split_provenance(
+            runner.state(),
+            &events,
+            survivor,
+            component,
+            start,
+            Zone::Library,
+        );
+    }
+
+    #[test]
+    fn positioned_commander_component_redirect_keeps_ordinary_sibling_position() {
+        use crate::types::actions::GameAction;
+        // Infrastructure sibling: commander designation is fixture metadata,
+        // not a claim that Sea-Dasher Octopus is a legal printed commander.
+        let (mut runner, bears, octopus, lost, sentinels) = totally_lost_mutate_fixture();
+        runner.state_mut().format_config.command_zone = true;
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&octopus)
+            .unwrap()
+            .is_commander = true;
+        let survivor = ObjectIncarnationRef::from_object(&runner.state().objects[&bears]);
+        let component = ObjectIncarnationRef::from_object(&runner.state().objects[&octopus]);
+        let start = runner.state().zone_changes_this_turn.len();
+        let outcome = runner.cast(lost).target_object(bears).resolve();
+        assert_parked_position(outcome.state(), octopus, Some(LibraryPosition::Top));
+        let mut events = outcome.events().to_vec();
+        events.extend(
+            runner
+                .act(GameAction::ChooseReplacement { index: 0 })
+                .unwrap()
+                .events,
+        );
+        assert_eq!(runner.state().objects[&octopus].zone, Zone::Command);
+        assert_component_top_set(runner.state(), &[bears], &sentinels);
+        assert_split_provenance(
+            runner.state(),
+            &events,
+            survivor,
+            component,
+            start,
+            Zone::Command,
+        );
+    }
+
+    #[test]
+    fn merged_component_carry_ignores_position_for_nonlibrary_destination_and_empty_merge() {
+        let (mut runner, bears, octopus, _, _) = totally_lost_mutate_fixture();
+        let redirect = create_object(
+            runner.state_mut(),
+            CardId(104),
+            PlayerId(0),
+            "Synthetic exile consult".into(),
+            Zone::Battlefield,
+        );
+        runner
+            .state_mut()
+            .objects
+            .get_mut(&redirect)
+            .unwrap()
+            .replacement_definitions
+            .push(optional_zone_redirect(Zone::Exile, Zone::Hand));
+        let applied = HashSet::from([AppliedReplacementKey::Object {
+            source: ObjectId(999),
+            index: 0,
+        }]);
+        assert!(matches!(
+            crate::game::merge::move_merged_permanent_on_leave(
+                runner.state_mut(),
+                bears,
+                Zone::Exile,
+                Some(&LibraryPosition::Top),
+                &applied,
+                &mut Vec::new(),
+            ),
+            BatchMoveResult::NeedsChoice
+        ));
+        let pending = runner.state().pending_replacement.as_ref().unwrap();
+        assert!(
+            matches!(&pending.proposed, ProposedEvent::ZoneChange { object_id, to: Zone::Exile, .. } if [bears, octopus].contains(object_id))
+        );
+        assert_eq!(event_placement(&pending.proposed), None);
+        assert_eq!(pending.proposed.applied_set(), &applied);
+
+        let (mut empty, card, _) = library_fixture(1);
+        let before = empty.clone();
+        let mut events = Vec::new();
+        for id in [card, ObjectId(u64::MAX)] {
+            assert!(matches!(
+                crate::game::merge::move_merged_permanent_on_leave(
+                    &mut empty,
+                    id,
+                    Zone::Library,
+                    Some(&LibraryPosition::Top),
+                    &HashSet::new(),
+                    &mut events,
+                ),
+                BatchMoveResult::Done
+            ));
+        }
+        assert_eq!(empty, before);
+        assert!(events.is_empty());
+    }
 
     /// Install a board-wide `Moved` replacement: "any object that would be put
     /// into a library is exiled instead" (synthetic — no such card exists in the
@@ -5735,6 +6498,10 @@ mod w3_library_placement_tests {
             &mut events,
         );
         assert_eq!(library(&state), vec![c, a, b]);
+        assert!(
+            events.is_empty(),
+            "same-library reorder emits no zone change"
+        );
     }
 
     /// F1 (CR 701.24a): a library placement whose replacement consult PARKS on a
@@ -5832,6 +6599,8 @@ mod w3_library_placement_tests {
         let ZoneMoveResult::NeedsChoice(chooser) = result else {
             panic!("expected the optional redirect to park, got a non-pausing result");
         };
+        assert_parked_position(&state, placed, Some(LibraryPosition::Top));
+        assert_eq!(state.objects[&placed].zone, Zone::Graveyard);
         assert!(
             state.pending_replacement.is_some(),
             "the parked record must carry the placement for the resume to thread back"
@@ -5840,7 +6609,7 @@ mod w3_library_placement_tests {
             state
                 .pending_replacement
                 .as_ref()
-                .and_then(|p| p.library_placement.clone()),
+                .and_then(|p| event_placement(&p.proposed)),
             Some(LibraryPosition::Top),
             "the parked record must stash the requested library placement"
         );
@@ -5858,6 +6627,7 @@ mod w3_library_placement_tests {
             vec![placed, a, b],
             "the resumed delivery must honor LibraryPosition::Top, not shuffle the position away"
         );
+        assert_finished(&state);
     }
 
     /// F-B (CR 616.1 + CR 701.24a): a batch tail must preserve explicit library
@@ -5952,6 +6722,7 @@ mod w3_library_placement_tests {
             move_objects_simultaneously(&mut state, reqs, &mut events),
             BatchMoveResult::NeedsChoice
         ));
+        assert_parked_position(&state, first, Some(LibraryPosition::Bottom));
         assert_eq!(
             state
                 .active_batch_delivery()
@@ -5972,8 +6743,9 @@ mod w3_library_placement_tests {
             .logical_zone_change_group
             .logical_group_id;
 
-        apply_as_current(&mut state, GameAction::ChooseReplacement { index: 1 })
+        let first_resume = apply_as_current(&mut state, GameAction::ChooseReplacement { index: 1 })
             .expect("decline first optional redirect");
+        assert_parked_position(&state, second, Some(LibraryPosition::Bottom));
         let final_member_pause = state
             .active_batch_delivery()
             .expect("a pause on the final member still retains the batch owner");
@@ -5992,7 +6764,7 @@ mod w3_library_placement_tests {
             state
                 .pending_replacement
                 .as_ref()
-                .and_then(|pending| pending.library_placement.clone()),
+                .and_then(|pending| event_placement(&pending.proposed)),
             Some(LibraryPosition::Bottom),
             "the second card's re-parked replacement must preserve bottom placement"
         );
@@ -6015,6 +6787,11 @@ mod w3_library_placement_tests {
             vec![a, b, first, second],
             "both declined batch moves must land on the bottom in request order"
         );
+        for card in [first, second] {
+            assert_eq!(first_resume.events.iter().chain(&second_resume.events)
+                .filter(|event| matches!(event, GameEvent::ZoneChanged { object_id, .. } if *object_id == card)).count(), 1);
+        }
+        assert_finished(&state);
     }
 
     /// F-A (CR 616.1 + CR 701.24a): the library placement must survive a SECOND
@@ -6027,10 +6804,12 @@ mod w3_library_placement_tests {
     /// (after declining both) still places the card at the requested index
     /// instead of the tail auto-shuffling it away.
     ///
-    /// The second redirect is gated by `UnlessControlsMatching` on a sentinel
+    /// Supplemental synthetic defensive fixture, not a legal public sequence:
+    /// the second redirect is gated by `UnlessControlsMatching` on a sentinel
     /// creature so it is suppressed on the first scan and becomes applicable once
-    /// the sentinel is removed between the two choices (a realistic board change
-    /// across a paused replacement). Before the fix the re-park reset the
+    /// the sentinel is manually removed between the two choices. The separate
+    /// `canonical_placement_survives_public_repeated_choices` regression covers
+    /// the public sequence without post-prompt edits. Before the fix the re-park reset the
     /// placement to `None`, so the final delivery shuffled — the order assertion
     /// below fails (and the `ShuffledLibrary` absence assertion guards against a
     /// seed-identity permutation false-pass).
@@ -6166,7 +6945,7 @@ mod w3_library_placement_tests {
             state
                 .pending_replacement
                 .as_ref()
-                .and_then(|p| p.library_placement.clone()),
+                .and_then(|p| event_placement(&p.proposed)),
             Some(LibraryPosition::Top),
             "the first parked record must stash the requested library placement"
         );
@@ -6190,7 +6969,7 @@ mod w3_library_placement_tests {
             state
                 .pending_replacement
                 .as_ref()
-                .and_then(|p| p.library_placement.clone()),
+                .and_then(|p| event_placement(&p.proposed)),
             Some(LibraryPosition::Top),
             "the re-parked record must still carry the placement threaded from the first park",
         );
@@ -6210,6 +6989,7 @@ mod w3_library_placement_tests {
             vec![placed, a, b],
             "after two declined parks the placement must still honor LibraryPosition::Top"
         );
+        assert_finished(&state);
     }
 
     /// A newly produced simultaneous move must park as a child of an existing
