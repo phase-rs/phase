@@ -58,6 +58,34 @@ use super::ability_utils::{
 use super::life_costs::PayLifeCostResult;
 
 const TERMINAL_CAST_CANCELLATION_ERROR: &str = "__terminal_cast_cancellation__";
+/// CR 601.6: terminal sentinel for a fully announced spell that a casting
+/// prohibition forbids (see `finalize_cast_pre_payment_checks`). Like
+/// [`TERMINAL_CAST_CANCELLATION_ERROR`], the cast has already been rewound, so
+/// the payment seam must not restore the pending cast.
+const TERMINAL_PROHIBITED_CAST_ERROR: &str = "__terminal_prohibited_cast__";
+/// CR 601.6 + CR 601.3a: every X the caster can announce gives the spell a
+/// quality a casting prohibition forbids, so the begun cast is rewound.
+const NO_ANNOUNCEABLE_X_PERMITS_CAST: &str =
+    "No value of X the caster can announce lets this spell be cast";
+
+/// Map a terminal pre-payment cancellation sentinel to the caller-facing error,
+/// or `None` when `err` is not terminal (the pending cast is still live).
+fn terminal_cast_cancellation_error(err: &EngineError) -> Option<EngineError> {
+    let EngineError::ActionNotAllowed(message) = err else {
+        return None;
+    };
+    match message.as_str() {
+        TERMINAL_CAST_CANCELLATION_ERROR => Some(EngineError::ActionNotAllowed(
+            "Chosen targets do not satisfy the casting condition".to_string(),
+        )),
+        TERMINAL_PROHIBITED_CAST_ERROR => Some(EngineError::ActionNotAllowed(
+            "A static ability prevents you from casting this spell with the announced X"
+                .to_string(),
+        )),
+        _ => None,
+    }
+}
+
 pub(crate) const ABANDONED_CAST_FINALIZATION_ERROR: &str = "__abandoned_cast_finalization__";
 
 fn abandoned_cast_finalization_error() -> EngineError {
@@ -10939,6 +10967,14 @@ fn pay_additional_cost_with_source(
                     "Minimum legal X value {min} exceeds maximum payable X value {max}"
                 )));
             }
+            // CR 601.6 + CR 601.3a: no announceable X lets the spell be cast.
+            if super::casting::every_announceable_x_is_prohibited(state, player, &pending, min, max)
+            {
+                super::casting::handle_cancel_cast(state, &pending, events);
+                return Err(EngineError::ActionNotAllowed(
+                    NO_ANNOUNCEABLE_X_PERMITS_CAST.to_string(),
+                ));
+            }
             let mut pending = pending;
             let cost = prepend_deferred_required_cost(cost, &mut pending);
             pending.additional_cost_flow = Some(AdditionalCost::Required(cost));
@@ -13362,6 +13398,33 @@ fn finalize_cast_pre_payment_checks(
         ));
     }
 
+    // CR 601.6 + CR 202.3e: the fully announced spell must still be one its
+    // caster may cast. The proposal check considered every X the caster could
+    // announce (CR 601.3a); the spell as announced — with its chosen X, or X = 0
+    // when none was announced (CR 107.3b: cast without paying a cost that
+    // includes X) — is checked here, before any cost is paid. Only an `{X}` in
+    // the mana cost changes the spell's mana value, so other spells were
+    // already decided exactly by the proposal check.
+    if state
+        .objects
+        .get(&object_id)
+        .is_some_and(|obj| obj.mana_cost.has_x())
+        && super::casting::announced_spell_is_prohibited(
+            state,
+            player,
+            object_id,
+            ability.chosen_x.unwrap_or(0),
+            casting_variant == CastingVariant::Fuse,
+        )
+    {
+        let pending_for_cancel =
+            PendingCast::new(object_id, card_id, ability.clone(), cost.clone());
+        super::casting::handle_cancel_cast(state, &pending_for_cancel, events);
+        return Err(EngineError::ActionNotAllowed(
+            TERMINAL_PROHIBITED_CAST_ERROR.to_string(),
+        ));
+    }
+
     // CR 702.85a: Evaluate cascade/resulting-MV constraints before payment.
     // For the constraint we synthesize the resulting MV from the printed cost
     // + chosen_x rather than reading `obj.cost_x_paid`, since that field is
@@ -13482,18 +13545,7 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         None,
         events,
     )
-    .map_err(|err| {
-        if matches!(
-            &err,
-            EngineError::ActionNotAllowed(message) if message == TERMINAL_CAST_CANCELLATION_ERROR
-        ) {
-            EngineError::ActionNotAllowed(
-                "Chosen targets do not satisfy the casting condition".to_string(),
-            )
-        } else {
-            err
-        }
-    })
+    .map_err(|err| terminal_cast_cancellation_error(&err).unwrap_or(err))
 }
 
 /// CR 601.2h-i: resume the already-paid cast without repeating cost election,
@@ -17464,6 +17516,20 @@ pub fn enter_payment_step(
                     "Minimum legal X value {min} exceeds maximum payable X value {max}"
                 )));
             }
+            // CR 601.6 + CR 601.3a: the proposal check admitted this spell
+            // because some X could evade a quality prohibition (Void Winnower
+            // and Rolling Thunder). When no X the caster can pay does, the cast
+            // can't be completed and is rewound rather than offering an X
+            // prompt with no legal answer.
+            if super::casting::every_announceable_x_is_prohibited(state, player, pending, min, max)
+            {
+                let pending_for_cancel = pending.clone();
+                state.pending_cast = None;
+                super::casting::handle_cancel_cast(state, &pending_for_cancel, events);
+                return Err(EngineError::ActionNotAllowed(
+                    NO_ANNOUNCEABLE_X_PERMITS_CAST.to_string(),
+                ));
+            }
             let pending_cast = pending.clone();
             let x_cost_previews = super::casting::build_choose_x_cost_previews(
                 state,
@@ -18218,14 +18284,8 @@ fn finalize_mana_payment_with_resume(
             Ok(state.waiting_for.clone())
         }
         Err(err) => {
-            if matches!(
-                &err,
-                EngineError::ActionNotAllowed(message)
-                    if message == TERMINAL_CAST_CANCELLATION_ERROR
-            ) {
-                return Err(EngineError::ActionNotAllowed(
-                    "Chosen targets do not satisfy the casting condition".to_string(),
-                ));
+            if let Some(terminal) = terminal_cast_cancellation_error(&err) {
+                return Err(terminal);
             }
             // CR 601.2h: A failed Pay attempt must not consume the pending cast —
             // the caster remains in the mana-payment window and may tap more
@@ -18672,14 +18732,8 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
             Ok(state.waiting_for.clone())
         }
         Err(err) => {
-            if matches!(
-                &err,
-                EngineError::ActionNotAllowed(message)
-                    if message == TERMINAL_CAST_CANCELLATION_ERROR
-            ) {
-                return Err(EngineError::ActionNotAllowed(
-                    "Chosen targets do not satisfy the casting condition".to_string(),
-                ));
+            if let Some(terminal) = terminal_cast_cancellation_error(&err) {
+                return Err(terminal);
             }
             // CR 601.2h: A failed Pay attempt must not consume the pending cast —
             // the caster remains in the mana-payment window and may tap more

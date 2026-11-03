@@ -1994,12 +1994,31 @@ impl ManaCost {
     /// spell's mana value as 5+X on the stack and corrupt every mana-value-keyed
     /// interaction with it (Spell Pierce, Mana Leak, "spells with mana value 3 or
     /// less").
+    ///
+    /// CR 202.3e + CR 107.3a: every `{X}` symbol in the cost is the same
+    /// announced value, so a `{X}{X}{G}` spell announced with X=2 has mana value
+    /// 5, not 3.
     pub fn mana_value_with_x(&self, zone: Zone, cost_x_paid: Option<u32>) -> u32 {
         self.mana_value()
             + match zone {
-                Zone::Stack if self.has_x() => cost_x_paid.unwrap_or(0),
+                Zone::Stack => cost_x_paid.unwrap_or(0) * self.x_symbol_count(),
                 _ => 0,
             }
+    }
+
+    /// CR 107.3: the number of `{X}` symbols in this mana cost (`{X}{X}{G}` has
+    /// two). Zero for every cost shape without per-shard symbols.
+    pub fn x_symbol_count(&self) -> u32 {
+        match self {
+            ManaCost::NoCost
+            | ManaCost::SelfManaCost
+            | ManaCost::SelfManaValue
+            | ManaCost::SelfManaCostReduced { .. } => 0,
+            ManaCost::Cost { shards, .. } => shards
+                .iter()
+                .filter(|s| matches!(s, ManaCostShard::X))
+                .count() as u32,
+        }
     }
 
     /// CR 508.1h + CR 509.1d: Aggregate this cost with another cost, producing a
@@ -3650,6 +3669,21 @@ mod tests {
         assert_eq!(cost.mana_value_with_x(Zone::Stack, None), 2);
         assert_eq!(cost.mana_value_with_x(Zone::Stack, Some(0)), 2);
         assert_eq!(cost.mana_value_with_x(Zone::Battlefield, Some(4)), 2);
+    }
+
+    #[test]
+    fn mana_value_with_x_counts_every_x_symbol() {
+        // CR 202.3e + CR 107.3a: each {X} is the announced value. {X}{X}{G}
+        // announced with X=2 is 2 + 2 + 1 = 5 on the stack (parity flips with X
+        // for a single X, never for a doubled one); off the stack X is 0.
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::X, ManaCostShard::Green],
+            generic: 0,
+        };
+        assert_eq!(cost.x_symbol_count(), 2);
+        assert_eq!(cost.mana_value_with_x(Zone::Stack, Some(2)), 5);
+        assert_eq!(cost.mana_value_with_x(Zone::Stack, Some(1)), 3);
+        assert_eq!(cost.mana_value_with_x(Zone::Hand, Some(2)), 1);
     }
 
     #[test]

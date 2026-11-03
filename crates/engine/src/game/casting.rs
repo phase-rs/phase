@@ -1326,7 +1326,7 @@ fn is_blocked_by_cant_cast_spells_for(
                         return false;
                     };
                     cant_cast_filter_matches_for(
-                        state, spell_obj, filter, source_obj, caster, fused,
+                        state, spell_obj, filter, source_obj, caster, fused, None,
                     )
                 }),
                 None => true,
@@ -14300,13 +14300,13 @@ fn spell_matches_cost_filter_for(
             let Some(source_obj) = state.objects.get(&source_id) else {
                 return false;
             };
-            cant_cast_filter_matches_for(state, spell_obj, filter, source_obj, caster, fused)
+            cant_cast_filter_matches_for(state, spell_obj, filter, source_obj, caster, fused, None)
         }
         TargetFilter::Named { .. } => {
             let Some(source_obj) = state.objects.get(&source_id) else {
                 return false;
             };
-            cant_cast_filter_matches_for(state, spell_obj, filter, source_obj, caster, fused)
+            cant_cast_filter_matches_for(state, spell_obj, filter, source_obj, caster, fused, None)
         }
         // CR 601.2e: Cost modifications only apply when the filter explicitly matches.
         // Fail-closed: unrecognized filter shapes do not universally reduce costs.
@@ -35415,11 +35415,109 @@ fn is_blocked_by_cant_be_cast(
 /// pre-payment fused split spell with its COMBINED characteristics (CR 702.102b)
 /// so `CantBeCast` `affected` filters keyed on mana value / colors see the fused
 /// spell. The non-`_for` entry delegates with `fused = false`.
+///
+/// This is the PROPOSAL check (CR 601.3): may the caster begin to cast the
+/// spell? Per CR 601.3a it considers the X values the caster could announce;
+/// the announced spell is re-checked by [`announced_spell_is_prohibited`].
 fn is_blocked_by_cant_be_cast_for(
     state: &GameState,
     caster: PlayerId,
     spell_obj: &super::game_object::GameObject,
     fused: bool,
+) -> bool {
+    is_blocked_by_cant_be_cast_with(state, caster, spell_obj, fused, CastXChoice::Proposal)
+}
+
+/// CR 601.6 + CR 601.2b + CR 202.3e: Is the spell `object_id` prohibited by a
+/// `CantBeCast` static once its caster has announced `x` for the `{X}` in its
+/// mana cost? The proposal check ([`is_blocked_by_cant_be_cast_for`]) lets a
+/// spell whose qualities X can change begin casting (CR 601.3a); this is the
+/// legality of the spell as actually announced. A spell cast without
+/// announcing X (CR 107.3b) is checked with `x = 0`.
+pub(crate) fn announced_spell_is_prohibited(
+    state: &GameState,
+    caster: PlayerId,
+    object_id: ObjectId,
+    x: u32,
+    fused: bool,
+) -> bool {
+    state.objects.get(&object_id).is_some_and(|spell_obj| {
+        is_blocked_by_cant_be_cast_with(state, caster, spell_obj, fused, CastXChoice::Announced(x))
+    })
+}
+
+/// CR 601.6 + CR 601.3a: Does every X in `min..=max` — the values the caster
+/// can announce for a pending spell — give it a quality a `CantBeCast` static
+/// forbids? The proposal check admits a spell whose X could evade such a
+/// prohibition; when none of the announceable values does, the cast can't be
+/// completed and the X prompt must not be offered. Always `false` for an
+/// activation (no `CantBeCast` reads it) or with no `CantBeCast` static.
+pub(crate) fn every_announceable_x_is_prohibited(
+    state: &GameState,
+    caster: PlayerId,
+    pending: &PendingCast,
+    min: u32,
+    max: u32,
+) -> bool {
+    pending.activation_ability_index.is_none()
+        && static_kind_present(state, StaticModeKind::CantBeCast)
+        && (min..=max).all(|x| {
+            announced_spell_is_prohibited(
+                state,
+                caster,
+                pending.object_id,
+                x,
+                pending.casting_variant == CastingVariant::Fuse,
+            )
+        })
+}
+
+/// CR 601.3a + CR 601.2b + CR 202.3e: Which value of X a casting-prohibition
+/// check reads when it evaluates the spell's qualities.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CastXChoice {
+    /// CR 601.3a: the cast has not been proposed. A prohibition whose verdict
+    /// the X announcement can change stops the caster from beginning the cast
+    /// only if no X they could announce evades it.
+    Proposal,
+    /// CR 601.2b + CR 202.3e: X has been announced; the spell is on the stack
+    /// (CR 601.2a), so its mana value counts every `{X}` as this value.
+    Announced(u32),
+}
+
+/// CR 601.3a: The X values a proposal check considers for `spell_obj`, or
+/// `None` when its mana cost has no `{X}` (no proposal choice changes its mana
+/// value, so the object is read as it is).
+///
+/// X=0 and X=1 are always considered: CR 601.3a's own example lets Void
+/// Winnower's opponent begin to cast Rolling Thunder ({X}{R}{R}) because the
+/// chosen X may make its mana value odd, whatever mana they hold. Larger values
+/// are considered up to the most X the caster can pay now (CR 601.2g-h): an X
+/// that can never be paid could never complete the cast. Over-admitting here is
+/// safe, because the announced spell is re-checked by
+/// [`announced_spell_is_prohibited`] when X is announced and again before
+/// payment, so the bound only has to avoid refusing a spell that some payable X
+/// would make legal.
+fn proposal_x_candidates(
+    state: &GameState,
+    caster: PlayerId,
+    spell_obj: &super::game_object::GameObject,
+) -> Option<std::ops::RangeInclusive<u32>> {
+    spell_obj.mana_cost.has_x().then(|| {
+        let payable =
+            casting_costs::max_x_value(state, caster, &spell_obj.mana_cost, Some(spell_obj.id));
+        0..=payable.max(1)
+    })
+}
+
+/// CR 101.2 + CR 604.1: shared body of the proposal and announced-spell
+/// `CantBeCast` checks; `x_choice` selects how the spell's X is read.
+fn is_blocked_by_cant_be_cast_with(
+    state: &GameState,
+    caster: PlayerId,
+    spell_obj: &super::game_object::GameObject,
+    fused: bool,
+    x_choice: CastXChoice,
 ) -> bool {
     // CR 604.1: O(1) presence gate — no CantBeCast static means no restriction.
     if !static_kind_present(state, StaticModeKind::CantBeCast) {
@@ -35440,7 +35538,32 @@ fn is_blocked_by_cant_be_cast_for(
 
         // CR 604.1: Check spell filter if present.
         if let Some(ref affected) = def.affected {
-            if !cant_cast_filter_matches_for(state, spell_obj, affected, bf_obj, caster, fused) {
+            let matches_with = |announced_x: Option<u32>| {
+                cant_cast_filter_matches_for(
+                    state,
+                    spell_obj,
+                    affected,
+                    bf_obj,
+                    caster,
+                    fused,
+                    announced_x,
+                )
+            };
+            let prohibits = match x_choice {
+                CastXChoice::Announced(x) => matches_with(Some(x)),
+                // CR 601.3a: each prohibiting effect is considered on its own —
+                // if any X the caster could announce takes the spell outside
+                // THIS effect's filter, the caster may begin to cast it,
+                // ignoring the effect. The object as it is (X = 0 off the
+                // stack) is checked first so a spell the filter does not match
+                // never pays for the candidate scan.
+                CastXChoice::Proposal => {
+                    matches_with(None)
+                        && proposal_x_candidates(state, caster, spell_obj)
+                            .is_none_or(|mut candidates| candidates.all(|x| matches_with(Some(x))))
+                }
+            };
+            if !prohibits {
                 continue;
             }
         }
@@ -35479,6 +35602,8 @@ fn is_blocked_by_cant_be_cast_for(
 /// `fused` requests the COMBINED-characteristics projection (CR 702.102b) for a
 /// pre-payment fused split spell; payment-time callers pass `false` and rely on
 /// the `fused_split_spell` marker OR-gate inside `spell_cast_record_for`.
+/// `announced_x: Some(x)` reads the spell's mana value with X announced as `x`
+/// (CR 202.3e); `None` reads the object as it currently presents itself.
 fn cant_cast_filter_matches_for(
     state: &GameState,
     spell_obj: &super::game_object::GameObject,
@@ -35486,6 +35611,7 @@ fn cant_cast_filter_matches_for(
     source_obj: &super::game_object::GameObject,
     caster: PlayerId,
     fused: bool,
+    announced_x: Option<u32>,
 ) -> bool {
     use crate::types::ability::ChosenAttribute;
 
@@ -35503,7 +35629,7 @@ fn cant_cast_filter_matches_for(
         }
         // Everything else — including IsChosenColor / IsChosenCardType properties —
         // flows through the shared source-aware typed-filter conjunction.
-        _ => super::filter::spell_object_matches_filter_from_state_for(
+        _ => super::filter::spell_object_matches_filter_with_announced_x(
             state,
             spell_obj,
             spell_obj.zone,
@@ -35512,6 +35638,7 @@ fn cant_cast_filter_matches_for(
             source_obj.id,
             &state.all_creature_types,
             fused,
+            announced_x,
         ),
     }
 }

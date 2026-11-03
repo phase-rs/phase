@@ -236,6 +236,7 @@ mod unstoppable_slasher_half_life;
 mod ureni_attack_trigger;
 mod vengeful_ancestor_goaded_attack_trigger;
 mod viewer_projection_ingest_gate;
+mod void_winnower_announced_x;
 mod vrestin_menoptra_leader_5949;
 mod wba_fodder_multiset;
 mod wba_loop_firewall_interposition;
