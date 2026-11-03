@@ -28501,6 +28501,28 @@ fn guarded_leading_window_is_distributed_to_coordinated_clause() {
     }
 }
 
+/// CR 611.2a + CR 608.2c: a leading window behind a reflexive "If you do," head
+/// still scopes both coordinated predicates of its sentence (#7962).
+#[test]
+fn reflexive_guarded_leading_window_is_distributed_to_coordinated_clause() {
+    let def = parse_effect_chain(
+        "Mythos of Vadrok deals 5 damage to target creature. If you do, until your next turn, that creature can't attack or block and its activated abilities can't be activated.",
+        AbilityKind::Spell,
+    );
+    let printed = Duration::UntilNextTurnOf {
+        player: PlayerScope::Controller,
+    };
+    let mut windowed = 0;
+    let mut link = def.sub_ability.as_deref();
+    while let Some(d) = link {
+        if d.duration.as_ref() == Some(&printed) {
+            windowed += 1;
+        }
+        link = d.sub_ability.as_deref();
+    }
+    assert!(windowed >= 2, "both predicates carry the window: {def:#?}");
+}
+
 /// CR 602.5 + CR 603.2a + CR 608.2c: Dovin Baan's +1 — "up to one target
 /// creature gets -3/-0 and its activated abilities can't be activated."
 /// The compound splits into a Pump primary and a CantBeActivated conjunct

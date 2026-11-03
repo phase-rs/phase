@@ -3450,11 +3450,15 @@ pub(crate) fn assemble_effect_chain(ir: &EffectChainIr) -> AbilityDefinition {
             // is read off the shell-peeled body, so a leading guard the chunk loop
             // already lifted into `condition` ("If {W}{U} was spent to cast this
             // spell, until your next turn, …" — Mythos of Vadrok) does not hide it.
+            // A reflexive head ("If you do, until your next turn, …") is not a
+            // general conditional the shell peels, so it is stripped first.
             // A sentinel (`None` = nothing stated, `Some(Permanent)` = the
             // sub-parser's "no window" marker) states nothing to distribute.
             let heads_sentence = clause_ir.source.fragment().is_some_and(|text| {
+                let (_, _, unguarded) =
+                    super::conditions::strip_if_you_do_conditional_with_head(text.trim());
                 let (body, _) =
-                    crate::parser::clause_shell::peel_clause_with_anchor(text.trim(), false);
+                    crate::parser::clause_shell::peel_clause_with_anchor(unguarded.trim(), false);
                 strip_leading_duration(body.trim()).is_some()
             });
             sentence_duration = (heads_sentence && !duration_is_unset_sentinel(&def.duration))
