@@ -51,6 +51,9 @@ mkdir -p "$TMP/crlf" "$TMP/text"
 # What native Windows jq does: every printed line ends CRLF.
 cat > "$TMP/crlf/jq" <<EOF
 #!/usr/bin/env bash
+# pipefail belongs to the STUB, not the suite: without it the pipe reports awk's status and every
+# jq -e branch looks true under this stub — a false model rather than a CRLF regression.
+set -o pipefail
 "$REAL_JQ" "\$@" | awk '{printf "%s\\r\\n", \$0}'
 EOF
 # A jq that answers with prose where a count is required: the gate must refuse, not guess.
@@ -150,7 +153,7 @@ else
 fi
 
 # --- row 4: a refusal on a LATER numeric read is still named on stderr -------------------------
-# These two sites used to carry a leftover `2>/dev/null` from their bare-jq days, which discarded
+# These three sites used to carry a leftover `2>/dev/null` from their bare-jq days, which discarded
 # `jq_num`'s own message and left a bare exit 2 with empty stderr — the failure this row pins.
 for target in mid_total mid_curr_total mid_diag; do
     run "$TMP/$target" "$TMP/base.json" "$TMP/worse.json"
@@ -179,6 +182,27 @@ if [ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -q "non-numeric value where a co
     ok "a sign-only value is refused (exit $RC)"
 else
     bad "a sign-only value must be refused, got exit $RC"
+    printf '%s\n' "$OUT" | sed 's/^/     /'
+fi
+
+# --- row 6: the loop's own count is validated, not just CR-stripped ----------------------------
+# The two diagnostics loops derive `count` from raw `jq -r … | to_entries[]`. A non-numeric value
+# there used to die later on `set -u` as an unnamed `n: unbound variable`; it now refuses by name.
+mkdir -p "$TMP/loop_count"
+cat > "$TMP/loop_count/jq" <<EOF
+#!/usr/bin/env bash
+set -o pipefail
+case "\$*" in
+    *to_entries*) printf 'swallowed_clause=n/a\\r\\n' ;;
+    *) exec "$REAL_JQ" "\$@" ;;
+esac
+EOF
+chmod +x "$TMP/loop_count/jq"
+run "$TMP/loop_count" "$TMP/base.json" "$TMP/worse.json"
+if [ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -q "non-numeric diagnostic count"; then
+    ok "a non-numeric diagnostic count is refused by name (exit $RC)"
+else
+    bad "a non-numeric diagnostic count must be refused by name, got exit $RC"
     printf '%s\n' "$OUT" | sed 's/^/     /'
 fi
 
