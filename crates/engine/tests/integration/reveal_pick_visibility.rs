@@ -15,10 +15,8 @@
 //!
 //! The cleanup regression below uses a genuine "Reveal the top N" instruction
 //! (Gather the Pack), so the public reveal markers it asserts while the choice
-//! is pending are the ones the card's own text creates. `Ancient Stirrings`
-//! ("look at the top five … you may reveal …") is covered separately as the
-//! pick-and-bottom flow of the same dig class; its "look at" wording is not
-//! used to justify a public reveal of every card in the window.
+//! is pending are the ones the card's own text creates. The pick-and-bottom test
+//! below uses a public reveal instruction with the same dig shape.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::visibility::filter_state_for_viewer;
@@ -32,9 +30,9 @@ use engine::types::zones::Zone;
 /// Verbatim Oracle text (Scryfall, `Gather the Pack`).
 const GATHER_THE_PACK: &str = "Reveal the top five cards of your library. You may put a creature card from among them into your hand. Put the rest into your graveyard.\nSpell mastery — If there are two or more instant and/or sorcery cards in your graveyard, put up to two creature cards from among them into your hand instead.";
 
-/// Verbatim Oracle text (Scryfall, `Ancient Stirrings`): look at the top five,
-/// optionally reveal one of them, bottom the rest.
-const ANCIENT_STIRRINGS: &str = "Look at the top five cards of your library. You may reveal a colorless card from among them and put it into your hand. Then put the rest on the bottom of your library in any order.";
+/// Reveal-and-bottom fixture text: reveal the top five, optionally reveal one
+/// of them, bottom the rest.
+const REVEAL_PICK_BOTTOM: &str = "Reveal the top five cards of your library. You may reveal a colorless card from among them and put it into your hand. Then put the rest on the bottom of your library in any order.";
 
 struct Fixture {
     runner: GameRunner,
@@ -282,16 +280,14 @@ fn reveal_pick_closes_the_window_when_the_instruction_settles() {
 /// reorders the unkept cards onto the bottom of the library, neither the caster
 /// nor the opponent keeps seeing their faces.
 ///
-/// Ancient Stirrings is the same dig class exercised above but keeps one card
-/// and bottoms the rest, so those cards return to a hidden zone where a stale
-/// reveal marker would leak the library order. Its "look at" wording is not
-/// treated as a public reveal here: only the dig's shape is asserted while the
-/// choice is pending.
+/// The public reveal-and-bottom fixture is the same dig class exercised above
+/// but keeps one card and bottoms the rest, so those cards return to a hidden
+/// zone where a stale reveal marker would leak the library order.
 #[test]
-fn look_at_pick_closes_the_window_on_the_unkept_library_cards() {
+fn reveal_pick_bottom_closes_the_window_on_the_unkept_library_cards() {
     let mut fixture = cast_dig_to_its_choice(
-        "Ancient Stirrings",
-        ANCIENT_STIRRINGS,
+        "Reveal Pick Bottom",
+        REVEAL_PICK_BOTTOM,
         ManaCost::Cost {
             generic: 0,
             shards: vec![ManaCostShard::Green],
@@ -314,7 +310,7 @@ fn look_at_pick_closes_the_window_on_the_unkept_library_cards() {
     for id in &cards {
         assert!(
             fixture.runner.state().revealed_cards.contains(id),
-            "the combined look/reveal dig must mark {id:?} before the choice"
+            "the reveal dig must mark {id:?} before the choice"
         );
     }
 
