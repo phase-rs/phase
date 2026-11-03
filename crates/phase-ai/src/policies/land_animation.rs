@@ -102,15 +102,7 @@ impl TacticalPolicy for LandAnimationPolicy {
         // This must precede the tapped check: `land_animation_tapped` returns
         // first for a tapped source, and an already-animated man-land can be
         // tapped, which would make this veto unreachable on those boards.
-        if crate::manland::animation_payoff_in_force(ctx.state, *source_id)
-            && crate::manland::repeat_only_resets_characteristics(ability_def)
-            && !crate::manland::repeat_changes_source(
-                ctx.state,
-                ctx.ai_player,
-                *source_id,
-                ability_def,
-            )
-        {
+        if crate::manland::repeat_gains_nothing(ctx.state, ctx.ai_player, *source_id, ability_def) {
             return PolicyVerdict::reject(PolicyReason::new(
                 "land_animation_redundant_already_creature",
             ));
@@ -646,7 +638,7 @@ mod tests {
         );
         assert!(
             runner.state().stack.is_empty(),
-            "reach guard: only the type half can answer"
+            "reach guard: nothing is pending"
         );
         let verdict = verdict_at(runner.state(), village, index);
         assert!(is_redundant_reject(&verdict), "got {verdict:?}");
@@ -664,7 +656,7 @@ mod tests {
         );
         assert!(
             !is_creature(runner.state(), village),
-            "reach guard: the type half cannot answer"
+            "reach guard: the land is not a creature yet"
         );
         let verdict = verdict_at(runner.state(), village, index);
         assert!(is_redundant_reject(&verdict), "got {verdict:?}");
@@ -740,10 +732,6 @@ mod tests {
             is_creature(runner.state(), barrens),
             "reach guard: the payoff is in force"
         );
-        assert!(crate::manland::animation_payoff_in_force(
-            runner.state(),
-            barrens
-        ));
         let verdict = verdict_at(runner.state(), barrens, index);
         assert!(
             matches!(verdict, PolicyVerdict::Score { .. }),
@@ -829,7 +817,7 @@ mod tests {
     }
 
     fn vetoed_without_board_check(state: &GameState, id: ObjectId, index: usize) -> bool {
-        crate::manland::animation_payoff_in_force(state, id)
+        is_creature(state, id)
             && crate::manland::repeat_only_resets_characteristics(
                 &state.objects[&id].abilities[index],
             )
@@ -1063,7 +1051,7 @@ mod tests {
         );
         assert!(
             !is_creature(runner.state(), village),
-            "reach guard: only the stack half can answer"
+            "reach guard: the land is not a creature yet"
         );
         let verdict = verdict_at(runner.state(), village, index);
         assert!(
@@ -1097,7 +1085,7 @@ mod tests {
         );
         assert!(
             !is_creature(runner.state(), village),
-            "reach guard: only the stack half can answer"
+            "reach guard: the land is not a creature yet"
         );
         let verdict = verdict_at(runner.state(), village, index);
         assert!(is_redundant_reject(&verdict), "got {verdict:?}");
@@ -1264,6 +1252,760 @@ mod tests {
             "reach guard: the copy entry targets the pending activation"
         );
 
+        let verdict = verdict_at(runner.state(), village, index);
+        assert!(is_redundant_reject(&verdict), "got {verdict:?}");
+    }
+
+    const DEFLECTING_SWAT: &str = "If you control a commander, you may cast this spell without paying its mana cost.\nYou may choose new targets for target spell or ability.";
+    const QUICKEN: &str = "The next sorcery spell you cast this turn can be cast as though it had flash. (It can be cast any time you could cast an instant.)\nDraw a card.";
+    const BRAMBLECRUSH: &str = "Destroy target noncreature permanent.";
+    const GLEN_ELENDRAS_ANSWER: &str = "This spell can't be countered.\nCounter all spells your opponents control and all abilities your opponents control. Create a 1/1 blue and black Faerie creature token with flying for each spell and ability countered this way.";
+    /// Synthetic land text.
+    const TWO_BODIES: &str = "{1}: This land becomes a 2/2 creature until end of turn. It's still a land.\n{2}: This land becomes a 4/4 creature with flying until end of turn. It's still a land.";
+    /// Synthetic land text: the same body until end of turn, or indefinitely.
+    const TWO_LIFETIMES: &str = "{1}: This land becomes a 3/3 creature until end of turn. It's still a land.\n{3}: This land becomes a 3/3 creature that's still a land. (This effect lasts indefinitely.)";
+
+    /// Passes priority until `reached` holds.
+    fn pass_until(runner: &mut GameRunner, reached: impl Fn(&GameState) -> bool) {
+        for _ in 0..12 {
+            if reached(runner.state()) {
+                return;
+            }
+            apply_as_current_for_simulation(runner.state_mut(), GameAction::PassPriority)
+                .expect("the player with priority passes");
+        }
+        panic!("not reached: {:?}", runner.state().waiting_for);
+    }
+
+    fn p0_has_priority(state: &GameState) -> bool {
+        matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0)
+    }
+
+    /// Indices of `id`'s self-animating abilities, in ability order.
+    fn animation_indices(runner: &GameRunner, id: ObjectId) -> Vec<usize> {
+        runner.state().objects[&id]
+            .abilities
+            .iter()
+            .enumerate()
+            .filter(|(_, ability)| crate::manland::animates_source(ability))
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    fn push_ability_entry(runner: &mut GameRunner, ability: ResolvedAbility) -> ObjectId {
+        let state = runner.state_mut();
+        let id = ObjectId(state.next_object_id);
+        state.next_object_id += 1;
+        state.stack.push_back(StackEntry {
+            id,
+            source_id: ability.source_id,
+            controller: ability.controller,
+            kind: StackEntryKind::ActivatedAbility {
+                source_id: ability.source_id,
+                ability: Box::new(ability),
+            },
+        });
+        id
+    }
+
+    fn stack_ability_filter() -> TargetFilter {
+        TargetFilter::StackAbility {
+            controller: None,
+            tag: None,
+            kind: None,
+        }
+    }
+
+    /// Synthetic: a root that targets `pending` and does nothing to it, above
+    /// `child`.
+    fn root_aimed_at(pending: ObjectId, child: ResolvedAbility) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: stack_ability_filter(),
+            },
+            vec![TargetRef::Object(pending)],
+            ObjectId(9998),
+            P1,
+        )
+        .sub_ability(child)
+    }
+
+    fn counter_node(targets: Vec<TargetRef>, target: TargetFilter) -> ResolvedAbility {
+        ResolvedAbility::new(
+            Effect::Counter {
+                target,
+                source_rider: None,
+                countered_spell_zone: None,
+            },
+            targets,
+            ObjectId(9998),
+            P1,
+        )
+    }
+
+    /// What each node of `entry_id`'s reach acts on.
+    fn reach_of(state: &GameState, entry_id: ObjectId) -> Vec<Vec<TargetRef>> {
+        let entry = state.stack.iter().find(|e| e.id == entry_id).unwrap();
+        engine::game::effects::stack_reach::stack_entry_node_reach(state, entry)
+            .into_iter()
+            .map(|reach| reach.acted_on)
+            .collect()
+    }
+
+    #[test]
+    fn a_counter_child_aimed_elsewhere_keeps_the_veto() {
+        let (mut runner, village, index) =
+            oracle_board("Treetop Village", TREETOP_VILLAGE, &[(ManaColor::Green, 8)]);
+        let elsewhere = push_ability_entry(
+            &mut runner,
+            ResolvedAbility::new(Effect::NoOp, Vec::new(), ObjectId(9997), P1),
+        );
+        announce(&mut runner, village, index);
+        let pending = runner.state().stack.back().unwrap().id;
+        let chain = push_ability_entry(
+            &mut runner,
+            root_aimed_at(
+                pending,
+                counter_node(vec![TargetRef::Object(elsewhere)], stack_ability_filter()),
+            ),
+        );
+        assert_eq!(
+            entry_targets(runner.state(), chain),
+            vec![TargetRef::Object(pending)],
+            "reach guard: the root targets the pending animation"
+        );
+        assert_eq!(
+            reach_of(runner.state(), chain),
+            vec![Vec::new(), vec![TargetRef::Object(elsewhere)]],
+            "reach guard: only the child counters, and not the pending animation"
+        );
+        let verdict = verdict_at(runner.state(), village, index);
+        assert!(is_redundant_reject(&verdict), "got {verdict:?}");
+    }
+
+    #[test]
+    fn a_counter_child_inheriting_the_root_target_lifts_the_veto() {
+        let (mut runner, village, index) =
+            oracle_board("Treetop Village", TREETOP_VILLAGE, &[(ManaColor::Green, 8)]);
+        announce(&mut runner, village, index);
+        let pending = runner.state().stack.back().unwrap().id;
+        let chain = push_ability_entry(
+            &mut runner,
+            root_aimed_at(
+                pending,
+                counter_node(Vec::new(), TargetFilter::ParentTarget),
+            ),
+        );
+        assert_eq!(
+            reach_of(runner.state(), chain),
+            vec![Vec::new(), vec![TargetRef::Object(pending)]],
+            "reach guard: the child counters the root's target"
+        );
+        let verdict = verdict_at(runner.state(), village, index);
+        assert!(
+            matches!(verdict, PolicyVerdict::Score { .. }),
+            "got {verdict:?}"
+        );
+    }
+
+    /// CR 405.5: Stifle below the animation resolves after it, even once
+    /// Deflecting Swat has pointed it at the animation (CR 115.7d).
+    #[test]
+    fn a_counter_below_retargeted_to_the_pending_animation_keeps_the_veto() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let village = scenario
+            .add_land_from_oracle(P0, "Treetop Village", TREETOP_VILLAGE)
+            .id();
+        let vault = scenario
+            .add_land_from_oracle(P0, "Mutavault", MUTAVAULT)
+            .id();
+        for _ in 0..8 {
+            scenario.add_basic_land(P0, ManaColor::Green);
+        }
+        let stifle = scenario
+            .add_spell_to_hand_from_oracle(P1, "Stifle", true, STIFLE)
+            .id();
+        let swat = scenario
+            .add_spell_to_hand_from_oracle(P1, "Deflecting Swat", true, DEFLECTING_SWAT)
+            .id();
+        for _ in 0..2 {
+            scenario.add_basic_land(P1, ManaColor::Blue);
+        }
+        for _ in 0..3 {
+            scenario.add_basic_land(P1, ManaColor::Red);
+        }
+        let mut runner = scenario.build();
+        {
+            let s = runner.state_mut();
+            s.turn_number = 3;
+            s.active_player = P0;
+            s.phase = Phase::PreCombatMain;
+            s.waiting_for = WaitingFor::Priority { player: P0 };
+        }
+        let village_index = animation_indices(&runner, village)[0];
+        let vault_index = animation_indices(&runner, vault)[0];
+        announce(&mut runner, vault, vault_index);
+        let other = pass_to_opponent(&mut runner);
+        {
+            runner.cast(stifle).target_object(other).commit();
+        }
+        let stifle_entry = runner.state().stack.back().unwrap().id;
+        pass_until(&mut runner, p0_has_priority);
+        announce(&mut runner, village, village_index);
+        let pending = pass_to_opponent(&mut runner);
+        {
+            runner.cast(swat).target_object(stifle_entry).commit();
+        }
+        pass_until(&mut runner, |s| {
+            matches!(s.waiting_for, WaitingFor::OptionalEffectChoice { .. })
+        });
+        runner
+            .act(GameAction::DecideOptionalEffect { accept: true })
+            .expect("Deflecting Swat's controller chooses new targets");
+        runner
+            .act(GameAction::RetargetSpell {
+                new_targets: vec![Some(TargetRef::Object(pending))],
+            })
+            .expect("Stifle can target the pending animation");
+        pass_until(&mut runner, p0_has_priority);
+        let order: Vec<ObjectId> = runner.state().stack.iter().map(|e| e.id).collect();
+        assert_eq!(
+            order,
+            vec![other, stifle_entry, pending],
+            "reach guard: Stifle sits below the animation"
+        );
+        assert_eq!(
+            entry_targets(runner.state(), stifle_entry),
+            vec![TargetRef::Object(pending)],
+            "reach guard: Stifle now targets the pending animation"
+        );
+        let verdict = verdict_at(runner.state(), village, village_index);
+        assert!(is_redundant_reject(&verdict), "got {verdict:?}");
+    }
+
+    #[test]
+    fn an_identical_pending_animation_vetoes_and_a_different_one_does_not() {
+        let (mut runner, land, _) =
+            oracle_board("Two Bodies", TWO_BODIES, &[(ManaColor::Green, 8)]);
+        let [small, large] = animation_indices(&runner, land)[..] else {
+            panic!("reach guard: two self-animating abilities");
+        };
+        announce(&mut runner, land, small);
+        assert!(
+            !is_creature(runner.state(), land),
+            "reach guard: only the pending animation can answer"
+        );
+        let same = verdict_at(runner.state(), land, small);
+        assert!(is_redundant_reject(&same), "same ability: got {same:?}");
+        let different = verdict_at(runner.state(), land, large);
+        assert!(
+            matches!(different, PolicyVerdict::Score { .. }),
+            "different body: got {different:?}"
+        );
+    }
+
+    #[test]
+    fn a_repeat_that_outlasts_the_animation_in_force_is_not_vetoed() {
+        let (mut runner, land, _) =
+            oracle_board("Two Lifetimes", TWO_LIFETIMES, &[(ManaColor::Green, 8)]);
+        let [this_turn, indefinite] = animation_indices(&runner, land)[..] else {
+            panic!("reach guard: two self-animating abilities");
+        };
+        announce(&mut runner, land, this_turn);
+        let pending = verdict_at(runner.state(), land, indefinite);
+        assert!(
+            matches!(pending, PolicyVerdict::Score { .. }),
+            "pending shorter animation: got {pending:?}"
+        );
+        resolve_accepting_optional(&mut runner);
+        assert!(is_creature(runner.state(), land), "reach guard: animated");
+        let same = verdict_at(runner.state(), land, this_turn);
+        assert!(is_redundant_reject(&same), "same lifetime: got {same:?}");
+        let longer = verdict_at(runner.state(), land, indefinite);
+        assert!(
+            matches!(longer, PolicyVerdict::Score { .. }),
+            "longer lifetime: got {longer:?}"
+        );
+
+        // CR 514.2: the cleanup step ends the until-end-of-turn body, and only
+        // the indefinite repeat carries it into a later turn.
+        let mut without = runner.state().clone();
+        engine::game::layers::prune_end_of_turn_effects(&mut without);
+        flush_layers(&mut without);
+        assert!(!is_creature(&without, land), "control: the body ends");
+        announce(&mut runner, land, indefinite);
+        resolve_accepting_optional(&mut runner);
+        let state = runner.state_mut();
+        engine::game::layers::prune_end_of_turn_effects(state);
+        flush_layers(state);
+        assert!(is_creature(state, land), "the repeat outlasts the turn");
+    }
+
+    #[test]
+    fn stalking_stones_repeat_after_resolution_is_rejected() {
+        let (mut runner, stones, index) =
+            oracle_board("Stalking Stones", STALKING_STONES, &[(ManaColor::Green, 8)]);
+        announce(&mut runner, stones, index);
+        resolve_accepting_optional(&mut runner);
+        assert!(
+            runner
+                .state()
+                .transient_continuous_effects
+                .iter()
+                .any(|effect| effect.duration == Duration::Permanent),
+            "reach guard: the animation lasts indefinitely"
+        );
+        let verdict = verdict_at(runner.state(), stones, index);
+        assert!(is_redundant_reject(&verdict), "got {verdict:?}");
+    }
+
+    /// CR 608.2b: Bramblecrush, cast with Quicken's permission above the
+    /// pending animation, loses its target if the land is a creature first.
+    #[test]
+    fn a_response_that_escapes_noncreature_removal_above_the_animation_is_not_vetoed() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let village = scenario
+            .add_land_from_oracle(P0, "Treetop Village", TREETOP_VILLAGE)
+            .id();
+        for _ in 0..8 {
+            scenario.add_basic_land(P0, ManaColor::Green);
+        }
+        let quicken = scenario
+            .add_spell_to_hand_from_oracle(P1, "Quicken", true, QUICKEN)
+            .id();
+        let bramblecrush = scenario
+            .add_spell_to_hand_from_oracle(P1, "Bramblecrush", false, BRAMBLECRUSH)
+            .id();
+        scenario.add_basic_land(P1, ManaColor::Blue);
+        for _ in 0..4 {
+            scenario.add_basic_land(P1, ManaColor::Green);
+        }
+        for _ in 0..3 {
+            scenario.add_card_to_library_top(P1, "Island");
+        }
+        let mut runner = scenario.build();
+        {
+            let s = runner.state_mut();
+            s.turn_number = 3;
+            s.active_player = P0;
+            s.phase = Phase::PreCombatMain;
+            s.waiting_for = WaitingFor::Priority { player: P0 };
+        }
+        let index = animation_indices(&runner, village)[0];
+        announce(&mut runner, village, index);
+        let pending = pass_to_opponent(&mut runner);
+        {
+            runner.cast(quicken).commit();
+        }
+        pass_until(&mut runner, |s| s.stack.len() == 1 && p0_has_priority(s));
+        apply_as_current_for_simulation(runner.state_mut(), GameAction::PassPriority)
+            .expect("the AI passes priority");
+        {
+            runner.cast(bramblecrush).target_object(village).commit();
+        }
+        let removal = runner.state().stack.back().unwrap().id;
+        pass_until(&mut runner, p0_has_priority);
+        assert_eq!(
+            runner
+                .state()
+                .stack
+                .iter()
+                .map(|e| e.id)
+                .collect::<Vec<_>>(),
+            vec![pending, removal],
+            "reach guard: the sorcery sits above the animation"
+        );
+        assert_eq!(
+            reach_of(runner.state(), removal),
+            vec![vec![TargetRef::Object(village)]],
+            "reach guard: it destroys the noncreature land"
+        );
+        let verdict = verdict_at(runner.state(), village, index);
+        assert!(
+            matches!(verdict, PolicyVerdict::Score { .. }),
+            "got {verdict:?}"
+        );
+    }
+
+    #[test]
+    fn a_mass_counter_above_the_pending_animation_lifts_the_veto() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let village = scenario
+            .add_land_from_oracle(P0, "Treetop Village", TREETOP_VILLAGE)
+            .id();
+        for _ in 0..8 {
+            scenario.add_basic_land(P0, ManaColor::Green);
+        }
+        let answer = scenario
+            .add_spell_to_hand_from_oracle(P1, "Glen Elendra's Answer", true, GLEN_ELENDRAS_ANSWER)
+            .id();
+        for _ in 0..4 {
+            scenario.add_basic_land(P1, ManaColor::Blue);
+        }
+        let mut runner = scenario.build();
+        {
+            let s = runner.state_mut();
+            s.turn_number = 3;
+            s.active_player = P0;
+            s.phase = Phase::PreCombatMain;
+            s.waiting_for = WaitingFor::Priority { player: P0 };
+        }
+        let index = animation_indices(&runner, village)[0];
+        announce(&mut runner, village, index);
+        pass_to_opponent(&mut runner);
+        {
+            runner.cast(answer).commit();
+        }
+        pass_until(&mut runner, p0_has_priority);
+        let top = runner.state().stack.back().unwrap();
+        assert!(
+            top.ability()
+                .is_some_and(|root| matches!(root.effect, Effect::CounterAll { .. })),
+            "reach guard: a mass counter sits above the animation"
+        );
+        let verdict = verdict_at(runner.state(), village, index);
+        assert!(
+            matches!(verdict, PolicyVerdict::Score { .. }),
+            "got {verdict:?}"
+        );
+    }
+
+    const TIME_STOP: &str = "End the turn. (Exile all spells and abilities, including this spell. The player whose turn it is discards down to their maximum hand size. Damage heals and \"this turn\" and \"until end of turn\" effects end.)";
+    const DIABOLIC_EDICT: &str = "Target player sacrifices a creature of their choice.";
+    const DAY_OF_JUDGMENT: &str = "Destroy all creatures.";
+
+    /// The AI holding priority in its own precombat main phase on turn 3.
+    fn p0_main_phase(runner: &mut GameRunner) {
+        let s = runner.state_mut();
+        s.turn_number = 3;
+        s.active_player = P0;
+        s.phase = Phase::PreCombatMain;
+        s.waiting_for = WaitingFor::Priority { player: P0 };
+    }
+
+    /// CR 724.1b: Time Stop exiles the pending activation, and Stalking
+    /// Stones' animation lasts indefinitely, so only a repeat resolved first
+    /// leaves a creature.
+    #[test]
+    fn ending_the_turn_above_a_lasting_pending_animation_leaves_the_repeat_eligible() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let stones = scenario
+            .add_land_from_oracle(P0, "Stalking Stones", STALKING_STONES)
+            .id();
+        for _ in 0..12 {
+            scenario.add_basic_land(P0, ManaColor::Green);
+        }
+        let time_stop = scenario
+            .add_spell_to_hand_from_oracle(P1, "Time Stop", true, TIME_STOP)
+            .id();
+        for _ in 0..6 {
+            scenario.add_basic_land(P1, ManaColor::Blue);
+        }
+        let mut runner = scenario.build();
+        p0_main_phase(&mut runner);
+        let index = animation_indices(&runner, stones)[0];
+        announce(&mut runner, stones, index);
+        assert!(
+            is_redundant_reject(&verdict_at(runner.state(), stones, index)),
+            "control: with nothing above it, the pending activation vetoes"
+        );
+        let pending = pass_to_opponent(&mut runner);
+        {
+            runner.cast(time_stop).commit();
+        }
+        pass_until(&mut runner, p0_has_priority);
+        let top = runner.state().stack.back().unwrap();
+        assert!(
+            top.ability()
+                .is_some_and(|root| matches!(root.effect, Effect::EndTheTurn)),
+            "reach guard: an end-the-turn spell sits above the animation"
+        );
+        assert_eq!(
+            runner.state().stack.front().map(|entry| entry.id),
+            Some(pending),
+            "reach guard: the pending activation is below it"
+        );
+        let verdict = verdict_at(runner.state(), stones, index);
+        assert!(
+            matches!(verdict, PolicyVerdict::Score { .. }),
+            "got {verdict:?}"
+        );
+    }
+
+    /// CR 701.21a: with the land animated first, the edict's player chooses
+    /// between it and Grizzly Bears.
+    #[test]
+    fn an_edict_above_the_pending_animation_leaves_the_repeat_eligible() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let village = scenario
+            .add_land_from_oracle(P0, "Treetop Village", TREETOP_VILLAGE)
+            .id();
+        let bears = scenario.add_creature(P0, "Grizzly Bears", 2, 2).id();
+        for _ in 0..8 {
+            scenario.add_basic_land(P0, ManaColor::Green);
+        }
+        let edict = scenario
+            .add_spell_to_hand_from_oracle(P1, "Diabolic Edict", true, DIABOLIC_EDICT)
+            .id();
+        for _ in 0..2 {
+            scenario.add_basic_land(P1, ManaColor::Black);
+        }
+        let mut runner = scenario.build();
+        p0_main_phase(&mut runner);
+        let index = animation_indices(&runner, village)[0];
+        announce(&mut runner, village, index);
+        assert!(
+            is_redundant_reject(&verdict_at(runner.state(), village, index)),
+            "control: with nothing above it, the pending activation vetoes"
+        );
+        let pending = pass_to_opponent(&mut runner);
+        {
+            runner.cast(edict).target_player(P0).commit();
+        }
+        pass_until(&mut runner, p0_has_priority);
+        let top = runner.state().stack.back().unwrap().id;
+        assert_ne!(
+            top, pending,
+            "reach guard: the edict sits above the animation"
+        );
+        assert_eq!(
+            entry_targets(runner.state(), top),
+            vec![TargetRef::Player(P0)],
+            "reach guard: the edict targets the AI"
+        );
+        assert!(
+            is_creature(runner.state(), bears) && !is_creature(runner.state(), village),
+            "reach guard: Grizzly Bears is the AI's only creature"
+        );
+        let verdict = verdict_at(runner.state(), village, index);
+        assert!(
+            matches!(verdict, PolicyVerdict::Score { .. }),
+            "got {verdict:?}"
+        );
+    }
+
+    /// CR 701.8a: Day of Judgment destroys the land only if it is a creature
+    /// first, so the two lines end differently.
+    #[test]
+    fn a_wrath_above_the_pending_animation_leaves_the_repeat_eligible() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let village = scenario
+            .add_land_from_oracle(P0, "Treetop Village", TREETOP_VILLAGE)
+            .id();
+        for _ in 0..8 {
+            scenario.add_basic_land(P0, ManaColor::Green);
+        }
+        let quicken = scenario
+            .add_spell_to_hand_from_oracle(P1, "Quicken", true, QUICKEN)
+            .id();
+        let wrath = scenario
+            .add_spell_to_hand_from_oracle(P1, "Day of Judgment", false, DAY_OF_JUDGMENT)
+            .id();
+        scenario.add_basic_land(P1, ManaColor::Blue);
+        for _ in 0..4 {
+            scenario.add_basic_land(P1, ManaColor::White);
+        }
+        for _ in 0..3 {
+            scenario.add_card_to_library_top(P1, "Island");
+        }
+        let mut runner = scenario.build();
+        p0_main_phase(&mut runner);
+        let index = animation_indices(&runner, village)[0];
+        announce(&mut runner, village, index);
+        let pending = pass_to_opponent(&mut runner);
+        {
+            runner.cast(quicken).commit();
+        }
+        pass_until(&mut runner, |s| s.stack.len() == 1 && p0_has_priority(s));
+        apply_as_current_for_simulation(runner.state_mut(), GameAction::PassPriority)
+            .expect("the AI passes priority");
+        {
+            runner.cast(wrath).commit();
+        }
+        let removal = runner.state().stack.back().unwrap().id;
+        pass_until(&mut runner, p0_has_priority);
+        assert_eq!(
+            runner
+                .state()
+                .stack
+                .iter()
+                .map(|e| e.id)
+                .collect::<Vec<_>>(),
+            vec![pending, removal],
+            "reach guard: the sorcery sits above the animation"
+        );
+        let verdict = verdict_at(runner.state(), village, index);
+        assert!(
+            matches!(verdict, PolicyVerdict::Score { .. }),
+            "got {verdict:?}"
+        );
+    }
+
+    /// CR 405.5: the edict below the animation resolves after it, so the land
+    /// is a creature by then on both lines.
+    #[test]
+    fn an_edict_below_the_pending_animation_keeps_the_veto() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let village = scenario
+            .add_land_from_oracle(P0, "Treetop Village", TREETOP_VILLAGE)
+            .id();
+        scenario.add_creature(P0, "Grizzly Bears", 2, 2);
+        for _ in 0..8 {
+            scenario.add_basic_land(P0, ManaColor::Green);
+        }
+        let edict = scenario
+            .add_spell_to_hand_from_oracle(P1, "Diabolic Edict", true, DIABOLIC_EDICT)
+            .id();
+        for _ in 0..2 {
+            scenario.add_basic_land(P1, ManaColor::Black);
+        }
+        let mut runner = scenario.build();
+        p0_main_phase(&mut runner);
+        let index = animation_indices(&runner, village)[0];
+        apply_as_current_for_simulation(runner.state_mut(), GameAction::PassPriority)
+            .expect("the AI passes priority");
+        {
+            runner.cast(edict).target_player(P0).commit();
+        }
+        let below = runner.state().stack.back().unwrap().id;
+        pass_until(&mut runner, p0_has_priority);
+        announce(&mut runner, village, index);
+        let pending = runner.state().stack.back().unwrap().id;
+        assert_eq!(
+            runner
+                .state()
+                .stack
+                .iter()
+                .map(|e| e.id)
+                .collect::<Vec<_>>(),
+            vec![below, pending],
+            "reach guard: the edict sits below the animation"
+        );
+        let verdict = verdict_at(runner.state(), village, index);
+        assert!(is_redundant_reject(&verdict), "got {verdict:?}");
+    }
+
+    const INSPIRED_CHARGE: &str = "Creatures you control get +2/+1 until end of turn.";
+
+    /// CR 611.2c: Inspired Charge's bonus applies only to the creatures on the
+    /// battlefield as it resolves, so the land gets it only if it is a creature
+    /// first.
+    #[test]
+    fn a_mass_pump_above_the_pending_animation_leaves_the_repeat_eligible() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let village = scenario
+            .add_land_from_oracle(P0, "Treetop Village", TREETOP_VILLAGE)
+            .id();
+        for _ in 0..4 {
+            scenario.add_basic_land(P0, ManaColor::Green);
+            scenario.add_basic_land(P0, ManaColor::White);
+        }
+        let charge = scenario
+            .add_spell_to_hand_from_oracle(P0, "Inspired Charge", true, INSPIRED_CHARGE)
+            .id();
+        let mut runner = scenario.build();
+        p0_main_phase(&mut runner);
+        let index = animation_indices(&runner, village)[0];
+        announce(&mut runner, village, index);
+        let pending = runner.state().stack.back().unwrap().id;
+        {
+            runner.cast(charge).commit();
+        }
+        let order: Vec<(ObjectId, PlayerId)> = runner
+            .state()
+            .stack
+            .iter()
+            .map(|entry| (entry.id, entry.controller))
+            .collect();
+        assert_eq!(order.len(), 2, "reach guard: both on the stack");
+        assert_eq!(
+            order[0],
+            (pending, P0),
+            "reach guard: the AI's pump sits above its own pending animation"
+        );
+        assert!(
+            p0_has_priority(runner.state()),
+            "reach guard: the AI holds priority"
+        );
+        let verdict = verdict_at(runner.state(), village, index);
+        assert!(
+            matches!(verdict, PolicyVerdict::Score { .. }),
+            "got {verdict:?}"
+        );
+    }
+
+    /// CR 405.5: Bramblecrush below the animation resolves after it, so the
+    /// land is already a creature by then and a response changes nothing.
+    #[test]
+    fn noncreature_removal_below_the_pending_animation_keeps_the_veto() {
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let village = scenario
+            .add_land_from_oracle(P0, "Treetop Village", TREETOP_VILLAGE)
+            .id();
+        for _ in 0..8 {
+            scenario.add_basic_land(P0, ManaColor::Green);
+        }
+        let quicken = scenario
+            .add_spell_to_hand_from_oracle(P1, "Quicken", true, QUICKEN)
+            .id();
+        let bramblecrush = scenario
+            .add_spell_to_hand_from_oracle(P1, "Bramblecrush", false, BRAMBLECRUSH)
+            .id();
+        scenario.add_basic_land(P1, ManaColor::Blue);
+        for _ in 0..4 {
+            scenario.add_basic_land(P1, ManaColor::Green);
+        }
+        for _ in 0..3 {
+            scenario.add_card_to_library_top(P1, "Island");
+        }
+        let mut runner = scenario.build();
+        {
+            let s = runner.state_mut();
+            s.turn_number = 3;
+            s.active_player = P0;
+            s.phase = Phase::PreCombatMain;
+            s.waiting_for = WaitingFor::Priority { player: P0 };
+        }
+        let index = animation_indices(&runner, village)[0];
+        apply_as_current_for_simulation(runner.state_mut(), GameAction::PassPriority)
+            .expect("the AI passes priority");
+        {
+            runner.cast(quicken).commit();
+        }
+        pass_until(&mut runner, |s| s.stack.is_empty() && p0_has_priority(s));
+        apply_as_current_for_simulation(runner.state_mut(), GameAction::PassPriority)
+            .expect("the AI passes priority");
+        {
+            runner.cast(bramblecrush).target_object(village).commit();
+        }
+        let removal = runner.state().stack.back().unwrap().id;
+        pass_until(&mut runner, p0_has_priority);
+        announce(&mut runner, village, index);
+        let pending = runner.state().stack.back().unwrap().id;
+        assert_eq!(
+            runner
+                .state()
+                .stack
+                .iter()
+                .map(|e| e.id)
+                .collect::<Vec<_>>(),
+            vec![removal, pending],
+            "reach guard: the sorcery sits below the animation"
+        );
+        assert_eq!(
+            reach_of(runner.state(), removal),
+            vec![vec![TargetRef::Object(village)]],
+            "reach guard: it destroys the noncreature land"
+        );
         let verdict = verdict_at(runner.state(), village, index);
         assert!(is_redundant_reject(&verdict), "got {verdict:?}");
     }

@@ -20,13 +20,15 @@ use engine::database::synthesis::KeywordTriggerInstaller;
 use engine::game::ability_utils::build_resolved_from_def;
 use engine::game::casting::can_pay_ability_mana_cost_after_auto_tap_excluding;
 use engine::game::effects::resolve_ability_chain;
+use engine::game::engine::apply_as_current_for_simulation;
 use engine::game::layers::flush_layers;
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, ContinuousModification, CostCategory, Effect, PtValue,
     StaticDefinition, TargetFilter,
 };
+use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
-use engine::types::game_state::{GameState, StackEntryKind};
+use engine::types::game_state::{GameState, StackEntryKind, TransientContinuousEffect, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;
 use engine::types::player::PlayerId;
@@ -257,44 +259,10 @@ pub(crate) fn activation_leaves_source_tapped(
     )
 }
 
-/// CR 611.2 + CR 602.2a: true when the man-land's animation payoff is already
-/// applied or still owed — the source is a creature now, or a self-animating
-/// activated ability of that source is on the stack and
-/// [`crate::policies::stack_awareness::has_pending_removal`] finds nothing.
-/// CR 602.2a: the ability is owed only until it is
-/// countered, so an answer already on the stack means it is not owed.
-/// The stack half covers the CR 117.3c window between announcement and
-/// resolution, when the source is not yet a creature.
-pub(crate) fn animation_payoff_in_force(state: &GameState, source_id: ObjectId) -> bool {
-    if state
-        .objects
-        .get(&source_id)
-        .is_some_and(|object| object.card_types.core_types.contains(&CoreType::Creature))
-    {
-        return true;
-    }
-    state.stack.iter().any(|entry| match &entry.kind {
-        StackEntryKind::ActivatedAbility {
-            source_id: pending_source,
-            ability,
-        } => {
-            *pending_source == source_id
-                && crate::policies::context::collect_ability_effects(ability)
-                    .into_iter()
-                    .any(effect_animates_self)
-                && !crate::policies::stack_awareness::has_pending_removal(state, entry.id)
-        }
-        _ => false,
-    })
-}
-
 /// True when every effect in `ability`'s chain is a self-scoped continuous
 /// effect whose modifications are only fixed type, color or P/T values, or a
 /// keyword grant that [`keyword_grant_collapses`]. A counter, a granted trigger, or any other
 /// modification makes it false.
-///
-/// [`repeat_changes_source`] compares public characteristics only, so it cannot
-/// see a second granted trigger; this predicate is what exempts those.
 pub(crate) fn repeat_only_resets_characteristics(ability: &AbilityDefinition) -> bool {
     crate::cast_facts::collect_definition_effects(ability)
         .into_iter()
@@ -360,40 +328,101 @@ fn keyword_grant_collapses(keyword: &Keyword) -> bool {
     !keyword.instances_must_coexist() && KeywordTriggerInstaller::triggers_for(keyword).is_empty()
 }
 
-/// CR 613.7 + CR 613.7b: true when resolving `ability` once more would change
-/// the source's public characteristics on the current board. The ability is
-/// resolved on a clone and `snapshot_public_characteristics` is compared, so an
-/// effect that overrode the source's own animation with a later timestamp is
-/// overridden in turn, as a real repeat would do.
-///
-/// False for a source that is not a creature, so a pending animation found by
-/// [`animation_payoff_in_force`]'s stack half still vetoes: resolving the
-/// ability here would make the source a creature and read as a change.
-pub(crate) fn repeat_changes_source(
+/// True when `source_id` is a creature or an activated ability of it is on the
+/// stack, `ability`'s chain only resets characteristics
+/// ([`repeat_only_resets_characteristics`]), and [`settles_alike`] holds for
+/// the board [`settle`]d without the repeat and the board settled with it
+/// resolved first.
+pub(crate) fn repeat_gains_nothing(
     state: &GameState,
     controller: PlayerId,
     source_id: ObjectId,
     ability: &AbilityDefinition,
 ) -> bool {
-    if !state
-        .objects
-        .get(&source_id)
-        .is_some_and(|object| object.card_types.core_types.contains(&CoreType::Creature))
+    let pending: Vec<ObjectId> = state
+        .stack
+        .iter()
+        .filter(|entry| {
+            matches!(
+                &entry.kind,
+                StackEntryKind::ActivatedAbility { source_id: pending_source, .. }
+                    if *pending_source == source_id
+            )
+        })
+        .map(|entry| entry.id)
+        .collect();
+    // Returns before the board is copied.
+    if (pending.is_empty()
+        && !state
+            .objects
+            .get(&source_id)
+            .is_some_and(|object| object.card_types.core_types.contains(&CoreType::Creature)))
+        || !repeat_only_resets_characteristics(ability)
     {
         return false;
     }
-    let mut simulated = state.clone();
-    flush_layers(&mut simulated);
-    let before = simulated.objects[&source_id].snapshot_public_characteristics();
+    let mut before = state.clone();
+    flush_layers(&mut before);
+    let mut after = before.clone();
     let resolved = build_resolved_from_def(ability, source_id, controller);
-    if resolve_ability_chain(&mut simulated, &resolved, &mut Vec::new(), 0).is_err() {
-        return true;
+    if resolve_ability_chain(&mut after, &resolved, &mut Vec::new(), 0).is_err() {
+        return false;
     }
-    flush_layers(&mut simulated);
-    simulated
-        .objects
-        .get(&source_id)
-        .is_none_or(|after| after.snapshot_public_characteristics() != before)
+    flush_layers(&mut after);
+    match (settle(before, &pending), settle(after, &pending)) {
+        (Some(without), Some(with)) => settles_alike(&without, &with, source_id),
+        _ => false,
+    }
+}
+
+/// How many passes [`settle`] makes before it gives up.
+const SETTLE_PASS_LIMIT: usize = 100;
+
+/// CR 117.4 + CR 405.5: `board` at the first priority, reached by every player
+/// passing in succession, at which none of `pending` is on the stack. `None`
+/// when reaching it takes any decision other than a pass, or once it has made
+/// [`SETTLE_PASS_LIMIT`] passes.
+fn settle(mut board: GameState, pending: &[ObjectId]) -> Option<GameState> {
+    for _ in 0..SETTLE_PASS_LIMIT {
+        if !matches!(board.waiting_for, WaitingFor::Priority { .. }) {
+            return None;
+        }
+        if !board.stack.iter().any(|entry| pending.contains(&entry.id)) {
+            return Some(board);
+        }
+        apply_as_current_for_simulation(&mut board, GameAction::PassPriority).ok()?;
+    }
+    None
+}
+
+/// CR 613.7 + CR 613.7b + CR 611.2a: `source_id` has the same public
+/// characteristics on both boards, or is on neither, and every continuous
+/// effect on `with` is also on `without` with every field but its id and
+/// timestamp equal, its duration among them.
+fn settles_alike(without: &GameState, with: &GameState, source_id: ObjectId) -> bool {
+    let characteristics = |board: &GameState| {
+        board
+            .objects
+            .get(&source_id)
+            .map(|object| object.snapshot_public_characteristics())
+    };
+    characteristics(without) == characteristics(with)
+        && with.transient_continuous_effects.iter().all(|effect| {
+            without
+                .transient_continuous_effects
+                .iter()
+                .any(|old| identity_free(old) == identity_free(effect))
+        })
+}
+
+/// `effect` with the id and timestamp each installation mints cleared, so two
+/// installations of the same effect compare equal.
+fn identity_free(effect: &TransientContinuousEffect) -> TransientContinuousEffect {
+    TransientContinuousEffect {
+        id: 0,
+        timestamp: 0,
+        ..effect.clone()
+    }
 }
 
 #[cfg(test)]

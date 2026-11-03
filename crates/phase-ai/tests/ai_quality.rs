@@ -2896,3 +2896,91 @@ fn ai_animates_a_manland_once_per_turn_across_priority_windows() {
         assert_eq!(animations, 1, "{difficulty:?}: animated {animations} times");
     }
 }
+
+/// Synthetic land text.
+const TWO_BODIES: &str = "{1}: This land becomes a 2/2 creature until end of turn. It's still a land.\n{2}: This land becomes a 4/4 creature with flying until end of turn. It's still a land.";
+
+#[test]
+fn production_scorer_rejects_only_an_identical_pending_animation() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let land = scenario
+        .add_land_from_oracle(P0, "Two Bodies", TWO_BODIES)
+        .id();
+    for _ in 0..8 {
+        scenario.add_basic_land(P0, engine::types::mana::ManaColor::Green);
+    }
+    let bolt = scenario
+        .add_spell_to_hand_from_oracle(
+            P1,
+            "Lightning Bolt",
+            true,
+            "Lightning Bolt deals 3 damage to any target.",
+        )
+        .id();
+    scenario.add_basic_land(P1, engine::types::mana::ManaColor::Red);
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.turn_number = 3;
+        state.active_player = P0;
+        state.phase = Phase::PreCombatMain;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+    }
+    let issued: Vec<GameAction> = engine::ai_support::legal_actions(runner.state())
+        .into_iter()
+        .filter(|action| {
+            matches!(action, GameAction::ActivateAbility { source_id, .. } if *source_id == land)
+        })
+        .collect();
+    let [identical, different] = &issued[..] else {
+        panic!("reach guard: the engine issues both animations, got {issued:?}");
+    };
+    runner
+        .act(identical.clone())
+        .expect("the engine accepts its own action");
+    runner.act(GameAction::PassPriority).expect("P0 passes");
+    {
+        runner.cast(bolt).target_player(P0).commit();
+    }
+    runner.act(GameAction::PassPriority).expect("P1 passes");
+    assert_eq!(
+        runner
+            .state()
+            .stack
+            .iter()
+            .map(|entry| entry.controller)
+            .collect::<Vec<_>>(),
+        vec![P0, P1],
+        "reach guard: the bolt sits above the pending animation"
+    );
+    let issued_now = engine::ai_support::legal_actions(runner.state());
+    assert!(
+        issued_now.contains(identical) && issued_now.contains(different),
+        "reach guard: the engine still issues both animations"
+    );
+    for difficulty in [
+        AiDifficulty::Easy,
+        AiDifficulty::Medium,
+        AiDifficulty::VeryHard,
+    ] {
+        let config = create_config(difficulty, Platform::Native);
+        let scored = phase_ai::score_candidates(runner.state(), P0, &config);
+        let score_of = |action: &GameAction| {
+            scored
+                .iter()
+                .find(|(scored_action, _)| scored_action == action)
+                .map(|(_, score)| *score)
+        };
+        assert_eq!(
+            score_of(identical),
+            Some(f64::NEG_INFINITY),
+            "{difficulty:?}: the identical pending animation vetoes a repeat"
+        );
+        assert!(
+            score_of(different).is_some_and(f64::is_finite),
+            "{difficulty:?}: a different body stays eligible, got {scored:?}"
+        );
+    }
+}
