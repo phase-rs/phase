@@ -1409,6 +1409,13 @@ fn a_moldervine_altar_of_the_brood_period_is_counted_to_the_casters_library() {
     };
     assert_eq!(schema.iteration_count, IterationCount::Fixed(9));
     assert_eq!(schema.deliverable_capacity, 9);
+    let after = taken(state, 9);
+    assert_eq!(
+        [0, 1].map(|seat| after.players[seat].library.len()),
+        [0, 0],
+        "the take draws P0's whole library"
+    );
+    assert!(after.game_end.is_none() && eliminated(&after).is_empty());
 }
 
 /// CR 732.1b: once both rotations of the Altar + Gravecrawler period are named, each later cycle
@@ -3284,6 +3291,87 @@ fn a_hellkite_charger_period_is_offered_at_its_next_combat_and_taken() {
             "{mode:?}"
         );
     }
+}
+
+/// CR 506.1 + CR 508.1a + CR 613.4c + CR 704.5a + CR 732.2a: beside Moraug, Fury of Akoum ("Each
+/// creature you control gets +1/+0 for each time it has attacked this turn."), Hellkite Charger
+/// wearing Bear Umbra deals one more damage each combat its period adds, so the period is offered
+/// at the first count whose growing damage reaches P1's life, with P0 the predicted winner, and a
+/// take of that count ends the game.
+#[test]
+fn a_hellkite_charger_period_beside_moraug_is_counted_over_its_growing_damage_and_taken() {
+    let db = shared_card_db().expect("card db");
+    for mode in [LoopDetectionMode::Interactive, LoopDetectionMode::On] {
+        let (mut runner, charger) = charger_board(7, true, &["Moraug, Fury of Akoum"], mode, db);
+        charger_until(
+            &mut runner,
+            charger,
+            |_| true,
+            |state| is_offer(state) || combats_begun(state) > 6,
+        );
+        let state = runner.state();
+        let (span, count) = offer_of(state);
+        assert_eq!(
+            (span.reach, span.cause),
+            (PeriodReach::Combat, NamingCause::TriggerTop),
+            "{mode:?}"
+        );
+        // The Charger has attacked in each combat begun: 5 printed, 2 from Bear Umbra, and one
+        // per attack from Moraug.
+        let first = 7 + combats_begun(state) as i32;
+        assert_eq!(state.objects[&charger].power, Some(first), "{mode:?}");
+        let life = state.players[1].life;
+        let n = (1..)
+            .find(|&n: &i32| (0..n).map(|k| first + k).sum::<i32>() >= life)
+            .expect("the damage reaches P1's life") as u32;
+        assert_eq!(fixed(&count), n, "{mode:?}");
+        let WaitingFor::LoopShortcut {
+            predicted_winner, ..
+        } = &state.waiting_for
+        else {
+            unreachable!("offer_of read the offer");
+        };
+        assert_eq!(*predicted_winner, Some(P0), "{mode:?}");
+
+        let events = take(&mut runner, n);
+        assert_eq!(
+            runner.state().waiting_for,
+            WaitingFor::GameOver { winner: Some(P0) },
+            "{mode:?}"
+        );
+        assert!(
+            events.contains(&GameEvent::GameOver { winner: Some(P0) }),
+            "{mode:?}"
+        );
+    }
+}
+
+/// CR 508.1a + CR 510.1a + CR 613.4c: Moraug, Fury of Akoum's "+1/+0 for each time it has
+/// attacked this turn" counts the attack being declared (Scryfall ruling: "The first time a
+/// creature attacks in a turn, the +1/+0 bonus will apply to the combat damage it deals during
+/// that combat."), so Hellkite Charger wearing Bear Umbra deals 8, 9 and 10 in its first three
+/// combats.
+#[test]
+fn moraug_counts_the_attack_being_declared_in_the_damage_it_deals() {
+    let db = shared_card_db().expect("card db");
+    let (mut runner, charger) = charger_board(
+        7,
+        true,
+        &["Moraug, Fury of Akoum"],
+        LoopDetectionMode::Off,
+        db,
+    );
+    let mut lives = vec![runner.state().players[1].life];
+    for combat in 2..=4 {
+        charger_until(
+            &mut runner,
+            charger,
+            |_| true,
+            |state| combats_begun(state) == combat && charger_trigger_top(state),
+        );
+        lives.push(runner.state().players[1].life);
+    }
+    assert_eq!(lives, [200, 192, 183, 173]);
 }
 
 /// Row 1's trigger-top frames at its second and third combats, with `other` on both battlefields.
@@ -6448,9 +6536,7 @@ fn assert_refused(
 /// colorless Wizard Soldier creature token named Cadet. Then creatures you control gain haste
 /// until end of turn." mints a token class, so the reproduced-token arm answers its pairs and
 /// refuses both on the board; Shivan Dragon's "{R}: This creature gets +1/+0 until end of turn."
-/// spends Mountains toward no axis; Hellkite Charger beside Moraug, Fury of Akoum ("Each
-/// creature you control gets +1/+0 for each time it has attacked this turn.") deals more damage
-/// each combat, so no constant per-cycle loss counts it.
+/// spends Mountains toward no axis.
 #[test]
 fn periods_the_counted_road_does_not_take_stay_refused() {
     assert_refused(
@@ -6480,15 +6566,6 @@ fn periods_the_counted_road_does_not_take_stay_refused() {
             other_ability,
         ),
         &[OfferRefusal::NoAxis, OfferRefusal::IllegalReplayedPlay],
-    );
-    assert_refused(
-        "Moraug, Fury of Akoum",
-        &charger_hand(7, true, &["Moraug, Fury of Akoum"]),
-        &[
-            OfferRefusal::Cover(ObjectGrowthVerdict::ResourceRecurrence(None)),
-            OfferRefusal::GrowingLoss,
-            OfferRefusal::NoRecurrence,
-        ],
     );
 }
 
@@ -7541,9 +7618,11 @@ fn a_moldervine_altar_of_the_brood_period_previews_its_mills_and_draws() {
 /// turn after this one.") sacrificing the five Thopters Thopter Assembly ("At the beginning of
 /// your upkeep, if you control no Thopters other than this creature, return this creature to its
 /// owner's hand and create five 1/1 colorless Thopter artifact creature tokens with flying.")
-/// makes each turn: the replay pays the Sieve's cost with the Thopters its own repetition made.
+/// makes each turn: the replay answers the Sieve's sacrifice from the Thopters the span recorded,
+/// so no span stops at that prompt — each stops later, at an activation its repetition cannot pay
+/// or at a cleanup discard it recorded no answer for (CR 514.1).
 #[test]
-fn a_time_sieve_thopter_assembly_period_pays_with_the_thopters_it_makes() {
+fn a_time_sieve_thopter_assembly_replay_answers_the_recorded_sacrifice() {
     let Some(db) = shared_card_db() else { return };
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
@@ -7560,10 +7639,6 @@ fn a_time_sieve_thopter_assembly_period_pays_with_the_thopters_it_makes() {
     let mut verdicts = Vec::new();
     while runner.state().turn_number <= start + 8 {
         let state = runner.state();
-        if is_offer(state) {
-            assert_eq!(road(state), Some(OfferRoad::RecordedPeriod));
-            return;
-        }
         let priority = matches!(state.waiting_for, WaitingFor::Priority { player } if player == P0)
             && state.stack.is_empty();
         if priority {
@@ -7622,5 +7697,7 @@ fn a_time_sieve_thopter_assembly_period_pays_with_the_thopters_it_makes() {
         };
         act(&mut runner, action);
     }
-    panic!("the period is offered; verdicts {verdicts:?}");
+    let mut expected = vec![Err(OfferRefusal::IllegalReplayedPlay); 5];
+    expected.push(Err(OfferRefusal::UnanswerablePrompt));
+    assert_eq!(verdicts, expected);
 }

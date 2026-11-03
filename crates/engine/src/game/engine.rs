@@ -3665,6 +3665,8 @@ fn certified_bounded_cycle_offer<'a>(
                 seat_life_charge: Vec::new(),
                 cleanup: None,
                 instructed_mills: None,
+                growth: Default::default(),
+                seat_life_charge_growth: Vec::new(),
             },
             period_frames,
         ));
@@ -3747,6 +3749,8 @@ fn certified_bounded_cycle_offer<'a>(
                     seat_life_charge: Vec::new(),
                     cleanup: None,
                     instructed_mills: None,
+                    growth: Default::default(),
+                    seat_life_charge_growth: Vec::new(),
                 },
                 period_frames,
             )
@@ -8635,15 +8639,22 @@ fn try_offer_object_growth_shortcut(
 }
 
 /// CR 704.5a + CR 732.2a: the threshold authority asked on one replayed cycle of a recorded loss
-/// period — `frames` its priority frames in order, `choices` the answers it recorded, and
-/// `cleanup` the hand a turn-cycle period carries into each cleanup (CR 514.1).
+/// period — `frames` its priority frames in order, `choices` the answers it recorded,
+/// `cleanup` the hand a turn-cycle period carries into each cleanup (CR 514.1), and `growth`
+/// what each repetition adds to the one before it (`resource::repetition_growth`), in which case
+/// `frames` are the offer's first repetition's.
 pub(crate) fn replay_bounded_offer(
     state: &GameState,
     caster: PlayerId,
     frames: &[GameState],
     choices: &[crate::analysis::decision_template::PinnedDecision],
     cleanup: Option<crate::analysis::resource::CleanupPair>,
+    growth: (
+        crate::analysis::resource::ResourceVector,
+        Vec<(PlayerId, i64)>,
+    ),
 ) -> Result<Option<super::period_confirm::BoundedOfferParts>, OfferRefusal> {
+    let (growth, seat_life_charge_growth) = growth;
     let frames: Vec<&GameState> = frames.iter().collect();
     // CR 732.1b: fewer than two frames is a period that did not come round.
     let (&current, window) = frames.split_last().ok_or(OfferRefusal::NoRecurrence)?;
@@ -8656,6 +8667,8 @@ pub(crate) fn replay_bounded_offer(
         seat_life_charge: Vec::new(),
         cleanup,
         instructed_mills: crate::analysis::resource::period_instructed_mills(state, prior, current),
+        growth,
+        seat_life_charge_growth,
     };
     // CR 732.2a: the points are the game choices the replay answered.
     let points = pinned_decisions_to_points(choices, state, caster)
@@ -8808,6 +8821,8 @@ pub(crate) fn counted_offer(
                 seat_life_charge: Vec::new(),
                 cleanup: None,
                 instructed_mills: None,
+                growth: Default::default(),
+                seat_life_charge_growth: Vec::new(),
             },
         )),
     };

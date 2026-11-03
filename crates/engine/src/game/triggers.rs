@@ -8259,8 +8259,11 @@ fn group_is_order_independent(state: &GameState, group: &[PendingTriggerContext]
 
     // C2 (fail-closed AST walker): two distinct soundness axes (event context,
     // sibling-mutable) — consumed ONLY by the gated-C2 distinct-event term.
-    let c2_order_independent = !crate::game::ability_scan::ability_uses_event_context(&reference)
-        && !crate::game::ability_scan::ability_reads_sibling_mutable(&reference);
+    let c2_order_independent =
+        !crate::game::ability_scan::ability_uses_event_context(
+            &reference,
+            crate::game::ability_scan::ScanMode::Conservative,
+        ) && !crate::game::ability_scan::ability_reads_sibling_mutable(&reference);
     rest.iter().all(|ctx| {
         let t = &ctx.pending;
         ctx.firing().is_delayed() == first.firing().is_delayed()

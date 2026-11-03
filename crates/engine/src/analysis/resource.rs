@@ -932,6 +932,14 @@ pub struct PeriodicDelta {
     /// period's draws could not be told apart, and the whole library loss is then read as draws.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructed_mills: Option<BTreeMap<PlayerId, InstructedMill>>,
+    /// CR 732.2a: what each repetition adds to the one before it on `delta`; zero for a constant
+    /// period. Read only through [`PeriodicDelta::repetition`].
+    #[serde(default, skip_serializing_if = "ResourceVector::is_zero")]
+    pub growth: ResourceVector,
+    /// CR 119.3 + CR 704.3: what each repetition adds to the one before it on
+    /// `seat_life_charge`, per seat, signed. Read only through [`PeriodicDelta::repetition`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub seat_life_charge_growth: Vec<(PlayerId, i64)>,
 }
 
 /// CR 701.17a + CR 701.17b: one seat's instructed mill per repetition, beside the library it
@@ -1063,7 +1071,94 @@ impl CleanupPair {
 /// takes it, `None` when unknown.
 type SeatDeparture = (u32, Option<usize>);
 
+/// CR 732.2a: what the second of two consecutive replayed repetitions adds to the first, given
+/// each one's frames (oldest first): on the endpoint delta, and on each seat's frame-wise life
+/// loss (CR 704.3), signed and sorted by seat.
+pub(crate) fn repetition_growth(
+    first: &[&GameState],
+    second: &[&GameState],
+) -> (ResourceVector, Vec<(PlayerId, i64)>) {
+    let charge = |frames: &[&GameState]| -> (ResourceVector, BTreeMap<PlayerId, i64>) {
+        match (frames.first(), frames.last()) {
+            (Some(&start), Some(&end)) => {
+                let delta = ResourceVector::period(start, end);
+                let frame_wise = delta.with_frame_wise_life_loss(frames).life;
+                (delta, frame_wise)
+            }
+            _ => Default::default(),
+        }
+    };
+    let (first_delta, first_loss) = charge(first);
+    let (second_delta, second_loss) = charge(second);
+    // Frame-wise entries are negative losses, so the loss grows by the first less the second.
+    let loss_growth = map_delta(&second_loss, &first_loss).into_iter().collect();
+    (
+        ResourceVector::delta(&first_delta, &second_delta),
+        loss_growth,
+    )
+}
+
 impl PeriodicDelta {
+    /// CR 732.2a: repetition `k` of the offer, counted from 1 at its asking frame — the first
+    /// repetition's charge plus `k − 1` growths. Every reader that turns this signature into a
+    /// count's consequence reads it here.
+    pub fn repetition(&self, k: u32) -> Cow<'_, PeriodicDelta> {
+        if self.growth.is_zero() && self.seat_life_charge_growth.is_empty() {
+            return Cow::Borrowed(self);
+        }
+        let steps = i64::from(k.saturating_sub(1));
+        let mut charge: BTreeMap<PlayerId, i64> = self.seat_life_charge.iter().copied().collect();
+        for &(seat, step) in &self.seat_life_charge_growth {
+            let slot = charge.entry(seat).or_insert(0);
+            *slot = slot.saturating_add(step.saturating_mul(steps));
+        }
+        Cow::Owned(PeriodicDelta {
+            delta: self.delta.advanced_by(&self.growth, steps),
+            // CR 119.3: a magnitude, so a seat it no longer charges leaves the divisor.
+            seat_life_charge: charge.into_iter().filter(|&(_, m)| m > 0).collect(),
+            ..self.clone()
+        })
+    }
+
+    /// CR 732.2a: what the first `n` repetitions move together — the sum of
+    /// [`PeriodicDelta::repetition`]`(k).delta` for `k` in `1..=n`, in closed form.
+    pub fn total_over(&self, n: u32) -> ResourceVector {
+        let n = i64::from(n);
+        ResourceVector::default()
+            .advanced_by(&self.delta, n)
+            .advanced_by(&self.growth, n.saturating_mul(n - 1) / 2)
+    }
+
+    /// CR 704.5b / CR 704.5c: the first repetition after which an axis whose per-repetition
+    /// magnitude `rate` reads has moved past `headroom`. An axis that does not grow is the one
+    /// division; a growing one is walked repetition by repetition, at most `horizon` of them.
+    fn first_rate_crossing(
+        &self,
+        headroom: i64,
+        horizon: u32,
+        rate: impl Fn(&PeriodicDelta) -> i64,
+    ) -> Option<u32> {
+        let first = rate(&self.repetition(1));
+        if rate(&self.repetition(2)) == first {
+            return ResourceVector::narrowed_repetitions(&[(headroom, first)])
+                .and_then(|strict| u32::try_from(strict.saturating_add(1)).ok());
+        }
+        let mut moved = 0i64;
+        (1..=horizon).find(|&k| {
+            moved = moved.saturating_add(rate(&self.repetition(k)));
+            moved > headroom.max(0)
+        })
+    }
+
+    /// CR 704.5c: the first repetition after which `seat`, holding `held` poison counters, holds
+    /// ten or more, or `None` when no repetition up to `horizon` gives it that many.
+    pub fn first_poison_crossing(&self, seat: PlayerId, held: u32, horizon: u32) -> Option<u32> {
+        self.first_rate_crossing(9 - i64::from(held), horizon, |at| {
+            at.delta.poison.get(&seat).copied().unwrap_or(0)
+        })
+        .filter(|&crossing| crossing <= horizon)
+    }
+
     /// [`PeriodicDelta::conforms_in`] over the WHOLE population — the degenerate scope, and the
     /// one the existing battery quantifies over.
     ///
@@ -1353,14 +1448,20 @@ impl PeriodicDelta {
         bound: ChargeBound,
         lead: AnnouncedLead<'a>,
     ) -> impl Iterator<Item = DeclaredLifeCharge> + 'a {
-        let charge_on_seat = |charges: &[(PlayerId, i64)]| {
+        let charge_on_seat = move |charges: &[(PlayerId, i64)]| {
             charges
                 .iter()
                 .find(|(charged, _)| *charged == seat)
                 .map_or(0, |(_, magnitude)| *magnitude)
         };
-        let floor = charge_on_seat(self.delta.seat_life_charges(&[]).as_slice());
-        let reserved = charge_on_seat(self.seat_life_charge.as_slice());
+        // CR 732.2a: each repetition's own floor and reserved charge.
+        let charges_at = move |iteration: IterationIndex| {
+            let at = self.repetition(iteration.saturating_add(1));
+            (
+                charge_on_seat(at.delta.seat_life_charges(&[]).as_slice()),
+                charge_on_seat(at.seat_life_charge.as_slice()),
+            )
+        };
         // CR 704.5a: the seats the bound reserved headroom for. No slot reaches a seat outside
         // them, and `PeriodicDelta::conforms` holds such a seat's loss to the observed one.
         let in_domain = self.declarable_victims.contains(&seat);
@@ -1386,6 +1487,7 @@ impl PeriodicDelta {
         let resolves_own = !one_template && slots.iter().any(|&(.., leads)| leads == 0);
         let resolves_behind = slots.iter().any(|&(.., leads)| leads > 0);
         (0..).map(move |iteration: IterationIndex| {
+            let (floor, reserved) = charges_at(iteration);
             // With no charged slot there is no pin to read and every repetition is alike.
             let resolve_at = |template: Option<&DecisionTemplate>, index: IterationIndex| {
                 template
@@ -1706,32 +1808,29 @@ impl PeriodicDelta {
             remaining_life,
             horizon,
         );
-        // The strict answer is the largest count after which no axis has crossed, so the
-        // crossing is the next one — `narrowed_repetitions` is the same division
-        // `seat_headroom_bound` performs, over these two axes' own headrooms.
+        // Each non-life axis crosses where `first_rate_crossing` says, over its own headroom.
         // CR 701.17a + CR 121.1 + CR 704.5b: milling an empty library loses nothing, so the
         // library crosses only on a draw; each repetition mills first, so the draw that finds it
         // empty comes in the repetition the whole per-repetition loss exhausts it.
-        let library_loss = -self.delta.library_delta.get(&p.id).copied().unwrap_or(0);
         let mills = self
             .instructed_mills
             .as_ref()
             .and_then(|mills| mills.get(&p.id))
             .map_or(0, |mill| mill.per_repetition);
-        let library_rate = if library_loss - mills > 0 {
-            library_loss
-        } else {
-            0
+        let library_rate = |at: &PeriodicDelta| {
+            let library_loss = -at.delta.library_delta.get(&p.id).copied().unwrap_or(0);
+            if library_loss - mills > 0 {
+                library_loss
+            } else {
+                0
+            }
         };
-        let non_life = ResourceVector::narrowed_repetitions(&[
-            (
-                9 - i64::from(p.poison_counters),
-                self.delta.poison.get(&p.id).copied().unwrap_or(0),
-            ),
-            (state.library_of(p.id).len() as i64, library_rate),
-        ])
-        .and_then(|strict| u32::try_from(strict.saturating_add(1)).ok());
-        let crossing = [life, non_life].into_iter().flatten().min()?;
+        let poison = self.first_rate_crossing(9 - i64::from(p.poison_counters), horizon, |at| {
+            at.delta.poison.get(&p.id).copied().unwrap_or(0)
+        });
+        let library =
+            self.first_rate_crossing(state.library_of(p.id).len() as i64, horizon, library_rate);
+        let crossing = [life, poison, library].into_iter().flatten().min()?;
         let rank = (life == Some(crossing))
             .then(|| {
                 self.departure_rank(
@@ -1785,7 +1884,15 @@ impl PeriodicDelta {
                     .map(|(_, magnitude)| (*magnitude).max(0))
                     .sum()
             });
-        if -self.delta.life.get(&p.id).copied().unwrap_or(0) > aimed_by_period {
+        if -self
+            .repetition(crossing)
+            .delta
+            .life
+            .get(&p.id)
+            .copied()
+            .unwrap_or(0)
+            > aimed_by_period
+        {
             return None;
         }
         let netted: i64 = self
@@ -2535,6 +2642,72 @@ impl ResourceVector {
             sac_triggers: after.sac_triggers - before.sac_triggers,
             counters: map_delta(&before.counters, &after.counters),
             generic_triggers: map_delta(&before.generic_triggers, &after.generic_triggers),
+        }
+    }
+
+    /// Whether every component is zero.
+    pub fn is_zero(&self) -> bool {
+        *self == ResourceVector::default()
+    }
+
+    /// `self` plus `times` copies of `step`, component by component, keeping
+    /// [`ResourceVector::delta`]'s convention that a zero map entry is absent.
+    pub(crate) fn advanced_by(&self, step: &ResourceVector, times: i64) -> ResourceVector {
+        fn sum<K: Ord + Copy>(
+            base: &BTreeMap<K, i64>,
+            step: &BTreeMap<K, i64>,
+            times: i64,
+        ) -> BTreeMap<K, i64> {
+            let mut out = base.clone();
+            for (&key, &rate) in step {
+                let slot = out.entry(key).or_insert(0);
+                *slot = slot.saturating_add(rate.saturating_mul(times));
+            }
+            out.retain(|_, value| *value != 0);
+            out
+        }
+        let mut mana = self.mana;
+        for (slot, rate) in mana.iter_mut().zip(step.mana) {
+            *slot = slot.saturating_add(rate.saturating_mul(times));
+        }
+        ResourceVector {
+            mana,
+            life: sum(&self.life, &step.life, times),
+            damage_dealt: sum(&self.damage_dealt, &step.damage_dealt, times),
+            library_delta: sum(&self.library_delta, &step.library_delta, times),
+            poison: sum(&self.poison, &step.poison, times),
+            tokens_created: self
+                .tokens_created
+                .saturating_add(step.tokens_created.saturating_mul(times)),
+            cards_drawn: self
+                .cards_drawn
+                .saturating_add(step.cards_drawn.saturating_mul(times)),
+            casts_this_step: self
+                .casts_this_step
+                .saturating_add(step.casts_this_step.saturating_mul(times)),
+            landfall_triggers: self
+                .landfall_triggers
+                .saturating_add(step.landfall_triggers.saturating_mul(times)),
+            combat_phases: self
+                .combat_phases
+                .saturating_add(step.combat_phases.saturating_mul(times)),
+            extra_turns: self
+                .extra_turns
+                .saturating_add(step.extra_turns.saturating_mul(times)),
+            death_triggers: self
+                .death_triggers
+                .saturating_add(step.death_triggers.saturating_mul(times)),
+            etb_triggers: self
+                .etb_triggers
+                .saturating_add(step.etb_triggers.saturating_mul(times)),
+            ltb_triggers: self
+                .ltb_triggers
+                .saturating_add(step.ltb_triggers.saturating_mul(times)),
+            sac_triggers: self
+                .sac_triggers
+                .saturating_add(step.sac_triggers.saturating_mul(times)),
+            counters: sum(&self.counters, &step.counters, times),
+            generic_triggers: sum(&self.generic_triggers, &step.generic_triggers, times),
         }
     }
 
@@ -6301,7 +6474,10 @@ fn set_aside_unread_trigger_events(copy: &mut GameState, prior: &GameState) {
             },
         ) = (&before.kind, &mut after.kind)
         {
-            if !crate::game::ability_scan::ability_uses_event_context(ability) {
+            if !crate::game::ability_scan::ability_uses_event_context(
+                ability,
+                crate::game::ability_scan::ScanMode::LoopFirewall,
+            ) {
                 trigger_event.clone_from(event);
             }
         }
@@ -11702,7 +11878,10 @@ mod tests {
             let ability =
                 lose_life_targeting(QuantityExpr::Fixed { value: 1 }, opp_typed(properties));
             assert!(
-                crate::game::ability_scan::ability_uses_event_context(&ability),
+                crate::game::ability_scan::ability_uses_event_context(
+                    &ability,
+                    crate::game::ability_scan::ScanMode::Conservative
+                ),
                 "the Typed arm keeps event:true"
             );
             assert!(
@@ -17875,6 +18054,8 @@ mod tests {
             seat_life_charge: published,
             cleanup: None,
             instructed_mills: None,
+            growth: Default::default(),
+            seat_life_charge_growth: Vec::new(),
         };
         let points = [seat_point(&slot, &[0, 1])];
         let observed = seat_schedule_declaration(&[(&slot, &[1])]);
@@ -17956,6 +18137,8 @@ mod tests {
                 .seat_life_charges(&dipping_charges),
             cleanup: None,
             instructed_mills: None,
+            growth: Default::default(),
+            seat_life_charge_growth: Vec::new(),
         };
         assert_eq!(
             dipping.seat_life_charge,
@@ -18016,6 +18199,8 @@ mod tests {
                     .collect(),
                 cleanup: None,
                 instructed_mills: None,
+                growth: Default::default(),
+                seat_life_charge_growth: Vec::new(),
             };
             let DeclaredLifeCharge { net, dip } = nth_charge(
                 &period,
@@ -18116,6 +18301,8 @@ mod tests {
             seat_life_charge: swap_published,
             cleanup: None,
             instructed_mills: None,
+            growth: Default::default(),
+            seat_life_charge_growth: Vec::new(),
         };
         let swap_points = [seat_point(&s1, &[0, 1]), seat_point(&s2, &[0, 1])];
         let swap_observed = seat_schedule_declaration(&[(&s1, &[0]), (&s2, &[1])]);
@@ -18178,6 +18365,8 @@ mod tests {
             seat_life_charge: life_loss_delta(&[(0, 2), (1, 2)]).seat_life_charges(&gain_charges),
             cleanup: None,
             instructed_mills: None,
+            growth: Default::default(),
+            seat_life_charge_growth: Vec::new(),
         };
         let away = seat_schedule_declaration(&[(&g, &[1])]);
         let kept = seat_schedule_declaration(&[(&g, &[0])]);
@@ -18221,6 +18410,8 @@ mod tests {
             seat_life_charge: vec![(p0, 1)],
             cleanup: None,
             instructed_mills: None,
+            growth: Default::default(),
+            seat_life_charge_growth: Vec::new(),
         };
         assert_eq!(
             nth_charge(&even, p0, None, None, &[], 0, &board, ChargeBound::Ceiling),
@@ -18279,6 +18470,8 @@ mod tests {
             seat_life_charge: frame_wise.seat_life_charges(&two_slots),
             cleanup: None,
             instructed_mills: None,
+            growth: Default::default(),
+            seat_life_charge_growth: Vec::new(),
         };
         let landing_points = [seat_point(&s1, &[0, 1]), seat_point(&s2, &[1])];
         let both_on_p1 = seat_schedule_declaration(&[(&s1, &[1]), (&s2, &[1])]);
@@ -18327,6 +18520,8 @@ mod tests {
             seat_life_charge: frame_wise.seat_life_charges(&one_slot),
             cleanup: None,
             instructed_mills: None,
+            growth: Default::default(),
+            seat_life_charge_growth: Vec::new(),
         };
         assert_eq!(
             leaving.declarable_victims,
@@ -20875,6 +21070,8 @@ mod tests {
             seat_life_charge: vec![(PlayerId(1), 3)],
             cleanup: None,
             instructed_mills: None,
+            growth: Default::default(),
+            seat_life_charge_growth: Vec::new(),
         };
         let json = serde_json::to_string(&populated)
             .expect("a populated PeriodicDelta must serialize (engine-wasm PANICS otherwise)");
@@ -21091,6 +21288,8 @@ mod tests {
                 seat_life_charge: vec![],
                 cleanup: None,
                 instructed_mills: None,
+                growth: Default::default(),
+                seat_life_charge_growth: Vec::new(),
             })),
             shortened_by: None,
             published_declaration: None,
@@ -28540,6 +28739,90 @@ mod tests {
         v
     }
 
+    /// A period whose first repetition costs P1 `first` life and each later one `step` more.
+    fn growing_loss(first: i64, step: i64) -> PeriodicDelta {
+        PeriodicDelta {
+            delta: victim_life(&[(1, -first)]),
+            seat_life_charge: vec![(PlayerId(1), first)],
+            growth: victim_life(&[(1, -step)]),
+            seat_life_charge_growth: vec![(PlayerId(1), step)],
+            ..PeriodicDelta::default()
+        }
+    }
+
+    /// CR 704.5a + CR 732.2a: a growing loss crosses where its arithmetic stream first reaches
+    /// the seat's life — 9 + 10 + … + 21 = 195 ≥ 192 at the thirteenth repetition — while the
+    /// same period without its growth crosses at ⌈192 / 9⌉ = 22.
+    #[test]
+    fn a_growing_loss_crosses_where_its_stream_reaches_the_life_total() {
+        let state = GameState::new_two_player(7);
+        let crossing = |period: &PeriodicDelta| {
+            PeriodicDelta::first_life_crossing(
+                period.declared_seat_life_charges(
+                    PlayerId(1),
+                    None,
+                    None,
+                    &[],
+                    &state,
+                    ChargeBound::Ceiling,
+                    AnnouncedLead::None,
+                ),
+                192,
+                400,
+            )
+        };
+        assert_eq!(crossing(&growing_loss(9, 1)), Some(13));
+        assert_eq!(crossing(&growing_loss(9, 0)), Some(22));
+    }
+
+    /// CR 732.2a: repetition k of a growing period conforms to its own charge, not to the one
+    /// before it.
+    #[test]
+    fn a_growing_repetition_conforms_to_its_own_charge() {
+        let period = growing_loss(9, 1);
+        let seats = BTreeSet::from([PlayerId(0), PlayerId(1)]);
+        assert!(period
+            .repetition(3)
+            .conforms_in(&victim_life(&[(1, -11)]), &[], &seats));
+        assert!(!period
+            .repetition(3)
+            .conforms_in(&victim_life(&[(1, -10)]), &[], &seats));
+    }
+
+    /// CR 704.5c: poison rising 1, 2, 3, 4 a repetition reaches ten at the fourth; a constant one
+    /// a repetition at the tenth; and a horizon short of the crossing names none.
+    #[test]
+    fn a_growing_poison_rate_crosses_where_its_sum_reaches_ten() {
+        let poison = |step: i64| PeriodicDelta {
+            delta: ResourceVector {
+                poison: BTreeMap::from([(PlayerId(1), 1)]),
+                ..ResourceVector::default()
+            },
+            growth: ResourceVector {
+                poison: BTreeMap::from([(PlayerId(1), step)]),
+                ..ResourceVector::default()
+            },
+            ..PeriodicDelta::default()
+        };
+        assert_eq!(poison(1).first_poison_crossing(PlayerId(1), 0, 20), Some(4));
+        assert_eq!(poison(1).first_poison_crossing(PlayerId(1), 0, 3), None);
+        assert_eq!(
+            poison(0).first_poison_crossing(PlayerId(1), 0, 20),
+            Some(10)
+        );
+    }
+
+    /// CR 732.2a: what the first n repetitions move together is the sum of each one's charge.
+    #[test]
+    fn a_growing_period_totals_the_sum_of_its_repetitions() {
+        let period = growing_loss(9, 1);
+        let summed = (1..=4).fold(ResourceVector::default(), |total, k| {
+            total.advanced_by(&period.repetition(k).delta, 1)
+        });
+        assert_eq!(period.total_over(4), summed);
+        assert_eq!(period.total_over(4), victim_life(&[(1, -42)]));
+    }
+
     /// `domain` is the CR 704.5a seat set the bound reserved for. Every row states it, so no
     /// row inherits a domain from a default and the out-of-domain axis is asserted only where
     /// it is the subject.
@@ -28556,6 +28839,8 @@ mod tests {
             seat_life_charge: Vec::new(),
             cleanup: None,
             instructed_mills: None,
+            growth: Default::default(),
+            seat_life_charge_growth: Vec::new(),
         }
     }
 

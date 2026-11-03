@@ -3734,16 +3734,19 @@ fn scan_target_filter(x: &TargetFilter, ctx: FilterReadContext, mode: ScanMode) 
         // `sibling: mode == Conservative` relaxation of this arm would silently turn
         // every delegating aggregate into a false certificate.
         TargetFilter::Typed(tf) => {
-            // CR 732.2a: a mode-divergent arm. `event` stays unconditionally true
-            // (byte-preserved).
-            // Under `Conservative` `sibling` stays true (byte-identical over-veto);
-            // under `LoopFirewall` it is precise — `props.sibling` is true only if a
+            // CR 732.2a: a mode-divergent arm.
+            // Under `Conservative` `event` and `sibling` stay true (byte-identical over-veto);
+            // under `LoopFirewall` each is precise — `props.sibling` is true only if a
             // property/controller genuinely reads the board (fail-closed), false for
             // a bare type/controller predicate (the canary's untap-all
-            // `Typed{Creature}` relaxes, permitting the offer).
+            // `Typed{Creature}` relaxes, permitting the offer), and `props.event` only if
+            // a property/controller reads the trigger (CR 603.4).
             let props = typed_filter_axes(tf, mode);
             Axes {
-                event: true,
+                event: match mode {
+                    ScanMode::Conservative => true,
+                    ScanMode::LoopFirewall => props.event,
+                },
                 sibling: match mode {
                     ScanMode::Conservative => true,
                     ScanMode::LoopFirewall => props.sibling,
@@ -5074,7 +5077,6 @@ fn scan_filter_prop(x: &FilterProp, mode: ScanMode) -> Axes {
         | FilterProp::AttachedTo { to: AttachmentReferent::DeclaredTarget { .. } }
         | FilterProp::Another
         | FilterProp::Unpaired
-        | FilterProp::OtherThanTriggerObject
         | FilterProp::HasColor { .. }
         | FilterProp::PowerGTSource
         | FilterProp::ColorCount { .. }
@@ -5107,7 +5109,6 @@ fn scan_filter_prop(x: &FilterProp, mode: ScanMode) -> Axes {
         | FilterProp::AttackedOrBlockedThisTurn
         | FilterProp::FaceDown
         | FilterProp::Transformed
-        | FilterProp::CouldBeTargetedByTriggeringSpell
         | FilterProp::HasXInManaCost
         | FilterProp::HasXInActivationCost
         | FilterProp::WasKicked
@@ -5123,6 +5124,11 @@ fn scan_filter_prop(x: &FilterProp, mode: ScanMode) -> Axes {
         | FilterProp::SharesCreatureTypeWithCommander
         | FilterProp::Other { .. } => Axes::NONE,
         FilterProp::EnteredThisTurn => Axes::history_of(HistoryMember::TurnNumber),
+        // CR 608.2k: each matches against the object or spell its trigger event named.
+        FilterProp::OtherThanTriggerObject | FilterProp::CouldBeTargetedByTriggeringSpell => Axes {
+            event: true,
+            ..Axes::NONE
+        },
 
         // --- QuantityExpr-bearing: recurse so `Ref(LifeTotal)` / `PlayerCounter`
         // thresholds surface the projected axis (CR 119 / CR 122.1). Finding A:
@@ -5671,9 +5677,9 @@ pub(crate) fn ability_reads_projected_resource(ability: &ResolvedAbility) -> boo
 }
 
 /// Axis 1: does this resolved ability read the concrete triggering-event /
-/// cost-paid-object context? (CR 603.4; `game::triggers` ordering.)
-pub(crate) fn ability_uses_event_context(ability: &ResolvedAbility) -> bool {
-    resolved_ability_axes(ability, ScanMode::Conservative).event
+/// cost-paid-object context? (CR 603.4; `game::triggers` ordering asks `Conservative`.)
+pub(crate) fn ability_uses_event_context(ability: &ResolvedAbility, mode: ScanMode) -> bool {
+    resolved_ability_axes(ability, mode).event
 }
 
 /// Axis 2: does this resolved ability read a source/recipient or board-scoped
@@ -8601,7 +8607,8 @@ mod tests {
     #[test]
     fn cr_603_3b_gate_is_byte_identical_for_a_token_trigger() {
         let ability = ResolvedAbility::new(vanilla_token(), Vec::new(), ObjectId(1), PlayerId(0));
-        let c2 = !ability_uses_event_context(&ability) && !ability_reads_sibling_mutable(&ability);
+        let c2 = !ability_uses_event_context(&ability, ScanMode::Conservative)
+            && !ability_reads_sibling_mutable(&ability);
         assert!(
             !c2,
             "token-bodied trigger must stay order-dependent (CR 603.3b)"
@@ -8728,7 +8735,7 @@ mod tests {
         let hawk_axes = scan_effect(&hawk, ScanMode::LoopFirewall);
         assert_eq!(
             (hawk_axes.event, hawk_axes.sibling, hawk_axes.projected),
-            (true, true, false),
+            (false, true, false),
             "SOUNDNESS — CR 608.2h, operative here and not decorative: this pump requires \
              \"information from the game (such as the number of creatures on the \
              battlefield)\", whose answer is \"determined only once, when the effect is \
@@ -8736,11 +8743,7 @@ mod tests {
              battlefield population, so EACH loop iteration re-determines it against a \
              larger board — which is precisely what makes the sequence's results \
              unpredictable under CR 732.2a. It must still read the sibling axis. A descent that relieved this too would be a blanket relief \
-             wearing the descent's clothes. `event` is `true` for a reason this arm does \
-             NOT own and must not be \"fixed\": an `Objects`-sourced `PropertyAggregate` walks its filter \
-             under `FilterReadContext::LiveBoardCensus`, and `scan_target_filter`'s \
-             `TargetFilter::Typed` arm sets `event: true` unconditionally (byte-preserved). \
-             The blanket used to mask that; the descent exposes it unchanged. `projected` \
+             wearing the descent's clothes. `projected` \
              is the axis the descent actually moves here (`true` under the blanket, `false` \
              now), so this triple discriminates the descent from the blanket on the \
              POSITIVE arm as well as on the negative one"
@@ -8836,13 +8839,9 @@ mod tests {
         let hawk = scan_effect(&hawk_attack_pump(), ScanMode::LoopFirewall);
         assert_eq!(
             (hawk.event, hawk.sibling, hawk.projected),
-            (true, true, false),
+            (false, true, false),
             "the aggregate pump's PRECISE triple must survive: this arm classifies the \
-             payload, never \"reads anything\". `scan_target_filter`'s \
-             `TargetFilter::Typed` arm sets `event: true` unconditionally, so an \
-             all-or-nothing guard would swallow this into the blanket AND veto every \
-             `Typed`-targeted pump — DERIVED from that unconditional `true`, never run: it \
-             reddens `pump_with_board_reading_target_still_vetoes`'s arm B"
+             payload, never \"reads anything\""
         );
     }
 
@@ -10460,57 +10459,68 @@ mod tests {
     #[test]
     fn event_context_axis_discriminates() {
         // "gain THAT MUCH life" reads the triggering event amount.
-        assert!(ability_uses_event_context(&ability_with_amount(
-            QuantityRef::EventContextAmount
-        )));
+        assert!(ability_uses_event_context(
+            &ability_with_amount(QuantityRef::EventContextAmount),
+            ScanMode::Conservative
+        ));
         // Fixed drain does not.
-        assert!(!ability_uses_event_context(&fixed_drain()));
+        assert!(!ability_uses_event_context(
+            &fixed_drain(),
+            ScanMode::Conservative
+        ));
 
         // Each of the 5 event-context escapees, reached through a carrier the walk
         // actually traverses, must classify event == true.
         // (1) ObjectScope::EventSource via QuantityRef::Power.
-        assert!(ability_uses_event_context(&ability_with_amount(
-            QuantityRef::Power {
+        assert!(ability_uses_event_context(
+            &ability_with_amount(QuantityRef::Power {
                 scope: ObjectScope::EventSource,
-            }
-        )));
-        assert!(ability_uses_event_context(&ability_with_amount(
-            QuantityRef::BasePower {
+            }),
+            ScanMode::Conservative
+        ));
+        assert!(ability_uses_event_context(
+            &ability_with_amount(QuantityRef::BasePower {
                 scope: ObjectScope::EventSource,
-            }
-        )));
+            }),
+            ScanMode::Conservative
+        ));
         // (2) TargetFilter::TriggeringSourceController via QuantityRef::ObjectCount filter.
-        assert!(ability_uses_event_context(&ability_with_amount(
-            QuantityRef::ObjectCount {
+        assert!(ability_uses_event_context(
+            &ability_with_amount(QuantityRef::ObjectCount {
                 filter: TargetFilter::TriggeringSourceController,
-            }
-        )));
+            }),
+            ScanMode::Conservative
+        ));
         // (3) TargetFilter::ParentTargetSlot via QuantityRef::ObjectCount filter.
-        assert!(ability_uses_event_context(&ability_with_amount(
-            QuantityRef::ObjectCount {
+        assert!(ability_uses_event_context(
+            &ability_with_amount(QuantityRef::ObjectCount {
                 filter: TargetFilter::ParentTargetSlot { index: 0 },
-            }
-        )));
+            }),
+            ScanMode::Conservative
+        ));
         // (4) QuantityRef::TimesCostPaidThisResolution directly.
-        assert!(ability_uses_event_context(&ability_with_amount(
-            QuantityRef::TimesCostPaidThisResolution
-        )));
+        assert!(ability_uses_event_context(
+            &ability_with_amount(QuantityRef::TimesCostPaidThisResolution),
+            ScanMode::Conservative
+        ));
         // (5) CastManaObjectScope::TriggeringSpell via QuantityRef::ManaSpentToCast,
         //     whose whole arm is Axes::CONSERVATIVE (fail-closed ⇒ event == true).
-        assert!(ability_uses_event_context(&ability_with_amount(
-            QuantityRef::ManaSpentToCast {
+        assert!(ability_uses_event_context(
+            &ability_with_amount(QuantityRef::ManaSpentToCast {
                 scope: CastManaObjectScope::TriggeringSpell,
                 metric: CastManaSpentMetric::Total,
-            }
-        )));
+            }),
+            ScanMode::Conservative
+        ));
 
         // Cross-axis negative: a purely projected-resource reader (life, CR 119)
         // does NOT read event context — the axes are independent.
-        assert!(!ability_uses_event_context(&ability_with_amount(
-            QuantityRef::LifeTotal {
+        assert!(!ability_uses_event_context(
+            &ability_with_amount(QuantityRef::LifeTotal {
                 player: PlayerScope::Controller,
-            }
-        )));
+            }),
+            ScanMode::Conservative
+        ));
     }
 
     /// CR 400.7d + CR 601.2h: the Adamant ability rider ("if at least three red mana
@@ -10580,9 +10590,12 @@ mod tests {
             },
             max: None,
         });
-        assert!(ability_uses_event_context(&a));
+        assert!(ability_uses_event_context(&a, ScanMode::Conservative));
         // Sanity: without the multi_target it is inert (isolates the min bound).
-        assert!(!ability_uses_event_context(&fixed_drain()));
+        assert!(!ability_uses_event_context(
+            &fixed_drain(),
+            ScanMode::Conservative
+        ));
     }
 
     // ---- BLOCKER 2 regression: target_constraints are traversed ----
@@ -10597,11 +10610,11 @@ mod tests {
                 qty: QuantityRef::EventContextAmount,
             },
         }];
-        assert!(ability_uses_event_context(&a));
+        assert!(ability_uses_event_context(&a, ScanMode::Conservative));
         // Sanity: the Different* constraints carry no read.
         let mut b = fixed_drain();
         b.target_constraints = vec![TargetSelectionConstraint::DifferentTargetPlayers];
-        assert!(!ability_uses_event_context(&b));
+        assert!(!ability_uses_event_context(&b, ScanMode::Conservative));
     }
 
     // ---- the CR 608.2i ledger read is an axis-2 board read ----
@@ -10795,9 +10808,10 @@ mod tests {
     /// `QuantityRef::EventContextAmount` — not an inert transient scalar.
     #[test]
     fn triggering_scry_look_count_reads_event_context() {
-        assert!(ability_uses_event_context(&ability_with_amount(
-            QuantityRef::TriggeringScryLookCount
-        )));
+        assert!(ability_uses_event_context(
+            &ability_with_amount(QuantityRef::TriggeringScryLookCount),
+            ScanMode::Conservative
+        ));
     }
 
     /// CR 701.22a + CR 701.22d + CR 603.2c: the completed-scry bottom count is
@@ -10913,6 +10927,20 @@ mod tests {
             properties: vec![FilterProp::Targets {
                 filter: Box::new(TargetFilter::Any),
             }],
+            ..TypedFilter::creature()
+        })
+    }
+
+    /// [`census_asserting_filter`] that also matches against its trigger's object (CR 608.2k),
+    /// so its own scan reads the event under `LoopFirewall`.
+    fn event_reading_census_filter() -> TargetFilter {
+        TargetFilter::Typed(TypedFilter {
+            properties: vec![
+                FilterProp::Targets {
+                    filter: Box::new(TargetFilter::Any),
+                },
+                FilterProp::OtherThanTriggerObject,
+            ],
             ..TypedFilter::creature()
         })
     }
@@ -11134,16 +11162,16 @@ mod tests {
     }
 
     /// B-1a EVENT-AXIS MASK — a matcher's `event` read does not propagate, while its
-    /// `sibling` read does. Pinned because `TargetFilter::Typed` sets `event`
-    /// unconditionally, so scanning matchers at all would otherwise re-classify every
-    /// typed matcher as an ordering-relevant event read.
+    /// `sibling` read does. Pinned because a matcher's filter can read the trigger
+    /// (`OtherThanTriggerObject`), so scanning matchers at all would otherwise re-classify
+    /// such a matcher as an ordering-relevant event read.
     ///
     /// REACH-GUARD: the fixture filter's own scan sets `event`, asserted inline — so a
     /// masked `false` below is the mask's verdict and not the filter's silence.
     /// Revert probe: drop the `Axes { event: false, .. }` mask ⇒ **FAILS**.
     #[test]
     fn b1a_matcher_event_axis_is_masked() {
-        let f = census_asserting_filter();
+        let f = event_reading_census_filter();
         assert!(
             scan_target_filter(
                 &f,
@@ -11169,6 +11197,68 @@ mod tests {
             "paired positive: the SAME matcher's board read still propagates, so the \
              mask above is axis-scoped and not a re-muted path"
         );
+    }
+
+    /// CR 603.4 + CR 608.2k: Valakut, the Molten Pinnacle's intervening "if you control at
+    /// least five other Mountains" counts Mountains other than the one whose entering
+    /// triggered it, so under the loop firewall its condition reads the event; the same count
+    /// without "other" reads none.
+    #[test]
+    fn a_count_of_objects_other_than_the_trigger_object_reads_the_event() {
+        let parsed = crate::parser::parse_oracle_text(
+            "This land enters tapped.\n\
+             Whenever a Mountain you control enters, if you control at least five other \
+             Mountains, you may have this land deal 3 damage to any target.\n\
+             {T}: Add {R}.",
+            "Valakut, the Molten Pinnacle",
+            &[],
+            &["Land".to_string()],
+            &[],
+        );
+        let condition = parsed
+            .triggers
+            .iter()
+            .find_map(|trigger| trigger.condition.clone())
+            .expect("Valakut's trigger carries its intervening if");
+        let TriggerCondition::QuantityComparison {
+            lhs,
+            comparator,
+            rhs,
+        } = &condition
+        else {
+            panic!("Valakut's condition is a count comparison: {condition:?}");
+        };
+        let QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        } = lhs
+        else {
+            panic!("Valakut's count is an object count: {lhs:?}");
+        };
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("Valakut counts a typed filter: {filter:?}");
+        };
+        assert!(
+            typed
+                .properties
+                .contains(&FilterProp::OtherThanTriggerObject),
+            "reach: the parsed count excludes the trigger object"
+        );
+        assert!(scan_trigger_condition(&condition, ScanMode::LoopFirewall).event);
+
+        let mut without_other = typed.clone();
+        without_other
+            .properties
+            .retain(|prop| *prop != FilterProp::OtherThanTriggerObject);
+        let counted = TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(without_other),
+                },
+            },
+            comparator: *comparator,
+            rhs: rhs.clone(),
+        };
+        assert!(!scan_trigger_condition(&counted, ScanMode::LoopFirewall).event);
     }
 
     /// B-1a CONTEXT PIN — the five matcher call sites route at `SnapshotOrEvent`,
@@ -11246,7 +11336,7 @@ mod tests {
         TriggerDefinition {
             execute: Some(Box::new(AbilityDefinition::new(
                 AbilityKind::Spell,
-                read_free_pump(census_asserting_filter()),
+                read_free_pump(event_reading_census_filter()),
             ))),
             ..bello_granted_trigger()
         }
@@ -11327,7 +11417,7 @@ mod tests {
     fn delayed_trigger_condition_scanner_classifies_every_variant() {
         use crate::types::phase::Phase;
 
-        let filter = census_asserting_filter();
+        let filter = event_reading_census_filter();
         nondegenerate!(&filter);
         let payload = class_reading_trigger();
         let payload_axes = scan_trigger_definition(&payload, ScanMode::LoopFirewall);
@@ -11503,7 +11593,7 @@ mod tests {
         let bare = TargetFilter::Typed(TypedFilter::creature());
         let single_object = TargetFilter::ParentTarget;
         for (label, filter, expected) in [
-            ("bare Typed", &bare, (true, true, false)),
+            ("bare Typed", &bare, (false, true, false)),
             ("ParentTarget", &single_object, (true, false, false)),
         ] {
             let built: [(&str, DelayedTriggerCondition); 4] = [

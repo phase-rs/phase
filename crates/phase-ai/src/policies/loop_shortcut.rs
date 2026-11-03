@@ -535,15 +535,11 @@ fn cycles_to_proposer_elimination(
     )
     .map(i64::from);
 
-    // CR 704.5c: `headroom / rate` rounded UP, the first whole cycle at which ten poison
-    // counters is met. Written long-hand rather than with `i64::div_ceil`, which is still
-    // unstable on this toolchain (`int_roundings`). Both operands are non-negative here —
-    // `headroom` is clamped and `rate` is guarded `> 0` — so the `+ rate - 1` form is exact,
-    // with no negative-operand truncation-toward-zero trap.
-    let poison_rate = period.delta.poison.get(&proposer).copied().unwrap_or(0);
-    let poison_fatal = (poison_rate > 0)
-        .then(|| ((10 - i64::from(player.poison_counters)).max(0) + poison_rate - 1) / poison_rate)
-        .filter(|fatal| *fatal <= i64::from(declared));
+    // CR 704.5c: the first repetition inside the declared count after which the proposer holds
+    // ten poison counters, off the engine's own per-repetition authority.
+    let poison_fatal = period
+        .first_poison_crossing(proposer, player.poison_counters, declared)
+        .map(i64::from);
 
     // No library term — see the CR 121.4 exclusion in this function's doc comment.
     life_fatal.into_iter().chain(poison_fatal).min()
@@ -900,6 +896,8 @@ mod tests {
             seat_life_charge: vec![],
             cleanup: None,
             instructed_mills: None,
+            growth: Default::default(),
+            seat_life_charge_growth: Vec::new(),
         }
     }
 
@@ -919,6 +917,8 @@ mod tests {
             seat_life_charge: vec![],
             cleanup: None,
             instructed_mills: None,
+            growth: Default::default(),
+            seat_life_charge_growth: Vec::new(),
         }
     }
 
@@ -1213,6 +1213,8 @@ mod tests {
             seat_life_charge: vec![(P0, 2), (P1, 2)],
             cleanup: None,
             instructed_mills: None,
+            growth: Default::default(),
+            seat_life_charge_growth: Vec::new(),
         };
         let point = either_seat_point(&slot);
         let published = seat_declaration(&[(&slot, P1)]);
@@ -1432,6 +1434,51 @@ mod tests {
             "loop_shortcut_bounded_declare_progress",
             "9 cycles leave the proposer at 9 poison — one short of lethal, so it still scores"
         );
+    }
+
+    /// CR 704.5a + CR 704.5c + CR 732.2a: the veto reads a growing period repetition by
+    /// repetition — losing 2, 3, 4, 5, 6 life takes a 20-life proposer out at the fifth, and
+    /// poison rising 1, 2, 3, 4 reaches ten at the fourth — where the first repetition alone
+    /// would last to the tenth.
+    #[test]
+    fn loop_shortcut_declare_refuses_a_growing_period_at_its_own_crossing() {
+        let grown = |mut period: PeriodicDelta, growth: ResourceVector| {
+            period.growth = growth;
+            period
+        };
+        let life = bounded_offer_with_period(
+            10,
+            grown(
+                periodic(&[], &[(P0, -2)]),
+                ResourceVector {
+                    life: [(P0, -1)].into_iter().collect(),
+                    ..Default::default()
+                },
+            ),
+        );
+        let poison = bounded_offer_with_period(
+            10,
+            grown(
+                periodic_poison(&[(P0, 1)]),
+                ResourceVector {
+                    poison: [(P0, 1)].into_iter().collect(),
+                    ..Default::default()
+                },
+            ),
+        );
+        for (state, fatal) in [(&life, 5), (&poison, 4)] {
+            assert_eq!(
+                kind_of(&verdict_for(state, &declare(IterationCount::Fixed(fatal)))),
+                "loop_shortcut_declare_eliminates_proposer"
+            );
+            assert_ne!(
+                kind_of(&verdict_for(
+                    state,
+                    &declare(IterationCount::Fixed(fatal - 1))
+                )),
+                "loop_shortcut_declare_eliminates_proposer"
+            );
+        }
     }
 
     /// CR 732.2a — the BOUNDED branch, both halves, on ONE schema differing only in `n`.

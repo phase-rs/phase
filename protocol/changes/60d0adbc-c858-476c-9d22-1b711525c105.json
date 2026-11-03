@@ -3,5 +3,5 @@
     "full",
     "wire"
   ],
-  "reason": "ConfirmedPeriod records the performed reach of each published declaration"
+  "reason": "ConfirmedPeriod records the performed reach of each published declaration, and PeriodicDelta states its per-repetition growth (growth, seat_life_charge_growth)"
 }

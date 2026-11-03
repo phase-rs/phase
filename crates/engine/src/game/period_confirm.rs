@@ -1766,7 +1766,7 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
             return Err(stopped);
         }
         (Err(refusal), Ok(_)) => return Err(refusal),
-        (Ok(PeriodSign::Unbounded(_) | PeriodSign::LossAxis(_)), Ok(_))
+        (Ok(PeriodSign::Unbounded(_)), Ok(_))
             if verdict
                 == ObjectGrowthVerdict::ResourceRecurrence(Some(RecurrenceCover::GrowthRead)) =>
         {
@@ -1780,27 +1780,55 @@ pub(crate) fn confirm(frame: &GameState, span: NamedSpan) -> Result<Confirmation
         // the authority measures on its replayed frames, and is offered at the count its
         // published declaration reaches when performed.
         (Ok(PeriodSign::LossAxis(unbounded)), Ok(_)) => {
-            let mut frames = Vec::new();
-            replay_cycle(
-                &mut s_n1.clone(),
-                &items,
-                &end,
-                &mut Vec::new(),
-                Some(&mut frames),
-                &mut Vec::new(),
-            )?;
+            let cycle_frames = |from: &GameState| {
+                let mut frames = Vec::new();
+                replay_cycle(
+                    &mut from.clone(),
+                    &items,
+                    &end,
+                    &mut Vec::new(),
+                    Some(&mut frames),
+                    &mut Vec::new(),
+                )
+                .map(|_| frames)
+            };
+            let second_frames = cycle_frames(&s_n1)?;
+            let first_frames = cycle_frames(&s_n)?;
+            let repetition_growth = crate::analysis::resource::repetition_growth(
+                &first_frames.iter().collect::<Vec<_>>(),
+                &second_frames.iter().collect::<Vec<_>>(),
+            );
+            let grows = !repetition_growth.0.is_zero() || !repetition_growth.1.is_empty();
+            // CR 732.2a: the two replayed repetitions charge differently, and only a cover that
+            // certified the growth (CR 613.4c) makes that difference repeat.
+            if grows
+                && verdict
+                    != ObjectGrowthVerdict::ResourceRecurrence(Some(RecurrenceCover::GrowthRead))
+            {
+                return Err(OfferRefusal::GrowingLoss);
+            }
+            let frames = if grows { first_frames } else { second_frames };
             // CR 514.1: a turn-cycle period's count is bounded by its cleanup discard.
             let cleanup = (verdict
                 == ObjectGrowthVerdict::ResourceRecurrence(Some(RecurrenceCover::TurnCycle)))
             .then(|| CleanupPair::measure(&frames, holder))
             .flatten();
-            match replay_bounded_offer(frame, holder, &frames, &choices, cleanup)? {
+            match replay_bounded_offer(
+                frame,
+                holder,
+                &frames,
+                &choices,
+                cleanup,
+                repetition_growth,
+            )? {
                 Some(mut parts) => {
                     performed_reaches =
                         perform_published(&mut parts, &s_n, &items, span.reach, holder);
                     let delta = ResourceVector::period(prior, current);
                     (delta, None, Some(parts), growth, CountedBy::Threshold)
                 }
+                // CR 732.2a: the unbounded road states no growth.
+                None if grows => return Err(OfferRefusal::GrowingLoss),
                 // No threshold: the unbounded road's.
                 None => {
                     let (delta, departure) = *unbounded;

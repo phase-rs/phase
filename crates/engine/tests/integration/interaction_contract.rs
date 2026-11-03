@@ -3650,6 +3650,8 @@ fn preview_offer_with_points(
                         seat_life_charge: Vec::new(),
                         cleanup: None,
                         instructed_mills: None,
+                        growth: Default::default(),
+                        seat_life_charge_growth: Vec::new(),
                     },
                 )
             }),
@@ -4471,6 +4473,8 @@ fn respond_period(
         seat_life_charge: Vec::new(),
         cleanup: None,
         instructed_mills: None,
+        growth: Default::default(),
+        seat_life_charge_growth: Vec::new(),
     }
 }
 

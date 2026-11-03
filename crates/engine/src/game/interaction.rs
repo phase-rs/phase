@@ -2818,8 +2818,9 @@ fn preview_key(
 /// and per affected seat.
 ///
 /// **This is arithmetic over the certificate's `per_cycle` signature, and nothing else.** It
-/// applies no game action, resolves nothing, and touches no `GameState`: the multiplication
-/// `n × δ` is the whole computation. In particular it is NOT
+/// applies no game action, resolves nothing, and touches no `GameState`: the sum of the first
+/// `n` repetitions' charges (`PeriodicDelta::total_over`) is the whole computation. In
+/// particular it is NOT
 /// `interaction::preview_interaction`, which answers a different question (is this response
 /// submittable) by cloning the state and applying to the clone. A clone-apply cannot answer
 /// this one anyway — the count may be up to `MAX_SHORTCUT_CYCLES`, and the point of a CR
@@ -2849,10 +2850,10 @@ fn shortcut_preview_entries(
             .map(|mill| (seat, *mill)),
         _ => None,
     };
-    let mut per_cycle_totals: BTreeMap<(InteractionShortcutPreviewFamily, Option<u8>), i64> =
-        BTreeMap::new();
+    let mut totals: BTreeMap<(InteractionShortcutPreviewFamily, Option<u8>), i64> = BTreeMap::new();
     let mut library_losses = Vec::new();
-    for (axis, magnitude) in periodic.delta.axis_components() {
+    // CR 732.2a: each repetition moves what the signature states for it.
+    for (axis, magnitude) in periodic.total_over(count).axis_components() {
         // The charged seat's life is re-added below, spread across the seats the declaration
         // allocates the count to. Folding it here as well would state it twice.
         if Some(axis) == charged_axis {
@@ -2862,14 +2863,9 @@ fn shortcut_preview_entries(
             library_losses.push((seat, mill, -magnitude));
             continue;
         }
-        let total = per_cycle_totals.entry(preview_key(axis)).or_insert(0);
+        let total = totals.entry(preview_key(axis)).or_insert(0);
         *total = total.saturating_add(magnitude);
     }
-    let mut totals: BTreeMap<(InteractionShortcutPreviewFamily, Option<u8>), i64> =
-        per_cycle_totals
-            .into_iter()
-            .map(|(key, per_cycle)| (key, per_cycle.saturating_mul(i64::from(count))))
-            .collect();
     // CR 701.17b: a seat mills no more than its library holds; CR 121.1: the rest of its library
     // loss is drawn.
     for (seat, mill, loss) in library_losses {
@@ -2879,18 +2875,23 @@ fn shortcut_preview_entries(
             .min(mill.library.max(0));
         let mill_key = (InteractionShortcutPreviewFamily::Mill, Some(seat.0));
         *totals.entry(mill_key).or_insert(0) -= milled;
-        let drawn = (loss - mill.per_repetition).max(0);
+        let drawn = (loss - mill.per_repetition.saturating_mul(i64::from(count))).max(0);
         let cards_key = (InteractionShortcutPreviewFamily::Cards, Some(seat.0));
-        *totals.entry(cards_key).or_insert(0) += drawn.saturating_mul(i64::from(count));
+        *totals.entry(cards_key).or_insert(0) += drawn;
     }
     // CR 119.3: the announced slot charges a LIFE magnitude, so the re-attribution moves the
     // `Life` family and nothing else. `DamageDealt`, `LibraryDelta` and `Poison` are seat-keyed
     // by `payload_seat` too, and keep the seat it gave them.
     if let Some(split) = victim {
+        let mut through = 0u32;
         for (seat, cycles) in &split.cycles {
             let key = preview_key(crate::analysis::resource::ResourceAxis::Life(*seat));
             let total = totals.entry(key).or_insert(0);
-            *total = total.saturating_sub(split.rate.saturating_mul(i64::from(*cycles)));
+            let landed = split
+                .charged_through(through.saturating_add(*cycles))
+                .saturating_sub(split.charged_through(through));
+            through = through.saturating_add(*cycles);
+            *total = total.saturating_sub(landed);
         }
     }
     totals
@@ -3040,11 +3041,12 @@ fn canonical_allocation(ids: &[InteractionChoiceId], count: u32) -> Vec<AmountAs
         .collect()
 }
 
-/// CR 119.3: the life magnitude one repetition charges through an announced slot, and the
-/// single seat that magnitude currently lands on.
+/// CR 119.3: the life magnitude the first repetition charges through an announced slot, what
+/// each later repetition adds to it, and the single seat that magnitude currently lands on.
 #[derive(Debug, Clone, Copy)]
 struct VictimCharge {
     rate: i64,
+    growth: i64,
     seat: PlayerId,
 }
 
@@ -3074,8 +3076,8 @@ struct VictimCharge {
 /// saying this point's slot is one the period charges, and is otherwise discarded. That is what
 /// makes the FOLD's precondition hold by construction rather than by coincidence: CR 732.2a
 /// states a count's magnitudes as the period times the count, and `shortcut_preview_entries`
-/// re-states the charged seat's life by dropping that axis and re-adding `rate` once per
-/// allocated cycle, so the substitution preserves the period's life total exactly. The reader is
+/// re-states the charged seat's life by dropping that axis and re-adding each allocated
+/// repetition's own charge, so the substitution preserves the period's life total exactly. The reader is
 /// thereby INDIFFERENT to which derivation minted the aggregate.
 fn victim_charge(
     periodic: &crate::analysis::resource::PeriodicDelta,
@@ -3095,6 +3097,13 @@ fn victim_charge(
     (losing.next().is_none() && seats.contains(seat)).then_some(())?;
     Some(VictimCharge {
         rate: loss.checked_neg()?,
+        growth: periodic
+            .growth
+            .life
+            .get(seat)
+            .copied()
+            .unwrap_or(0)
+            .checked_neg()?,
         seat: *seat,
     })
 }
@@ -3103,10 +3112,12 @@ fn victim_charge(
 /// declaration allocates it to.
 ///
 /// `cycles` is never empty — the one constructor filters that case away — so "a split with no
-/// parts" is unrepresentable rather than a case the fold has to remember.
+/// parts" is unrepresentable rather than a case the fold has to remember. Its runs are in
+/// repetition order, because a growing charge lands differently on each.
 #[derive(Debug, Clone)]
 struct VictimSplit {
     rate: i64,
+    growth: i64,
     charged_seat: PlayerId,
     cycles: Vec<(PlayerId, u32)>,
 }
@@ -3139,17 +3150,24 @@ impl VictimSplit {
             if let Some((_, tail)) = cycles.last_mut() {
                 *tail = tail.saturating_sub(1);
             }
-            match cycles.iter_mut().find(|(seat, _)| *seat == lead) {
-                Some((_, landed)) => *landed += 1,
-                None => cycles.push((lead, 1)),
-            }
+            cycles.insert(0, (lead, 1));
         }
         Some(Self {
             rate: charge.rate,
+            growth: charge.growth,
             charged_seat: charge.seat,
             cycles,
         })
         .filter(|split| !split.cycles.is_empty())
+    }
+
+    /// CR 732.2a: what the first `n` repetitions charge together, in `PeriodicDelta::total_over`'s
+    /// closed form.
+    fn charged_through(&self, n: u32) -> i64 {
+        let n = i64::from(n);
+        self.rate
+            .saturating_mul(n)
+            .saturating_add(self.growth.saturating_mul(n.saturating_mul(n - 1) / 2))
     }
 }
 
@@ -3253,8 +3271,8 @@ struct ShortcutPreviewBasis<'a> {
 /// is minted over, resolved once per offer rather than once per count.
 ///
 /// Refuses an offer carrying no measured per-period signature, and one whose period states
-/// nothing on any family: a magnitude is the period times the count, so neither has anything
-/// to multiply.
+/// nothing on any family: a magnitude is the sum of the count's repetitions, so neither has
+/// anything to sum.
 fn shortcut_preview_basis<'a>(
     interaction_id: &InteractionId,
     projection: &'a LoopShortcutProjection,
@@ -3335,7 +3353,7 @@ fn shortcut_preview_element(
 /// Three things have to hold before there is anything to state, and all three are the offer's
 /// own: a measured per-period signature, a finite count window, and a period that states
 /// something at all (a period netting to nothing on every family publishes no element at any
-/// count, because `amount` is the period times the count).
+/// count, because `amount` is the sum of the count's repetitions).
 fn loop_shortcut_preview(
     interaction_id: &InteractionId,
     projection: &LoopShortcutProjection,
@@ -11846,6 +11864,96 @@ pub fn submit_interaction_with_rejection(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// CR 732.2a: a growing period's preview states the sum of its repetitions — P1 losing 9, then
+    /// 10, 11 and 12 previews −42 over four, not four times the first repetition's −9.
+    #[test]
+    fn a_growing_period_previews_the_sum_of_its_repetitions() {
+        use crate::analysis::resource::{PeriodicDelta, ResourceVector};
+        let life = |loss: i64| ResourceVector {
+            life: BTreeMap::from([(PlayerId(1), -loss)]),
+            ..ResourceVector::default()
+        };
+        let periodic = PeriodicDelta {
+            delta: life(9),
+            growth: life(1),
+            ..PeriodicDelta::default()
+        };
+        assert_eq!(
+            shortcut_preview_entries(&periodic, 4, None),
+            vec![InteractionShortcutPreviewEntry {
+                family: InteractionShortcutPreviewFamily::Life,
+                player: Some(1),
+                amount: -42,
+            }]
+        );
+    }
+
+    /// CR 119.3 + CR 732.2a: a growing charge lands on each seat as the repetitions the
+    /// declaration allocates it, in order — P1 losing 9 a repetition, growing by 1, puts 9 on the
+    /// seat of the first repetition and 10, 11 and 12 on the seat of the next three; with the
+    /// trigger on the stack latched on P2, P2 takes the first and the last two.
+    #[test]
+    fn a_growing_charged_slot_spreads_each_repetitions_own_charge() {
+        use crate::analysis::decision_template::{ChoicePoint, DecisionSlot};
+        use crate::analysis::resource::{PeriodicDelta, ResourceVector};
+        let life = |loss: i64| ResourceVector {
+            life: BTreeMap::from([(PlayerId(1), -loss)]),
+            ..ResourceVector::default()
+        };
+        let slot = DecisionSlot::first(
+            crate::types::game_state::YieldTarget::ThisObject {
+                source_id: ObjectId(1),
+                incarnation: None,
+                trigger_description: None,
+            },
+            ChoicePoint::AnnouncedTarget,
+        );
+        let periodic = PeriodicDelta {
+            delta: life(9),
+            growth: life(1),
+            victim_slot: vec![(slot.clone(), 9)],
+            ..PeriodicDelta::default()
+        };
+        let point = LoopShortcutPointProjection {
+            slot,
+            kind: InteractionShortcutPointKind::Targets,
+            min: 1,
+            max: 1,
+            unique: false,
+            ordered: false,
+            read_only: false,
+            candidate_indices: vec![0, 1],
+        };
+        let seats = [PlayerId(1), PlayerId(2)];
+        let ids = [
+            InteractionChoiceId("p1".into()),
+            InteractionChoiceId("p2".into()),
+        ];
+        let allocation = [
+            AmountAssignment {
+                choice_id: ids[0].clone(),
+                amount: 1,
+            },
+            AmountAssignment {
+                choice_id: ids[1].clone(),
+                amount: 3,
+            },
+        ];
+        let charge = victim_charge(&periodic, &point, &seats).expect("the slot charges P1");
+        let preview = |lead: Option<PlayerId>| {
+            let split = VictimSplit::new(&charge, &ids, &seats, &allocation, lead);
+            shortcut_preview_entries(&periodic, 4, split.as_ref())
+                .into_iter()
+                .map(|entry| (entry.player, entry.amount))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(preview(None), vec![(Some(1), -9), (Some(2), -33)]);
+        assert_eq!(
+            preview(Some(PlayerId(2))),
+            vec![(Some(1), -10), (Some(2), -32)]
+        );
+    }
 
     /// The exact printed return clauses exercise the shared choice protocol;
     /// Spree payment/mode selection is outside this test's scope.

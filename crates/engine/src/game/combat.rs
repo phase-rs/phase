@@ -7141,6 +7141,8 @@ pub(super) fn commit_attack_declaration(
     state
         .attacker_declarations_this_turn
         .extend(attacker_declarations);
+    // CR 613.4c: the attack count grew after the CR 508.1k snapshot, so layer 7c re-reads it.
+    crate::game::layers::mark_layers_full(state);
 
     super::restrictions::record_attackers_declared(state, attacker_count);
 }
