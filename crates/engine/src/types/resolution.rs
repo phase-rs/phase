@@ -1810,6 +1810,41 @@ impl ResolutionStack {
         }
     }
 
+    /// CR 400.7 + CR 616.1: Find the UNIQUE parked BatchDelivery owner whose
+    /// `paused_current` matches a resumed delivery. Unlike the fixed
+    /// parent/child accessor above, this walks the whole stack because a tail
+    /// park can push more than one frame above the batch (counter ordering, the
+    /// continuation tail). Ambiguity (0 or >1 matching owners) fails closed, and
+    /// the incarnation-bearing member key makes a collision impossible for a
+    /// single batch.
+    pub fn paused_batch_delivery_mut_for_member(
+        &mut self,
+        member: crate::types::identifiers::ObjectIncarnationRef,
+        approved_event: &crate::types::proposed_event::ProposedEvent,
+    ) -> Option<&mut PendingBatchDeliveries> {
+        let mut found = None;
+        let mut slot = self.frames.top();
+        while let Some(current) = slot {
+            if let Some(ResolutionFrame::BatchDelivery(batch)) = self.frames.get(current) {
+                if batch
+                    .paused_current
+                    .as_ref()
+                    .is_some_and(|paused| paused.captures_resumed(member, approved_event))
+                {
+                    if found.is_some() {
+                        return None;
+                    }
+                    found = Some(current);
+                }
+            }
+            slot = self.frames.below(current);
+        }
+        match self.frames.get_mut(found?) {
+            Some(ResolutionFrame::BatchDelivery(batch)) => Some(batch),
+            Some(_) | None => None,
+        }
+    }
+
     /// Consume exactly the active BatchDelivery owner after its logical group
     /// settles once.
     pub fn take_active_batch_delivery(

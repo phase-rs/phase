@@ -1638,6 +1638,14 @@ fn anticipated_zone_change_delivery(
 /// `mill_double_redirect_choice_continuation` (two sequential parks, no
 /// completion) and `surveil_rest_pile_redirect_continuation` (two sequential
 /// parks WITH a completion that must fire once after the second park drains).
+///
+/// CLASSIFICATION CONTRACT (issue #10431): the resumed segment's
+/// `terminal_completion` is recorded by the resume seam
+/// (`engine_replacement::handle_replacement_choice_inner`) before either
+/// terminal, so a delivery that parks again in its own tail (ETB counter
+/// ordering, entering-attacker choice) is still classified `Moved` here. `None`
+/// at this point means the delivery never reached a terminal decision and is a
+/// contract violation, not a state this function may paper over.
 pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut Vec<GameEvent>) {
     if let Some(pending) = state.active_batch_delivery().cloned() {
         let PendingBatchDeliveries {
@@ -1690,9 +1698,24 @@ pub(crate) fn drain_pending_batch_deliveries(state: &mut GameState, events: &mut
                 &paused_current.delivery_events,
             )
             .expect("resumed batch retains its exact paused delivery");
-            let terminal_completion = paused_current
-                .terminal_completion
-                .expect("resumed batch delivery records its exact terminal completion");
+            // CR 616.1 + CR 603.10a: a resumed batch member must be classified
+            // before its owner can be drained. The resume seam records it whether
+            // the delivery returns `Done` or parks again
+            // (`engine_replacement::handle_replacement_choice_inner`), so `None`
+            // here means a delivery that never reached a terminal decision — a
+            // contract violation, never a fallback (settlement would leave the
+            // member `Pending`).
+            let terminal_completion =
+                paused_current
+                    .terminal_completion
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "resumed batch member {} (incarnation {}) has no terminal completion ({} retained delivery events)",
+                            paused_current.member.object_id.0,
+                            paused_current.member.incarnation,
+                            paused_current.delivery_events.len()
+                        )
+                    });
             logical_zone_change_group
                 .record_delivery_completion(paused_current.member.object_id, terminal_completion)
                 .expect("resumed batch member records its exact terminal outcome");
