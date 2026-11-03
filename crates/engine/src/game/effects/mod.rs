@@ -16091,7 +16091,7 @@ fn phase_out_context_union_requires_parent(effect: &Effect) -> Option<bool> {
         match filter {
             TargetFilter::ParentTarget => Some(true),
             TargetFilter::SelfRef => Some(false),
-            TargetFilter::Or(filters) => filters.iter().try_fold(true, |dependent, filter| {
+            TargetFilter::Or { filters } => filters.iter().try_fold(true, |dependent, filter| {
                 // Inspect every child, even after SelfRef: unsupported later leaves
                 // must invalidate the proof rather than inherit independence.
                 requires_parent(filter).map(|child| dependent && child)
@@ -16101,7 +16101,7 @@ fn phase_out_context_union_requires_parent(effect: &Effect) -> Option<bool> {
     }
     match effect {
         Effect::PhaseOut {
-            target: target @ TargetFilter::Or(_),
+            target: target @ TargetFilter::Or { .. },
         } => requires_parent(target),
         _ => None,
     }
@@ -28779,20 +28779,77 @@ mod tests {
     fn phase_out_context_union_dependency_proof_is_bounded() {
         use TargetFilter::{Or, ParentTarget, SelfRef};
         for (target, expected) in [
-            (Or(vec![SelfRef, ParentTarget]), Some(false)),
             (
-                Or(vec![ParentTarget, Or(vec![SelfRef, SelfRef])]),
+                Or {
+                    filters: vec![SelfRef, ParentTarget],
+                },
                 Some(false),
             ),
-            (Or(vec![ParentTarget, Or(vec![ParentTarget])]), Some(true)),
-            (Or(vec![]), Some(true)),
-            (Or(vec![Or(vec![])]), Some(true)),
-            (Or(vec![TargetFilter::Any, SelfRef, ParentTarget]), None),
-            (Or(vec![SelfRef, ParentTarget, TargetFilter::Any]), None),
-            (Or(vec![SelfRef, Or(vec![TargetFilter::Any])]), None),
+            (
+                Or {
+                    filters: vec![
+                        ParentTarget,
+                        Or {
+                            filters: vec![SelfRef, SelfRef],
+                        },
+                    ],
+                },
+                Some(false),
+            ),
+            (
+                Or {
+                    filters: vec![
+                        ParentTarget,
+                        Or {
+                            filters: vec![ParentTarget],
+                        },
+                    ],
+                },
+                Some(true),
+            ),
+            (Or { filters: vec![] }, Some(true)),
+            (
+                Or {
+                    filters: vec![Or { filters: vec![] }],
+                },
+                Some(true),
+            ),
+            (
+                Or {
+                    filters: vec![TargetFilter::Any, SelfRef, ParentTarget],
+                },
+                None,
+            ),
+            (
+                Or {
+                    filters: vec![SelfRef, ParentTarget, TargetFilter::Any],
+                },
+                None,
+            ),
+            (
+                Or {
+                    filters: vec![
+                        SelfRef,
+                        Or {
+                            filters: vec![TargetFilter::Any],
+                        },
+                    ],
+                },
+                None,
+            ),
             (ParentTarget, None),
-            (TargetFilter::And(vec![SelfRef, ParentTarget]), None),
-            (TargetFilter::Not(Box::new(SelfRef)), None),
+            (
+                TargetFilter::And {
+                    filters: vec![SelfRef, ParentTarget],
+                },
+                None,
+            ),
+            (
+                TargetFilter::Not {
+                    filter: Box::new(SelfRef),
+                },
+                None,
+            ),
         ] {
             assert_eq!(
                 phase_out_context_union_requires_parent(&Effect::PhaseOut {
@@ -28825,38 +28882,88 @@ mod tests {
             (ParentTarget, false, false, false, false),
             (ParentTarget, true, false, true, false),
             (
-                Or(vec![ParentTarget, Or(vec![ParentTarget])]),
+                Or {
+                    filters: vec![
+                        ParentTarget,
+                        Or {
+                            filters: vec![ParentTarget],
+                        },
+                    ],
+                },
                 false,
                 false,
                 false,
                 false,
             ),
-            (Or(vec![SelfRef, ParentTarget]), false, false, true, true),
             (
-                Or(vec![ParentTarget, Or(vec![SelfRef, SelfRef])]),
+                Or {
+                    filters: vec![SelfRef, ParentTarget],
+                },
                 false,
                 false,
                 true,
                 true,
             ),
-            (Or(vec![SelfRef, ParentTarget]), false, true, true, false),
-            (Or(vec![SelfRef, ParentTarget]), true, false, true, true),
             (
-                Or(vec![SelfRef, ParentTarget, TargetFilter::Any]),
+                Or {
+                    filters: vec![
+                        ParentTarget,
+                        Or {
+                            filters: vec![SelfRef, SelfRef],
+                        },
+                    ],
+                },
+                false,
+                false,
+                true,
+                true,
+            ),
+            (
+                Or {
+                    filters: vec![SelfRef, ParentTarget],
+                },
+                false,
+                true,
+                true,
+                false,
+            ),
+            (
+                Or {
+                    filters: vec![SelfRef, ParentTarget],
+                },
+                true,
+                false,
+                true,
+                true,
+            ),
+            (
+                Or {
+                    filters: vec![SelfRef, ParentTarget, TargetFilter::Any],
+                },
                 false,
                 false,
                 false,
                 false,
             ),
             (
-                Or(vec![TargetFilter::Any, ParentTarget, SelfRef]),
+                Or {
+                    filters: vec![TargetFilter::Any, ParentTarget, SelfRef],
+                },
                 false,
                 false,
                 false,
                 false,
             ),
-            (Or(vec![]), false, false, true, false),
-            (Or(vec![Or(vec![])]), false, false, true, false),
+            (Or { filters: vec![] }, false, false, true, false),
+            (
+                Or {
+                    filters: vec![Or { filters: vec![] }],
+                },
+                false,
+                false,
+                true,
+                false,
+            ),
         ] {
             let mut scenario = GameScenario::new();
             let source = scenario.add_creature(P0, "Source", 2, 2).id();
