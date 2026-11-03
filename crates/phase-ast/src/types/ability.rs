@@ -42866,6 +42866,7 @@ mod tests {
             TargetFilter::Or {
                 filters: vec![TargetFilter::Or { filters: vec![] }],
             },
+            TargetFilter::Any,
             TargetFilter::SelfRef,
             TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You)),
         ] {
@@ -42897,7 +42898,6 @@ mod tests {
             TargetFilter::Or {
                 filters: vec![TargetFilter::SelfRef, TargetFilter::Any],
             },
-            TargetFilter::Any,
             TargetFilter::And {
                 filters: vec![TargetFilter::SelfRef, TargetFilter::ParentTarget],
             },
