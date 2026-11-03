@@ -2879,7 +2879,6 @@ fn evaluate_selected_format_summary(
     let Ok(format_rules) = selected.rules() else {
         return (None, Vec::new(), BTreeSet::new());
     };
-    let uses_commander = format_rules.uses_commander;
 
     if format_rules.companion_slot() == CompanionSlot::SideboardOnly
         && !request.companion.is_empty()
@@ -3347,7 +3346,6 @@ fn evaluate_selected_format(
     let Ok(format_rules) = selected.rules() else {
         return (Some(false), vec![CUSTOM_FORMAT_UNRESOLVED.to_string()]);
     };
-    let uses_commander = format_rules.uses_commander;
 
     if format_rules.companion_slot() == CompanionSlot::SideboardOnly
         && !request.companion.is_empty()
