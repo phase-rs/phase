@@ -36054,10 +36054,10 @@ impl GameState {
             std::mem::take(&mut self.triggers_fired_this_turn_per_opponent),
             &mut |(reference, _)| rank_reference(reference),
         );
-        self.trigger_indicated_actions_this_turn = Box::new(rank_hash_set(
+        *self.trigger_indicated_actions_this_turn = rank_hash_set(
             std::mem::take(&mut *self.trigger_indicated_actions_this_turn),
             &mut |(reference, _)| rank_reference(reference),
-        ));
+        );
         self.triggered_abilities_added_mana_this_turn = rank_hash_set(
             std::mem::take(&mut self.triggered_abilities_added_mana_this_turn),
             &mut |(reference, _)| rank_reference(reference),
