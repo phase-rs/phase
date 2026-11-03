@@ -1,5 +1,7 @@
 use super::super::engine::apply_as_current;
 use super::*;
+use crate::game::scenario::{GameScenario, P0};
+use crate::game::scenario_db::GameScenarioDbExt;
 use crate::game::zones;
 use crate::game::zones::create_object;
 use crate::parser::oracle::parse_oracle_text;
@@ -57100,9 +57102,6 @@ fn resolution_face_legality_admits_the_land_face_only_under_a_play_policy() {
 /// legality the window and election read agree.
 #[test]
 fn resolution_land_back_face_admission_reads_the_policy_filter_on_the_played_face() {
-    use crate::game::scenario::{GameScenario, P0};
-    use crate::game::scenario_db::GameScenarioDbExt;
-
     let db = crate::test_support::shared_card_db();
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);

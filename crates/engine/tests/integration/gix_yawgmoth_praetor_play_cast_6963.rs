@@ -23,8 +23,10 @@ use engine::types::ability::{
     ResolutionCastWindow, TargetFilter,
 };
 use engine::types::actions::GameAction;
+use engine::types::counter::CounterType;
 use engine::types::game_state::{CastOfferKind, ExileLink, ExileLinkKind, GameState, WaitingFor};
 use engine::types::identifiers::ObjectId;
+use engine::types::keywords::Keyword;
 use engine::types::mana::{ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
@@ -1207,8 +1209,6 @@ fn gix_window_reopens_after_an_as_enters_color_choice_across_a_reload() {
 /// battlefield with its counters and the window re-opens with Divination.
 #[test]
 fn gix_window_reopens_after_a_delivery_tail_counter_order_choice() {
-    use engine::types::counter::CounterType;
-
     const DEANNA_TROI: &str =
         "Other creatures you control enter with an additional +1/+1 counter on them.";
 
@@ -1268,8 +1268,6 @@ fn gix_window_reopens_after_a_delivery_tail_counter_order_choice() {
 /// window re-opens with Divination.
 #[test]
 fn gix_window_plays_a_modal_cards_only_legal_land_face_without_a_prompt() {
-    use engine::types::keywords::Keyword;
-
     let Some(db) = load_db() else { return };
     let (mut board, staged) = gix_board(1, |s| {
         vec![
