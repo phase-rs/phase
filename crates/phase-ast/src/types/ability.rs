@@ -7463,10 +7463,16 @@ pub enum FilterProp {
     /// Differs from `SameName` (which reads the source object's name): this
     /// reads from `ability.targets[0]` when that target is `TargetRef::Object`,
     /// looking up the name from `state.objects` (or `lki_cache` if the target
-    /// has already left its zone).
+    /// has already left its zone). A nameless object (a face-down permanent,
+    /// CR 708.2a) shares no name — not with another nameless object and not with
+    /// itself (CR 201.2a); the evaluator compares through the shared
+    /// `names_shared` rule.
     SameNameAsParentTarget,
     /// CR 607.2a + CR 201.2: Matches an object whose name equals a card durably
     /// exiled by this ability's source. Used by the Extraplanar Lens class.
+    /// A nameless object (a face-down permanent, CR 708.2a) shares no name —
+    /// not with another nameless object and not with itself (CR 201.2a); the
+    /// evaluator compares through the shared `names_shared` rule.
     SameNameAsExiledBySource,
     /// CR 201.2 + CR 201.2a: Matches objects whose name equals the name of any
     /// permanent currently on the battlefield. `controller` optionally narrows
@@ -7474,6 +7480,9 @@ pub enum FilterProp {
     /// i.e. "shares a name with a permanent" unqualified). Used by "put a card
     /// onto the battlefield if it has the same name as a permanent" patterns
     /// (Mitotic Manipulation, and any analogous dig-with-name-match effect).
+    /// A nameless object (a face-down permanent, CR 708.2a) shares no name —
+    /// not with another nameless object and not with itself (CR 201.2a); the
+    /// evaluator compares through the shared `names_shared` rule.
     NameMatchesAnyPermanent {
         controller: Option<ControllerRef>,
     },
