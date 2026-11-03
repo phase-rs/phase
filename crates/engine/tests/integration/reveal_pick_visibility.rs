@@ -1,6 +1,5 @@
 //! Issue #8059: a "reveal the top N cards, keep one, put the rest away" flow
-//! must not leave the unpicked cards visible to the casting player after
-//! resolution finishes.
+//! must not leave the unpicked cards visible after resolution finishes.
 //!
 //! CR 701.20a: a card that has been revealed stays revealed only as long as
 //! the instruction that revealed it needs it. CR 701.20d: revealed cards that
@@ -13,30 +12,50 @@
 //! which is the channel `filter_state_for_viewer` consults when it decides
 //! whether a library card's face is visible. Closing the reveal window is the
 //! reveal-markers cleanup on the dig's completion tail.
+//!
+//! The cleanup regression below uses a genuine "Reveal the top N" instruction
+//! (Gather the Pack), so the public reveal markers it asserts while the choice
+//! is pending are the ones the card's own text creates. `Ancient Stirrings`
+//! ("look at the top five … you may reveal …") is covered separately as the
+//! pick-and-bottom flow of the same dig class; its "look at" wording is not
+//! used to justify a public reveal of every card in the window.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::visibility::filter_state_for_viewer;
 use engine::types::actions::GameAction;
 use engine::types::game_state::{CastPaymentMode, WaitingFor};
 use engine::types::identifiers::ObjectId;
+use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
-/// Verbatim Oracle text (Scryfall, `Ancient Stirrings`): reveal the top five,
-/// keep one from among them, put the rest on the bottom in any order.
+/// Verbatim Oracle text (Scryfall, `Gather the Pack`).
+const GATHER_THE_PACK: &str = "Reveal the top five cards of your library. You may put a creature card from among them into your hand. Put the rest into your graveyard.\nSpell mastery — If there are two or more instant and/or sorcery cards in your graveyard, put up to two creature cards from among them into your hand instead.";
+
+/// Verbatim Oracle text (Scryfall, `Ancient Stirrings`): look at the top five,
+/// optionally reveal one of them, bottom the rest.
 const ANCIENT_STIRRINGS: &str = "Look at the top five cards of your library. You may reveal a colorless card from among them and put it into your hand. Then put the rest on the bottom of your library in any order.";
 
 struct Fixture {
     runner: GameRunner,
-    /// The five cards the spell revealed, topmost first.
+    /// The five cards the spell reveals, topmost first.
     revealed: Vec<ObjectId>,
+    /// Their printed names, in the same order.
+    revealed_names: Vec<String>,
     /// A card beneath them that the spell never reveals.
     deep: ObjectId,
 }
 
-/// Cast Ancient Stirrings and stop at its keep decision, with the top card
-/// (`revealed[0]`) still unchosen.
-fn cast_ancient_stirrings_to_its_choice() -> Fixture {
+/// Cast a reveal/look dig and stop at its keep decision, with the five cards
+/// still on top of the library and nothing chosen yet. The library holds five
+/// untyped cards the dig's filter never matches, so the keep choice offers no
+/// eligible card — every test drives the "put the rest away" branch.
+fn cast_dig_to_its_choice(
+    name: &str,
+    oracle_text: &str,
+    mana_cost: ManaCost,
+    mana: &[ManaType],
+) -> Fixture {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
 
@@ -44,15 +63,26 @@ fn cast_ancient_stirrings_to_its_choice() -> Fixture {
     // stacked on top of it (`library[0]` is the top).
     let deep = scenario.add_card_to_library_top(P0, "Deep Library Card");
     let mut revealed = Vec::new();
+    let mut revealed_names = Vec::new();
     for index in 0..5 {
-        let name = format!("Revealed Card {index}");
-        revealed.push(scenario.add_card_to_library_top(P0, &name));
+        let card_name = format!("Revealed Card {index}");
+        revealed.push(scenario.add_card_to_library_top(P0, &card_name));
+        revealed_names.push(card_name);
     }
     revealed.reverse();
+    revealed_names.reverse();
 
-    let spell = scenario
-        .add_spell_to_hand_from_oracle(P0, "Ancient Stirrings", false, ANCIENT_STIRRINGS)
-        .id();
+    let spell = {
+        let mut builder = scenario.add_spell_to_hand_from_oracle(P0, name, false, oracle_text);
+        builder.with_mana_cost(mana_cost);
+        builder.id()
+    };
+    scenario.with_mana_pool(
+        P0,
+        mana.iter()
+            .map(|kind| ManaUnit::new(*kind, spell, false, vec![]))
+            .collect(),
+    );
 
     let mut runner = scenario.build();
     let card_id = runner.state().objects[&spell].card_id;
@@ -63,95 +93,232 @@ fn cast_ancient_stirrings_to_its_choice() -> Fixture {
             targets: vec![],
             payment_mode: CastPaymentMode::Auto,
         })
-        .expect("Ancient Stirrings must cast");
+        .expect("the dig spell must cast");
 
+    drive_to_choice(&mut runner);
+
+    Fixture {
+        runner,
+        revealed,
+        revealed_names,
+        deep,
+    }
+}
+
+/// Run the spell to its `WaitingFor::DigChoice`, passing priority as needed.
+fn drive_to_choice(runner: &mut GameRunner) {
     for _ in 0..16 {
         match runner.state().waiting_for.clone() {
+            WaitingFor::DigChoice { .. } => return,
             WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
             WaitingFor::Priority { .. } => {
                 runner
                     .act(GameAction::PassPriority)
                     .expect("pass priority while resolving");
             }
-            WaitingFor::DigChoice { .. } => break,
             ref other => panic!("unexpected prompt before the keep decision: {other:?}"),
         }
     }
-
-    Fixture {
-        runner,
-        revealed,
-        deep,
-    }
+    panic!(
+        "the dig never reached its keep decision; waiting_for={:?}",
+        runner.state().waiting_for
+    );
 }
 
-/// The fixture's reach guard, and the leak's precondition: the spell really is
-/// showing five cards, and that reveal is still open while the choice is
-/// pending.
+/// Finish the spell after the keep decision: pass priority until the stack is
+/// empty and the caster holds priority again.
+fn finish_resolution(runner: &mut GameRunner) {
+    for _ in 0..8 {
+        if matches!(runner.state().waiting_for, WaitingFor::Priority { .. })
+            && runner.state().stack.is_empty()
+        {
+            return;
+        }
+        runner
+            .act(GameAction::PassPriority)
+            .expect("pass priority to finish the spell");
+    }
+    panic!(
+        "the spell never finished resolving; waiting_for={:?}",
+        runner.state().waiting_for
+    );
+}
+
+/// CR 701.20a: a genuine "Reveal the top five cards" instruction makes the
+/// looked-at pile public while its keep decision is pending — every player sees
+/// the faces, and the caster can see them well enough to choose.
 #[test]
-fn reveal_pick_window_is_open_while_the_choice_is_pending() {
-    let fixture = cast_ancient_stirrings_to_its_choice();
+fn reveal_top_five_is_public_while_the_choice_is_pending() {
+    let mut fixture = cast_dig_to_its_choice(
+        "Gather the Pack",
+        GATHER_THE_PACK,
+        ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Green],
+        },
+        &[ManaType::Green, ManaType::Colorless],
+    );
+
+    assert!(
+        fixture.runner.state().players[0].mana_pool.is_empty(),
+        "the cast must actually pay {{1}}{{G}}, not bypass payment"
+    );
 
     let WaitingFor::DigChoice {
         player,
         cards,
         up_to,
+        selectable_cards,
         ..
     } = fixture.runner.state().waiting_for.clone()
     else {
         panic!(
-            "Ancient Stirrings must reach its keep decision; got {:?}",
+            "Gather the Pack must reach its keep decision; got {:?}",
             fixture.runner.state().waiting_for
         );
     };
     assert_eq!(player, P0);
-    assert!(up_to, "the reveal is optional: \"you may reveal ...\"");
+    assert!(
+        up_to,
+        "the reveal is optional: \"you may put ... into your hand\""
+    );
     assert_eq!(
         cards, fixture.revealed,
         "the dig must offer exactly the five cards it revealed"
     );
+    assert!(
+        selectable_cards.is_empty(),
+        "none of the untyped library cards is a creature, so no card is keepable"
+    );
+
+    let opponent_view = filter_state_for_viewer(fixture.runner.state(), P1);
     for id in &fixture.revealed {
         assert!(
             fixture.runner.state().revealed_cards.contains(id),
             "the revealed card {id:?} must be publicly revealed during the choice"
+        );
+        assert_ne!(
+            opponent_view.objects[id].name, "Hidden Card",
+            "a real reveal instruction shows the card to the opponent while the choice is pending"
         );
     }
     assert!(
         !fixture.revealed.contains(&fixture.deep),
         "the card beneath the reveal window is never looked at"
     );
+
+    // Leave the game in a settled state so the runner's drop checks stay quiet.
+    fixture
+        .runner
+        .act(GameAction::SelectCards { cards: Vec::new() })
+        .expect("decline to keep a card");
+    finish_resolution(&mut fixture.runner);
+}
+
+/// CR 701.20a + CR 401.2 (issue #8059): once the keep decision settles, no card
+/// the dig revealed stays marked as revealed. The unkept cards land in the
+/// graveyard, where their faces are public zone information — not because a
+/// stale reveal marker follows them there.
+#[test]
+fn reveal_pick_closes_the_window_when_the_instruction_settles() {
+    let mut fixture = cast_dig_to_its_choice(
+        "Gather the Pack",
+        GATHER_THE_PACK,
+        ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Green],
+        },
+        &[ManaType::Green, ManaType::Colorless],
+    );
+
+    fixture
+        .runner
+        .act(GameAction::SelectCards { cards: Vec::new() })
+        .expect("decline to keep a card");
+    finish_resolution(&mut fixture.runner);
+
+    let library: Vec<ObjectId> = fixture
+        .runner
+        .state()
+        .library_of(P0)
+        .iter()
+        .copied()
+        .collect();
+    assert_eq!(
+        library,
+        vec![fixture.deep],
+        "every revealed card leaves the library; only the never-revealed card remains"
+    );
+    for id in &fixture.revealed {
+        assert_eq!(
+            fixture.runner.state().objects[id].zone,
+            Zone::Graveyard,
+            "the unkept revealed card {id:?} goes to the graveyard"
+        );
+        assert!(
+            !fixture.runner.state().revealed_cards.contains(id),
+            "the reveal marker for {id:?} must be dropped once the instruction ends"
+        );
+    }
+
+    // Positive guard: the cards are visible again strictly as graveyard
+    // contents (a public zone), which proves the projection is still willing to
+    // show them once the reveal window itself is closed.
+    let caster_view = filter_state_for_viewer(fixture.runner.state(), P0);
+    let opponent_view = filter_state_for_viewer(fixture.runner.state(), P1);
+    for id in &fixture.revealed {
+        assert_ne!(
+            caster_view.objects[id].name, "Hidden Card",
+            "a card in the graveyard is public to the caster"
+        );
+        assert_ne!(
+            opponent_view.objects[id].name, "Hidden Card",
+            "a card in the graveyard is public to the opponent"
+        );
+    }
 }
 
 /// CR 701.20a + CR 701.20d + CR 401.2 (issue #8059): after the keep decision
 /// reorders the unkept cards onto the bottom of the library, neither the caster
 /// nor the opponent keeps seeing their faces.
+///
+/// Ancient Stirrings is the same dig class exercised above but keeps one card
+/// and bottoms the rest, so those cards return to a hidden zone where a stale
+/// reveal marker would leak the library order. Its "look at" wording is not
+/// treated as a public reveal here: only the dig's shape is asserted while the
+/// choice is pending.
 #[test]
-fn reveal_pick_closes_the_window_on_the_unkept_library_cards() {
-    let mut fixture = cast_ancient_stirrings_to_its_choice();
+fn look_at_pick_closes_the_window_on_the_unkept_library_cards() {
+    let mut fixture = cast_dig_to_its_choice(
+        "Ancient Stirrings",
+        ANCIENT_STIRRINGS,
+        ManaCost::Cost {
+            generic: 0,
+            shards: vec![ManaCostShard::Green],
+        },
+        &[ManaType::Green],
+    );
 
-    let WaitingFor::DigChoice { cards, .. } = fixture.runner.state().waiting_for.clone() else {
+    let WaitingFor::DigChoice { cards, up_to, .. } = fixture.runner.state().waiting_for.clone()
+    else {
         panic!("the dig's keep decision must be pending");
     };
+    assert!(
+        up_to,
+        "the keep is optional: \"you may reveal ... and put it into your hand\""
+    );
+    assert_eq!(
+        cards, fixture.revealed,
+        "the dig must offer exactly the five cards it revealed"
+    );
+
     let kept = cards[0];
     let unkept: Vec<ObjectId> = cards[1..].to_vec();
-
     fixture
         .runner
         .act(GameAction::SelectCards { cards: vec![kept] })
         .expect("keep the top revealed card");
-    for _ in 0..8 {
-        if matches!(
-            fixture.runner.state().waiting_for,
-            WaitingFor::Priority { .. }
-        ) && fixture.runner.state().stack.is_empty()
-        {
-            break;
-        }
-        fixture
-            .runner
-            .act(GameAction::PassPriority)
-            .expect("pass priority to finish the spell");
-    }
+    finish_resolution(&mut fixture.runner);
 
     assert_eq!(
         fixture.runner.state().objects[&kept].zone,
@@ -182,7 +349,7 @@ fn reveal_pick_closes_the_window_on_the_unkept_library_cards() {
         );
     }
     assert_eq!(
-        caster_view.objects[&kept].name, "Revealed Card 4",
+        caster_view.objects[&kept].name, fixture.revealed_names[0],
         "the kept card sits in the caster's hand and stays visible to them"
     );
 }
