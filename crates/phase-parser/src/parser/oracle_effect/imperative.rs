@@ -8228,6 +8228,28 @@ pub(super) fn lower_utility_imperative_ast(ast: UtilityImperativeAst) -> Effect 
     }
 }
 
+/// CR 615.7: Strip the optional "the next "/"next " count quantifier and parse
+/// the counted shield quantity with the shared `parse_count_expr` grammar,
+/// returning the quantity and the remaining stream. Single authority for the
+/// quantifier axis shared by [`parse_prevention_amount`] and
+/// `lower::try_parse_prevent_distribute`; a determiner-less "prevent <qty>
+/// damage" is left untouched.
+///
+/// The two callers keep different static placeholders for a dynamic quantity —
+/// `Next(1)` here, `All` in the distribute path (whose shield is natively
+/// expressed as "all damage, split among the targets") — because neither
+/// placeholder is read once `amount_dynamic` is `Some`: `prevent_damage::resolve`
+/// resolves the dynamic quantity and overwrites `amount` with it.
+pub(super) fn parse_counted_prevention_quantity(rest: &str) -> Option<(QuantityExpr, &str)> {
+    let after_quantifier = opt(alt((
+        tag::<_, _, OracleError<'_>>("the next "),
+        tag("next "),
+    )))
+    .parse(rest)
+    .map_or(rest, |(after, _)| after);
+    parse_count_expr(after_quantifier)
+}
+
 /// CR 615.1a + CR 615.7 + CR 107.3a: decompose the prevention amount from the
 /// LOCAL parser stream (`rest`, positioned just past "prevent ") with nom
 /// combinators. Returns the static `amount` plus the dynamic quantity that
@@ -8237,7 +8259,7 @@ pub(super) fn lower_utility_imperative_ast(ast: UtilityImperativeAst) -> Effect 
 /// "all but " is tried before bare "all " (shared prefix). The counted forms
 /// ("prevent [the] next <qty> damage", "prevent <qty> damage") strip the
 /// optional quantifier and delegate to `parse_count_expr`, the shared
-/// effect-quantity grammar: a literal yields `Next(n)` (CR 107.1b); the
+/// effect-quantity grammar: a literal yields `Next(n)` (CR 615.7); the
 /// announced `X` (CR 107.3a) or any composed dynamic count is carried in the
 /// dynamic slot with `Next(1)` as the static placeholder.
 ///
@@ -8260,13 +8282,7 @@ pub(super) fn parse_prevention_amount(rest: &str) -> (PreventionAmount, Option<Q
     // CR 615.7: counted shield. One quantifier axis for "the next" and the
     // determiner-less "next" (the form `try_parse_prevent_distribute` accepts);
     // a bare "prevent <qty> damage" is left untouched.
-    let after_quantifier = opt(alt((
-        tag::<_, _, OracleError<'_>>("the next "),
-        tag("next "),
-    )))
-    .parse(rest)
-    .map_or(rest, |(after, _)| after);
-    match parse_count_expr(after_quantifier) {
+    match parse_counted_prevention_quantity(rest) {
         Some((QuantityExpr::Fixed { value }, _)) => (
             PreventionAmount::Next(u32::try_from(value).unwrap_or(0)),
             None,
@@ -29048,7 +29064,7 @@ mod tests {
         );
     }
 
-    /// CR 615.7 + CR 107.3a + CR 107.1b: the shared prevention-amount authority
+    /// CR 615.7 + CR 107.3a: the shared prevention-amount authority
     /// decomposes every form of the amount axis from the stream just past
     /// "prevent ". The blanket forms carry no dynamic quantity; a literal counted
     /// form yields `Next(n)` (the `2` row proves the literal path still fires);

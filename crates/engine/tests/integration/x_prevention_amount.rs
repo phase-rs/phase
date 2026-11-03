@@ -475,7 +475,7 @@ fn temper_export_round_trip_through_both_native_loaders_prevents_two() {
 }
 
 /// R8: X is bound per cast, not globally — two casts with different X each keep
-/// their own shield (CR 107.3i + CR 107.3k).
+/// their own shield (CR 107.3a + CR 107.3i).
 #[test]
 fn announced_x_is_bound_per_cast_not_globally() {
     let mut scenario = GameScenario::new();

@@ -25642,7 +25642,7 @@ fn prevention_followup_if_this_way_does_not_emit_condition_warning() {
 /// `amount_dynamic` (`Next(1)` stays as the static placeholder), while a trailing
 /// "where X is <quantity>" binder still DEFINES X and replaces it with the
 /// card's own count. The negative siblings are Guardian Angel's fixed second
-/// shield and the three binder cards.
+/// shield and the four binder cards.
 #[derive(Clone, Copy)]
 enum ExpectedDynamic {
     /// The announced `{X}`: `Next(1)` placeholder plus `Variable X`.
@@ -25765,8 +25765,10 @@ fn x_prevention_class_parses_announced_x_as_dynamic_amount() {
             &["Instant"],
             &[],
             &[
+                // The second shield's recipient ("that permanent or player")
+                // is a pre-existing defect, deliberately unasserted.
                 (ExpectedDynamic::AnnouncedX, ExpectedTarget::Any),
-                (ExpectedDynamic::Fixed, ExpectedTarget::Any),
+                (ExpectedDynamic::Fixed, ExpectedTarget::Unasserted),
             ],
         ),
         (

@@ -10166,19 +10166,9 @@ pub(super) fn try_parse_prevent_distribute(text: &str) -> Option<ParsedEffectCla
     let (after_prevent, _) = tag::<_, _, OracleError<'_>>("prevent ")
         .parse(lower.as_str())
         .ok()?;
-    // CR 615.7: prevention shields are printed as "prevent the next N damage …".
-    // Strip the optional "the next "/"next " quantifier before the count so the
-    // shared `parse_count_expr` sees a bare quantity. `opt` makes both the
-    // "the next" and the determiner-less "next" forms parse, and leaves the input
-    // untouched for "prevent N damage" (no quantifier).
-    let (after_quantifier, _) = opt(alt((
-        tag::<_, _, OracleError<'_>>("the next "),
-        tag::<_, _, OracleError<'_>>("next "),
-    )))
-    .parse(after_prevent)
-    .unwrap_or((after_prevent, None));
-    // Parse the prevention amount.
-    let (qty, rem) = parse_count_expr(after_quantifier)?;
+    // CR 615.7: strip the optional "the next "/"next " quantifier and parse the
+    // counted shield through the shared prevention-amount authority.
+    let (qty, rem) = super::imperative::parse_counted_prevention_quantity(after_prevent)?;
     // CR 615.7: Require "damage" immediately after the quantity.
     let (after_damage, _) = tag::<_, _, OracleError<'_>>("damage").parse(rem).ok()?;
 
