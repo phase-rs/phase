@@ -272,8 +272,8 @@ mod tests {
     use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
     use engine::game::zones::create_object;
     use engine::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification,
-        CopyRetargetPermission, PtValue, QuantityExpr, StaticDefinition, TargetFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, ContinuousModification, PtValue, QuantityExpr,
+        StaticDefinition, TargetFilter,
     };
     use engine::types::ability::{Duration, ResolvedAbility, TargetRef};
     use engine::types::counter::CounterType;
@@ -1269,53 +1269,51 @@ mod tests {
         );
     }
 
-    fn copy_spell_effect() -> Effect {
-        Effect::CopySpell {
-            target: TargetFilter::Any,
-            retarget: CopyRetargetPermission::KeepOriginalTargets,
-            copier: None,
-            additional_modifications: Vec::new(),
-            starting_loyalty_from_casualty_sacrifice: false,
-        }
-    }
+    const RETURN_THE_FAVOR: &str = "Spree (Choose one or more additional costs.)\n+ {1} \u{2014} Copy target instant spell, sorcery spell, activated ability, or triggered ability. You may choose new targets for the copy.\n+ {1} \u{2014} Change the target of target spell or ability with a single target.";
 
     #[test]
     fn copy_effect_targeting_a_pending_animation_does_not_lift_the_veto() {
-        let (mut runner, village, index) =
-            oracle_board("Treetop Village", TREETOP_VILLAGE, &[(ManaColor::Green, 8)]);
+        let mut scenario = GameScenario::new();
+        scenario.at_phase(Phase::PreCombatMain);
+        let village = scenario
+            .add_land_from_oracle(P0, "Treetop Village", TREETOP_VILLAGE)
+            .id();
+        for _ in 0..8 {
+            scenario.add_basic_land(P0, ManaColor::Green);
+        }
+        let copier = scenario
+            .add_spell_to_hand_from_oracle(P1, "Return the Favor", true, RETURN_THE_FAVOR)
+            .id();
+        for _ in 0..3 {
+            scenario.add_basic_land(P1, ManaColor::Red);
+        }
+        let mut runner = scenario.build();
+        p0_main_phase(&mut runner);
+        let index = runner.state().objects[&village]
+            .abilities
+            .iter()
+            .position(crate::manland::animates_source)
+            .expect("the Oracle text parses to a self-animating ability");
         announce(&mut runner, village, index);
-        let pending = runner.state().stack.back().expect("pending entry").id;
         assert!(
             is_redundant_reject(&verdict_at(runner.state(), village, index)),
             "control: with nothing answering it, the pending activation vetoes"
         );
 
-        let copy_entry_id = ObjectId(runner.state().next_object_id);
-        // Synthetic: an opponent's copy of the pending activation. No printed
-        // card copies an opponent's untargeted ability; the nearest, Lithoform
-        // Engine, copies only an ability its controller controls.
-        {
-            let state = runner.state_mut();
-            let ability = ResolvedAbility::new(
-                copy_spell_effect(),
-                vec![TargetRef::Object(pending)],
-                ObjectId(9998),
-                P1,
-            );
-            state.stack.push_back(StackEntry {
-                id: copy_entry_id,
-                source_id: ObjectId(9998),
-                controller: P1,
-                kind: StackEntryKind::ActivatedAbility {
-                    source_id: ObjectId(9998),
-                    ability: Box::new(ability),
-                },
-            });
-            state.next_object_id += 1;
-        }
+        let pending = pass_to_opponent(&mut runner);
+        runner
+            .cast(copier)
+            .modes(&[0])
+            .target_object(pending)
+            .commit();
+        pass_until(&mut runner, p0_has_priority);
+        let top = runner.state().stack.back().expect("the copy spell");
         assert!(
-            entry_targets(runner.state(), copy_entry_id).contains(&TargetRef::Object(pending)),
-            "reach guard: the copy entry targets the pending activation"
+            runner.state().stack.len() == 2
+                && top.controller == P1
+                && matches!(top.kind, StackEntryKind::Spell { .. })
+                && entry_targets(runner.state(), top.id).contains(&TargetRef::Object(pending)),
+            "reach guard: P1's Return the Favor is on the stack above, targeting, the pending animation"
         );
 
         let verdict = verdict_at(runner.state(), village, index);
