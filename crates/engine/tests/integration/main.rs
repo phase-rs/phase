@@ -149,6 +149,7 @@ mod issue_6858_draw_that_many_discard;
 mod issue_6877_departed_triggering_spell;
 mod issue_7386_ozolith_combat_counter_move;
 mod issue_8024_terminal_rest_captures;
+mod issue_8065_nightmare_shepherd;
 mod issue_836_hero_of_bladehold_battle_cry;
 mod issue_8485_maze_of_ith_defender;
 mod issue_879_obsessive_pursuit;
