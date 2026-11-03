@@ -26,7 +26,7 @@ ok() { PASS=$((PASS + 1)); printf 'ok   %s\n' "$1"; }
 bad() { FAIL=$((FAIL + 1)); printf 'FAIL %s\n' "$1"; }
 
 # The real jq, resolved BEFORE any PATH override.
-REAL_JQ="$(command -v jq 2>/dev/null)" || {
+REAL_JQ="$(type -P jq 2>/dev/null)" || {
     printf 'FAIL jq not found on PATH\n' >&2
     exit 1
 }
@@ -51,14 +51,29 @@ mkdir -p "$TMP/crlf" "$TMP/text"
 # What native Windows jq does: every printed line ends CRLF.
 cat > "$TMP/crlf/jq" <<EOF
 #!/usr/bin/env bash
-"$REAL_JQ" "\$@" | sed 's/\$/\r/'
+"$REAL_JQ" "\$@" | awk '{printf "%s\\r\\n", \$0}'
 EOF
 # A jq that answers with prose where a count is required: the gate must refuse, not guess.
 cat > "$TMP/text/jq" <<'EOF'
 #!/usr/bin/env bash
 printf 'n/a\r\n'
 EOF
-chmod +x "$TMP/crlf/jq" "$TMP/text/jq"
+mkdir -p "$TMP/mid_total" "$TMP/mid_diag"
+cat > "$TMP/mid_total/jq" <<EOF
+#!/usr/bin/env bash
+case "\$*" in
+    *'total_cards // 0'*) printf 'n/a\\r\\n' ;;
+    *) exec "$REAL_JQ" "\$@" ;;
+esac
+EOF
+cat > "$TMP/mid_diag/jq" <<EOF
+#!/usr/bin/env bash
+case "\$*" in
+    *.diagnostics\[*) printf 'n/a\\r\\n' ;;
+    *) exec "$REAL_JQ" "\$@" ;;
+esac
+EOF
+chmod +x "$TMP/crlf/jq" "$TMP/text/jq" "$TMP/mid_total/jq" "$TMP/mid_diag/jq"
 
 # --- helpers ----------------------------------------------------------------------------------
 # run <jq-dir|-> <baseline> <current> : stdout+stderr in $OUT, status in $RC
@@ -126,6 +141,19 @@ else
     bad "a non-numeric jq value must fail loudly, got exit $RC"
     printf '%s\n' "$OUT" | sed 's/^/     /'
 fi
+
+# --- row 4: a refusal on a LATER numeric read is still named on stderr -------------------------
+# These two sites used to carry a leftover `2>/dev/null` from their bare-jq days, which discarded
+# `jq_num`'s own message and left a bare exit 2 with empty stderr — the failure this row pins.
+for target in mid_total mid_diag; do
+    run "$TMP/$target" "$TMP/base.json" "$TMP/worse.json"
+    if [ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -q "non-numeric value where a count was required"; then
+        ok "a mid-run refusal at $target is named on stderr (exit $RC)"
+    else
+        bad "a mid-run refusal at $target must be named, got exit $RC"
+        printf '%s\n' "$OUT" | sed 's/^/     /'
+    fi
+done
 
 printf '\n%s passed, %s failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ] || exit 1

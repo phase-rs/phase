@@ -400,6 +400,19 @@ local_resource('prelowered-ratchet',
     labels = ['lint'],
 )
 
+# The coverage-regression check's numeric boundary (issue #10549): CRLF jq, non-numeric refusal,
+# and the `-gt`/`-lt` arms. Tilt is the enforcement venue for script suites, not GitHub CI — CI
+# runs the gate itself (ci.yml), never its fixtures.
+local_resource('coverage-crlf',
+    cmd = '/bin/bash scripts/lib/coverage_crlf_tests.sh',
+    deps = ['scripts/coverage-regression-check.sh',
+            'scripts/lib/coverage_crlf_tests.sh'],
+    ignore = TMP_IGNORE,
+    allow_parallel = True,
+    auto_init = 'lint' in enabled,
+    labels = ['lint'],
+)
+
 # Gate H's full shell seams are local Tilt checks, not a separate CI suite.
 # Fixtures use the real gate/detector and the shared scanner's import dependency.
 local_resource('residue-ratchet',

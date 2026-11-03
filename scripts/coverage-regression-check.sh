@@ -33,6 +33,9 @@
 #   <current>   path to the newly produced coverage-data.json
 #   --fail-on-engine  exit 1 if REGRESSED (engine) bucket is non-empty
 #
+#   --self-test       run this script's own fixture suite
+#                     (scripts/lib/coverage_crlf_tests.sh) and exit with its status
+#
 # The coverage-data.json layout comes from `coverage-report` (see
 # crates/engine/src/bin/coverage_report.rs): .cards[] with .card_name,
 # .supported, and .gap_details[].handler.
@@ -231,8 +234,8 @@ fi
 
 diag_fail=0
 if [[ "$baseline_has_diag" -eq 1 ]]; then
-    base_total=$(jq_num -r '.total_cards // 0' "$BASELINE" 2>/dev/null)
-    curr_total=$(jq_num -r '.total_cards // 0' "$CURRENT" 2>/dev/null)
+    base_total=$(jq_num -r '.total_cards // 0' "$BASELINE")
+    curr_total=$(jq_num -r '.total_cards // 0' "$CURRENT")
     new_cards=$((curr_total - base_total))
     if [[ "$new_cards" -lt 0 ]]; then
         new_cards=0
@@ -289,7 +292,7 @@ if [[ "$baseline_has_diag" -eq 1 ]]; then
 
     while IFS='=' read -r cat count; do
         count="${count%$'\r'}"
-        base_count=$(jq_num -r ".diagnostics[\"$cat\"] // 0" "$BASELINE" 2>/dev/null)
+        base_count=$(jq_num -r ".diagnostics[\"$cat\"] // 0" "$BASELINE")
         if [[ "$count" -gt "$base_count" ]]; then
             increase=$((count - base_count))
             honesty_only=$(jq_num -r --arg cat "$cat" '
