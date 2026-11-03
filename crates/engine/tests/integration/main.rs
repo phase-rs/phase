@@ -287,5 +287,6 @@ mod controller_anaphor_binds_through_context;
 
 mod resolution_progress_contract;
 
+mod ignite_memories_random_reveal;
 mod risky_move_gain_control_trigger;
 mod token_attack_destination;
