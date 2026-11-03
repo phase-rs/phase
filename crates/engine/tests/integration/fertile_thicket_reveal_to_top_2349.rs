@@ -19,7 +19,8 @@
 //! parsed Dig config runs through the real cast pipeline, so reverting either
 //! parser step breaks the assertions below.
 
-use engine::game::scenario::{GameScenario, P0};
+use engine::game::scenario::{GameScenario, P0, P1};
+use engine::game::visibility::filter_state_for_viewer;
 use engine::types::actions::GameAction;
 use engine::types::card_type::{CoreType, Supertype};
 use engine::types::game_state::WaitingFor;
@@ -151,5 +152,32 @@ fn fertile_thicket_keeps_revealed_basic_land_on_top_and_rest_on_bottom() {
         "the revealed basic land must be publicly revealed (reveal:true); \
          revealed_cards = {:?}",
         state.revealed_cards
+    );
+
+    // CR 701.20a + CR 701.20d + CR 401.2 (issue #8059): the reveal window ends
+    // with this instruction for the cards it put away. The four cards now on the
+    // bottom of the library stop being revealed, so neither player may see their
+    // faces there; only the kept Forest, which this instruction revealed and left
+    // on top, stays public.
+    let caster_view = filter_state_for_viewer(state, P0);
+    let opponent_view = filter_state_for_viewer(state, P1);
+    for &id in &[other1, other2, other3, other4] {
+        assert!(
+            !state.revealed_cards.contains(&id),
+            "the bottomed card {id:?} must not stay revealed; revealed_cards = {:?}",
+            state.revealed_cards
+        );
+        assert_eq!(
+            caster_view.objects[&id].name, "Hidden Card",
+            "the bottomed card {id:?} must not stay visible to its own controller"
+        );
+        assert_eq!(
+            opponent_view.objects[&id].name, "Hidden Card",
+            "the bottomed card {id:?} must not stay visible to the opponent"
+        );
+    }
+    assert_ne!(
+        opponent_view.objects[&basic_land].name, "Hidden Card",
+        "positive guard: the kept Forest is still publicly revealed on top"
     );
 }

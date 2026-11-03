@@ -13,10 +13,13 @@
 //! whether a library card's face is visible. Closing the reveal window is the
 //! reveal-markers cleanup on the dig's completion tail.
 //!
-//! The cleanup regression below uses a genuine "Reveal the top N" instruction
-//! (Gather the Pack), so the public reveal markers it asserts while the choice
-//! is pending are the ones the card's own text creates. The pick-and-bottom test
-//! below uses a public reveal instruction with the same dig shape.
+//! The cleanup regressions below use a genuine "Reveal the top N" instruction
+//! (Gather the Pack), so the public reveal markers they assert while the choice
+//! is pending are the ones the card's own text creates. The pick-and-bottom
+//! flow is covered separately by Ancient Stirrings, the card shape the report's
+//! thread is titled after: its "look at" wording is never used to justify a
+//! public-reveal assertion while the choice is pending — that test asserts only
+//! that the cards it puts back on the bottom stop being visible afterwards.
 
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::visibility::filter_state_for_viewer;
@@ -28,11 +31,11 @@ use engine::types::phase::Phase;
 use engine::types::zones::Zone;
 
 /// Verbatim Oracle text (Scryfall, `Gather the Pack`).
-const GATHER_THE_PACK: &str = "Reveal the top five cards of your library. You may put a creature card from among them into your hand. Put the rest into your graveyard.\nSpell mastery — If there are two or more instant and/or sorcery cards in your graveyard, put up to two creature cards from among them into your hand instead.";
+const GATHER_THE_PACK: &str = "Reveal the top five cards of your library. You may put a creature card from among them into your hand. Put the rest into your graveyard.\nSpell mastery — If there are two or more instant and/or sorcery cards in your graveyard, put up to two creature cards from among the revealed cards into your hand instead of one.";
 
-/// Reveal-and-bottom fixture text: reveal the top five, optionally reveal one
-/// of them, bottom the rest.
-const REVEAL_PICK_BOTTOM: &str = "Reveal the top five cards of your library. You may reveal a colorless card from among them and put it into your hand. Then put the rest on the bottom of your library in any order.";
+/// Verbatim Oracle text (Scryfall, `Ancient Stirrings`): look at the top five,
+/// optionally reveal one of them, bottom the rest.
+const ANCIENT_STIRRINGS: &str = "Look at the top five cards of your library. You may reveal a colorless card from among them and put it into your hand. Then put the rest on the bottom of your library in any order.";
 
 struct Fixture {
     runner: GameRunner,
@@ -276,18 +279,20 @@ fn reveal_pick_closes_the_window_when_the_instruction_settles() {
     }
 }
 
-/// CR 701.20a + CR 701.20d + CR 401.2 (issue #8059): after the keep decision
-/// reorders the unkept cards onto the bottom of the library, neither the caster
-/// nor the opponent keeps seeing their faces.
+/// CR 701.20a + CR 701.20d + CR 401.2 (issue #8059): Ancient Stirrings looks at
+/// the top five cards, keeps the one its controller reveals, and puts the rest
+/// on the bottom of the library. Once that instruction finishes, neither player
+/// keeps seeing the four cards that went back into the library.
 ///
-/// The public reveal-and-bottom fixture is the same dig class exercised above
-/// but keeps one card and bottoms the rest, so those cards return to a hidden
-/// zone where a stale reveal marker would leak the library order.
+/// This is the shape the report's thread is titled after. It deliberately says
+/// nothing about what the pending choice shows — that is the card's own
+/// reveal-vs-look question, covered above by a genuine "Reveal the top N" card
+/// — so the test cannot enshrine a hidden-information leak as expected.
 #[test]
-fn reveal_pick_bottom_closes_the_window_on_the_unkept_library_cards() {
+fn ancient_stirrings_private_look_ends_when_the_unkept_cards_are_bottomed() {
     let mut fixture = cast_dig_to_its_choice(
-        "Reveal Pick Bottom",
-        REVEAL_PICK_BOTTOM,
+        "Ancient Stirrings",
+        ANCIENT_STIRRINGS,
         ManaCost::Cost {
             generic: 0,
             shards: vec![ManaCostShard::Green],
@@ -295,9 +300,14 @@ fn reveal_pick_bottom_closes_the_window_on_the_unkept_library_cards() {
         &[ManaType::Green],
     );
 
+    assert!(
+        fixture.runner.state().players[0].mana_pool.is_empty(),
+        "the cast must actually pay {{G}}, not bypass payment"
+    );
+
     let WaitingFor::DigChoice { cards, up_to, .. } = fixture.runner.state().waiting_for.clone()
     else {
-        panic!("the dig's keep decision must be pending");
+        panic!("the look spell's keep decision must be pending");
     };
     assert!(
         up_to,
@@ -305,12 +315,15 @@ fn reveal_pick_bottom_closes_the_window_on_the_unkept_library_cards() {
     );
     assert_eq!(
         cards, fixture.revealed,
-        "the dig must offer exactly the five cards it revealed"
+        "the look must offer exactly the five cards it looked at"
     );
+
+    // Positive guard: the caster can see the five cards they are choosing from.
+    let caster_view = filter_state_for_viewer(fixture.runner.state(), P0);
     for id in &cards {
-        assert!(
-            fixture.runner.state().revealed_cards.contains(id),
-            "the reveal dig must mark {id:?} before the choice"
+        assert_ne!(
+            caster_view.objects[id].name, "Hidden Card",
+            "the caster must see the card {id:?} they are choosing from"
         );
     }
 
@@ -319,7 +332,7 @@ fn reveal_pick_bottom_closes_the_window_on_the_unkept_library_cards() {
     fixture
         .runner
         .act(GameAction::SelectCards { cards: vec![kept] })
-        .expect("keep the top revealed card");
+        .expect("keep the top looked-at card");
     finish_resolution(&mut fixture.runner);
 
     assert_eq!(
@@ -334,6 +347,8 @@ fn reveal_pick_bottom_closes_the_window_on_the_unkept_library_cards() {
         "the unkept cards go to the bottom of the library; library = {library:?}"
     );
 
+    // CR 701.20d + CR 401.2: a looked-at card put back into the library stops
+    // being lookable — even for the player who just looked at it.
     let caster_view = filter_state_for_viewer(fixture.runner.state(), P0);
     let opponent_view = filter_state_for_viewer(fixture.runner.state(), P1);
     for id in &unkept {
@@ -347,7 +362,7 @@ fn reveal_pick_bottom_closes_the_window_on_the_unkept_library_cards() {
         );
         assert!(
             !fixture.runner.state().revealed_cards.contains(id),
-            "the reveal marker for {id:?} must be dropped once the instruction ends"
+            "no reveal marker may be left for {id:?}"
         );
     }
     assert_eq!(
