@@ -23,6 +23,7 @@
 use engine::game::combat::AttackTarget;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::types::actions::GameAction;
+use engine::types::events::GameEvent;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::phase::Phase;
@@ -78,12 +79,17 @@ fn drive_to_declare_attackers(runner: &mut GameRunner) {
 /// trigger needs no ordering prompt, so it resolves inside this drive; the rows
 /// assert its outcome (draw count, shuffle destination, win) rather than a
 /// transient stack entry.
-fn drive_combat_damage(runner: &mut GameRunner, attacks: &[(ObjectId, AttackTarget)]) {
+fn drive_combat_damage(
+    runner: &mut GameRunner,
+    attacks: &[(ObjectId, AttackTarget)],
+) -> Vec<GameEvent> {
     drive_to_declare_attackers(runner);
-    runner
+    let mut events = runner
         .declare_attackers(attacks)
-        .expect("attackers should be legal");
-    let _ = runner.combat_damage();
+        .expect("attackers should be legal")
+        .events;
+    events.extend(runner.combat_damage().events().iter().cloned());
+    events
 }
 
 /// CR 603.2c + CR 120.4b + CR 510.2: combat damage to two opponents is one trigger
@@ -104,7 +110,7 @@ fn combat_damage_to_two_opponents_is_one_trigger() {
     let mut runner = scenario.build();
     let hand_before = hand_len(&runner, P0);
 
-    drive_combat_damage(
+    let _ = drive_combat_damage(
         &mut runner,
         &[
             (a1, AttackTarget::Player(P1)),
@@ -188,7 +194,7 @@ fn win_after_the_draw_empties_the_library() {
     let mut runner = scenario.build();
     let hand_before = hand_len(&runner, P0);
 
-    drive_combat_damage(&mut runner, &[(attacker, AttackTarget::Player(P1))]);
+    let _ = drive_combat_damage(&mut runner, &[(attacker, AttackTarget::Player(P1))]);
 
     assert_eq!(
         runner.life(P1),
@@ -220,10 +226,11 @@ fn win_after_the_draw_empties_the_library() {
     );
 }
 
-/// Ruling 2026-08-21 + CR 121.4 / CR 704.5b: the ability's own resolution names P0
-/// the winner even though its draw came from an empty library. This row asserts
-/// the win outcome and the empty-library fact only; it deliberately asserts
-/// nothing about P0's elimination state (see the follow-up note below).
+/// Ruling 2026-08-21 + CR 104.1 / CR 121.4 / CR 704.5b: the ability's own
+/// resolution names P0 the winner even though its draw came from an empty
+/// library. The win happens while the ability is resolving, before the
+/// empty-library state-based action would be checked; once the game has ended,
+/// no SBAs run (issue #10451), so the winner stays in the game.
 #[test]
 fn win_survives_a_draw_from_an_empty_library() {
     let mut scenario = GameScenario::new_n_player(3, 42);
@@ -233,7 +240,7 @@ fn win_survives_a_draw_from_an_empty_library() {
     let attacker = scenario.add_creature(P0, "Attacker", 1, 1).id();
     let mut runner = scenario.build();
 
-    drive_combat_damage(&mut runner, &[(attacker, AttackTarget::Player(P1))]);
+    let events = drive_combat_damage(&mut runner, &[(attacker, AttackTarget::Player(P1))]);
 
     assert_eq!(
         runner.life(P1),
@@ -258,15 +265,20 @@ fn win_survives_a_draw_from_an_empty_library() {
         "the draw really came from an empty library"
     );
     assert_eq!(hand_len(&runner, P0), 0, "there was nothing to draw");
+    assert!(
+        !p0.is_eliminated,
+        "the winner must not be eliminated by the empty-library loss SBA"
+    );
+    let game_over_at = events
+        .iter()
+        .position(
+            |event| matches!(event, GameEvent::GameOver { winner: Some(winner) } if *winner == P0),
+        )
+        .expect("the win emitted GameOver");
+    assert!(
+        !events[game_over_at..]
+            .iter()
+            .any(|event| matches!(event, GameEvent::PlayerLost { player_id } if *player_id == P0)),
+        "no PlayerLost for the winner may be emitted after the win"
+    );
 }
-
-// Follow-up note (report-only; no code in this change). The row above does not
-// prove the ruling's "not eliminated" clause. Today the engine's terminal
-// player-loss SBA safety net runs after the win lands: `reconcile_terminal_sba`
-// (`crates/engine/src/game/engine.rs`) calls `sba::has_pending_player_loss_sba`
-// and then `sba::check_state_based_actions`, and neither reads
-// `state.waiting_for == WaitingFor::GameOver` nor a `game_end` flag — so
-// `collect_draw_from_empty_losers` (`crates/engine/src/game/sba.rs`) still
-// eliminates P0 on the `drew_from_empty_library` flag that the ability's own
-// draw set. That is a core-engine defect in `engine.rs`/`sba.rs`, outside this
-// parser-only change's scope: follow-up issue (filed separately).
