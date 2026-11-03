@@ -11,8 +11,9 @@
 use engine::database::card_db::CardDatabase;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::scenario_db::GameScenarioDbExt;
-use engine::types::ability::TriggerCondition;
+use engine::types::ability::{TargetRef, TriggerCondition};
 use engine::types::actions::{CastChoice, GameAction};
+use engine::types::events::GameEvent;
 use engine::types::game_state::{CastOfferKind, CastPaymentMode, StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaColor, ManaType, ManaUnit};
@@ -31,6 +32,7 @@ const MIRROR_GALLERY: &str = "The \"legend rule\" doesn't apply.";
 const MIRAGE_MIRROR: &str = "{2}: This artifact becomes a copy of target artifact, creature, enchantment, or land until end of turn.";
 const MASTERMIND_PLUM: &str = "Whenever Mastermind Plum attacks, exile up to one target card from a graveyard. If an artifact card was exiled this way, create a Treasure token. (It's an artifact with \"{T}, Sacrifice this token: Add one mana of any color.\")\nWhenever you cast a spell, if mana from a Treasure was spent to cast it, you draw a card and you lose 1 life.";
 const INGA_AND_ESIKA: &str = "Creatures you control have vigilance and \"{T}: Add one mana of any color. Spend this mana only to cast a creature spell.\"\nWhenever you cast a creature spell, if three or more mana from creatures was spent to cast it, draw a card.";
+const AZORIUS_SIGNET: &str = "{1}, {T}: Add {W}{U}.";
 
 fn db() -> &'static CardDatabase {
     shared_card_db().expect("integration card fixture must load")
@@ -932,4 +934,386 @@ fn inga_and_esika_still_counts_mana_from_creatures() {
     assert_eq!(trigger_sources(&runner), []);
     resolve_all(&mut runner);
     assert_eq!(hand_len(&runner), hand - 1, "the spell left, nothing drawn");
+}
+
+/// One mana of `mana_type` from each of `sources`.
+fn pool_from(mana_type: ManaType, sources: &[ObjectId]) -> Vec<ManaUnit> {
+    sources
+        .iter()
+        .map(|source| ManaUnit::new(mana_type, *source, false, vec![]))
+        .collect()
+}
+
+/// Barracks beside exactly the lands that pay Benevolent River Spirit's {U}{U} and waterbend {5}
+/// without it: Barracks is the seventh payment, as a tap or as mana.
+struct SpiritBoard {
+    runner: GameRunner,
+    barracks: ObjectId,
+    lands: Vec<ObjectId>,
+    spirit: ObjectId,
+}
+
+fn spirit_board() -> SpiritBoard {
+    let mut scenario = main_phase();
+    let barracks = add_barracks(&mut scenario);
+    let mut lands = vec![
+        scenario.add_basic_land(P0, ManaColor::Blue),
+        scenario.add_basic_land(P0, ManaColor::Blue),
+    ];
+    lands.extend((0..4).map(|_| scenario.add_basic_land(P0, ManaColor::White)));
+    lands.sort();
+    let spirit = real(&mut scenario, P0, "Benevolent River Spirit", Zone::Hand);
+    SpiritBoard {
+        runner: scenario.build(),
+        barracks,
+        lands,
+        spirit,
+    }
+}
+
+fn sorted_spent_sources(runner: &GameRunner, spell: ObjectId) -> Vec<ObjectId> {
+    let mut spent = spent_sources(runner, spell);
+    spent.sort();
+    spent
+}
+
+/// CR 701.67a + CR 106.3: tapping Barracks "rather than pay that mana" produces none, so the
+/// spell was not cast using mana produced by Barracks, and the tap is in no spent-mana record.
+#[test]
+fn a_waterbend_tap_of_barracks_is_not_mana_it_produced() {
+    let mut board = spirit_board();
+    let spirit = board.spirit;
+    board
+        .runner
+        .cast(spirit)
+        .convoke_with(&[board.barracks])
+        .commit();
+
+    assert!(
+        board.runner.state().objects[&board.barracks].tapped,
+        "reach guard: Barracks paid one generic mana of the waterbend cost"
+    );
+    assert_eq!(board.runner.state().stack.len(), 1);
+    assert_eq!(sorted_spent_sources(&board.runner, spirit), board.lands);
+    let object = &board.runner.state().objects[&spirit];
+    assert_eq!(object.mana_spent_to_cast_amount, 6);
+    assert_eq!(object.colors_spent_to_cast.white, 4);
+    assert_eq!(object.colors_spent_to_cast.blue, 2);
+    assert_eq!(trigger_sources(&board.runner), []);
+    assert_eq!(
+        board.runner.state().mana_spent_on_spells_this_turn[&P0],
+        6,
+        "CR 701.67a: expend counts the mana, not the tap"
+    );
+
+    pass_until_settled(&mut board.runner);
+    assert_eq!(
+        board.runner.state().objects[&spirit].zone,
+        Zone::Battlefield
+    );
+    assert_eq!(gnome_soldiers(&board.runner), 0);
+}
+
+/// CR 106.3 + CR 601.2h: the paired row: Barracks taps for {W} toward the same spell, the mana
+/// goes to its generic cost, and Barracks triggers once.
+#[test]
+fn barracks_mana_toward_a_waterbend_cost_triggers_it() {
+    let mut board = spirit_board();
+    let spirit = board.spirit;
+    float(&mut board.runner, board.barracks);
+    board.runner.cast(spirit).commit();
+
+    let mut expected = board.lands.clone();
+    expected.push(board.barracks);
+    expected.sort();
+    assert_eq!(sorted_spent_sources(&board.runner, spirit), expected);
+    assert_eq!(trigger_sources(&board.runner), [board.barracks]);
+
+    pass_until_settled(&mut board.runner);
+    assert_eq!(gnome_soldiers(&board.runner), 1);
+    assert_eq!(
+        board.runner.state().objects[&spirit].zone,
+        Zone::Battlefield
+    );
+}
+
+/// CR 701.67a: a creature tapped for waterbend is not mana from a creature: Inga and Esika needs
+/// three, and two of them plus a tap is two.
+#[test]
+fn inga_and_esika_does_not_count_a_waterbend_tap() {
+    let board = |waterbend_tap: bool| {
+        let mut scenario = main_phase();
+        scenario.add_creature_from_oracle(P0, "Inga and Esika", 2, 3, INGA_AND_ESIKA);
+        let creatures: Vec<ObjectId> = (0..3).map(|_| scenario.add_vanilla(P0, 1, 1)).collect();
+        let plains = scenario.add_basic_land(P0, ManaColor::White);
+        let spirit = real(&mut scenario, P0, "Benevolent River Spirit", Zone::Hand);
+        let (paying, helper) = if waterbend_tap {
+            (&creatures[..2], Some(creatures[2]))
+        } else {
+            (&creatures[..3], None)
+        };
+        let mut pool = pool_from(ManaType::Blue, paying);
+        pool.extend(pool_from(ManaType::White, &[plains; 4]));
+        scenario.with_mana_pool(P0, pool);
+        (scenario.build(), spirit, helper)
+    };
+
+    let (mut runner, spirit, helper) = board(false);
+    let hand = hand_len(&runner);
+    assert_eq!(helper, None);
+    runner.cast(spirit).commit();
+    assert_eq!(trigger_sources(&runner).len(), 1);
+    pass_until_settled(&mut runner);
+    assert_eq!(hand_len(&runner), hand, "the spell left, a card was drawn");
+
+    let (mut runner, spirit, helper) = board(true);
+    let hand = hand_len(&runner);
+    let helper = helper.expect("the tap row stages a helper");
+    runner.cast(spirit).convoke_with(&[helper]).commit();
+    assert!(
+        runner.state().objects[&helper].tapped,
+        "reach guard: the third creature paid by tapping"
+    );
+    assert_eq!(spent_sources(&runner, spirit).len(), 6);
+    assert_eq!(trigger_sources(&runner), []);
+    pass_until_settled(&mut runner);
+    assert_eq!(hand_len(&runner), hand - 1, "the spell left, nothing drawn");
+}
+
+fn tap_markers(runner: &GameRunner) -> usize {
+    runner.state().players[0]
+        .mana_pool
+        .count_where(|unit| unit.is_convoke_payment())
+}
+
+/// CR 106.3: the tap adds no mana, so nothing that watches mana being added sees it.
+fn tap_for_waterbend(runner: &mut GameRunner, permanent: ObjectId) {
+    let result = runner
+        .act(GameAction::TapForConvoke {
+            object_id: permanent,
+            mana_type: ManaType::Colorless,
+        })
+        .expect("the waterbend tap must be accepted");
+    assert!(
+        !result
+            .events
+            .iter()
+            .any(|event| matches!(event, GameEvent::ManaAdded { .. })),
+        "{:?}",
+        result.events
+    );
+}
+
+/// Waterbender Ascension's "Waterbend {4}" activated and its target chosen, up to the payment
+/// window.
+fn activate_ascension(runner: &mut GameRunner, ascension: ObjectId, target: ObjectId) {
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: ascension,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the waterbend ability must be activatable");
+    for _ in 0..4 {
+        match runner.state().waiting_for {
+            WaitingFor::ManaPayment { .. } => return,
+            WaitingFor::TargetSelection { .. } => {
+                runner
+                    .act(GameAction::ChooseTarget {
+                        target: Some(TargetRef::Object(target)),
+                    })
+                    .expect("the target must be accepted");
+            }
+            ref other => panic!("unexpected prompt before payment: {other:?}"),
+        }
+    }
+    panic!("the payment window did not open");
+}
+
+struct AscensionBoard {
+    runner: GameRunner,
+    ascension: ObjectId,
+    helpers: Vec<ObjectId>,
+    island: ObjectId,
+    signet: ObjectId,
+}
+
+fn ascension_board() -> AscensionBoard {
+    let mut scenario = main_phase();
+    let ascension = real(
+        &mut scenario,
+        P0,
+        "Waterbender Ascension",
+        Zone::Battlefield,
+    );
+    let helpers = (0..3).map(|_| scenario.add_vanilla(P0, 1, 1)).collect();
+    let island = scenario.add_basic_land(P0, ManaColor::Blue);
+    let signet = scenario
+        .add_artifact_from_oracle(P0, "Azorius Signet", AZORIUS_SIGNET)
+        .id();
+    AscensionBoard {
+        runner: scenario.build(),
+        ascension,
+        helpers,
+        island,
+        signet,
+    }
+}
+
+/// CR 701.67a: on an activated ability too, each tap pays one generic mana and the rest is paid as
+/// mana: only the Island's blue is the mana spent to activate.
+#[test]
+fn waterbend_taps_pay_an_activation_and_only_real_mana_is_recorded() {
+    let mut board = ascension_board();
+    let target = board.helpers[0];
+    activate_ascension(&mut board.runner, board.ascension, target);
+    for helper in board.helpers.clone() {
+        tap_for_waterbend(&mut board.runner, helper);
+    }
+    assert_eq!(tap_markers(&board.runner), 3);
+
+    board
+        .runner
+        .act(GameAction::PassPriority)
+        .expect("three taps and the Island pay {4}");
+
+    assert!(board.runner.state().objects[&board.island].tapped);
+    assert!(
+        !board.runner.state().objects[&board.signet].tapped,
+        "the taps left one mana to pay"
+    );
+    assert_eq!(tap_markers(&board.runner), 0, "the taps were consumed");
+    assert_eq!(board.runner.state().players[0].mana_pool.total(), 0);
+    assert_eq!(board.runner.state().stack.len(), 1);
+    let entry = &board.runner.state().stack[0];
+    let StackEntryKind::ActivatedAbility { ability, .. } = &entry.kind else {
+        panic!("unexpected stack entry: {:?}", entry.kind);
+    };
+    assert_eq!(
+        ability
+            .noted_mana_payment
+            .as_ref()
+            .map(|payment| payment.types.as_slice()),
+        Some([ManaType::Blue].as_slice()),
+        "CR 106.1b: the tap is no mana spent to activate"
+    );
+}
+
+/// CR 701.67a + CR 107.3: "Waterbend {X}" locks X as generic mana, so taps alone can pay all of it.
+#[test]
+fn waterbend_taps_pay_an_x_activation_on_their_own() {
+    let mut scenario = main_phase();
+    let katara = real(
+        &mut scenario,
+        P0,
+        "Katara, Water Tribe's Hope",
+        Zone::Battlefield,
+    );
+    let helpers: Vec<ObjectId> = (0..2).map(|_| scenario.add_vanilla(P0, 1, 1)).collect();
+    let mut runner = scenario.build();
+
+    runner
+        .act(GameAction::ActivateAbility {
+            source_id: katara,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the waterbend ability must be activatable");
+    runner
+        .act(GameAction::ChooseX { value: 2 })
+        .expect("two taps can pay X=2");
+    for helper in &helpers {
+        tap_for_waterbend(&mut runner, *helper);
+    }
+    runner
+        .act(GameAction::PassPriority)
+        .expect("the taps pay all of {X}");
+
+    assert_eq!(runner.state().stack.len(), 1);
+    assert_eq!(tap_markers(&runner), 0);
+    assert_eq!(runner.state().players[0].mana_pool.total(), 0);
+}
+
+/// CR 701.67a: a tap pays the waterbend cost it was made for, not another ability's: the Island
+/// pays the Signet's {1} and the tap is left for the waterbend cost.
+#[test]
+fn a_waterbend_tap_cannot_fund_a_mana_ability() {
+    let mut board = ascension_board();
+    let target = board.helpers[0];
+    let signet = board.signet;
+    activate_ascension(&mut board.runner, board.ascension, target);
+    tap_for_waterbend(&mut board.runner, board.helpers[1]);
+
+    board
+        .runner
+        .act(GameAction::ActivateAbility {
+            source_id: signet,
+            ability_index: 0,
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the Island can pay the Signet's {1}");
+
+    assert!(
+        board.runner.state().objects[&signet].tapped,
+        "reach guard: the Signet activated"
+    );
+    assert!(
+        board.runner.state().objects[&board.island].tapped,
+        "the Signet's {{1}} came from the Island"
+    );
+    assert_eq!(tap_markers(&board.runner), 1, "the tap was not spent");
+}
+
+/// CR 733.1: withdrawing the activation undoes the tap made toward it, marker and all.
+#[test]
+fn cancelling_a_waterbend_activation_untaps_the_helper() {
+    let mut board = ascension_board();
+    let target = board.helpers[0];
+    let helper = board.helpers[1];
+    activate_ascension(&mut board.runner, board.ascension, target);
+    tap_for_waterbend(&mut board.runner, helper);
+    assert!(board.runner.state().objects[&helper].tapped);
+
+    board
+        .runner
+        .act(GameAction::CancelCast)
+        .expect("nothing was paid yet");
+
+    assert!(!board.runner.state().objects[&helper].tapped);
+    assert_eq!(tap_markers(&board.runner), 0);
+    assert_eq!(board.runner.state().players[0].mana_pool.total(), 0);
+    assert!(board.runner.state().stack.is_empty());
+}
+
+/// CR 733.1: the same for a spell: its cast reversal restores the tap.
+#[test]
+fn cancelling_a_waterbend_cast_untaps_barracks() {
+    let mut board = spirit_board();
+    let (spirit, barracks) = (board.spirit, board.barracks);
+    let card_id = board.runner.state().objects[&spirit].card_id;
+    board
+        .runner
+        .act(GameAction::CastSpell {
+            object_id: spirit,
+            card_id,
+            targets: vec![],
+            payment_mode: CastPaymentMode::Auto,
+        })
+        .expect("the spell must be castable");
+    assert!(matches!(
+        board.runner.state().waiting_for,
+        WaitingFor::ManaPayment { .. }
+    ));
+    tap_for_waterbend(&mut board.runner, barracks);
+    assert!(board.runner.state().objects[&barracks].tapped);
+
+    board
+        .runner
+        .act(GameAction::CancelCast)
+        .expect("nothing was paid yet");
+
+    assert!(!board.runner.state().objects[&barracks].tapped);
+    assert_eq!(tap_markers(&board.runner), 0);
+    assert_eq!(board.runner.state().players[0].mana_pool.total(), 0);
+    assert_eq!(board.runner.state().objects[&spirit].zone, Zone::Hand);
 }

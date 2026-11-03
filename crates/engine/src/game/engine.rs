@@ -14,7 +14,9 @@ use crate::types::actions::{
     DebugAction, DebugCardCreationKind, GameAction, MayTriggerAutoChoiceOp, PriorityYieldOp,
     ResolveAllConsentDecision, ResolveAllScope, TriggerOrderTemplateOp,
 };
-use crate::types::events::{BendingType, ContestRound, GameEvent, ManaTapState};
+#[cfg(test)]
+use crate::types::events::ManaTapState;
+use crate::types::events::{BendingType, ContestRound, GameEvent};
 use crate::types::game_state::{
     ActionResult, AssistState, AutoMayChoice, AutoPassMode, AutoPassRequest, CastOfferKind,
     CastingVariant, ConvokeMode, CostResume, CounterCostRootSubtree, GameState, LandPlayRecord,
@@ -15675,7 +15677,7 @@ fn apply_non_priority_pass_action(
                 convoke_mode: convoke_mode.or(Some(ConvokeMode::Delve)),
             }
         }
-        // CR 702.51a / Waterbend: Tap a creature or artifact to pay mana.
+        // CR 702.51a / CR 702.126a / CR 701.67a: Tap a creature or artifact rather than pay mana.
         // CR 702.51a + CR 302.6: Convoke taps creatures to pay mana; summoning sickness
         // (CR 302.6) is not checked because convoke does not use the tap activated-ability mechanism.
         (
@@ -15733,7 +15735,7 @@ fn apply_non_priority_pass_action(
                         crate::types::mana::ManaType::Colorless
                     }
                 }
-                // Waterbend always produces colorless
+                // CR 701.67a: Waterbend pays generic mana only — always colorless.
                 ConvokeMode::Waterbend => crate::types::mana::ManaType::Colorless,
                 // CR 702.126a: Improvise pays generic mana only — always colorless.
                 ConvokeMode::Improvise => crate::types::mana::ManaType::Colorless,
@@ -15743,36 +15745,15 @@ fn apply_non_priority_pass_action(
             // authority so a "can't become tapped" creature is refused (no
             // summoning sickness check — CR 702.51a + CR 302.6).
             crate::game::restrictions::tap_permanent_for_cost(state, object_id, &mut events)?;
-            let unit = match mode {
-                ConvokeMode::Convoke => {
-                    crate::types::mana::ManaUnit::convoke_payment(resolved_mana_type, object_id)
-                }
-                ConvokeMode::Waterbend => crate::types::mana::ManaUnit::new(
-                    resolved_mana_type,
-                    object_id,
-                    false,
-                    Vec::new(),
-                ),
-                // CR 702.126a/b: improvise mana exists only to pay this spell's
-                // generic cost — `convoke_payment` carries the restriction that
-                // keeps it from leaking into the pool as real mana.
-                ConvokeMode::Improvise => {
-                    crate::types::mana::ManaUnit::convoke_payment(resolved_mana_type, object_id)
-                }
-                ConvokeMode::Delve => unreachable!("delve uses its own ManaPayment arm"),
-            };
-            // CR 118.3a: stamp a pip id on pool entry. Convoke/improvise markers
-            // are consumed by the shared algorithm and never pinned (the frontend
-            // filters ConvokePayment units); Waterbend produces real pinnable mana.
+            // CR 702.51a + CR 702.126a + CR 701.67a: each mode taps the permanent
+            // "rather than pay that mana", so no mana is produced (CR 106.3).
+            // `convoke_payment` is the one marker for that substitution: it
+            // satisfies the cost while staying out of every mana-spent record.
+            let unit = crate::types::mana::ManaUnit::convoke_payment(resolved_mana_type, object_id);
+            // CR 118.3a: stamp a pip id on pool entry. These markers are consumed
+            // by the shared algorithm and never pinned (the frontend filters
+            // ConvokePayment units).
             let _ = state.add_mana_to_pool(*player, unit);
-            if mode == ConvokeMode::Waterbend {
-                events.push(GameEvent::ManaAdded {
-                    player_id: *player,
-                    mana_type: resolved_mana_type,
-                    source_id: object_id,
-                    tap_state: ManaTapState::NotFromTap,
-                });
-            }
             if tapped_creature_for_convoke {
                 let pending = state.pending_cast.as_mut().ok_or_else(|| {
                     EngineError::InvalidAction("No pending cast for convoke".to_string())

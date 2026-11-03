@@ -24198,8 +24198,9 @@ pub(super) fn pay_mana_cost_with_choices_and_resume(
         .collect::<HashSet<_>>();
     cleanup_unused_convoke_payments(state, player, source_id, &spent_convoke_sources);
 
-    // CR 702.51a: Convoke taps are consumed by the payment algorithm but are
-    // not mana spent to cast the spell.
+    // CR 702.51a + CR 702.126a + CR 701.67a: Convoke, improvise and waterbend
+    // taps are consumed by the payment algorithm but are not mana spent to cast
+    // the spell.
     let mana_spent_units = spent_units
         .iter()
         .filter(|unit| !unit.is_convoke_payment())
@@ -24586,11 +24587,17 @@ fn pay_ability_mana_cost_with_choices_excluding_and_parent(
     let activation_context = activation_payment_context(state, source_id, ability_index);
     let activation_ctx = activation_context.as_payment_context();
 
+    // CR 701.67a: each waterbend tap stands in for one generic mana of this
+    // cost, so only the rest is paid as mana. The markers are consumed once
+    // that payment has gone through: a paused payment retries with them intact.
+    let waterbend_taps = waterbend_taps_paying_activation(state, player, cost, resume);
+    let cost_after_taps = cost.reduced_by_generic(waterbend_taps);
+
     let payment = auto_tap_and_pay_cost_excluding(
         state,
         player,
         source_id,
-        cost,
+        &cost_after_taps,
         Some(&activation_ctx),
         phyrexian_choices,
         events,
@@ -24599,6 +24606,7 @@ fn pay_ability_mana_cost_with_choices_excluding_and_parent(
         resume,
         parent,
     )?;
+    consume_waterbend_tap_markers(state, player, source_id, waterbend_taps)?;
 
     // CR 106.1b + CR 602.2b (issue #6504): stamp the mana type(s) just spent
     // onto this ability's own source, mirroring `colors_spent_to_cast`'s
@@ -24628,6 +24636,69 @@ fn pay_ability_mana_cost_with_choices_excluding_and_parent(
             remaining_life_payments,
         },
     })
+}
+
+/// CR 701.67a: How many generic mana of an activation's waterbend cost the
+/// player's tap markers pay. A marker never pays for an activation through the
+/// spend path, where `ManaRestriction::allows_activation` keeps it from funding
+/// any other ability, such as a mana ability's own `{1}`: only the waterbend
+/// payment window it was tapped in may redeem it, and that is the window the
+/// `resume` names.
+fn waterbend_taps_paying_activation(
+    state: &GameState,
+    player: PlayerId,
+    cost: &crate::types::mana::ManaCost,
+    resume: Option<&ManaAbilityResume>,
+) -> u32 {
+    let in_waterbend_window = matches!(
+        resume,
+        Some(ManaAbilityResume::ManaPayment {
+            convoke_mode: Some(ConvokeMode::Waterbend),
+            ..
+        })
+    );
+    let crate::types::mana::ManaCost::Cost { generic, .. } = cost else {
+        return 0;
+    };
+    if !in_waterbend_window {
+        return 0;
+    }
+    let markers = state
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .map_or(0, |p| {
+            p.mana_pool.count_where(|unit| unit.is_convoke_payment())
+        });
+    u32::try_from(markers).map_or(*generic, |markers| markers.min(*generic))
+}
+
+/// CR 701.67a + CR 118.3a: Remove the markers whose taps paid part of an
+/// activation's cost. Being no mana, they join no spent-mana record.
+fn consume_waterbend_tap_markers(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    count: u32,
+) -> Result<(), EngineError> {
+    if count == 0 {
+        return Ok(());
+    }
+    let markers = state
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .into_iter()
+        .flat_map(|p| p.mana_pool.units())
+        .filter(|unit| unit.is_convoke_payment())
+        .take(count as usize)
+        .collect::<Vec<_>>();
+    let recipient = state.mana_payment_recipient(source_id, player);
+    state
+        .resolve_and_apply_mana_spend(player, recipient, &markers)
+        .map_err(|_| {
+            EngineError::ActionNotAllowed("Mana pool changed before payment applied".to_string())
+        })
 }
 
 /// Pay a mana cost during effect resolution. Resolution-time "you may pay"
@@ -31510,6 +31581,22 @@ pub fn handle_cancel_cast(
     for object_id in &convoked_creatures {
         if let Some(obj) = state.objects.get_mut(object_id) {
             obj.tapped = false;
+        }
+    }
+    // CR 733.1: an activation has no cast reversal to restore its payments, so
+    // a waterbend tap made toward it is undone along with its marker.
+    if pending.activation_ability_index.is_some() {
+        let tapped_for_payment = state
+            .players
+            .iter()
+            .flat_map(|player| player.mana_pool.shapes())
+            .filter(|(unit, _)| unit.is_convoke_payment())
+            .map(|(unit, _)| unit.source_id)
+            .collect::<Vec<_>>();
+        for object_id in tapped_for_payment {
+            if let Some(obj) = state.objects.get_mut(&object_id) {
+                obj.tapped = false;
+            }
         }
     }
     // CR 733.1: a cancel drops the cast's delve and convoke markers; a terminal
