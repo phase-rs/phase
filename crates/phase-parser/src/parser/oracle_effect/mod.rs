@@ -2550,6 +2550,8 @@ fn try_parse_whenever_this_turn_from(
     // this selects a parsing mode, it does not implement a rule.)
     let mut inner_ctx = ParseContext {
         trigger_condition_scope: TriggerConditionScope::Delayed,
+        // CR 603.7 + CR 608.2k: delayed body, no announced parent target.
+        spell_anaphor_event_source: true,
         ..ParseContext::default()
     };
     let mut trigger_def = parse_dealt_damage_this_way_dies_trigger(condition_text, &mut inner_ctx)
@@ -3058,7 +3060,20 @@ fn try_parse_when_next_event(tp: TextPair) -> Option<ParsedEffectClause> {
     let mut inner = if let Some(parsed) = try_parse_enters_with_additional_counters(effect_lower) {
         parsed
     } else {
-        parse_effect_chain(effect_text, AbilityKind::Spell)
+        // CR 603.7 + CR 608.2k: this body belongs to a delayed triggered ability;
+        // mark it so the bare spell anaphor keeps the event-source binding instead
+        // of being refined to a parent target the delayed trigger does not have.
+        let mut body_ctx = ParseContext {
+            spell_anaphor_event_source: true,
+            ..ParseContext::default()
+        };
+        // Standalone mode, matching this builder's pre-existing entry point.
+        lower_ability_ir(&parse_ability_ir(
+            effect_text,
+            AbilityKind::Spell,
+            ChainLoweringMode::Standalone,
+            &mut body_ctx,
+        ))
     };
     // CR 608.2k: In a "when you next cast a <spell> this turn" delayed trigger the
     // "that <spell>" anaphor in the body names the newly-cast spell object (the
@@ -3182,7 +3197,11 @@ fn try_parse_when_next_generic_event(tp: TextPair) -> Option<ParsedEffectClause>
     // Reuse the shared trigger-condition parser. Re-prefix "you " so the bare
     // condition (e.g. "attack") matches the "you attack" production; the parser
     // accepts an optional "whenever "/"when " prefix but expects the subject.
-    let mut inner_ctx = ParseContext::default();
+    let mut inner_ctx = ParseContext {
+        // CR 603.7 + CR 608.2k: delayed-body anaphors keep the event-source binding.
+        spell_anaphor_event_source: true,
+        ..ParseContext::default()
+    };
     let condition_for_parser = format!("you {condition_text}");
     let (mode, mut trigger_def) = crate::parser::oracle_trigger::parse_trigger_condition(
         &condition_for_parser,
@@ -3266,7 +3285,11 @@ fn try_parse_reflexive_this_way_trigger(tp: TextPair) -> Option<ParsedEffectClau
         return None;
     }
 
-    let mut inner_ctx = ParseContext::default();
+    let mut inner_ctx = ParseContext {
+        // CR 603.7 + CR 608.2k: delayed-body anaphors keep the event-source binding.
+        spell_anaphor_event_source: true,
+        ..ParseContext::default()
+    };
     let trigger_def = if let Some(def) = parse_reflexive_excess_damage_trigger(before.lower) {
         def
     } else {
@@ -3442,6 +3465,8 @@ fn try_parse_at_next_phase_delayed_trigger(
     let (effect_text, condition) = strip_temporal_prefix(text);
     let condition = condition?;
     let mut ctx = antecedents.clone_player_antecedents();
+    // CR 603.7 + CR 608.2k: delayed body, no announced parent target.
+    ctx.spell_anaphor_event_source = true;
     let inner = parse_effect_chain_with_context(effect_text, kind, &mut ctx);
     Some(ParsedEffectClause {
         optional_targeting: false,
@@ -5245,6 +5270,8 @@ fn try_parse_inline_delayed_trigger(
     // Throwaway (`ChosenColorQualifierScope` rule 1) — the parsed `inner` is
     // kept, `inner_ctx` is dropped.
     let mut inner_ctx = ctx.clone_throwaway();
+    // CR 603.7 + CR 608.2k: delayed body, no announced parent target.
+    inner_ctx.spell_anaphor_event_source = true;
     inner_ctx.subject = match &condition {
         DelayedTriggerCondition::WhenDies { filter }
         | DelayedTriggerCondition::WhenLeavesPlayFiltered { filter }
@@ -12268,7 +12295,19 @@ fn parse_effect_clause_inner_with_damage_context(
     if let Some((is_win, effect_text)) =
         imperative::try_parse_reflexive_coin_flip_branch(text, &lower)
     {
-        let inner = parse_effect_chain(effect_text, AbilityKind::Spell);
+        // CR 603.7 + CR 608.2k: reflexive delayed body — keep the event-source
+        // binding for a bare spell anaphor.
+        let mut body_ctx = ParseContext {
+            spell_anaphor_event_source: true,
+            ..ParseContext::default()
+        };
+        // Standalone mode, matching this builder's pre-existing entry point.
+        let inner = lower_ability_ir(&parse_ability_ir(
+            effect_text,
+            AbilityKind::Spell,
+            ChainLoweringMode::Standalone,
+            &mut body_ctx,
+        ));
         return build_reflexive_coin_flip_trigger(is_win, inner);
     }
 
@@ -12483,7 +12522,7 @@ fn parse_effect_clause_inner_with_damage_context(
 
     // CR 115.7: "change the target of" / "you may choose new targets for" —
     // must be checked before subject stripping since "you may choose" would be split.
-    if let Some(effect) = try_parse_change_targets(tp.lower) {
+    if let Some(effect) = try_parse_change_targets(tp.lower, ctx) {
         return parsed_clause(effect);
     }
 
@@ -24650,7 +24689,13 @@ fn push_counter_conjunct_target(
 ) -> Option<()> {
     let reparsed = format!("counter {kw} {}", conjunct.trim());
     let reparsed_lower = reparsed.to_lowercase();
-    let target = match imperative::parse_counter_ast(&reparsed, &reparsed_lower)? {
+    // Mass-counter conjuncts carry typed filters ("counter all creatures"), never a
+    // bare spell anaphor, so the default (non-trigger) context is correct here.
+    let target = match imperative::parse_counter_ast(
+        &reparsed,
+        &reparsed_lower,
+        &mut ParseContext::default(),
+    )? {
         ZoneCounterImperativeAst::Counter {
             all: true, target, ..
         } => target,
@@ -37127,7 +37172,7 @@ fn parse_imperative_effect_inner(tp: TextPair, ctx: &mut ParseContext) -> Parsed
     }
 
     // CR 115.7: "change the target of" / "you may choose new targets for"
-    if let Some(effect) = try_parse_change_targets(tp.lower) {
+    if let Some(effect) = try_parse_change_targets(tp.lower, ctx) {
         return parsed_clause(effect);
     }
 
@@ -43556,9 +43601,14 @@ pub(super) fn parse_child_ability_with_parent_target(
     text: &str,
     kind: AbilityKind,
     parent_target_available: bool,
+    spell_anaphor_event_source: bool,
 ) -> AbilityDefinition {
     let mut child_ctx = ParseContext {
         parent_target_available,
+        // CR 608.2k: an "instead" sub-body parsed out of a triggered ability has
+        // no announced parent target; carry the event-source fact so a bare
+        // "that spell" keeps the trigger's binding.
+        spell_anaphor_event_source,
         ..ParseContext::default()
     };
     lower_ability_ir(&parse_ability_ir_with_damage_context(
@@ -46679,6 +46729,7 @@ fn parse_effect_chain_ir_body(
                 &text,
                 kind,
                 instead_parent_target_available,
+                ctx.in_trigger || ctx.spell_anaphor_event_source,
             );
             if body.condition.is_some() {
                 builder
@@ -48132,6 +48183,9 @@ fn parse_effect_chain_ir_body(
             // player" on Ghyrson) bind to the triggering event instead of being
             // reparsed as ordinary target phrases.
             in_trigger: ctx.in_trigger,
+            // CR 603.7 + CR 608.2k: a delayed-trigger body's chunks are still that
+            // delayed body, so its spell-anaphor binding travels with them.
+            spell_anaphor_event_source: ctx.spell_anaphor_event_source,
             bare_card_aggregate_source,
             nearest_dig_rest_zone,
             // CR 611.2a: this chunk's leading duration was peeled by
@@ -52797,7 +52851,7 @@ fn starts_with_you_may_choose_new_targets(text: &str) -> bool {
     .is_some()
 }
 
-fn try_parse_change_targets(lower: &str) -> Option<Effect> {
+fn try_parse_change_targets(lower: &str, ctx: &mut ParseContext) -> Option<Effect> {
     type E<'a> = OracleError<'a>;
 
     let (rest, scope) = alt((
@@ -52817,7 +52871,7 @@ fn try_parse_change_targets(lower: &str) -> Option<Effect> {
     // Split off trailing "to [target]" — forced retarget destination.
     let (spell_phrase, forced_to) =
         if let Ok((_, (before, after))) = nom_primitives::split_once_on(rest, " to ") {
-            let (filter, _) = parse_target(after);
+            let (filter, _) = parse_target_with_ctx(after, ctx);
             (before, Some(filter))
         } else {
             (rest, None)
@@ -52861,7 +52915,8 @@ fn try_parse_change_targets(lower: &str) -> Option<Effect> {
         // `constrain_filter_to_stack` pass is needed or wanted.
         stack_target
     } else if scan_contains_phrase(spell_phrase_clean, "spell") {
-        // Parse with parse_target for type-specific spells (e.g. "instant or sorcery spell")
+        // Parse with the context-free entry (unchanged diagnostics), then refine a
+        // bare "that spell" for a non-trigger instruction below.
         let (parsed, _) = parse_target(spell_phrase_clean);
         constrain_filter_to_stack(parsed)
     } else {
@@ -52869,6 +52924,10 @@ fn try_parse_change_targets(lower: &str) -> Option<Effect> {
         parsed
     };
 
+    // CR 608.2c: a non-trigger retarget instruction's bare "that spell" names the
+    // spell mentioned earlier in the same sequence; a triggered one keeps the
+    // event-source binding.
+    target = crate::parser::oracle_target::bind_spell_anaphor_to_context(ctx, target);
     // Add HasSingleTarget property if "with a single target" was specified
     if has_single_target {
         target = add_single_target_constraint(target);
@@ -53747,12 +53806,12 @@ fn last_night_together_folds_attacker_restriction_into_additional_phase() {
 /// keep both legs.
 #[cfg(test)]
 mod change_targets_stack_object_tests {
-    use super::{try_parse_change_targets, TargetFilter};
+    use super::{try_parse_change_targets, ParseContext, TargetFilter};
     use crate::types::ability::{Effect, FilterProp, StackAbilityKind, TypeFilter};
     use crate::types::zones::Zone;
 
     fn change_targets_filter(lower: &str) -> TargetFilter {
-        match try_parse_change_targets(lower)
+        match try_parse_change_targets(lower, &mut ParseContext::default())
             .unwrap_or_else(|| panic!("retarget clause must parse: {lower}"))
         {
             Effect::ChangeTargets { target, .. } => target,

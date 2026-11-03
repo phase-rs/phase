@@ -340,6 +340,17 @@ pub struct ParseContext {
     /// A declared "target creature" subject inside a trigger body fails closed
     /// to `Unimplemented` (Ria Ivor's shield is not yet supported).
     pub in_trigger: bool,
+    /// Whether a bare "that spell" anaphor in this effect body must bind the
+    /// EVENT SOURCE (CR 608.2k) rather than an earlier announced target.
+    ///
+    /// Set for a delayed triggered ability's body (CR 603.7) and for an
+    /// "instead" sub-body parsed out of a triggered ability: those bodies parse
+    /// with a default context but have no announced parent target, so their
+    /// anaphor names the object the trigger condition referred to. Distinct
+    /// from `in_trigger`, which gates many other parser branches; this flag
+    /// only stops `bind_spell_anaphor_to_context` from refining the anaphor to
+    /// a parent target that does not exist.
+    pub spell_anaphor_event_source: bool,
     /// Contextual source for the exact bare aggregate surface "those cards".
     /// Set per effect-chain chunk from the nearest typed producer, or from a
     /// proven trigger subject batch when no compatible chain producer wins.

@@ -2664,7 +2664,20 @@ pub fn parse_mana_spend_trigger(lower: &str) -> Option<ManaSpellGrant> {
         return None;
     }
     // Parse the reflexive effect (scry N, gain N life, draw a card, copy that spell…).
-    let ability = super::parse_effect_chain(effect_text, AbilityKind::Activated);
+    // CR 603.7 + CR 608.2k: a mana-spend trigger's body has no announced parent
+    // target; mark it so the bare "that spell" anaphor keeps the event-source
+    // binding (Primal Wellspring, Pyromancer's Goggles).
+    let mut body_ctx = ParseContext {
+        spell_anaphor_event_source: true,
+        ..ParseContext::default()
+    };
+    // Standalone mode, matching this builder's pre-existing entry point.
+    let ability = super::lower_ability_ir(&super::parse_ability_ir(
+        effect_text,
+        AbilityKind::Activated,
+        super::ChainLoweringMode::Standalone,
+        &mut body_ctx,
+    ));
     // COVERAGE-HONESTY ALLOWLIST — what it is actually for (CR 608.2c):
     // `parse_effect_chain` parses some spell-referencing effects only PARTIALLY and
     // silently swallows the remainder. Jade Orb of Dragonkind's "it enters with an

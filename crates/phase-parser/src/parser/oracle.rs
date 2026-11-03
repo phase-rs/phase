@@ -642,7 +642,20 @@ fn try_parse_opening_hand_reveal_delayed_trigger(
         Ok((input, condition))
     })?;
 
-    let effect = parse_effect_chain(rest, AbilityKind::Spell);
+    // CR 603.7 + CR 608.2k: delayed body, no announced parent target. Keep the
+    // Standalone lowering mode this builder already used.
+    let mut body_ctx = crate::parser::oracle_ir::context::ParseContext {
+        spell_anaphor_event_source: true,
+        ..Default::default()
+    };
+    let effect = crate::parser::oracle_effect::lower_ability_ir(
+        &crate::parser::oracle_effect::parse_ability_ir(
+            rest,
+            AbilityKind::Spell,
+            crate::parser::oracle_effect::ChainLoweringMode::Standalone,
+            &mut body_ctx,
+        ),
+    );
     if has_unimplemented(&effect) {
         return None;
     }
@@ -5636,7 +5649,10 @@ fn attach_trigger_die_result_branches(
         return start_line;
     }
 
-    let (branches, next_line) = parse_die_result_branches_ir(lines, start_line, AbilityKind::Spell);
+    // CR 608.2c + CR 608.2k: a trigger-owned results table is part of the
+    // triggered ability, so its rows keep the event-source anaphor binding.
+    let (branches, next_line) =
+        parse_die_result_branches_ir(lines, start_line, AbilityKind::Spell, true);
     for trigger in triggers
         .iter_mut()
         .filter(|trigger| trigger.has_terminal_roll_die())
@@ -5665,7 +5681,8 @@ fn attach_following_die_result_table(
         return start_line;
     }
 
-    let (branches, next_line) = parse_die_result_branches_ir(lines, start_line, AbilityKind::Spell);
+    let (branches, next_line) =
+        parse_die_result_branches_ir(lines, start_line, AbilityKind::Spell, false);
     if branches.is_empty() {
         return start_line;
     }
@@ -14213,7 +14230,7 @@ mod following_die_result_table_attach_tests {
 /// The `has_unimplemented` tests elsewhere in this file hand-build a `RollDie`
 /// AST, which proves the gate can SEE such a marker but not that the row
 /// collector ever PRODUCES one. This module drives the real collector
-/// (`parse_die_result_branches_ir` → `parse_ability_ir_standalone`), so the
+/// (`parse_die_result_branches_ir` → `parse_ability_ir` in `Standalone` mode), so the
 /// marker path is actually exercised end to end.
 #[cfg(test)]
 mod die_result_row_failure_marker_tests {
@@ -14232,7 +14249,8 @@ mod die_result_row_failure_marker_tests {
 
     #[test]
     fn an_unparseable_row_body_surfaces_a_marker_instead_of_vanishing() {
-        let (branches, next_line) = parse_die_result_branches_ir(&LINES, 0, AbilityKind::Spell);
+        let (branches, next_line) =
+            parse_die_result_branches_ir(&LINES, 0, AbilityKind::Spell, false);
         // A row that VANISHES is worse than a row that fails: the table would
         // silently shrink and the printed instruction would be unrecoverable.
         assert_eq!(branches.len(), 2, "both printed rows must be collected");
@@ -14260,7 +14278,7 @@ mod die_result_row_failure_marker_tests {
     /// the assertion above while being completely inert.
     #[test]
     fn the_sibling_row_in_the_same_table_still_carries_a_real_effect() {
-        let (branches, _) = parse_die_result_branches_ir(&LINES, 0, AbilityKind::Spell);
+        let (branches, _) = parse_die_result_branches_ir(&LINES, 0, AbilityKind::Spell, false);
         let parseable = lower_ability_ir(&branches[0].effect);
         assert!(
             matches!(parseable.effect.as_ref(), Effect::Draw { .. }),

@@ -9576,7 +9576,7 @@ fn effect_counter_unless_rejects_unrecognized_mana_symbol() {
         "shared trigger-side unless-cost parser must not reinterpret malformed mana as life"
     );
     assert!(
-        imperative::parse_counter_ast(text, &lower).is_none(),
+        imperative::parse_counter_ast(text, &lower, &mut ParseContext::default()).is_none(),
         "counter AST must decline an unparsed unless-payment rider"
     );
     let def = parse_effect_chain(text, AbilityKind::Spell);
@@ -83525,9 +83525,11 @@ fn possessive_shift_subject_binds_hand_reveal_to_target_controller() {
         }
     ));
     // The helper touched only the reveal: the counter keeps its base shape.
+    // CR 608.2c: the counter is a resolving spell instruction, so its bare "that
+    // spell" names the spell's earlier announced target (not a trigger event).
     assert_json_eq(
         &*reveal.sub_ability.as_deref().expect("counter").effect,
-        r#"{"type":"Counter","target":{"type":"TriggeringSource"}}"#,
+        r#"{"type":"Counter","target":{"type":"ParentTarget"}}"#,
         "Denied!'s counter",
     );
 
@@ -95757,4 +95759,174 @@ fn return_arm_routes_through_the_shared_this_way_policy() {
             "reveal-choice return keeps its pre-routing outcome, got {parsed:?} for {line:?}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// CR 608.2c + CR 608.2k — the bare "that spell" anaphor binds by ability
+// context: the spell's earlier announced target in a resolving spell, the
+// triggering event's spell object inside a triggered ability.
+// ---------------------------------------------------------------------------
+
+/// Collect every `Counter`/`CopySpell` target that is a spell-anaphor context
+/// reference (`ParentTarget` or `TriggeringSource`) from a serialized parse.
+fn spell_anaphor_targets(value: &serde_json::Value, out: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if matches!(
+                map.get("type").and_then(|v| v.as_str()),
+                Some("Counter") | Some("CopySpell")
+            ) {
+                if let Some(target) = map
+                    .get("target")
+                    .and_then(|t| t.get("type"))
+                    .and_then(|v| v.as_str())
+                    .filter(|t| matches!(*t, "ParentTarget" | "TriggeringSource"))
+                {
+                    out.push(target.to_string());
+                }
+            }
+            for inner in map.values() {
+                spell_anaphor_targets(inner, out);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for inner in items {
+                spell_anaphor_targets(inner, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn assert_spell_anaphor(name: &str, text: &str, types: &[&str], expected: &str) {
+    let parsed = parse_named_face(text, name, types);
+    // Walk the whole parse: spells/activated abilities live in `abilities`,
+    // triggered bodies in `triggers` (and their execute chains).
+    let value = serde_json::to_value(&parsed).expect("parsed abilities serialize");
+    let mut targets = Vec::new();
+    spell_anaphor_targets(&value, &mut targets);
+    assert!(
+        !targets.is_empty(),
+        "{name}: expected a Counter/CopySpell spell anaphor, got none in {value}"
+    );
+    assert!(
+        targets.iter().all(|target| target == expected),
+        "{name}: every spell anaphor must bind {expected}, got {targets:?}"
+    );
+}
+
+/// CR 608.2c: a resolving spell's "counter/copy that spell" names the spell's
+/// earlier announced target — not a trigger event that does not exist.
+#[test]
+fn resolving_spell_that_spell_binds_the_parent_target() {
+    assert_spell_anaphor(
+        "Denied!",
+        "Choose a card name, then target spell's controller reveals their hand. If a card with the \
+         chosen name is revealed this way, counter that spell.",
+        &["Instant"],
+        "ParentTarget",
+    );
+    assert_spell_anaphor(
+        "Mages' Contest",
+        "You and target spell's controller bid life. You start the bidding with a bid of 1. In turn \
+         order, each player may top the high bid. The bidding ends if the high bid stands. The high \
+         bidder loses life equal to the high bid. If you win the bidding, counter that spell.",
+        &["Instant"],
+        "ParentTarget",
+    );
+    assert_spell_anaphor(
+        "Bring the Ending",
+        "Counter target spell unless its controller pays {2}.\nCorrupted — Counter that spell \
+         instead if its controller has three or more poison counters.",
+        &["Instant"],
+        "ParentTarget",
+    );
+    assert_spell_anaphor(
+        "Stubborn Denial",
+        "Counter target noncreature spell unless its controller pays {1}.\nFerocious — If you \
+         control a creature with power 4 or greater, counter that spell instead.",
+        &["Instant"],
+        "ParentTarget",
+    );
+    assert_spell_anaphor(
+        "Silumgar's Scorn",
+        "As an additional cost to cast this spell, you may reveal a Dragon card from your hand.\n\
+         Counter target spell unless its controller pays {1}. If you revealed a Dragon card or \
+         controlled a Dragon as you cast this spell, counter that spell instead.",
+        &["Instant"],
+        "ParentTarget",
+    );
+    assert_spell_anaphor(
+        "Anticognition",
+        "Counter target creature or planeswalker spell unless its controller pays {2}. If an \
+         opponent has eight or more cards in their graveyard, instead counter that spell, then \
+         scry 2.",
+        &["Instant"],
+        "ParentTarget",
+    );
+    assert_spell_anaphor(
+        "Prohibit",
+        "Kicker {2} (You may pay an additional {2} as you cast this spell.)\nCounter target spell \
+         if its mana value is 2 or less. If this spell was kicked, counter that spell if its mana \
+         value is 4 or less instead.",
+        &["Instant"],
+        "ParentTarget",
+    );
+}
+
+/// CR 608.2k: inside a triggered ability the same anaphor names the triggering
+/// event's spell object. The rows cover a printed trigger counter (Chalice of the
+/// Void), delayed bodies (Galvanic Iteration, Sea Gate Stormcaller, Tomb of
+/// Horrors Adventurer) and trigger-owned sub-parsers that carry a COPY anaphor
+/// (Mathise's die-result row, Pyromancer's Goggles' mana-spend trigger). The copy
+/// consumer keeps the event-source default by design, so those two rows prove the
+/// sub-parser keeps the binding; the corpus diff guards a future counter anaphor
+/// inside those bodies (no printed card has one today).
+#[test]
+fn triggered_ability_that_spell_binds_the_event_source() {
+    assert_spell_anaphor(
+        "Chalice of the Void",
+        "This artifact enters with X charge counters on it.\nWhenever a player casts a spell with \
+         mana value equal to the number of charge counters on this artifact, counter that spell.",
+        &["Artifact"],
+        "TriggeringSource",
+    );
+    assert_spell_anaphor(
+        "Galvanic Iteration",
+        "When you next cast an instant or sorcery spell this turn, copy that spell. You may choose \
+         new targets for the copy.\nFlashback {1}{U}{R}",
+        &["Instant"],
+        "TriggeringSource",
+    );
+    assert_spell_anaphor(
+        "Sea Gate Stormcaller",
+        "Kicker {4}{U}\nWhen this creature enters, copy the next instant or sorcery spell with mana \
+         value 2 or less you cast this turn when you cast it. If this creature was kicked, copy that \
+         spell twice instead. You may choose new targets for the copies.",
+        &["Creature"],
+        "TriggeringSource",
+    );
+    assert_spell_anaphor(
+        "Tomb of Horrors Adventurer",
+        "When this creature enters, you take the initiative.\nWhenever you cast your second spell \
+         each turn, copy it. If you've completed a dungeon, copy that spell twice instead. You may \
+         choose new targets for the copies.",
+        &["Creature"],
+        "TriggeringSource",
+    );
+    assert_spell_anaphor(
+        "Mathise, Surge Channeler",
+        "Whenever you cast an instant or sorcery spell with mana value 3 or greater, roll a d20.\n\
+         1-9 | Each player draws a card.\n10-19 | You draw a card.\n20 | Copy that spell. You may \
+         choose new targets for the copy.",
+        &["Creature"],
+        "TriggeringSource",
+    );
+    assert_spell_anaphor(
+        "Pyromancer's Goggles",
+        "{T}: Add {R}. When that mana is spent to cast a red instant or sorcery spell, copy that \
+         spell and you may choose new targets for the copy.",
+        &["Artifact"],
+        "TriggeringSource",
+    );
 }
