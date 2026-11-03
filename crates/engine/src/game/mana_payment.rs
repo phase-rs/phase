@@ -1023,20 +1023,67 @@ pub(crate) fn phyrexian_choice_vector(
 /// Swamp must spend the black on the strict `{B}` and pay life for `{B/P}`.
 /// Phyrexian indices keep their relative order so per-shard `ShardChoice`
 /// cursors and `PhyrexianShard` results stay aligned with the printed cost.
-fn phyrexian_deferred_order(
+/// `None` retains the planner's mana-only treatment of Phyrexian symbols.
+/// CR 601.2h + CR 107.4h: costs may be paid in any order. Pay colored/source
+/// requirements before Snow so its any-type payment cannot consume the only
+/// unit for a later strict requirement. Two-brid symbols follow Snow: their
+/// two-generic fallback must not consume the reserved Snow unit (CR 107.4e).
+/// Preserve order within each group and ordinary ordering without Snow.
+fn payment_shard_order(
     shards: &[ManaCostShard],
-    life_colors: crate::types::mana::LifePaymentColors,
+    life_colors: Option<crate::types::mana::LifePaymentColors>,
 ) -> Vec<usize> {
-    let is_phyrexian = |i: usize| {
-        is_phyrexian_requirement(&effective_shard_requirement(
-            shard_to_mana_type(shards[i]),
-            life_colors,
-        ))
-    };
-    (0..shards.len())
-        .filter(|&i| !is_phyrexian(i))
-        .chain((0..shards.len()).filter(|&i| is_phyrexian(i)))
-        .collect()
+    let mut order: Vec<_> = (0..shards.len()).collect();
+    let has_snow = shards.contains(&ManaCostShard::Snow);
+    order.sort_by_key(|&i| {
+        let is_phyrexian = life_colors.is_some_and(|colors| {
+            is_phyrexian_requirement(&effective_shard_requirement(
+                shard_to_mana_type(shards[i]),
+                colors,
+            ))
+        });
+        let quality_order = if !has_snow || is_phyrexian {
+            0
+        } else {
+            match shard_to_mana_type(shards[i]) {
+                ShardRequirement::Snow => 1,
+                ShardRequirement::TwoGenericHybrid(_) => 2,
+                _ => 0,
+            }
+        };
+        (is_phyrexian, quality_order)
+    });
+    order
+}
+
+// CR 107.4f + CR 601.2h: reserve the mana option of the remaining shards,
+// except those explicitly announced as life. Read the actual payment order;
+// choice indices follow only its Phyrexian-shaped symbols.
+fn remaining_payment_color_demand(
+    shards: &[ManaCostShard],
+    remaining_order: &[usize],
+    life_colors: Option<crate::types::mana::LifePaymentColors>,
+    phyrexian_choices: Option<&[ShardChoice]>,
+) -> ColorDemand {
+    let mut demand = [0; 5];
+    let mut choice_cursor = 0;
+    for &index in remaining_order {
+        let is_phyrexian = life_colors.is_some_and(|colors| {
+            is_phyrexian_requirement(&effective_shard_requirement(
+                shard_to_mana_type(shards[index]),
+                colors,
+            ))
+        });
+        if is_phyrexian {
+            let choice = phyrexian_choices.and_then(|choices| choices.get(choice_cursor));
+            choice_cursor += 1;
+            if choice == Some(&ShardChoice::PayLife) {
+                continue;
+            }
+        }
+        accumulate_shard_demand(&mut demand, shards[index]);
+    }
+    demand
 }
 
 /// Check if the pool can pay the cost, respecting mana restrictions when `spell` is provided.
@@ -1123,10 +1170,14 @@ pub(crate) fn reduce_cost_by_pool(
     };
 
     let mut scratch = pool.clone();
-    let mut residual_shards: Vec<ManaCostShard> = Vec::new();
+    // CR 107.4h: retain the pending snow demand in the actual payment order.
+    let mut quality_demand = SourceQualityDemand::from_shards(shards);
+    let mut residual_shards = vec![None; shards.len()];
     let mut residual_generic = generic;
 
-    for &shard in shards {
+    let order = payment_shard_order(shards, None);
+    for (position, &idx) in order.iter().enumerate() {
+        let shard = shards[idx];
         let paid = match shard_to_mana_type(shard) {
             // CR 107.4a/f + CR 609.4b: Exact color required (any_color relaxes to any mana).
             // Phyrexian's life-payment option lives in the real payment path — at the planner
@@ -1137,19 +1188,34 @@ pub(crate) fn reduce_cost_by_pool(
                 if mana_spend_permission
                     .is_some_and(|permission| permission.allows_payment_as(color))
                 {
-                    spend_any_for_required_colors(&mut scratch, &[color], spell, None, &[])
-                        .is_some()
+                    spend_any_for_required_colors(
+                        &mut scratch,
+                        &[color],
+                        spell,
+                        None,
+                        &[],
+                        quality_demand,
+                    )
+                    .is_some()
                 } else {
-                    spend_eligible(&mut scratch, color, spell, &[]).is_some()
+                    spend_eligible(&mut scratch, color, spell, &[], quality_demand).is_some()
                 }
             }
             // CR 107.4e/f: Hybrid pays either half.
             ShardRequirement::Hybrid(a, b) | ShardRequirement::HybridPhyrexian(a, b) => {
                 if any_color {
-                    spend_any_for_required_colors(&mut scratch, &[a, b], spell, None, &[]).is_some()
+                    spend_any_for_required_colors(
+                        &mut scratch,
+                        &[a, b],
+                        spell,
+                        None,
+                        &[],
+                        quality_demand,
+                    )
+                    .is_some()
                 } else {
-                    spend_eligible(&mut scratch, a, spell, &[]).is_some()
-                        || spend_eligible(&mut scratch, b, spell, &[]).is_some()
+                    spend_eligible(&mut scratch, a, spell, &[], quality_demand).is_some()
+                        || spend_eligible(&mut scratch, b, spell, &[], quality_demand).is_some()
                 }
             }
             // CR 107.4e: {C/color} — prefer colorless, else the colored half.
@@ -1161,11 +1227,19 @@ pub(crate) fn reduce_cost_by_pool(
                         spell,
                         None,
                         &[],
+                        quality_demand,
                     )
                     .is_some()
                 } else {
-                    spend_eligible(&mut scratch, ManaType::Colorless, spell, &[]).is_some()
-                        || spend_eligible(&mut scratch, color, spell, &[]).is_some()
+                    spend_eligible(
+                        &mut scratch,
+                        ManaType::Colorless,
+                        spell,
+                        &[],
+                        quality_demand,
+                    )
+                    .is_some()
+                        || spend_eligible(&mut scratch, color, spell, &[], quality_demand).is_some()
                 }
             }
             // CR 107.4e: {2/color} — 1 colored is cheaper than 2 generic; try colored first.
@@ -1173,9 +1247,17 @@ pub(crate) fn reduce_cost_by_pool(
             // afford both halves, rather than half-draining it.
             ShardRequirement::TwoGenericHybrid(color) => {
                 if any_color {
-                    spend_any_for_required_colors(&mut scratch, &[color], spell, None, &[])
-                        .is_some()
-                } else if spend_eligible(&mut scratch, color, spell, &[]).is_some() {
+                    spend_any_for_required_colors(
+                        &mut scratch,
+                        &[color],
+                        spell,
+                        None,
+                        &[],
+                        quality_demand,
+                    )
+                    .is_some()
+                } else if spend_eligible(&mut scratch, color, spell, &[], quality_demand).is_some()
+                {
                     true
                 } else {
                     let mut backup = scratch.clone();
@@ -1190,9 +1272,24 @@ pub(crate) fn reduce_cost_by_pool(
                 }
             }
             // CR 107.4h: Snow mana only from snow sources.
-            ShardRequirement::Snow => spend_snow_unit(&mut scratch, spell, &[]).is_some(),
+            ShardRequirement::Snow => {
+                quality_demand.snow -= 1;
+                let future_demand =
+                    remaining_payment_color_demand(shards, &order[position + 1..], None, None);
+                spend_snow_unit(&mut scratch, spell, &[], Some(&future_demand)).is_some()
+            }
             ShardRequirement::TwoOrMoreColorSource => {
-                spend_two_or_more_color_source_eligible(&mut scratch, spell, &[]).is_some()
+                quality_demand.multicolor -= 1;
+                let future_demand =
+                    remaining_payment_color_demand(shards, &order[position + 1..], None, None);
+                spend_two_or_more_color_source_eligible(
+                    &mut scratch,
+                    spell,
+                    &[],
+                    quality_demand,
+                    &future_demand,
+                )
+                .is_some()
             }
             // CR 107.1b: `ManaCost::concretize_x` strips `X` shards into generic
             // before auto-tap runs, so this arm is defensive. Keep the shard in
@@ -1205,9 +1302,17 @@ pub(crate) fn reduce_cost_by_pool(
             // direct dispatch path. Pay-mana semantics mirror `TwoGenericHybrid`.
             ShardRequirement::TwoGenericHybridPhyrexian(color) => {
                 if any_color {
-                    spend_any_for_required_colors(&mut scratch, &[color], spell, None, &[])
-                        .is_some()
-                } else if spend_eligible(&mut scratch, color, spell, &[]).is_some() {
+                    spend_any_for_required_colors(
+                        &mut scratch,
+                        &[color],
+                        spell,
+                        None,
+                        &[],
+                        quality_demand,
+                    )
+                    .is_some()
+                } else if spend_eligible(&mut scratch, color, spell, &[], quality_demand).is_some()
+                {
                     true
                 } else {
                     let mut backup = scratch.clone();
@@ -1223,9 +1328,11 @@ pub(crate) fn reduce_cost_by_pool(
             }
         };
         if !paid {
-            residual_shards.push(shard);
+            residual_shards[idx] = Some(shard);
         }
     }
+    // Keep the residual's original symbol order despite the payment order.
+    let residual_shards: Vec<_> = residual_shards.into_iter().flatten().collect();
 
     // CR 107.4b + CR 601.2b/h: Generic may be paid with any eligible mana, except
     // for generic pips constrained by a "Spend only [colors] mana on X" restriction.
@@ -1412,29 +1519,38 @@ fn pay_cost_with_demand_and_choices_once(
         | ManaCost::SelfManaValue
         | ManaCost::SelfManaCostReduced { .. } => Ok((Vec::new(), Vec::new())),
         ManaCost::Cost { shards, generic } => {
+            // CR 107.4h: decrement on dispatch, including Phyrexian deferral.
+            let mut quality_demand = SourceQualityDemand::from_shards(shards);
             let mut spent = Vec::new();
             let mut life_payments = Vec::new();
             let mut choice_cursor = 0usize;
             let mut preferred_hybrid_colors: Vec<(ManaType, ManaType, ManaType)> = Vec::new();
 
             // CR 107.4a + CR 107.4f + CR 118.3: Pay non-Phyrexian shards before
-            // Phyrexian-shape shards (see `phyrexian_deferred_order`) so each
+            // Phyrexian-shape shards (see `payment_shard_order`) so each
             // mana-vs-life decision sees the pool remaining after every strict
             // requirement is met. K'rrik promotion is applied per shard so the
             // life-as-payment arms handle the ShardChoice uniformly.
-            for idx in phyrexian_deferred_order(shards, life_colors) {
+            let order = payment_shard_order(shards, Some(life_colors));
+            for (position, &idx) in order.iter().enumerate() {
                 match effective_shard_requirement(shard_to_mana_type(shards[idx]), life_colors) {
                     ShardRequirement::Single(mt) => {
                         // CR 609.4b: When any_color, any mana can pay colored costs.
                         if mana_spend_permission
                             .is_some_and(|permission| permission.allows_payment_as(mt))
                         {
-                            let unit =
-                                spend_any_for_required_colors(pool, &[mt], spell, None, pins)
-                                    .ok_or(PaymentError::InsufficientMana)?;
+                            let unit = spend_any_for_required_colors(
+                                pool,
+                                &[mt],
+                                spell,
+                                None,
+                                pins,
+                                quality_demand,
+                            )
+                            .ok_or(PaymentError::InsufficientMana)?;
                             spent.push(unit);
                         } else {
-                            let unit = spend_eligible(pool, mt, spell, pins)
+                            let unit = spend_eligible(pool, mt, spell, pins, quality_demand)
                                 .ok_or(PaymentError::InsufficientMana)?;
                             spent.push(unit);
                         }
@@ -1442,9 +1558,15 @@ fn pay_cost_with_demand_and_choices_once(
                     // CR 107.4e: Hybrid mana — pay with either half.
                     ShardRequirement::Hybrid(a, b) => {
                         if any_color {
-                            let unit =
-                                spend_any_for_required_colors(pool, &[a, b], spell, None, pins)
-                                    .ok_or(PaymentError::InsufficientMana)?;
+                            let unit = spend_any_for_required_colors(
+                                pool,
+                                &[a, b],
+                                spell,
+                                None,
+                                pins,
+                                quality_demand,
+                            )
+                            .ok_or(PaymentError::InsufficientMana)?;
                             spent.push(unit);
                         } else {
                             let remaining_pair_shards =
@@ -1457,7 +1579,7 @@ fn pay_cost_with_demand_and_choices_once(
                                 remaining_pair_shards,
                                 &mut preferred_hybrid_colors,
                             );
-                            let unit = spend_eligible(pool, color, spell, pins)
+                            let unit = spend_eligible(pool, color, spell, pins, quality_demand)
                                 .ok_or(PaymentError::InsufficientMana)?;
                             spent.push(unit);
                         }
@@ -1475,9 +1597,16 @@ fn pay_cost_with_demand_and_choices_once(
                             }
                             Some(ShardChoice::PayMana) => {
                                 let unit = if any_color {
-                                    spend_any_for_required_colors(pool, &[color], spell, None, pins)
+                                    spend_any_for_required_colors(
+                                        pool,
+                                        &[color],
+                                        spell,
+                                        None,
+                                        pins,
+                                        quality_demand,
+                                    )
                                 } else {
-                                    spend_eligible(pool, color, spell, pins)
+                                    spend_eligible(pool, color, spell, pins, quality_demand)
                                 }
                                 .ok_or(PaymentError::InsufficientMana)?;
                                 spent.push(unit);
@@ -1494,9 +1623,10 @@ fn pay_cost_with_demand_and_choices_once(
                                             spell,
                                             None,
                                             pins,
+                                            quality_demand,
                                         )
                                     } else {
-                                        spend_eligible(pool, color, spell, pins)
+                                        spend_eligible(pool, color, spell, pins, quality_demand)
                                     }
                                 } else {
                                     None
@@ -1512,11 +1642,19 @@ fn pay_cost_with_demand_and_choices_once(
                     // CR 107.4e: Monocolored hybrid {2/C} — pay 1 colored or 2 generic.
                     ShardRequirement::TwoGenericHybrid(color) => {
                         if any_color {
-                            let unit =
-                                spend_any_for_required_colors(pool, &[color], spell, None, pins)
-                                    .ok_or(PaymentError::InsufficientMana)?;
+                            let unit = spend_any_for_required_colors(
+                                pool,
+                                &[color],
+                                spell,
+                                None,
+                                pins,
+                                quality_demand,
+                            )
+                            .ok_or(PaymentError::InsufficientMana)?;
                             spent.push(unit);
-                        } else if let Some(unit) = spend_eligible(pool, color, spell, pins) {
+                        } else if let Some(unit) =
+                            spend_eligible(pool, color, spell, pins, quality_demand)
+                        {
                             spent.push(unit);
                         } else {
                             for _ in 0..2 {
@@ -1528,13 +1666,33 @@ fn pay_cost_with_demand_and_choices_once(
                     }
                     // CR 107.4h: Snow mana {S} — paid with mana from a snow source.
                     ShardRequirement::Snow => {
-                        let unit = spend_snow_unit(pool, spell, pins)
+                        quality_demand.snow -= 1;
+                        let future_demand = remaining_payment_color_demand(
+                            shards,
+                            &order[position + 1..],
+                            Some(life_colors),
+                            phyrexian_choices.map(|choices| &choices[choice_cursor..]),
+                        );
+                        let unit = spend_snow_unit(pool, spell, pins, Some(&future_demand))
                             .ok_or(PaymentError::InsufficientMana)?;
                         spent.push(unit);
                     }
                     ShardRequirement::TwoOrMoreColorSource => {
-                        let unit = spend_two_or_more_color_source_eligible(pool, spell, pins)
-                            .ok_or(PaymentError::InsufficientMana)?;
+                        quality_demand.multicolor -= 1;
+                        let future_demand = remaining_payment_color_demand(
+                            shards,
+                            &order[position + 1..],
+                            Some(life_colors),
+                            phyrexian_choices.map(|choices| &choices[choice_cursor..]),
+                        );
+                        let unit = spend_two_or_more_color_source_eligible(
+                            pool,
+                            spell,
+                            pins,
+                            quality_demand,
+                            &future_demand,
+                        )
+                        .ok_or(PaymentError::InsufficientMana)?;
                         spent.push(unit);
                     }
                     // CR 107.3: {X} defaults to 0; caller specifies X value separately.
@@ -1548,15 +1706,16 @@ fn pay_cost_with_demand_and_choices_once(
                                 spell,
                                 None,
                                 pins,
+                                quality_demand,
                             )
                             .ok_or(PaymentError::InsufficientMana)?;
                             spent.push(unit);
                         } else if let Some(unit) =
-                            spend_eligible(pool, ManaType::Colorless, spell, pins)
+                            spend_eligible(pool, ManaType::Colorless, spell, pins, quality_demand)
                         {
                             spent.push(unit);
                         } else {
-                            let unit = spend_eligible(pool, color, spell, pins)
+                            let unit = spend_eligible(pool, color, spell, pins, quality_demand)
                                 .ok_or(PaymentError::InsufficientMana)?;
                             spent.push(unit);
                         }
@@ -1574,7 +1733,14 @@ fn pay_cost_with_demand_and_choices_once(
                             }
                             Some(ShardChoice::PayMana) => {
                                 let unit = if any_color {
-                                    spend_any_for_required_colors(pool, &[a, b], spell, None, pins)
+                                    spend_any_for_required_colors(
+                                        pool,
+                                        &[a, b],
+                                        spell,
+                                        None,
+                                        pins,
+                                        quality_demand,
+                                    )
                                 } else {
                                     let remaining_pair_shards =
                                         count_remaining_hybrid_shards(shards, idx, a, b);
@@ -1586,7 +1752,7 @@ fn pay_cost_with_demand_and_choices_once(
                                         remaining_pair_shards,
                                         &mut preferred_hybrid_colors,
                                     );
-                                    spend_eligible(pool, color, spell, pins)
+                                    spend_eligible(pool, color, spell, pins, quality_demand)
                                 }
                                 .ok_or(PaymentError::InsufficientMana)?;
                                 spent.push(unit);
@@ -1603,6 +1769,7 @@ fn pay_cost_with_demand_and_choices_once(
                                             spell,
                                             None,
                                             pins,
+                                            quality_demand,
                                         )
                                     } else {
                                         let remaining_pair_shards =
@@ -1615,7 +1782,7 @@ fn pay_cost_with_demand_and_choices_once(
                                             remaining_pair_shards,
                                             &mut preferred_hybrid_colors,
                                         );
-                                        spend_eligible(pool, color, spell, pins)
+                                        spend_eligible(pool, color, spell, pins, quality_demand)
                                     }
                                 } else {
                                     None
@@ -1651,10 +1818,12 @@ fn pay_cost_with_demand_and_choices_once(
                                         spell,
                                         None,
                                         pins,
+                                        quality_demand,
                                     )
                                     .ok_or(PaymentError::InsufficientMana)?;
                                     spent.push(unit);
-                                } else if let Some(unit) = spend_eligible(pool, color, spell, pins)
+                                } else if let Some(unit) =
+                                    spend_eligible(pool, color, spell, pins, quality_demand)
                                 {
                                     spent.push(unit);
                                 } else {
@@ -1677,13 +1846,15 @@ fn pay_cost_with_demand_and_choices_once(
                                             spell,
                                             None,
                                             pins,
+                                            quality_demand,
                                         )
                                         .map(|u| {
                                             spent.push(u);
                                             true
                                         })
                                         .unwrap_or(false)
-                                    } else if let Some(u) = spend_eligible(pool, color, spell, pins)
+                                    } else if let Some(u) =
+                                        spend_eligible(pool, color, spell, pins, quality_demand)
                                     {
                                         spent.push(u);
                                         true
@@ -1794,6 +1965,7 @@ pub fn compute_phyrexian_shards(
     };
 
     let mut sim = pool.clone();
+    let mut quality_demand = SourceQualityDemand::from_shards(shards);
     let mut results = Vec::new();
     let mut preferred_hybrid_colors: Vec<(ManaType, ManaType, ManaType)> = Vec::new();
     // CR 107.4f + CR 118.3 + CR 119.8: Strict shards and forced Phyrexian
@@ -1806,20 +1978,35 @@ pub fn compute_phyrexian_shards(
     // CR 107.4f + CR 118.3: Resolve non-Phyrexian shards first (consuming their
     // mana from `sim`), then the deferred Phyrexian shards — so each shard's
     // `ShardOptions` reflects the pool after every strict requirement is met
-    // (see `phyrexian_deferred_order`). K'rrik promotion is applied per shard.
-    for idx in phyrexian_deferred_order(shards, life_colors) {
+    // (see `payment_shard_order`). K'rrik promotion is applied per shard.
+    let order = payment_shard_order(shards, Some(life_colors));
+    for (position, &idx) in order.iter().enumerate() {
         match effective_shard_requirement(shard_to_mana_type(shards[idx]), life_colors) {
             ShardRequirement::Single(mt) => {
                 if mana_spend_permission.is_some_and(|permission| permission.allows_payment_as(mt))
                 {
-                    let _ = spend_any_for_required_colors(&mut sim, &[mt], spell, None, &[]);
+                    let _ = spend_any_for_required_colors(
+                        &mut sim,
+                        &[mt],
+                        spell,
+                        None,
+                        &[],
+                        quality_demand,
+                    );
                 } else {
-                    let _ = spend_eligible(&mut sim, mt, spell, &[]);
+                    let _ = spend_eligible(&mut sim, mt, spell, &[], quality_demand);
                 }
             }
             ShardRequirement::Hybrid(a, b) => {
                 if any_color {
-                    let _ = spend_any_for_required_colors(&mut sim, &[a, b], spell, None, &[]);
+                    let _ = spend_any_for_required_colors(
+                        &mut sim,
+                        &[a, b],
+                        spell,
+                        None,
+                        &[],
+                        quality_demand,
+                    );
                 } else {
                     let remaining_pair_shards = count_remaining_hybrid_shards(shards, idx, a, b);
                     let color = select_hybrid_payment_color(
@@ -1830,7 +2017,7 @@ pub fn compute_phyrexian_shards(
                         remaining_pair_shards,
                         &mut preferred_hybrid_colors,
                     );
-                    let _ = spend_eligible(&mut sim, color, spell, &[]);
+                    let _ = spend_eligible(&mut sim, color, spell, &[], quality_demand);
                 }
             }
             ShardRequirement::Phyrexian(color) => {
@@ -1856,9 +2043,16 @@ pub fn compute_phyrexian_shards(
                 });
                 if matches!(options, ShardOptions::ManaOnly) {
                     let _ = if any_color {
-                        spend_any_for_required_colors(&mut sim, &[color], spell, None, &[])
+                        spend_any_for_required_colors(
+                            &mut sim,
+                            &[color],
+                            spell,
+                            None,
+                            &[],
+                            quality_demand,
+                        )
                     } else {
-                        spend_eligible(&mut sim, color, spell, &[])
+                        spend_eligible(&mut sim, color, spell, &[], quality_demand)
                     };
                 } else if matches!(options, ShardOptions::LifeOnly) {
                     life_budget = life_budget.saturating_sub(1);
@@ -1866,18 +2060,45 @@ pub fn compute_phyrexian_shards(
             }
             ShardRequirement::TwoGenericHybrid(color) => {
                 if any_color {
-                    let _ = spend_any_for_required_colors(&mut sim, &[color], spell, None, &[]);
-                } else if spend_eligible(&mut sim, color, spell, &[]).is_none() {
+                    let _ = spend_any_for_required_colors(
+                        &mut sim,
+                        &[color],
+                        spell,
+                        None,
+                        &[],
+                        quality_demand,
+                    );
+                } else if spend_eligible(&mut sim, color, spell, &[], quality_demand).is_none() {
                     for _ in 0..2 {
                         let _ = spend_generic_eligible(&mut sim, spell, None, &[]);
                     }
                 }
             }
             ShardRequirement::Snow => {
-                let _ = spend_snow_unit(&mut sim, spell, &[]);
+                quality_demand.snow -= 1;
+                let future_demand = remaining_payment_color_demand(
+                    shards,
+                    &order[position + 1..],
+                    Some(life_colors),
+                    None,
+                );
+                let _ = spend_snow_unit(&mut sim, spell, &[], Some(&future_demand));
             }
             ShardRequirement::TwoOrMoreColorSource => {
-                let _ = spend_two_or_more_color_source_eligible(&mut sim, spell, &[]);
+                quality_demand.multicolor -= 1;
+                let future_demand = remaining_payment_color_demand(
+                    shards,
+                    &order[position + 1..],
+                    Some(life_colors),
+                    None,
+                );
+                let _ = spend_two_or_more_color_source_eligible(
+                    &mut sim,
+                    spell,
+                    &[],
+                    quality_demand,
+                    &future_demand,
+                );
             }
             ShardRequirement::X => {}
             ShardRequirement::ColorlessHybrid(color) => {
@@ -1888,9 +2109,12 @@ pub fn compute_phyrexian_shards(
                         spell,
                         None,
                         &[],
+                        quality_demand,
                     );
-                } else if spend_eligible(&mut sim, ManaType::Colorless, spell, &[]).is_none() {
-                    let _ = spend_eligible(&mut sim, color, spell, &[]);
+                } else if spend_eligible(&mut sim, ManaType::Colorless, spell, &[], quality_demand)
+                    .is_none()
+                {
+                    let _ = spend_eligible(&mut sim, color, spell, &[], quality_demand);
                 }
             }
             ShardRequirement::HybridPhyrexian(a, b) => {
@@ -1920,7 +2144,14 @@ pub fn compute_phyrexian_shards(
                 });
                 if matches!(options, ShardOptions::ManaOnly) {
                     let _ = if any_color {
-                        spend_any_for_required_colors(&mut sim, &[a, b], spell, None, &[])
+                        spend_any_for_required_colors(
+                            &mut sim,
+                            &[a, b],
+                            spell,
+                            None,
+                            &[],
+                            quality_demand,
+                        )
                     } else {
                         let remaining_pair_shards =
                             count_remaining_hybrid_shards(shards, idx, a, b);
@@ -1932,7 +2163,7 @@ pub fn compute_phyrexian_shards(
                             remaining_pair_shards,
                             &mut preferred_hybrid_colors,
                         );
-                        spend_eligible(&mut sim, color, spell, &[])
+                        spend_eligible(&mut sim, color, spell, &[], quality_demand)
                     };
                 } else if matches!(options, ShardOptions::LifeOnly) {
                     life_budget = life_budget.saturating_sub(1);
@@ -1978,8 +2209,16 @@ pub fn compute_phyrexian_shards(
                     // Mirror `pay_cost_with_demand_and_choices`'s preference:
                     // prefer 1 colored, then atomic 2-generic fallback.
                     if any_color {
-                        let _ = spend_any_for_required_colors(&mut sim, &[color], spell, None, &[]);
-                    } else if spend_eligible(&mut sim, color, spell, &[]).is_none() {
+                        let _ = spend_any_for_required_colors(
+                            &mut sim,
+                            &[color],
+                            spell,
+                            None,
+                            &[],
+                            quality_demand,
+                        );
+                    } else if spend_eligible(&mut sim, color, spell, &[], quality_demand).is_none()
+                    {
                         let mut backup = sim.clone();
                         if spend_generic_eligible(&mut backup, spell, None, &[]).is_some()
                             && spend_generic_eligible(&mut backup, spell, None, &[]).is_some()
@@ -2016,7 +2255,15 @@ fn sim_any_for_required_colors_available(
     required_colors: &[ManaType],
 ) -> bool {
     let mut clone = pool.clone();
-    spend_any_for_required_colors(&mut clone, required_colors, spell, None, &[]).is_some()
+    spend_any_for_required_colors(
+        &mut clone,
+        required_colors,
+        spell,
+        None,
+        &[],
+        SourceQualityDemand::default(),
+    )
+    .is_some()
 }
 
 fn sim_color_available(
@@ -2025,7 +2272,14 @@ fn sim_color_available(
     color: ManaType,
 ) -> bool {
     let mut clone = pool.clone();
-    spend_eligible(&mut clone, color, spell, &[]).is_some()
+    spend_eligible(
+        &mut clone,
+        color,
+        spell,
+        &[],
+        SourceQualityDemand::default(),
+    )
+    .is_some()
 }
 
 /// CR 107.4a: Phyrexian shards always reference one of the five colors; `Colorless`
@@ -2218,20 +2472,69 @@ fn spell_permits_unit(spell: Option<&PaymentContext<'_>>, unit: &ManaShape) -> b
     spell.is_none_or(|ctx| ctx_permits_unit(ctx, unit))
 }
 
+/// Remaining source-quality requirements in one payment traversal.
+/// CR 107.4h: Snow is a property of the producing source, not a mana color.
+/// Experiment Five's {Z} similarly requires a source that could produce at
+/// least two colors; one dual-quality unit cannot pay both requirements.
+#[derive(Clone, Copy, Default)]
+struct SourceQualityDemand {
+    snow: usize,
+    multicolor: usize,
+}
+
+impl SourceQualityDemand {
+    // CR 601.2h: retain the still-unpaid source-quality costs in this payment.
+    fn from_shards(shards: &[ManaCostShard]) -> Self {
+        Self {
+            snow: shards.iter().filter(|&&s| s == ManaCostShard::Snow).count(),
+            multicolor: shards
+                .iter()
+                .filter(|&&s| s == ManaCostShard::TwoOrMoreColorSource)
+                .count(),
+        }
+    }
+
+    // CR 106.6 + CR 601.2h: count only context-eligible units and reserve
+    // distinct units for each pending cost. The union count prevents a unit
+    // possessing both qualities from being counted once for S and again for Z.
+    fn preserves_after(
+        self,
+        pool: &ManaPool,
+        spent: &ManaShape,
+        spell: Option<&PaymentContext<'_>>,
+    ) -> bool {
+        let snow = pool.count_where(|u| u.is_snow() && spell_permits_unit(spell, u));
+        let multicolor = pool.count_where(|u| {
+            u.source_could_produce_two_or_more_colors && spell_permits_unit(spell, u)
+        });
+        let either = pool.count_where(|u| {
+            (u.is_snow() || u.source_could_produce_two_or_more_colors)
+                && spell_permits_unit(spell, u)
+        });
+        snow.saturating_sub(usize::from(spent.is_snow())) >= self.snow
+            && multicolor.saturating_sub(usize::from(spent.source_could_produce_two_or_more_colors))
+                >= self.multicolor
+            && either.saturating_sub(usize::from(
+                spent.is_snow() || spent.source_could_produce_two_or_more_colors,
+            )) >= self.snow + self.multicolor
+    }
+}
+
 fn spend_eligible(
     pool: &mut ManaPool,
     color: ManaType,
     spell: Option<&PaymentContext<'_>>,
     pins: &[ManaPipId],
+    quality_demand: SourceQualityDemand,
 ) -> Option<ManaUnit> {
     match spell {
-        Some(ctx) => spend_color_prefer_non_z(pool, color, pins, |unit| {
+        Some(ctx) => spend_color_prefer_non_z(pool, color, pins, quality_demand, spell, |unit| {
             if color == ManaType::Colorless && unit.is_convoke_payment() {
                 return false;
             }
             ctx_permits_unit(ctx, unit)
         }),
-        None => spend_color_prefer_non_z(pool, color, pins, |unit| {
+        None => spend_color_prefer_non_z(pool, color, pins, quality_demand, spell, |unit| {
             !(color == ManaType::Colorless && unit.is_convoke_payment())
         }),
     }
@@ -2250,12 +2553,56 @@ fn spend_color_prefer_non_z(
     pool: &mut ManaPool,
     color: ManaType,
     pins: &[ManaPipId],
+    quality_demand: SourceQualityDemand,
+    spell: Option<&PaymentContext<'_>>,
     allows: impl Fn(&ManaShape) -> bool,
 ) -> Option<ManaUnit> {
     // CR 118.3a: a player-pinned eligible unit of this color is spent first;
-    // otherwise the legacy non-`Z`-then-any ordering is preserved exactly.
+    // without pending snow, preserve the legacy non-`Z`-then-any ordering.
     spend_selected(pool, |pool| {
         pool.first_pinned_where(pins, |unit| unit.color == color && allows(unit))
+            .or_else(|| {
+                // CR 107.4h + CR 106.6: prefer interchangeable eligible
+                // non-snow mana while a snow cost remains. Preserve the
+                // non-Z preference within that eligible non-snow set.
+                if quality_demand.snow == 0 {
+                    return None;
+                }
+                // CR 601.2h: prefer a unit only when the remaining eligible
+                // pool can still cover both kinds of source-quality costs.
+                // In particular, the sole non-snow Z unit is not interchangeable
+                // with snow U when another snow unit can pay the pending S.
+                pool.first_where(|unit| {
+                    unit.color == color
+                        && !unit.is_snow()
+                        && !unit.source_could_produce_two_or_more_colors
+                        && allows(unit)
+                        && quality_demand.preserves_after(pool, unit, spell)
+                })
+                .or_else(|| {
+                    pool.first_where(|unit| {
+                        unit.color == color
+                            && !unit.is_snow()
+                            && allows(unit)
+                            && quality_demand.preserves_after(pool, unit, spell)
+                    })
+                })
+                .or_else(|| {
+                    pool.first_where(|unit| {
+                        unit.color == color
+                            && !unit.source_could_produce_two_or_more_colors
+                            && allows(unit)
+                            && quality_demand.preserves_after(pool, unit, spell)
+                    })
+                })
+                .or_else(|| {
+                    pool.first_where(|unit| {
+                        unit.color == color
+                            && allows(unit)
+                            && quality_demand.preserves_after(pool, unit, spell)
+                    })
+                })
+            })
             .or_else(|| {
                 pool.first_where(|unit| {
                     unit.color == color
@@ -2455,6 +2802,19 @@ fn eligible_color_count(
     })
 }
 
+// A colorless, undemanded, or surplus unit leaves the colored reserve intact.
+// CR 118.10: the same unit cannot fund both this payment and a reserved pip.
+fn color_is_unreserved(
+    pool: &ManaPool,
+    color: ManaType,
+    spell: Option<&PaymentContext<'_>>,
+    demand: &ColorDemand,
+) -> bool {
+    mana_type_to_demand_index(color).is_none_or(|i| {
+        demand[i] == 0 || eligible_color_count(pool, color, spell) > demand[i] as usize
+    })
+}
+
 fn spend_any_eligible(
     pool: &mut ManaPool,
     spell: Option<&PaymentContext<'_>>,
@@ -2477,7 +2837,13 @@ fn spend_any_eligible(
     }
     match spell {
         Some(ctx) => {
-            if let Some(unit) = spend_eligible(pool, ManaType::Colorless, Some(ctx), pins) {
+            if let Some(unit) = spend_eligible(
+                pool,
+                ManaType::Colorless,
+                Some(ctx),
+                pins,
+                SourceQualityDemand::default(),
+            ) {
                 return Some(unit);
             }
 
@@ -2524,9 +2890,14 @@ fn spend_any_eligible(
                 }
             }
             best.and_then(|(color, _, _)| {
-                spend_color_prefer_non_z(pool, color, pins, |unit| {
-                    !unit.is_convoke_payment() && ctx_permits_unit(ctx, unit)
-                })
+                spend_color_prefer_non_z(
+                    pool,
+                    color,
+                    pins,
+                    SourceQualityDemand::default(),
+                    None,
+                    |unit| !unit.is_convoke_payment() && ctx_permits_unit(ctx, unit),
+                )
             })
         }
         None => spend_any_unit(pool, pins),
@@ -2539,6 +2910,7 @@ fn spend_any_for_required_colors(
     spell: Option<&PaymentContext<'_>>,
     demand: Option<&ColorDemand>,
     pins: &[ManaPipId],
+    quality_demand: SourceQualityDemand,
 ) -> Option<ManaUnit> {
     // CR 118.3a: this path pays a colored/hybrid requirement that any of
     // `required_colors` can satisfy. Scan a pinned unit across the eligible colors
@@ -2553,8 +2925,37 @@ fn spend_any_for_required_colors(
     }) {
         return Some(unit);
     }
+    if quality_demand.snow > 0 {
+        // CR 609.4b + CR 107.4h: a permitted off-color unit can pay this
+        // requirement without changing its actual type or Snow provenance.
+        // Scan pins over the same eligible substitution set as the fallback.
+        if let Some(unit) = spend_selected(pool, |pool| {
+            pool.first_pinned_where(pins, |unit| {
+                !unit.is_convoke_payment() && spell_permits_unit(spell, unit)
+            })
+            .or_else(|| {
+                required_colors.iter().find_map(|color| {
+                    pool.first_where(|unit| {
+                        unit.color == *color
+                            && !unit.is_convoke_payment()
+                            && spell_permits_unit(spell, unit)
+                            && quality_demand.preserves_after(pool, unit, spell)
+                    })
+                })
+            })
+            .or_else(|| {
+                pool.first_where(|unit| {
+                    !unit.is_convoke_payment()
+                        && spell_permits_unit(spell, unit)
+                        && quality_demand.preserves_after(pool, unit, spell)
+                })
+            })
+        }) {
+            return Some(unit);
+        }
+    }
     for color in required_colors {
-        if let Some(unit) = spend_eligible(pool, *color, spell, pins) {
+        if let Some(unit) = spend_eligible(pool, *color, spell, pins, quality_demand) {
             return Some(unit);
         }
     }
@@ -2573,7 +2974,14 @@ fn spend_restricted_x_generic_eligible(
     pins: &[ManaPipId],
 ) -> Option<ManaUnit> {
     if any_color {
-        return spend_any_for_required_colors(pool, allowed_colors, spell, demand, pins);
+        return spend_any_for_required_colors(
+            pool,
+            allowed_colors,
+            spell,
+            demand,
+            pins,
+            SourceQualityDemand::default(),
+        );
     }
     if let Some(unit) = spend_selected(pool, |pool| {
         pool.first_pinned_where(pins, |unit| {
@@ -2585,7 +2993,13 @@ fn spend_restricted_x_generic_eligible(
         return Some(unit);
     }
     if allowed_colors.len() == 1 {
-        return spend_eligible(pool, allowed_colors[0], spell, pins);
+        return spend_eligible(
+            pool,
+            allowed_colors[0],
+            spell,
+            pins,
+            SourceQualityDemand::default(),
+        );
     }
     let mut best: Option<(ManaType, bool, usize)> = None;
     for &color in allowed_colors {
@@ -2605,7 +3019,9 @@ fn spend_restricted_x_generic_eligible(
             }
         }
     }
-    best.and_then(|(color, _, _)| spend_eligible(pool, color, spell, pins))
+    best.and_then(|(color, _, _)| {
+        spend_eligible(pool, color, spell, pins, SourceQualityDemand::default())
+    })
 }
 
 /// Planner-layer generic spend that respects an outer cost's colored `demand`.
@@ -2665,13 +3081,7 @@ fn spend_generic_non_demanded(
                 return false;
             }
         }
-        match mana_type_to_demand_index(unit.color) {
-            // Colorless: index `None`, never demanded.
-            None => true,
-            Some(i) => {
-                demand[i] == 0 || eligible_color_count(pool, unit.color, spell) > demand[i] as usize
-            }
-        }
+        color_is_unreserved(pool, unit.color, spell, demand)
     };
 
     spend_selected(pool, |pool| {
@@ -2731,7 +3141,13 @@ fn spend_any_unit(pool: &mut ManaPool, pins: &[ManaPipId]) -> Option<ManaUnit> {
     }
 
     // Prefer colorless first, then least-available color
-    if let Some(unit) = spend_eligible(pool, ManaType::Colorless, None, pins) {
+    if let Some(unit) = spend_eligible(
+        pool,
+        ManaType::Colorless,
+        None,
+        pins,
+        SourceQualityDemand::default(),
+    ) {
         return Some(unit);
     }
 
@@ -2757,7 +3173,14 @@ fn spend_any_unit(pool: &mut ManaPool, pins: &[ManaPipId]) -> Option<ManaUnit> {
     }
 
     best.and_then(|(color, _)| {
-        spend_color_prefer_non_z(pool, color, pins, |unit| !unit.is_convoke_payment())
+        spend_color_prefer_non_z(
+            pool,
+            color,
+            pins,
+            SourceQualityDemand::default(),
+            None,
+            |unit| !unit.is_convoke_payment(),
+        )
     })
 }
 
@@ -2768,11 +3191,21 @@ fn spend_snow_unit(
     pool: &mut ManaPool,
     spell: Option<&PaymentContext<'_>>,
     pins: &[ManaPipId],
+    demand: Option<&ColorDemand>,
 ) -> Option<ManaUnit> {
     // CR 118.3a: prefer a pinned snow unit before the first available one.
     spend_selected(pool, |pool| {
         pool.first_pinned_where(pins, |unit| {
             unit.is_snow() && spell_permits_unit(spell, unit)
+        })
+        .or_else(|| {
+            demand.and_then(|demand| {
+                pool.first_where(|unit| {
+                    unit.is_snow()
+                        && spell_permits_unit(spell, unit)
+                        && color_is_unreserved(pool, unit.color, spell, demand)
+                })
+            })
         })
         .or_else(|| match spell {
             Some(ctx) => pool.first_where(|m| m.is_snow() && ctx_permits_unit(ctx, m)),
@@ -2785,11 +3218,27 @@ fn spend_two_or_more_color_source_eligible(
     pool: &mut ManaPool,
     spell: Option<&PaymentContext<'_>>,
     pins: &[ManaPipId],
+    quality_demand: SourceQualityDemand,
+    demand: &ColorDemand,
 ) -> Option<ManaUnit> {
     // CR 118.3a: prefer a pinned {Z}-eligible unit before the first match.
     spend_selected(pool, |pool| {
         pool.first_pinned_where(pins, |unit| {
             unit.source_could_produce_two_or_more_colors && spell_permits_unit(spell, unit)
+        })
+        .or_else(|| {
+            // Preserve Snow without consuming the sole color for a later pip.
+            // With no pending Snow, retain the existing source preference.
+            (quality_demand.snow > 0)
+                .then(|| {
+                    pool.first_where(|unit| {
+                        unit.source_could_produce_two_or_more_colors
+                            && !unit.is_snow()
+                            && spell_permits_unit(spell, unit)
+                            && color_is_unreserved(pool, unit.color, spell, demand)
+                    })
+                })
+                .flatten()
         })
         .or_else(|| match spell {
             Some(ctx) => pool.first_where(|unit| {
@@ -3131,7 +3580,9 @@ mod tests {
         ));
 
         // The live spend also refuses to consume the snow unit under the restriction.
-        assert!(spend_snow_unit(&mut pool, Some(&PaymentContext::Spell(&forbid)), &[]).is_none());
+        assert!(
+            spend_snow_unit(&mut pool, Some(&PaymentContext::Spell(&forbid)), &[], None).is_none()
+        );
         assert_eq!(pool.total(), 1, "the real snow unit must be left unspent");
     }
 

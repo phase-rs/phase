@@ -52,6 +52,9 @@ pub use crate::types::mana::ManaSourcePenalty;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LiveManaOutputUnit {
     pub mana_type: ManaType,
+    /// CR 106.3 + CR 107.4h: the producing ability, including an Aura trigger,
+    /// supplies the snow provenance of its own units.
+    pub supertype: Option<crate::types::mana::ManaSupertype>,
     pub restrictions: Vec<ManaRestriction>,
 }
 
@@ -310,7 +313,7 @@ pub struct ManaSourceOption {
     pub ability_index: Option<usize>,
     /// Indexing/representative color for this row.
     /// For normal sources this is the exact mana type produced.
-    /// For filter-land combination rows (`atomic_combination.is_some()`),
+    /// For multi-mana rows (`atomic_combination.is_some()`),
     /// this mirrors the first color of the combination and is used only for
     /// shard-matching lookup; the full mana production is driven by
     /// `atomic_combination`.
@@ -645,6 +648,7 @@ fn manual_selection_for_option(
         // resolver ask for its color. The colorless marker is intentionally
         // inert while `output` is deferred and canonicalizes all planner rows.
         selection.mana_type = ManaType::Colorless;
+        selection.atomic_combination = None;
         selection.output = ManaSourceOutput::DeferredColorChoice { quantity };
     }
     Some(selection)
@@ -751,6 +755,8 @@ fn live_base_mana_output(
     let Some(ability_index) = option.ability_index else {
         return vec![LiveManaOutputUnit {
             mana_type: option.mana_type,
+            supertype: source_is_snow(state, option.object_id)
+                .then_some(crate::types::mana::ManaSupertype::Snow),
             restrictions: option.restrictions.clone(),
         }];
     };
@@ -938,6 +944,8 @@ fn live_mana_output_units(
         .into_iter()
         .map(|mana_type| LiveManaOutputUnit {
             mana_type,
+            supertype: source_is_snow(state, restriction_source_id)
+                .then_some(crate::types::mana::ManaSupertype::Snow),
             restrictions: restrictions.clone(),
         })
         .collect()
@@ -2569,6 +2577,30 @@ struct ProfileApplication {
     output: u32,
 }
 
+/// CR 106.3 + CR 608.2c: add mana as instructed; for these counted outputs,
+/// one chosen type applies to every unit, unlike an "any combination" effect.
+/// Keep row sizing and replay on the same class.
+pub(crate) fn single_color_production_count(produced: &ManaProduction) -> Option<&QuantityExpr> {
+    match produced {
+        ManaProduction::AnyOneColor { count, .. }
+        | ManaProduction::AnyOneColorAmongPermanents { count, .. }
+        | ManaProduction::OpponentLandColors { count }
+        | ManaProduction::AnyTypeProduceableBy { count, .. }
+        | ManaProduction::AnyInCommandersColorIdentity { count, .. } => Some(count),
+        ManaProduction::Fixed { .. }
+        | ManaProduction::Colorless { .. }
+        | ManaProduction::Mixed { .. }
+        | ManaProduction::AnyCombination { .. }
+        | ManaProduction::ChosenColor { .. }
+        | ManaProduction::NotedType { .. }
+        | ManaProduction::AnyCombinationOfObjectColors { .. }
+        | ManaProduction::ChoiceAmongExiledColors { .. }
+        | ManaProduction::ChoiceAmongCombinations { .. }
+        | ManaProduction::DistinctColorsAmongPermanents { .. }
+        | ManaProduction::TriggerEventManaType => None,
+    }
+}
+
 fn resolved_production_count(
     produced: &ManaProduction,
     state: &GameState,
@@ -3487,6 +3519,35 @@ fn emit_source_rows(
                 .map(|(mana_type, _)| SourceRow {
                     mana_type,
                     atomic_combination: None,
+                    restrictions: concrete_restrictions.clone(),
+                })
+                .collect()
+        }
+        // CR 106.3 + CR 605.3b: one activation adds the entire same-color
+        // bundle. CR 107.3a: unannounced X is not a known zero; preserve its
+        // capability rows until the activation's amount choice is made.
+        produced
+            if single_color_production_count(produced).is_some_and(|count| !count.contains_x()) =>
+        {
+            // Reuse the live label's sizing authority: a paid-object amount
+            // needs its candidate bound, and an "instead" condition can
+            // replace the base output before its amount is evaluated.
+            let resolved =
+                resolved_mana_ability_for_live_output(state, object_id, controller, ability);
+            let count = match &resolved.effect {
+                Effect::Mana { produced, .. } => {
+                    resolved_production_count(produced, state, &resolved) as usize
+                }
+                _ => 0,
+            };
+            if count == 0 {
+                return Vec::new();
+            }
+            mana_options_from_production(state, controller, object_id, produced)
+                .into_iter()
+                .map(|mana_type| SourceRow {
+                    mana_type,
+                    atomic_combination: (count > 1).then(|| vec![mana_type; count]),
                     restrictions: concrete_restrictions.clone(),
                 })
                 .collect()
