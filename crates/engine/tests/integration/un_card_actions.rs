@@ -8,15 +8,13 @@
 
 use engine::game::engine::{apply, EngineError};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
-use engine::game::triggers::{PendingTrigger, PendingTriggerContext};
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{
-    AbilityCost, Effect, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
-    TriggerDefinition,
+    AbilityCost, Effect, StaticDefinition, TargetFilter, TargetRef, TriggerDefinition,
 };
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
-use engine::types::game_state::{PendingTriggerOrder, TriggerOrderGroup, WaitingFor};
+use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -2062,58 +2060,125 @@ fn waiting_touch_triggers_are_bounded_per_player() {
 #[test]
 fn touch_triggers_held_in_an_ordering_prompt_count_toward_the_cap() {
     let max = engine::game::un_actions::MAX_PENDING_TOUCH_TRIGGERS;
-    let (mut runner, bile, _, _) = vile_bile_scenario();
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let bile = scenario
+        .add_creature_from_oracle(P0, "Vile Bile", 2, 2, VILE_BILE)
+        .id();
+    let other_bile = scenario
+        .add_creature_from_oracle(P0, "Vile Bile", 2, 2, VILE_BILE)
+        .id();
+    let bolt = scenario.add_bolt_to_hand(P0);
+    let mut runner = scenario.build();
+    // Enough life to survive every touch this test parks and resolves.
+    runner.state_mut().players[1].life = 1000;
+    un_action(&mut runner, P1, UnAction::SetEnabled { enabled: true });
 
-    // CR 603.3b: a touch parked while a decision was pending leaves the deferred
-    // queue for the in-flight ordering pass as soon as that queue is drained.
-    // The touches held there are still waiting to resolve, so they occupy the
-    // same bound.
-    let ordered_touch = || {
-        let mut pending = PendingTrigger::ordinary(
-            bile,
-            P1,
-            None,
-            Box::new(ResolvedAbility::new(Effect::NoOp, Vec::new(), bile, P1)),
-            0,
-        );
-        pending.trigger_event = Some(GameEvent::ObjectTouched {
-            player: P1,
-            object_id: bile,
-        });
-        PendingTriggerContext::single(pending)
-    };
-    let set_ordered = |runner: &mut GameRunner, count: usize| {
-        runner.state_mut().pending_trigger_order = Some(PendingTriggerOrder {
-            groups: vec![TriggerOrderGroup {
-                controller: P1,
-                triggers: (0..count).map(|_| ordered_touch()).collect(),
-                ordered: false,
-            }],
-            resume_after_ordering: None,
-        });
-    };
-
-    set_ordered(&mut runner, max);
-    let rejected = touch_result(&mut runner, P1, bile);
+    // P0 starts casting Lightning Bolt, which pauses for its target.
+    let card_id = runner.state().objects[&bolt].card_id;
+    runner
+        .act(GameAction::CastSpell {
+            object_id: bolt,
+            card_id,
+            targets: vec![],
+            payment_mode: Default::default(),
+        })
+        .expect("P0 begins casting Lightning Bolt");
     assert!(
-        matches!(rejected, Err(EngineError::InvalidAction(_))),
-        "an ordering prompt holding {max} touches leaves no room for another: {rejected:?}"
+        matches!(
+            runner.state().waiting_for,
+            WaitingFor::TargetSelection { .. }
+        ),
+        "reach guard: the announcement pauses for Bolt's target, got {:?}",
+        runner.state().waiting_for
     );
 
-    // One fewer ordered touch frees exactly one slot: the ordered contexts are
-    // counted once each, not once per queue they could have occupied.
-    set_ordered(&mut runner, max - 1);
+    // CR 603.3: touches made during the announcement park in the deferred queue.
+    // Touching two different Vile Biles keeps the batch order-dependent, so the
+    // drain really opens a CR 603.3b ordering pass rather than auto-ordering it.
+    for _ in 0..max - 2 {
+        touch(&mut runner, P1, bile);
+    }
+    touch(&mut runner, P1, other_bile);
+    assert_eq!(
+        runner.state().deferred_triggers.len(),
+        max - 1,
+        "reach guard: every touch parked while the decision was pending"
+    );
+
+    runner
+        .act(GameAction::ChooseTarget {
+            target: Some(TargetRef::Player(P0)),
+        })
+        .expect("P0 targets themself with Bolt");
+    let WaitingFor::OrderTriggers { triggers, .. } = runner.state().waiting_for.clone() else {
+        panic!(
+            "expected the parked touches to open an ordering pass, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+    assert_eq!(
+        triggers.len(),
+        max - 1,
+        "the ordering pass holds every parked touch"
+    );
+
+    // Touches held in the ordering pass are still waiting to resolve, so they
+    // occupy the same bound: exactly one more fits.
+    let stack_before = runner.state().stack.len();
     touch(&mut runner, P1, bile);
+    assert!(
+        matches!(runner.state().waiting_for, WaitingFor::OrderTriggers { .. }),
+        "the ordering prompt stays open, got {:?}",
+        runner.state().waiting_for
+    );
     assert_eq!(
         runner.state().stack.len(),
+        stack_before,
+        "the touch waits for the ordering decision"
+    );
+    assert_eq!(
+        runner.state().deferred_triggers.len(),
         1,
-        "reach guard: the accepted touch triggered Vile Bile"
+        "the accepted touch is parked behind the ordering pass"
     );
     let rejected = touch_result(&mut runner, P1, bile);
     assert!(
         matches!(rejected, Err(EngineError::InvalidAction(_))),
-        "{max} waiting touches fill the bound again: {rejected:?}"
+        "{max} waiting touches fill the bound: {rejected:?}"
     );
+
+    // P0 orders the held triggers; the touch parked behind the prompt is placed
+    // once the pass finishes, so all `max` touches resolve.
+    runner
+        .act(GameAction::OrderTriggers {
+            order: (0..triggers.len()).collect(),
+        })
+        .expect("P0 orders the held triggers");
+    for _ in 0..max * 4 {
+        match runner.state().waiting_for.clone() {
+            WaitingFor::OrderTriggers { triggers, .. } => {
+                runner
+                    .act(GameAction::OrderTriggers {
+                        order: (0..triggers.len()).collect(),
+                    })
+                    .expect("ordering the remaining triggers");
+            }
+            WaitingFor::Priority { .. } if runner.state().stack.is_empty() => break,
+            WaitingFor::Priority { .. } => {
+                runner
+                    .act(GameAction::PassPriority)
+                    .expect("priority passes");
+            }
+            other => panic!("unexpected prompt while the touches resolve: {other:?}"),
+        }
+    }
+    assert_eq!(
+        runner.life(P1),
+        1000 - 2 * max as i32,
+        "every touch resolved, including the one parked behind the ordering pass"
+    );
+    assert_settled(&runner, "after every touch resolved");
 }
 
 #[test]
