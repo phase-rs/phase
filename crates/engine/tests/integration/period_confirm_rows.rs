@@ -7532,7 +7532,7 @@ fn a_moldervine_altar_of_the_brood_period_previews_its_mills_and_draws() {
         );
         if p1_library == 10 {
             let events = take_recorded(runner.state_mut(), n).events;
-            assert_eq!(markers(&events).len(), n as usize);
+            assert_eq!(markers(&events).last(), Some(&(P0, n)), "{p1_library}");
         }
     }
 }

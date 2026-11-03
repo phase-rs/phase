@@ -654,10 +654,12 @@ fn rebind_convoke(
 
 /// CR 400.7 + CR 601.2h: a recorded cost selection whose objects the prompt does not offer,
 /// with each such object replaced by an unused offered object of the same name; `rebound` is
-/// the recorded selection with the objects minted in the period already replaced.
+/// the recorded selection with the objects minted in the period already replaced, and `chosen`
+/// the name each recorded object had when it was chosen.
 fn rebind_cost_selection(
     recorded: &GameAction,
     rebound: GameAction,
+    chosen: &[String],
     replay: &GameState,
 ) -> GameAction {
     let (
@@ -675,12 +677,15 @@ fn rebind_cost_selection(
         .copied()
         .collect();
     let mut rebound_cards = Vec::with_capacity(cards.len());
-    for (id, original) in cards.iter().zip(original) {
+    for (index, (id, original)) in cards.iter().zip(original).enumerate() {
         if choices.contains(id) {
             rebound_cards.push(*id);
             continue;
         }
-        let Some(printed) = name(id).or_else(|| name(original)) else {
+        let Some(printed) = name(id)
+            .or_else(|| name(original))
+            .or_else(|| chosen.get(index).map(String::as_str))
+        else {
             return rebound;
         };
         let Some(at) = unused.iter().position(|other| name(other) == Some(printed)) else {
@@ -1273,11 +1278,15 @@ fn answer(
             }
             continue;
         }
+        let chosen = item
+            .cost_move
+            .as_ref()
+            .map_or(&[][..], |recorded| recorded.chosen.as_slice());
+        let action = rebind_cost_selection(&item.action, rebound(item, replay), chosen, replay);
         let offered = item
             .cost_move
             .as_ref()
-            .and_then(|_| CostChoices::at(replay));
-        let action = rebind_cost_selection(&item.action, rebound(item, replay), replay);
+            .and_then(|_| CostChoices::at(replay, &action));
         let choice = answered_choice(replay, &action);
         match step(
             replay,

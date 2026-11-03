@@ -929,7 +929,7 @@ pub struct PeriodicDelta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cleanup: Option<CleanupPair>,
     /// CR 701.17a: per seat, what one repetition mills from its library; `None` where the
-    /// period's departure was not certified, and the whole library loss is then read as draws.
+    /// period's draws could not be told apart, and the whole library loss is then read as draws.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructed_mills: Option<BTreeMap<PlayerId, InstructedMill>>,
 }
@@ -4896,40 +4896,84 @@ pub(crate) struct CertifiedInstructedDeparture {
 /// 1's stable-partition compare; a cost or legality change by the drive aborting on the second
 /// cycle. The failure mode is an UNDER-stated bonus, not an over-stated promise.
 ///
-/// CR 701.17a: `libraries` are the frames before projection; a departure leaves from the top, so C1b compares their order.
-pub(crate) fn certify_instructed_library_departure(
-    prior: &GameState,
-    current: &GameState,
-    libraries: [&GameState; 2],
-) -> Option<CertifiedInstructedDeparture> {
-    // C1a, action conjunct. `record_drawn_card` PUSHES, so within one turn each player's
-    // vector is append-only and the period's slice is exactly the suffix appended between
-    // the two frames — an id drawn in an EARLIER period of the same turn, returned to a
-    // library and departed later, sits in the PREFIX and is correctly admitted.
+/// CR 121.1: per drawing player, the cards drawn between `prior` and `current`.
+fn drawn_between<'a>(
+    prior: &'a GameState,
+    current: &'a GameState,
+) -> Option<BTreeMap<PlayerId, &'a [ObjectId]>> {
+    // `record_drawn_card` PUSHES, so within one turn each player's vector is append-only and the
+    // period's slice is exactly the suffix appended between the two frames — an id drawn in an
+    // EARLIER period of the same turn, returned to a library and departed later, sits in the
+    // PREFIX and is correctly admitted.
     //
     // The one thing that shrinks a vector is `turns::start_next_turn`, which clears the map.
     // A frame pair straddling that boundary has no period slice at all, so a NON-EXTENSION
-    // refuses the period outright, for either owner and in either direction. The obvious
-    // clamp (`current[prior_len.min(len)..]`) yields an EMPTY slice there and would admit
-    // every draw, which is the exact fail-open this shape forecloses.
-    let mut drawn_this_period: HashSet<ObjectId> = HashSet::new();
+    // answers `None`, for either owner and in either direction. The obvious clamp
+    // (`current[prior_len.min(len)..]`) yields an EMPTY slice there and would admit every draw,
+    // which is the exact fail-open this shape forecloses.
     let journal_owners: BTreeSet<PlayerId> = prior
         .cards_drawn_this_turn
         .keys()
         .chain(current.cards_drawn_this_turn.keys())
         .copied()
         .collect();
-    for owner in journal_owners {
-        let prior_drawn: &[ObjectId] = prior
-            .cards_drawn_this_turn
-            .get(&owner)
-            .map_or(&[][..], |v| v.as_slice());
-        let current_drawn: &[ObjectId] = current
-            .cards_drawn_this_turn
-            .get(&owner)
-            .map_or(&[][..], |v| v.as_slice());
-        drawn_this_period.extend(current_drawn.strip_prefix(prior_drawn)?.iter().copied());
-    }
+    journal_owners
+        .into_iter()
+        .map(|owner| {
+            let drawn = |frame: &'a GameState| {
+                frame
+                    .cards_drawn_this_turn
+                    .get(&owner)
+                    .map_or(&[][..], |v| v.as_slice())
+            };
+            Some((owner, drawn(current).strip_prefix(drawn(prior))?))
+        })
+        .collect()
+}
+
+/// CR 121.1 + CR 701.17b + CR 704.5b: per seat whose library one period shrank, the part of that
+/// loss the period did not draw — a draw from an empty library loses and a mill never does —
+/// beside the library `state` holds; `None` across a turn boundary, where the draw journal has no
+/// period slice.
+pub(crate) fn period_instructed_mills(
+    state: &GameState,
+    prior: &GameState,
+    current: &GameState,
+) -> Option<BTreeMap<PlayerId, InstructedMill>> {
+    let drawn = drawn_between(prior, current)?;
+    let mills: BTreeMap<PlayerId, InstructedMill> = prior
+        .players
+        .iter()
+        .filter_map(|player| {
+            let held = |frame: &GameState| frame.library_of(player.id).len() as i64;
+            let loss = held(prior) - held(current);
+            let drew = drawn.get(&player.id).map_or(0, |cards| cards.len() as i64);
+            (loss > 0).then(|| {
+                (
+                    player.id,
+                    InstructedMill {
+                        per_repetition: (loss - drew).max(0),
+                        library: held(state),
+                    },
+                )
+            })
+        })
+        .collect();
+    (!mills.is_empty()).then_some(mills)
+}
+
+/// CR 701.17a: `libraries` are the frames before projection; a departure leaves from the top, so C1b compares their order.
+pub(crate) fn certify_instructed_library_departure(
+    prior: &GameState,
+    current: &GameState,
+    libraries: [&GameState; 2],
+) -> Option<CertifiedInstructedDeparture> {
+    // C1a, action conjunct.
+    let drawn_this_period: HashSet<ObjectId> = drawn_between(prior, current)?
+        .into_values()
+        .flatten()
+        .copied()
+        .collect();
 
     // C1a, candidate set. Present in BOTH frames (CR 400.7 makes the departed card a new
     // object at the rules level; it does not make it a new `ObjectId` here, and nothing

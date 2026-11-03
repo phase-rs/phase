@@ -267,6 +267,10 @@ pub struct CostMove {
     pub destination: Zone,
     /// `None` for an object that no longer exists.
     pub arrivals: Vec<Option<Zone>>,
+    /// CR 400.7: the name of each object the answer chose, in its order, read before it moved,
+    /// since a moved object is a new one and a token that left the battlefield is gone.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chosen: Vec<String>,
 }
 
 /// Where an object-moving cost sends the objects it chooses; `None` for a cost that moves none.
@@ -299,12 +303,22 @@ fn cost_destination(kind: &PayCostKind) -> Option<Zone> {
 pub(crate) struct CostChoices {
     destination: Zone,
     choices: Vec<(ObjectId, Zone)>,
+    chosen: Vec<String>,
 }
 
 impl CostChoices {
-    pub(crate) fn at(state: &GameState) -> Option<Self> {
+    /// The prompt `state` waits on, answered by `answer`.
+    pub(crate) fn at(state: &GameState, answer: &GameAction) -> Option<Self> {
         let WaitingFor::PayCost { kind, choices, .. } = &state.waiting_for else {
             return None;
+        };
+        let chosen = match answer {
+            GameAction::SelectCards { cards } => cards
+                .iter()
+                .map(|id| state.objects.get(id).map(|o| o.name.clone()))
+                .collect::<Option<Vec<_>>>()
+                .unwrap_or_default(),
+            _ => Vec::new(),
         };
         Some(Self {
             destination: cost_destination(kind)?,
@@ -312,6 +326,7 @@ impl CostChoices {
                 .iter()
                 .filter_map(|id| state.objects.get(id).map(|o| (*id, o.zone)))
                 .collect(),
+            chosen,
         })
     }
 
@@ -329,6 +344,7 @@ impl CostChoices {
         CostMove {
             destination: self.destination,
             arrivals,
+            chosen: self.chosen.clone(),
         }
     }
 }
@@ -1418,7 +1434,7 @@ pub(crate) fn begin_action(
                 let optional = answer_optionality(&state.waiting_for, answer);
                 let point = state.waiting_for.option_point();
                 let asking = asking_node(state, at);
-                cost = CostChoices::at(state).map(|choices| (at, choices));
+                cost = CostChoices::at(state, action).map(|choices| (at, choices));
                 let trace = trace_mut(state);
                 let asked_by = asking.map(|key| trace.intern(key));
                 let entry = TraceEntry {

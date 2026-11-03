@@ -3210,7 +3210,7 @@ fn build_cert(
     state: &GameState,
     delta: &crate::analysis::resource::ResourceVector,
     winner: PlayerId,
-    departure: Option<&crate::analysis::resource::CertifiedInstructedDeparture>,
+    milled: Option<&BTreeMap<PlayerId, i64>>,
 ) -> crate::analysis::loop_check::LoopCertificate {
     // CR 732.2a: the two fields are derived from DIFFERENT deltas, deliberately. `unbounded`
     // reads the FULL delta, because an instructed library departure is genuine
@@ -3218,8 +3218,8 @@ fn build_cert(
     // `win_kind` reads the REDUCED one, because CR 121.4 / CR 104.3c put the loss on a DRAW
     // from an empty library rather than on the departure, so classifying `Decking` here would
     // claim a threshold the engine cannot prove — see `without_certified_departure`.
-    let win_kind_delta = match departure {
-        Some(certified) => delta.without_certified_departure(&certified.per_victim),
+    let win_kind_delta = match milled {
+        Some(milled) => delta.without_certified_departure(milled),
         None => delta.clone(),
     };
     crate::analysis::loop_check::LoopCertificate {
@@ -3796,10 +3796,9 @@ enum FrameSource<'a, 'v> {
     },
     /// CR 732.2a: a recorded period replayed by the confirmer, every choice of which is an answer
     /// it recorded, so there is no unspecified window to gate; its replayed frames' announced
-    /// slots carry the charges, and its certified library departure is what it mills.
+    /// slots carry the charges.
     Replay {
         answers: &'a [crate::analysis::decision_template::PinnedDecision],
-        departure: Option<crate::analysis::resource::CertifiedInstructedDeparture>,
     },
 }
 
@@ -3861,7 +3860,7 @@ fn bounded_offer_tail(
     // exact recurrence (which says nothing about choices) and basis B consults no board
     // predicate at all. And deliberately NOT a second `loop_states_cover_modulo_growth_pinned`
     // call: that predicate refuses on BOARD facts without ever examining a choice.
-    let (touch, recorded, departure) = match source {
+    let (touch, recorded) = match source {
         FrameSource::Ring { touch, verdicts } => {
             let slots: Vec<DecisionSlot> = points.iter().map(|p| p.slot.clone()).collect();
             if !crate::analysis::resource::stack_choices_are_all_specified(
@@ -3873,11 +3872,11 @@ fn bounded_offer_tail(
             ) {
                 return Err(TailRefusal::UnspecifiedChoiceWindow);
             }
-            (touch, None, None)
+            (touch, None)
         }
         // CR 608.1 + CR 732.2a: the replayed frames are the period's window, whose announcements
         // and resolutions carry the charges as the ring's do.
-        FrameSource::Replay { answers, departure } => {
+        FrameSource::Replay { answers } => {
             let (&last, window) = period_frames
                 .split_last()
                 .ok_or(TailRefusal::UnspecifiedChoiceWindow)?;
@@ -3886,7 +3885,7 @@ fn bounded_offer_tail(
                 last,
                 crate::analysis::resource::PeriodCertification::BoardCovered,
             );
-            (touch, Some(answers), departure)
+            (touch, Some(answers))
         }
     };
 
@@ -4077,12 +4076,18 @@ fn bounded_offer_tail(
     // (8) The certificate, with the two fields the bounded class states differently from
     // Path A's spelled out at the site rather than mutated after the fact.
     // `build_cert`'s only use of the pair is `board_delta`, a comparand read.
+    let milled: Option<BTreeMap<PlayerId, i64>> = periodic.instructed_mills.as_ref().map(|mills| {
+        mills
+            .iter()
+            .map(|(&seat, mill)| (seat, mill.per_repetition))
+            .collect()
+    });
     let mut base = build_cert(
         cert_prior,
         current,
         &periodic.delta,
         proposer,
-        departure.as_ref(),
+        milled.as_ref(),
     );
     // CR 500.7 + CR 121.4: a turn-cycle period grows its caster's extra turns and consumes its
     // library, which the cascade bounds.
@@ -8567,7 +8572,10 @@ fn try_offer_object_growth_shortcut(
         &s_n2,
         &confirmation.delta,
         caster,
-        confirmation.departure.as_ref(),
+        confirmation
+            .departure
+            .as_ref()
+            .map(|certified| &certified.per_victim),
     );
     // CR 732.2a: an UNBOUNDED object-growth offer is not repeated a CR 704-limited number of
     // times — it is materialized once as an unbounded axis — so it MEASURES no repetition
@@ -8640,11 +8648,6 @@ pub(crate) fn replay_bounded_offer(
     // CR 732.1b: fewer than two frames is a period that did not come round.
     let (&current, window) = frames.split_last().ok_or(OfferRefusal::NoRecurrence)?;
     let &prior = window.first().ok_or(OfferRefusal::NoRecurrence)?;
-    let departure = crate::analysis::resource::certify_instructed_library_departure(
-        prior,
-        current,
-        [prior, current],
-    );
     let periodic = crate::analysis::resource::PeriodicDelta {
         frames_per_period: window.len() as u32,
         delta: crate::analysis::resource::ResourceVector::period(prior, current),
@@ -8652,22 +8655,7 @@ pub(crate) fn replay_bounded_offer(
         declarable_victims: Vec::new(),
         seat_life_charge: Vec::new(),
         cleanup,
-        instructed_mills: departure.as_ref().map(|certified| {
-            certified
-                .per_victim
-                .iter()
-                .map(|(&seat, &per_repetition)| {
-                    let library = state.library_of(seat).len() as i64;
-                    (
-                        seat,
-                        crate::analysis::resource::InstructedMill {
-                            per_repetition,
-                            library,
-                        },
-                    )
-                })
-                .collect()
-        }),
+        instructed_mills: crate::analysis::resource::period_instructed_mills(state, prior, current),
     };
     // CR 732.2a: the points are the game choices the replay answered.
     let points = pinned_decisions_to_points(choices, state, caster)
@@ -8680,10 +8668,7 @@ pub(crate) fn replay_bounded_offer(
             frames,
             periodic,
             points,
-            source: FrameSource::Replay {
-                answers: choices,
-                departure,
-            },
+            source: FrameSource::Replay { answers: choices },
         },
         false,
         caster,
