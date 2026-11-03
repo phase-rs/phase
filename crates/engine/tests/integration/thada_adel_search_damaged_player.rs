@@ -5,6 +5,7 @@
 use super::rules::{run_combat, GameScenario, Phase, P0, P1};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
+use engine::types::events::{GameEvent, PlayerActionKind};
 use engine::types::game_state::WaitingFor;
 use engine::types::zones::Zone;
 
@@ -57,11 +58,23 @@ fn thada_adel_searches_the_damaged_players_library() {
         "only the damaged player's artifact is a candidate"
     );
 
-    runner
+    let result = runner
         .act(GameAction::SelectCards {
             cards: vec![opp_artifact],
         })
         .expect("select the found artifact");
+    // The damaged player, not the searcher, shuffles their library.
+    assert!(
+        result.events.iter().any(|event| matches!(
+            event,
+            GameEvent::PlayerPerformedAction {
+                player_id: P1,
+                action: PlayerActionKind::ShuffledLibrary,
+                ..
+            }
+        )),
+        "the damaged player shuffles their library"
+    );
     assert_eq!(
         runner.state().objects[&opp_artifact].zone,
         Zone::Exile,
