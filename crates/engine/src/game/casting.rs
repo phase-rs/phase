@@ -34328,6 +34328,31 @@ struct AppliedAbilityCostModifier {
     minimum_mana: u32,
 }
 
+/// CR 400.7 + CR 602.2a: the activating source as the pricing read sees it. The
+/// activation being priced now is the LIVE object; a journal row is the source as
+/// it was announced — its snapshot facts AND the zone it was announced from, kept
+/// together because CR 109.2 needs both to answer the same question.
+#[derive(Clone, Copy)]
+enum ActivationSourceFacts<'a> {
+    Live,
+    Recorded { lki: &'a LKISnapshot, zone: Zone },
+}
+
+impl ActivationSourceFacts<'_> {
+    /// CR 109.2 + CR 110.1: whether the activation's source WAS a permanent on
+    /// the battlefield — the only reading under which a zone-less description of
+    /// a card type ("creatures you control") can name it.
+    fn was_battlefield_permanent(self, state: &GameState, source: ObjectId) -> bool {
+        match self {
+            Self::Live => state
+                .objects
+                .get(&source)
+                .is_some_and(|object| object.zone == Zone::Battlefield),
+            Self::Recorded { zone, .. } => zone == Zone::Battlefield,
+        }
+    }
+}
+
 /// The activating side of a `ReduceAbilityCost` applicability check, for the
 /// activation being priced now or for one recorded earlier this turn. The gates
 /// below read only this, so "does this modifier apply to that activation" is
@@ -34335,8 +34360,8 @@ struct AppliedAbilityCostModifier {
 struct ActivationView<'a> {
     activator: PlayerId,
     source: ObjectId,
-    /// `None`: the live source. `Some`: its facts as they were when activated.
-    source_lki: Option<&'a LKISnapshot>,
+    /// The live source, or the source as it was announced (CR 400.7).
+    source_facts: ActivationSourceFacts<'a>,
     active_keyword: Option<&'static str>,
     is_mana: bool,
     is_loyalty: bool,
@@ -34381,17 +34406,39 @@ fn reduce_ability_cost_non_target_gates_admit(
             return false;
         }
     }
-    // CR 602.2: scope by the source filter against the ability's SOURCE permanent.
-    affected.is_none_or(|filter| match view.source_lki {
-        None => super::filter::matches_target_filter(state, view.source, filter, filter_ctx),
-        Some(lki) => super::filter::matches_target_filter_on_lki_snapshot(
-            state,
-            view.source,
-            lki,
-            filter,
-            filter_ctx,
-        ),
-    })
+    // CR 602.2 + CR 109.2 + CR 110.1: scope by the source filter against the
+    // ability's source — but a description that denotes a BATTLEFIELD PERMANENT
+    // can only be satisfied while the source IS one. A graveyard unearth
+    // (CR 702.84a) or a hand cycling ability (CR 702.29a) activates a CARD, which
+    // CR 108.4a gives an owner instead of a controller and which CR 110.1 does
+    // not make a permanent, so "creatures you control" names nothing about it.
+    // An activator-scoped ("abilities you activate"), global, self-referential or
+    // chosen-name ("sources with the chosen name", CR 109.2c) description is not
+    // restricted this way and keeps applying in every zone.
+    let Some(affected) = affected else {
+        return true;
+    };
+    if super::filter::filter_denotes_battlefield_permanent(affected)
+        && !view
+            .source_facts
+            .was_battlefield_permanent(state, view.source)
+    {
+        return false;
+    }
+    match view.source_facts {
+        ActivationSourceFacts::Live => {
+            super::filter::matches_target_filter(state, view.source, affected, filter_ctx)
+        }
+        ActivationSourceFacts::Recorded { lki, .. } => {
+            super::filter::matches_target_filter_on_lki_snapshot(
+                state,
+                view.source,
+                lki,
+                affected,
+                filter_ctx,
+            )
+        }
+    }
 }
 
 /// CR 601.2c + CR 115.1: whether any committed target of a recorded activation
@@ -34479,7 +34526,10 @@ fn first_qualifying_activation_this_turn<'s>(
             let view = ActivationView {
                 activator: record.activator,
                 source: record.source,
-                source_lki: Some(&record.source_lki),
+                source_facts: ActivationSourceFacts::Recorded {
+                    lki: &record.source_lki,
+                    zone: record.source_zone,
+                },
                 active_keyword: record
                     .ability_tag
                     .map(crate::types::ability::AbilityTag::keyword_str),
@@ -34546,10 +34596,13 @@ fn transient_reduce_ability_cost_present(state: &GameState) -> bool {
 /// Hojo around) are projected out and ordinary activation loops still compare
 /// equal.
 ///
-/// Every gate is evaluable on a recorded row (the source and each target are
+/// Every gate is evaluable on a recorded row (the source — its snapshot facts
+/// and the zone it was announced from, CR 602.2a — and each target are
 /// snapshots, which `reduce_ability_cost_non_target_gates_admit` and
 /// `recorded_targets_match_filter` read), so no definition falls back to
-/// keeping every row.
+/// keeping every row. A row recorded off the battlefield therefore does not
+/// qualify for a battlefield-scoped modifier, and `keep_first` runs per
+/// definition, so any modifier that can read the row still keeps it.
 pub(crate) fn cost_observable_activation_journal(
     state: &GameState,
 ) -> HashMap<PlayerId, im::Vector<AbilityActivationRecord>> {
@@ -34697,7 +34750,7 @@ fn resolve_one_reduce_ability_cost(
     let view = ActivationView {
         activator: player,
         source: ability_source_id,
-        source_lki: None,
+        source_facts: ActivationSourceFacts::Live,
         active_keyword,
         is_mana: ability_is_mana,
         is_loyalty: ability_is_loyalty,
