@@ -5583,7 +5583,7 @@ mod w3_library_placement_tests {
         Vec<ObjectId>,
     ) {
         use crate::game::scenario::{GameScenario, P0};
-        use crate::types::actions::GameAction;
+        use crate::types::actions::{AlternativeCastDecision, GameAction};
         use crate::types::game_state::CastingVariant;
         use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
         use crate::types::phase::Phase;
@@ -5631,6 +5631,7 @@ mod w3_library_placement_tests {
         let sentinels = runner.state().players[0].library.iter().copied().collect();
         let outcome = runner
             .cast(octopus)
+            .alternative_cast(AlternativeCastDecision::Alternative)
             .casting_variant(CastingVariant::Mutate)
             .target_object(bears)
             .resolve();
