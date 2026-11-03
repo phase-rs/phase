@@ -11841,7 +11841,8 @@ struct SharedQualitySource<'a> {
 /// face-down permanent carries `""` (CR 708.2a) — yields the EMPTY set, which
 /// `quality_sets_overlap` can never intersect: "An object with no name doesn't
 /// have the same name as any other object, including another object with no
-/// name." This is the single home of that rule for every name comparison.
+/// name." This is the single home of that rule for every name VALUE-SET
+/// comparison; `FilterProp::SameName` still compares raw names (see its arm).
 fn shared_name_values(name: &str) -> HashSet<String> {
     if name.is_empty() {
         HashSet::new()
@@ -19662,12 +19663,17 @@ mod tests {
         // R9b: the real "other" in the pump shape is `Not{ParentTarget}`,
         // concretized by `resolved_object_filter` — the raw arm is unbound on a
         // freshly-built ability (`target_incarnations` is empty), so the row must
-        // resolve the announced target first.
+        // resolve the announced target first. Runs on the NAMED board: the name
+        // leg is true for both Grizzly Bears, so only the concretization decides.
         let resolved_pump =
-            crate::game::effects::resolved_object_filter(&state, &on_nameless, &pump_shape);
+            crate::game::effects::resolved_object_filter(&state, &on_bears, &pump_shape);
         assert!(
-            !matches(&state, target, &resolved_pump, &on_nameless),
+            !matches(&state, bears, &resolved_pump, &on_bears),
             "CR 611.2a: the announced target does not receive the modification twice"
+        );
+        assert!(
+            matches(&state, bears_twin, &resolved_pump, &on_bears),
+            "the concretized mass leg still matches the other same-name creature"
         );
 
         // R13–R15: the record door reads the same reference and the same rule.
