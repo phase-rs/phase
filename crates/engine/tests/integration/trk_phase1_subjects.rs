@@ -967,11 +967,9 @@ fn reality_ripple_preserves_target_selection_and_legality() {
         let selected = scenario.add_creature(P1, "Grizzly Bears", 2, 2).id();
         let other = scenario.add_creature(P1, "Runeclaw Bear", 2, 2).id();
         let shrouded = scenario
-            .add_creature_from_oracle(
-                P1,
-                "Deadly Insect",
-                6,
-                1,
+            .add_creature(P1, "Deadly Insect", 6, 1)
+            .from_oracle_text_with_keywords(
+                &["Shroud"],
                 "Shroud (This creature can't be the target of spells or abilities.)",
             )
             .id();
@@ -1044,13 +1042,12 @@ fn reality_ripple_preserves_target_selection_and_legality() {
     let spell = scenario
         .add_spell_to_hand_from_oracle(P0, "Reality Ripple", true, REALITY_RIPPLE)
         .id();
-    scenario.add_creature_from_oracle(
-        P1,
-        "Deadly Insect",
-        6,
-        1,
-        "Shroud (This creature can't be the target of spells or abilities.)",
-    );
+    scenario
+        .add_creature(P1, "Deadly Insect", 6, 1)
+        .from_oracle_text_with_keywords(
+            &["Shroud"],
+            "Shroud (This creature can't be the target of spells or abilities.)",
+        );
     scenario.add_enchantment_from_oracle(P1, "Glorious Anthem", "Creatures you control get +1/+1.");
     let mut runner = scenario.build();
     let card_id = runner.state().objects[&spell].card_id;
@@ -1082,11 +1079,9 @@ fn teferis_protection_preserves_mass_phasing_and_empty_population() {
         let own = populated.then(|| {
             let creature = scenario.add_creature(P0, "Runeclaw Bear", 2, 2).id();
             let shrouded = scenario
-                .add_creature_from_oracle(
-                    P0,
-                    "Deadly Insect",
-                    6,
-                    1,
+                .add_creature(P0, "Deadly Insect", 6, 1)
+                .from_oracle_text_with_keywords(
+                    &["Shroud"],
                     "Shroud (This creature can't be the target of spells or abilities.)",
                 )
                 .id();
