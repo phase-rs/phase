@@ -7483,14 +7483,13 @@ fn drop_auto_inert_noop_trigger(state: &mut GameState, ctx: &PendingTriggerConte
         origin,
     };
     match state.may_trigger_auto_choice_for_live_prompt(&key) {
-        Some(AutoMayChoice::Decline) => {
-            // CR 603.5: the remembered decline is the controller's optional choice.
-            state.record_loop_decision(crate::game::play_trace::AnswerOptionality::Optional);
-            true
-        }
+        // CR 603.5: an optional trigger goes on the stack regardless of whether
+        // its controller intends to exercise the option; the remembered decline
+        // is applied when the ability resolves. While it waits on the stack,
+        // players receive priority and it can be targeted (Strionic Resonator).
+        Some(AutoMayChoice::Decline) | None => false,
         // CR 603.3d: no legal target means no choice was offered, so nothing is recorded.
         Some(AutoMayChoice::Accept) => pending_trigger_has_no_legal_resolution_targets(state, ctx),
-        None => false,
     }
 }
 
@@ -11427,8 +11426,8 @@ pub(crate) fn collect_mana_action_trigger_batch(
 ///
 /// The collected state records what observing bound (`ActivationObservers`):
 /// any admitted trigger, counted at match time — before an auto-inert context
-/// (a remembered decline) is pruned, since admission alone may have spent a
-/// "triggers only once each turn" limit. A bound observation revokes any undo
+/// (a remembered accept with no legal target) is pruned, since admission alone
+/// may have spent a "triggers only once each turn" limit. A bound observation revokes any undo
 /// already recorded for this source (CR 605.3b; a replacement-paused
 /// activation reaches this boundary only on resume), and
 /// `mana_sources::record_undoable_mana_tap` never records one for it.

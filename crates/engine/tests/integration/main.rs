@@ -219,6 +219,7 @@ mod std_dynqty_a_damage_mod_runtime;
 mod std_longtail_b_delayed_effects;
 mod std_s07_damage_doublers;
 mod stensian_sanguinist_prepare;
+mod stored_may_decline_trigger_uses_stack;
 mod strategic_betrayal_6505;
 pub mod support;
 mod swallow_optional_you_may;
