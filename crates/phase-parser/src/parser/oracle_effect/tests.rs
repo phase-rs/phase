@@ -95895,3 +95895,77 @@ fn dig_from_among_explicit_rest_clauses_still_override_the_library_default() {
         other => panic!("expected Effect::Dig, got {other:?}"),
     }
 }
+
+/// PAIRED NEGATIVE at the class boundary: the silent-remainder default belongs
+/// to LIBRARY LOOKS (CR 701.20e "look at … does not move them"), not to any
+/// "from among them" anaphor. When the cards were MILLED first (CR 701.17a)
+/// they are already in the graveyard, and "return a permanent card from among
+/// them to your hand" selects out of that milled set — the unchosen milled
+/// cards must stay in the graveyard, never be shuffled back into the library.
+///
+/// The mill form lowers to `Mill` + a `ChangeZone`/`ChangeZoneAll` reading the
+/// milled tracked set (CR 701.17c), so the default has no `Effect::Dig` to
+/// touch; this test pins that shape with a printed card's verbatim text.
+#[test]
+fn mill_from_among_never_gets_the_library_remainder_default() {
+    fn collect<'a>(def: &'a crate::types::ability::AbilityDefinition, out: &mut Vec<&'a Effect>) {
+        out.push(&def.effect);
+        if let Some(sub) = def.sub_ability.as_deref() {
+            collect(sub, out);
+        }
+        if let Some(else_ability) = def.else_ability.as_deref() {
+            collect(else_ability, out);
+        }
+    }
+
+    // Midnight Tilling (verbatim Scryfall text): "Mill four cards, then you may
+    // return a permanent card from among them to your hand."
+    let parsed = crate::parser::oracle::parse_oracle_text(
+        "Mill four cards, then you may return a permanent card from among them to your hand. (To \
+         mill four cards, put the top four cards of your library into your graveyard.)",
+        "Midnight Tilling",
+        &[],
+        &["Instant".to_string()],
+        &[],
+    );
+    let root = parsed
+        .abilities
+        .first()
+        .expect("Midnight Tilling must parse to one spell ability");
+    let mut effects = Vec::new();
+    collect(root, &mut effects);
+
+    // Positive reach guards: the mill really parsed, and the "from among them"
+    // selection really reads the milled set — otherwise the exclusion below
+    // would pass vacuously.
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Mill {
+                destination: Zone::Graveyard,
+                ..
+            }
+        )),
+        "the printed \"mill four cards\" must parse to Mill → graveyard, got {effects:#?}"
+    );
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::ChangeZone {
+                destination: Zone::Hand,
+                target: TargetFilter::TrackedSetFiltered { .. },
+                ..
+            }
+        )),
+        "the \"from among them\" return must read the milled tracked set, got {effects:#?}"
+    );
+
+    // THE EXCLUSION: no look-at Dig exists here at all, so the library
+    // remainder default can never route a milled card back into the library.
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Dig { .. })),
+        "a mill-from-among chain must not lower to Effect::Dig, got {effects:#?}"
+    );
+}
