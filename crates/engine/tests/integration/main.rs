@@ -60,6 +60,7 @@ mod dandan_shared_pile_storage;
 mod dandan_simultaneous_draw;
 mod dandan_wheel_split;
 mod dandan_zone_change_identity;
+mod debug_move_to_zone_simulated_priority;
 mod deferred_card_type_reflexive_guard;
 mod delayed_event_subject_anaphor_snapshot;
 mod delayed_that_many_resolution_scope;
