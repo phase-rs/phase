@@ -33627,6 +33627,17 @@ const UNREPRESENTABLE_CAST_CAP_GAP: &str = "unrepresentable_cast_cap";
 /// free cast of ANY card, so the clause is refused instead.
 const CAST_TARGET_UNTYPED_GAP: &str = "cast_target_untyped";
 
+/// CR 712.8a + CR 712.11c: The parser gap name for a "from among … exiled this
+/// way" cast clause that names a type on BOTH sides of the anchor ("cast
+/// enchantment spells from among the creature cards exiled this way"). The
+/// suffix gates the card pool, judged on the card where it is (CR 712.8a); the
+/// prefix gates the spell, judged on the face being cast (CR 712.11c). One cast
+/// filter cannot carry the two stages, so the clause is refused rather than
+/// lowered to a single gate that judges both against each face. No printed card
+/// has this shape; the nearest printed cards each carry one side (Wand of
+/// Wonder the prefix, Etali, Primal Conqueror the suffix).
+const FROM_AMONG_POOL_AND_SPELL_GATE_GAP: &str = "from_among_pool_and_spell_gate";
+
 /// CR 608.2c + CR 608.2g: The single construction seam for every `from among`
 /// batch-cast arm.
 ///
@@ -34164,20 +34175,32 @@ fn ensure_exile_zone_on_cast_target(filter: &mut TargetFilter) {
     }
 }
 
+/// What the `"from among (the|those) [TYPED] (card|cards) exiled this way"`
+/// anchor lowers to, when it is present.
+#[derive(Debug, Clone, PartialEq)]
+enum FromAmongExiledAnchor {
+    /// The cast target: the exile anaphor, with the one-sided type gate if any.
+    Target(TargetFilter),
+    /// A type on both sides of the anchor — a card-pool gate and a spell-face
+    /// gate no single cast filter can carry ([`FROM_AMONG_POOL_AND_SPELL_GATE_GAP`]).
+    PoolAndSpellGate,
+}
+
 /// CR 610.3 + CR 608.2c: Parse the `"from among (the|those) [TYPED]
 /// (card|cards) exiled this way"` anchor and lift its optional typed leg
 /// into a `TargetFilter`.
 ///
 /// Returns:
-/// * `Some(And { ExiledBySource, Typed(tf) })` — typed leg present
+/// * `Some(Target(And { ExiledBySource, Typed(tf) }))` — typed leg present
 ///   (Etali: "the nonland cards exiled this way" → AND with Non(Land)).
-/// * `Some(ExiledBySource)` — bare "the cards exiled this way".
+/// * `Some(Target(ExiledBySource))` — bare "the cards exiled this way".
+/// * `Some(PoolAndSpellGate)` — a type on both sides of the anchor; refused.
 /// * `None` — anchor or "exiled this way" suffix not present.
 ///
 /// Composition mirrors `has_from_among_cards_exiled_with_self` (anchor
 /// strip) and `parse_cast_type_list` / `parse_type_phrase_folding` (typed
 /// leg extraction).
-fn parse_from_among_exiled_this_way(rest: &str) -> Option<TargetFilter> {
+fn parse_from_among_exiled_this_way(rest: &str) -> Option<FromAmongExiledAnchor> {
     type E<'a> = OracleError<'a>;
     let (after_anchor, before_anchor) = take_until::<_, _, E>("from among ").parse(rest).ok()?;
     let (after_anchor, _) = tag::<_, _, E>("from among ").parse(after_anchor).ok()?;
@@ -34206,11 +34229,11 @@ fn parse_from_among_exiled_this_way(rest: &str) -> Option<TargetFilter> {
     // Then the post-article probe ("instant or sorcery cards"), then
     // `parse_type_phrase_folding` ("nonland cards", "creature cards").
     //
-    // CR 601.3 + CR 608.2c: when BOTH positions carry a type ("cast artifact
-    // spells from among the instant and sorcery cards exiled this way"), each
-    // restricts what may be cast, so the gate is their intersection — never
-    // whichever probe matched first, which would silently authorize a card
-    // only one side admits.
+    // CR 712.8a + CR 712.11c: when BOTH positions carry a type ("cast
+    // enchantment spells from among the creature cards exiled this way"), the
+    // suffix gates the card pool and the prefix gates the spell face, judged at
+    // different stages. A single cast filter evaluates both against each face,
+    // so the shape is refused (`PoolAndSpellGate`) rather than lowered.
     //
     // CR 601.3: a single pre-anchor type ("cast creature spells from among
     // cards exiled this way") is the same restriction as a list; without it
@@ -34220,10 +34243,8 @@ fn parse_from_among_exiled_this_way(rest: &str) -> Option<TargetFilter> {
     let suffix_filter = parse_cast_type_list(after_article)
         .unwrap_or_else(|| super::oracle_target::parse_type_phrase_folding(after_article).0);
     let mut typed_filter = match prefix_gate {
-        Some(prefix) if cast_filter_has_meaningful_typed_leaf(&suffix_filter) => {
-            TargetFilter::And {
-                filters: vec![prefix, suffix_filter],
-            }
+        Some(_) if cast_filter_has_meaningful_typed_leaf(&suffix_filter) => {
+            return Some(FromAmongExiledAnchor::PoolAndSpellGate);
         }
         Some(prefix) => prefix,
         None => suffix_filter,
@@ -34237,18 +34258,18 @@ fn parse_from_among_exiled_this_way(rest: &str) -> Option<TargetFilter> {
     // accessor that excludes Card/Any noise.
     let meaningful = cast_filter_has_meaningful_typed_leaf(&typed_filter);
 
-    Some(if !meaningful {
+    Some(FromAmongExiledAnchor::Target(if !meaningful {
         TargetFilter::ExiledBySource
     } else {
         ensure_exile_zone_on_cast_target(&mut typed_filter);
         if typed_filter.references_exiled_by_source() {
-            return Some(typed_filter.normalized());
+            return Some(FromAmongExiledAnchor::Target(typed_filter.normalized()));
         }
         TargetFilter::And {
             filters: vec![TargetFilter::ExiledBySource, typed_filter],
         }
         .normalized()
-    })
+    }))
 }
 
 /// CR 608.2g + CR 601.2 + CR 118.9: Parse the counted free-cast-window form
@@ -34283,7 +34304,15 @@ fn try_parse_counted_free_cast_from_exiled_this_way(rest: &str) -> Option<Effect
         .parse(after_count)
         .ok()?;
 
-    let mut filter = parse_from_among_exiled_this_way(after_noun)?;
+    let mut filter = match parse_from_among_exiled_this_way(after_noun)? {
+        FromAmongExiledAnchor::Target(filter) => filter,
+        FromAmongExiledAnchor::PoolAndSpellGate => {
+            return Some(Effect::unimplemented(
+                FROM_AMONG_POOL_AND_SPELL_GATE_GAP,
+                rest,
+            ));
+        }
+    };
     // CR 608.2c: "the OTHER cards exiled this way" — rewrite the
     // source-relative `Another` into the tracked-set complement of the prior
     // choose's picks (see doc comment).
@@ -35330,15 +35359,24 @@ fn try_parse_cast_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
     // Unlocks the WotC-templated "exiled this way" family: Etali Primal
     // Conqueror, Etali Primal Storm, Crabomination, Gix Yawgmoth Praetor,
     // Hellcarver Demon, and similar.
-    if let Some(target) = parse_from_among_exiled_this_way(rest) {
-        return Some(from_among_batch_cast_effect(
-            from_among_batch_cast_driver(mode, without_paying, rest, ctx),
-            target,
-            mode,
-            without_paying,
-            constraint,
-            rest,
-        ));
+    match parse_from_among_exiled_this_way(rest) {
+        Some(FromAmongExiledAnchor::Target(target)) => {
+            return Some(from_among_batch_cast_effect(
+                from_among_batch_cast_driver(mode, without_paying, rest, ctx),
+                target,
+                mode,
+                without_paying,
+                constraint,
+                rest,
+            ));
+        }
+        Some(FromAmongExiledAnchor::PoolAndSpellGate) => {
+            return Some(Effect::unimplemented(
+                FROM_AMONG_POOL_AND_SPELL_GATE_GAP,
+                rest,
+            ));
+        }
+        None => {}
     }
     // CR 400.1/400.2 + CR 608.2c: The bare "them"/"those cards" anaphor is
     // ambiguous — it usually refers to an exile the chain produced

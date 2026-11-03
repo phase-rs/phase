@@ -55388,64 +55388,42 @@ fn cast_from_among_the_cards_exiled_this_way_binds_to_exiled_by_source() {
     assert_eq!(target, TargetFilter::ExiledBySource);
 }
 
-/// CR 601.3 + CR 608.2c: a type printed on BOTH sides of the anchor ("artifact
-/// spells from among the instant or sorcery cards exiled this way") restricts
-/// on both sides, so the cast target keeps both gates — never just the first
-/// one a probe matched, which would authorize an exiled artifact that is
-/// neither an instant nor a sorcery.
+/// CR 712.8a + CR 712.11c: a type printed on BOTH sides of the anchor ("cast
+/// enchantment spells from among the creature cards exiled this way") gates
+/// two different things at two different stages — the suffix the card pool,
+/// judged on the card where it is (CR 712.8a), the prefix the spell, judged on
+/// the face being cast (CR 712.11c). One cast filter cannot carry both, so the
+/// clause is refused: it lowers to the `from_among_pool_and_spell_gate` gap,
+/// never to a cast grant, on both the uncounted and the counted route.
 ///
 /// Shape-only hardening, not a card test: no printed card carries a type gate
 /// on both sides of the anchor. The nearest printed cards each carry one side —
 /// Wand of Wonder the prefix gate ("instant and/or sorcery spells from among
 /// cards exiled this way"), Etali, Primal Conqueror the suffix gate ("from
-/// among the nonland cards exiled this way").
+/// among the nonland cards exiled this way"). Reach guard: Etali's printed
+/// one-sided clause still lowers to its typed cast grant.
 #[test]
-fn cast_from_among_exiled_this_way_keeps_both_a_prefix_and_a_suffix_type_gate() {
-    let e = parse_effect(
-        "cast any number of artifact spells from among the instant or sorcery cards exiled this way without paying their mana costs",
+fn cast_from_among_exiled_this_way_refuses_a_prefix_and_a_suffix_type_gate() {
+    for combined in [
+        "cast any number of enchantment spells from among the creature cards exiled this way without paying their mana costs",
+        "cast up to two artifact spells from among the instant or sorcery cards exiled this way without paying their mana costs",
+    ] {
+        let e = parse_effect(combined);
+        assert!(
+            matches!(&e, Effect::Unimplemented { name, .. } if name == FROM_AMONG_POOL_AND_SPELL_GATE_GAP),
+            "a type on both sides of the anchor is refused, not lowered: {combined:?} -> {e:?}"
+        );
+    }
+
+    let etali = parse_effect(
+        "cast any number of spells from among the nonland cards exiled this way without paying their mana costs",
     );
-    let Effect::CastFromZone { target, .. } = e else {
-        panic!("expected CastFromZone, got {:?}", e);
+    let Effect::CastFromZone { target, .. } = &etali else {
+        panic!("reach-guard: Etali's one-sided clause lowers to CastFromZone, got {etali:?}");
     };
     assert!(
         target.references_exiled_by_source(),
-        "expected the ExiledBySource anaphor in {target:?}"
-    );
-    // Every type-filter conjunct of the intersected gate. A `TypedFilter`'s
-    // `type_filters` are conjunctive, and an `And` of typed legs is too; an
-    // `AnyOf` is ONE conjunct (a disjunction), so it is kept whole, never
-    // flattened — flattening would let separate `Instant` and `Sorcery`
-    // conjuncts (an unsatisfiable gate) pass for the printed "instant or sorcery".
-    fn type_conjuncts(filter: &TargetFilter, out: &mut Vec<TypeFilter>) {
-        match filter {
-            TargetFilter::Typed(tf) => out.extend(tf.type_filters.iter().cloned()),
-            TargetFilter::And { filters } => filters.iter().for_each(|f| type_conjuncts(f, out)),
-            _ => {}
-        }
-    }
-    let TargetFilter::And { .. } = &target else {
-        panic!("the two gates intersect: expected an AND target, got {target:?}");
-    };
-    let mut conjuncts = Vec::new();
-    type_conjuncts(&target, &mut conjuncts);
-    let is_instant_or_sorcery = |tf: &TypeFilter| {
-        matches!(tf, TypeFilter::AnyOf(types)
-            if types.len() == 2
-                && types.contains(&TypeFilter::Instant)
-                && types.contains(&TypeFilter::Sorcery))
-    };
-    assert_eq!(
-        conjuncts.len(),
-        2,
-        "exactly the prefix gate and the suffix gate: {target:?}"
-    );
-    assert!(
-        conjuncts.contains(&TypeFilter::Artifact),
-        "the prefix gate Artifact is its own conjunct: {target:?}"
-    );
-    assert!(
-        conjuncts.iter().any(is_instant_or_sorcery),
-        "the suffix gate is a single AnyOf(Instant, Sorcery) conjunct: {target:?}"
+        "reach-guard: Etali's grant binds the exile anaphor: {target:?}"
     );
 }
 
