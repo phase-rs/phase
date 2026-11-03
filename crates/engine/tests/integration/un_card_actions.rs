@@ -8,13 +8,15 @@
 
 use engine::game::engine::{apply, EngineError};
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
+use engine::game::triggers::{PendingTrigger, PendingTriggerContext};
 use engine::parser::parse_oracle_text;
 use engine::types::ability::{
-    AbilityCost, Effect, StaticDefinition, TargetFilter, TargetRef, TriggerDefinition,
+    AbilityCost, Effect, ResolvedAbility, StaticDefinition, TargetFilter, TargetRef,
+    TriggerDefinition,
 };
 use engine::types::actions::GameAction;
 use engine::types::events::GameEvent;
-use engine::types::game_state::WaitingFor;
+use engine::types::game_state::{PendingTriggerOrder, TriggerOrderGroup, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
 use engine::types::phase::Phase;
@@ -2055,6 +2057,63 @@ fn waiting_touch_triggers_are_bounded_per_player() {
     assert_eq!(runner.life(P1), 998, "then one of P1's touches resolved");
     touch(&mut runner, P1, bile);
     assert_eq!(runner.state().stack.len(), max);
+}
+
+#[test]
+fn touch_triggers_held_in_an_ordering_prompt_count_toward_the_cap() {
+    let max = engine::game::un_actions::MAX_PENDING_TOUCH_TRIGGERS;
+    let (mut runner, bile, _, _) = vile_bile_scenario();
+
+    // CR 603.3b: a touch parked while a decision was pending leaves the deferred
+    // queue for the in-flight ordering pass as soon as that queue is drained.
+    // The touches held there are still waiting to resolve, so they occupy the
+    // same bound.
+    let ordered_touch = || {
+        let mut pending = PendingTrigger::ordinary(
+            bile,
+            P1,
+            None,
+            Box::new(ResolvedAbility::new(Effect::NoOp, Vec::new(), bile, P1)),
+            0,
+        );
+        pending.trigger_event = Some(GameEvent::ObjectTouched {
+            player: P1,
+            object_id: bile,
+        });
+        PendingTriggerContext::single(pending)
+    };
+    let set_ordered = |runner: &mut GameRunner, count: usize| {
+        runner.state_mut().pending_trigger_order = Some(PendingTriggerOrder {
+            groups: vec![TriggerOrderGroup {
+                controller: P1,
+                triggers: (0..count).map(|_| ordered_touch()).collect(),
+                ordered: false,
+            }],
+            resume_after_ordering: None,
+        });
+    };
+
+    set_ordered(&mut runner, max);
+    let rejected = touch_result(&mut runner, P1, bile);
+    assert!(
+        matches!(rejected, Err(EngineError::InvalidAction(_))),
+        "an ordering prompt holding {max} touches leaves no room for another: {rejected:?}"
+    );
+
+    // One fewer ordered touch frees exactly one slot: the ordered contexts are
+    // counted once each, not once per queue they could have occupied.
+    set_ordered(&mut runner, max - 1);
+    touch(&mut runner, P1, bile);
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "reach guard: the accepted touch triggered Vile Bile"
+    );
+    let rejected = touch_result(&mut runner, P1, bile);
+    assert!(
+        matches!(rejected, Err(EngineError::InvalidAction(_))),
+        "{max} waiting touches fill the bound again: {rejected:?}"
+    );
 }
 
 #[test]

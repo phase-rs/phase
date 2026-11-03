@@ -16,6 +16,7 @@
 //!   the stack through the ordinary trigger pipeline.
 
 use crate::game::game_object::{GameObject, ObjectIdentityBindingExt};
+use crate::game::triggers::PendingTriggerContext;
 use crate::types::ability::{AbilityCost, Effect, TriggerDefinition};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{ActionResult, GameState, StackEntryKind, WaitingFor};
@@ -338,32 +339,55 @@ fn has_functioning_touch_ability(state: &GameState, obj: &GameObject) -> bool {
 /// already more life than any ordinary game holds.
 pub const MAX_PENDING_TOUCH_TRIGGERS: usize = 64;
 
-/// How many touch triggers `player` caused that have not yet resolved.
+/// Whether `event` records `player` touching an object.
+fn touched_by(event: &GameEvent, player: PlayerId) -> bool {
+    matches!(event, GameEvent::ObjectTouched { player: toucher, .. } if *toucher == player)
+}
+
+/// Whether `context` is a trigger `player` caused by touching an object. A
+/// context counts once even when its firing event also appears in the batched
+/// `trigger_events`.
+fn is_touch_context_of(context: &PendingTriggerContext, player: PlayerId) -> bool {
+    context
+        .pending
+        .trigger_event
+        .as_ref()
+        .is_some_and(|event| touched_by(event, player))
+        || context
+            .trigger_events
+            .iter()
+            .any(|event| touched_by(event, player))
+}
+
+/// How many touch triggers `player` caused that have not yet resolved: the ones
+/// already on the stack, the ones parked in the deferred queue, and the ones a
+/// CR 603.3b ordering pass is holding. A parked touch moves out of
+/// `deferred_triggers` into `pending_trigger_order` while an ordering prompt is
+/// open, so both queues are counted; a context is in exactly one of them.
 fn pending_touch_triggers(state: &GameState, player: PlayerId) -> usize {
-    let touched_by = |event: &GameEvent| matches!(event, GameEvent::ObjectTouched { player: toucher, .. } if *toucher == player);
     let on_stack = state
         .stack
         .iter()
         .filter(|entry| match &entry.kind {
-            StackEntryKind::TriggeredAbility { trigger_event, .. } => {
-                trigger_event.as_ref().is_some_and(touched_by)
-            }
+            StackEntryKind::TriggeredAbility { trigger_event, .. } => trigger_event
+                .as_ref()
+                .is_some_and(|event| touched_by(event, player)),
             _ => false,
         })
         .count();
     let parked = state
         .deferred_triggers
         .iter()
-        .filter(|context| {
-            context
-                .pending
-                .trigger_event
-                .as_ref()
-                .is_some_and(touched_by)
-                || context.trigger_events.iter().any(touched_by)
-        })
+        .filter(|context| is_touch_context_of(context, player))
         .count();
-    on_stack + parked
+    let ordered = state
+        .pending_trigger_order
+        .iter()
+        .flat_map(|order| order.groups.iter())
+        .flat_map(|group| group.triggers.iter())
+        .filter(|context| is_touch_context_of(context, player))
+        .count();
+    on_stack + parked + ordered
 }
 
 /// Recompute the Un-actions menu: the gesture kinds that some functioning Gotcha
